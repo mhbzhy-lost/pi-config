@@ -1,15 +1,31 @@
+# OS
 .DS_Store
+
+# Dependencies
 node_modules/
 
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Pi runtime (machine-specific)
 /pi/auth.json
 /pi/trust.json
 /pi/npm/
 /pi/git/
 /pi/tmp/
 /pi/run-history.jsonl
+
+# Sessions and logs
 /var/
+
+# Playwright MCP generated files
+/.playwright-mcp/
+
+# Debug/temp extensions
+/pi/extensions/test-payload.ts
+
+# Secrets
 /skill-overrides/external-llm-review/.env
-/skill-overrides/external-llm-review/.venv/
-/skill-overrides/external-llm-review/__pycache__/
-/skill-overrides/external-llm-review/tests/__pycache__/
-/var/logs/external-review-gate.log

@@ -43,9 +43,25 @@ test("uses cd context and unwraps sudo command and env before checking rm", () =
 test("fails closed for symlinks and shell-expanded or indeterminate rm targets", () => {
   assert.equal(policy("rm -rf missing-workspace-target"), undefined);
   assertBlocked("rm -rf $HOME/cache", "RM_TARGET_UNCERTAIN", /无法确定 rm 目标/);
-  assertBlocked("rm -rf ~/cache", "RM_TARGET_UNCERTAIN", /无法确定 rm 目标/);
+  assertBlocked("rm -rf ~/cache", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assertBlocked("rm -rf *", "RM_TARGET_UNCERTAIN", /无法确定 rm 目标/);
   assertBlocked("rm -rf -- $(pwd)", "RM_TARGET_UNCERTAIN", /无法确定 rm 目标/);
+});
+
+test("allows rm with tilde paths that resolve within the workspace", () => {
+  const home = homedir();
+  assert.equal(policy(`rm -rf ~/${realpathSync(workspaceRoot).split("/").pop()}/test/helpers`, {
+    cwd: workspaceRoot,
+    workspaceRoot,
+  }), undefined);
+  assertBlocked(`rm -rf ~/unrelated-dir`, "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
+});
+
+test("blocks rm targeting the protected pi config directory", () => {
+  assertBlocked("rm -rf pi", "RM_PROTECTED_DIR", /受保护的 pi 配置目录/, { cwd: workspaceRoot });
+  assertBlocked("rm -rf pi/settings.json", "RM_PROTECTED_DIR", /受保护的 pi 配置目录/, { cwd: workspaceRoot });
+  assertBlocked("rm -rf ./pi/extensions", "RM_PROTECTED_DIR", /受保护的 pi 配置目录/, { cwd: workspaceRoot });
+  assertBlocked(`rm -rf ${join(workspaceRoot, "pi")}`, "RM_PROTECTED_DIR", /受保护的 pi 配置目录/);
 });
 
 test("allows rm in the system temporary directory", () => {

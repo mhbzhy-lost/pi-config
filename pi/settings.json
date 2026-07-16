@@ -1,9 +1,32 @@
 {
-  "lastChangelogVersion": "0.80.6",
+  "lastChangelogVersion": "0.80.7",
+  "hideThinkingBlock": true,
   "theme": "light",
-  "defaultProvider": "openai-idealab",
-  "defaultModel": "Qwen3.7-Max-DogFooding",
+  "defaultProvider": "anthropic-idealab",
+  "defaultModel": "claude-opus-4-6",
   "packages": [
     "npm:pi-subagents@0.34.0"
-  ]
+  ],
+  "subagents": {
+    "agentOverrides": {
+      "context-builder": {
+        "disabled": true
+      },
+      "oracle": {
+        "disabled": true
+      },
+      "planner": {
+        "disabled": true
+      },
+      "reviewer": {
+        "disabled": true
+      },
+      "scout": {
+        "disabled": true
+      },
+      "worker": {
+        "disabled": true
+      }
+    }
+  }
 }

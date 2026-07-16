@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 
 const COMMIT_TYPES = new Set(["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"]);
 const WRAPPERS = new Set(["sudo", "command", "env"]);
@@ -42,9 +42,17 @@ function shellSegments(command) {
   return segments;
 }
 
+function expandTilde(token) {
+  const home = homedir();
+  if (token === "~") return home;
+  if (token.startsWith("~/")) return home + token.slice(1);
+  return token;
+}
+
 function unwrap(segment) {
   let tokens = segment.trim().match(/(?:\$'[^']*'|"[^"]*"|'[^']*'|[^\s])+/g) ?? [];
   tokens = tokens.map((token) => token.replace(/^(?:\$')?['"]|['"]$/g, ""));
+  tokens = tokens.map(expandTilde);
   while (tokens[0] && (WRAPPERS.has(tokens[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]))) {
     if (tokens[0] === "env") {
       tokens = tokens.slice(1);
@@ -103,16 +111,24 @@ function canonicalRoots(paths) {
   return [...new Set(paths.map((path) => canonicalCandidate(path) ?? resolve(path)))];
 }
 
+function protectedDirs(workspaceRoot) {
+  return canonicalRoots([resolve(workspaceRoot, "pi")]);
+}
+
 function checkRm(tokens, cwd, workspaceRoot) {
   if (tokens[0] !== "rm" && !tokens[0]?.endsWith("/rm")) return undefined;
   const targets = tokens.slice(1).filter((token) => token !== "--" && !token.startsWith("-"));
   if (targets.length === 0 || targets.some(hasExpansion)) {
     return violation("RM_TARGET_UNCERTAIN", "无法确定 rm 目标，已按 fail-closed 阻断");
   }
+  const guarded = protectedDirs(workspaceRoot);
   for (const target of targets) {
     const path = resolve(cwd, target);
     const candidate = canonicalCandidate(path);
     if (!candidate) return violation("RM_TARGET_UNCERTAIN", "无法确定 rm 目标，已按 fail-closed 阻断");
+    if (guarded.some((root) => isWithin(candidate, root))) {
+      return violation("RM_PROTECTED_DIR", "禁止删除受保护的 pi 配置目录");
+    }
     const workspace = canonicalCandidate(workspaceRoot);
     const temporary = canonicalRoots([tmpdir(), "/tmp", "/private/tmp"]);
     if (workspace && isWithin(candidate, workspace)) continue;
@@ -120,7 +136,6 @@ function checkRm(tokens, cwd, workspaceRoot) {
     if (!isWithin(candidate, workspaceRoot)) {
       return violation("RM_OUTSIDE_WORKSPACE", "禁止 workspace 外 rm");
     }
-    return violation("RM_OUTSIDE_WORKSPACE", "禁止 workspace 外 rm");
   }
   return undefined;
 }

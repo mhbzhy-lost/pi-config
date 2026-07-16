@@ -1,6 +1,6 @@
 ---
 name: external-llm-review
-description: 外部 LLM 代码评审。收到 code review / push review / 外部评审 / external review 请求时使用。所有模型家族首选 idealab-anthropic (Claude Opus)，不可用时按家族选异源 fallback。输出 Strengths / Critical / Important / Minor / Assessment，按"综合判断 4 步"消化。
+description: Use when performing code review on a diff or changeset — after implementation, before merge, or on push. Covers cross-model external review requests and independent reviewer dispatch.
 ---
 
 # External LLM Cross-Model Code Review
