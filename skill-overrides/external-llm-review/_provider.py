@@ -101,7 +101,6 @@ class IdealabAnthropicProvider(BaseProvider):
         payload: dict = {
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "temperature": spec.get("temperature", 0.2),
             "messages": user_messages,
         }
         if system:
