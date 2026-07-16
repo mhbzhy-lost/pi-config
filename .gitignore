@@ -1,0 +1,15 @@
+.DS_Store
+node_modules/
+
+/pi/auth.json
+/pi/trust.json
+/pi/npm/
+/pi/git/
+/pi/tmp/
+/pi/run-history.jsonl
+/var/
+/skill-overrides/external-llm-review/.env
+/skill-overrides/external-llm-review/.venv/
+/skill-overrides/external-llm-review/__pycache__/
+/skill-overrides/external-llm-review/tests/__pycache__/
+/var/logs/external-review-gate.log

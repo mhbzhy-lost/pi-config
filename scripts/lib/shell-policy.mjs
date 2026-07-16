@@ -1,0 +1,224 @@
+import { readdirSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
+
+const COMMIT_TYPES = new Set(["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"]);
+const WRAPPERS = new Set(["sudo", "command", "env"]);
+const SOURCE_PATH = /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs)$/i;
+
+function violation(code, reason) {
+  return { block: true, code, reason };
+}
+
+function shellSegments(command) {
+  const segments = [];
+  let quote;
+  let start = 0;
+  const text = String(command);
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    const separatorLength = char === ";" ? 1 : text.slice(index, index + 2) === "&&" || text.slice(index, index + 2) === "||" ? 2 : 0;
+    if (separatorLength) {
+      const segment = text.slice(start, index).trim();
+      if (segment) segments.push(segment);
+      index += separatorLength - 1;
+      start = index + 1;
+    }
+  }
+  const segment = text.slice(start).trim();
+  if (segment) segments.push(segment);
+  return segments;
+}
+
+function unwrap(segment) {
+  let tokens = segment.trim().match(/(?:\$'[^']*'|"[^"]*"|'[^']*'|[^\s])+/g) ?? [];
+  tokens = tokens.map((token) => token.replace(/^(?:\$')?['"]|['"]$/g, ""));
+  while (tokens[0] && (WRAPPERS.has(tokens[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]))) {
+    if (tokens[0] === "env") {
+      tokens = tokens.slice(1);
+      while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) tokens = tokens.slice(1);
+    } else {
+      tokens = tokens.slice(1);
+    }
+  }
+  return tokens;
+}
+
+function commandContext(command, cwd) {
+  let current = resolve(cwd);
+  const commands = [];
+  for (const segment of shellSegments(command)) {
+    const tokens = unwrap(segment);
+    if (tokens[0] === "cd" && tokens[1]) {
+      current = resolve(current, tokens[1]);
+      commands.push({ tokens, cwd: current, cd: true });
+      continue;
+    }
+    commands.push({ tokens, cwd: current });
+  }
+  return commands;
+}
+
+function hasExpansion(target) {
+  return /[$*?\[\]{}~`]|\$\(|<\(|>\(/.test(target);
+}
+
+function isWithin(path, root) {
+  const delta = relative(resolve(root), resolve(path));
+  return delta === "" || (!delta.startsWith("..") && !isAbsolute(delta));
+}
+
+function existingAncestor(path) {
+  let current = path;
+  while (true) {
+    try {
+      return { path: current, realpath: realpathSync(current) };
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return undefined;
+      current = parent;
+    }
+  }
+}
+
+function canonicalCandidate(path) {
+  const ancestor = existingAncestor(path);
+  if (!ancestor) return undefined;
+  return resolve(ancestor.realpath, relative(ancestor.path, path));
+}
+
+function canonicalRoots(paths) {
+  return [...new Set(paths.map((path) => canonicalCandidate(path) ?? resolve(path)))];
+}
+
+function checkRm(tokens, cwd, workspaceRoot) {
+  if (tokens[0] !== "rm" && !tokens[0]?.endsWith("/rm")) return undefined;
+  const targets = tokens.slice(1).filter((token) => token !== "--" && !token.startsWith("-"));
+  if (targets.length === 0 || targets.some(hasExpansion)) {
+    return violation("RM_TARGET_UNCERTAIN", "无法确定 rm 目标，已按 fail-closed 阻断");
+  }
+  for (const target of targets) {
+    const path = resolve(cwd, target);
+    const candidate = canonicalCandidate(path);
+    if (!candidate) return violation("RM_TARGET_UNCERTAIN", "无法确定 rm 目标，已按 fail-closed 阻断");
+    const workspace = canonicalCandidate(workspaceRoot);
+    const temporary = canonicalRoots([tmpdir(), "/tmp", "/private/tmp"]);
+    if (workspace && isWithin(candidate, workspace)) continue;
+    if (temporary.some((root) => isWithin(candidate, root))) continue;
+    if (!isWithin(candidate, workspaceRoot)) {
+      return violation("RM_OUTSIDE_WORKSPACE", "禁止 workspace 外 rm");
+    }
+    return violation("RM_OUTSIDE_WORKSPACE", "禁止 workspace 外 rm");
+  }
+  return undefined;
+}
+
+function commitMessage(tokens) {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "-m" || token === "--message") return tokens[index + 1];
+    if (token.startsWith("--message=")) return token.slice("--message=".length);
+    if (token.startsWith("-m") && token.length > 2) return token.slice(2);
+  }
+  return undefined;
+}
+
+function validateCommit(tokens) {
+  const commitIndex = tokens.indexOf("commit");
+  if (commitIndex < 0) return undefined;
+  if (tokens.some((token) => token === "-F" || token === "--file" || token.startsWith("--file="))) {
+    return violation("COMMIT_MESSAGE_REQUIRED", "提交必须使用明确的 -m/--message message");
+  }
+  const message = commitMessage(tokens);
+  if (!message) return violation("COMMIT_MESSAGE_REQUIRED", "提交必须使用明确的 -m/--message message");
+  if (/^\$'/.test(message)) return violation("COMMIT_MESSAGE_INVALID", "commit message 不得使用 shell $'...' 形式");
+  const normalized = message.replace(/^\$'|'$/g, "");
+  const match = normalized.match(/^([a-z]+)(?:\([^\n)]+\))?:\s*(.+)$/s);
+  if (!match || !COMMIT_TYPES.has(match[1])) return violation("COMMIT_MESSAGE_INVALID", "commit type 不符合 Conventional Commit 规则");
+  const subject = match[2].split("\n")[0].trim();
+  if (!/[\u4e00-\u9fff]/.test(subject)) return violation("COMMIT_MESSAGE_INVALID", "commit subject 必须包含中文");
+  if (/[。.]$/.test(subject)) return violation("COMMIT_MESSAGE_INVALID", "commit subject 不得以句号结尾");
+  if (/^(?:已修复|实现了|修复了|增加了)/.test(subject)) return violation("COMMIT_MESSAGE_INVALID", "commit subject 不得使用过去时");
+  if (/^(?:fix|update|bugfix|wip|修改|更新)$/i.test(subject)) return violation("COMMIT_MESSAGE_INVALID", "commit subject 信息量不足");
+  if (/(?:^|\n)Co-Authored-By:\s*(?:Claude|Copilot|Cursor|AI\b)/i.test(normalized) || /Generated with\s+\S+/i.test(normalized) || /AI-assisted/i.test(normalized)) {
+    return violation("COMMIT_MESSAGE_INVALID", "commit message 不得包含 AI 署名");
+  }
+  return undefined;
+}
+
+function planTodos(repoRoot) {
+  const plans = resolve(repoRoot, "docs", "plans");
+  let entries;
+  try {
+    entries = readdirSync(plans, { recursive: true, withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    return [{ file: plans, text: `读取失败: ${error.message}` }];
+  }
+  const results = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+    const file = resolve(entry.parentPath ?? entry.path ?? plans, entry.name);
+    try {
+      const content = readFileSync(file, "utf8");
+      for (const line of content.split(/\r?\n/)) {
+        const match = line.match(/^-?\s*TODO:\s*(.+)/);
+        if (match) results.push({ file, text: `TODO: ${match[1]}` });
+      }
+    } catch (error) {
+      results.push({ file, text: `读取失败: ${error.message}` });
+    }
+  }
+  return results;
+}
+
+export function scanPendingPlanTodos(repoRoot) {
+  return planTodos(repoRoot);
+}
+
+export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }) {
+  const skipCommitValidation = env.GIT_COMMIT_HOOK_SKIP === "1" || /(?:^|\s)GIT_COMMIT_HOOK_SKIP=1(?:\s|$)/.test(command);
+  const commands = commandContext(command, cwd);
+  for (const { tokens, cwd: commandCwd, cd } of commands) {
+    const rmViolation = checkRm(tokens, commandCwd, workspaceRoot);
+    if (rmViolation) return rmViolation;
+    if (cd && commands.some((command) => command.tokens[0] === "git")) {
+      return violation("GIT_CWD_FORBIDDEN", "禁止通过 cd 切换 Git 工作目录");
+    }
+    if (tokens[0] === "git" && tokens.includes("-C")) {
+      return violation("GIT_C_FORBIDDEN", "禁止使用 git -C 切换工作目录");
+    }
+    const commitViolation = skipCommitValidation ? undefined : validateCommit(tokens);
+    if (commitViolation) return commitViolation;
+    const gitSubcommand = tokens[0] === "git" ? tokens.find((token, index) => index > 0 && !token.startsWith("-")) : undefined;
+    if (gitSubcommand === "push" && !tokens.includes("--dry-run")) {
+      const todos = planTodos(commandCwd);
+      if (todos.length > 0) {
+        return violation("PUSH_PENDING_PLAN_TODOS", `存在未完成计划 TODO 或读取失败: ${todos[0].text}`);
+      }
+    }
+  }
+  return undefined;
+}
+
+export function codingReminderFor({ toolName, input }) {
+  if (!new Set(["write", "edit"]).has(toolName)) return undefined;
+  const path = input?.path ?? input?.filePath ?? input?.file_path ?? input?.filename;
+  if (!path || !SOURCE_PATH.test(path)) return undefined;
+  const normalized = path.replaceAll("\\", "/");
+  const basename = normalized.split("/").at(-1);
+  if (/(?:^|\/)__(?:tests?)__\//.test(normalized) || /(?:^|\/)(?:tests?|test)\//.test(normalized) || /(?:^|[._-])(?:test|spec)(?:[._-]|$)/i.test(basename)) return undefined;
+  return "逻辑变更请先遵循 test-driven-development，并在修复问题前记录 docs/bugs/bug-*.md 根因分析。";
+}

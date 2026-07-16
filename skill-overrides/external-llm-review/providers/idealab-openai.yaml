@@ -1,0 +1,5 @@
+provider: idealab-openai
+base_url: https://idealab.alibaba-inc.com/api/openai/v1
+api_key: ${IDEALAB_OPENAI_API_KEY}
+model: Qwen3.7-Max-DogFooding
+max_tokens: 8000

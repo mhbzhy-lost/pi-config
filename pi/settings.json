@@ -1,0 +1,9 @@
+{
+  "lastChangelogVersion": "0.80.6",
+  "theme": "light",
+  "defaultProvider": "openai-idealab",
+  "defaultModel": "Qwen3.7-Max-DogFooding",
+  "packages": [
+    "npm:pi-subagents@0.34.0"
+  ]
+}

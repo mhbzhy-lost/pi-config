@@ -1,0 +1,84 @@
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+const PLAN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const SCHEMA_VERSION = "pi-plan-control.v1";
+
+function validIdentity(value) {
+  return typeof value === "string" && PLAN_ID.test(value) && !value.includes("..");
+}
+
+function controlPaths(stateRoot, planId) {
+  if (!validIdentity(planId)) throw new Error("Invalid planId");
+  const runsRoot = path.resolve(stateRoot, "var", "plan-runs");
+  const directory = path.resolve(runsRoot, planId, "control");
+  const relative = path.relative(runsRoot, directory);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Plan control path escapes plan-runs");
+  return { directory, request: path.join(directory, "cancel-request.json"), ack: path.join(directory, "cancel-ack.json") };
+}
+
+async function writeAtomic(file, value) {
+  await mkdir(path.dirname(file), { recursive: true });
+  const temporary = path.join(path.dirname(file), `.${path.basename(file)}-${process.pid}-${crypto.randomUUID()}.tmp`);
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
+  await rename(temporary, file);
+}
+
+function parseRequest(value) {
+  if (!value || value.schemaVersion !== SCHEMA_VERSION || value.type !== "cancel" || !validIdentity(value.requestId) || !validIdentity(value.planId) || !validIdentity(value.runId) || typeof value.occurredAt !== "string" || !value.occurredAt) {
+    throw new Error("Invalid cancel request");
+  }
+  return value;
+}
+
+function matchingCancelledAck(value, request) {
+  return value && value.schemaVersion === SCHEMA_VERSION && value.type === "cancel" && value.requestId === request.requestId && value.planId === request.planId && value.runId === request.runId && value.lifecycle === "cancelled" && value.result === "accepted" && typeof value.occurredAt === "string" && value.occurredAt;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export function createPlanControl({ stateRoot, id = () => crypto.randomUUID(), now = () => new Date().toISOString(), intervalMs = 50, timeoutMs = 5_000 } = {}) {
+  if (typeof stateRoot !== "string" || !stateRoot) throw new Error("stateRoot is required");
+
+  return {
+    paths(planId) {
+      return controlPaths(stateRoot, planId);
+    },
+    async requestCancel({ planId, runId }) {
+      if (!validIdentity(planId)) throw new Error("Invalid planId");
+      if (!validIdentity(runId)) throw new Error("Invalid runId");
+      const request = parseRequest({ schemaVersion: SCHEMA_VERSION, requestId: id(), planId, runId, type: "cancel", occurredAt: now() });
+      const paths = controlPaths(stateRoot, planId);
+      await writeAtomic(paths.request, request);
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() <= deadline) {
+        try {
+          const ack = JSON.parse(await readFile(paths.ack, "utf8"));
+          if (matchingCancelledAck(ack, request)) return ack;
+        } catch (error) {
+          if (error?.code !== "ENOENT" && error instanceof SyntaxError) throw new Error("Invalid cancel acknowledgement");
+          if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+        }
+        await delay(intervalMs);
+      }
+      throw new Error("Plan cancellation acknowledgement timed out");
+    },
+    async readRequest(planId) {
+      const paths = controlPaths(stateRoot, planId);
+      try {
+        return parseRequest(JSON.parse(await readFile(paths.request, "utf8")));
+      } catch (error) {
+        if (error?.code === "ENOENT") return null;
+        throw error;
+      }
+    },
+    async writeAck(ack) {
+      const request = parseRequest(ack);
+      if (!["cancelled", "rejected"].includes(ack.lifecycle) || typeof ack.result !== "string" || !ack.result) throw new Error("Invalid cancel acknowledgement");
+      await writeAtomic(controlPaths(stateRoot, request.planId).ack, ack);
+      return ack;
+    },
+  };
+}

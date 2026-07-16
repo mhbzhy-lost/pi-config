@@ -1,0 +1,11 @@
+# Pi 全局 Skill 白名单。
+# 只有此文件列出的 Skill 才由 skill-whitelist Extension 注入 Pi。
+
+external-llm-review
+git-commit-convention
+systematic-debugging
+test-driven-development
+receiving-code-review
+writing-skills
+writing-plans
+plan-runner-dispatch

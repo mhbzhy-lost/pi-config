@@ -1,0 +1,28 @@
+{
+  "providers": {
+    "openai-idealab": {
+      "baseUrl": "https://idealab.alibaba-inc.com/api/openai/v1",
+      "api": "openai-completions",
+      "authHeader": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "maxTokensField": "max_tokens",
+        "thinkingFormat": "qwen",
+        "supportsStrictMode": false,
+        "supportsLongCacheRetention": false
+      },
+      "models": [
+        {
+          "id": "Qwen3.7-Max-DogFooding",
+          "name": "Qwen 3.7 Max DogFooding",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1000000,
+          "maxTokens": 32768
+        }
+      ]
+    }
+  }
+}

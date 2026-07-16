@@ -1,0 +1,15 @@
+{
+  "name": "pi-config",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "test:integration": "node --test test/pi-runtime.integration.mjs",
+    "test:subagents": "node --test test/pi-subagents-runtime.integration.mjs",
+    "test:plan": "node --test test/plan-capsule.integration.mjs",
+    "doctor": "node scripts/doctor.mjs"
+  }
+}
