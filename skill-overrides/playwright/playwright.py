@@ -2,13 +2,16 @@
 """
 Playwright MCP wrapper for pi skill.
 Manages a persistent Playwright MCP server process, proxies via Unix socket.
+Each start creates an independent browser instance automatically.
 
 Usage:
-  playwright.py start [--headless]   Start the MCP server daemon
-  playwright.py call <tool> [args]   Call an MCP tool (args as JSON string)
-  playwright.py stop                 Stop the MCP server daemon
-  playwright.py status               Check if server is running
+  playwright.py start [--headless]   Start a new browser instance
+  playwright.py call <tool> [args]   Call an MCP tool (auto-detects instance)
+  playwright.py stop                 Stop the browser instance
+  playwright.py status               Check running instance
   playwright.py tools                List available tools
+  playwright.py instances            List all running instances
+  playwright.py stopall              Stop all running instances
 """
 
 import json
@@ -20,19 +23,38 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
-STATE_DIR = Path(tempfile.gettempdir()) / "pi-playwright-mcp"
-SOCKET_PATH = STATE_DIR / "server.sock"
-PID_FILE = STATE_DIR / "daemon.pid"
-LOG_FILE = STATE_DIR / "daemon.log"
-MCP_PID_FILE = STATE_DIR / "mcp.pid"
-
+BASE_STATE_DIR = Path(tempfile.gettempdir()) / "pi-playwright-mcp"
 CLIENT_TIMEOUT = 60.0
+
+_instance_name: str | None = None
+_instance_explicit = False
+
+
+def state_dir() -> Path:
+    return BASE_STATE_DIR / _instance_name
+
+
+def socket_path() -> Path:
+    return state_dir() / "server.sock"
+
+
+def pid_file() -> Path:
+    return state_dir() / "daemon.pid"
+
+
+def log_file() -> Path:
+    return state_dir() / "daemon.log"
+
+
+def mcp_pid_file() -> Path:
+    return state_dir() / "mcp.pid"
 
 
 def ensure_state_dir():
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_dir().mkdir(parents=True, exist_ok=True)
 
 
 def read_pid(path: Path) -> int | None:
@@ -44,30 +66,68 @@ def read_pid(path: Path) -> int | None:
         return None
 
 
+def running_instances() -> list[tuple[str, int]]:
+    """Return list of (instance_name, pid) for all running instances."""
+    if not BASE_STATE_DIR.exists():
+        return []
+    results = []
+    for d in sorted(BASE_STATE_DIR.iterdir()):
+        if d.is_dir():
+            pid = read_pid(d / "daemon.pid")
+            if pid and (d / "server.sock").exists():
+                results.append((d.name, pid))
+    return results
+
+
+def resolve_instance():
+    """Auto-resolve instance when not explicitly specified."""
+    global _instance_name
+    if _instance_name is not None:
+        return
+
+    instances = running_instances()
+    if len(instances) == 1:
+        _instance_name = instances[0][0]
+    elif len(instances) == 0:
+        print("No running instances. Start one with: playwright.py start [--headless]", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print("Multiple instances running. Specify with --instance <name>:", file=sys.stderr)
+        for name, pid in instances:
+            print(f"  {name} (pid={pid})", file=sys.stderr)
+        sys.exit(1)
+
+
 def is_running() -> bool:
-    return read_pid(PID_FILE) is not None and SOCKET_PATH.exists()
+    return read_pid(pid_file()) is not None and socket_path().exists()
 
 
 def do_status():
-    pid = read_pid(PID_FILE)
-    if pid and SOCKET_PATH.exists():
-        print(f"Running (daemon pid={pid})")
+    resolve_instance()
+    pid = read_pid(pid_file())
+    if pid and socket_path().exists():
+        print(f"Running (instance={_instance_name}, pid={pid})")
     else:
-        print("Not running")
+        print(f"Not running (instance={_instance_name})")
 
 
 def do_start(headless: bool = False):
+    global _instance_name
+
+    if _instance_name is None:
+        _instance_name = uuid.uuid4().hex[:8]
+
     ensure_state_dir()
 
     if is_running():
-        print("Already running")
+        print(f"Already running (instance={_instance_name})")
         return
 
-    cmd = [sys.executable, __file__, "_daemon"]
+    cmd = [sys.executable, __file__, "_daemon", "--instance", _instance_name]
     if headless:
         cmd.append("--headless")
 
-    log = open(LOG_FILE, "a")
+    log = open(log_file(), "a")
     proc = subprocess.Popen(
         cmd,
         stdout=log,
@@ -75,36 +135,63 @@ def do_start(headless: bool = False):
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
-    PID_FILE.write_text(str(proc.pid))
+    pid_file().write_text(str(proc.pid))
 
     for _ in range(50):
-        if SOCKET_PATH.exists():
+        if socket_path().exists():
             try:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                s.connect(str(SOCKET_PATH))
+                s.connect(str(socket_path()))
                 s.close()
-                print(f"Started (pid={proc.pid}, headless={headless})")
+                print(f"Started (instance={_instance_name}, pid={proc.pid}, headless={headless})")
                 return
             except (ConnectionRefusedError, FileNotFoundError):
                 pass
         time.sleep(0.1)
 
-    print(f"Failed to start (check log: {LOG_FILE})", file=sys.stderr)
+    print(f"Failed to start (check log: {log_file()})", file=sys.stderr)
     sys.exit(1)
 
 
 def do_stop():
-    pid = read_pid(PID_FILE)
+    resolve_instance()
+    pid = read_pid(pid_file())
     if pid:
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
 
-    for f in [PID_FILE, SOCKET_PATH, MCP_PID_FILE]:
+    for f in [pid_file(), socket_path(), mcp_pid_file()]:
         f.unlink(missing_ok=True)
 
-    print("Stopped")
+    try:
+        state_dir().rmdir()
+    except OSError:
+        pass
+
+    print(f"Stopped (instance={_instance_name})")
+
+
+def do_stopall():
+    """Stop all running instances."""
+    instances = running_instances()
+    if not instances:
+        print("No running instances")
+        return
+    for name, pid in instances:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        d = BASE_STATE_DIR / name
+        for f in ["daemon.pid", "server.sock", "mcp.pid"]:
+            (d / f).unlink(missing_ok=True)
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+        print(f"  Stopped {name} (pid={pid})")
 
 
 def send_request(req: dict, timeout: float = CLIENT_TIMEOUT) -> dict:
@@ -114,7 +201,7 @@ def send_request(req: dict, timeout: float = CLIENT_TIMEOUT) -> dict:
 
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
-    s.connect(str(SOCKET_PATH))
+    s.connect(str(socket_path()))
 
     try:
         payload = json.dumps(req) + "\n"
@@ -133,6 +220,8 @@ def send_request(req: dict, timeout: float = CLIENT_TIMEOUT) -> dict:
 
 
 def do_call(tool_name: str, args_json: str = "{}"):
+    resolve_instance()
+
     try:
         args = json.loads(args_json)
     except json.JSONDecodeError as e:
@@ -166,6 +255,7 @@ def do_call(tool_name: str, args_json: str = "{}"):
 
 
 def do_tools():
+    resolve_instance()
     req = {"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}
     result = send_request(req)
     tools = result.get("result", {}).get("tools", [])
@@ -176,7 +266,8 @@ def do_tools():
 
 def run_daemon(headless: bool):
     """Daemon: manages MCP subprocess and proxies via Unix socket with threads."""
-    SOCKET_PATH.unlink(missing_ok=True)
+    ensure_state_dir()
+    socket_path().unlink(missing_ok=True)
 
     mcp_cmd = ["npx", "-y", "@playwright/mcp"]
     if headless:
@@ -188,7 +279,7 @@ def run_daemon(headless: bool):
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
-    MCP_PID_FILE.write_text(str(mcp.pid))
+    mcp_pid_file().write_text(str(mcp.pid))
 
     init_req = json.dumps({
         "jsonrpc": "2.0",
@@ -213,7 +304,6 @@ def run_daemon(headless: bool):
     stdin_lock = threading.Lock()
     pending = {}
     pending_lock = threading.Lock()
-    pending_event = threading.Event()
 
     def read_mcp_stdout():
         """Read MCP responses and dispatch to waiting clients."""
@@ -244,10 +334,10 @@ def run_daemon(headless: bool):
     reader_thread.start()
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(SOCKET_PATH))
+    server.bind(str(socket_path()))
     server.listen(5)
     server.settimeout(1.0)
-    print(f"Listening on {SOCKET_PATH}", flush=True)
+    print(f"Listening on {socket_path()} (instance={_instance_name})", flush=True)
 
     def handle_client(conn):
         """Read request from client, forward to MCP stdin."""
@@ -290,7 +380,7 @@ def run_daemon(headless: bool):
 
     finally:
         server.close()
-        SOCKET_PATH.unlink(missing_ok=True)
+        socket_path().unlink(missing_ok=True)
         mcp.terminate()
         try:
             mcp.wait(timeout=5)
@@ -298,31 +388,63 @@ def run_daemon(headless: bool):
             mcp.kill()
 
 
+def parse_instance(argv: list[str]) -> list[str]:
+    """Extract --instance <name> from argv, set global, return remaining args."""
+    global _instance_name, _instance_explicit
+    rest = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--instance" and i + 1 < len(argv):
+            _instance_name = argv[i + 1]
+            _instance_explicit = True
+            i += 2
+        else:
+            rest.append(argv[i])
+            i += 1
+    return rest
+
+
+def do_list_instances():
+    """List all running instances."""
+    instances = running_instances()
+    if not instances:
+        print("No running instances")
+        return
+    for name, pid in instances:
+        print(f"  {name} (pid={pid})")
+
+
 def main():
-    if len(sys.argv) < 2:
+    argv = parse_instance(sys.argv[1:])
+
+    if len(argv) < 1:
         print(__doc__)
         sys.exit(1)
 
-    cmd = sys.argv[1]
+    cmd = argv[0]
 
     if cmd == "start":
-        headless = "--headless" in sys.argv
+        headless = "--headless" in argv
         do_start(headless)
     elif cmd == "stop":
         do_stop()
+    elif cmd == "stopall":
+        do_stopall()
     elif cmd == "status":
         do_status()
+    elif cmd == "instances":
+        do_list_instances()
     elif cmd == "call":
-        if len(sys.argv) < 3:
+        if len(argv) < 2:
             print("Usage: playwright.py call <tool_name> [args_json]", file=sys.stderr)
             sys.exit(1)
-        tool_name = sys.argv[2]
-        args_json = sys.argv[3] if len(sys.argv) > 3 else "{}"
+        tool_name = argv[1]
+        args_json = argv[2] if len(argv) > 2 else "{}"
         do_call(tool_name, args_json)
     elif cmd == "tools":
         do_tools()
     elif cmd == "_daemon":
-        headless = "--headless" in sys.argv
+        headless = "--headless" in argv
         run_daemon(headless)
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
