@@ -49,7 +49,9 @@ export function createPlanCoordinator({ plan, entries, append, id = () => crypto
   function authorizeNestedSubagent(tool) {
     if (!expectedIntent) throw new Error("no dispatch intent");
     if (intentConsumed) throw new Error("dispatch intent already consumed");
-    if (!sameTool(tool, expectedIntent.tool)) throw new Error("nested subagent call does not match dispatch intent");
+    if (!sameTool(tool, expectedIntent.tool)) {
+      throw new Error(`nested subagent call does not match dispatch intent${toolMismatchHint(tool, expectedIntent.tool)}`);
+    }
     intentConsumed = true;
     return true;
   }
@@ -156,8 +158,23 @@ function buildExecutionPrompt(_plan, task) {
   return lines.join("\n");
 }
 
+const COMPARED_FIELDS = ["agent", "cwd", "context", "async", "clarify"];
+
 function sameTool(left, right) {
-  return ["agent", "cwd", "context", "async", "clarify"].every((field) => left?.[field] === right[field]);
+  return COMPARED_FIELDS.every((field) => left?.[field] === right?.[field]);
+}
+
+function toolMismatchHint(actual, expected) {
+  const mismatches = [];
+  for (const field of COMPARED_FIELDS) {
+    const a = actual?.[field];
+    const e = expected?.[field];
+    if (a !== e) {
+      mismatches.push(`${field}: expected ${JSON.stringify(e)}, got ${JSON.stringify(a)}`);
+    }
+  }
+  if (mismatches.length === 0) return "";
+  return `\nField mismatches:\n${mismatches.map((m) => `  - ${m}`).join("\n")}\nRetry subagent() with the exact values shown above.`;
 }
 
 function terminalOutcome(state) {
