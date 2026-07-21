@@ -111,9 +111,9 @@ uv run --no-project \
   --review-round 1
 ```
 
-## Fallback（仅限 push hook）
+## Fallback（仅限 push gate）
 
-`${PI_CONFIG_HOME}/scripts/hooks/external-review-gate.sh` 在 push 拦截时自动尝试 3 个 provider：`idealab-anthropic → bailian → idealab-openai`，按序 fallback：超时/非零退出/异常都会跳到下一个。全部失败则 degraded allow（不再阻断 push）。
+Push gate（`scripts/lib/review-invoker.mjs`）在拦截 `git push` 时自动尝试 3 个 provider：`idealab-anthropic → bailian → idealab-openai`，按序 fallback：超时/异常都会跳到下一个。全部失败则 fail-open（不阻断 push）。
 
 直接 CLI 调用 reviewer.py 不走 fallback，单 provider 失败即报错退出。
 
