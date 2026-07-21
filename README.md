@@ -7,6 +7,7 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 
 - Git
 - Node.js 22.19 或更高版本
+- uv (Python package manager)
 - Pi Coding Agent
 
 ## 安装 Pi
@@ -75,6 +76,32 @@ Shell 集成固定：
 
 `pi/extensions/skill-whitelist.ts` 随后通过 `resources_discover` 只注入
 `skill-overrides/skills.list` 中列出的 Skill。它不复制或创建软链接。
+
+## Basic Memory 本地持久存储
+
+Pi 通过 `pi/extensions/basic-memory.ts` 注册五个工具：
+
+| 工具 | 用途 |
+|------|------|
+| `memory_search` | 搜索笔记 |
+| `memory_read` | 读取指定笔记 |
+| `memory_context` | 构建上下文 |
+| `memory_recent` | 最近活动 |
+| `memory_write` | 写入笔记 |
+
+约束：
+
+- 所有命令强制 `--local`，不连接云端
+- 默认 project 由 Basic Memory 自动解析
+- `memory_write` 在写入前检测疑似凭据/秘密并拒绝
+- 不提供 `--overwrite`、delete、reset、reindex
+
+诊断命令：
+
+```bash
+basic-memory status --local --json
+basic-memory doctor --local
+```
 
 ## Skill 选择
 

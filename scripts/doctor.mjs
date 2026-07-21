@@ -11,6 +11,7 @@ const execFile = promisify(execFileCallback);
 
 const PI_VERSION = "0.80.10";
 const PI_SUBAGENTS_VERSION = "0.34.0";
+const BASIC_MEMORY_VERSION = "0.22.1";
 const EXPECTED_SKILLS = [
   "external-llm-review",
   "git-commit-convention",
@@ -48,6 +49,16 @@ function parseFrontmatter(content) {
   const match = content?.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return null;
   return Object.fromEntries(match[1].split("\n").map((line) => line.split(/:\s+/, 2)));
+}
+
+async function readInstalledBasicMemoryVersion() {
+  try {
+    const { stdout } = await execFile("basic-memory", ["--version"]);
+    const match = stdout.trim().match(/(\d+\.\d+\.\d+)/);
+    return match ? match[1] : stdout.trim();
+  } catch {
+    return "unknown";
+  }
 }
 
 async function readInstalledPiVersion() {
@@ -98,6 +109,11 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   const piVersion = await (options.readPiVersion ?? readInstalledPiVersion)();
   if (piVersion !== PI_VERSION) {
     issues.push(`unexpected Pi version: ${piVersion}; expected ${PI_VERSION}`);
+  }
+
+  const bmVersion = await (options.readBasicMemoryVersion ?? readInstalledBasicMemoryVersion)();
+  if (bmVersion !== BASIC_MEMORY_VERSION) {
+    issues.push(`unexpected basic-memory version: ${bmVersion}; expected ${BASIC_MEMORY_VERSION}`);
   }
 
   for (const [name, expected] of Object.entries(REQUIRED_PROFILES)) {

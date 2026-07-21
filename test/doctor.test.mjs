@@ -49,7 +49,7 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     );
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "index.ts"), "");
 
-    assert.deepEqual(await inspectConfiguration(root, { readPiVersion: async () => "0.80.10" }), []);
+    assert.deepEqual(await inspectConfiguration(root, { readPiVersion: async () => "0.80.10", readBasicMemoryVersion: async () => "0.22.1" }), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -173,4 +173,28 @@ test("inspectConfiguration reports the final plan execution contract gaps", asyn
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("reports issue when basic-memory version is wrong", async () => {
+  const issues = await inspectConfiguration(repoRoot, {
+    readPiVersion: async () => "0.80.10",
+    readBasicMemoryVersion: async () => "0.20.0",
+  });
+  assert.ok(issues.some((i) => i.includes("basic-memory") && i.includes("0.22.1")));
+});
+
+test("reports issue when basic-memory is not installed", async () => {
+  const issues = await inspectConfiguration(repoRoot, {
+    readPiVersion: async () => "0.80.10",
+    readBasicMemoryVersion: async () => "unknown",
+  });
+  assert.ok(issues.some((i) => i.includes("basic-memory")));
+});
+
+test("no issue when basic-memory version matches", async () => {
+  const issues = await inspectConfiguration(repoRoot, {
+    readPiVersion: async () => "0.80.10",
+    readBasicMemoryVersion: async () => "0.22.1",
+  });
+  assert.ok(!issues.some((i) => i.includes("basic-memory")));
 });

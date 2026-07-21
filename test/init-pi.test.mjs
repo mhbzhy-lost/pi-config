@@ -30,7 +30,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "tests", "test_reviewer.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "tests", "test_reviewer.py"));
     await chmod(join(fixtureRepo, "init-pi.sh"), 0o755);
 
-    for (const command of ["git", "npm"]) {
+    for (const command of ["git", "npm", "uv"]) {
       const commandPath = join(fakeBin, command);
       await writeFile(commandPath, `#!/usr/bin/env bash\nprintf '%s\\n' '${command} '"$*" >> "$COMMAND_LOG"\n`);
       await chmod(commandPath, 0o755);
@@ -90,6 +90,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     assert.match(commands, /npm test/);
     assert.match(commands, /npm run doctor/);
     assert.match(commands, /npm run test:integration/);
+    assert.match(commands, /uv tool install --force basic-memory==0\.22\.1/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
