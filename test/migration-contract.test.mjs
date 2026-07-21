@@ -17,6 +17,10 @@ const expectedSkills = [
   "plan-runner-dispatch",
   "exa-search",
   "playwright",
+  "goal-contract",
+  "mac-mini-worker",
+  "normandy-cli",
+  "tbctx7",
 ];
 
 test("migration exposes exactly the required Skills", async () => {

@@ -181,16 +181,23 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     // Gate enforcement: if HEAD has advanced but lifecycle is still running,
     // the plan has work that was never verified. Force plan_verify.
     if (typeof options.getHeadCommit === "function" && projection.workspace?.headCommit) {
+      let currentHead;
+      let headCheckFailed = false;
       try {
-        const currentHead = await options.getHeadCommit();
-        if (currentHead && currentHead !== projection.workspace.headCommit) {
-          pi.sendMessage(
-            { customType: "pi-plan-follow-up-v1", content: `Worktree HEAD advanced to ${currentHead} but plan lifecycle is still running. You MUST call plan_verify now. If verification fails, call plan_block with the reason. You cannot exit without reaching a terminal lifecycle state (validated or blocked).`, details: { planId: projection.planId, enforcement: "gate-required" } },
-            { triggerTurn: true, deliverAs: "followUp" },
-          );
-          return;
-        }
-      } catch {}
+        currentHead = await options.getHeadCommit();
+      } catch {
+        headCheckFailed = true;
+      }
+      if (headCheckFailed || (currentHead && currentHead !== projection.workspace.headCommit)) {
+        const reason = headCheckFailed
+          ? "Cannot determine worktree HEAD (git failed). Assuming work exists."
+          : `Worktree HEAD advanced to ${currentHead} but plan lifecycle is still running.`;
+        pi.sendMessage(
+          { customType: "pi-plan-follow-up-v1", content: `${reason} You MUST call plan_verify now. If verification fails, call plan_block with the reason. You cannot exit without reaching a terminal lifecycle state (validated or blocked).`, details: { planId: projection.planId, enforcement: "gate-required" } },
+          { triggerTurn: true, deliverAs: "followUp" },
+        );
+        return;
+      }
     }
     pi.appendEntry("pi-plan-event-v1", {
       schemaVersion: "pi-plan-event.v1",

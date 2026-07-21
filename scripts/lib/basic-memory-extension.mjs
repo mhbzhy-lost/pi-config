@@ -26,7 +26,9 @@ const COMMANDS = {
 
 function truncate(output) {
   if (Buffer.byteLength(output, "utf8") <= MAX_OUTPUT_BYTES) return output;
-  const truncated = output.slice(0, MAX_OUTPUT_BYTES);
+  const buf = Buffer.from(output, "utf8").subarray(0, MAX_OUTPUT_BYTES);
+  // Decode safely, replacing any truncated multi-byte tail
+  const truncated = new TextDecoder("utf-8", { fatal: false }).decode(buf);
   return `${truncated}\n\n[truncated: output exceeded ${MAX_OUTPUT_BYTES} bytes]`;
 }
 

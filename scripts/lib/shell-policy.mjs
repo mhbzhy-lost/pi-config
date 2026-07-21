@@ -140,9 +140,21 @@ function checkRm(tokens, cwd, workspaceRoot) {
   return undefined;
 }
 
+function gitSubcommand(tokens) {
+  // Skip flags and their value arguments (e.g. -C <path>, --git-dir <path>)
+  const VALUE_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--namespace", "-c"]);
+  let i = 1;
+  while (i < tokens.length) {
+    if (VALUE_FLAGS.has(tokens[i])) { i += 2; continue; }
+    if (tokens[i].startsWith("-")) { i++; continue; }
+    return tokens[i];
+  }
+  return undefined;
+}
+
 function checkDestructiveGit(tokens) {
   if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
-  const subcommand = tokens.find((t, i) => i > 0 && !t.startsWith("-"));
+  const subcommand = gitSubcommand(tokens);
   if (!subcommand) return undefined;
 
   if (subcommand === "reset" && tokens.includes("--hard")) {
@@ -169,9 +181,15 @@ function checkShellWrapper(tokens, cwd, workspaceRoot) {
   const shells = new Set(["sh", "bash", "zsh"]);
   const cmd = tokens[0]?.split("/").pop();
   if (!cmd || !shells.has(cmd)) return undefined;
-  if (tokens[1] !== "-c" || !tokens[2]) return undefined;
-  // Recursively check the inner command
-  return checkSingleCommand(tokens[2], cwd, workspaceRoot);
+  // Find -c as standalone or as combined short flag (e.g. -lc, -xc)
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === "-c" && tokens[i + 1]) return checkSingleCommand(tokens[i + 1], cwd, workspaceRoot);
+    if (t.startsWith("-") && !t.startsWith("--") && t.endsWith("c") && tokens[i + 1]) {
+      return checkSingleCommand(tokens[i + 1], cwd, workspaceRoot);
+    }
+  }
+  return undefined;
 }
 
 function checkSingleCommand(command, cwd, workspaceRoot) {

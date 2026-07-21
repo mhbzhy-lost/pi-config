@@ -245,3 +245,19 @@ test("allows safe commands inside sh -c wrapper", () => {
   assert.equal(policy("sh -c 'echo hello'"), undefined);
   assert.equal(policy("bash -c 'git status'"), undefined);
 });
+
+test("blocks git -C with destructive subcommand", () => {
+  // checkDestructiveGit now correctly identifies subcommands past -C/--git-dir flags
+  assertBlocked("git -C /some/path reset --hard", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git -C /worktree clean -fd", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git --git-dir /x -C /y reset --hard HEAD~5", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  // Non-destructive git -C still blocked by GIT_C_FORBIDDEN
+  assertBlocked("git -C /some/path status", "GIT_C_FORBIDDEN", /git -C/);
+});
+
+test("blocks dangerous commands with multi-flag sh -c variants", () => {
+  assertBlocked("bash -x -c 'git reset --hard'", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("sh --norc -c 'rm -rf /Users/shared'", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
+  assertBlocked("bash -lc 'git clean -fd'", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assert.equal(policy("bash -x -c 'echo safe'"), undefined);
+});

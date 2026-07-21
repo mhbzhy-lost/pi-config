@@ -200,13 +200,9 @@ export function createPlanRunnerDependencies({ pi, audit, externalReview, taskRe
       return Boolean(current?.planId && !TERMINAL.has(current.lifecycle) && ["created", "running"].includes(current.lifecycle));
     },
     async getHeadCommit() {
-      const ctx = { cwd: undefined };
-      try {
-        const entries = localEntries.length > 0 ? localEntries : [];
-        const proj = entries.reduce((p, e) => applyEvent(p, e), createProjection());
-        if (proj.workspace?.worktree) return await git(proj.workspace.worktree, "rev-parse", "HEAD");
-      } catch {}
-      return undefined;
+      const proj = localEntries.reduce((p, e) => applyEvent(p, e), createProjection());
+      if (!proj.workspace?.worktree) throw new Error("Plan worktree is unknown");
+      return git(proj.workspace.worktree, "rev-parse", "HEAD");
     },
     async blockPlan({ reason }, { ctx }) {
       if (typeof reason !== "string" || !reason.trim()) throw new Error("Block reason is required.");
