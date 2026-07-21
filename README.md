@@ -7,16 +7,17 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 
 - Git
 - Node.js 22.19 或更高版本
+- uv (Python package manager)
 - Pi Coding Agent
 
 ## 安装 Pi
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.6
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.10
 pi --version
 ```
 
-本仓当前只验证 Pi `0.80.6`。升级 Pi 前必须重新运行单元测试和真实集成测试。
+本仓当前只验证 Pi `0.80.10`。升级 Pi 前必须重新运行单元测试和真实集成测试。
 
 ## 初始化
 
@@ -27,7 +28,7 @@ pi --version
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
 - 初始化 Git submodule。
-- 安装并固定 Pi `0.80.6`。
+- 安装并固定 Pi `0.80.10`。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
 
@@ -35,8 +36,7 @@ pi --version
 `/login openai-idealab`；凭据只保存到被 Git 忽略的 `pi/auth.json`。
 
 真实集成测试使用 `--offline`，不执行启动网络请求；使用 `--no-session`，不保存
-session；不向模型发送 prompt。测试通过 RPC `get_commands` 断言只加载八个白名单
-Skill。Pi 启动时可能初始化被 Git 忽略的 `pi/auth.json`；集成测试不会删除或覆盖该
+session；不向模型发送 prompt。测试通过 RPC `get_commands` 断言只加载白名单 Skill。Pi 启动时可能初始化被 Git 忽略的 `pi/auth.json`；集成测试不会删除或覆盖该
 文件，避免影响后续真实登录凭据。
 
 初始化后重新打开终端，或执行：
@@ -58,7 +58,7 @@ Idealab OpenAI 直连 Provider 定义在 `pi/models.json`。首次使用时在 P
 ```bash
 pi
 # 在 Pi 中执行：/login openai-idealab
-pi --model openai-idealab/Qwen3.7-Max-DogFooding --thinking high
+pi --model openai-idealab/Peach-07-17-DogFooding --thinking high
 ```
 
 `scripts/pi-shell.zsh` 将 Pi 默认配置根指向仓库内 `pi/`，因此直接运行 `pi` 即可匹配
@@ -75,7 +75,33 @@ Shell 集成固定：
 - `--no-skills`，关闭 Pi 默认 Skill 发现
 
 `pi/extensions/skill-whitelist.ts` 随后通过 `resources_discover` 只注入
-`agents/skills.list` 中列出的 Skill。它不复制或创建软链接。
+`skill-overrides/skills.list` 中列出的 Skill。它不复制或创建软链接。
+
+## Basic Memory 本地持久存储
+
+Pi 通过 `pi/extensions/basic-memory.ts` 注册五个工具：
+
+| 工具 | 用途 |
+|------|------|
+| `memory_search` | 搜索笔记 |
+| `memory_read` | 读取指定笔记 |
+| `memory_context` | 构建上下文 |
+| `memory_recent` | 最近活动 |
+| `memory_write` | 写入笔记 |
+
+约束：
+
+- 所有命令强制 `--local`，不连接云端
+- 默认 project 由 Basic Memory 自动解析
+- `memory_write` 在写入前检测疑似凭据/秘密并拒绝
+- 不提供 `--overwrite`、delete、reset、reindex
+
+诊断命令：
+
+```bash
+basic-memory status --local --json
+basic-memory doctor --local
+```
 
 ## Skill 选择
 
@@ -96,6 +122,6 @@ compaction 延续不属于此功能范围。状态、取消和 Gate 范围见[Pi
 ## 升级 Superpowers
 
 1. 在 `vendor/superpowers` 检出目标 tag 或 commit。
-2. 检查白名单中八个 Skill 的变化。
+2. 检查白名单中 Skill 的变化。
 3. 运行 `npm test` 和 `npm run doctor`。
 4. 人工确认后更新 submodule gitlink。

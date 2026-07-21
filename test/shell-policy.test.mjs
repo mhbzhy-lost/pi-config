@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative as pathRelative } from "node:path";
 import { realpathSync } from "node:fs";
 import test from "node:test";
 import {
@@ -29,7 +29,7 @@ test("blocks rm targets outside the workspace and permits known workspace paths"
   assertBlocked("rm -rf /Users/shared", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assertBlocked("rm -rf ../../other", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assert.equal(policy("rm -rf ./helpers"), undefined);
-  assert.equal(policy("rm -rf /Users/leshi.zhy/pi-config/test/helpers"), undefined);
+  assert.equal(policy(`rm -rf ${join(workspaceRoot, "test", "helpers")}`), undefined);
 });
 
 test("uses cd context and unwraps sudo command and env before checking rm", () => {
@@ -37,7 +37,7 @@ test("uses cd context and unwraps sudo command and env before checking rm", () =
   assertBlocked("sudo rm -rf /Users/shared", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assertBlocked("command rm -rf /Users/shared", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assertBlocked("env MODE=test rm -rf /Users/shared", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
-  assert.equal(policy("cd /Users/leshi.zhy/pi-config/test && rm -rf helpers"), undefined);
+  assert.equal(policy(`cd ${join(workspaceRoot, "test")} && rm -rf helpers`), undefined);
 });
 
 test("fails closed for symlinks and shell-expanded or indeterminate rm targets", () => {
@@ -50,10 +50,15 @@ test("fails closed for symlinks and shell-expanded or indeterminate rm targets",
 
 test("allows rm with tilde paths that resolve within the workspace", () => {
   const home = homedir();
-  assert.equal(policy(`rm -rf ~/${realpathSync(workspaceRoot).split("/").pop()}/test/helpers`, {
-    cwd: workspaceRoot,
-    workspaceRoot,
-  }), undefined);
+
+  const relFromHome = pathRelative(home, realpathSync(workspaceRoot));
+  // Only test if workspace is actually under HOME
+  if (!relFromHome.startsWith("..") && relFromHome !== "") {
+    assert.equal(policy(`rm -rf ~/${relFromHome}/test/helpers`, {
+      cwd: workspaceRoot,
+      workspaceRoot,
+    }), undefined);
+  }
   assertBlocked(`rm -rf ~/unrelated-dir`, "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
 });
 
@@ -210,4 +215,33 @@ test("returns coding reminders only for source edits", () => {
   for (const path of ["src/app.test.ts", "src/app.spec.ts", "src/app_test.py", "src/test.ts", "tests/app.ts", "test/app.ts", "__tests__/app.ts"]) {
     assert.equal(codingReminderFor({ toolName: "write", input: { path } }), undefined, path);
   }
+});
+
+test("blocks destructive git commands that cannot be undone", () => {
+  assertBlocked("git reset --hard", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git reset --hard HEAD~1", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git clean -fd", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git clean -fdx", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git checkout -- src/app.ts", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git restore --worktree src/app.ts", "GIT_DESTRUCTIVE", /不可逆 Git/);
+});
+
+test("allows safe git commands and dry-run variants", () => {
+  assert.equal(policy("git reset src/app.ts"), undefined);
+  assert.equal(policy("git clean -nfd"), undefined);
+  assert.equal(policy("git clean --dry-run -fd"), undefined);
+  assert.equal(policy("git checkout main"), undefined);
+  assert.equal(policy("git restore --staged src/app.ts"), undefined);
+  assert.equal(policy("git stash"), undefined);
+});
+
+test("blocks dangerous commands inside sh -c wrapper", () => {
+  assertBlocked("sh -c 'git reset --hard'", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("bash -c 'rm -rf /Users/shared'", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
+  assertBlocked("zsh -c 'git clean -fd'", "GIT_DESTRUCTIVE", /不可逆 Git/);
+});
+
+test("allows safe commands inside sh -c wrapper", () => {
+  assert.equal(policy("sh -c 'echo hello'"), undefined);
+  assert.equal(policy("bash -c 'git status'"), undefined);
 });

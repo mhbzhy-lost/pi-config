@@ -15,11 +15,13 @@ const expectedSkills = [
   "writing-skills",
   "writing-plans",
   "plan-runner-dispatch",
+  "exa-search",
+  "playwright",
 ];
 
 test("migration exposes exactly the required Skills", async () => {
   const { loadDesiredSkills } = await import("../scripts/lib/skill-whitelist.mjs");
-  const skills = await loadDesiredSkills(repoRoot, join(repoRoot, "agents", "skills.list"));
+  const skills = await loadDesiredSkills(repoRoot, join(repoRoot, "skill-overrides", "skills.list"), join(repoRoot, "skill-overrides", "skills.local.list"));
 
   assert.deepEqual([...skills.keys()], expectedSkills);
 });

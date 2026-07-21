@@ -1,4 +1,4 @@
-import { checkShellPolicy, codingReminderFor } from "./shell-policy.mjs";
+import { checkShellPolicy, checkSensitivePath, codingReminderFor } from "./shell-policy.mjs";
 import { createPushReviewState } from "./push-review-state.mjs";
 import {
   gatherDiffInfo as defaultGatherDiffInfo,
@@ -36,6 +36,10 @@ export function createSecurityGatesExtension(pi, {
   const resolvedEnvFile = envFile || join(configRoot, "skill-overrides", "external-llm-review", ".env");
 
   pi.on("tool_call", async (event, ctx) => {
+    // Check sensitive path access for read/write/edit tools
+    const sensitiveViolation = checkSensitivePath({ toolName: event.toolName, input: event.input, cwd: ctx.cwd || "." });
+    if (sensitiveViolation) return { block: true, reason: sensitiveViolation.reason };
+
     if (event.toolName !== "bash" || typeof event.input?.command !== "string") return undefined;
     const cwd = ctx.cwd;
     if (!cwd) return { block: true, reason: "无法取得可信工作目录，安全门禁已按 fail-closed 阻断 bash" };

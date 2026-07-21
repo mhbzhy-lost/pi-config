@@ -2,9 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PI_VERSION="0.80.6"
+PI_VERSION="0.80.10"
 PI_PACKAGE="@earendil-works/pi-coding-agent@$PI_VERSION"
 PI_SUBAGENTS_VERSION="0.34.0"
+BASIC_MEMORY_VERSION="0.22.1"
 ZSHRC_PATH="${ZDOTDIR:-$HOME}/.zshrc"
 SHELL_INTEGRATION="$SCRIPT_DIR/scripts/pi-shell.zsh"
 
@@ -83,6 +84,9 @@ fs.renameSync(tempPath, zshrcPath);
 fs.chmodSync(zshrcPath, mode);
 NODE
 printf '[ok] registered Pi shell integration in %s\n' "$ZSHRC_PATH"
+
+# Install Basic Memory CLI
+uv tool install --force "basic-memory==$BASIC_MEMORY_VERSION"
 
 (
   cd -- "$SCRIPT_DIR"

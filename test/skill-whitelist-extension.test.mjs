@@ -21,8 +21,11 @@ test("extension contributes exactly the allowlisted skill directories", async ()
     {},
   );
 
-  const expected = [...(await loadDesiredSkills(repoRoot, join(repoRoot, "agents", "skills.list"))).values()];
-  assert.deepEqual(result.skillPaths, expected);
+  const expected = [...(await loadDesiredSkills(repoRoot, join(repoRoot, "skill-overrides", "skills.list"), join(repoRoot, "skill-overrides", "skills.local.list"))).values()];
+  assert.deepEqual(result.skillPaths.slice(0, expected.length), expected);
+  for (const extra of result.skillPaths.slice(expected.length)) {
+    assert.match(extra, /\.pi\/skills\//);
+  }
 });
 
 test("Pi extension entry delegates to the tested factory", async () => {

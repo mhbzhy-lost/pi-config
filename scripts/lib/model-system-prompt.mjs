@@ -2,7 +2,10 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const PROVIDER_PROMPT_MAP = {
-  "openai-idealab": { pattern: /Qwen/i, file: "SYSTEM.qwen.md" },
+  "openai-idealab": {
+    pattern: /^(?:Qwen.*|Peach-07-17-DogFooding)$/i,
+    file: "SYSTEM.qwen.md",
+  },
   "anthropic-idealab": { pattern: /claude/i, file: "SYSTEM.anthropic.md" },
 };
 

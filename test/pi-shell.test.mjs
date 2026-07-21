@@ -24,7 +24,7 @@ test("shell integration makes bare pi use the repository configuration", async (
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
       {
         encoding: "utf8",
-        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output },
+        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_AGENT_SESSION_DIR: "" },
       },
     );
 

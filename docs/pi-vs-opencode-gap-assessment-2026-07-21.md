@@ -10,7 +10,7 @@
 
 如果以 OpenCode 的完整产品平台为参照，当前 Pi 的覆盖约为 **50% 至 60%**。主要差距不在模型调用或编码能力，而在统一权限系统、MCP/LSP、会话服务化、多客户端、IDE/Web、组织级配置和生态兼容。
 
-当前最紧迫问题不是继续增加功能，而是恢复可信基线。真实验证结果为 `221/227` 个 Node 测试通过、6 个失败，`doctor` 失败，初始化入口也会失败。主分支目前不能被视为可发布状态。
+当前最紧迫问题不是继续增加功能，而是恢复可信基线。~~真实验证结果为 `221/227` 个 Node 测试通过、6 个失败，`doctor` 失败，初始化入口也会失败。主分支目前不能被视为可发布状态。~~（修复前证据；见 §12.1 修复后验证。）
 
 综合建议：下一阶段采用“**先稳固强约束终端工作流，再补高价值平台能力**”路线，不以逐项复制 OpenCode 为目标。优先完成基线修复、统一权限/脱敏、Memory/Knowledge、会话与 Subagent 可观测性；MCP/LSP 采用按需求接入；Web/Desktop/通用 Server 暂缓。
 
@@ -31,12 +31,12 @@
 |---|---:|---:|---:|---|
 | 开发流程与质量门禁 | 20% | 4.5/5 | 3.5/5 | Pi 领先 |
 | Agent/Subagent 编排 | 15% | 4.0/5 | 3.8/5 | Pi 略领先；OpenCode 后台能力仍有实验项 |
-| 权限与安全治理 | 15% | 3.0/5 | 4.0/5 | OpenCode 声明式权限更完整，Pi 专项 Gate 更强 |
+| 权限与安全治理 | 15% | 3.5/5 | 4.0/5 | Pi 新增最高危硬禁止；统一 permission engine 仍为下阶段 |
 | Extension/Plugin 扩展性 | 10% | 4.5/5 | 4.5/5 | 基本相当，设计哲学不同 |
 | Session 与上下文连续性 | 10% | 3.2/5 | 4.5/5 | OpenCode 的父子会话、数据库和多客户端更成熟 |
 | MCP/LSP/工具生态 | 10% | 2.0/5 | 5.0/5 | OpenCode 显著领先 |
 | Server/SDK/客户端 | 15% | 2.5/5 | 5.0/5 | Pi 有 SDK/RPC 基础，当前配置未产品化 |
-| 工程基线与运维 | 5% | 2.5/5 | 4.0/5 | Pi 当前测试和 doctor 为红色 |
+| 工程基线与运维 | 5% | 4.0/5 | 4.0/5 | Pi 基线已恢复全绿（见 §12.1） |
 | **加权总分** | **100%** | **3.45/5** | **4.22/5** | Pi 是强工作流，OpenCode 是完整平台 |
 
 OpenCode 的高分不等于默认更安全。其多数权限默认允许，Plan 与 `.env` 的官方文档和 `1.17.20` 源码还存在差异；插件也可直接执行本机代码。Pi 当前的 fail-closed 专项策略在高风险开发操作上更严格。
@@ -137,6 +137,35 @@ OpenCode 支持 remote config、global/project config、环境注入、managed c
 
 当前同时存在 OpenCode binary `1.18.4`、源码 `1.17.20`、plugin SDK `1.14.48`。Pi 也存在文档固定 `0.80.6`、实际 `0.80.10` 的差异。下一阶段应把宿主、插件、配置 schema 和真实集成测试纳入一个版本矩阵。
 
+
+## 7.5 已批准范围
+
+基于差距评估，以下范围已获批准：
+
+**P0 全部执行：**
+- 恢复发布基线（测试全绿、doctor 全绿、版本统一）
+- 统一契约表述（Plan Gate 完成语义、Skill 数量、模型匹配）
+- 安全面关键收口（最高危硬禁止）
+- Basic Memory 本地专用工具接入
+
+**最高危硬禁止仅含：**
+- 凭据文件访问（`auth.json`、`.env`/`.env.*` 等认证文件）
+- 不可逆 Git 操作（`git reset --hard`、`git clean -fd`、`git checkout -- file` 等）与工作区外删除
+- 危险包装器绕过（`sh -c` 等 shell wrapper 中的同类危险命令）
+
+**延后至后续阶段：**
+- 通用 `allow/ask/deny` 权限引擎
+- 统一可观测性面板
+- 完整 Memory/Knowledge 系统（自动写入、MCP 桥、cloud 同步）
+- Secret/PII 全链路脱敏
+- MCP/LSP 通用层
+- Web/Desktop/Server
+
+**Basic Memory 接入约束：**
+- 仅暴露五个工具：`memory_search`、`memory_read`、`memory_context`、`memory_recent`、`memory_write`
+- 强制 `--local` 路由，不开放 delete/reset/cloud/MCP 通用桥
+- 写入前拒绝包含秘密/凭据的内容
+
 ## 8. 建议路线图
 
 ### 阶段 A：恢复可信基线，预计 2 至 4 天
@@ -221,3 +250,36 @@ OpenCode 支持 remote config、global/project config、环境注入、managed c
 - Claude/OpenCode 遗留能力：`~/claude-config/userconf/plugins/`、`userconf/skills/`、`.claude/memory/`、`docs/knowledge/`
 - OpenCode 官方文档：<https://opencode.ai/docs/agents/>、<https://opencode.ai/docs/permissions/>、<https://opencode.ai/docs/plugins/>、<https://opencode.ai/docs/mcp-servers/>、<https://opencode.ai/docs/lsp/>、<https://opencode.ai/docs/server/>、<https://opencode.ai/docs/sdk/>
 - OpenCode Releases：<https://github.com/anomalyco/opencode/releases>
+
+## 12.1 修复后验证（P0 Hardening 完成）
+
+修复前状态（评估日 2026-07-21）：
+- `npm test`：221/227 通过，6 失败
+- `npm run doctor`：失败（版本漂移、Skill 数量不匹配）
+- `init-pi.sh`：会失败
+
+修复后状态（计划 `af9d78dc` 执行后）：
+
+```
+$ npm test
+ℹ tests 268
+ℹ pass 268
+ℹ fail 0
+
+$ node --test test/shell-policy.test.mjs test/security-gates-extension.test.mjs test/basic-memory-extension.test.mjs
+ℹ pass 48
+ℹ fail 0
+
+$ uv run --no-project --with httpx --with python-dotenv --with pyyaml python -m unittest discover -s skill-overrides/external-llm-review/tests
+Ran 66 tests in 0.022s — OK
+
+$ basic-memory --version
+Basic Memory version: 0.22.1
+```
+
+变更摘要：
+- 契约漂移全部修复（PI_VERSION、Skill 数量、模型匹配、Anthropic payload）
+- Plan Gate `unavailable` → fail-closed
+- 新增安全硬禁止：凭据文件、不可逆 Git、sh -c 包装器绕过
+- 接入 Basic Memory 五个本地工具，secret ingress 拒绝
+- init-pi.sh 固定 basic-memory==0.22.1，doctor 诊断版本

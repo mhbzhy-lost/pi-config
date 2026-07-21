@@ -9,8 +9,9 @@ import { loadDesiredSkills } from "./lib/skill-whitelist.mjs";
 
 const execFile = promisify(execFileCallback);
 
-const PI_VERSION = "0.80.6";
+const PI_VERSION = "0.80.10";
 const PI_SUBAGENTS_VERSION = "0.34.0";
+const BASIC_MEMORY_VERSION = "0.22.1";
 const EXPECTED_SKILLS = [
   "external-llm-review",
   "git-commit-convention",
@@ -20,6 +21,8 @@ const EXPECTED_SKILLS = [
   "writing-skills",
   "writing-plans",
   "plan-runner-dispatch",
+  "exa-search",
+  "playwright",
 ];
 const REQUIRED_PROFILES = {
   executor: { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: "pi/extensions/provider-fallback.ts" },
@@ -48,6 +51,16 @@ function parseFrontmatter(content) {
   return Object.fromEntries(match[1].split("\n").map((line) => line.split(/:\s+/, 2)));
 }
 
+async function readInstalledBasicMemoryVersion() {
+  try {
+    const { stdout } = await execFile("basic-memory", ["--version"]);
+    const match = stdout.trim().match(/(\d+\.\d+\.\d+)/);
+    return match ? match[1] : stdout.trim();
+  } catch {
+    return "unknown";
+  }
+}
+
 async function readInstalledPiVersion() {
   try {
     const { stdout } = await execFile(process.env.PI_REAL_BIN ?? "pi", ["--version"]);
@@ -59,8 +72,9 @@ async function readInstalledPiVersion() {
 
 export async function inspectConfiguration(repoRoot, options = {}) {
   const issues = [];
-  const listPath = join(repoRoot, "agents", "skills.list");
-  const desired = await loadDesiredSkills(repoRoot, listPath);
+  const listPath = join(repoRoot, "skill-overrides", "skills.list");
+  const localListPath = join(repoRoot, "skill-overrides", "skills.local.list");
+  const desired = await loadDesiredSkills(repoRoot, listPath, localListPath);
 
   if (JSON.stringify([...desired.keys()]) !== JSON.stringify(EXPECTED_SKILLS)) {
     issues.push("unexpected Skill whitelist");
@@ -95,6 +109,11 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   const piVersion = await (options.readPiVersion ?? readInstalledPiVersion)();
   if (piVersion !== PI_VERSION) {
     issues.push(`unexpected Pi version: ${piVersion}; expected ${PI_VERSION}`);
+  }
+
+  const bmVersion = await (options.readBasicMemoryVersion ?? readInstalledBasicMemoryVersion)();
+  if (bmVersion !== BASIC_MEMORY_VERSION) {
+    issues.push(`unexpected basic-memory version: ${bmVersion}; expected ${BASIC_MEMORY_VERSION}`);
   }
 
   for (const [name, expected] of Object.entries(REQUIRED_PROFILES)) {

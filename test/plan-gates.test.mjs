@@ -156,7 +156,7 @@ test("fails closed for failing commands, invalid audit, and critical external fi
   }
 });
 
-test("unavailable external-review does not block final-completeness when tasks are accepted", async (t) => {
+test("unavailable external-review blocks plan validation (fail-closed)", async (t) => {
   const cwd = await repository();
   t.after(() => rm(cwd, { recursive: true, force: true }));
   await writeFile(path.join(cwd, "change.txt"), "change\n");
@@ -172,11 +172,11 @@ test("unavailable external-review does not block final-completeness when tasks a
     audit: async () => ({ findings: [] }),
     externalReview: async () => ({ available: false, findings: [] }),
   });
-  assert.equal(result.validated, true);
+  assert.equal(result.validated, false);
   const erGate = result.attempts.find((a) => a.type === "external-review");
   assert.equal(erGate.status, "unavailable");
   const fcGate = result.attempts.find((a) => a.type === "final-completeness");
-  assert.equal(fcGate.status, "passed");
+  assert.equal(fcGate.status, "failed");
 });
 
 test("returns four immutable gate attempts and invalidates all when HEAD changes during gates", async (t) => {

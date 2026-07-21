@@ -89,6 +89,25 @@ test("does not replace system prompt when model id does not contain Qwen", async
   assert.equal(result, undefined);
 });
 
+
+test("replaces system prompt for the configured Peach compatibility model", async () => {
+  const pi = createMockPi();
+  createModelSystemPromptExtension(pi);
+
+  const handler = pi.handlers.get("before_agent_start");
+  const ctx = {
+    model: { provider: "openai-idealab", id: "Peach-07-17-DogFooding" },
+  };
+
+  const result = await handler(
+    { systemPrompt: "generic prompt", systemPromptOptions: {} },
+    ctx,
+  );
+
+  assert.ok(result);
+  assert.match(result.systemPrompt, /Stop Rules/);
+});
+
 test("handles missing model context gracefully", async () => {
   const pi = createMockPi();
   createModelSystemPromptExtension(pi);
