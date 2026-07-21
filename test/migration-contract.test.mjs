@@ -58,8 +58,8 @@ test("migration keeps ordinary agent profiles independent from subagent tools", 
   assert.equal(spark.model, "codex-pool/gpt-5.6-sol");
   assert.equal(executor.tools.includes("subagent"), false);
   assert.equal(spark.tools.includes("subagent"), false);
-  assert.equal(executor.extensions, '""');
-  assert.equal(spark.extensions, '""');
+  assert.equal(executor.extensions, "pi/extensions/provider-fallback.ts");
+  assert.equal(spark.extensions, "pi/extensions/provider-fallback.ts");
 });
 
 test("migration keeps the Plan profiles and child extension isolated", async () => {
@@ -83,7 +83,7 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
   assert.equal(reviewer.share, "false");
   assert.equal(runner.fallback, "false");
   assert.equal(reviewer.fallback, "false");
-  assert.equal(runner.subagentOnlyExtensions, ".pi-subagents/plan-runner-entry.mjs");
+  assert.equal(runner.subagentOnlyExtensions, ".pi-subagents/plan-runner-entry.mjs, pi/extensions/provider-fallback.ts");
   assert.equal(runner.tools.includes("subagent"), true);
   assert.equal(reviewer.tools.includes("subagent"), false);
   assert.equal(reviewer.tools.includes("write"), false);

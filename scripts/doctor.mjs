@@ -22,10 +22,10 @@ const EXPECTED_SKILLS = [
   "plan-runner-dispatch",
 ];
 const REQUIRED_PROFILES = {
-  executor: { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: '""' },
-  spark: { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: '""' },
-  "plan-runner": { model: "codex-pool/gpt-5.6-sol", subagent: true, extensions: '""', childExtension: ".pi-subagents/plan-runner-entry.mjs" },
-  "plan-reviewer": { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: '""' },
+  executor: { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: "pi/extensions/provider-fallback.ts" },
+  spark: { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: "pi/extensions/provider-fallback.ts" },
+  "plan-runner": { model: "codex-pool/gpt-5.6-sol", subagent: true, extensions: "pi/extensions/provider-fallback.ts", childExtension: ".pi-subagents/plan-runner-entry.mjs, pi/extensions/provider-fallback.ts" },
+  "plan-reviewer": { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: "pi/extensions/provider-fallback.ts" },
 };
 const LEGACY_TASK7_FILES = [
   "scripts/lib/subagent-jobs.mjs",
