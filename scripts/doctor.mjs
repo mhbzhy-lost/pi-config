@@ -23,12 +23,16 @@ const EXPECTED_SKILLS = [
   "plan-runner-dispatch",
   "exa-search",
   "playwright",
+  "goal-contract",
+  "mac-mini-worker",
+  "normandy-cli",
+  "tbctx7",
 ];
 const REQUIRED_PROFILES = {
-  executor: { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: "pi/extensions/provider-fallback.ts" },
-  spark: { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: "pi/extensions/provider-fallback.ts" },
-  "plan-runner": { model: "codex-pool/gpt-5.6-sol", subagent: true, extensions: "pi/extensions/provider-fallback.ts", childExtension: ".pi-subagents/plan-runner-entry.mjs, pi/extensions/provider-fallback.ts" },
-  "plan-reviewer": { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: "pi/extensions/provider-fallback.ts" },
+  executor: { model: "codex-pool/gpt-5.6-terra", subagent: false, extensions: undefined },
+  spark: { model: "codex-pool/gpt-5.3-codex-spark", subagent: false, extensions: undefined },
+  "plan-runner": { model: "codex-pool/gpt-5.6-sol", subagent: true, extensions: undefined, childExtension: ".pi-subagents/plan-runner-entry.mjs" },
+  "plan-reviewer": { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: undefined },
 };
 const LEGACY_TASK7_FILES = [
   "scripts/lib/subagent-jobs.mjs",

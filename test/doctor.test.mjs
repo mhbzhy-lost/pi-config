@@ -12,13 +12,17 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    for (const skill of ["external-llm-review", "git-commit-convention", "systematic-debugging", "test-driven-development", "receiving-code-review", "writing-skills", "writing-plans", "plan-runner-dispatch", "exa-search", "playwright"]) {
+    for (const skill of ["external-llm-review", "git-commit-convention", "systematic-debugging", "test-driven-development", "receiving-code-review", "writing-skills", "writing-plans", "plan-runner-dispatch", "exa-search", "playwright", "goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7"]) {
       await mkdir(join(root, "skill-overrides", skill), { recursive: true });
       await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), "# test\n");
     }
     await writeFile(
       join(root, "skill-overrides", "skills.list"),
       "external-llm-review\ngit-commit-convention\nsystematic-debugging\ntest-driven-development\nreceiving-code-review\nwriting-skills\nwriting-plans\nplan-runner-dispatch\nexa-search\nplaywright\n",
+    );
+    await writeFile(
+      join(root, "skill-overrides", "skills.local.list"),
+      "goal-contract\nmac-mini-worker\nnormandy-cli\ntbctx7\n",
     );
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "pi", "agents"), { recursive: true });
@@ -35,13 +39,13 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     await writeFile(join(root, "scripts", "lib", "plan", "parent-lifecycle.mjs"), "");
     await writeFile(join(root, ".gitignore"), "/var/\n");
     for (const [name, model, tools] of [
-      ["executor", "codex-pool/gpt-5.6-sol", "read"],
-      ["spark", "codex-pool/gpt-5.6-sol", "read"],
+      ["executor", "codex-pool/gpt-5.6-terra", "read"],
+      ["spark", "codex-pool/gpt-5.3-codex-spark", "read"],
       ["plan-runner", "codex-pool/gpt-5.6-sol", "subagent"],
       ["plan-reviewer", "codex-pool/gpt-5.6-sol", "read"],
     ]) {
-      const childExtension = name === "plan-runner" ? "subagentOnlyExtensions: .pi-subagents/plan-runner-entry.mjs, pi/extensions/provider-fallback.ts\n" : "";
-      await writeFile(join(root, "pi", "agents", `${name}.md`), `---\nmodel: ${model}\nextensions: pi/extensions/provider-fallback.ts\n${childExtension}tools: ${tools}\n---\n`);
+      const childExtension = name === "plan-runner" ? "subagentOnlyExtensions: .pi-subagents/plan-runner-entry.mjs\n" : "";
+      await writeFile(join(root, "pi", "agents", `${name}.md`), `---\nmodel: ${model}\n${childExtension}tools: ${tools}\n---\n`);
     }
     await writeFile(
       join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"),
@@ -154,7 +158,7 @@ test("inspectConfiguration reports the final plan execution contract gaps", asyn
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "pi", "settings.json"), "{}");
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
-    await writeFile(join(root, "pi", "agents", "executor.md"), "---\nmodel: codex-pool/gpt-5.6-sol\ntools: read\n---\n");
+    await writeFile(join(root, "pi", "agents", "executor.md"), "---\nmodel: codex-pool/gpt-5.6-sol\nextensions: pi/extensions/provider-fallback.ts\ntools: read\n---\n");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
     await mkdir(join(root, "scripts", "lib"), { recursive: true });
     await writeFile(join(root, "scripts", "lib", "subagent-jobs.mjs"), "legacy\n");

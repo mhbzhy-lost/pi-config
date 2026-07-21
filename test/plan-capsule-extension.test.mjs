@@ -40,8 +40,8 @@ async function execute(tool, params, ctx = context()) {
 test("plan-runner alone uses the real subagentOnlyExtensions profile field", async () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const profiles = await Promise.all(["plan-runner", "plan-reviewer", "executor", "spark"].map((name) => readFile(resolve(root, "pi", "agents", `${name}.md`), "utf8")));
-  assert.match(profiles[0], /^subagentOnlyExtensions: \.pi-subagents\/plan-runner-entry\.mjs, pi\/extensions\/provider-fallback\.ts$/m);
-  assert.match(profiles[0], /^extensions: pi\/extensions\/provider-fallback\.ts$/m);
+  assert.match(profiles[0], /^subagentOnlyExtensions: \.pi-subagents\/plan-runner-entry\.mjs$/m);
+  for (const profile of profiles) assert.doesNotMatch(profile, /^extensions:/m);
   for (const profile of profiles.slice(1)) assert.doesNotMatch(profile, /plan-capsule/);
 });
 

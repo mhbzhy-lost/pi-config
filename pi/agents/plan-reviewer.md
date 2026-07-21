@@ -6,7 +6,6 @@ thinking: low
 temperature: 0
 share: false
 fallback: false
-extensions: pi/extensions/provider-fallback.ts
 tools: read,grep,bash
 ---
 Review plan changes without modifying files or starting subagents.
