@@ -48,7 +48,7 @@ test("plan-runner alone uses the real subagentOnlyExtensions profile field", asy
 test("capsule registers only plan_open and declares actual bootstrap fields", () => {
   const { tools } = setup();
   assert.deepEqual([...tools.keys()], ["plan_open"]);
-  assert.deepEqual(Object.keys(tools.get("plan_open").parameters.properties).sort(), ["allowPlanCommits", "baseCommit", "planHash", "planId", "planPath", "worktree"]);
+  assert.deepEqual(Object.keys(tools.get("plan_open").parameters.properties).sort(), ["allowPlanCommits", "approvedHash", "baseCommit", "planHash", "planId", "planPath", "worktree"]);
 });
 
 test("plan_open fails closed when the Task 12 binding dependency is absent", async () => {
@@ -71,6 +71,24 @@ test("plan_open validates then persists and activates the lifecycle tools", asyn
   assert.equal(entries[0].data.data.workspace.planHash, binding.planHash);
   assert.deepEqual([...tools.keys()], ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block"]);
   assert.deepEqual(activeTools().filter((name) => name.startsWith("plan_")), ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block"]);
+});
+
+test("plan_open accepts supervisor-approved hash override when file hash differs", async () => {
+  const actualHash = "b".repeat(64);
+  const binding = {
+    planId: "release-11", planPath: "/plan.md",
+    planHash: "a".repeat(64), baseCommit: "base",
+    worktree: "/worktree", allowPlanCommits: true,
+    approvedHash: actualHash,
+  };
+  const { tools } = setup({
+    validateBinding: async (input) => {
+      assert.equal(input.planHash, actualHash);
+      return { ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] };
+    },
+  });
+  const result = await execute(tools.get("plan_open"), binding);
+  assert.equal(result.isError, false, result.content[0].text);
 });
 
 test("plan_open starts child control only after persisting plan.created and session shutdown stops it", async () => {

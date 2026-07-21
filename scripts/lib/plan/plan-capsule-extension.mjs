@@ -215,7 +215,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     description: "Bind an approved plan to this Plan Session.",
     parameters: {
       type: "object",
-      properties: { planId: STRING, planPath: STRING, planHash: STRING, baseCommit: STRING, worktree: STRING, allowPlanCommits: { type: "boolean", const: true } },
+      properties: { planId: STRING, planPath: STRING, planHash: STRING, approvedHash: { type: "string", minLength: 64, maxLength: 64 }, baseCommit: STRING, worktree: STRING, allowPlanCommits: { type: "boolean", const: true } },
       required: ["planId", "planPath", "planHash", "baseCommit", "worktree", "allowPlanCommits"],
       additionalProperties: false,
     },
@@ -223,7 +223,8 @@ export function createPlanCapsuleExtension(pi, options = {}) {
       if (opened) return result("Plan is already open.", true);
       if (typeof options.validateBinding !== "function") return result("Plan binding validation is unavailable.", true);
       try {
-        const binding = await options.validateBinding(input, { ctx });
+        const effectiveInput = input.approvedHash ? { ...input, planHash: input.approvedHash } : input;
+        const binding = await options.validateBinding(effectiveInput, { ctx });
         if (!binding || binding.planId !== input.planId || !Array.isArray(binding.tasks) || binding.tasks.length === 0) {
           throw new Error("Invalid verified plan binding.");
         }

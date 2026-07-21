@@ -67,7 +67,8 @@ async function readBinding(input, ctx) {
   if (actualCwd !== declaredWorktree) throw new Error("Plan binding worktree does not match child cwd.");
   const source = await readFile(input.planPath, "utf8");
   const plan = parsePlanDocument(source, input.planPath);
-  if (plan.sha256 !== input.planHash) throw new Error("Plan hash does not match approved plan.");
+  const effectiveHash = input.approvedHash ?? input.planHash;
+  if (plan.sha256 !== effectiveHash) throw new Error("Plan hash does not match approved plan.");
   const [headCommit, resolvedBase, branch, commonDir] = await Promise.all([
     git(actualCwd, "rev-parse", "HEAD^{commit}"),
     git(actualCwd, "rev-parse", "--verify", `${input.baseCommit}^{commit}`),
