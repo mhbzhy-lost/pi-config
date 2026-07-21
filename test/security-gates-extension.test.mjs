@@ -6,13 +6,13 @@ import { createSecurityGatesExtension } from "../scripts/lib/security-gates-exte
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-function setup() {
+function setup(opts) {
   const handlers = new Map();
   createSecurityGatesExtension({
     on(name, handler) {
       handlers.set(name, handler);
     },
-  });
+  }, opts);
   return handlers;
 }
 
@@ -55,26 +55,13 @@ test("tool_call fails closed when bash context cwd is unavailable", async () => 
   assert.match(result.reason, /工作目录|安全门禁/);
 });
 
-test("tool_call runs external review only for permitted real git push commands", async () => {
-  const calls = [];
-  const handlers = new Map();
-  createSecurityGatesExtension({
-    on(name, handler) {
-      handlers.set(name, handler);
-    },
-  }, {
-    runExternalReview: async (options) => {
-      calls.push(options);
-      return { block: true, reason: "review denied" };
-    },
-    hookPath: "/hooks/external-review-gate.sh",
-    logPath: "/pi-config/var/logs/external-review-gate.log",
+test("git push --dry-run and EXTERNAL_REVIEW_SKIP bypass review", async () => {
+  let reviewCalled = false;
+  const handlers = setup({
+    gatherDiffInfo: async () => { reviewCalled = true; return { exempt: false, baseRef: "origin/main", range: "origin/main..HEAD", diffHash: "x", fileCount: 1 }; },
+    runReview: async () => ({ output: "### Critical\n\n1. Bug", provider: "test" }),
   });
 
-  const denied = await handlers.get("tool_call")(
-    { toolName: "bash", input: { command: "git push origin main" } },
-    { cwd: workspace },
-  );
   const dryRun = await handlers.get("tool_call")(
     { toolName: "bash", input: { command: "git push --dry-run origin main" } },
     { cwd: workspace },
@@ -84,14 +71,89 @@ test("tool_call runs external review only for permitted real git push commands",
     { cwd: workspace },
   );
 
-  assert.equal(denied.block, true);
-  assert.equal(denied.reason, "review denied");
   assert.equal(dryRun, undefined);
   assert.equal(skipped, undefined);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].command, "git push origin main");
-  assert.equal(calls[0].hookPath, "/hooks/external-review-gate.sh");
-  assert.equal(calls[0].logPath, "/pi-config/var/logs/external-review-gate.log");
+  assert.equal(reviewCalled, false);
+});
+
+test("git push 触发 review，有 Critical 时 deny", async () => {
+  let reviewCount = 0;
+  const handlers = setup({
+    gatherDiffInfo: async () => ({ exempt: false, baseRef: "origin/main", range: "origin/main..HEAD", diffHash: "aaa", fileCount: 2 }),
+    runReview: async () => { reviewCount++; return { output: "### Critical\n\n1. Bug found\n\n### Minor\n\nNone.", provider: "test" }; },
+  });
+
+  const result = await handlers.get("tool_call")(
+    { toolName: "bash", input: { command: "git push" } },
+    { cwd: "/repo" },
+  );
+
+  assert.equal(result.block, true);
+  assert.match(result.reason, /禁止 push/);
+  assert.match(result.reason, /Bug found/);
+  assert.equal(reviewCount, 1);
+});
+
+test("git push 相同 diffHash 不重复 review，直接从内存 deny", async () => {
+  let reviewCount = 0;
+  const handlers = setup({
+    gatherDiffInfo: async () => ({ exempt: false, baseRef: "origin/main", range: "origin/main..HEAD", diffHash: "aaa", fileCount: 2 }),
+    runReview: async () => { reviewCount++; return { output: "### Critical\n\n1. Bug\n\n### Minor\n\nNone.", provider: "test" }; },
+  });
+
+  const handler = handlers.get("tool_call");
+  const event = { toolName: "bash", input: { command: "git push" } };
+  const ctx = { cwd: "/repo" };
+
+  await handler(event, ctx);
+  const r2 = await handler(event, ctx);
+
+  assert.equal(r2.block, true);
+  assert.equal(reviewCount, 1);
+});
+
+test("git push review 通过时 allow", async () => {
+  const handlers = setup({
+    gatherDiffInfo: async () => ({ exempt: false, baseRef: "origin/main", range: "origin/main..HEAD", diffHash: "bbb", fileCount: 5 }),
+    runReview: async () => ({ output: "### Critical\n\nNone.\n\n### Important\n\nN/A\n\n### Minor\n\n- typo", provider: "test" }),
+  });
+
+  const result = await handlers.get("tool_call")(
+    { toolName: "bash", input: { command: "git push" } },
+    { cwd: "/repo" },
+  );
+
+  assert.equal(result, undefined);
+});
+
+test("git push 小 diff 豁免不跑 review", async () => {
+  let reviewCalled = false;
+  const handlers = setup({
+    gatherDiffInfo: async () => ({ exempt: true, reason: "small-or-non-code" }),
+    runReview: async () => { reviewCalled = true; return { output: null }; },
+  });
+
+  const result = await handlers.get("tool_call")(
+    { toolName: "bash", input: { command: "git push" } },
+    { cwd: "/repo" },
+  );
+
+  assert.equal(result, undefined);
+  assert.equal(reviewCalled, false);
+});
+
+test("git push reviewer 不可用时 fail-open", async () => {
+  const handlers = setup({
+    gatherDiffInfo: async () => ({ exempt: false, baseRef: "origin/main", range: "origin/main..HEAD", diffHash: "ccc", fileCount: 3 }),
+    runReview: async () => ({ output: null, provider: null }),
+  });
+
+  const result = await handlers.get("tool_call")(
+    { toolName: "bash", input: { command: "git push" } },
+    { cwd: "/repo" },
+  );
+
+  assert.equal(result, undefined);
 });
 
 test("tool_result appends a coding reminder only to successful text content without mutation", async () => {
