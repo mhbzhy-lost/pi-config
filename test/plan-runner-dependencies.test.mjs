@@ -164,7 +164,7 @@ test("authorizes exactly one nested subagent intent without executing it", async
   const ctx = context(repo.worktree, entries.map((data) => ({ customType: "pi-plan-event-v1", data })));
 
   const next = await deps.continuePlan({ reason: "resume" }, { ctx });
-  assert.deepEqual(Object.keys(next.tool).sort(), ["agent", "async", "clarify", "context", "cwd", "task"]);
+  assert.deepEqual(Object.keys(next.tool).sort(), ["acceptance", "agent", "async", "clarify", "context", "cwd", "task"]);
   assert.equal(appended[0].type, "attempt.dispatch-requested");
   assert.equal(deps.authorizeNestedSubagent(next.tool, { ctx }), true);
   assert.throws(() => deps.authorizeNestedSubagent(next.tool, { ctx }), /consumed/i);
@@ -299,7 +299,7 @@ test("rejects an otherwise valid binding after its worktree HEAD advances", asyn
   );
 });
 
-test("verification appends all gate attempts and refuses validation without a provider", async (t) => {
+test("verification passes with unavailable external-review provider and marks it unavailable", async (t) => {
   const repo = await fixture();
   t.after(() => rm(repo.origin, { recursive: true, force: true }));
   const source = await readFile(repo.planPath, "utf8");
@@ -319,9 +319,10 @@ test("verification appends all gate attempts and refuses validation without a pr
   const ctx = context(repo.worktree, entries.map((data) => ({ customType: "pi-plan-event-v1", data })));
 
   const result = await deps.verifyPlan({ ctx });
-  assert.equal(result.validated, false);
-  assert.deepEqual(appended.map((entry) => entry.type), ["workspace.head-observed", "gate.finished", "gate.finished", "gate.finished", "gate.finished"]);
-  assert.equal(appended.some((entry) => entry.type === "plan.validated"), false);
+  assert.equal(result.validated, true);
+  const erGate = result.attempts.find((a) => a.type === "external-review");
+  assert.equal(erGate.status, "unavailable");
+  assert.deepEqual(appended.map((entry) => entry.type), ["workspace.head-observed", "gate.finished", "gate.finished", "gate.finished", "gate.finished", "plan.validated"]);
 });
 
 test("verification observes the worker commit and validates four passing gates on that HEAD", async (t) => {
@@ -358,4 +359,37 @@ test("verification observes the worker commit and validates four passing gates o
   assert.equal(status.lifecycle, "validated");
   assert.equal(status.validatedHead, head);
   assert.equal(status.headCommit, head);
+});
+
+test("auto-accepts task when no taskReview is provided and marks reviewSkipped", async (t) => {
+  const repo = await fixture();
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const source = await readFile(repo.planPath, "utf8");
+  const { sha256 } = (await import("../scripts/lib/plan/plan-document.mjs")).parsePlanDocument(source, repo.planPath);
+  const binding = await createPlanRunnerDependencies().validateBinding(
+    { planId: repo.planId, planPath: repo.planPath, planHash: sha256, baseCommit: repo.baseCommit, worktree: repo.worktree, allowPlanCommits: true },
+    { ctx: context(repo.worktree) },
+  );
+  const appended = [];
+  const deps = createPlanRunnerDependencies({
+    pi: { appendEntry(_type, data) { appended.push(data); } },
+    readRuntimeArtifacts: async () => ({ status: { kind: "stable", value: { state: "complete" } } }),
+    runtimePollIntervalMs: 0,
+    runtimePollTimeoutMs: 10,
+  });
+  const ctx = context(repo.worktree, [{ customType: "pi-plan-event-v1", data: created(binding) }]);
+  const next = await deps.continuePlan({ reason: "resume" }, { ctx });
+  deps.authorizeNestedSubagent(next.tool, { ctx });
+
+  const status = await deps.handleNestedResult({
+    toolName: "subagent",
+    input: next.tool,
+    details: { runId: "run-auto", asyncDir: "/async/run-auto", results: [{ sessionFile: "/sessions/run-auto.jsonl" }] },
+    isError: false,
+  }, { ctx });
+
+  assert.equal(status.state, "succeeded");
+  assert.equal(status.reviewSkipped, true);
+  const accepted = appended.filter((e) => e.type === "task.accepted");
+  assert.equal(accepted.length, 1);
 });

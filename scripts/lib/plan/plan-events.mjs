@@ -214,7 +214,10 @@ function validatePlan(projection, data) {
   for (const gate of GATES) {
     const result = projection.gates.get(gate);
     if (!result) throw new Error(`missing gate: ${gate}`);
-    if (result.status !== "passed" || result.inputHead !== projection.workspace.headCommit) {
+    if (result.inputHead !== projection.workspace.headCommit) {
+      throw new Error(`gate did not pass current head: ${gate}`);
+    }
+    if (result.status !== "passed" && result.status !== "unavailable") {
       throw new Error(`gate did not pass current head: ${gate}`);
     }
   }

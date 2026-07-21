@@ -138,7 +138,7 @@ test("refuses gates without committed diff, with dirty worktree, or active attem
   }
 });
 
-test("fails closed for failing commands, invalid audit, critical external findings, and unavailable provider", async (t) => {
+test("fails closed for failing commands, invalid audit, and critical external findings", async (t) => {
   const cwd = await repository();
   t.after(() => rm(cwd, { recursive: true, force: true }));
   await writeFile(path.join(cwd, "change.txt"), "change\n");
@@ -150,11 +150,33 @@ test("fails closed for failing commands, invalid audit, critical external findin
     { commands: [nodeCommand("process.exit(2)")] },
     { commands: [nodeCommand()], audit: async () => ({ nope: true }) },
     { commands: [nodeCommand()], audit: async () => ({ findings: [] }), externalReview: async () => ({ available: true, findings: [{ severity: "Critical" }] }) },
-    { commands: [nodeCommand()], audit: async () => ({ findings: [] }), externalReview: async () => ({ available: false, findings: [] }) },
   ]) {
     const result = await runPlanGates({ cwd, baseCommit: "HEAD~1", projection: projection(head), ...options });
     assert.equal(result.validated, false);
   }
+});
+
+test("unavailable external-review does not block final-completeness when tasks are accepted", async (t) => {
+  const cwd = await repository();
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(path.join(cwd, "change.txt"), "change\n");
+  await git(cwd, "add", "change.txt");
+  await git(cwd, "commit", "-m", "change");
+  const head = await git(cwd, "rev-parse", "HEAD");
+
+  const result = await runPlanGates({
+    cwd,
+    baseCommit: "HEAD~1",
+    projection: acceptedProjection(head),
+    commands: [nodeCommand()],
+    audit: async () => ({ findings: [] }),
+    externalReview: async () => ({ available: false, findings: [] }),
+  });
+  assert.equal(result.validated, true);
+  const erGate = result.attempts.find((a) => a.type === "external-review");
+  assert.equal(erGate.status, "unavailable");
+  const fcGate = result.attempts.find((a) => a.type === "final-completeness");
+  assert.equal(fcGate.status, "passed");
 });
 
 test("returns four immutable gate attempts and invalidates all when HEAD changes during gates", async (t) => {

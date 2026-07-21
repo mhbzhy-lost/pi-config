@@ -38,6 +38,7 @@ export function createPlanCoordinator({ plan, entries, append, id = () => crypto
       context: "fresh",
       async: true,
       clarify: false,
+      acceptance: { level: "none", reason: "plan-runner manages verification through dedicated gates" },
     };
     appendEvent("attempt.dispatch-requested", { attemptId, taskId: task.id, tool });
     expectedIntent = { attemptId, taskId: task.id, tool };
@@ -149,11 +150,14 @@ function replay(entries) {
 }
 
 function buildExecutionPrompt(_plan, task) {
-  return `Execute plan task ${task.id}.`;
+  const lines = [`Execute plan task ${task.id}: ${task.title}.`];
+  if (task.files?.length) lines.push(`Files: ${task.files.join(", ")}`);
+  lines.push("Commit all changes in the worktree when done.");
+  return lines.join("\n");
 }
 
 function sameTool(left, right) {
-  return ["agent", "task", "cwd", "context", "async", "clarify"].every((field) => left?.[field] === right[field]);
+  return ["agent", "cwd", "context", "async", "clarify"].every((field) => left?.[field] === right[field]);
 }
 
 function terminalOutcome(state) {

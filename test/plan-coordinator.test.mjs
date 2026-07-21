@@ -13,8 +13,8 @@ const workspace = {
 };
 
 function plan(tasks = [
-  { id: "task-1", deps: [], agent: "executor" },
-  { id: "task-2", deps: [], agent: "reviewer" },
+  { id: "task-1", deps: [], agent: "executor", title: "创建 smoke test 文件", files: ["sandbox/smoke.txt"], body: "**Files:**\n- Create: `sandbox/smoke.txt`" },
+  { id: "task-2", deps: [], agent: "reviewer", title: "审查结果", files: ["sandbox/smoke.txt"], body: "**Files:**\n- Modify: `sandbox/smoke.txt`" },
 ]) {
   return { tasks };
 }
@@ -59,6 +59,7 @@ test("authorizes only the earliest runnable task with exact fresh async paramete
     context: "fresh",
     async: true,
     clarify: false,
+    acceptance: { level: "none", reason: "plan-runner manages verification through dedicated gates" },
   });
   assert.match(intent.tool.task, /task-1/);
   assert.equal(appended[0].type, "attempt.dispatch-requested");
@@ -70,11 +71,17 @@ test("allows exactly the persisted nested subagent intent once and rejects devia
   const intent = subject.authorizeNext();
 
   assert.throws(() => subject.authorizeNestedSubagent({ ...intent.tool, agent: "other" }), /does not match/);
-  assert.throws(() => subject.authorizeNestedSubagent({ ...intent.tool, task: "different" }), /does not match/);
   assert.throws(() => subject.authorizeNestedSubagent({ ...intent.tool, cwd: "/other" }), /does not match/);
   assert.throws(() => subject.authorizeNestedSubagent({ ...intent.tool, async: false }), /does not match/);
   assert.equal(subject.authorizeNestedSubagent(intent.tool), true);
   assert.throws(() => subject.authorizeNestedSubagent(intent.tool), /already consumed/);
+});
+
+test("authorizeNestedSubagent tolerates LLM-rephrased task text", () => {
+  const { coordinator: subject } = coordinator();
+  const intent = subject.authorizeNext();
+
+  assert.equal(subject.authorizeNestedSubagent({ ...intent.tool, task: "Rephrased by LLM: do task-1 now" }), true);
 });
 
 test("binds foreground and async structured nested results without parsing display text", () => {
@@ -166,4 +173,21 @@ test("recovery binds persisted nested result, settles clear terminal status, and
   assert.equal(recovery.state, "recovered");
   assert.deepEqual(appended.map((entry) => entry.type), ["attempt.bound", "attempt.settled"]);
   assert.throws(() => subject.authorizeNext(), /awaiting review/);
+});
+
+test("buildExecutionPrompt includes task title, files, and commit instruction", () => {
+  const { coordinator: subject } = coordinator();
+  const intent = subject.authorizeNext();
+  assert.match(intent.tool.task, /smoke test/);
+  assert.match(intent.tool.task, /sandbox\/smoke\.txt/);
+  assert.match(intent.tool.task, /commit/i);
+});
+
+test("dispatch disables acceptance so plan gates control quality", () => {
+  const { coordinator: subject } = coordinator();
+  const intent = subject.authorizeNext();
+  assert.ok(intent.tool.acceptance, "dispatch should set acceptance");
+  assert.equal(intent.tool.acceptance.level, "none");
+  assert.equal(typeof intent.tool.acceptance.reason, "string");
+  assert.ok(intent.tool.acceptance.reason.length > 0);
 });

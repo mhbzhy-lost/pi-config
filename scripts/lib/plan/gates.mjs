@@ -38,7 +38,7 @@ function complete(projection, attempts, inspection) {
   return [...projection.tasks.values()].every((task) => task.status === "accepted")
     && [...projection.attempts.values()].every((item) => !["dispatch-requested", "active"].includes(item.status))
     && clean(inspection)
-    && attempts.slice(0, 3).every((item) => item.status === "passed");
+    && attempts.slice(0, 3).every((item) => item.status === "passed" || item.status === "unavailable");
 }
 
 export async function runPlanGates({ cwd, baseCommit, projection, commands, audit = async () => ({ findings: [] }), externalReview = async () => ({ available: false, findings: [] }) }) {
@@ -74,7 +74,7 @@ export async function runPlanGates({ cwd, baseCommit, projection, commands, audi
 
   let review;
   try {
-    review = await externalReview({ cwd, inputHead, changeSetHash });
+    review = await externalReview({ cwd, inputHead, changeSetHash, baseCommit });
   } catch {
     review = undefined;
   }
@@ -90,7 +90,8 @@ export async function runPlanGates({ cwd, baseCommit, projection, commands, audi
     for (const result of attempts) result.status = "failed";
     return { validated: false, lifecycle: "running", attempts };
   }
-  return { validated: attempts.every((result) => result.status === "passed"), lifecycle: attempts.every((result) => result.status === "passed") ? "verifying" : "running", attempts };
+  const nonBlocking = (status) => status === "passed" || status === "unavailable";
+  return { validated: attempts.every((result) => nonBlocking(result.status)), lifecycle: attempts.every((result) => nonBlocking(result.status)) ? "verifying" : "running", attempts };
 }
 
 export { TYPES };

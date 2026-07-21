@@ -30,16 +30,18 @@ const planSource = `# Approved plan
 
 function setup(options = {}) {
   const commands = new Map();
+  const tools = new Map();
   const events = new Map();
   const entries = [];
   const pi = {
     events,
     registerCommand(name, command) { commands.set(name, command); },
+    registerTool(tool) { tools.set(tool.name, tool); },
     on(name, handler) { events.set(name, handler); },
     appendEntry(customType, data) { entries.push({ customType, data }); },
   };
   createPlanLauncherExtension(pi, options);
-  return { commands, events, entries };
+  return { commands, tools, events, entries };
 }
 
 async function fixture() {
@@ -563,17 +565,84 @@ test("a restarted parent recovers the same seven-field handle from durable state
 test("plan runner entry wires child-persistent capsule dependencies", async () => {
   const source = await readFile(new URL("../pi/child-extensions/plan-runner.ts", import.meta.url), "utf8");
   assert.match(source, /createPlanRunnerDependencies/);
-  assert.match(source, /createPlanCapsuleExtension\(pi, createPlanRunnerDependencies\(\{ pi \}\)\)/);
+  assert.match(source, /createPlanCapsuleExtension\(pi, createPlanRunnerDependencies/);
+  assert.match(source, /externalReview/);
+  assert.match(source, /createExternalReviewAdapter/);
 });
 
 test("plan runner dispatch skill is allowlisted and constrains parent behavior", async () => {
-  const list = await readFile(new URL("../agents/skills.list", import.meta.url), "utf8");
+  const list = await readFile(new URL("../skill-overrides/skills.list", import.meta.url), "utf8");
   const skill = await readFile(new URL("../skill-overrides/plan-runner-dispatch/SKILL.md", import.meta.url), "utf8");
   assert.match(list, /^plan-runner-dispatch$/m);
   assert.match(skill, /^name: plan-runner-dispatch$/m);
   assert.match(skill, /^description: Use when /m);
   assert.match(skill, /writing-plans/);
-  assert.match(skill, /\/plan-run <exact-path>/);
+  assert.match(skill, /plan_run/);
   assert.match(skill, /must not execute plan tasks/i);
   assert.match(skill, /validatedHead/);
+});
+
+test("plan_run tool is registered alongside the plan-run command", () => {
+  const { commands, tools } = setup();
+  assert.ok(commands.has("plan-run"), "slash command should be registered");
+  assert.ok(tools.has("plan_run"), "tool should be registered");
+  const tool = tools.get("plan_run");
+  assert.equal(typeof tool.execute, "function");
+  assert.ok(tool.parameters?.properties?.planPath, "tool should accept planPath parameter");
+  assert.ok(tool.parameters.required.includes("planPath"), "planPath should be required");
+});
+
+test("plan_run tool launches plan with same behavior as the command", async () => {
+  const { root, planPath } = await fixture();
+  try {
+    const calls = [];
+    const { tools, entries } = setup({
+      originRoot: root,
+      stateRoot: root,
+      readBaseCommit: async () => "a".repeat(40),
+      createWorkspace: async (input) => ({ ...input, workspacePath: join(root, "var", "plan-worktrees", input.planId) }),
+      createRpcClient: () => ({ spawn: async (input) => { calls.push(input); return { details: { runId: "run-tool", asyncDir: "/async/tool" } }; } }),
+      readRuntimeStatus: async () => ({ runId: "run-tool", state: "running", steps: [{ sessionFile: "/sessions/tool.jsonl" }] }),
+      id: () => "plan-tool",
+    });
+
+    const tool = tools.get("plan_run");
+    const result = await tool.execute("call-1", { planPath }, undefined, undefined, {});
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].data.planId, "plan-tool");
+    assert.equal(entries[0].data.runId, "run-tool");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].agent, "plan-runner");
+    assert.equal(calls[0].context, "fresh");
+    assert.match(calls[0].task, /"allowPlanCommits":true/);
+    assert.equal(result.isError, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan_run tool skips interactive confirmation", async () => {
+  const { root, planPath } = await fixture();
+  try {
+    const confirmCalls = [];
+    const { tools } = setup({
+      originRoot: root,
+      stateRoot: root,
+      readBaseCommit: async () => "a".repeat(40),
+      createWorkspace: async (input) => ({ ...input, workspacePath: join(root, "var", "plan-worktrees", input.planId) }),
+      createRpcClient: () => ({ spawn: async () => ({ details: { runId: "run-1", asyncDir: "/async" } }) }),
+      readRuntimeStatus: async () => ({ runId: "run-1", state: "running", steps: [{ sessionFile: "/sessions/one.jsonl" }] }),
+      id: () => "plan-no-confirm",
+    });
+
+    const tool = tools.get("plan_run");
+    await tool.execute("call-1", { planPath }, undefined, undefined, {
+      mode: "tui", hasUI: true,
+      ui: { confirm: async (...args) => { confirmCalls.push(args); return true; } },
+    });
+    assert.equal(confirmCalls.length, 0, "tool should not prompt for confirmation");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

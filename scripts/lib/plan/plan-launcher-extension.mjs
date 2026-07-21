@@ -198,87 +198,110 @@ export function createPlanLauncherExtension(pi, options = {}) {
     return handleEntries(ctx).find((handle) => handle.planId === planId) ?? readPersistedHandle(stateRoot, planId);
   };
 
+  async function launchPlan({ planPath, planId }, ctx = {}) {
+    await access(planPath);
+    const plan = parsePlanDocument(await readFile(planPath, "utf8"), planPath);
+    if (await getHandle(planId, ctx)) throw new Error(`Plan already exists: ${planId}`);
+    const baseCommit = options.readBaseCommit ? await options.readBaseCommit(originRoot) : await concreteBase(originRoot);
+    let workspaceLease;
+    let parentLease;
+    let runtimeWrapper;
+    try {
+      workspaceLease = await (options.createWorkspace ?? createPlanWorkspace)({ originRoot, stateRoot, planId, baseCommit });
+      const worktree = workspaceLease.workspacePath;
+      const token = crypto.randomUUID();
+      parentLease = (options.createParentLease ?? createParentLease)({
+        stateRoot,
+        planId,
+        token,
+        parentPid: process.pid,
+        intervalMs: options.parentLeaseIntervalMs,
+      });
+      await parentLease.beat();
+      runtimeWrapper = await writePlanRunnerRuntimeWrapper(worktree, planRunnerEntry, {
+        leasePath: parentLease.path,
+        planId,
+        token,
+        timeoutMs: parentLeaseTimeoutMs,
+      });
+      parentLease.start();
+      const spawned = await rpc().spawn({
+        agent: "plan-runner",
+        task: bootstrap({ planId, planPath, planHash: plan.sha256, baseCommit, worktree, allowPlanCommits: true }),
+        cwd: worktree,
+        context: "fresh",
+      });
+      const details = spawned?.details;
+      const result = details?.results?.[0] ?? {};
+      const sessionFile = typeof result.sessionFile === "string" && result.sessionFile
+        ? result.sessionFile
+        : await waitForSessionFile(readRuntimeStatus, details?.asyncDir, details?.runId, {
+          intervalMs: options.pollIntervalMs,
+          timeoutMs: options.spawnTimeoutMs,
+        });
+      const handle = {
+        planId,
+        planHash: plan.sha256,
+        runId: details?.runId,
+        asyncDir: details?.asyncDir,
+        sessionFile,
+        statusPath: path.join(stateRoot, "var", "plan-runs", planId, "status.json"),
+        worktree,
+      };
+      if (!validHandle(handle)) throw new Error("Plan runner returned an incomplete lifecycle handle");
+      await (options.persistHandle ?? persistHandle)(stateRoot, handle);
+      pi.appendEntry(HANDLE_TYPE, handle);
+      activeRuns.set(handle.runId, { handle, lease: parentLease, released: false });
+      ctx.ui?.notify?.(`${HANDLE_PREFIX}${JSON.stringify(handle)}`, "info");
+      return handle;
+    } catch (error) {
+      if (parentLease) {
+        await parentLease.stop();
+        await parentLease.remove();
+      }
+      if (runtimeWrapper) await rm(runtimeWrapper, { force: true });
+      if (workspaceLease) {
+        try {
+          await (options.rollbackWorkspace ?? rollbackPlanWorkspace)(workspaceLease);
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], "Plan launch failed and workspace rollback failed", { cause: error });
+        }
+      }
+      throw error;
+    }
+  }
+
+  pi.registerTool({
+    name: "plan_run",
+    label: "Run plan",
+    description: "Launch an approved plan in a dedicated worktree via the plan-runner agent.",
+    parameters: {
+      type: "object",
+      properties: { planPath: { type: "string", minLength: 1, description: "Path to the approved plan document" } },
+      required: ["planPath"],
+      additionalProperties: false,
+    },
+    async execute(_id, params, _signal, _update, ctx) {
+      try {
+        const planId = options.id?.() ?? crypto.randomUUID();
+        const handle = await launchPlan({ planPath: params.planPath, planId }, ctx);
+        return { content: [{ type: "text", text: JSON.stringify(handle, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: "text", text: error instanceof Error ? error.message : "Plan launch failed." }], isError: true };
+      }
+    },
+  });
+
   pi.registerCommand("plan-run", {
     description: "Run an approved plan in a dedicated worktree.",
     async handler(args, ctx = {}) {
       const request = runRequest(args, ctx, () => options.id?.() ?? crypto.randomUUID());
-      const planPath = request.planPath;
-      await access(planPath);
-      const plan = parsePlanDocument(await readFile(planPath, "utf8"), planPath);
-      const planId = request.planId;
-      if (await getHandle(planId, ctx)) throw new Error(`Plan already exists: ${planId}`);
       if (interactive(ctx)) {
         if (typeof ctx.ui?.confirm !== "function" || !(await ctx.ui.confirm("Authorize plan commits", "Allow commits in the dedicated plan branch only; merge and push remain forbidden?"))) {
           throw new Error("Plan commit authorization was not confirmed");
         }
       }
-      const baseCommit = options.readBaseCommit ? await options.readBaseCommit(originRoot) : await concreteBase(originRoot);
-      let workspaceLease;
-      let parentLease;
-      let runtimeWrapper;
-      try {
-        workspaceLease = await (options.createWorkspace ?? createPlanWorkspace)({ originRoot, stateRoot, planId, baseCommit });
-        const worktree = workspaceLease.workspacePath;
-        const token = crypto.randomUUID();
-        parentLease = (options.createParentLease ?? createParentLease)({
-          stateRoot,
-          planId,
-          token,
-          parentPid: process.pid,
-          intervalMs: options.parentLeaseIntervalMs,
-        });
-        await parentLease.beat();
-        runtimeWrapper = await writePlanRunnerRuntimeWrapper(worktree, planRunnerEntry, {
-          leasePath: parentLease.path,
-          planId,
-          token,
-          timeoutMs: parentLeaseTimeoutMs,
-        });
-        parentLease.start();
-        const spawned = await rpc().spawn({
-          agent: "plan-runner",
-          task: bootstrap({ planId, planPath, planHash: plan.sha256, baseCommit, worktree, allowPlanCommits: true }),
-          cwd: worktree,
-          context: "fresh",
-        });
-        const details = spawned?.details;
-        const result = details?.results?.[0] ?? {};
-        const sessionFile = typeof result.sessionFile === "string" && result.sessionFile
-          ? result.sessionFile
-          : await waitForSessionFile(readRuntimeStatus, details?.asyncDir, details?.runId, {
-            intervalMs: options.pollIntervalMs,
-            timeoutMs: options.spawnTimeoutMs,
-          });
-        const handle = {
-          planId,
-          planHash: plan.sha256,
-          runId: details?.runId,
-          asyncDir: details?.asyncDir,
-          sessionFile,
-          statusPath: path.join(stateRoot, "var", "plan-runs", planId, "status.json"),
-          worktree,
-        };
-        if (!validHandle(handle)) throw new Error("Plan runner returned an incomplete lifecycle handle");
-        await (options.persistHandle ?? persistHandle)(stateRoot, handle);
-        pi.appendEntry(HANDLE_TYPE, handle);
-        activeRuns.set(handle.runId, { handle, lease: parentLease, released: false });
-        ctx.ui?.notify?.(`${HANDLE_PREFIX}${JSON.stringify(handle)}`, "info");
-        return handle;
-      } catch (error) {
-        if (parentLease) {
-          await parentLease.stop();
-          await parentLease.remove();
-        }
-        if (runtimeWrapper) await rm(runtimeWrapper, { force: true });
-        if (workspaceLease) {
-          try {
-            await (options.rollbackWorkspace ?? rollbackPlanWorkspace)(workspaceLease);
-          } catch (rollbackError) {
-            throw new AggregateError([error, rollbackError], "Plan launch failed and workspace rollback failed", { cause: error });
-          }
-        }
-        throw error;
-      }
+      return launchPlan(request, ctx);
     },
   });
 

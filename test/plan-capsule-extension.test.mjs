@@ -129,6 +129,19 @@ test("capsule hook authorizes exactly one matching nested subagent call", async 
   assert.match(denied.reason, /intent differs/i);
 });
 
+test("capsule allows subagent management actions without dispatch authorization", async () => {
+  const { handlers } = setup({
+    authorizeNestedSubagent: () => { throw new Error("should not be called"); },
+  });
+  const ctx = context([{ customType: "pi-plan-event-v1", data: created }]);
+  await handlers.get("session_start")({ type: "session_start" }, ctx);
+
+  for (const action of ["status", "interrupt", "resume", "steer", "list", "get"]) {
+    const result = await handlers.get("tool_call")({ toolName: "subagent", input: { action, id: "run-1" } }, ctx);
+    assert.equal(result, undefined, `action '${action}' should not be blocked`);
+  }
+});
+
 test("capsule forwards only one authorized structured subagent tool_result and triggers a follow-up", async () => {
   const received = [];
   const { handlers, messages } = setup({

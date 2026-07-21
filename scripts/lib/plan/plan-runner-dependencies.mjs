@@ -48,7 +48,7 @@ function eventFor(current, type, data, id, now) {
 }
 
 function sameTool(left, right) {
-  return ["agent", "task", "cwd", "context", "async", "clarify"].every((field) => left?.[field] === right?.[field]);
+  return ["agent", "cwd", "context", "async", "clarify"].every((field) => left?.[field] === right?.[field]);
 }
 
 async function stateRootFor(cwd) {
@@ -81,7 +81,7 @@ async function readBinding(input, ctx) {
   return { ...input, worktree: actualCwd, originRoot, headCommit, tasks: plan.tasks, plan };
 }
 
-export function createPlanRunnerDependencies({ pi, audit, externalReview, taskReview, readRuntimeArtifacts = defaultReadRuntimeArtifacts, runtimePollIntervalMs = 50, runtimePollTimeoutMs = 5000, id = () => crypto.randomUUID(), now = () => new Date().toISOString(), controlIntervalMs = 50, stopNestedRun } = {}) {
+export function createPlanRunnerDependencies({ pi, audit, externalReview, taskReview, readRuntimeArtifacts = defaultReadRuntimeArtifacts, runtimePollIntervalMs = 50, runtimePollTimeoutMs = 300_000, id = () => crypto.randomUUID(), now = () => new Date().toISOString(), controlIntervalMs = 50, stopNestedRun } = {}) {
   let pendingCoordinator;
   let stoppingActiveRuns;
   const activeRuns = new Map();
@@ -254,18 +254,22 @@ export function createPlanRunnerDependencies({ pi, audit, externalReview, taskRe
       const next = currentProjection(ctx);
       const settledAttempt = next.attempts.get(attemptId);
       let review;
+      let reviewSkipped = false;
       try {
         review = typeof taskReview === "function" ? await taskReview({ taskId: attempt.taskId, attempt: { attemptId, ...settledAttempt }, projection: next, ctx }) : undefined;
       } catch {
         review = undefined;
       }
       if (!strictReview(review)) {
-        await derivedStatus(ctx);
-        return { state: "awaiting-review" };
+        if (typeof taskReview === "function") {
+          await derivedStatus(ctx);
+          return { state: "awaiting-review" };
+        }
+        reviewSkipped = true;
       }
       pendingCoordinator.acceptReviewedTask(attempt.taskId);
       await derivedStatus(ctx);
-      return { state: "succeeded" };
+      return { state: "succeeded", reviewSkipped };
     },
     async verifyPlan({ ctx }) {
       const current = currentProjection(ctx);

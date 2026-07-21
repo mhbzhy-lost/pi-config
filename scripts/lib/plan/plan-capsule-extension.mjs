@@ -123,6 +123,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   });
   pi.on("tool_call", async (event, ctx) => {
     if (event?.toolName !== "subagent") return undefined;
+    if (typeof event?.input?.action === "string") return undefined;
     if (!opened || typeof options.authorizeNestedSubagent !== "function") {
       return { block: true, reason: "No nested subagent dispatch is authorized." };
     }
