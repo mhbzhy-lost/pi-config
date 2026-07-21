@@ -284,3 +284,24 @@ test("agent_settled reports terminal summaries and interrupts only unsafe active
   await handlers.get("agent_settled")({ type: "agent_settled" }, context([{ customType: "pi-plan-event-v1", data: created }]));
   assert.equal(entries[0].data.type, "plan.interrupted");
 });
+
+test("plan_open passes planPath through to validateBinding for worktree-relative resolution", async () => {
+  const binding = {
+    planId: "release-11",
+    planPath: "docs/plans/my-plan.md",
+    planHash: "a".repeat(64),
+    baseCommit: "base",
+    worktree: "/worktree",
+    allowPlanCommits: true,
+  };
+  let receivedPath = "";
+  const { tools } = setup({
+    validateBinding: async (input) => {
+      receivedPath = input.planPath;
+      return { ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] };
+    },
+  });
+  const result = await execute(tools.get("plan_open"), binding);
+  assert.equal(result.isError, false, result.content[0].text);
+  assert.equal(receivedPath, "docs/plans/my-plan.md");
+});
