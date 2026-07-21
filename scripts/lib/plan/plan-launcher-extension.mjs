@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -209,6 +209,13 @@ export function createPlanLauncherExtension(pi, options = {}) {
     try {
       workspaceLease = await (options.createWorkspace ?? createPlanWorkspace)({ originRoot, stateRoot, planId, baseCommit });
       const worktree = workspaceLease.workspacePath;
+      const worktreePlanPath = path.join(worktree, planPath);
+      try {
+        await access(worktreePlanPath);
+      } catch {
+        await mkdir(path.dirname(worktreePlanPath), { recursive: true });
+        await copyFile(planPath, worktreePlanPath);
+      }
       const token = crypto.randomUUID();
       parentLease = (options.createParentLease ?? createParentLease)({
         stateRoot,

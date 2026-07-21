@@ -646,3 +646,43 @@ test("plan_run tool skips interactive confirmation", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+test("plan-run copies plan file into worktree when absent from baseCommit", async () => {
+  const { root, planPath } = await fixture();
+  const worktree = join(root, "var", "plan-worktrees", "plan-one");
+  const entry = join(root, "pi", "child-extensions", "plan-runner.ts");
+  try {
+    await mkdir(join(root, "pi", "child-extensions"), { recursive: true });
+    await writeFile(entry, "export default function () {}\n");
+    let spawnedTask = "";
+    const { commands } = setup({
+      originRoot: root,
+      stateRoot: root,
+      readBaseCommit: async () => "a".repeat(40),
+      planRunnerEntry: entry,
+      createWorkspace: async (input) => {
+        await mkdir(worktree, { recursive: true });
+        return { ...input, workspacePath: worktree };
+      },
+      createParentLease: (input) => ({
+        path: join(root, "var", "plan-runs", input.planId, "control", "parent-lease.json"),
+        beat: async () => {},
+        start: () => {},
+        stop: () => {},
+        remove: async () => {},
+      }),
+      createRpcClient: () => ({
+        spawn: async (params) => {
+          spawnedTask = params.task;
+          const content = await readFile(join(worktree, planPath), "utf8");
+          assert.match(content, /pi-plan\.v1/);
+          return { details: { runId: "run-1", asyncDir: "/async", results: [{ sessionFile: "/session" }] } };
+        },
+      }),
+      id: () => "plan-one",
+    });
+    await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+    assert.match(spawnedTask, /planHash/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
