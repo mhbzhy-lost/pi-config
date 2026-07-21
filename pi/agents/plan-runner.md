@@ -1,7 +1,7 @@
 ---
 name: plan-runner
 description: Dedicated coordinator for one approved plan session
-model: openai/gpt-5.6-terra
+model: openai-codex/gpt-5.6-terra
 thinking: low
 temperature: 0
 share: false

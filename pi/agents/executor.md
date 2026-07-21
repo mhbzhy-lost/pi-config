@@ -1,7 +1,7 @@
 ---
 name: executor
 description: Deterministic coding subagent for precise multi-file implementation
-model: openai/gpt-5.6-terra
+model: openai-codex/gpt-5.6-terra
 thinking: low
 temperature: 0
 extensions: ""

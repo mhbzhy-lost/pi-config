@@ -15,14 +15,15 @@
       },
       "models": [
         {
-          "id": "Qwen3.7-Max-DogFooding",
-          "name": "Qwen 3.7 Max DogFooding",
+          "id": "Peach-07-17-DogFooding",
+          "name": "Peach 07-17 DogFooding",
           "reasoning": true,
           "input": [
-            "text"
+            "text",
+            "image"
           ],
-          "contextWindow": 1000000,
-          "maxTokens": 32768
+          "contextWindow": 990000,
+          "maxTokens": 65535
         }
       ]
     },

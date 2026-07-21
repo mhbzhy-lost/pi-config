@@ -1,7 +1,7 @@
 ---
 name: spark
 description: Fast deterministic subagent for focused changes
-model: openai/gpt-5.3-codex-spark
+model: openai-codex/gpt-5.3-codex-spark
 thinking: off
 temperature: 0
 extensions: ""
