@@ -199,6 +199,15 @@ export function createPlanRunnerDependencies({ pi, audit, externalReview, taskRe
     canContinue(current) {
       return Boolean(current?.planId && !TERMINAL.has(current.lifecycle) && ["created", "running"].includes(current.lifecycle));
     },
+    async getHeadCommit() {
+      const ctx = { cwd: undefined };
+      try {
+        const entries = localEntries.length > 0 ? localEntries : [];
+        const proj = entries.reduce((p, e) => applyEvent(p, e), createProjection());
+        if (proj.workspace?.worktree) return await git(proj.workspace.worktree, "rev-parse", "HEAD");
+      } catch {}
+      return undefined;
+    },
     async blockPlan({ reason }, { ctx }) {
       if (typeof reason !== "string" || !reason.trim()) throw new Error("Block reason is required.");
       const current = currentProjection(ctx);
