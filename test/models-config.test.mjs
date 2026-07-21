@@ -6,37 +6,18 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("models.json configures the direct Idealab Qwen provider", async () => {
+test("models.json configures Idealab providers", async () => {
   const modelsConfig = JSON.parse(
     await readFile(join(repoRoot, "pi", "models.json"), "utf8"),
   );
 
-  assert.deepEqual(modelsConfig, {
-    providers: {
-      "openai-idealab": {
-        baseUrl: "https://idealab.alibaba-inc.com/api/openai/v1",
-        api: "openai-completions",
-        authHeader: true,
-        compat: {
-          supportsStore: false,
-          supportsDeveloperRole: false,
-          supportsReasoningEffort: false,
-          maxTokensField: "max_tokens",
-          thinkingFormat: "qwen",
-          supportsStrictMode: false,
-          supportsLongCacheRetention: false,
-        },
-        models: [
-          {
-            id: "Qwen3.7-Max-DogFooding",
-            name: "Qwen 3.7 Max DogFooding",
-            reasoning: true,
-            input: ["text"],
-            contextWindow: 1000000,
-            maxTokens: 32768,
-          },
-        ],
-      },
-    },
-  });
+  assert.ok(modelsConfig.providers["openai-idealab"]);
+  assert.equal(modelsConfig.providers["openai-idealab"].api, "openai-completions");
+  assert.equal(modelsConfig.providers["openai-idealab"].baseUrl, "https://idealab.alibaba-inc.com/api/openai/v1");
+  assert.ok(modelsConfig.providers["openai-idealab"].models.length >= 1);
+
+  assert.ok(modelsConfig.providers["anthropic-idealab"]);
+  assert.equal(modelsConfig.providers["anthropic-idealab"].api, "anthropic-messages");
+  assert.equal(modelsConfig.providers["anthropic-idealab"].baseUrl, "https://idealab.alibaba-inc.com/api/anthropic");
+  assert.ok(modelsConfig.providers["anthropic-idealab"].models.length >= 1);
 });

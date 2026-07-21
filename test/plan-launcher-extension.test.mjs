@@ -578,7 +578,7 @@ test("plan runner dispatch skill is allowlisted and constrains parent behavior",
   assert.match(skill, /^description: Use when /m);
   assert.match(skill, /writing-plans/);
   assert.match(skill, /plan_run/);
-  assert.match(skill, /must not execute plan tasks/i);
+  assert.match(skill, /不得.*执行计划任务|must not execute plan tasks/i);
   assert.match(skill, /validatedHead/);
 });
 

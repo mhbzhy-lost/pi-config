@@ -54,8 +54,8 @@ test("migration keeps ordinary agent profiles independent from subagent tools", 
     ),
   );
 
-  assert.equal(executor.model, "openai/gpt-5.6-terra");
-  assert.equal(spark.model, "openai/gpt-5.3-codex-spark");
+  assert.equal(executor.model, "openai-codex/gpt-5.6-terra");
+  assert.equal(spark.model, "openai-codex/gpt-5.3-codex-spark");
   assert.equal(executor.tools.includes("subagent"), false);
   assert.equal(spark.tools.includes("subagent"), false);
   assert.equal(executor.extensions, '""');
@@ -77,8 +77,8 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
     ),
   );
 
-  assert.equal(runner.model, "openai/gpt-5.6-terra");
-  assert.equal(reviewer.model, "openai/gpt-5.6-terra");
+  assert.equal(runner.model, "openai-codex/gpt-5.6-terra");
+  assert.equal(reviewer.model, "openai-codex/gpt-5.6-terra");
   assert.equal(runner.share, "false");
   assert.equal(reviewer.share, "false");
   assert.equal(runner.fallback, "false");
