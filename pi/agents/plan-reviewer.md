@@ -1,7 +1,7 @@
 ---
 name: plan-reviewer
 description: Read-only reviewer for plan compliance
-model: openai-codex/gpt-5.6-terra
+model: codex-pool/gpt-5.6-sol
 thinking: low
 temperature: 0
 share: false
