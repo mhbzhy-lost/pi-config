@@ -3,7 +3,7 @@ import test from "node:test";
 import { probeProvider, resolveFallbackModel } from "../scripts/lib/provider-fallback.mjs";
 
 test("probeProvider returns true for a reachable endpoint", async () => {
-  const probe = probeProvider("http://127.0.0.1:1", { timeoutMs: 100, fetch: async () => ({ ok: true }) });
+  const probe = probeProvider("http://127.0.0.1:1", { timeoutMs: 100, fetch: async () => ({ ok: true, status: 200 }) });
   assert.equal(await probe, true);
 });
 
@@ -23,12 +23,18 @@ test("probeProvider returns false on timeout", async () => {
   assert.equal(await probe, false);
 });
 
-test("probeProvider returns false on non-ok HTTP status", async () => {
-  const probe = probeProvider("http://127.0.0.1:1", {
+test("probeProvider returns true on 4xx/5xx (server reachable)", async () => {
+  const probe401 = probeProvider("http://127.0.0.1:1", {
+    timeoutMs: 100,
+    fetch: async () => ({ ok: false, status: 401 }),
+  });
+  assert.equal(await probe401, true);
+
+  const probe502 = probeProvider("http://127.0.0.1:1", {
     timeoutMs: 100,
     fetch: async () => ({ ok: false, status: 502 }),
   });
-  assert.equal(await probe, false);
+  assert.equal(await probe502, true);
 });
 
 test("resolveFallbackModel returns primary when reachable", async () => {

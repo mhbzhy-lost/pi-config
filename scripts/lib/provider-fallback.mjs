@@ -16,8 +16,10 @@ export async function probeProvider(baseUrl, { timeoutMs = 3000, fetch: fetchFn 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetchFn(`${baseUrl}/models`, { signal: controller.signal });
-      return response?.ok === true;
+      const response = await fetchFn(baseUrl, { method: "HEAD", signal: controller.signal });
+      // Any HTTP response (including 4xx/5xx) means the server is reachable.
+      // Only network errors and timeouts mean unreachable.
+      return response != null;
     } finally {
       clearTimeout(timer);
     }
