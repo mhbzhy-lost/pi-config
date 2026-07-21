@@ -53,8 +53,16 @@ export async function resolveSkillSource(repoRoot, name) {
   throw new Error(`missing SKILL.md for allowlisted skill: ${name}`);
 }
 
-export async function loadDesiredSkills(repoRoot, listPath) {
+export async function loadDesiredSkills(repoRoot, listPath, localListPath) {
   const names = parseSkillList(await readFile(listPath, "utf8"));
+  if (localListPath) {
+    try {
+      const localNames = parseSkillList(await readFile(localListPath, "utf8"));
+      for (const name of localNames) {
+        if (!names.includes(name)) names.push(name);
+      }
+    } catch {}
+  }
   const desired = new Map();
   for (const name of names) {
     desired.set(name, await resolveSkillSource(repoRoot, name));
