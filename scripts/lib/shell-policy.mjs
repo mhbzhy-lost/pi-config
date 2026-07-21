@@ -140,6 +140,53 @@ function checkRm(tokens, cwd, workspaceRoot) {
   return undefined;
 }
 
+function checkDestructiveGit(tokens) {
+  if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
+  const subcommand = tokens.find((t, i) => i > 0 && !t.startsWith("-"));
+  if (!subcommand) return undefined;
+
+  if (subcommand === "reset" && tokens.includes("--hard")) {
+    return violation("GIT_DESTRUCTIVE", "禁止不可逆 Git 操作: git reset --hard");
+  }
+  if (subcommand === "clean") {
+    // Allow dry-run variants: -n, --dry-run, or combined like -nfd
+    const isDryRun = tokens.includes("--dry-run") || tokens.some((t) => t.startsWith("-") && !t.startsWith("--") && t.includes("n"));
+    if (isDryRun) return undefined;
+    if (tokens.some((t) => t.startsWith("-") && !t.startsWith("--") && t.includes("f"))) {
+      return violation("GIT_DESTRUCTIVE", "禁止不可逆 Git 操作: git clean -f");
+    }
+  }
+  if (subcommand === "checkout" && tokens.includes("--")) {
+    return violation("GIT_DESTRUCTIVE", "禁止不可逆 Git 操作: git checkout -- file");
+  }
+  if (subcommand === "restore" && tokens.includes("--worktree")) {
+    return violation("GIT_DESTRUCTIVE", "禁止不可逆 Git 操作: git restore --worktree");
+  }
+  return undefined;
+}
+
+function checkShellWrapper(tokens, cwd, workspaceRoot) {
+  const shells = new Set(["sh", "bash", "zsh"]);
+  const cmd = tokens[0]?.split("/").pop();
+  if (!cmd || !shells.has(cmd)) return undefined;
+  if (tokens[1] !== "-c" || !tokens[2]) return undefined;
+  // Recursively check the inner command
+  return checkSingleCommand(tokens[2], cwd, workspaceRoot);
+}
+
+function checkSingleCommand(command, cwd, workspaceRoot) {
+  const commands = commandContext(command, cwd);
+  for (const { tokens, cwd: commandCwd } of commands) {
+    const rmViolation = checkRm(tokens, commandCwd, workspaceRoot);
+    if (rmViolation) return rmViolation;
+    const gitViolation = checkDestructiveGit(tokens);
+    if (gitViolation) return gitViolation;
+    const wrapperViolation = checkShellWrapper(tokens, commandCwd, workspaceRoot);
+    if (wrapperViolation) return wrapperViolation;
+  }
+  return undefined;
+}
+
 function commitMessage(tokens) {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
@@ -203,12 +250,37 @@ export function scanPendingPlanTodos(repoRoot) {
   return planTodos(repoRoot);
 }
 
+const SAFE_ENV_SUFFIX = /\.env\.(?:example|sample|template)$/i;
+const SENSITIVE_BASENAME = /^(?:auth|mcp-auth)\.json$/i;
+
+export function checkSensitivePath({ toolName, input, cwd }) {
+  if (!["read", "write", "edit"].includes(toolName)) return undefined;
+  const raw = input?.path ?? input?.filePath ?? input?.file_path ?? input?.filename;
+  if (!raw) return violation("SENSITIVE_PATH_UNCERTAIN", "敏感文件工具调用缺少可信路径");
+  const expanded = expandTilde(raw);
+  const path = isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
+  const candidate = canonicalCandidate(path);
+  const normalized = (candidate ?? path).replaceAll("\\", "/");
+  if (SAFE_ENV_SUFFIX.test(normalized)) return undefined;
+  if (/(?:^|\/)\.env(?:\.[^/]+)?$/i.test(normalized)) {
+    return violation("SENSITIVE_ENV_FILE", "禁止 Agent 访问环境凭据文件");
+  }
+  if (SENSITIVE_BASENAME.test(normalized.split("/").at(-1)) && /(?:^|\/)(?:pi|opencode)(?:\/|$)/i.test(normalized)) {
+    return violation("SENSITIVE_AUTH_FILE", "禁止 Agent 访问认证凭据文件");
+  }
+  return undefined;
+}
+
 export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }) {
   const skipCommitValidation = env.GIT_COMMIT_HOOK_SKIP === "1" || /(?:^|\s)GIT_COMMIT_HOOK_SKIP=1(?:\s|$)/.test(command);
   const commands = commandContext(command, cwd);
   for (const { tokens, cwd: commandCwd, cd } of commands) {
     const rmViolation = checkRm(tokens, commandCwd, workspaceRoot);
     if (rmViolation) return rmViolation;
+    const gitViolation = checkDestructiveGit(tokens);
+    if (gitViolation) return gitViolation;
+    const wrapperViolation = checkShellWrapper(tokens, commandCwd, workspaceRoot);
+    if (wrapperViolation) return wrapperViolation;
     if (cd && commands.some((command) => command.tokens[0] === "git")) {
       return violation("GIT_CWD_FORBIDDEN", "禁止通过 cd 切换 Git 工作目录");
     }

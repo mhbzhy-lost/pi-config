@@ -216,3 +216,32 @@ test("returns coding reminders only for source edits", () => {
     assert.equal(codingReminderFor({ toolName: "write", input: { path } }), undefined, path);
   }
 });
+
+test("blocks destructive git commands that cannot be undone", () => {
+  assertBlocked("git reset --hard", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git reset --hard HEAD~1", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git clean -fd", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git clean -fdx", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git checkout -- src/app.ts", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("git restore --worktree src/app.ts", "GIT_DESTRUCTIVE", /不可逆 Git/);
+});
+
+test("allows safe git commands and dry-run variants", () => {
+  assert.equal(policy("git reset src/app.ts"), undefined);
+  assert.equal(policy("git clean -nfd"), undefined);
+  assert.equal(policy("git clean --dry-run -fd"), undefined);
+  assert.equal(policy("git checkout main"), undefined);
+  assert.equal(policy("git restore --staged src/app.ts"), undefined);
+  assert.equal(policy("git stash"), undefined);
+});
+
+test("blocks dangerous commands inside sh -c wrapper", () => {
+  assertBlocked("sh -c 'git reset --hard'", "GIT_DESTRUCTIVE", /不可逆 Git/);
+  assertBlocked("bash -c 'rm -rf /Users/shared'", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
+  assertBlocked("zsh -c 'git clean -fd'", "GIT_DESTRUCTIVE", /不可逆 Git/);
+});
+
+test("allows safe commands inside sh -c wrapper", () => {
+  assert.equal(policy("sh -c 'echo hello'"), undefined);
+  assert.equal(policy("bash -c 'git status'"), undefined);
+});

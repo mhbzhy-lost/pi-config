@@ -204,3 +204,60 @@ test("tool_result leaves errors, image content, and non-source writes unchanged"
   assert.equal(await handlers.get("tool_result")(image, { cwd: workspace }), undefined);
   assert.equal(await handlers.get("tool_result")(readme, { cwd: workspace }), undefined);
 });
+
+test("tool_call blocks read/write/edit of credential files", async () => {
+  const handlers = setup();
+  const handler = handlers.get("tool_call");
+
+  for (const path of [
+    "pi/auth.json",
+    "../.local/share/opencode/auth.json",
+    "~/.local/share/opencode/auth.json",
+    "~/.local/share/opencode/mcp-auth.json",
+    ".env",
+    ".env.local",
+    ".env.production",
+    "config/.env.staging",
+  ]) {
+    for (const toolName of ["read", "write", "edit"]) {
+      const result = await handler(
+        { toolName, input: { path } },
+        { cwd: workspace },
+      );
+      assert.equal(result?.block, true, `${toolName} ${path} should be blocked`);
+    }
+  }
+});
+
+test("tool_call allows safe env-like and documentation files", async () => {
+  const handlers = setup();
+  const handler = handlers.get("tool_call");
+
+  for (const path of [
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+    "docs/auth-setup.md",
+    "src/config.json",
+  ]) {
+    for (const toolName of ["read", "write", "edit"]) {
+      const result = await handler(
+        { toolName, input: { path } },
+        { cwd: workspace },
+      );
+      assert.equal(result, undefined, `${toolName} ${path} should be allowed`);
+    }
+  }
+});
+
+test("tool_call blocks destructive git via bash shell-policy", async () => {
+  const handlers = setup();
+  const handler = handlers.get("tool_call");
+
+  const result = await handler(
+    { toolName: "bash", input: { command: "git reset --hard HEAD~1" } },
+    { cwd: workspace },
+  );
+  assert.equal(result.block, true);
+  assert.match(result.reason, /不可逆 Git/);
+});
