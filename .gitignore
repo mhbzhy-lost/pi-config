@@ -27,5 +27,9 @@ __pycache__/
 # Debug/temp extensions
 /pi/extensions/test-payload.ts
 
+# Pi runtime (subagent artifacts)
+/.pi-subagents/
+/pi/models-store.json
+
 # Secrets
 /skill-overrides/external-llm-review/.env

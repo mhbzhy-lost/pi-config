@@ -1,20 +1,21 @@
 ---
 name: playwright
-description: Use when needing to interact with web pages - navigate, click, fill forms, take screenshots, extract page content, test web applications, or automate browser workflows.
+description: Use when needing to interact with web pages - navigate, click, fill forms, take screenshots, extract content, or automate browser workflows. Also use when seeing errors like "Server not running" or "No running instances" from playwright.py.
 ---
 
 # Playwright Browser Automation
 
-Control a browser via Playwright MCP for web automation, testing, and content extraction.
+## Overview
+
+Control a browser via a local Playwright MCP wrapper script. The script manages a persistent browser instance and proxies commands through a Unix socket.
+
+**Core principle:** `start` → interact via `call` → `stop`. Always `browser_snapshot` before interacting with elements (provides stable `ref` targets).
 
 ## When to Use
 
-- Navigate to URLs and interact with web pages (click, type, select)
+- Automate browser interaction: navigate, click, type, select, screenshot
+- Extract page content or verify web application state
 - Fill and submit forms
-- Take screenshots of web pages
-- Extract page content via accessibility snapshots
-- Test web applications end-to-end
-- Automate multi-step browser workflows
 - Monitor console messages or network requests
 
 ## Lifecycle
@@ -22,105 +23,56 @@ Control a browser via Playwright MCP for web automation, testing, and content ex
 ```bash
 SCRIPT=~/pi-config/skill-overrides/playwright/playwright.py
 
-# Start browser (headless recommended for automation)
-python3 $SCRIPT start --headless
-
-# Check status
-python3 $SCRIPT status
-
-# List available tools
-python3 $SCRIPT tools
-
-# Stop when done
-python3 $SCRIPT stop
+python3 $SCRIPT start --headless     # Launch browser (always use --headless unless user login needed)
+python3 $SCRIPT call <tool> '<json>' # Interact
+python3 $SCRIPT stop                 # Clean up
 ```
 
-## Calling Tools
+Multi-instance: `instances`, `stopall`, `--instance <name>` for disambiguation.
+
+## Core Pattern
 
 ```bash
-python3 $SCRIPT call <tool_name> '<json_args>'
-```
-
-## Common Workflows
-
-### Navigate and snapshot
-
-```bash
+# 1. Navigate
 python3 $SCRIPT call browser_navigate '{"url": "https://example.com"}'
+
+# 2. Snapshot to get element refs
 python3 $SCRIPT call browser_snapshot
+
+# 3. Interact using refs from snapshot (e.g. target "e123")
+python3 $SCRIPT call browser_click '{"element": "Submit", "target": "e123"}'
+python3 $SCRIPT call browser_type '{"element": "Search", "target": "e45", "text": "query"}'
 ```
 
-### Click an element
-
-Use `browser_snapshot` first to get element references (ref attributes), then:
-
-```bash
-python3 $SCRIPT call browser_click '{"element": "Submit button", "target": "e123"}'
-```
-
-### Type into a field
-
-```bash
-python3 $SCRIPT call browser_type '{"element": "Search input", "target": "e45", "text": "hello"}'
-```
-
-### Fill a form (multiple fields)
-
-```bash
-python3 $SCRIPT call browser_fill_form '{"fields": [{"name": "username", "type": "textbox", "target": "e10", "value": "user"}, {"name": "password", "type": "textbox", "target": "e11", "value": "pass"}]}'
-```
-
-### Take a screenshot
-
-```bash
-python3 $SCRIPT call browser_take_screenshot '{"filename": ".playwright-mcp/screenshot.png"}'
-```
-
-### Evaluate JavaScript
-
-```bash
-python3 $SCRIPT call browser_evaluate '{"function": "() => document.title"}'
-```
-
-### Wait for content
-
-```bash
-python3 $SCRIPT call browser_wait_for '{"text": "Loading complete"}'
-```
-
-### Press keyboard key
-
-```bash
-python3 $SCRIPT call browser_press_key '{"key": "Enter"}'
-```
-
-## Tool Reference
+## Quick Reference
 
 | Tool | Purpose |
 |------|---------|
 | `browser_navigate` | Go to URL |
-| `browser_snapshot` | Get accessibility tree (preferred over screenshot for understanding page) |
+| `browser_snapshot` | Accessibility tree with refs (preferred for understanding page) |
 | `browser_click` | Click element by ref |
-| `browser_type` | Type text into element |
-| `browser_fill_form` | Fill multiple form fields |
-| `browser_take_screenshot` | Save screenshot to file |
-| `browser_evaluate` | Run JavaScript |
-| `browser_press_key` | Press keyboard key |
-| `browser_hover` | Hover over element |
-| `browser_select_option` | Select dropdown option |
-| `browser_wait_for` | Wait for text or timeout |
+| `browser_type` | Type into element |
+| `browser_fill_form` | Fill multiple fields: `{"fields": [{"name": "...", "type": "textbox", "target": "eN", "value": "..."}]}` |
+| `browser_take_screenshot` | Save screenshot: `{"filename": "path.png"}` |
+| `browser_evaluate` | Run JS: `{"function": "() => document.title"}` |
+| `browser_press_key` | Keyboard key: `{"key": "Enter"}` |
+| `browser_hover` | Hover element |
+| `browser_select_option` | Dropdown selection |
+| `browser_wait_for` | Wait for text: `{"text": "Loading complete"}` |
 | `browser_find` | Search snapshot for text/regex |
 | `browser_navigate_back` | Go back |
-| `browser_console_messages` | Get console output |
-| `browser_network_requests` | List network requests |
-| `browser_close` | Close the page |
+| `browser_console_messages` | Console output |
+| `browser_network_requests` | Network requests |
+| `browser_close` | Close page |
 | `browser_resize` | Resize window |
-| `browser_tabs` | Manage browser tabs |
+| `browser_tabs` | Manage tabs |
 
-## Best Practices
+## Common Mistakes
 
-1. **Always start with `browser_navigate`** then `browser_snapshot` to understand the page
-2. **Use snapshot refs** for element interactions - they are stable references from the accessibility tree
-3. **Prefer snapshot over screenshot** for understanding page structure
-4. **Use `browser_wait_for`** after actions that trigger page changes
-5. **Stop the server** when done to free resources
+| Mistake | Fix |
+|---------|-----|
+| Calling `browser_click`/`browser_type` without snapshot | Always `browser_snapshot` first to get ref targets |
+| Using headed mode unnecessarily | Default to `--headless`; only use headed when user must manually login |
+| Forgetting to `stop` after use | Always stop to free resources |
+| Guessing element refs | Refs come from snapshot output only; re-snapshot after page changes |
+| Snapshotting immediately after navigation/click | Use `browser_wait_for` before re-snapshot on slow pages |
