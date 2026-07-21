@@ -104,6 +104,23 @@ test("rewrites thinking type from enabled to adaptive", () => {
   assert.equal(result.thinking.budget_tokens, undefined);
 });
 
+test("strips budget_tokens from adaptive thinking (Pi kernel sends both)", () => {
+  const pi = createMockPi();
+  createExtension(pi);
+  const handler = pi.handlers.get("before_provider_request");
+  const payload = {
+    model: "claude-opus-4-6",
+    messages: [],
+    thinking: { type: "adaptive", budget_tokens: 16000 },
+  };
+  const result = handler(
+    { payload },
+    { model: { provider: "anthropic-idealab", id: "claude-opus-4-6" } },
+  );
+  assert.equal(result.thinking.type, "adaptive");
+  assert.equal(result.thinking.budget_tokens, undefined);
+});
+
 test("places cache markers on system and message blocks", () => {
   const pi = createMockPi();
   createExtension(pi);

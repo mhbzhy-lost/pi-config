@@ -260,6 +260,9 @@ function rewriteThinking(payload: Record<string, unknown>): void {
   const t = thinking as Record<string, unknown>;
   if (t.type === "enabled") {
     t.type = "adaptive";
+  }
+  // Anthropic adaptive thinking does not accept budget_tokens
+  if (t.type === "adaptive") {
     delete t.budget_tokens;
   }
 }
