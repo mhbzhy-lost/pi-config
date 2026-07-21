@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative as pathRelative } from "node:path";
 import { realpathSync } from "node:fs";
 import test from "node:test";
 import {
@@ -29,7 +29,7 @@ test("blocks rm targets outside the workspace and permits known workspace paths"
   assertBlocked("rm -rf /Users/shared", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assertBlocked("rm -rf ../../other", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assert.equal(policy("rm -rf ./helpers"), undefined);
-  assert.equal(policy("rm -rf /Users/leshi.zhy/pi-config/test/helpers"), undefined);
+  assert.equal(policy(`rm -rf ${join(workspaceRoot, "test", "helpers")}`), undefined);
 });
 
 test("uses cd context and unwraps sudo command and env before checking rm", () => {
@@ -37,7 +37,7 @@ test("uses cd context and unwraps sudo command and env before checking rm", () =
   assertBlocked("sudo rm -rf /Users/shared", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assertBlocked("command rm -rf /Users/shared", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assertBlocked("env MODE=test rm -rf /Users/shared", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
-  assert.equal(policy("cd /Users/leshi.zhy/pi-config/test && rm -rf helpers"), undefined);
+  assert.equal(policy(`cd ${join(workspaceRoot, "test")} && rm -rf helpers`), undefined);
 });
 
 test("fails closed for symlinks and shell-expanded or indeterminate rm targets", () => {
@@ -50,10 +50,15 @@ test("fails closed for symlinks and shell-expanded or indeterminate rm targets",
 
 test("allows rm with tilde paths that resolve within the workspace", () => {
   const home = homedir();
-  assert.equal(policy(`rm -rf ~/${realpathSync(workspaceRoot).split("/").pop()}/test/helpers`, {
-    cwd: workspaceRoot,
-    workspaceRoot,
-  }), undefined);
+
+  const relFromHome = pathRelative(home, realpathSync(workspaceRoot));
+  // Only test if workspace is actually under HOME
+  if (!relFromHome.startsWith("..") && relFromHome !== "") {
+    assert.equal(policy(`rm -rf ~/${relFromHome}/test/helpers`, {
+      cwd: workspaceRoot,
+      workspaceRoot,
+    }), undefined);
+  }
   assertBlocked(`rm -rf ~/unrelated-dir`, "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
 });
 

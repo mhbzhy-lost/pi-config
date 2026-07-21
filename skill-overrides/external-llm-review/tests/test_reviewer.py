@@ -595,7 +595,7 @@ class IdealabAnthropicProviderTest(unittest.TestCase):
 
         self.assertEqual(payload["model"], "claude-opus-4-6")
         self.assertEqual(payload["max_tokens"], 16000)
-        self.assertEqual(payload["temperature"], 0.3)
+        self.assertNotIn("temperature", payload)  # Anthropic provider omits temperature
         self.assertEqual(payload["system"], "You are a critic.")
         self.assertEqual(len(payload["messages"]), 1)
         self.assertEqual(payload["messages"][0]["role"], "user")

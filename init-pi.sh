@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PI_VERSION="0.80.6"
+PI_VERSION="0.80.10"
 PI_PACKAGE="@earendil-works/pi-coding-agent@$PI_VERSION"
 PI_SUBAGENTS_VERSION="0.34.0"
 ZSHRC_PATH="${ZDOTDIR:-$HOME}/.zshrc"

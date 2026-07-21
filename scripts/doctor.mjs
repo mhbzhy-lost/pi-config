@@ -9,7 +9,7 @@ import { loadDesiredSkills } from "./lib/skill-whitelist.mjs";
 
 const execFile = promisify(execFileCallback);
 
-const PI_VERSION = "0.80.6";
+const PI_VERSION = "0.80.10";
 const PI_SUBAGENTS_VERSION = "0.34.0";
 const EXPECTED_SKILLS = [
   "external-llm-review",
@@ -20,6 +20,8 @@ const EXPECTED_SKILLS = [
   "writing-skills",
   "writing-plans",
   "plan-runner-dispatch",
+  "exa-search",
+  "playwright",
 ];
 const REQUIRED_PROFILES = {
   executor: { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: "pi/extensions/provider-fallback.ts" },
@@ -59,8 +61,9 @@ async function readInstalledPiVersion() {
 
 export async function inspectConfiguration(repoRoot, options = {}) {
   const issues = [];
-  const listPath = join(repoRoot, "agents", "skills.list");
-  const desired = await loadDesiredSkills(repoRoot, listPath);
+  const listPath = join(repoRoot, "skill-overrides", "skills.list");
+  const localListPath = join(repoRoot, "skill-overrides", "skills.local.list");
+  const desired = await loadDesiredSkills(repoRoot, listPath, localListPath);
 
   if (JSON.stringify([...desired.keys()]) !== JSON.stringify(EXPECTED_SKILLS)) {
     issues.push("unexpected Skill whitelist");
