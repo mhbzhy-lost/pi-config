@@ -137,6 +137,35 @@ OpenCode 支持 remote config、global/project config、环境注入、managed c
 
 当前同时存在 OpenCode binary `1.18.4`、源码 `1.17.20`、plugin SDK `1.14.48`。Pi 也存在文档固定 `0.80.6`、实际 `0.80.10` 的差异。下一阶段应把宿主、插件、配置 schema 和真实集成测试纳入一个版本矩阵。
 
+
+## 7.5 已批准范围
+
+基于差距评估，以下范围已获批准：
+
+**P0 全部执行：**
+- 恢复发布基线（测试全绿、doctor 全绿、版本统一）
+- 统一契约表述（Plan Gate 完成语义、Skill 数量、模型匹配）
+- 安全面关键收口（最高危硬禁止）
+- Basic Memory 本地专用工具接入
+
+**最高危硬禁止仅含：**
+- 凭据文件访问（`auth.json`、`.env`/`.env.*` 等认证文件）
+- 不可逆 Git 操作（`git reset --hard`、`git clean -fd`、`git checkout -- file` 等）与工作区外删除
+- 危险包装器绕过（`sh -c` 等 shell wrapper 中的同类危险命令）
+
+**延后至后续阶段：**
+- 通用 `allow/ask/deny` 权限引擎
+- 统一可观测性面板
+- 完整 Memory/Knowledge 系统（自动写入、MCP 桥、cloud 同步）
+- Secret/PII 全链路脱敏
+- MCP/LSP 通用层
+- Web/Desktop/Server
+
+**Basic Memory 接入约束：**
+- 仅暴露五个工具：`memory_search`、`memory_read`、`memory_context`、`memory_recent`、`memory_write`
+- 强制 `--local` 路由，不开放 delete/reset/cloud/MCP 通用桥
+- 写入前拒绝包含秘密/凭据的内容
+
 ## 8. 建议路线图
 
 ### 阶段 A：恢复可信基线，预计 2 至 4 天
