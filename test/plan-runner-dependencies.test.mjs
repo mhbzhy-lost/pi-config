@@ -299,7 +299,7 @@ test("rejects an otherwise valid binding after its worktree HEAD advances", asyn
   );
 });
 
-test("verification passes with unavailable external-review provider and marks it unavailable", async (t) => {
+test("verification fails-closed with unavailable external-review provider", async (t) => {
   const repo = await fixture();
   t.after(() => rm(repo.origin, { recursive: true, force: true }));
   const source = await readFile(repo.planPath, "utf8");
@@ -319,10 +319,10 @@ test("verification passes with unavailable external-review provider and marks it
   const ctx = context(repo.worktree, entries.map((data) => ({ customType: "pi-plan-event-v1", data })));
 
   const result = await deps.verifyPlan({ ctx });
-  assert.equal(result.validated, true);
+  assert.equal(result.validated, false);
   const erGate = result.attempts.find((a) => a.type === "external-review");
   assert.equal(erGate.status, "unavailable");
-  assert.deepEqual(appended.map((entry) => entry.type), ["workspace.head-observed", "gate.finished", "gate.finished", "gate.finished", "gate.finished", "plan.validated"]);
+  assert.deepEqual(appended.map((entry) => entry.type), ["workspace.head-observed", "gate.finished", "gate.finished", "gate.finished", "gate.finished"]);
 });
 
 test("verification observes the worker commit and validates four passing gates on that HEAD", async (t) => {
