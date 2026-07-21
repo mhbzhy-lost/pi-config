@@ -12,3 +12,17 @@ pi() {
 
   "$_PI_CONFIG_UPSTREAM_PI" --no-skills "$@"
 }
+
+pi-full() (
+  local restored=0
+  _pi_full_restore() {
+    if (( ! restored )); then
+      printf '\033[?1049l'
+      restored=1
+    fi
+  }
+
+  trap _pi_full_restore EXIT HUP INT TERM
+  printf '\033[?1049h\033[2J\033[H'
+  pi "$@"
+)

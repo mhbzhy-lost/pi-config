@@ -39,3 +39,29 @@ test("shell integration makes bare pi use the repository configuration", async (
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("pi-full runs pi in the alternate screen and restores the primary screen", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-full-"));
+  try {
+    const output = join(root, "args.txt");
+    const fakePi = join(root, "pi-real");
+    await writeFile(fakePi, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$OUTPUT\"\n");
+    await chmod(fakePi, 0o755);
+
+    const result = spawnSync(
+      "zsh",
+      ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi-full --version`],
+      {
+        encoding: "utf8",
+        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output },
+      },
+    );
+
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "\u001b[?1049h\u001b[2J\u001b[H\u001b[?1049l");
+    assert.equal(await readFile(output, "utf8"), "--no-skills\n--version\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
