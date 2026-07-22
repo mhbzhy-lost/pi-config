@@ -1,3 +1,5 @@
+import { open } from "node:fs/promises";
+
 export interface ProgressState {
   turnCount: number;
   lastTool?: string;
@@ -51,6 +53,27 @@ export function parseProgressEvents(
   if (next.totalTokens !== undefined) parts.push(`${Math.round(next.totalTokens / 1000)}k tok`);
 
   return { summary: parts.join(" | "), state: next };
+}
+
+export async function tailEventsFile(
+  filePath: string,
+  fromOffset: number,
+): Promise<{ lines: string[]; offset: number }> {
+  let fh;
+  try {
+    fh = await open(filePath, "r");
+    const stat = await fh.stat();
+    if (stat.size <= fromOffset) return { lines: [], offset: fromOffset };
+    const buf = Buffer.alloc(stat.size - fromOffset);
+    await fh.read(buf, 0, buf.length, fromOffset);
+    const text = buf.toString("utf8");
+    const lines = text.split("\n").filter((line) => line.trim().length > 0);
+    return { lines, offset: stat.size };
+  } catch {
+    return { lines: [], offset: fromOffset };
+  } finally {
+    await fh?.close();
+  }
 }
 
 export default function asyncProgressWatcher(_pi: unknown) {}
