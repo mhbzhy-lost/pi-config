@@ -1,4 +1,9 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { watch } from "node:fs";
 import { open } from "node:fs/promises";
+import { join } from "node:path";
+
+const POLL_INTERVAL_MS = 5000;
 
 export interface ProgressState {
   turnCount: number;
@@ -76,4 +81,71 @@ export async function tailEventsFile(
   }
 }
 
-export default function asyncProgressWatcher(_pi: unknown) {}
+function startWatching(
+  eventsPath: string,
+  onProgress: (summary: string) => void,
+): { stop: () => void } {
+  let offset = 0;
+  let state: ProgressState = { turnCount: 0 };
+  let stopped = false;
+
+  const tick = async () => {
+    if (stopped) return;
+    const { lines, offset: newOffset } = await tailEventsFile(eventsPath, offset);
+    if (lines.length === 0) return;
+    offset = newOffset;
+    const result = parseProgressEvents(lines, state);
+    if (result) {
+      state = result.state;
+      onProgress(result.summary);
+    }
+  };
+
+  // fs.watch for immediate notification, poll as fallback
+  let watcher: ReturnType<typeof watch> | undefined;
+  try {
+    watcher = watch(eventsPath, () => { void tick(); });
+  } catch { /* file may not exist yet */ }
+  const interval = setInterval(() => { void tick(); }, POLL_INTERVAL_MS);
+
+  return {
+    stop() {
+      stopped = true;
+      watcher?.close();
+      clearInterval(interval);
+    },
+  };
+}
+
+export default function asyncProgressWatcher(pi: ExtensionAPI) {
+  const watchers = new Map<string, { stop: () => void }>();
+
+  pi.events.on("subagent:async-started", (event: any) => {
+    const runId = event?.runId;
+    const asyncDir = event?.asyncDir;
+    if (!runId || !asyncDir || watchers.has(runId)) return;
+    const eventsPath = join(asyncDir, "events.jsonl");
+    const watcher = startWatching(eventsPath, (summary) => {
+      pi.sendMessage(
+        { customType: "async-progress", content: `[${runId.slice(0, 8)}] ${summary}`, display: true },
+        { triggerTurn: false },
+      );
+    });
+    watchers.set(runId, watcher);
+  });
+
+  pi.events.on("subagent:async-complete", (event: any) => {
+    const runId = event?.runId;
+    if (!runId) return;
+    const watcher = watchers.get(runId);
+    if (watcher) {
+      watcher.stop();
+      watchers.delete(runId);
+    }
+  });
+
+  pi.on("session_shutdown", () => {
+    for (const [, watcher] of watchers) watcher.stop();
+    watchers.clear();
+  });
+}
