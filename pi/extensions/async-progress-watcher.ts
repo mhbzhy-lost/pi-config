@@ -81,7 +81,7 @@ export async function tailEventsFile(
   }
 }
 
-function startWatching(
+export function startWatching(
   eventsPath: string,
   onProgress: (summary: string) => void,
 ): { stop: () => void } {

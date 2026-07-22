@@ -56,3 +56,32 @@ test("tailEventsFile returns empty for no new content", async () => {
   assert.equal(result.offset, offset);
   await rm(tmpFile);
 });
+
+test("startWatching delivers progress summary on events.jsonl update", async () => {
+  const tmpFile = join(tmpdir(), `test-watcher-${Date.now()}.jsonl`);
+  await writeFile(tmpFile, "");
+  const summaries = [];
+  const { startWatching } = await import("../pi/extensions/async-progress-watcher.ts");
+  const watcher = startWatching(tmpFile, (summary) => {
+    summaries.push(summary);
+  });
+
+  try {
+    await appendFile(tmpFile, [
+      JSON.stringify({ type: "turn_start" }),
+      JSON.stringify({ type: "tool_execution_start", tool: "bash" }),
+      JSON.stringify({ type: "tool_execution_end", tool: "bash", durationMs: 1500 }),
+      JSON.stringify({ type: "turn_end" }),
+    ].join("\n") + "\n");
+
+    // Allow the 5s polling fallback to deliver the update if fs.watch does not.
+    await new Promise((resolve) => setTimeout(resolve, 6000));
+
+    assert.ok(summaries.length > 0, "should have received at least one progress summary");
+    assert.match(summaries[0], /turn 1/);
+    assert.match(summaries[0], /bash/);
+  } finally {
+    watcher.stop();
+    await rm(tmpFile, { force: true });
+  }
+}, 7000);
