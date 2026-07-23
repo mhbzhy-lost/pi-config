@@ -1,0 +1,1 @@
+../source/scripts/install-cli.sh
