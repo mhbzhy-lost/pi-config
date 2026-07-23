@@ -12,3 +12,4 @@ plan-runner-dispatch
 
 exa-search
 playwright
+browser-auth-session
