@@ -1,11 +1,13 @@
 {
-  "lastChangelogVersion": "0.80.10",
+  "lastChangelogVersion": "0.81.1",
   "hideThinkingBlock": true,
   "theme": "light",
-  "defaultProvider": "codex-pool",
-  "defaultModel": "gpt-5.6-sol",
+  "defaultProvider": "anthropic-idealab",
+  "defaultModel": "claude-opus-4-6",
   "packages": [
-    "npm:pi-subagents@0.34.0"
+    "npm:pi-subagents@0.34.0",
+    "../../.r2c/integrations/pi-adapter",
+    "npm:@juicesharp/rpiv-todo"
   ],
   "subagents": {
     "agentOverrides": {
