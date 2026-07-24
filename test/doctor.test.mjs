@@ -59,6 +59,30 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
   }
 });
 
+test("inspectConfiguration accepts additional valid local skills", async () => {
+  const root = await mkdtemp(join(tmpdir(), "doctor-"));
+  try {
+    const globalSkills = ["external-llm-review", "git-commit-convention", "systematic-debugging", "test-driven-development", "receiving-code-review", "writing-skills", "writing-plans", "plan-runner-dispatch", "exa-search", "playwright"];
+    const localSkills = ["goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7", "crash-analyzer-usage"];
+    await mkdir(join(root, "skill-overrides"), { recursive: true });
+    for (const skill of [...globalSkills, ...localSkills]) {
+      await mkdir(join(root, "skill-overrides", skill), { recursive: true });
+      await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), "# test\n");
+    }
+    await writeFile(join(root, "skill-overrides", "skills.list"), `${globalSkills.join("\n")}\n`);
+    await writeFile(join(root, "skill-overrides", "skills.local.list"), `${localSkills.join("\n")}\n`);
+
+    const issues = await inspectConfiguration(root, {
+      readPiVersion: async () => "0.80.10",
+      readBasicMemoryVersion: async () => "0.22.1",
+    });
+
+    assert.equal(issues.includes("unexpected Skill whitelist"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("inspectConfiguration requires the Parent-owned Plan lifecycle helper", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {

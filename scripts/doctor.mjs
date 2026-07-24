@@ -5,14 +5,14 @@ import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import { loadDesiredSkills } from "./lib/skill-whitelist.mjs";
+import { loadDesiredSkills, parseSkillList } from "./lib/skill-whitelist.mjs";
 
 const execFile = promisify(execFileCallback);
 
 const PI_VERSION = "0.80.10";
 const PI_SUBAGENTS_VERSION = "0.34.0";
 const BASIC_MEMORY_VERSION = "0.22.1";
-const EXPECTED_SKILLS = [
+const EXPECTED_GLOBAL_SKILLS = [
   "external-llm-review",
   "git-commit-convention",
   "systematic-debugging",
@@ -23,10 +23,6 @@ const EXPECTED_SKILLS = [
   "plan-runner-dispatch",
   "exa-search",
   "playwright",
-  "goal-contract",
-  "mac-mini-worker",
-  "normandy-cli",
-  "tbctx7",
 ];
 const REQUIRED_PROFILES = {
   executor: { model: "codex-pool/gpt-5.6-terra", subagent: false, extensions: undefined },
@@ -79,8 +75,9 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   const listPath = join(repoRoot, "skill-overrides", "skills.list");
   const localListPath = join(repoRoot, "skill-overrides", "skills.local.list");
   const desired = await loadDesiredSkills(repoRoot, listPath, localListPath);
+  const globalSkills = parseSkillList(await readFile(listPath, "utf8"));
 
-  if (JSON.stringify([...desired.keys()]) !== JSON.stringify(EXPECTED_SKILLS)) {
+  if (JSON.stringify(globalSkills) !== JSON.stringify(EXPECTED_GLOBAL_SKILLS)) {
     issues.push("unexpected Skill whitelist");
   }
 

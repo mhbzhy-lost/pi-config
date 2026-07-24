@@ -2,7 +2,9 @@
 
 ## 现象
 
-实际配置加载 10 个全局 Skill 和 `skills.local.list` 中 4 个本地 Skill，但 `npm run doctor` 报错 `unexpected Skill whitelist`。
+实际配置加载 10 个全局 Skill 和 `skills.local.list` 中的本地 Skill，但新增第 5 个合法本地 Skill 后，`npm run doctor` 再次报错 `unexpected Skill whitelist`。
+
+此前修复只把 Doctor 的硬编码期望从全局 10 项同步成“全局 10 项 + 当时本地 4 项”，因此任何后续本地扩展都会复发。
 
 ## 影响
 
@@ -10,7 +12,7 @@ Doctor 无法通过；任何把 `npm run doctor` 作为 deterministic Gate 的 P
 
 ## 根因
 
-`loadDesiredSkills()` 会合并 `skills.list` 与 `skills.local.list`，但 `scripts/doctor.mjs` 的 `EXPECTED_SKILLS` 仍只列出全局 10 项，运行时契约和 Doctor 静态期望不一致。
+`loadDesiredSkills()` 会合并 `skills.list` 与 `skills.local.list`，但 `scripts/doctor.mjs` 的 `EXPECTED_SKILLS` 同时硬编码了全局项和本机项。本地清单本应是可扩展配置，Doctor 却把某一时刻的合并结果当成静态契约，形成第二个事实来源。
 
 ## 促成因素
 
@@ -20,8 +22,8 @@ Doctor 无法通过；任何把 `npm run doctor` 作为 deterministic Gate 的 P
 
 ## 修复方向
 
-将 Doctor 期望列表同步为全局 10 项加本地 4 项，并让接受配置的测试 fixture 同时覆盖两个列表。
+Doctor 只固定校验受版本控制的 `skills.list` 全局清单；`skills.local.list` 由 `loadDesiredSkills()` 按实际内容解析和校验，不限制本地 Skill 的名称或数量。
 
 ## 防复发
 
-Doctor 接受测试必须创建与仓库相同的 global/local Skill 分层；发布验证继续显式运行 `npm run doctor`，不能只依赖 `npm test`。
+Doctor 测试必须证明：全局清单漂移仍会失败，而新增合法、可解析的本地 Skill 不会产生 `unexpected Skill whitelist`。发布验证继续显式运行 `npm run doctor`，不能只依赖 `npm test`。
