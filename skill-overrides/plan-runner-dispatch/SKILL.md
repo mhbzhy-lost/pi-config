@@ -15,6 +15,51 @@ description: Use when the user explicitly chooses the Plan Runner Dispatch execu
 - 用户明确说 "/plan-run" 或 "用 plan-runner 执行"
 - 用户明确要求隔离执行环境时（非自行判断）
 
+## Required Plan Input
+
+`plan_run` 只接受严格的 `pi-plan.v1` 文档。首次调用 `plan_run` 之前，必须读取计划并确认以下结构；缺少任一项时先按模板修正，禁止调用后再猜测格式。
+
+````markdown
+# 计划标题
+
+## Execution Contract
+
+```json
+{
+  "schemaVersion": "pi-plan.v1",
+  "verification": [
+    "实际可执行的测试命令",
+    "git diff --check"
+  ],
+  "requiredGates": [
+    "deterministic",
+    "plan-audit",
+    "external-review",
+    "final-completeness"
+  ]
+}
+```
+
+### Task N: 任务标题
+
+**Deps:** Task 1, Task 2
+
+**Files:**
+- Create: `path/to/new-file`
+- Modify: `path/to/existing-file`
+- Delete: `path/to/removed-file`
+````
+
+输入约束：
+
+- 全文必须恰好一个二级标题 `## Execution Contract`，紧跟一个 `json` fenced block。
+- `schemaVersion` 必须是 `pi-plan.v1`；`verification` 是非空命令数组；四个 `requiredGates` 缺一不可。
+- Task 标题必须是 `### Task N: ...`，编号唯一。
+- 无依赖时省略整个 `**Deps:**` 字段，禁止写 `**Deps:** 无`；有依赖时只写已声明且非自身的 `Task N`，支持逗号分隔多个依赖。
+- 每个 Task 的 `**Files:**` 必须至少包含一条 `Create/Modify/Delete` 路径。纯验证步骤放入 `verification`，不要伪造“无新文件”Task。
+
+调用前 checklist：标题、Contract、四个 Gate、非空 verification、每个 Task 的 Deps/Files 均符合上面模板。若 `plan_run` 仍返回解析错误，禁止猜测 JSON key、嵌套或位置；读取 `${PI_CODING_AGENT_DIR}/../scripts/lib/plan/plan-document.mjs` 的实际约束，报告并修正精确失败项后只重试一次。
+
 ## 流程
 
 1. 确认计划已写好并保存（通常由 `writing-plans` 完成）

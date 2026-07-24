@@ -578,6 +578,16 @@ test("plan runner dispatch skill is allowlisted and constrains parent behavior",
   assert.match(skill, /^description: Use when /m);
   assert.match(skill, /writing-plans/);
   assert.match(skill, /plan_run/);
+  assert.match(skill, /^## Required Plan Input$/m);
+  assert.match(skill, /## Execution Contract/);
+  assert.match(skill, /"schemaVersion": "pi-plan\.v1"/);
+  assert.match(skill, /"verification"/);
+  for (const gate of ["deterministic", "plan-audit", "external-review", "final-completeness"]) assert.match(skill, new RegExp(gate));
+  assert.match(skill, /### Task N/);
+  assert.match(skill, /无依赖.*省略.*Deps|omit.*Deps.*no dependenc/i);
+  assert.match(skill, /Files.*至少|Files.*non-empty/i);
+  assert.match(skill, /首次调用.*plan_run.*之前|before.*first.*plan_run/i);
+  assert.match(skill, /禁止猜测|must not guess/i);
   assert.match(skill, /不得.*执行计划任务|must not execute plan tasks/i);
   assert.match(skill, /validatedHead/);
 });
