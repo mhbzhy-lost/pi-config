@@ -45,7 +45,7 @@ function parseTasks(text, path) {
     if (!depsMatch) fail(path, "Task must use optional Deps followed by non-empty Files", id);
     const files = [...depsMatch[2].matchAll(/^- (?:Create|Modify|Delete): `([^`]+)`$/gm)].map((file) => file[1]);
     if (files.length === 0) fail(path, "Files must be non-empty", id);
-    const deps = depsMatch[1] ? depsMatch[1].split(", ").map((dep) => `task-${dep}`) : [];
+    const deps = depsMatch[1] ? [...depsMatch[1].matchAll(/\d+/g)].map((match) => `task-${match[0]}`) : [];
     tasks.push({ id, title: match[2].trim(), deps, files, body });
   }
 

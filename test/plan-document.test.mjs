@@ -43,6 +43,14 @@ test("rejects invalid contract schema, verification, and required gates", () => 
   }
 });
 
+test("parses multiple task dependencies in declaration order", () => {
+  const plan = parsePlanDocument(document({
+    tasks: "### Task 1: One\n\n**Files:**\n- Create: `a.mjs`\n\n### Task 2: Two\n\n**Files:**\n- Create: `b.mjs`\n\n### Task 3: Three\n\n**Deps:** Task 1, Task 2\n\n**Files:**\n- Create: `c.mjs`\n",
+  }), "/plans/multi-deps.md");
+
+  assert.deepEqual(plan.tasks[2].deps, ["task-1", "task-2"]);
+});
+
 test("rejects duplicate, unknown, and self task dependencies with plan path and task id", () => {
   for (const [name, tasks, taskId] of [
     ["duplicate", "### Task 1: One\n\n**Files:**\n- Create: `a.mjs`\n\n### Task 1: Again\n\n**Files:**\n- Create: `b.mjs`", "task-1"],
