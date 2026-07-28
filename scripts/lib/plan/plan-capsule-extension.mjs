@@ -195,7 +195,8 @@ export function createPlanCapsuleExtension(pi, options = {}) {
       pi.sendMessage({ customType: "pi-plan-summary-v1", content: `Plan ${projection.planId} ${projection.lifecycle}.`, details: { planId: projection.planId, lifecycle: projection.lifecycle } });
       return;
     }
-    const hasActiveAttempt = [...projection.attempts.values()].some((attempt) => ["active", "waiting-attention"].includes(attempt.status));
+    const hasActiveAttempt = [...projection.attempts.values()].some((attempt) => attempt.status === "active");
+    const hasWaitingAttention = [...projection.attempts.values()].some((attempt) => attempt.status === "waiting-attention");
     if (hasActiveAttempt) {
       pi.sendMessage(
         {
@@ -207,6 +208,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
       );
       return;
     }
+    if (hasWaitingAttention) return;
     if (options.canContinue?.(projection) === true) {
       pi.sendMessage(
         { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: projection.planId } },

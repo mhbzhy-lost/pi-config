@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { createWriteStream, realpathSync } from "node:fs";
-import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { chmod, mkdir, open, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -52,10 +52,12 @@ function bootstrap(input, promptMarker = "") {
   })}\nDo not merge or push.`;
 }
 
-function waitForSessionStart(child, { cwd, sessionFile, timeoutMs }) {
+function waitForSessionStart(child, { cwd, stdoutPath, sessionFile, timeoutMs, pollIntervalMs = 20 }) {
   let buffer = "";
+  let offset = 0;
   let settled = false;
-  let timer;
+  let pollTimer;
+  let timeoutTimer;
   const expectedCwd = realpathSync(cwd);
   let resolveReady;
   let rejectReady;
@@ -64,9 +66,8 @@ function waitForSessionStart(child, { cwd, sessionFile, timeoutMs }) {
     rejectReady = reject;
   });
   const cleanup = () => {
-    if (timer) clearTimeout(timer);
-    child.stdout.off("data", onData);
-    child.stdout.off("end", onEnd);
+    if (pollTimer) clearTimeout(pollTimer);
+    if (timeoutTimer) clearTimeout(timeoutTimer);
     child.off("error", onError);
     child.off("exit", onExit);
   };
@@ -77,8 +78,28 @@ function waitForSessionStart(child, { cwd, sessionFile, timeoutMs }) {
     if (error) rejectReady(error);
     else resolveReady(value);
   };
-  const onData = (chunk) => {
-    buffer += chunk.toString("utf8");
+  const validateSessionEvent = (event) => {
+    let eventCwd;
+    try {
+      eventCwd = typeof event?.cwd === "string" ? realpathSync(event.cwd) : undefined;
+    } catch {
+      eventCwd = undefined;
+    }
+    if (event?.type !== "session" || event.version !== 3 || typeof event.id !== "string" || !event.id
+      || eventCwd !== expectedCwd) {
+      settle(new Error("Standalone Plan Runner emitted an invalid session start event"));
+      return false;
+    }
+    settle(undefined, { sessionId: event.id, sessionFile });
+    return true;
+  };
+  const parseAvailableLines = (content) => {
+    if (content.length < offset) {
+      settle(new Error("Standalone Plan Runner stdout was truncated before session start"));
+      return;
+    }
+    buffer += content.slice(offset);
+    offset = content.length;
     let newline;
     while ((newline = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, newline).trim();
@@ -91,35 +112,60 @@ function waitForSessionStart(child, { cwd, sessionFile, timeoutMs }) {
         settle(new Error("Standalone Plan Runner emitted invalid JSON before session start"));
         return;
       }
-      let eventCwd;
-      try {
-        eventCwd = typeof event?.cwd === "string" ? realpathSync(event.cwd) : undefined;
-      } catch {
-        eventCwd = undefined;
-      }
-      if (event?.type !== "session" || event.version !== 3 || typeof event.id !== "string" || !event.id
-        || eventCwd !== expectedCwd) {
-        settle(new Error("Standalone Plan Runner emitted an invalid session start event"));
-        return;
-      }
-      settle(undefined, { sessionId: event.id, sessionFile });
+      if (event?.type !== "session") continue;
+      validateSessionEvent(event);
       return;
     }
   };
-  const onEnd = () => settle(new Error("Standalone Plan Runner stdout ended before session start"));
+  const parseSessionFile = (content) => {
+    const newline = content.indexOf("\n");
+    if (newline < 0) return;
+    const line = content.slice(0, newline).trim();
+    if (!line) {
+      settle(new Error("Standalone Plan Runner session file starts with an empty event"));
+      return;
+    }
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      settle(new Error("Standalone Plan Runner session file starts with invalid JSON"));
+      return;
+    }
+    validateSessionEvent(event);
+  };
+  const poll = async () => {
+    if (settled) return;
+    try {
+      parseAvailableLines(await readFile(stdoutPath, "utf8"));
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        settle(error);
+        return;
+      }
+    }
+    if (settled) return;
+    try {
+      parseSessionFile(await readFile(sessionFile, "utf8"));
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        settle(error);
+        return;
+      }
+    }
+    if (!settled) pollTimer = setTimeout(() => void poll(), pollIntervalMs);
+  };
   const onError = (error) => settle(error);
   const onExit = (exitCode, signal) => settle(new Error(
     `Standalone Plan Runner exited before session start (exitCode=${exitCode}, signal=${signal})`,
   ));
-  child.stdout.on("data", onData);
-  child.stdout.once("end", onEnd);
   child.once("error", onError);
   child.once("exit", onExit);
-  timer = setTimeout(
+  timeoutTimer = setTimeout(
     () => settle(new Error("Standalone Plan Runner session start event was not emitted")),
     timeoutMs,
   );
-  timer.unref?.();
+  void poll();
   void ready.catch(() => {});
   return ready;
 }
@@ -168,20 +214,30 @@ export async function spawnStandaloneHost({
   const keeperScript = [
     'bootstrap="$PI_PLAN_BOOTSTRAP_COMMAND"',
     "unset PI_PLAN_BOOTSTRAP_COMMAND",
-    "{ printf '%s\\n' \"$bootstrap\"; while :; do sleep 3600; done; } | exec \"$@\"",
+    "{ printf '%s\\n' \"$bootstrap\"; exec sleep 2147483647; } | exec \"$@\"",
   ].join("\n");
   const childEnv = { ...environment, PI_PLAN_HOST_RUN_ID: hostRunId, PI_PLAN_BOOTSTRAP_COMMAND: bootstrapCommand };
   delete childEnv.PI_SUBAGENT_PARENT_SESSION;
-  const child = spawn("/bin/sh", ["-c", keeperScript, "pi-plan-host-keeper", command, ...args], {
-    cwd,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: childEnv,
-    windowsHide: true,
-  });
-  const ready = waitForSessionStart(child, { cwd, sessionFile, timeoutMs: startupTimeoutMs });
-  child.stdout.pipe(createWriteStream(stdoutPath, { flags: "a", mode: 0o600 }));
-  child.stderr.pipe(createWriteStream(stderrPath, { flags: "a", mode: 0o600 }));
+  const [stdoutFile, stderrFile] = await Promise.all([open(stdoutPath, "a"), open(stderrPath, "a")]);
+  let child;
+  let ready;
+  try {
+    child = spawn("/bin/sh", ["-c", keeperScript, "pi-plan-host-keeper", command, ...args], {
+      cwd,
+      detached: true,
+      stdio: ["ignore", stdoutFile.fd, stderrFile.fd],
+      env: childEnv,
+      windowsHide: true,
+    });
+    ready = waitForSessionStart(child, {
+      cwd,
+      stdoutPath,
+      sessionFile,
+      timeoutMs: startupTimeoutMs,
+    });
+  } finally {
+    await Promise.all([stdoutFile.close(), stderrFile.close()]);
+  }
   child.unref();
   const startedAt = new Date().toISOString();
   await writeFile(statusPath, JSON.stringify({ state: "running", pid: child.pid, startedAt }), { mode: 0o600 });
@@ -204,6 +260,19 @@ function hostPidExists(pid) {
   } catch (error) {
     return error?.code === "EPERM";
   }
+}
+
+function processTargetExists(target) {
+  try {
+    process.kill(target, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function signalProcessTarget(target, value) {
+  process.kill(target, value);
 }
 
 async function defaultCaptureHostIdentity(pid) {
@@ -229,34 +298,36 @@ export async function stopStandaloneHost(pid, {
   graceMs = 5_000,
   handle,
   verifyHostIdentity,
-  isProcessAlive = hostPidExists,
-  signal = (processId, value) => process.kill(processId, value),
+  isProcessAlive = processTargetExists,
+  signal = signalProcessTarget,
   sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 } = {}) {
   if (!Number.isInteger(pid) || pid < 1) throw new Error("Invalid Plan Host pid");
-  if (!isProcessAlive(pid)) return;
+  const target = -pid;
+  if (!isProcessAlive(target)) return;
   if (handle && !(await verifyHostIdentity?.(handle))) throw new Error("Plan Host process identity fencing failed");
-  try { signal(pid, "SIGTERM"); } catch (error) { if (error?.code !== "ESRCH") throw error; return; }
+  try { signal(target, "SIGTERM"); } catch (error) { if (error?.code !== "ESRCH") throw error; return; }
   const deadline = Date.now() + graceMs;
   while (Date.now() < deadline) {
-    if (!isProcessAlive(pid)) return;
+    if (!isProcessAlive(target)) return;
     if (handle && !(await verifyHostIdentity?.(handle))) return;
     await sleep(50);
   }
   if (handle && !(await verifyHostIdentity?.(handle))) return;
-  try { signal(pid, "SIGKILL"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+  try { signal(target, "SIGKILL"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
 }
 
 async function interruptStandaloneHost(pid, {
   handle,
   verifyHostIdentity,
-  isProcessAlive = hostPidExists,
-  signal = (processId, value) => process.kill(processId, value),
+  isProcessAlive = processTargetExists,
+  signal = signalProcessTarget,
 } = {}) {
   if (!Number.isInteger(pid) || pid < 1) throw new Error("Invalid Plan Host pid");
-  if (!isProcessAlive(pid)) return;
+  const target = -pid;
+  if (!isProcessAlive(target)) return;
   if (handle && !(await verifyHostIdentity?.(handle))) throw new Error("Plan Host process identity fencing failed");
-  try { signal(pid, "SIGINT"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+  try { signal(target, "SIGINT"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
 }
 
 async function defaultReadHostStatus(runDir) {

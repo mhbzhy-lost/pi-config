@@ -468,10 +468,15 @@ test("persists Supervisor Attention and resolves a fenced durable Root reply onl
   const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
   const appended = [];
   const messages = [];
+  let deliveryAttempts = 0;
   const deps = runnerDependencies(repo, {
     pi: {
       appendEntry(_type, data) { appended.push(data); },
-      sendMessage(message, options) { messages.push({ message, options }); },
+      sendMessage(message, options) {
+        deliveryAttempts++;
+        if (deliveryAttempts === 1) throw new Error("turn queue busy");
+        messages.push({ message, options });
+      },
     },
     executionBackend: backend(),
     allocateAttemptWorkspace: async (input) => fakeAllocator(input),
@@ -518,7 +523,10 @@ test("persists Supervisor Attention and resolves a fenced durable Root reply onl
     occurredAt: "2026-07-26T00:00:01.000Z",
   };
   await control.writeAttentionReply(command);
+  await assert.rejects(deps.processAttentionReplies({ binding, ctx }), /turn queue busy/);
   assert.deepEqual(await deps.processAttentionReplies({ binding, ctx }), [command]);
+  assert.equal(deliveryAttempts, 2);
+  assert.equal(messages.length, 1);
   assert.equal(messages.at(-1).message.customType, "pi-plan-attention-reply-v1");
 
   const authorization = await deps.authorizeSupervisorReply(replyInput, { ctx });

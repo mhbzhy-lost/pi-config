@@ -300,9 +300,7 @@ export function createPlanRunnerDependencies({
         || attempt.runId !== command.runId) continue;
       if (command.expectedProjectionVersion !== attempt.attention.projectionVersion) continue;
       if (announcedAttentionReplies.has(command.requestId)) continue;
-      announcedAttentionReplies.add(command.requestId);
-      ready.push(command);
-      pi?.sendMessage?.(
+      await pi?.sendMessage?.(
         {
           customType: "pi-plan-attention-reply-v1",
           content: command.message,
@@ -317,6 +315,8 @@ export function createPlanRunnerDependencies({
         },
         { triggerTurn: true, deliverAs: "followUp" },
       );
+      announcedAttentionReplies.add(command.requestId);
+      ready.push(command);
     }
     return ready;
   }

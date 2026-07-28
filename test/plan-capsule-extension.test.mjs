@@ -18,6 +18,27 @@ const activeEvents = [
   { schemaVersion: "pi-plan-event.v1", eventId: "requested", planId: "release-11", occurredAt: "2026-07-15T00:00:02.000Z", type: "attempt.dispatch-requested", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", baseCommit: "base", workspace: attemptWorkspace, tool: { agent: "executor", task: "prompt", cwd: attemptWorkspace.path, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: "hash" } },
   { schemaVersion: "pi-plan-event.v1", eventId: "bound", planId: "release-11", occurredAt: "2026-07-15T00:00:03.000Z", type: "attempt.bound", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", runId: "run-1", asyncDir: "/async/run-1", sessionFile: "/sessions/run-1.jsonl" } },
 ];
+const waitingAttentionEvents = [
+  ...activeEvents,
+  {
+    schemaVersion: "pi-plan-event.v1", eventId: "attention-requested", planId: "release-11",
+    occurredAt: "2026-07-15T00:00:04.000Z", type: "attempt.attention-requested",
+    data: {
+      requestId: "request-1", taskId: "task-1", attemptId: "attempt-1", runId: "run-1",
+      kind: "need_decision", message: "Choose the target", projectionVersion: 5,
+      createdAt: "2026-07-15T00:00:04.000Z",
+      evidence: { bodyPath: "attention/request-1.md", bodySha256: "b".repeat(64) },
+    },
+  },
+  {
+    schemaVersion: "pi-plan-event.v1", eventId: "attention-escalated", planId: "release-11",
+    occurredAt: "2026-07-15T00:00:05.000Z", type: "attempt.attention-escalated",
+    data: {
+      attemptId: "attempt-1", requestId: "request-1", runId: "run-1", expectedProjectionVersion: 5,
+      evidence: { bodyPath: "attention/request-1.md", bodySha256: "b".repeat(64) },
+    },
+  },
+];
 
 function context(branch = []) {
   return { sessionManager: { getBranch: () => branch } };
@@ -321,6 +342,15 @@ test("agent_settled routes active Attempts to the bounded Supervisor-wait contro
   assert.equal(messages.length, 1);
   assert.equal(messages[0].message.details.enforcement, "executor-control-loop");
   assert.match(messages[0].message.content, /supervisor pending.*1000ms.*supervisor pending/i);
+});
+
+test("agent_settled stays idle while every active Attempt waits for Root Attention", async () => {
+  const { handlers, messages } = setup({ canContinue: () => true });
+  await handlers.get("agent_settled")(
+    { type: "agent_settled" },
+    context(waitingAttentionEvents.map((data) => ({ customType: "pi-plan-event-v1", data }))),
+  );
+  assert.deepEqual(messages, []);
 });
 
 test("agent_settled uses a valid custom follow-up payload for runnable work", async () => {

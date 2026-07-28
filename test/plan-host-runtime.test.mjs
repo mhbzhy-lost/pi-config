@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +22,137 @@ function input(root, overrides = {}) {
     ...overrides,
   };
 }
+
+function processGroupExists(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function waitForProcessGroupExit(pid, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processGroupExists(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return !processGroupExists(pid);
+}
+
+async function forceKillProcessGroup(pid) {
+  if (!processGroupExists(pid)) return;
+  try { process.kill(-pid, "SIGKILL"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+  assert.equal(await waitForProcessGroupExit(pid), true, `test cleanup leaked process group ${pid}`);
+}
+
+async function waitForPidFile(file, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const pid = Number(await readFile(file, "utf8"));
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("helper did not persist the Standalone Host pid");
+}
+
+function waitForChildExit(child, timeoutMs = 2_000) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer;
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once("exit", onExit);
+    timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+  });
+}
+
+test("a Standalone Host does not keep its spawning Root process alive", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-host-parent-exit-"));
+  const fakePi = path.join(root, "fake-pi");
+  const pidFile = path.join(root, "host.pid");
+  const runtimeUrl = new URL("../scripts/lib/plan/plan-host-runtime.mjs", import.meta.url).href;
+  await writeFile(fakePi, `#!/bin/sh
+printf '{"type":"session","version":3,"id":"parent-exit-session","timestamp":"2026-07-28T00:00:00.000Z","cwd":"%s"}\\n' "$PWD"
+exec sleep 30
+`);
+  await chmod(fakePi, 0o755);
+  const helper = spawn(process.execPath, [
+    "--input-type=module",
+    "-e",
+    `import { writeFile } from "node:fs/promises";
+import { spawnStandaloneHost } from ${JSON.stringify(runtimeUrl)};
+const handle = await spawnStandaloneHost({
+  task: "parent exit",
+  cwd: ${JSON.stringify(root)},
+  extensions: [],
+  noExtensions: true,
+  noSkills: true,
+  sessionDir: ${JSON.stringify(path.join(root, "run", "sessions"))},
+  runDir: ${JSON.stringify(path.join(root, "run"))},
+  command: ${JSON.stringify(fakePi)},
+  environment: process.env,
+  hostRunId: "host-parent-exit",
+});
+await handle.ready;
+await writeFile(${JSON.stringify(pidFile)}, String(handle.pid));`,
+  ], { stdio: "ignore" });
+  let hostPid;
+  try {
+    hostPid = await waitForPidFile(pidFile);
+    assert.equal(await waitForChildExit(helper), true, "Root process stayed alive after Host startup");
+    assert.equal(processGroupExists(hostPid), true, "Standalone Host must survive Root exit");
+  } finally {
+    if (helper.exitCode === null && helper.signalCode === null) {
+      try { helper.kill("SIGKILL"); } catch {}
+    }
+    if (hostPid) await forceKillProcessGroup(hostPid);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stopping a Standalone Host terminates its detached keeper process group", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-host-process-group-"));
+  const fakePi = path.join(root, "fake-pi");
+  await writeFile(fakePi, `#!/bin/sh
+printf '{"type":"session","version":3,"id":"group-session","timestamp":"2026-07-28T00:00:00.000Z","cwd":"%s"}\\n' "$PWD"
+exec sleep 30
+`);
+  await chmod(fakePi, 0o755);
+  let handle;
+  try {
+    handle = await spawnStandaloneHost({
+      task: "process group cleanup",
+      cwd: root,
+      extensions: [],
+      noExtensions: true,
+      noSkills: true,
+      sessionDir: path.join(root, "run", "sessions"),
+      runDir: path.join(root, "run"),
+      command: fakePi,
+      environment: process.env,
+      hostRunId: "host-process-group",
+    });
+    await handle.ready;
+
+    await stopStandaloneHost(handle.pid, { graceMs: 100 });
+
+    assert.equal(await waitForProcessGroupExit(handle.pid), true);
+  } finally {
+    if (handle?.pid) await forceKillProcessGroup(handle.pid);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Standalone Host artifacts are private independent of the caller umask", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-host-private-"));
@@ -49,9 +181,7 @@ test("Standalone Host artifacts are private independent of the caller umask", as
       assert.equal((await stat(path.join(runDir, file))).mode & 0o777, 0o600, file);
     }
   } finally {
-    if (processHandle?.pid) {
-      try { process.kill(processHandle.pid, "SIGTERM"); } catch {}
-    }
+    if (processHandle?.pid) await forceKillProcessGroup(processHandle.pid);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -94,7 +224,48 @@ exec sleep 30
     });
     assert.doesNotThrow(() => process.kill(handle.pid, 0));
   } finally {
-    if (handle?.pid) await stopStandaloneHost(handle.pid, { graceMs: 100 }).catch(() => {});
+    if (handle?.pid) {
+      await stopStandaloneHost(handle.pid, { graceMs: 100 }).catch(() => {});
+      await forceKillProcessGroup(handle.pid);
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Host startup accepts RPC output before binding from the session file", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-host-session-file-"));
+  const fakePi = path.join(root, "fake-pi");
+  await writeFile(fakePi, `#!/bin/sh
+session_file=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--session" ]; then session_file="$2"; shift 2; else shift; fi
+done
+printf '{"type":"extension_ui_request","method":"setWidget"}\\n'
+printf '{"type":"session","version":3,"id":"session-file-id","timestamp":"2026-07-28T00:00:00.000Z","cwd":"%s"}\\n' "$PWD" > "$session_file"
+exec sleep 30
+`);
+  await chmod(fakePi, 0o755);
+  let handle;
+  try {
+    handle = await spawnStandaloneHost({
+      task: "session file binding",
+      cwd: root,
+      extensions: [],
+      noExtensions: true,
+      noSkills: true,
+      sessionDir: path.join(root, "run", "sessions"),
+      runDir: path.join(root, "run"),
+      command: fakePi,
+      environment: process.env,
+      hostRunId: "host-session-file",
+    });
+
+    assert.deepEqual(await handle.ready, {
+      sessionId: "session-file-id",
+      sessionFile: handle.sessionFile,
+    });
+  } finally {
+    if (handle?.pid) await forceKillProcessGroup(handle.pid);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -132,9 +303,7 @@ exec sleep 30
     await assert.rejects(stat(handle.sessionFile), (error) => error?.code === "ENOENT");
     await host.stop(handle);
   } finally {
-    if (handle?.pid) {
-      try { process.kill(handle.pid, "SIGKILL"); } catch {}
-    }
+    if (handle?.pid) await forceKillProcessGroup(handle.pid);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -165,9 +334,7 @@ sleep 5
     assert.equal((await host.reconcile(handle)).attached, true);
     await host.interrupt(handle);
   } finally {
-    if (handle?.pid) {
-      try { process.kill(handle.pid, "SIGKILL"); } catch {}
-    }
+    if (handle?.pid) await forceKillProcessGroup(handle.pid);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -415,10 +582,10 @@ test("stop revalidates process identity during the grace period before SIGKILL",
     handle: { pid: 42, processIdentity: "owned" },
     verifyHostIdentity: async () => identities.shift() ?? false,
     isProcessAlive: () => true,
-    signal: (_pid, value) => signals.push(value),
+    signal: (target, value) => signals.push([target, value]),
     sleep: async () => {},
   });
-  assert.deepEqual(signals, ["SIGTERM"]);
+  assert.deepEqual(signals, [[-42, "SIGTERM"]]);
 });
 
 test("interrupt and stop require the live process identity to match the v3 handle", async () => {

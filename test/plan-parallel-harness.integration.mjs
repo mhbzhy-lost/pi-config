@@ -120,7 +120,7 @@ Execute only the approved task and commit the result.
     passed = true;
     t.diagnostic(`scenario=parallel-success lifecycle=${status.lifecycle} validatedHead=${status.validatedHead}`);
   } finally {
-    if (handle && host) await host.stop(handle).catch(() => {});
+    if (handle && host) await host.stop(handle);
     if (passed && process.env.PLAN_HARNESS_PRESERVE !== "1") {
       await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     } else {
@@ -247,7 +247,7 @@ Request the required decision, then execute only the approved task and commit th
     t.diagnostic(`scenario=attention-roundtrip lifecycle=${finalStatus.lifecycle} requestId=${waitingAttempt.attention.requestId}`);
   } finally {
     try { await handlers.get("session_shutdown")?.(); } catch {}
-    if (handle && host) await host.stop(handle).catch(() => {});
+    if (handle && host) await host.stop(handle);
     if (passed && process.env.PLAN_HARNESS_PRESERVE !== "1") {
       await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     } else {

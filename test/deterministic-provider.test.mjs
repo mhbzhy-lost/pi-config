@@ -84,6 +84,34 @@ test("deterministic Plan Runner delivers only a durable Root Attention reply", (
   );
 });
 
+test("deterministic Plan Runner recognizes Pi-converted durable Attention replies", () => {
+  const prompt = user('PI_PLAN_HARNESS_STANDALONE\nexact bootstrap JSON:\n{"planId":"plan-1"}');
+  const waiting = toolResult("plan_status", '{"tasks":[{"attempts":[{"status":"waiting-attention"}]}]}');
+  const pending = toolResult("subagent_supervisor", "pending", {
+    pending: [{ id: "request-converted", runId: "run-1" }],
+  });
+  const convertedReply = user("APPROVED");
+
+  assert.deepEqual(
+    decide([prompt, waiting, pending, convertedReply], ["subagent_supervisor"]),
+    {
+      tool: {
+        name: "subagent_supervisor",
+        arguments: { action: "reply", replyTo: "request-converted", message: "APPROVED" },
+      },
+    },
+  );
+
+  const delivered = toolResult("subagent_supervisor", "delivered", { replyTo: "request-converted" });
+  assert.deepEqual(
+    decide(
+      [prompt, waiting, pending, convertedReply, delivered],
+      ["subagent_supervisor", "subagent_wait", "plan_status"],
+    ),
+    { tool: { name: "subagent_supervisor", arguments: { action: "pending" } } },
+  );
+});
+
 test("standalone compatibility child completes with its exact tool inventory", () => {
   assert.deepEqual(
     decide([user("PI_SUBAGENTS_COMPAT_CHILD_COMPLETE")], ["contact_supervisor", "read"]),

@@ -4,12 +4,19 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
+import { loadDesiredSkills } from "../scripts/lib/skill-whitelist.mjs";
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const shellIntegration = join(repoRoot, "scripts", "pi-shell.zsh");
 const piBinary = process.env.PI_REAL_BIN;
 
-test("real Pi RPC loads the controlled Skills plus audited package Skills", () => {
+test("real Pi RPC loads the controlled Skills plus audited package Skills", async () => {
   assert.ok(piBinary, "PI_REAL_BIN must point to a supported Pi 0.82.x runtime");
+  const controlledSkills = await loadDesiredSkills(
+    repoRoot,
+    join(repoRoot, "skill-overrides", "skills.list"),
+    join(repoRoot, "skill-overrides", "skills.local.list"),
+  );
 
   const result = spawnSync(
     "zsh",
@@ -47,24 +54,7 @@ test("real Pi RPC loads the controlled Skills plus audited package Skills", () =
     .filter((command) => command.source === "skill")
     .map((command) => command.name);
   assert.deepEqual(skills, [
-    "skill:external-llm-review",
-    "skill:git-commit-convention",
-    "skill:systematic-debugging",
-    "skill:test-driven-development",
-    "skill:receiving-code-review",
-    "skill:writing-skills",
-    "skill:writing-plans",
-    "skill:plan-runner-dispatch",
-    "skill:exa-search",
-    "skill:playwright",
-    "skill:browser-auth-session",
-    "skill:goal-contract",
-    "skill:mac-mini-worker",
-    "skill:normandy-cli",
-    "skill:tbctx7",
-    "skill:crash-analyzer-usage",
-    "skill:nanocompose-cli",
-    "skill:a1",
+    ...[...controlledSkills.keys()].map((name) => `skill:${name}`),
     "skill:cache-stats",
     "skill:external-llm-review-provider",
     "skill:manage-providers",

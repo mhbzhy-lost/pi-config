@@ -98,12 +98,19 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
   if (userText.includes("PI_PLAN_HARNESS_STANDALONE")) {
     const bootstrap = userText.match(/exact bootstrap JSON:\s*\n(\{[^\n]+\})/)?.[1];
     const resultsFor = (name) => toolResults.filter((message) => message.toolName === name);
-    const durableReply = messages.find((message) => message?.role === "custom"
+    const customDurableReply = messages.find((message) => message?.role === "custom"
       && message.customType === "pi-plan-attention-reply-v1");
-    const durableRequestId = durableReply?.details?.requestId;
-    const durableMessage = typeof durableReply?.content === "string" ? durableReply.content : textParts(durableReply);
-    const delivered = resultsFor("subagent_supervisor")
-      .some((message) => message.details?.replyTo === durableRequestId);
+    const convertedDurableReply = [...messages].reverse().find((message) => message?.role === "user"
+      && textParts(message).trim() === "APPROVED");
+    const latestPending = [...toolResults].reverse().find((message) => message.toolName === "subagent_supervisor"
+      && Array.isArray(message.details?.pending) && message.details.pending.length > 0);
+    const durableRequestId = customDurableReply?.details?.requestId ?? latestPending?.details?.pending?.[0]?.id;
+    const durableMessage = customDurableReply
+      ? (typeof customDurableReply.content === "string" ? customDurableReply.content : textParts(customDurableReply))
+      : textParts(convertedDurableReply);
+    const delivered = typeof durableRequestId === "string" && durableRequestId
+      ? resultsFor("subagent_supervisor").some((message) => message.details?.replyTo === durableRequestId)
+      : false;
     if (typeof durableRequestId === "string" && durableRequestId && durableMessage.trim()
       && !delivered && toolNames.includes("subagent_supervisor")) {
       return {
@@ -130,7 +137,7 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
     const waits = resultsFor("subagent_wait");
     const statuses = resultsFor("plan_status");
     const latestStatus = textParts(statuses.at(-1));
-    if (/"status":\s*"waiting-attention"/.test(latestStatus)) {
+    if (/"status":\s*"waiting-attention"/.test(latestStatus) && !delivered) {
       return { text: "PLAN_HARNESS_WAITING_ATTENTION" };
     }
     if (/"status":\s*"validated"|"status":\s*"succeeded"/.test(latestStatus) && toolNames.includes("plan_continue")) {
