@@ -14,7 +14,9 @@ export function createFooterComponent({
   getCwd,
   getHome,
   getModel,
-  getBranch,
+  getContextUsage,
+  getThinkingLevel,
+  getSubagentStatus,
   requestRender,
   theme,
   visibleWidth,
@@ -32,33 +34,45 @@ export function createFooterComponent({
       const currentModel = getModel();
       const providerLabel = currentModel?.provider ? `(${currentModel.provider})` : "";
       const modelLabel = currentModel?.id || "no-model";
+      const providerModelLabel = `${providerLabel} ${modelLabel}`.trim();
+      const thinkingLabel = `thinking: ${getThinkingLevel?.() || "off"}`;
 
-      let lastInput = 0;
+      let contextUsage;
       try {
-        const branch = getBranch();
-        for (let i = branch.length - 1; i >= 0; i--) {
-          const entry = branch[i];
-          if (entry.type === "message" && entry.message?.role === "assistant" && entry.message?.usage) {
-            const usage = entry.message.usage;
-            lastInput = (usage.input || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0);
-            break;
-          }
-        }
+        contextUsage = getContextUsage();
       } catch {}
 
-      const contextWindow = currentModel?.contextWindow || 1_000_000;
-      const percentage = lastInput > 0 ? ((lastInput / contextWindow) * 100).toFixed(1) : "0.0";
+      const contextWindow = contextUsage?.contextWindow || currentModel?.contextWindow || 1_000_000;
       const windowLabel = contextWindow >= 1_000_000
         ? `${(contextWindow / 1_000_000).toFixed(1)}M`
         : `${(contextWindow / 1000).toFixed(0)}k`;
-      const line = layoutFooter({
-        width,
-        left: displayedCwd,
-        right: `${percentage}%/${windowLabel}  ${providerLabel} ${modelLabel}`,
-        visibleWidth,
-        truncateToWidth,
-      });
-      return [theme.fg("dim", line)];
+      const contextLabel = contextUsage?.percent === null
+        ? `?/${windowLabel}`
+        : `${(contextUsage?.percent ?? 0).toFixed(1)}%/${windowLabel}`;
+      const lines = [
+        layoutFooter({
+          width,
+          left: displayedCwd,
+          right: contextLabel,
+          visibleWidth,
+          truncateToWidth,
+        }),
+        layoutFooter({
+          width,
+          left: getSubagentStatus?.() || "",
+          right: providerModelLabel,
+          visibleWidth,
+          truncateToWidth,
+        }),
+        layoutFooter({
+          width,
+          left: "",
+          right: thinkingLabel,
+          visibleWidth,
+          truncateToWidth,
+        }),
+      ];
+      return lines.map((line) => theme.fg("dim", line));
     },
   };
 }

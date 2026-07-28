@@ -13,6 +13,8 @@ test("package scripts expose unit, integration, subagent, and read-only doctor c
     "test:integration": "node --test test/pi-runtime.integration.mjs",
     "test:subagents": "node --test test/pi-subagents-runtime.integration.mjs",
     "test:plan": "node --test test/plan-capsule.integration.mjs",
+    "test:plan-harness": "node --test test/plan-parallel-harness.integration.mjs",
+    "setup:plan-runtime": "node scripts/setup-plan-runtime-deps.mjs",
     doctor: "node scripts/doctor.mjs",
   });
 });

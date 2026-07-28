@@ -1,5 +1,7 @@
 # Plan Runner 自建 Runtime 与 IR 层
 
+> **状态：已被替代。** 后续执行以 `docs/superpowers/plans/2026-07-24-plan-runner-pi-subagents-parallel-harness.md` 为准；IR工作和薄Host进程监管保留，通用自建Executor Runtime方向废止。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **目标：** Plan Runner 解除对 `pi-subagents` RPC 的依赖，自建最小子进程 runtime，引入 IR 层实现 DAG 并行派发，并提供 TUI 流式可观测。

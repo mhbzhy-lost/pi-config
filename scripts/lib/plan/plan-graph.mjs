@@ -21,3 +21,10 @@ export function nextRunnableTask(projection) {
   }
   return undefined;
 }
+
+export function runnableFrontier(projection) {
+  return projection.graph.tasks.filter(task => {
+    if (projection.tasks.get(task.id)?.status !== "pending") return false;
+    return task.deps.every(dep => projection.tasks.get(dep)?.status === "accepted");
+  });
+}

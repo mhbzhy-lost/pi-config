@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mjs";
-import { runPlanGates } from "../scripts/lib/plan/gates.mjs";
+import { createTaskCommandRegistry, resolveTaskVerification, runPlanGates } from "../scripts/lib/plan/gates.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -47,6 +47,26 @@ function acceptedProjection(head) {
   result.tasks.set("task-1", { status: "accepted" });
   return result;
 }
+
+test("builds a controlled task command registry from approved contract commands and package scripts", async (t) => {
+  const cwd = await repository();
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(path.join(cwd, "package.json"), JSON.stringify({ scripts: { test: "node --test", "lint:plan": "node lint.mjs", "unsafe name": "echo no" } }));
+  const plan = {
+    verification: ["node --test test/plan.test.mjs"],
+    taskVerification: { "task-1": ["package:test", "contract:verification:1"] },
+  };
+  const registry = await createTaskCommandRegistry({ cwd, plan });
+  assert.deepEqual(resolveTaskVerification({ plan, taskId: "task-1", registry }), [
+    { id: "package:test", command: "npm run test --" },
+    { id: "contract:verification:1", command: "node --test test/plan.test.mjs" },
+  ]);
+  assert.equal(registry.has("package:unsafe name"), false);
+  assert.throws(
+    () => resolveTaskVerification({ plan: { ...plan, taskVerification: { "task-1": ["task prose"] } }, taskId: "task-1", registry }),
+    /registered command/i,
+  );
+});
 
 test("runs every declared verification command string before validating the current head", async (t) => {
   const cwd = await repository();

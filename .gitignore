@@ -20,6 +20,7 @@ __pycache__/
 
 # Sessions and logs
 /var/
+/.nano/
 
 # Playwright MCP generated files
 /.playwright-mcp/

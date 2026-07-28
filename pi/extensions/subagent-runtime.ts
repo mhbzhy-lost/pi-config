@@ -1,0 +1,39 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+import upstreamSubagentRuntime from "../npm/node_modules/pi-subagents/index.ts";
+import { loadConfig } from "../npm/node_modules/pi-subagents/src/extension/config.ts";
+import registerSubagentNotify from "../npm/node_modules/pi-subagents/src/runs/background/notify.ts";
+import { resolveCurrentSessionId } from "../npm/node_modules/pi-subagents/src/shared/session-identity.ts";
+import {
+  formatCompactSubagentNotification,
+  formatCompactSubagentToolResult,
+} from "../../scripts/lib/subagent-dispatch/compact-rendering.ts";
+import { installHeadlessTypedSubagentRuntime } from "../../scripts/lib/subagent-dispatch/extension.ts";
+
+function notificationColor(text: string): "error" | "warning" | "success" {
+  if (text.split("\n").some((line) => line.startsWith("✗"))) return "error";
+  if (text.split("\n").some((line) => line.startsWith("Ⅱ"))) return "warning";
+  return "success";
+}
+
+export default function subagentRuntime(pi: ExtensionAPI): void {
+  if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.PI_SUBAGENT_FANOUT_CHILD === "1") return;
+  const completionBatch = loadConfig().completionBatch;
+  const renderSubagentResult = (result: any, _options: any, theme: any, context: any) => {
+    const text = formatCompactSubagentToolResult(result, context?.args ?? {});
+    return new Text(theme.fg(result?.isError ? "error" : "dim", text), 0, 0);
+  };
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap: upstreamSubagentRuntime,
+    completionNotifierFactory(api: ExtensionAPI, state: { currentSessionId: string | null }) {
+      return registerSubagentNotify(api, state, { batchConfig: completionBatch });
+    },
+    resolveSessionId: resolveCurrentSessionId,
+    renderSubagentResult,
+  });
+  // Upstream registers the same custom type during bootstrap; the project renderer must win last-write ownership.
+  pi.registerMessageRenderer("subagent-notify", (message, { outputPad }, theme) => {
+    const text = formatCompactSubagentNotification(message);
+    return new Text(theme.fg(notificationColor(text), text), outputPad, 0);
+  });
+}

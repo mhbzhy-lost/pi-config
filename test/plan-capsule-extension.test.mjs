@@ -11,6 +11,14 @@ const created = {
   data: { workspace: { originRoot: "/origin", worktree: "/worktrees/release-11", baseCommit: "base", headCommit: "base", planPath: "/origin/docs/release.md", planHash: "a".repeat(64) }, tasks: ["task-1"] },
 };
 
+const attemptWorkspace = { path: "/attempts/attempt-1", branch: "pi-plan-attempt/release-11/task-1/1", ownerToken: "owner-1" };
+const activeEvents = [
+  created,
+  { schemaVersion: "pi-plan-event.v1", eventId: "allocated", planId: "release-11", occurredAt: "2026-07-15T00:00:01.000Z", type: "attempt.workspace-allocated", data: { attemptId: "attempt-1", taskId: "task-1", baseCommit: "base", workspace: attemptWorkspace } },
+  { schemaVersion: "pi-plan-event.v1", eventId: "requested", planId: "release-11", occurredAt: "2026-07-15T00:00:02.000Z", type: "attempt.dispatch-requested", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", baseCommit: "base", workspace: attemptWorkspace, tool: { agent: "executor", task: "prompt", cwd: attemptWorkspace.path, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: "hash" } },
+  { schemaVersion: "pi-plan-event.v1", eventId: "bound", planId: "release-11", occurredAt: "2026-07-15T00:00:03.000Z", type: "attempt.bound", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", runId: "run-1", asyncDir: "/async/run-1", sessionFile: "/sessions/run-1.jsonl" } },
+];
+
 function context(branch = []) {
   return { sessionManager: { getBranch: () => branch } };
 }
@@ -20,7 +28,7 @@ function setup(options = {}) {
   const handlers = new Map();
   const entries = [];
   const messages = [];
-  let activeTools = options.activeTools ?? ["read", "grep", "bash", "subagent", "plan_open"];
+  let activeTools = options.activeTools ?? ["read", "grep", "bash", "subagent", "contact_supervisor", "subagent_wait", "subagent_supervisor", "plan_open"];
   const pi = {
     registerTool(tool) { tools.set(tool.name, tool); },
     on(name, handler) { handlers.set(name, handler); },
@@ -41,6 +49,11 @@ test("plan-runner alone uses the real subagentOnlyExtensions profile field", asy
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const profiles = await Promise.all(["plan-runner", "plan-reviewer", "executor", "spark"].map((name) => readFile(resolve(root, "pi", "agents", `${name}.md`), "utf8")));
   assert.match(profiles[0], /^subagentOnlyExtensions: \.pi-subagents\/plan-runner-entry\.mjs$/m);
+  assert.match(profiles[0], /^tools: plan_open,plan_status,plan_continue,plan_verify,plan_block,subagent_wait,subagent_supervisor,read,grep,bash$/m);
+  assert.match(profiles[0], /pending[\s\S]*timeoutMs: 1000[\s\S]*pending/);
+  assert.doesNotMatch(profiles[0], /^tools:.*(?:^|,)subagent(?:,|$)/m);
+  assert.match(profiles[2], /^tools: .*contact_supervisor$/m);
+  assert.doesNotMatch(profiles[2], /^tools:.*(?:^|,)subagent(?:,|$)/m);
   for (const profile of profiles) assert.doesNotMatch(profile, /^extensions:/m);
   for (const profile of profiles.slice(1)) assert.doesNotMatch(profile, /plan-capsule/);
 });
@@ -49,6 +62,45 @@ test("capsule registers only plan_open and declares actual bootstrap fields", ()
   const { tools } = setup();
   assert.deepEqual([...tools.keys()], ["plan_open"]);
   assert.deepEqual(Object.keys(tools.get("plan_open").parameters.properties).sort(), ["allowPlanCommits", "approvedHash", "baseCommit", "planHash", "planId", "planPath", "worktree"]);
+});
+
+test("runtime capability check waits until plan_open after extension session handlers settle", async () => {
+  const calls = [];
+  const binding = { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
+  const { tools, handlers } = setup({
+    assertRuntimeCapabilities: async () => calls.push("assert"),
+    validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
+  });
+
+  await handlers.get("session_start")({ reason: "startup" }, context());
+  assert.deepEqual(calls, []);
+  await handlers.get("before_agent_start")({}, context());
+  assert.deepEqual(calls, ["assert"]);
+
+  const result = await execute(tools.get("plan_open"), binding);
+  assert.equal(result.isError, false, result.content[0].text);
+  assert.deepEqual(calls, ["assert"]);
+});
+
+test("plan_open fails before binding when runtime capability remains unavailable", async () => {
+  const binding = { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
+  let bindingCalled = false;
+  const { tools, entries } = setup({
+    assertRuntimeCapabilities: async () => {
+      throw new Error("runtime tool unavailable");
+    },
+    validateBinding: async () => {
+      bindingCalled = true;
+      throw new Error("must not run");
+    },
+  });
+
+  const result = await execute(tools.get("plan_open"), binding);
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /runtime tool unavailable/);
+  assert.equal(bindingCalled, false);
+  assert.deepEqual(entries, []);
 });
 
 test("plan_open fails closed when the Task 12 binding dependency is absent", async () => {
@@ -70,7 +122,10 @@ test("plan_open validates then persists and activates the lifecycle tools", asyn
   assert.equal(entries[0].data.data.workspace.planPath, binding.planPath);
   assert.equal(entries[0].data.data.workspace.planHash, binding.planHash);
   assert.deepEqual([...tools.keys()], ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block"]);
-  assert.deepEqual(activeTools().filter((name) => name.startsWith("plan_")), ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block"]);
+  assert.deepEqual(activeTools(), [
+    "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block",
+    "subagent_wait", "subagent_supervisor", "read", "grep", "bash",
+  ]);
 });
 
 test("plan_open accepts supervisor-approved hash override when file hash differs", async () => {
@@ -108,14 +163,17 @@ test("plan_open starts child control only after persisting plan.created and sess
   assert.deepEqual(calls, [["start", "release-11", "plan.created"], ["stop"]]);
 });
 
-test("session shutdown runs both cleanups and aggregates failures", async () => {
+test("session shutdown runs both cleanups best-effort without throwing", async () => {
   const calls = [];
   const binding = { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
   const { tools, handlers } = setup({
     stopActiveRuns: async () => {
       calls.push("runs");
+      await new Promise((resolve) => setImmediate(resolve));
+      calls.push("runs-done");
       throw new Error("run stop failed");
     },
+    disposeExecutionBackend: async () => calls.push("backend"),
     startPlanControl: async () => () => {
       calls.push("control");
       throw new Error("control stop failed");
@@ -123,69 +181,67 @@ test("session shutdown runs both cleanups and aggregates failures", async () => 
     validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
   });
   await execute(tools.get("plan_open"), binding);
-  await assert.rejects(handlers.get("session_shutdown")({}, context()), AggregateError);
-  assert.deepEqual(calls, ["control", "runs"]);
+  await handlers.get("session_shutdown")({}, context());
+  assert.deepEqual(calls, ["control", "runs", "runs-done", "backend"]);
 });
 
-test("capsule hook authorizes exactly one matching nested subagent call", async () => {
-  const calls = [];
-  const { handlers } = setup({
-    authorizeNestedSubagent: (input, { ctx }) => {
-      calls.push({ input, ctx });
-      if (input.agent !== "executor") throw new Error("intent differs");
-      return true;
-    },
-  });
-  const ctx = context([{ customType: "pi-plan-event-v1", data: created }]);
-  await handlers.get("session_start")({ type: "session_start" }, ctx);
-  const event = { toolName: "subagent", input: { agent: "executor" } };
-
-  assert.equal(await handlers.get("tool_call")(event, ctx), undefined);
-  assert.deepEqual(calls, [{ input: event.input, ctx }]);
-  const denied = await handlers.get("tool_call")({ toolName: "subagent", input: { agent: "other" } }, ctx);
-  assert.equal(denied.block, true);
-  assert.match(denied.reason, /intent differs/i);
-});
-
-test("capsule allows subagent management actions without dispatch authorization", async () => {
-  const { handlers } = setup({
-    authorizeNestedSubagent: () => { throw new Error("should not be called"); },
-  });
-  const ctx = context([{ customType: "pi-plan-event-v1", data: created }]);
+test("capsule blocks every subagent and contact_supervisor call inside an opened Plan Session", async () => {
+  const { handlers } = setup();
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
   await handlers.get("session_start")({ type: "session_start" }, ctx);
 
-  for (const action of ["status", "interrupt", "resume", "steer", "list", "get"]) {
-    const result = await handlers.get("tool_call")({ toolName: "subagent", input: { action, id: "run-1" } }, ctx);
-    assert.equal(result, undefined, `action '${action}' should not be blocked`);
+  for (const event of [
+    { toolName: "subagent", input: { agent: "executor" } },
+    { toolName: "subagent", input: { action: "status", id: "run-1" } },
+    { toolName: "contact_supervisor", input: { message: "bypass" } },
+    { toolName: "subagent_supervisor", input: { action: "send", to: "other", message: "bypass" } },
+  ]) {
+    const denied = await handlers.get("tool_call")(event, ctx);
+    assert.equal(denied.block, true);
   }
 });
 
-test("capsule forwards only one authorized structured subagent tool_result and triggers a follow-up", async () => {
-  const received = [];
-  const { handlers, messages } = setup({
-    authorizeNestedSubagent: () => true,
-    handleNestedResult: async (event, { ctx }) => {
-      received.push({ event, ctx });
-      return { state: "succeeded" };
-    },
+test("capsule persists native Supervisor requests through the injected Attention boundary", async () => {
+  const recorded = [];
+  const { handlers } = setup({
+    recordSupervisorRequest: async (request, { ctx }) => recorded.push({ request, ctx }),
   });
-  const ctx = context([{ customType: "pi-plan-event-v1", data: created }]);
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
   await handlers.get("session_start")({ type: "session_start" }, ctx);
-  const call = { toolName: "subagent", input: { agent: "executor" } };
-  const result = { toolName: "subagent", input: call.input, details: { runId: "run-1", results: [] }, isError: false };
+  const message = {
+    customType: "subagent_supervisor_request",
+    content: "Choose the target",
+    display: true,
+    details: { id: "request-1", reason: "need_decision", expectsReply: true, runId: "run-1", agent: "executor", childIndex: 0 },
+  };
 
-  await handlers.get("tool_call")(call, ctx);
+  await handlers.get("message_end")({ message }, ctx);
+  assert.deepEqual(recorded, [{ request: message, ctx }]);
+});
+
+test("capsule resolves only the authorized successful native Supervisor reply", async () => {
+  const authorized = [];
+  const resolved = [];
+  const { handlers } = setup({
+    authorizeSupervisorReply: async (input) => {
+      authorized.push(input);
+      return { requestId: input.replyTo, runId: "run-1" };
+    },
+    resolveSupervisorReply: async (authorization) => resolved.push(authorization),
+  });
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
+  await handlers.get("session_start")({ type: "session_start" }, ctx);
+  const input = { action: "reply", replyTo: "request-1", to: "executor", message: "Use target A" };
+  const call = { toolName: "subagent_supervisor", toolCallId: "reply-call-1", input };
+  assert.equal(await handlers.get("tool_call")(call, ctx), undefined);
+  const result = { toolName: "subagent_supervisor", toolCallId: "reply-call-1", input, isError: false };
   await handlers.get("tool_result")(result, ctx);
   await handlers.get("tool_result")(result, ctx);
-  await handlers.get("tool_result")({ ...result, isError: true }, ctx);
-  await handlers.get("tool_result")({ ...result, details: {} }, ctx);
-  await handlers.get("tool_result")({ ...result, toolName: "bash" }, ctx);
 
-  assert.deepEqual(received, [{ event: result, ctx }]);
-  assert.deepEqual(messages, [{
-    message: { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: "release-11" } },
-    options: { triggerTurn: true, deliverAs: "followUp" },
-  }]);
+  assert.deepEqual(authorized, [input]);
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].requestId, "request-1");
+  assert.equal(resolved[0].message, "Use target A");
 });
 
 test("plan lifecycle tools fail closed until their domain dependencies are injected", async () => {
@@ -254,6 +310,17 @@ test("session tree with no plan stops coordination and records recovery needed",
   await handlers.get("session_tree")({ type: "session_tree", newLeafId: "leaf", oldLeafId: "old" }, context());
   assert.deepEqual(stops, [true]);
   assert.deepEqual(recovery, [true]);
+});
+
+test("agent_settled routes active Attempts to the bounded Supervisor-wait control loop", async () => {
+  const { handlers, messages } = setup({ canContinue: () => true });
+  await handlers.get("agent_settled")(
+    { type: "agent_settled" },
+    context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data }))),
+  );
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].message.details.enforcement, "executor-control-loop");
+  assert.match(messages[0].message.content, /supervisor pending.*1000ms.*supervisor pending/i);
 });
 
 test("agent_settled uses a valid custom follow-up payload for runnable work", async () => {

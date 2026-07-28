@@ -2,6 +2,10 @@ import { applyEvent, createProjection } from "./plan-events.mjs";
 
 const STRING = { type: "string", minLength: 1 };
 const EMPTY_OBJECT = { type: "object", properties: {}, additionalProperties: false };
+const PLAN_ACTIVE_TOOLS = [
+  "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block",
+  "subagent_wait", "subagent_supervisor", "read", "grep", "bash",
+];
 
 function result(value, isError = false) {
   return {
@@ -32,8 +36,16 @@ function register(pi, tool) {
 export function createPlanCapsuleExtension(pi, options = {}) {
   let opened = false;
   let lifecycleRegistered = false;
+  let runtimeCapabilitiesReady = false;
   let stopPlanControl;
-  const authorizedNestedCalls = new Set();
+  const authorizedSupervisorReplies = new Map();
+  const resolvedSupervisorCalls = new Set();
+
+  async function assertRuntimeCapabilities() {
+    if (runtimeCapabilitiesReady) return;
+    await options.assertRuntimeCapabilities?.();
+    runtimeCapabilitiesReady = true;
+  }
 
   function activateTools() {
     if (lifecycleRegistered) return;
@@ -94,8 +106,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
         }
       },
     });
-    const active = pi.getActiveTools();
-    pi.setActiveTools([...new Set([...active, "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block"])]);
+    pi.setActiveTools([...PLAN_ACTIVE_TOOLS]);
   }
 
   async function restore(ctx) {
@@ -111,47 +122,60 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   }
 
   pi.on("session_start", async (_event, ctx) => restore(ctx));
+  pi.on("before_agent_start", async () => assertRuntimeCapabilities());
   pi.on("session_shutdown", async () => {
     const control = stopPlanControl;
     stopPlanControl = undefined;
-    const results = await Promise.allSettled([
+    await Promise.allSettled([
       Promise.resolve().then(() => control?.()),
       Promise.resolve().then(() => options.stopActiveRuns?.()),
     ]);
-    const errors = results.filter((entry) => entry.status === "rejected").map((entry) => entry.reason);
-    if (errors.length) throw new AggregateError(errors, "Plan session shutdown failed");
+    await Promise.resolve().then(() => options.disposeExecutionBackend?.()).catch(() => {});
   });
   pi.on("tool_call", async (event, ctx) => {
-    if (event?.toolName !== "subagent") return undefined;
-    if (typeof event?.input?.action === "string") return undefined;
-    if (!opened || typeof options.authorizeNestedSubagent !== "function") {
-      return { block: true, reason: "No nested subagent dispatch is authorized." };
+    if (!opened) return undefined;
+    if (["subagent", "contact_supervisor"].includes(event?.toolName)) {
+      return { block: true, reason: "Plan Harness dispatch and supervision are owned by the Standalone Plan Runner control plane." };
+    }
+    if (event?.toolName !== "subagent_supervisor") return undefined;
+    if (!["pending", "reply"].includes(event?.input?.action)) {
+      return { block: true, reason: "Plan Runner Supervisor access is limited to pending and fenced reply operations." };
+    }
+    if (event.input.action === "pending") return undefined;
+    if (typeof options.authorizeSupervisorReply !== "function") {
+      return { block: true, reason: "Supervisor reply authorization is unavailable." };
+    }
+    const key = event.toolCallId ?? `${event.input.replyTo}:${event.input.to}`;
+    if (authorizedSupervisorReplies.has(key) || resolvedSupervisorCalls.has(key)) {
+      return { block: true, reason: "Supervisor reply tool call is duplicated." };
     }
     try {
-      const authorized = options.authorizeNestedSubagent(event.input, { ctx });
-      if (authorized !== true) return { block: true, reason: "Nested subagent dispatch was not authorized." };
-      authorizedNestedCalls.add(JSON.stringify(event.input));
+      const authorization = await options.authorizeSupervisorReply(event.input, { projection: projectionFrom(ctx), ctx });
+      authorizedSupervisorReplies.set(key, { ...authorization, message: event.input.message, to: event.input.to });
       return undefined;
     } catch (error) {
-      return { block: true, reason: error instanceof Error ? error.message : "Nested subagent dispatch was not authorized." };
+      return { block: true, reason: error instanceof Error ? error.message : "Supervisor reply is not authorized." };
     }
   });
   pi.on("tool_result", async (event, ctx) => {
-    if (event?.toolName !== "subagent" || event?.isError === true) return undefined;
-    if (!event?.details || typeof event.details.runId !== "string" || event.details.runId === "") return undefined;
-    const key = JSON.stringify(event.input);
-    if (!authorizedNestedCalls.delete(key) || typeof options.handleNestedResult !== "function") return undefined;
-    const outcome = await options.handleNestedResult(event, { ctx });
-    if (outcome?.state !== "ignored") {
-      const current = projectionFrom(ctx);
-      if (current.planId) {
-        pi.sendMessage(
-          { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: current.planId } },
-          { triggerTurn: true, deliverAs: "followUp" },
-        );
-      }
+    if (event?.toolName !== "subagent_supervisor" || event?.input?.action !== "reply") return;
+    const key = event.toolCallId ?? `${event.input.replyTo}:${event.input.to}`;
+    const authorization = authorizedSupervisorReplies.get(key);
+    if (!authorization || resolvedSupervisorCalls.has(key)) return;
+    if (event.isError) {
+      authorizedSupervisorReplies.delete(key);
+      return;
     }
-    return undefined;
+    if (typeof options.resolveSupervisorReply !== "function") return;
+    await options.resolveSupervisorReply(authorization, { projection: projectionFrom(ctx), ctx });
+    authorizedSupervisorReplies.delete(key);
+    resolvedSupervisorCalls.add(key);
+  });
+  pi.on("message_end", async (event, ctx) => {
+    const message = event?.message ?? event;
+    if (message?.customType !== "subagent_supervisor_request") return;
+    if (typeof options.recordSupervisorRequest !== "function") throw new Error("Supervisor Attention persistence is unavailable.");
+    await options.recordSupervisorRequest(message, { projection: projectionFrom(ctx), ctx });
   });
   pi.on("session_tree", async (_event, ctx) => {
     const projection = await restore(ctx);
@@ -169,6 +193,18 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     }
     if (["blocked", "cancelled"].includes(projection.lifecycle)) {
       pi.sendMessage({ customType: "pi-plan-summary-v1", content: `Plan ${projection.planId} ${projection.lifecycle}.`, details: { planId: projection.planId, lifecycle: projection.lifecycle } });
+      return;
+    }
+    const hasActiveAttempt = [...projection.attempts.values()].some((attempt) => ["active", "waiting-attention"].includes(attempt.status));
+    if (hasActiveAttempt) {
+      pi.sendMessage(
+        {
+          customType: "pi-plan-follow-up-v1",
+          content: "Run the executor control loop: check Supervisor pending; when empty call subagent_wait with timeoutMs 1000ms; then check Supervisor pending again.",
+          details: { planId: projection.planId, enforcement: "executor-control-loop" },
+        },
+        { triggerTurn: true, deliverAs: "followUp" },
+      );
       return;
     }
     if (options.canContinue?.(projection) === true) {
@@ -223,6 +259,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
       if (opened) return result("Plan is already open.", true);
       if (typeof options.validateBinding !== "function") return result("Plan binding validation is unavailable.", true);
       try {
+        await assertRuntimeCapabilities();
         const effectiveInput = input.approvedHash ? { ...input, planHash: input.approvedHash } : input;
         const binding = await options.validateBinding(effectiveInput, { ctx });
         if (!binding || binding.planId !== input.planId || !Array.isArray(binding.tasks) || binding.tasks.length === 0) {

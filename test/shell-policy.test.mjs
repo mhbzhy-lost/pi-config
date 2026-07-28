@@ -150,6 +150,24 @@ test("blocks git -C regardless of commit message validity", () => {
   assertBlocked('git -C /tmp commit -m "feat: 添加提交校验"', "GIT_C_FORBIDDEN", /git -C/);
 });
 
+test("blocks Git repository and worktree overrides that bypass workspace deletion boundaries", () => {
+  assertBlocked(
+    "git --git-dir=/outside/.git --work-tree=/outside rm tracked.txt",
+    "GIT_CONTEXT_FORBIDDEN",
+    /Git.*工作目录|仓库/,
+  );
+  assertBlocked(
+    "git --git-dir /outside/.git --work-tree /outside rm tracked.txt",
+    "GIT_CONTEXT_FORBIDDEN",
+    /Git.*工作目录|仓库/,
+  );
+  assertBlocked(
+    "GIT_DIR=/outside/.git GIT_WORK_TREE=/outside git rm tracked.txt",
+    "GIT_CONTEXT_FORBIDDEN",
+    /Git.*工作目录|仓库/,
+  );
+});
+
 test("commit skip only bypasses commit validation", () => {
   assert.equal(policy('GIT_COMMIT_HOOK_SKIP=1 git commit -m "bad: english"'), undefined);
   assertBlocked('GIT_COMMIT_HOOK_SKIP=1 rm -rf /Users/shared', "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);

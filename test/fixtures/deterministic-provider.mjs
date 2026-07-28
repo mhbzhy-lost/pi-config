@@ -1,4 +1,5 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { decideDeterministicTurn, deterministicExecutorCommand } from "./deterministic-provider-state.mjs";
 
 export default function (pi) {
   pi.registerProvider("fake", {
@@ -28,7 +29,8 @@ export default function (pi) {
         .map((part) => part.text)
         .join("\n") ?? "").join("\n");
       const bootstrap = userText.match(/exact bootstrap JSON:\s*\n(\{[^\n]+\})/)?.[1];
-      const next = (() => {
+      const compatTurn = decideDeterministicTurn({ messages, toolNames: [...availableTools] });
+      const next = compatTurn?.tool ?? (() => {
         if (toolResults.some((message) => message?.toolName === "plan_verify")) return undefined;
         if (bootstrap && availableTools.has("plan_open") && toolResults.length === 0) {
           return { name: "plan_open", arguments: JSON.parse(bootstrap) };
@@ -49,10 +51,12 @@ export default function (pi) {
           return { name: "subagent", arguments: payload.tool };
         }
         if (availableTools.has("bash") && toolResults.length === 0) {
-          return { name: "bash", arguments: { command: "printf 'worker\\n' >> README.md && git add README.md && git commit -m 'test: deterministic worker'" } };
+          const command = deterministicExecutorCommand(userText);
+          if (command) return { name: "bash", arguments: { command } };
         }
         return undefined;
       })();
+      const responseText = compatTurn?.text ?? "deterministic";
       const usage = {
         input: 0,
         output: 0,
@@ -63,7 +67,7 @@ export default function (pi) {
       };
       const message = {
         role: "assistant",
-        content: next ? [{ type: "toolCall", id: `deterministic-${next.name}-${toolResults.length}`, name: next.name, arguments: next.arguments }] : [{ type: "text", text: "deterministic" }],
+        content: next ? [{ type: "toolCall", id: `deterministic-${next.name}-${toolResults.length}`, name: next.name, arguments: next.arguments }] : [{ type: "text", text: responseText }],
         api: model.api,
         provider: model.provider,
         model: model.id,
@@ -80,8 +84,8 @@ export default function (pi) {
         stream.push({ type: "done", reason: "toolUse", message });
       } else {
         stream.push({ type: "text_start", contentIndex: 0, partial: message });
-        stream.push({ type: "text_delta", contentIndex: 0, delta: "deterministic", partial: message });
-        stream.push({ type: "text_end", contentIndex: 0, content: "deterministic", partial: message });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: responseText, partial: message });
+        stream.push({ type: "text_end", contentIndex: 0, content: responseText, partial: message });
         stream.push({ type: "done", reason: "stop", message });
       }
       stream.end();

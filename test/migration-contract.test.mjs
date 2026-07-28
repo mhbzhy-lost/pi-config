@@ -15,12 +15,20 @@ const expectedSkills = [
   "writing-skills",
   "writing-plans",
   "plan-runner-dispatch",
+  "subagent-dispatch",
   "exa-search",
   "playwright",
+  "browser-auth-session",
   "goal-contract",
   "mac-mini-worker",
   "normandy-cli",
   "tbctx7",
+  "crash-analyzer-usage",
+  "nanocompose-cli",
+  "a1",
+  "tmcp",
+  "dp3-mcp",
+  "crash-mcp",
 ];
 
 test("migration exposes exactly the required Skills", async () => {
@@ -92,7 +100,10 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
   assert.equal(runner.extensions, undefined);
   assert.equal(reviewer.extensions, undefined);
   assert.equal(runner.subagentOnlyExtensions, ".pi-subagents/plan-runner-entry.mjs");
-  assert.equal(runner.tools.includes("subagent"), true);
+  const runnerTools = new Set(runner.tools.split(","));
+  assert.equal(runnerTools.has("subagent"), false);
+  assert.equal(runnerTools.has("subagent_wait"), true);
+  assert.equal(runnerTools.has("subagent_supervisor"), true);
   assert.equal(reviewer.tools.includes("subagent"), false);
   assert.equal(reviewer.tools.includes("write"), false);
   await access(join(repoRoot, "pi", "child-extensions", "plan-capsule.ts"));

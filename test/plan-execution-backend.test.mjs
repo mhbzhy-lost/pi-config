@@ -1,0 +1,257 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { createPiSubagentsExecutionBackend } from "../scripts/lib/plan/pi-subagents-execution-backend.mjs";
+
+function createEvents() {
+  const listeners = new Map();
+  return {
+    on(channel, listener) {
+      const values = listeners.get(channel) ?? new Set();
+      values.add(listener);
+      listeners.set(channel, values);
+      return () => values.delete(listener);
+    },
+    emit(channel, value) {
+      for (const listener of listeners.get(channel) ?? []) listener(value);
+    },
+    count(channel) {
+      return listeners.get(channel)?.size ?? 0;
+    },
+  };
+}
+
+function capabilities(overrides = {}) {
+  return {
+    version: 1,
+    methods: ["ping", "spawn", "status", "interrupt", "stop"],
+    session: { sessionId: "plan-session-uuid", sessionFile: "/sessions/plan-session-1.jsonl", cwd: "/plan" },
+    ...overrides,
+  };
+}
+
+function spawnInput(overrides = {}) {
+  return {
+    dispatchId: "attempt-1.dispatch.1",
+    attemptId: "attempt-1",
+    agent: "executor",
+    task: "Execute approved task",
+    cwd: "/attempts/attempt-1",
+    output: "/results/attempt-1.json",
+    timeoutMs: 900_000,
+    ...overrides,
+  };
+}
+
+test("asserts capabilities and emits the exact asynchronous executor RPC envelope", async () => {
+  const events = createEvents();
+  const calls = [];
+  const facts = [];
+  const rpc = {
+    async ping() { return capabilities(); },
+    async spawn(params, options) {
+      calls.push({ params, options });
+      events.emit("subagent:async-started", {
+        id: "run-1",
+        asyncDir: "/async/run-1",
+        cwd: params.cwd,
+        sessionId: "/sessions/plan-session-1.jsonl",
+      });
+      return { details: { runId: "run-1", asyncDir: "/async/run-1" }, text: "formatted output" };
+    },
+    dispose() {},
+  };
+  const backend = createPiSubagentsExecutionBackend({ rpc, events, emitFact: (fact) => facts.push(fact), now: () => "2026-07-26T00:00:00.000Z" });
+
+  const negotiated = await backend.assertCapabilities({
+    rpcVersion: 1,
+    methods: ["ping", "spawn", "status", "interrupt", "stop"],
+  });
+  assert.equal(negotiated.sessionId, "/sessions/plan-session-1.jsonl");
+  assert.equal(negotiated.rpcSessionId, "plan-session-uuid");
+  const binding = await backend.spawn(spawnInput());
+
+  assert.deepEqual(calls, [{
+    params: {
+      agent: "executor",
+      task: "Execute approved task",
+      cwd: "/attempts/attempt-1",
+      context: "fresh",
+      worktree: false,
+      async: true,
+      clarify: false,
+      output: "/results/attempt-1.json",
+      outputMode: "file-only",
+      acceptance: false,
+      artifacts: true,
+      timeoutMs: 900_000,
+    },
+    options: { requestId: "attempt-1.dispatch.1" },
+  }]);
+  assert.deepEqual(binding, {
+    dispatchId: "attempt-1.dispatch.1",
+    attemptId: "attempt-1",
+    runId: "run-1",
+    asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-1",
+    output: "/results/attempt-1.json",
+    sessionId: "/sessions/plan-session-1.jsonl",
+  });
+  assert.deepEqual(facts, [{
+    type: "execution.started",
+    dispatchId: "attempt-1.dispatch.1",
+    attemptId: "attempt-1",
+    runId: "run-1",
+    asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-1",
+    state: "running",
+    observedAt: "2026-07-26T00:00:00.000Z",
+  }]);
+  backend.dispose();
+});
+
+test("normalizes matching completion facts and rejects zero-match or wrong-session lifecycle events", async () => {
+  const events = createEvents();
+  const facts = [];
+  const rpc = {
+    async ping() { return capabilities(); },
+    async spawn(params) {
+      events.emit("subagent:async-started", { id: "run-1", asyncDir: "/async/run-1", cwd: params.cwd, sessionId: "/sessions/plan-session-1.jsonl" });
+      return { details: { runId: "run-1", asyncDir: "/async/run-1" } };
+    },
+    dispose() {},
+  };
+  const backend = createPiSubagentsExecutionBackend({ rpc, events, emitFact: (fact) => facts.push(fact), now: () => "observed" });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  await backend.spawn(spawnInput());
+
+  events.emit("subagent:async-complete", {
+    runId: "run-1",
+    asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-1",
+    sessionId: "/sessions/plan-session-1.jsonl",
+    state: "complete",
+  });
+  events.emit("subagent:async-started", {
+    id: "unknown",
+    asyncDir: "/async/unknown",
+    cwd: "/attempts/unknown",
+    sessionId: "/sessions/plan-session-1.jsonl",
+  });
+  events.emit("subagent:async-started", {
+    id: "wrong-session",
+    asyncDir: "/async/wrong-session",
+    cwd: "/attempts/unknown",
+    sessionId: "another-session",
+  });
+
+  assert.equal(facts[1].type, "execution.completed");
+  assert.deepEqual(facts[1], {
+    type: "execution.completed",
+    dispatchId: "attempt-1.dispatch.1",
+    attemptId: "attempt-1",
+    runId: "run-1",
+    asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-1",
+    state: "complete",
+    observedAt: "observed",
+  });
+  assert.equal(facts[2].type, "execution.protocol-violation");
+  assert.equal(facts[2].code, "LIFECYCLE_BINDING_NOT_FOUND");
+  assert.equal(facts[3].code, "LIFECYCLE_SESSION_MISMATCH");
+  backend.dispose();
+});
+
+test("does not guess when more than one pending dispatch has the same cwd", async () => {
+  const events = createEvents();
+  const facts = [];
+  const resolvers = [];
+  const rpc = {
+    async ping() { return capabilities(); },
+    spawn() { return new Promise((resolve) => resolvers.push(resolve)); },
+    dispose() {},
+  };
+  const backend = createPiSubagentsExecutionBackend({ rpc, events, emitFact: (fact) => facts.push(fact) });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  const first = backend.spawn(spawnInput());
+  const second = backend.spawn(spawnInput({ dispatchId: "attempt-2.dispatch.1", attemptId: "attempt-2" }));
+  events.emit("subagent:async-started", {
+    id: "ambiguous-run",
+    asyncDir: "/async/ambiguous",
+    cwd: "/attempts/attempt-1",
+    sessionId: "/sessions/plan-session-1.jsonl",
+  });
+  assert.equal(facts[0].code, "LIFECYCLE_BINDING_AMBIGUOUS");
+  resolvers[0]({ details: { runId: "run-1", asyncDir: "/async/run-1" } });
+  resolvers[1]({ details: { runId: "run-2", asyncDir: "/async/run-2" } });
+  await Promise.all([first, second]);
+  backend.dispose();
+});
+
+test("uses status RPC only to reconcile, then reads and validates authoritative artifacts", async () => {
+  const events = createEvents();
+  const calls = [];
+  const artifactCalls = [];
+  const rpc = {
+    async ping() { return capabilities(); },
+    async spawn(params) {
+      events.emit("subagent:async-started", { id: "run-1", asyncDir: "/async/run-1", cwd: params.cwd, sessionId: "/sessions/plan-session-1.jsonl" });
+      return { details: { runId: "run-1", asyncDir: "/async/run-1" } };
+    },
+    async status(params) { calls.push(["status", params]); return { text: "formatted, non-authoritative" }; },
+    async interrupt(params) { calls.push(["interrupt", params]); return { ok: true }; },
+    async stop(params) { calls.push(["stop", params]); return { ok: true }; },
+    dispose() { calls.push(["dispose"]); },
+  };
+  const readArtifacts = async (input) => {
+    artifactCalls.push(input);
+    return { status: { kind: "stable", value: { state: "running" } } };
+  };
+  const backend = createPiSubagentsExecutionBackend({ rpc, events, readArtifacts });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  await backend.spawn(spawnInput());
+
+  assert.deepEqual(await backend.status({ runId: "run-1", asyncDir: "/async/run-1" }), {
+    status: { kind: "stable", value: { state: "running" } },
+  });
+  await backend.interrupt({ runId: "run-1", asyncDir: "/async/run-1" });
+  await backend.stop({ runId: "run-1", asyncDir: "/async/run-1" });
+  assert.deepEqual(calls.slice(0, 3), [
+    ["status", { runId: "run-1", dir: "/async/run-1" }],
+    ["interrupt", { runId: "run-1", dir: "/async/run-1" }],
+    ["stop", { runId: "run-1", dir: "/async/run-1" }],
+  ]);
+  assert.deepEqual(artifactCalls, [{
+    artifactDir: "/async/run-1",
+    binding: {
+      runId: "run-1",
+      sessionId: "/sessions/plan-session-1.jsonl",
+      cwd: "/attempts/attempt-1",
+      output: "/results/attempt-1.json",
+    },
+  }]);
+  backend.dispose();
+  assert.deepEqual(calls.at(-1), ["dispose"]);
+});
+
+test("fails closed on capability drift and removes lifecycle listeners on dispose", async () => {
+  const events = createEvents();
+  let disposed = false;
+  const backend = createPiSubagentsExecutionBackend({
+    rpc: {
+      async ping() { return capabilities({ version: 2, methods: ["ping"] }); },
+      dispose() { disposed = true; },
+    },
+    events,
+  });
+  await assert.rejects(
+    backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] }),
+    (error) => error.code === "EXECUTION_CAPABILITY_MISMATCH",
+  );
+  assert.equal(events.count("subagent:async-started"), 1);
+  assert.equal(events.count("subagent:async-complete"), 1);
+  backend.dispose();
+  assert.equal(events.count("subagent:async-started"), 0);
+  assert.equal(events.count("subagent:async-complete"), 0);
+  assert.equal(disposed, true);
+});

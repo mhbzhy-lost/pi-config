@@ -127,6 +127,7 @@ function watchdogHarness({ content, now = 0, timeoutMs = 10, startupGraceMs = 10
   let check;
   let stopped = false;
   let expired = 0;
+  let expiration;
   const watchdog = startParentLeaseWatchdog({
     leasePath: "/tmp/parent-lease.json",
     planId: "plan-1",
@@ -148,12 +149,14 @@ function watchdogHarness({ content, now = 0, timeoutMs = 10, startupGraceMs = 10
       return { unref() {}, close() { stopped = true; } };
     },
     clearInterval: (timer) => timer.close(),
-    onExpired: () => { expired += 1; },
+    isProcessAlive: () => true,
+    onExpired: (details) => { expired += 1; expiration = details; },
   });
   return {
     run: async () => check(),
     set now(value) { clock = value; },
     get expired() { return expired; },
+    get expiration() { return expiration; },
     get stopped() { return stopped; },
     watchdog,
   };
@@ -180,6 +183,24 @@ test("watchdog expires a missing lease after startup grace", async () => {
   harness.now = 11;
   await harness.run();
   assert.equal(harness.expired, 1);
+  assert.deepEqual(harness.expiration, {
+    leasePath: "/tmp/parent-lease.json",
+    planId: "plan-1",
+    token: "token-1",
+    reason: "missing",
+    observedLease: undefined,
+    leaseAgeMs: undefined,
+    parentPidAlive: undefined,
+  });
+});
+
+test("watchdog reports invalid lease identity separately from staleness", async () => {
+  const harness = watchdogHarness({ content: lease({ token: "other", updatedAt: 100 }), now: 100 });
+  await harness.run();
+  assert.equal(harness.expiration.reason, "invalid");
+  assert.equal(harness.expiration.leaseAgeMs, 0);
+  assert.equal(harness.expiration.observedLease.token, "other");
+  assert.equal(harness.expiration.parentPidAlive, true);
 });
 
 test("watchdog expires stale leases once and does not check after stop", async () => {
@@ -187,8 +208,46 @@ test("watchdog expires stale leases once and does not check after stop", async (
   await harness.run();
   await harness.run();
   assert.equal(harness.expired, 1);
+  assert.equal(harness.expiration.reason, "stale");
+  assert.equal(harness.expiration.leaseAgeMs, 11);
+  assert.equal(harness.expiration.observedLease.parentPid, 123);
+  assert.equal(harness.expiration.parentPidAlive, true);
   harness.watchdog.stop();
   assert.equal(harness.stopped, true);
   await harness.run();
   assert.equal(harness.expired, 1);
+});
+
+test("watchdog tolerates a temporarily stale lease that recovers within timeout", async () => {
+  let clock = 100;
+  let check;
+  let expired = 0;
+  let content = lease({ updatedAt: 95 });
+  const watchdog = startParentLeaseWatchdog({
+    leasePath: "/tmp/parent-lease.json",
+    planId: "plan-1",
+    token: "token-1",
+    timeoutMs: 30_000,
+    startupGraceMs: 30_000,
+    checkIntervalMs: 1,
+    readFile: async () => content,
+    now: () => clock,
+    setInterval: (fn) => { check = fn; return { unref() {} }; },
+    clearInterval() {},
+    onExpired: () => { expired += 1; },
+  });
+
+  // Parent blocks: lease goes 20s stale (within 30s timeout)
+  clock = 115_000;
+  content = lease({ updatedAt: 95_000 });
+  await check();
+  assert.equal(expired, 0, "must not expire within timeout window");
+
+  // Parent recovers: lease refreshed
+  content = lease({ updatedAt: 115_000 });
+  clock = 120_000;
+  await check();
+  assert.equal(expired, 0, "must not expire after recovery");
+
+  watchdog.stop();
 });

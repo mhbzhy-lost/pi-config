@@ -37,12 +37,31 @@ function acceptedTask(projection, taskId = "task-1") {
   return apply(projection, "task.accepted", { taskId });
 }
 
-function dispatchTool() {
-  return { agent: "executor", task: "prompt", cwd: "/worktree", context: "fresh", async: true, clarify: false };
+function dispatchTool(attemptId = "attempt-1") {
+  return { agent: "executor", task: "prompt", cwd: `/attempts/${attemptId}`, context: "fresh", async: true, clarify: false, worktree: false };
+}
+
+function attemptWorkspace(attemptId) {
+  return { path: `/attempts/${attemptId}`, branch: `pi-plan-attempt/plan-1/task-1/${attemptId}`, ownerToken: `${attemptId}-owner` };
 }
 
 function requestAttempt(projection, attemptId, taskId = "task-1") {
-  return apply(projection, "attempt.dispatch-requested", { attemptId, taskId, tool: dispatchTool() });
+  const workspaceLease = attemptWorkspace(attemptId);
+  projection = apply(projection, "attempt.workspace-allocated", {
+    attemptId,
+    taskId,
+    baseCommit: workspace.headCommit,
+    workspace: workspaceLease,
+  });
+  return apply(projection, "attempt.dispatch-requested", {
+    attemptId,
+    taskId,
+    dispatchId: `${attemptId}-dispatch`,
+    baseCommit: workspace.headCommit,
+    workspace: workspaceLease,
+    tool: dispatchTool(attemptId),
+    toolHash: `${attemptId}-tool-hash`,
+  });
 }
 
 function bindAttempt(projection, attemptId, taskId = "task-1") {
@@ -50,6 +69,7 @@ function bindAttempt(projection, attemptId, taskId = "task-1") {
   return apply(projection, "attempt.bound", {
     attemptId,
     taskId,
+    dispatchId: `${attemptId}-dispatch`,
     runId: `${attemptId}-run`,
     asyncDir: `/${attemptId}`,
     sessionFile: `/${attemptId}.jsonl`,
@@ -136,10 +156,10 @@ test("attempt activity moves created plans to running and preserves transitions"
   assert.equal(projection.attempts.get("attempt-1").runId, "attempt-1-run");
 
   assert.throws(
-    () => apply(projection, "attempt.bound", { attemptId: "attempt-1", taskId: "task-1" }),
+    () => apply(projection, "attempt.bound", { attemptId: "attempt-1", taskId: "task-1", dispatchId: "attempt-1-dispatch" }),
     /not dispatch-requested/,
   );
-  projection = apply(projection, "attempt.settled", { attemptId: "attempt-1", outcome: "succeeded" });
+  projection = apply(projection, "attempt.settled", { attemptId: "attempt-1", outcome: "succeeded", resultCommit: "result-1" });
   assert.equal(projection.attempts.get("attempt-1").taskId, "task-1");
   assert.equal(projection.attempts.get("attempt-1").status, "succeeded");
   assert.equal(projection.attempts.get("attempt-1").runId, "attempt-1-run");
@@ -149,21 +169,54 @@ test("attempt activity moves created plans to running and preserves transitions"
   );
 });
 
-test("persists exactly one dispatch intent before its binding and preserves structured identifiers", () => {
+test("settles an explicitly blocked Attempt without inventing a result commit", () => {
+  let projection = bindAttempt(createRunningProjection(), "attempt-1");
+
+  projection = apply(projection, "attempt.settled", {
+    attemptId: "attempt-1",
+    outcome: "blocked",
+    blockerReason: "real-module-candidates-not-ready",
+    blockers: ["cocoapods", "tbctx7_code_auth"],
+    evidenceSha256: "a".repeat(64),
+  });
+
+  assert.equal(projection.attempts.get("attempt-1").status, "blocked");
+  assert.equal(projection.attempts.get("attempt-1").resultCommit, undefined);
+  assert.equal(projection.attempts.get("attempt-1").blockerReason, "real-module-candidates-not-ready");
+  assert.deepEqual(projection.attempts.get("attempt-1").blockers, ["cocoapods", "tbctx7_code_auth"]);
+  assert.equal(projection.attempts.get("attempt-1").evidenceSha256, "a".repeat(64));
+});
+
+test("persists workspace ownership and exactly one dispatch intent before binding", () => {
   let projection = createRunningProjection();
+  projection = apply(projection, "attempt.workspace-allocated", {
+    attemptId: "attempt-1",
+    taskId: "task-1",
+    baseCommit: workspace.headCommit,
+    workspace: attemptWorkspace("attempt-1"),
+  });
   projection = apply(projection, "attempt.dispatch-requested", {
     attemptId: "attempt-1",
     taskId: "task-1",
-    tool: { agent: "executor", task: "prompt", cwd: "/worktree", context: "fresh", async: true, clarify: false },
+    dispatchId: "attempt-1-dispatch",
+    baseCommit: workspace.headCommit,
+    workspace: attemptWorkspace("attempt-1"),
+    tool: dispatchTool(),
+    toolHash: "attempt-1-tool-hash",
   });
   assert.deepEqual(projection.attempts.get("attempt-1"), {
     taskId: "task-1",
     status: "dispatch-requested",
-    tool: { agent: "executor", task: "prompt", cwd: "/worktree", context: "fresh", async: true, clarify: false },
+    dispatchId: "attempt-1-dispatch",
+    baseCommit: workspace.headCommit,
+    workspace: attemptWorkspace("attempt-1"),
+    tool: dispatchTool(),
+    toolHash: "attempt-1-tool-hash",
   });
   projection = apply(projection, "attempt.bound", {
     attemptId: "attempt-1",
     taskId: "task-1",
+    dispatchId: "attempt-1-dispatch",
     runId: "run-1",
     asyncDir: "/async/1",
     sessionFile: "/sessions/one.jsonl",
@@ -171,7 +224,11 @@ test("persists exactly one dispatch intent before its binding and preserves stru
   assert.deepEqual(projection.attempts.get("attempt-1"), {
     taskId: "task-1",
     status: "active",
-    tool: { agent: "executor", task: "prompt", cwd: "/worktree", context: "fresh", async: true, clarify: false },
+    dispatchId: "attempt-1-dispatch",
+    baseCommit: workspace.headCommit,
+    workspace: attemptWorkspace("attempt-1"),
+    tool: dispatchTool(),
+    toolHash: "attempt-1-tool-hash",
     runId: "run-1",
     asyncDir: "/async/1",
     sessionFile: "/sessions/one.jsonl",
@@ -186,10 +243,73 @@ test("rejects attempts for undeclared tasks and a second active mutating attempt
   );
 
   projection = requestAttempt(projection, "attempt-1", "task-1");
+  // Different task can now have a parallel dispatch (task-level mutual exclusion)
+  const parallel = requestAttempt(projection, "attempt-2", "task-2");
+  assert.equal(parallel.attempts.get("attempt-2").taskId, "task-2");
+  // Same task still rejected
   assert.throws(
-    () => requestAttempt(projection, "attempt-2", "task-2"),
+    () => requestAttempt(projection, "attempt-3", "task-1"),
     /active attempt/,
   );
+});
+
+test("advances succeeded attempts through validation, integration, and workspace release", () => {
+  let projection = bindAttempt(createRunningProjection(), "attempt-1");
+  projection = apply(projection, "attempt.settled", {
+    attemptId: "attempt-1",
+    outcome: "succeeded",
+    resultCommit: "result-commit",
+  });
+  projection = apply(projection, "attempt.validated", {
+    attemptId: "attempt-1",
+    resultCommit: "result-commit",
+    validationHash: "validation-hash",
+    diffSha256: "d".repeat(64),
+    changedPaths: ["src/a.mjs"],
+    evidence: [{ path: "evidence/validation.json", sha256: "e".repeat(64) }],
+  });
+  assert.equal(projection.attempts.get("attempt-1").status, "validated");
+  assert.equal(projection.attempts.get("attempt-1").validationDiffSha256, "d".repeat(64));
+  assert.deepEqual(projection.attempts.get("attempt-1").validationChangedPaths, ["src/a.mjs"]);
+  projection = apply(projection, "integration.requested", {
+    attemptId: "attempt-1",
+    expectedHead: workspace.headCommit,
+    resultCommit: "result-commit",
+    diffSha256: "d".repeat(64),
+  });
+  projection = apply(projection, "integration.finished", {
+    attemptId: "attempt-1",
+    previousHead: workspace.headCommit,
+    newHead: "integrated-head",
+  });
+  assert.equal(projection.attempts.get("attempt-1").status, "integrated");
+  assert.equal(projection.attempts.get("attempt-1").resultCommit, "result-commit");
+  assert.deepEqual(projection.tasks.get("task-1"), { status: "accepted" });
+  projection = apply(projection, "attempt.workspace-released", {
+    attemptId: "attempt-1",
+    disposition: "integrated-cleanup",
+    evidence: { path: "evidence/release.json", sha256: "r".repeat(64) },
+  });
+  assert.equal(projection.attempts.get("attempt-1").workspaceReleased, true);
+});
+
+test("rejects dispatch intents that do not match their allocated workspace", () => {
+  let projection = createRunningProjection();
+  projection = apply(projection, "attempt.workspace-allocated", {
+    attemptId: "attempt-1",
+    taskId: "task-1",
+    baseCommit: workspace.headCommit,
+    workspace: attemptWorkspace("attempt-1"),
+  });
+  assert.throws(() => apply(projection, "attempt.dispatch-requested", {
+    attemptId: "attempt-1",
+    taskId: "task-1",
+    dispatchId: "dispatch-1",
+    baseCommit: "stale",
+    workspace: attemptWorkspace("attempt-1"),
+    tool: dispatchTool(),
+    toolHash: "tool-hash",
+  }), /baseCommit/);
 });
 
 test("accepts a task once and keeps task values directly usable", () => {
@@ -242,7 +362,7 @@ test("observes a new HEAD, invalidates current gates, and permits replacement ga
 test("validates only fully accepted, settled, clean plans with four current passed gates", () => {
   let projection = createRunningProjection();
   projection = bindAttempt(projection, "attempt-1");
-  projection = apply(projection, "attempt.settled", { attemptId: "attempt-1", outcome: "succeeded" });
+  projection = apply(projection, "attempt.settled", { attemptId: "attempt-1", outcome: "succeeded", resultCommit: "result-1" });
   projection = acceptedTask(projection);
   projection = passedGates(projection);
 
@@ -262,7 +382,7 @@ test("fails closed when validation has nonterminal tasks, active attempts, missi
   });
   assert.throws(() => apply(projection, "plan.validated", { worktreeClean: true }), /active attempt/);
 
-  projection = apply(projection, "attempt.settled", { attemptId: "attempt-1", outcome: "succeeded" });
+  projection = apply(projection, "attempt.settled", { attemptId: "attempt-1", outcome: "succeeded", resultCommit: "result-1" });
   assert.throws(() => apply(projection, "plan.validated", { worktreeClean: true }), /missing gate/);
 
   for (const type of ["plan-audit", "external-review", "final-completeness"]) {
@@ -297,7 +417,7 @@ test("moves a running plan into explicit terminal lifecycle states only", () => 
   for (const type of ["plan.blocked", "plan.cancelled", "plan.interrupted"]) {
     let projection = createRunningProjection();
     projection = bindAttempt(projection, `${type}-attempt`);
-    projection = apply(projection, "attempt.settled", { attemptId: `${type}-attempt`, outcome: "succeeded" });
+    projection = apply(projection, "attempt.settled", { attemptId: `${type}-attempt`, outcome: "succeeded", resultCommit: `${type}-result` });
     projection = apply(projection, type, {});
     assert.equal(projection.lifecycle, type.slice(5));
     assert.throws(() => apply(projection, "plan.cancelled", {}), /terminal/);

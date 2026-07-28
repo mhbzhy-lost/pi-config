@@ -88,11 +88,25 @@ function validLease(value, planId, token) {
     Number.isFinite(value.updatedAt);
 }
 
-async function defaultExpired({ leasePath, planId, token }) {
+function defaultProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function defaultExpired({ leasePath, planId, token, reason, observedLease, leaseAgeMs, parentPidAlive }) {
   await writeAtomic(path.join(path.dirname(leasePath), "parent-lost.json"), {
     schemaVersion: "pi-plan-parent-lost.v1",
     planId,
     token,
+    reason,
+    observedLease,
+    leaseAgeMs,
+    parentPidAlive,
     occurredAt: new Date().toISOString(),
   });
   process.kill(process.pid, "SIGTERM");
@@ -110,6 +124,7 @@ export function startParentLeaseWatchdog({
   now = () => Date.now(),
   setInterval: schedule = setInterval,
   clearInterval: cancel = clearInterval,
+  isProcessAlive = defaultProcessAlive,
 } = {}) {
   if (typeof leasePath !== "string" || !leasePath) throw new Error("leasePath is required");
   if (!validPlanId(planId)) throw new Error("Invalid planId");
@@ -133,12 +148,25 @@ export function startParentLeaseWatchdog({
       } catch (error) {
         if (error?.code === "ENOENT" && now() - startedAt < startupGraceMs) return;
         expired = true;
-        await onExpired({ leasePath, planId, token });
+        await onExpired({
+          leasePath,
+          planId,
+          token,
+          reason: error?.code === "ENOENT" ? "missing" : "unreadable",
+          observedLease: undefined,
+          leaseAgeMs: undefined,
+          parentPidAlive: undefined,
+        });
         return;
       }
-      if (!validLease(value, planId, token) || now() - value.updatedAt > timeoutMs) {
+      const leaseAgeMs = Number.isFinite(value?.updatedAt) ? now() - value.updatedAt : undefined;
+      const parentPidAlive = isProcessAlive(value?.parentPid);
+      if (!validLease(value, planId, token)) {
         expired = true;
-        await onExpired({ leasePath, planId, token });
+        await onExpired({ leasePath, planId, token, reason: "invalid", observedLease: value, leaseAgeMs, parentPidAlive });
+      } else if (leaseAgeMs > timeoutMs) {
+        expired = true;
+        await onExpired({ leasePath, planId, token, reason: "stale", observedLease: value, leaseAgeMs, parentPidAlive });
       }
     } finally {
       checking = false;

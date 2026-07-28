@@ -27,6 +27,8 @@ test("footer component uses the current model and requests a rerender when inval
     getCwd: () => "/Users/test/workspace",
     getHome: () => "/Users/test",
     getModel: () => currentModel,
+    getContextUsage: () => ({ tokens: 10_000, contextWindow: currentModel.contextWindow, percent: 5 }),
+    getThinkingLevel: () => "medium",
     getBranch: () => [{
       type: "message",
       message: {
@@ -42,7 +44,7 @@ test("footer component uses the current model and requests a rerender when inval
     truncateToWidth,
   });
 
-  assert.match(component.render(100)[0], /\(anthropic-idealab\) claude-opus-4-6$/);
+  assert.match(component.render(100)[1], /\(anthropic-idealab\) claude-opus-4-6$/);
 
   currentModel = {
     provider: "codex-pool",
@@ -52,7 +54,69 @@ test("footer component uses the current model and requests a rerender when inval
   component.invalidate();
 
   assert.equal(renderRequests, 1);
-  assert.match(component.render(100)[0], /\(codex-pool\) gpt-5.6-sol$/);
+  assert.match(component.render(100)[1], /\(codex-pool\) gpt-5.6-sol$/);
+});
+
+test("footer renders subagents below cwd while keeping context, provider/model, and thinking right-aligned", () => {
+  const component = layoutModule.createFooterComponent({
+    getCwd: () => "/Users/test/workspace",
+    getHome: () => "/Users/test",
+    getModel: () => ({
+      provider: "codex-pool",
+      id: "gpt-5.6-sol",
+      contextWindow: 272_000,
+    }),
+    getContextUsage: () => ({ tokens: 207_000, contextWindow: 272_000, percent: 76.1 }),
+    getThinkingLevel: () => "high",
+    getSubagentStatus: () => "executor, reviewer",
+    requestRender: () => {},
+    theme: { fg: (_color, text) => text },
+    visibleWidth,
+    truncateToWidth,
+  });
+
+  const lines = component.render(58);
+  const providerModel = "(codex-pool) gpt-5.6-sol";
+  const subagentStatus = "executor, reviewer";
+  assert.deepEqual(lines, [
+    `~/workspace${"76.1%/272k".padStart(47)}`,
+    `${subagentStatus}${providerModel.padStart(58 - subagentStatus.length)}`,
+    "thinking: high".padStart(58),
+  ]);
+});
+
+test("footer clears stale assistant usage when compaction makes context usage unknown", () => {
+  let contextUsage = { tokens: 160_000, contextWindow: 200_000, percent: 80 };
+  const component = layoutModule.createFooterComponent({
+    getCwd: () => "/Users/test/workspace",
+    getHome: () => "/Users/test",
+    getModel: () => ({
+      provider: "anthropic-idealab",
+      id: "claude-opus-4-6",
+      contextWindow: 200_000,
+    }),
+    getContextUsage: () => contextUsage,
+    getBranch: () => [{
+      type: "message",
+      message: {
+        role: "assistant",
+        usage: { input: 160_000, cacheRead: 0, cacheWrite: 0 },
+      },
+    }],
+    requestRender: () => {},
+    theme: { fg: (_color, text) => text },
+    visibleWidth,
+    truncateToWidth,
+  });
+
+  assert.match(component.render(100)[0], /80\.0%\/200k/);
+
+  contextUsage = { tokens: null, contextWindow: 200_000, percent: null };
+  component.invalidate();
+
+  const compacted = component.render(100)[0];
+  assert.match(compacted, /\?\/200k/);
+  assert.doesNotMatch(compacted, /80\.0%/);
 });
 
 test("footer truncates a long cwd to fit a 58-column terminal", () => {

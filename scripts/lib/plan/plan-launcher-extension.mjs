@@ -1,54 +1,18 @@
 import { access, copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { parsePlanDocument } from "./plan-document.mjs";
 import { createPlanWorkspace, rollbackPlanWorkspace } from "./workspace.mjs";
-import { createSubagentsRpcClient } from "../subagents-rpc-client.mjs";
 import { createPlanControl } from "./plan-control.mjs";
-import { createParentLease } from "./parent-lifecycle.mjs";
+import { createPlanHostRuntime } from "./plan-host-runtime.mjs";
 
-const HANDLE_TYPE = "pi-plan-launch-handle-v1";
+const HANDLE_TYPE = "pi-plan-launch-handle-v3";
 const HANDLE_PREFIX = "PI_PLAN_HANDLE=";
-const HANDLE_FIELDS = ["planId", "planHash", "runId", "asyncDir", "sessionFile", "statusPath", "worktree"];
+const HANDLE_SCHEMA = "pi-plan-handle.v3";
 const PLAN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const PLAN_RUNNER_RUNTIME_PATH = ".pi-subagents/plan-runner-entry.mjs";
 const DEFAULT_PLAN_RUNNER_ENTRY = fileURLToPath(new URL("../../../pi/child-extensions/plan-runner.ts", import.meta.url));
-const PARENT_LIFECYCLE_ENTRY = fileURLToPath(new URL("./parent-lifecycle.mjs", import.meta.url));
-
-function handleEntries(ctx) {
-  return ctx?.sessionManager?.getBranch?.().filter((entry) => entry?.customType === HANDLE_TYPE).map((entry) => entry.data) ?? [];
-}
-
-function terminal(state) {
-  return ["complete", "failed", "timedOut", "cancelled", "stopped"].includes(state);
-}
-
-function runtimeState(status) {
-  const structured = status?.status?.kind === "stable" ? status.status.value?.state : status?.state;
-  if (structured) return structured;
-  const match = typeof status?.text === "string" && /^State:\s*(\S(?:.*\S)?)\s*$/m.exec(status.text);
-  return match?.[1]?.trim();
-}
-
-function trustedStatusPath(stateRoot, handle) {
-  const expected = path.resolve(stateRoot, "var", "plan-runs", handle.planId, "status.json");
-  if (typeof handle.statusPath !== "string" || path.resolve(handle.statusPath) !== expected) {
-    throw new Error("Plan handle status path is not trusted");
-  }
-}
-
-async function concreteBase(originRoot) {
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const run = promisify(execFile);
-  const { stdout } = await run("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: originRoot });
-  return stdout.trim();
-}
-
-function bootstrap(binding) {
-  return `You are the dedicated Plan Runner. Your first action must be plan_open with this exact bootstrap JSON:\n${JSON.stringify(binding)}\nYou may create commits only in the dedicated plan branch. Do not merge or push.`;
-}
+const DEFAULT_PI_SUBAGENTS_ENTRY = fileURLToPath(new URL("../../../pi/npm/node_modules/pi-subagents", import.meta.url));
 
 function interactive(ctx) {
   return ctx?.mode === "tui" && ctx?.hasUI === true;
@@ -62,19 +26,26 @@ function runRequest(args, ctx, id) {
   if (typeof args !== "string" || !args.trim()) throw new Error("noninteractive plan-run requires JSON with allowPlanCommits: true");
   let request;
   try { request = JSON.parse(args); } catch { throw new Error("noninteractive plan-run requires JSON with allowPlanCommits: true"); }
-  if (!request || typeof request !== "object" || Array.isArray(request) || typeof request.planPath !== "string" || !request.planPath.trim() || request.allowPlanCommits !== true) {
+  if (!request || typeof request !== "object" || Array.isArray(request)
+    || typeof request.planPath !== "string" || !request.planPath.trim() || request.allowPlanCommits !== true) {
     throw new Error("noninteractive plan-run requires JSON with allowPlanCommits: true");
   }
   return { planPath: request.planPath, planId: request.planId ?? id() };
 }
 
 function validHandle(handle) {
-  return HANDLE_FIELDS.every((field) => typeof handle[field] === "string" && handle[field]);
+  return handle?.schemaVersion === HANDLE_SCHEMA
+    && typeof handle.planId === "string" && PLAN_ID.test(handle.planId) && !handle.planId.includes("..")
+    && typeof handle.planHash === "string" && handle.planHash
+    && typeof handle.hostRunId === "string" && handle.hostRunId
+    && typeof handle.processIdentity === "string" && handle.processIdentity
+    && Number.isInteger(handle.pid) && handle.pid > 0
+    && ["runDir", "sessionFile", "statusPath", "worktree", "startedAt"].every((field) => typeof handle[field] === "string" && handle[field]);
 }
 
 function persistedHandlePath(stateRoot, planId) {
   if (typeof planId !== "string" || !PLAN_ID.test(planId) || planId.includes("..")) throw new Error("Invalid planId");
-  return path.resolve(stateRoot, "var", "plan-runs", planId, "parent-handle.json");
+  return path.resolve(stateRoot, "var", "plan-runs", planId, "host-handle.json");
 }
 
 async function persistHandle(stateRoot, handle) {
@@ -86,187 +57,173 @@ async function persistHandle(stateRoot, handle) {
 }
 
 async function readPersistedHandle(stateRoot, planId) {
-  const file = persistedHandlePath(stateRoot, planId);
   let handle;
   try {
-    handle = JSON.parse(await readFile(file, "utf8"));
+    handle = JSON.parse(await readFile(persistedHandlePath(stateRoot, planId), "utf8"));
   } catch (error) {
     if (error?.code === "ENOENT") return undefined;
     throw error;
   }
-  if (!validHandle(handle) || handle.planId !== planId) throw new Error("Persisted Plan handle is invalid");
-  trustedStatusPath(stateRoot, handle);
-  const expectedWorktree = path.resolve(stateRoot, "var", "plan-worktrees", planId);
-  if (path.resolve(handle.worktree) !== expectedWorktree) throw new Error("Persisted Plan worktree is not trusted");
+  if (handle?.schemaVersion !== HANDLE_SCHEMA) throw new Error("Legacy Plan handle requires explicit migration to v3");
+  if (!validHandle(handle) || handle.planId !== planId) throw new Error("Persisted v3 Plan handle is invalid");
   return handle;
 }
 
-async function defaultRuntimeStatus(asyncDir) {
-  return JSON.parse(await readFile(path.join(asyncDir, "status.json"), "utf8"));
+async function concreteBase(originRoot) {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { stdout } = await promisify(execFile)("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: originRoot });
+  return stdout.trim();
 }
 
-async function waitForSessionFile(readStatus, asyncDir, runId, { intervalMs = 50, timeoutMs = 5_000 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() <= deadline) {
-    try {
-      const status = await readStatus(asyncDir);
-      if (status?.runId && status.runId !== runId) throw new Error("Plan runner status runId does not match spawn reply");
-      const sessionFile = status?.sessionFile ?? status?.steps?.[0]?.sessionFile;
-      if (typeof sessionFile === "string" && sessionFile) return sessionFile;
-    } catch (error) {
-      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+function trustedHandle(stateRoot, handle) {
+  if (!validHandle(handle)) throw new Error("Plan handle must be pi-plan-handle.v3");
+  const runRoot = path.resolve(stateRoot, "var", "plan-runs", handle.planId);
+  const expectedStatus = path.join(runRoot, "status.json");
+  const expectedRunDir = path.join(runRoot, "host");
+  const expectedWorktree = path.resolve(stateRoot, "var", "plan-worktrees", handle.planId);
+  if (path.resolve(handle.statusPath) !== expectedStatus || path.resolve(handle.runDir) !== expectedRunDir
+    || path.resolve(handle.worktree) !== expectedWorktree) {
+    throw new Error("Plan v3 handle contains an untrusted path");
   }
-  throw new Error("Plan runner session artifact timed out");
+  return handle;
 }
 
-async function waitForTerminalRuntime(readStatus, asyncDir, { intervalMs = 50, timeoutMs = 5_000 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() <= deadline) {
-    try {
-      const status = await readStatus(asyncDir);
-      const state = runtimeState(status);
-      if (terminal(state)) return state;
-    } catch (error) {
-      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+function planPathInWorktree({ originRoot, worktree, planPath }) {
+  const relative = path.relative(originRoot, path.resolve(planPath));
+  if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) return path.join(worktree, relative);
+  return path.join(worktree, ".pi-plan-runtime", "approved-plan.md");
+}
+
+function toolResult(value, isError = false) {
+  return {
+    content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+function pendingAttention(plan, { planId, requestId, expectedProjectionVersion }) {
+  if (plan?.planId !== undefined && plan.planId !== planId) throw new Error("Plan Attention planId does not match");
+  if (!Number.isInteger(expectedProjectionVersion) || expectedProjectionVersion < 1) {
+    throw new Error("Plan Attention projection version is invalid");
   }
-  throw new Error("Plan cancellation is not confirmed by a terminal artifact");
-}
-
-async function writePlanRunnerRuntimeWrapper(worktree, entry, lifecycle) {
-  const wrapper = path.join(worktree, PLAN_RUNNER_RUNTIME_PATH);
-  await mkdir(path.dirname(wrapper), { recursive: true });
-  await writeFile(wrapper, `import planRunner from ${JSON.stringify(pathToFileURL(entry).href)};\nimport { startParentLeaseWatchdog } from ${JSON.stringify(pathToFileURL(PARENT_LIFECYCLE_ENTRY).href)};\nconst lifecycle = ${JSON.stringify(lifecycle)};\nexport default function (pi) {\n  startParentLeaseWatchdog(lifecycle);\n  planRunner(pi);\n}\n`);
-  return wrapper;
+  const matches = [];
+  for (const task of plan?.tasks ?? []) {
+    for (const attempt of task.attempts ?? []) {
+      if (attempt.status !== "waiting-attention" || attempt.attention?.status !== "pending"
+        || attempt.attention.requestId !== requestId) continue;
+      matches.push({ taskId: task.taskId, attemptId: attempt.attemptId, runId: attempt.runId, attention: attempt.attention });
+    }
+  }
+  if (matches.length !== 1) throw new Error("Plan Attention does not match exactly one pending Attempt");
+  if (matches[0].attention.projectionVersion !== expectedProjectionVersion) {
+    throw new Error("Plan Attention projection version is stale");
+  }
+  return matches[0];
 }
 
 export function createPlanLauncherExtension(pi, options = {}) {
-  const originRoot = options.originRoot ?? process.cwd();
-  const stateRoot = options.stateRoot ?? originRoot;
-  const rpc = () => options.createRpcClient?.() ?? createSubagentsRpcClient(pi.events);
-  const readRuntimeStatus = options.readRuntimeStatus ?? defaultRuntimeStatus;
+  const originRoot = path.resolve(options.originRoot ?? process.cwd());
+  const stateRoot = path.resolve(options.stateRoot ?? originRoot);
   const planRunnerEntry = options.planRunnerEntry ?? DEFAULT_PLAN_RUNNER_ENTRY;
-  const parentLeaseTimeoutMs = options.parentLeaseTimeoutMs ?? 5_000;
-  const control = options.planControl ?? createPlanControl({
-    stateRoot,
-    id: options.id,
-    intervalMs: options.pollIntervalMs,
-    timeoutMs: options.cancelTimeoutMs,
+  const hostRuntime = options.hostRuntime ?? createPlanHostRuntime({
+    emitAttention: (message) => pi.sendMessage?.(message, { triggerTurn: true, deliverAs: "followUp" }),
+    extraExtensions: [DEFAULT_PI_SUBAGENTS_ENTRY],
+    noExtensions: true,
   });
-  const activeRuns = new Map();
-  const releaseRun = async (run) => {
-    if (!run || run.released) return;
-    run.released = true;
-    activeRuns.delete(run.handle.runId);
-    const errors = [];
-    try {
-      await run.lease.stop();
-    } catch (error) {
-      errors.push(error);
-    }
-    try {
-      await run.lease.remove();
-    } catch (error) {
-      errors.push(error);
-    }
-    if (errors.length) throw new AggregateError(errors, "Plan lease release failed");
-  };
-  const stopRun = async (run) => {
-    const errors = [];
-    try {
-      await rpc().stop({ runId: run.handle.runId });
-      await waitForTerminalRuntime(readRuntimeStatus, run.handle.asyncDir, {
-        intervalMs: options.pollIntervalMs,
-        timeoutMs: options.cancelTerminalTimeoutMs ?? options.cancelTimeoutMs,
-      });
-    } catch (error) {
-      errors.push(error);
-    }
-    try {
-      await releaseRun(run);
-    } catch (error) {
-      errors.push(error);
-    }
-    if (errors.length) throw new AggregateError(errors, `Plan ${run.handle.planId} stop failed`);
-  };
-  const getHandle = async (planId, ctx) => {
+  const control = options.planControl ?? createPlanControl({ stateRoot, id: options.id, now: options.now });
+  const activeHandles = new Map();
+  const attentionPollers = new Map();
+  const schedule = options.schedule ?? setInterval;
+  const cancelSchedule = options.cancelSchedule ?? clearInterval;
+  const attentionPollIntervalMs = options.attentionPollIntervalMs ?? 1_000;
+
+  function stopAttentionPoller(hostRunId) {
+    const timer = attentionPollers.get(hostRunId);
+    if (timer === undefined) return;
+    cancelSchedule(timer);
+    attentionPollers.delete(hostRunId);
+  }
+
+  function startAttentionPoller(handle) {
+    if (attentionPollers.has(handle.hostRunId)) return;
+    let polling = false;
+    const timer = schedule(async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const observed = await hostRuntime.status(handle);
+        if (["complete", "failed", "stopped"].includes(observed.host?.state)
+          || ["validated", "blocked", "cancelled", "interrupted"].includes(observed.plan?.lifecycle)) {
+          stopAttentionPoller(handle.hostRunId);
+        }
+      } catch {
+        // Durable status remains authoritative; a later poll or explicit status can retry.
+      } finally {
+        polling = false;
+      }
+    }, attentionPollIntervalMs);
+    timer?.unref?.();
+    attentionPollers.set(handle.hostRunId, timer);
+  }
+
+  async function getHandle(planId, ctx) {
     const provided = await options.findHandle?.(planId, ctx);
-    if (provided) return provided;
-    return handleEntries(ctx).find((handle) => handle.planId === planId) ?? readPersistedHandle(stateRoot, planId);
-  };
+    if (provided) return trustedHandle(stateRoot, provided);
+    const branch = ctx?.sessionManager?.getBranch?.() ?? [];
+    const fromSession = branch
+      .filter((entry) => entry?.customType === HANDLE_TYPE)
+      .map((entry) => entry.data)
+      .find((handle) => handle.planId === planId);
+    const handle = fromSession ?? await readPersistedHandle(stateRoot, planId);
+    if (!handle) throw new Error(`Unknown plan: ${planId}`);
+    return trustedHandle(stateRoot, handle);
+  }
 
   async function launchPlan({ planPath, planId }, ctx = {}) {
     await access(planPath);
     const plan = parsePlanDocument(await readFile(planPath, "utf8"), planPath);
-    if (await getHandle(planId, ctx)) throw new Error(`Plan already exists: ${planId}`);
+    let existing;
+    try { existing = await getHandle(planId, ctx); } catch (error) {
+      if (!/Unknown plan/.test(error.message)) throw error;
+    }
+    if (existing) throw new Error(`Plan already exists: ${planId}`);
     const baseCommit = options.readBaseCommit ? await options.readBaseCommit(originRoot) : await concreteBase(originRoot);
     let workspaceLease;
-    let parentLease;
-    let runtimeWrapper;
+    let handle;
     try {
       workspaceLease = await (options.createWorkspace ?? createPlanWorkspace)({ originRoot, stateRoot, planId, baseCommit });
       const worktree = workspaceLease.workspacePath;
-      const worktreePlanPath = path.join(worktree, planPath);
+      const approvedPlanPath = planPathInWorktree({ originRoot, worktree, planPath });
       try {
-        await access(worktreePlanPath);
+        await access(approvedPlanPath);
       } catch {
-        await mkdir(path.dirname(worktreePlanPath), { recursive: true });
-        await copyFile(planPath, worktreePlanPath);
+        await mkdir(path.dirname(approvedPlanPath), { recursive: true });
+        await copyFile(planPath, approvedPlanPath);
       }
-      const token = crypto.randomUUID();
-      parentLease = (options.createParentLease ?? createParentLease)({
-        stateRoot,
+      const runDir = path.join(stateRoot, "var", "plan-runs", planId, "host");
+      const statusPath = path.join(stateRoot, "var", "plan-runs", planId, "status.json");
+      handle = await hostRuntime.spawnPlanRunner({
         planId,
-        token,
-        parentPid: process.pid,
-        intervalMs: options.parentLeaseIntervalMs,
-      });
-      await parentLease.beat();
-      runtimeWrapper = await writePlanRunnerRuntimeWrapper(worktree, planRunnerEntry, {
-        leasePath: parentLease.path,
-        planId,
-        token,
-        timeoutMs: parentLeaseTimeoutMs,
-      });
-      parentLease.start();
-      const spawned = await rpc().spawn({
-        agent: "plan-runner",
-        task: bootstrap({ planId, planPath, planHash: plan.sha256, baseCommit, worktree, allowPlanCommits: true }),
-        cwd: worktree,
-        context: "fresh",
-      });
-      const details = spawned?.details;
-      const result = details?.results?.[0] ?? {};
-      const sessionFile = typeof result.sessionFile === "string" && result.sessionFile
-        ? result.sessionFile
-        : await waitForSessionFile(readRuntimeStatus, details?.asyncDir, details?.runId, {
-          intervalMs: options.pollIntervalMs,
-          timeoutMs: options.spawnTimeoutMs,
-        });
-      const handle = {
-        planId,
+        planPath: approvedPlanPath,
         planHash: plan.sha256,
-        runId: details?.runId,
-        asyncDir: details?.asyncDir,
-        sessionFile,
-        statusPath: path.join(stateRoot, "var", "plan-runs", planId, "status.json"),
-        worktree,
-      };
-      if (!validHandle(handle)) throw new Error("Plan runner returned an incomplete lifecycle handle");
+        baseCommit,
+        originRoot,
+        stateRoot,
+        cwd: worktree,
+        extension: planRunnerEntry,
+        runDir,
+        statusPath,
+      });
+      trustedHandle(stateRoot, handle);
       await (options.persistHandle ?? persistHandle)(stateRoot, handle);
       pi.appendEntry(HANDLE_TYPE, handle);
-      activeRuns.set(handle.runId, { handle, lease: parentLease, released: false });
+      activeHandles.set(handle.hostRunId, handle);
+      startAttentionPoller(handle);
       ctx.ui?.notify?.(`${HANDLE_PREFIX}${JSON.stringify(handle)}`, "info");
       return handle;
     } catch (error) {
-      if (parentLease) {
-        await parentLease.stop();
-        await parentLease.remove();
-      }
-      if (runtimeWrapper) await rm(runtimeWrapper, { force: true });
+      if (handle) await hostRuntime.stop(handle).catch(() => {});
       if (workspaceLease) {
         try {
           await (options.rollbackWorkspace ?? rollbackPlanWorkspace)(workspaceLease);
@@ -281,20 +238,66 @@ export function createPlanLauncherExtension(pi, options = {}) {
   pi.registerTool({
     name: "plan_run",
     label: "Run plan",
-    description: "Launch an approved plan in a dedicated worktree via the plan-runner agent.",
+    description: "Launch an approved plan in a dedicated worktree via the standalone plan-runner.",
     parameters: {
       type: "object",
-      properties: { planPath: { type: "string", minLength: 1, description: "Path to the approved plan document" } },
+      properties: { planPath: { type: "string", minLength: 1 } },
       required: ["planPath"],
       additionalProperties: false,
     },
     async execute(_id, params, _signal, _update, ctx) {
       try {
-        const planId = options.id?.() ?? crypto.randomUUID();
-        const handle = await launchPlan({ planPath: params.planPath, planId }, ctx);
+        const handle = await launchPlan({ planPath: params.planPath, planId: options.id?.() ?? crypto.randomUUID() }, ctx);
         return { content: [{ type: "text", text: JSON.stringify(handle, null, 2) }] };
       } catch (error) {
         return { content: [{ type: "text", text: error instanceof Error ? error.message : "Plan launch failed." }], isError: true };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "plan_attention_reply",
+    label: "Reply to plan attention",
+    description: "Queue an explicit user decision for one pending durable Plan Attention request.",
+    parameters: {
+      type: "object",
+      properties: {
+        planId: { type: "string", minLength: 1 },
+        requestId: { type: "string", minLength: 1 },
+        expectedProjectionVersion: { type: "integer", minimum: 0 },
+        message: { type: "string", minLength: 1, maxLength: 65_536 },
+      },
+      required: ["planId", "requestId", "expectedProjectionVersion", "message"],
+      additionalProperties: false,
+    },
+    async execute(_id, params, _signal, _update, ctx) {
+      try {
+        if (typeof params.message !== "string" || !params.message.trim()) throw new Error("Plan Attention reply message is required");
+        const handle = await getHandle(params.planId, ctx);
+        const observed = await hostRuntime.status(handle);
+        const match = pendingAttention(observed.plan, params);
+        const command = {
+          planId: params.planId,
+          requestId: params.requestId,
+          taskId: match.taskId,
+          attemptId: match.attemptId,
+          runId: match.runId,
+          expectedProjectionVersion: params.expectedProjectionVersion,
+          message: params.message,
+          occurredAt: options.now?.() ?? new Date().toISOString(),
+        };
+        const prior = (await control.readAttentionReplies(params.planId))
+          .find((candidate) => candidate.requestId === params.requestId);
+        if (prior) {
+          for (const field of ["planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message"]) {
+            if (prior[field] !== command[field]) throw new Error("A different durable Plan Attention reply is already queued");
+          }
+        } else {
+          await control.writeAttentionReply(command);
+        }
+        return toolResult({ status: "queued", planId: params.planId, requestId: params.requestId });
+      } catch (error) {
+        return toolResult(error instanceof Error ? error.message : "Plan Attention reply failed.", true);
       }
     },
   });
@@ -303,29 +306,25 @@ export function createPlanLauncherExtension(pi, options = {}) {
     description: "Run an approved plan in a dedicated worktree.",
     async handler(args, ctx = {}) {
       const request = runRequest(args, ctx, () => options.id?.() ?? crypto.randomUUID());
-      if (interactive(ctx)) {
-        if (typeof ctx.ui?.confirm !== "function" || !(await ctx.ui.confirm("Authorize plan commits", "Allow commits in the dedicated plan branch only; merge and push remain forbidden?"))) {
-          throw new Error("Plan commit authorization was not confirmed");
-        }
+      if (interactive(ctx) && (typeof ctx.ui?.confirm !== "function"
+        || !(await ctx.ui.confirm("Authorize plan commits", "Allow commits in the dedicated plan branch only; merge and push remain forbidden?")))) {
+        throw new Error("Plan commit authorization was not confirmed");
       }
       return launchPlan(request, ctx);
     },
   });
 
+  // Root lifecycle does not own the Standalone Host lifetime.
   pi.on?.("session_shutdown", async () => {
-    const results = await Promise.allSettled([...activeRuns.values()].map(stopRun));
-    const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
-    if (errors.length) throw new AggregateError(errors, "Plan shutdown cleanup failed");
+    for (const hostRunId of attentionPollers.keys()) stopAttentionPoller(hostRunId);
   });
 
   pi.registerCommand("plan-status", {
-    description: "Read the Plan Session derived status.",
+    description: "Read Host and Plan domain status.",
     async handler(planId, ctx = {}) {
-      const handle = await getHandle(planId, ctx);
-      if (!handle) throw new Error(`Unknown plan: ${planId}`);
-      const status = JSON.parse(await readFile(handle.statusPath, "utf8"));
-      ctx.ui?.notify?.(JSON.stringify(status), "info");
-      return status;
+      const result = await hostRuntime.status(await getHandle(planId, ctx));
+      ctx.ui?.notify?.(JSON.stringify(result), "info");
+      return result;
     },
   });
 
@@ -333,60 +332,43 @@ export function createPlanLauncherExtension(pi, options = {}) {
     description: "Open the Plan Session artifact.",
     async handler(planId, ctx = {}) {
       const handle = await getHandle(planId, ctx);
-      if (!handle) throw new Error(`Unknown plan: ${planId}`);
-      const artifact = { sessionFile: handle.sessionFile, statusPath: handle.statusPath };
+      const artifact = { sessionFile: handle.sessionFile, statusPath: handle.statusPath, worktree: handle.worktree };
       ctx.ui?.notify?.(JSON.stringify(artifact), "info");
       return artifact;
     },
   });
 
   pi.registerCommand("plan-pause", {
-    description: "Interrupt a running Plan Session.",
+    description: "Interrupt a running Standalone Plan Runner.",
     async handler(planId, ctx = {}) {
-      const handle = await getHandle(planId, ctx);
-      if (!handle) throw new Error(`Unknown plan: ${planId}`);
-      return rpc().interrupt({ runId: handle.runId });
+      await hostRuntime.interrupt(await getHandle(planId, ctx));
     },
   });
 
   pi.registerCommand("plan-cancel", {
-    description: "Cancel a Plan Session after recording child intent.",
-      async handler(planId, ctx = {}) {
-        const handle = await getHandle(planId, ctx);
-        if (!handle) throw new Error(`Unknown plan: ${planId}`);
-        trustedStatusPath(stateRoot, handle);
-        if (typeof options.recordCancelIntent === "function") await options.recordCancelIntent(handle);
-        else await control.requestCancel(handle);
-        const run = activeRuns.get(handle.runId);
-        await rpc().stop({ runId: handle.runId });
-        const rawState = await waitForTerminalRuntime(readRuntimeStatus, handle.asyncDir, {
-          intervalMs: options.pollIntervalMs,
-          timeoutMs: options.cancelTerminalTimeoutMs ?? options.cancelTimeoutMs,
-        });
-        if (run) await releaseRun(run);
-        return `Plan ${planId} cancelled (upstream state: ${rawState}).`;
+    description: "Persist cancellation intent and stop the Standalone Host.",
+    async handler(planId, ctx = {}) {
+      const handle = await getHandle(planId, ctx);
+      if (typeof options.recordCancelIntent === "function") await options.recordCancelIntent(handle);
+      else await control.requestCancel({ planId: handle.planId, runId: handle.hostRunId });
+      await hostRuntime.stop(handle);
+      stopAttentionPoller(handle.hostRunId);
+      activeHandles.delete(handle.hostRunId);
+      return `Plan ${planId} cancelled.`;
     },
   });
 
   pi.registerCommand("plan-recover", {
-    description: "Reconcile an existing Plan Session without spawning.",
+    description: "Attach a verified v3 Host handle without spawning.",
     async handler(planId, ctx = {}) {
       const handle = await getHandle(planId, ctx);
-      if (!handle) throw new Error(`Unknown plan: ${planId}`);
-      const status = await rpc().status({ runId: handle.runId });
-      const recovery = {
-        runId: handle.runId,
-        asyncDir: handle.asyncDir,
-        sessionFile: handle.sessionFile,
-        worktree: handle.worktree,
-        status,
-      };
-      if (!activeRuns.has(handle.runId) && !terminal(runtimeState(status))) {
-        recovery.ownerState = "orphaned-owner";
-        recovery.blocked = true;
+      const result = await hostRuntime.reconcile(handle);
+      if (result.attached) {
+        activeHandles.set(handle.hostRunId, handle);
+        startAttentionPoller(handle);
       }
-      ctx.ui?.notify?.(JSON.stringify(recovery), "info");
-      return recovery;
+      ctx.ui?.notify?.(JSON.stringify(result), "info");
+      return result;
     },
   });
 }

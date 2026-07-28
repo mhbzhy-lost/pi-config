@@ -5,18 +5,33 @@ import { createPlanCoordinator } from "../scripts/lib/plan/coordinator.mjs";
 
 const workspace = {
   originRoot: "/repo",
-  worktree: "/worktree",
+  worktree: "/accumulator",
   baseCommit: "base",
-  headCommit: "head",
+  headCommit: "base",
   planPath: "/repo/docs/plan.md",
   planHash: "a".repeat(64),
 };
 
-function plan(tasks = [
-  { id: "task-1", deps: [], agent: "executor", title: "创建 smoke test 文件", files: ["sandbox/smoke.txt"], body: "**Files:**\n- Create: `sandbox/smoke.txt`" },
-  { id: "task-2", deps: [], agent: "reviewer", title: "审查结果", files: ["sandbox/smoke.txt"], body: "**Files:**\n- Modify: `sandbox/smoke.txt`" },
-]) {
-  return { tasks };
+function task(id, { deps = [], resources = [], allowedPaths = [`src/${id}/**`] } = {}) {
+  return {
+    id,
+    deps,
+    agent: "executor",
+    title: `Implement ${id}`,
+    files: allowedPaths,
+    allowedPaths,
+    resources,
+    body: "",
+  };
+}
+
+function plan(tasks = [task("task-1"), task("task-2")], capacities = {}) {
+  return {
+    schemaVersion: "pi-plan.v2",
+    tasks,
+    resourceCapacities: capacities,
+    verification: ["true"],
+  };
 }
 
 function createdEntry(tasks = ["task-1", "task-2"]) {
@@ -30,164 +45,338 @@ function createdEntry(tasks = ["task-1", "task-2"]) {
   };
 }
 
-function coordinator({ entries = [createdEntry()], nestedResults = [], statuses = new Map() } = {}) {
-  const appended = [];
-  const result = createPlanCoordinator({
-    plan: plan(),
-    entries,
-    append: (entry) => appended.push(entry),
-    id: (() => {
-      let index = 0;
-      return () => `event-${++index}`;
-    })(),
-    now: () => "2026-07-15T00:00:01.000Z",
-    nestedResults: () => nestedResults,
-    readStatus: (asyncDir) => statuses.get(asyncDir),
-  });
-  return { ...result, appended };
+function lease(input) {
+  return {
+    planId: input.planId,
+    taskId: input.taskId,
+    attemptId: input.attemptId,
+    baseCommit: input.baseCommit,
+    path: `/attempts/${input.attemptId}`,
+    branch: `pi-plan-attempt/${input.planId}/${input.taskId}/${input.attemptId.split("-").at(-1)}`,
+    ownerToken: `${input.attemptId}-owner`,
+  };
 }
 
-test("authorizes only the earliest runnable task with exact fresh async parameters", () => {
-  const { coordinator: subject, appended } = coordinator();
+function harness({ approvedPlan = plan(), entries, backend: backendOverrides = {}, allocation = lease, options = {} } = {}) {
+  const appended = [];
+  const spawned = [];
+  const allocations = [];
+  let run = 0;
+  const backend = {
+    async spawn(input) {
+      spawned.push(input);
+      run++;
+      return {
+        dispatchId: input.dispatchId,
+        attemptId: input.attemptId,
+        runId: `run-${run}`,
+        asyncDir: `/async/run-${run}`,
+        cwd: input.cwd,
+        sessionId: "plan-session",
+      };
+    },
+    async status() {
+      return { status: { kind: "stable", value: { state: "running" } } };
+    },
+    ...backendOverrides,
+  };
+  const result = createPlanCoordinator({
+    plan: approvedPlan,
+    entries: entries ?? [createdEntry(approvedPlan.tasks.map(({ id }) => id))],
+    append: (entry) => appended.push(entry),
+    allocateWorkspace: async (input) => {
+      allocations.push(input);
+      return allocation(input);
+    },
+    backend,
+    readAttemptHead: async (workspaceLease) => `${workspaceLease.attemptId}-commit`,
+    stateRoot: "/repo",
+    outputForAttempt: (attemptId) => `/results/${attemptId}.json`,
+    id: (() => { let index = 0; return () => `event-${++index}`; })(),
+    now: () => "2026-07-15T00:00:01.000Z",
+    ...options,
+  });
+  return { ...result, appended, spawned, allocations, backend };
+}
 
-  const intent = subject.authorizeNext();
+test("dispatches every authorized root with isolated cwd and returns no model-callable tool", async () => {
+  const approvedPlan = plan([
+    task("task-1", { resources: [{ id: "xcode", mode: "exclusive" }] }),
+    task("task-2", { resources: [{ id: "xcode", mode: "exclusive" }] }),
+    task("task-3", { allowedPaths: ["docs/**"] }),
+  ], { xcode: 1 });
+  const { coordinator, appended, spawned } = harness({ approvedPlan });
 
-  assert.deepEqual(intent.tool, {
+  const result = await coordinator.dispatchAuthorized();
+
+  assert.equal(result.state, "waiting-executors");
+  assert.deepEqual(result.dispatched.map(({ taskId }) => taskId), ["task-1", "task-3"]);
+  assert.notEqual(result.dispatched[0].cwd, result.dispatched[1].cwd);
+  assert.equal(result.dispatched.every((dispatch) => !("tool" in dispatch)), true);
+  assert.deepEqual(appended.map(({ type }) => type), [
+    "attempt.workspace-allocated", "attempt.dispatch-requested", "attempt.bound",
+    "attempt.workspace-allocated", "attempt.dispatch-requested", "attempt.bound",
+  ]);
+  assert.deepEqual(spawned.map(({ cwd }) => cwd), [
+    "/attempts/attempt-plan-1-task-1-1",
+    "/attempts/attempt-plan-1-task-3-1",
+  ]);
+  assert.deepEqual(spawned.map(({ dispatchId }) => dispatchId), [
+    "attempt-plan-1-task-1-1.dispatch.1",
+    "attempt-plan-1-task-3-1.dispatch.1",
+  ]);
+});
+
+test("derives immutable backend input from the approved task and allocated lease", async () => {
+  const approvedPlan = plan([task("task-1", { allowedPaths: ["src/a/**"] })]);
+  const { coordinator, spawned, appended } = harness({ approvedPlan });
+  await coordinator.dispatchAuthorized();
+
+  assert.deepEqual(spawned[0], {
+    dispatchId: "attempt-plan-1-task-1-1.dispatch.1",
+    attemptId: "attempt-plan-1-task-1-1",
     agent: "executor",
-    task: intent.tool.task,
-    cwd: "/worktree",
+    task: [
+      "Execute plan task task-1: Implement task-1.",
+      "Allowed paths: src/a/**",
+      "Commit all changes in the attempt worktree when done.",
+      "If an approved fail-closed prerequisite requires stopping without task file changes or a commit, write this JSON shape to the authoritative output:",
+      '{"attempt_id":"attempt-plan-1-task-1-1","task_id":"task-1","status":"blocked","reason":"<code>","blockers":["<sorted-code>"],"changed_files":[],"commit":null}',
+      "An optional artifact object may contain a sha256 evidence digest. Never include secrets, credentials, URLs, or local paths.",
+    ].join("\n"),
+    cwd: "/attempts/attempt-plan-1-task-1-1",
+    output: "/results/attempt-plan-1-task-1-1.json",
+    timeoutMs: 900_000,
+  });
+  const intent = appended.find(({ type }) => type === "attempt.dispatch-requested");
+  assert.equal(intent.data.tool.cwd, spawned[0].cwd);
+  assert.equal(intent.data.tool.worktree, false);
+  assert.equal(intent.data.tool.acceptance, false);
+  assert.match(intent.data.toolHash, /^[a-f0-9]{64}$/);
+});
+
+test("blocks and preserves the allocated workspace when backend spawn is uncertain", async () => {
+  const { coordinator, appended, allocations } = harness({
+    approvedPlan: plan([task("task-1")]),
+    backend: { async spawn() { throw new Error("RPC reply lost"); } },
+  });
+
+  const result = await coordinator.dispatchAuthorized();
+
+  assert.equal(result.state, "blocked");
+  assert.equal(allocations.length, 1);
+  assert.deepEqual(appended.map(({ type }) => type), [
+    "attempt.workspace-allocated",
+    "attempt.dispatch-requested",
+    "plan.blocked",
+  ]);
+  assert.equal(appended.at(-1).data.reason, "dispatch_uncertain");
+});
+
+test("settles out-of-order completions against their exact attempt", async () => {
+  const { coordinator, appended } = harness();
+  const dispatched = await coordinator.dispatchAuthorized();
+  const [first, second] = dispatched.dispatched;
+
+  await coordinator.settleBoundAttempt("succeeded", second.attemptId);
+  await coordinator.settleBoundAttempt("failed", first.attemptId);
+
+  const settled = appended.filter(({ type }) => type === "attempt.settled");
+  assert.deepEqual(settled.map(({ data }) => [data.attemptId, data.outcome]), [
+    [second.attemptId, "succeeded"],
+    [first.attemptId, "failed"],
+  ]);
+});
+
+function requestedEntries() {
+  const attemptId = "attempt-plan-1-task-1-1";
+  const workspaceLease = lease({ planId: "plan-1", taskId: "task-1", attemptId, baseCommit: "base" });
+  const tool = {
+    agent: "executor",
+    task: "approved prompt",
+    cwd: workspaceLease.path,
     context: "fresh",
     async: true,
     clarify: false,
-    acceptance: { level: "none", reason: "plan-runner manages verification through dedicated gates" },
+    worktree: false,
+    output: "/results/attempt.json",
+    outputMode: "file-only",
+    acceptance: false,
+    artifacts: true,
+    timeoutMs: 900_000,
+  };
+  return [
+    createdEntry(["task-1"]),
+    { schemaVersion: "pi-plan-event.v1", eventId: "allocated", planId: "plan-1", occurredAt: "2026-07-15T00:00:01.000Z", type: "attempt.workspace-allocated", data: { attemptId, taskId: "task-1", baseCommit: "base", workspace: workspaceLease } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "requested", planId: "plan-1", occurredAt: "2026-07-15T00:00:02.000Z", type: "attempt.dispatch-requested", data: { attemptId, taskId: "task-1", dispatchId: `${attemptId}.dispatch.1`, baseCommit: "base", workspace: workspaceLease, tool, toolHash: "hash" } },
+  ];
+}
+
+test("recovery blocks an unbound dispatch instead of spawning it again", async () => {
+  const { coordinator, appended, spawned } = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries: requestedEntries(),
   });
-  assert.match(intent.tool.task, /task-1/);
-  assert.equal(appended[0].type, "attempt.dispatch-requested");
-  assert.equal(appended[0].data.taskId, "task-1");
-});
-
-test("allows exactly the persisted nested subagent intent once and rejects deviations", () => {
-  const { coordinator: subject } = coordinator();
-  const intent = subject.authorizeNext();
-
-  assert.throws(() => subject.authorizeNestedSubagent({ ...intent.tool, agent: "other" }), /does not match/);
-  assert.throws(() => subject.authorizeNestedSubagent({ ...intent.tool, cwd: "/other" }), /does not match/);
-  assert.throws(() => subject.authorizeNestedSubagent({ ...intent.tool, async: false }), /does not match/);
-  assert.equal(subject.authorizeNestedSubagent(intent.tool), true);
-  assert.throws(() => subject.authorizeNestedSubagent(intent.tool), /already consumed/);
-});
-
-test("authorizeNestedSubagent tolerates LLM-rephrased task text", () => {
-  const { coordinator: subject } = coordinator();
-  const intent = subject.authorizeNext();
-
-  assert.equal(subject.authorizeNestedSubagent({ ...intent.tool, task: "Rephrased by LLM: do task-1 now" }), true);
-});
-
-test("binds foreground and async structured nested results without parsing display text", () => {
-  const { coordinator: subject, appended } = coordinator();
-  subject.authorizeNext();
-
-  subject.bindNestedResult({
-    details: {
-      runId: "foreground-run",
-      results: [{ sessionFile: "/sessions/foreground.jsonl", artifactPaths: ["/artifacts/foreground"] }],
-    },
-    text: "runId: wrong-text-value",
-  });
-  assert.deepEqual(appended.at(-1).data, {
-    attemptId: "attempt-plan-1-task-1-1",
-    taskId: "task-1",
-    runId: "foreground-run",
-    asyncDir: null,
-    sessionFile: "/sessions/foreground.jsonl",
-  });
-
-  const { coordinator: asyncSubject, appended: asyncAppended } = coordinator();
-  asyncSubject.authorizeNext();
-  asyncSubject.bindNestedResult({ details: { runId: "async-run", asyncDir: "/async/run", results: [{ sessionFile: "/sessions/async.jsonl" }] } });
-  assert.deepEqual(asyncAppended.at(-1).data, {
-    attemptId: "attempt-plan-1-task-1-1",
-    taskId: "task-1",
-    runId: "async-run",
-    asyncDir: "/async/run",
-    sessionFile: "/sessions/async.jsonl",
-  });
-});
-
-test("does not accept a terminal attempt until explicit review acceptance", () => {
-  const { coordinator: subject, appended } = coordinator();
-  subject.authorizeNext();
-  subject.bindNestedResult({ details: { runId: "run-1", asyncDir: "/async" } });
-  subject.settleBoundAttempt("succeeded");
-
-  assert.equal(appended.some((entry) => entry.type === "task.accepted"), false);
-  subject.acceptReviewedTask("task-1");
-  assert.equal(appended.at(-1).type, "task.accepted");
-});
-
-test("creates a distinct retry attempt only after a failed attempt settles", () => {
-  const { coordinator: subject } = coordinator();
-  const first = subject.authorizeNext();
-  subject.bindNestedResult({ details: { runId: "run-1", asyncDir: "/async/1" } });
-  subject.settleBoundAttempt("failed");
-  const retry = subject.authorizeNext();
-
-  assert.notEqual(first.attemptId, retry.attemptId);
-  assert.equal(retry.attemptId, "attempt-plan-1-task-1-2");
-});
-
-test("blocks rather than resending an unbound persisted dispatch request", () => {
-  const { coordinator: subject, appended } = coordinator({
-    entries: [
-      createdEntry(),
-      {
-        schemaVersion: "pi-plan-event.v1", eventId: "requested", planId: "plan-1", occurredAt: "2026-07-15T00:00:01.000Z",
-        type: "attempt.dispatch-requested",
-        data: { attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", tool: { agent: "executor", task: "prompt", cwd: "/worktree", context: "fresh", async: true, clarify: false } },
-      },
-    ],
-  });
-
-  assert.equal(subject.recover().state, "blocked");
+  const result = await coordinator.recover({ facts: [] });
+  assert.equal(result.state, "blocked");
+  assert.equal(spawned.length, 0);
   assert.equal(appended.at(-1).type, "plan.blocked");
   assert.equal(appended.at(-1).data.reason, "dispatch_uncertain");
 });
 
-test("recovery binds persisted nested result, settles clear terminal status, and never respawns it", () => {
-  const { coordinator: subject, appended } = coordinator({
-    entries: [
-      createdEntry(),
-      {
-        schemaVersion: "pi-plan-event.v1", eventId: "requested", planId: "plan-1", occurredAt: "2026-07-15T00:00:01.000Z",
-        type: "attempt.dispatch-requested",
-        data: { attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", tool: { agent: "executor", task: "prompt", cwd: "/worktree", context: "fresh", async: true, clarify: false } },
-      },
-    ],
-    nestedResults: [{ details: { runId: "run-1", asyncDir: "/async/1", results: [{ sessionFile: "/sessions/one.jsonl" }] } }],
-    statuses: new Map([["/async/1", { state: "complete" }]]),
+test("recovery binds exactly one matching started fact and rejects ambiguous facts", async () => {
+  const fact = {
+    type: "execution.started",
+    dispatchId: "attempt-plan-1-task-1-1.dispatch.1",
+    attemptId: "attempt-plan-1-task-1-1",
+    runId: "run-1",
+    asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-plan-1-task-1-1",
+    state: "running",
+  };
+  const exact = harness({ approvedPlan: plan([task("task-1")]), entries: requestedEntries() });
+  assert.equal((await exact.coordinator.recover({ facts: [fact] })).state, "waiting-executors");
+  assert.equal(exact.appended.at(-1).type, "attempt.bound");
+
+  const ambiguous = harness({ approvedPlan: plan([task("task-1")]), entries: requestedEntries() });
+  const result = await ambiguous.coordinator.recover({ facts: [fact, { ...fact }] });
+  assert.equal(result.state, "blocked");
+  assert.equal(ambiguous.appended.at(-1).data.reason, "protocol_violation");
+});
+
+test("recovery keeps running artifacts active and settles terminal artifacts", async () => {
+  const requested = requestedEntries();
+  const bound = {
+    schemaVersion: "pi-plan-event.v1",
+    eventId: "bound",
+    planId: "plan-1",
+    occurredAt: "2026-07-15T00:00:03.000Z",
+    type: "attempt.bound",
+    data: {
+      attemptId: "attempt-plan-1-task-1-1",
+      taskId: "task-1",
+      dispatchId: "attempt-plan-1-task-1-1.dispatch.1",
+      runId: "run-1",
+      asyncDir: "/async/run-1",
+      sessionFile: null,
+    },
+  };
+  const running = harness({ approvedPlan: plan([task("task-1")]), entries: [...requested, bound] });
+  assert.equal((await running.coordinator.recover()).state, "waiting-executors");
+  assert.equal(running.appended.length, 0);
+
+  const complete = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries: [...requested, bound],
+    backend: { async status() { return { status: { kind: "stable", value: { state: "complete" } } }; } },
   });
-
-  const recovery = subject.recover();
-
-  assert.equal(recovery.state, "recovered");
-  assert.deepEqual(appended.map((entry) => entry.type), ["attempt.bound", "attempt.settled"]);
-  assert.throws(() => subject.authorizeNext(), /awaiting review/);
+  assert.equal((await complete.coordinator.recover()).state, "ready-to-integrate");
+  assert.equal(complete.appended.at(-1).type, "attempt.settled");
+  assert.equal(complete.appended.at(-1).data.outcome, "succeeded");
 });
 
-test("buildExecutionPrompt includes task title, files, and commit instruction", () => {
-  const { coordinator: subject } = coordinator();
-  const intent = subject.authorizeNext();
-  assert.match(intent.tool.task, /smoke test/);
-  assert.match(intent.tool.task, /sandbox\/smoke\.txt/);
-  assert.match(intent.tool.task, /commit/i);
+test("recovery preserves an explicit Executor block without reading or validating a commit", async () => {
+  let headReads = 0;
+  let validations = 0;
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    backend: { async status() { return { status: { kind: "stable", value: { state: "complete" } } }; } },
+    options: {
+      async readAttemptDisposition({ attemptId, taskId, output }) {
+        assert.equal(attemptId, "attempt-plan-1-task-1-1");
+        assert.equal(taskId, "task-1");
+        assert.equal(output, "/results/attempt-plan-1-task-1-1.json");
+        return {
+          status: "blocked",
+          reason: "real-module-candidates-not-ready",
+          blockers: ["cocoapods", "tbctx7_code_auth"],
+          evidenceSha256: "a".repeat(64),
+        };
+      },
+      async readAttemptHead() {
+        headReads++;
+        return "base";
+      },
+      async validateAttemptResult() {
+        validations++;
+        return { accepted: false, code: "NO_RESULT_COMMIT" };
+      },
+    },
+  });
+  await subject.coordinator.dispatchAuthorized();
+
+  const recovered = await subject.coordinator.recover();
+
+  assert.equal(recovered.state, "blocked");
+  assert.equal(headReads, 0);
+  assert.equal(validations, 0);
+  assert.deepEqual(subject.appended.slice(-2).map(({ type }) => type), [
+    "attempt.settled",
+    "plan.blocked",
+  ]);
+  assert.deepEqual(subject.appended.at(-2).data, {
+    attemptId: "attempt-plan-1-task-1-1",
+    outcome: "blocked",
+    blockerReason: "real-module-candidates-not-ready",
+    blockers: ["cocoapods", "tbctx7_code_auth"],
+    evidenceSha256: "a".repeat(64),
+  });
+  assert.deepEqual(subject.appended.at(-1).data, {
+    reason: "executor_blocked",
+    detail: {
+      attemptId: "attempt-plan-1-task-1-1",
+      taskId: "task-1",
+      blockerReason: "real-module-candidates-not-ready",
+      blockers: ["cocoapods", "tbctx7_code_auth"],
+      evidenceSha256: "a".repeat(64),
+    },
+  });
+  assert.equal(subject.coordinator.projection().attempts.get("attempt-plan-1-task-1-1").status, "blocked");
 });
 
-test("dispatch disables acceptance so plan gates control quality", () => {
-  const { coordinator: subject } = coordinator();
-  const intent = subject.authorizeNext();
-  assert.ok(intent.tool.acceptance, "dispatch should set acceptance");
-  assert.equal(intent.tool.acceptance.level, "none");
-  assert.equal(typeof intent.tool.acceptance.reason, "string");
-  assert.ok(intent.tool.acceptance.reason.length > 0);
+test("validates a completed Attempt, enqueues it, and drains integration before another dispatch frontier", async () => {
+  const calls = [];
+  const queued = [];
+  const integrationQueue = {
+    enqueue(attempt) { calls.push("enqueue"); queued.push(attempt); },
+    async drain() { calls.push("drain"); return { state: "waiting", integrated: [] }; },
+  };
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    backend: { async status() { return { status: { kind: "stable", value: { state: "complete" } } }; } },
+    options: {
+      integrationQueue,
+      integrationOwnerToken: "owner",
+      validateAttemptResult: async ({ lease: attemptLease }) => ({
+        accepted: true,
+        attemptId: attemptLease.attemptId,
+        baseCommit: attemptLease.baseCommit,
+        resultCommit: `${attemptLease.attemptId}-commit`,
+        changedPaths: ["src/task-1/a.mjs"],
+        diffSha256: "diff-hash",
+        evidence: [],
+      }),
+    },
+  });
+  await subject.coordinator.dispatchAuthorized();
+  calls.length = 0;
+  const recovered = await subject.coordinator.recover();
+
+  assert.equal(recovered.state, "ready-to-integrate");
+  assert.deepEqual(calls, ["enqueue"]);
+  assert.equal(queued[0].taskId, "task-1");
+  assert.equal(queued[0].validationHash.length, 64);
+  assert.deepEqual(subject.appended.slice(-2).map(({ type }) => type), ["attempt.settled", "attempt.validated"]);
+
+  await subject.coordinator.dispatchAuthorized();
+  assert.deepEqual(calls, ["enqueue", "drain"]);
+});
+
+test("failed attempts receive a new workspace and sequence on retry", async () => {
+  const { coordinator } = harness({ approvedPlan: plan([task("task-1")]) });
+  const first = await coordinator.dispatchAuthorized();
+  await coordinator.settleBoundAttempt("failed", first.dispatched[0].attemptId);
+  const retry = await coordinator.dispatchAuthorized();
+  assert.equal(retry.dispatched[0].attemptId, "attempt-plan-1-task-1-2");
+  assert.notEqual(retry.dispatched[0].cwd, first.dispatched[0].cwd);
 });

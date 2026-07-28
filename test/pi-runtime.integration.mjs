@@ -8,8 +8,8 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const shellIntegration = join(repoRoot, "scripts", "pi-shell.zsh");
 const piBinary = process.env.PI_REAL_BIN;
 
-test("real Pi RPC loads exactly the eight allowlisted skills", () => {
-  assert.ok(piBinary, "PI_REAL_BIN must point to Pi 0.80.6");
+test("real Pi RPC loads the controlled Skills plus audited package Skills", () => {
+  assert.ok(piBinary, "PI_REAL_BIN must point to a supported Pi 0.82.x runtime");
 
   const result = spawnSync(
     "zsh",
@@ -55,5 +55,18 @@ test("real Pi RPC loads exactly the eight allowlisted skills", () => {
     "skill:writing-skills",
     "skill:writing-plans",
     "skill:plan-runner-dispatch",
+    "skill:exa-search",
+    "skill:playwright",
+    "skill:browser-auth-session",
+    "skill:goal-contract",
+    "skill:mac-mini-worker",
+    "skill:normandy-cli",
+    "skill:tbctx7",
+    "skill:crash-analyzer-usage",
+    "skill:nanocompose-cli",
+    "skill:a1",
+    "skill:cache-stats",
+    "skill:external-llm-review-provider",
+    "skill:manage-providers",
   ]);
 });

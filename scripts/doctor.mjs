@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from "node:module";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFile as execFileCallback } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
@@ -9,8 +10,9 @@ import { loadDesiredSkills, parseSkillList } from "./lib/skill-whitelist.mjs";
 
 const execFile = promisify(execFileCallback);
 
-const PI_VERSION = "0.80.10";
-const PI_SUBAGENTS_VERSION = "0.34.0";
+const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1"];
+const PI_SUBAGENTS_VERSION = "0.37.0";
+const TYPEBOX_VERSION = "1.1.38";
 const BASIC_MEMORY_VERSION = "0.22.1";
 const EXPECTED_GLOBAL_SKILLS = [
   "external-llm-review",
@@ -21,15 +23,32 @@ const EXPECTED_GLOBAL_SKILLS = [
   "writing-skills",
   "writing-plans",
   "plan-runner-dispatch",
+  "subagent-dispatch",
   "exa-search",
   "playwright",
+  "browser-auth-session",
 ];
 const REQUIRED_PROFILES = {
   executor: { model: "codex-pool/gpt-5.6-terra", subagent: false, extensions: undefined },
   spark: { model: "codex-pool/gpt-5.3-codex-spark", subagent: false, extensions: undefined },
-  "plan-runner": { model: "codex-pool/gpt-5.6-sol", subagent: true, extensions: undefined, childExtension: ".pi-subagents/plan-runner-entry.mjs" },
+  "plan-runner": {
+    model: "codex-pool/gpt-5.6-sol",
+    subagent: false,
+    extensions: undefined,
+    childExtension: ".pi-subagents/plan-runner-entry.mjs",
+    requiredTools: ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "subagent_wait", "subagent_supervisor"],
+    forbiddenTools: ["subagent", "contact_supervisor"],
+  },
   "plan-reviewer": { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: undefined },
 };
+const LEGACY_RUNTIME_FILES = [
+  "scripts/lib/runtime/spawn.mjs",
+  "scripts/lib/runtime/monitor.mjs",
+  "scripts/lib/runtime/control.mjs",
+  "scripts/lib/runtime/stream.mjs",
+  "scripts/lib/runtime/index.mjs",
+];
+const REQUIRED_RPC_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop"];
 const LEGACY_TASK7_FILES = [
   "scripts/lib/subagent-jobs.mjs",
   "scripts/lib/subagent-extension.mjs",
@@ -43,6 +62,22 @@ async function readIfExists(path) {
   } catch {
     return null;
   }
+}
+
+function packageSource(entry) {
+  return typeof entry === "string" ? entry : entry?.source;
+}
+
+function hasDisabledSubagentResources(settings) {
+  const entry = settings?.packages?.find((candidate) => /^npm:pi-subagents(?:@|$)/.test(packageSource(candidate) ?? ""));
+  return Boolean(
+    entry
+    && typeof entry === "object"
+    && entry.source === `npm:pi-subagents@${PI_SUBAGENTS_VERSION}`
+    && ["extensions", "skills", "prompts", "themes"].every(
+      (resource) => Array.isArray(entry[resource]) && entry[resource].length === 0,
+    ),
+  );
 }
 
 function parseFrontmatter(content) {
@@ -101,6 +136,22 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     }
   }
 
+  const settingsSource = await readIfExists(join(repoRoot, "pi", "settings.json"));
+  try {
+    const settings = JSON.parse(settingsSource ?? "{}");
+    if (!hasDisabledSubagentResources(settings)) {
+      issues.push("pi-subagents package resources must all be disabled");
+    }
+  } catch {
+    issues.push("pi-subagents package resources must all be disabled");
+  }
+
+  try {
+    await access(join(repoRoot, "pi", "extensions", "subagent-runtime.ts"), constants.R_OK);
+  } catch {
+    issues.push("missing typed subagent runtime extension: pi/extensions/subagent-runtime.ts");
+  }
+
   try {
     await access(join(repoRoot, "scripts", "lib", "plan", "parent-lifecycle.mjs"), constants.R_OK);
   } catch {
@@ -108,8 +159,8 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   }
 
   const piVersion = await (options.readPiVersion ?? readInstalledPiVersion)();
-  if (piVersion !== PI_VERSION) {
-    issues.push(`unexpected Pi version: ${piVersion}; expected ${PI_VERSION}`);
+  if (!SUPPORTED_PI_VERSIONS.includes(piVersion)) {
+    issues.push(`unexpected Pi version: ${piVersion}; supported ${SUPPORTED_PI_VERSIONS.join(", ")}`);
   }
 
   const bmVersion = await (options.readBasicMemoryVersion ?? readInstalledBasicMemoryVersion)();
@@ -124,7 +175,14 @@ export async function inspectConfiguration(repoRoot, options = {}) {
       continue;
     }
     if (profile.model !== expected.model) issues.push(`unexpected ${name} model: ${profile.model ?? "unknown"}; expected ${expected.model}`);
-    if ((profile.tools ?? "").includes("subagent") !== expected.subagent) issues.push(`unexpected ${name} subagent capability`);
+    const tools = new Set((profile.tools ?? "").split(",").map((tool) => tool.trim()).filter(Boolean));
+    if (tools.has("subagent") !== expected.subagent) issues.push(`unexpected ${name} subagent capability`);
+    for (const tool of expected.requiredTools ?? []) {
+      if (!tools.has(tool)) issues.push(`missing ${name} control tool: ${tool}`);
+    }
+    for (const tool of expected.forbiddenTools ?? []) {
+      if (tools.has(tool)) issues.push(`forbidden ${name} control tool: ${tool}`);
+    }
     if (profile.extensions !== expected.extensions) issues.push(`unexpected ${name} extension isolation`);
     if (expected.childExtension && profile.subagentOnlyExtensions !== expected.childExtension) issues.push(`unexpected ${name} child extension`);
   }
@@ -153,6 +211,30 @@ export async function inspectConfiguration(repoRoot, options = {}) {
       await access(join(repoRoot, legacy));
       issues.push(`legacy Task 7 runtime still exists: ${legacy}`);
     } catch {}
+  }
+
+  for (const legacy of LEGACY_RUNTIME_FILES) {
+    try {
+      await access(join(repoRoot, legacy));
+      issues.push(`legacy generic Plan runtime still exists: ${legacy}`);
+    } catch {}
+  }
+
+  const hostSource = await readIfExists(join(repoRoot, "scripts", "lib", "plan", "plan-host-runtime.mjs"));
+  if (!hostSource?.includes("PI_SUBAGENT_CHILD") || !hostSource.includes("PI_SUBAGENT_FANOUT_CHILD")) {
+    issues.push("Standalone Plan Host does not reject child and fanout-child environments");
+  }
+  if (!hostSource?.includes("delete childEnv.PI_SUBAGENT_PARENT_SESSION")) {
+    issues.push("Standalone Plan Host does not rebuild its session identity");
+  }
+  if (/lib\/runtime|spawnExecutor/.test(hostSource ?? "")) {
+    issues.push("thin Plan Host retains an Executor or legacy runtime API");
+  }
+  for (const relativeSource of ["coordinator.mjs", "plan-runner-dependencies.mjs", "pi-subagents-execution-backend.mjs"]) {
+    const source = await readIfExists(join(repoRoot, "scripts", "lib", "plan", relativeSource));
+    if (/spawnPiAgent|createMonitor|stopAgent|interruptAgent/.test(source ?? "")) {
+      issues.push(`Executor production path retains legacy runtime: ${relativeSource}`);
+    }
   }
 
   try {
@@ -186,17 +268,44 @@ export async function inspectConfiguration(repoRoot, options = {}) {
       } catch (error) {
         issues.push(`pi-subagents RPC probe failed: ${error.message}`);
       }
+      const rpcSource = await readIfExists(join(packageRoot, "src", "extension", "rpc.ts"));
+      if (!rpcSource) {
+        issues.push("pi-subagents RPC v1 source is unavailable");
+      } else {
+        for (const method of REQUIRED_RPC_METHODS) {
+          if (!new RegExp(`(?:^|[\\s,\\[])['\"]${method}['\"](?:[\\s,\\]]|$)`).test(rpcSource)) {
+            issues.push(`pi-subagents RPC v1 method missing: ${method}`);
+          }
+        }
+      }
     }
   } catch {
     issues.push(`missing Pi package: pi-subagents@${PI_SUBAGENTS_VERSION}`);
+  }
+
+  const typeboxRoot = join(repoRoot, "pi", "npm", "node_modules", "typebox");
+  const typeboxPackagePath = join(typeboxRoot, "package.json");
+  try {
+    const metadata = JSON.parse(await readFile(typeboxPackagePath, "utf8"));
+    if (metadata.version !== TYPEBOX_VERSION) {
+      issues.push(`unexpected typebox version: ${metadata.version ?? "unknown"}; expected ${TYPEBOX_VERSION}`);
+    } else {
+      try {
+        createRequire(packagePath).resolve("typebox/compile");
+      } catch (error) {
+        issues.push(`typebox/compile is not resolvable from pi-subagents: ${error.message}`);
+      }
+    }
+  } catch {
+    issues.push(`missing Pi package: typebox@${TYPEBOX_VERSION}`);
   }
 
   return issues;
 }
 
 const LIMITATIONS = [
-  "limitation: pi-subagents stable RPC v1 does not expose native resume; paused plans require safe recovery, not resume",
-  "limitation: detached noninteractive Plan Runner exits after its first agent_end; compaction cannot safely continue to validated",
+  "limitation: an unbound RPC dispatch that cannot be uniquely reconciled enters dispatch_uncertain and is never spawned again automatically",
+  "limitation: formatted RPC status text is diagnostic only; Plan lifecycle uses event, Git, and official artifact facts",
 ];
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;

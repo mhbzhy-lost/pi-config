@@ -1,12 +1,124 @@
-import { applyEvent, createProjection } from "./plan-events.mjs";
-import { createPlanGraph, nextRunnableTask } from "./plan-graph.mjs";
+import { createHash } from "node:crypto";
 
-export function createPlanCoordinator({ plan, entries, append, id = () => crypto.randomUUID(), now = () => new Date().toISOString(), nestedResults = () => [], readStatus = () => undefined }) {
-  if (!Array.isArray(entries) || typeof append !== "function") throw new Error("entries and append are required");
-  const graph = createPlanGraph(plan);
+import { applyEvent, createProjection } from "./plan-events.mjs";
+import { compilePlanToIR } from "./ir/compile.mjs";
+import { authorizedFrontier } from "./ir/frontier.mjs";
+import { hashValidatedAttempt } from "./integration-queue.mjs";
+
+function sha256(value) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function replay(entries) {
+  let projection = createProjection();
+  for (const entry of entries) projection = applyEvent(projection, entry);
+  return projection;
+}
+
+function authorizationIR(plan) {
+  const compiled = compilePlanToIR(plan);
+  if (compiled.version === "plan-ir.v2") return compiled;
+  return Object.freeze({
+    version: "plan-ir.v2",
+    resourceCapacities: Object.freeze({}),
+    nodes: Object.freeze(compiled.nodes.map((node) => Object.freeze({
+      ...node,
+      allowedPaths: Object.freeze([...(node.files ?? [])]),
+      resources: Object.freeze([]),
+    }))),
+    edges: compiled.edges,
+    hash: null,
+    nodeFingerprints: Object.freeze({}),
+  });
+}
+
+function buildExecutionPrompt(task, attemptId) {
+  const paths = task.allowedPaths ?? task.files ?? [];
+  const blockedResult = JSON.stringify({
+    attempt_id: attemptId,
+    task_id: task.id,
+    status: "blocked",
+    reason: "<code>",
+    blockers: ["<sorted-code>"],
+    changed_files: [],
+    commit: null,
+  });
+  return [
+    `Execute plan task ${task.id}: ${task.title}.`,
+    ...(paths.length ? [`Allowed paths: ${paths.join(", ")}`] : []),
+    "Commit all changes in the attempt worktree when done.",
+    "If an approved fail-closed prerequisite requires stopping without task file changes or a commit, write this JSON shape to the authoritative output:",
+    blockedResult,
+    "An optional artifact object may contain a sha256 evidence digest. Never include secrets, credentials, URLs, or local paths.",
+  ].join("\n");
+}
+
+function nextAttemptId(projection, taskId) {
+  const sequence = [...projection.attempts.values()].filter((attempt) => attempt.taskId === taskId).length + 1;
+  return `attempt-${projection.planId}-${taskId}-${sequence}`;
+}
+
+function runtimeState(artifacts) {
+  return artifacts?.status?.kind === "stable" ? artifacts.status.value?.state : undefined;
+}
+
+function terminalOutcome(state) {
+  if (state === "complete" || state === "completed") return "succeeded";
+  if (["failed", "stopped"].includes(state)) return "failed";
+  if (state === "paused") return "interrupted";
+  return undefined;
+}
+
+function activeAttempts(projection) {
+  return [...projection.attempts.entries()]
+    .filter(([, attempt]) => ["active", "waiting-attention"].includes(attempt.status))
+    .map(([attemptId, attempt]) => ({ attemptId, ...attempt }));
+}
+
+function requestedAttempts(projection) {
+  return [...projection.attempts.entries()]
+    .filter(([, attempt]) => attempt.status === "dispatch-requested")
+    .map(([attemptId, attempt]) => ({ attemptId, ...attempt }));
+}
+
+function attemptsForTask(projection, taskId) {
+  return [...projection.attempts.entries()]
+    .filter(([, attempt]) => attempt.taskId === taskId)
+    .map(([attemptId, attempt]) => ({ attemptId, ...attempt }));
+}
+
+function stateFor(projection) {
+  if (projection.lifecycle === "blocked") return "blocked";
+  if ([...projection.tasks.values()].every((task) => ["accepted", "integrated"].includes(task.status))) return "ready-to-verify";
+  if ([...projection.attempts.values()].some((attempt) => ["succeeded", "validated", "integration-requested"].includes(attempt.status))) {
+    return "ready-to-integrate";
+  }
+  if (activeAttempts(projection).length > 0 || requestedAttempts(projection).length > 0) return "waiting-executors";
+  return "waiting-resources";
+}
+
+export function createPlanCoordinator({
+  plan,
+  entries,
+  append,
+  allocateWorkspace,
+  backend,
+  stateRoot,
+  outputForAttempt = (attemptId) => `${stateRoot}/var/plan-runs/results/${attemptId}.json`,
+  readAttemptDisposition,
+  readAttemptHead,
+  validateAttemptResult,
+  verificationForTask = async () => [],
+  integrationQueue: initialIntegrationQueue,
+  integrationOwnerToken,
+  timeoutMs = 900_000,
+  id = () => crypto.randomUUID(),
+  now = () => new Date().toISOString(),
+} = {}) {
+  if (!plan || !Array.isArray(entries) || typeof append !== "function") throw new Error("plan, entries, and append are required");
+  const ir = authorizationIR(plan);
   let projection = replay(entries);
-  let expectedIntent = undefined;
-  let intentConsumed = false;
+  let integrationQueue = initialIntegrationQueue;
 
   function appendEvent(type, data) {
     const entry = {
@@ -17,186 +129,264 @@ export function createPlanCoordinator({ plan, entries, append, id = () => crypto
       type,
       data,
     };
-    const nextProjection = applyEvent(projection, entry);
+    const next = applyEvent(projection, entry);
     append(entry);
-    projection = nextProjection;
+    projection = next;
     return entry;
   }
 
-  function authorizeNext() {
-    if (pendingAttempt()) throw new Error("an attempt is already active");
-    const task = nextRunnableTask({ ...projection, graph });
-    if (!task) throw new Error("no runnable task");
-    if (attemptsForTask(task.id).some((attempt) => attempt.status === "succeeded")) {
-      throw new Error(`task is awaiting review: ${task.id}`);
-    }
-    const attemptId = nextAttemptId(projection, task.id);
-    const tool = {
-      agent: task.agent ?? "executor",
-      task: buildExecutionPrompt(plan, task, projection),
-      cwd: projection.workspace.worktree,
-      context: "fresh",
-      async: true,
-      clarify: false,
-      acceptance: { level: "none", reason: "plan-runner manages verification through dedicated gates" },
+  function block(reason, detail) {
+    if (projection.lifecycle !== "blocked") appendEvent("plan.blocked", { reason, ...(detail ? { detail } : {}) });
+    return {
+      state: "blocked",
+      dispatched: [],
+      projectionVersion: projection.version,
     };
-    appendEvent("attempt.dispatch-requested", { attemptId, taskId: task.id, tool });
-    expectedIntent = { attemptId, taskId: task.id, tool };
-    intentConsumed = false;
-    return { attemptId, tool };
   }
 
-  function authorizeNestedSubagent(tool) {
-    if (!expectedIntent) throw new Error("no dispatch intent");
-    if (intentConsumed) throw new Error("dispatch intent already consumed");
-    if (!sameTool(tool, expectedIntent.tool)) {
-      throw new Error(`nested subagent call does not match dispatch intent${toolMismatchHint(tool, expectedIntent.tool)}`);
-    }
-    intentConsumed = true;
-    return true;
-  }
-
-  function bindNestedResult(result, attempt = expectedIntent ?? requestedAttempt()) {
-    if (!attempt) throw new Error("no dispatch intent to bind");
-    const normalizedResult = result?.result ?? result;
-    const details = normalizedResult?.details;
-    if (!details || typeof details.runId !== "string" || details.runId === "") throw new Error("structured details.runId is required");
-    const first = Array.isArray(details.results) ? details.results[0] : undefined;
-    appendEvent("attempt.bound", {
-      attemptId: attempt.attemptId,
-      taskId: attempt.taskId,
-      runId: details.runId,
-      asyncDir: typeof details.asyncDir === "string" ? details.asyncDir : null,
-      sessionFile: typeof first?.sessionFile === "string" ? first.sessionFile : null,
-    });
-    expectedIntent = undefined;
-    intentConsumed = false;
-    return { attemptId: attempt.attemptId, terminalOutcome: foregroundOutcome(details) };
-  }
-
-  function settleBoundAttempt(outcome) {
-    const attempt = activeAttempt();
-    if (!attempt || attempt.status !== "active") throw new Error("no bound active attempt");
-    appendEvent("attempt.settled", { attemptId: attempt.attemptId, outcome });
-  }
-
-  function acceptReviewedTask(taskId) {
-    const task = projection.tasks.get(taskId);
-    if (!task || task.status !== "pending") throw new Error("task is not pending");
-    if (!attemptsForTask(taskId).some((attempt) => attempt.status === "succeeded")) {
-      throw new Error("task has no successful settled attempt");
-    }
-    appendEvent("task.accepted", { taskId });
-  }
-
-  function recover() {
-    const requested = requestedAttempt();
-    let persistedResult;
-    let boundOutcome;
-    if (requested) {
-      persistedResult = findPersistedResult(requested);
-      if (!persistedResult) {
-        appendEvent("plan.blocked", { reason: "dispatch_uncertain" });
-        return { state: "blocked", projection };
+  async function settleBoundAttempt(outcome, attemptId) {
+    const attempt = projection.attempts.get(attemptId);
+    if (!attempt || attempt.status !== "active") throw new Error(`no bound active attempt: ${attemptId}`);
+    let resultCommit;
+    if (outcome === "succeeded" && typeof readAttemptDisposition === "function") {
+      const disposition = await readAttemptDisposition({
+        attemptId,
+        taskId: attempt.taskId,
+        output: outputForAttempt(attemptId),
+      });
+      if (disposition?.status === "blocked") {
+        appendEvent("attempt.settled", {
+          attemptId,
+          outcome: "blocked",
+          blockerReason: disposition.reason,
+          blockers: disposition.blockers,
+          ...(disposition.evidenceSha256 ? { evidenceSha256: disposition.evidenceSha256 } : {}),
+        });
+        const detail = {
+          attemptId,
+          taskId: attempt.taskId,
+          blockerReason: disposition.reason,
+          blockers: disposition.blockers,
+          ...(disposition.evidenceSha256 ? { evidenceSha256: disposition.evidenceSha256 } : {}),
+        };
+        block("executor_blocked", detail);
+        return {
+          attemptId,
+          outcome: "blocked",
+          resultCommit: null,
+          validation: null,
+          projectionVersion: projection.version,
+        };
       }
-      boundOutcome = bindNestedResult(persistedResult, requested).terminalOutcome;
     }
-    const bound = activeAttempt();
-    const status = bound?.asyncDir ? readStatus(bound.asyncDir) : undefined;
-    const outcome = boundOutcome ?? terminalOutcome(runtimeState(status));
-    if (outcome) settleBoundAttempt(outcome);
-    return { state: "recovered", projection };
-  }
-
-  function attemptsForTask(taskId) {
-    return [...projection.attempts.entries()]
-      .filter(([, attempt]) => attempt.taskId === taskId)
-      .map(([attemptId, attempt]) => ({ attemptId, ...attempt }));
-  }
-
-  function attemptWithStatus(statuses) {
-    for (const [attemptId, attempt] of projection.attempts) {
-      if (statuses.includes(attempt.status)) return { attemptId, ...attempt };
+    if (outcome === "succeeded") {
+      if (typeof readAttemptHead !== "function") throw new Error("readAttemptHead is required to settle a successful attempt");
+      resultCommit = await readAttemptHead(attempt.workspace);
+      if (typeof resultCommit !== "string" || !resultCommit) throw new Error("successful attempt HEAD is unavailable");
     }
-    return undefined;
-  }
-
-  function pendingAttempt() {
-    return attemptWithStatus(["dispatch-requested", "active"]);
-  }
-
-  function requestedAttempt() {
-    return attemptWithStatus(["dispatch-requested"]);
-  }
-
-  function activeAttempt() {
-    return attemptWithStatus(["active"]);
-  }
-
-  function findPersistedResult(attempt) {
-    return nestedResults().find((candidate) => {
-      if (candidate?.attemptId !== undefined && candidate.attemptId !== attempt.attemptId) return false;
-      if (candidate?.tool !== undefined && !sameTool(candidate.tool, attempt.tool)) return false;
-      const result = candidate?.result ?? candidate;
-      return typeof result?.details?.runId === "string" && result.details.runId !== "";
-    });
-  }
-
-  return { coordinator: { authorizeNext, authorizeNestedSubagent, bindNestedResult, settleBoundAttempt, acceptReviewedTask, recover } };
-}
-
-function replay(entries) {
-  let projection = createProjection();
-  for (const entry of entries) projection = applyEvent(projection, entry);
-  return projection;
-}
-
-function buildExecutionPrompt(_plan, task) {
-  const lines = [`Execute plan task ${task.id}: ${task.title}.`];
-  if (task.files?.length) lines.push(`Files: ${task.files.join(", ")}`);
-  lines.push("Commit all changes in the worktree when done.");
-  return lines.join("\n");
-}
-
-const COMPARED_FIELDS = ["agent", "cwd", "context", "async", "clarify"];
-
-function sameTool(left, right) {
-  return COMPARED_FIELDS.every((field) => left?.[field] === right?.[field]);
-}
-
-function toolMismatchHint(actual, expected) {
-  const mismatches = [];
-  for (const field of COMPARED_FIELDS) {
-    const a = actual?.[field];
-    const e = expected?.[field];
-    if (a !== e) {
-      mismatches.push(`${field}: expected ${JSON.stringify(e)}, got ${JSON.stringify(a)}`);
+    appendEvent("attempt.settled", { attemptId, outcome, ...(resultCommit ? { resultCommit } : {}) });
+    let validation = null;
+    if (outcome === "succeeded" && typeof validateAttemptResult === "function") {
+      const node = ir.nodes.find((candidate) => candidate.id === attempt.taskId);
+      const attemptLease = {
+        ...attempt.workspace,
+        planId: projection.planId,
+        taskId: attempt.taskId,
+        attemptId,
+        baseCommit: attempt.baseCommit,
+      };
+      validation = await validateAttemptResult({
+        lease: attemptLease,
+        allowedPaths: node.allowedPaths,
+        verification: await verificationForTask(node.id),
+      });
+      if (!validation?.accepted) {
+        block("attempt_validation_failed", { attemptId, code: validation?.code ?? "invalid_result" });
+      } else {
+        const validatedAttempt = {
+          planId: projection.planId,
+          taskId: attempt.taskId,
+          attemptId,
+          resultCommit: validation.resultCommit,
+          diffSha256: validation.diffSha256,
+          changedPaths: validation.changedPaths,
+          evidence: validation.evidence,
+          workspace: attemptLease,
+          deps: [...node.deps],
+        };
+        validatedAttempt.validationHash = hashValidatedAttempt(validatedAttempt);
+        appendEvent("attempt.validated", {
+          attemptId,
+          resultCommit: validation.resultCommit,
+          validationHash: validatedAttempt.validationHash,
+          diffSha256: validation.diffSha256,
+          changedPaths: validation.changedPaths,
+          evidence: validation.evidence,
+        });
+        integrationQueue?.enqueue(validatedAttempt);
+      }
     }
+    return { attemptId, outcome, resultCommit: resultCommit ?? null, validation, projectionVersion: projection.version };
   }
-  if (mismatches.length === 0) return "";
-  return `\nField mismatches:\n${mismatches.map((m) => `  - ${m}`).join("\n")}\nRetry subagent() with the exact values shown above.`;
-}
 
-function terminalOutcome(state) {
-  if (state === "complete") return "succeeded";
-  if (state === "failed") return "failed";
-  if (state === "paused") return "interrupted";
-  return undefined;
-}
+  async function dispatchAuthorized() {
+    if (!projection.planId || ["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
+      throw new Error("Plan cannot dispatch executors");
+    }
+    if (typeof allocateWorkspace !== "function" || typeof backend?.spawn !== "function") {
+      throw new Error("Attempt workspace allocator and execution backend are required");
+    }
+    if (integrationQueue) {
+      const integration = await integrationQueue.drain({ expectedHead: projection.workspace.headCommit, ownerToken: integrationOwnerToken });
+      if (integration?.state === "blocked") return { state: "blocked", dispatched: [], projectionVersion: projection.version };
+    }
+    const authorization = authorizedFrontier(ir, projection);
+    if (!Array.isArray(authorization)) return block("authorization_deadlock", authorization);
+    const frontier = authorization.filter((node) => !attemptsForTask(projection, node.id)
+      .some((attempt) => ["succeeded", "validated", "integration-requested", "integrated"].includes(attempt.status)));
+    if (frontier.length === 0) {
+      return { state: stateFor(projection), dispatched: [], projectionVersion: projection.version };
+    }
 
-function runtimeState(status) {
-  if (status?.status?.kind === "stable") return status.status.value?.state;
-  return status?.state;
-}
+    const dispatched = [];
+    for (const node of frontier) {
+      const attemptId = nextAttemptId(projection, node.id);
+      const attemptBaseCommit = projection.workspace.headCommit;
+      const workspaceLease = await allocateWorkspace({
+        originRoot: projection.workspace.originRoot,
+        stateRoot,
+        planId: projection.planId,
+        taskId: node.id,
+        attemptId,
+        baseCommit: attemptBaseCommit,
+      });
+      appendEvent("attempt.workspace-allocated", {
+        attemptId,
+        taskId: node.id,
+        baseCommit: attemptBaseCommit,
+        workspace: workspaceLease,
+      });
+      const dispatchId = `${attemptId}.dispatch.1`;
+      const prompt = buildExecutionPrompt(node, attemptId);
+      const output = outputForAttempt(attemptId);
+      const tool = {
+        agent: "executor",
+        task: prompt,
+        cwd: workspaceLease.path,
+        context: "fresh",
+        async: true,
+        clarify: false,
+        worktree: false,
+        output,
+        outputMode: "file-only",
+        acceptance: false,
+        artifacts: true,
+        timeoutMs,
+      };
+      appendEvent("attempt.dispatch-requested", {
+        attemptId,
+        taskId: node.id,
+        dispatchId,
+        baseCommit: attemptBaseCommit,
+        workspace: workspaceLease,
+        tool,
+        toolHash: sha256(tool),
+      });
 
-function foregroundOutcome(details) {
-  if (typeof details?.asyncDir === "string") return undefined;
-  const result = Array.isArray(details?.results) ? details.results[0] : undefined;
-  if (typeof result?.exitCode !== "number") return undefined;
-  return result.exitCode === 0 ? "succeeded" : "failed";
-}
+      let binding;
+      try {
+        binding = await backend.spawn({
+          dispatchId,
+          attemptId,
+          agent: "executor",
+          task: prompt,
+          cwd: workspaceLease.path,
+          output,
+          timeoutMs,
+        });
+        if (binding?.dispatchId !== dispatchId || binding?.attemptId !== attemptId
+          || binding?.cwd !== workspaceLease.path || typeof binding?.runId !== "string"
+          || typeof binding?.asyncDir !== "string") {
+          return block("protocol_violation", { attemptId, dispatchId });
+        }
+      } catch (error) {
+        const reason = error?.code?.includes?.("MISMATCH") ? "protocol_violation" : "dispatch_uncertain";
+        return block(reason, { attemptId, dispatchId, error: error instanceof Error ? error.message : String(error) });
+      }
+      appendEvent("attempt.bound", {
+        attemptId,
+        taskId: node.id,
+        dispatchId,
+        runId: binding.runId,
+        asyncDir: binding.asyncDir,
+        sessionFile: binding.sessionFile ?? null,
+      });
+      dispatched.push({
+        taskId: node.id,
+        attemptId,
+        dispatchId,
+        runId: binding.runId,
+        asyncDir: binding.asyncDir,
+        cwd: workspaceLease.path,
+      });
+    }
+    return { state: "waiting-executors", dispatched, projectionVersion: projection.version };
+  }
 
-function nextAttemptId(projection, taskId) {
-  const sequence = [...projection.attempts.values()].filter((attempt) => attempt.taskId === taskId).length + 1;
-  return `attempt-${projection.planId}-${taskId}-${sequence}`;
+  function matchingFacts(attempt, facts) {
+    return facts.filter((fact) => fact?.type === "execution.started"
+      && fact.dispatchId === attempt.dispatchId
+      && fact.attemptId === attempt.attemptId
+      && fact.cwd === attempt.workspace.path
+      && typeof fact.runId === "string"
+      && typeof fact.asyncDir === "string");
+  }
+
+  async function recover({ facts = [] } = {}) {
+    for (const attempt of requestedAttempts(projection)) {
+      const matching = matchingFacts(attempt, facts);
+      if (matching.length === 0) return block("dispatch_uncertain", { attemptId: attempt.attemptId, dispatchId: attempt.dispatchId });
+      if (matching.length > 1) return block("protocol_violation", { attemptId: attempt.attemptId, dispatchId: attempt.dispatchId });
+      const fact = matching[0];
+      appendEvent("attempt.bound", {
+        attemptId: attempt.attemptId,
+        taskId: attempt.taskId,
+        dispatchId: attempt.dispatchId,
+        runId: fact.runId,
+        asyncDir: fact.asyncDir,
+        sessionFile: fact.sessionFile ?? null,
+      });
+    }
+
+    for (const attempt of activeAttempts(projection)) {
+      if (attempt.status === "waiting-attention") continue;
+      const artifacts = await backend.status({ runId: attempt.runId, asyncDir: attempt.asyncDir });
+      const outcome = terminalOutcome(runtimeState(artifacts));
+      if (outcome) await settleBoundAttempt(outcome, attempt.attemptId);
+    }
+    return {
+      state: stateFor(projection),
+      dispatched: [],
+      projectionVersion: projection.version,
+    };
+  }
+
+  return {
+    coordinator: Object.freeze({
+      dispatchAuthorized,
+      recover,
+      settleBoundAttempt,
+      setIntegrationQueue(queue) {
+        if (integrationQueue && integrationQueue !== queue) throw new Error("Integration queue is already configured");
+        integrationQueue = queue;
+      },
+      appendIntegrationEvent(type, data) {
+        if (!["integration.requested", "integration.finished", "attempt.workspace-released", "plan.blocked"].includes(type)) {
+          throw new Error(`Invalid integration event: ${type}`);
+        }
+        return appendEvent(type, data);
+      },
+      projection: () => projection,
+    }),
+  };
 }

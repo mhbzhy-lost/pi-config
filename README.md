@@ -13,11 +13,11 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 ## 安装 Pi
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.10
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.82.1
 pi --version
 ```
 
-本仓当前只验证 Pi `0.80.10`。升级 Pi 前必须重新运行单元测试和真实集成测试。
+本仓已验证Pi `0.82.0`和`0.82.1`，初始化默认安装`0.82.1`。升级Pi前必须重新运行单元测试、Doctor、真实`pi-subagents`兼容门禁和Plan Harness smoke。
 
 ## 初始化
 
@@ -28,7 +28,8 @@ pi --version
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
 - 初始化 Git submodule。
-- 安装并固定 Pi `0.80.10`。
+- 安装并固定 Pi `0.82.1`。
+- 在 `pi/npm` 顶层精确安装 `pi-subagents@0.37.0` 与 `typebox@1.1.38`。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
 
@@ -115,9 +116,9 @@ basic-memory doctor --local
 
 ## 计划执行仓
 
-批准计划通过 `/plan-run <计划路径>` 在独立 Session 和 worktree 中执行；完成验证不会自动合回或
-push。Parent 只负责启动与观察，不接管旧的运行中子会话，重启不会继续旧执行。暂停/恢复和 detached
-compaction 延续不属于此功能范围。状态、取消和 Gate 范围见[Pi 计划执行仓说明](docs/pi-plan-execution-capsule.md)。
+批准计划通过`/plan-run <计划路径>`启动thin Host和Standalone Plan Runner，并在独立accumulator/Attempt worktree中执行。无路径或资源冲突的Task可以并行；Executor只由官方`pi-subagents` RPC派发。
+
+完成必须同时满足Plan终态为`validated`、`validatedHead == headCommit`以及accumulator产物审查通过。Host退出、Executor进程退出或格式化status文本都不能单独证明完成。验证不会自动合回或push；Attention、恢复、dispatch uncertain、单Writer集成和显式merge-back见[Pi计划执行仓说明](docs/pi-plan-execution-capsule.md)及[Harness运行手册](docs/knowledge/plan-runner-pi-subagents-harness.md)。
 
 ## 升级 Superpowers
 

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVER="tiga-ssot-dp3"
+ENVIRONMENT="pre"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  dp3-mcp [--env daily|pre|prod] list
+  dp3-mcp [--env daily|pre|prod] describe TOOL
+  dp3-mcp [--env daily|pre|prod] call TOOL /absolute/path/to/input.json
+EOF
+}
+
+find_um() {
+  if command -v um >/dev/null 2>&1; then
+    command -v um
+    return
+  fi
+  if [[ -x "$HOME/.npm-global/bin/um" ]]; then
+    printf '%s\n' "$HOME/.npm-global/bin/um"
+    return
+  fi
+  printf '%s\n' "error: um is unavailable; load the tmcp skill and complete its setup" >&2
+  exit 3
+}
+
+require_auth() {
+  UM="$(find_um)"
+  if ! "$UM" whoami >/dev/null 2>&1; then
+    printf '%s\n' "error: TMCP authentication is unavailable; load the tmcp skill and follow its authentication setup" >&2
+    exit 3
+  fi
+}
+
+validate_tool() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    printf '%s\n' "error: invalid tool name" >&2
+    exit 2
+  }
+}
+
+if [[ "${1:-}" == "--env" ]]; then
+  [[ $# -ge 2 ]] || { usage; exit 2; }
+  ENVIRONMENT="$2"
+  shift 2
+fi
+case "$ENVIRONMENT" in
+  daily|pre|prod) ;;
+  *) printf '%s\n' "error: env must be daily, pre, or prod" >&2; exit 2 ;;
+esac
+
+COMMAND="${1:-}"
+[[ -n "$COMMAND" ]] || { usage; exit 2; }
+shift
+
+case "$COMMAND" in
+  list)
+    [[ $# -eq 0 ]] || { usage; exit 2; }
+    require_auth
+    exec "$UM" tmcp client list-tool \
+      -s "$SERVER" --env "$ENVIRONMENT" --transport streamable -f json
+    ;;
+  describe)
+    [[ $# -eq 1 ]] || { usage; exit 2; }
+    validate_tool "$1"
+    require_auth
+    exec "$UM" tmcp client call-tool \
+      -s "$SERVER" --env "$ENVIRONMENT" --transport streamable \
+      --tool "$1" --describe --buc auto -f json --no-trace-id
+    ;;
+  call)
+    [[ $# -eq 2 ]] || { usage; exit 2; }
+    validate_tool "$1"
+    [[ "$2" == /* && -f "$2" ]] || {
+      printf '%s\n' "error: input must be an absolute path to a JSON file" >&2
+      exit 2
+    }
+    require_auth
+    exec "$UM" tmcp client call-tool \
+      -s "$SERVER" --env "$ENVIRONMENT" --transport streamable \
+      --tool "$1" --input "@$2" --buc auto -f json --no-trace-id
+    ;;
+  *) usage; exit 2 ;;
+esac

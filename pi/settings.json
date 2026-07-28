@@ -1,16 +1,28 @@
 {
-  "lastChangelogVersion": "0.81.1",
-  "hideThinkingBlock": true,
+  "lastChangelogVersion": "0.82.1",
   "theme": "light",
-  "defaultProvider": "anthropic-idealab",
-  "defaultModel": "claude-opus-4-6",
+  "defaultProvider": "codex-pool",
+  "defaultModel": "gpt-5.6-sol",
+  "hideThinkingBlock": true,
   "packages": [
-    "npm:pi-subagents@0.34.0",
+    {
+      "source": "npm:pi-subagents@0.37.0",
+      "extensions": [],
+      "skills": [],
+      "prompts": [],
+      "themes": []
+    },
     "../../.r2c/integrations/pi-adapter",
-    "npm:@juicesharp/rpiv-todo"
+    {
+      "source": "npm:@juicesharp/rpiv-todo",
+      "extensions": []
+    }
   ],
   "subagents": {
     "agentOverrides": {
+      "advisor": {
+        "disabled": true
+      },
       "context-builder": {
         "disabled": true
       },
@@ -18,6 +30,9 @@
         "disabled": true
       },
       "planner": {
+        "disabled": true
+      },
+      "researcher": {
         "disabled": true
       },
       "reviewer": {
@@ -35,5 +50,6 @@
     "codex-pool/gpt-5.6-sol",
     "anthropic-idealab/claude-opus-4-6",
     "openai-idealab/Peach-07-17-DogFooding"
-  ]
+  ],
+  "defaultThinkingLevel": "xhigh"
 }

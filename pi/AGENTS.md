@@ -5,7 +5,12 @@
 ## TDD
 
 **绝对红线**：任何产生逻辑变更的 coding，动手前必须先加载 `test-driven-development` skill 并严格执行其流程。先写实现再补测试 = 违规，回退重来。
-豁免：单行改动 / 已有测试覆盖（必须显式声明豁免理由）。
+豁免：单行改动 / 纯文档变更 / 已有测试覆盖（必须显式声明豁免理由）。
+
+## Subagent
+
+所有 subagent 派发必须遵循 `subagent-dispatch` skill 的要求。
+尽可能保持主 agent 上下文的信息有效性和高抽象层级，有相对独立的任务都尽可能交给 subagent 去做，原则上主 agent 只负责收集报告、形成决策、编写计划。
 
 ## Bugfix
 
@@ -60,10 +65,6 @@ commit message 格式与主观约束见 `git-commit-convention` skill。
 1. **Subagent-Driven**：主 agent 自行编排计划执行，任务间可审查。主 agent 读取计划的 `Deps` 字段构建 DAG；无依赖任务并行派发（后台模式），有依赖的等上游完成后再派发。
 2. **Inline Execution**：按 skill 原始流程在当前会话逐任务执行，适合简单计划或无需门禁的场景；忽略其引用的未纳入白名单的 sub-skill。
 3. **Plan Runner Dispatch**：加载 `plan-runner-dispatch` skill，通过 `/plan-run` 将计划交给独立的 plan-runner agent 在专属 Plan Session 中执行，适合需要隔离执行环境和结构化生命周期管控的场景。
-
-## Subagent
-
-所有 `task` 必须使用 `background: true`。编码任务默认使用 `executor`；单文件快速任务使用 `spark`。
 
 # Superpowers
 

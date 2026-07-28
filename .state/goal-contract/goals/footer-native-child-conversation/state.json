@@ -1,0 +1,166 @@
+{
+  "schema_version": "goal_contract.v1.1",
+  "slug": "footer-native-child-conversation",
+  "status": "completed",
+  "phase": "complete",
+  "current_slice": "slice-005",
+  "last_verified_at": "2026-07-28T12:08:06Z",
+  "next_action": "Goal complete; broader main-conversation physical scrollback remains a separate pending task",
+  "blocked_reason": null,
+  "contract_path": ".state/goal-contract/goals/footer-native-child-conversation/goal-contract.md",
+  "feature_list_path": ".state/goal-contract/goals/footer-native-child-conversation/feature-list.json",
+  "evidence_path": ".state/goal-contract/goals/footer-native-child-conversation/evidence.jsonl",
+  "recovery_path": ".state/goal-contract/goals/footer-native-child-conversation/recovery.md",
+  "amendments_path": ".state/goal-contract/goals/footer-native-child-conversation/amendments.jsonl",
+  "practice_profile": {
+    "schema_version": "goal_contract.practice_profile.v1",
+    "source_projects": [
+      "pi-config"
+    ],
+    "evidence_lanes": [
+      {
+        "id": "source",
+        "purpose": "Code, diff, design, and repository artifact evidence."
+      },
+      {
+        "id": "build",
+        "purpose": "Compile, lint, typecheck, package, and generated-config evidence."
+      },
+      {
+        "id": "runtime",
+        "purpose": "Runtime logs, device/simulator state, session events, screenshots, and generated artifacts."
+      },
+      {
+        "id": "delivery",
+        "purpose": "Preview, publish, release, final manifest, and downstream handoff evidence."
+      },
+      {
+        "id": "eval",
+        "purpose": "Evaluator, benchmark, task suite, score, policy decision, and behavior report evidence."
+      },
+      {
+        "id": "environment",
+        "purpose": "Auth, credentials, toolchain, cloud device, sandbox, and external-service blocker evidence."
+      },
+      {
+        "id": "review",
+        "purpose": "Code review, security review, cross-review, user correction, and residual-risk evidence."
+      }
+    ],
+    "authority_ladder": [
+      {
+        "id": "source_trace",
+        "rank": 1,
+        "lane": "eval",
+        "allowed_claims": [
+          "full benchmark outcome",
+          "full conversion latency"
+        ],
+        "notes": "Producer-owned phase boundary, PipelineRun, source trace, or equivalent source-of-truth manifest."
+      },
+      {
+        "id": "usage_report",
+        "rank": 2,
+        "lane": "eval",
+        "allowed_claims": [
+          "token usage",
+          "cost",
+          "provider/runtime usage"
+        ],
+        "notes": "Provider or runtime usage report. Heuristic estimates must not be marked collected."
+      },
+      {
+        "id": "source_artifact",
+        "rank": 3,
+        "lane": "source",
+        "allowed_claims": [
+          "artifact shape",
+          "schema compatibility",
+          "producer output existence"
+        ],
+        "notes": "Generated files, manifests, reports, schemas, or source artifacts."
+      },
+      {
+        "id": "runner_trace",
+        "rank": 4,
+        "lane": "environment",
+        "allowed_claims": [
+          "diagnostic wall-clock",
+          "subprocess health",
+          "wrapper failure"
+        ],
+        "notes": "Runner/subprocess traces are diagnostic only unless the contract explicitly promotes them through an amendment."
+      },
+      {
+        "id": "heuristic_estimate",
+        "rank": 5,
+        "lane": "review",
+        "allowed_claims": [
+          "speculative estimate"
+        ],
+        "notes": "May explain uncertainty; must not satisfy collected metrics or full benchmark claims."
+      }
+    ],
+    "drift_detectors": [
+      {
+        "id": "no-harness-owned-business-stages",
+        "invalid_when": "A full benchmark path adds harness-owned subprocess business stages instead of reading producer output.",
+        "action": "Mark scope drift and propose an amendment before continuing."
+      },
+      {
+        "id": "no-full-latency-without-source-trace",
+        "invalid_when": "A dashboard or trend reports full conversion p95/p99 without source_trace/PipelineRun evidence.",
+        "action": "Mark the result invalid or not_run/incomplete."
+      },
+      {
+        "id": "runner-trace-diagnostic-only",
+        "invalid_when": "runner_trace, wrapper wall-clock, replay, compile-only, or partial task evidence satisfies a full benchmark DoD item.",
+        "action": "Move the claim to diagnostic evidence and keep the benchmark incomplete."
+      },
+      {
+        "id": "no-heuristic-collected-usage",
+        "invalid_when": "Heuristic token or cost estimates are labeled collected.",
+        "action": "Mark usage as estimated or missing_evidence."
+      }
+    ],
+    "slice_ordering_gate": [
+      {
+        "id": "protocol-before-dashboard",
+        "requires": [
+          "source-of-truth schema",
+          "read-only ingest",
+          "producer manifest example"
+        ],
+        "before": [
+          "dashboard",
+          "trend",
+          "full benchmark gate",
+          "producer integration"
+        ],
+        "reason": "A visible dashboard must not be built on wrapper-derived business facts."
+      },
+      {
+        "id": "gate-before-integration",
+        "requires": [
+          "full benchmark validity rules",
+          "negative tests for forbidden evidence"
+        ],
+        "before": [
+          "D2/DX producer rollout",
+          "autonomous execution handoff"
+        ],
+        "reason": "Producer integrations must enter through the same evidence authority contract."
+      }
+    ],
+    "blocker_taxonomy": [
+      "environment_auth",
+      "toolchain",
+      "device_runtime",
+      "external_service",
+      "missing_evidence",
+      "scope_conflict",
+      "review_rejected"
+    ],
+    "completion_rule": "Do not mark a goal complete by collapsing source, build, runtime, delivery, eval, environment, and review lanes into one verdict."
+  }
+}

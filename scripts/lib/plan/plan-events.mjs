@@ -1,10 +1,19 @@
+import { createHash } from "node:crypto";
+
+import { createAttentionRequest } from "./attention.mjs";
+
 const SCHEMA_VERSION = "pi-plan-event.v1";
 const GATES = new Set(["deterministic", "plan-audit", "external-review", "final-completeness"]);
 const TERMINAL_LIFECYCLES = new Set(["validated", "blocked", "cancelled", "interrupted"]);
+const OPEN_ATTEMPT_STATUSES = new Set(["workspace-allocated", "dispatch-requested", "active", "waiting-attention", "validated"]);
+const SETTLED_OUTCOMES = new Set(["succeeded", "failed", "interrupted", "cancelled", "blocked"]);
+const BLOCKER_CODE = /^[a-z0-9][a-z0-9:_-]{0,127}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 
 export function createProjection() {
   return {
     planId: null,
+    version: 0,
     lifecycle: null,
     tasks: new Map(),
     attempts: new Map(),
@@ -31,14 +40,38 @@ export function applyEvent(projection, event) {
     case "plan.created":
       createPlan(next, event);
       break;
+    case "attempt.workspace-allocated":
+      allocateAttemptWorkspace(next, event.data);
+      break;
     case "attempt.dispatch-requested":
       requestDispatch(next, event.data);
       break;
     case "attempt.bound":
       bindAttempt(next, event.data);
       break;
+    case "attempt.attention-requested":
+      requestAttention(next, event);
+      break;
+    case "attempt.attention-escalated":
+      escalateAttention(next, event.data);
+      break;
+    case "attempt.attention-resolved":
+      resolveAttention(next, event.data);
+      break;
     case "attempt.settled":
       settleAttempt(next, event.data);
+      break;
+    case "attempt.validated":
+      validateAttempt(next, event.data);
+      break;
+    case "integration.requested":
+      requestIntegration(next, event.data);
+      break;
+    case "integration.finished":
+      finishIntegration(next, event.data);
+      break;
+    case "attempt.workspace-released":
+      releaseAttemptWorkspace(next, event.data);
       break;
     case "task.accepted":
       acceptTask(next, event.data);
@@ -61,6 +94,7 @@ export function applyEvent(projection, event) {
     default:
       throw new Error(`unsupported event type: ${event.type}`);
   }
+  next.version = projection.version + 1;
   next.eventIds.add(event.eventId);
   return next;
 }
@@ -112,13 +146,55 @@ function createPlan(projection, event) {
   for (const taskId of tasks) projection.tasks.set(taskId, { status: "pending" });
 }
 
+function validateAttemptWorkspace(workspace) {
+  if (!workspace || typeof workspace !== "object" || Array.isArray(workspace)) throw new Error("invalid attempt workspace");
+  for (const field of ["path", "branch", "ownerToken"]) requireIdentity(workspace, field);
+  const validated = { path: workspace.path, branch: workspace.branch, ownerToken: workspace.ownerToken };
+  for (const field of ["planId", "taskId", "attemptId", "originRoot", "stateRoot", "baseCommit", "leasePath", "createdAt"]) {
+    if (workspace[field] !== undefined) {
+      requireIdentity(workspace, field);
+      validated[field] = workspace[field];
+    }
+  }
+  return validated;
+}
+
+function sameAttemptWorkspace(left, right) {
+  return left?.path === right?.path && left?.branch === right?.branch && left?.ownerToken === right?.ownerToken;
+}
+
+function allocateAttemptWorkspace(projection, data) {
+  requireActivePlan(projection);
+  requireIdentity(data, "attemptId");
+  requireIdentity(data, "taskId");
+  requireIdentity(data, "baseCommit");
+  if (projection.attempts.has(data.attemptId)) throw new Error(`attempt already exists: ${data.attemptId}`);
+  const task = projection.tasks.get(data.taskId);
+  if (!task) throw new Error(`unknown task: ${data.taskId}`);
+  if (task.status !== "pending") throw new Error(`task is not pending: ${data.taskId}`);
+  for (const [attemptId, attempt] of projection.attempts) {
+    if (OPEN_ATTEMPT_STATUSES.has(attempt.status) && attempt.taskId === data.taskId) {
+      throw new Error(`active attempt already exists for task ${data.taskId}: ${attemptId}`);
+    }
+  }
+  projection.attempts.set(data.attemptId, {
+    taskId: data.taskId,
+    status: "workspace-allocated",
+    baseCommit: data.baseCommit,
+    workspace: validateAttemptWorkspace(data.workspace),
+  });
+  projection.lifecycle = "running";
+}
+
 function bindAttempt(projection, data) {
   requireActivePlan(projection);
   requireIdentity(data, "attemptId");
   requireIdentity(data, "taskId");
+  requireIdentity(data, "dispatchId");
   const existing = projection.attempts.get(data.attemptId);
   if (existing?.status !== "dispatch-requested") throw new Error(`attempt is not dispatch-requested: ${data.attemptId}`);
   if (existing.taskId !== data.taskId) throw new Error(`attempt task does not match: ${data.attemptId}`);
+  if (existing.dispatchId !== data.dispatchId) throw new Error(`attempt dispatch does not match: ${data.attemptId}`);
   requireIdentity(data, "runId");
   for (const field of ["asyncDir", "sessionFile"]) {
     if (data[field] !== null && (typeof data[field] !== "string" || data[field].trim() === "")) {
@@ -137,27 +213,210 @@ function bindAttempt(projection, data) {
 
 function requestDispatch(projection, data) {
   requireActivePlan(projection);
-  requireIdentity(data, "attemptId");
-  requireIdentity(data, "taskId");
-  if (projection.attempts.has(data.attemptId)) throw new Error(`attempt already exists: ${data.attemptId}`);
-  const task = projection.tasks.get(data.taskId);
-  if (!task) throw new Error(`unknown task: ${data.taskId}`);
-  if (task.status !== "pending") throw new Error(`task is not pending: ${data.taskId}`);
-  for (const [attemptId, attempt] of projection.attempts) {
-    if (["dispatch-requested", "active"].includes(attempt.status)) throw new Error(`active attempt already exists: ${attemptId}`);
-  }
+  for (const field of ["attemptId", "taskId", "dispatchId", "baseCommit", "toolHash"]) requireIdentity(data, field);
+  const attempt = projection.attempts.get(data.attemptId);
+  if (!attempt || attempt.status !== "workspace-allocated") throw new Error(`attempt workspace is not allocated: ${data.attemptId}`);
+  if (attempt.taskId !== data.taskId) throw new Error(`attempt task does not match: ${data.attemptId}`);
+  if (attempt.baseCommit !== data.baseCommit) throw new Error(`attempt baseCommit does not match: ${data.attemptId}`);
+  if (!sameAttemptWorkspace(attempt.workspace, data.workspace)) throw new Error(`attempt workspace does not match: ${data.attemptId}`);
   validateTool(data.tool);
-  projection.attempts.set(data.attemptId, { taskId: data.taskId, status: "dispatch-requested", tool: { ...data.tool } });
+  if (data.tool.cwd !== attempt.workspace.path) throw new Error(`tool cwd does not match attempt workspace: ${data.attemptId}`);
+  projection.attempts.set(data.attemptId, {
+    ...attempt,
+    status: "dispatch-requested",
+    dispatchId: data.dispatchId,
+    tool: { ...data.tool },
+    toolHash: data.toolHash,
+  });
   projection.lifecycle = "running";
 }
 
 function settleAttempt(projection, data) {
   requireActivePlan(projection);
   requireIdentity(data, "attemptId");
-  if (typeof data.outcome !== "string" || data.outcome.trim() === "") throw new Error("invalid outcome");
+  if (!SETTLED_OUTCOMES.has(data.outcome)) throw new Error("invalid outcome");
   const attempt = projection.attempts.get(data.attemptId);
   if (!attempt || attempt.status !== "active") throw new Error(`attempt is not active: ${data.attemptId}`);
-  projection.attempts.set(data.attemptId, { ...attempt, status: data.outcome });
+  if (data.outcome === "succeeded") requireIdentity(data, "resultCommit");
+  let blocked;
+  if (data.outcome === "blocked") {
+    requireIdentity(data, "blockerReason");
+    if (!BLOCKER_CODE.test(data.blockerReason)
+      || !Array.isArray(data.blockers) || data.blockers.length === 0 || data.blockers.length > 32
+      || data.blockers.some((blocker) => typeof blocker !== "string" || !BLOCKER_CODE.test(blocker))
+      || new Set(data.blockers).size !== data.blockers.length
+      || data.blockers.some((blocker, index) => index > 0 && data.blockers[index - 1] > blocker)
+      || (data.evidenceSha256 !== undefined
+        && (typeof data.evidenceSha256 !== "string" || !SHA256.test(data.evidenceSha256)))) {
+      throw new Error("invalid blocked disposition");
+    }
+    blocked = {
+      blockerReason: data.blockerReason,
+      blockers: [...data.blockers],
+      ...(data.evidenceSha256 ? { evidenceSha256: data.evidenceSha256 } : {}),
+    };
+  }
+  projection.attempts.set(data.attemptId, {
+    ...attempt,
+    status: data.outcome,
+    ...(data.outcome === "succeeded" ? { resultCommit: data.resultCommit } : {}),
+    ...blocked,
+  });
+}
+
+function messageSha256(message) {
+  return createHash("sha256").update(message).digest("hex");
+}
+
+function attentionEvidence(evidence) {
+  if (evidence === undefined) return null;
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) throw new Error("invalid attention evidence");
+  for (const field of ["bodyPath", "bodySha256"]) requireIdentity(evidence, field);
+  return { bodyPath: evidence.bodyPath, bodySha256: evidence.bodySha256 };
+}
+
+function redactedAttention(request, evidence, status = "pending") {
+  return {
+    requestId: request.requestId,
+    kind: request.kind,
+    blocking: request.blocking,
+    status,
+    messageSha256: messageSha256(request.message),
+    projectionVersion: request.projectionVersion,
+    createdAt: request.createdAt,
+    evidence: attentionEvidence(evidence),
+  };
+}
+
+function requestAttention(projection, event) {
+  requireActivePlan(projection);
+  const request = createAttentionRequest({ ...event.data, planId: event.planId });
+  const attempt = projection.attempts.get(request.attemptId);
+  if (!attempt) throw new Error(`unknown attempt: ${request.attemptId}`);
+  if (attempt.attention?.blocking && attempt.attention.status !== "resolved") {
+    throw new Error(`unresolved blocking attention already exists: ${request.attemptId}`);
+  }
+  if (attempt.status !== "active") throw new Error(`attempt is not active: ${request.attemptId}`);
+  if (attempt.taskId !== request.taskId) throw new Error(`attention task does not match: ${request.attemptId}`);
+  if (attempt.runId !== request.runId) throw new Error(`attention runId does not match: ${request.attemptId}`);
+  if (request.projectionVersion !== projection.version + 1) throw new Error("attention projection version does not match next projection");
+  const redacted = redactedAttention(request, event.data.evidence);
+  projection.attempts.set(request.attemptId, request.blocking
+    ? { ...attempt, status: "waiting-attention", attention: redacted }
+    : { ...attempt, lastProgress: redacted });
+}
+
+function requirePendingAttention(projection, data) {
+  requireIdentity(data, "attemptId");
+  requireIdentity(data, "requestId");
+  requireIdentity(data, "runId");
+  if (!Number.isInteger(data.expectedProjectionVersion) || data.expectedProjectionVersion !== projection.version) {
+    throw new Error("attention projection version is stale");
+  }
+  const attempt = projection.attempts.get(data.attemptId);
+  if (!attempt || attempt.status !== "waiting-attention") throw new Error(`attempt is not waiting-attention: ${data.attemptId}`);
+  if (attempt.runId !== data.runId) throw new Error(`attention runId does not match: ${data.attemptId}`);
+  if (attempt.attention?.requestId !== data.requestId || attempt.attention.status !== "pending") {
+    throw new Error(`attention request does not match: ${data.attemptId}`);
+  }
+  return attempt;
+}
+
+function escalateAttention(projection, data) {
+  requireActivePlan(projection);
+  const attempt = requirePendingAttention(projection, data);
+  projection.attempts.set(data.attemptId, {
+    ...attempt,
+    attention: {
+      ...attempt.attention,
+      escalated: true,
+      evidence: attentionEvidence(data.evidence),
+      projectionVersion: projection.version + 1,
+    },
+  });
+}
+
+function resolveAttention(projection, data) {
+  requireActivePlan(projection);
+  const attempt = requirePendingAttention(projection, data);
+  requireIdentity(data, "resolutionSha256");
+  projection.attempts.set(data.attemptId, {
+    ...attempt,
+    status: "active",
+    attention: {
+      ...attempt.attention,
+      status: "resolved",
+      resolutionSha256: data.resolutionSha256,
+      projectionVersion: projection.version + 1,
+    },
+  });
+}
+
+function validateAttempt(projection, data) {
+  requireActivePlan(projection);
+  for (const field of ["attemptId", "resultCommit", "validationHash"]) requireIdentity(data, field);
+  if (!Array.isArray(data.evidence)) throw new Error("invalid validation evidence");
+  if (data.changedPaths !== undefined && (!Array.isArray(data.changedPaths) || !data.changedPaths.every((item) => typeof item === "string" && item))) {
+    throw new Error("invalid validation changedPaths");
+  }
+  if (data.diffSha256 !== undefined) requireIdentity(data, "diffSha256");
+  const attempt = projection.attempts.get(data.attemptId);
+  if (!attempt || attempt.status !== "succeeded") throw new Error(`attempt is not succeeded: ${data.attemptId}`);
+  if (attempt.resultCommit !== data.resultCommit) throw new Error(`attempt resultCommit does not match: ${data.attemptId}`);
+  projection.attempts.set(data.attemptId, {
+    ...attempt,
+    status: "validated",
+    validationHash: data.validationHash,
+    validationDiffSha256: data.diffSha256 ?? null,
+    validationChangedPaths: data.changedPaths ? [...data.changedPaths] : [],
+    validationEvidence: data.evidence.map((item) => ({ ...item })),
+  });
+}
+
+function requestIntegration(projection, data) {
+  requireActivePlan(projection);
+  for (const field of ["attemptId", "expectedHead", "resultCommit", "diffSha256"]) requireIdentity(data, field);
+  const attempt = projection.attempts.get(data.attemptId);
+  if (!attempt || attempt.status !== "validated") throw new Error(`attempt is not validated: ${data.attemptId}`);
+  if (attempt.resultCommit !== data.resultCommit) throw new Error(`attempt resultCommit does not match: ${data.attemptId}`);
+  if (attempt.integration?.status === "requested") throw new Error(`integration already requested: ${data.attemptId}`);
+  projection.attempts.set(data.attemptId, {
+    ...attempt,
+    integration: { status: "requested", expectedHead: data.expectedHead, resultCommit: data.resultCommit, diffSha256: data.diffSha256 },
+  });
+}
+
+function finishIntegration(projection, data) {
+  requireActivePlan(projection);
+  for (const field of ["attemptId", "previousHead", "newHead"]) requireIdentity(data, field);
+  const attempt = projection.attempts.get(data.attemptId);
+  if (!attempt || attempt.status !== "validated" || attempt.integration?.status !== "requested") {
+    throw new Error(`integration is not requested: ${data.attemptId}`);
+  }
+  if (attempt.integration.expectedHead !== data.previousHead) throw new Error(`integration previousHead does not match: ${data.attemptId}`);
+  projection.attempts.set(data.attemptId, {
+    ...attempt,
+    status: "integrated",
+    integration: { ...attempt.integration, status: "finished", previousHead: data.previousHead, newHead: data.newHead },
+  });
+  projection.tasks.set(attempt.taskId, { status: "accepted" });
+  projection.workspace = { ...projection.workspace, headCommit: data.newHead };
+  projection.gates.clear();
+  projection.lifecycle = "running";
+}
+
+function releaseAttemptWorkspace(projection, data) {
+  requireActivePlan(projection);
+  for (const field of ["attemptId", "disposition"]) requireIdentity(data, field);
+  const attempt = projection.attempts.get(data.attemptId);
+  if (!attempt) throw new Error(`unknown attempt: ${data.attemptId}`);
+  if (!data.evidence || typeof data.evidence !== "object" || Array.isArray(data.evidence)) throw new Error("invalid workspace release evidence");
+  projection.attempts.set(data.attemptId, {
+    ...attempt,
+    workspaceReleased: true,
+    workspaceDisposition: data.disposition,
+    workspaceReleaseEvidence: { ...data.evidence },
+  });
 }
 
 function acceptTask(projection, data) {
@@ -194,7 +453,7 @@ function observeHead(projection, data) {
   requireActivePlan(projection);
   requireIdentity(data, "headCommit");
   for (const attempt of projection.attempts.values()) {
-    if (["dispatch-requested", "active"].includes(attempt.status)) throw new Error("active attempt prevents HEAD observation");
+    if (OPEN_ATTEMPT_STATUSES.has(attempt.status)) throw new Error("active attempt prevents HEAD observation");
   }
   if (data.headCommit === projection.workspace.headCommit) throw new Error("HEAD is already observed");
   projection.workspace = { ...projection.workspace, headCommit: data.headCommit };
@@ -209,7 +468,7 @@ function validatePlan(projection, data) {
     if (task.status !== "accepted") throw new Error(`task is not accepted: ${taskId}`);
   }
   for (const [attemptId, attempt] of projection.attempts) {
-    if (["dispatch-requested", "active"].includes(attempt.status)) throw new Error(`active attempt: ${attemptId}`);
+    if (OPEN_ATTEMPT_STATUSES.has(attempt.status)) throw new Error(`active attempt: ${attemptId}`);
   }
   for (const gate of GATES) {
     const result = projection.gates.get(gate);
@@ -240,5 +499,5 @@ function requireIdentity(data, field) {
 function validateTool(tool) {
   if (!tool || typeof tool !== "object" || Array.isArray(tool)) throw new Error("invalid tool");
   for (const field of ["agent", "task", "cwd", "context"]) requireIdentity(tool, field);
-  if (tool.context !== "fresh" || tool.async !== true || tool.clarify !== false) throw new Error("invalid tool flags");
+  if (tool.context !== "fresh" || tool.async !== true || tool.clarify !== false || tool.worktree !== false) throw new Error("invalid tool flags");
 }

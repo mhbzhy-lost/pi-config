@@ -30,14 +30,20 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "tests", "test_reviewer.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "tests", "test_reviewer.py"));
     await chmod(join(fixtureRepo, "init-pi.sh"), 0o755);
 
-    for (const command of ["git", "npm", "uv"]) {
+    for (const command of ["git", "uv"]) {
       const commandPath = join(fakeBin, command);
       await writeFile(commandPath, `#!/usr/bin/env bash\nprintf '%s\\n' '${command} '"$*" >> "$COMMAND_LOG"\n`);
       await chmod(commandPath, 0o755);
     }
+    const fakeNpm = join(fakeBin, "npm");
+    await writeFile(
+      fakeNpm,
+      "#!/usr/bin/env bash\nprintf 'npm %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"--prefix\" && \"$3\" == \"run\" && \"$4\" == \"setup:plan-runtime\" ]]; then mkdir -p \"$2/pi/npm/node_modules/typebox\"; printf '{\\\"version\\\":\\\"1.1.38\\\"}' > \"$2/pi/npm/node_modules/typebox/package.json\"; fi\n",
+    );
+    await chmod(fakeNpm, 0o755);
     await writeFile(
       fakePi,
-      "#!/usr/bin/env bash\nprintf 'pi-real %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.34.0\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'pi-real %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.37.0\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
     );
     await chmod(fakePi, 0o755);
 
@@ -85,8 +91,11 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     const commands = await readFile(commandLog, "utf8");
     assert.match(commands, /git -C .* submodule update --init --recursive/);
-    assert.match(commands, /npm install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.80\.10/);
-    assert.match(commands, /pi-real install npm:pi-subagents@0\.34\.0/);
+    assert.match(commands, /npm install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.82\.1/);
+    assert.match(commands, /pi-real install npm:pi-subagents@0\.37\.0/);
+    assert.match(commands, /npm --prefix .* run setup:plan-runtime/);
+    const typeboxPackage = JSON.parse(await readFile(join(fixtureRepo, "pi", "npm", "node_modules", "typebox", "package.json"), "utf8"));
+    assert.equal(typeboxPackage.version, "1.1.38");
     assert.match(commands, /npm test/);
     assert.match(commands, /npm run doctor/);
     assert.match(commands, /npm run test:integration/);

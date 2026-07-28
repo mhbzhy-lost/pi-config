@@ -53,28 +53,35 @@ function unwrap(segment) {
   let tokens = segment.trim().match(/(?:\$'[^']*'|"[^"]*"|'[^']*'|[^\s])+/g) ?? [];
   tokens = tokens.map((token) => token.replace(/^(?:\$')?['"]|['"]$/g, ""));
   tokens = tokens.map(expandTilde);
+  const environment = [];
   while (tokens[0] && (WRAPPERS.has(tokens[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]))) {
     if (tokens[0] === "env") {
       tokens = tokens.slice(1);
-      while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) tokens = tokens.slice(1);
+      while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) {
+        environment.push(tokens[0]);
+        tokens = tokens.slice(1);
+      }
+    } else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) {
+      environment.push(tokens[0]);
+      tokens = tokens.slice(1);
     } else {
       tokens = tokens.slice(1);
     }
   }
-  return tokens;
+  return { tokens, environment };
 }
 
 function commandContext(command, cwd) {
   let current = resolve(cwd);
   const commands = [];
   for (const segment of shellSegments(command)) {
-    const tokens = unwrap(segment);
+    const { tokens, environment } = unwrap(segment);
     if (tokens[0] === "cd" && tokens[1]) {
       current = resolve(current, tokens[1]);
-      commands.push({ tokens, cwd: current, cd: true });
+      commands.push({ tokens, environment, cwd: current, cd: true });
       continue;
     }
-    commands.push({ tokens, cwd: current });
+    commands.push({ tokens, environment, cwd: current });
   }
   return commands;
 }
@@ -152,6 +159,19 @@ function gitSubcommand(tokens) {
   return undefined;
 }
 
+function checkGitContextOverride(tokens, environment = []) {
+  if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
+  const hasFlagOverride = tokens.slice(1).some((token) =>
+    token === "--git-dir" || token.startsWith("--git-dir=")
+      || token === "--work-tree" || token.startsWith("--work-tree="),
+  );
+  const hasEnvironmentOverride = environment.some((entry) => /^(?:GIT_DIR|GIT_WORK_TREE)=/.test(entry));
+  if (hasFlagOverride || hasEnvironmentOverride) {
+    return violation("GIT_CONTEXT_FORBIDDEN", "禁止通过 Git 参数或环境变量切换仓库或工作目录");
+  }
+  return undefined;
+}
+
 function checkDestructiveGit(tokens) {
   if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
   const subcommand = gitSubcommand(tokens);
@@ -194,11 +214,13 @@ function checkShellWrapper(tokens, cwd, workspaceRoot) {
 
 function checkSingleCommand(command, cwd, workspaceRoot) {
   const commands = commandContext(command, cwd);
-  for (const { tokens, cwd: commandCwd } of commands) {
+  for (const { tokens, environment, cwd: commandCwd } of commands) {
     const rmViolation = checkRm(tokens, commandCwd, workspaceRoot);
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);
     if (gitViolation) return gitViolation;
+    const gitContextViolation = checkGitContextOverride(tokens, environment);
+    if (gitContextViolation) return gitContextViolation;
     const wrapperViolation = checkShellWrapper(tokens, commandCwd, workspaceRoot);
     if (wrapperViolation) return wrapperViolation;
   }
@@ -292,11 +314,13 @@ export function checkSensitivePath({ toolName, input, cwd }) {
 export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }) {
   const skipCommitValidation = env.GIT_COMMIT_HOOK_SKIP === "1" || /(?:^|\s)GIT_COMMIT_HOOK_SKIP=1(?:\s|$)/.test(command);
   const commands = commandContext(command, cwd);
-  for (const { tokens, cwd: commandCwd, cd } of commands) {
+  for (const { tokens, environment, cwd: commandCwd, cd } of commands) {
     const rmViolation = checkRm(tokens, commandCwd, workspaceRoot);
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);
     if (gitViolation) return gitViolation;
+    const gitContextViolation = checkGitContextOverride(tokens, environment);
+    if (gitContextViolation) return gitContextViolation;
     const wrapperViolation = checkShellWrapper(tokens, commandCwd, workspaceRoot);
     if (wrapperViolation) return wrapperViolation;
     if (cd && commands.some((command) => command.tokens[0] === "git")) {

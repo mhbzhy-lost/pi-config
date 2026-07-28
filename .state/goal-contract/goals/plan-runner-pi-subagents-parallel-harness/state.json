@@ -1,0 +1,213 @@
+{
+  "schema_version": "goal_contract.v1.1",
+  "slug": "plan-runner-pi-subagents-parallel-harness",
+  "status": "completed",
+  "phase": "completed",
+  "current_slice": null,
+  "last_verified_at": "2026-07-26T18:38:35Z",
+  "next_action": "Harness 14/14已封板；Crash Fix V2可建立独立Goal Contract后启动",
+  "blocked_reason": null,
+  "contract_path": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness/goal-contract.md",
+  "feature_list_path": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness/feature-list.json",
+  "evidence_path": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness/evidence.jsonl",
+  "recovery_path": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness/recovery.md",
+  "amendments_path": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness/amendments.jsonl",
+  "practice_profile": {
+    "schema_version": "goal_contract.practice_profile.v1",
+    "source_projects": [
+      "pi-config"
+    ],
+    "evidence_lanes": [
+      {
+        "id": "source",
+        "purpose": "Plan event、Git提交、IR和源代码契约证据。"
+      },
+      {
+        "id": "build",
+        "purpose": "单元测试、集成测试、Doctor和格式检查证据。"
+      },
+      {
+        "id": "runtime",
+        "purpose": "pi-subagents lifecycle、session、Supervisor和真实Pi运行证据。"
+      },
+      {
+        "id": "delivery",
+        "purpose": "Plan Harness启用、旧Runtime删除和迁移结果证据。"
+      },
+      {
+        "id": "eval",
+        "purpose": "Synthetic repo故障矩阵和行为验收证据。"
+      },
+      {
+        "id": "environment",
+        "purpose": "Pi版本、package版本、Provider、文件系统和外部环境blocker证据。"
+      },
+      {
+        "id": "review",
+        "purpose": "独立代码审查、安全审查和残余风险证据。"
+      }
+    ],
+    "authority_ladder": [
+      {
+        "id": "plan_event_and_git",
+        "rank": 1,
+        "lane": "source",
+        "allowed_claims": [
+          "Plan领域状态",
+          "Attempt所有权",
+          "result commit",
+          "accumulator HEAD",
+          "validatedHead"
+        ],
+        "notes": "Append-only Plan event与受控Git命令共同证明领域迁移和文件结果。"
+      },
+      {
+        "id": "pi_subagents_lifecycle",
+        "rank": 2,
+        "lane": "runtime",
+        "allowed_claims": [
+          "runId",
+          "asyncDir",
+          "sessionId",
+          "运行状态",
+          "Supervisor transport"
+        ],
+        "notes": "只证明执行Runtime事实，不产生Task accepted或Plan validated。"
+      },
+      {
+        "id": "deterministic_test",
+        "rank": 3,
+        "lane": "build",
+        "allowed_claims": [
+          "parser行为",
+          "reducer行为",
+          "workspace隔离",
+          "资源锁行为",
+          "验证与集成行为"
+        ],
+        "notes": "只证明覆盖场景，不替代真实Runtime兼容门禁。"
+      },
+      {
+        "id": "independent_review",
+        "rank": 4,
+        "lane": "review",
+        "allowed_claims": [
+          "架构finding",
+          "安全finding",
+          "恢复finding",
+          "完整性finding"
+        ],
+        "notes": "Critical或Important finding未清零时不能完成。"
+      },
+      {
+        "id": "status_projection",
+        "rank": 5,
+        "lane": "environment",
+        "allowed_claims": [
+          "观察",
+          "诊断"
+        ],
+        "notes": "status.json、widget和dashboard是可再生投影，不能驱动迁移。"
+      }
+    ],
+    "drift_detectors": [
+      {
+        "id": "no-agent-owned-dispatch",
+        "invalid_when": "Plan Agent或Executor直接调用subagent、改变cwd、worktree或dispatch参数。",
+        "action": "标记scope drift并停止派发。"
+      },
+      {
+        "id": "unique-attempt-workspace",
+        "invalid_when": "两个active Attempt具有相同canonical cwd、branch或owner token。",
+        "action": "立即block Plan并保留全部workspace。"
+      },
+      {
+        "id": "no-runtime-authority-collapse",
+        "invalid_when": "RPC文本、stdout、widget或status projection被用于产生accepted、integrated或validated。",
+        "action": "撤销该结论并从Plan event、artifact和Git重新投影。"
+      },
+      {
+        "id": "no-automatic-uncertain-retry",
+        "invalid_when": "dispatch-requested缺少唯一run binding时再次spawn。",
+        "action": "标记协议违规并停止计划。"
+      },
+      {
+        "id": "single-integration-writer",
+        "invalid_when": "非Integration Queue修改accumulator或自动rebase/cherry-pick。",
+        "action": "中止集成并验证accumulator HEAD。"
+      },
+      {
+        "id": "no-legacy-runtime-fallback",
+        "invalid_when": "兼容门禁失败后继续扩展通用spawnPiAgent派发Executor，或让薄Host接收Attempt task。",
+        "action": "设置goal为blocked，要求修复或升级pi-subagents能力；薄Host只能管理Standalone Plan Runner。"
+      }
+    ],
+    "slice_ordering_gate": [
+      {
+        "id": "compatibility-before-adapter",
+        "requires": [
+          "Task 1真实兼容门禁"
+        ],
+        "before": [
+          "Task 2至Task 14"
+        ],
+        "reason": "禁止在不兼容Standalone Runtime上继续投入或恢复通用自建Executor Runtime。"
+      },
+      {
+        "id": "contracts-before-dispatch",
+        "requires": [
+          "Task 2至Task 6"
+        ],
+        "before": [
+          "Coordinator直接并行派发"
+        ],
+        "reason": "spawn前必须能够证明授权和所有权。"
+      },
+      {
+        "id": "validation-before-integration",
+        "requires": [
+          "Attempt validator及负向测试"
+        ],
+        "before": [
+          "Integration Queue接收结果"
+        ],
+        "reason": "未验证commit不得进入accumulator。"
+      },
+      {
+        "id": "fault-matrix-before-deletion",
+        "requires": [
+          "顶层Standalone迁移",
+          "薄Host边界",
+          "真实故障矩阵"
+        ],
+        "before": [
+          "删除通用自建Executor Runtime"
+        ],
+        "reason": "保留一次可回退的实施窗口，但不长期双运行。"
+      },
+      {
+        "id": "full-gates-before-completion",
+        "requires": [
+          "自动测试",
+          "Doctor",
+          "真实集成",
+          "独立审查"
+        ],
+        "before": [
+          "goal complete"
+        ],
+        "reason": "各证据lane不能相互替代。"
+      }
+    ],
+    "blocker_taxonomy": [
+      "environment_auth",
+      "toolchain",
+      "device_runtime",
+      "external_service",
+      "missing_evidence",
+      "scope_conflict",
+      "review_rejected"
+    ],
+    "completion_rule": "只有14个计划Task完成、所有DoD有对应证据且没有pending amendment时才能完成；source、build、runtime、eval、environment和review证据不得合并为单一结论。"
+  }
+}

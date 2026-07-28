@@ -63,6 +63,18 @@ function installCompactReadSkillRenderer(readRenderer: any) {
   };
 }
 
+export function collapseCollapsedCallLines(
+  lines: string[],
+  width: number,
+  status: string,
+  measureWidth = visibleWidth,
+  truncate = truncateToWidth,
+): string[] {
+  const callWidth = Math.max(0, width - measureWidth(status));
+  if (lines.length === 0) return status ? [truncate(status, width, "…")] : [];
+  return [`${truncate(lines[0], callWidth, "…")}${status}`];
+}
+
 function installCollapsedSingleLineRenderer(name: ToolName, renderer: any) {
   const renderCall = renderer.renderCall;
   const renderResult = renderer.renderResult;
@@ -77,11 +89,7 @@ function installCollapsedSingleLineRenderer(name: ToolName, renderer: any) {
         const status = summary ? theme.fg("dim", ` · ${summary}`) : "";
         const callWidth = Math.max(0, width - visibleWidth(status));
         const lines = component.render(callWidth);
-        if (lines.length === 0) return status ? [truncateToWidth(status, width, "…")] : [];
-        return [
-          `${truncateToWidth(lines[0], callWidth, "…")}${status}`,
-          ...lines.slice(1),
-        ];
+        return collapseCollapsedCallLines(lines, width, status);
       },
       invalidate() {
         component.invalidate?.();

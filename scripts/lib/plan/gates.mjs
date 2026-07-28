@@ -1,5 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
@@ -39,6 +41,38 @@ function complete(projection, attempts, inspection) {
     && [...projection.attempts.values()].every((item) => !["dispatch-requested", "active"].includes(item.status))
     && clean(inspection)
     && attempts.slice(0, 3).every((item) => item.status === "passed");
+}
+
+export async function createTaskCommandRegistry({ cwd, plan }) {
+  const registry = new Map();
+  for (const [index, command] of (plan?.verification ?? []).entries()) {
+    if (typeof command !== "string" || !command.trim()) throw new Error("Approved contract verification command is invalid");
+    registry.set(`contract:verification:${index + 1}`, Object.freeze({
+      id: `contract:verification:${index + 1}`,
+      command,
+    }));
+  }
+  let packageJson;
+  try {
+    packageJson = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  for (const name of Object.keys(packageJson?.scripts ?? {}).sort()) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9:._-]*$/.test(name)) continue;
+    registry.set(`package:${name}`, Object.freeze({ id: `package:${name}`, command: `npm run ${name} --` }));
+  }
+  return registry;
+}
+
+export function resolveTaskVerification({ plan, taskId, registry }) {
+  const ids = plan?.taskVerification?.[taskId] ?? [];
+  if (!Array.isArray(ids)) throw new Error(`Task verification is invalid for ${taskId}`);
+  return ids.map((id) => {
+    const command = registry?.get?.(id);
+    if (!command) throw new Error(`Task verification ID is not a registered command: ${id}`);
+    return { id: command.id, command: command.command };
+  });
 }
 
 export async function runPlanGates({ cwd, baseCommit, projection, commands, audit = async () => ({ findings: [] }), externalReview = async () => ({ available: false, findings: [] }) }) {

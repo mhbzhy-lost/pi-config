@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createSubagentsRpcClient } from "../scripts/lib/subagents-rpc-client.mjs";
+import { createSubagentsRpcClient, SubagentsRpcError } from "../scripts/lib/subagents-rpc-client.mjs";
 
 function createEvents() {
   const listeners = new Map();
@@ -63,7 +63,12 @@ test("rejects an error envelope and removes its reply listener", async () => {
     error: { code: "unavailable", message: "unavailable" },
   });
 
-  await assert.rejects(request, /unavailable/);
+  await assert.rejects(request, (error) => {
+    assert.equal(error instanceof SubagentsRpcError, true);
+    assert.equal(error.code, "unavailable");
+    assert.match(error.message, /unavailable/);
+    return true;
+  });
   assert.equal(events.listenerCount(replyChannel), 0);
   client.dispose();
 });
@@ -119,6 +124,40 @@ test("spawn enforces asynchronous non-clarifying calls and rejects action", asyn
   events.emit("subagents:rpc:v1:reply:request-6", { version: 1, requestId: "request-6", success: true, data: {} });
   await request;
   assert.throws(() => client.spawn({ action: "run" }), /action/);
+  client.dispose();
+});
+
+test("uses a validated caller request id for dispatch fencing", async () => {
+  const events = createEvents();
+  const client = createSubagentsRpcClient(events);
+  const request = client.spawn({ agent: "executor", task: "run", cwd: "/repo" }, { requestId: "attempt-1.dispatch.1" });
+
+  assert.equal(events.emitted[0].value.requestId, "attempt-1.dispatch.1");
+  events.emit("subagents:rpc:v1:reply:attempt-1.dispatch.1", {
+    version: 1,
+    requestId: "attempt-1.dispatch.1",
+    success: true,
+    data: {},
+  });
+  await request;
+  for (const requestId of ["", "has space", "../escape", "x".repeat(161), "line\nbreak"]) {
+    assert.throws(() => client.spawn({ agent: "executor" }, { requestId }), /requestId/i);
+  }
+  client.dispose();
+});
+
+test("rejects concurrent reuse of a caller request id", async () => {
+  const events = createEvents();
+  const client = createSubagentsRpcClient(events);
+  const first = client.status({ runId: "run-1" }, { requestId: "status-1" });
+  assert.throws(() => client.status({ runId: "run-1" }, { requestId: "status-1" }), /already pending/i);
+  events.emit("subagents:rpc:v1:reply:status-1", {
+    version: 1,
+    requestId: "status-1",
+    success: true,
+    data: {},
+  });
+  await first;
   client.dispose();
 });
 

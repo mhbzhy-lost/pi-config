@@ -28,6 +28,10 @@ async function git(cwd, ...args) {
   return stdout.trim();
 }
 
+export async function runPlanGit(cwd, ...args) {
+  return git(cwd, ...args);
+}
+
 function safePlanId(planId) {
   if (typeof planId !== "string" || !PLAN_ID.test(planId) || planId.includes("..")) {
     fail("Invalid planId");

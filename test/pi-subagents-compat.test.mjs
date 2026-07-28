@@ -1,72 +1,267 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import test from "node:test";
-import { createSubagentsRpcClient, evaluateCompatibility, REQUIRED_METHODS } from "../scripts/probes/pi-subagents-compat.mjs";
+import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  SessionManager,
+} from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
+import * as compat from "../scripts/probes/pi-subagents-compat.mjs";
 
+const { createSubagentsRpcClient, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } = compat;
+const repoRoot = process.cwd();
 const compatibleReport = {
-  piVersion: "0.80.6",
-  rpcMethods: ["ping", "status", "spawn", "interrupt", "stop"],
-  planExtensionLoaded: true,
-  planChildNestedSpawn: true,
-  nestedResultHasDetails: true,
-  workerCanSpawn: false,
-  stopReachedTerminalState: true,
+  piVersion: "0.82.1",
+  version: "0.37.0",
+  typeboxVersion: "1.1.38",
+  typeboxCompileResolvable: true,
+  rpcVersion: 1,
+  methods: ["ping", "status", "spawn", "interrupt", "stop"],
+  events: ["subagent:async-started", "subagent:async-complete"],
+  standaloneRootService: true,
+  standaloneNoChildEnv: true,
+  standaloneSessionRebased: true,
+  exactCwd: true,
+  worktreeDisabled: true,
+  waitWakesOnCompletion: true,
+  rpcStatusFindsActiveRun: true,
+  statusArtifactObservesSupervisorBlock: true,
+  supervisorRoundTrip: true,
+  executorFanoutBlocked: true,
+  nestedEventFiles: 0,
 };
 
-test("exports the stable RPC v1 method contract", () => {
+function evaluate(report) {
+  assert.equal(typeof compat.evaluatePlanHarnessCompatibility, "function");
+  return compat.evaluatePlanHarnessCompatibility(report);
+}
+
+test("exports the stable RPC v1 method and supported Pi contracts", () => {
   assert.deepEqual(REQUIRED_METHODS, ["ping", "status", "spawn", "interrupt", "stop"]);
+  assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1"]);
 });
 
-test("accepts the required Pi subagent compatibility report", () => {
-  assert.deepEqual(evaluateCompatibility(compatibleReport), { ok: true, failures: [] });
+test("requires upstream fleet transcript, artifact-root, and every public Pi native conversation capability", async () => {
+  assert.equal(typeof compat.assertBrowserTranscriptCompatibility, "function");
+  const imported = [];
+  const capabilities = [
+    "SessionManager", "sessionEntryToContextMessages", "AssistantMessageComponent", "BashExecutionComponent",
+    "BranchSummaryMessageComponent", "CompactionSummaryMessageComponent", "CustomMessageComponent", "parseSkillBlock",
+    "SkillInvocationMessageComponent", "ToolExecutionComponent", "UserMessageComponent",
+  ];
+  const piModule = Object.fromEntries(capabilities.map((capability) => [capability, () => {}]));
+  await compat.assertBrowserTranscriptCompatibility({
+    packageRoot: "/tmp/pi-subagents",
+    piModule,
+    jiti: { import: async (path) => {
+      imported.push(path);
+      return path.endsWith("fleet-transcript.ts")
+        ? { readFleetTranscript() {}, renderFleetTranscript() {} }
+        : { getArtifactsDir() {} };
+    } },
+  });
+  assert.deepEqual(imported, [
+    join("/tmp/pi-subagents", "src/tui/fleet-transcript.ts"),
+    join("/tmp/pi-subagents", "src/shared/artifacts.ts"),
+  ]);
+
+  for (const capability of capabilities) {
+    const incomplete = { ...piModule };
+    delete incomplete[capability];
+    await assert.rejects(
+      compat.assertBrowserTranscriptCompatibility({
+        packageRoot: "/tmp/pi-subagents", piModule: incomplete,
+        jiti: { import: async () => ({ readFleetTranscript() {}, renderFleetTranscript() {}, getArtifactsDir() {} }) },
+      }),
+      new RegExp(capability),
+    );
+  }
 });
 
-test("rejects an unsupported Pi version", () => {
-  assert.deepEqual(evaluateCompatibility({ ...compatibleReport, piVersion: "0.80.5" }), {
-    ok: false,
-    failures: ["unexpected Pi version: 0.80.5"],
+test("checks browser transcript compatibility against the installed pi-subagents package", async () => {
+  const jiti = createJiti(import.meta.url, { moduleCache: false });
+  await compat.assertBrowserTranscriptCompatibility({
+    packageRoot: join(process.cwd(), "pi/npm/node_modules/pi-subagents"),
+    jiti,
   });
 });
 
-test("reports each missing stable RPC method", () => {
-  assert.deepEqual(evaluateCompatibility({ ...compatibleReport, rpcMethods: ["ping", "status", "spawn", "interrupt"] }), {
-    ok: false,
-    failures: ["missing RPC method: stop"],
+test("binds the installed supervisor runtime behind project-owned tools", async () => {
+  const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION"];
+  const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
+  for (const name of markers) delete process.env[name];
+
+  let result;
+  try {
+    const agentDir = join(repoRoot, "pi");
+    const loader = new DefaultResourceLoader({ cwd: repoRoot, agentDir });
+    await loader.reload();
+    result = await createAgentSession({
+      cwd: repoRoot,
+      agentDir,
+      resourceLoader: loader,
+      sessionManager: SessionManager.inMemory(repoRoot),
+    });
+    const errors = [];
+
+    await result.session.bindExtensions({
+      mode: "rpc",
+      shutdownHandler() {},
+      onError(error) { errors.push(error); },
+    });
+    const toolNames = result.session.getAllTools()
+      .map((tool) => tool.name)
+      .filter((name) => name.includes("subagent") || name === "intercom");
+    const subagent = result.session.getToolDefinition("subagent");
+    const notifyRenderer = result.session.resourceLoader.getExtensions().extensions
+      .map((extension) => extension.messageRenderers.get("subagent-notify"))
+      .find((renderer) => typeof renderer === "function");
+    const supervisor = result.session.getToolDefinition("subagent_supervisor");
+    const signal = new AbortController().signal;
+    const status = await supervisor.execute("compat-status", { action: "status" }, signal, undefined, undefined);
+    const pending = await supervisor.execute("compat-pending", { action: "pending" }, signal, undefined, undefined);
+    const theme = { fg: (_color, text) => text, bold: (text) => text };
+    const notifyMessage = {
+      customType: "subagent-notify",
+      content: "Background task completed: **delegate** [Renderer smoke]\n\nfull output\n\nSession file: /tmp/session.jsonl",
+      display: true,
+      details: { titles: ["Renderer smoke"] },
+    };
+    const notifyBefore = structuredClone(notifyMessage);
+    const notifyLines = notifyRenderer(notifyMessage, { expanded: true, outputPad: 0 }, theme)
+      .render(120)
+      .map((line) => line.trimEnd());
+    const statusResult = {
+      content: [{ type: "text", text: "Run: run-1\nState: running\nDir: /tmp/run-1\nLog: /tmp/log" }],
+      details: { mode: "single", results: [], runId: "run-1", asyncDir: "/tmp/run-1" },
+    };
+    const statusBefore = structuredClone(statusResult);
+    const statusLines = subagent.renderResult(
+      statusResult,
+      { expanded: true },
+      theme,
+      { args: { action: "status", id: "run-1" } },
+    ).render(120).map((line) => line.trimEnd());
+
+    assert.deepEqual(errors, []);
+    assert.deepEqual(toolNames, ["subagent", "subagent_supervisor"]);
+    assert.equal(typeof subagent.renderResult, "function");
+    assert.equal(typeof notifyRenderer, "function");
+    assert.deepEqual(notifyLines, ["✓ Renderer smoke · completed"]);
+    assert.deepEqual(statusLines, ["Status: running"]);
+    assert.deepEqual(notifyMessage, notifyBefore);
+    assert.deepEqual(statusResult, statusBefore);
+    assert.doesNotMatch(supervisor.description, /pi-subagents|upstream/i);
+    assert.equal(status.details.active, true);
+    assert.equal(status.details.pending, 0);
+    assert.deepEqual(pending.details.pending, []);
+  } finally {
+    if (result) {
+      await result.session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });
+      result.session.dispose();
+    }
+    for (const [name, value] of previousMarkers) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("accepts the standalone Plan Harness compatibility report", () => {
+  assert.deepEqual(evaluate(compatibleReport), { ok: true, failures: [] });
+});
+
+test("rejects runtime versions outside the explicit support set", () => {
+  assert.deepEqual(evaluate({ ...compatibleReport, piVersion: "0.82.0" }), { ok: true, failures: [] });
+  assert.deepEqual(evaluate({ ...compatibleReport, piVersion: "0.83.0" }).failures, ["unsupported Pi version: 0.83.0"]);
+  assert.deepEqual(evaluate({ ...compatibleReport, version: "0.35.1" }).failures, ["unexpected pi-subagents version: 0.35.1"]);
+  assert.deepEqual(evaluate({ ...compatibleReport, typeboxVersion: "1.1.24" }).failures, ["unexpected typebox version: 1.1.24"]);
+});
+
+test("requires TypeBox compiler resolution from pi-subagents", () => {
+  assert.deepEqual(evaluate({ ...compatibleReport, typeboxCompileResolvable: false }).failures, [
+    "typebox/compile is not resolvable from pi-subagents",
+  ]);
+});
+
+test("requires RPC v1 methods and lifecycle events", () => {
+  assert.deepEqual(evaluate({ ...compatibleReport, rpcVersion: 2 }).failures, ["unexpected RPC version: 2"]);
+  assert.deepEqual(evaluate({ ...compatibleReport, methods: compatibleReport.methods.filter((method) => method !== "stop") }).failures, [
+    "missing RPC method: stop",
+  ]);
+  assert.deepEqual(evaluate({ ...compatibleReport, events: ["subagent:async-started"] }).failures, [
+    "missing lifecycle event: subagent:async-complete",
+  ]);
+});
+
+test("requires every standalone runtime boundary", () => {
+  const requirements = [
+    ["standaloneRootService", "Standalone Plan Runner did not load the root service"],
+    ["standaloneNoChildEnv", "Standalone Plan Runner inherited child mode"],
+    ["standaloneSessionRebased", "Standalone Plan Runner retained the inherited parent session route"],
+    ["exactCwd", "Executor did not use the authorized cwd"],
+    ["worktreeDisabled", "pi-subagents created an unauthorized worktree"],
+    ["waitWakesOnCompletion", "wait did not wake on completion"],
+    ["rpcStatusFindsActiveRun", "RPC status did not find the active Executor"],
+    ["statusArtifactObservesSupervisorBlock", "Status artifact did not observe the Supervisor block"],
+    ["supervisorRoundTrip", "Supervisor request/reply failed"],
+    ["executorFanoutBlocked", "Executor can dispatch nested subagents"],
+  ];
+
+  for (const [field, message] of requirements) {
+    assert.deepEqual(evaluate({ ...compatibleReport, [field]: false }).failures, [message], field);
+  }
+});
+
+test("rejects nested event files on the standalone executor path", () => {
+  assert.deepEqual(evaluate({ ...compatibleReport, nestedEventFiles: 1 }).failures, ["unexpected nested event files: 1"]);
+});
+
+test("builds a standalone environment without inheriting a parent session route", () => {
+  assert.equal(typeof compat.buildStandaloneRuntimeEnv, "function");
+  assert.deepEqual(compat.buildStandaloneRuntimeEnv({
+    PATH: "/test/bin",
+    PI_SUBAGENT_PARENT_SESSION: "parent-session",
+  }), { PATH: "/test/bin" });
+});
+
+test("fails closed instead of clearing child execution markers", () => {
+  assert.throws(() => compat.buildStandaloneRuntimeEnv({ PI_SUBAGENT_CHILD: "1" }), /PI_SUBAGENT_CHILD/);
+  assert.throws(() => compat.buildStandaloneRuntimeEnv({ PI_SUBAGENT_FANOUT_CHILD: "1" }), /PI_SUBAGENT_FANOUT_CHILD/);
+});
+
+test("builds the exact top-level runtime dependency install command", async () => {
+  let setup = {};
+  try {
+    setup = await import("../scripts/setup-plan-runtime-deps.mjs");
+  } catch {}
+  assert.equal(typeof setup.buildPlanRuntimeInstallCommand, "function");
+  assert.deepEqual(setup.buildPlanRuntimeInstallCommand("/tmp/pi/npm"), {
+    command: "npm",
+    args: [
+      "install", "--prefix", "/tmp/pi/npm", "--save-exact",
+      "pi-subagents@0.37.0", "typebox@1.1.38",
+    ],
   });
 });
 
-test("rejects a Plan child that does not load its extension", () => {
-  assert.deepEqual(evaluateCompatibility({ ...compatibleReport, planExtensionLoaded: false }), {
-    ok: false,
-    failures: ["Plan child did not load plan-capsule extension"],
+test("installs the exact runtime dependencies through the injected process runner", async () => {
+  const setup = await import("../scripts/setup-plan-runtime-deps.mjs");
+  assert.equal(typeof setup.installPlanRuntimeDependencies, "function");
+  const calls = [];
+  const result = await setup.installPlanRuntimeDependencies({
+    piNpmDir: "/tmp/pi/npm",
+    env: { PATH: "/test/bin" },
+    run: async (...args) => calls.push(args),
   });
-});
 
-test("rejects a Plan child that cannot make an authorized nested spawn", () => {
-  assert.deepEqual(evaluateCompatibility({ ...compatibleReport, planChildNestedSpawn: false }), {
-    ok: false,
-    failures: ["Plan child cannot spawn an authorized nested worker"],
-  });
-});
-
-test("rejects nested results without structured lifecycle details", () => {
-  assert.deepEqual(evaluateCompatibility({ ...compatibleReport, nestedResultHasDetails: false }), {
-    ok: false,
-    failures: ["nested subagent result lacks structured lifecycle details"],
-  });
-});
-
-test("rejects ordinary workers that can recursively spawn", () => {
-  assert.deepEqual(evaluateCompatibility({ ...compatibleReport, workerCanSpawn: true }), {
-    ok: false,
-    failures: ["ordinary worker can recursively spawn subagents"],
-  });
-});
-
-test("rejects stop operations that do not reach a terminal artifact state", () => {
-  assert.deepEqual(evaluateCompatibility({ ...compatibleReport, stopReachedTerminalState: false }), {
-    ok: false,
-    failures: ["stop did not reach a terminal artifact state"],
-  });
+  assert.deepEqual(calls, [[
+    "npm",
+    ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "pi-subagents@0.37.0", "typebox@1.1.38"],
+    { env: { PATH: "/test/bin" } },
+  ]]);
+  assert.deepEqual(result, { piNpmDir: "/tmp/pi/npm" });
 });
 
 function createEvents() {
