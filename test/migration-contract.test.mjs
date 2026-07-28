@@ -6,7 +6,7 @@ import test from "node:test";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-const expectedSkills = [
+const expectedGlobalSkills = [
   "external-llm-review",
   "git-commit-convention",
   "systematic-debugging",
@@ -19,23 +19,13 @@ const expectedSkills = [
   "exa-search",
   "playwright",
   "browser-auth-session",
-  "goal-contract",
-  "mac-mini-worker",
-  "normandy-cli",
-  "tbctx7",
-  "crash-analyzer-usage",
-  "nanocompose-cli",
-  "a1",
-  "tmcp",
-  "dp3-mcp",
-  "crash-mcp",
 ];
 
-test("migration exposes exactly the required Skills", async () => {
+test("migration exposes exactly the required global Skills", async () => {
   const { loadDesiredSkills } = await import("../scripts/lib/skill-whitelist.mjs");
-  const skills = await loadDesiredSkills(repoRoot, join(repoRoot, "skill-overrides", "skills.list"), join(repoRoot, "skill-overrides", "skills.local.list"));
+  const skills = await loadDesiredSkills(repoRoot, join(repoRoot, "skill-overrides", "skills.list"));
 
-  assert.deepEqual([...skills.keys()], expectedSkills);
+  assert.deepEqual([...skills.keys()], expectedGlobalSkills);
 });
 
 test("migration removes the legacy Task 7 runtime", async () => {
