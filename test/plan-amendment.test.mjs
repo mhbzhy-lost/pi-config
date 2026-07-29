@@ -50,15 +50,25 @@ test("rejects changes to accepted and integrated task contracts but permits repa
   assert.doesNotThrow(() => validateAmendment({ projection: accepted, oldIr, newIr: repair }));
 });
 
-test("collects active and waiting attempts whose effective task contract changes", () => {
-  const active = projection({ attempts: [
-    ["attempt-task-2-2", { taskId: "task-2", status: "waiting-attention" }],
-    ["attempt-task-2-1", { taskId: "task-2", status: "active" }],
-    ["attempt-task-1-1", { taskId: "task-1", status: "active" }],
+for (const status of ["workspace-allocated", "dispatch-requested", "active", "waiting-attention", "validated"]) {
+  test(`collects ${status} attempts whose effective task contract changes`, () => {
+    const current = projection({ attempts: [
+      ["attempt-task-2", { taskId: "task-2", status }],
+      ["attempt-task-1", { taskId: "task-1", status }],
+    ] });
+    const changed = ir([oldIr.nodes[0], node("task-2", { full: "c", effective: "c", resources: [{ id: "provider", mode: "shared" }] })], { provider: 2 });
+
+    assert.deepEqual(validateAmendment({ projection: current, oldIr, newIr: changed }).supersededAttemptIds, ["attempt-task-2"]);
+  });
+}
+
+test("does not collect settled attempts whose effective task contract changes", () => {
+  const settled = projection({ attempts: [
+    ...["failed", "interrupted", "cancelled", "blocked"].map((status) => [`attempt-${status}`, { taskId: "task-2", status }]),
   ] });
   const changed = ir([oldIr.nodes[0], node("task-2", { full: "c", effective: "c", resources: [{ id: "provider", mode: "shared" }] })], { provider: 2 });
 
-  assert.deepEqual(validateAmendment({ projection: active, oldIr, newIr: changed }).supersededAttemptIds, ["attempt-task-2-1", "attempt-task-2-2"]);
+  assert.deepEqual(validateAmendment({ projection: settled, oldIr, newIr: changed }).supersededAttemptIds, []);
 });
 
 test("allows retirement only for pending tasks that have never been attempted", () => {
@@ -85,7 +95,18 @@ test("rejects reuse of retired or historical task IDs", () => {
   );
 });
 
-test("rejects resource capacities below active claims and returns new task hashes", () => {
+for (const status of ["workspace-allocated", "dispatch-requested", "validated"]) {
+  test(`rejects resource capacities below ${status} claims`, () => {
+    const current = projection({ attempts: [
+      ["attempt-2", { taskId: "task-2", status }],
+    ] });
+    const tooSmall = ir(oldIr.nodes, { provider: 0 });
+
+    assert.throws(() => validateAmendment({ projection: current, oldIr, newIr: tooSmall }), /resource capacity is below active claims: provider/);
+  });
+}
+
+test("rejects resource capacities below open claims, ignores settled claims, and returns new task hashes", () => {
   const active = projection({ attempts: [
     ["attempt-2", { taskId: "task-2", status: "active" }],
     ["attempt-3", { taskId: "task-3", status: "waiting-attention" }],
@@ -94,6 +115,10 @@ test("rejects resource capacities below active claims and returns new task hashe
   const tooSmall = ir(withThirdTask.nodes, { provider: 1 });
 
   assert.throws(() => validateAmendment({ projection: active, oldIr: withThirdTask, newIr: tooSmall }), /resource capacity is below active claims: provider/);
+  const settled = projection({ attempts: [
+    ...["failed", "interrupted", "cancelled", "blocked", "integrated"].map((status) => [`attempt-${status}`, { taskId: "task-2", status }]),
+  ] });
+  assert.doesNotThrow(() => validateAmendment({ projection: settled, oldIr, newIr: ir(oldIr.nodes, { provider: 0 }) }));
   assert.deepEqual(validateAmendment({ projection: projection(), oldIr, newIr: oldIr }).taskHashes, {
     "task-1": { full: oldIr.nodes[0].hashes.full, effective: oldIr.nodes[0].hashes.effective, scheduling: oldIr.nodes[0].hashes.scheduling },
     "task-2": { full: oldIr.nodes[1].hashes.full, effective: oldIr.nodes[1].hashes.effective, scheduling: oldIr.nodes[1].hashes.scheduling },

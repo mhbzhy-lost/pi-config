@@ -1,4 +1,4 @@
-const SUPERSEDE_STATUSES = new Set(["active", "waiting-attention"]);
+const OPEN_ATTEMPT_STATUSES = new Set(["workspace-allocated", "dispatch-requested", "active", "waiting-attention", "validated"]);
 const IMMUTABLE_STATUSES = new Set(["accepted", "integrated"]);
 
 function nodesById(ir) {
@@ -48,7 +48,7 @@ function validateImmutableTasks(projection, oldById, newById) {
 function validateResourceCapacity(projection, oldById, newIr) {
   const claims = new Map();
   for (const attempt of projection.attempts.values()) {
-    if (!SUPERSEDE_STATUSES.has(attempt.status)) continue;
+    if (!OPEN_ATTEMPT_STATUSES.has(attempt.status)) continue;
     const node = oldById.get(attempt.taskId);
     if (!node) continue;
     for (const resource of node.resources ?? []) {
@@ -92,7 +92,7 @@ export function validateAmendment({ projection, oldIr, newIr }) {
   validateResourceCapacity(projection, oldById, newIr);
 
   const supersededAttemptIds = [...projection.attempts]
-    .filter(([, attempt]) => SUPERSEDE_STATUSES.has(attempt.status)
+    .filter(([, attempt]) => OPEN_ATTEMPT_STATUSES.has(attempt.status)
       && oldById.has(attempt.taskId)
       && newById.has(attempt.taskId)
       && oldById.get(attempt.taskId).hashes.effective !== newById.get(attempt.taskId).hashes.effective)
