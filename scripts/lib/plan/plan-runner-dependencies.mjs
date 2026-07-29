@@ -118,6 +118,7 @@ export function createPlanRunnerDependencies({
   inspectAttemptWorkspace = defaultInspectAttemptWorkspace,
   releaseAttemptWorkspace = defaultReleaseAttemptWorkspace,
   validateAttemptResult = defaultValidateAttemptResult,
+  integrationQueueFactory = createIntegrationQueue,
   integrationOwnerToken = crypto.randomUUID(),
   takeExecutionFacts = () => [],
   id = () => crypto.randomUUID(),
@@ -322,10 +323,12 @@ export function createPlanRunnerDependencies({
     }).coordinator;
     const taskById = new Map(plan.tasks.map((task) => [task.id, task]));
     const projection = coordinator.projection();
-    const queue = createIntegrationQueue({
+    const queue = integrationQueueFactory({
       accumulator: current.workspace.worktree,
       integrationOwnerToken,
-      nodeOrder: plan.tasks.map((task) => task.id),
+      nodeOrder: current.revision && ir.version === "plan-ir.v3"
+        ? ir.nodes.map((node) => node.id)
+        : plan.tasks.map((task) => task.id),
       integratedTaskIds: [...projection.tasks.entries()]
         .filter(([, task]) => ["accepted", "integrated"].includes(task.status))
         .map(([taskId]) => taskId),

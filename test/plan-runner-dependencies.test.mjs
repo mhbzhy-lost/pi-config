@@ -12,6 +12,7 @@ import { createPlanControl } from "../scripts/lib/plan/plan-control.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mjs";
 import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
+import { createIntegrationQueue } from "../scripts/lib/plan/integration-queue.mjs";
 
 const TEST_MANIFEST = "a".repeat(64);
 const TEST_IR = "b".repeat(64);
@@ -50,6 +51,46 @@ const parallelSource = `# Parallel plan
 **Files:**
 - Create: \`src/beta.txt\`
 `;
+
+function forwardDependencySource() {
+  return `# Forward dependency queue fixture
+
+**Goal:** Integrate a dependency before its source-ordered dependent.
+
+## Execution Contract
+
+\`\`\`json
+${JSON.stringify({
+    schemaVersion: "pi-plan.v3", revision: 1, parentPlanHash: null,
+    verification: [{ id: "plan:test", command: "true", cwd: ".", timeoutMs: 900000 }],
+    requiredGates: ["deterministic", "plan-audit", "external-review", "final-completeness"],
+    resourceCapacities: {},
+    executionDefaults: { agent: "executor", risk: "normal", workflow: { mode: "inherit-repository" }, timeoutMs: 900000 },
+    taskExecution: { "task-1": {}, "task-2": {} },
+    taskAcceptance: {
+      "task-1": { strategy: "commands", commandIds: ["plan:test"] },
+      "task-2": { strategy: "commands", commandIds: ["plan:test"] },
+    },
+  })}
+\`\`\`
+
+### Task 1: Dependent task
+
+**Deps:** Task 2
+
+**Files:**
+- Create: \`src/task-1.mjs\`
+
+Implement Task 1 after Task 2 is integrated.
+
+### Task 2: Dependency task
+
+**Files:**
+- Create: \`src/task-2.mjs\`
+
+Implement Task 2 first.
+`;
+}
 
 async function git(cwd, ...args) {
   const { stdout } = await execFile("git", args, { cwd });
@@ -375,6 +416,78 @@ test("one coordinator step dispatches parallel roots to distinct workspaces", as
   assert.deepEqual(result.dispatched.map(({ taskId }) => taskId), ["task-1", "task-2"]);
   assert.equal(new Set(result.dispatched.map(({ cwd }) => cwd)).size, 2);
   assert.equal(spawns.every(({ agent }) => agent === "executor"), true);
+});
+
+test("public continuePlan gives the queue current v3 IR topology for a forward dependency", async (t) => {
+  const repo = await fixture(forwardDependencySource(), { separateStateRoot: true });
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const store = createPlanRevisionStore({ stateRoot: repo.stateRoot });
+  const prepared = await store.prepareRevision({
+    planId: repo.planId,
+    sourceBytes: Buffer.from(forwardDependencySource()),
+    reason: "initial-approval",
+    initiator: { kind: "launcher" },
+  });
+  await store.writeCurrent(prepared);
+  const revision = await store.readRevision(repo.planId, 1);
+  const binding = {
+    ...(await bindingInput(repo)),
+    manifestSha256: revision.manifestSha256,
+    planIrHash: revision.manifest.irHash,
+  };
+  const branch = [];
+  const appended = [];
+  const spawns = [];
+  const pi = { async appendEntry(type, data) {
+    appended.push(data);
+    branch.push({ customType: type, data });
+  } };
+  let captured;
+  const deps = createPlanRunnerDependencies({
+    pi,
+    originRoot: repo.origin,
+    stateRoot: repo.stateRoot,
+    revisionStore: store,
+    executionBackend: backend({ spawns }),
+    allocateAttemptWorkspace: async (input) => fakeAllocator(input),
+    integrationQueueFactory(options) {
+      captured = options;
+      return createIntegrationQueue(options);
+    },
+  });
+  const validated = await deps.validateBinding(binding, { ctx: context(repo.worktree) });
+  await pi.appendEntry("pi-plan-event-v1", {
+    schemaVersion: "pi-plan-event.v1",
+    eventId: "forward-created",
+    planId: repo.planId,
+    occurredAt: "2026-07-29T00:00:00.000Z",
+    type: "plan.created",
+    data: {
+      workspace: {
+        originRoot: validated.originRoot,
+        worktree: validated.worktree,
+        baseCommit: validated.baseCommit,
+        headCommit: validated.headCommit,
+      },
+      tasks: revision.plan.tasks.map((task) => task.id),
+      revision: {
+        number: revision.revision,
+        manifestSha256: revision.manifestSha256,
+        sourceBytesSha256: revision.manifest.sourceBytesSha256,
+        planHash: revision.manifest.planHash,
+        irVersion: revision.manifest.irVersion,
+        irHash: revision.manifest.irHash,
+        taskHashes: revision.manifest.taskHashes,
+      },
+    },
+  });
+
+  const result = await deps.continuePlan({}, { ctx: context(repo.worktree, branch) });
+
+  assert.deepEqual(revision.ir.nodes.map((node) => node.id), ["task-2", "task-1"]);
+  assert.deepEqual(captured.nodeOrder, revision.ir.nodes.map((node) => node.id));
+  assert.deepEqual(result.dispatched.map(({ taskId }) => taskId), ["task-2"]);
+  assert.equal(appended.some((entry) => entry.type === "attempt.dispatch-requested" && entry.data.taskId === "task-1"), false);
 });
 
 test("session shutdown stops each bound backend run once", async (t) => {

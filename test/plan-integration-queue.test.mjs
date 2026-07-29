@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { createIntegrationQueue, hashValidatedAttempt } from "../scripts/lib/plan/integration-queue.mjs";
+import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
+import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -79,6 +81,47 @@ function queueFor(repo, overrides = {}) {
   return { queue, events, released, resources, integrationOwnerToken };
 }
 
+function forwardDependencyPlan() {
+  const source = `# Forward dependency queue fixture
+
+**Goal:** Integrate dependencies in compiled topology order.
+
+## Execution Contract
+
+\`\`\`json
+${JSON.stringify({
+    schemaVersion: "pi-plan.v3", revision: 1, parentPlanHash: null,
+    verification: [{ id: "plan:test", command: "true", cwd: ".", timeoutMs: 900000 }],
+    requiredGates: ["deterministic", "plan-audit", "external-review", "final-completeness"],
+    resourceCapacities: {},
+    executionDefaults: { agent: "executor", risk: "normal", workflow: { mode: "inherit-repository" }, timeoutMs: 900000 },
+    taskExecution: { "task-1": {}, "task-2": {} },
+    taskAcceptance: {
+      "task-1": { strategy: "commands", commandIds: ["plan:test"] },
+      "task-2": { strategy: "commands", commandIds: ["plan:test"] },
+    },
+  })}
+\`\`\`
+
+### Task 1: Dependent task
+
+**Deps:** Task 2
+
+**Files:**
+- Create: \`src/task-1.mjs\`
+
+Integrate after Task 2.
+
+### Task 2: Dependency task
+
+**Files:**
+- Create: \`src/task-2.mjs\`
+
+Integrate first.
+`;
+  return parsePlanDocument(source, "forward-dependency.md");
+}
+
 test("integrates same-base attempts serially in Plan order even when task-2 completes first", async () => {
   await withFixture({}, async (repo) => {
     const subject = queueFor(repo);
@@ -93,6 +136,33 @@ test("integrates same-base attempts serially in Plan order even when task-2 comp
     assert.deepEqual(subject.events.filter(({ type }) => type === "integration.requested").map(({ data }) => data.taskId), ["task-1", "task-2"]);
     assert.deepEqual(subject.released, ["attempt-task-1", "attempt-task-2"]);
     assert.deepEqual(subject.resources, ["attempt-task-1", "attempt-task-2"]);
+  });
+});
+
+test("integrates a parsed forward dependency in compiled IR topology order", async () => {
+  await withFixture({}, async (repo) => {
+    const ir = compilePlanToIR(forwardDependencyPlan());
+    const nodeOrder = ir.nodes.map((node) => node.id);
+    assert.deepEqual(nodeOrder, ["task-2", "task-1"]);
+    const subject = queueFor(repo, { nodeOrder });
+    const dependency = { ...repo.attempts["task-2"], deps: [] };
+    dependency.validationHash = hashValidatedAttempt(dependency);
+    subject.queue.enqueue(dependency);
+
+    const first = await subject.queue.drain({ expectedHead: repo.baseCommit, ownerToken: subject.integrationOwnerToken });
+    assert.deepEqual(first.integrated.map(({ taskId }) => taskId), ["task-2"]);
+
+    const dependent = { ...repo.attempts["task-1"], deps: ["task-2"] };
+    dependent.validationHash = hashValidatedAttempt(dependent);
+    subject.queue.enqueue(dependent);
+    const second = await subject.queue.drain({
+      expectedHead: await git(repo.origin, "rev-parse", "HEAD"),
+      ownerToken: subject.integrationOwnerToken,
+    });
+
+    assert.deepEqual(second.integrated.map(({ taskId }) => taskId), ["task-1"]);
+    assert.deepEqual(subject.events.filter(({ type }) => type === "integration.requested").map(({ data }) => data.taskId), ["task-2", "task-1"]);
+    assert.deepEqual(subject.events.filter(({ type }) => type === "integration.finished").map(({ data }) => data.taskId), ["task-2", "task-1"]);
   });
 });
 
