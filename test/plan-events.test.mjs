@@ -96,6 +96,95 @@ function passedGates(projection) {
   return projection;
 }
 
+function sha(seed) {
+  return seed.repeat(64).slice(0, 64);
+}
+
+function revisionProjection(tasks = ["task-1", "task-2", "task-3"]) {
+  const revisionWorkspace = { originRoot: "/repo", worktree: "/worktree", baseCommit: "base", headCommit: "head" };
+  const taskHashes = Object.fromEntries(tasks.map((taskId, index) => [taskId, {
+    full: sha(String(index + 1)), effective: sha(String(index + 1)), scheduling: sha(String(index + 4)),
+  }]));
+  return applyEvent(createProjection(), event("plan.created", {
+    workspace: revisionWorkspace,
+    tasks,
+    revision: { number: 1, manifestSha256: sha("a"), sourceBytesSha256: sha("b"), planHash: sha("c"), irVersion: "plan-ir.v3", irHash: sha("d"), taskHashes },
+  }));
+}
+
+function amendmentData(projection, overrides = {}) {
+  const old = projection.revision.taskHashes;
+  const taskHashes = {
+    "task-1": { ...old["task-1"] },
+    "task-2": { full: sha("5"), effective: sha("5"), scheduling: sha("6") },
+    "task-4": { full: sha("7"), effective: sha("7"), scheduling: sha("8") },
+  };
+  return {
+    revision: 2, parentRevision: 1, manifestSha256: sha("9"), sourceBytesSha256: sha("a"), planHash: sha("b"), irHash: sha("c"), taskHashes,
+    diff: { added: ["task-4"], changed: ["task-2"], rebound: [], retired: ["task-3"], unchanged: ["task-1"] },
+    supersededAttemptIds: [], requestId: "supervisor-request-1", reason: "clarify execution contract", ...overrides,
+  };
+}
+
+test("atomically projects a strict Plan amendment matrix with tombstones and supersede intent", () => {
+  let projection = revisionProjection();
+  projection = apply(projection, "task.accepted", { taskId: "task-1" });
+  projection = apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-2", taskId: "task-2", baseCommit: "head", workspace: attemptWorkspace("attempt-2") });
+  projection = apply(projection, "attempt.dispatch-requested", {
+    attemptId: "attempt-2", taskId: "task-2", dispatchId: "dispatch-2", baseCommit: "head", workspace: attemptWorkspace("attempt-2"), tool: dispatchTool("attempt-2"), toolHash: "tool-2",
+    planIrHash: projection.revision.irHash, taskHash: projection.revision.taskHashes["task-2"].effective, schedulingHash: projection.revision.taskHashes["task-2"].scheduling, dispatchContextHash: sha("e"),
+  });
+  const data = amendmentData(projection, { supersededAttemptIds: ["attempt-2"] });
+  const amended = apply(projection, "plan.amended", data);
+  assert.equal(amended.revision.number, 2);
+  assert.equal(amended.revision.irVersion, "plan-ir.v3");
+  assert.deepEqual(amended.revision.taskHashes, data.taskHashes);
+  assert.deepEqual(amended.tasks.get("task-1"), { status: "accepted" });
+  assert.deepEqual(amended.tasks.get("task-2"), { status: "pending" });
+  assert.deepEqual(amended.tasks.get("task-3"), { status: "retired" });
+  assert.deepEqual(amended.tasks.get("task-4"), { status: "pending" });
+  assert.equal(amended.attempts.get("attempt-2").status, "supersede-requested");
+  assert.deepEqual(amended.amendmentRequestIds, new Set(["supervisor-request-1"]));
+});
+
+test("rejects invalid Plan amendments without mutating the current projection", () => {
+  const projection = revisionProjection();
+  const original = structuredClone({ revision: projection.revision, tasks: [...projection.tasks], attempts: [...projection.attempts] });
+  const invalid = [
+    ["legacy projection", createRunningProjection(), amendmentData(projection), /revision identity/],
+    ["bad exact keys", projection, { ...amendmentData(projection), extra: true }, /plan.amended data/],
+    ["bad revision chain", projection, amendmentData(projection, { revision: 3 }), /revision/],
+    ["invalid SHA", projection, amendmentData(projection, { manifestSha256: "bad" }), /manifestSha256/],
+    ["unsorted diff", projection, amendmentData(projection, { diff: { added: ["task-z", "task-4"], changed: ["task-2"], rebound: [], retired: ["task-3"], unchanged: ["task-1"] } }), /diff/],
+    ["wrong partition", projection, amendmentData(projection, { diff: { added: ["task-4"], changed: [], rebound: [], retired: ["task-3"], unchanged: ["task-1", "task-2"] } }), /diff/],
+    ["missing task hash", projection, (() => { const { "task-4": ignored, ...taskHashes } = amendmentData(projection).taskHashes; return amendmentData(projection, { taskHashes }); })(), /diff/],
+  ];
+  for (const [label, current, data, expected] of invalid) assert.throws(() => apply(current, "plan.amended", data), expected, label);
+  assert.deepEqual({ revision: projection.revision, tasks: [...projection.tasks], attempts: [...projection.attempts] }, original);
+});
+
+test("requires exact supersede attempts, rejects request replay, and preserves accepted rebound carry-forward", () => {
+  let projection = revisionProjection(["task-1", "task-2"]);
+  projection = apply(projection, "task.accepted", { taskId: "task-1" });
+  projection = apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-2", taskId: "task-2", baseCommit: "head", workspace: attemptWorkspace("attempt-2") });
+  const changed = amendmentData(projection, {
+    taskHashes: { "task-1": { ...projection.revision.taskHashes["task-1"], effective: sha("f") }, "task-2": { ...projection.revision.taskHashes["task-2"], effective: sha("e") } },
+    diff: { added: [], changed: [], rebound: ["task-1", "task-2"], retired: [], unchanged: [] },
+  });
+  assert.throws(() => apply(projection, "plan.amended", changed), /supersededAttemptIds/);
+  const amended = apply(projection, "plan.amended", { ...changed, supersededAttemptIds: ["attempt-2"] });
+  assert.equal(amended.tasks.get("task-1").status, "accepted");
+  assert.equal(amended.attempts.get("attempt-2").status, "supersede-requested");
+  assert.throws(() => apply(amended, "plan.amended", { ...changed, revision: 3, parentRevision: 2 }), /duplicate amendment requestId/);
+  const withTombstone = apply(revisionProjection(), "plan.amended", amendmentData(revisionProjection()));
+  assert.throws(() => apply(withTombstone, "plan.amended", {
+    revision: 3, parentRevision: 2, manifestSha256: sha("1"), sourceBytesSha256: sha("2"), planHash: sha("3"), irHash: sha("4"),
+    taskHashes: { ...withTombstone.revision.taskHashes, "task-3": { full: sha("5"), effective: sha("5"), scheduling: sha("6") } },
+    diff: { added: ["task-3"], changed: [], rebound: [], retired: [], unchanged: ["task-1", "task-2", "task-4"] },
+    supersededAttemptIds: [], requestId: "new-request", reason: "reuse a tombstone",
+  }), /historical task ID/);
+});
+
 test("creates a created projection with every declared task pending", () => {
   const projection = createRunningProjection();
 

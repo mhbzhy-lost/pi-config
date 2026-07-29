@@ -6,6 +6,7 @@ const SCHEMA_VERSION = "pi-plan-event.v1";
 const GATES = new Set(["deterministic", "plan-audit", "external-review", "final-completeness"]);
 const TERMINAL_LIFECYCLES = new Set(["validated", "blocked", "cancelled", "interrupted"]);
 const OPEN_ATTEMPT_STATUSES = new Set(["workspace-allocated", "dispatch-requested", "active", "waiting-attention", "validated"]);
+const AMENDMENT_CONTRACT_ATTEMPT_STATUSES = new Set(["workspace-allocated", "dispatch-requested", "active", "waiting-attention", "succeeded", "validated"]);
 const SETTLED_OUTCOMES = new Set(["succeeded", "failed", "interrupted", "cancelled", "blocked"]);
 const BLOCKER_CODE = /^[a-z0-9][a-z0-9:_-]{0,127}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -22,6 +23,7 @@ export function createProjection() {
     revision: null,
     validatedHead: null,
     eventIds: new Set(),
+    amendmentRequestIds: new Set(),
   };
 }
 
@@ -40,6 +42,9 @@ export function applyEvent(projection, event) {
   switch (event.type) {
     case "plan.created":
       createPlan(next, event);
+      break;
+    case "plan.amended":
+      amendPlan(next, event.data);
       break;
     case "attempt.workspace-allocated":
       allocateAttemptWorkspace(next, event.data);
@@ -128,6 +133,7 @@ function copyProjection(projection) {
     attempts: new Map(projection.attempts),
     gates: new Map(projection.gates),
     eventIds: new Set(projection.eventIds),
+    amendmentRequestIds: new Set(projection.amendmentRequestIds ?? []),
   };
 }
 
@@ -165,6 +171,65 @@ function validateRevision(revision, tasks) {
     taskHashes[taskId] = { full: hashes.full, effective: hashes.effective, scheduling: hashes.scheduling };
   }
   return { number: revision.number, manifestSha256: revision.manifestSha256, sourceBytesSha256: revision.sourceBytesSha256, planHash: revision.planHash, irVersion: revision.irVersion, irHash: revision.irHash, taskHashes };
+}
+
+function sameStrings(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sortedIdentifiers(value, field) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "") || new Set(value).size !== value.length || !sameStrings(value, [...value].sort())) {
+    throw new Error(`invalid ${field}`);
+  }
+  return value;
+}
+
+function immutableTask(projection, taskId) {
+  return projection.tasks.get(taskId)?.status === "accepted"
+    || [...projection.attempts.values()].some((attempt) => attempt.taskId === taskId && attempt.status === "integrated");
+}
+
+function amendPlan(projection, data) {
+  const keys = ["diff", "irHash", "manifestSha256", "parentRevision", "planHash", "reason", "requestId", "revision", "sourceBytesSha256", "supersededAttemptIds", "taskHashes"];
+  if (JSON.stringify(Object.keys(data).sort()) !== JSON.stringify(keys)) throw new Error("invalid plan.amended data keys");
+  if (!projection.revision) throw new Error("plan.amended requires committed revision identity");
+  requireIdentity(data, "requestId");
+  requireIdentity(data, "reason");
+  if (projection.amendmentRequestIds.has(data.requestId)) throw new Error(`duplicate amendment requestId: ${data.requestId}`);
+  if (!Number.isSafeInteger(data.revision) || data.revision !== projection.revision.number + 1 || data.parentRevision !== projection.revision.number) throw new Error("invalid amendment revision chain");
+  for (const field of ["manifestSha256", "sourceBytesSha256", "planHash", "irHash"]) if (typeof data[field] !== "string" || !SHA256.test(data[field])) throw new Error(`invalid amendment ${field}`);
+  const oldHashes = projection.revision.taskHashes;
+  const oldTaskIds = Object.keys(oldHashes).sort();
+  const newRevision = validateRevision({ number: data.revision, manifestSha256: data.manifestSha256, sourceBytesSha256: data.sourceBytesSha256, planHash: data.planHash, irVersion: projection.revision.irVersion, irHash: data.irHash, taskHashes: data.taskHashes }, Object.keys(data.taskHashes));
+  const newTaskIds = Object.keys(newRevision.taskHashes).sort();
+  const diff = data.diff;
+  if (!diff || typeof diff !== "object" || Array.isArray(diff) || JSON.stringify(Object.keys(diff).sort()) !== JSON.stringify(["added", "changed", "rebound", "retired", "unchanged"])) throw new Error("invalid amendment diff");
+  for (const field of ["added", "changed", "rebound", "retired", "unchanged"]) sortedIdentifiers(diff[field], `amendment diff.${field}`);
+  const added = newTaskIds.filter((id) => !oldHashes[id]);
+  const retired = oldTaskIds.filter((id) => !newRevision.taskHashes[id]);
+  const changed = oldTaskIds.filter((id) => newRevision.taskHashes[id] && oldHashes[id].full !== newRevision.taskHashes[id].full);
+  const rebound = oldTaskIds.filter((id) => newRevision.taskHashes[id] && oldHashes[id].full === newRevision.taskHashes[id].full && oldHashes[id].effective !== newRevision.taskHashes[id].effective);
+  const unchanged = oldTaskIds.filter((id) => newRevision.taskHashes[id] && oldHashes[id].full === newRevision.taskHashes[id].full && oldHashes[id].effective === newRevision.taskHashes[id].effective);
+  if (!sameStrings(diff.added, added) || !sameStrings(diff.retired, retired) || !sameStrings(diff.changed, changed) || !sameStrings(diff.rebound, rebound) || !sameStrings(diff.unchanged, unchanged)) throw new Error("amendment diff does not match task hashes");
+  for (const taskId of added) {
+    if (projection.tasks.has(taskId) || [...projection.attempts.values()].some((attempt) => attempt.taskId === taskId)) throw new Error(`historical task ID cannot be reused: ${taskId}`);
+  }
+  for (const taskId of oldTaskIds) {
+    if (immutableTask(projection, taskId) && (!newRevision.taskHashes[taskId] || oldHashes[taskId].full !== newRevision.taskHashes[taskId].full)) throw new Error(`accepted task contract is immutable: ${taskId}`);
+  }
+  for (const taskId of retired) {
+    if (projection.tasks.get(taskId)?.status !== "pending") throw new Error(`retired task is not pending: ${taskId}`);
+    if ([...projection.attempts.values()].some((attempt) => attempt.taskId === taskId)) throw new Error(`retired task has attempt history: ${taskId}`);
+  }
+  const supersededAttemptIds = [...projection.attempts.entries()]
+    .filter(([, attempt]) => AMENDMENT_CONTRACT_ATTEMPT_STATUSES.has(attempt.status) && newRevision.taskHashes[attempt.taskId] && oldHashes[attempt.taskId]?.effective !== newRevision.taskHashes[attempt.taskId].effective)
+    .map(([attemptId]) => attemptId).sort();
+  if (!sameStrings(sortedIdentifiers(data.supersededAttemptIds, "supersededAttemptIds"), supersededAttemptIds)) throw new Error("supersededAttemptIds do not match affected attempts");
+  projection.revision = newRevision;
+  for (const taskId of added) projection.tasks.set(taskId, { status: "pending" });
+  for (const taskId of retired) projection.tasks.set(taskId, { status: "retired" });
+  for (const attemptId of supersededAttemptIds) projection.attempts.set(attemptId, { ...projection.attempts.get(attemptId), status: "supersede-requested" });
+  projection.amendmentRequestIds.add(data.requestId);
 }
 
 function validateAttemptWorkspace(workspace) {
