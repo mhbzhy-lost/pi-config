@@ -10,6 +10,7 @@ const AMENDMENT_CONTRACT_ATTEMPT_STATUSES = new Set(["workspace-allocated", "dis
 const SETTLED_OUTCOMES = new Set(["succeeded", "failed", "interrupted", "cancelled", "blocked"]);
 const BLOCKER_CODE = /^[a-z0-9][a-z0-9:_-]{0,127}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const AMENDMENT_REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export function createProjection() {
   return {
@@ -193,9 +194,12 @@ function amendPlan(projection, data) {
   const keys = ["diff", "irHash", "manifestSha256", "parentRevision", "planHash", "reason", "requestId", "revision", "sourceBytesSha256", "supersededAttemptIds", "taskHashes"];
   if (JSON.stringify(Object.keys(data).sort()) !== JSON.stringify(keys)) throw new Error("invalid plan.amended data keys");
   if (!projection.revision) throw new Error("plan.amended requires committed revision identity");
-  requireIdentity(data, "requestId");
-  requireIdentity(data, "reason");
+  requireAmendmentRequestId(data.requestId);
+  requireAmendmentReason(data.reason);
   if (projection.amendmentRequestIds.has(data.requestId)) throw new Error(`duplicate amendment requestId: ${data.requestId}`);
+  if ([...projection.attempts.values()].some((attempt) => attempt.status === "supersede-requested")) {
+    throw new Error("supersede cleanup is pending");
+  }
   if (!Number.isSafeInteger(data.revision) || data.revision !== projection.revision.number + 1 || data.parentRevision !== projection.revision.number) throw new Error("invalid amendment revision chain");
   for (const field of ["manifestSha256", "sourceBytesSha256", "planHash", "irHash"]) if (typeof data[field] !== "string" || !SHA256.test(data[field])) throw new Error(`invalid amendment ${field}`);
   const oldHashes = projection.revision.taskHashes;
@@ -584,6 +588,16 @@ function requireActivePlan(projection) {
 
 function requireNonterminalPlan(projection) {
   if (projection.lifecycle === null || TERMINAL_LIFECYCLES.has(projection.lifecycle)) throw new Error("plan is terminal");
+}
+
+function requireAmendmentRequestId(requestId) {
+  if (typeof requestId !== "string" || !AMENDMENT_REQUEST_ID.test(requestId)) throw new Error("invalid amendment requestId");
+}
+
+function requireAmendmentReason(reason) {
+  if (typeof reason !== "string" || reason.trim() === "" || Buffer.byteLength(reason, "utf8") > 4096) {
+    throw new Error("invalid amendment reason");
+  }
 }
 
 function requireIdentity(data, field) {

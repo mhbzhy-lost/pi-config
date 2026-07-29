@@ -163,6 +163,39 @@ test("rejects invalid Plan amendments without mutating the current projection", 
   assert.deepEqual({ revision: projection.revision, tasks: [...projection.tasks], attempts: [...projection.attempts] }, original);
 });
 
+test("rejects invalid amendment metadata without mutating the current projection", () => {
+  const projection = revisionProjection();
+  const original = structuredClone({ revision: projection.revision, tasks: [...projection.tasks], attempts: [...projection.attempts], amendmentRequestIds: [...projection.amendmentRequestIds] });
+  for (const [label, data, expected] of [
+    ["requestId with spaces", amendmentData(projection, { requestId: "request id" }), /requestId/],
+    ["requestId with slash", amendmentData(projection, { requestId: "request/id" }), /requestId/],
+    ["requestId with invalid leading character", amendmentData(projection, { requestId: ".request-id" }), /requestId/],
+    ["blank reason", amendmentData(projection, { reason: " \t\n" }), /reason/],
+    ["reason longer than 4096 UTF-8 bytes", amendmentData(projection, { reason: "\u00e9".repeat(2049) }), /reason/],
+  ]) {
+    assert.throws(() => apply(projection, "plan.amended", data), expected, label);
+    assert.deepEqual({ revision: projection.revision, tasks: [...projection.tasks], attempts: [...projection.attempts], amendmentRequestIds: [...projection.amendmentRequestIds] }, original, label);
+  }
+});
+
+test("rejects a new amendment while supersede cleanup is pending without mutating the projection", () => {
+  let projection = revisionProjection(["task-1", "task-2"]);
+  projection = apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-2", taskId: "task-2", baseCommit: "head", workspace: attemptWorkspace("attempt-2") });
+  projection = apply(projection, "plan.amended", amendmentData(projection, {
+    taskHashes: { "task-1": { ...projection.revision.taskHashes["task-1"] }, "task-2": { ...projection.revision.taskHashes["task-2"], effective: sha("e") } },
+    diff: { added: [], changed: [], rebound: ["task-2"], retired: [], unchanged: ["task-1"] },
+    supersededAttemptIds: ["attempt-2"],
+  }));
+  const original = structuredClone({ revision: projection.revision, tasks: [...projection.tasks], attempts: [...projection.attempts], amendmentRequestIds: [...projection.amendmentRequestIds] });
+  const second = amendmentData(projection, {
+    revision: 3, parentRevision: 2, requestId: "supervisor-request-2",
+    taskHashes: { "task-1": { ...projection.revision.taskHashes["task-1"] }, "task-2": { ...projection.revision.taskHashes["task-2"], effective: sha("f") } },
+    diff: { added: [], changed: [], rebound: ["task-2"], retired: [], unchanged: ["task-1"] },
+  });
+  assert.throws(() => apply(projection, "plan.amended", second), /supersede cleanup/);
+  assert.deepEqual({ revision: projection.revision, tasks: [...projection.tasks], attempts: [...projection.attempts], amendmentRequestIds: [...projection.amendmentRequestIds] }, original);
+});
+
 test("requires exact supersede attempts, rejects request replay, and preserves accepted rebound carry-forward", () => {
   let projection = revisionProjection(["task-1", "task-2"]);
   projection = apply(projection, "task.accepted", { taskId: "task-1" });
