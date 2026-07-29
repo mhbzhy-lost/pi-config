@@ -38,6 +38,8 @@ function validHandle(handle) {
     && typeof handle.planId === "string" && PLAN_ID.test(handle.planId) && !handle.planId.includes("..")
     && Number.isSafeInteger(handle.revision) && handle.revision >= 1
     && typeof handle.manifestSha256 === "string" && /^[a-f0-9]{64}$/.test(handle.manifestSha256)
+    && typeof handle.sourceBytesSha256 === "string" && /^[a-f0-9]{64}$/.test(handle.sourceBytesSha256)
+    && typeof handle.planHash === "string" && /^[a-f0-9]{64}$/.test(handle.planHash)
     && typeof handle.planIrHash === "string" && /^[a-f0-9]{64}$/.test(handle.planIrHash)
     && typeof handle.hostRunId === "string" && handle.hostRunId
     && typeof handle.processIdentity === "string" && handle.processIdentity
@@ -198,6 +200,8 @@ export function createPlanLauncherExtension(pi, options = {}) {
         planId,
         revision: prepared.revision,
         manifestSha256: prepared.manifestSha256,
+        sourceBytesSha256: prepared.manifest.sourceBytesSha256,
+        planHash: prepared.manifest.planHash,
         planIrHash: prepared.manifest.irHash,
         baseCommit,
         originRoot,
@@ -208,6 +212,10 @@ export function createPlanLauncherExtension(pi, options = {}) {
         statusPath,
       });
       trustedHandle(stateRoot, handle);
+      for (const field of ["planId", "revision", "manifestSha256", "sourceBytesSha256", "planHash", "planIrHash"]) {
+        const expected = field === "planId" ? planId : field === "revision" ? prepared.revision : field === "manifestSha256" ? prepared.manifestSha256 : field === "planIrHash" ? prepared.manifest.irHash : prepared.manifest[field];
+        if (handle[field] !== expected) throw new Error(`Plan Host returned mismatched ${field}`);
+      }
       await (options.persistHandle ?? persistHandle)(stateRoot, handle);
       pi.appendEntry(HANDLE_TYPE, handle);
       activeHandles.set(handle.hostRunId, handle);

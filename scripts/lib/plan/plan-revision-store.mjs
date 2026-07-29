@@ -62,29 +62,44 @@ export function createPlanRevisionStore({ stateRoot, now = () => new Date().toIS
   async function readRevision(planId, revision) {
     validIdentity(planId, revision);
     const directory = revisionDirectory(root, planId, revision);
-    let sourceBytes;
-    let artifact;
-    let manifestBytes;
     try {
-      [sourceBytes, artifact, manifestBytes] = await Promise.all([
-        readFile(path.join(directory, "source.md")), readFile(path.join(directory, "plan-ir.json")), readFile(path.join(directory, "manifest.json")),
-      ]);
+      return await readRevisionFromDirectory(directory, planId, revision);
     } catch (error) {
       if (error?.code === "ENOENT") return null;
       throw error;
     }
+  }
+
+  function expectedParentRevision(revision) {
+    return revision === 1 ? null : revision - 1;
+  }
+
+  function validateRevisionArtifacts({ directory, planId, revision, sourceBytes, artifact, manifestBytes }) {
     let manifest;
     let ir;
     try { manifest = JSON.parse(manifestBytes); ir = JSON.parse(artifact); } catch { throw new Error("malformed Plan revision artifact"); }
-    if (!manifest || manifest.schemaVersion !== "plan-revision.v1" || manifest.planId !== planId || manifest.revision !== revision
-      || sha256Bytes(sourceBytes) !== manifest.sourceBytesSha256 || sha256Bytes(artifact) !== manifest.irArtifactSha256
-      || manifest.irHash !== (ir.hash ?? sha256Bytes(artifact)) || !HASH.test(manifest.planHash) || !HASH.test(manifest.irHash)) {
-      throw new Error("malformed Plan revision artifact");
-    }
     const source = new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes);
     const plan = parsePlanDocument(source, path.join(directory, "source.md"));
-    if (plan.sha256 !== manifest.planHash) throw new Error("malformed Plan revision artifact");
+    const compiled = compilePlanToIR(plan);
+    const expectedIrHash = compiled.hash ?? sha256Bytes(artifact);
+    const expectedTaskHashes = revisionTaskHashes(compiled);
+    const requiredManifestKeys = ["schemaVersion", "planId", "revision", "parentRevision", "irVersion", "createdAt", "reason", "initiator", "sourceBytesSha256", "planHash", "irHash", "irArtifactSha256", "taskHashes"];
+    if (!manifest || Object.keys(manifest).length !== requiredManifestKeys.length || !requiredManifestKeys.every((key) => Object.hasOwn(manifest, key))
+      || manifest.schemaVersion !== "plan-revision.v1" || manifest.planId !== planId || manifest.revision !== revision
+      || manifest.parentRevision !== expectedParentRevision(revision) || manifest.irVersion !== compiled.version
+      || sha256Bytes(sourceBytes) !== manifest.sourceBytesSha256 || sha256Bytes(artifact) !== manifest.irArtifactSha256
+      || manifest.irHash !== expectedIrHash || manifest.planHash !== plan.sha256 || !HASH.test(manifest.planHash) || !HASH.test(manifest.irHash)
+      || JSON.stringify(ir) !== JSON.stringify(compiled) || JSON.stringify(manifest.taskHashes) !== JSON.stringify(expectedTaskHashes)) {
+      throw new Error("malformed Plan revision artifact");
+    }
     return Object.freeze({ planId, revision, directory, sourcePath: path.join(directory, "source.md"), irPath: path.join(directory, "plan-ir.json"), sourceBytes, plan, ir, manifest, manifestSha256: sha256Bytes(manifestBytes) });
+  }
+
+  async function readRevisionFromDirectory(directory, planId, revision) {
+    const [sourceBytes, artifact, manifestBytes] = await Promise.all([
+      readFile(path.join(directory, "source.md")), readFile(path.join(directory, "plan-ir.json")), readFile(path.join(directory, "manifest.json")),
+    ]);
+    return validateRevisionArtifacts({ directory, planId, revision, sourceBytes, artifact, manifestBytes });
   }
 
   async function prepareRevision({ planId, sourceBytes, reason, initiator, expectedIrHash } = {}) {
@@ -96,6 +111,9 @@ export function createPlanRevisionStore({ stateRoot, now = () => new Date().toIS
     const plan = parsePlanDocument(source, `${planId}.md`);
     const revision = plan.schemaVersion === "pi-plan.v3" ? plan.revision : 1;
     validIdentity(planId, revision);
+    if (plan.schemaVersion === "pi-plan.v3" && (revision !== 1 || reason !== "initial-approval" || initiator.kind !== "launcher")) {
+      throw new Error("v3 initial approval can only prepare revision 1 through Launcher");
+    }
     if (plan.schemaVersion !== "pi-plan.v3" && (reason !== "initial-approval" || initiator.kind !== "launcher")) {
       throw new Error("legacy Plan revisions can only be initially approved by Launcher");
     }
@@ -104,7 +122,7 @@ export function createPlanRevisionStore({ stateRoot, now = () => new Date().toIS
     const irHash = ir.hash ?? sha256Bytes(irArtifact);
     if (expectedIrHash !== undefined && expectedIrHash !== irHash) throw new Error("expected Plan IR hash does not match");
     const manifest = {
-      schemaVersion: "plan-revision.v1", planId, revision, createdAt: now(), reason, initiator,
+      schemaVersion: "plan-revision.v1", planId, revision, parentRevision: expectedParentRevision(revision), irVersion: ir.version, createdAt: now(), reason, initiator,
       sourceBytesSha256: sha256Bytes(sourceBytes), planHash: plan.sha256, irHash,
       irArtifactSha256: sha256Bytes(irArtifact), taskHashes: revisionTaskHashes(ir),
     };
@@ -127,7 +145,9 @@ export function createPlanRevisionStore({ stateRoot, now = () => new Date().toIS
       await writePrivate(path.join(candidate, "plan-ir.json"), irArtifact);
       await writePrivate(path.join(candidate, "manifest.json"), manifestBytes);
       const verified = await readRevisionFrom(candidate, planId, revision);
-      if (!verified.sourceBytes.equals(sourceBytes) || verified.manifest.irHash !== irHash) throw new Error("Plan revision candidate verification failed");
+      if (!verified.sourceBytes.equals(sourceBytes) || verified.manifest.irHash !== irHash || JSON.stringify(verified.ir) !== JSON.stringify(ir)
+        || verified.manifest.irVersion !== ir.version || verified.manifest.parentRevision !== expectedParentRevision(revision)
+        || JSON.stringify(verified.manifest.taskHashes) !== JSON.stringify(revisionTaskHashes(ir))) throw new Error("Plan revision candidate verification failed");
       try { await rename(candidate, directory); } catch (error) {
         if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") throw error;
         const published = await readRevision(planId, revision);
@@ -142,18 +162,18 @@ export function createPlanRevisionStore({ stateRoot, now = () => new Date().toIS
     const original = revisionDirectory(root, planId, revision);
     const relative = path.relative(path.dirname(original), directory);
     if (!relative.startsWith(".candidate-")) throw new Error("invalid Plan revision candidate");
-    const [sourceBytes, artifact, manifestBytes] = await Promise.all([readFile(path.join(directory, "source.md")), readFile(path.join(directory, "plan-ir.json")), readFile(path.join(directory, "manifest.json"))]);
-    const manifest = JSON.parse(manifestBytes);
-    const ir = JSON.parse(artifact);
-    if (sha256Bytes(sourceBytes) !== manifest.sourceBytesSha256 || sha256Bytes(artifact) !== manifest.irArtifactSha256 || manifest.irHash !== (ir.hash ?? sha256Bytes(artifact))) throw new Error("malformed Plan revision artifact");
-    return { sourceBytes, manifest, ir };
+    return readRevisionFromDirectory(directory, planId, revision);
   }
 
-  async function writeCurrent(planId, manifest) {
-    validIdentity(planId, manifest?.revision);
-    validateHash(manifest.manifestSha256 ?? "", "manifest hash");
+  async function writeCurrent(prepared) {
+    const { planId, revision, manifest, manifestSha256 } = prepared ?? {};
+    validIdentity(planId, revision);
+    if (!manifest || manifest.planId !== planId || manifest.revision !== revision) throw new Error("invalid prepared Plan revision");
+    const verified = await readRevision(planId, revision);
+    if (!verified || verified.manifestSha256 !== manifestSha256 || verified.manifest.irHash !== manifest.irHash) throw new Error("invalid prepared Plan revision");
+    validateHash(manifestSha256, "manifest hash");
     validateHash(manifest.irHash, "IR hash");
-    const pointer = { schemaVersion: "plan-revision-pointer.v1", planId, revision: manifest.revision, manifestSha256: manifest.manifestSha256, irHash: manifest.irHash };
+    const pointer = { schemaVersion: "plan-revision-pointer.v1", planId, revision, manifestSha256, irHash: manifest.irHash };
     const destination = currentPath(planId);
     await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
     const temporary = `${destination}.${randomUUID()}.tmp`;
@@ -175,7 +195,7 @@ export function createPlanRevisionStore({ stateRoot, now = () => new Date().toIS
   async function reconcileCurrent(planId, revision) {
     const prepared = await readRevision(planId, revision);
     if (!prepared) return null;
-    await writeCurrent(planId, { ...prepared.manifest, manifestSha256: prepared.manifestSha256 });
+    await writeCurrent(prepared);
     return prepared;
   }
 

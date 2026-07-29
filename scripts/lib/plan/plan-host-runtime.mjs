@@ -8,11 +8,11 @@ import { promisify } from "node:util";
 const execFile = promisify(execFileCallback);
 
 const HANDLE_FIELDS = [
-  "schemaVersion", "planId", "revision", "manifestSha256", "planIrHash", "hostRunId", "processIdentity", "pid", "runDir",
+  "schemaVersion", "planId", "revision", "manifestSha256", "sourceBytesSha256", "planHash", "planIrHash", "hostRunId", "processIdentity", "pid", "runDir",
   "sessionFile", "statusPath", "worktree", "startedAt",
 ];
 const INPUT_FIELDS = new Set([
-  "planId", "revision", "manifestSha256", "planIrHash", "baseCommit", "originRoot", "stateRoot", "cwd", "extension", "runDir", "statusPath",
+  "planId", "revision", "manifestSha256", "sourceBytesSha256", "planHash", "planIrHash", "baseCommit", "originRoot", "stateRoot", "cwd", "extension", "runDir", "statusPath",
 ]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -23,7 +23,7 @@ function assertHandle(handle) {
   for (const field of HANDLE_FIELDS) {
     if (field === "pid" || field === "revision") {
       if (!Number.isInteger(handle[field]) || handle[field] < 1) throw new Error(`Invalid v3 Plan Host ${field}`);
-    } else if ((field === "manifestSha256" || field === "planIrHash") && (typeof handle[field] !== "string" || !/^[a-f0-9]{64}$/.test(handle[field]))) {
+    } else if ((field === "manifestSha256" || field === "sourceBytesSha256" || field === "planHash" || field === "planIrHash") && (typeof handle[field] !== "string" || !/^[a-f0-9]{64}$/.test(handle[field]))) {
       throw new Error(`Invalid v3 Plan Host ${field}`);
     } else if (typeof handle[field] !== "string" || !handle[field]) {
       throw new Error(`Invalid v3 Plan Host ${field}`);
@@ -42,7 +42,7 @@ function assertSpawnInput(input) {
     } else if (typeof input[field] !== "string" || !input[field]) throw new Error(`Invalid Plan Runner input ${field}`);
   }
   if (!ID.test(input.planId) || input.planId.includes("..")) throw new Error("Invalid Plan Runner input planId");
-  if (!Number.isSafeInteger(input.revision) || input.revision < 1 || !/^[a-f0-9]{64}$/.test(input.manifestSha256) || !/^[a-f0-9]{64}$/.test(input.planIrHash)) {
+  if (!Number.isSafeInteger(input.revision) || input.revision < 1 || !/^[a-f0-9]{64}$/.test(input.manifestSha256) || !/^[a-f0-9]{64}$/.test(input.sourceBytesSha256) || !/^[a-f0-9]{64}$/.test(input.planHash) || !/^[a-f0-9]{64}$/.test(input.planIrHash)) {
     throw new Error("Invalid Plan Runner revision identity");
   }
   return input;
@@ -487,6 +487,8 @@ export function createPlanHostRuntime({
         planId: input.planId,
         revision: input.revision,
         manifestSha256: input.manifestSha256,
+        sourceBytesSha256: input.sourceBytesSha256,
+        planHash: input.planHash,
         planIrHash: input.planIrHash,
         hostRunId,
         processIdentity,
