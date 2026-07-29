@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createPlanCapsuleExtension } from "../../scripts/lib/plan/plan-capsule-extension.mjs";
 import { createPlanRunnerDependencies } from "../../scripts/lib/plan/plan-runner-dependencies.mjs";
@@ -19,21 +21,24 @@ function runtimeRoots(data: unknown) {
     throw new Error("Root broker plan runtime is invalid");
   }
   const { originRoot, stateRoot } = runtime as Record<string, unknown>;
-  if (typeof originRoot !== "string" || !originRoot || !originRoot.startsWith("/")
-    || typeof stateRoot !== "string" || !stateRoot || !stateRoot.startsWith("/")) {
+  if (typeof originRoot !== "string" || !originRoot || !path.isAbsolute(originRoot)
+    || typeof stateRoot !== "string" || !stateRoot || !path.isAbsolute(stateRoot)) {
     throw new Error("Root broker plan runtime is invalid");
   }
   return { originRoot, stateRoot };
 }
 
-async function bootstrapRuntimeRoots(rpc: { ping(): Promise<unknown> }, sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))) {
-  const deadline = Date.now() + GRANT_TIMEOUT_MS;
+export async function bootstrapRuntimeRoots(rpc: { ping(): Promise<unknown> }, { sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)), clock = () => Date.now(), timeoutMs = GRANT_TIMEOUT_MS, retryMs = GRANT_RETRY_MS } = {}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(retryMs) || retryMs <= 0) {
+    throw new Error("Root broker retry timing must be positive safe integers");
+  }
+  const deadline = clock() + timeoutMs;
   for (;;) {
     try {
       return runtimeRoots(await rpc.ping());
     } catch (error: any) {
-      if (error?.code !== "GRANT_NOT_READY" || Date.now() >= deadline) throw error;
-      await sleep(GRANT_RETRY_MS);
+      if (error?.code !== "GRANT_NOT_READY" || clock() >= deadline) throw error;
+      await sleep(retryMs);
     }
   }
 }
@@ -44,28 +49,33 @@ export default async function planRunner(pi: ExtensionAPI) {
 
   const executionFacts: unknown[] = [];
   const rpc = rootOwned.rpc;
-  const roots = await bootstrapRuntimeRoots(rpc);
-  const executionBackend = createPiSubagentsExecutionBackend({
-    rpc,
-    events: pi.events,
-    emitFact: (fact: unknown) => executionFacts.push(fact),
-  });
-  const deps = createPlanRunnerDependencies({
-    pi,
-    ...roots,
-    executionBackend,
-    takeExecutionFacts: () => executionFacts.splice(0),
-    externalReview: createExternalReviewAdapter(),
-  });
+  try {
+    const roots = await bootstrapRuntimeRoots(rpc);
+    const executionBackend = createPiSubagentsExecutionBackend({
+      rpc,
+      events: pi.events,
+      emitFact: (fact: unknown) => executionFacts.push(fact),
+    });
+    const deps = createPlanRunnerDependencies({
+      pi,
+      ...roots,
+      executionBackend,
+      takeExecutionFacts: () => executionFacts.splice(0),
+      externalReview: createExternalReviewAdapter(),
+    });
 
-  createPlanCapsuleExtension(pi, {
-    ...deps,
-    async assertRuntimeCapabilities() {
-      ensurePlanRuntimeTools(pi, REQUIRED_RUNTIME_TOOLS);
-      await executionBackend.assertCapabilities({ rpcVersion: 1, methods: REQUIRED_RPC_METHODS });
-    },
-    disposeExecutionBackend() {
-      executionBackend.dispose();
-    },
-  });
+    createPlanCapsuleExtension(pi, {
+      ...deps,
+      async assertRuntimeCapabilities() {
+        ensurePlanRuntimeTools(pi, REQUIRED_RUNTIME_TOOLS);
+        await executionBackend.assertCapabilities({ rpcVersion: 1, methods: REQUIRED_RPC_METHODS });
+      },
+      disposeExecutionBackend() {
+        executionBackend.dispose();
+      },
+    });
+  } catch (error) {
+    rootOwned.dispose();
+    throw error;
+  }
 }

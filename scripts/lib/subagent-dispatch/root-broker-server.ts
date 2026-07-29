@@ -85,11 +85,17 @@ export class RootBrokerServer {
     const existing = this.executorGrants.get(runId);
     if (existing) return existing;
     const pending = (async () => {
+      if (this.principals.has(runId)) throw new Error("Root subagent broker principal is already granted");
       const callerToken = this.randomToken();
-      const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId, callerToken, role: "executor" });
       this.principals.set(runId, { role: "executor", callerToken });
-      this.grantPaths.add(grantPath);
-      return { callerToken };
+      try {
+        const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId, callerToken, role: "executor" });
+        this.grantPaths.add(grantPath);
+        return { callerToken };
+      } catch (error) {
+        this.principals.delete(runId);
+        throw error;
+      }
     })();
     this.executorGrants.set(runId, pending);
     try { return await pending; } catch (error) { this.executorGrants.delete(runId); throw error; }
@@ -100,7 +106,7 @@ export class RootBrokerServer {
       || [cwd, originRoot, stateRoot].some((value) => typeof value !== "string" || value.length === 0 || !path.isAbsolute(value))) {
       throw new Error("Root subagent broker caller grant is invalid");
     }
-    if (this.callers.has(callerRunId)) throw new Error("Root subagent broker caller is already granted");
+    if (this.callers.has(callerRunId) || this.principals.has(callerRunId)) throw new Error("Root subagent broker caller is already granted");
     const callerToken = this.randomToken();
     const caller: Caller = { planId, cwd, originRoot, stateRoot, role, callerToken, ownedRunIds: new Set() };
     this.callers.set(callerRunId, caller);

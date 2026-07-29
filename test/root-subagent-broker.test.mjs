@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { connect } from "node:net";
-import { mkdtemp, rm as removePath, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, rm as removePath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import test from "node:test";
 import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
+import { bootstrapRuntimeRoots, default as planRunner } from "../pi/child-extensions/plan-runner.ts";
 import { installRootSessionOwner, installRootSessionOwnerLifecycle } from "../pi/child-extensions/root-session-owner.ts";
 import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 
@@ -28,6 +29,37 @@ function request({ callerRunId, callerToken, method, params, requestId = "reques
   return { schemaVersion: "pi-root-subagent-broker-request.v1", requestId, rootSessionId: root, callerRunId, callerToken, method, params };
 }
 
+test("bootstrap runtime roots loads and accepts only an exact absolute-root projection", async () => {
+  await assert.rejects(() => bootstrapRuntimeRoots({ ping: async () => ({ planRuntime: { originRoot: "/origin", stateRoot: "/state", extra: true } }) }), /invalid/i);
+  for (const planRuntime of [
+    {}, { originRoot: "/origin" }, { stateRoot: "/state" },
+    { originRoot: "origin", stateRoot: "/state" }, { originRoot: "/origin", stateRoot: "state" },
+    { originRoot: ["/origin"], stateRoot: "/state" }, { originRoot: "/origin", stateRoot: null },
+  ]) {
+    await assert.rejects(() => bootstrapRuntimeRoots({ ping: async () => ({ planRuntime }) }), /invalid/i);
+  }
+  assert.deepEqual(await bootstrapRuntimeRoots({ ping: async () => ({ planRuntime: { originRoot: "/origin", stateRoot: "/state" } }) }), { originRoot: "/origin", stateRoot: "/state" });
+});
+
+test("bootstrap retries only pending grants and respects its injected deadline", async () => {
+  let now = 0;
+  const sleeps = [];
+  const pending = Object.assign(new Error("pending"), { code: "GRANT_NOT_READY" });
+  await assert.rejects(() => bootstrapRuntimeRoots({ ping: async () => { throw pending; } }, {
+    clock: () => now,
+    sleep: async (ms) => { sleeps.push(ms); now += ms; },
+    timeoutMs: 50,
+    retryMs: 25,
+  }), /pending/);
+  assert.deepEqual(sleeps, [25, 25]);
+  await assert.rejects(() => bootstrapRuntimeRoots({ ping: async () => { throw new Error("invalid"); } }, {
+    sleep: async () => { throw new Error("must not sleep"); }, timeoutMs: 1, retryMs: 1,
+  }), /invalid/);
+  for (const options of [{ timeoutMs: 0 }, { timeoutMs: 1.5 }, { retryMs: -1 }, { retryMs: Number.MAX_SAFE_INTEGER + 1 }]) {
+    await assert.rejects(() => bootstrapRuntimeRoots({ ping: async () => ({}) }, options), /positive safe integer/i);
+  }
+});
+
 async function socketRequest(value, { keepOpen = false } = {}) {
   const socket = connect(brokerSocketPath(rootSessionId));
   await once(socket, "connect");
@@ -43,6 +75,72 @@ async function socketRequest(value, { keepOpen = false } = {}) {
   });
   return { reply, socket: keepOpen ? socket : (socket.end(), undefined) };
 }
+
+test("default plan runner bootstraps from a delayed real broker grant without PI_PLAN roots", async (t) => {
+  const runId = "delayed-plan-run";
+  const environment = ["PI_PLAN_ORIGIN_ROOT", "PI_PLAN_STATE_ROOT", "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_SUBAGENT_RUN_ID"]
+    .map((key) => [key, Object.hasOwn(process.env, key), process.env[key]]);
+  const handlers = new Map();
+  const tools = new Map();
+  const pi = {
+    events: { on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); return () => {}; } },
+    on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); },
+    registerTool(tool) { tools.set(tool.name, tool); },
+    getActiveTools() { return []; }, setActiveTools() {}, sendMessage() {}, appendEntry() {},
+  };
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
+  await broker.start();
+  t.after(async () => {
+    for (const handler of handlers.get("session_shutdown") ?? []) await handler();
+    await broker.closeRootSession();
+    for (const [key, existed, value] of environment) {
+      if (existed) process.env[key] = value; else delete process.env[key];
+    }
+  });
+  delete process.env.PI_PLAN_ORIGIN_ROOT;
+  delete process.env.PI_PLAN_STATE_ROOT;
+  process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = "1";
+  process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID = rootSessionId;
+  process.env.PI_SUBAGENT_RUN_ID = runId;
+  const factory = planRunner(pi);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await broker.grantCaller({ callerRunId: runId, planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
+  await factory;
+  assert.equal(tools.has("plan_open"), true);
+  assert.equal(tools.has("subagent"), true);
+  assert.equal(tools.has("plan_executor_supervisor"), true);
+});
+
+
+test("factory disposes the registered broker client when a malformed grant aborts bootstrap", async (t) => {
+  const runId = "malformed-plan-run";
+  const grantPath = brokerGrantPath(rootSessionId, runId);
+  const environment = ["PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_SUBAGENT_RUN_ID"]
+    .map((key) => [key, Object.hasOwn(process.env, key), process.env[key]]);
+  const handlers = new Map();
+  const tools = new Map();
+  const pi = {
+    events: { on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); return () => {}; } },
+    on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); },
+    registerTool(tool) { tools.set(tool.name, tool); },
+    getActiveTools() { return []; }, setActiveTools() {}, sendMessage() {}, appendEntry() {},
+  };
+  t.after(async () => {
+    await removePath(grantPath, { force: true });
+    for (const [key, existed, value] of environment) {
+      if (existed) process.env[key] = value; else delete process.env[key];
+    }
+  });
+  await mkdir(path.dirname(grantPath), { recursive: true });
+  await writeFile(grantPath, "{malformed");
+  process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = "1";
+  process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID = rootSessionId;
+  process.env.PI_SUBAGENT_RUN_ID = runId;
+  await assert.rejects(() => planRunner(pi), /grant is unavailable/i);
+  const response = await tools.get("subagent").execute("id", { action: "status", id: "run" });
+  assert.equal(response.details.code, "CLIENT_DISPOSED");
+});
+
 
 test("broker forwards flat spawn, projects caller cwd, rejects foreign control, and closes subscribers", async (t) => {
   const upstream = fakeUpstream();
@@ -195,6 +293,55 @@ test("root ownership lifecycle propagates startup errors", async () => {
     createClient: () => { throw new Error("subscription failed"); },
   });
   await assert.rejects(handlers.get("session_start")(), /subscription failed/);
+});
+
+test("caller grant publishes matching identities before the grant and rolls back only its token", async () => {
+  let broker;
+  let observed;
+  broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: fakeUpstream(),
+    randomToken: () => "a".repeat(64),
+    writeGrant: async (grant) => {
+      observed = { caller: broker.callers.get(grant.runId), principal: broker.principals.get(grant.runId), grant };
+      throw new Error("write failed");
+    },
+  });
+  await assert.rejects(() => broker.grantCaller({ callerRunId: "plan-run-rollback", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" }), /write failed/);
+  assert.equal(observed.caller.callerToken, observed.grant.callerToken);
+  assert.deepEqual(observed.principal, { role: "plan-runner", callerToken: observed.grant.callerToken });
+  assert.equal(broker.callers.has("plan-run-rollback"), false);
+  assert.equal(broker.principals.has("plan-run-rollback"), false);
+  assert.equal(broker.grantPaths.size, 0);
+});
+
+test("executor grant publishes before write, rolls back, and can retry", async () => {
+  let broker;
+  let writes = 0;
+  broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: fakeUpstream(),
+    randomToken: () => "b".repeat(64),
+    writeGrant: async (grant) => {
+      assert.deepEqual(broker.principals.get(grant.runId), { role: "executor", callerToken: grant.callerToken });
+      if (writes++ === 0) throw new Error("write failed");
+      return "/tmp/executor-grant";
+    },
+  });
+  await assert.rejects(() => broker.ensureExecutorOwner("executor-retry"), /write failed/);
+  assert.equal(broker.principals.has("executor-retry"), false);
+  assert.equal(broker.executorGrants.has("executor-retry"), false);
+  await broker.ensureExecutorOwner("executor-retry");
+  assert.equal(broker.grantPaths.has("/tmp/executor-grant"), true);
+});
+
+test("caller grant never overwrites a principal collision or writes a grant", async () => {
+  let writes = 0;
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), writeGrant: async () => { writes += 1; return "/tmp/grant"; } });
+  broker.principals.set("collision", { role: "executor", callerToken: "c".repeat(64) });
+  await assert.rejects(() => broker.grantCaller({ callerRunId: "collision", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" }), /already granted/);
+  assert.deepEqual(broker.principals.get("collision"), { role: "executor", callerToken: "c".repeat(64) });
+  assert.equal(writes, 0);
 });
 
 test("root broker grants direct async executor runs idempotently", async (t) => {
