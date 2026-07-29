@@ -77,6 +77,7 @@ function buildExecutionPrompt(view, { attemptId, baseCommit, output, receipts })
     `Resources: ${JSON.stringify(task.resources)}`,
     `Execution: ${JSON.stringify(task.execution)}`,
     `Acceptance: ${task.acceptance.strategy}`,
+    JSON.stringify(task.acceptance),
     `Attempt: ${attemptId}`,
     `Base commit: ${baseCommit}`,
     `Authoritative output: ${output}`,
@@ -363,6 +364,9 @@ export function createPlanCoordinator({
     for (const node of frontier) {
       const attemptId = nextAttemptId(projection, node.id);
       const attemptBaseCommit = projection.workspace.headCommit;
+      const execution = ir.version === "plan-ir.v3" ? selectExecutionView(ir, node.id) : legacyExecutionView(ir, node.id);
+      const receipts = ir.version === "plan-ir.v3" ? collectDependencyReceipts(projection, execution.task) : Object.freeze([]);
+      const output = outputForAttempt(attemptId);
       const workspaceLease = await allocateWorkspace({
         originRoot: projection.workspace.originRoot,
         stateRoot,
@@ -378,9 +382,6 @@ export function createPlanCoordinator({
         workspace: workspaceLease,
       });
       const dispatchId = `${attemptId}.dispatch.1`;
-      const execution = ir.version === "plan-ir.v3" ? selectExecutionView(ir, node.id) : legacyExecutionView(ir, node.id);
-      const receipts = ir.version === "plan-ir.v3" ? collectDependencyReceipts(projection, execution.task) : Object.freeze([]);
-      const output = outputForAttempt(attemptId);
       const prompt = buildExecutionPrompt(execution, { attemptId, baseCommit: attemptBaseCommit, output, receipts });
       const tool = {
         agent: execution.task.execution?.agent ?? execution.task.agent ?? "executor",

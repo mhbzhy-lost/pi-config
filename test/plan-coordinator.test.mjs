@@ -85,6 +85,47 @@ Implement the approved change.
 `, "/plans/v3-coordinator.md");
 }
 
+function v3DependencyPlan() {
+  return parsePlanDocument(`# V3 dependency coordinator fixture
+
+**Goal:** dispatch a task from its integrated dependency receipt
+
+## Execution Contract
+
+\`\`\`json
+${JSON.stringify({
+  schemaVersion: "pi-plan.v3", revision: 1, parentPlanHash: null,
+  verification: [{ id: "test", command: "true", cwd: ".", timeoutMs: 900000 }],
+  requiredGates: ["deterministic", "plan-audit", "external-review", "final-completeness"], resourceCapacities: {},
+  executionDefaults: { agent: "executor", risk: "normal", workflow: { mode: "inherit-repository" }, timeoutMs: 321000 },
+  taskExecution: { "task-1": {}, "task-2": {} },
+  taskAcceptance: {
+    "task-1": { strategy: "commands", commandIds: ["test"] },
+    "task-2": { strategy: "commands", commandIds: ["test"] },
+  },
+})}
+\`\`\`
+
+Keep the execution contract intact.
+
+### Task 1: Produce receipt
+
+**Files:**
+- Modify: \`src/receipt.mjs\`
+
+Produce the bounded receipt.
+
+### Task 2: Consume integrated receipt
+
+**Deps:** Task 1
+
+**Files:**
+- Modify: \`src/consumer.mjs\`
+
+Consume the bounded receipt.
+`, "/plans/v3-dependency-coordinator.md");
+}
+
 function createdV3Entry(ir) {
   return {
     ...createdEntry(ir.nodes.map(({ id }) => id)),
@@ -116,6 +157,51 @@ function replay(entries) {
   let projection = createProjection();
   for (const entry of entries) projection = applyEvent(projection, entry);
   return projection;
+}
+
+function event(type, data, sequence) {
+  return {
+    schemaVersion: "pi-plan-event.v1",
+    eventId: `receipt-${sequence}`,
+    planId: "plan-1",
+    occurredAt: "2026-07-15T00:00:00.000Z",
+    type,
+    data,
+  };
+}
+
+function integratedDependencyEntries(ir) {
+  const attemptId = "attempt-plan-1-task-1-1";
+  const dispatchId = `${attemptId}.dispatch.1`;
+  const workspaceLease = lease({ planId: "plan-1", taskId: "task-1", attemptId, baseCommit: "base" });
+  const tool = { agent: "executor", task: "Produce the bounded receipt.", cwd: workspaceLease.path, context: "fresh", async: true, clarify: false, worktree: false };
+  const dispatchContext = {
+    planIrHash: ir.hash, taskHash: ir.nodes[0].hashes.effective, schedulingHash: ir.nodes[0].hashes.scheduling,
+    attemptId, baseCommit: "base", output: "/results/dependency.json", dependencyReceipts: [],
+  };
+  const entries = [
+    createdV3Entry(ir),
+    event("attempt.workspace-allocated", { attemptId, taskId: "task-1", baseCommit: "base", workspace: workspaceLease }, 1),
+    event("attempt.dispatch-requested", {
+      attemptId, taskId: "task-1", dispatchId, baseCommit: "base", workspace: workspaceLease, tool,
+      toolHash: createHash("sha256").update(JSON.stringify(tool)).digest("hex"),
+      planIrHash: ir.hash, taskHash: ir.nodes[0].hashes.effective, schedulingHash: ir.nodes[0].hashes.scheduling,
+      dispatchContextHash: createHash("sha256").update(JSON.stringify(dispatchContext)).digest("hex"),
+    }, 2),
+    event("attempt.bound", { attemptId, taskId: "task-1", dispatchId, runId: "run-receipt", asyncDir: "/async/receipt", sessionFile: "/sessions/receipt.jsonl" }, 3),
+    event("attempt.settled", { attemptId, outcome: "succeeded", resultCommit: "dependency-result" }, 4),
+    event("attempt.validated", {
+      attemptId, resultCommit: "dependency-result", validationHash: "dependency-validation", diffSha256: "dependency-diff",
+      changedPaths: ["src/receipt.mjs"], evidence: [
+        { kind: "command", commandId: "test", exitCode: 0, stdout: "private stdout", stderr: "private stderr", transcript: "/private/transcript" },
+        { kind: "local", path: "/private/evidence.json", transcript: "/private/local-transcript" },
+      ],
+    }, 5),
+    event("integration.requested", { attemptId, expectedHead: "base", resultCommit: "dependency-result", diffSha256: "dependency-diff" }, 6),
+    event("integration.finished", { attemptId, previousHead: "base", newHead: "dependency-head" }, 7),
+  ];
+  assert.equal(replay(entries).attempts.get(attemptId).status, "integrated");
+  return entries;
 }
 
 function deferred() {
@@ -626,7 +712,7 @@ test("v3 dispatch emits the complete exact prompt and canonical identity context
   const event = appended.find(({ type }) => type === "attempt.dispatch-requested");
   assert.match(event.data.tool.task, /^Plan: V3 coordinator fixture\nPlan instructions:\n\*\*Goal:\*\* dispatch the exact approved task\n\n\nKeep the execution contract intact\.\nTask: task-1 Exact task\nTask body:\n\*\*Files:\*\*\n- Modify: `src\/exact\.mjs`\n\nImplement the approved change\.\nDependency receipts:\n\[\]/);
   assert.match(event.data.tool.task, /\nAllowed paths: src\/exact\.mjs\nResources: \[\]\nExecution: /);
-  assert.match(event.data.tool.task, /\nAcceptance: commands\nAttempt: attempt-plan-1-task-1-1\nBase commit: base\nAuthoritative output: \/results\/attempt-plan-1-task-1-1\.json\nResult contract: /);
+  assert.equal(event.data.tool.task.includes(`\nAcceptance: commands\n${JSON.stringify(ir.nodes[0].acceptance)}\nAttempt: attempt-plan-1-task-1-1\nBase commit: base\nAuthoritative output: /results/attempt-plan-1-task-1-1.json\nResult contract: `), true);
   assert.match(event.data.tool.task, /\nBlocked result shape: /);
   assert.equal(event.data.planIrHash, ir.hash);
   assert.equal(event.data.taskHash, ir.nodes[0].hashes.effective);
@@ -637,4 +723,68 @@ test("v3 dispatch emits the complete exact prompt and canonical identity context
   };
   assert.equal(event.data.dispatchContextHash, createHash("sha256").update(JSON.stringify(canonical)).digest("hex"));
   assert.equal(event.data.toolHash, createHash("sha256").update(JSON.stringify(event.data.tool)).digest("hex"));
+});
+
+test("v3 dependency dispatch fails closed before allocation when its integrated receipt is incomplete", async () => {
+  const approvedPlan = v3DependencyPlan();
+  const ir = compilePlanToIR(approvedPlan);
+  const projection = replay([createdV3Entry(ir)]);
+  projection.tasks.set("task-1", { status: "accepted" });
+  projection.attempts.set("attempt-plan-1-task-1-1", {
+    taskId: "task-1", status: "integrated", resultCommit: "dependency-result",
+    integration: { newHead: "dependency-head" }, validationChangedPaths: ["src/exact.mjs"],
+  });
+  const subject = harness({ approvedPlan, entries: [createdV3Entry(ir)], options: { readProjection: () => projection } });
+  await assert.rejects(subject.coordinator.dispatchAuthorized(), /integrated dependency receipt is incomplete/);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.spawned.length, 0);
+  assert.equal(subject.appended.length, 0);
+});
+
+test("v3 dependency dispatch replays an integrated receipt into the exact redacted prompt", async () => {
+  const approvedPlan = v3DependencyPlan();
+  const ir = compilePlanToIR(approvedPlan);
+  const subject = harness({ approvedPlan, entries: integratedDependencyEntries(ir) });
+
+  const dispatched = await subject.coordinator.dispatchAuthorized();
+
+  assert.deepEqual(dispatched.dispatched.map(({ taskId }) => taskId), ["task-2"]);
+  assert.equal(subject.spawned.length, 1);
+  const prompt = subject.appended.find(({ type }) => type === "attempt.dispatch-requested").data.tool.task;
+  const receipts = [{
+    taskId: "task-1", resultCommit: "dependency-result", integratedHead: "dependency-head",
+    changedPaths: ["src/receipt.mjs"], verificationSummary: [{ commandId: "test", exitCode: 0 }],
+  }];
+  assert.equal(prompt.includes(`Dependency receipts:\n${JSON.stringify(receipts)}`), true);
+  for (const privateValue of ["private stdout", "private stderr", "/private/transcript", "/private/evidence.json", "/private/local-transcript", "/attempts/"]) {
+    assert.equal(prompt.includes(privateValue), false);
+  }
+});
+
+test("v3 successful settle enqueues dependencies from the compiled dependency view", async () => {
+  const approvedPlan = v3DependencyPlan();
+  const ir = compilePlanToIR(approvedPlan);
+  const queued = [];
+  const subject = harness({
+    approvedPlan,
+    entries: integratedDependencyEntries(ir),
+    options: {
+      integrationQueue: { enqueue(attempt) { queued.push(attempt); }, async drain() { return { state: "waiting", integrated: [] }; } },
+      readAttemptHead: async () => "task-2-result",
+      validateAttemptResult: async () => ({
+        accepted: true, resultCommit: "task-2-result", diffSha256: "task-2-diff", changedPaths: ["src/consumer.mjs"],
+        evidence: [{ kind: "command", commandId: "test", exitCode: 0 }],
+      }),
+    },
+  });
+  const dispatched = await subject.coordinator.dispatchAuthorized();
+  const attemptId = dispatched.dispatched[0].attemptId;
+
+  await assert.doesNotReject(subject.coordinator.settleBoundAttempt("succeeded", attemptId));
+
+  const validation = subject.appended.find(({ type }) => type === "attempt.validated");
+  assert.equal(validation.data.attemptId, attemptId);
+  assert.equal(queued.length, 1);
+  assert.deepEqual(queued[0].deps, ["task-1"]);
+  assert.equal(queued[0].validationHash, validation.data.validationHash);
 });
