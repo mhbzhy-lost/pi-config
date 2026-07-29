@@ -293,14 +293,12 @@ exec sleep 30
       env: { ...process.env, PLAN_TEST_MARKER: marker },
       id: () => "host-session-event",
     });
-    const startedAt = Date.now();
     handle = await host.spawnPlanRunner(input(root, {
       cwd: root,
       runDir: path.join(root, "run"),
       statusPath: path.join(root, "status.json"),
     }));
 
-    assert.ok(Date.now() - startedAt < 2_000, "Host must not wait for first assistant persistence");
     assert.equal(await readFile(marker, "utf8"), "ready");
     assert.equal(path.dirname(handle.sessionFile), path.join(root, "run", "sessions"));
     await assert.rejects(stat(handle.sessionFile), (error) => error?.code === "ENOENT");

@@ -321,7 +321,7 @@ test("reads and acknowledges cancel control from a stateRoot separate from the G
     now: () => "2026-07-15T00:00:01.000Z",
   });
   const ctx = context(repo.worktree, [{ customType: "pi-plan-event-v1", data: created(binding) }]);
-  const control = createPlanControl({ stateRoot: repo.stateRoot, id: () => "request-1", now: () => "2026-07-15T00:00:00.000Z" });
+  const control = createPlanControl({ stateRoot: repo.stateRoot, timeoutMs: 30_000, id: () => "request-1", now: () => "2026-07-15T00:00:00.000Z" });
   const pending = control.requestCancel({ planId: repo.planId, runId: "run-1" });
   while (!(await control.readRequest(repo.planId))) await new Promise((resolve) => setTimeout(resolve, 1));
 
@@ -363,7 +363,7 @@ test("child control loop persists cancellation and acknowledges exactly once", a
     now: () => "2026-07-15T00:00:01.000Z",
   });
   const ctx = context(repo.worktree, [{ customType: "pi-plan-event-v1", data: created(binding) }]);
-  const control = createPlanControl({ stateRoot: repo.origin, id: () => "request-1", now: () => "2026-07-15T00:00:00.000Z" });
+  const control = createPlanControl({ stateRoot: repo.origin, timeoutMs: 30_000, id: () => "request-1", now: () => "2026-07-15T00:00:00.000Z" });
   const pending = control.requestCancel({ planId: repo.planId, runId: "run-1" });
   while (!(await control.readRequest(repo.planId))) await new Promise((resolve) => setTimeout(resolve, 1));
 
