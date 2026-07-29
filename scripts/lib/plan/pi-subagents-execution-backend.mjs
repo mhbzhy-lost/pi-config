@@ -26,8 +26,19 @@ function deferred() {
 }
 
 function supersedeRequest(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== 2 || !["dispatchId", "attemptId"].every((key) => Object.hasOwn(input, key))) {
+    throw new ExecutionProtocolError("INVALID_EXECUTION_REQUEST", "Supersede input must contain exactly dispatchId and attemptId");
+  }
   const request = normalizeExecutionSpawn({ ...input, agent: "executor", task: "Supersede dispatch", cwd: "/unused", output: "/unused", timeoutMs: 1 });
   return { dispatchId: request.dispatchId, attemptId: request.attemptId };
+}
+
+function exactSpawnRequest(input) {
+  const keys = ["dispatchId", "attemptId", "agent", "task", "cwd", "output", "timeoutMs"];
+  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== keys.length || !keys.every((key) => Object.hasOwn(input, key))) {
+    throw new ExecutionProtocolError("INVALID_EXECUTION_REQUEST", "Dispatch recovery input must contain the complete spawn request");
+  }
+  return normalizeExecutionSpawn(input);
 }
 
 function nonempty(value) {
@@ -62,27 +73,38 @@ export function createPiSubagentsExecutionBackend({
   const byRunId = new Map();
   let sessionId = null;
   let rpcSessionId = null;
+  let capabilitiesVerified = false;
   let disposed = false;
 
   function createEntry(request, binding = null) {
-    return { request, binding, bindingWait: deferred(), cancelling: false, stopPromise: null, supersedePromise: null };
+    const bindingWait = deferred();
+    // A deferred may be rejected during dispose without a caller waiting yet.
+    bindingWait.promise.catch(() => {});
+    return { request, binding, bindingWait, cancelling: false, stopPromise: null, supersedePromise: null, terminalProof: null };
   }
 
   function bind(entry, binding) {
     entry.binding = binding;
     byRunId.set(binding.runId, binding);
     entry.bindingWait.resolve(binding);
-    if (entry.cancelling) void stopBound(entry);
+    if (entry.cancelling) {
+      void stopBound(entry).catch((error) => violation("SUPERSEDE_STOP_FAILED", "Background supersede stop failed", { ...binding, error: error?.message }));
+    }
   }
 
   async function stopBound(entry) {
     if (!entry.binding) return null;
-    entry.stopPromise ??= Promise.resolve().then(() => rpc.stop({ runId: entry.binding.runId, dir: entry.binding.asyncDir }));
+    if (!entry.stopPromise) {
+      const stop = Promise.resolve().then(() => rpc.stop({ runId: entry.binding.runId, dir: entry.binding.asyncDir }));
+      entry.stopPromise = stop;
+      stop.catch(() => {}).finally(() => { if (entry.stopPromise === stop) entry.stopPromise = null; });
+    }
     await entry.stopPromise;
     return entry.binding;
   }
 
   async function terminalProof(entry) {
+    if (entry.terminalProof) return entry.terminalProof;
     const binding = await stopBound(entry);
     const deadline = Date.now() + supersedeTimeoutMs;
     while (!disposed && Date.now() <= deadline) {
@@ -101,11 +123,18 @@ export function createPiSubagentsExecutionBackend({
 
   function beginSupersede(entry) {
     entry.cancelling = true;
-    entry.supersedePromise ??= (async () => {
-      const binding = entry.binding ?? await Promise.race([entry.bindingWait.promise, new Promise((_, reject) => setTimeout(() => reject(new ExecutionProtocolError("EXECUTION_DISPATCH_UNCERTAIN", "Dispatch binding was not observed", entry.request.dispatchId)), supersedeTimeoutMs))]);
-      if (!binding) throw new ExecutionProtocolError("EXECUTION_DISPATCH_UNCERTAIN", "Dispatch binding was not observed", entry.request.dispatchId);
-      return terminalProof(entry);
-    })();
+    if (entry.terminalProof) return Promise.resolve(entry.terminalProof);
+    if (!entry.supersedePromise) {
+      const call = (async () => {
+        const binding = entry.binding ?? await Promise.race([entry.bindingWait.promise, new Promise((_, reject) => setTimeout(() => reject(new ExecutionProtocolError("EXECUTION_DISPATCH_UNCERTAIN", "Dispatch binding was not observed", entry.request.dispatchId)), supersedeTimeoutMs))]);
+        if (!binding) throw new ExecutionProtocolError("EXECUTION_DISPATCH_UNCERTAIN", "Dispatch binding was not observed", entry.request.dispatchId);
+        const proof = await terminalProof(entry);
+        entry.terminalProof = proof;
+        return proof;
+      })();
+      entry.supersedePromise = call;
+      call.catch(() => {}).finally(() => { if (entry.supersedePromise === call) entry.supersedePromise = null; });
+    }
     return entry.supersedePromise;
   }
 
@@ -216,6 +245,9 @@ export function createPiSubagentsExecutionBackend({
 
   for (const binding of bindings) {
     const recovered = recoveredEntry(binding);
+    if (sessionId && sessionId !== recovered.binding.sessionId) {
+      throw new ExecutionProtocolError("EXECUTION_CAPABILITY_MISMATCH", "Recovered bindings belong to different Plan Sessions");
+    }
     const entry = createEntry(recovered.request, recovered.binding);
     entry.bindingWait.resolve(entry.binding);
     pending.set(recovered.request.dispatchId, entry);
@@ -225,7 +257,7 @@ export function createPiSubagentsExecutionBackend({
 
   function ensureReady() {
     if (disposed) throw new ExecutionProtocolError("EXECUTION_BACKEND_DISPOSED", "Execution backend is disposed");
-    if (!sessionId) throw new ExecutionProtocolError("EXECUTION_CAPABILITIES_UNVERIFIED", "Execution capabilities are not verified");
+    if (!capabilitiesVerified) throw new ExecutionProtocolError("EXECUTION_CAPABILITIES_UNVERIFIED", "Execution capabilities are not verified");
   }
 
   function boundTarget(input) {
@@ -263,6 +295,7 @@ export function createPiSubagentsExecutionBackend({
       }
       sessionId = negotiatedSessionId;
       rpcSessionId = negotiatedRpcSessionId;
+      capabilitiesVerified = true;
       return Object.freeze({
         rpcVersion: result.version,
         methods: Object.freeze([...methods]),
@@ -325,6 +358,18 @@ export function createPiSubagentsExecutionBackend({
       pending.set(recovered.request.dispatchId, entry);
       byRunId.set(recovered.binding.runId, entry.binding);
       return entry.binding;
+    },
+    async recoverDispatch(input) {
+      ensureReady();
+      const request = exactSpawnRequest(input);
+      const existing = pending.get(request.dispatchId);
+      if (existing) {
+        if (!existing.binding && stableJson(existing.request) === stableJson(request)) return existing.request;
+        throw new ExecutionProtocolError("EXECUTION_DISPATCH_CONFLICT", "Recovered dispatch conflicts with an existing dispatch", request.dispatchId);
+      }
+      const entry = createEntry(request);
+      pending.set(request.dispatchId, entry);
+      return entry.request;
     },
     async supersede(input) {
       ensureReady();

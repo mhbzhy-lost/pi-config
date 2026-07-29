@@ -388,3 +388,87 @@ test("recoverBinding validates the negotiated session and fails closed on identi
   );
   backend.dispose();
 });
+
+test("supersede retries an unbound timeout after a late lifecycle start", async () => {
+  const subject = supersedeHarness({ spawn: () => new Promise(() => {}) });
+  await subject.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  void subject.backend.spawn(spawnInput()).catch(() => {});
+  await assert.rejects(subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" }), (error) => error.code === "EXECUTION_DISPATCH_UNCERTAIN");
+  subject.events.emit("subagent:async-started", { id: "late-run", asyncDir: "/async/late", cwd: "/attempts/attempt-1", sessionId: "/sessions/plan-session-1.jsonl" });
+  assert.equal((await subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" })).kind, "terminal");
+  assert.deepEqual(subject.stops, [{ runId: "late-run", dir: "/async/late" }]);
+  subject.backend.dispose();
+});
+
+test("supersede retries failed stops while sharing an in-flight stop and caches terminal proof", async () => {
+  const events = createEvents();
+  let stops = 0;
+  const backend = createPiSubagentsExecutionBackend({ events, supersedePollIntervalMs: 1, rpc: { async ping() { return capabilities(); }, async spawn() { return { details: { runId: "run-1", asyncDir: "/async/run-1" } }; }, async stop() { stops += 1; if (stops === 1) throw new Error("transient"); }, dispose() {} }, readArtifacts: async () => ({ status: { kind: "stable", value: { state: "stopped" } } }) });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  await backend.spawn(spawnInput());
+  await assert.rejects(backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" }));
+  const [one, two] = await Promise.all([backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" }), backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" })]);
+  assert.deepEqual(one, two);
+  await backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" });
+  assert.equal(stops, 2);
+  backend.dispose();
+});
+
+test("recoverDispatch is exact, idempotent, never spawns, and fences a late lifecycle", async () => {
+  const events = createEvents();
+  let spawns = 0;
+  const backend = createPiSubagentsExecutionBackend({ events, supersedeTimeoutMs: 15, supersedePollIntervalMs: 1, rpc: { async ping() { return capabilities(); }, async spawn() { spawns += 1; }, async stop() {}, dispose() {} }, readArtifacts: async () => ({ status: { kind: "stable", value: { state: "stopped" } } }) });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  const request = spawnInput();
+  assert.deepEqual(await backend.recoverDispatch(request), request);
+  assert.deepEqual(await backend.recoverDispatch(request), request);
+  assert.equal(spawns, 0);
+  await assert.rejects(backend.recoverDispatch({ ...request, extra: true }), (error) => error.code === "INVALID_EXECUTION_REQUEST");
+  await assert.rejects(backend.recoverDispatch({ ...request, timeoutMs: 2 }), (error) => error.code === "EXECUTION_DISPATCH_CONFLICT");
+  await assert.rejects(backend.supersede({ dispatchId: request.dispatchId, attemptId: request.attemptId, extra: true }), (error) => error.code === "INVALID_EXECUTION_REQUEST");
+  await assert.rejects(backend.supersede({ dispatchId: request.dispatchId }), (error) => error.code === "INVALID_EXECUTION_REQUEST");
+  await assert.rejects(backend.supersede({ dispatchId: request.dispatchId, attemptId: request.attemptId }), (error) => error.code === "EXECUTION_DISPATCH_UNCERTAIN");
+  events.emit("subagent:async-started", { id: "late-run", asyncDir: "/async/late", cwd: request.cwd, sessionId: "/sessions/plan-session-1.jsonl" });
+  assert.equal((await backend.supersede({ dispatchId: request.dispatchId, attemptId: request.attemptId })).kind, "terminal");
+  backend.dispose();
+});
+
+test("rejects mixed constructor sessions", () => {
+  const binding = { dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1", cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl" };
+  assert.throws(() => createPiSubagentsExecutionBackend({ events: createEvents(), rpc: { ping() {} }, bindings: [binding, { ...binding, dispatchId: "attempt-2.dispatch.1", runId: "run-2", sessionId: "other", sessionFile: "other" }] }), (error) => error.code === "EXECUTION_CAPABILITY_MISMATCH");
+});
+
+test("recovered bindings do not bypass capability negotiation", async () => {
+  const binding = { dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1", cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl" };
+  const backend = createPiSubagentsExecutionBackend({ events: createEvents(), rpc: { async ping() { return capabilities(); }, async stop() {}, async spawn() {}, dispose() {} }, bindings: [binding] });
+  for (const call of [() => backend.spawn(spawnInput({ dispatchId: "attempt-2.dispatch.1" })), () => backend.status({ runId: "run-1", asyncDir: "/async/run-1" }), () => backend.stop({ runId: "run-1", asyncDir: "/async/run-1" }), () => backend.supersede({ dispatchId: binding.dispatchId, attemptId: binding.attemptId }), () => backend.recoverBinding(binding), () => backend.recoverDispatch(spawnInput({ dispatchId: "attempt-2.dispatch.1" }))]) {
+    await assert.rejects(call(), (error) => error.code === "EXECUTION_CAPABILITIES_UNVERIFIED");
+  }
+  backend.dispose();
+});
+
+test("consumes deferred and background stop rejections without hiding awaited errors", async () => {
+  const events = createEvents();
+  const unhandled = [];
+  const listener = (error) => unhandled.push(error);
+  process.on("unhandledRejection", listener);
+  try {
+    const subject = supersedeHarness({ spawn: () => new Promise(() => {}) });
+    await subject.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+    void subject.backend.spawn(spawnInput()).catch(() => {});
+    const waiting = subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" });
+    subject.backend.dispose();
+    await assert.rejects(waiting, (error) => error.code === "EXECUTION_BACKEND_DISPOSED");
+    const rejecting = supersedeHarness({ spawn: () => new Promise(() => {}) });
+    rejecting.backend = createPiSubagentsExecutionBackend({ events: rejecting.events, rpc: { async ping() { return capabilities(); }, async spawn() { return new Promise(() => {}); }, async stop() { throw new Error("late failure"); }, dispose() {} }, supersedeTimeoutMs: 20, supersedePollIntervalMs: 1 });
+    await rejecting.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+    void rejecting.backend.spawn(spawnInput()).catch(() => {});
+    await assert.rejects(rejecting.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" }), (error) => error.code === "EXECUTION_DISPATCH_UNCERTAIN");
+    rejecting.events.emit("subagent:async-started", { id: "late-run", asyncDir: "/async/late", cwd: "/attempts/attempt-1", sessionId: "/sessions/plan-session-1.jsonl" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    rejecting.backend.dispose();
+    assert.equal(unhandled.length, 0);
+  } finally {
+    process.off("unhandledRejection", listener);
+  }
+});
