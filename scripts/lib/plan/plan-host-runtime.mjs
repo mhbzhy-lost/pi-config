@@ -453,6 +453,15 @@ export function createPlanHostRuntime({
       if (model) spawnOptions.model = model;
       const result = await spawnHost(spawnOptions);
       if (!Number.isInteger(result?.pid) || result.pid < 1) throw new Error("Standalone Plan Runner process handle is incomplete");
+      let startup;
+      if (result.ready !== undefined) {
+        try {
+          startup = await result.ready;
+        } catch (error) {
+          await stopHost(result.pid).catch(() => {});
+          throw error;
+        }
+      }
       let processIdentity;
       try {
         processIdentity = result.processIdentity ?? await captureHostIdentity(result.pid);
@@ -463,15 +472,6 @@ export function createPlanHostRuntime({
           throw new AggregateError([error, stopError], "Plan Host identity capture failed and spawned Host cleanup failed", { cause: error });
         }
         throw error;
-      }
-      let startup;
-      if (result.ready !== undefined) {
-        try {
-          startup = await result.ready;
-        } catch (error) {
-          await stopHost(result.pid).catch(() => {});
-          throw error;
-        }
       }
       let sessionFile = result.sessionFile ?? startup?.sessionFile;
       if (!sessionFile) {

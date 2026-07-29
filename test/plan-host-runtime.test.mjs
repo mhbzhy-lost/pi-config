@@ -345,11 +345,48 @@ sleep 5
 test("stops a spawned Host when process identity capture fails", async () => {
   const stopped = [];
   const host = createPlanHostRuntime({
-    spawnHost: async () => ({ pid: 4242, sessionFile: "/session.jsonl" }),
+    spawnHost: async () => ({ pid: 4242, ready: Promise.resolve(), sessionFile: "/session.jsonl" }),
     captureHostIdentity: async () => { throw new Error("identity unavailable"); },
     stopHost: async (pid) => stopped.push(pid),
   });
   await assert.rejects(host.spawnPlanRunner(input("/tmp")), /identity unavailable/);
+  assert.deepEqual(stopped, [4242]);
+});
+
+test("captures Host identity only after startup ready completes", async () => {
+  let readyCompleted = false;
+  let resolveReady;
+  const ready = new Promise((resolve) => {
+    resolveReady = () => {
+      readyCompleted = true;
+      resolve({ sessionFile: "/session.jsonl" });
+    };
+  });
+  const host = createPlanHostRuntime({
+    spawnHost: async () => ({ pid: 4242, ready }),
+    captureHostIdentity: async () => {
+      assert.equal(readyCompleted, true, "identity capture must wait for startup ready");
+      return "process-4242";
+    },
+  });
+
+  const runner = host.spawnPlanRunner(input("/tmp"));
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveReady();
+  const handle = await runner;
+  assert.equal(handle.processIdentity, "process-4242");
+});
+
+test("stops startup failure without capturing a directly supplied Host identity", async () => {
+  const stopped = [];
+  const startupError = new Error("session startup failed");
+  const host = createPlanHostRuntime({
+    spawnHost: async () => ({ pid: 4242, processIdentity: "process-4242", ready: Promise.reject(startupError) }),
+    captureHostIdentity: async () => assert.fail("must not capture identity before startup succeeds"),
+    stopHost: async (pid) => stopped.push(pid),
+  });
+
+  await assert.rejects(host.spawnPlanRunner(input("/tmp")), startupError);
   assert.deepEqual(stopped, [4242]);
 });
 
