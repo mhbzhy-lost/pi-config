@@ -15,6 +15,7 @@ import { createProjection, applyEvent } from "./plan-events.mjs";
 import { createTaskCommandRegistry, resolveTaskVerification, runPlanGates } from "./gates.mjs";
 import { createPlanControl } from "./plan-control.mjs";
 import { createPlanRevisionStore } from "./plan-revision-store.mjs";
+import { assertCurrentRevisionIdentity, createPlanAmendmentService } from "./plan-amendment.mjs";
 
 const execFile = promisify(execFileCallback);
 const TERMINAL = new Set(["validated", "blocked", "cancelled", "interrupted"]);
@@ -180,6 +181,75 @@ export function createPlanRunnerDependencies({
     return status;
   }
 
+  async function readCurrentRevision({ ctx } = {}) {
+    const projection = currentProjection(ctx);
+    if (!projection?.revision || !projection?.planId) throw new Error("Plan current revision is unavailable.");
+    const current = assertCurrentRevisionIdentity(
+      await revisionStore.readRevision(projection.planId, projection.revision.number), projection,
+    );
+    if (!Buffer.isBuffer(current.sourceBytes) && !(current.sourceBytes instanceof Uint8Array)) throw new Error("Plan current revision source is unavailable.");
+    const source = Buffer.from(current.sourceBytes).toString("utf8");
+    if (Buffer.from(source, "utf8").compare(Buffer.from(current.sourceBytes)) !== 0) throw new Error("Plan current revision source is not valid UTF-8.");
+    return { revision: current.revision, planHash: current.manifest.planHash, irHash: current.manifest.irHash, source };
+  }
+
+  async function supersedeAttempt({ attemptId, expectedTaskHash }, { ctx } = {}) {
+    let projection = currentProjection(ctx);
+    const attempt = projection.attempts.get(attemptId);
+    if (!attempt || attempt.status !== "supersede-requested" || attempt.supersededTaskHash !== expectedTaskHash
+      || attempt.supersededByRevision !== projection.revision?.number) throw new Error("Attempt supersede cleanup identity is stale.");
+    let evidence;
+    if (attempt.supersededFromStatus === "workspace-allocated") {
+      evidence = { kind: "never-started", dispatchId: null };
+    } else {
+      if (!executionBackend?.supersede) throw new Error("Execution supersede capability is unavailable.");
+      try {
+        evidence = await executionBackend.supersede({ dispatchId: attempt.dispatchId, attemptId });
+      } catch (error) {
+        if (error?.code !== "EXECUTION_DISPATCH_NOT_FOUND") throw error;
+        if (attempt.supersededFromStatus === "dispatch-requested") {
+          await executionBackend.recoverDispatch({ dispatchId: attempt.dispatchId, attemptId, agent: attempt.tool.agent, task: attempt.tool.task, cwd: attempt.tool.cwd, output: attempt.tool.output, timeoutMs: attempt.tool.timeoutMs });
+        } else {
+          if (!attempt.sessionFile) throw new Error("Persisted execution sessionFile is required for recovery.");
+          await executionBackend.recoverBinding({ dispatchId: attempt.dispatchId, attemptId, runId: attempt.runId, asyncDir: attempt.asyncDir, cwd: attempt.tool?.cwd ?? attempt.workspace.path, output: attempt.tool?.output, sessionId: attempt.sessionFile, sessionFile: attempt.sessionFile });
+        }
+        evidence = await executionBackend.supersede({ dispatchId: attempt.dispatchId, attemptId });
+      }
+    }
+    projection = currentProjection(ctx);
+    const latest = projection.attempts.get(attemptId);
+    if (!latest || latest.status !== "supersede-requested" || latest.supersededTaskHash !== expectedTaskHash || latest.supersededByRevision !== projection.revision.number) throw new Error("Attempt supersede cleanup changed during proof.");
+    await appendEvent(ctx, "attempt.superseded", { attemptId, taskId: latest.taskId, supersededByRevision: projection.revision.number, oldTaskHash: expectedTaskHash, evidence }, projection.version);
+    projection = currentProjection(ctx);
+    const superseded = projection.attempts.get(attemptId);
+    if (superseded.workspaceReleased) return;
+    const clean = superseded.supersedeProof?.kind === "never-started" && !superseded.resultCommit
+      ? await import("./attempt-workspace.mjs").then(({ inspectAttemptWorkspace }) => inspectAttemptWorkspace(superseded.workspace).then((inspection) => inspection.clean))
+      : false;
+    const disposition = clean ? "superseded-cleanup" : "superseded-preserve";
+    await appendEvent(ctx, "attempt.workspace-released", { attemptId, disposition, evidence: { kind: disposition } }, projection.version);
+    await derivedStatus(ctx);
+    await releaseAttemptWorkspace(superseded.workspace, { ownerToken: superseded.workspace.ownerToken, disposition });
+  }
+
+  async function recoverSupersededAttempts({ ctx } = {}) {
+    const projection = currentProjection(ctx);
+    if (!projection?.revision || !projection.planId) return;
+    const committed = assertCurrentRevisionIdentity(await revisionStore.readRevision(projection.planId, projection.revision.number), projection);
+    await revisionStore.writeCurrent(committed);
+    const errors = [];
+    for (const [attemptId, attempt] of [...currentProjection(ctx).attempts].sort(([a], [b]) => a.localeCompare(b))) {
+      if (attempt.workspaceReleased || !["supersede-requested", "superseded"].includes(attempt.status)) continue;
+      try {
+        if (attempt.status === "superseded") {
+          await appendEvent(ctx, "attempt.workspace-released", { attemptId, disposition: "superseded-preserve", evidence: { kind: "superseded-preserve" } }, currentProjection(ctx).version);
+          await derivedStatus(ctx);
+          await releaseAttemptWorkspace(attempt.workspace, { ownerToken: attempt.workspace.ownerToken, disposition: "superseded-preserve" });
+        } else await supersedeAttempt({ attemptId, expectedTaskHash: attempt.supersededTaskHash }, { ctx });
+      } catch (error) { errors.push(error); }
+    }
+    if (errors.length) throw new AggregateError(errors, "Superseded Attempt recovery failed");
+  }
   async function approvedPlan(current) {
     if (current.revision) {
       const revision = await revisionStore.readRevision(current.planId, current.revision.number);
@@ -338,7 +408,9 @@ export function createPlanRunnerDependencies({
   }
 
   return {
-    appendPlanEvent: appendEvent,
+    readCurrentRevision,
+    amendPlan: (input, { ctx }) => createPlanAmendmentService({ revisionStore, eventWriter: writer, currentProjection: () => currentProjection(ctx), supersedeAttempt: (input) => supersedeAttempt(input, { ctx }) }).amend(input),
+    recoverSupersededAttempts,
     writeCurrentRevision: (revision) => revisionStore.writeCurrent(revision),
     async validateBinding(input, { ctx }) {
       const binding = await readBinding(input, ctx, configuredRoots, revisionStore);

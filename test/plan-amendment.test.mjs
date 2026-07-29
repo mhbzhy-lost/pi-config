@@ -213,6 +213,31 @@ async function amendmentHarness({ appendError, pointerError, supersedeError, att
   return { root, current, calls, appendedEvents, service, source: amendmentSource({ revision: 2, parentPlanHash: initial.manifest.planHash, taskTwoBody: "amended contract" }) };
 }
 
+test("requires exactly one resolved blocking authorization before reading", async () => {
+  const fixture = await amendmentHarness();
+  try {
+    fixture.current.attempts.set("attempt-3", {
+      taskId: "task-2", status: "active", attention: { requestId: "request-2", status: "resolved", blocking: true },
+    });
+    await assert.rejects(
+      fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "approved scope change", source: fixture.source }),
+      /exactly one resolved blocking Supervisor request/,
+    );
+    assert.deepEqual(fixture.calls, []);
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+
+test("continues supersede cleanup after pointer repair fails", async () => {
+  const fixture = await amendmentHarness({ pointerError: new Error("pointer rejected") });
+  try {
+    await assert.rejects(
+      fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "approved scope change", source: fixture.source }),
+      AggregateError,
+    );
+    assert.equal(fixture.calls.filter((call) => call.startsWith("supersede:")).length, 2);
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+
 test("commits a validated v3 amendment before pointer and supersede cleanup", async () => {
   const fixture = await amendmentHarness();
   try {
@@ -286,9 +311,9 @@ for (const [label, options, expected] of [
   test(`preserves commit ordering on ${label}`, async () => {
     const fixture = await amendmentHarness(options);
     try {
-      await assert.rejects(fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "approved scope change", source: fixture.source }), label === "supersede rejection" ? AggregateError : new RegExp(label.split(" ")[0]));
+      await assert.rejects(fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "approved scope change", source: fixture.source }), ["pointer rejection", "supersede rejection"].includes(label) ? AggregateError : new RegExp(label.split(" ")[0]));
       assert.deepEqual(fixture.calls.slice(0, expected.length), expected);
-      if (label === "supersede rejection") assert.deepEqual(fixture.calls.slice(4).map((call) => call.split(":").slice(0, 2).join(":")), ["supersede:attempt-1", "supersede:attempt-2"]);
+      if (["pointer rejection", "supersede rejection"].includes(label)) assert.deepEqual(fixture.calls.slice(4).map((call) => call.split(":").slice(0, 2).join(":")), ["supersede:attempt-1", "supersede:attempt-2"]);
       else assert.equal(fixture.calls.some((call) => call.startsWith("supersede:")), false);
     } finally { await rm(fixture.root, { recursive: true, force: true }); }
   });

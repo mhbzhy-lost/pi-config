@@ -15,20 +15,22 @@ function validateServiceInput(input) {
   if (typeof input.source !== "string" || !input.source.trim() || Buffer.byteLength(input.source, "utf8") > 1024 * 1024) throw new Error("invalid Plan amendment source");
 }
 
-function revisionIdentityMatches(current, projection) {
-  const revision = projection.revision;
+export function assertCurrentRevisionIdentity(current, projection) {
+  const revision = projection?.revision;
   const manifest = current?.manifest;
-  return current?.planId === projection.planId
-    && current?.revision === revision.number
-    && current?.manifestSha256 === revision.manifestSha256
-    && manifest?.planId === projection.planId
-    && manifest?.revision === revision.number
-    && manifest?.sourceBytesSha256 === revision.sourceBytesSha256
-    && manifest?.planHash === revision.planHash
-    && manifest?.irVersion === revision.irVersion
-    && manifest?.irHash === revision.irHash
-    && current?.ir?.version === manifest?.irVersion
-    && current?.ir?.hash === manifest?.irHash;
+  if (!revision || !manifest
+    || current?.planId !== projection.planId
+    || current?.revision !== revision.number
+    || current?.manifestSha256 !== revision.manifestSha256
+    || manifest.planId !== projection.planId
+    || manifest.revision !== revision.number
+    || manifest.sourceBytesSha256 !== revision.sourceBytesSha256
+    || manifest.planHash !== revision.planHash
+    || manifest.irVersion !== revision.irVersion
+    || manifest.irHash !== revision.irHash
+    || current?.ir?.version !== manifest.irVersion
+    || current?.ir?.hash !== manifest.irHash) throw new Error("revision identity mismatch");
+  return current;
 }
 
 export function createPlanAmendmentService({ revisionStore, eventWriter, currentProjection, supersedeAttempt } = {}) {
@@ -39,19 +41,18 @@ export function createPlanAmendmentService({ revisionStore, eventWriter, current
     if (!projection?.revision || typeof projection.planId !== "string" || !projection.planId) throw new Error("Plan amendment requires committed revision identity");
     if (projection.version !== input.expectedProjectionVersion) throw new Error("Plan projection version conflict");
     if (projection.revision.number !== input.baseRevision) throw new Error("Plan base revision is stale");
-    const sourceMatch = [...projection.attempts.entries()].find(([, attempt]) => attempt.attention?.requestId === input.requestId && attempt.attention.status === "resolved" && attempt.attention.blocking === true);
-    if (!sourceMatch) throw new Error("Plan amendment requires a resolved blocking Supervisor request");
-    const [sourceAttemptId, sourceAttempt] = sourceMatch;
-    const current = await revisionStore.readRevision(projection.planId, input.baseRevision);
-    if (!revisionIdentityMatches(current, projection)) throw new Error("revision identity mismatch");
+    const sourceMatches = [...projection.attempts.entries()].filter(([, attempt]) => attempt.attention?.requestId === input.requestId && attempt.attention.status === "resolved" && attempt.attention.blocking === true);
+    if (sourceMatches.length !== 1) throw new Error("Plan amendment requires exactly one resolved blocking Supervisor request");
+    const [sourceAttemptId, sourceAttempt] = sourceMatches[0];
+    const current = assertCurrentRevisionIdentity(await revisionStore.readRevision(projection.planId, input.baseRevision), projection);
     const parsed = parsePlanDocument(input.source, current.sourcePath);
     if (parsed.revision !== input.baseRevision + 1 || parsed.parentPlanHash !== current.manifest.planHash) throw new Error("Plan amendment revision chain does not match");
     const nextIr = compilePlanToIR(parsed);
     const validated = validateAmendment({ projection, oldIr: current.ir, newIr: nextIr });
     const prepared = await revisionStore.prepareRevision({ planId: projection.planId, sourceBytes: Buffer.from(input.source, "utf8"), expectedIrHash: nextIr.hash, reason: input.reason, initiator: { kind: "supervisor-request", requestId: input.requestId, taskId: sourceAttempt.taskId, attemptId: sourceAttemptId, runId: sourceAttempt.runId } });
     await eventWriter.append({ expectedProjectionVersion: input.expectedProjectionVersion, planId: projection.planId, type: "plan.amended", data: amendmentEventData(prepared, validated, input) });
-    await revisionStore.writeCurrent(prepared);
     const errors = [];
+    try { await revisionStore.writeCurrent(prepared); } catch (error) { errors.push(error); }
     for (const attemptId of validated.supersededAttemptIds) {
       try { await supersedeAttempt({ attemptId, expectedTaskHash: projection.attempts.get(attemptId)?.taskHash ?? projection.revision.taskHashes[projection.attempts.get(attemptId)?.taskId]?.effective }); } catch (error) { errors.push(error); }
     }

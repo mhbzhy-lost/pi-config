@@ -85,7 +85,9 @@ test("plan-runner alone uses the real subagentOnlyExtensions profile field", asy
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const profiles = await Promise.all(["plan-runner", "plan-reviewer", "executor", "spark"].map((name) => readFile(resolve(root, "pi", "agents", `${name}.md`), "utf8")));
   assert.match(profiles[0], /^subagentOnlyExtensions: \.pi-subagents\/plan-runner-entry\.mjs$/m);
-  assert.match(profiles[0], /^tools: plan_open,plan_status,plan_continue,plan_verify,plan_block,subagent_wait,subagent_supervisor,read,grep,bash$/m);
+  assert.match(profiles[0], /^tools: plan_open,plan_status,plan_continue,plan_verify,plan_block,plan_read_revision,plan_amend,subagent_wait,subagent_supervisor,read,grep$/m);
+  assert.match(profiles[0], /plan_read_revision[\s\S]*plan_amend/);
+  assert.doesNotMatch(profiles[0], /\bbash\b|approvedHash|contact_supervisor/);
   assert.match(profiles[0], /pending[\s\S]*timeoutMs: 1000[\s\S]*pending/);
   assert.doesNotMatch(profiles[0], /^tools:.*(?:^|,)subagent(?:,|$)/m);
   assert.match(profiles[2], /^tools: .*contact_supervisor$/m);
@@ -157,10 +159,10 @@ test("plan_open validates then persists and activates the lifecycle tools", asyn
   assert.equal(entries[0].data.type, "plan.created");
   assert.equal(entries[0].data.data.workspace.planPath, undefined);
   assert.equal(entries[0].data.data.workspace.planHash, undefined);
-  assert.deepEqual([...tools.keys()], ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block"]);
+  assert.deepEqual([...tools.keys()], ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend"]);
   assert.deepEqual(activeTools(), [
-    "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block",
-    "subagent_wait", "subagent_supervisor", "read", "grep", "bash",
+    "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
+    "subagent_wait", "subagent_supervisor", "read", "grep",
   ]);
 });
 

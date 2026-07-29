@@ -4,8 +4,8 @@ const STRING = { type: "string", minLength: 1 };
 const EMPTY_OBJECT = { type: "object", properties: {}, additionalProperties: false };
 const OPEN_KEYS = ["allowPlanCommits", "baseCommit", "manifestSha256", "planId", "planIrHash", "revision", "worktree"];
 const PLAN_ACTIVE_TOOLS = [
-  "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block",
-  "subagent_wait", "subagent_supervisor", "read", "grep", "bash",
+  "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
+  "subagent_wait", "subagent_supervisor", "read", "grep",
 ];
 
 function result(value, isError = false) {
@@ -115,6 +115,21 @@ export function createPlanCapsuleExtension(pi, options = {}) {
         }
       },
     });
+    register(pi, {
+      name: "plan_read_revision", label: "Read current plan revision", description: "Read the current committed Plan source.", parameters: EMPTY_OBJECT,
+      async execute(_id, _params, _signal, _update, ctx) {
+        if (typeof options.readCurrentRevision !== "function") return result("Plan revision read capability is unavailable.", true);
+        try { return result(await options.readCurrentRevision({ ctx })); } catch (error) { return result(error instanceof Error ? error.message : "Plan revision read failed.", true); }
+      },
+    });
+    register(pi, {
+      name: "plan_amend", label: "Amend plan", description: "Commit an authorized complete Plan revision.",
+      parameters: { type: "object", properties: { expectedProjectionVersion: { type: "integer", minimum: 1 }, baseRevision: { type: "integer", minimum: 1 }, requestId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" }, reason: { type: "string", minLength: 1, maxLength: 4096 }, source: { type: "string", minLength: 1, maxLength: 1048576 } }, required: ["expectedProjectionVersion", "baseRevision", "requestId", "reason", "source"], additionalProperties: false },
+      async execute(_id, params, _signal, _update, ctx) {
+        if (typeof options.amendPlan !== "function") return result("Plan amendment capability is unavailable.", true);
+        try { return result(await options.amendPlan(params, { ctx })); } catch (error) { return result(error instanceof Error ? error.message : "Plan amendment failed.", true); }
+      },
+    });
     pi.setActiveTools([...PLAN_ACTIVE_TOOLS]);
   }
 
@@ -131,7 +146,10 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   }
 
   pi.on("session_start", async (_event, ctx) => restore(ctx));
-  pi.on("before_agent_start", async () => assertRuntimeCapabilities());
+  pi.on("before_agent_start", async (_event, ctx) => {
+    await assertRuntimeCapabilities();
+    if (opened && typeof options.recoverSupersededAttempts === "function") await options.recoverSupersededAttempts({ ctx });
+  });
   pi.on("session_shutdown", async () => {
     const control = stopPlanControl;
     stopPlanControl = undefined;
@@ -143,7 +161,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   });
   pi.on("tool_call", async (event, ctx) => {
     if (!opened) return undefined;
-    if (["subagent", "contact_supervisor"].includes(event?.toolName)) {
+    if (["subagent", "contact_supervisor", "bash"].includes(event?.toolName)) {
       return { block: true, reason: "Plan Harness dispatch and supervision are owned by the Standalone Plan Runner control plane." };
     }
     if (event?.toolName !== "subagent_supervisor") return undefined;
