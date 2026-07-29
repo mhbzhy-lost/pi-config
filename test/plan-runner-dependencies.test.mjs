@@ -10,6 +10,8 @@ import { createPlanRunnerDependencies } from "../scripts/lib/plan/plan-runner-de
 import { createPlanCapsuleExtension } from "../scripts/lib/plan/plan-capsule-extension.mjs";
 import { createPlanControl } from "../scripts/lib/plan/plan-control.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
+import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mjs";
+import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
 
 const TEST_MANIFEST = "a".repeat(64);
 const TEST_IR = "b".repeat(64);
@@ -645,4 +647,186 @@ test("real dependencies expose plan_open event append capability to the Capsule"
 
   assert.equal(result.isError, false, result.content[0].text);
   assert.deepEqual(entries.map(({ data }) => data.type), ["plan.created"]);
+});
+
+function revisionReplaySource(revision, parentPlanHash, taskTwoBody) {
+  return `# Revision replay fixture
+
+**Goal:** replay the exact current approved revision.
+
+## Execution Contract
+
+\`\`\`json
+${JSON.stringify({
+  schemaVersion: "pi-plan.v3", revision, parentPlanHash,
+  verification: [{ id: "plan:test", command: "true", cwd: ".", timeoutMs: 900000 }],
+  requiredGates: ["deterministic", "plan-audit", "external-review", "final-completeness"],
+  resourceCapacities: {},
+  executionDefaults: { agent: "executor", risk: "normal", workflow: { mode: "inherit-repository" }, timeoutMs: 900000 },
+  taskExecution: { "task-1": {}, "task-2": {} },
+  taskAcceptance: {
+    "task-1": { strategy: "commands", commandIds: ["plan:test"] },
+    "task-2": { strategy: "commands", commandIds: ["plan:test"] },
+  },
+})}
+\`\`\`
+
+### Task 1: Authorization source
+
+**Files:**
+- Modify: \`src/authorization.mjs\`
+
+Keep the authorization task unchanged.
+
+### Task 2: Replay target
+
+**Files:**
+- Modify: \`src/replay-target.mjs\`
+
+${taskTwoBody}
+`;
+}
+
+function replayProjection(entries) {
+  return entries.reduce((projection, entry) => applyEvent(projection, entry), createProjection());
+}
+
+test("public continuePlan replays the current revision IR after an authorized amendment", async (t) => {
+  const origin = await mkdtemp(path.join(os.tmpdir(), "pi-current-revision-replay-"));
+  t.after(() => rm(origin, { recursive: true, force: true }));
+  const stateRoot = path.join(origin, "state");
+  const planId = "current-revision-replay";
+  await git(origin, "init");
+  await git(origin, "config", "user.email", "test@example.com");
+  await git(origin, "config", "user.name", "Test User");
+  await writeFile(path.join(origin, "README.md"), "base\n");
+  await git(origin, "add", "README.md");
+  await git(origin, "commit", "-m", "base");
+  const baseCommit = await git(origin, "rev-parse", "HEAD");
+  const worktree = path.join(stateRoot, "var", "plan-worktrees", planId);
+  await mkdir(path.dirname(worktree), { recursive: true });
+  await git(origin, "worktree", "add", "-b", `pi-plan/${planId}`, worktree, baseCommit);
+
+  const sourceOne = revisionReplaySource(1, null, "Revision 1 body.");
+  const store = createPlanRevisionStore({ stateRoot });
+  const preparedOne = await store.prepareRevision({
+    planId, sourceBytes: Buffer.from(sourceOne), reason: "initial-approval", initiator: { kind: "launcher" },
+  });
+  await store.writeCurrent(preparedOne);
+  const revisionOne = await store.readRevision(planId, 1);
+  const entries = [];
+  const branch = [];
+  const appended = [];
+  const spawns = [];
+  const bindings = new Map();
+  const supersedes = [];
+  const releases = [];
+  const reads = [];
+  const revisionStore = {
+    async readRevision(...input) { reads.push(input); return store.readRevision(...input); },
+    async readCurrent(...input) { return store.readCurrent(...input); },
+    async prepareRevision(...input) { return store.prepareRevision(...input); },
+    async writeCurrent(...input) { return store.writeCurrent(...input); },
+  };
+  const ctx = context(worktree, branch);
+  const pi = { async appendEntry(type, data) {
+    appended.push(data);
+    entries.push(data);
+    branch.push({ customType: type, data });
+  } };
+  const deps = createPlanRunnerDependencies({
+    pi, originRoot: origin, stateRoot, revisionStore,
+    allocateAttemptWorkspace: async (input) => fakeAllocator(input),
+    releaseAttemptWorkspace: async (workspace, options) => { releases.push({ workspace, options }); },
+    executionBackend: {
+      async spawn(input) {
+        spawns.push(input);
+        const sequence = spawns.length;
+        const binding = { dispatchId: input.dispatchId, attemptId: input.attemptId, runId: `replay-run-${sequence}`, asyncDir: `/async/replay-${sequence}`, cwd: input.cwd, sessionId: "stable-session" };
+        bindings.set(input.attemptId, binding);
+        return binding;
+      },
+      async supersede(input) {
+        supersedes.push(input);
+        const binding = bindings.get(input.attemptId);
+        assert.ok(binding);
+        assert.equal(input.dispatchId, binding.dispatchId);
+        return { kind: "terminal", dispatchId: binding.dispatchId, runId: binding.runId, asyncDir: binding.asyncDir, artifactSha256: "f".repeat(64) };
+      },
+    },
+  });
+  const identity = (revision) => ({
+    number: revision.revision, manifestSha256: revision.manifestSha256,
+    sourceBytesSha256: revision.manifest.sourceBytesSha256, planHash: revision.manifest.planHash,
+    irVersion: revision.manifest.irVersion, irHash: revision.manifest.irHash, taskHashes: revision.manifest.taskHashes,
+  });
+  await pi.appendEntry("pi-plan-event-v1", {
+    schemaVersion: "pi-plan-event.v1", eventId: "replay-created", planId, occurredAt: "2026-07-29T00:00:00.000Z", type: "plan.created",
+    data: { workspace: { originRoot: origin, worktree, baseCommit, headCommit: baseCommit }, tasks: revisionOne.plan.tasks.map((task) => task.id), revision: identity(revisionOne) },
+  });
+
+  const first = await deps.continuePlan({}, { ctx });
+  assert.deepEqual(first.dispatched.map(({ taskId }) => taskId), ["task-1", "task-2"]);
+  const firstTaskTwoAttempt = first.dispatched.find(({ taskId }) => taskId === "task-2");
+  assert.ok(firstTaskTwoAttempt);
+  const firstTaskTwo = entries.find((entry) => entry.type === "attempt.dispatch-requested" && entry.data.taskId === "task-2");
+  assert.match(firstTaskTwo.data.tool.task, /Revision 1 body\./);
+  assert.equal(firstTaskTwo.data.planIrHash, revisionOne.manifest.irHash);
+  assert.equal(firstTaskTwo.data.taskHash, revisionOne.manifest.taskHashes["task-2"].effective);
+  assert.equal(firstTaskTwo.data.schedulingHash, revisionOne.manifest.taskHashes["task-2"].scheduling);
+
+  let projection = replayProjection(entries);
+  const taskOneAttempt = first.dispatched.find(({ taskId }) => taskId === "task-1");
+  assert.ok(taskOneAttempt);
+  await deps.appendPlanEvent(ctx, "attempt.attention-requested", {
+    requestId: "revision-two-approved", taskId: "task-1", attemptId: taskOneAttempt.attemptId, runId: taskOneAttempt.runId,
+    kind: "need_decision", message: "Approve revision two", projectionVersion: projection.version + 1, createdAt: "2026-07-29T00:00:01.000Z",
+  }, projection.version, planId);
+  projection = replayProjection(entries);
+  await deps.appendPlanEvent(ctx, "attempt.attention-resolved", {
+    attemptId: taskOneAttempt.attemptId, requestId: "revision-two-approved", runId: taskOneAttempt.runId,
+    expectedProjectionVersion: projection.version, resolutionSha256: "a".repeat(64),
+  }, projection.version, planId);
+  projection = replayProjection(entries);
+
+  const sourceTwo = revisionReplaySource(2, revisionOne.manifest.planHash, "Revision 2 body.");
+  const amended = await deps.amendPlan({
+    baseRevision: 1, expectedProjectionVersion: projection.version, requestId: "revision-two-approved", reason: "approved replay target", source: sourceTwo,
+  }, { ctx });
+  const revisionTwo = await store.readRevision(planId, 2);
+  assert.equal(amended.revision, 2);
+  assert.equal((await store.readRevision(planId, 1)).sourceBytes.compare(Buffer.from(sourceOne)), 0);
+  assert.deepEqual(identity(revisionTwo), identity(await store.readRevision(planId, 2)));
+  assert.equal(entries.filter((entry) => entry.type === "plan.amended").length, 1);
+  assert.equal(entries.filter((entry) => entry.type === "attempt.superseded").length, 1);
+  assert.equal(entries.filter((entry) => entry.type === "attempt.workspace-released").length, 1);
+  assert.equal(supersedes.length, 1);
+  const superseded = entries.find((entry) => entry.type === "attempt.superseded");
+  assert.deepEqual(superseded.data.evidence, {
+    kind: "terminal", dispatchId: firstTaskTwoAttempt.dispatchId, runId: firstTaskTwoAttempt.runId,
+    asyncDir: firstTaskTwoAttempt.asyncDir, artifactSha256: "f".repeat(64),
+  });
+  assert.equal(releases.length, 1);
+  projection = replayProjection(entries);
+  assert.equal(projection.attempts.get(taskOneAttempt.attemptId).status, "active");
+
+  reads.length = 0;
+  const second = await deps.continuePlan({}, { ctx });
+  assert.deepEqual(second.dispatched.map(({ taskId }) => taskId), ["task-2"]);
+  assert.deepEqual(reads, [[planId, 2], [planId, 2]]);
+  assert.equal(spawns.length, 3);
+  assert.deepEqual(spawns.map((spawn) => spawn.task.match(/Revision [12] body\./)?.[0]), [undefined, "Revision 1 body.", "Revision 2 body."]);
+  const secondTaskTwo = entries.filter((entry) => entry.type === "attempt.dispatch-requested" && entry.data.taskId === "task-2").at(-1);
+  assert.match(secondTaskTwo.data.tool.task, /Revision 2 body\./);
+  assert.doesNotMatch(secondTaskTwo.data.tool.task, /Revision 1 body\./);
+  assert.equal(secondTaskTwo.data.planIrHash, revisionTwo.manifest.irHash);
+  assert.equal(secondTaskTwo.data.taskHash, revisionTwo.manifest.taskHashes["task-2"].effective);
+  assert.equal(secondTaskTwo.data.schedulingHash, revisionTwo.manifest.taskHashes["task-2"].scheduling);
+  assert.notEqual(secondTaskTwo.data.taskHash, firstTaskTwo.data.taskHash);
+  assert.equal(secondTaskTwo.data.schedulingHash, firstTaskTwo.data.schedulingHash);
+  assert.match(secondTaskTwo.data.dispatchContextHash, /^[a-f0-9]{64}$/);
+  assert.notEqual(secondTaskTwo.data.dispatchContextHash, firstTaskTwo.data.dispatchContextHash);
+  assert.notEqual(secondTaskTwo.data.attemptId, firstTaskTwo.data.attemptId);
+  assert.notEqual(secondTaskTwo.data.dispatchId, firstTaskTwo.data.dispatchId);
+  assert.equal(entries.filter((entry) => entry.type === "plan.amended").length, 1);
 });

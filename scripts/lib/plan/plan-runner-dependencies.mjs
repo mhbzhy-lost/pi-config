@@ -297,7 +297,11 @@ export function createPlanRunnerDependencies({
     const { stateRoot } = await rootsFor(ctx, current.planId);
     const resultsDir = path.join(stateRoot, "var", "plan-runs", current.planId, "results");
     await mkdir(resultsDir, { recursive: true });
-    const commandRegistry = await createTaskCommandRegistry({ cwd: current.workspace.worktree, plan });
+    let commandRegistry;
+    const verificationForTask = async (taskId) => {
+      commandRegistry ??= createTaskCommandRegistry({ cwd: current.workspace.worktree, plan });
+      return resolveTaskVerification({ plan, taskId, registry: await commandRegistry });
+    };
     const coordinator = createPlanCoordinator({
       ir,
       entries: combinedEvents(ctx),
@@ -311,7 +315,7 @@ export function createPlanRunnerDependencies({
       readAttemptDisposition,
       readAttemptHead: (lease) => git(lease.path, "rev-parse", "HEAD^{commit}"),
       validateAttemptResult,
-      verificationForTask: (taskId) => resolveTaskVerification({ plan, taskId, registry: commandRegistry }),
+      verificationForTask,
       integrationOwnerToken,
       id,
       now,
