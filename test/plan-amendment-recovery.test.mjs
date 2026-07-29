@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
 import { createPlanRunnerDependencies } from "../scripts/lib/plan/plan-runner-dependencies.mjs";
+import { createPlanControl } from "../scripts/lib/plan/plan-control.mjs";
 import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mjs";
 import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
 
@@ -17,13 +18,13 @@ async function git(cwd, ...args) {
   return (await execFile("git", args, { cwd })).stdout.trim();
 }
 
-function source(revision, parentPlanHash, changed = "original") {
+function source(revision, parentPlanHash, changed = ["original", "original"]) {
   return Buffer.from(`# Recovery fixture
 
 ## Execution Contract
 
 \`\`\`json
-{"schemaVersion":"pi-plan.v3","revision":${revision},"parentPlanHash":${JSON.stringify(parentPlanHash)},"verification":[{"id":"test","command":"true","cwd":".","timeoutMs":900000}],"requiredGates":["deterministic","plan-audit","external-review","final-completeness"],"resourceCapacities":{},"executionDefaults":{"agent":"executor","risk":"normal","workflow":{"mode":"inherit-repository"},"timeoutMs":900000},"taskExecution":{"task-1":{},"task-2":{}},"taskAcceptance":{"task-1":{"strategy":"commands","commandIds":["test"]},"task-2":{"strategy":"commands","commandIds":["test"]}}}
+{"schemaVersion":"pi-plan.v3","revision":${revision},"parentPlanHash":${JSON.stringify(parentPlanHash)},"verification":[{"id":"test","command":"true","cwd":".","timeoutMs":900000}],"requiredGates":["deterministic","plan-audit","external-review","final-completeness"],"resourceCapacities":{},"executionDefaults":{"agent":"executor","risk":"normal","workflow":{"mode":"inherit-repository"},"timeoutMs":900000},"taskExecution":{"task-1":{},"task-2":{},"task-3":{}},"taskAcceptance":{"task-1":{"strategy":"commands","commandIds":["test"]},"task-2":{"strategy":"commands","commandIds":["test"]},"task-3":{"strategy":"commands","commandIds":["test"]}}}
 \`\`\`
 
 Recover amendment workspaces after an interrupted approved revision.
@@ -35,12 +36,19 @@ Recover amendment workspaces after an interrupted approved revision.
 
 Authorize amendment recovery.
 
-### Task 2: ${changed}
+### Task 2: ${changed[0]}
 
 **Files:**
 - Modify: \`b.txt\`
 
 Perform the changed target task.
+
+### Task 3: ${changed[1]}
+
+**Files:**
+- Modify: \`c.txt\`
+
+Perform the second changed target task.
 `);
 }
 
@@ -75,6 +83,8 @@ function terminalProof(id) {
 
 async function fixture({
   attempt = "workspace-allocated",
+  attempts = [{ attemptId: attemptId(), taskId: "task-2", status: attempt }],
+  reverseInsertion = false,
   pointer = "match",
   inspect = async () => ({ clean: true }),
   release = async () => {},
@@ -97,11 +107,11 @@ async function fixture({
 
   const store = createPlanRevisionStore({ stateRoot });
   const one = await store.prepareRevision({ planId, sourceBytes: source(1, null), reason: "initial-approval", initiator: { kind: "launcher" } });
-  const two = await store.prepareRevision({ planId, sourceBytes: source(2, one.manifest.planHash, "changed contract"), reason: "scope-approved", initiator: { kind: "supervisor-request", requestId: "auth", taskId: "task-1", attemptId: "auth-attempt", runId: "auth-run" } });
+  const two = await store.prepareRevision({ planId, sourceBytes: source(2, one.manifest.planHash, ["changed contract", "changed second contract"]), reason: "scope-approved", initiator: { kind: "supervisor-request", requestId: "auth", taskId: "task-1", attemptId: "auth-attempt", runId: "auth-run" } });
   const [r1, r2] = await Promise.all([store.readRevision(planId, 1), store.readRevision(planId, 2)]);
   if (pointer === "match") await store.writeCurrent(r2);
   const workspace = { originRoot: origin, worktree, baseCommit, headCommit: baseCommit };
-  const entries = [event(planId, "plan.created", { workspace, tasks: ["task-1", "task-2"], revision: { number: 1, manifestSha256: r1.manifestSha256, sourceBytesSha256: r1.manifest.sourceBytesSha256, planHash: r1.manifest.planHash, irVersion: r1.manifest.irVersion, irHash: r1.manifest.irHash, taskHashes: r1.manifest.taskHashes } })];
+  const entries = [event(planId, "plan.created", { workspace, tasks: ["task-1", "task-2", "task-3"], revision: { number: 1, manifestSha256: r1.manifestSha256, sourceBytesSha256: r1.manifest.sourceBytesSha256, planHash: r1.manifest.planHash, irVersion: r1.manifest.irVersion, irHash: r1.manifest.irHash, taskHashes: r1.manifest.taskHashes } })];
   const authLease = { path: "/auth", branch: "pi-plan-attempt/recovery/task-1/auth", ownerToken: "auth-owner" };
   entries.push(
     event(planId, "attempt.workspace-allocated", { attemptId: "auth-attempt", taskId: "task-1", baseCommit, workspace: authLease }),
@@ -110,15 +120,17 @@ async function fixture({
     event(planId, "attempt.attention-requested", { requestId: "auth", taskId: "task-1", attemptId: "auth-attempt", runId: "auth-run", kind: "need_decision", message: "approved", projectionVersion: 5, createdAt: "2026-07-29T00:00:00.000Z" }),
     event(planId, "attempt.attention-resolved", { attemptId: "auth-attempt", requestId: "auth", runId: "auth-run", expectedProjectionVersion: 5, resolutionSha256: sha("c") }),
   );
-  const id = attemptId();
-  const lease = { path: `/attempts/${id}`, branch: `pi-plan-attempt/recovery/task-2/0`, ownerToken: `${id}-owner` };
-  entries.push(event(planId, "attempt.workspace-allocated", { attemptId: id, taskId: "task-2", baseCommit, workspace: lease }));
-  if (attempt !== "workspace-allocated") {
-    const tool = { agent: "executor", task: "target", cwd: lease.path, output: `${lease.path}/out`, timeoutMs: 1, context: "fresh", async: true, clarify: false, worktree: false };
-    entries.push(event(planId, "attempt.dispatch-requested", { attemptId: id, taskId: "task-2", dispatchId: `${id}-dispatch`, baseCommit, workspace: lease, tool, toolHash: sha("d"), planIrHash: r1.manifest.irHash, taskHash: r1.manifest.taskHashes["task-2"].effective, schedulingHash: r1.manifest.taskHashes["task-2"].scheduling, dispatchContextHash: sha("e") }));
-    if (attempt === "active") entries.push(event(planId, "attempt.bound", { attemptId: id, taskId: "task-2", dispatchId: `${id}-dispatch`, runId: `${id}-run`, asyncDir: `${lease.path}/async`, sessionFile: `${lease.path}/session` }));
+  for (const target of (reverseInsertion ? [...attempts].reverse() : attempts)) {
+    const { attemptId: id, taskId, status } = target;
+    const lease = { path: `/attempts/${id}`, branch: `pi-plan-attempt/recovery/${taskId}/0`, ownerToken: `${id}-owner` };
+    entries.push(event(planId, "attempt.workspace-allocated", { attemptId: id, taskId, baseCommit, workspace: lease }));
+    if (status !== "workspace-allocated") {
+      const tool = { agent: "executor", task: "target", cwd: lease.path, output: `${lease.path}/out`, timeoutMs: 1, context: "fresh", async: true, clarify: false, worktree: false };
+      entries.push(event(planId, "attempt.dispatch-requested", { attemptId: id, taskId, dispatchId: `${id}-dispatch`, baseCommit, workspace: lease, tool, toolHash: sha("d"), planIrHash: r1.manifest.irHash, taskHash: r1.manifest.taskHashes[taskId].effective, schedulingHash: r1.manifest.taskHashes[taskId].scheduling, dispatchContextHash: sha("e") }));
+      if (status === "active") entries.push(event(planId, "attempt.bound", { attemptId: id, taskId, dispatchId: `${id}-dispatch`, runId: `${id}-run`, asyncDir: `${lease.path}/async`, sessionFile: `${lease.path}/session` }));
+    }
   }
-  entries.push(event(planId, "plan.amended", { revision: 2, parentRevision: 1, manifestSha256: r2.manifestSha256, sourceBytesSha256: r2.manifest.sourceBytesSha256, planHash: r2.manifest.planHash, irHash: r2.manifest.irHash, taskHashes: r2.manifest.taskHashes, diff: { added: [], changed: ["task-2"], rebound: [], retired: [], unchanged: ["task-1"] }, supersededAttemptIds: [id], requestId: "auth", reason: "approved recovery" }));
+  entries.push(event(planId, "plan.amended", { revision: 2, parentRevision: 1, manifestSha256: r2.manifestSha256, sourceBytesSha256: r2.manifest.sourceBytesSha256, planHash: r2.manifest.planHash, irHash: r2.manifest.irHash, taskHashes: r2.manifest.taskHashes, diff: { added: [], changed: ["task-2", "task-3"], rebound: [], retired: [], unchanged: ["task-1"] }, supersededAttemptIds: attempts.map(({ attemptId: id }) => id).sort(), requestId: "auth", reason: "approved recovery" }));
 
   const calls = { supersede: [], recoverBinding: [], recoverDispatch: [], release: [], inspect: [], spawn: [], stop: [] };
   const backend = {
@@ -330,4 +342,94 @@ test("physical release failure is not retried after its durable checkpoint", asy
   assertRecovery(f, { physicalRelease: 1 });
   await f.deps.recoverSupersededAttempts({ ctx: f.ctx });
   assertRecovery(f, { physicalRelease: 1 });
+});
+
+test("multi-attempt backend failures continue in attemptId order after reverse insertion", async (t) => {
+  const ids = ["attempt-01", "attempt-02"];
+  const f = await fixture({
+    attempts: [{ attemptId: "attempt-02", taskId: "task-2", status: "dispatch-requested" }, { attemptId: "attempt-01", taskId: "task-3", status: "dispatch-requested" }],
+    reverseInsertion: true,
+    backend: { async supersede(input) { f.calls.supersede.push(input); if (input.attemptId === "attempt-01") throw new Error("backend failed"); return terminalProof(input.attemptId); } },
+  });
+  t.after(() => rm(f.origin, { recursive: true, force: true }));
+  await assert.rejects(f.deps.recoverSupersededAttempts({ ctx: f.ctx }), AggregateError);
+  assert.deepEqual(f.calls.supersede.map(({ attemptId: id }) => id), ids);
+  assert.deepEqual(eventsOf(f, "attempt.superseded").map(({ data }) => data.attemptId), ["attempt-02"]);
+  assert.deepEqual(eventsOf(f, "attempt.workspace-released").map(({ data }) => data.attemptId), ["attempt-02"]);
+  assert.deepEqual(f.calls.release.map(([{ path: leasePath }]) => leasePath), ["/attempts/attempt-02"]);
+  assert.equal(eventsOf(f, "plan.amended").length, 1);
+  assert.equal(f.calls.spawn.length, 0);
+  const projection = replay(f.entries);
+  assert.deepEqual(f.calls.recoverDispatch, []);
+  assert.equal(projection.attempts.get("attempt-01").workspaceReleased, undefined);
+  assert.equal(projection.attempts.get("attempt-02").workspaceReleased, true);
+});
+
+test("multi-attempt release failures continue and durable checkpoints prevent replay", async (t) => {
+  let fail = true;
+  const f = await fixture({
+    attempts: [{ attemptId: "attempt-02", taskId: "task-2", status: "workspace-allocated" }, { attemptId: "attempt-01", taskId: "task-3", status: "workspace-allocated" }],
+    reverseInsertion: true,
+    release: async (lease) => { if (lease.path.endsWith("attempt-01") && fail) { fail = false; throw new Error("release failed"); } },
+  });
+  t.after(() => rm(f.origin, { recursive: true, force: true }));
+  await assert.rejects(f.deps.recoverSupersededAttempts({ ctx: f.ctx }), AggregateError);
+  assert.deepEqual(eventsOf(f, "attempt.superseded").map(({ data }) => data.attemptId), ["attempt-01", "attempt-02"]);
+  assert.deepEqual(eventsOf(f, "attempt.workspace-released").map(({ data }) => data.attemptId), ["attempt-01", "attempt-02"]);
+  assert.deepEqual(f.calls.release.map(([{ path: leasePath }]) => leasePath), ["/attempts/attempt-01", "/attempts/attempt-02"]);
+  const before = { proofs: eventsOf(f, "attempt.superseded").length, releases: eventsOf(f, "attempt.workspace-released").length, physical: f.calls.release.length, backend: f.calls.supersede.length };
+  await f.deps.recoverSupersededAttempts({ ctx: f.ctx });
+  assert.deepEqual({ proofs: eventsOf(f, "attempt.superseded").length, releases: eventsOf(f, "attempt.workspace-released").length, physical: f.calls.release.length, backend: f.calls.supersede.length }, before);
+  const projection = replay(f.entries);
+  assert.equal(projection.attempts.get("attempt-01").workspaceReleased, true);
+  assert.equal(projection.attempts.get("attempt-02").workspaceReleased, true);
+});
+
+test("lifecycle-moving public entries stop after recovery fence errors", async (t) => {
+  const cases = [
+    ["status", (f) => f.deps.status({ ctx: f.ctx })],
+    ["continue", (f) => f.deps.continuePlan({}, { ctx: f.ctx })],
+    ["verify", (f) => f.deps.verifyPlan({ ctx: f.ctx })],
+    ["recover", (f) => f.deps.recoverExecutors({}, { ctx: f.ctx })],
+    ["collect", (f) => f.deps.collectExecutorResults({}, { ctx: f.ctx })],
+    ["block", (f) => f.deps.blockPlan({ reason: "blocked" }, { ctx: f.ctx })],
+  ];
+  for (const [name, invoke] of cases) {
+    const f = await fixture({ pointer: "missing" });
+    t.after(() => rm(f.origin, { recursive: true, force: true }));
+    f.revisionStore.writeCurrent = async () => { throw new Error(`${name} pointer`); };
+    const before = f.entries.length;
+    await assert.rejects(invoke(f), AggregateError);
+    const added = f.entries.slice(before).map(({ type }) => type);
+    assert.deepEqual(added, ["attempt.superseded", "attempt.workspace-released"]);
+    assert.equal(f.calls.spawn.length, 0);
+    assert.equal(f.calls.release.length, 1);
+    assert.equal(replay(f.entries).attempts.get(attemptId()).workspaceReleased, true);
+    assert.equal(eventsOf(f, "plan.blocked").length, 0);
+    assert.equal(eventsOf(f, "plan.cancelled").length, 0);
+    assert.equal(eventsOf(f, "gate.finished").length, 0);
+  }
+});
+
+test("durable cancel request is fenced by recovery failure without accepted acknowledgement", async (t) => {
+  const f = await fixture({ pointer: "missing" });
+  t.after(() => rm(f.origin, { recursive: true, force: true }));
+  f.revisionStore.writeCurrent = async () => { throw new Error("cancel pointer"); };
+  const control = createPlanControl({ stateRoot: path.join(f.origin, "state"), intervalMs: 1, timeoutMs: 20 });
+  const pending = control.requestCancel({ planId: "recovery", runId: "cancel-run" });
+  const pendingResult = pending.then(() => null, (error) => error);
+  let request;
+  for (let retry = 0; retry < 20 && !request; retry++) {
+    request = await control.readRequest("recovery");
+    if (!request) await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.ok(request);
+  await assert.rejects(f.deps.processCancelControl({ binding: { planId: "recovery", stateRoot: path.join(f.origin, "state") }, ctx: f.ctx }), AggregateError);
+  const timeout = await pendingResult;
+  assert.match(timeout.message, /timed out/);
+  await assert.rejects(readFile(control.paths("recovery").ack, "utf8"), { code: "ENOENT" });
+  assert.equal(eventsOf(f, "plan.cancelled").length, 0);
+  assert.deepEqual(f.entries.slice(-2).map(({ type }) => type), ["attempt.superseded", "attempt.workspace-released"]);
+  assert.equal(f.calls.release.length, 1);
+  assert.equal(replay(f.entries).attempts.get(attemptId()).workspaceReleased, true);
 });
