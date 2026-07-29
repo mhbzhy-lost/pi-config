@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DEPENDENCY_RECEIPTS, PLAN_IR_V3, assertPlanIRV3, deepFreeze } from "./schema.mjs";
 
 function sha256(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -151,6 +152,70 @@ function compileV2(plan, sorted) {
   });
 }
 
+function compileV3(plan, sorted) {
+  assertNoConcurrentOwnershipConflicts(plan.tasks.map((task) => ({
+    id: task.id,
+    deps: task.deps,
+    allowedPaths: task.allowedPaths,
+  })));
+  const executionPolicy = {
+    isolation: "attempt-worktree",
+    repositoryInstructions: "required",
+    externalSideEffects: "attention-required",
+    resultContract: "plan-attempt-result.v1",
+    commit: { requiredOnSuccess: true, exactlyOne: true, allowMerge: false },
+  };
+  const source = {
+    schemaVersion: plan.schemaVersion,
+    revision: plan.revision,
+    parentPlanHash: plan.parentPlanHash,
+    planHash: plan.sha256,
+  };
+  const verification = {
+    commands: plan.verification.map((entry) => ({ ...entry })),
+    requiredGates: [...plan.requiredGates],
+  };
+  const contextHash = sha256({ title: plan.title, instructions: plan.instructions, executionPolicy });
+  const verificationHash = sha256(verification);
+  const sourceOrder = new Map(plan.tasks.map((task, index) => [task.id, index + 1]));
+  const nodes = sorted.map((task) => {
+    const node = {
+      id: task.id,
+      sourceOrder: sourceOrder.get(task.id),
+      title: task.title,
+      body: task.body,
+      dependencies: task.deps.map((taskId) => ({ taskId, requiredState: "integrated", receipts: [...DEPENDENCY_RECEIPTS] })),
+      allowedPaths: [...task.allowedPaths],
+      resources: task.resources.map((resource) => ({ ...resource })),
+      execution: structuredClone(task.execution),
+      acceptance: structuredClone(task.acceptance),
+    };
+    const scheduling = sha256({
+      id: node.id, sourceOrder: node.sourceOrder, dependencies: node.dependencies,
+      allowedPaths: node.allowedPaths, resources: node.resources, agent: node.execution.agent,
+    });
+    const semantics = sha256({
+      id: node.id, title: node.title, body: node.body, execution: node.execution, acceptance: node.acceptance,
+    });
+    const full = sha256(node);
+    const effective = sha256({ contextHash, verificationHash, full });
+    return { ...node, hashes: { scheduling, semantics, full, effective } };
+  });
+  const edges = plan.tasks.flatMap((task) => task.deps.map((from) => ({ from, to: task.id })));
+  const graphHash = sha256({
+    resourceCapacities: sortedRecord(plan.resourceCapacities),
+    edges,
+    schedulingHashes: nodes.map((node) => node.hashes.scheduling),
+  });
+  const root = {
+    version: PLAN_IR_V3, source, title: plan.title, instructions: plan.instructions,
+    executionPolicy, verification, resourceCapacities: sortedRecord(plan.resourceCapacities), nodes, edges,
+  };
+  const hashes = { context: contextHash, verification: verificationHash, graph: graphHash };
+  const full = sha256({ root, hashes });
+  return assertPlanIRV3(deepFreeze({ ...root, hashes: { ...hashes, full }, hash: full }));
+}
+
 export function compilePlanToIR(plan) {
   const ids = new Set();
   for (const task of plan.tasks) {
@@ -161,5 +226,6 @@ export function compilePlanToIR(plan) {
   }
 
   const sorted = topoSort(plan.tasks);
+  if (plan.schemaVersion === "pi-plan.v3") return compileV3(plan, sorted);
   return plan.schemaVersion === "pi-plan.v2" ? compileV2(plan, sorted) : compileV1(plan, sorted);
 }
