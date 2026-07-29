@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
-import { diffPlanRevisions, validateAmendment } from "../scripts/lib/plan/plan-amendment.mjs";
+import { createPlanAmendmentService, diffPlanRevisions, validateAmendment } from "../scripts/lib/plan/plan-amendment.mjs";
+import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
 
 function hash(seed) {
   return seed.repeat(64).slice(0, 64);
@@ -135,3 +139,102 @@ test("rejects resource capacities below open claims, ignores settled claims, and
     "task-2": { full: oldIr.nodes[1].hashes.full, effective: oldIr.nodes[1].hashes.effective, scheduling: oldIr.nodes[1].hashes.scheduling },
   });
 });
+
+function amendmentSource({ revision, parentPlanHash, taskTwoBody }) {
+  return `# Amendment service fixture
+
+This approved plan exercises the amendment protocol.
+
+## Execution Contract
+
+\`\`\`json
+{"schemaVersion":"pi-plan.v3","revision":${revision},"parentPlanHash":${JSON.stringify(parentPlanHash)},"verification":[{"id":"plan:test","command":"node --test","cwd":".","timeoutMs":900000}],"requiredGates":["deterministic","plan-audit","external-review","final-completeness"],"resourceCapacities":{},"executionDefaults":{"agent":"executor","risk":"normal","workflow":{"mode":"inherit-repository"},"timeoutMs":900000},"taskExecution":{"task-1":{},"task-2":{}},"taskAcceptance":{"task-1":{"strategy":"commands","commandIds":["plan:test"]},"task-2":{"strategy":"commands","commandIds":["plan:test"]}}}
+\`\`\`
+
+### Task 1: Stable task
+
+**Files:**
+- Modify: \`src/one.mjs\`
+
+Keep this task ${taskTwoBody}.
+
+### Task 2: Mutable task
+
+**Files:**
+- Modify: \`src/two.mjs\`
+
+${taskTwoBody}
+`;
+}
+
+async function amendmentHarness({ appendError, pointerError, supersedeError, attention = { status: "resolved", blocking: true } } = {}) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-amendment-service-"));
+  const store = createPlanRevisionStore({ stateRoot: root, now: () => "2026-07-29T00:00:00.000Z" });
+  const initial = await store.prepareRevision({
+    planId: "plan-amendment", sourceBytes: Buffer.from(amendmentSource({ revision: 1, parentPlanHash: null, taskTwoBody: "original contract" })),
+    reason: "initial-approval", initiator: { kind: "launcher" },
+  });
+  const current = {
+    planId: "plan-amendment", version: 7,
+    revision: { number: 1, ...initial.manifest, taskHashes: initial.manifest.taskHashes },
+    tasks: new Map([["task-1", { status: "pending" }], ["task-2", { status: "pending" }]]),
+    attempts: new Map([
+      ["attempt-1", { taskId: "task-1", status: "workspace-allocated" }],
+      ["attempt-2", { taskId: "task-2", taskHash: initial.manifest.taskHashes["task-2"].effective, runId: "run-2", status: "active", attention: { requestId: "request-2", ...attention } }],
+    ]),
+    amendmentRequestIds: new Set(),
+  };
+  const calls = [];
+  const revisionStore = {
+    async readRevision(...args) { calls.push("read"); return store.readRevision(...args); },
+    async prepareRevision(...args) { calls.push("prepare"); return store.prepareRevision(...args); },
+    async writeCurrent(...args) { calls.push("writeCurrent"); if (pointerError) throw pointerError; return store.writeCurrent(...args); },
+  };
+  const service = createPlanAmendmentService({
+    revisionStore,
+    currentProjection: () => current,
+    eventWriter: { async append(event) { calls.push("append"); if (appendError) throw appendError; return event; } },
+    async supersedeAttempt(input) { calls.push(`supersede:${input.attemptId}:${input.expectedTaskHash}`); if (typeof supersedeError === "function" ? supersedeError(input) : supersedeError) throw typeof supersedeError === "function" ? supersedeError(input) : supersedeError; },
+  });
+  return { root, current, calls, service, source: amendmentSource({ revision: 2, parentPlanHash: initial.manifest.planHash, taskTwoBody: "amended contract" }) };
+}
+
+test("commits a validated v3 amendment before pointer and supersede cleanup", async () => {
+  const fixture = await amendmentHarness();
+  try {
+    const result = await fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "approved scope change", source: fixture.source });
+    assert.equal(result.revision, 2);
+    assert.deepEqual(result.supersededAttemptIds, ["attempt-1", "attempt-2"]);
+    assert.deepEqual(fixture.calls.slice(0, 4), ["read", "prepare", "append", "writeCurrent"]);
+    assert.match(fixture.calls[4], /^supersede:attempt-1:[a-f0-9]{64}$/);
+    assert.match(fixture.calls[5], /^supersede:attempt-2:[a-f0-9]{64}$/);
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+
+test("fails closed before preparation for invalid input, authorization, and revision chains", async () => {
+  const fixture = await amendmentHarness();
+  try {
+    await assert.rejects(fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "x", source: fixture.source, ir: {} }), /input keys/);
+    fixture.current.attempts.get("attempt-2").attention = { requestId: "request-2", status: "pending", blocking: true };
+    await assert.rejects(fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "x", source: fixture.source }), /resolved blocking/);
+    fixture.current.attempts.get("attempt-2").attention = { requestId: "request-2", status: "resolved", blocking: true };
+    await assert.rejects(fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "x", source: fixture.source.replace('"revision":2', '"revision":3') }), /revision chain/);
+    assert.deepEqual(fixture.calls, ["read"]);
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+
+for (const [label, options, expected] of [
+  ["append rejection", { appendError: new Error("append rejected") }, ["read", "prepare", "append"]],
+  ["pointer rejection", { pointerError: new Error("pointer rejected") }, ["read", "prepare", "append", "writeCurrent"]],
+  ["supersede rejection", { supersedeError: (input) => input.attemptId === "attempt-1" ? new Error("stop rejected") : null }, ["read", "prepare", "append", "writeCurrent"]],
+]) {
+  test(`preserves commit ordering on ${label}`, async () => {
+    const fixture = await amendmentHarness(options);
+    try {
+      await assert.rejects(fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "approved scope change", source: fixture.source }), label === "supersede rejection" ? AggregateError : new RegExp(label.split(" ")[0]));
+      assert.deepEqual(fixture.calls.slice(0, expected.length), expected);
+      if (label === "supersede rejection") assert.deepEqual(fixture.calls.slice(4).map((call) => call.split(":").slice(0, 2).join(":")), ["supersede:attempt-1", "supersede:attempt-2"]);
+      else assert.equal(fixture.calls.some((call) => call.startsWith("supersede:")), false);
+    } finally { await rm(fixture.root, { recursive: true, force: true }); }
+  });
+}
