@@ -140,6 +140,14 @@ function amendmentData(projection, overrides = {}) {
   };
 }
 
+function attentionData(projection, attemptId, taskId, requestId, kind = "need_decision") {
+  return { requestId, taskId, attemptId, runId: `${attemptId}-run`, kind, message: `${attemptId} needs attention`, projectionVersion: projection.version + 1, createdAt: "2026-07-15T00:00:00.000Z" };
+}
+
+function attentionSnapshot(projection) {
+  return structuredClone({ attempts: [...projection.attempts], attentionRequestIds: [...projection.attentionRequestIds], version: projection.version });
+}
+
 test("rejects Plan amendments without exactly one resolved blocking Attention authorization", () => {
   const projection = revisionProjection();
   projection.attempts.clear();
@@ -160,6 +168,67 @@ test("rejects Plan amendments without exactly one resolved blocking Attention au
   projection.attempts.set("authorization-a", { taskId: "task-1", status: "blocked", attention: { requestId: "supervisor-request-1", blocking: true, status: "resolved" } });
   projection.attempts.set("authorization-b", { taskId: "task-2", status: "blocked", attention: { requestId: "supervisor-request-1", blocking: true, status: "resolved" } });
   assert.throws(() => apply(projection, "plan.amended", data), /authorization/);
+});
+
+test("keeps Attention request identities append-only across replay, attempts, progress, and supersede", () => {
+  const replayEvents = [
+    event("plan.created", { workspace: { originRoot: "/repo", worktree: "/worktree", baseCommit: "base", headCommit: "head" }, tasks: ["task-1"], revision }),
+    event("attempt.workspace-allocated", { attemptId: "replay", taskId: "task-1", baseCommit: "head", workspace: attemptWorkspace("replay") }),
+    event("attempt.dispatch-requested", { attemptId: "replay", taskId: "task-1", dispatchId: "replay-dispatch", baseCommit: "head", workspace: attemptWorkspace("replay"), tool: dispatchTool("replay"), toolHash: "replay-tool", planIrHash: revision.irHash, taskHash: revision.taskHashes["task-1"].effective, schedulingHash: revision.taskHashes["task-1"].scheduling, dispatchContextHash: sha("3") }),
+    event("attempt.bound", { attemptId: "replay", taskId: "task-1", dispatchId: "replay-dispatch", runId: "replay-run", asyncDir: "/replay", sessionFile: "/replay.jsonl" }),
+    event("attempt.attention-requested", { requestId: "replayed-request", taskId: "task-1", attemptId: "replay", runId: "replay-run", kind: "need_decision", message: "Need decision", projectionVersion: 5, createdAt: "2026-07-15T00:00:00.000Z" }),
+    event("attempt.attention-resolved", { attemptId: "replay", requestId: "replayed-request", runId: "replay-run", expectedProjectionVersion: 5, resolutionSha256: sha("4") }),
+  ];
+  let replayed = createProjection();
+  for (const replayEvent of replayEvents) replayed = applyEvent(replayed, replayEvent);
+  assert.ok(replayed.attentionRequestIds instanceof Set);
+  assert.deepEqual(replayed.attentionRequestIds, new Set(["replayed-request"]));
+  const replayedSnapshot = attentionSnapshot(replayed);
+  assert.throws(() => apply(replayed, "attempt.attention-requested", attentionData(replayed, "replay", "task-1", "replayed-request")), /duplicate attention requestId/);
+  assert.deepEqual(attentionSnapshot(replayed), replayedSnapshot);
+
+  let projection = revisionProjection(["task-1", "task-2"]);
+  for (const [attemptId, taskId] of [["first", "task-1"], ["second", "task-2"]]) {
+    const lease = attemptWorkspace(attemptId);
+    projection = apply(projection, "attempt.workspace-allocated", { attemptId, taskId, baseCommit: "head", workspace: lease });
+    projection = apply(projection, "attempt.dispatch-requested", { attemptId, taskId, dispatchId: `${attemptId}-dispatch`, baseCommit: "head", workspace: lease, tool: dispatchTool(attemptId), toolHash: `${attemptId}-tool`, planIrHash: projection.revision.irHash, taskHash: projection.revision.taskHashes[taskId].effective, schedulingHash: projection.revision.taskHashes[taskId].scheduling, dispatchContextHash: sha(attemptId === "first" ? "1" : "2") });
+    projection = apply(projection, "attempt.bound", { attemptId, taskId, dispatchId: `${attemptId}-dispatch`, runId: `${attemptId}-run`, asyncDir: `/${attemptId}`, sessionFile: `/${attemptId}.jsonl` });
+  }
+  projection = apply(projection, "attempt.attention-requested", attentionData(projection, "first", "task-1", "progress-request", "progress_update"));
+  for (const [label, data] of [
+    ["across Attempts", attentionData(projection, "second", "task-2", "progress-request")],
+    ["after progress as blocking", attentionData(projection, "first", "task-1", "progress-request")],
+    ["after progress as nonblocking", attentionData(projection, "first", "task-1", "progress-request", "progress_update")],
+  ]) {
+    const snapshot = attentionSnapshot(projection);
+    assert.throws(() => apply(projection, "attempt.attention-requested", data), /duplicate attention requestId/, label);
+    assert.deepEqual(attentionSnapshot(projection), snapshot, label);
+  }
+
+  let superseded = revisionProjection(["task-1", "task-2"]);
+  const lease = attemptWorkspace("superseded");
+  superseded = apply(superseded, "attempt.workspace-allocated", { attemptId: "superseded", taskId: "task-2", baseCommit: "head", workspace: lease });
+  superseded = apply(superseded, "attempt.dispatch-requested", { attemptId: "superseded", taskId: "task-2", dispatchId: "superseded-dispatch", baseCommit: "head", workspace: lease, tool: dispatchTool("superseded"), toolHash: "superseded-tool", planIrHash: superseded.revision.irHash, taskHash: superseded.revision.taskHashes["task-2"].effective, schedulingHash: superseded.revision.taskHashes["task-2"].scheduling, dispatchContextHash: sha("5") });
+  superseded = apply(superseded, "attempt.bound", { attemptId: "superseded", taskId: "task-2", dispatchId: "superseded-dispatch", runId: "superseded-run", asyncDir: "/superseded", sessionFile: "/superseded.jsonl" });
+  superseded = apply(superseded, "attempt.attention-requested", attentionData(superseded, "superseded", "task-2", "superseded-request"));
+  superseded = apply(superseded, "plan.amended", amendmentData(superseded, { taskHashes: { "task-1": { ...superseded.revision.taskHashes["task-1"] }, "task-2": { ...superseded.revision.taskHashes["task-2"], effective: sha("8") } }, diff: { added: [], changed: [], rebound: ["task-2"], retired: [], unchanged: ["task-1"] }, supersededAttemptIds: ["superseded"] }));
+  assert.equal(superseded.attempts.get("superseded").attention.status, "superseded");
+  assert.ok(superseded.attentionRequestIds.has("superseded-request"));
+  const supersededSnapshot = attentionSnapshot(superseded);
+  assert.throws(() => apply(superseded, "attempt.attention-requested", attentionData(superseded, "superseded", "task-2", "superseded-request")), /duplicate attention requestId/);
+  assert.deepEqual(attentionSnapshot(superseded), supersededSnapshot);
+});
+
+test("rejects an amendment that supersedes a dispatch Attempt with a stale taskHash without mutation", () => {
+  let projection = revisionProjection(["task-1", "task-2"]);
+  const lease = attemptWorkspace("stale-hash");
+  projection = apply(projection, "attempt.workspace-allocated", { attemptId: "stale-hash", taskId: "task-2", baseCommit: "head", workspace: lease });
+  projection = apply(projection, "attempt.dispatch-requested", { attemptId: "stale-hash", taskId: "task-2", dispatchId: "stale-hash-dispatch", baseCommit: "head", workspace: lease, tool: dispatchTool("stale-hash"), toolHash: "stale-hash-tool", planIrHash: projection.revision.irHash, taskHash: projection.revision.taskHashes["task-2"].effective, schedulingHash: projection.revision.taskHashes["task-2"].scheduling, dispatchContextHash: sha("6") });
+  projection.attempts.get("stale-hash").taskHash = sha("9");
+  const original = structuredClone({ revision: projection.revision, attempts: [...projection.attempts], version: projection.version });
+  const amendment = amendmentData(projection, { taskHashes: { "task-1": { ...projection.revision.taskHashes["task-1"] }, "task-2": { ...projection.revision.taskHashes["task-2"], effective: sha("8") } }, diff: { added: [], changed: [], rebound: ["task-2"], retired: [], unchanged: ["task-1"] }, supersededAttemptIds: ["stale-hash"] });
+  assert.throws(() => apply(projection, "plan.amended", amendment), /attempt taskHash does not match old revision/);
+  assert.deepEqual({ revision: projection.revision, attempts: [...projection.attempts], version: projection.version }, original);
 });
 
 test("atomically projects a strict Plan amendment matrix with tombstones and supersede intent", () => {
