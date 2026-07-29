@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   ExecutionProtocolError,
   executionSpawnRpcParams,
@@ -8,6 +10,25 @@ import { readRuntimeArtifacts } from "./runtime-artifacts.mjs";
 
 const STARTED_EVENT = "subagent:async-started";
 const COMPLETED_EVENT = "subagent:async-complete";
+const TERMINAL_STATES = new Set(["complete", "failed", "paused", "stopped"]);
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise; });
+  return { promise, resolve, reject };
+}
+
+function supersedeRequest(input) {
+  const request = normalizeExecutionSpawn({ ...input, agent: "executor", task: "Supersede dispatch", cwd: "/unused", output: "/unused", timeoutMs: 1 });
+  return { dispatchId: request.dispatchId, attemptId: request.attemptId };
+}
 
 function nonempty(value) {
   return typeof value === "string" && value.length > 0;
@@ -30,13 +51,84 @@ export function createPiSubagentsExecutionBackend({
   emitFact = () => {},
   now = () => new Date().toISOString(),
   bindings = [],
+  supersedeTimeoutMs = 30_000,
+  supersedePollIntervalMs = 100,
 } = {}) {
   if (!rpc || !events?.on) throw new ExecutionProtocolError("EXECUTION_BACKEND_INVALID", "rpc and events are required");
+  if (!Number.isSafeInteger(supersedeTimeoutMs) || supersedeTimeoutMs < 1 || !Number.isSafeInteger(supersedePollIntervalMs) || supersedePollIntervalMs < 1) {
+    throw new ExecutionProtocolError("EXECUTION_BACKEND_INVALID", "Supersede timing options must be positive safe integers");
+  }
   const pending = new Map();
   const byRunId = new Map();
   let sessionId = null;
   let rpcSessionId = null;
   let disposed = false;
+
+  function createEntry(request, binding = null) {
+    return { request, binding, bindingWait: deferred(), cancelling: false, stopPromise: null, supersedePromise: null };
+  }
+
+  function bind(entry, binding) {
+    entry.binding = binding;
+    byRunId.set(binding.runId, binding);
+    entry.bindingWait.resolve(binding);
+    if (entry.cancelling) void stopBound(entry);
+  }
+
+  async function stopBound(entry) {
+    if (!entry.binding) return null;
+    entry.stopPromise ??= Promise.resolve().then(() => rpc.stop({ runId: entry.binding.runId, dir: entry.binding.asyncDir }));
+    await entry.stopPromise;
+    return entry.binding;
+  }
+
+  async function terminalProof(entry) {
+    const binding = await stopBound(entry);
+    const deadline = Date.now() + supersedeTimeoutMs;
+    while (!disposed && Date.now() <= deadline) {
+      try {
+        const artifacts = await readArtifacts({ artifactDir: binding.asyncDir, binding: { runId: binding.runId, sessionId: binding.sessionId, cwd: binding.cwd, output: binding.output } });
+        if (artifacts?.status?.kind === "stable" && TERMINAL_STATES.has(artifacts.status.value?.state)) {
+          return Object.freeze({ kind: "terminal", dispatchId: entry.request.dispatchId, runId: binding.runId, asyncDir: binding.asyncDir, artifactSha256: createHash("sha256").update(stableJson(artifacts.status.value)).digest("hex") });
+        }
+      } catch (error) {
+        if (error?.code === "RUNTIME_ARTIFACT_BINDING_MISMATCH" || error?.code === "RUNTIME_ARTIFACT_OUTPUT_MISMATCH") throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, supersedePollIntervalMs));
+    }
+    throw new ExecutionProtocolError(disposed ? "EXECUTION_BACKEND_DISPOSED" : "EXECUTION_DISPATCH_UNCERTAIN", disposed ? "Execution backend is disposed" : "Terminal execution artifact was not observed", entry.request.dispatchId);
+  }
+
+  function beginSupersede(entry) {
+    entry.cancelling = true;
+    entry.supersedePromise ??= (async () => {
+      const binding = entry.binding ?? await Promise.race([entry.bindingWait.promise, new Promise((_, reject) => setTimeout(() => reject(new ExecutionProtocolError("EXECUTION_DISPATCH_UNCERTAIN", "Dispatch binding was not observed", entry.request.dispatchId)), supersedeTimeoutMs))]);
+      if (!binding) throw new ExecutionProtocolError("EXECUTION_DISPATCH_UNCERTAIN", "Dispatch binding was not observed", entry.request.dispatchId);
+      return terminalProof(entry);
+    })();
+    return entry.supersedePromise;
+  }
+
+  function recoveredEntry(binding, requireActiveSession = false) {
+    if (!binding?.dispatchId || !binding?.attemptId || !binding?.runId || !binding?.asyncDir
+      || !binding?.cwd || !binding?.output || !binding?.sessionId || !binding?.sessionFile) {
+      throw new ExecutionProtocolError("EXECUTION_BINDING_INVALID", "Recovered execution binding is incomplete");
+    }
+    if (requireActiveSession && (binding.sessionId !== sessionId || binding.sessionFile !== sessionId)) {
+      throw new ExecutionProtocolError("EXECUTION_CAPABILITY_MISMATCH", "Recovered binding session does not match active RPC session");
+    }
+    if (binding.sessionId !== binding.sessionFile) {
+      throw new ExecutionProtocolError("EXECUTION_BINDING_INVALID", "Recovered execution binding session identity is inconsistent");
+    }
+    const request = normalizeExecutionSpawn({
+      ...binding,
+      agent: "executor",
+      task: binding.task ?? "Recovered approved task",
+      output: binding.output ?? `${binding.asyncDir}/recovered-output.json`,
+      timeoutMs: binding.timeoutMs ?? 1,
+    });
+    return { request, binding: Object.freeze({ ...binding }) };
+  }
 
   function publish(fact) {
     emitFact(Object.freeze(fact));
@@ -101,9 +193,9 @@ export function createPiSubagentsExecutionBackend({
       cwd: entry.request.cwd,
       output: entry.request.output,
       sessionId,
+      sessionFile: sessionId,
     });
-    entry.binding = binding;
-    byRunId.set(runId, binding);
+    bind(entry, binding);
     publish({
       type: completed ? "execution.completed" : "execution.started",
       dispatchId: entry.request.dispatchId,
@@ -114,7 +206,7 @@ export function createPiSubagentsExecutionBackend({
       state: completed ? (nonempty(event.state) ? event.state : "complete") : "running",
       observedAt: now(),
     });
-    if (completed) pending.delete(entry.request.dispatchId);
+
   }
 
   const unsubscribes = [
@@ -123,21 +215,12 @@ export function createPiSubagentsExecutionBackend({
   ].filter((unsubscribe) => typeof unsubscribe === "function");
 
   for (const binding of bindings) {
-    if (!binding?.dispatchId || !binding?.attemptId || !binding?.runId || !binding?.asyncDir
-      || !binding?.cwd || !binding?.output || !binding?.sessionId) {
-      throw new ExecutionProtocolError("EXECUTION_BINDING_INVALID", "Recovered execution binding is incomplete");
-    }
-    const request = normalizeExecutionSpawn({
-      ...binding,
-      agent: "executor",
-      task: binding.task ?? "Recovered approved task",
-      output: binding.output ?? `${binding.asyncDir}/recovered-output.json`,
-      timeoutMs: binding.timeoutMs ?? 1,
-    });
-    const entry = { request, binding: Object.freeze({ ...binding }) };
-    pending.set(request.dispatchId, entry);
-    byRunId.set(binding.runId, entry.binding);
-    sessionId ??= binding.sessionId;
+    const recovered = recoveredEntry(binding);
+    const entry = createEntry(recovered.request, recovered.binding);
+    entry.bindingWait.resolve(entry.binding);
+    pending.set(recovered.request.dispatchId, entry);
+    byRunId.set(recovered.binding.runId, entry.binding);
+    sessionId ??= recovered.binding.sessionId;
   }
 
   function ensureReady() {
@@ -195,7 +278,7 @@ export function createPiSubagentsExecutionBackend({
       if (pending.has(request.dispatchId)) {
         throw new ExecutionProtocolError("EXECUTION_DISPATCH_DUPLICATE", `Dispatch already exists: ${request.dispatchId}`);
       }
-      const entry = { request, binding: null };
+      const entry = createEntry(request);
       pending.set(request.dispatchId, entry);
       try {
         const reply = await rpc.spawn(executionSpawnRpcParams(request), { requestId: request.dispatchId });
@@ -209,7 +292,7 @@ export function createPiSubagentsExecutionBackend({
           throw new ExecutionProtocolError("SPAWN_REPLY_BINDING_MISMATCH", "Spawn reply disagrees with lifecycle start");
         }
         if (!entry.binding) {
-          entry.binding = Object.freeze({
+          bind(entry, Object.freeze({
             dispatchId: request.dispatchId,
             attemptId: request.attemptId,
             runId: observed.runId,
@@ -217,14 +300,41 @@ export function createPiSubagentsExecutionBackend({
             cwd: request.cwd,
             output: request.output,
             sessionId,
-          });
-          byRunId.set(observed.runId, entry.binding);
+            sessionFile: sessionId,
+          }));
         }
         return entry.binding;
       } catch (error) {
-        if (!entry.binding) pending.delete(request.dispatchId);
+        if (!entry.binding && !entry.cancelling) pending.delete(request.dispatchId);
         throw error;
       }
+    },
+    async recoverBinding(binding) {
+      ensureReady();
+      const recovered = recoveredEntry(binding, true);
+      const existingDispatch = pending.get(recovered.request.dispatchId);
+      const existingRun = byRunId.get(recovered.binding.runId);
+      if (existingDispatch || existingRun) {
+        if (existingDispatch?.binding && existingDispatch.binding.runId === recovered.binding.runId
+          && existingRun === existingDispatch.binding
+          && stableJson(existingDispatch.binding) === stableJson(recovered.binding)) return existingDispatch.binding;
+        throw new ExecutionProtocolError("EXECUTION_BINDING_CONFLICT", "Recovered binding conflicts with an existing dispatch or run", recovered.request.dispatchId);
+      }
+      const entry = createEntry(recovered.request, recovered.binding);
+      entry.bindingWait.resolve(entry.binding);
+      pending.set(recovered.request.dispatchId, entry);
+      byRunId.set(recovered.binding.runId, entry.binding);
+      return entry.binding;
+    },
+    async supersede(input) {
+      ensureReady();
+      const request = supersedeRequest(input);
+      const entry = pending.get(request.dispatchId);
+      if (!entry) throw new ExecutionProtocolError("EXECUTION_DISPATCH_NOT_FOUND", "Dispatch is not known", request.dispatchId);
+      if (entry.request.attemptId !== request.attemptId) {
+        throw new ExecutionProtocolError("EXECUTION_DISPATCH_MISMATCH", "Dispatch does not belong to the supplied attempt", request.dispatchId);
+      }
+      return beginSupersede(entry);
     },
     async status(input) {
       const { target, binding } = boundTarget(input);
@@ -251,6 +361,7 @@ export function createPiSubagentsExecutionBackend({
       if (disposed) return;
       disposed = true;
       for (const unsubscribe of unsubscribes) unsubscribe();
+      for (const entry of pending.values()) entry.bindingWait.reject(new ExecutionProtocolError("EXECUTION_BACKEND_DISPOSED", "Execution backend is disposed"));
       pending.clear();
       byRunId.clear();
       rpc.dispose?.();

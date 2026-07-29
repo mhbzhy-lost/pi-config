@@ -96,6 +96,7 @@ test("asserts capabilities and emits the exact asynchronous executor RPC envelop
     cwd: "/attempts/attempt-1",
     output: "/results/attempt-1.json",
     sessionId: "/sessions/plan-session-1.jsonl",
+    sessionFile: "/sessions/plan-session-1.jsonl",
   });
   assert.deepEqual(facts, [{
     type: "execution.started",
@@ -254,4 +255,136 @@ test("fails closed on capability drift and removes lifecycle listeners on dispos
   assert.equal(events.count("subagent:async-started"), 0);
   assert.equal(events.count("subagent:async-complete"), 0);
   assert.equal(disposed, true);
+});
+
+function supersedeHarness({ spawn, artifacts = async () => ({ status: { kind: "stable", value: { state: "stopped" } } }) } = {}) {
+  const events = createEvents();
+  const stops = [];
+  const rpc = {
+    async ping() { return capabilities(); },
+    spawn: spawn ?? (async () => ({ details: { runId: "run-1", asyncDir: "/async/run-1" } })),
+    async stop(input) { stops.push(input); return { ok: true }; },
+    dispose() {},
+  };
+  const backend = createPiSubagentsExecutionBackend({
+    rpc, events, readArtifacts: artifacts, supersedeTimeoutMs: 40, supersedePollIntervalMs: 1,
+  });
+  return { backend, events, stops };
+}
+
+test("supersede fences a reply-first run and returns only an authoritative terminal artifact proof", async () => {
+  const reads = [];
+  const subject = supersedeHarness({
+    artifacts: async (input) => {
+      reads.push(input);
+      return { status: { kind: "stable", value: { state: reads.length === 1 ? "stopping" : "stopped", runId: "run-1" } } };
+    },
+  });
+  await subject.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  await subject.backend.spawn(spawnInput());
+
+  const [first, second] = await Promise.all([
+    subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" }),
+    subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" }),
+  ]);
+
+  assert.deepEqual(subject.stops, [{ runId: "run-1", dir: "/async/run-1" }]);
+  assert.deepEqual(first, second);
+  assert.deepEqual(Object.keys(first).sort(), ["artifactSha256", "asyncDir", "dispatchId", "kind", "runId"]);
+  assert.equal(first.kind, "terminal");
+  assert.equal(first.runId, "run-1");
+  assert.match(first.artifactSha256, /^[0-9a-f]{64}$/);
+  assert.equal(reads.length >= 2, true);
+  subject.backend.dispose();
+});
+
+test("supersede fences an event-first or reply-lost late binding exactly once", async () => {
+  let resolveSpawn;
+  const subject = supersedeHarness({ spawn: () => new Promise((resolve) => { resolveSpawn = resolve; }) });
+  await subject.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  const spawning = subject.backend.spawn(spawnInput());
+  const superseding = subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" });
+  subject.events.emit("subagent:async-started", {
+    id: "run-1", asyncDir: "/async/run-1", cwd: "/attempts/attempt-1", sessionId: "/sessions/plan-session-1.jsonl",
+  });
+  resolveSpawn({ details: { runId: "run-1", asyncDir: "/async/run-1" } });
+
+  await spawning;
+  assert.equal((await superseding).kind, "terminal");
+  assert.deepEqual(subject.stops, [{ runId: "run-1", dir: "/async/run-1" }]);
+  subject.backend.dispose();
+});
+
+test("supersede keeps its late-start fence after an unbound timeout", async () => {
+  const subject = supersedeHarness({ spawn: () => new Promise(() => {}) });
+  await subject.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  void subject.backend.spawn(spawnInput()).catch(() => {});
+  await assert.rejects(
+    subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" }),
+    (error) => error.code === "EXECUTION_DISPATCH_UNCERTAIN",
+  );
+  subject.events.emit("subagent:async-started", {
+    id: "late-run", asyncDir: "/async/late", cwd: "/attempts/attempt-1", sessionId: "/sessions/plan-session-1.jsonl",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(subject.stops, [{ runId: "late-run", dir: "/async/late" }]);
+  subject.backend.dispose();
+});
+
+test("supersede rejects an attempt mismatch", async () => {
+  const subject = supersedeHarness();
+  await subject.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  await subject.backend.spawn(spawnInput());
+  await assert.rejects(
+    subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "another-attempt" }),
+    (error) => error.code === "EXECUTION_DISPATCH_MISMATCH",
+  );
+  subject.backend.dispose();
+});
+
+test("supersede supports recovered completed bindings and fails closed on reply conflict", async () => {
+  const events = createEvents();
+  const stops = [];
+  const backend = createPiSubagentsExecutionBackend({
+    events,
+    rpc: { async ping() { return capabilities(); }, async stop(input) { stops.push(input); }, dispose() {} },
+    readArtifacts: async () => ({ status: { kind: "stable", value: { state: "complete" } } }),
+    bindings: [{
+      dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1",
+      cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl",
+    }],
+  });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  assert.equal((await backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" })).kind, "terminal");
+  assert.deepEqual(stops, [{ runId: "run-1", dir: "/async/run-1" }]);
+  backend.dispose();
+});
+
+test("recoverBinding validates the negotiated session and fails closed on identity conflicts", async () => {
+  const events = createEvents();
+  const backend = createPiSubagentsExecutionBackend({
+    events,
+    rpc: { async ping() { return capabilities(); }, async stop() {}, dispose() {} },
+    readArtifacts: async () => ({ status: { kind: "stable", value: { state: "stopped" } } }),
+  });
+  const binding = {
+    dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl",
+  };
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  assert.deepEqual(await backend.recoverBinding(binding), binding);
+  assert.deepEqual(await backend.recoverBinding(binding), binding);
+  await assert.rejects(
+    backend.recoverBinding({ ...binding, runId: "run-2" }),
+    (error) => error.code === "EXECUTION_BINDING_CONFLICT",
+  );
+  await assert.rejects(
+    backend.recoverBinding({ ...binding, dispatchId: "attempt-2.dispatch.1", runId: "run-1" }),
+    (error) => error.code === "EXECUTION_BINDING_CONFLICT",
+  );
+  await assert.rejects(
+    backend.recoverBinding({ ...binding, sessionId: "other-session" }),
+    (error) => error.code === "EXECUTION_CAPABILITY_MISMATCH",
+  );
+  backend.dispose();
 });
