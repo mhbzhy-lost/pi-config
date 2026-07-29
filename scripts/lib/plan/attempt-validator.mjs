@@ -83,15 +83,27 @@ async function hasSymlinkEscape(root, changedPath) {
   return false;
 }
 
+function safeCommandCwd(value) {
+  return typeof value === "string" && !path.isAbsolute(value) && !value.includes("\\")
+    && !/[\x00-\x1f\x7f?*\[\]{}]/.test(value)
+    && (value === "." || (value !== "" && value.split("/").every((segment) => segment && segment !== "." && segment !== "..")));
+}
+
+function normalizeVerificationCommand(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)
+    || !COMMAND_ID.test(entry.id ?? "") || typeof entry.command !== "string" || !entry.command.trim()) {
+    throw new Error("controlled verification requires registered command objects");
+  }
+  if (entry.cwd === undefined && entry.timeoutMs === undefined) return { id: entry.id, command: entry.command };
+  if (!safeCommandCwd(entry.cwd) || !Number.isSafeInteger(entry.timeoutMs) || entry.timeoutMs <= 0 || entry.timeoutMs > 86_400_000) {
+    throw new Error("controlled verification cwd or timeout is invalid");
+  }
+  return { id: entry.id, command: entry.command, cwd: entry.cwd, timeoutMs: entry.timeoutMs };
+}
+
 function validateVerification(verification) {
   if (!Array.isArray(verification)) throw new Error("controlled verification must be an array");
-  return verification.map((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)
-      || !COMMAND_ID.test(entry.id ?? "") || typeof entry.command !== "string" || !entry.command.trim()) {
-      throw new Error("controlled verification requires registered command objects");
-    }
-    return { id: entry.id, command: entry.command };
-  });
+  return verification.map(normalizeVerificationCommand);
 }
 
 async function runVerification({ lease, commands }) {
@@ -109,7 +121,11 @@ async function runVerification({ lease, commands }) {
     let stderr = "";
     let exitCode = 0;
     try {
-      const result = await execFile("/bin/sh", ["-c", item.command], { cwd: lease.path, encoding: "utf8" });
+      const result = await execFile("/bin/sh", ["-c", item.command], {
+        cwd: item.cwd === undefined ? lease.path : path.resolve(lease.path, item.cwd),
+        encoding: "utf8",
+        ...(item.timeoutMs === undefined ? {} : { timeout: item.timeoutMs }),
+      });
       stdout = result.stdout;
       stderr = result.stderr;
     } catch (error) {

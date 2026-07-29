@@ -299,8 +299,8 @@ export function createPlanRunnerDependencies({
     await mkdir(resultsDir, { recursive: true });
     let commandRegistry;
     const verificationForTask = async (taskId) => {
-      commandRegistry ??= createTaskCommandRegistry({ cwd: current.workspace.worktree, plan });
-      return resolveTaskVerification({ plan, taskId, registry: await commandRegistry });
+      commandRegistry ??= createTaskCommandRegistry({ cwd: current.workspace.worktree, ir, legacyPlan: plan });
+      return resolveTaskVerification({ ir, legacyPlan: plan, taskId, registry: await commandRegistry });
     };
     const coordinator = createPlanCoordinator({
       ir,
@@ -620,6 +620,10 @@ export function createPlanRunnerDependencies({
       const current = currentProjection(ctx);
       if (!current.planId) throw new Error("Plan is not open.");
       const plan = await approvedPlan(current);
+      const revision = current.revision
+        ? assertCurrentRevisionIdentity(await revisionStore.readRevision(current.planId, current.revision.number), current)
+        : undefined;
+      const commands = revision?.ir?.version === "plan-ir.v3" ? revision.ir.verification.commands : plan.verification;
       let next = current;
       const headCommit = await git(current.workspace.worktree, "rev-parse", "HEAD^{commit}");
       if (headCommit !== next.workspace.headCommit) {
@@ -630,7 +634,7 @@ export function createPlanRunnerDependencies({
         cwd: current.workspace.worktree,
         baseCommit: next.workspace.baseCommit,
         projection: next,
-        commands: plan.verification,
+        commands,
         audit,
         externalReview,
       });

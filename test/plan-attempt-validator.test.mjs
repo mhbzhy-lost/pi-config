@@ -10,6 +10,10 @@ import { validateAttemptResult } from "../scripts/lib/plan/attempt-validator.mjs
 
 const execFile = promisify(execFileCallback);
 
+function nodeCommand(source = "") {
+  return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}`;
+}
+
 async function git(cwd, ...args) {
   const { stdout } = await execFile("git", args, { cwd });
   return stdout.trim();
@@ -176,6 +180,32 @@ test("rejects failed controlled verification and preserves stdout and stderr evi
     assert.equal(result.code, "VERIFICATION_FAILED");
     assert.equal(result.evidence[0].exitCode, 3);
     assert.equal(await readFile(result.evidence[0].stderrPath, "utf8"), "failed");
+  });
+});
+
+test("runs structured verification in a safe relative cwd with a timeout", async () => {
+  await withRepository(async ({ root, lease }) => {
+    await commitFile(root, "src/a.txt");
+    await mkdir(path.join(root, "src", "subdir"));
+    const result = await validateAttemptResult({
+      lease, allowedPaths: ["src/**"],
+      verification: [{ id: "plan:test", command: nodeCommand("require('node:fs').writeFileSync('marker', '')"), cwd: "src/subdir", timeoutMs: 1_000 }],
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(await readFile(path.join(root, "src", "subdir", "marker"), "utf8"), "");
+  });
+});
+
+test("rejects unsafe structured verification before writing evidence or executing", async () => {
+  await withRepository(async ({ root, lease }) => {
+    await commitFile(root, "src/a.txt");
+    for (const entry of [
+      { cwd: "../outside", timeoutMs: 1 }, { cwd: "/tmp", timeoutMs: 1 }, { cwd: "src\\bad", timeoutMs: 1 },
+      { cwd: "src//bad", timeoutMs: 1 }, { cwd: "src", timeoutMs: 0 }, { cwd: "src", timeoutMs: Infinity },
+    ]) await assert.rejects(validateAttemptResult({
+      lease, allowedPaths: ["src/**"], verification: [{ id: "plan:test", command: "touch should-not-run", ...entry }],
+    }), /cwd or timeout/i);
+    await assert.rejects(readFile(path.join(root, "should-not-run")));
   });
 });
 

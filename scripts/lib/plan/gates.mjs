@@ -2,6 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { selectVerificationView } from "./ir/index.mjs";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
@@ -37,20 +38,36 @@ async function inspect(cwd, baseCommit) {
 }
 
 function complete(projection, attempts, inspection) {
-  return [...projection.tasks.values()].every((task) => task.status === "accepted")
+  return [...projection.tasks.values()].every((task) => ["accepted", "retired"].includes(task.status))
     && [...projection.attempts.values()].every((item) => !["dispatch-requested", "active"].includes(item.status))
     && clean(inspection)
     && attempts.slice(0, 3).every((item) => item.status === "passed");
 }
 
-export async function createTaskCommandRegistry({ cwd, plan }) {
+function safeCwd(value) {
+  return typeof value === "string" && !path.isAbsolute(value) && !value.includes("\\")
+    && !/[\x00-\x1f\x7f?*\[\]{}]/.test(value)
+    && (value === "." || (value !== "" && value.split("/").every((segment) => segment && segment !== "." && segment !== "..")));
+}
+
+function normalizeGateCommand(entry) {
+  if (typeof entry === "string" && entry.trim()) return { command: entry, cwd: ".", timeoutMs: undefined };
+  if (!entry || typeof entry !== "object" || typeof entry.command !== "string" || !entry.command.trim()
+    || !safeCwd(entry.cwd) || !Number.isSafeInteger(entry.timeoutMs) || entry.timeoutMs <= 0 || entry.timeoutMs > 86_400_000) {
+    throw new Error("Plan verification command is invalid");
+  }
+  return { command: entry.command, cwd: entry.cwd, timeoutMs: entry.timeoutMs };
+}
+
+export async function createTaskCommandRegistry({ cwd, ir, legacyPlan, plan }) {
+  const approved = ir?.version === "plan-ir.v3"
+    ? ir.verification?.commands
+    : (legacyPlan ?? plan)?.verification?.map((command, index) => ({ id: `contract:verification:${index + 1}`, command }));
+  if (!Array.isArray(approved)) throw new Error("Approved contract verification command is invalid");
   const registry = new Map();
-  for (const [index, command] of (plan?.verification ?? []).entries()) {
-    if (typeof command !== "string" || !command.trim()) throw new Error("Approved contract verification command is invalid");
-    registry.set(`contract:verification:${index + 1}`, Object.freeze({
-      id: `contract:verification:${index + 1}`,
-      command,
-    }));
+  for (const entry of approved) {
+    if (!entry || typeof entry.id !== "string" || !entry.id || typeof entry.command !== "string" || !entry.command.trim()) throw new Error("Approved contract verification command is invalid");
+    registry.set(entry.id, Object.freeze({ ...entry }));
   }
   let packageJson;
   try {
@@ -65,19 +82,31 @@ export async function createTaskCommandRegistry({ cwd, plan }) {
   return registry;
 }
 
-export function resolveTaskVerification({ plan, taskId, registry }) {
-  const ids = plan?.taskVerification?.[taskId] ?? [];
-  if (!Array.isArray(ids)) throw new Error(`Task verification is invalid for ${taskId}`);
-  return ids.map((id) => {
+export function resolveTaskVerification({ ir, legacyPlan, plan, taskId, registry }) {
+  const v3 = ir?.version === "plan-ir.v3";
+  const legacy = legacyPlan ?? plan;
+  const task = v3 ? ir.nodes?.find((node) => node.id === taskId) : undefined;
+  if (v3 && !task) throw new Error(`Task verification is invalid for ${taskId}`);
+  const acceptance = v3 ? selectVerificationView(ir, taskId).acceptance : { strategy: "commands", commandIds: legacy?.taskVerification?.[taskId] ?? [] };
+  if (acceptance.strategy !== "commands") return [];
+  if (!Array.isArray(acceptance.commandIds)) throw new Error(`Task verification is invalid for ${taskId}`);
+  return acceptance.commandIds.map((id) => {
     const command = registry?.get?.(id);
     if (!command) throw new Error(`Task verification ID is not a registered command: ${id}`);
-    return { id: command.id, command: command.command };
+    if (!v3) return { id: command.id, command: command.command };
+    return { id: command.id, command: command.command, cwd: command.cwd ?? ".", timeoutMs: command.timeoutMs ?? task.execution.timeoutMs };
   });
 }
 
 export async function runPlanGates({ cwd, baseCommit, projection, commands, audit = async () => ({ findings: [] }), externalReview = async () => ({ available: false, findings: [] }) }) {
   const initial = await inspect(cwd, baseCommit);
-  const validCommands = Array.isArray(commands) && commands.length > 0 && commands.every((command) => typeof command === "string" && command.trim() !== "");
+  let normalizedCommands;
+  try {
+    normalizedCommands = Array.isArray(commands) && commands.length > 0 ? commands.map(normalizeGateCommand) : undefined;
+  } catch {
+    normalizedCommands = undefined;
+  }
+  const validCommands = Array.isArray(normalizedCommands);
   const preflight = initial.diff !== ""
     && clean(initial)
     && initial.head === projection.workspace?.headCommit
@@ -90,7 +119,10 @@ export async function runPlanGates({ cwd, baseCommit, projection, commands, audi
   let commandStatus = preflight ? "passed" : "failed";
   if (preflight) {
     try {
-      for (const command of commands) await execFile("/bin/sh", ["-c", command], { cwd });
+      for (const entry of normalizedCommands) await execFile("/bin/sh", ["-c", entry.command], {
+        cwd: path.resolve(cwd, entry.cwd),
+        ...(entry.timeoutMs === undefined ? {} : { timeout: entry.timeoutMs }),
+      });
     } catch (error) {
       commandStatus = "failed";
     }

@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mjs";
 import { createTaskCommandRegistry, resolveTaskVerification, runPlanGates } from "../scripts/lib/plan/gates.mjs";
+import { deepFreeze } from "../scripts/lib/plan/ir/index.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -66,6 +67,50 @@ test("builds a controlled task command registry from approved contract commands 
     () => resolveTaskVerification({ plan: { ...plan, taskVerification: { "task-1": ["task prose"] } }, taskId: "task-1", registry }),
     /registered command/i,
   );
+});
+
+test("uses v3 IR commands and acceptance without reinterpreting the legacy plan", async (t) => {
+  const cwd = await repository();
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const ir = deepFreeze({
+    version: "plan-ir.v3", source: { schemaVersion: "pi-plan.v3" }, hash: "a".repeat(64), hashes: { full: "a".repeat(64) }, edges: [],
+    verification: { commands: [{ id: "plan:test", command: "node --test", cwd: "test", timeoutMs: 900_000 }] },
+    nodes: [{ id: "task-1", execution: { timeoutMs: 1_200_000 }, acceptance: { strategy: "commands", commandIds: ["plan:test"] } }],
+  });
+  const registry = await createTaskCommandRegistry({ cwd, ir, legacyPlan: { verification: ["false"] } });
+  assert.deepEqual(resolveTaskVerification({ ir, taskId: "task-1", registry }), [
+    { id: "plan:test", command: "node --test", cwd: "test", timeoutMs: 900_000 },
+  ]);
+  assert.deepEqual(resolveTaskVerification({ ir: deepFreeze({ ...ir, nodes: [{ ...ir.nodes[0], acceptance: { strategy: "deferred", commandIds: [] } }] }), taskId: "task-1", registry }), []);
+  assert.throws(() => resolveTaskVerification({ ir, taskId: "unknown", registry }), /task|verification/i);
+});
+
+test("runs structured gate commands in their declared directory with a bounded timeout", async (t) => {
+  const cwd = await repository();
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await mkdir(path.join(cwd, "subdir"));
+  await writeFile(path.join(cwd, "change.txt"), "change\n");
+  await git(cwd, "add", "change.txt");
+  await git(cwd, "commit", "-m", "change");
+  const head = await git(cwd, "rev-parse", "HEAD");
+  const result = await runPlanGates({ cwd, baseCommit: "HEAD~1", projection: acceptedProjection(head), commands: [{ command: nodeCommand("if (require('node:path').basename(process.cwd()) !== 'subdir') process.exit(1)"), cwd: "subdir", timeoutMs: 1_000 }], audit: async () => ({ findings: [] }), externalReview: async () => ({ available: true, findings: [] }) });
+  assert.equal(result.validated, true);
+  const timedOut = await runPlanGates({ cwd, baseCommit: "HEAD~1", projection: acceptedProjection(head), commands: [{ command: nodeCommand("setTimeout(() => {}, 1000)"), cwd: ".", timeoutMs: 10 }] });
+  assert.equal(timedOut.validated, false);
+});
+
+test("rejects invalid structured gate commands before execution and accepts retired tasks", async (t) => {
+  const cwd = await repository();
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(path.join(cwd, "change.txt"), "change\n");
+  await git(cwd, "add", "change.txt");
+  await git(cwd, "commit", "-m", "change");
+  const head = await git(cwd, "rev-parse", "HEAD");
+  const state = acceptedProjection(head);
+  state.tasks.set("retired", { status: "retired" });
+  const result = await runPlanGates({ cwd, baseCommit: "HEAD~1", projection: state, commands: [{ command: "touch escaped", cwd: "../", timeoutMs: 1_000 }] });
+  assert.equal(result.validated, false);
+  await assert.rejects(access(path.join(path.dirname(cwd), "escaped")));
 });
 
 test("runs every declared verification command string before validating the current head", async (t) => {
