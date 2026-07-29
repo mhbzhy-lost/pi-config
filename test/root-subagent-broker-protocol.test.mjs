@@ -3,6 +3,7 @@ import { rm, stat, writeFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  BROKER_METHODS,
   BrokerProtocolError,
   brokerGrantPath,
   brokerSocketPath,
@@ -72,6 +73,12 @@ test("allows the fixed broker method set", () => {
     const params = method === "supervisor.reply" ? { replyTo: "upstream-request-1", answer: "yes" } : request().params;
     assert.equal(parseBrokerRequest(request({ method, params })).method, method);
   }
+});
+
+test("keeps the exported broker method set frozen and fail closed", () => {
+  assert.equal(Object.isFrozen(BROKER_METHODS), true);
+  assert.throws(() => BROKER_METHODS.push("nested.spawn"), TypeError);
+  expectInvalid(() => parseBrokerRequest(request({ method: "nested.spawn" })), /method/);
 });
 
 test("fixes supervisor push and reply identities to upstream request identity", () => {

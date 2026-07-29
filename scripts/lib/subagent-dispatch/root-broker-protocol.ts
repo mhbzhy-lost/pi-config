@@ -8,9 +8,9 @@ const GRANT_SCHEMA_VERSION = "pi-root-subagent-broker-grant.v1";
 const SOCKET_PATH_LIMIT = 103;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
-const METHODS = ["ping", "spawn", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "subscribe"];
-const PUSH_TYPES = ["execution.started", "execution.completed", "supervisor.request", "root.closing"];
-const GRANT_ROLES = ["plan-runner", "executor"];
+const METHODS = Object.freeze(["ping", "spawn", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "subscribe"] as const);
+const PUSH_TYPES = Object.freeze(["execution.started", "execution.completed", "supervisor.request", "root.closing"] as const);
+const GRANT_ROLES = Object.freeze(["plan-runner", "executor"] as const);
 
 export const BROKER_METHODS = METHODS;
 
