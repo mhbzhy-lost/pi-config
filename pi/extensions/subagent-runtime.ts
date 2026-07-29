@@ -49,9 +49,15 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     if (brokerStarted) throw new Error("Root subagent broker is already started");
     const rootSessionId = resolveCurrentSessionId(ctx.sessionManager);
     const broker = new RootBrokerServer({ rootSessionId, upstream: createTypedSubagentRpcClient(pi.events) });
-    await broker.start();
-    bindRootBroker(pi, broker);
-    brokerStarted = true;
+    try {
+      await broker.start();
+      bindRootBroker(pi, broker);
+      brokerStarted = true;
+    } catch (error) {
+      unbindRootBroker(pi);
+      await broker.closeRootSession().catch(() => undefined);
+      throw error;
+    }
   });
   // Upstream registers the same custom type during bootstrap; the project renderer must win last-write ownership.
   pi.registerMessageRenderer("subagent-notify", (message, { outputPad }, theme) => {

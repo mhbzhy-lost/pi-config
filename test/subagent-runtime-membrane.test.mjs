@@ -291,6 +291,21 @@ test("beforeDispose completes before RPC disposal in the single shutdown handler
   assert.deepEqual(order, ["before", "dispose"]);
 });
 
+test("beforeDispose failure still disposes RPC and removes its cleanup entry", async () => {
+  const pi = createPi();
+  const order = [];
+  const rpc = createRpc({ dispose() { order.push("dispose"); } });
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    async beforeDispose() { order.push("before"); throw new Error("close failed"); },
+  });
+  const shutdown = pi.handlers.get("session_shutdown")[0];
+  await assert.rejects(() => shutdown(), /close failed/);
+  await shutdown();
+  assert.deepEqual(order, ["before", "dispose"]);
+});
+
 test("project subagent schema exposes an object root to OpenAI-compatible providers", () => {
   const pi = createPi();
 
