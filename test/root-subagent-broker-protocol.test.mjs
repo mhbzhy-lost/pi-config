@@ -7,11 +7,14 @@ import {
   BrokerProtocolError,
   brokerGrantPath,
   brokerSocketPath,
+  createBrokerFailureResponse,
+  createBrokerSuccessResponse,
   createSupervisorRequestPush,
   ensureBrokerSocketDirectory,
   parseBrokerGrant,
   parseBrokerPush,
   parseBrokerRequest,
+  parseBrokerResponse,
   readBrokerGrant,
   serializeBrokerGrant,
   setBrokerSocketPermissions,
@@ -42,6 +45,18 @@ function grant(overrides = {}) {
     runId: callerRunId,
     callerToken: token,
     role: "plan-runner",
+    ...overrides,
+  };
+}
+
+function response(overrides = {}) {
+  return {
+    schemaVersion: "pi-root-subagent-broker-response.v1",
+    requestId: "request-1",
+    rootSessionId,
+    callerRunId,
+    success: true,
+    data: { executionId: "execution-1" },
     ...overrides,
   };
 }
@@ -79,6 +94,40 @@ test("keeps the exported broker method set frozen and fail closed", () => {
   assert.equal(Object.isFrozen(BROKER_METHODS), true);
   assert.throws(() => BROKER_METHODS.push("nested.spawn"), TypeError);
   expectInvalid(() => parseBrokerRequest(request({ method: "nested.spawn" })), /method/);
+});
+
+test("creates and parses exact broker response envelopes bound to request identity", () => {
+  const expectedIdentity = { requestId: "request-1", rootSessionId, callerRunId };
+  const success = createBrokerSuccessResponse({ ...expectedIdentity, data: { executionId: "execution-1" } });
+  const failure = createBrokerFailureResponse({ ...expectedIdentity, code: "execution_failed", message: "Execution failed" });
+  const { data: _data, ...failureBase } = response({ success: false });
+
+  assert.deepEqual(success, response());
+  assert.deepEqual(parseBrokerResponse(success, expectedIdentity), success);
+  assert.deepEqual(failure, {
+    schemaVersion: "pi-root-subagent-broker-response.v1",
+    requestId: "request-1",
+    rootSessionId,
+    callerRunId,
+    success: false,
+    error: { code: "execution_failed", message: "Execution failed" },
+  });
+  assert.deepEqual(parseBrokerResponse(failure, expectedIdentity), failure);
+
+  expectInvalid(() => parseBrokerResponse(null), /response.*object/i);
+  expectInvalid(() => parseBrokerResponse(response({ extra: true })), /unknown/i);
+  expectInvalid(() => parseBrokerResponse(response({ schemaVersion: "pi-root-subagent-broker-response.v2" })), /schemaVersion/);
+  expectInvalid(() => parseBrokerResponse(response({ requestId: "other-request" }), expectedIdentity), /requestId/);
+  expectInvalid(() => parseBrokerResponse(response({ rootSessionId: "other-root" }), expectedIdentity), /rootSessionId/);
+  expectInvalid(() => parseBrokerResponse(response({ callerRunId: "other-run" }), expectedIdentity), /callerRunId/);
+  expectInvalid(() => parseBrokerResponse(response({ success: "true" })), /success/);
+  expectInvalid(() => parseBrokerResponse(response({ data: undefined })), /data/);
+  expectInvalid(() => parseBrokerResponse({ ...failureBase, error: { code: "bad/code", message: "failed" } }), /error.code/);
+  expectInvalid(() => parseBrokerResponse({ ...failureBase, error: { code: "failed", message: "" } }), /error.message/);
+  expectInvalid(() => parseBrokerResponse({ ...failureBase, error: { code: "failed", message: "x".repeat(1025) } }), /error.message/);
+  expectInvalid(() => parseBrokerResponse({ ...failureBase, error: { code: "failed", message: "failed", extra: true } }), /unknown/i);
+  expectInvalid(() => parseBrokerResponse({ ...response(), error: { code: "failed", message: "failed" } }), /unknown|success/i);
+  expectInvalid(() => parseBrokerResponse(failureBase), /error/);
 });
 
 test("fixes supervisor push and reply identities to upstream request identity", () => {

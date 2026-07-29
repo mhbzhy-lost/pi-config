@@ -5,7 +5,9 @@ import path from "node:path";
 const REQUEST_SCHEMA_VERSION = "pi-root-subagent-broker-request.v1";
 const PUSH_SCHEMA_VERSION = "pi-root-subagent-broker-push.v1";
 const GRANT_SCHEMA_VERSION = "pi-root-subagent-broker-grant.v1";
+const RESPONSE_SCHEMA_VERSION = "pi-root-subagent-broker-response.v1";
 const SOCKET_PATH_LIMIT = 103;
+const ERROR_MESSAGE_LIMIT = 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const METHODS = Object.freeze(["ping", "spawn", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "subscribe"] as const);
@@ -37,6 +39,29 @@ export type BrokerGrant = {
   runId: string;
   callerToken: string;
   role: (typeof GRANT_ROLES)[number];
+};
+export type BrokerResponse = {
+  schemaVersion: "pi-root-subagent-broker-response.v1";
+  requestId: string;
+  rootSessionId: string;
+  callerRunId: string;
+  success: true;
+  data: unknown;
+} | {
+  schemaVersion: "pi-root-subagent-broker-response.v1";
+  requestId: string;
+  rootSessionId: string;
+  callerRunId: string;
+  success: false;
+  error: {
+    code: string;
+    message: string;
+  };
+};
+export type BrokerResponseIdentity = {
+  requestId?: string;
+  rootSessionId?: string;
+  callerRunId?: string;
 };
 
 export class BrokerProtocolError extends Error {
@@ -82,6 +107,26 @@ function callerToken(value) {
 
 function record(value, name) {
   if (!isPlainObject(value)) fail(`${name} must be an object`);
+  return value;
+}
+
+function responseData(value) {
+  if (value === undefined) fail("response.data must not be undefined");
+  try {
+    if (!Object.hasOwn(JSON.parse(JSON.stringify({ data: value })), "data")) {
+      fail("response.data must be JSON serializable");
+    }
+  } catch (error) {
+    if (error instanceof BrokerProtocolError) throw error;
+    fail("response.data must be JSON serializable");
+  }
+  return value;
+}
+
+function errorMessage(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > ERROR_MESSAGE_LIMIT) {
+    fail(`error.message must be a non-empty string of at most ${ERROR_MESSAGE_LIMIT} characters`);
+  }
   return value;
 }
 
@@ -173,6 +218,64 @@ export function parseBrokerPush(value) {
     }
   }
   return push;
+}
+
+export function parseBrokerResponse(value, expectedIdentity: BrokerResponseIdentity = {}) {
+  if (!isPlainObject(value)) fail("response must be an object");
+  if (typeof value.success !== "boolean") fail("response.success must be a boolean");
+  const response = value.success
+    ? exactObject(value, "response", ["schemaVersion", "requestId", "rootSessionId", "callerRunId", "success", "data"])
+    : exactObject(value, "response", ["schemaVersion", "requestId", "rootSessionId", "callerRunId", "success", "error"]);
+  if (response.schemaVersion !== RESPONSE_SCHEMA_VERSION) fail("response.schemaVersion is unsupported");
+  identity(response.requestId, "requestId");
+  identity(response.rootSessionId, "rootSessionId");
+  identity(response.callerRunId, "callerRunId");
+  for (const key of ["requestId", "rootSessionId", "callerRunId"]) {
+    if (expectedIdentity[key] !== undefined && response[key] !== identity(expectedIdentity[key], `expectedIdentity.${key}`)) {
+      fail(`response.${key} does not match expected identity`);
+    }
+  }
+  if (response.success) {
+    responseData(response.data);
+  } else {
+    const error = exactObject(response.error, "response.error", ["code", "message"]);
+    identity(error.code, "error.code");
+    errorMessage(error.message);
+  }
+  return response as BrokerResponse;
+}
+
+export function createBrokerSuccessResponse({ requestId, rootSessionId, callerRunId, data }: {
+  requestId: string;
+  rootSessionId: string;
+  callerRunId: string;
+  data: unknown;
+}): BrokerResponse {
+  return parseBrokerResponse({
+    schemaVersion: RESPONSE_SCHEMA_VERSION,
+    requestId,
+    rootSessionId,
+    callerRunId,
+    success: true,
+    data,
+  });
+}
+
+export function createBrokerFailureResponse({ requestId, rootSessionId, callerRunId, code, message }: {
+  requestId: string;
+  rootSessionId: string;
+  callerRunId: string;
+  code: string;
+  message: string;
+}): BrokerResponse {
+  return parseBrokerResponse({
+    schemaVersion: RESPONSE_SCHEMA_VERSION,
+    requestId,
+    rootSessionId,
+    callerRunId,
+    success: false,
+    error: { code, message },
+  });
 }
 
 export function parseBrokerGrant(value) {
