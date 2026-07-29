@@ -14,7 +14,7 @@ import {
 } from "./root-broker-protocol.ts";
 
 type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: () => void | Promise<void> };
-type Caller = { planId: string; cwd: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
+type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; events?: { on(channel: string, listener: (event: any) => void): () => void } };
 
@@ -95,18 +95,25 @@ export class RootBrokerServer {
     try { return await pending; } catch (error) { this.executorGrants.delete(runId); throw error; }
   }
 
-  async grantCaller({ callerRunId, planId, cwd, role }: { callerRunId: string; planId: string; cwd: string; role: unknown }) {
-    if (role !== "plan-runner" || typeof planId !== "string" || planId.length === 0 || typeof cwd !== "string" || cwd.length === 0 || !path.isAbsolute(cwd)) {
+  async grantCaller({ callerRunId, planId, cwd, originRoot, stateRoot, role }: { callerRunId: string; planId: string; cwd: string; originRoot: string; stateRoot: string; role: unknown }) {
+    if (role !== "plan-runner" || typeof planId !== "string" || planId.length === 0
+      || [cwd, originRoot, stateRoot].some((value) => typeof value !== "string" || value.length === 0 || !path.isAbsolute(value))) {
       throw new Error("Root subagent broker caller grant is invalid");
     }
     if (this.callers.has(callerRunId)) throw new Error("Root subagent broker caller is already granted");
     const callerToken = this.randomToken();
-    const caller: Caller = { planId, cwd, role, callerToken, ownedRunIds: new Set() };
-    const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId: callerRunId, callerToken, role });
+    const caller: Caller = { planId, cwd, originRoot, stateRoot, role, callerToken, ownedRunIds: new Set() };
     this.callers.set(callerRunId, caller);
     this.principals.set(callerRunId, { role, callerToken });
-    this.grantPaths.add(grantPath);
-    return { callerToken };
+    try {
+      const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId: callerRunId, callerToken, role });
+      this.grantPaths.add(grantPath);
+      return { callerToken };
+    } catch (error) {
+      this.callers.delete(callerRunId);
+      this.principals.delete(callerRunId);
+      throw error;
+    }
   }
 
   handleSocket(socket: Socket) {
@@ -156,7 +163,7 @@ export class RootBrokerServer {
       }
       if (request.method === "ping") {
         const data = await this.upstream.ping();
-        return createBrokerSuccessResponse({ ...request, data: { ...data, session: { ...(data?.session ?? {}), cwd: caller.cwd } } });
+        return createBrokerSuccessResponse({ ...request, data: { ...data, session: { ...(data?.session ?? {}), cwd: caller.cwd }, planRuntime: { originRoot: caller.originRoot, stateRoot: caller.stateRoot } } });
       }
       if (request.method === "spawn") return await this.spawn(request, caller);
       if (["status", "steer", "interrupt", "stop"].includes(request.method)) return await this.control(request, caller);

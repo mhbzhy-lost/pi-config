@@ -49,8 +49,8 @@ test("broker forwards flat spawn, projects caller cwd, rejects foreign control, 
   const broker = new RootBrokerServer({ rootSessionId, upstream });
   await broker.start();
   t.after(() => broker.closeRootSession());
-  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
-  const other = await broker.grantCaller({ callerRunId: "plan-run-2", planId: "plan-2", cwd: "/other", role: "plan-runner" });
+  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const other = await broker.grantCaller({ callerRunId: "plan-run-2", planId: "plan-2", cwd: "/other", originRoot: "/other", stateRoot: "/state-other", role: "plan-runner" });
 
   assert.equal((await stat(brokerSocketPath(rootSessionId))).mode & 0o777, 0o600);
   assert.equal((await stat(brokerGrantPath(rootSessionId, "plan-run-1"))).mode & 0o777, 0o600);
@@ -74,11 +74,25 @@ test("broker fails closed for root, caller, and token mismatches", async (t) => 
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
   await broker.start();
   t.after(() => broker.closeRootSession());
-  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   for (const change of [{ root: "other-root" }, { callerRunId: "other-run" }, { callerToken: "b".repeat(64) }]) {
     const reply = await socketRequest(request({ callerRunId: change.callerRunId ?? "plan-run-1", callerToken: change.callerToken ?? caller.callerToken, method: "ping", params: {}, root: change.root ?? rootSessionId }));
     assert.equal(reply.reply.success, false);
   }
+});
+
+test("broker returns identity-bound runtime roots without changing the grant schema", async (t) => {
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  const first = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", originRoot: "/origin-a", stateRoot: "/state-a", role: "plan-runner" });
+  const second = await broker.grantCaller({ callerRunId: "plan-run-2", planId: "plan-2", cwd: "/other", originRoot: "/origin-b", stateRoot: "/state-b", role: "plan-runner" });
+  const firstPing = await socketRequest(request({ callerRunId: "plan-run-1", callerToken: first.callerToken, method: "ping", params: {} }));
+  const secondPing = await socketRequest(request({ callerRunId: "plan-run-2", callerToken: second.callerToken, method: "ping", params: {} }));
+  assert.deepEqual(firstPing.reply.data.planRuntime, { originRoot: "/origin-a", stateRoot: "/state-a" });
+  assert.deepEqual(secondPing.reply.data.planRuntime, { originRoot: "/origin-b", stateRoot: "/state-b" });
+  const grant = await readBrokerGrant(rootSessionId, "plan-run-1");
+  assert.deepEqual(Object.keys(grant).sort(), ["callerToken", "role", "rootSessionId", "runId", "schemaVersion"]);
 });
 
 test("child-safe client reads its grant, authenticates each request, and rejects on dispose", async (t) => {
@@ -86,7 +100,7 @@ test("child-safe client reads its grant, authenticates each request, and rejects
   const broker = new RootBrokerServer({ rootSessionId, upstream });
   await broker.start();
   t.after(() => broker.closeRootSession());
-  await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const client = createRootBrokerClient({ rootSessionId, callerRunId: "plan-run-1" });
   t.after(() => client.dispose());
 
@@ -101,7 +115,7 @@ test("child-safe subscription distinguishes local disposal from remote EOF", asy
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
   await broker.start();
   t.after(() => broker.closeRootSession());
-  await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const client = createRootBrokerClient({ rootSessionId, callerRunId: "plan-run-1" });
   t.after(() => client.dispose());
   const subscription = await client.subscribe(() => {});
@@ -210,7 +224,7 @@ test("executor grant subscribes with its own identity and cannot call other meth
   const broker = new RootBrokerServer({ rootSessionId, upstream });
   await broker.start();
   t.after(() => broker.closeRootSession());
-  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const spawned = await socketRequest(request({ callerRunId: "plan-run-1", callerToken: caller.callerToken, method: "spawn", params: { agent: "executor" } }));
   assert.equal(spawned.reply.success, true);
   const executor = await readBrokerGrant(rootSessionId, "executor-run-1");
@@ -248,7 +262,7 @@ test("broker closes idle sockets, disposes upstream once, and validates caller g
   t.after(() => broker.closeRootSession());
   for (const grant of [
     { callerRunId: "bad-role", planId: "plan", cwd: "/repo", role: "executor" },
-    { callerRunId: "empty-plan", planId: "", cwd: "/repo", role: "plan-runner" },
+    { callerRunId: "empty-plan", planId: "", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" },
     { callerRunId: "relative-cwd", planId: "plan", cwd: "repo", role: "plan-runner" },
   ]) await assert.rejects(() => broker.grantCaller(grant));
   const idle = connect(brokerSocketPath(rootSessionId));
@@ -289,7 +303,7 @@ test("broker cleans failed spawn grants and bounds failure messages", async () =
     },
     writeGrant: async () => { if (grants++ > 0) throw new Error("grant write failed"); return "/tmp/grant"; },
   });
-  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const reply = await broker.dispatch(request({ callerRunId: "plan-run-1", callerToken: caller.callerToken, method: "spawn", params: { agent: "executor" } }), {});
   assert.equal(reply.success, false);
   assert.equal(reply.error.message.length <= 1024, true);
@@ -304,7 +318,7 @@ test("broker leaves no executor principal after invalid spawn reply", async () =
     upstream: { ...fakeUpstream(), async spawn() { return { details: { runId: "executor-run-invalid" } }; } },
     writeGrant: async () => "/tmp/grant",
   });
-  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const reply = await broker.dispatch(request({ callerRunId: "plan-run-1", callerToken: caller.callerToken, method: "spawn", params: { agent: "executor" } }), {});
   assert.equal(reply.success, false);
   assert.equal(reply.error.code, "spawn_invalid");

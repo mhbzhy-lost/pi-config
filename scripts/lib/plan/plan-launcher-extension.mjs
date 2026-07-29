@@ -17,8 +17,9 @@ function runRequest(args, ctx, id) {
     if (typeof args !== "string" || !args.trim()) throw new Error("plan-run requires a plan path");
     return { planPath: args, planId: id() };
   }
+  if (typeof args !== "string" || !args.trim()) throw new Error("noninteractive plan-run requires JSON with allowPlanCommits: true");
   let request; try { request = JSON.parse(args); } catch { throw new Error("noninteractive plan-run requires JSON with allowPlanCommits: true"); }
-  if (!request || typeof request.planPath !== "string" || !request.planPath.trim() || request.allowPlanCommits !== true) throw new Error("noninteractive plan-run requires JSON with allowPlanCommits: true");
+  if (!request || typeof request !== "object" || Array.isArray(request) || typeof request.planPath !== "string" || !request.planPath.trim() || request.allowPlanCommits !== true) throw new Error("noninteractive plan-run requires JSON with allowPlanCommits: true");
   return { planPath: request.planPath, planId: request.planId ?? id() };
 }
 function validHandle(handle) {
@@ -29,6 +30,16 @@ function validHandle(handle) {
     && [handle.rootSessionId, handle.planRunnerRunId, handle.asyncDir, handle.worktree, handle.baseCommit].every((value) => typeof value === "string" && value.length > 0);
 }
 function trustedHandle(handle) { if (!validHandle(handle)) throw new Error("Plan handle must be pi-plan-handle.v4"); return handle; }
+function toolResult(value, isError = false) {
+  return { content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }], ...(isError ? { isError: true } : {}) };
+}
+function pendingAttention(plan, { planId, requestId, expectedProjectionVersion }) {
+  if (!Number.isInteger(expectedProjectionVersion) || expectedProjectionVersion < 1) throw new Error("Plan Attention projection version is invalid");
+  const matches = (plan?.tasks ?? []).flatMap((task) => (task.attempts ?? []).filter((attempt) => attempt.status === "waiting-attention" && attempt.attention?.status === "pending" && attempt.attention.requestId === requestId).map((attempt) => ({ taskId: task.taskId, attemptId: attempt.attemptId, runId: attempt.runId, attention: attempt.attention })));
+  if (matches.length !== 1 || plan?.planId !== undefined && plan.planId !== planId) throw new Error("Plan Attention does not match exactly one pending Attempt");
+  if (matches[0].attention.projectionVersion !== expectedProjectionVersion) throw new Error("Plan Attention projection version is stale");
+  return matches[0];
+}
 function bootstrapRevisionIdentity(prepared, { planId, baseCommit, worktree }) {
   return `Open the approved Plan revision by calling plan_open exactly once with ${JSON.stringify({ planId, revision: prepared.revision, manifestSha256: prepared.manifestSha256, planIrHash: prepared.manifest.irHash, baseCommit, worktree, allowPlanCommits: true })}.`;
 }
@@ -50,6 +61,31 @@ export function createPlanLauncherExtension(pi, options = {}) {
   const revisionStore = options.revisionStore ?? createPlanRevisionStore({ stateRoot, now: options.now });
   const control = options.planControl ?? createPlanControl({ stateRoot, id: options.id, now: options.now });
   const activeHandles = new Map();
+  const launchFences = new Map();
+  const attentionPollers = new Map();
+  const schedule = options.schedule ?? setInterval;
+  const cancelSchedule = options.cancelSchedule ?? clearInterval;
+  const stopAttentionPoller = (planId) => {
+    const timer = attentionPollers.get(planId);
+    if (timer !== undefined) cancelSchedule(timer);
+    attentionPollers.delete(planId);
+  };
+  const startAttentionPoller = (handle) => {
+    if (attentionPollers.has(handle.planId)) return;
+    let polling = false;
+    const timer = schedule(async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const [raw, runner] = await Promise.all([readFile(path.join(stateRoot, "var", "plan-runs", handle.planId, "status.json"), "utf8"), rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir })]);
+        const plan = JSON.parse(raw);
+        if (["validated", "blocked", "cancelled", "interrupted"].includes(plan?.lifecycle) || ["complete", "failed", "stopped"].includes(runner?.state)) stopAttentionPoller(handle.planId);
+      } catch { /* Durable projection or Root RPC may be transiently unavailable. */ }
+      finally { polling = false; }
+    }, options.attentionPollIntervalMs ?? 1_000);
+    timer?.unref?.();
+    attentionPollers.set(handle.planId, timer);
+  };
   const rootBroker = () => options.rootBroker ?? requireRootBroker(pi);
   const rootIdentity = () => {
     const broker = rootBroker();
@@ -69,9 +105,12 @@ export function createPlanLauncherExtension(pi, options = {}) {
   }
   async function stopIfBound(binding, broker) {
     if (typeof binding?.runId !== "string" || !binding.runId) return;
-    await broker.upstream.stop({ runId: binding.runId, dir: binding.asyncDir }).catch((error) => { throw error; });
+    const params = typeof binding.asyncDir === "string" && binding.asyncDir ? { runId: binding.runId, dir: binding.asyncDir } : { runId: binding.runId };
+    await broker.upstream.stop(params).catch((error) => { throw error; });
   }
   async function launchPlan({ planPath, planId }, ctx = {}) {
+    if (launchFences.has(planId)) throw new Error(`Plan launch is already in progress: ${planId}`);
+    const pending = (async () => {
     if (!PLAN_ID.test(planId)) throw new Error("Invalid planId");
     const sourceBytes = await readFile(planPath);
     const prepared = await revisionStore.prepareRevision({ planId, sourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } });
@@ -84,9 +123,9 @@ export function createPlanLauncherExtension(pi, options = {}) {
       const worktree = lease.workspacePath;
       const reply = await broker.upstream.spawn({ agent: "plan-runner", title: `Plan ${planId}`, task: bootstrapRevisionIdentity(prepared, { planId, baseCommit, worktree }), cwd: worktree, context: "fresh", async: true, clarify: false, artifacts: true, output: false, timeoutMs: options.planRunnerTimeoutMs ?? DEFAULT_TIMEOUT_MS });
       binding = requireAsyncBinding(reply);
-      await broker.grantCaller({ callerRunId: binding.runId, planId, cwd: worktree, role: "plan-runner" });
+      await broker.grantCaller({ callerRunId: binding.runId, planId, cwd: worktree, originRoot, stateRoot, role: "plan-runner" });
       const handle = trustedHandle({ schemaVersion: HANDLE_SCHEMA, planId, revision: prepared.revision, manifestSha256: prepared.manifestSha256, sourceBytesSha256: prepared.manifest.sourceBytesSha256, planHash: prepared.manifest.planHash, planIrHash: prepared.manifest.irHash, rootSessionId: broker.rootSessionId, planRunnerRunId: binding.runId, asyncDir: binding.asyncDir, worktree, baseCommit });
-      pi.appendEntry(HANDLE_TYPE, handle); activeHandles.set(planId, handle); ctx.ui?.notify?.(`${HANDLE_PREFIX}${JSON.stringify(handle)}`, "info"); return handle;
+      pi.appendEntry(HANDLE_TYPE, handle); activeHandles.set(planId, handle); startAttentionPoller(handle); ctx.ui?.notify?.(`${HANDLE_PREFIX}${JSON.stringify(handle)}`, "info"); return handle;
     } catch (error) {
       const partial = binding ?? error?.binding; const cleanup = [];
       if (partial?.runId) cleanup.push(stopIfBound(partial, broker));
@@ -95,12 +134,30 @@ export function createPlanLauncherExtension(pi, options = {}) {
       if (failures.length) throw new AggregateError([error, ...failures], "Plan launch failed and cleanup failed", { cause: error });
       throw error;
     }
+    })();
+    launchFences.set(planId, pending);
+    try { return await pending; } finally { launchFences.delete(planId); }
   }
-  pi.registerTool({ name: "plan_run", label: "Run plan", description: "Launch an approved plan through the Plan dispatch authorization boundary.", parameters: { type: "object", properties: { planPath: { type: "string", minLength: 1 } }, required: ["planPath"], additionalProperties: false }, async execute(_id, params, _signal, _update, ctx) { try { const handle = await launchPlan({ planPath: params.planPath, planId: options.id?.() ?? crypto.randomUUID() }, ctx); return { content: [{ type: "text", text: JSON.stringify(handle, null, 2) }] }; } catch (error) { return { content: [{ type: "text", text: error.message }], isError: true }; } } });
+  pi.registerTool({ name: "plan_run", label: "Run plan", description: "Launch an approved plan through the Plan dispatch authorization boundary.", parameters: { type: "object", properties: { planPath: { type: "string", minLength: 1 } }, required: ["planPath"], additionalProperties: false }, async execute(_id, params, _signal, _update, ctx) { try { const handle = await launchPlan({ planPath: params.planPath, planId: options.id?.() ?? crypto.randomUUID() }, ctx); return toolResult(handle); } catch (error) { return toolResult(error instanceof Error ? error.message : String(error), true); } } });
+  pi.registerTool({ name: "plan_attention_reply", label: "Reply to plan attention", description: "Queue an explicit user decision for one pending durable Plan Attention request.", parameters: { type: "object", properties: { planId: { type: "string", minLength: 1 }, requestId: { type: "string", minLength: 1 }, expectedProjectionVersion: { type: "integer", minimum: 0 }, message: { type: "string", minLength: 1, maxLength: 65536 } }, required: ["planId", "requestId", "expectedProjectionVersion", "message"], additionalProperties: false }, async execute(_id, params, _signal, _update, ctx) {
+    try {
+      if (typeof params.message !== "string" || !params.message.trim()) throw new Error("Plan Attention reply message is required");
+      const handle = await getHandle(params.planId, ctx);
+      const plan = JSON.parse(await readFile(path.join(stateRoot, "var", "plan-runs", handle.planId, "status.json"), "utf8"));
+      const match = pendingAttention(plan, params);
+      const command = { planId: params.planId, requestId: params.requestId, taskId: match.taskId, attemptId: match.attemptId, runId: match.runId, expectedProjectionVersion: params.expectedProjectionVersion, message: params.message, occurredAt: options.now?.() ?? new Date().toISOString() };
+      const prior = (await control.readAttentionReplies(params.planId)).find((candidate) => candidate.requestId === params.requestId);
+      if (prior) {
+        for (const field of ["planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message"]) if (prior[field] !== command[field]) throw new Error("A different durable Plan Attention reply is already queued");
+      } else await control.writeAttentionReply(command);
+      return toolResult({ status: "queued", planId: params.planId, requestId: params.requestId });
+    } catch (error) { return toolResult(error instanceof Error ? error.message : String(error), true); }
+  } });
   pi.registerCommand("plan-run", { description: "Run an approved plan in a dedicated worktree.", async handler(args, ctx = {}) { const request = runRequest(args, ctx, () => options.id?.() ?? crypto.randomUUID()); if (interactive(ctx) && (typeof ctx.ui?.confirm !== "function" || !(await ctx.ui.confirm("Authorize plan commits", "Allow commits in the dedicated plan branch only; merge and push remain forbidden?")))) throw new Error("Plan commit authorization was not confirmed"); return launchPlan(request, ctx); } });
+  pi.on?.("session_shutdown", async () => { for (const planId of attentionPollers.keys()) stopAttentionPoller(planId); });
   pi.registerCommand("plan-status", { description: "Read Plan Runner status.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); return rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); } });
   pi.registerCommand("plan-open", { description: "Open the Plan Runner artifact.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); const status = await rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); return { asyncDir: handle.asyncDir, worktree: handle.worktree, status }; } });
   pi.registerCommand("plan-pause", { description: "Interrupt a running Plan Runner.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); return rootIdentity().upstream.interrupt({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); } });
-  pi.registerCommand("plan-cancel", { description: "Persist cancellation intent and stop the Plan Runner.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); if (typeof options.recordCancelIntent === "function") await options.recordCancelIntent(handle); else await control.requestCancel({ planId: handle.planId, runId: handle.planRunnerRunId }); await rootIdentity().upstream.stop({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); activeHandles.delete(planId); return `Plan ${planId} cancelled.`; } });
-  pi.registerCommand("plan-recover", { description: "Reattach the current Root Plan Runner.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); return rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); } });
+  pi.registerCommand("plan-cancel", { description: "Persist cancellation intent and stop the Plan Runner.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); if (typeof options.recordCancelIntent === "function") await options.recordCancelIntent(handle); else await control.requestCancel({ planId: handle.planId, runId: handle.planRunnerRunId }); await rootIdentity().upstream.stop({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); stopAttentionPoller(handle.planId); activeHandles.delete(planId); return `Plan ${planId} cancelled.`; } });
+  pi.registerCommand("plan-recover", { description: "Reattach the current Root Plan Runner.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); startAttentionPoller(handle); return rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); } });
 }

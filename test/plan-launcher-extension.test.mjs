@@ -47,7 +47,7 @@ test("plan-run launches a session-local Root Plan Runner and never persists a ha
     const spawn = calls[0][1];
     assert.deepEqual(Object.keys(spawn).sort(), ["agent", "artifacts", "async", "clarify", "context", "cwd", "output", "task", "timeoutMs", "title"]);
     assert.equal(spawn.agent, "plan-runner"); assert.equal(spawn.title, "Plan plan-one"); assert.equal(spawn.cwd, handle.worktree); assert.equal(spawn.context, "fresh"); assert.equal(spawn.async, true); assert.equal(spawn.clarify, false); assert.equal(spawn.artifacts, true); assert.equal(spawn.output, false); assert.ok(Number.isInteger(spawn.timeoutMs) && spawn.timeoutMs > 0);
-    assert.deepEqual(calls[1][1], { callerRunId: "plan-runner-run-1", planId: "plan-one", cwd: handle.worktree, role: "plan-runner" });
+    assert.deepEqual(calls[1][1], { callerRunId: "plan-runner-run-1", planId: "plan-one", cwd: handle.worktree, originRoot: root, stateRoot: root, role: "plan-runner" });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
