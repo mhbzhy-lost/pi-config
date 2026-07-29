@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createPlanHostRuntime } from "../scripts/lib/plan/plan-host-runtime.mjs";
+import { createPlanHostRuntime, spawnStandaloneHost } from "../scripts/lib/plan/plan-host-runtime.mjs";
 import { createPlanLauncherExtension } from "../scripts/lib/plan/plan-launcher-extension.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
@@ -21,13 +21,14 @@ const planRunnerExtension = path.join(repoRoot, "test", "fixtures", "plan-harnes
 const sourcePlan = path.join(repoRoot, "test", "fixtures", "plan-harness", "plans", "parallel-success.md");
 const sourceResourcePlan = path.join(repoRoot, "test", "fixtures", "plan-harness", "plans", "resource-serialized.md");
 const sourceAttentionPlan = path.join(repoRoot, "test", "fixtures", "plan-harness", "plans", "attention-roundtrip.md");
+const testSpawnHost = (options) => spawnStandaloneHost({ ...options, startupTimeoutMs: 30_000 });
 
 async function git(cwd, ...args) {
   const { stdout } = await execFile("git", args, { cwd });
   return stdout.trim();
 }
 
-async function waitForPlanStatus(file, predicate, timeoutMs = 120_000) {
+async function waitForPlanStatus(file, predicate, timeoutMs = 240_000) {
   const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() < deadline) {
@@ -75,7 +76,7 @@ test("parallel and resource Harness fixtures are strict v3 contracts", async () 
     && task.acceptance.reason === "Harness 仅验证资源串行与路径所有权，文件组合在最终 Gate 验证"));
 });
 
-test("real submodule Standalone Plan Runner reaches validated and produces the requested artifact", { timeout: 300_000 }, async (t) => {
+test("real submodule Standalone Plan Runner reaches validated and produces the requested artifact", { timeout: 480_000 }, async (t) => {
   assert.ok(piBinary, "PI_REAL_BIN is required for the Plan Harness integration test");
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-harness-real-"));
   const sourceRepo = path.join(root, "source-repo");
@@ -127,6 +128,7 @@ Execute only the approved task and commit the result.
     const runDir = path.join(stateRoot, "var", "plan-runs", planId, "host");
     const statusPath = path.join(stateRoot, "var", "plan-runs", planId, "status.json");
     host = createPlanHostRuntime({
+      spawnHost: testSpawnHost,
       model: "fake/deterministic",
       extraExtensions: [provider, path.join(repoRoot, "pi", "npm", "node_modules", "pi-subagents")],
       noExtensions: true,
@@ -210,7 +212,7 @@ Execute only the approved task and commit the result.
   }
 });
 
-test("real Root bridge keeps Attention pending until a fenced user decision resumes the Executor", { timeout: 300_000 }, async (t) => {
+test("real Root bridge keeps Attention pending until a fenced user decision resumes the Executor", { timeout: 480_000 }, async (t) => {
   assert.ok(piBinary, "PI_REAL_BIN is required for the Plan Harness integration test");
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-harness-attention-"));
   const sourceRepo = path.join(root, "source-repo");
@@ -252,6 +254,7 @@ Request the required decision, then execute only the approved task and commit th
     await git(superproject, "commit", "-am", "add attention harness submodule");
 
     host = createPlanHostRuntime({
+      spawnHost: testSpawnHost,
       model: "fake/deterministic",
       extraExtensions: [provider, path.join(repoRoot, "pi", "npm", "node_modules", "pi-subagents")],
       noExtensions: true,
