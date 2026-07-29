@@ -64,6 +64,8 @@ test("migration keeps ordinary agent profiles independent from subagent tools", 
   assert.equal(spark.tools.includes("subagent"), false);
   assert.equal(executor.extensions, undefined);
   assert.equal(spark.extensions, undefined);
+  assert.equal(executor.subagentOnlyExtensions, "pi/child-extensions/root-session-owner.ts");
+  await access(join(repoRoot, executor.subagentOnlyExtensions));
 });
 
 test("migration keeps the Plan profiles and child extension isolated", async () => {
@@ -91,9 +93,11 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
   assert.equal(reviewer.extensions, undefined);
   assert.equal(runner.subagentOnlyExtensions, ".pi-subagents/plan-runner-entry.mjs");
   const runnerTools = new Set(runner.tools.split(","));
-  assert.equal(runnerTools.has("subagent"), false);
-  assert.equal(runnerTools.has("subagent_wait"), true);
-  assert.equal(runnerTools.has("subagent_supervisor"), true);
+  for (const tool of ["subagent", "subagent_wait", "subagent_supervisor", "plan_executor_supervisor"]) {
+    assert.equal(runnerTools.has(tool), false);
+  }
+  assert.equal(runnerTools.has("plan_read_revision"), true);
+  assert.equal(runnerTools.has("plan_amend"), true);
   assert.equal(reviewer.tools.includes("subagent"), false);
   assert.equal(reviewer.tools.includes("write"), false);
   await access(join(repoRoot, "pi", "child-extensions", "plan-capsule.ts"));

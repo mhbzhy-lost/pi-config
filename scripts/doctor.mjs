@@ -36,8 +36,8 @@ const REQUIRED_PROFILES = {
     subagent: false,
     extensions: undefined,
     childExtension: ".pi-subagents/plan-runner-entry.mjs",
-    requiredTools: ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "subagent_wait", "subagent_supervisor"],
-    forbiddenTools: ["subagent", "contact_supervisor"],
+    requiredTools: ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend"],
+    forbiddenTools: ["subagent", "subagent_wait", "subagent_supervisor", "plan_executor_supervisor", "contact_supervisor"],
   },
   "plan-reviewer": { model: "codex-pool/gpt-5.6-sol", subagent: false, extensions: undefined },
 };
