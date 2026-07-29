@@ -105,14 +105,27 @@ export function createPiSubagentsExecutionBackend({
 
   async function terminalProof(entry) {
     if (entry.terminalProof) return entry.terminalProof;
-    const binding = await stopBound(entry);
+    const binding = entry.binding;
+    const readProof = async () => {
+      const artifacts = await readArtifacts({ artifactDir: binding.asyncDir, binding: { runId: binding.runId, sessionId: binding.sessionId, cwd: binding.cwd, output: binding.output } });
+      if (artifacts?.status?.kind === "stable" && TERMINAL_STATES.has(artifacts.status.value?.state)) {
+        return Object.freeze({ kind: "terminal", dispatchId: entry.request.dispatchId, runId: binding.runId, asyncDir: binding.asyncDir, artifactSha256: createHash("sha256").update(stableJson(artifacts.status.value)).digest("hex") });
+      }
+      return null;
+    };
+    let initial = null;
+    try {
+      initial = await readProof();
+    } catch (error) {
+      if (error?.code === "RUNTIME_ARTIFACT_BINDING_MISMATCH" || error?.code === "RUNTIME_ARTIFACT_OUTPUT_MISMATCH") throw error;
+    }
+    if (initial) return initial;
+    await stopBound(entry);
     const deadline = Date.now() + supersedeTimeoutMs;
     while (!disposed && Date.now() <= deadline) {
       try {
-        const artifacts = await readArtifacts({ artifactDir: binding.asyncDir, binding: { runId: binding.runId, sessionId: binding.sessionId, cwd: binding.cwd, output: binding.output } });
-        if (artifacts?.status?.kind === "stable" && TERMINAL_STATES.has(artifacts.status.value?.state)) {
-          return Object.freeze({ kind: "terminal", dispatchId: entry.request.dispatchId, runId: binding.runId, asyncDir: binding.asyncDir, artifactSha256: createHash("sha256").update(stableJson(artifacts.status.value)).digest("hex") });
-        }
+        const proof = await readProof();
+        if (proof) return proof;
       } catch (error) {
         if (error?.code === "RUNTIME_ARTIFACT_BINDING_MISMATCH" || error?.code === "RUNTIME_ARTIFACT_OUTPUT_MISMATCH") throw error;
       }

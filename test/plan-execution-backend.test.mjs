@@ -356,7 +356,7 @@ test("supersede supports recovered completed bindings and fails closed on reply 
   });
   await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
   assert.equal((await backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" })).kind, "terminal");
-  assert.deepEqual(stops, [{ runId: "run-1", dir: "/async/run-1" }]);
+  assert.deepEqual(stops, []);
   backend.dispose();
 });
 
@@ -403,7 +403,8 @@ test("supersede retries an unbound timeout after a late lifecycle start", async 
 test("supersede retries failed stops while sharing an in-flight stop and caches terminal proof", async () => {
   const events = createEvents();
   let stops = 0;
-  const backend = createPiSubagentsExecutionBackend({ events, supersedePollIntervalMs: 1, rpc: { async ping() { return capabilities(); }, async spawn() { return { details: { runId: "run-1", asyncDir: "/async/run-1" } }; }, async stop() { stops += 1; if (stops === 1) throw new Error("transient"); }, dispose() {} }, readArtifacts: async () => ({ status: { kind: "stable", value: { state: "stopped" } } }) });
+  let artifactReads = 0;
+  const backend = createPiSubagentsExecutionBackend({ events, supersedePollIntervalMs: 1, rpc: { async ping() { return capabilities(); }, async spawn() { return { details: { runId: "run-1", asyncDir: "/async/run-1" } }; }, async stop() { stops += 1; if (stops === 1) throw new Error("transient"); }, dispose() {} }, readArtifacts: async () => ({ status: { kind: "stable", value: { state: artifactReads++ < 2 ? "running" : "stopped" } } }) });
   await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
   await backend.spawn(spawnInput());
   await assert.rejects(backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" }));
@@ -471,4 +472,28 @@ test("consumes deferred and background stop rejections without hiding awaited er
   } finally {
     process.off("unhandledRejection", listener);
   }
+});
+
+test("supersede proves terminal artifacts before stopping and fails closed on initial identity mismatch", async () => {
+  for (const state of ["complete", "failed", "paused", "stopped"]) {
+    const subject = supersedeHarness({ artifacts: async () => ({ status: { kind: "stable", value: { state } } }) });
+    await subject.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+    await subject.backend.spawn(spawnInput());
+    assert.equal((await subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" })).kind, "terminal");
+    assert.deepEqual(subject.stops, []);
+    subject.backend.dispose();
+  }
+  let reads = 0;
+  const subject = supersedeHarness({ artifacts: async () => ({ status: { kind: "stable", value: { state: reads++ === 0 ? "running" : "stopped" } } }) });
+  await subject.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  await subject.backend.spawn(spawnInput());
+  await subject.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" });
+  assert.equal(subject.stops.length, 1);
+  subject.backend.dispose();
+  const mismatch = supersedeHarness({ artifacts: async () => { const error = new Error("mismatch"); error.code = "RUNTIME_ARTIFACT_BINDING_MISMATCH"; throw error; } });
+  await mismatch.backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  await mismatch.backend.spawn(spawnInput());
+  await assert.rejects(mismatch.backend.supersede({ dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1" }), (error) => error.code === "RUNTIME_ARTIFACT_BINDING_MISMATCH");
+  assert.deepEqual(mismatch.stops, []);
+  mismatch.backend.dispose();
 });
