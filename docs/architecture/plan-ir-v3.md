@@ -52,7 +52,7 @@ Harness/revision service 是唯一 parser/compiler 所有者：读取 source byt
 | 节点 `scheduling` | `id`、`sourceOrder`、dependencies、allowed paths、resources、`execution.agent` | frontier、路径和资源调度。 |
 | 节点 `full` | 整个节点，不含其 `hashes` | accepted/integrated Task 的不可改写合同。 |
 | 节点 `effective` | context hash、verification hash、节点 full hash | 当前 revision 下实际派发的 Task 合同。 |
-| `dispatchContextHash` | Coordinator 生成的 execution prompt、attempt ID、base commit 与 dependency receipts | dispatch 的传输上下文绑定，不是第二领域 IR。 |
+| `dispatchContextHash` | `planIrHash`、`taskHash`、`schedulingHash`、`attemptId`、`baseCommit`、`output`、`dependencyReceipts`；不以 prompt 字符串代替 | dispatch 的传输上下文绑定，不是第二领域 IR。 |
 
 只改 Task body 会改 `semantics/full/effective` 与根 hash，不改 `scheduling`；改依赖、路径、资源、source order 或 agent 会改 scheduling、graph、full/effective 与根 hash；改 Plan 指令或验证命令会改 context 或 verification、所有受影响 effective 与根 hash。
 
