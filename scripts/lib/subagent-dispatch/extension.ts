@@ -325,6 +325,7 @@ export function createTypedSubagentExtension(
     titleRegistry = getTitleRegistry(cleanupStore),
     extraDisposables = [],
     renderSubagentResult,
+    beforeDispose = async () => {},
   } = {},
 ) {
   const registry = cleanupRegistry(cleanupStore);
@@ -377,8 +378,12 @@ export function createTypedSubagentExtension(
 
   pi.on("session_shutdown", async () => {
     if (registry.get(pi)?.token !== token) return;
-    dispose();
-    registry.delete(pi);
+    try {
+      await beforeDispose();
+    } finally {
+      dispose();
+      registry.delete(pi);
+    }
   });
 
   return Object.freeze({ tool, supervisorTool, dispose });
@@ -388,6 +393,7 @@ export function installHeadlessTypedSubagentRuntime(pi, {
   bootstrap,
   completionNotifierFactory,
   resolveSessionId,
+  beforeRuntimeDispose,
   ...options
 } = {}) {
   if (typeof bootstrap !== "function") {
@@ -428,5 +434,6 @@ export function installHeadlessTypedSubagentRuntime(pi, {
     supervisorAdapter,
     titleRegistry,
     extraDisposables: completionNotifier ? [completionNotifier] : [],
+    beforeDispose: beforeRuntimeDispose,
   });
 }

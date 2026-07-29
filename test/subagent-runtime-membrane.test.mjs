@@ -277,6 +277,20 @@ test("project subagent tool retains the injected display-only result renderer", 
   assert.equal(pi.tools[0].renderResult, renderSubagentResult);
 });
 
+test("beforeDispose completes before RPC disposal in the single shutdown handler", async () => {
+  const pi = createPi();
+  const order = [];
+  const rpc = createRpc({ dispose() { order.push("dispose"); } });
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    async beforeDispose() { order.push("before"); },
+  });
+  assert.equal((pi.handlers.get("session_shutdown") ?? []).length, 1);
+  await pi.handlers.get("session_shutdown")[0]({ reason: "shutdown" });
+  assert.deepEqual(order, ["before", "dispose"]);
+});
+
 test("project subagent schema exposes an object root to OpenAI-compatible providers", () => {
   const pi = createPi();
 
