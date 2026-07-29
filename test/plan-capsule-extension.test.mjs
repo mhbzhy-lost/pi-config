@@ -120,6 +120,23 @@ test("runtime capability check waits until plan_open after extension session han
   assert.deepEqual(calls, ["assert"]);
 });
 
+test("before_agent_start checks capabilities before recovering an opened Plan", async () => {
+  const calls = [];
+  const { handlers } = setup({
+    assertRuntimeCapabilities: async () => calls.push("capabilities"),
+    recoverSupersededAttempts: async () => calls.push("recovery"),
+  });
+  const ctx = context([{
+    customType: "pi-plan-event-v1",
+    data: created,
+  }]);
+
+  await handlers.get("session_start")({}, ctx);
+  await handlers.get("before_agent_start")({}, ctx);
+
+  assert.deepEqual(calls, ["capabilities", "recovery"]);
+});
+
 test("plan_open fails before binding when runtime capability remains unavailable", async () => {
   const binding = openBinding();
   let bindingCalled = false;
@@ -325,6 +342,29 @@ test("capsule resolves only the authorized successful native Supervisor reply", 
   assert.equal(resolved[0].requestId, "request-1");
   assert.equal(resolved[0].message, "Use target A");
 });
+
+test("plan revision tools use exact schemas and forward only params plus context", async () => {
+  const calls = [];
+  const { tools } = setup({
+    validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
+    readCurrentRevision: async (value) => { calls.push(["read", value]); return { revision: 1 }; },
+    amendPlan: async (params, value) => { calls.push(["amend", params, value]); return { revision: 2 }; },
+  });
+  await execute(tools.get("plan_open"), openBinding());
+  const amend = tools.get("plan_amend");
+  assert.deepEqual(tools.get("plan_read_revision").parameters, { type: "object", properties: {}, additionalProperties: false });
+  assert.deepEqual(Object.keys(amend.parameters.properties).sort(), ["baseRevision", "expectedProjectionVersion", "reason", "requestId", "source"]);
+  assert.deepEqual(amend.parameters.required, ["expectedProjectionVersion", "baseRevision", "requestId", "reason", "source"]);
+  assert.equal(amend.parameters.additionalProperties, false);
+  const ctx = context();
+  await execute(tools.get("plan_read_revision"), {}, ctx);
+  await execute(amend, { expectedProjectionVersion: 1, baseRevision: 1, requestId: "amend-1", reason: "fix", source: "# Plan" }, ctx);
+  assert.deepEqual(calls, [
+    ["read", { ctx }],
+    ["amend", { expectedProjectionVersion: 1, baseRevision: 1, requestId: "amend-1", reason: "fix", source: "# Plan" }, { ctx }],
+  ]);
+});
+
 
 test("plan lifecycle tools fail closed until their domain dependencies are injected", async () => {
   const { tools } = setup({ validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: ["task-1"] }) });

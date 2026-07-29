@@ -4,7 +4,7 @@ import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { allocateAttemptWorkspace as defaultAllocateAttemptWorkspace, releaseAttemptWorkspace as defaultReleaseAttemptWorkspace } from "./attempt-workspace.mjs";
+import { allocateAttemptWorkspace as defaultAllocateAttemptWorkspace, inspectAttemptWorkspace as defaultInspectAttemptWorkspace, releaseAttemptWorkspace as defaultReleaseAttemptWorkspace } from "./attempt-workspace.mjs";
 import { validateAttemptResult as defaultValidateAttemptResult } from "./attempt-validator.mjs";
 import { createIntegrationQueue } from "./integration-queue.mjs";
 import { createPlanCoordinator } from "./coordinator.mjs";
@@ -115,6 +115,7 @@ export function createPlanRunnerDependencies({
   externalReview,
   executionBackend,
   allocateAttemptWorkspace = defaultAllocateAttemptWorkspace,
+  inspectAttemptWorkspace = defaultInspectAttemptWorkspace,
   releaseAttemptWorkspace = defaultReleaseAttemptWorkspace,
   validateAttemptResult = defaultValidateAttemptResult,
   integrationOwnerToken = crypto.randomUUID(),
@@ -166,10 +167,10 @@ export function createPlanRunnerDependencies({
     now,
   });
 
-  async function appendEvent(ctx, type, data, expectedProjectionVersion) {
+  async function appendEvent(ctx, type, data, expectedProjectionVersion, planId) {
     const current = currentProjection(ctx);
     const expected = expectedProjectionVersion ?? current.version;
-    return writer.append({ expectedProjectionVersion: expected, planId: current.planId, type, data });
+    return writer.append({ expectedProjectionVersion: expected, planId: current.planId ?? planId, type, data });
   }
 
   async function derivedStatus(ctx) {
@@ -193,6 +194,20 @@ export function createPlanRunnerDependencies({
     return { revision: current.revision, planHash: current.manifest.planHash, irHash: current.manifest.irHash, source };
   }
 
+  async function releaseSupersededWorkspace(attemptId, { ctx } = {}) {
+    const projection = currentProjection(ctx);
+    const attempt = projection.attempts.get(attemptId);
+    if (!attempt || attempt.workspaceReleased || attempt.status !== "superseded") return;
+    let clean = false;
+    if (attempt.supersedeProof?.kind === "never-started" && !attempt.resultCommit) {
+      try { clean = (await inspectAttemptWorkspace(attempt.workspace)).clean === true; } catch {}
+    }
+    const disposition = clean ? "superseded-cleanup" : "superseded-preserve";
+    await appendEvent(ctx, "attempt.workspace-released", { attemptId, disposition, evidence: { kind: disposition } }, projection.version);
+    await derivedStatus(ctx);
+    await releaseAttemptWorkspace(attempt.workspace, { ownerToken: attempt.workspace.ownerToken, disposition });
+  }
+
   async function supersedeAttempt({ attemptId, expectedTaskHash }, { ctx } = {}) {
     let projection = currentProjection(ctx);
     const attempt = projection.attempts.get(attemptId);
@@ -208,10 +223,14 @@ export function createPlanRunnerDependencies({
       } catch (error) {
         if (error?.code !== "EXECUTION_DISPATCH_NOT_FOUND") throw error;
         if (attempt.supersededFromStatus === "dispatch-requested") {
-          await executionBackend.recoverDispatch({ dispatchId: attempt.dispatchId, attemptId, agent: attempt.tool.agent, task: attempt.tool.task, cwd: attempt.tool.cwd, output: attempt.tool.output, timeoutMs: attempt.tool.timeoutMs });
+          if (typeof executionBackend.recoverDispatch !== "function") throw new Error("Execution dispatch recovery capability is unavailable.");
+          const request = { dispatchId: attempt.dispatchId, attemptId, agent: attempt.tool?.agent, task: attempt.tool?.task, cwd: attempt.tool?.cwd, output: attempt.tool?.output, timeoutMs: attempt.tool?.timeoutMs };
+          if (Object.values(request).some((value) => value === undefined || value === null)) throw new Error("Persisted execution dispatch recovery data is incomplete.");
+          await executionBackend.recoverDispatch(request);
         } else {
-          if (!attempt.sessionFile) throw new Error("Persisted execution sessionFile is required for recovery.");
-          await executionBackend.recoverBinding({ dispatchId: attempt.dispatchId, attemptId, runId: attempt.runId, asyncDir: attempt.asyncDir, cwd: attempt.tool?.cwd ?? attempt.workspace.path, output: attempt.tool?.output, sessionId: attempt.sessionFile, sessionFile: attempt.sessionFile });
+          if (typeof executionBackend.recoverBinding !== "function") throw new Error("Execution binding recovery capability is unavailable.");
+          if (!attempt.sessionFile || !attempt.runId || !attempt.asyncDir || !attempt.tool?.output) throw new Error("Persisted execution binding recovery data is incomplete.");
+          await executionBackend.recoverBinding({ dispatchId: attempt.dispatchId, attemptId, runId: attempt.runId, asyncDir: attempt.asyncDir, cwd: attempt.tool.cwd, output: attempt.tool.output, sessionId: attempt.sessionFile, sessionFile: attempt.sessionFile });
         }
         evidence = await executionBackend.supersede({ dispatchId: attempt.dispatchId, attemptId });
       }
@@ -220,31 +239,25 @@ export function createPlanRunnerDependencies({
     const latest = projection.attempts.get(attemptId);
     if (!latest || latest.status !== "supersede-requested" || latest.supersededTaskHash !== expectedTaskHash || latest.supersededByRevision !== projection.revision.number) throw new Error("Attempt supersede cleanup changed during proof.");
     await appendEvent(ctx, "attempt.superseded", { attemptId, taskId: latest.taskId, supersededByRevision: projection.revision.number, oldTaskHash: expectedTaskHash, evidence }, projection.version);
-    projection = currentProjection(ctx);
-    const superseded = projection.attempts.get(attemptId);
-    if (superseded.workspaceReleased) return;
-    const clean = superseded.supersedeProof?.kind === "never-started" && !superseded.resultCommit
-      ? await import("./attempt-workspace.mjs").then(({ inspectAttemptWorkspace }) => inspectAttemptWorkspace(superseded.workspace).then((inspection) => inspection.clean))
-      : false;
-    const disposition = clean ? "superseded-cleanup" : "superseded-preserve";
-    await appendEvent(ctx, "attempt.workspace-released", { attemptId, disposition, evidence: { kind: disposition } }, projection.version);
-    await derivedStatus(ctx);
-    await releaseAttemptWorkspace(superseded.workspace, { ownerToken: superseded.workspace.ownerToken, disposition });
+    await releaseSupersededWorkspace(attemptId, { ctx });
   }
 
   async function recoverSupersededAttempts({ ctx } = {}) {
     const projection = currentProjection(ctx);
     if (!projection?.revision || !projection.planId) return;
-    const committed = assertCurrentRevisionIdentity(await revisionStore.readRevision(projection.planId, projection.revision.number), projection);
-    await revisionStore.writeCurrent(committed);
     const errors = [];
+    try {
+      const committed = assertCurrentRevisionIdentity(await revisionStore.readRevision(projection.planId, projection.revision.number), projection);
+      let current;
+      try { current = await revisionStore.readCurrent?.(projection.planId); } catch {}
+      if (!current || current.revision !== committed.revision || current.manifestSha256 !== committed.manifestSha256
+        || current.manifest?.irHash !== committed.manifest.irHash) await revisionStore.writeCurrent(committed);
+    } catch (error) { errors.push(error); }
     for (const [attemptId, attempt] of [...currentProjection(ctx).attempts].sort(([a], [b]) => a.localeCompare(b))) {
       if (attempt.workspaceReleased || !["supersede-requested", "superseded"].includes(attempt.status)) continue;
       try {
         if (attempt.status === "superseded") {
-          await appendEvent(ctx, "attempt.workspace-released", { attemptId, disposition: "superseded-preserve", evidence: { kind: "superseded-preserve" } }, currentProjection(ctx).version);
-          await derivedStatus(ctx);
-          await releaseAttemptWorkspace(attempt.workspace, { ownerToken: attempt.workspace.ownerToken, disposition: "superseded-preserve" });
+          await releaseSupersededWorkspace(attemptId, { ctx });
         } else await supersedeAttempt({ attemptId, expectedTaskHash: attempt.supersededTaskHash }, { ctx });
       } catch (error) { errors.push(error); }
     }
@@ -357,6 +370,7 @@ export function createPlanRunnerDependencies({
     const control = controlFor(binding);
     const request = await control.readRequest(binding.planId);
     if (!request) return null;
+    await recoverSupersededAttempts({ ctx });
     const current = currentProjection(ctx);
     if (current.lifecycle === "cancelled") {
       const ack = { ...request, lifecycle: "cancelled", result: "accepted", occurredAt: now() };
@@ -408,6 +422,7 @@ export function createPlanRunnerDependencies({
   }
 
   return {
+    appendPlanEvent: appendEvent,
     readCurrentRevision,
     amendPlan: (input, { ctx }) => createPlanAmendmentService({ revisionStore, eventWriter: writer, currentProjection: () => currentProjection(ctx), supersedeAttempt: (input) => supersedeAttempt(input, { ctx }) }).amend(input),
     recoverSupersededAttempts,
@@ -525,6 +540,7 @@ export function createPlanRunnerDependencies({
       return () => clearInterval(timer);
     },
     async status({ ctx }) {
+      await recoverSupersededAttempts({ ctx });
       await consumeExecutionFacts(ctx);
       return derivedStatus(ctx);
     },
@@ -537,11 +553,13 @@ export function createPlanRunnerDependencies({
     },
     async blockPlan({ reason }, { ctx }) {
       if (typeof reason !== "string" || !reason.trim()) throw new Error("Block reason is required.");
+      await recoverSupersededAttempts({ ctx });
       const current = currentProjection(ctx);
       await appendEvent(ctx, "plan.blocked", { reason }, current.version);
       return derivedStatus(ctx);
     },
     async continuePlan(input = {}, { ctx }) {
+      await recoverSupersededAttempts({ ctx });
       const current = currentProjection(ctx);
       if (!current.planId || TERMINAL.has(current.lifecycle)) throw new Error("Plan cannot continue.");
       if (input.expectedProjectionVersion !== undefined && input.expectedProjectionVersion !== current.version) {
@@ -553,12 +571,14 @@ export function createPlanRunnerDependencies({
       return result;
     },
     async recoverExecutors({ facts = [] } = {}, { ctx }) {
+      await recoverSupersededAttempts({ ctx });
       const coordinator = await coordinatorFor(ctx);
       const result = await coordinator.recover({ facts });
       await derivedStatus(ctx);
       return result;
     },
     async collectExecutorResults({ facts = [] } = {}, { ctx }) {
+      await recoverSupersededAttempts({ ctx });
       const coordinator = await coordinatorFor(ctx);
       const result = await coordinator.recover({ facts });
       await derivedStatus(ctx);
@@ -580,6 +600,7 @@ export function createPlanRunnerDependencies({
       return stoppingActiveRuns;
     },
     async verifyPlan({ ctx }) {
+      await recoverSupersededAttempts({ ctx });
       const current = currentProjection(ctx);
       if (!current.planId) throw new Error("Plan is not open.");
       const plan = await approvedPlan(current);

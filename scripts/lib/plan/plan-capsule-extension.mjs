@@ -300,7 +300,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
           },
           tasks,
           revision: binding.revisionIdentity ?? binding.revision,
-        }, 0);
+        }, 0, input.planId);
         await options.writeCurrentRevision(binding.revision);
         if (typeof options.startPlanControl === "function") {
           const stop = await options.startPlanControl({ binding, ctx });

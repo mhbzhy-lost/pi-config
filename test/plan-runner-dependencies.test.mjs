@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { createPlanRunnerDependencies } from "../scripts/lib/plan/plan-runner-dependencies.mjs";
+import { createPlanCapsuleExtension } from "../scripts/lib/plan/plan-capsule-extension.mjs";
 import { createPlanControl } from "../scripts/lib/plan/plan-control.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 
@@ -288,6 +289,24 @@ test("reads and acknowledges cancel control from a stateRoot separate from the G
   }
   await pending;
   assert.equal(result?.lifecycle, "cancelled");
+});
+
+test("cancel polling with no durable request does not run recovery or touch the revision pointer", async (t) => {
+  const repo = await fixture();
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  let writes = 0;
+  const deps = runnerDependencies(repo, {
+    revisionStore: {
+      async readRevision() { return repo.revision; },
+      async readCurrent() { return null; },
+      async writeCurrent() { writes++; },
+    },
+  });
+  const ctx = context(repo.worktree, [{ customType: "pi-plan-event-v1", data: created(binding) }]);
+
+  assert.equal(await deps.processCancelControl({ binding, ctx }), null);
+  assert.equal(writes, 0);
 });
 
 test("child control loop persists cancellation and acknowledges exactly once", async (t) => {
@@ -601,4 +620,29 @@ test("verification validates four passing gates on the observed accumulator HEAD
   assert.equal(status.lifecycle, "validated");
   assert.equal(status.validatedHead, await git(repo.worktree, "rev-parse", "HEAD"));
   assert.equal(appended.at(-1).type, "plan.validated");
+});
+
+test("real dependencies expose plan_open event append capability to the Capsule", async (t) => {
+  const repo = await fixture();
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const tools = new Map();
+  const entries = [];
+  const branch = [];
+  const ctx = context(repo.worktree, branch);
+  const pi = {
+    registerTool(tool) { tools.set(tool.name, tool); },
+    on() {},
+    setActiveTools() {},
+    appendEntry(type, data) {
+      entries.push({ type, data });
+      branch.push({ customType: type, data });
+    },
+  };
+  const deps = runnerDependencies(repo, { pi });
+  createPlanCapsuleExtension(pi, deps);
+
+  const result = await tools.get("plan_open").execute("open", await bindingInput(repo), undefined, undefined, ctx);
+
+  assert.equal(result.isError, false, result.content[0].text);
+  assert.deepEqual(entries.map(({ data }) => data.type), ["plan.created"]);
 });
