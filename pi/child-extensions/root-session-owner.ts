@@ -18,8 +18,10 @@ export default function rootSessionOwner(pi: any) {
 
 export async function installRootSessionOwner(pi: any, options: Options = {}) {
   const env = options.env ?? process.env;
+  const enabled = env.PI_ROOT_SUBAGENT_BROKER_ENABLED === "1";
   const rootSessionId = env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID;
   const callerRunId = env.PI_SUBAGENT_RUN_ID;
+  if (!enabled) return Object.freeze({ dispose() {} });
   if (!rootSessionId || !callerRunId) throw new Error("Root ownership requires PI_SUBAGENT_RUN_ID and PI_SUBAGENT_ORCHESTRATOR_SESSION_ID");
   const createClient = options.createClient ?? createRootBrokerClient;
   const client = createClient({ rootSessionId, callerRunId });

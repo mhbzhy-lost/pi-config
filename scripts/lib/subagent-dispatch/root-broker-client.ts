@@ -17,6 +17,7 @@ type ClientOptions = {
 };
 
 type Subscription = { dispose(): void; closed: Promise<void> };
+const MAX_BUFFER_BYTES = 64 * 1024;
 
 function clientError(message: string, code?: string) {
   const error = new Error(message);
@@ -51,6 +52,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
 
   const envelope = async (method: string, params: Record<string, unknown>) => {
     const current = await grant();
+    assertLive();
     return {
       schemaVersion: "pi-root-subagent-broker-request.v1",
       requestId: safeRequestId(createId),
@@ -86,6 +88,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
       socket.once("close", () => { if (!settled) finish(clientError("Root broker disconnected before response", "BROKER_DISCONNECTED")); });
       socket.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
+        if (Buffer.byteLength(buffer, "utf8") > MAX_BUFFER_BYTES) return finish(clientError("Root broker response is too large", "BROKER_RESPONSE_TOO_LARGE"));
         const newline = buffer.indexOf("\n");
         if (newline < 0) return;
         let response;
@@ -113,7 +116,10 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
       const cleanup = () => sockets.delete(socket);
       const fail = (error: Error) => {
         cleanup();
-        if (!acknowledged) reject(error);
+        if (!acknowledged) {
+          subscriptions.delete(handle);
+          reject(error);
+        }
         else if (localDispose) settleClosed();
         else rejectClosed(error);
       };
@@ -131,6 +137,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
       socket.once("close", () => fail(clientError("Root broker subscription disconnected", "BROKER_DISCONNECTED")));
       socket.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
+        if (Buffer.byteLength(buffer, "utf8") > MAX_BUFFER_BYTES) { socket.destroy(clientError("Root broker subscription is too large", "BROKER_RESPONSE_TOO_LARGE")); return; }
         for (;;) {
           const newline = buffer.indexOf("\n");
           if (newline < 0) break;

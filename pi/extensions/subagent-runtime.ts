@@ -27,6 +27,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     return new Text(theme.fg(result?.isError ? "error" : "dim", text), 0, 0);
   };
   let brokerStarted = false;
+  let previousBrokerMarker: string | undefined;
   installHeadlessTypedSubagentRuntime(pi, {
     bootstrap: upstreamSubagentRuntime,
     completionNotifierFactory(api: ExtensionAPI, state: { currentSessionId: string | null }) {
@@ -40,6 +41,9 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         await broker.closeRootSession();
       } finally {
         unbindRootBroker(pi, broker);
+        if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
+        else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
+        previousBrokerMarker = undefined;
         brokerStarted = false;
       }
     },
@@ -48,8 +52,10 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     if (brokerStarted) throw new Error("Root subagent broker is already started");
     const rootSessionId = resolveCurrentSessionId(ctx.sessionManager);
-    const broker = new RootBrokerServer({ rootSessionId, upstream: createTypedSubagentRpcClient(pi.events) });
+    const broker = new RootBrokerServer({ rootSessionId, upstream: createTypedSubagentRpcClient(pi.events), events: pi.events });
+    previousBrokerMarker = process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
     await startAndBindRootBroker(pi, broker);
+    process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = "1";
     brokerStarted = true;
   });
   // Upstream registers the same custom type during bootstrap; the project renderer must win last-write ownership.

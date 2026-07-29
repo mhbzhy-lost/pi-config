@@ -12,8 +12,13 @@ const REQUIRED_RPC_METHODS = ["ping", "spawn", "status", "interrupt", "stop"];
 
 export default function planRunner(pi: ExtensionAPI) {
   const rootOwned = installRootOwnedSubagent(pi);
-  void installRootSessionOwner(pi, {
-    createClient: () => rootOwned.rpc,
+  let owner: Awaited<ReturnType<typeof installRootSessionOwner>> | undefined;
+  pi.on("session_start", async () => {
+    owner = await installRootSessionOwner(pi);
+  });
+  pi.on("session_shutdown", () => {
+    owner?.dispose();
+    owner = undefined;
   });
 
   const executionFacts: unknown[] = [];

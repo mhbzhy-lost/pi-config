@@ -119,7 +119,7 @@ test("root ownership guard retries only a missing grant and terminates once on r
   let attempts = 0;
   let close;
   const owner = await installRootSessionOwner({ sendMessage: async (message) => messages.push(message) }, {
-    env: { PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: rootSessionId, PI_SUBAGENT_RUN_ID: "plan-run-1" },
+    env: { PI_ROOT_SUBAGENT_BROKER_ENABLED: "1", PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: rootSessionId, PI_SUBAGENT_RUN_ID: "plan-run-1" },
     createClient: () => ({
       subscribe: async () => {
         attempts += 1;
@@ -140,6 +140,38 @@ test("root ownership guard retries only a missing grant and terminates once on r
   assert.deepEqual(signals, [{ pid: 42, signal: "SIGTERM" }]);
   assert.equal(messages[0].customType, "pi-root-session-closing-v1");
   owner.dispose();
+});
+
+test("root ownership guard is a legacy no-op without the root broker capability marker", async () => {
+  let created = 0;
+  const owner = await installRootSessionOwner({}, {
+    env: { PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: rootSessionId, PI_SUBAGENT_RUN_ID: "legacy-run" },
+    createClient: () => { created += 1; throw new Error("must not connect"); },
+  });
+  assert.equal(created, 0);
+  owner.dispose();
+});
+
+test("root broker grants direct async executor runs idempotently", async (t) => {
+  const grants = [];
+  const events = { on(_channel, listener) { this.listener = listener; return () => { this.unsubscribed = true; }; } };
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: fakeUpstream(),
+    events,
+    writeGrant: async (grant) => { grants.push(grant); return `/tmp/${grant.runId}`; },
+    randomToken: () => "a".repeat(64),
+  });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  await Promise.all([
+    events.listener({ id: "direct-executor", agent: "executor" }),
+    events.listener({ runId: "direct-executor", agent: "executor" }),
+  ]);
+  assert.deepEqual(grants, [{ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId, runId: "direct-executor", callerToken: "a".repeat(64), role: "executor" }]);
+  assert.equal(broker.principals.get("direct-executor").role, "executor");
+  await broker.closeRootSession();
+  assert.equal(events.unsubscribed, true);
 });
 
 test("executor grant subscribes with its own identity and cannot call other methods", async (t) => {

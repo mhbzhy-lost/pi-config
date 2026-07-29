@@ -16,7 +16,7 @@ import {
 type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: () => void | Promise<void> };
 type Caller = { planId: string; cwd: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
-type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string };
+type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; events?: { on(channel: string, listener: (event: any) => void): () => void } };
 
 const FORBIDDEN_SPAWN_FIELDS = new Set(["caller", "root", "token", "parent", "depth", "path", "fanout", "callerRunId", "callerToken", "rootSessionId", "parentRunId", "parentDepth", "parentPath"]);
 const MAX_BUFFER = 64 * 1024;
@@ -34,17 +34,21 @@ export class RootBrokerServer {
   subscriptions = new Map<string, Set<Socket>>();
   sockets = new Set<Socket>();
   grantPaths = new Set<string>();
+  executorGrants = new Map<string, Promise<{ callerToken: string }>>();
+  unsubscribeStarted: (() => void) | undefined;
   server: ReturnType<typeof createServer> | undefined;
   closed = false;
   closePromise: Promise<void> | undefined;
   writeGrant: typeof writeBrokerGrant;
   randomToken: () => string;
+  events: Dependencies["events"];
 
-  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex") }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
+  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), events }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     this.rootSessionId = rootSessionId;
     this.upstream = upstream;
     this.writeGrant = writeGrant;
     this.randomToken = randomToken;
+    this.events = events;
   }
 
   async start() {
@@ -62,12 +66,31 @@ export class RootBrokerServer {
         server!.listen(socketPath, () => { server?.off("error", fail); resolve(); });
       });
       await setBrokerSocketPermissions(socketPath);
+      this.unsubscribeStarted = this.events?.on("subagent:async-started", (event) => {
+        const runId = event?.runId ?? event?.id;
+        if (typeof runId === "string" && ["executor", "spark"].includes(event?.agent)) void this.ensureExecutorOwner(runId);
+      });
     } catch (error) {
       this.server = undefined;
       await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
       await rm(socketPath, { force: true });
       throw error;
     }
+  }
+
+  async ensureExecutorOwner(runId: string) {
+    if (this.closed) throw new Error("Root subagent broker is closing");
+    const existing = this.executorGrants.get(runId);
+    if (existing) return existing;
+    const pending = (async () => {
+      const callerToken = this.randomToken();
+      const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId, callerToken, role: "executor" });
+      this.principals.set(runId, { role: "executor", callerToken });
+      this.grantPaths.add(grantPath);
+      return { callerToken };
+    })();
+    this.executorGrants.set(runId, pending);
+    try { return await pending; } catch (error) { this.executorGrants.delete(runId); throw error; }
   }
 
   async grantCaller({ callerRunId, planId, cwd, role }: { callerRunId: string; planId: string; cwd: string; role: unknown }) {
@@ -152,10 +175,8 @@ export class RootBrokerServer {
       return failure(request, "spawn_invalid", "Upstream spawn reply is missing runId or asyncDir");
     }
     try {
-      const callerToken = this.randomToken();
-      const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId, callerToken, role: "executor" });
-      this.grantPaths.add(grantPath);
-      this.principals.set(runId, { role: "executor", callerToken });
+      const owner = await this.ensureExecutorOwner(runId);
+      const callerToken = owner.callerToken;
       caller.ownedRunIds.add(runId);
       this.runOwners.set(runId, request.callerRunId);
     } catch (error) {
@@ -174,7 +195,10 @@ export class RootBrokerServer {
   async closeRootSession() {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
+    this.unsubscribeStarted?.();
+    this.unsubscribeStarted = undefined;
     this.closePromise = (async () => {
+      await Promise.allSettled([...this.executorGrants.values()]);
       for (const [callerRunId, sockets] of this.subscriptions) {
         const push = { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "root.closing", data: {} };
         for (const socket of sockets) if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);
