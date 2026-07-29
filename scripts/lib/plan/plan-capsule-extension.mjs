@@ -2,6 +2,7 @@ import { applyEvent, createProjection } from "./plan-events.mjs";
 
 const STRING = { type: "string", minLength: 1 };
 const EMPTY_OBJECT = { type: "object", properties: {}, additionalProperties: false };
+const OPEN_KEYS = ["allowPlanCommits", "baseCommit", "manifestSha256", "planId", "planIrHash", "revision", "worktree"];
 const PLAN_ACTIVE_TOOLS = [
   "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block",
   "subagent_wait", "subagent_supervisor", "read", "grep", "bash",
@@ -31,6 +32,14 @@ function projectionFrom(ctx) {
 
 function register(pi, tool) {
   pi.registerTool(tool);
+}
+
+function assertExactOpenInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || JSON.stringify(Object.keys(input).sort()) !== JSON.stringify(OPEN_KEYS)) throw new Error("Invalid plan_open input.");
+  if (typeof input.planId !== "string" || typeof input.baseCommit !== "string" || typeof input.worktree !== "string"
+    || !Number.isSafeInteger(input.revision) || input.revision < 1 || !/^[0-9a-f]{64}$/.test(input.manifestSha256)
+    || !/^[0-9a-f]{64}$/.test(input.planIrHash) || input.allowPlanCommits !== true) throw new Error("Invalid plan_open input.");
 }
 
 export function createPlanCapsuleExtension(pi, options = {}) {
@@ -246,17 +255,18 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     description: "Bind an approved plan to this Plan Session.",
     parameters: {
       type: "object",
-      properties: { planId: STRING, planPath: STRING, planHash: STRING, approvedHash: { type: "string", minLength: 64, maxLength: 64 }, baseCommit: STRING, worktree: STRING, allowPlanCommits: { type: "boolean", const: true } },
-      required: ["planId", "planPath", "planHash", "baseCommit", "worktree", "allowPlanCommits"],
+      properties: { planId: STRING, revision: { type: "integer", minimum: 1 }, manifestSha256: { type: "string", pattern: "^[0-9a-f]{64}$" }, planIrHash: { type: "string", pattern: "^[0-9a-f]{64}$" }, baseCommit: STRING, worktree: STRING, allowPlanCommits: { type: "boolean", const: true } },
+      required: ["planId", "revision", "manifestSha256", "planIrHash", "baseCommit", "worktree", "allowPlanCommits"],
       additionalProperties: false,
     },
     async execute(_id, input, _signal, _update, ctx) {
       if (opened) return result("Plan is already open.", true);
       if (typeof options.validateBinding !== "function") return result("Plan binding validation is unavailable.", true);
       try {
+        assertExactOpenInput(input);
         await assertRuntimeCapabilities();
-        const effectiveInput = input.approvedHash ? { ...input, planHash: input.approvedHash } : input;
-        const binding = await options.validateBinding(effectiveInput, { ctx });
+        if (typeof options.appendPlanEvent !== "function" || typeof options.writeCurrentRevision !== "function") throw new Error("Plan revision persistence is unavailable.");
+        const binding = await options.validateBinding(input, { ctx });
         if (!binding || binding.planId !== input.planId || !Array.isArray(binding.tasks) || binding.tasks.length === 0) {
           throw new Error("Invalid verified plan binding.");
         }
@@ -269,11 +279,11 @@ export function createPlanCapsuleExtension(pi, options = {}) {
             worktree: binding.worktree,
             baseCommit: binding.baseCommit,
             headCommit: binding.headCommit,
-            planPath: binding.planPath,
-            planHash: binding.planHash,
           },
           tasks,
+          revision: binding.revisionIdentity ?? binding.revision,
         }, 0);
+        await options.writeCurrentRevision(binding.revision);
         if (typeof options.startPlanControl === "function") {
           const stop = await options.startPlanControl({ binding, ctx });
           if (typeof stop !== "function") throw new Error("Plan control startup failed.");

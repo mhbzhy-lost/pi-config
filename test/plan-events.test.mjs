@@ -12,6 +12,11 @@ const workspace = {
   planPath: "/origin/docs/release-plan.md",
   planHash: "a".repeat(64),
 };
+const revision = {
+  number: 1, manifestSha256: "b".repeat(64), sourceBytesSha256: "c".repeat(64), planHash: "d".repeat(64),
+  irVersion: "plan-ir.v3", irHash: "e".repeat(64),
+  taskHashes: { "task-1": { full: "f".repeat(64), effective: "1".repeat(64), scheduling: "2".repeat(64) }, },
+};
 
 function event(type, data = {}, overrides = {}) {
   return {
@@ -125,6 +130,43 @@ test("requires and preserves immutable approved plan identity", () => {
     /workspace.planHash/,
   );
   assert.deepEqual(createRunningProjection().workspace, workspace);
+});
+
+test("projects a defensive revision identity and requires matching dispatch hashes", () => {
+  const revisionWorkspace = { originRoot: "/repo", worktree: "/worktree", baseCommit: "base", headCommit: "head" };
+  let projection = applyEvent(createProjection(), event("plan.created", { workspace: revisionWorkspace, tasks: ["task-1"], revision }));
+  assert.deepEqual(projection.revision, revision);
+  revision.taskHashes["task-1"].effective = "0".repeat(64);
+  assert.equal(projection.revision.taskHashes["task-1"].effective, "1".repeat(64));
+  projection = apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-1", taskId: "task-1", baseCommit: "head", workspace: attemptWorkspace("attempt-1") });
+  const dispatch = { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", baseCommit: "head", workspace: attemptWorkspace("attempt-1"), tool: dispatchTool(), toolHash: "tool", planIrHash: revision.irHash, taskHash: "1".repeat(64), schedulingHash: "2".repeat(64), dispatchContextHash: "3".repeat(64) };
+  projection = apply(projection, "attempt.dispatch-requested", dispatch);
+  assert.equal(projection.attempts.get("attempt-1").taskHash, "1".repeat(64));
+  assert.throws(() => applyEvent(createProjection(), event("plan.created", { workspace: revisionWorkspace, tasks: ["task-1"], revision: { ...revision, taskHashes: {} } })), /taskHashes/);
+});
+
+test("rejects every revision dispatch identity mismatch and malformed dispatch context", () => {
+  const revisionWorkspace = { originRoot: "/repo", worktree: "/worktree", baseCommit: "base", headCommit: "head" };
+  const baseDispatch = {
+    attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", baseCommit: "head",
+    workspace: attemptWorkspace("attempt-1"), tool: dispatchTool(), toolHash: "tool",
+    planIrHash: revision.irHash, taskHash: "0".repeat(64), schedulingHash: "2".repeat(64), dispatchContextHash: "3".repeat(64),
+  };
+  const allocatedProjection = () => applyEvent(
+    applyEvent(createProjection(), event("plan.created", { workspace: revisionWorkspace, tasks: ["task-1"], revision })),
+    event("attempt.workspace-allocated", { attemptId: "attempt-1", taskId: "task-1", baseCommit: "head", workspace: attemptWorkspace("attempt-1") }),
+  );
+
+  for (const [label, data, expected] of [
+    ["planIrHash mismatch", { ...baseDispatch, planIrHash: "4".repeat(64) }, /dispatch revision identity/],
+    ["effective taskHash mismatch", { ...baseDispatch, taskHash: "4".repeat(64) }, /dispatch revision identity/],
+    ["schedulingHash mismatch", { ...baseDispatch, schedulingHash: "4".repeat(64) }, /dispatch revision identity/],
+    ["missing dispatchContextHash", (() => { const { dispatchContextHash, ...data } = baseDispatch; return data; })(), /invalid dispatch (revision keys|dispatchContextHash)/],
+    ["non-SHA-256 dispatchContextHash", { ...baseDispatch, dispatchContextHash: "not-a-sha" }, /invalid dispatchContextHash/],
+    ["extra dispatch key", { ...baseDispatch, unexpected: true }, /invalid dispatch revision keys/],
+  ]) {
+    assert.throws(() => apply(allocatedProjection(), "attempt.dispatch-requested", data), expected, label);
+  }
 });
 
 test("rejects invalid envelopes, mixed plans, and duplicate event ids", () => {

@@ -10,6 +10,9 @@ import { createPlanRunnerDependencies } from "../scripts/lib/plan/plan-runner-de
 import { createPlanControl } from "../scripts/lib/plan/plan-control.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 
+const TEST_MANIFEST = "a".repeat(64);
+const TEST_IR = "b".repeat(64);
+
 const execFile = promisify(execFileCallback);
 
 const planSource = `# Approved plan
@@ -68,7 +71,13 @@ async function fixture(source = planSource, { separateStateRoot = false } = {}) 
   await mkdir(docs);
   const planPath = path.join(docs, "release-candidate.md");
   await writeFile(planPath, source);
-  return { origin, stateRoot, worktree, planPath, planId, baseCommit };
+  const plan = parsePlanDocument(source, planPath);
+  const revision = {
+    planId, revision: 1, manifestSha256: TEST_MANIFEST,
+    manifest: { planId, revision: 1, manifestSha256: TEST_MANIFEST, sourceBytesSha256: "c".repeat(64), planHash: plan.sha256, irVersion: "plan-ir.v3", irHash: TEST_IR, taskHashes: Object.fromEntries(plan.tasks.map((task) => [task.id, { full: "e".repeat(64), effective: "f".repeat(64), scheduling: "0".repeat(64) }])) },
+    ir: { version: "plan-ir.v3", hash: TEST_IR }, plan, planPath,
+  };
+  return { origin, stateRoot, worktree, planPath, planId, baseCommit, revision };
 }
 
 async function submoduleFixture() {
@@ -135,12 +144,11 @@ function created(binding) {
 }
 
 async function bindingInput(repo) {
-  const source = await readFile(repo.planPath, "utf8");
-  const { sha256 } = parsePlanDocument(source, repo.planPath);
   return {
     planId: repo.planId,
-    planPath: repo.planPath,
-    planHash: sha256,
+    revision: 1,
+    manifestSha256: TEST_MANIFEST,
+    planIrHash: TEST_IR,
     baseCommit: repo.baseCommit,
     worktree: repo.worktree,
     allowPlanCommits: true,
@@ -151,6 +159,12 @@ function runnerDependencies(repo, options = {}) {
   return createPlanRunnerDependencies({
     originRoot: repo.origin,
     stateRoot: repo.stateRoot,
+    revisionStore: { async readRevision(planId, revision) {
+      if (planId !== repo.planId || revision !== 1) return null;
+      if (repo.revision) return repo.revision;
+      const plan = parsePlanDocument(await readFile(repo.planPath, "utf8"), repo.planPath);
+      return { planId, revision, manifestSha256: TEST_MANIFEST, manifest: { planId, revision, sourceBytesSha256: "c".repeat(64), planHash: plan.sha256, irVersion: "plan-ir.v3", irHash: TEST_IR, taskHashes: Object.fromEntries(plan.tasks.map((task) => [task.id, { full: "e".repeat(64), effective: "f".repeat(64), scheduling: "0".repeat(64) }])) }, ir: { version: "plan-ir.v3", hash: TEST_IR }, plan, planPath: repo.planPath };
+    }, async writeCurrent() {} },
     ...options,
   });
 }

@@ -17,6 +17,12 @@ export function createPlanStatus({ entries, artifacts = new Map() }) {
     projectionVersion: projection.version,
     headCommit: projection.workspace?.headCommit ?? null,
     validatedHead: projection.validatedHead,
+    ...(projection.revision ? { revision: {
+      number: projection.revision.number,
+      manifestSha256: projection.revision.manifestSha256,
+      irVersion: projection.revision.irVersion,
+      irHash: projection.revision.irHash,
+    } } : {}),
     tasks: [...projection.tasks].map(([taskId, task]) => ({
       taskId,
       ...task,

@@ -8,18 +8,25 @@ import { allocateAttemptWorkspace as defaultAllocateAttemptWorkspace, releaseAtt
 import { validateAttemptResult as defaultValidateAttemptResult } from "./attempt-validator.mjs";
 import { createIntegrationQueue } from "./integration-queue.mjs";
 import { createPlanCoordinator } from "./coordinator.mjs";
-import { parsePlanDocument } from "./plan-document.mjs";
 import { createPlanStatus, writePlanStatus } from "./plan-projection.mjs";
 import { readAttemptDisposition } from "./runtime-artifacts.mjs";
 import { createPlanEventWriter } from "./plan-event-writer.mjs";
 import { createProjection, applyEvent } from "./plan-events.mjs";
 import { createTaskCommandRegistry, resolveTaskVerification, runPlanGates } from "./gates.mjs";
 import { createPlanControl } from "./plan-control.mjs";
+import { createPlanRevisionStore } from "./plan-revision-store.mjs";
 
 const execFile = promisify(execFileCallback);
 const TERMINAL = new Set(["validated", "blocked", "cancelled", "interrupted"]);
 const ATTENTION_KINDS = new Set(["interview_request", "need_decision", "scope_change", "contract_question", "external_side_effect", "user_preference", "progress_update"]);
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const BINDING_KEYS = ["allowPlanCommits", "baseCommit", "manifestSha256", "planId", "planIrHash", "revision", "worktree"];
+const SHA256 = /^[0-9a-f]{64}$/;
+
+function requireExactKeys(value, keys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`Invalid ${label}.`);
+}
 
 async function git(cwd, ...args) {
   const { stdout } = await execFile("git", args, { cwd });
@@ -72,29 +79,31 @@ async function validateWorkspaceRoots({ originRoot, stateRoot, planId, actualCwd
   return { originRoot: resolvedOrigin, stateRoot: resolvedState };
 }
 
-async function readBinding(input, ctx, configuredRoots) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Invalid plan binding.");
-  for (const field of ["planId", "planPath", "planHash", "baseCommit", "worktree"]) {
-    if (typeof input[field] !== "string" || input[field].trim() === "") throw new Error(`Invalid ${field}.`);
-  }
+async function readBinding(input, ctx, configuredRoots, revisionStore) {
+  requireExactKeys(input, BINDING_KEYS, "plan binding");
+  for (const field of ["planId", "manifestSha256", "planIrHash", "baseCommit", "worktree"]) if (typeof input[field] !== "string" || input[field].trim() === "") throw new Error(`Invalid ${field}.`);
+  if (!SHA256.test(input.manifestSha256) || !SHA256.test(input.planIrHash)) throw new Error("Invalid plan revision hash.");
+  if (!Number.isSafeInteger(input.revision) || input.revision < 1) throw new Error("Invalid revision.");
   if (input.allowPlanCommits !== true) throw new Error("Plan commit authorization is required.");
   if (typeof ctx?.cwd !== "string") throw new Error("Child working directory is unavailable.");
   const [actualCwd, declaredWorktree] = await Promise.all([realpath(ctx.cwd), realpath(input.worktree)]);
   if (actualCwd !== declaredWorktree) throw new Error("Plan binding worktree does not match child cwd.");
   const roots = await validateWorkspaceRoots({ ...configuredRoots, planId: input.planId, actualCwd });
-  const source = await readFile(input.planPath, "utf8");
-  const plan = parsePlanDocument(source, input.planPath);
-  const effectiveHash = input.approvedHash ?? input.planHash;
-  if (plan.sha256 !== effectiveHash) throw new Error("Plan hash does not match approved plan.");
+  if (!revisionStore || typeof revisionStore.readRevision !== "function") throw new Error("Plan revision store is unavailable.");
+  const revision = await revisionStore.readRevision(input.planId, input.revision);
+  if (!revision || revision.planId !== input.planId || revision.revision !== input.revision
+    || revision.manifestSha256 !== input.manifestSha256 || revision.manifest?.planId !== input.planId
+    || revision.manifest?.revision !== input.revision || revision.manifest.irHash !== input.planIrHash
+    || revision.ir?.version !== revision.manifest.irVersion || revision.ir?.hash !== revision.manifest.irHash
+    || !Array.isArray(revision.plan?.tasks)) throw new Error("Plan revision does not match binding.");
+  const plan = revision.plan;
   const [headCommit, resolvedBase, branch] = await Promise.all([
-    git(actualCwd, "rev-parse", "HEAD^{commit}"),
-    git(actualCwd, "rev-parse", "--verify", `${input.baseCommit}^{commit}`),
-    git(actualCwd, "branch", "--show-current"),
+    git(actualCwd, "rev-parse", "HEAD^{commit}"), git(actualCwd, "rev-parse", "--verify", `${input.baseCommit}^{commit}`), git(actualCwd, "branch", "--show-current"),
   ]);
   if (resolvedBase !== input.baseCommit) throw new Error("Base commit must be a concrete matching commit.");
   if (headCommit !== input.baseCommit) throw new Error("Workspace HEAD must equal the base commit at startup.");
   if (branch !== `pi-plan/${input.planId}`) throw new Error("Plan worktree branch is not owned by planId.");
-  return { ...input, worktree: actualCwd, ...roots, headCommit, tasks: plan.tasks, plan };
+  return { ...input, worktree: actualCwd, ...roots, headCommit, tasks: plan.tasks, plan, planPath: revision.planPath, planHash: revision.manifest.planHash, revision, revisionIdentity: { number: revision.revision, manifestSha256: revision.manifestSha256, sourceBytesSha256: revision.manifest.sourceBytesSha256, planHash: revision.manifest.planHash, irVersion: revision.manifest.irVersion, irHash: revision.manifest.irHash, taskHashes: revision.manifest.taskHashes } };
 }
 
 export function createPlanRunnerDependencies({
@@ -112,6 +121,7 @@ export function createPlanRunnerDependencies({
   id = () => crypto.randomUUID(),
   now = () => new Date().toISOString(),
   controlIntervalMs = 50,
+  revisionStore = createPlanRevisionStore({ stateRoot: configuredStateRoot }),
 } = {}) {
   const localEntries = [];
   let stoppingActiveRuns;
@@ -171,8 +181,16 @@ export function createPlanRunnerDependencies({
   }
 
   async function approvedPlan(current) {
+    if (current.revision) {
+      const revision = await revisionStore.readRevision(current.planId, current.revision.number);
+      if (!revision || revision.manifestSha256 !== current.revision.manifestSha256 || revision.manifest.irHash !== current.revision.irHash) {
+        throw new Error("Approved plan revision is unavailable.");
+      }
+      return revision.plan;
+    }
     const source = await readFile(current.workspace.planPath, "utf8").catch(() => undefined);
     if (!source) throw new Error("Approved plan artifact is unavailable.");
+    const { parsePlanDocument } = await import("./plan-document.mjs");
     const plan = parsePlanDocument(source, current.workspace.planPath);
     if (plan.sha256 !== current.workspace.planHash) throw new Error("Approved plan hash no longer matches the binding.");
     return plan;
@@ -321,8 +339,9 @@ export function createPlanRunnerDependencies({
 
   return {
     appendPlanEvent: appendEvent,
+    writeCurrentRevision: (revision) => revisionStore.writeCurrent(revision),
     async validateBinding(input, { ctx }) {
-      const binding = await readBinding(input, ctx, configuredRoots);
+      const binding = await readBinding(input, ctx, configuredRoots, revisionStore);
       lastWorkspace = binding.worktree;
       return binding;
     },

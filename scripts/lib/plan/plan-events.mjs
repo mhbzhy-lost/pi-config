@@ -19,6 +19,7 @@ export function createProjection() {
     attempts: new Map(),
     gates: new Map(),
     workspace: null,
+    revision: null,
     validatedHead: null,
     eventIds: new Set(),
   };
@@ -131,19 +132,39 @@ function copyProjection(projection) {
 }
 
 function createPlan(projection, event) {
-  const { workspace, tasks } = event.data;
-  for (const field of ["originRoot", "worktree", "baseCommit", "headCommit", "planPath", "planHash"]) {
-    if (typeof workspace?.[field] !== "string" || workspace[field].trim() === "") {
-      throw new Error(`invalid workspace.${field}`);
-    }
+  const { workspace, tasks, revision } = event.data;
+  if (revision !== undefined && JSON.stringify(Object.keys(event.data).sort()) !== JSON.stringify(["revision", "tasks", "workspace"])) throw new Error("invalid plan.created data");
+  const workspaceFields = revision
+    ? ["originRoot", "worktree", "baseCommit", "headCommit"]
+    : ["originRoot", "worktree", "baseCommit", "headCommit", "planPath", "planHash"];
+  for (const field of workspaceFields) {
+    if (typeof workspace?.[field] !== "string" || workspace[field].trim() === "") throw new Error(`invalid workspace.${field}`);
   }
+  if (revision && JSON.stringify(Object.keys(workspace).sort()) !== JSON.stringify([...workspaceFields].sort())) throw new Error("invalid workspace keys");
   if (!Array.isArray(tasks) || tasks.length === 0) throw new Error("tasks must be nonempty");
   if (new Set(tasks).size !== tasks.length) throw new Error("tasks must be unique");
   for (const taskId of tasks) requireIdentity({ taskId }, "taskId");
+  const validatedRevision = revision === undefined ? null : validateRevision(revision, tasks);
   projection.planId = event.planId;
   projection.lifecycle = "created";
-  projection.workspace = { ...workspace };
+  projection.workspace = Object.fromEntries(workspaceFields.map((field) => [field, workspace[field]]));
+  projection.revision = validatedRevision;
   for (const taskId of tasks) projection.tasks.set(taskId, { status: "pending" });
+}
+
+function validateRevision(revision, tasks) {
+  if (!revision || typeof revision !== "object" || Array.isArray(revision) || !Number.isSafeInteger(revision.number) || revision.number < 1 || !["plan-ir.v1", "plan-ir.v2", "plan-ir.v3"].includes(revision.irVersion)) throw new Error("invalid revision");
+  if (JSON.stringify(Object.keys(revision).sort()) !== JSON.stringify(["irHash", "irVersion", "manifestSha256", "number", "planHash", "sourceBytesSha256", "taskHashes"])) throw new Error("invalid revision keys");
+  for (const field of ["manifestSha256", "sourceBytesSha256", "planHash", "irHash"]) if (typeof revision[field] !== "string" || !SHA256.test(revision[field])) throw new Error(`invalid revision.${field}`);
+  if (!revision.taskHashes || typeof revision.taskHashes !== "object" || Array.isArray(revision.taskHashes) || JSON.stringify(Object.keys(revision.taskHashes).sort()) !== JSON.stringify([...tasks].sort())) throw new Error("invalid revision.taskHashes");
+  const taskHashes = {};
+  for (const taskId of tasks) {
+    const hashes = revision.taskHashes[taskId];
+    if (!hashes || JSON.stringify(Object.keys(hashes).sort()) !== JSON.stringify(["effective", "full", "scheduling"])) throw new Error("invalid revision.taskHashes");
+    for (const field of ["full", "effective", "scheduling"]) if (typeof hashes[field] !== "string" || !SHA256.test(hashes[field])) throw new Error("invalid revision.taskHashes");
+    taskHashes[taskId] = { full: hashes.full, effective: hashes.effective, scheduling: hashes.scheduling };
+  }
+  return { number: revision.number, manifestSha256: revision.manifestSha256, sourceBytesSha256: revision.sourceBytesSha256, planHash: revision.planHash, irVersion: revision.irVersion, irHash: revision.irHash, taskHashes };
 }
 
 function validateAttemptWorkspace(workspace) {
@@ -221,12 +242,20 @@ function requestDispatch(projection, data) {
   if (!sameAttemptWorkspace(attempt.workspace, data.workspace)) throw new Error(`attempt workspace does not match: ${data.attemptId}`);
   validateTool(data.tool);
   if (data.tool.cwd !== attempt.workspace.path) throw new Error(`tool cwd does not match attempt workspace: ${data.attemptId}`);
+  if (projection.revision) {
+    const revisionDispatchKeys = ["attemptId", "baseCommit", "dispatchContextHash", "dispatchId", "planIrHash", "schedulingHash", "taskHash", "taskId", "tool", "toolHash", "workspace"];
+    if (JSON.stringify(Object.keys(data).sort()) !== JSON.stringify(revisionDispatchKeys)) throw new Error("invalid dispatch revision keys");
+    for (const field of ["planIrHash", "taskHash", "schedulingHash", "dispatchContextHash"]) if (typeof data[field] !== "string" || !SHA256.test(data[field])) throw new Error(`invalid ${field}`);
+    const expected = projection.revision.taskHashes[data.taskId];
+    if (data.planIrHash !== projection.revision.irHash || data.taskHash !== expected.effective || data.schedulingHash !== expected.scheduling) throw new Error("dispatch revision identity does not match");
+  }
   projection.attempts.set(data.attemptId, {
     ...attempt,
     status: "dispatch-requested",
     dispatchId: data.dispatchId,
     tool: { ...data.tool },
     toolHash: data.toolHash,
+    ...(projection.revision ? { planIrHash: data.planIrHash, taskHash: data.taskHash, schedulingHash: data.schedulingHash, dispatchContextHash: data.dispatchContextHash } : {}),
   });
   projection.lifecycle = "running";
 }

@@ -199,3 +199,10 @@ test("rejects a plan id that escapes the plan-runs directory", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("exposes only the bounded revision summary", () => {
+  const revision = { number: 1, manifestSha256: "a".repeat(64), sourceBytesSha256: "b".repeat(64), planHash: "c".repeat(64), irVersion: "plan-ir.v3", irHash: "d".repeat(64), taskHashes: { "task-1": { full: "e".repeat(64), effective: "f".repeat(64), scheduling: "1".repeat(64) } } };
+  const status = createPlanStatus({ entries: [event("plan.created", { workspace: { originRoot: "/repo", worktree: "/worktree", baseCommit: "base", headCommit: "head" }, tasks: ["task-1"], revision })] });
+  assert.deepEqual(status.revision, { number: 1, manifestSha256: "a".repeat(64), irVersion: "plan-ir.v3", irHash: "d".repeat(64) });
+  assert.equal(JSON.stringify(status).includes("taskHashes"), false);
+});

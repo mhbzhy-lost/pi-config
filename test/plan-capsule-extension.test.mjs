@@ -40,6 +40,10 @@ const waitingAttentionEvents = [
   },
 ];
 
+function openBinding() {
+  return { planId: "release-11", revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64), baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
+}
+
 function context(branch = []) {
   return { sessionManager: { getBranch: () => branch } };
 }
@@ -67,6 +71,7 @@ function setup(options = {}) {
         planId: existing?.planId ?? "release-11", occurredAt: options.now?.() ?? new Date().toISOString(), type, data,
       });
     },
+    writeCurrentRevision: async () => {},
     ...options,
   });
   return { tools, handlers, entries, messages, activeTools: () => activeTools };
@@ -92,12 +97,12 @@ test("plan-runner alone uses the real subagentOnlyExtensions profile field", asy
 test("capsule registers only plan_open and declares actual bootstrap fields", () => {
   const { tools } = setup();
   assert.deepEqual([...tools.keys()], ["plan_open"]);
-  assert.deepEqual(Object.keys(tools.get("plan_open").parameters.properties).sort(), ["allowPlanCommits", "approvedHash", "baseCommit", "planHash", "planId", "planPath", "worktree"]);
+  assert.deepEqual(Object.keys(tools.get("plan_open").parameters.properties).sort(), ["allowPlanCommits", "baseCommit", "manifestSha256", "planId", "planIrHash", "revision", "worktree"]);
 });
 
 test("runtime capability check waits until plan_open after extension session handlers settle", async () => {
   const calls = [];
-  const binding = { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
+  const binding = openBinding();
   const { tools, handlers } = setup({
     assertRuntimeCapabilities: async () => calls.push("assert"),
     validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
@@ -114,7 +119,7 @@ test("runtime capability check waits until plan_open after extension session han
 });
 
 test("plan_open fails before binding when runtime capability remains unavailable", async () => {
-  const binding = { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
+  const binding = openBinding();
   let bindingCalled = false;
   const { tools, entries } = setup({
     assertRuntimeCapabilities: async () => {
@@ -136,13 +141,13 @@ test("plan_open fails before binding when runtime capability remains unavailable
 
 test("plan_open fails closed when the Task 12 binding dependency is absent", async () => {
   const { tools } = setup();
-  const result = await execute(tools.get("plan_open"), { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree" });
+  const result = await execute(tools.get("plan_open"), openBinding());
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /binding validation is unavailable/i);
 });
 
 test("plan_open validates then persists and activates the lifecycle tools", async () => {
-  const binding = { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
+  const binding = openBinding();
   const { tools, entries, activeTools } = setup({
     validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
   });
@@ -150,8 +155,8 @@ test("plan_open validates then persists and activates the lifecycle tools", asyn
   assert.equal(result.isError, false, result.content[0].text);
   assert.equal(entries[0].customType, "pi-plan-event-v1");
   assert.equal(entries[0].data.type, "plan.created");
-  assert.equal(entries[0].data.data.workspace.planPath, binding.planPath);
-  assert.equal(entries[0].data.data.workspace.planHash, binding.planHash);
+  assert.equal(entries[0].data.data.workspace.planPath, undefined);
+  assert.equal(entries[0].data.data.workspace.planHash, undefined);
   assert.deepEqual([...tools.keys()], ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block"]);
   assert.deepEqual(activeTools(), [
     "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block",
@@ -159,27 +164,71 @@ test("plan_open validates then persists and activates the lifecycle tools", asyn
   ]);
 });
 
-test("plan_open accepts supervisor-approved hash override when file hash differs", async () => {
-  const actualHash = "b".repeat(64);
-  const binding = {
-    planId: "release-11", planPath: "/plan.md",
-    planHash: "a".repeat(64), baseCommit: "base",
-    worktree: "/worktree", allowPlanCommits: true,
-    approvedHash: actualHash,
-  };
+test("plan_open appends plan.created before writing the current revision", async () => {
+  const calls = [];
   const { tools } = setup({
-    validateBinding: async (input) => {
-      assert.equal(input.planHash, actualHash);
-      return { ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] };
+    validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
+    appendPlanEvent: async (_ctx, type, _data, expectedProjectionVersion) => calls.push(["appendPlanEvent", type, expectedProjectionVersion]),
+    writeCurrentRevision: async (revision) => calls.push(["writeCurrentRevision", revision]),
+  });
+
+  const result = await execute(tools.get("plan_open"), openBinding());
+
+  assert.equal(result.isError, false, result.content[0].text);
+  assert.deepEqual(calls, [["appendPlanEvent", "plan.created", 0], ["writeCurrentRevision", 1]]);
+});
+
+test("plan_open does not write the current revision when plan.created append rejects", async () => {
+  const calls = [];
+  const { tools } = setup({
+    validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
+    appendPlanEvent: async () => {
+      calls.push("appendPlanEvent");
+      throw new Error("append rejected");
+    },
+    writeCurrentRevision: async () => calls.push("writeCurrentRevision"),
+  });
+
+  const result = await execute(tools.get("plan_open"), openBinding());
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /append rejected/);
+  assert.deepEqual(calls, ["appendPlanEvent"]);
+});
+
+test("plan_open leaves durable plan.created intact when current revision write rejects", async () => {
+  const calls = [];
+  const durableEvents = [];
+  const { tools } = setup({
+    validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
+    appendPlanEvent: async (_ctx, type, data, expectedProjectionVersion) => {
+      calls.push(["appendPlanEvent", type, expectedProjectionVersion]);
+      durableEvents.push({ type, data });
+    },
+    writeCurrentRevision: async () => {
+      calls.push(["writeCurrentRevision", 1]);
+      throw new Error("pointer rejected");
     },
   });
+
+  const result = await execute(tools.get("plan_open"), openBinding());
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /pointer rejected/);
+  assert.deepEqual(calls, [["appendPlanEvent", "plan.created", 0], ["writeCurrentRevision", 1]]);
+  assert.deepEqual(durableEvents.map(({ type }) => type), ["plan.created"]);
+});
+
+test("plan_open does not allow an approved hash override", async () => {
+  const binding = openBinding();
+  const { tools } = setup({ validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }) });
   const result = await execute(tools.get("plan_open"), binding);
   assert.equal(result.isError, false, result.content[0].text);
 });
 
 test("plan_open starts child control only after persisting plan.created and session shutdown stops it", async () => {
   const calls = [];
-  const binding = { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
+  const binding = openBinding();
   const { tools, handlers, entries } = setup({
     validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
     startPlanControl: async ({ binding: opened }) => {
@@ -196,7 +245,7 @@ test("plan_open starts child control only after persisting plan.created and sess
 
 test("session shutdown runs both cleanups best-effort without throwing", async () => {
   const calls = [];
-  const binding = { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
+  const binding = openBinding();
   const { tools, handlers } = setup({
     stopActiveRuns: async () => {
       calls.push("runs");
@@ -277,7 +326,7 @@ test("capsule resolves only the authorized successful native Supervisor reply", 
 
 test("plan lifecycle tools fail closed until their domain dependencies are injected", async () => {
   const { tools } = setup({ validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: ["task-1"] }) });
-  await execute(tools.get("plan_open"), { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree" });
+  await execute(tools.get("plan_open"), openBinding());
   for (const name of ["plan_status", "plan_continue", "plan_verify", "plan_block"]) {
     const result = await execute(tools.get(name), {});
     assert.equal(result.isError, true, name);
@@ -286,9 +335,9 @@ test("plan lifecycle tools fail closed until their domain dependencies are injec
 
 test("plan_status returns the injected derived projection", async () => {
   const { tools } = setup({ status: async () => ({ lifecycle: "running", planId: "release-11" }) });
-  await execute(tools.get("plan_open"), { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree" }).catch(() => {});
+  await execute(tools.get("plan_open"), openBinding()).catch(() => {});
   const opened = setup({ validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: ["task-1"] }), status: async () => ({ lifecycle: "running", planId: "release-11" }) });
-  await execute(opened.tools.get("plan_open"), { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree" });
+  await execute(opened.tools.get("plan_open"), openBinding());
   const result = await execute(opened.tools.get("plan_status"), {});
   assert.equal(result.isError, false);
   assert.match(result.content[0].text, /"lifecycle": "running"/);
@@ -297,7 +346,7 @@ test("plan_status returns the injected derived projection", async () => {
 test("plan_continue invokes only the injected one-step coordinator", async () => {
   const calls = [];
   const { tools } = setup({ validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: ["task-1"] }), continuePlan: async (value) => calls.push(value) });
-  await execute(tools.get("plan_open"), { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree" });
+  await execute(tools.get("plan_open"), openBinding());
   const result = await execute(tools.get("plan_continue"), { reason: "resume" });
   assert.equal(result.isError, false);
   assert.deepEqual(calls, [{ reason: "resume" }]);
@@ -305,7 +354,7 @@ test("plan_continue invokes only the injected one-step coordinator", async () =>
 
 test("plan_verify invokes verifier without appending plan.validated", async () => {
   const { tools, entries } = setup({ validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: ["task-1"] }), verifyPlan: async () => ({ lifecycle: "verifying" }) });
-  await execute(tools.get("plan_open"), { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree" });
+  await execute(tools.get("plan_open"), openBinding());
   entries.length = 0;
   const result = await execute(tools.get("plan_verify"), {});
   assert.equal(result.isError, false);
@@ -315,7 +364,7 @@ test("plan_verify invokes verifier without appending plan.validated", async () =
 test("plan_block delegates a legal block intent without accepting work", async () => {
   const calls = [];
   const { tools } = setup({ validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: ["task-1"] }), blockPlan: async (value) => calls.push(value) });
-  await execute(tools.get("plan_open"), { planId: "release-11", planPath: "/plan.md", planHash: "hash", baseCommit: "base", worktree: "/worktree" });
+  await execute(tools.get("plan_open"), openBinding());
   const result = await execute(tools.get("plan_block"), { reason: "needs approval" });
   assert.equal(result.isError, false);
   assert.deepEqual(calls, [{ reason: "needs approval" }]);
@@ -392,23 +441,11 @@ test("agent_settled reports terminal summaries and interrupts only unsafe active
   assert.equal(entries[0].data.type, "plan.interrupted");
 });
 
-test("plan_open passes planPath through to validateBinding for worktree-relative resolution", async () => {
-  const binding = {
-    planId: "release-11",
-    planPath: "docs/plans/my-plan.md",
-    planHash: "a".repeat(64),
-    baseCommit: "base",
-    worktree: "/worktree",
-    allowPlanCommits: true,
-  };
-  let receivedPath = "";
-  const { tools } = setup({
-    validateBinding: async (input) => {
-      receivedPath = input.planPath;
-      return { ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] };
-    },
-  });
-  const result = await execute(tools.get("plan_open"), binding);
-  assert.equal(result.isError, false, result.content[0].text);
-  assert.equal(receivedPath, "docs/plans/my-plan.md");
+test("plan_open rejects legacy planPath input before validateBinding", async () => {
+  let called = false;
+  const { tools } = setup({ validateBinding: async () => { called = true; } });
+  const result = await execute(tools.get("plan_open"), { ...openBinding(), planPath: "docs/plans/my-plan.md" });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Invalid plan_open input/);
+  assert.equal(called, false);
 });
