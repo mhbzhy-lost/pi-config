@@ -147,6 +147,7 @@ const CONTROL_SCHEMA = {
 };
 
 export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
+  type: "object",
   anyOf: [CODING_SCHEMA, GENERIC_SCHEMA, CONTROL_SCHEMA],
 });
 

@@ -277,6 +277,22 @@ test("project subagent tool retains the injected display-only result renderer", 
   assert.equal(pi.tools[0].renderResult, renderSubagentResult);
 });
 
+test("project subagent schema exposes an object root to OpenAI-compatible providers", () => {
+  const pi = createPi();
+
+  createTypedSubagentExtension(pi, {
+    rpc: createRpc(),
+    cleanupStore: {},
+  });
+
+  const schema = pi.tools[0].parameters;
+  assert.equal(schema.type, "object");
+  assert.equal(schema.anyOf.length, 3);
+  for (const [index, branch] of schema.anyOf.entries()) {
+    assert.equal(branch.type, "object", `anyOf branch ${index} must expose an object root`);
+  }
+});
+
 test("headless runtime installation exposes only project-owned subagent tools", () => {
   const pi = createPi();
   const rpc = createRpc();
