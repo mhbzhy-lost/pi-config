@@ -11,14 +11,18 @@ const DISPOSITIONS = new Set([
   "failed-preserve",
   "conflict-preserve",
   "attention-preserve",
+  "superseded-cleanup",
+  "superseded-preserve",
 ]);
-const PRESERVE_DISPOSITIONS = new Set(["failed-preserve", "conflict-preserve", "attention-preserve"]);
+const PRESERVE_DISPOSITIONS = new Set(["failed-preserve", "conflict-preserve", "attention-preserve", "superseded-preserve"]);
 const ALLOWED_STATUS = {
   "integrated-cleanup": new Set(["integrated"]),
   "cancelled-cleanup": new Set(["cancelled"]),
   "failed-preserve": new Set(["failed"]),
   "conflict-preserve": new Set(["succeeded", "validated", "failed"]),
   "attention-preserve": new Set(["waiting-attention"]),
+  "superseded-cleanup": new Set(["superseded"]),
+  "superseded-preserve": new Set(["superseded"]),
 };
 
 function fail(message) {

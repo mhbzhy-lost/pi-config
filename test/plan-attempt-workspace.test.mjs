@@ -215,3 +215,18 @@ test("authoritative lease fields cannot be changed through the caller object", a
     );
   });
 });
+
+test("releases only authorized superseded cleanup and preserve dispositions", async () => {
+  await withRepository(async (repository) => {
+    const cleanup = await allocateAttemptWorkspace(input(repository));
+    await authorizeRelease(cleanup, "superseded-cleanup", "superseded");
+    assert.deepEqual(await releaseAttemptWorkspace(cleanup, { ownerToken: cleanup.ownerToken, disposition: "superseded-cleanup" }), { released: true, preserved: false, disposition: "superseded-cleanup" });
+    await assert.rejects(access(cleanup.path));
+
+    const preserve = await allocateAttemptWorkspace(input(repository, { attemptId: "attempt-plan-1-task-2-2" }));
+    await authorizeRelease(preserve, "superseded-preserve", "superseded");
+    assert.deepEqual(await releaseAttemptWorkspace(preserve, { ownerToken: preserve.ownerToken, disposition: "superseded-preserve" }), { released: false, preserved: true, disposition: "superseded-preserve" });
+    await access(preserve.path);
+    await assert.rejects(releaseAttemptWorkspace(preserve, { ownerToken: preserve.ownerToken, disposition: "integrated-cleanup" }), /authorized|status/i);
+  });
+});

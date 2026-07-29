@@ -77,6 +77,9 @@ export function applyEvent(projection, event) {
     case "integration.finished":
       finishIntegration(next, event.data);
       break;
+    case "attempt.superseded":
+      supersedeAttempt(next, event.data);
+      break;
     case "attempt.workspace-released":
       releaseAttemptWorkspace(next, event.data);
       break;
@@ -197,7 +200,7 @@ function amendPlan(projection, data) {
   requireAmendmentRequestId(data.requestId);
   requireAmendmentReason(data.reason);
   if (projection.amendmentRequestIds.has(data.requestId)) throw new Error(`duplicate amendment requestId: ${data.requestId}`);
-  if ([...projection.attempts.values()].some((attempt) => attempt.status === "supersede-requested")) {
+  if ([...projection.attempts.values()].some((attempt) => hasSupersedeCleanupFence(attempt))) {
     throw new Error("supersede cleanup is pending");
   }
   if (!Number.isSafeInteger(data.revision) || data.revision !== projection.revision.number + 1 || data.parentRevision !== projection.revision.number) throw new Error("invalid amendment revision chain");
@@ -232,7 +235,20 @@ function amendPlan(projection, data) {
   projection.revision = newRevision;
   for (const taskId of added) projection.tasks.set(taskId, { status: "pending" });
   for (const taskId of retired) projection.tasks.set(taskId, { status: "retired" });
-  for (const attemptId of supersededAttemptIds) projection.attempts.set(attemptId, { ...projection.attempts.get(attemptId), status: "supersede-requested" });
+  for (const attemptId of supersededAttemptIds) {
+    const attempt = projection.attempts.get(attemptId);
+    const supersededTaskHash = attempt.taskHash ?? oldHashes[attempt.taskId].effective;
+    if (attempt.taskHash && attempt.taskHash !== oldHashes[attempt.taskId].effective) {
+      throw new Error(`attempt taskHash does not match old revision: ${attemptId}`);
+    }
+    projection.attempts.set(attemptId, {
+      ...attempt,
+      status: "supersede-requested",
+      supersededFromStatus: attempt.status,
+      supersededTaskHash,
+      supersededByRevision: data.revision,
+    });
+  }
   projection.amendmentRequestIds.add(data.requestId);
 }
 
@@ -263,7 +279,7 @@ function allocateAttemptWorkspace(projection, data) {
   if (!task) throw new Error(`unknown task: ${data.taskId}`);
   if (task.status !== "pending") throw new Error(`task is not pending: ${data.taskId}`);
   for (const [attemptId, attempt] of projection.attempts) {
-    if (OPEN_ATTEMPT_STATUSES.has(attempt.status) && attempt.taskId === data.taskId) {
+    if ((OPEN_ATTEMPT_STATUSES.has(attempt.status) || hasSupersedeCleanupFence(attempt)) && attempt.taskId === data.taskId) {
       throw new Error(`active attempt already exists for task ${data.taskId}: ${attemptId}`);
     }
   }
@@ -503,11 +519,63 @@ function finishIntegration(projection, data) {
   projection.lifecycle = "running";
 }
 
+function supersedeAttempt(projection, data) {
+  const keys = ["attemptId", "evidence", "oldTaskHash", "supersededByRevision", "taskId"];
+  if (JSON.stringify(Object.keys(data).sort()) !== JSON.stringify(keys)) throw new Error("invalid attempt.superseded data keys");
+  requireIdentity(data, "attemptId");
+  requireIdentity(data, "taskId");
+  if (typeof data.oldTaskHash !== "string" || !SHA256.test(data.oldTaskHash)) throw new Error("invalid oldTaskHash");
+  if (!Number.isSafeInteger(data.supersededByRevision)) throw new Error("invalid supersededByRevision");
+  const attempt = projection.attempts.get(data.attemptId);
+  if (!attempt || attempt.status !== "supersede-requested") throw new Error(`attempt is not supersede-requested: ${data.attemptId}`);
+  if (attempt.taskId !== data.taskId) throw new Error(`attempt task does not match: ${data.attemptId}`);
+  if (attempt.supersededTaskHash !== data.oldTaskHash) throw new Error("oldTaskHash does not match supersede request");
+  if (attempt.supersededByRevision !== data.supersededByRevision) throw new Error("supersededByRevision does not match supersede request");
+  const evidence = validateSupersedeEvidence(attempt, data.evidence);
+  projection.attempts.set(data.attemptId, {
+    ...attempt,
+    status: "superseded",
+    ...evidence.runBinding,
+    supersedeProof: evidence.proof,
+  });
+}
+
+function validateSupersedeEvidence(attempt, evidence) {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) throw new Error("invalid supersede evidence");
+  if (evidence.kind === "never-started") {
+    if (JSON.stringify(Object.keys(evidence).sort()) !== JSON.stringify(["dispatchId", "kind"])) throw new Error("invalid never-started evidence keys");
+    if (attempt.supersededFromStatus === "workspace-allocated" && evidence.dispatchId === null) return { proof: { kind: evidence.kind, dispatchId: null }, runBinding: {} };
+    if (attempt.supersededFromStatus === "dispatch-requested" && evidence.dispatchId === attempt.dispatchId) return { proof: { kind: evidence.kind, dispatchId: evidence.dispatchId }, runBinding: {} };
+    throw new Error("never-started dispatchId does not match attempt");
+  }
+  if (evidence.kind !== "terminal" || JSON.stringify(Object.keys(evidence).sort()) !== JSON.stringify(["artifactSha256", "asyncDir", "dispatchId", "kind", "runId"])) throw new Error("invalid terminal evidence keys");
+  for (const field of ["dispatchId", "runId", "asyncDir"]) requireIdentity(evidence, field);
+  if (typeof evidence.artifactSha256 !== "string" || !SHA256.test(evidence.artifactSha256)) throw new Error("invalid terminal artifactSha256");
+  if (attempt.supersededFromStatus === "dispatch-requested") {
+    if (evidence.dispatchId !== attempt.dispatchId) throw new Error("terminal dispatchId does not match attempt");
+    return { proof: { ...evidence }, runBinding: { runId: evidence.runId, asyncDir: evidence.asyncDir } };
+  }
+  if (!["active", "waiting-attention", "succeeded", "validated"].includes(attempt.supersededFromStatus)
+    || evidence.dispatchId !== attempt.dispatchId || evidence.runId !== attempt.runId || evidence.asyncDir !== attempt.asyncDir) throw new Error("terminal identity does not match attempt");
+  return { proof: { ...evidence }, runBinding: {} };
+}
+
+function hasSupersedeCleanupFence(attempt) {
+  return attempt.status === "supersede-requested" || (attempt.status === "superseded" && attempt.workspaceReleased !== true);
+}
+
 function releaseAttemptWorkspace(projection, data) {
   requireActivePlan(projection);
   for (const field of ["attemptId", "disposition"]) requireIdentity(data, field);
   const attempt = projection.attempts.get(data.attemptId);
   if (!attempt) throw new Error(`unknown attempt: ${data.attemptId}`);
+  if (attempt.workspaceReleased === true) throw new Error(`attempt workspace is already released: ${data.attemptId}`);
+  if (attempt.status === "superseded" && !["superseded-cleanup", "superseded-preserve"].includes(data.disposition)) {
+    throw new Error("invalid superseded workspace disposition");
+  }
+  if (attempt.status !== "superseded" && ["superseded-cleanup", "superseded-preserve"].includes(data.disposition)) {
+    throw new Error("superseded workspace disposition requires superseded attempt");
+  }
   if (!data.evidence || typeof data.evidence !== "object" || Array.isArray(data.evidence)) throw new Error("invalid workspace release evidence");
   projection.attempts.set(data.attemptId, {
     ...attempt,
@@ -551,7 +619,7 @@ function observeHead(projection, data) {
   requireActivePlan(projection);
   requireIdentity(data, "headCommit");
   for (const attempt of projection.attempts.values()) {
-    if (OPEN_ATTEMPT_STATUSES.has(attempt.status)) throw new Error("active attempt prevents HEAD observation");
+    if (OPEN_ATTEMPT_STATUSES.has(attempt.status) || hasSupersedeCleanupFence(attempt)) throw new Error("active attempt prevents HEAD observation");
   }
   if (data.headCommit === projection.workspace.headCommit) throw new Error("HEAD is already observed");
   projection.workspace = { ...projection.workspace, headCommit: data.headCommit };
@@ -566,7 +634,7 @@ function validatePlan(projection, data) {
     if (task.status !== "accepted") throw new Error(`task is not accepted: ${taskId}`);
   }
   for (const [attemptId, attempt] of projection.attempts) {
-    if (OPEN_ATTEMPT_STATUSES.has(attempt.status)) throw new Error(`active attempt: ${attemptId}`);
+    if (OPEN_ATTEMPT_STATUSES.has(attempt.status) || hasSupersedeCleanupFence(attempt)) throw new Error(`active attempt: ${attemptId}`);
   }
   for (const gate of GATES) {
     const result = projection.gates.get(gate);

@@ -587,3 +587,46 @@ test("moves a running plan into explicit terminal lifecycle states only", () => 
     assert.throws(() => apply(projection, "plan.cancelled", {}), /terminal/);
   }
 });
+
+test("persists strict supersede provenance and only accepts matching proof before release", () => {
+  let projection = revisionProjection(["task-1", "task-2"]);
+  projection = apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-2", taskId: "task-2", baseCommit: "head", workspace: attemptWorkspace("attempt-2") });
+  projection = apply(projection, "plan.amended", amendmentData(projection, {
+    taskHashes: { "task-1": { ...projection.revision.taskHashes["task-1"] }, "task-2": { ...projection.revision.taskHashes["task-2"], effective: sha("e") } },
+    diff: { added: [], changed: [], rebound: ["task-2"], retired: [], unchanged: ["task-1"] }, supersededAttemptIds: ["attempt-2"],
+  }));
+  const requested = projection.attempts.get("attempt-2");
+  assert.equal(requested.supersededFromStatus, "workspace-allocated");
+  assert.equal(requested.supersededTaskHash, sha("2"));
+  assert.equal(requested.supersededByRevision, 2);
+  assert.throws(() => apply(projection, "attempt.superseded", { attemptId: "attempt-2", taskId: "task-2", oldTaskHash: sha("0"), supersededByRevision: 2, evidence: { kind: "never-started", dispatchId: null } }), /oldTaskHash/);
+  assert.throws(() => apply(projection, "attempt.superseded", { attemptId: "attempt-2", taskId: "task-2", oldTaskHash: sha("2"), supersededByRevision: 2, evidence: { kind: "never-started", dispatchId: "unexpected" } }), /dispatchId/);
+  projection = apply(projection, "attempt.superseded", { attemptId: "attempt-2", taskId: "task-2", oldTaskHash: sha("2"), supersededByRevision: 2, evidence: { kind: "never-started", dispatchId: null } });
+  assert.equal(projection.attempts.get("attempt-2").status, "superseded");
+  assert.equal(projection.attempts.get("attempt-2").workspaceReleased, undefined);
+  assert.throws(() => apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-3", taskId: "task-2", baseCommit: "head", workspace: attemptWorkspace("attempt-3") }), /active attempt/);
+  assert.throws(() => apply(projection, "attempt.workspace-released", { attemptId: "attempt-2", disposition: "failed-preserve", evidence: {} }), /disposition/);
+  projection = apply(projection, "attempt.workspace-released", { attemptId: "attempt-2", disposition: "superseded-cleanup", evidence: {} });
+  assert.equal(projection.attempts.get("attempt-2").workspaceReleased, true);
+  projection = apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-3", taskId: "task-2", baseCommit: "head", workspace: attemptWorkspace("attempt-3") });
+  assert.equal(projection.attempts.get("attempt-3").status, "workspace-allocated");
+});
+
+test("requires dispatch and run binding identity for terminal supersede proof", () => {
+  let projection = revisionProjection(["task-1", "task-2"]);
+  const workspaceLease = attemptWorkspace("attempt-2");
+  projection = apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-2", taskId: "task-2", baseCommit: "head", workspace: workspaceLease });
+  projection = apply(projection, "attempt.dispatch-requested", {
+    attemptId: "attempt-2", taskId: "task-2", dispatchId: "attempt-2-dispatch", baseCommit: "head", workspace: workspaceLease,
+    tool: dispatchTool("attempt-2"), toolHash: "tool-2", planIrHash: projection.revision.irHash,
+    taskHash: projection.revision.taskHashes["task-2"].effective, schedulingHash: projection.revision.taskHashes["task-2"].scheduling, dispatchContextHash: sha("f"),
+  });
+  projection = apply(projection, "plan.amended", amendmentData(projection, {
+    taskHashes: { "task-1": { ...projection.revision.taskHashes["task-1"] }, "task-2": { ...projection.revision.taskHashes["task-2"], effective: sha("e") } },
+    diff: { added: [], changed: [], rebound: ["task-2"], retired: [], unchanged: ["task-1"] }, supersededAttemptIds: ["attempt-2"],
+  }));
+  const data = { attemptId: "attempt-2", taskId: "task-2", oldTaskHash: sha("2"), supersededByRevision: 2, evidence: { kind: "terminal", dispatchId: "attempt-2-dispatch", runId: "late-run", asyncDir: "/late", artifactSha256: sha("a") } };
+  assert.throws(() => apply(projection, "attempt.superseded", { ...data, extra: true }), /keys/);
+  projection = apply(projection, "attempt.superseded", data);
+  assert.equal(projection.attempts.get("attempt-2").runId, "late-run");
+});
