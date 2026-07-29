@@ -105,11 +105,25 @@ function revisionProjection(tasks = ["task-1", "task-2", "task-3"]) {
   const taskHashes = Object.fromEntries(tasks.map((taskId, index) => [taskId, {
     full: sha(String(index + 1)), effective: sha(String(index + 1)), scheduling: sha(String(index + 4)),
   }]));
-  return applyEvent(createProjection(), event("plan.created", {
+  const projection = applyEvent(createProjection(), event("plan.created", {
     workspace: revisionWorkspace,
     tasks,
     revision: { number: 1, manifestSha256: sha("a"), sourceBytesSha256: sha("b"), planHash: sha("c"), irVersion: "plan-ir.v3", irHash: sha("d"), taskHashes },
   }));
+  projection.attempts.set("amendment-authorization", {
+    taskId: tasks[0],
+    status: "blocked",
+    attention: { requestId: "supervisor-request-1", blocking: true, status: "resolved" },
+  });
+  return projection;
+}
+
+function authorizeAmendment(projection, requestId) {
+  projection.attempts.set(`amendment-authorization-${requestId}`, {
+    taskId: "task-1",
+    status: "blocked",
+    attention: { requestId, blocking: true, status: "resolved" },
+  });
 }
 
 function amendmentData(projection, overrides = {}) {
@@ -125,6 +139,28 @@ function amendmentData(projection, overrides = {}) {
     supersededAttemptIds: [], requestId: "supervisor-request-1", reason: "clarify execution contract", ...overrides,
   };
 }
+
+test("rejects Plan amendments without exactly one resolved blocking Attention authorization", () => {
+  const projection = revisionProjection();
+  projection.attempts.clear();
+  const original = structuredClone({ revision: projection.revision, attempts: [...projection.attempts] });
+  const data = amendmentData(projection);
+  for (const attention of [
+    undefined,
+    { requestId: "unknown", blocking: true, status: "resolved" },
+    { requestId: "supervisor-request-1", blocking: true, status: "pending" },
+    { requestId: "supervisor-request-1", blocking: true, status: "escalated" },
+    { requestId: "supervisor-request-1", blocking: false, status: "resolved" },
+  ]) {
+    projection.attempts.clear();
+    if (attention) projection.attempts.set("authorization", { taskId: "task-1", status: "blocked", attention });
+    assert.throws(() => apply(projection, "plan.amended", data), /authorization/);
+    assert.deepEqual({ revision: projection.revision, attempts: [...projection.attempts] }, { revision: original.revision, attempts: attention ? [["authorization", { taskId: "task-1", status: "blocked", attention }]] : [] });
+  }
+  projection.attempts.set("authorization-a", { taskId: "task-1", status: "blocked", attention: { requestId: "supervisor-request-1", blocking: true, status: "resolved" } });
+  projection.attempts.set("authorization-b", { taskId: "task-2", status: "blocked", attention: { requestId: "supervisor-request-1", blocking: true, status: "resolved" } });
+  assert.throws(() => apply(projection, "plan.amended", data), /authorization/);
+});
 
 test("atomically projects a strict Plan amendment matrix with tombstones and supersede intent", () => {
   let projection = revisionProjection();
@@ -236,6 +272,7 @@ test("rejects a new amendment while supersede cleanup is pending without mutatin
     diff: { added: [], changed: [], rebound: ["task-2"], retired: [], unchanged: ["task-1"] },
     supersededAttemptIds: ["attempt-2"],
   }));
+  authorizeAmendment(projection, "supervisor-request-2");
   const original = structuredClone({ revision: projection.revision, tasks: [...projection.tasks], attempts: [...projection.attempts], amendmentRequestIds: [...projection.amendmentRequestIds] });
   const second = amendmentData(projection, {
     revision: 3, parentRevision: 2, requestId: "supervisor-request-2",
@@ -259,10 +296,12 @@ test("requires exact supersede attempts, rejects request replay, and preserves a
   assert.equal(amended.tasks.get("task-1").status, "accepted");
   assert.equal(amended.attempts.get("attempt-2").status, "supersede-requested");
   assert.throws(() => apply(amended, "plan.amended", { ...changed, revision: 3, parentRevision: 2 }), /duplicate amendment requestId/);
-  const withTombstone = apply(revisionProjection(), "plan.amended", amendmentData(revisionProjection()));
-  assert.throws(() => apply(withTombstone, "plan.amended", {
+  const withTombstone = revisionProjection();
+  const amendedTombstone = apply(withTombstone, "plan.amended", amendmentData(withTombstone));
+  authorizeAmendment(amendedTombstone, "new-request");
+  assert.throws(() => apply(amendedTombstone, "plan.amended", {
     revision: 3, parentRevision: 2, manifestSha256: sha("1"), sourceBytesSha256: sha("2"), planHash: sha("3"), irHash: sha("4"),
-    taskHashes: { ...withTombstone.revision.taskHashes, "task-3": { full: sha("5"), effective: sha("5"), scheduling: sha("6") } },
+    taskHashes: { ...amendedTombstone.revision.taskHashes, "task-3": { full: sha("5"), effective: sha("5"), scheduling: sha("6") } },
     diff: { added: ["task-3"], changed: [], rebound: [], retired: [], unchanged: ["task-1", "task-2", "task-4"] },
     supersededAttemptIds: [], requestId: "new-request", reason: "reuse a tombstone",
   }), /historical task ID/);
@@ -654,6 +693,7 @@ test("persists strict supersede provenance and only accepts matching proof befor
   projection = apply(projection, "attempt.superseded", { attemptId: "attempt-2", taskId: "task-2", oldTaskHash: sha("2"), supersededByRevision: 2, evidence: { kind: "never-started", dispatchId: null } });
   assert.equal(projection.attempts.get("attempt-2").status, "superseded");
   assert.equal(projection.attempts.get("attempt-2").workspaceReleased, undefined);
+  authorizeAmendment(projection, "supervisor-request-2");
   const blockedAmendment = amendmentData(projection, {
     revision: 3, parentRevision: 2, requestId: "supervisor-request-2",
     taskHashes: { "task-1": { ...projection.revision.taskHashes["task-1"] }, "task-2": { ...projection.revision.taskHashes["task-2"], effective: sha("f") } },

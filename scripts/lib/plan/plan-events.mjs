@@ -25,6 +25,7 @@ export function createProjection() {
     validatedHead: null,
     eventIds: new Set(),
     amendmentRequestIds: new Set(),
+    attentionRequestIds: new Set(),
   };
 }
 
@@ -138,6 +139,7 @@ function copyProjection(projection) {
     gates: new Map(projection.gates),
     eventIds: new Set(projection.eventIds),
     amendmentRequestIds: new Set(projection.amendmentRequestIds ?? []),
+    attentionRequestIds: new Set(projection.attentionRequestIds ?? []),
   };
 }
 
@@ -199,6 +201,10 @@ function amendPlan(projection, data) {
   if (!projection.revision) throw new Error("plan.amended requires committed revision identity");
   requireAmendmentRequestId(data.requestId);
   requireAmendmentReason(data.reason);
+  const authorizations = [...projection.attempts.values()].filter((attempt) => attempt.attention?.requestId === data.requestId
+    && attempt.attention.blocking === true
+    && attempt.attention.status === "resolved");
+  if (authorizations.length !== 1) throw new Error("plan.amended requires exactly one resolved blocking Attention authorization");
   if (projection.amendmentRequestIds.has(data.requestId)) throw new Error(`duplicate amendment requestId: ${data.requestId}`);
   if ([...projection.attempts.values()].some((attempt) => hasSupersedeCleanupFence(attempt))) {
     throw new Error("supersede cleanup is pending");
@@ -416,6 +422,9 @@ function redactedAttention(request, evidence, status = "pending") {
 function requestAttention(projection, event) {
   requireActivePlan(projection);
   const request = createAttentionRequest({ ...event.data, planId: event.planId });
+  if (projection.attentionRequestIds.has(request.requestId)) {
+    throw new Error(`duplicate attention requestId: ${request.requestId}`);
+  }
   const attempt = projection.attempts.get(request.attemptId);
   if (!attempt) throw new Error(`unknown attempt: ${request.attemptId}`);
   if (attempt.attention?.blocking && attempt.attention.status !== "resolved") {
@@ -426,6 +435,7 @@ function requestAttention(projection, event) {
   if (attempt.runId !== request.runId) throw new Error(`attention runId does not match: ${request.attemptId}`);
   if (request.projectionVersion !== projection.version + 1) throw new Error("attention projection version does not match next projection");
   const redacted = redactedAttention(request, event.data.evidence);
+  projection.attentionRequestIds.add(request.requestId);
   projection.attempts.set(request.attemptId, request.blocking
     ? { ...attempt, status: "waiting-attention", attention: redacted }
     : { ...attempt, lastProgress: redacted });
