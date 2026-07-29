@@ -9,6 +9,14 @@ import { compilePlanToIR } from "./ir/index.mjs";
 const PLAN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MAX_SOURCE_BYTES = 1024 * 1024;
 const HASH = /^[a-f0-9]{64}$/;
+const MANIFEST_FIELDS = [
+  "schemaVersion", "planId", "revision", "parentRevision", "irVersion", "createdAt", "reason", "initiator",
+  "sourceBytesSha256", "planHash", "irHash", "irArtifactSha256", "taskHashes",
+];
+
+function canonicalManifestBytes(manifest) {
+  return Buffer.from(`${JSON.stringify(Object.fromEntries(MANIFEST_FIELDS.map((field) => [field, manifest[field]])), null, 2)}\n`, "utf8");
+}
 
 function sha256Bytes(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -82,10 +90,10 @@ export function createPlanRevisionStore({ stateRoot, now = () => new Date().toIS
     const plan = parsePlanDocument(source, path.join(directory, "source.md"));
     const compiled = compilePlanToIR(plan);
     const canonicalIrArtifact = Buffer.from(`${JSON.stringify(compiled, null, 2)}\n`, "utf8");
-    const canonicalManifest = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    const canonicalManifest = canonicalManifestBytes(manifest);
     const expectedIrHash = compiled.hash ?? sha256Bytes(canonicalIrArtifact);
     const expectedTaskHashes = revisionTaskHashes(compiled);
-    const requiredManifestKeys = ["schemaVersion", "planId", "revision", "parentRevision", "irVersion", "createdAt", "reason", "initiator", "sourceBytesSha256", "planHash", "irHash", "irArtifactSha256", "taskHashes"];
+    const requiredManifestKeys = MANIFEST_FIELDS;
     if (!manifest || Object.keys(manifest).length !== requiredManifestKeys.length || !requiredManifestKeys.every((key) => Object.hasOwn(manifest, key))
       || !Buffer.from(artifact).equals(canonicalIrArtifact) || !Buffer.from(manifestBytes).equals(canonicalManifest)
       || manifest.schemaVersion !== "plan-revision.v1" || manifest.planId !== planId || manifest.revision !== revision
@@ -96,7 +104,7 @@ export function createPlanRevisionStore({ stateRoot, now = () => new Date().toIS
       || JSON.stringify(ir) !== JSON.stringify(compiled) || JSON.stringify(manifest.taskHashes) !== JSON.stringify(expectedTaskHashes)) {
       throw new Error("malformed Plan revision artifact");
     }
-    return Object.freeze({ planId, revision, directory, sourcePath: path.join(directory, "source.md"), irPath: path.join(directory, "plan-ir.json"), sourceBytes, artifactBytes: artifact, manifestBytes, plan, ir, manifest, manifestSha256: sha256Bytes(manifestBytes) });
+    return Object.freeze({ planId, revision, directory, sourcePath: path.join(directory, "source.md"), irPath: path.join(directory, "plan-ir.json"), sourceBytes, artifactBytes: artifact, manifestBytes, plan, ir: compiled, manifest, manifestSha256: sha256Bytes(manifestBytes) });
   }
 
   async function readRevisionFromDirectory(directory, planId, revision) {
@@ -133,7 +141,7 @@ export function createPlanRevisionStore({ stateRoot, now = () => new Date().toIS
       sourceBytesSha256: sha256Bytes(sourceBytes), planHash: plan.sha256, irHash,
       irArtifactSha256: sha256Bytes(irArtifact), taskHashes: revisionTaskHashes(ir),
     };
-    const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    const manifestBytes = canonicalManifestBytes(manifest);
     const directory = revisionDirectory(root, planId, revision);
     const existing = await readRevision(planId, revision);
     const same = (value) => JSON.stringify(value) === JSON.stringify(manifest.initiator);

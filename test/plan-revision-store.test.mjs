@@ -12,6 +12,31 @@ const sourceBytes = Buffer.from(`# Approved plan  \r\n\r\n## Execution Contract\
 const v3SourceBytes = Buffer.from(`# Complete IR plan\n\n**Goal:** preserve approved instructions\n\n## Execution Contract\n\n\`\`\`json\n{"schemaVersion":"pi-plan.v3","revision":1,"parentPlanHash":null,"verification":[{"id":"plan:test","command":"node --test","cwd":".","timeoutMs":900000}],"requiredGates":["deterministic","plan-audit","external-review","final-completeness"],"resourceCapacities":{},"executionDefaults":{"agent":"executor","risk":"normal","workflow":{"mode":"inherit-repository"},"timeoutMs":900000},"taskExecution":{"task-1":{"risk":"high","workflow":{"mode":"tdd"},"timeoutMs":1200000}},"taskAcceptance":{"task-1":{"strategy":"commands","commandIds":["plan:test"]}}}\n\`\`\`\n\n### Task 1: Compile semantics\n\n**Files:**\n- Modify: \`src/ir.mjs\`\n\n- [ ] Write a test first\n`, "utf8");
 const v3Revision2SourceBytes = Buffer.from(v3SourceBytes.toString().replace('"revision":1,"parentPlanHash":null', `"revision":2,"parentPlanHash":"${"a".repeat(64)}"`), "utf8");
 
+test("rejects reordered manifest bytes for reads and idempotent prepares", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-revision-manifest-order-"));
+  try {
+    const store = createPlanRevisionStore({ stateRoot: root });
+    const prepared = await store.prepareRevision({ planId: "plan-1", sourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } });
+    const manifest = JSON.parse(await readFile(path.join(prepared.directory, "manifest.json"), "utf8"));
+    const reordered = Object.fromEntries(Object.entries(manifest).reverse());
+    await writeFile(path.join(prepared.directory, "manifest.json"), `${JSON.stringify(reordered, null, 2)}\n`);
+    await assert.rejects(store.readRevision("plan-1", 1), /malformed/i);
+    await assert.rejects(store.prepareRevision({ planId: "plan-1", sourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } }), /malformed|immutable/i);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("returns the compiler's recursively frozen IR after rereading a revision", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-revision-frozen-ir-"));
+  try {
+    const store = createPlanRevisionStore({ stateRoot: root });
+    const prepared = await store.prepareRevision({ planId: "plan-1", sourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } });
+    const reread = await store.readRevision("plan-1", prepared.revision);
+    assert.equal(Object.isFrozen(reread.ir), true);
+    assert.equal(Object.isFrozen(reread.ir.nodes), true);
+    assert.equal(Object.isFrozen(reread.ir.nodes[0]), true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("v3 amendments prepare revision two while initial identities remain exclusive", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-revision-amendment-"));
   try {
