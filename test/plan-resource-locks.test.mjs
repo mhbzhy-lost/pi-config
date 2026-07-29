@@ -139,6 +139,15 @@ test("authorizedFrontier rebuilds active claims and returns an empty frontier wh
   assert.deepEqual(authorizedFrontier(ir, projection).map(({ id }) => id), ["task-a"]);
 });
 
+test("authorizedFrontier treats retired tasks as completed and never schedules them", () => {
+  const ir = {
+    version: "plan-ir.v2", resourceCapacities: {},
+    nodes: [{ ...node("retired"), deps: [] }, { ...node("live"), deps: ["retired"] }],
+  };
+  const projection = { tasks: new Map([["retired", { status: "retired" }], ["live", { status: "pending" }]]), attempts: new Map() };
+  assert.deepEqual(authorizedFrontier(ir, projection).map(({ id }) => id), ["live"]);
+});
+
 test("authorizedFrontier returns a structured deadlock when no active attempt can make progress", () => {
   const ir = {
     version: "plan-ir.v2",

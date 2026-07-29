@@ -355,7 +355,7 @@ export function createPlanRunnerDependencies({
         validationHash: attempt.validationHash,
         workspace: attempt.workspace,
         integration: attempt.integration ? { ...attempt.integration } : undefined,
-        deps: [...(task?.deps ?? [])],
+        deps: current.revision ? (ir.nodes.find((node) => node.id === attempt.taskId)?.dependencies ?? []).map(({ taskId }) => taskId) : [...(task?.deps ?? [])],
       });
     }
     return coordinator;

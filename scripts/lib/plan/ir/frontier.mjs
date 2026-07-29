@@ -1,6 +1,6 @@
 import { createResourceClaimSet, selectAuthorizedFrontier } from "../resource-locks.mjs";
 
-const COMPLETED_TASK_STATUSES = new Set(["accepted", "integrated"]);
+const COMPLETED_TASK_STATUSES = new Set(["accepted", "integrated", "retired"]);
 const TERMINAL_BLOCKED_TASK_STATUSES = new Set(["cancelled", "failed"]);
 
 export function runnableFrontier(ir, completedSet, activeSet = new Set()) {

@@ -32,20 +32,26 @@ function legacyExecutionView(ir, taskId) {
 function collectDependencyReceipts(projection, task) {
   const receipts = [];
   for (const dependency of task.dependencies ?? []) {
-    const integrated = [...projection.attempts.entries()].find(([, attempt]) => attempt.taskId === dependency.taskId && attempt.status === "integrated");
-    if (!integrated) throw new Error(`integrated dependency receipt is unavailable: ${dependency.taskId}`);
-    const [, attempt] = integrated;
+    const integrated = [...projection.attempts.entries()]
+      .filter(([, attempt]) => attempt.taskId === dependency.taskId && attempt.status === "integrated");
+    if (integrated.length !== 1) throw new Error(`integrated dependency receipt is unavailable: ${dependency.taskId}`);
+    const [, attempt] = integrated[0];
     const resultCommit = attempt.resultCommit;
     const integratedHead = attempt.integration?.newHead;
     if (typeof resultCommit !== "string" || !resultCommit || typeof integratedHead !== "string" || !integratedHead) {
       throw new Error(`integrated dependency receipt is incomplete: ${dependency.taskId}`);
     }
+    const changedPaths = attempt.validationChangedPaths;
+    const evidence = attempt.validationEvidence;
+    if (!Array.isArray(changedPaths) || !Array.isArray(evidence)) throw new Error(`integrated dependency receipt is incomplete: ${dependency.taskId}`);
     receipts.push(Object.freeze({
       taskId: dependency.taskId,
       resultCommit,
       integratedHead,
-      changedPaths: Object.freeze([...(attempt.validationChangedPaths ?? [])]),
-      verificationSummary: Object.freeze([...(attempt.validationEvidence ?? [])].map((entry) => Object.freeze({ commandId: entry.commandId, exitCode: entry.exitCode }))),
+      changedPaths: Object.freeze([...changedPaths]),
+      verificationSummary: Object.freeze(evidence
+        .filter((entry) => entry?.kind === "command")
+        .map((entry) => Object.freeze({ commandId: entry.commandId, exitCode: entry.exitCode }))),
     }));
   }
   return Object.freeze(receipts);
@@ -62,16 +68,20 @@ function buildExecutionPrompt(view, { attemptId, baseCommit, output, receipts })
     "An optional artifact object may contain a sha256 evidence digest. Never include secrets, credentials, URLs, or local paths.",
   ].join("\n");
   return [
-    "Plan title:", plan.title, "Plan instructions:", plan.instructions,
-    "Task title:", task.title, "Task body:", task.body,
-    "Dependency receipts:", JSON.stringify(receipts),
-    "Allowed paths:", task.allowedPaths.join(", "),
-    "Resources:", JSON.stringify(task.resources),
-    "Execution:", JSON.stringify(task.execution),
-    "Acceptance:", JSON.stringify(task.acceptance),
-    "Attempt context:", JSON.stringify({ attemptId, baseCommit, output }),
-    "Result contract:", plan.executionPolicy.resultContract,
-    "Blocked result shape:", blockedResult,
+    `Plan: ${plan.title}`,
+    `Plan instructions:\n${plan.instructions}`,
+    `Task: ${task.id} ${task.title}`,
+    `Task body:\n${task.body}`,
+    `Dependency receipts:\n${JSON.stringify(receipts)}`,
+    `Allowed paths: ${task.allowedPaths.join(", ")}`,
+    `Resources: ${JSON.stringify(task.resources)}`,
+    `Execution: ${JSON.stringify(task.execution)}`,
+    `Acceptance: ${task.acceptance.strategy}`,
+    `Attempt: ${attemptId}`,
+    `Base commit: ${baseCommit}`,
+    `Authoritative output: ${output}`,
+    `Result contract: ${plan.executionPolicy.resultContract}`,
+    `Blocked result shape: ${blockedResult}`,
   ].join("\n");
 }
 
@@ -111,7 +121,7 @@ function attemptsForTask(projection, taskId) {
 
 function stateFor(projection) {
   if (projection.lifecycle === "blocked") return "blocked";
-  if ([...projection.tasks.values()].every((task) => ["accepted", "integrated"].includes(task.status))) return "ready-to-verify";
+  if ([...projection.tasks.values()].every((task) => ["accepted", "integrated", "retired"].includes(task.status))) return "ready-to-verify";
   if ([...projection.attempts.values()].some((attempt) => ["succeeded", "validated", "integration-requested"].includes(attempt.status))) {
     return "ready-to-integrate";
   }
@@ -312,7 +322,7 @@ export function createPlanCoordinator({
           changedPaths: validation.changedPaths,
           evidence: validation.evidence,
           workspace: attemptLease,
-          deps: [...node.deps],
+          deps: ir.version === "plan-ir.v3" ? node.dependencies.map(({ taskId }) => taskId) : [...node.deps],
         };
         validatedAttempt.validationHash = hashValidatedAttempt(validatedAttempt);
         await appendEvent("attempt.validated", {
@@ -390,7 +400,15 @@ export function createPlanCoordinator({
         planIrHash: ir.hash ?? projection.revision.irHash,
         taskHash: execution.task.hashes?.effective ?? projection.revision.taskHashes[node.id].effective,
         schedulingHash: execution.task.hashes?.scheduling ?? projection.revision.taskHashes[node.id].scheduling,
-        dispatchContextHash: sha256({ prompt, attemptId, baseCommit: attemptBaseCommit, output, receipts }),
+        dispatchContextHash: sha256({
+          planIrHash: ir.hash ?? projection.revision.irHash,
+          taskHash: execution.task.hashes?.effective ?? projection.revision.taskHashes[node.id].effective,
+          schedulingHash: execution.task.hashes?.scheduling ?? projection.revision.taskHashes[node.id].scheduling,
+          attemptId,
+          baseCommit: attemptBaseCommit,
+          output,
+          dependencyReceipts: receipts,
+        }),
       } : {};
       await appendEvent("attempt.dispatch-requested", {
         attemptId,

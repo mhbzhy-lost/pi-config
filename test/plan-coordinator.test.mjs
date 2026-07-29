@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { createPlanEventWriter } from "../scripts/lib/plan/plan-event-writer.mjs";
 import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mjs";
 import { createPlanCoordinator } from "../scripts/lib/plan/coordinator.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
+import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 
 test("requires a compiled Plan IR instead of compiling a parsed plan", () => {
   assert.throws(
@@ -52,6 +54,49 @@ function createdEntry(tasks = ["task-1", "task-2"]) {
     occurredAt: "2026-07-15T00:00:00.000Z",
     type: "plan.created",
     data: { workspace, tasks },
+  };
+}
+
+function v3Plan() {
+  return parsePlanDocument(`# V3 coordinator fixture
+
+**Goal:** dispatch the exact approved task
+
+## Execution Contract
+
+\`\`\`json
+${JSON.stringify({
+  schemaVersion: "pi-plan.v3", revision: 1, parentPlanHash: null,
+  verification: [{ id: "test", command: "true", cwd: ".", timeoutMs: 900000 }],
+  requiredGates: ["deterministic", "plan-audit", "external-review", "final-completeness"], resourceCapacities: {},
+  executionDefaults: { agent: "executor", risk: "normal", workflow: { mode: "inherit-repository" }, timeoutMs: 321000 },
+  taskExecution: {}, taskAcceptance: { "task-1": { strategy: "commands", commandIds: ["test"] } },
+})}
+\`\`\`
+
+Keep the execution contract intact.
+
+### Task 1: Exact task
+
+**Files:**
+- Modify: \`src/exact.mjs\`
+
+Implement the approved change.
+`, "/plans/v3-coordinator.md");
+}
+
+function createdV3Entry(ir) {
+  return {
+    ...createdEntry(ir.nodes.map(({ id }) => id)),
+    data: {
+      workspace: Object.fromEntries(["originRoot", "worktree", "baseCommit", "headCommit"].map((key) => [key, workspace[key]])),
+      tasks: ir.nodes.map(({ id }) => id),
+      revision: {
+        number: 1, manifestSha256: "a".repeat(64), sourceBytesSha256: "b".repeat(64),
+        planHash: ir.source.planHash, irVersion: ir.version, irHash: ir.hash,
+        taskHashes: Object.fromEntries(ir.nodes.map((node) => [node.id, Object.fromEntries(["full", "effective", "scheduling"].map((key) => [key, node.hashes[key]]))])),
+      },
+    },
   };
 }
 
@@ -564,4 +609,32 @@ test("failed attempts receive a new workspace and sequence on retry", async () =
   const retry = await coordinator.dispatchAuthorized();
   assert.equal(retry.dispatched[0].attemptId, "attempt-plan-1-task-1-2");
   assert.notEqual(retry.dispatched[0].cwd, first.dispatched[0].cwd);
+});
+
+test("v3 dispatch emits the complete exact prompt and canonical identity context", async () => {
+  const approvedPlan = v3Plan();
+  const ir = compilePlanToIR(approvedPlan);
+  const spawned = [];
+  const appended = [];
+  const coordinator = createPlanCoordinator({
+    ir, entries: [createdV3Entry(ir)], append: (entry) => appended.push(entry),
+    allocateWorkspace: async (input) => lease(input),
+    backend: { async spawn(input) { spawned.push(input); return { dispatchId: input.dispatchId, attemptId: input.attemptId, runId: "run-v3", asyncDir: "/async/v3", cwd: input.cwd }; } },
+    stateRoot: "/repo", outputForAttempt: (attemptId) => `/results/${attemptId}.json`, id: (() => { let sequence = 0; return () => `v3-event-${++sequence}`; })(), now: () => "2026-07-15T00:00:01.000Z",
+  }).coordinator;
+  await coordinator.dispatchAuthorized();
+  const event = appended.find(({ type }) => type === "attempt.dispatch-requested");
+  assert.match(event.data.tool.task, /^Plan: V3 coordinator fixture\nPlan instructions:\n\*\*Goal:\*\* dispatch the exact approved task\n\n\nKeep the execution contract intact\.\nTask: task-1 Exact task\nTask body:\n\*\*Files:\*\*\n- Modify: `src\/exact\.mjs`\n\nImplement the approved change\.\nDependency receipts:\n\[\]/);
+  assert.match(event.data.tool.task, /\nAllowed paths: src\/exact\.mjs\nResources: \[\]\nExecution: /);
+  assert.match(event.data.tool.task, /\nAcceptance: commands\nAttempt: attempt-plan-1-task-1-1\nBase commit: base\nAuthoritative output: \/results\/attempt-plan-1-task-1-1\.json\nResult contract: /);
+  assert.match(event.data.tool.task, /\nBlocked result shape: /);
+  assert.equal(event.data.planIrHash, ir.hash);
+  assert.equal(event.data.taskHash, ir.nodes[0].hashes.effective);
+  assert.equal(event.data.schedulingHash, ir.nodes[0].hashes.scheduling);
+  const canonical = {
+    planIrHash: ir.hash, taskHash: ir.nodes[0].hashes.effective, schedulingHash: ir.nodes[0].hashes.scheduling,
+    attemptId: "attempt-plan-1-task-1-1", baseCommit: "base", output: "/results/attempt-plan-1-task-1-1.json", dependencyReceipts: [],
+  };
+  assert.equal(event.data.dispatchContextHash, createHash("sha256").update(JSON.stringify(canonical)).digest("hex"));
+  assert.equal(event.data.toolHash, createHash("sha256").update(JSON.stringify(event.data.tool)).digest("hex"));
 });
