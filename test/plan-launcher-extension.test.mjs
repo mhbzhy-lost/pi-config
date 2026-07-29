@@ -188,7 +188,7 @@ test("plan-status forwards pending Attention using the Host event contract once"
     const { commands, messages } = setup(options(root, calls, { findHandle: async () => handle(root) }));
     await commands.get("plan-status").handler("plan-one", {});
     await commands.get("plan-status").handler("plan-one", {});
-    assert.deepEqual(messages, [{ customType: "pi-plan-attention-v1", content: `Plan ${"plan-one"} requires an explicit user decision for request ${"request-1"}. Read the private body at ${path.join(root, "var", "plan-runs", "plan-one", "attention", "request-1.md")} and call plan_attention_reply with expectedProjectionVersion 4. Wait for the user's explicit decision; do not infer one.`, details: { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, bodyPath: "attention/request-1.md", bodySha256 } }]);
+    assert.deepEqual(messages, [{ customType: "pi-plan-attention-v1", content: [`Plan plan-one requires user input for Attention request-1.`, `Read the private Attention body with the read tool at ${path.join(root, "var", "plan-runs", "plan-one", "attention", "request-1.md")}, summarize it to the user, and wait for an explicit decision.`, "After the user decides, call plan_attention_reply with planId=plan-one, requestId=request-1, and expectedProjectionVersion=4.", "Do not infer or submit a decision on the user's behalf."].join("\n"), details: { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, bodyPath: "attention/request-1.md", bodySha256 } }]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

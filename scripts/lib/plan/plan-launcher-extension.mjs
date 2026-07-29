@@ -98,7 +98,12 @@ export function createPlanLauncherExtension(pi, options = {}) {
       await readFile(absoluteBodyPath, "utf8");
       await pi.sendMessage?.({
         customType: "pi-plan-attention-v1",
-        content: `Plan ${handle.planId} requires an explicit user decision for request ${attention.requestId}. Read the private body at ${absoluteBodyPath} and call plan_attention_reply with expectedProjectionVersion ${attention.projectionVersion}. Wait for the user's explicit decision; do not infer one.`,
+        content: [
+          `Plan ${handle.planId} requires user input for Attention ${attention.requestId}.`,
+          `Read the private Attention body with the read tool at ${absoluteBodyPath}, summarize it to the user, and wait for an explicit decision.`,
+          `After the user decides, call plan_attention_reply with planId=${handle.planId}, requestId=${attention.requestId}, and expectedProjectionVersion=${attention.projectionVersion}.`,
+          "Do not infer or submit a decision on the user's behalf.",
+        ].join("\n"),
         details: { planId: handle.planId, requestId: attention.requestId, expectedProjectionVersion: attention.projectionVersion, bodyPath, bodySha256 },
       });
       forwardedAttention.add(key);
