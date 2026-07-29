@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createPlanAmendmentService, diffPlanRevisions, validateAmendment } from "../scripts/lib/plan/plan-amendment.mjs";
+import { applyEvent } from "../scripts/lib/plan/plan-events.mjs";
 import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
 
 function hash(seed) {
@@ -167,7 +168,7 @@ ${taskTwoBody}
 `;
 }
 
-async function amendmentHarness({ appendError, pointerError, supersedeError, attention = { status: "resolved", blocking: true } } = {}) {
+async function amendmentHarness({ appendError, pointerError, supersedeError, attention = { status: "resolved", blocking: true }, mutateRevision } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-amendment-service-"));
   const store = createPlanRevisionStore({ stateRoot: root, now: () => "2026-07-29T00:00:00.000Z" });
   const initial = await store.prepareRevision({
@@ -175,8 +176,9 @@ async function amendmentHarness({ appendError, pointerError, supersedeError, att
     reason: "initial-approval", initiator: { kind: "launcher" },
   });
   const current = {
-    planId: "plan-amendment", version: 7,
-    revision: { number: 1, ...initial.manifest, taskHashes: initial.manifest.taskHashes },
+    planId: "plan-amendment", version: 7, lifecycle: "running", gates: new Map(), workspace: null,
+    validatedHead: null, eventIds: new Set(),
+    revision: { number: 1, manifestSha256: initial.manifestSha256, ...initial.manifest, taskHashes: initial.manifest.taskHashes },
     tasks: new Map([["task-1", { status: "pending" }], ["task-2", { status: "pending" }]]),
     attempts: new Map([
       ["attempt-1", { taskId: "task-1", status: "workspace-allocated" }],
@@ -184,19 +186,31 @@ async function amendmentHarness({ appendError, pointerError, supersedeError, att
     ]),
     amendmentRequestIds: new Set(),
   };
+  const originalReadRevision = store.readRevision.bind(store);
   const calls = [];
+  const appendedEvents = [];
   const revisionStore = {
-    async readRevision(...args) { calls.push("read"); return store.readRevision(...args); },
+    async readRevision(...args) { calls.push("read"); const revision = await originalReadRevision(...args); return mutateRevision ? mutateRevision(structuredClone(revision)) : revision; },
     async prepareRevision(...args) { calls.push("prepare"); return store.prepareRevision(...args); },
     async writeCurrent(...args) { calls.push("writeCurrent"); if (pointerError) throw pointerError; return store.writeCurrent(...args); },
   };
   const service = createPlanAmendmentService({
     revisionStore,
     currentProjection: () => current,
-    eventWriter: { async append(event) { calls.push("append"); if (appendError) throw appendError; return event; } },
+    eventWriter: { async append(event) {
+      calls.push("append");
+      appendedEvents.push(event);
+      if (appendError) throw appendError;
+      const applied = applyEvent(current, {
+        schemaVersion: "pi-plan-event.v1", eventId: "event-amendment", planId: event.planId,
+        occurredAt: "2026-07-29T00:00:01.000Z", type: event.type, data: event.data,
+      });
+      Object.assign(current, applied);
+      return event;
+    } },
     async supersedeAttempt(input) { calls.push(`supersede:${input.attemptId}:${input.expectedTaskHash}`); if (typeof supersedeError === "function" ? supersedeError(input) : supersedeError) throw typeof supersedeError === "function" ? supersedeError(input) : supersedeError; },
   });
-  return { root, current, calls, service, source: amendmentSource({ revision: 2, parentPlanHash: initial.manifest.planHash, taskTwoBody: "amended contract" }) };
+  return { root, current, calls, appendedEvents, service, source: amendmentSource({ revision: 2, parentPlanHash: initial.manifest.planHash, taskTwoBody: "amended contract" }) };
 }
 
 test("commits a validated v3 amendment before pointer and supersede cleanup", async () => {
@@ -208,8 +222,49 @@ test("commits a validated v3 amendment before pointer and supersede cleanup", as
     assert.deepEqual(fixture.calls.slice(0, 4), ["read", "prepare", "append", "writeCurrent"]);
     assert.match(fixture.calls[4], /^supersede:attempt-1:[a-f0-9]{64}$/);
     assert.match(fixture.calls[5], /^supersede:attempt-2:[a-f0-9]{64}$/);
+    assert.equal(fixture.current.revision.number, 2);
+    assert.equal(fixture.current.attempts.get("attempt-1").status, "supersede-requested");
+    assert.equal(fixture.current.attempts.get("attempt-2").status, "supersede-requested");
+    assert.equal(fixture.current.revision.parentRevision, undefined);
+    assert.equal(fixture.appendedEvents[0].data.revision, 2);
+    assert.equal(fixture.appendedEvents[0].data.parentRevision, 1);
+    assert.equal(fixture.appendedEvents[0].data.planHash, fixture.current.revision.planHash);
   } finally { await rm(fixture.root, { recursive: true, force: true }); }
 });
+
+test("rejects invalid direct amendment inputs before reading a revision", async () => {
+  const fixture = await amendmentHarness();
+  try {
+    const valid = { expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "approved scope change", source: fixture.source };
+    for (const input of [
+      { ...valid, expectedProjectionVersion: 0 }, { ...valid, source: "" }, { ...valid, source: " \n\t " },
+      { ...valid, reason: "x".repeat(4097) }, { ...valid, source: "x".repeat(1024 * 1024 + 1) },
+    ]) await assert.rejects(fixture.service.amend(input), /invalid Plan amendment (projection version|source|reason)/);
+    assert.deepEqual(fixture.calls, []);
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+
+for (const [label, mutateRevision] of [
+  ["planId", (revision) => { revision.planId = "other-plan"; }],
+  ["revision", (revision) => { revision.revision = 9; }],
+  ["manifestSha256", (revision) => { revision.manifestSha256 = hash("f"); }],
+  ["manifest.planId", (revision) => { revision.manifest.planId = "other-plan"; }],
+  ["manifest.revision", (revision) => { revision.manifest.revision = 9; }],
+  ["manifest.sourceBytesSha256", (revision) => { revision.manifest.sourceBytesSha256 = hash("f"); }],
+  ["manifest.planHash", (revision) => { revision.manifest.planHash = hash("f"); }],
+  ["manifest.irVersion", (revision) => { revision.manifest.irVersion = "other-version"; }],
+  ["manifest.irHash", (revision) => { revision.manifest.irHash = hash("f"); }],
+  ["ir.version", (revision) => { revision.ir.version = "other-version"; }],
+  ["ir.hash", (revision) => { revision.ir.hash = hash("f"); }],
+]) {
+  test(`rejects a mismatched current revision ${label} before preparation`, async () => {
+    const fixture = await amendmentHarness({ mutateRevision });
+    try {
+      await assert.rejects(fixture.service.amend({ expectedProjectionVersion: 7, baseRevision: 1, requestId: "request-2", reason: "approved scope change", source: fixture.source }), /revision identity mismatch/);
+      assert.deepEqual(fixture.calls, ["read"]);
+    } finally { await rm(fixture.root, { recursive: true, force: true }); }
+  });
+}
 
 test("fails closed before preparation for invalid input, authorization, and revision chains", async () => {
   const fixture = await amendmentHarness();

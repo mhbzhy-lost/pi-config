@@ -8,11 +8,27 @@ function amendmentEventData(prepared, validated, input) {
 function validateServiceInput(input) {
   const keys = ["baseRevision", "expectedProjectionVersion", "reason", "requestId", "source"];
   if (!input || typeof input !== "object" || Array.isArray(input) || JSON.stringify(Object.keys(input).sort()) !== JSON.stringify(keys)) throw new Error("invalid Plan amendment input keys");
-  if (!Number.isSafeInteger(input.expectedProjectionVersion) || input.expectedProjectionVersion < 0) throw new Error("invalid Plan amendment projection version");
+  if (!Number.isSafeInteger(input.expectedProjectionVersion) || input.expectedProjectionVersion < 1) throw new Error("invalid Plan amendment projection version");
   if (!Number.isSafeInteger(input.baseRevision) || input.baseRevision < 1) throw new Error("invalid Plan amendment base revision");
   if (typeof input.requestId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.requestId)) throw new Error("invalid Plan amendment requestId");
   if (typeof input.reason !== "string" || !input.reason.trim() || Buffer.byteLength(input.reason, "utf8") > 4096) throw new Error("invalid Plan amendment reason");
-  if (typeof input.source !== "string" || Buffer.byteLength(input.source, "utf8") > 1024 * 1024) throw new Error("invalid Plan amendment source");
+  if (typeof input.source !== "string" || !input.source.trim() || Buffer.byteLength(input.source, "utf8") > 1024 * 1024) throw new Error("invalid Plan amendment source");
+}
+
+function revisionIdentityMatches(current, projection) {
+  const revision = projection.revision;
+  const manifest = current?.manifest;
+  return current?.planId === projection.planId
+    && current?.revision === revision.number
+    && current?.manifestSha256 === revision.manifestSha256
+    && manifest?.planId === projection.planId
+    && manifest?.revision === revision.number
+    && manifest?.sourceBytesSha256 === revision.sourceBytesSha256
+    && manifest?.planHash === revision.planHash
+    && manifest?.irVersion === revision.irVersion
+    && manifest?.irHash === revision.irHash
+    && current?.ir?.version === manifest?.irVersion
+    && current?.ir?.hash === manifest?.irHash;
 }
 
 export function createPlanAmendmentService({ revisionStore, eventWriter, currentProjection, supersedeAttempt } = {}) {
@@ -27,7 +43,7 @@ export function createPlanAmendmentService({ revisionStore, eventWriter, current
     if (!sourceMatch) throw new Error("Plan amendment requires a resolved blocking Supervisor request");
     const [sourceAttemptId, sourceAttempt] = sourceMatch;
     const current = await revisionStore.readRevision(projection.planId, input.baseRevision);
-    if (!current || current.manifest.planHash !== projection.revision.planHash || current.manifest.irHash !== projection.revision.irHash) throw new Error("Plan amendment current revision identity does not match projection");
+    if (!revisionIdentityMatches(current, projection)) throw new Error("revision identity mismatch");
     const parsed = parsePlanDocument(input.source, current.sourcePath);
     if (parsed.revision !== input.baseRevision + 1 || parsed.parentPlanHash !== current.manifest.planHash) throw new Error("Plan amendment revision chain does not match");
     const nextIr = compilePlanToIR(parsed);
