@@ -847,8 +847,10 @@ test("public continuePlan replays the current revision IR after an authorized am
     entries.push(data);
     branch.push({ customType: type, data });
   } };
+  const facts = [];
   const deps = createPlanRunnerDependencies({
     pi, originRoot: origin, stateRoot, revisionStore,
+    takeExecutionFacts: () => facts.splice(0),
     allocateAttemptWorkspace: async (input) => fakeAllocator(input),
     releaseAttemptWorkspace: async (workspace, options) => { releases.push({ workspace, options }); },
     executionBackend: {
@@ -858,6 +860,9 @@ test("public continuePlan replays the current revision IR after an authorized am
         const binding = { dispatchId: input.dispatchId, attemptId: input.attemptId, runId: `replay-run-${sequence}`, asyncDir: `/async/replay-${sequence}`, cwd: input.cwd, sessionId: "stable-session" };
         bindings.set(input.attemptId, binding);
         return binding;
+      },
+      async status() {
+        return { status: { kind: "stable", value: { state: "running" } } };
       },
       async supersede(input) {
         supersedes.push(input);
@@ -922,6 +927,32 @@ test("public continuePlan replays the current revision IR after an authorized am
   assert.equal(releases.length, 1);
   projection = replayProjection(entries);
   assert.equal(projection.attempts.get(taskOneAttempt.attemptId).status, "active");
+
+  const resolvedStopFact = {
+    type: "execution.protocol-violation", code: "SUPERSEDE_STOP_FAILED",
+    dispatchId: firstTaskTwoAttempt.dispatchId, attemptId: firstTaskTwoAttempt.attemptId,
+    runId: firstTaskTwoAttempt.runId, asyncDir: firstTaskTwoAttempt.asyncDir, cwd: firstTaskTwoAttempt.cwd,
+  };
+  for (const fact of [
+    { ...resolvedStopFact, attemptId: undefined },
+    { ...resolvedStopFact, dispatchId: "wrong-dispatch" },
+    { ...resolvedStopFact, runId: "wrong-run" },
+    { ...resolvedStopFact, asyncDir: "/wrong-async" },
+    { ...resolvedStopFact, code: "LIFECYCLE_BINDING_MISMATCH" },
+  ]) {
+    const blocked = [];
+    const replayBranch = [...branch];
+    const blockedDeps = createPlanRunnerDependencies({
+      pi: { async appendEntry(type, data) { blocked.push(data); replayBranch.push({ customType: type, data }); } },
+      originRoot: origin, stateRoot, revisionStore,
+      takeExecutionFacts: () => [fact],
+    });
+    await blockedDeps.status({ ctx: context(worktree, replayBranch) });
+    assert.deepEqual(blocked.map(({ type, data }) => [type, data.code]), [["plan.blocked", fact.code]]);
+  }
+
+  facts.push(resolvedStopFact);
+  assert.notEqual((await deps.status({ ctx })).lifecycle, "blocked");
 
   reads.length = 0;
   const second = await deps.continuePlan({}, { ctx });

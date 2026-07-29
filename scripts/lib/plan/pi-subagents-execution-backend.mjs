@@ -88,7 +88,12 @@ export function createPiSubagentsExecutionBackend({
     byRunId.set(binding.runId, binding);
     entry.bindingWait.resolve(binding);
     if (entry.cancelling) {
-      void stopBound(entry).catch((error) => violation("SUPERSEDE_STOP_FAILED", "Background supersede stop failed", { ...binding, error: error?.message }));
+      void stopBound(entry).catch((error) => violation("SUPERSEDE_STOP_FAILED", "Background supersede stop failed", {
+        ...binding,
+        dispatchId: entry.request.dispatchId,
+        attemptId: entry.request.attemptId,
+        error: error?.message,
+      }));
     }
   }
 
@@ -181,6 +186,8 @@ export function createPiSubagentsExecutionBackend({
       type: "execution.protocol-violation",
       code,
       message,
+      ...(nonempty(event?.dispatchId) ? { dispatchId: event.dispatchId } : {}),
+      ...(nonempty(event?.attemptId) ? { attemptId: event.attemptId } : {}),
       runId: event?.runId ?? event?.id ?? null,
       asyncDir: event?.asyncDir ?? null,
       cwd: event?.cwd ?? null,

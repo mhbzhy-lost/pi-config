@@ -368,17 +368,34 @@ export function createPlanRunnerDependencies({
     return coordinator;
   }
 
+  function resolvedSupersedeStopViolation(current, fact) {
+    if (fact?.type !== "execution.protocol-violation" || fact.code !== "SUPERSEDE_STOP_FAILED") return false;
+    if (![fact.attemptId, fact.dispatchId, fact.runId, fact.asyncDir].every((value) => typeof value === "string" && value.length > 0)) return false;
+    const attempt = current.attempts.get(fact.attemptId);
+    const proof = attempt?.supersedeProof;
+    return attempt?.dispatchId === fact.dispatchId
+      && attempt.status === "superseded"
+      && attempt.workspaceReleased === true
+      && proof?.kind === "terminal"
+      && proof.dispatchId === fact.dispatchId
+      && proof.runId === fact.runId
+      && proof.asyncDir === fact.asyncDir
+      && attempt.runId === fact.runId
+      && attempt.asyncDir === fact.asyncDir;
+  }
+
   async function consumeExecutionFacts(ctx) {
     const facts = takeExecutionFacts();
     if (!Array.isArray(facts) || facts.length === 0) return null;
     const current = currentProjection(ctx);
-    const violation = facts.find((fact) => fact?.type === "execution.protocol-violation");
+    const unresolvedFacts = facts.filter((fact) => !resolvedSupersedeStopViolation(current, fact));
+    const violation = unresolvedFacts.find((fact) => fact?.type === "execution.protocol-violation");
     if (violation) {
       await appendEvent(ctx, "plan.blocked", { reason: "execution_protocol_violation", code: violation.code }, current.version);
       return { state: "blocked", projectionVersion: currentProjection(ctx).version };
     }
     const coordinator = await coordinatorFor(ctx);
-    return coordinator.recover({ facts });
+    return coordinator.recover({ facts: unresolvedFacts });
   }
 
   function controlFor(binding) {
