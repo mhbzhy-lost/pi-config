@@ -59,10 +59,10 @@ function normalizeGateCommand(entry) {
   return { command: entry.command, cwd: entry.cwd, timeoutMs: entry.timeoutMs };
 }
 
-export async function createTaskCommandRegistry({ cwd, ir, legacyPlan, plan }) {
+export async function createTaskCommandRegistry({ cwd, ir, legacyPlan }) {
   const approved = ir?.version === "plan-ir.v3"
     ? ir.verification?.commands
-    : (legacyPlan ?? plan)?.verification?.map((command, index) => ({ id: `contract:verification:${index + 1}`, command }));
+    : legacyPlan?.verification?.map((command, index) => ({ id: `contract:verification:${index + 1}`, command }));
   if (!Array.isArray(approved)) throw new Error("Approved contract verification command is invalid");
   const registry = new Map();
   for (const entry of approved) {
@@ -82,12 +82,12 @@ export async function createTaskCommandRegistry({ cwd, ir, legacyPlan, plan }) {
   return registry;
 }
 
-export function resolveTaskVerification({ ir, legacyPlan, plan, taskId, registry }) {
+export function resolveTaskVerification({ ir, legacyPlan, taskId, registry }) {
   const v3 = ir?.version === "plan-ir.v3";
-  const legacy = legacyPlan ?? plan;
+  if (!v3 && (!legacyPlan || typeof legacyPlan !== "object")) throw new Error(`Task verification is invalid for ${taskId}`);
   const task = v3 ? ir.nodes?.find((node) => node.id === taskId) : undefined;
   if (v3 && !task) throw new Error(`Task verification is invalid for ${taskId}`);
-  const acceptance = v3 ? selectVerificationView(ir, taskId).acceptance : { strategy: "commands", commandIds: legacy?.taskVerification?.[taskId] ?? [] };
+  const acceptance = v3 ? selectVerificationView(ir, taskId).acceptance : { strategy: "commands", commandIds: legacyPlan.taskVerification?.[taskId] ?? [] };
   if (acceptance.strategy !== "commands") return [];
   if (!Array.isArray(acceptance.commandIds)) throw new Error(`Task verification is invalid for ${taskId}`);
   return acceptance.commandIds.map((id) => {

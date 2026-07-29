@@ -183,6 +183,29 @@ test("rejects failed controlled verification and preserves stdout and stderr evi
   });
 });
 
+test("fails a structured verification timeout with bounded evidence and no delayed side effect", async () => {
+  await withRepository(async ({ root, lease }) => {
+    await commitFile(root, "src/a.txt");
+    const marker = path.join(root, "timeout.marker");
+    const result = await validateAttemptResult({
+      lease,
+      allowedPaths: ["src/**"],
+      verification: [{
+        id: "plan:timeout",
+        command: nodeCommand(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, ''), 1000)`),
+        cwd: ".",
+        timeoutMs: 10,
+      }],
+    });
+
+    assert.equal(result.accepted, false);
+    assert.equal(result.code, "VERIFICATION_FAILED");
+    assert.notEqual(result.evidence[0].exitCode, 0);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await assert.rejects(readFile(marker));
+  });
+});
+
 test("runs structured verification in a safe relative cwd with a timeout", async () => {
   await withRepository(async ({ root, lease }) => {
     await commitFile(root, "src/a.txt");

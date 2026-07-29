@@ -49,22 +49,24 @@ function acceptedProjection(head) {
   return result;
 }
 
-test("builds a controlled task command registry from approved contract commands and package scripts", async (t) => {
+test("builds a controlled task command registry from explicit legacy contract commands and package scripts", async (t) => {
   const cwd = await repository();
   t.after(() => rm(cwd, { recursive: true, force: true }));
   await writeFile(path.join(cwd, "package.json"), JSON.stringify({ scripts: { test: "node --test", "lint:plan": "node lint.mjs", "unsafe name": "echo no" } }));
-  const plan = {
+  const legacyPlan = {
     verification: ["node --test test/plan.test.mjs"],
     taskVerification: { "task-1": ["package:test", "contract:verification:1"] },
   };
-  const registry = await createTaskCommandRegistry({ cwd, plan });
-  assert.deepEqual(resolveTaskVerification({ plan, taskId: "task-1", registry }), [
+  const registry = await createTaskCommandRegistry({ cwd, legacyPlan });
+  assert.deepEqual(resolveTaskVerification({ legacyPlan, taskId: "task-1", registry }), [
     { id: "package:test", command: "npm run test --" },
     { id: "contract:verification:1", command: "node --test test/plan.test.mjs" },
   ]);
   assert.equal(registry.has("package:unsafe name"), false);
+  await assert.rejects(createTaskCommandRegistry({ cwd }), /approved contract/i);
+  assert.throws(() => resolveTaskVerification({ taskId: "task-1", registry }), /task verification/i);
   assert.throws(
-    () => resolveTaskVerification({ plan: { ...plan, taskVerification: { "task-1": ["task prose"] } }, taskId: "task-1", registry }),
+    () => resolveTaskVerification({ legacyPlan: { ...legacyPlan, taskVerification: { "task-1": ["task prose"] } }, taskId: "task-1", registry }),
     /registered command/i,
   );
 });
@@ -99,7 +101,19 @@ test("runs structured gate commands in their declared directory with a bounded t
   assert.equal(timedOut.validated, false);
 });
 
-test("rejects invalid structured gate commands before execution and accepts retired tasks", async (t) => {
+test("rejects invalid structured gate commands before execution", async (t) => {
+  const cwd = await repository();
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(path.join(cwd, "change.txt"), "change\n");
+  await git(cwd, "add", "change.txt");
+  await git(cwd, "commit", "-m", "change");
+  const head = await git(cwd, "rev-parse", "HEAD");
+  const result = await runPlanGates({ cwd, baseCommit: "HEAD~1", projection: acceptedProjection(head), commands: [{ command: "touch escaped", cwd: "../", timeoutMs: 1_000 }] });
+  assert.equal(result.validated, false);
+  await assert.rejects(access(path.join(path.dirname(cwd), "escaped")));
+});
+
+test("accepts retired tasks when every gate is valid", async (t) => {
   const cwd = await repository();
   t.after(() => rm(cwd, { recursive: true, force: true }));
   await writeFile(path.join(cwd, "change.txt"), "change\n");
@@ -108,9 +122,18 @@ test("rejects invalid structured gate commands before execution and accepts reti
   const head = await git(cwd, "rev-parse", "HEAD");
   const state = acceptedProjection(head);
   state.tasks.set("retired", { status: "retired" });
-  const result = await runPlanGates({ cwd, baseCommit: "HEAD~1", projection: state, commands: [{ command: "touch escaped", cwd: "../", timeoutMs: 1_000 }] });
-  assert.equal(result.validated, false);
-  await assert.rejects(access(path.join(path.dirname(cwd), "escaped")));
+
+  const result = await runPlanGates({
+    cwd,
+    baseCommit: "HEAD~1",
+    projection: state,
+    commands: [{ command: nodeCommand(), cwd: ".", timeoutMs: 1_000 }],
+    audit: async () => ({ findings: [] }),
+    externalReview: async () => ({ available: true, findings: [] }),
+  });
+
+  assert.equal(result.validated, true);
+  assert.equal(result.attempts.find((item) => item.type === "final-completeness")?.status, "passed");
 });
 
 test("runs every declared verification command string before validating the current head", async (t) => {
