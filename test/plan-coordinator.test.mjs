@@ -204,6 +204,78 @@ test("stops a deferred spawned run when external cancellation wins before bindin
   assert.doesNotThrow(() => replay(entries));
 });
 
+test("stops a spawned run when cancellation wins the attempt.bound CAS", async () => {
+  const entries = [createdEntry(["task-1"])];
+  const boundQueued = deferred();
+  const releaseBound = deferred();
+  const stops = [];
+  const sharedWriter = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => { entries.push(entry); },
+    id: (() => { let index = 0; return () => `shared-${++index}`; })(),
+    now: () => "2026-07-15T00:00:01.000Z",
+  });
+  const writer = {
+    async append(input) {
+      if (input.type === "attempt.bound") {
+        boundQueued.resolve();
+        await releaseBound.promise;
+      }
+      return await sharedWriter.append(input);
+    },
+  };
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries,
+    backend: { async stop(target) { stops.push(target); } },
+    options: { writer, readEntries: async () => entries, readProjection: () => replay(entries) },
+  });
+
+  const dispatch = subject.coordinator.dispatchAuthorized();
+  await boundQueued.promise;
+  await sharedWriter.append({ expectedProjectionVersion: 3, planId: "plan-1", type: "plan.cancelled", data: { reason: "external" } });
+  releaseBound.resolve();
+
+  const result = await dispatch;
+  assert.equal(result.state, "cancelled");
+  assert.deepEqual(stops, [{ runId: "run-1", asyncDir: "/async/run-1" }]);
+  assert.equal(entries.filter(({ type }) => type === "attempt.bound").length, 0);
+  assert.doesNotThrow(() => replay(entries));
+});
+
+test("retries attempt.bound after a non-terminal projection conflict", async () => {
+  const entries = [createdEntry(["task-1"])];
+  const stops = [];
+  const sharedWriter = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => { entries.push(entry); },
+    id: (() => { let index = 0; return () => `shared-${++index}`; })(),
+    now: () => "2026-07-15T00:00:01.000Z",
+  });
+  let conflict = true;
+  const writer = {
+    async append(input) {
+      if (input.type === "attempt.bound" && conflict) {
+        conflict = false;
+        throw Object.assign(new Error("injected conflict"), { code: "PROJECTION_CONFLICT" });
+      }
+      return await sharedWriter.append(input);
+    },
+  };
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries,
+    backend: { async stop(target) { stops.push(target); } },
+    options: { writer, readEntries: async () => entries, readProjection: () => replay(entries) },
+  });
+
+  const result = await subject.coordinator.dispatchAuthorized();
+
+  assert.equal(result.state, "waiting-executors");
+  assert.equal(entries.filter(({ type }) => type === "attempt.bound").length, 1);
+  assert.deepEqual(stops, []);
+});
+
 test("dispatches every authorized root with isolated cwd and returns no model-callable tool", async () => {
   const approvedPlan = plan([
     task("task-1", { resources: [{ id: "xcode", mode: "exclusive" }] }),

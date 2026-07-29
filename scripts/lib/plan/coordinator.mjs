@@ -173,6 +173,52 @@ export function createPlanCoordinator({
     };
   }
 
+  async function stopSpawnedBinding(binding, originalError) {
+    try {
+      await backend.stop?.({ runId: binding.runId, asyncDir: binding.asyncDir });
+    } catch (stopError) {
+      if (originalError) throw new AggregateError([originalError, stopError], "binding persistence and executor cleanup failed");
+      throw stopError;
+    }
+    if (originalError) throw originalError;
+  }
+
+  async function bindOrCleanupSpawnedAttempt({ attemptId, taskId, dispatchId, binding }) {
+    const bound = {
+      attemptId,
+      taskId,
+      dispatchId,
+      runId: binding.runId,
+      asyncDir: binding.asyncDir,
+      sessionFile: binding.sessionFile ?? null,
+    };
+    for (;;) {
+      await refreshProjection();
+      if (["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
+        await stopSpawnedBinding(binding);
+        return { state: projection.lifecycle };
+      }
+      const attempt = projection.attempts.get(attemptId);
+      const sameBinding = attempt && ["active", "waiting-attention"].includes(attempt.status)
+        && attempt.dispatchId === dispatchId && attempt.runId === binding.runId && attempt.asyncDir === binding.asyncDir;
+      if (sameBinding) return { state: null };
+      const requested = attempt?.status === "dispatch-requested"
+        && attempt.taskId === taskId && attempt.dispatchId === dispatchId;
+      if (!requested) {
+        await stopSpawnedBinding(binding);
+        return await block("protocol_violation", { attemptId, dispatchId });
+      }
+      try {
+        await appendEvent("attempt.bound", bound);
+        return { state: null };
+      } catch (error) {
+        await refreshProjection();
+        if (error?.code === "PROJECTION_CONFLICT") continue;
+        await stopSpawnedBinding(binding, error);
+      }
+    }
+  }
+
   async function settleBoundAttempt(outcome, attemptId) {
     await refreshProjection();
     if (["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
@@ -347,19 +393,19 @@ export function createPlanCoordinator({
         const reason = error?.code?.includes?.("MISMATCH") ? "protocol_violation" : "dispatch_uncertain";
         return await block(reason, { attemptId, dispatchId, error: error instanceof Error ? error.message : String(error) });
       }
-      await refreshProjection();
-      if (["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
-        await backend.stop?.({ runId: binding.runId, asyncDir: binding.asyncDir });
-        return { state: projection.lifecycle, dispatched, projectionVersion: projection.version };
-      }
-      await appendEvent("attempt.bound", {
+      const bindingResult = await bindOrCleanupSpawnedAttempt({
         attemptId,
         taskId: node.id,
         dispatchId,
-        runId: binding.runId,
-        asyncDir: binding.asyncDir,
-        sessionFile: binding.sessionFile ?? null,
+        binding,
       });
+      if (bindingResult.state) {
+        return {
+          state: bindingResult.state,
+          dispatched,
+          projectionVersion: projection.version,
+        };
+      }
       dispatched.push({
         taskId: node.id,
         attemptId,
