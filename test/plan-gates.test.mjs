@@ -187,6 +187,40 @@ test("ignores only pi-subagents runtime artifacts when checking a clean committe
   assert.equal(result.validated, true);
 });
 
+test("ignores only top-level attempts runtime workspaces when checking gate cleanliness", async (t) => {
+  const cases = [
+    { name: "top-level attempts directory", setup: (cwd) => mkdir(path.join(cwd, "attempts", "attempt-1"), { recursive: true }).then(() => writeFile(path.join(cwd, "attempts", "attempt-1", "preserved.txt"), "runtime\n")), expected: true },
+    { name: "nested attempts directory", setup: (cwd) => mkdir(path.join(cwd, "nested", "attempts"), { recursive: true }).then(() => writeFile(path.join(cwd, "nested", "attempts", "preserved.txt"), "runtime\n")), expected: false },
+    { name: "ordinary untracked file", setup: (cwd) => writeFile(path.join(cwd, "other.txt"), "untracked\n"), expected: false },
+    { name: "attempts file", setup: (cwd) => writeFile(path.join(cwd, "attempts"), "not a directory\n"), expected: false },
+    { name: "tracked dirty file", setup: (cwd) => writeFile(path.join(cwd, "file.txt"), "dirty\n"), expected: false },
+  ];
+
+  for (const scenario of cases) {
+    const cwd = await repository();
+    t.after(() => rm(cwd, { recursive: true, force: true }));
+    await writeFile(path.join(cwd, "change.txt"), "change\n");
+    await git(cwd, "add", "change.txt");
+    await git(cwd, "commit", "-m", "change");
+    const head = await git(cwd, "rev-parse", "HEAD");
+    const state = acceptedProjection(head);
+    state.attempts.set("attempt-1", { status: "completed" });
+    await scenario.setup(cwd);
+
+    const result = await runPlanGates({
+      cwd,
+      baseCommit: "HEAD~1",
+      projection: state,
+      commands: [nodeCommand()],
+      audit: async () => ({ findings: [] }),
+      externalReview: async () => ({ available: true, findings: [] }),
+    });
+
+    assert.equal(result.validated, scenario.expected, scenario.name);
+    assert.ok(result.attempts.every((attempt) => attempt.status === (scenario.expected ? "passed" : "failed")), scenario.name);
+  }
+});
+
 test("fails closed when the projection head is not the real gate input head", async (t) => {
   const cwd = await repository();
   t.after(() => rm(cwd, { recursive: true, force: true }));

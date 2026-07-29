@@ -31,7 +31,7 @@ async function inspect(cwd, baseCommit) {
   return {
     head,
     dirtyTrackedFiles: status ? status.split("\n") : [],
-    untrackedFiles: untracked.split("\0").filter((file) => file && !file.startsWith(".pi-subagents/")),
+    untrackedFiles: untracked.split("\0").filter((file) => file && !file.startsWith(".pi-subagents/") && !file.startsWith("attempts/")),
     diff,
     changeSetHash: createHash("sha256").update(`${baseCommit}\0${head}\0${diff}`).digest("hex"),
   };
