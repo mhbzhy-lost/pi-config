@@ -11,6 +11,7 @@ import { createPlanCoordinator } from "./coordinator.mjs";
 import { parsePlanDocument } from "./plan-document.mjs";
 import { createPlanStatus, writePlanStatus } from "./plan-projection.mjs";
 import { readAttemptDisposition } from "./runtime-artifacts.mjs";
+import { createPlanEventWriter } from "./plan-event-writer.mjs";
 import { createProjection, applyEvent } from "./plan-events.mjs";
 import { createTaskCommandRegistry, resolveTaskVerification, runPlanGates } from "./gates.mjs";
 import { createPlanControl } from "./plan-control.mjs";
@@ -31,20 +32,6 @@ function events(ctx) {
   return branch.filter((entry) => entry?.customType === "pi-plan-event-v1").map((entry) => entry.data).filter(Boolean);
 }
 
-function append(pi, entry) {
-  pi?.appendEntry?.("pi-plan-event-v1", entry);
-}
-
-function eventFor(current, type, data, id, now) {
-  return {
-    schemaVersion: "pi-plan-event.v1",
-    eventId: id(),
-    planId: current.planId,
-    occurredAt: now(),
-    type,
-    data,
-  };
-}
 
 async function writeAttentionBody({ stateRoot, planId, requestId, message }) {
   if (!IDENTITY.test(requestId) || requestId.includes("..")) throw new Error("Invalid Attention requestId");
@@ -158,9 +145,20 @@ export function createPlanRunnerDependencies({
     return value;
   }
 
-  function appendLocal(entry) {
-    localEntries.push(entry);
-    append(pi, entry);
+  const writer = createPlanEventWriter({
+    readEntries: async () => combinedEvents(lastCtx),
+    append: async (entry) => {
+      if (pi?.appendEntry) await pi.appendEntry("pi-plan-event-v1", entry);
+      localEntries.push(entry);
+    },
+    id,
+    now,
+  });
+
+  async function appendEvent(ctx, type, data, expectedProjectionVersion) {
+    const current = currentProjection(ctx);
+    const expected = expectedProjectionVersion ?? current.version;
+    return writer.append({ expectedProjectionVersion: expected, planId: current.planId, type, data });
   }
 
   async function derivedStatus(ctx) {
@@ -190,7 +188,8 @@ export function createPlanRunnerDependencies({
     const coordinator = createPlanCoordinator({
       plan,
       entries: combinedEvents(ctx),
-      append: appendLocal,
+      writer,
+      readEntries: async () => combinedEvents(ctx),
       allocateWorkspace: allocateAttemptWorkspace,
       backend: executionBackend,
       stateRoot,
@@ -215,7 +214,7 @@ export function createPlanRunnerDependencies({
       isPlanActive: () => !TERMINAL.has(coordinator.projection().lifecycle),
       append: (type, data) => coordinator.appendIntegrationEvent(type, data),
       releaseWorkspace: async (attempt) => {
-        coordinator.appendIntegrationEvent("attempt.workspace-released", {
+        await coordinator.appendIntegrationEvent("attempt.workspace-released", {
           attemptId: attempt.attemptId,
           disposition: "integrated-cleanup",
           evidence: { kind: "integration-cleanup", resultCommit: attempt.resultCommit },
@@ -254,7 +253,7 @@ export function createPlanRunnerDependencies({
     const current = currentProjection(ctx);
     const violation = facts.find((fact) => fact?.type === "execution.protocol-violation");
     if (violation) {
-      appendLocal(eventFor(current, "plan.blocked", { reason: "execution_protocol_violation", code: violation.code }, id, now));
+      await appendEvent(ctx, "plan.blocked", { reason: "execution_protocol_violation", code: violation.code }, current.version);
       return { state: "blocked", projectionVersion: currentProjection(ctx).version };
     }
     const coordinator = await coordinatorFor(ctx);
@@ -280,9 +279,7 @@ export function createPlanRunnerDependencies({
       await control.writeAck(ack);
       return ack;
     }
-    const entry = eventFor(current, "plan.cancelled", { reason: "parent_cancel", requestId: request.requestId }, id, now);
-    applyEvent(current, entry);
-    appendLocal(entry);
+    await appendEvent(ctx, "plan.cancelled", { reason: "parent_cancel", requestId: request.requestId }, current.version);
     await derivedStatus(ctx);
     const ack = { ...request, lifecycle: "cancelled", result: "accepted", occurredAt: now() };
     await control.writeAck(ack);
@@ -322,6 +319,7 @@ export function createPlanRunnerDependencies({
   }
 
   return {
+    appendPlanEvent: appendEvent,
     async validateBinding(input, { ctx }) {
       const binding = await readBinding(input, ctx, configuredRoots);
       lastWorkspace = binding.worktree;
@@ -344,7 +342,7 @@ export function createPlanRunnerDependencies({
       const { stateRoot } = await rootsFor(ctx, current.planId);
       const evidence = await writeAttentionBody({ stateRoot, planId: current.planId, requestId, message: body });
       const kind = ATTENTION_KINDS.has(details.reason) ? details.reason : "need_decision";
-      appendLocal(eventFor(current, "attempt.attention-requested", {
+      await appendEvent(ctx, "attempt.attention-requested", {
         requestId,
         taskId: attempt.taskId,
         attemptId,
@@ -354,16 +352,16 @@ export function createPlanRunnerDependencies({
         projectionVersion: current.version + 1,
         createdAt: now(),
         evidence,
-      }, id, now));
+      }, current.version);
       current = currentProjection(ctx);
       if (kind !== "progress_update") {
-        appendLocal(eventFor(current, "attempt.attention-escalated", {
+        await appendEvent(ctx, "attempt.attention-escalated", {
           attemptId,
           requestId,
           runId: attempt.runId,
           expectedProjectionVersion: current.version,
           evidence,
-        }, id, now));
+        }, current.version);
       }
       await derivedStatus(ctx);
       return { requestId, attemptId, runId: attempt.runId, projectionVersion: currentProjection(ctx).version, evidence };
@@ -403,13 +401,13 @@ export function createPlanRunnerDependencies({
     async resolveSupervisorReply(authorization, { ctx }) {
       const current = currentProjection(ctx);
       if (authorization?.expectedProjectionVersion !== current.version) throw new Error("Supervisor reply projection version is stale");
-      appendLocal(eventFor(current, "attempt.attention-resolved", {
+      await appendEvent(ctx, "attempt.attention-resolved", {
         attemptId: authorization.attemptId,
         requestId: authorization.requestId,
         runId: authorization.runId,
         expectedProjectionVersion: authorization.expectedProjectionVersion,
         resolutionSha256: authorization.resolutionSha256,
-      }, id, now));
+      }, current.version);
       if (authorization.command) {
         const { stateRoot } = await rootsFor(ctx, current.planId);
         const control = createPlanControl({ stateRoot, id, now });
@@ -448,9 +446,7 @@ export function createPlanRunnerDependencies({
     async blockPlan({ reason }, { ctx }) {
       if (typeof reason !== "string" || !reason.trim()) throw new Error("Block reason is required.");
       const current = currentProjection(ctx);
-      const entry = eventFor(current, "plan.blocked", { reason }, id, now);
-      applyEvent(current, entry);
-      appendLocal(entry);
+      await appendEvent(ctx, "plan.blocked", { reason }, current.version);
       return derivedStatus(ctx);
     },
     async continuePlan(input = {}, { ctx }) {
@@ -498,9 +494,8 @@ export function createPlanRunnerDependencies({
       let next = current;
       const headCommit = await git(current.workspace.worktree, "rev-parse", "HEAD^{commit}");
       if (headCommit !== next.workspace.headCommit) {
-        const entry = eventFor(next, "workspace.head-observed", { headCommit }, id, now);
-        next = applyEvent(next, entry);
-        appendLocal(entry);
+        await appendEvent(ctx, "workspace.head-observed", { headCommit }, next.version);
+        next = currentProjection(ctx);
       }
       const result = await runPlanGates({
         cwd: current.workspace.worktree,
@@ -511,14 +506,12 @@ export function createPlanRunnerDependencies({
         externalReview,
       });
       for (const attempt of result.attempts) {
-        const entry = eventFor(next, "gate.finished", attempt, id, now);
-        next = applyEvent(next, entry);
-        appendLocal(entry);
+        await appendEvent(ctx, "gate.finished", attempt, next.version);
+        next = currentProjection(ctx);
       }
       if (result.validated) {
-        const entry = eventFor(next, "plan.validated", { worktreeClean: true }, id, now);
-        applyEvent(next, entry);
-        appendLocal(entry);
+        await appendEvent(ctx, "plan.validated", { worktreeClean: true }, next.version);
+        next = currentProjection(ctx);
       }
       await derivedStatus(ctx);
       return result;

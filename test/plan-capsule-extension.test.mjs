@@ -58,7 +58,17 @@ function setup(options = {}) {
     setActiveTools(next) { activeTools = next; },
     sendMessage(message, sendOptions) { messages.push({ message, options: sendOptions }); },
   };
-  createPlanCapsuleExtension(pi, options);
+  createPlanCapsuleExtension(pi, {
+    appendPlanEvent: async (_ctx, type, data) => {
+      const events = _ctx?.sessionManager?.getBranch?.() ?? [];
+      const existing = events.find((entry) => entry?.customType === "pi-plan-event-v1")?.data;
+      pi.appendEntry("pi-plan-event-v1", {
+        schemaVersion: "pi-plan-event.v1", eventId: options.id?.() ?? crypto.randomUUID(),
+        planId: existing?.planId ?? "release-11", occurredAt: options.now?.() ?? new Date().toISOString(), type, data,
+      });
+    },
+    ...options,
+  });
   return { tools, handlers, entries, messages, activeTools: () => activeTools };
 }
 

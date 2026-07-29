@@ -237,14 +237,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
         return;
       }
     }
-    pi.appendEntry("pi-plan-event-v1", {
-      schemaVersion: "pi-plan-event.v1",
-      eventId: options.id?.() ?? crypto.randomUUID(),
-      planId: projection.planId,
-      occurredAt: options.now?.() ?? new Date().toISOString(),
-      type: "plan.interrupted",
-      data: { reason: "unsafe_to_continue" },
-    });
+    await options.appendPlanEvent?.(ctx, "plan.interrupted", { reason: "unsafe_to_continue" }, projection.version);
   });
 
   register(pi, {
@@ -269,24 +262,18 @@ export function createPlanCapsuleExtension(pi, options = {}) {
         }
         const tasks = binding.tasks.map((task) => typeof task === "object" && task !== null ? task.id : task);
         if (tasks.some((taskId) => typeof taskId !== "string" || taskId.trim() === "")) throw new Error("Invalid verified plan binding.");
-        pi.appendEntry("pi-plan-event-v1", {
-          schemaVersion: "pi-plan-event.v1",
-          eventId: options.id?.() ?? crypto.randomUUID(),
-          planId: binding.planId,
-          occurredAt: options.now?.() ?? new Date().toISOString(),
-          type: "plan.created",
-          data: {
-            workspace: {
-              originRoot: binding.originRoot,
-              worktree: binding.worktree,
-              baseCommit: binding.baseCommit,
-              headCommit: binding.headCommit,
-              planPath: binding.planPath,
-              planHash: binding.planHash,
-            },
-            tasks,
+        if (typeof options.appendPlanEvent !== "function") throw new Error("Plan event writer is unavailable.");
+        await options.appendPlanEvent(ctx, "plan.created", {
+          workspace: {
+            originRoot: binding.originRoot,
+            worktree: binding.worktree,
+            baseCommit: binding.baseCommit,
+            headCommit: binding.headCommit,
+            planPath: binding.planPath,
+            planHash: binding.planHash,
           },
-        });
+          tasks,
+        }, 0);
         if (typeof options.startPlanControl === "function") {
           const stop = await options.startPlanControl({ binding, ctx });
           if (typeof stop !== "function") throw new Error("Plan control startup failed.");

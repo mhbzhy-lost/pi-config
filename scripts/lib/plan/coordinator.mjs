@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { createPlanEventWriter } from "./plan-event-writer.mjs";
 import { applyEvent, createProjection } from "./plan-events.mjs";
 import { compilePlanToIR } from "./ir/compile.mjs";
 import { authorizedFrontier } from "./ir/frontier.mjs";
@@ -101,6 +102,8 @@ export function createPlanCoordinator({
   plan,
   entries,
   append,
+  writer: suppliedWriter,
+  readEntries,
   allocateWorkspace,
   backend,
   stateRoot,
@@ -115,28 +118,38 @@ export function createPlanCoordinator({
   id = () => crypto.randomUUID(),
   now = () => new Date().toISOString(),
 } = {}) {
-  if (!plan || !Array.isArray(entries) || typeof append !== "function") throw new Error("plan, entries, and append are required");
+  if (!plan || !Array.isArray(entries) || (typeof append !== "function" && !suppliedWriter)) throw new Error("plan, entries, and append are required");
   const ir = authorizationIR(plan);
-  let projection = replay(entries);
+  const localEntries = [...entries];
+  const writer = suppliedWriter ?? createPlanEventWriter({
+    readEntries: readEntries ?? (async () => localEntries),
+    append: async (entry) => { await append(entry); localEntries.push(entry); },
+    id,
+    now,
+  });
+  let projection = replay(localEntries);
   let integrationQueue = initialIntegrationQueue;
 
-  function appendEvent(type, data) {
-    const entry = {
-      schemaVersion: "pi-plan-event.v1",
-      eventId: id(),
+  async function refreshProjection() {
+    projection = replay(await (readEntries ?? (async () => localEntries))());
+    return projection;
+  }
+
+  async function appendEvent(type, data) {
+    await refreshProjection();
+    const entry = await writer.append({
+      expectedProjectionVersion: projection.version,
       planId: projection.planId,
-      occurredAt: now(),
       type,
       data,
-    };
-    const next = applyEvent(projection, entry);
-    append(entry);
-    projection = next;
+    });
+    await refreshProjection();
     return entry;
   }
 
-  function block(reason, detail) {
-    if (projection.lifecycle !== "blocked") appendEvent("plan.blocked", { reason, ...(detail ? { detail } : {}) });
+  async function block(reason, detail) {
+    await refreshProjection();
+    if (projection.lifecycle !== "blocked") await appendEvent("plan.blocked", { reason, ...(detail ? { detail } : {}) });
     return {
       state: "blocked",
       dispatched: [],
@@ -155,7 +168,7 @@ export function createPlanCoordinator({
         output: outputForAttempt(attemptId),
       });
       if (disposition?.status === "blocked") {
-        appendEvent("attempt.settled", {
+        await appendEvent("attempt.settled", {
           attemptId,
           outcome: "blocked",
           blockerReason: disposition.reason,
@@ -169,7 +182,7 @@ export function createPlanCoordinator({
           blockers: disposition.blockers,
           ...(disposition.evidenceSha256 ? { evidenceSha256: disposition.evidenceSha256 } : {}),
         };
-        block("executor_blocked", detail);
+        await block("executor_blocked", detail);
         return {
           attemptId,
           outcome: "blocked",
@@ -184,7 +197,7 @@ export function createPlanCoordinator({
       resultCommit = await readAttemptHead(attempt.workspace);
       if (typeof resultCommit !== "string" || !resultCommit) throw new Error("successful attempt HEAD is unavailable");
     }
-    appendEvent("attempt.settled", { attemptId, outcome, ...(resultCommit ? { resultCommit } : {}) });
+    await appendEvent("attempt.settled", { attemptId, outcome, ...(resultCommit ? { resultCommit } : {}) });
     let validation = null;
     if (outcome === "succeeded" && typeof validateAttemptResult === "function") {
       const node = ir.nodes.find((candidate) => candidate.id === attempt.taskId);
@@ -201,7 +214,7 @@ export function createPlanCoordinator({
         verification: await verificationForTask(node.id),
       });
       if (!validation?.accepted) {
-        block("attempt_validation_failed", { attemptId, code: validation?.code ?? "invalid_result" });
+        await block("attempt_validation_failed", { attemptId, code: validation?.code ?? "invalid_result" });
       } else {
         const validatedAttempt = {
           planId: projection.planId,
@@ -215,7 +228,7 @@ export function createPlanCoordinator({
           deps: [...node.deps],
         };
         validatedAttempt.validationHash = hashValidatedAttempt(validatedAttempt);
-        appendEvent("attempt.validated", {
+        await appendEvent("attempt.validated", {
           attemptId,
           resultCommit: validation.resultCommit,
           validationHash: validatedAttempt.validationHash,
@@ -241,7 +254,7 @@ export function createPlanCoordinator({
       if (integration?.state === "blocked") return { state: "blocked", dispatched: [], projectionVersion: projection.version };
     }
     const authorization = authorizedFrontier(ir, projection);
-    if (!Array.isArray(authorization)) return block("authorization_deadlock", authorization);
+    if (!Array.isArray(authorization)) return await block("authorization_deadlock", authorization);
     const frontier = authorization.filter((node) => !attemptsForTask(projection, node.id)
       .some((attempt) => ["succeeded", "validated", "integration-requested", "integrated"].includes(attempt.status)));
     if (frontier.length === 0) {
@@ -260,7 +273,7 @@ export function createPlanCoordinator({
         attemptId,
         baseCommit: attemptBaseCommit,
       });
-      appendEvent("attempt.workspace-allocated", {
+      await appendEvent("attempt.workspace-allocated", {
         attemptId,
         taskId: node.id,
         baseCommit: attemptBaseCommit,
@@ -283,7 +296,7 @@ export function createPlanCoordinator({
         artifacts: true,
         timeoutMs,
       };
-      appendEvent("attempt.dispatch-requested", {
+      await appendEvent("attempt.dispatch-requested", {
         attemptId,
         taskId: node.id,
         dispatchId,
@@ -307,13 +320,18 @@ export function createPlanCoordinator({
         if (binding?.dispatchId !== dispatchId || binding?.attemptId !== attemptId
           || binding?.cwd !== workspaceLease.path || typeof binding?.runId !== "string"
           || typeof binding?.asyncDir !== "string") {
-          return block("protocol_violation", { attemptId, dispatchId });
+          return await block("protocol_violation", { attemptId, dispatchId });
         }
       } catch (error) {
         const reason = error?.code?.includes?.("MISMATCH") ? "protocol_violation" : "dispatch_uncertain";
-        return block(reason, { attemptId, dispatchId, error: error instanceof Error ? error.message : String(error) });
+        return await block(reason, { attemptId, dispatchId, error: error instanceof Error ? error.message : String(error) });
       }
-      appendEvent("attempt.bound", {
+      await refreshProjection();
+      if (["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
+        await backend.stop?.({ runId: binding.runId, asyncDir: binding.asyncDir });
+        return { state: projection.lifecycle, dispatched, projectionVersion: projection.version };
+      }
+      await appendEvent("attempt.bound", {
         attemptId,
         taskId: node.id,
         dispatchId,
@@ -345,10 +363,10 @@ export function createPlanCoordinator({
   async function recover({ facts = [] } = {}) {
     for (const attempt of requestedAttempts(projection)) {
       const matching = matchingFacts(attempt, facts);
-      if (matching.length === 0) return block("dispatch_uncertain", { attemptId: attempt.attemptId, dispatchId: attempt.dispatchId });
-      if (matching.length > 1) return block("protocol_violation", { attemptId: attempt.attemptId, dispatchId: attempt.dispatchId });
+      if (matching.length === 0) return await block("dispatch_uncertain", { attemptId: attempt.attemptId, dispatchId: attempt.dispatchId });
+      if (matching.length > 1) return await block("protocol_violation", { attemptId: attempt.attemptId, dispatchId: attempt.dispatchId });
       const fact = matching[0];
-      appendEvent("attempt.bound", {
+      await appendEvent("attempt.bound", {
         attemptId: attempt.attemptId,
         taskId: attempt.taskId,
         dispatchId: attempt.dispatchId,
@@ -380,11 +398,11 @@ export function createPlanCoordinator({
         if (integrationQueue && integrationQueue !== queue) throw new Error("Integration queue is already configured");
         integrationQueue = queue;
       },
-      appendIntegrationEvent(type, data) {
+      async appendIntegrationEvent(type, data) {
         if (!["integration.requested", "integration.finished", "attempt.workspace-released", "plan.blocked"].includes(type)) {
           throw new Error(`Invalid integration event: ${type}`);
         }
-        return appendEvent(type, data);
+        return await appendEvent(type, data);
       },
       projection: () => projection,
     }),
