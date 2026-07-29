@@ -15,6 +15,7 @@ import {
 
 type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: () => void | Promise<void> };
 type Caller = { planId: string; cwd: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
+type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string };
 
 const FORBIDDEN_SPAWN_FIELDS = new Set(["caller", "root", "token", "parent", "depth", "path", "fanout", "callerRunId", "callerToken", "rootSessionId", "parentRunId", "parentDepth", "parentPath"]);
@@ -28,6 +29,7 @@ export class RootBrokerServer {
   rootSessionId: string;
   upstream: Upstream;
   callers = new Map<string, Caller>();
+  principals = new Map<string, Principal>();
   runOwners = new Map<string, string>();
   subscriptions = new Map<string, Set<Socket>>();
   sockets = new Set<Socket>();
@@ -77,6 +79,7 @@ export class RootBrokerServer {
     const caller: Caller = { planId, cwd, role, callerToken, ownedRunIds: new Set() };
     const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId: callerRunId, callerToken, role });
     this.callers.set(callerRunId, caller);
+    this.principals.set(callerRunId, { role, callerToken });
     this.grantPaths.add(grantPath);
     return { callerToken };
   }
@@ -113,8 +116,11 @@ export class RootBrokerServer {
   async dispatch(request: any, socket: Socket) {
     if (this.closed) return failure(request, "root_closing", "Root session is closing");
     if (request.rootSessionId !== this.rootSessionId) return failure(request, "root_mismatch", "Root session does not match");
+    const principal = this.principals.get(request.callerRunId);
+    if (!principal || principal.callerToken !== request.callerToken) return failure(request, "caller_unauthorized", "Caller is not granted");
+    if (principal.role === "executor" && request.method !== "subscribe") return failure(request, "role_unauthorized", "Executor may only subscribe");
     const caller = this.callers.get(request.callerRunId);
-    if (!caller || caller.callerToken !== request.callerToken) return failure(request, "caller_unauthorized", "Caller is not granted");
+    if (principal.role === "plan-runner" && !caller) return failure(request, "caller_unauthorized", "Caller is not granted");
     try {
       if (request.method === "subscribe") {
         const subscribers = this.subscriptions.get(request.callerRunId) ?? new Set<Socket>();
@@ -146,8 +152,10 @@ export class RootBrokerServer {
       return failure(request, "spawn_invalid", "Upstream spawn reply is missing runId or asyncDir");
     }
     try {
-      const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId, callerToken: this.randomToken(), role: "executor" });
+      const callerToken = this.randomToken();
+      const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId, callerToken, role: "executor" });
       this.grantPaths.add(grantPath);
+      this.principals.set(runId, { role: "executor", callerToken });
       caller.ownedRunIds.add(runId);
       this.runOwners.set(runId, request.callerRunId);
     } catch (error) {

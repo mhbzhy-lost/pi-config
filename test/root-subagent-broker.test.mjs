@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { brokerGrantPath, brokerSocketPath } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
+import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 
@@ -79,6 +79,41 @@ test("broker fails closed for root, caller, and token mismatches", async (t) => 
   }
 });
 
+test("executor grant subscribes with its own identity and cannot call other methods", async (t) => {
+  const upstream = fakeUpstream();
+  const broker = new RootBrokerServer({ rootSessionId, upstream });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  const spawned = await socketRequest(request({ callerRunId: "plan-run-1", callerToken: caller.callerToken, method: "spawn", params: { agent: "executor" } }));
+  assert.equal(spawned.reply.success, true);
+  const executor = await readBrokerGrant(rootSessionId, "executor-run-1");
+
+  const subscription = await socketRequest(request({ callerRunId: executor.runId, callerToken: executor.callerToken, method: "subscribe", params: {} }), { keepOpen: true });
+  assert.equal(subscription.reply.success, true);
+  for (const denied of [
+    request({ callerRunId: executor.runId, callerToken: "a".repeat(64), method: "subscribe", params: {} }),
+    request({ callerRunId: "executor-run-2", callerToken: executor.callerToken, method: "subscribe", params: {} }),
+  ]) {
+    const reply = await socketRequest(denied);
+    assert.equal(reply.reply.success, false);
+    assert.equal(reply.reply.error.code, "caller_unauthorized");
+  }
+
+  for (const [method, params] of [
+    ["ping", {}], ["spawn", {}], ["status", {}], ["steer", {}], ["interrupt", {}], ["stop", {}], ["supervisor.pending", {}], ["supervisor.reply", { replyTo: "request-2" }],
+  ]) {
+    const reply = await socketRequest(request({ callerRunId: executor.runId, callerToken: executor.callerToken, method, params }));
+    assert.equal(reply.reply.success, false);
+    assert.equal(reply.reply.error.code, "role_unauthorized");
+  }
+  assert.deepEqual(upstream.calls, [{ method: "spawn", params: { agent: "executor", async: true, clarify: false } }]);
+
+  const closing = once(subscription.socket, "data");
+  await broker.closeRootSession();
+  assert.equal(JSON.parse((await closing)[0].toString()).callerRunId, executor.runId);
+});
+
 test("broker closes idle sockets, disposes upstream once, and validates caller grants at runtime", async (t) => {
   const order = [];
   const upstream = { ...fakeUpstream(), dispose() { order.push("upstream.dispose"); } };
@@ -134,6 +169,21 @@ test("broker cleans failed spawn grants and bounds failure messages", async () =
   assert.equal(reply.error.message.length <= 1024, true);
   assert.deepEqual(stops, [{ runId: "executor-run-2", dir: "/async/2" }]);
   assert.equal(broker.runOwners.has("executor-run-2"), false);
+  assert.equal(broker.principals?.has("executor-run-2") ?? false, false);
+});
+
+test("broker leaves no executor principal after invalid spawn reply", async () => {
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: { ...fakeUpstream(), async spawn() { return { details: { runId: "executor-run-invalid" } }; } },
+    writeGrant: async () => "/tmp/grant",
+  });
+  const caller = await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  const reply = await broker.dispatch(request({ callerRunId: "plan-run-1", callerToken: caller.callerToken, method: "spawn", params: { agent: "executor" } }), {});
+  assert.equal(reply.success, false);
+  assert.equal(reply.error.code, "spawn_invalid");
+  assert.equal(broker.runOwners.has("executor-run-invalid"), false);
+  assert.equal(broker.principals?.has("executor-run-invalid") ?? false, false);
 });
 
 test("root broker registry isolates Pis and has bind/require/unbind contracts", () => {
