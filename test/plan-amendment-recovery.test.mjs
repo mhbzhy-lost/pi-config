@@ -348,7 +348,6 @@ test("multi-attempt backend failures continue in attemptId order after reverse i
   const ids = ["attempt-01", "attempt-02"];
   const f = await fixture({
     attempts: [{ attemptId: "attempt-02", taskId: "task-2", status: "dispatch-requested" }, { attemptId: "attempt-01", taskId: "task-3", status: "dispatch-requested" }],
-    reverseInsertion: true,
     backend: { async supersede(input) { f.calls.supersede.push(input); if (input.attemptId === "attempt-01") throw new Error("backend failed"); return terminalProof(input.attemptId); } },
   });
   t.after(() => rm(f.origin, { recursive: true, force: true }));
@@ -369,7 +368,6 @@ test("multi-attempt release failures continue and durable checkpoints prevent re
   let fail = true;
   const f = await fixture({
     attempts: [{ attemptId: "attempt-02", taskId: "task-2", status: "workspace-allocated" }, { attemptId: "attempt-01", taskId: "task-3", status: "workspace-allocated" }],
-    reverseInsertion: true,
     release: async (lease) => { if (lease.path.endsWith("attempt-01") && fail) { fail = false; throw new Error("release failed"); } },
   });
   t.after(() => rm(f.origin, { recursive: true, force: true }));
