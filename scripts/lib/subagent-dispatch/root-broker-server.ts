@@ -174,9 +174,12 @@ export class RootBrokerServer {
       for (const socket of this.sockets) if (!socket.destroyed) socket.end();
       setTimeout(() => { for (const socket of this.sockets) if (!socket.destroyed) socket.destroy(); }, 25).unref?.();
       await new Promise<void>((resolve) => this.server ? this.server.close(() => resolve()) : resolve());
-      await rm(brokerSocketPath(this.rootSessionId), { force: true });
-      await Promise.all([...this.grantPaths].map((grantPath) => rm(grantPath, { force: true })));
-      await this.upstream.dispose?.();
+      try {
+        await rm(brokerSocketPath(this.rootSessionId), { force: true });
+        await Promise.all([...this.grantPaths].map((grantPath) => rm(grantPath, { force: true })));
+      } finally {
+        await this.upstream.dispose?.();
+      }
     })();
     return this.closePromise;
   }

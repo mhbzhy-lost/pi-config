@@ -13,6 +13,17 @@ export function requireRootBroker(pi: object): RootBrokerServer {
   return broker;
 }
 
-export function unbindRootBroker(pi: object): void {
-  brokers.delete(pi);
+export function unbindRootBroker(pi: object, broker?: RootBrokerServer): void {
+  if (!broker || brokers.get(pi) === broker) brokers.delete(pi);
+}
+
+export async function startAndBindRootBroker(pi: object, broker: RootBrokerServer): Promise<void> {
+  try {
+    bindRootBroker(pi, broker);
+    await broker.start();
+  } catch (error) {
+    unbindRootBroker(pi, broker);
+    await broker.closeRootSession().catch(() => undefined);
+    throw error;
+  }
 }

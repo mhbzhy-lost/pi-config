@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { connect } from "node:net";
-import { stat } from "node:fs/promises";
+import { mkdtemp, rm as removePath, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { brokerGrantPath, brokerSocketPath } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
-import { bindRootBroker, requireRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 
 const rootSessionId = "root-broker-test-1";
 
@@ -99,6 +101,21 @@ test("broker closes idle sockets, disposes upstream once, and validates caller g
   assert.deepEqual(order, ["upstream.dispose"]);
 });
 
+test("broker disposes upstream when grant cleanup fails", async (t) => {
+  let disposed = 0;
+  const grantDirectory = await mkdtemp(path.join(tmpdir(), "root-broker-grant-"));
+  t.after(() => removePath(grantDirectory, { recursive: true, force: true }));
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: { ...fakeUpstream(), dispose() { disposed += 1; } },
+  });
+  await broker.start();
+  broker.grantPaths.add(grantDirectory);
+
+  await assert.rejects(() => broker.closeRootSession());
+  assert.equal(disposed, 1);
+});
+
 test("broker cleans failed spawn grants and bounds failure messages", async () => {
   const stops = [];
   let grants = 0;
@@ -131,4 +148,35 @@ test("root broker registry isolates Pis and has bind/require/unbind contracts", 
   unbindRootBroker(first);
   unbindRootBroker(first);
   assert.throws(() => requireRootBroker(first));
+});
+
+test("root broker startup keeps an existing binding and closes the rejected broker", async () => {
+  const pi = {};
+  const existing = {};
+  const next = {
+    starts: 0,
+    closes: 0,
+    async start() { this.starts += 1; },
+    async closeRootSession() { this.closes += 1; },
+  };
+  bindRootBroker(pi, existing);
+
+  await assert.rejects(() => startAndBindRootBroker(pi, next), /already bound/);
+  assert.equal(next.starts, 0);
+  assert.equal(next.closes, 1);
+  assert.equal(requireRootBroker(pi), existing);
+  unbindRootBroker(pi);
+});
+
+test("root broker startup rolls back only its failed reservation and closes it", async () => {
+  const pi = {};
+  const next = {
+    closes: 0,
+    async start() { throw new Error("listen failed"); },
+    async closeRootSession() { this.closes += 1; },
+  };
+
+  await assert.rejects(() => startAndBindRootBroker(pi, next), /listen failed/);
+  assert.equal(next.closes, 1);
+  assert.throws(() => requireRootBroker(pi));
 });

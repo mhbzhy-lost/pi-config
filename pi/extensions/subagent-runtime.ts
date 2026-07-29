@@ -10,7 +10,7 @@ import {
 } from "../../scripts/lib/subagent-dispatch/compact-rendering.ts";
 import { installHeadlessTypedSubagentRuntime } from "../../scripts/lib/subagent-dispatch/extension.ts";
 import { createTypedSubagentRpcClient } from "../../scripts/lib/subagent-dispatch/rpc-client.ts";
-import { bindRootBroker, requireRootBroker, unbindRootBroker } from "../../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
 function notificationColor(text: string): "error" | "warning" | "success" {
@@ -39,7 +39,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       try {
         await broker.closeRootSession();
       } finally {
-        unbindRootBroker(pi);
+        unbindRootBroker(pi, broker);
         brokerStarted = false;
       }
     },
@@ -49,15 +49,8 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     if (brokerStarted) throw new Error("Root subagent broker is already started");
     const rootSessionId = resolveCurrentSessionId(ctx.sessionManager);
     const broker = new RootBrokerServer({ rootSessionId, upstream: createTypedSubagentRpcClient(pi.events) });
-    try {
-      await broker.start();
-      bindRootBroker(pi, broker);
-      brokerStarted = true;
-    } catch (error) {
-      unbindRootBroker(pi);
-      await broker.closeRootSession().catch(() => undefined);
-      throw error;
-    }
+    await startAndBindRootBroker(pi, broker);
+    brokerStarted = true;
   });
   // Upstream registers the same custom type during bootstrap; the project renderer must win last-write ownership.
   pi.registerMessageRenderer("subagent-notify", (message, { outputPad }, theme) => {
