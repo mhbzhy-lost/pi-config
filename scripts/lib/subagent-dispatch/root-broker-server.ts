@@ -68,7 +68,9 @@ export class RootBrokerServer {
       await setBrokerSocketPermissions(socketPath);
       this.unsubscribeStarted = this.events?.on("subagent:async-started", (event) => {
         const runId = event?.runId ?? event?.id;
-        if (typeof runId === "string" && ["executor", "spark"].includes(event?.agent)) void this.ensureExecutorOwner(runId);
+        if (typeof runId === "string" && ["executor", "spark"].includes(event?.agent)) {
+          void this.ensureExecutorOwner(runId).catch(() => undefined);
+        }
       });
     } catch (error) {
       this.server = undefined;

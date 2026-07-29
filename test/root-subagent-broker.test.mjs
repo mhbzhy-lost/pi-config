@@ -9,7 +9,7 @@ import test from "node:test";
 import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
-import { installRootSessionOwner } from "../pi/child-extensions/root-session-owner.ts";
+import { installRootSessionOwner, installRootSessionOwnerLifecycle } from "../pi/child-extensions/root-session-owner.ts";
 import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 
 const rootSessionId = "root-broker-test-1";
@@ -150,6 +150,37 @@ test("root ownership guard is a legacy no-op without the root broker capability 
   });
   assert.equal(created, 0);
   owner.dispose();
+});
+
+test("root ownership lifecycle awaits one marker-enabled subscription and disposes it once", async () => {
+  const handlers = new Map();
+  const pi = { on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); } };
+  let subscribed = 0;
+  let disposed = 0;
+  let clientDisposed = 0;
+  installRootSessionOwnerLifecycle(pi, {
+    env: { PI_ROOT_SUBAGENT_BROKER_ENABLED: "1", PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: rootSessionId, PI_SUBAGENT_RUN_ID: "run-1" },
+    createClient: () => ({ async subscribe() { subscribed += 1; return { closed: new Promise(() => {}), dispose() { disposed += 1; } }; }, dispose() { clientDisposed += 1; } }),
+  });
+  assert.equal(handlers.get("session_start").length, 1);
+  assert.equal(handlers.get("session_shutdown").length, 1);
+  await handlers.get("session_start")[0]();
+  assert.equal(subscribed, 1);
+  await assert.rejects(handlers.get("session_start")[0](), /already started/i);
+  await handlers.get("session_shutdown")[0]();
+  await handlers.get("session_shutdown")[0]();
+  assert.equal(disposed, 1);
+  assert.equal(clientDisposed, 1);
+});
+
+test("root ownership lifecycle propagates startup errors", async () => {
+  const handlers = new Map();
+  const pi = { on(type, handler) { handlers.set(type, handler); } };
+  installRootSessionOwnerLifecycle(pi, {
+    env: { PI_ROOT_SUBAGENT_BROKER_ENABLED: "1", PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: rootSessionId, PI_SUBAGENT_RUN_ID: "run-1" },
+    createClient: () => { throw new Error("subscription failed"); },
+  });
+  await assert.rejects(handlers.get("session_start")(), /subscription failed/);
 });
 
 test("root broker grants direct async executor runs idempotently", async (t) => {

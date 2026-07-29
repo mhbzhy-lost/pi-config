@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { access, readFile, rm } from "node:fs/promises";
 import test from "node:test";
 import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
 import {
@@ -40,6 +41,31 @@ function evaluate(report) {
 test("exports the stable RPC v1 method and supported Pi contracts", () => {
   assert.deepEqual(REQUIRED_METHODS, ["ping", "status", "spawn", "interrupt", "stop"]);
   assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1"]);
+});
+
+test("installed launch arguments keep project child agents outside fanout hierarchy", async () => {
+  const jiti = createJiti(import.meta.url, { moduleCache: false });
+  const piArgs = await jiti.import(join(repoRoot, "pi/npm/node_modules/pi-subagents/src/runs/shared/pi-args.ts"));
+  const agents = Object.fromEntries(await Promise.all(["plan-runner", "executor", "plan-reviewer", "spark"].map(async (name) => {
+    const source = await readFile(join(repoRoot, "pi/agents", `${name}.md`), "utf8");
+    const fields = Object.fromEntries(source.match(/^---\n([\s\S]*?)\n---/)[1].split("\n").map((line) => line.split(/:\s*/, 2)));
+    return [name, fields];
+  })));
+  for (const fields of Object.values(agents)) {
+    const plan = piArgs.resolvePiLaunchToolPlan({ tools: fields.tools?.split(/,\s*/), subagentOnlyExtensions: fields.subagentOnlyExtensions ? [fields.subagentOnlyExtensions] : [], cwd: repoRoot });
+    assert.equal(plan.fanoutAuthorized, false);
+    assert.ok(!plan.declaredBuiltinTools.includes("subagent"));
+    assert.ok(!plan.extensionArgs.some((entry) => entry.includes("fanout-child")));
+  }
+  await access(join(repoRoot, agents.executor.subagentOnlyExtensions));
+  const built = piArgs.buildPiArgs({ baseArgs: [], task: "probe", sessionEnabled: false, inheritProjectContext: false, inheritSkills: false, tools: agents.executor.tools.split(/,\s*/), subagentOnlyExtensions: [agents.executor.subagentOnlyExtensions], cwd: repoRoot });
+  try {
+    assert.equal(built.env.PI_SUBAGENT_FANOUT_CHILD, "0");
+    assert.equal(built.env.PI_SUBAGENT_PARENT_DEPTH || undefined, undefined);
+    assert.equal(built.env.PI_SUBAGENT_PARENT_RUN_ID || undefined, undefined);
+    assert.equal(built.env.PI_SUBAGENT_PARENT_PATH || undefined, undefined);
+    assert.ok(built.args.includes(agents.executor.subagentOnlyExtensions));
+  } finally { await rm(built.tempDir, { recursive: true, force: true }); }
 });
 
 test("requires upstream fleet transcript, artifact-root, and every public Pi native conversation capability", async () => {

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createHeadlessSubagentApi } from "../scripts/lib/subagent-dispatch/runtime-membrane.ts";
 import { installHeadlessTypedSubagentRuntime } from "../scripts/lib/subagent-dispatch/extension.ts";
+import { installRootOwnedSubagent } from "../pi/child-extensions/root-owned-subagent.ts";
 
 let supervisor = {};
 try {
@@ -196,6 +197,23 @@ test("allows a unique project-owned supervisor name and label", () => {
   });
   assert.equal(tool.name, "plan_executor_supervisor");
   assert.equal(tool.label, "Plan Executor Supervisor");
+});
+
+test("root-owned project supervisor calls only the broker and never the native supervisor", async () => {
+  const pi = createPi();
+  let nativeExecutions = 0;
+  const calls = [];
+  const rpc = { dispose() {}, supervisorPending() { calls.push("pending"); return { pending: [] }; }, supervisorReply(params) { calls.push(params); return { replied: true }; } };
+  pi.registerTool({ name: "subagent_supervisor", execute() { nativeExecutions += 1; } });
+  installRootOwnedSubagent(pi, { rootSessionId: "root", callerRunId: "run", createClient: () => rpc });
+  assert.ok(pi.tools.some((tool) => tool.name === "subagent"));
+  const project = pi.tools.find((tool) => tool.name === "plan_executor_supervisor");
+  assert.ok(project);
+  await project.execute("pending", { action: "pending" });
+  await project.execute("status", { action: "status" });
+  await project.execute("reply", { action: "reply", replyTo: "request-1", message: "go" });
+  assert.deepEqual(calls, ["pending", "pending", { action: "reply", replyTo: "request-1", message: "go" }]);
+  assert.equal(nativeExecutions, 0);
 });
 
 test("delegates every execution argument and the resolved result unchanged", async () => {

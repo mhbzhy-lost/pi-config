@@ -5,21 +5,14 @@ import { ensurePlanRuntimeTools } from "../../scripts/lib/plan/plan-runtime-tool
 import { createPiSubagentsExecutionBackend } from "../../scripts/lib/plan/pi-subagents-execution-backend.mjs";
 import { createExternalReviewAdapter } from "../../scripts/lib/plan/external-review-adapter.mjs";
 import { installRootOwnedSubagent } from "./root-owned-subagent.ts";
-import { installRootSessionOwner } from "./root-session-owner.ts";
+import { installRootSessionOwnerLifecycle } from "./root-session-owner.ts";
 
 const REQUIRED_RUNTIME_TOOLS: string[] = [];
 const REQUIRED_RPC_METHODS = ["ping", "spawn", "status", "interrupt", "stop"];
 
 export default function planRunner(pi: ExtensionAPI) {
   const rootOwned = installRootOwnedSubagent(pi);
-  let owner: Awaited<ReturnType<typeof installRootSessionOwner>> | undefined;
-  pi.on("session_start", async () => {
-    owner = await installRootSessionOwner(pi);
-  });
-  pi.on("session_shutdown", () => {
-    owner?.dispose();
-    owner = undefined;
-  });
+  installRootSessionOwnerLifecycle(pi);
 
   const executionFacts: unknown[] = [];
   const rpc = rootOwned.rpc;

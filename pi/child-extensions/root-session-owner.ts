@@ -13,7 +13,29 @@ type Options = {
 };
 
 export default function rootSessionOwner(pi: any) {
-  pi.on("session_start", async () => installRootSessionOwner(pi));
+  installRootSessionOwnerLifecycle(pi);
+}
+
+export function installRootSessionOwnerLifecycle(pi: any, options: Options = {}) {
+  let owner: Awaited<ReturnType<typeof installRootSessionOwner>> | undefined;
+  let started = false;
+  let disposed = false;
+  pi.on("session_start", async () => {
+    if (started) throw new Error("Root session owner is already started");
+    started = true;
+    try {
+      owner = await installRootSessionOwner(pi, options);
+    } catch (error) {
+      started = false;
+      throw error;
+    }
+  });
+  pi.on("session_shutdown", () => {
+    if (disposed) return;
+    disposed = true;
+    owner?.dispose();
+    owner = undefined;
+  });
 }
 
 export async function installRootSessionOwner(pi: any, options: Options = {}) {
