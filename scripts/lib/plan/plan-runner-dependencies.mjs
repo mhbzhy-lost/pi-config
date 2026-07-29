@@ -190,6 +190,7 @@ export function createPlanRunnerDependencies({
       entries: combinedEvents(ctx),
       writer,
       readEntries: async () => combinedEvents(ctx),
+      readProjection: () => currentProjection(ctx),
       allocateWorkspace: allocateAttemptWorkspace,
       backend: executionBackend,
       stateRoot,

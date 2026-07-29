@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createPlanEventWriter } from "../scripts/lib/plan/plan-event-writer.mjs";
+import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mjs";
 import { createPlanCoordinator } from "../scripts/lib/plan/coordinator.mjs";
 
 const workspace = {
@@ -57,6 +59,18 @@ function lease(input) {
   };
 }
 
+function replay(entries) {
+  let projection = createProjection();
+  for (const entry of entries) projection = applyEvent(projection, entry);
+  return projection;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function harness({ approvedPlan = plan(), entries, backend: backendOverrides = {}, allocation = lease, options = {} } = {}) {
   const appended = [];
   const spawned = [];
@@ -98,6 +112,97 @@ function harness({ approvedPlan = plan(), entries, backend: backendOverrides = {
   });
   return { ...result, appended, spawned, allocations, backend };
 }
+
+test("synchronously reflects an external cancellation and refuses dispatch before allocation", async () => {
+  const entries = [createdEntry(["task-1"])];
+  const appended = [];
+  const sharedWriter = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => { entries.push(entry); appended.push(entry); },
+    id: (() => { let index = 0; return () => `shared-${++index}`; })(),
+    now: () => "2026-07-15T00:00:01.000Z",
+  });
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries,
+    options: { writer: sharedWriter, readEntries: async () => entries, readProjection: () => replay(entries) },
+  });
+
+  await sharedWriter.append({ expectedProjectionVersion: 1, planId: "plan-1", type: "plan.cancelled", data: { reason: "external" } });
+
+  assert.equal(subject.coordinator.projection().lifecycle, "cancelled");
+  await assert.rejects(subject.coordinator.dispatchAuthorized(), /Plan cannot dispatch executors/);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.spawned.length, 0);
+  assert.equal(appended.at(-1).type, "plan.cancelled");
+});
+
+test("does not recover or settle attempts after an external cancellation", async () => {
+  const entries = [...requestedEntries(), {
+    schemaVersion: "pi-plan-event.v1", eventId: "bound", planId: "plan-1", occurredAt: "2026-07-15T00:00:03.000Z", type: "attempt.bound",
+    data: { attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", dispatchId: "attempt-plan-1-task-1-1.dispatch.1", runId: "run-1", asyncDir: "/async/run-1", sessionFile: null },
+  }];
+  const appended = [];
+  const sharedWriter = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => { entries.push(entry); appended.push(entry); },
+    id: () => "cancelled",
+    now: () => "2026-07-15T00:00:04.000Z",
+  });
+  let statusReads = 0;
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries,
+    backend: { async status() { statusReads++; return { status: { kind: "stable", value: { state: "complete" } } }; } },
+    options: { writer: sharedWriter, readEntries: async () => entries, readProjection: () => replay(entries) },
+  });
+  await sharedWriter.append({ expectedProjectionVersion: 4, planId: "plan-1", type: "plan.cancelled", data: { reason: "external" } });
+  const eventCount = entries.length;
+
+  assert.equal((await subject.coordinator.recover()).state, "cancelled");
+  await assert.rejects(subject.coordinator.settleBoundAttempt("failed", "attempt-plan-1-task-1-1"), /Plan cannot settle attempts/);
+  assert.equal(statusReads, 0);
+  assert.equal(entries.length, eventCount);
+  assert.equal(appended.length, 1);
+});
+
+test("stops a deferred spawned run when external cancellation wins before binding", async () => {
+  const entries = [createdEntry(["task-1"])];
+  const spawnStarted = deferred();
+  const releaseBinding = deferred();
+  const stops = [];
+  const sharedWriter = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => { entries.push(entry); },
+    id: (() => { let index = 0; return () => `shared-${++index}`; })(),
+    now: () => "2026-07-15T00:00:01.000Z",
+  });
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries,
+    backend: {
+      async spawn(input) {
+        spawnStarted.resolve();
+        await releaseBinding.promise;
+        return { dispatchId: input.dispatchId, attemptId: input.attemptId, runId: "run-deferred", asyncDir: "/async/deferred", cwd: input.cwd };
+      },
+      async stop(target) { stops.push(target); },
+    },
+    options: { writer: sharedWriter, readEntries: async () => entries, readProjection: () => replay(entries) },
+  });
+
+  const dispatch = subject.coordinator.dispatchAuthorized();
+  await spawnStarted.promise;
+  assert.equal(replay(entries).attempts.get("attempt-plan-1-task-1-1").status, "dispatch-requested");
+  await sharedWriter.append({ expectedProjectionVersion: 3, planId: "plan-1", type: "plan.cancelled", data: { reason: "external" } });
+  releaseBinding.resolve();
+
+  const result = await dispatch;
+  assert.equal(result.state, "cancelled");
+  assert.deepEqual(stops, [{ runId: "run-deferred", asyncDir: "/async/deferred" }]);
+  assert.equal(replay(entries).attempts.get("attempt-plan-1-task-1-1").status, "dispatch-requested");
+  assert.doesNotThrow(() => replay(entries));
+});
 
 test("dispatches every authorized root with isolated cwd and returns no model-callable tool", async () => {
   const approvedPlan = plan([

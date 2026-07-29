@@ -104,6 +104,7 @@ export function createPlanCoordinator({
   append,
   writer: suppliedWriter,
   readEntries,
+  readProjection,
   allocateWorkspace,
   backend,
   stateRoot,
@@ -119,6 +120,7 @@ export function createPlanCoordinator({
   now = () => new Date().toISOString(),
 } = {}) {
   if (!plan || !Array.isArray(entries) || (typeof append !== "function" && !suppliedWriter)) throw new Error("plan, entries, and append are required");
+  if (readProjection !== undefined && typeof readProjection !== "function") throw new Error("readProjection must be a function");
   const ir = authorizationIR(plan);
   const localEntries = [...entries];
   const writer = suppliedWriter ?? createPlanEventWriter({
@@ -130,9 +132,23 @@ export function createPlanCoordinator({
   let projection = replay(localEntries);
   let integrationQueue = initialIntegrationQueue;
 
-  async function refreshProjection() {
-    projection = replay(await (readEntries ?? (async () => localEntries))());
+  function setProjection(value) {
+    if (!value || typeof value !== "object" || !Number.isInteger(value.version)
+      || !(value.tasks instanceof Map) || !(value.attempts instanceof Map)) {
+      throw new Error("readProjection must return a plan projection");
+    }
+    projection = value;
     return projection;
+  }
+
+  function refreshProjectionSync() {
+    if (readProjection) setProjection(readProjection());
+    return projection;
+  }
+
+  async function refreshProjection() {
+    if (readProjection) return refreshProjectionSync();
+    return setProjection(replay(await (readEntries ?? (async () => localEntries))()));
   }
 
   async function appendEvent(type, data) {
@@ -158,6 +174,10 @@ export function createPlanCoordinator({
   }
 
   async function settleBoundAttempt(outcome, attemptId) {
+    await refreshProjection();
+    if (["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
+      throw new Error("Plan cannot settle attempts");
+    }
     const attempt = projection.attempts.get(attemptId);
     if (!attempt || attempt.status !== "active") throw new Error(`no bound active attempt: ${attemptId}`);
     let resultCommit;
@@ -243,6 +263,7 @@ export function createPlanCoordinator({
   }
 
   async function dispatchAuthorized() {
+    await refreshProjection();
     if (!projection.planId || ["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
       throw new Error("Plan cannot dispatch executors");
     }
@@ -361,6 +382,10 @@ export function createPlanCoordinator({
   }
 
   async function recover({ facts = [] } = {}) {
+    await refreshProjection();
+    if (["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
+      return { state: projection.lifecycle, dispatched: [], projectionVersion: projection.version };
+    }
     for (const attempt of requestedAttempts(projection)) {
       const matching = matchingFacts(attempt, facts);
       if (matching.length === 0) return await block("dispatch_uncertain", { attemptId: attempt.attemptId, dispatchId: attempt.dispatchId });
@@ -404,7 +429,7 @@ export function createPlanCoordinator({
         }
         return await appendEvent(type, data);
       },
-      projection: () => projection,
+      projection: () => refreshProjectionSync(),
     }),
   };
 }

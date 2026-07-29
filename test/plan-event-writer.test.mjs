@@ -22,7 +22,10 @@ test("serializes concurrent same-version submissions", async () => {
 
 test("rejects stale, reducer-invalid, and terminal writes before append", async () => {
   const entries = [created()]; const appended = []; const subject = writer(entries, async (entry) => { appended.push(entry); entries.push(entry); });
-  await assert.rejects(subject.append({ expectedProjectionVersion: 0, planId: "plan-1", type: "task.accepted", data: { taskId: "task-1" } }), /version/i);
+  const conflict = await subject.append({ expectedProjectionVersion: 0, planId: "plan-1", type: "task.accepted", data: { taskId: "task-1" } })
+    .then(() => assert.fail("expected projection conflict"), (error) => error);
+  assert.match(conflict.message, /version/i);
+  assert.equal(conflict.code, "PROJECTION_CONFLICT");
   await assert.rejects(subject.append({ expectedProjectionVersion: 1, planId: "plan-1", type: "attempt.bound", data: {} }), /attempt|invalid/i);
   await subject.append({ expectedProjectionVersion: 1, planId: "plan-1", type: "plan.blocked", data: { reason: "blocked" } });
   await assert.rejects(subject.append({ expectedProjectionVersion: 2, planId: "plan-1", type: "task.accepted", data: { taskId: "task-1" } }), /terminal/i);

@@ -17,7 +17,10 @@ export function createPlanEventWriter({ readEntries, append, id = () => crypto.r
       }
       const projection = replay(await readEntries());
       if (projection.version !== expectedProjectionVersion) {
-        throw new Error(`projection version conflict: expected ${expectedProjectionVersion}, current ${projection.version}`);
+        throw Object.assign(
+          new Error(`projection version conflict: expected ${expectedProjectionVersion}, current ${projection.version}`),
+          { code: "PROJECTION_CONFLICT" },
+        );
       }
       const entry = {
         schemaVersion: "pi-plan-event.v1",
