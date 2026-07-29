@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 
 import { createPlanEventWriter } from "./plan-event-writer.mjs";
 import { applyEvent, createProjection } from "./plan-events.mjs";
-import { compilePlanToIR } from "./ir/compile.mjs";
 import { authorizedFrontier } from "./ir/frontier.mjs";
+import { selectExecutionView, selectSchedulingView } from "./ir/views.mjs";
 import { hashValidatedAttempt } from "./integration-queue.mjs";
 
 function sha256(value) {
@@ -16,41 +16,62 @@ function replay(entries) {
   return projection;
 }
 
-function authorizationIR(plan) {
-  const compiled = compilePlanToIR(plan);
-  if (compiled.version === "plan-ir.v2") return compiled;
-  return Object.freeze({
-    version: "plan-ir.v2",
-    resourceCapacities: Object.freeze({}),
-    nodes: Object.freeze(compiled.nodes.map((node) => Object.freeze({
-      ...node,
-      allowedPaths: Object.freeze([...(node.files ?? [])]),
-      resources: Object.freeze([]),
-    }))),
-    edges: compiled.edges,
-    hash: null,
-    nodeFingerprints: Object.freeze({}),
-  });
+function assertCompiledIR(ir) {
+  if (!ir || !["plan-ir.v1", "plan-ir.v2", "plan-ir.v3"].includes(ir.version)) {
+    throw new Error("compiled Plan IR is required");
+  }
+  return ir;
 }
 
-function buildExecutionPrompt(task, attemptId) {
-  const paths = task.allowedPaths ?? task.files ?? [];
-  const blockedResult = JSON.stringify({
-    attempt_id: attemptId,
-    task_id: task.id,
-    status: "blocked",
-    reason: "<code>",
-    blockers: ["<sorted-code>"],
-    changed_files: [],
-    commit: null,
-  });
-  return [
+function legacyExecutionView(ir, taskId) {
+  const task = ir.nodes.find((node) => node.id === taskId);
+  if (!task) throw new Error(`unknown IR task: ${taskId}`);
+  return { task };
+}
+
+function collectDependencyReceipts(projection, task) {
+  const receipts = [];
+  for (const dependency of task.dependencies ?? []) {
+    const integrated = [...projection.attempts.entries()].find(([, attempt]) => attempt.taskId === dependency.taskId && attempt.status === "integrated");
+    if (!integrated) throw new Error(`integrated dependency receipt is unavailable: ${dependency.taskId}`);
+    const [, attempt] = integrated;
+    const resultCommit = attempt.resultCommit;
+    const integratedHead = attempt.integration?.newHead;
+    if (typeof resultCommit !== "string" || !resultCommit || typeof integratedHead !== "string" || !integratedHead) {
+      throw new Error(`integrated dependency receipt is incomplete: ${dependency.taskId}`);
+    }
+    receipts.push(Object.freeze({
+      taskId: dependency.taskId,
+      resultCommit,
+      integratedHead,
+      changedPaths: Object.freeze([...(attempt.validationChangedPaths ?? [])]),
+      verificationSummary: Object.freeze([...(attempt.validationEvidence ?? [])].map((entry) => Object.freeze({ commandId: entry.commandId, exitCode: entry.exitCode }))),
+    }));
+  }
+  return Object.freeze(receipts);
+}
+
+function buildExecutionPrompt(view, { attemptId, baseCommit, output, receipts }) {
+  const { plan, task } = view;
+  const blockedResult = JSON.stringify({ attempt_id: attemptId, task_id: task.id, status: "blocked", reason: "<code>", blockers: ["<sorted-code>"], changed_files: [], commit: null });
+  if (!plan) return [
     `Execute plan task ${task.id}: ${task.title}.`,
-    ...(paths.length ? [`Allowed paths: ${paths.join(", ")}`] : []),
+    ...((task.allowedPaths ?? task.files ?? []).length ? [`Allowed paths: ${(task.allowedPaths ?? task.files).join(", ")}`] : []),
     "Commit all changes in the attempt worktree when done.",
-    "If an approved fail-closed prerequisite requires stopping without task file changes or a commit, write this JSON shape to the authoritative output:",
-    blockedResult,
+    "If an approved fail-closed prerequisite requires stopping without task file changes or a commit, write this JSON shape to the authoritative output:", blockedResult,
     "An optional artifact object may contain a sha256 evidence digest. Never include secrets, credentials, URLs, or local paths.",
+  ].join("\n");
+  return [
+    "Plan title:", plan.title, "Plan instructions:", plan.instructions,
+    "Task title:", task.title, "Task body:", task.body,
+    "Dependency receipts:", JSON.stringify(receipts),
+    "Allowed paths:", task.allowedPaths.join(", "),
+    "Resources:", JSON.stringify(task.resources),
+    "Execution:", JSON.stringify(task.execution),
+    "Acceptance:", JSON.stringify(task.acceptance),
+    "Attempt context:", JSON.stringify({ attemptId, baseCommit, output }),
+    "Result contract:", plan.executionPolicy.resultContract,
+    "Blocked result shape:", blockedResult,
   ].join("\n");
 }
 
@@ -99,7 +120,7 @@ function stateFor(projection) {
 }
 
 export function createPlanCoordinator({
-  plan,
+  ir,
   entries,
   append,
   writer: suppliedWriter,
@@ -119,9 +140,9 @@ export function createPlanCoordinator({
   id = () => crypto.randomUUID(),
   now = () => new Date().toISOString(),
 } = {}) {
-  if (!plan || !Array.isArray(entries) || (typeof append !== "function" && !suppliedWriter)) throw new Error("plan, entries, and append are required");
+  if (!Array.isArray(entries) || (typeof append !== "function" && !suppliedWriter)) throw new Error("entries and append are required");
   if (readProjection !== undefined && typeof readProjection !== "function") throw new Error("readProjection must be a function");
-  const ir = authorizationIR(plan);
+  assertCompiledIR(ir);
   const localEntries = [...entries];
   const writer = suppliedWriter ?? createPlanEventWriter({
     readEntries: readEntries ?? (async () => localEntries),
@@ -276,7 +297,7 @@ export function createPlanCoordinator({
       };
       validation = await validateAttemptResult({
         lease: attemptLease,
-        allowedPaths: node.allowedPaths,
+        allowedPaths: node.allowedPaths ?? node.files,
         verification: await verificationForTask(node.id),
       });
       if (!validation?.accepted) {
@@ -320,7 +341,7 @@ export function createPlanCoordinator({
       const integration = await integrationQueue.drain({ expectedHead: projection.workspace.headCommit, ownerToken: integrationOwnerToken });
       if (integration?.state === "blocked") return { state: "blocked", dispatched: [], projectionVersion: projection.version };
     }
-    const authorization = authorizedFrontier(ir, projection);
+    const authorization = authorizedFrontier(selectSchedulingView(ir), projection);
     if (!Array.isArray(authorization)) return await block("authorization_deadlock", authorization);
     const frontier = authorization.filter((node) => !attemptsForTask(projection, node.id)
       .some((attempt) => ["succeeded", "validated", "integration-requested", "integrated"].includes(attempt.status)));
@@ -347,10 +368,12 @@ export function createPlanCoordinator({
         workspace: workspaceLease,
       });
       const dispatchId = `${attemptId}.dispatch.1`;
-      const prompt = buildExecutionPrompt(node, attemptId);
+      const execution = ir.version === "plan-ir.v3" ? selectExecutionView(ir, node.id) : legacyExecutionView(ir, node.id);
+      const receipts = ir.version === "plan-ir.v3" ? collectDependencyReceipts(projection, execution.task) : Object.freeze([]);
       const output = outputForAttempt(attemptId);
+      const prompt = buildExecutionPrompt(execution, { attemptId, baseCommit: attemptBaseCommit, output, receipts });
       const tool = {
-        agent: "executor",
+        agent: execution.task.execution?.agent ?? execution.task.agent ?? "executor",
         task: prompt,
         cwd: workspaceLease.path,
         context: "fresh",
@@ -361,8 +384,14 @@ export function createPlanCoordinator({
         outputMode: "file-only",
         acceptance: false,
         artifacts: true,
-        timeoutMs,
+        timeoutMs: execution.task.execution?.timeoutMs ?? timeoutMs,
       };
+      const dispatchIdentity = projection.revision ? {
+        planIrHash: ir.hash ?? projection.revision.irHash,
+        taskHash: execution.task.hashes?.effective ?? projection.revision.taskHashes[node.id].effective,
+        schedulingHash: execution.task.hashes?.scheduling ?? projection.revision.taskHashes[node.id].scheduling,
+        dispatchContextHash: sha256({ prompt, attemptId, baseCommit: attemptBaseCommit, output, receipts }),
+      } : {};
       await appendEvent("attempt.dispatch-requested", {
         attemptId,
         taskId: node.id,
@@ -371,6 +400,7 @@ export function createPlanCoordinator({
         workspace: workspaceLease,
         tool,
         toolHash: sha256(tool),
+        ...dispatchIdentity,
       });
 
       let binding;
@@ -378,11 +408,11 @@ export function createPlanCoordinator({
         binding = await backend.spawn({
           dispatchId,
           attemptId,
-          agent: "executor",
+          agent: execution.task.execution?.agent ?? execution.task.agent ?? "executor",
           task: prompt,
           cwd: workspaceLease.path,
           output,
-          timeoutMs,
+          timeoutMs: execution.task.execution?.timeoutMs ?? timeoutMs,
         });
         if (binding?.dispatchId !== dispatchId || binding?.attemptId !== attemptId
           || binding?.cwd !== workspaceLease.path || typeof binding?.runId !== "string"

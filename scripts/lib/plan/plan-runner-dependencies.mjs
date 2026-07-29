@@ -281,13 +281,25 @@ export function createPlanRunnerDependencies({
 
   async function coordinatorFor(ctx) {
     const current = currentProjection(ctx);
-    const plan = await approvedPlan(current);
+    let plan;
+    let ir;
+    if (current.revision) {
+      const revision = assertCurrentRevisionIdentity(await revisionStore.readRevision(current.planId, current.revision.number), current);
+      if (revision.manifest.planHash !== current.revision.planHash || revision.ir.version !== revision.manifest.irVersion
+        || revision.ir.hash !== revision.manifest.irHash) throw new Error("Current compiled Plan IR is unavailable.");
+      plan = revision.plan;
+      ir = revision.ir;
+    } else {
+      plan = await approvedPlan(current);
+      const { compilePlanToIR } = await import("./ir/index.mjs");
+      ir = compilePlanToIR(plan);
+    }
     const { stateRoot } = await rootsFor(ctx, current.planId);
     const resultsDir = path.join(stateRoot, "var", "plan-runs", current.planId, "results");
     await mkdir(resultsDir, { recursive: true });
     const commandRegistry = await createTaskCommandRegistry({ cwd: current.workspace.worktree, plan });
     const coordinator = createPlanCoordinator({
-      plan,
+      ir,
       entries: combinedEvents(ctx),
       writer,
       readEntries: async () => combinedEvents(ctx),

@@ -95,7 +95,7 @@ describe("plan-ir.v3 schema", () => {
     for (const view of [scheduling, execution, verification]) {
       assert.equal(Object.hasOwn(view, "version"), false);
       assert.equal(Object.hasOwn(view, "hash"), false);
-      assert.equal(Object.isFrozen(view), false);
+      assert.equal(Object.isFrozen(view), true);
     }
   });
 });

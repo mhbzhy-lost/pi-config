@@ -4,6 +4,14 @@ import test from "node:test";
 import { createPlanEventWriter } from "../scripts/lib/plan/plan-event-writer.mjs";
 import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mjs";
 import { createPlanCoordinator } from "../scripts/lib/plan/coordinator.mjs";
+import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
+
+test("requires a compiled Plan IR instead of compiling a parsed plan", () => {
+  assert.throws(
+    () => createPlanCoordinator({ plan: {}, entries: [], append() {} }),
+    /compiled Plan IR is required/,
+  );
+});
 
 const workspace = {
   originRoot: "/repo",
@@ -95,7 +103,7 @@ function harness({ approvedPlan = plan(), entries, backend: backendOverrides = {
     ...backendOverrides,
   };
   const result = createPlanCoordinator({
-    plan: approvedPlan,
+    ir: compilePlanToIR(approvedPlan),
     entries: entries ?? [createdEntry(approvedPlan.tasks.map(({ id }) => id))],
     append: (entry) => appended.push(entry),
     allocateWorkspace: async (input) => {

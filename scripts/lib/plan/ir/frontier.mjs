@@ -21,8 +21,8 @@ function activeAttempts(projection) {
 }
 
 export function authorizedFrontier(ir, projection) {
-  if (ir.version !== "plan-ir.v2") {
-    throw Object.assign(new Error(`Unsupported authorization IR: ${ir.version}`), { code: "UNSUPPORTED_AUTHORIZATION_IR" });
+  if (!ir || !Array.isArray(ir.nodes) || !ir.resourceCapacities) {
+    throw Object.assign(new Error("Unsupported scheduling view"), { code: "UNSUPPORTED_AUTHORIZATION_IR" });
   }
   const tasks = projection.tasks ?? new Map();
   const completed = new Set();
