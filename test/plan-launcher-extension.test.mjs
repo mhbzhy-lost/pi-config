@@ -52,7 +52,9 @@ function handleFor(root, input, overrides = {}) {
   return {
     schemaVersion: "pi-plan-handle.v3",
     planId: input.planId,
-    planHash: input.planHash,
+    revision: input.revision ?? 1,
+    manifestSha256: input.manifestSha256 ?? "a".repeat(64),
+    planIrHash: input.planIrHash ?? "b".repeat(64),
     hostRunId: `host-${input.planId}`,
     processIdentity: `process-${input.planId}`,
     pid: 4242,
@@ -88,14 +90,14 @@ test("plan-run launches one Standalone Plan Runner and persists only the v3 Host
     });
 
     assert.equal(launches.length, 1);
-    assert.deepEqual(Object.keys(launches[0]).sort(), ["baseCommit", "cwd", "extension", "originRoot", "planHash", "planId", "planPath", "runDir", "stateRoot", "statusPath"]);
+    assert.deepEqual(Object.keys(launches[0]).sort(), ["baseCommit", "cwd", "extension", "manifestSha256", "originRoot", "planId", "planIrHash", "revision", "runDir", "stateRoot", "statusPath"]);
     assert.equal(launches[0].originRoot, root);
     assert.equal(launches[0].stateRoot, root);
     assert.equal("task" in launches[0], false);
     assert.equal("agent" in launches[0], false);
     assert.equal(entries[0].customType, "pi-plan-launch-handle-v3");
     assert.deepEqual(Object.keys(entries[0].data).sort(), [
-      "hostRunId", "pid", "planHash", "planId", "processIdentity", "runDir", "schemaVersion", "sessionFile", "startedAt", "statusPath", "worktree",
+      "hostRunId", "manifestSha256", "pid", "planId", "planIrHash", "processIdentity", "revision", "runDir", "schemaVersion", "sessionFile", "startedAt", "statusPath", "worktree",
     ].sort());
     assert.match(notifications[0][0], /^PI_PLAN_HANDLE=/);
     const persisted = JSON.parse(await readFile(path.join(root, "var", "plan-runs", "plan-one", "host-handle.json"), "utf8"));
@@ -165,7 +167,7 @@ test("plan-cancel records durable intent before stopping the Host", async () => 
   try {
     const calls = [];
     const handle = handleFor(root, {
-      planId: "plan-one", planHash: "hash",
+      planId: "plan-one", revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64),
       runDir: path.join(root, "var", "plan-runs", "plan-one", "host"),
       statusPath: path.join(root, "var", "plan-runs", "plan-one", "status.json"),
       cwd: path.join(root, "var", "plan-worktrees", "plan-one"),
@@ -190,7 +192,7 @@ test("status and recover attach a trusted v3 handle without spawning", async () 
   const { root } = await fixture();
   try {
     const handle = handleFor(root, {
-      planId: "plan-one", planHash: "hash",
+      planId: "plan-one", revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64),
       runDir: path.join(root, "var", "plan-runs", "plan-one", "host"),
       statusPath: path.join(root, "var", "plan-runs", "plan-one", "status.json"),
       cwd: path.join(root, "var", "plan-worktrees", "plan-one"),
@@ -293,7 +295,7 @@ test("Root queues a fenced user decision through the Plan Attention reply tool",
   try {
     const handle = handleFor(root, {
       planId: "plan-one",
-      planHash: "hash",
+      revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64),
       runDir: path.join(root, "var", "plan-runs", "plan-one", "host"),
       statusPath: path.join(root, "var", "plan-runs", "plan-one", "status.json"),
       cwd: path.join(root, "var", "plan-worktrees", "plan-one"),

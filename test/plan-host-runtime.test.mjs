@@ -10,8 +10,9 @@ import { createPlanHostRuntime, spawnStandaloneHost, stopStandaloneHost } from "
 function input(root, overrides = {}) {
   return {
     planId: "plan-1",
-    planPath: "/repo/docs/plan.md",
-    planHash: "a".repeat(64),
+    revision: 1,
+    manifestSha256: "a".repeat(64),
+    planIrHash: "c".repeat(64),
     baseCommit: "b".repeat(40),
     originRoot: "/repo",
     stateRoot: "/repo",
@@ -372,7 +373,7 @@ test("spawns only a Standalone Plan Runner and returns the exact v3 handle", asy
     assert.deepEqual(handle, {
       schemaVersion: "pi-plan-handle.v3",
       planId: "plan-1",
-      planHash: "a".repeat(64),
+      revision: 1, manifestSha256: "a".repeat(64), planIrHash: "c".repeat(64),
       hostRunId: "host-run-1",
       processIdentity: "process-4242",
       pid: 4242,
@@ -453,7 +454,7 @@ test("status and reconcile keep Host process state separate from Plan domain sta
       verifyHostIdentity: async () => true,
     });
     const handle = {
-      schemaVersion: "pi-plan-handle.v3", planId: "plan-1", planHash: "a".repeat(64), hostRunId: "host-1",
+      schemaVersion: "pi-plan-handle.v3", planId: "plan-1", revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64), hostRunId: "host-1",
       processIdentity: "process-4242", pid: 4242, runDir: input(root).runDir, sessionFile: "/sessions/plan.jsonl", statusPath: planStatus,
       worktree: "/repo/worktree", startedAt: "now",
     };
@@ -479,7 +480,7 @@ test("reconcile fails closed when a running status belongs to a reused pid", asy
     verifyHostIdentity: async () => false,
   });
   const handle = {
-    schemaVersion: "pi-plan-handle.v3", planId: "plan-1", planHash: "hash", hostRunId: "host-1", processIdentity: "process-4242", pid: 4242,
+    schemaVersion: "pi-plan-handle.v3", planId: "plan-1", revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64), hostRunId: "host-1", processIdentity: "process-4242", pid: 4242,
     runDir: "/run", sessionFile: "/session", statusPath: "/status", worktree: "/worktree", startedAt: "now",
   };
   await assert.rejects(host.reconcile(handle), /identity|fencing/i);
@@ -509,7 +510,7 @@ test("forwards only typed Attention references and deduplicates within one Host 
       emitAttention: (message) => messages.push(message),
     });
     const handle = {
-      schemaVersion: "pi-plan-handle.v3", planId: "plan-1", planHash: "a".repeat(64), hostRunId: "host-1",
+      schemaVersion: "pi-plan-handle.v3", planId: "plan-1", revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64), hostRunId: "host-1",
       processIdentity: "process-4242", pid: 4242, runDir: input(root).runDir, sessionFile: "/sessions/plan.jsonl", statusPath: planStatus,
       worktree: "/repo/worktree", startedAt: "now",
     };
@@ -561,7 +562,7 @@ test("retries typed Attention after a transient emitter failure", async () => {
       },
     });
     const handle = {
-      schemaVersion: "pi-plan-handle.v3", planId: "plan-1", planHash: "hash", hostRunId: "host-retry",
+      schemaVersion: "pi-plan-handle.v3", planId: "plan-1", revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64), hostRunId: "host-retry",
       processIdentity: "process-retry", pid: 42, runDir: input(root).runDir, sessionFile: "/session",
       statusPath: planStatus, worktree: "/worktree", startedAt: "now",
     };
@@ -591,7 +592,7 @@ test("stop revalidates process identity during the grace period before SIGKILL",
 test("interrupt and stop require the live process identity to match the v3 handle", async () => {
   const calls = [];
   const handle = {
-    schemaVersion: "pi-plan-handle.v3", planId: "plan-1", planHash: "hash", hostRunId: "host-1", processIdentity: "process-42", pid: 42,
+    schemaVersion: "pi-plan-handle.v3", planId: "plan-1", revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64), hostRunId: "host-1", processIdentity: "process-42", pid: 42,
     runDir: "/run", sessionFile: "/session", statusPath: "/status", worktree: "/worktree", startedAt: "now",
   };
   const host = createPlanHostRuntime({

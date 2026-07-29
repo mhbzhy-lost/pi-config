@@ -1,8 +1,8 @@
-import { access, copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parsePlanDocument } from "./plan-document.mjs";
+import { createPlanRevisionStore } from "./plan-revision-store.mjs";
 import { createPlanWorkspace, rollbackPlanWorkspace } from "./workspace.mjs";
 import { createPlanControl } from "./plan-control.mjs";
 import { createPlanHostRuntime } from "./plan-host-runtime.mjs";
@@ -36,7 +36,9 @@ function runRequest(args, ctx, id) {
 function validHandle(handle) {
   return handle?.schemaVersion === HANDLE_SCHEMA
     && typeof handle.planId === "string" && PLAN_ID.test(handle.planId) && !handle.planId.includes("..")
-    && typeof handle.planHash === "string" && handle.planHash
+    && Number.isSafeInteger(handle.revision) && handle.revision >= 1
+    && typeof handle.manifestSha256 === "string" && /^[a-f0-9]{64}$/.test(handle.manifestSha256)
+    && typeof handle.planIrHash === "string" && /^[a-f0-9]{64}$/.test(handle.planIrHash)
     && typeof handle.hostRunId === "string" && handle.hostRunId
     && typeof handle.processIdentity === "string" && handle.processIdentity
     && Number.isInteger(handle.pid) && handle.pid > 0
@@ -89,11 +91,6 @@ function trustedHandle(stateRoot, handle) {
   return handle;
 }
 
-function planPathInWorktree({ originRoot, worktree, planPath }) {
-  const relative = path.relative(originRoot, path.resolve(planPath));
-  if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) return path.join(worktree, relative);
-  return path.join(worktree, ".pi-plan-runtime", "approved-plan.md");
-}
 
 function toolResult(value, isError = false) {
   return {
@@ -131,6 +128,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
     extraExtensions: [DEFAULT_PI_SUBAGENTS_ENTRY],
     noExtensions: true,
   });
+  const revisionStore = options.revisionStore ?? createPlanRevisionStore({ stateRoot, now: options.now });
   const control = options.planControl ?? createPlanControl({ stateRoot, id: options.id, now: options.now });
   const activeHandles = new Map();
   const attentionPollers = new Map();
@@ -181,8 +179,8 @@ export function createPlanLauncherExtension(pi, options = {}) {
   }
 
   async function launchPlan({ planPath, planId }, ctx = {}) {
-    await access(planPath);
-    const plan = parsePlanDocument(await readFile(planPath, "utf8"), planPath);
+    const sourceBytes = await readFile(planPath);
+    const prepared = await revisionStore.prepareRevision({ planId, sourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } });
     let existing;
     try { existing = await getHandle(planId, ctx); } catch (error) {
       if (!/Unknown plan/.test(error.message)) throw error;
@@ -194,19 +192,13 @@ export function createPlanLauncherExtension(pi, options = {}) {
     try {
       workspaceLease = await (options.createWorkspace ?? createPlanWorkspace)({ originRoot, stateRoot, planId, baseCommit });
       const worktree = workspaceLease.workspacePath;
-      const approvedPlanPath = planPathInWorktree({ originRoot, worktree, planPath });
-      try {
-        await access(approvedPlanPath);
-      } catch {
-        await mkdir(path.dirname(approvedPlanPath), { recursive: true });
-        await copyFile(planPath, approvedPlanPath);
-      }
       const runDir = path.join(stateRoot, "var", "plan-runs", planId, "host");
       const statusPath = path.join(stateRoot, "var", "plan-runs", planId, "status.json");
       handle = await hostRuntime.spawnPlanRunner({
         planId,
-        planPath: approvedPlanPath,
-        planHash: plan.sha256,
+        revision: prepared.revision,
+        manifestSha256: prepared.manifestSha256,
+        planIrHash: prepared.manifest.irHash,
         baseCommit,
         originRoot,
         stateRoot,

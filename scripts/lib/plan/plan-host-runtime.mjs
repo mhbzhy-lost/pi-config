@@ -8,11 +8,11 @@ import { promisify } from "node:util";
 const execFile = promisify(execFileCallback);
 
 const HANDLE_FIELDS = [
-  "schemaVersion", "planId", "planHash", "hostRunId", "processIdentity", "pid", "runDir",
+  "schemaVersion", "planId", "revision", "manifestSha256", "planIrHash", "hostRunId", "processIdentity", "pid", "runDir",
   "sessionFile", "statusPath", "worktree", "startedAt",
 ];
 const INPUT_FIELDS = new Set([
-  "planId", "planPath", "planHash", "baseCommit", "originRoot", "stateRoot", "cwd", "extension", "runDir", "statusPath",
+  "planId", "revision", "manifestSha256", "planIrHash", "baseCommit", "originRoot", "stateRoot", "cwd", "extension", "runDir", "statusPath",
 ]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -21,8 +21,10 @@ function assertHandle(handle) {
     throw new Error("Legacy Plan handle requires explicit migration to pi-plan-handle.v3");
   }
   for (const field of HANDLE_FIELDS) {
-    if (field === "pid") {
-      if (!Number.isInteger(handle.pid) || handle.pid < 1) throw new Error("Invalid v3 Plan Host pid");
+    if (field === "pid" || field === "revision") {
+      if (!Number.isInteger(handle[field]) || handle[field] < 1) throw new Error(`Invalid v3 Plan Host ${field}`);
+    } else if ((field === "manifestSha256" || field === "planIrHash") && (typeof handle[field] !== "string" || !/^[a-f0-9]{64}$/.test(handle[field]))) {
+      throw new Error(`Invalid v3 Plan Host ${field}`);
     } else if (typeof handle[field] !== "string" || !handle[field]) {
       throw new Error(`Invalid v3 Plan Host ${field}`);
     }
@@ -35,17 +37,23 @@ function assertSpawnInput(input) {
   const unsupported = Object.keys(input).filter((field) => !INPUT_FIELDS.has(field));
   if (unsupported.length > 0) throw new Error(`Unsupported Plan Runner input field: ${unsupported.join(", ")}`);
   for (const field of INPUT_FIELDS) {
-    if (typeof input[field] !== "string" || !input[field]) throw new Error(`Invalid Plan Runner input ${field}`);
+    if (field === "revision") {
+      if (!Number.isSafeInteger(input[field]) || input[field] < 1) throw new Error(`Invalid Plan Runner input ${field}`);
+    } else if (typeof input[field] !== "string" || !input[field]) throw new Error(`Invalid Plan Runner input ${field}`);
   }
   if (!ID.test(input.planId) || input.planId.includes("..")) throw new Error("Invalid Plan Runner input planId");
+  if (!Number.isSafeInteger(input.revision) || input.revision < 1 || !/^[a-f0-9]{64}$/.test(input.manifestSha256) || !/^[a-f0-9]{64}$/.test(input.planIrHash)) {
+    throw new Error("Invalid Plan Runner revision identity");
+  }
   return input;
 }
 
 function bootstrap(input, promptMarker = "") {
   return `You are the dedicated Standalone Plan Runner. ${promptMarker}\nYour first action must be plan_open with this exact bootstrap JSON:\n${JSON.stringify({
     planId: input.planId,
-    planPath: input.planPath,
-    planHash: input.planHash,
+    revision: input.revision,
+    manifestSha256: input.manifestSha256,
+    planIrHash: input.planIrHash,
     baseCommit: input.baseCommit,
     worktree: input.cwd,
     allowPlanCommits: true,
@@ -477,7 +485,9 @@ export function createPlanHostRuntime({
       const handle = {
         schemaVersion: "pi-plan-handle.v3",
         planId: input.planId,
-        planHash: input.planHash,
+        revision: input.revision,
+        manifestSha256: input.manifestSha256,
+        planIrHash: input.planIrHash,
         hostRunId,
         processIdentity,
         pid: result.pid,
