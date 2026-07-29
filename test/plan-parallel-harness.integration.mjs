@@ -9,6 +9,8 @@ import test from "node:test";
 import { createPlanHostRuntime } from "../scripts/lib/plan/plan-host-runtime.mjs";
 import { createPlanLauncherExtension } from "../scripts/lib/plan/plan-launcher-extension.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
+import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
+import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
 import { createPlanWorkspace } from "../scripts/lib/plan/workspace.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -17,6 +19,7 @@ const piBinary = process.env.PI_REAL_BIN;
 const provider = path.join(repoRoot, "test", "fixtures", "deterministic-provider.mjs");
 const planRunnerExtension = path.join(repoRoot, "test", "fixtures", "plan-harness", "plan-runner-extension.ts");
 const sourcePlan = path.join(repoRoot, "test", "fixtures", "plan-harness", "plans", "parallel-success.md");
+const sourceResourcePlan = path.join(repoRoot, "test", "fixtures", "plan-harness", "plans", "resource-serialized.md");
 const sourceAttentionPlan = path.join(repoRoot, "test", "fixtures", "plan-harness", "plans", "attention-roundtrip.md");
 
 async function git(cwd, ...args) {
@@ -38,6 +41,39 @@ async function waitForPlanStatus(file, predicate, timeoutMs = 120_000) {
   }
   throw new Error(`Plan Harness timed out; last status=${JSON.stringify(last)}`);
 }
+
+async function readPlanEvents(sessionFile) {
+  const lines = (await readFile(sessionFile, "utf8")).split("\n").filter(Boolean);
+  return lines.map((line) => JSON.parse(line))
+    .filter((entry) => entry?.customType === "pi-plan-event-v1" && entry?.data)
+    .map((entry) => entry.data);
+}
+
+test("parallel and resource Harness fixtures are strict v3 contracts", async () => {
+  const [parallel, resource] = await Promise.all([
+    readFile(sourcePlan, "utf8").then((source) => parsePlanDocument(source, sourcePlan)),
+    readFile(sourceResourcePlan, "utf8").then((source) => parsePlanDocument(source, sourceResourcePlan)),
+  ]);
+
+  for (const plan of [parallel, resource]) {
+    assert.equal(plan.schemaVersion, "pi-plan.v3");
+    assert.equal(plan.revision, 1);
+    assert.equal(plan.parentPlanHash, null);
+    assert.ok(plan.instructions.length > 0);
+    assert.equal(plan.verification[0].cwd, ".");
+    assert.equal(plan.verification[0].timeoutMs, 120_000);
+    assert.ok(plan.tasks.every((task) => task.execution.agent === "executor" && task.execution.timeoutMs === 120_000));
+    assert.equal(plan.tasks.length, 2);
+    assert.ok(plan.tasks.every((task) => task.body.length > 0));
+  }
+  assert.deepEqual(parallel.verification.map((command) => command.id), ["plan:worker-1", "plan:worker-2"]);
+  assert.deepEqual(parallel.tasks.map((task) => task.acceptance.commandIds), [["plan:worker-1"], ["plan:worker-2"]]);
+  assert.equal(resource.verification[0].command, "test -f one.txt && test -f two.txt");
+  assert.deepEqual(resource.resourceCapacities, { xcode: 1 });
+  assert.ok(resource.tasks.every((task) => task.resources.some((resource) => resource.id === "xcode" && resource.mode === "exclusive")));
+  assert.ok(resource.tasks.every((task) => task.acceptance.strategy === "structural-only"
+    && task.acceptance.reason === "Harness 仅验证资源串行与路径所有权，文件组合在最终 Gate 验证"));
+});
 
 test("real submodule Standalone Plan Runner reaches validated and produces the requested artifact", { timeout: 300_000 }, async (t) => {
   assert.ok(piBinary, "PI_REAL_BIN is required for the Plan Harness integration test");
@@ -80,7 +116,14 @@ Execute only the approved task and commit the result.
     const planId = "real-smoke";
     const lease = await createPlanWorkspace({ originRoot: origin, stateRoot, planId, baseCommit });
     const planPath = path.join(lease.workspacePath, "docs", "plan.md");
-    const plan = parsePlanDocument(await readFile(planPath, "utf8"), planPath);
+    const sourceBytes = await readFile(planPath);
+    const plan = parsePlanDocument(sourceBytes.toString("utf8"), planPath);
+    const revision = await createPlanRevisionStore({ stateRoot }).prepareRevision({
+      planId,
+      sourceBytes,
+      reason: "initial-approval",
+      initiator: { kind: "launcher" },
+    });
     const runDir = path.join(stateRoot, "var", "plan-runs", planId, "host");
     const statusPath = path.join(stateRoot, "var", "plan-runs", planId, "status.json");
     host = createPlanHostRuntime({
@@ -91,8 +134,11 @@ Execute only the approved task and commit the result.
     });
     handle = await host.spawnPlanRunner({
       planId,
-      planPath,
-      planHash: plan.sha256,
+      revision: revision.revision,
+      manifestSha256: revision.manifestSha256,
+      sourceBytesSha256: revision.manifest.sourceBytesSha256,
+      planHash: revision.manifest.planHash,
+      planIrHash: revision.manifest.irHash,
       baseCommit,
       originRoot: origin,
       stateRoot,
@@ -110,6 +156,41 @@ Execute only the approved task and commit the result.
     const attempts = status.tasks.map((task) => task.attempts[0]);
     assert.ok(attempts.every((attempt) => attempt.status === "integrated"), JSON.stringify(attempts));
     assert.ok(attempts.every((attempt) => attempt.baseCommit === baseCommit), JSON.stringify(attempts));
+    const ir = compilePlanToIR(plan);
+    assert.equal(revision.manifest.irHash, ir.hash);
+    const revisionStore = createPlanRevisionStore({ stateRoot });
+    const storedRevision = await revisionStore.readRevision(planId, 1);
+    assert.ok(storedRevision);
+    assert.deepEqual(storedRevision.sourceBytes, sourceBytes);
+    assert.equal(storedRevision.manifest.planHash, plan.sha256);
+    await assert.rejects(access(path.join(lease.workspacePath, ".pi-plan-runtime", "approved-plan.md")));
+
+    const events = await readPlanEvents(handle.sessionFile);
+    const created = events.find((event) => event.type === "plan.created");
+    assert.ok(created, "official session must contain plan.created");
+    assert.deepEqual(created.data.revision, {
+      number: 1,
+      manifestSha256: revision.manifestSha256,
+      sourceBytesSha256: revision.manifest.sourceBytesSha256,
+      planHash: revision.manifest.planHash,
+      irVersion: ir.version,
+      irHash: ir.hash,
+      taskHashes: revision.manifest.taskHashes,
+    });
+    const dispatches = events.filter((event) => event.type === "attempt.dispatch-requested");
+    assert.equal(dispatches.length, 2);
+    for (const node of ir.nodes) {
+      const dispatch = dispatches.find((event) => event.data.taskId === node.id);
+      assert.ok(dispatch, `official session must dispatch ${node.id}`);
+      assert.equal(dispatch.data.planIrHash, ir.hash);
+      assert.equal(dispatch.data.taskHash, node.hashes.effective);
+      assert.equal(dispatch.data.schedulingHash, node.hashes.scheduling);
+      assert.ok(dispatch.data.tool.task.includes(`Plan instructions:\n${plan.instructions}`));
+      assert.ok(dispatch.data.tool.task.includes(`Task body:\n${node.body}`));
+      assert.ok(dispatch.data.tool.task.includes(`Acceptance: ${node.acceptance.strategy}`));
+      assert.ok(dispatch.data.tool.task.includes(JSON.stringify(node.acceptance)));
+    }
+
     assert.equal(await readFile(path.join(lease.workspacePath, "README.md"), "utf8"), "base\nworker\n");
     assert.equal(await readFile(path.join(lease.workspacePath, "worker.txt"), "utf8"), "worker-2\n");
     assert.equal(await git(lease.workspacePath, "rev-list", "--count", `${baseCommit}..HEAD`), "2");
