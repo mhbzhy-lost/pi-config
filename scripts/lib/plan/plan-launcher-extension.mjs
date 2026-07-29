@@ -70,6 +70,36 @@ export function createPlanLauncherExtension(pi, options = {}) {
     if (timer !== undefined) cancelSchedule(timer);
     attentionPollers.delete(planId);
   };
+  const forwardedAttention = new Set();
+  const forwardAttention = async (handle, plan, { failClosed = false } = {}) => {
+    const matches = (plan?.tasks ?? []).flatMap((task) => (task.attempts ?? []).filter((attempt) => attempt.status === "waiting-attention" && attempt.attention?.status === "pending" && typeof attempt.attention.requestId === "string").map((attempt) => ({ attention: attempt.attention })));
+    for (const match of matches) {
+      const { attention } = match;
+      const bodyPath = attention.evidence?.bodyPath;
+      const bodySha256 = attention.evidence?.bodySha256;
+      const validPath = bodyPath === `attention/${attention.requestId}.md` && typeof bodySha256 === "string" && /^[a-f0-9]{64}$/.test(bodySha256);
+      if (!validPath) {
+        if (failClosed) throw new Error("Plan Attention evidence is invalid");
+        continue;
+      }
+      const key = `${handle.planId}:${attention.requestId}:${attention.projectionVersion}`;
+      if (forwardedAttention.has(key)) continue;
+      const runsRoot = path.resolve(stateRoot, "var", "plan-runs", handle.planId);
+      const absoluteBodyPath = path.resolve(runsRoot, bodyPath);
+      const relative = path.relative(runsRoot, absoluteBodyPath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        if (failClosed) throw new Error("Plan Attention evidence is invalid");
+        continue;
+      }
+      await readFile(absoluteBodyPath, "utf8");
+      await pi.sendMessage?.({
+        customType: "pi-plan-attention-v1",
+        content: "Plan Runner requires a Root-mediated user decision. Show this request to the user and wait for an explicit decision before replying.",
+        details: { planId: handle.planId, requestId: attention.requestId, expectedProjectionVersion: attention.projectionVersion, bodyPath, bodySha256 },
+      });
+      forwardedAttention.add(key);
+    }
+  };
   const startAttentionPoller = (handle) => {
     if (attentionPollers.has(handle.planId)) return;
     let polling = false;
@@ -79,6 +109,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
       try {
         const [raw, runner] = await Promise.all([readFile(path.join(stateRoot, "var", "plan-runs", handle.planId, "status.json"), "utf8"), rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir })]);
         const plan = JSON.parse(raw);
+        await forwardAttention(handle, plan);
         if (["validated", "blocked", "cancelled", "interrupted"].includes(plan?.lifecycle) || ["complete", "failed", "stopped"].includes(runner?.state)) stopAttentionPoller(handle.planId);
       } catch { /* Durable projection or Root RPC may be transiently unavailable. */ }
       finally { polling = false; }
@@ -101,6 +132,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
     if (!raw) throw new Error(`Unknown plan: ${planId}`);
     const handle = trustedHandle(raw);
     if (handle.rootSessionId !== rootIdentity().rootSessionId) throw new Error("Plan run belongs to another Root session");
+    if (handle.worktree !== path.join(stateRoot, "var", "plan-worktrees", handle.planId)) throw new Error("Plan handle worktree is untrusted");
     return handle;
   }
   async function stopIfBound(binding, broker) {
@@ -114,7 +146,12 @@ export function createPlanLauncherExtension(pi, options = {}) {
     if (!PLAN_ID.test(planId)) throw new Error("Invalid planId");
     const sourceBytes = await readFile(planPath);
     const prepared = await revisionStore.prepareRevision({ planId, sourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } });
-    let existing; try { existing = await getHandle(planId, ctx); } catch (error) { if (!/Plan handle|Unknown plan/.test(error.message)) throw error; }
+    let existing;
+    try {
+      existing = await getHandle(planId, ctx);
+    } catch (error) {
+      if (error?.message !== `Unknown plan: ${planId}`) throw error;
+    }
     if (existing) throw new Error(`Plan already exists: ${planId}`);
     const broker = rootIdentity(); const baseCommit = options.readBaseCommit ? await options.readBaseCommit(originRoot) : await concreteBase(originRoot);
     let lease; let binding;
@@ -139,7 +176,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
     try { return await pending; } finally { launchFences.delete(planId); }
   }
   pi.registerTool({ name: "plan_run", label: "Run plan", description: "Launch an approved plan through the Plan dispatch authorization boundary.", parameters: { type: "object", properties: { planPath: { type: "string", minLength: 1 } }, required: ["planPath"], additionalProperties: false }, async execute(_id, params, _signal, _update, ctx) { try { const handle = await launchPlan({ planPath: params.planPath, planId: options.id?.() ?? crypto.randomUUID() }, ctx); return toolResult(handle); } catch (error) { return toolResult(error instanceof Error ? error.message : String(error), true); } } });
-  pi.registerTool({ name: "plan_attention_reply", label: "Reply to plan attention", description: "Queue an explicit user decision for one pending durable Plan Attention request.", parameters: { type: "object", properties: { planId: { type: "string", minLength: 1 }, requestId: { type: "string", minLength: 1 }, expectedProjectionVersion: { type: "integer", minimum: 0 }, message: { type: "string", minLength: 1, maxLength: 65536 } }, required: ["planId", "requestId", "expectedProjectionVersion", "message"], additionalProperties: false }, async execute(_id, params, _signal, _update, ctx) {
+  pi.registerTool({ name: "plan_attention_reply", label: "Reply to plan attention", description: "Queue an explicit user decision for one pending durable Plan Attention request.", parameters: { type: "object", properties: { planId: { type: "string", minLength: 1 }, requestId: { type: "string", minLength: 1 }, expectedProjectionVersion: { type: "integer", minimum: 1 }, message: { type: "string", minLength: 1, maxLength: 65536 } }, required: ["planId", "requestId", "expectedProjectionVersion", "message"], additionalProperties: false }, async execute(_id, params, _signal, _update, ctx) {
     try {
       if (typeof params.message !== "string" || !params.message.trim()) throw new Error("Plan Attention reply message is required");
       const handle = await getHandle(params.planId, ctx);
@@ -155,7 +192,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
   } });
   pi.registerCommand("plan-run", { description: "Run an approved plan in a dedicated worktree.", async handler(args, ctx = {}) { const request = runRequest(args, ctx, () => options.id?.() ?? crypto.randomUUID()); if (interactive(ctx) && (typeof ctx.ui?.confirm !== "function" || !(await ctx.ui.confirm("Authorize plan commits", "Allow commits in the dedicated plan branch only; merge and push remain forbidden?")))) throw new Error("Plan commit authorization was not confirmed"); return launchPlan(request, ctx); } });
   pi.on?.("session_shutdown", async () => { for (const planId of attentionPollers.keys()) stopAttentionPoller(planId); });
-  pi.registerCommand("plan-status", { description: "Read Plan Runner status.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); return rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); } });
+  pi.registerCommand("plan-status", { description: "Read Plan Runner status.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); const runner = await rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); try { const plan = JSON.parse(await readFile(path.join(stateRoot, "var", "plan-runs", handle.planId, "status.json"), "utf8")); await forwardAttention(handle, plan, { failClosed: true }); return { runner, plan }; } catch (error) { if (error?.code === "ENOENT") return runner; throw error; } } });
   pi.registerCommand("plan-open", { description: "Open the Plan Runner artifact.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); const status = await rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); return { asyncDir: handle.asyncDir, worktree: handle.worktree, status }; } });
   pi.registerCommand("plan-pause", { description: "Interrupt a running Plan Runner.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); return rootIdentity().upstream.interrupt({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); } });
   pi.registerCommand("plan-cancel", { description: "Persist cancellation intent and stop the Plan Runner.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); if (typeof options.recordCancelIntent === "function") await options.recordCancelIntent(handle); else await control.requestCancel({ planId: handle.planId, runId: handle.planRunnerRunId }); await rootIdentity().upstream.stop({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); stopAttentionPoller(handle.planId); activeHandles.delete(planId); return `Plan ${planId} cancelled.`; } });

@@ -17,10 +17,45 @@ async function fixture() {
 }
 
 function setup(options = {}) {
-  const commands = new Map(); const tools = new Map(); const entries = [];
-  const pi = { registerCommand: (name, command) => commands.set(name, command), registerTool: (tool) => tools.set(tool.name, tool), on() {}, appendEntry: (customType, data) => entries.push({ customType, data }) };
+  const commands = new Map();
+  const tools = new Map();
+  const entries = [];
+  const events = new Map();
+  const messages = [];
+  const pi = {
+    registerCommand: (name, command) => commands.set(name, command),
+    registerTool: (tool) => tools.set(tool.name, tool),
+    on: (name, handler) => events.set(name, handler),
+    appendEntry: (customType, data) => entries.push({ customType, data }),
+    sendMessage: async (message) => messages.push(message),
+  };
   createPlanLauncherExtension(pi, options);
-  return { commands, tools, entries };
+  return { commands, tools, entries, events, messages };
+}
+
+function handle(root, overrides = {}) {
+  return {
+    schemaVersion: "pi-plan-handle.v4",
+    planId: "plan-one",
+    revision: 1,
+    manifestSha256: hashes.manifestSha256,
+    sourceBytesSha256: hashes.sourceBytesSha256,
+    planHash: hashes.planHash,
+    planIrHash: hashes.irHash,
+    rootSessionId: "root-session-1",
+    planRunnerRunId: "run-1",
+    asyncDir: "/async/1",
+    worktree: path.join(root, "var", "plan-worktrees", "plan-one"),
+    baseCommit: "e".repeat(40),
+    ...overrides,
+  };
+}
+
+async function writeProjection(root, projection) {
+  const dir = path.join(root, "var", "plan-runs", "plan-one");
+  await (await import("node:fs/promises")).mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, "status.json"), JSON.stringify(projection));
+  return dir;
 }
 
 function broker(calls, overrides = {}) {
@@ -54,7 +89,7 @@ test("plan-run launches a session-local Root Plan Runner and never persists a ha
 test("Root B rejects management of Root A's Plan Runner without Root RPC", async () => {
   const { root } = await fixture(); const calls = [];
   try {
-    const handle = { schemaVersion: "pi-plan-handle.v4", planId: "plan-one", revision: 1, manifestSha256: hashes.manifestSha256, sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, planIrHash: hashes.irHash, rootSessionId: "root-session-A", planRunnerRunId: "run-A", asyncDir: "/async/A", worktree: "/worktree", baseCommit: "e".repeat(40) };
+    const handle = { schemaVersion: "pi-plan-handle.v4", planId: "plan-one", revision: 1, manifestSha256: hashes.manifestSha256, sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, planIrHash: hashes.irHash, rootSessionId: "root-session-A", planRunnerRunId: "run-A", asyncDir: "/async/A", worktree: path.join(root, "var", "plan-worktrees", "plan-one"), baseCommit: "e".repeat(40) };
     const { commands } = setup(options(root, calls, { rootSessionId: "root-session-B", findHandle: async () => handle }));
     for (const name of ["plan-status", "plan-cancel", "plan-open", "plan-pause", "plan-recover"]) await assert.rejects(commands.get(name).handler("plan-one", {}), /belongs to another Root session/);
     assert.deepEqual(calls, []);
@@ -72,7 +107,7 @@ test("grant failure stops the spawned runner and rolls back", async () => {
 });
 
 test("management uses Root RPC and cancellation records intent first", async () => {
-  const { root } = await fixture(); const calls = []; const handle = { schemaVersion: "pi-plan-handle.v4", planId: "plan-one", revision: 1, manifestSha256: hashes.manifestSha256, sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, planIrHash: hashes.irHash, rootSessionId: "root-session-1", planRunnerRunId: "run-1", asyncDir: "/async/1", worktree: "/worktree", baseCommit: "e".repeat(40) };
+  const { root } = await fixture(); const calls = []; const handle = { schemaVersion: "pi-plan-handle.v4", planId: "plan-one", revision: 1, manifestSha256: hashes.manifestSha256, sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, planIrHash: hashes.irHash, rootSessionId: "root-session-1", planRunnerRunId: "run-1", asyncDir: "/async/1", worktree: path.join(root, "var", "plan-worktrees", "plan-one"), baseCommit: "e".repeat(40) };
   try { const { commands } = setup(options(root, calls, { findHandle: async () => handle, recordCancelIntent: async () => calls.push(["intent"]) })); await commands.get("plan-status").handler("plan-one", {}); await commands.get("plan-pause").handler("plan-one", {}); await commands.get("plan-open").handler("plan-one", {}); await commands.get("plan-recover").handler("plan-one", {}); await commands.get("plan-cancel").handler("plan-one", {}); assert.deepEqual(calls.map(([name]) => name), ["status", "interrupt", "status", "status", "intent", "stop"]); assert.deepEqual(calls.at(-1)[1], { runId: "run-1", dir: "/async/1" }); } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -80,4 +115,99 @@ test("plan runner entry remains child-safe and uses the Root-owned adapter", asy
   const source = await readFile(new URL("../pi/child-extensions/plan-runner.ts", import.meta.url), "utf8");
   assert.match(source, /installRootOwnedSubagent/); assert.match(source, /installRootSessionOwnerLifecycle/); assert.match(source, /createPlanCapsuleExtension/);
   assert.doesNotMatch(source, /PI_SUBAGENT_CHILD.*return/); assert.doesNotMatch(source, /createSubagentsRpcClient|spawnPiAgent|createMonitor/);
+});
+
+test("plan-status returns both Root RPC state and durable Plan projection", async () => {
+  const { root } = await fixture(); const calls = [];
+  const handle = { schemaVersion: "pi-plan-handle.v4", planId: "plan-one", revision: 1, manifestSha256: hashes.manifestSha256, sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, planIrHash: hashes.irHash, rootSessionId: "root-session-1", planRunnerRunId: "run-1", asyncDir: "/async/1", worktree: path.join(root, "var", "plan-worktrees", "plan-one"), baseCommit: "e".repeat(40) };
+  try {
+    const dir = path.join(root, "var", "plan-runs", "plan-one");
+    await (await import("node:fs/promises")).mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "status.json"), JSON.stringify({ planId: "plan-one", lifecycle: "running", tasks: [] }));
+    const { commands } = setup(options(root, calls, { findHandle: async () => handle }));
+    assert.deepEqual(await commands.get("plan-status").handler("plan-one", {}), { runner: { state: "running" }, plan: { planId: "plan-one", lifecycle: "running", tasks: [] } });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("noninteractive malformed input is rejected", async () => {
+  const { root } = await fixture();
+  try { const { commands } = setup(options(root, [])); await assert.rejects(commands.get("plan-run").handler("{}", {}), /allowPlanCommits/); } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("plan_run tool launches through the command launch path", async () => {
+  const { root, planPath } = await fixture(); const calls = [];
+  try { const { tools } = setup(options(root, calls)); const result = await tools.get("plan_run").execute("id", { planPath }, undefined, undefined, {}); assert.equal(result.isError, undefined); assert.equal(calls.filter(([name]) => name === "spawn").length, 1); } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("invalid current Root handle fails closed before Root RPC", async () => {
+  const { root } = await fixture(); const calls = [];
+  try { const { commands } = setup(options(root, calls, { findHandle: async () => ({ planId: "plan-one" }) })); await assert.rejects(commands.get("plan-status").handler("plan-one", {}), /pi-plan-handle.v4/); assert.deepEqual(calls, []); } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("non-Error tool failures are stringified", async () => {
+  const { root, planPath } = await fixture(); const calls = [];
+  try { const { tools } = setup(options(root, calls, { createWorkspace: async () => { throw "workspace unavailable"; } })); const result = await tools.get("plan_run").execute("id", { planPath }, undefined, undefined, {}); assert.equal(result.isError, true); assert.equal(result.content[0].text, "workspace unavailable"); } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("launch fence rejects concurrent same planId requests", async () => {
+  const { root, planPath } = await fixture(); const calls = []; let rejectSpawn;
+  const pendingSpawn = new Promise((_, reject) => { rejectSpawn = reject; });
+  try {
+    const delayedBroker = broker(calls);
+    delayedBroker.upstream.spawn = async (input) => { calls.push(["spawn", input]); return pendingSpawn; };
+    const { commands } = setup(options(root, calls, { rootBroker: delayedBroker }));
+    const first = commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+    while (!calls.some(([name]) => name === "spawn")) await new Promise((resolve) => setImmediate(resolve));
+    await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /already in progress/);
+    const firstFailure = assert.rejects(first, /spawn failed/);
+    rejectSpawn(new Error("spawn failed")); await firstFailure;
+    assert.equal(calls.filter(([name]) => name === "spawn").length, 1);
+    delayedBroker.upstream.spawn = async (input) => {
+      calls.push(["spawn", input]);
+      return { details: { runId: "run-after-retry", asyncDir: "/async/retry" } };
+    };
+    await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+    assert.equal(calls.filter(([name]) => name === "spawn").length, 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("plan-status forwards pending Attention using the Host event contract once", async () => {
+  const { root } = await fixture();
+  const calls = [];
+  try {
+    const bodySha256 = "f".repeat(64);
+    const dir = await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256 } } }] }] });
+    await (await import("node:fs/promises")).mkdir(path.join(dir, "attention"), { recursive: true });
+    await writeFile(path.join(dir, "attention", "request-1.md"), "Choose the deployment target.");
+    const { commands, messages } = setup(options(root, calls, { findHandle: async () => handle(root) }));
+    await commands.get("plan-status").handler("plan-one", {});
+    await commands.get("plan-status").handler("plan-one", {});
+    assert.deepEqual(messages, [{ customType: "pi-plan-attention-v1", content: "Plan Runner requires a Root-mediated user decision. Show this request to the user and wait for an explicit decision before replying.", details: { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, bodyPath: "attention/request-1.md", bodySha256 } }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("plan_attention_reply fences projection and is idempotent", async () => {
+  const { root } = await fixture(); const calls = []; const writes = [];
+  try {
+    await writeProjection(root, { planId: "plan-one", tasks: [{ taskId: "task-1", attempts: [{ attemptId: "attempt-1", runId: "run-1", status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4 } }] }] });
+    const planControl = { readAttentionReplies: async () => writes, writeAttentionReply: async (reply) => writes.push(reply) };
+    const { tools } = setup(options(root, calls, { findHandle: async () => handle(root), planControl }));
+    const reply = { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, message: "Proceed." };
+    assert.equal((await tools.get("plan_attention_reply").execute("id", reply, undefined, undefined, {})).isError, undefined);
+    assert.equal((await tools.get("plan_attention_reply").execute("id", reply, undefined, undefined, {})).isError, undefined);
+    assert.equal(writes.length, 1);
+    assert.equal((await tools.get("plan_attention_reply").execute("id", { ...reply, expectedProjectionVersion: 3 }, undefined, undefined, {})).isError, true);
+    assert.equal((await tools.get("plan_attention_reply").execute("id", { ...reply, message: "Stop." }, undefined, undefined, {})).isError, true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("session shutdown cancels Attention pollers without stopping Plan Runners", async () => {
+  const { root, planPath } = await fixture(); const calls = []; const cancelled = [];
+  try {
+    const { commands, events } = setup(options(root, calls, { schedule: () => "timer-1", cancelSchedule: (timer) => cancelled.push(timer) }));
+    await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+    await events.get("session_shutdown")();
+    assert.deepEqual(cancelled, ["timer-1"]);
+    assert.equal(calls.some(([name]) => name === "stop"), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
