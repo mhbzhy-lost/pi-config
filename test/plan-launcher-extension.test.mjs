@@ -90,15 +90,17 @@ test("Root B rejects management of Root A's Plan Runner without Root RPC", async
   const { root } = await fixture(); const calls = [];
   try {
     const handle = { schemaVersion: "pi-plan-handle.v4", planId: "plan-one", revision: 1, manifestSha256: hashes.manifestSha256, sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, planIrHash: hashes.irHash, rootSessionId: "root-session-A", planRunnerRunId: "run-A", asyncDir: "/async/A", worktree: path.join(root, "var", "plan-worktrees", "plan-one"), baseCommit: "e".repeat(40) };
-    const { commands } = setup(options(root, calls, { rootSessionId: "root-session-B", findHandle: async () => handle }));
+    const { commands, tools } = setup(options(root, calls, { rootSessionId: "root-session-B", findHandle: async () => handle }));
     for (const name of ["plan-status", "plan-cancel", "plan-open", "plan-pause", "plan-recover"]) await assert.rejects(commands.get(name).handler("plan-one", {}), /belongs to another Root session/);
+    const reply = await tools.get("plan_attention_reply").execute("id", { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 1, message: "Proceed." }, undefined, undefined, {});
+    assert.equal(reply.isError, true);
     assert.deepEqual(calls, []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("incomplete spawn binding stops any bound run and rolls back", async () => {
   const { root, planPath } = await fixture(); const calls = [];
-  try { const { commands } = setup(options(root, calls, { spawnReply: { details: { runId: "run-1" } } })); await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /missing runId or asyncDir/); assert.deepEqual(calls.map(([name]) => name), ["spawn", "stop", "rollback"]); } finally { await rm(root, { recursive: true, force: true }); }
+  try { const { commands } = setup(options(root, calls, { spawnReply: { details: { runId: "run-1" } } })); await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /missing runId or asyncDir/); assert.deepEqual(calls.map(([name]) => name), ["spawn", "stop", "rollback"]); assert.deepEqual(calls[1][1], { runId: "run-1" }); } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("grant failure stops the spawned runner and rolls back", async () => {
@@ -129,9 +131,13 @@ test("plan-status returns both Root RPC state and durable Plan projection", asyn
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("noninteractive malformed input is rejected", async () => {
-  const { root } = await fixture();
-  try { const { commands } = setup(options(root, [])); await assert.rejects(commands.get("plan-run").handler("{}", {}), /allowPlanCommits/); } finally { await rm(root, { recursive: true, force: true }); }
+test("noninteractive malformed inputs do not prepare, create a workspace, or spawn", async () => {
+  const { root } = await fixture(); const calls = []; let prepared = 0; let workspaces = 0;
+  try {
+    const { commands } = setup(options(root, calls, { revisionStore: { async prepareRevision() { prepared++; throw new Error("must not prepare"); } }, createWorkspace: async () => { workspaces++; throw new Error("must not create"); } }));
+    for (const input of ["", "not json", "null", "[]", "{}", '{"planPath":""}', '{"planPath":"x"}', '{"planPath":"x","allowPlanCommits":false}']) await assert.rejects(commands.get("plan-run").handler(input, {}), /allowPlanCommits/);
+    assert.deepEqual({ prepared, workspaces, spawns: calls.filter(([name]) => name === "spawn").length }, { prepared: 0, workspaces: 0, spawns: 0 });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("plan_run tool launches through the command launch path", async () => {
@@ -182,7 +188,7 @@ test("plan-status forwards pending Attention using the Host event contract once"
     const { commands, messages } = setup(options(root, calls, { findHandle: async () => handle(root) }));
     await commands.get("plan-status").handler("plan-one", {});
     await commands.get("plan-status").handler("plan-one", {});
-    assert.deepEqual(messages, [{ customType: "pi-plan-attention-v1", content: "Plan Runner requires a Root-mediated user decision. Show this request to the user and wait for an explicit decision before replying.", details: { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, bodyPath: "attention/request-1.md", bodySha256 } }]);
+    assert.deepEqual(messages, [{ customType: "pi-plan-attention-v1", content: `Plan ${"plan-one"} requires an explicit user decision for request ${"request-1"}. Read the private body at ${path.join(root, "var", "plan-runs", "plan-one", "attention", "request-1.md")} and call plan_attention_reply with expectedProjectionVersion 4. Wait for the user's explicit decision; do not infer one.`, details: { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, bodyPath: "attention/request-1.md", bodySha256 } }]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -198,6 +204,67 @@ test("plan_attention_reply fences projection and is idempotent", async () => {
     assert.equal(writes.length, 1);
     assert.equal((await tools.get("plan_attention_reply").execute("id", { ...reply, expectedProjectionVersion: 3 }, undefined, undefined, {})).isError, true);
     assert.equal((await tools.get("plan_attention_reply").execute("id", { ...reply, message: "Stop." }, undefined, undefined, {})).isError, true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("plan-status fails closed when a pending Attention body is missing", async () => {
+  const { root } = await fixture(); const calls = [];
+  try {
+    await writeProjection(root, { planId: "plan-one", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256: "f".repeat(64) } } }] }] });
+    const { commands } = setup(options(root, calls, { findHandle: async () => handle(root) }));
+    await assert.rejects(commands.get("plan-status").handler("plan-one", {}), /ENOENT/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("plan-status rejects malformed pending Attention evidence", async () => {
+  const { root } = await fixture(); const calls = [];
+  try {
+    await writeProjection(root, { planId: "plan-one", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/other.md", bodySha256: "not-a-hash" } } }] }] });
+    const { commands } = setup(options(root, calls, { findHandle: async () => handle(root) }));
+    await assert.rejects(commands.get("plan-status").handler("plan-one", {}), /evidence is invalid/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("launch fails closed when findHandle throws a same-worded ordinary Error", async () => {
+  const { root, planPath } = await fixture(); const calls = [];
+  try {
+    const { commands } = setup(options(root, calls, { findHandle: async () => { throw new Error("Unknown plan: plan-one"); } }));
+    await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /Unknown plan/);
+    assert.equal(calls.some(([name]) => name === "spawn"), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("duplicate pending Attention requestId rejects reply without a write", async () => {
+  const { root } = await fixture(); const calls = []; const writes = [];
+  try {
+    await writeProjection(root, { planId: "plan-one", tasks: [{ taskId: "a", attempts: [{ attemptId: "a", runId: "run-a", status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4 } }] }, { taskId: "b", attempts: [{ attemptId: "b", runId: "run-b", status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4 } }] }] });
+    const { tools } = setup(options(root, calls, { findHandle: async () => handle(root), planControl: { readAttentionReplies: async () => writes, writeAttentionReply: async (reply) => writes.push(reply) } }));
+    const result = await tools.get("plan_attention_reply").execute("id", { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, message: "Proceed." }, undefined, undefined, {});
+    assert.equal(result.isError, true); assert.deepEqual(writes, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("current Root rejects an untrusted worktree before RPC or attention writes", async () => {
+  const { root } = await fixture(); const calls = []; const writes = [];
+  try {
+    await writeProjection(root, { planId: "plan-one", tasks: [{ taskId: "task-1", attempts: [{ attemptId: "attempt-1", runId: "run-1", status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4 } }] }] });
+    const bad = handle(root, { worktree: path.join(root, "foreign") });
+    const { commands, tools } = setup(options(root, calls, { findHandle: async () => bad, planControl: { readAttentionReplies: async () => writes, writeAttentionReply: async (reply) => writes.push(reply) } }));
+    await assert.rejects(commands.get("plan-status").handler("plan-one", {}), /worktree is untrusted/);
+    const result = await tools.get("plan_attention_reply").execute("id", { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, message: "Proceed." }, undefined, undefined, {});
+    assert.equal(result.isError, true); assert.deepEqual(calls, []); assert.deepEqual(writes, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("terminal poller cancels once without stopping the runner", async () => {
+  const { root, planPath } = await fixture(); const calls = []; const cancelled = []; let poll;
+  try {
+    const terminalBroker = broker(calls); terminalBroker.upstream.status = async (input) => { calls.push(["status", input]); return { state: "failed" }; };
+    const { commands } = setup(options(root, calls, { rootBroker: terminalBroker, schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer) }));
+    await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+    await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [] });
+    await poll(); await poll();
+    assert.deepEqual(cancelled, ["timer-1"]); assert.equal(calls.some(([name]) => name === "stop"), false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

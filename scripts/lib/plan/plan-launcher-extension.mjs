@@ -11,6 +11,10 @@ const HANDLE_SCHEMA = "pi-plan-handle.v4";
 const PLAN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
+class UnknownPlanError extends Error {
+  constructor(planId) { super(`Unknown plan: ${planId}`); this.code = "PLAN_UNKNOWN"; }
+}
+
 function interactive(ctx) { return ctx?.mode === "tui" && ctx?.hasUI === true; }
 function runRequest(args, ctx, id) {
   if (interactive(ctx)) {
@@ -94,7 +98,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
       await readFile(absoluteBodyPath, "utf8");
       await pi.sendMessage?.({
         customType: "pi-plan-attention-v1",
-        content: "Plan Runner requires a Root-mediated user decision. Show this request to the user and wait for an explicit decision before replying.",
+        content: `Plan ${handle.planId} requires an explicit user decision for request ${attention.requestId}. Read the private body at ${absoluteBodyPath} and call plan_attention_reply with expectedProjectionVersion ${attention.projectionVersion}. Wait for the user's explicit decision; do not infer one.`,
         details: { planId: handle.planId, requestId: attention.requestId, expectedProjectionVersion: attention.projectionVersion, bodyPath, bodySha256 },
       });
       forwardedAttention.add(key);
@@ -129,7 +133,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
     const branch = ctx?.sessionManager?.getBranch?.() ?? [];
     const fromSession = branch.filter((entry) => entry?.customType === HANDLE_TYPE).map((entry) => entry.data).find((handle) => handle.planId === planId);
     const raw = provided ?? fromSession ?? activeHandles.get(planId);
-    if (!raw) throw new Error(`Unknown plan: ${planId}`);
+    if (!raw) throw new UnknownPlanError(planId);
     const handle = trustedHandle(raw);
     if (handle.rootSessionId !== rootIdentity().rootSessionId) throw new Error("Plan run belongs to another Root session");
     if (handle.worktree !== path.join(stateRoot, "var", "plan-worktrees", handle.planId)) throw new Error("Plan handle worktree is untrusted");
@@ -150,7 +154,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
     try {
       existing = await getHandle(planId, ctx);
     } catch (error) {
-      if (error?.message !== `Unknown plan: ${planId}`) throw error;
+      if (!(error instanceof UnknownPlanError)) throw error;
     }
     if (existing) throw new Error(`Plan already exists: ${planId}`);
     const broker = rootIdentity(); const baseCommit = options.readBaseCommit ? await options.readBaseCommit(originRoot) : await concreteBase(originRoot);
@@ -192,7 +196,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
   } });
   pi.registerCommand("plan-run", { description: "Run an approved plan in a dedicated worktree.", async handler(args, ctx = {}) { const request = runRequest(args, ctx, () => options.id?.() ?? crypto.randomUUID()); if (interactive(ctx) && (typeof ctx.ui?.confirm !== "function" || !(await ctx.ui.confirm("Authorize plan commits", "Allow commits in the dedicated plan branch only; merge and push remain forbidden?")))) throw new Error("Plan commit authorization was not confirmed"); return launchPlan(request, ctx); } });
   pi.on?.("session_shutdown", async () => { for (const planId of attentionPollers.keys()) stopAttentionPoller(planId); });
-  pi.registerCommand("plan-status", { description: "Read Plan Runner status.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); const runner = await rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); try { const plan = JSON.parse(await readFile(path.join(stateRoot, "var", "plan-runs", handle.planId, "status.json"), "utf8")); await forwardAttention(handle, plan, { failClosed: true }); return { runner, plan }; } catch (error) { if (error?.code === "ENOENT") return runner; throw error; } } });
+  pi.registerCommand("plan-status", { description: "Read Plan Runner status.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); const runner = await rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); let raw; try { raw = await readFile(path.join(stateRoot, "var", "plan-runs", handle.planId, "status.json"), "utf8"); } catch (error) { if (error?.code === "ENOENT") return runner; throw error; } const plan = JSON.parse(raw); await forwardAttention(handle, plan, { failClosed: true }); return { runner, plan }; } });
   pi.registerCommand("plan-open", { description: "Open the Plan Runner artifact.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); const status = await rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); return { asyncDir: handle.asyncDir, worktree: handle.worktree, status }; } });
   pi.registerCommand("plan-pause", { description: "Interrupt a running Plan Runner.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); return rootIdentity().upstream.interrupt({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); } });
   pi.registerCommand("plan-cancel", { description: "Persist cancellation intent and stop the Plan Runner.", async handler(planId, ctx = {}) { const handle = await getHandle(planId, ctx); if (typeof options.recordCancelIntent === "function") await options.recordCancelIntent(handle); else await control.requestCancel({ planId: handle.planId, runId: handle.planRunnerRunId }); await rootIdentity().upstream.stop({ runId: handle.planRunnerRunId, dir: handle.asyncDir }); stopAttentionPoller(handle.planId); activeHandles.delete(planId); return `Plan ${planId} cancelled.`; } });
