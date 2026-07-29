@@ -114,7 +114,7 @@ test("checks browser transcript compatibility against the installed pi-subagents
 });
 
 test("binds the installed supervisor runtime behind project-owned tools", async () => {
-  const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION"];
+  const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED"];
   const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
   for (const name of markers) delete process.env[name];
 
@@ -136,6 +136,7 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
       shutdownHandler() {},
       onError(error) { errors.push(error); },
     });
+    assert.equal(process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED, "1");
     const toolNames = result.session.getAllTools()
       .map((tool) => tool.name)
       .filter((name) => name.includes("subagent") || name === "intercom");
@@ -183,13 +184,20 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
     assert.equal(status.details.pending, 0);
     assert.deepEqual(pending.details.pending, []);
   } finally {
-    if (result) {
-      await result.session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });
-      result.session.dispose();
-    }
-    for (const [name, value] of previousMarkers) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
+    try {
+      if (result) {
+        try {
+          await result.session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });
+          assert.equal(process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED, previousMarkers.get("PI_ROOT_SUBAGENT_BROKER_ENABLED"));
+        } finally {
+          result.session.dispose();
+        }
+      }
+    } finally {
+      for (const [name, value] of previousMarkers) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
     }
   }
 });
