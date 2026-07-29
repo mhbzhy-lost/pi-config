@@ -104,9 +104,32 @@ test("plan-run launches one Standalone Plan Runner and persists only the v3 Host
     assert.match(notifications[0][0], /^PI_PLAN_HANDLE=/);
     const persisted = JSON.parse(await readFile(path.join(root, "var", "plan-runs", "plan-one", "host-handle.json"), "utf8"));
     assert.deepEqual(persisted, entries[0].data);
+    await assert.rejects(readFile(path.join(root, "var", "plan-worktrees", "plan-one", ".pi-plan-runtime", "approved-plan.md")));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Host identity mismatch stops the Host, rolls back, and does not persist a handle", async () => {
+  const { root, planPath } = await fixture();
+  try {
+    const calls = [];
+    const hostRuntime = {
+      async spawnPlanRunner(input) { return handleFor(root, input, { revision: input.revision + 1, planIrHash: "f".repeat(64) }); },
+      async stop(handle) { calls.push(["stop", handle.hostRunId]); }, async status() {}, async interrupt() {}, async reconcile() {},
+    };
+    const { commands, entries } = setup({
+      originRoot: root, stateRoot: root, hostRuntime,
+      readBaseCommit: async () => "b".repeat(40),
+      createWorkspace: async ({ planId }) => workspace(root, planId),
+      rollbackWorkspace: async () => calls.push(["rollback"]),
+      id: () => "plan-one",
+    });
+    await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /mismatched revision|mismatched planIrHash/i);
+    assert.deepEqual(calls, [["stop", "host-plan-one"], ["rollback"]]);
+    assert.equal(entries.length, 0);
+    await assert.rejects(readFile(path.join(root, "var", "plan-runs", "plan-one", "host-handle.json")));
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("Root session shutdown leaves the Standalone Host alive", async () => {

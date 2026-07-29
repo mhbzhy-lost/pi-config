@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +10,44 @@ import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store
 const sourceBytes = Buffer.from(`# Approved plan  \r\n\r\n## Execution Contract\r\n\r\n\`\`\`json\r\n{"schemaVersion":"pi-plan.v1","verification":["npm test"],"requiredGates":["deterministic","plan-audit","external-review","final-completeness"]}\r\n\`\`\`\r\n\r\n### Task 1: Ship it  \r\n\r\n**Files:**\r\n- Create: \`src/a.mjs\`  \r\n`, "utf8");
 
 const v3SourceBytes = Buffer.from(`# Complete IR plan\n\n**Goal:** preserve approved instructions\n\n## Execution Contract\n\n\`\`\`json\n{"schemaVersion":"pi-plan.v3","revision":1,"parentPlanHash":null,"verification":[{"id":"plan:test","command":"node --test","cwd":".","timeoutMs":900000}],"requiredGates":["deterministic","plan-audit","external-review","final-completeness"],"resourceCapacities":{},"executionDefaults":{"agent":"executor","risk":"normal","workflow":{"mode":"inherit-repository"},"timeoutMs":900000},"taskExecution":{"task-1":{"risk":"high","workflow":{"mode":"tdd"},"timeoutMs":1200000}},"taskAcceptance":{"task-1":{"strategy":"commands","commandIds":["plan:test"]}}}\n\`\`\`\n\n### Task 1: Compile semantics\n\n**Files:**\n- Modify: \`src/ir.mjs\`\n\n- [ ] Write a test first\n`, "utf8");
+const v3Revision2SourceBytes = Buffer.from(v3SourceBytes.toString().replace('"revision":1,"parentPlanHash":null', `"revision":2,"parentPlanHash":"${"a".repeat(64)}"`), "utf8");
+
+test("v3 amendments prepare revision two while initial identities remain exclusive", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-revision-amendment-"));
+  try {
+    const store = createPlanRevisionStore({ stateRoot: root });
+    await store.prepareRevision({ planId: "v3", sourceBytes: v3SourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } });
+    const amendment = await store.prepareRevision({
+      planId: "v3", sourceBytes: v3Revision2SourceBytes, reason: "scope-approved", initiator: { kind: "supervisor-request", requestId: "request-1", taskId: "task-1", attemptId: "attempt-1", runId: "run-1" },
+    });
+    assert.equal(amendment.revision, 2);
+    assert.equal(amendment.manifest.parentRevision, 1);
+    assert.equal(amendment.manifest.irVersion, "plan-ir.v3");
+    await assert.rejects(store.prepareRevision({ planId: "v3-initial", sourceBytes: v3Revision2SourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } }), /revision.*1|initial/i);
+    await assert.rejects(store.prepareRevision({ planId: "v3-non-launcher", sourceBytes: v3SourceBytes, reason: "initial-approval", initiator: { kind: "supervisor-request" } }), /Launcher|initial/i);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("real candidate directories never become current and canonical artifact bytes are immutable", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-revision-artifact-"));
+  try {
+    const store = createPlanRevisionStore({ stateRoot: root });
+    const prepared = await store.prepareRevision({ planId: "v3", sourceBytes: v3SourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } });
+    const candidate = path.join(root, "var", "plan-runs", "v3", "revisions", ".candidate-000001-crash");
+    await mkdir(candidate, { recursive: true });
+    await writeFile(path.join(candidate, "current.json"), "weak implementation bait");
+    assert.equal(await store.readCurrent("v3"), null);
+    assert.equal((await store.readRevision("v3", 1)).manifestSha256, prepared.manifestSha256);
+    const reformatted = Buffer.from(JSON.stringify(prepared.ir));
+    const manifestPath = path.join(prepared.directory, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.irArtifactSha256 = createHash("sha256").update(reformatted).digest("hex");
+    await writeFile(prepared.irPath, reformatted);
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await assert.rejects(store.readRevision("v3", 1), /malformed/i);
+    await assert.rejects(store.prepareRevision({ planId: "v3", sourceBytes: v3SourceBytes, reason: "initial-approval", initiator: { kind: "launcher" } }), /malformed|immutable/i);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 
 test("prepares immutable private source, IR, and manifest outside the worktree", async () => {

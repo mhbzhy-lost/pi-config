@@ -212,8 +212,15 @@ export function createPlanLauncherExtension(pi, options = {}) {
         statusPath,
       });
       trustedHandle(stateRoot, handle);
-      for (const field of ["planId", "revision", "manifestSha256", "sourceBytesSha256", "planHash", "planIrHash"]) {
-        const expected = field === "planId" ? planId : field === "revision" ? prepared.revision : field === "manifestSha256" ? prepared.manifestSha256 : field === "planIrHash" ? prepared.manifest.irHash : prepared.manifest[field];
+      const expectedIdentity = {
+        planId,
+        revision: prepared.revision,
+        manifestSha256: prepared.manifestSha256,
+        sourceBytesSha256: prepared.manifest.sourceBytesSha256,
+        planHash: prepared.manifest.planHash,
+        planIrHash: prepared.manifest.irHash,
+      };
+      for (const [field, expected] of Object.entries(expectedIdentity)) {
         if (handle[field] !== expected) throw new Error(`Plan Host returned mismatched ${field}`);
       }
       await (options.persistHandle ?? persistHandle)(stateRoot, handle);
