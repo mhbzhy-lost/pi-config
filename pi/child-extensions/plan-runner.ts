@@ -4,18 +4,20 @@ import { createPlanRunnerDependencies } from "../../scripts/lib/plan/plan-runner
 import { ensurePlanRuntimeTools } from "../../scripts/lib/plan/plan-runtime-tools.mjs";
 import { createPiSubagentsExecutionBackend } from "../../scripts/lib/plan/pi-subagents-execution-backend.mjs";
 import { createExternalReviewAdapter } from "../../scripts/lib/plan/external-review-adapter.mjs";
-import { createSubagentsRpcClient } from "../../scripts/lib/subagents-rpc-client.mjs";
+import { installRootOwnedSubagent } from "./root-owned-subagent.ts";
+import { installRootSessionOwner } from "./root-session-owner.ts";
 
-const REQUIRED_RUNTIME_TOOLS = ["subagent_wait", "subagent_supervisor"];
+const REQUIRED_RUNTIME_TOOLS: string[] = [];
 const REQUIRED_RPC_METHODS = ["ping", "spawn", "status", "interrupt", "stop"];
 
 export default function planRunner(pi: ExtensionAPI) {
-  if (process.env.PI_SUBAGENT_CHILD || process.env.PI_SUBAGENT_FANOUT_CHILD) {
-    throw new Error("Standalone Plan Runner refuses child or fanout-child mode.");
-  }
+  const rootOwned = installRootOwnedSubagent(pi);
+  void installRootSessionOwner(pi, {
+    createClient: () => rootOwned.rpc,
+  });
 
   const executionFacts: unknown[] = [];
-  const rpc = createSubagentsRpcClient(pi.events);
+  const rpc = rootOwned.rpc;
   const executionBackend = createPiSubagentsExecutionBackend({
     rpc,
     events: pi.events,

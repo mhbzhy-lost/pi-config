@@ -188,6 +188,16 @@ test("exports a project-owned static supervisor contract", () => {
   assert.doesNotMatch(tool.description, /pi-subagents|upstream/i);
 });
 
+test("allows a unique project-owned supervisor name and label", () => {
+  requireSupervisorApi();
+  const tool = createSupervisorTool(createSupervisorAdapter(), {
+    name: "plan_executor_supervisor",
+    label: "Plan Executor Supervisor",
+  });
+  assert.equal(tool.name, "plan_executor_supervisor");
+  assert.equal(tool.label, "Plan Executor Supervisor");
+});
+
 test("delegates every execution argument and the resolved result unchanged", async () => {
   requireSupervisorApi();
   const adapter = createSupervisorAdapter();

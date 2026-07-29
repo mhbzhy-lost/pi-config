@@ -8,6 +8,8 @@ import test from "node:test";
 
 import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
+import { createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
+import { installRootSessionOwner } from "../pi/child-extensions/root-session-owner.ts";
 import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 
 const rootSessionId = "root-broker-test-1";
@@ -77,6 +79,67 @@ test("broker fails closed for root, caller, and token mismatches", async (t) => 
     const reply = await socketRequest(request({ callerRunId: change.callerRunId ?? "plan-run-1", callerToken: change.callerToken ?? caller.callerToken, method: "ping", params: {}, root: change.root ?? rootSessionId }));
     assert.equal(reply.reply.success, false);
   }
+});
+
+test("child-safe client reads its grant, authenticates each request, and rejects on dispose", async (t) => {
+  const upstream = fakeUpstream();
+  const broker = new RootBrokerServer({ rootSessionId, upstream });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: "plan-run-1" });
+  t.after(() => client.dispose());
+
+  const reply = await client.spawn({ agent: "executor", task: "execute", async: false, clarify: true });
+  assert.equal(reply.details.runId, "executor-run-1");
+  assert.deepEqual(upstream.calls[0].params, { agent: "executor", task: "execute", async: true, clarify: false });
+  client.dispose();
+  await assert.rejects(client.ping(), /disposed/i);
+});
+
+test("child-safe subscription distinguishes local disposal from remote EOF", async (t) => {
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  await broker.grantCaller({ callerRunId: "plan-run-1", planId: "plan-1", cwd: "/repo", role: "plan-runner" });
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: "plan-run-1" });
+  t.after(() => client.dispose());
+  const subscription = await client.subscribe(() => {});
+  subscription.dispose();
+  await subscription.closed;
+  const remote = await client.subscribe(() => {});
+  const remoteFailure = assert.rejects(remote.closed, /root closing|disconnected|EOF/i);
+  await broker.closeRootSession();
+  await remoteFailure;
+});
+
+test("root ownership guard retries only a missing grant and terminates once on remote EOF", async () => {
+  const signals = [];
+  const messages = [];
+  let attempts = 0;
+  let close;
+  const owner = await installRootSessionOwner({ sendMessage: async (message) => messages.push(message) }, {
+    env: { PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: rootSessionId, PI_SUBAGENT_RUN_ID: "plan-run-1" },
+    createClient: () => ({
+      subscribe: async () => {
+        attempts += 1;
+        if (attempts === 1) { const error = new Error("not ready"); error.code = "GRANT_NOT_READY"; throw error; }
+        const closed = new Promise((_, reject) => { close = () => reject(new Error("EOF")); });
+        return { dispose() {}, closed };
+      },
+      dispose() {},
+    }),
+    clock: () => 0,
+    sleep: async () => {},
+    kill: (pid, signal) => signals.push({ pid, signal }),
+    pid: 42,
+  });
+  close();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 2);
+  assert.deepEqual(signals, [{ pid: 42, signal: "SIGTERM" }]);
+  assert.equal(messages[0].customType, "pi-root-session-closing-v1");
+  owner.dispose();
 });
 
 test("executor grant subscribes with its own identity and cannot call other methods", async (t) => {
