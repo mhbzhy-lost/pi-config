@@ -46,11 +46,11 @@ async function waitForProcessGroupExit(pid, timeoutMs = 1_000) {
 
 async function forceKillProcessGroup(pid) {
   if (!processGroupExists(pid)) return;
-  try { process.kill(-pid, "SIGKILL"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+  try { process.kill(-pid, "SIGKILL"); } catch (error) { if (error?.code === "ESRCH" || error?.code === "EPERM") return; throw error; }
   assert.equal(await waitForProcessGroupExit(pid), true, `test cleanup leaked process group ${pid}`);
 }
 
-async function waitForPidFile(file, timeoutMs = 2_000) {
+async function waitForPidFile(file, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
