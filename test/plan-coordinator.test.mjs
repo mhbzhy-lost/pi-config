@@ -57,7 +57,7 @@ function createdEntry(tasks = ["task-1", "task-2"]) {
   };
 }
 
-function v3Plan() {
+function v3Plan({ instructions = "Keep the execution contract intact.", body = "Implement the approved change.", taskExecution = {} } = {}) {
   return parsePlanDocument(`# V3 coordinator fixture
 
 **Goal:** dispatch the exact approved task
@@ -70,18 +70,18 @@ ${JSON.stringify({
   verification: [{ id: "test", command: "true", cwd: ".", timeoutMs: 900000 }],
   requiredGates: ["deterministic", "plan-audit", "external-review", "final-completeness"], resourceCapacities: {},
   executionDefaults: { agent: "executor", risk: "normal", workflow: { mode: "inherit-repository" }, timeoutMs: 321000 },
-  taskExecution: {}, taskAcceptance: { "task-1": { strategy: "commands", commandIds: ["test"] } },
+  taskExecution: { "task-1": taskExecution }, taskAcceptance: { "task-1": { strategy: "commands", commandIds: ["test"] } },
 })}
 \`\`\`
 
-Keep the execution contract intact.
+${instructions}
 
 ### Task 1: Exact task
 
 **Files:**
 - Modify: \`src/exact.mjs\`
 
-Implement the approved change.
+${body}
 `, "/plans/v3-coordinator.md");
 }
 
@@ -139,6 +139,38 @@ function createdV3Entry(ir) {
       },
     },
   };
+}
+
+function canonicalDispatchContext(event) {
+  const { planIrHash, taskHash, schedulingHash } = event.data;
+  return {
+    planIrHash, taskHash, schedulingHash,
+    attemptId: event.data.attemptId, baseCommit: event.data.baseCommit,
+    output: event.data.tool.output, dependencyReceipts: [],
+  };
+}
+
+async function dispatchV3(approvedPlan) {
+  const ir = compilePlanToIR(approvedPlan);
+  const entries = [createdV3Entry(ir)];
+  const spawned = [];
+  const writer = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => entries.push(entry),
+    id: (() => { let sequence = 0; return () => `v3-matrix-${++sequence}`; })(),
+    now: () => "2026-07-15T00:00:01.000Z",
+  });
+  const { coordinator } = createPlanCoordinator({
+    ir, entries, writer, readEntries: async () => entries, readProjection: () => replay(entries),
+    allocateWorkspace: async (input) => lease(input),
+    backend: { async spawn(input) { spawned.push(input); return { dispatchId: input.dispatchId, attemptId: input.attemptId, runId: "run-v3-matrix", asyncDir: "/async/v3-matrix", cwd: input.cwd }; } },
+    stateRoot: "/repo", outputForAttempt: (attemptId) => `/results/${attemptId}.json`, timeoutMs: 654000,
+    id: (() => { let sequence = 0; return () => `v3-coordinator-${++sequence}`; })(), now: () => "2026-07-15T00:00:01.000Z",
+  });
+  await coordinator.dispatchAuthorized();
+  const event = entries.find(({ type }) => type === "attempt.dispatch-requested");
+  assert.equal(event.data.dispatchContextHash, createHash("sha256").update(JSON.stringify(canonicalDispatchContext(event))).digest("hex"));
+  return { ir, event, spawned: spawned[0] };
 }
 
 function lease(input) {
@@ -723,6 +755,51 @@ test("v3 dispatch emits the complete exact prompt and canonical identity context
   };
   assert.equal(event.data.dispatchContextHash, createHash("sha256").update(JSON.stringify(canonical)).digest("hex"));
   assert.equal(event.data.toolHash, createHash("sha256").update(JSON.stringify(event.data.tool)).digest("hex"));
+});
+
+test("v3 dispatch carries body-only IR hash changes while scheduling remains stable", async () => {
+  const baseline = await dispatchV3(v3Plan());
+  const changed = await dispatchV3(v3Plan({ body: "Implement the changed approved behavior." }));
+
+  assert.notEqual(changed.event.data.tool.task, baseline.event.data.tool.task);
+  assert.notEqual(changed.event.data.planIrHash, baseline.event.data.planIrHash);
+  assert.notEqual(changed.event.data.taskHash, baseline.event.data.taskHash);
+  assert.notEqual(changed.event.data.dispatchContextHash, baseline.event.data.dispatchContextHash);
+  assert.equal(changed.event.data.schedulingHash, baseline.event.data.schedulingHash);
+  assert.notEqual(changed.ir.nodes[0].hashes.full, baseline.ir.nodes[0].hashes.full);
+  assert.notEqual(changed.ir.nodes[0].hashes.effective, baseline.ir.nodes[0].hashes.effective);
+});
+
+test("v3 dispatch carries instructions-only effective hash changes while local full remains stable", async () => {
+  const baseline = await dispatchV3(v3Plan());
+  const changed = await dispatchV3(v3Plan({ instructions: "Keep the changed global execution contract intact." }));
+
+  assert.notEqual(changed.event.data.tool.task, baseline.event.data.tool.task);
+  assert.notEqual(changed.event.data.planIrHash, baseline.event.data.planIrHash);
+  assert.notEqual(changed.event.data.taskHash, baseline.event.data.taskHash);
+  assert.notEqual(changed.event.data.dispatchContextHash, baseline.event.data.dispatchContextHash);
+  assert.equal(changed.event.data.schedulingHash, baseline.event.data.schedulingHash);
+  assert.equal(changed.ir.nodes[0].hashes.full, baseline.ir.nodes[0].hashes.full);
+  assert.notEqual(changed.ir.nodes[0].hashes.effective, baseline.ir.nodes[0].hashes.effective);
+});
+
+test("v3 dispatch inherits the executor agent with task risk and timeout identity changes", async () => {
+  const baseline = await dispatchV3(v3Plan());
+  const changed = await dispatchV3(v3Plan({ taskExecution: { risk: "high", timeoutMs: 123000 } }));
+
+  assert.equal(changed.ir.nodes[0].execution.agent, "executor");
+  assert.equal(changed.ir.nodes[0].execution.risk, "high");
+  assert.equal(changed.ir.nodes[0].execution.timeoutMs, 123000);
+  assert.equal(changed.event.data.tool.agent, changed.ir.nodes[0].execution.agent);
+  assert.equal(changed.event.data.tool.timeoutMs, 123000);
+  assert.equal(changed.spawned.agent, changed.ir.nodes[0].execution.agent);
+  assert.equal(changed.spawned.timeoutMs, 123000);
+  assert.notEqual(changed.event.data.planIrHash, baseline.event.data.planIrHash);
+  assert.notEqual(changed.event.data.taskHash, baseline.event.data.taskHash);
+  assert.equal(changed.event.data.schedulingHash, baseline.event.data.schedulingHash);
+  assert.notEqual(changed.event.data.dispatchContextHash, baseline.event.data.dispatchContextHash);
+  assert.notEqual(changed.ir.nodes[0].hashes.full, baseline.ir.nodes[0].hashes.full);
+  assert.notEqual(changed.ir.nodes[0].hashes.effective, baseline.ir.nodes[0].hashes.effective);
 });
 
 test("v3 dependency dispatch fails closed before allocation when its integrated receipt is incomplete", async () => {
