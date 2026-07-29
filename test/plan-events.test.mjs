@@ -147,6 +147,56 @@ test("atomically projects a strict Plan amendment matrix with tombstones and sup
   assert.deepEqual(amended.amendmentRequestIds, new Set(["supervisor-request-1"]));
 });
 
+test("atomically closes unresolved blocking Attention when an amendment supersedes its Attempt", () => {
+  function revisedProjection() {
+    let projection = revisionProjection(["task-1", "task-2"]);
+    for (const attemptId of ["source", "waiting"]) {
+      const taskId = attemptId === "source" ? "task-1" : "task-2";
+      const workspaceLease = attemptWorkspace(attemptId);
+      projection = apply(projection, "attempt.workspace-allocated", { attemptId, taskId, baseCommit: "head", workspace: workspaceLease });
+      projection = apply(projection, "attempt.dispatch-requested", {
+        attemptId, taskId, dispatchId: `${attemptId}-dispatch`, baseCommit: "head", workspace: workspaceLease,
+        tool: dispatchTool(attemptId), toolHash: `${attemptId}-tool`, planIrHash: projection.revision.irHash,
+        taskHash: projection.revision.taskHashes[taskId].effective, schedulingHash: projection.revision.taskHashes[taskId].scheduling, dispatchContextHash: sha(attemptId === "source" ? "a" : "b"),
+      });
+      projection = apply(projection, "attempt.bound", { attemptId, taskId, dispatchId: `${attemptId}-dispatch`, runId: `${attemptId}-run`, asyncDir: `/${attemptId}`, sessionFile: `/${attemptId}.jsonl` });
+    }
+    const attention = (attemptId) => ({ requestId: `${attemptId}-request`, taskId: attemptId === "source" ? "task-1" : "task-2", attemptId, runId: `${attemptId}-run`, kind: "need_decision", message: `${attemptId} needs a decision`, projectionVersion: projection.version + 1, createdAt: "2026-07-15T00:00:00.000Z", evidence: { bodyPath: `${attemptId}.md`, bodySha256: sha(attemptId === "source" ? "c" : "d") } });
+    projection = apply(projection, "attempt.attention-requested", attention("source"));
+    projection = apply(projection, "attempt.attention-resolved", { attemptId: "source", requestId: "source-request", runId: "source-run", expectedProjectionVersion: projection.version, resolutionSha256: sha("e") });
+    projection = apply(projection, "attempt.attention-requested", attention("waiting"));
+    projection = apply(projection, "attempt.attention-escalated", { attemptId: "waiting", requestId: "waiting-request", runId: "waiting-run", expectedProjectionVersion: projection.version, evidence: { bodyPath: "waiting-escalated.md", bodySha256: sha("f") } });
+    return projection;
+  }
+
+  const amend = (projection) => amendmentData(projection, {
+    taskHashes: {
+      "task-1": { ...projection.revision.taskHashes["task-1"], effective: sha("7") },
+      "task-2": { ...projection.revision.taskHashes["task-2"], effective: sha("8") },
+    },
+    diff: { added: [], changed: [], rebound: ["task-1", "task-2"], retired: [], unchanged: [] },
+    supersededAttemptIds: ["source", "waiting"],
+  });
+
+  const before = revisedProjection();
+  const sourceAttention = structuredClone(before.attempts.get("source").attention);
+  const waitingAttention = structuredClone(before.attempts.get("waiting").attention);
+  const amended = apply(before, "plan.amended", amend(before));
+  const waiting = amended.attempts.get("waiting");
+  assert.deepEqual(amended.attempts.get("source").attention, sourceAttention);
+  assert.deepEqual(waiting.attention, { ...waitingAttention, status: "superseded", supersededByRevision: 2, projectionVersion: before.version + 1 });
+  assert.equal(waiting.attention.resolutionSha256, undefined);
+  for (const type of ["attempt.attention-resolved", "attempt.attention-escalated"]) {
+    assert.throws(() => apply(amended, type, { attemptId: "waiting", requestId: "waiting-request", runId: "waiting-run", expectedProjectionVersion: amended.version, ...(type.endsWith("resolved") ? { resolutionSha256: sha("9") } : { evidence: { bodyPath: "late.md", bodySha256: sha("a") } }) }), /waiting-attention/);
+  }
+  const replay = revisedProjection();
+  assert.deepEqual(apply(replay, "plan.amended", amend(replay)).attempts.get("waiting").attention, waiting.attention);
+  const invalid = { ...amend(before), supersededAttemptIds: ["source"] };
+  const original = structuredClone(before.attempts.get("waiting").attention);
+  assert.throws(() => apply(before, "plan.amended", invalid), /supersededAttemptIds/);
+  assert.deepEqual(before.attempts.get("waiting").attention, original);
+});
+
 test("rejects invalid Plan amendments without mutating the current projection", () => {
   const projection = revisionProjection();
   const original = structuredClone({ revision: projection.revision, tasks: [...projection.tasks], attempts: [...projection.attempts] });
@@ -604,10 +654,29 @@ test("persists strict supersede provenance and only accepts matching proof befor
   projection = apply(projection, "attempt.superseded", { attemptId: "attempt-2", taskId: "task-2", oldTaskHash: sha("2"), supersededByRevision: 2, evidence: { kind: "never-started", dispatchId: null } });
   assert.equal(projection.attempts.get("attempt-2").status, "superseded");
   assert.equal(projection.attempts.get("attempt-2").workspaceReleased, undefined);
+  const blockedAmendment = amendmentData(projection, {
+    revision: 3, parentRevision: 2, requestId: "supervisor-request-2",
+    taskHashes: { "task-1": { ...projection.revision.taskHashes["task-1"] }, "task-2": { ...projection.revision.taskHashes["task-2"], effective: sha("f") } },
+    diff: { added: [], changed: [], rebound: ["task-2"], retired: [], unchanged: ["task-1"] },
+  });
+  assert.throws(() => apply(projection, "plan.amended", blockedAmendment), /supersede cleanup/);
+  assert.throws(() => apply(projection, "workspace.head-observed", { headCommit: "later-head" }), /active attempt/);
+  projection.tasks.set("task-1", { status: "accepted" });
+  projection.tasks.set("task-2", { status: "accepted" });
+  projection.lifecycle = "verifying";
+  assert.throws(() => apply(projection, "plan.validated", { worktreeClean: true }), /active attempt/);
+  projection.lifecycle = "running";
+  projection.tasks.set("task-2", { status: "pending" });
   assert.throws(() => apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-3", taskId: "task-2", baseCommit: "head", workspace: attemptWorkspace("attempt-3") }), /active attempt/);
   assert.throws(() => apply(projection, "attempt.workspace-released", { attemptId: "attempt-2", disposition: "failed-preserve", evidence: {} }), /disposition/);
   projection = apply(projection, "attempt.workspace-released", { attemptId: "attempt-2", disposition: "superseded-cleanup", evidence: {} });
   assert.equal(projection.attempts.get("attempt-2").workspaceReleased, true);
+  projection.tasks.set("task-1", { status: "accepted" });
+  projection.tasks.set("task-2", { status: "accepted" });
+  projection.lifecycle = "verifying";
+  assert.throws(() => apply(projection, "plan.validated", { worktreeClean: true }), /missing gate/);
+  projection.lifecycle = "running";
+  projection.tasks.set("task-2", { status: "pending" });
   projection = apply(projection, "attempt.workspace-allocated", { attemptId: "attempt-3", taskId: "task-2", baseCommit: "head", workspace: attemptWorkspace("attempt-3") });
   assert.equal(projection.attempts.get("attempt-3").status, "workspace-allocated");
 });

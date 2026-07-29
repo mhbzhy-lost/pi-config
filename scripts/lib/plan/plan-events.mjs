@@ -241,9 +241,20 @@ function amendPlan(projection, data) {
     if (attempt.taskHash && attempt.taskHash !== oldHashes[attempt.taskId].effective) {
       throw new Error(`attempt taskHash does not match old revision: ${attemptId}`);
     }
+    const supersededAttention = attempt.status === "waiting-attention"
+      && attempt.attention?.blocking
+      && attempt.attention.status !== "resolved"
+      ? {
+        ...attempt.attention,
+        status: "superseded",
+        supersededByRevision: data.revision,
+        projectionVersion: projection.version + 1,
+      }
+      : attempt.attention;
     projection.attempts.set(attemptId, {
       ...attempt,
       status: "supersede-requested",
+      ...(supersededAttention ? { attention: supersededAttention } : {}),
       supersededFromStatus: attempt.status,
       supersededTaskHash,
       supersededByRevision: data.revision,
