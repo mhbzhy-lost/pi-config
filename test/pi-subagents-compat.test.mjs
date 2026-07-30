@@ -129,6 +129,7 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
   const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED"];
   const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
   for (const name of markers) delete process.env[name];
+  const runtimeMarkers = new Map(markers.map((name) => [name, process.env[name]]));
 
   let result;
   try {
@@ -200,7 +201,7 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
       if (result) {
         try {
           await result.session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });
-          assert.equal(process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED, previousMarkers.get("PI_ROOT_SUBAGENT_BROKER_ENABLED"));
+          assert.equal(process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED, runtimeMarkers.get("PI_ROOT_SUBAGENT_BROKER_ENABLED"));
         } finally {
           result.session.dispose();
         }
