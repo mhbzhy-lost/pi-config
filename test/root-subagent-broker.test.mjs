@@ -224,6 +224,7 @@ test("broker returns identity-bound runtime roots without changing the grant sch
   const firstPing = await socketRequest(request({ callerRunId: "plan-run-1", callerToken: first.callerToken, method: "ping", params: {} }));
   const secondPing = await socketRequest(request({ callerRunId: "plan-run-2", callerToken: second.callerToken, method: "ping", params: {} }));
   assert.deepEqual(firstPing.reply.data.planRuntime, { originRoot: "/origin-a", stateRoot: "/state-a" });
+  assert.equal(firstPing.reply.data.methods.includes("spawn.lookup"), true);
   assert.deepEqual(secondPing.reply.data.planRuntime, { originRoot: "/origin-b", stateRoot: "/state-b" });
   const grant = await readBrokerGrant(rootSessionId, "plan-run-1");
   assert.deepEqual(Object.keys(grant).sort(), ["callerToken", "role", "rootSessionId", "runId", "schemaVersion"]);
