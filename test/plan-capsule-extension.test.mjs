@@ -41,6 +41,37 @@ const waitingAttentionEvents = [
   },
 ];
 
+function mixedInFlightValidatedEvents(inFlightStatus) {
+  const mixedCreated = {
+    ...created,
+    eventId: "mixed-created",
+    data: { ...created.data, tasks: ["task-1", "task-2"] },
+  };
+  const taskOneEvents = activeEvents.slice(1).map((event) => ({
+    ...event,
+    eventId: `mixed-task-1-${event.eventId}`,
+    data: { ...event.data },
+  }));
+  if (inFlightStatus === "dispatch-requested") taskOneEvents.splice(2);
+  if (inFlightStatus === "waiting-attention") {
+    taskOneEvents.push({
+      ...waitingAttentionEvents[4],
+      eventId: "mixed-task-1-attention-requested",
+      data: { ...waitingAttentionEvents[4].data, projectionVersion: 5 },
+    });
+  }
+  const taskTwoWorkspace = { path: "/attempts/attempt-2", branch: "pi-plan-attempt/release-11/task-2/1", ownerToken: "owner-2" };
+  return [
+    mixedCreated,
+    ...taskOneEvents,
+    { schemaVersion: "pi-plan-event.v1", eventId: "mixed-task-2-allocated", planId: "release-11", occurredAt: "2026-07-15T00:00:06.000Z", type: "attempt.workspace-allocated", data: { attemptId: "attempt-2", taskId: "task-2", baseCommit: "base", workspace: taskTwoWorkspace } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "mixed-task-2-requested", planId: "release-11", occurredAt: "2026-07-15T00:00:07.000Z", type: "attempt.dispatch-requested", data: { attemptId: "attempt-2", taskId: "task-2", dispatchId: "dispatch-2", baseCommit: "base", workspace: taskTwoWorkspace, tool: { agent: "executor", task: "prompt", cwd: taskTwoWorkspace.path, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: "hash-2" } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "mixed-task-2-bound", planId: "release-11", occurredAt: "2026-07-15T00:00:08.000Z", type: "attempt.bound", data: { attemptId: "attempt-2", taskId: "task-2", dispatchId: "dispatch-2", runId: "run-2", asyncDir: "/async/run-2", sessionFile: "/sessions/run-2.jsonl" } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "mixed-task-2-settled", planId: "release-11", occurredAt: "2026-07-15T00:00:09.000Z", type: "attempt.settled", data: { attemptId: "attempt-2", outcome: "succeeded", resultCommit: "result-2" } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "mixed-task-2-validated", planId: "release-11", occurredAt: "2026-07-15T00:00:10.000Z", type: "attempt.validated", data: { attemptId: "attempt-2", resultCommit: "result-2", validationHash: "validation-2", evidence: [{ path: "evidence/task-2-validation.json", sha256: "v".repeat(64) }] } },
+  ];
+}
+
 function openBinding() {
   return { planId: "release-11", revision: 1, manifestSha256: "a".repeat(64), planIrHash: "b".repeat(64), baseCommit: "base", worktree: "/worktree", allowPlanCommits: true };
 }
@@ -573,6 +604,22 @@ test("agent_settled stays idle while every active Attempt waits for Root Attenti
   );
   assert.deepEqual(messages, []);
 });
+
+for (const inFlightStatus of ["dispatch-requested", "active", "waiting-attention"]) {
+  test(`agent_settled continues coordinator work with ${inFlightStatus} and validated Attempts`, async () => {
+    const { handlers, messages } = setup({ canContinue: () => true });
+    await handlers.get("agent_settled")(
+      { type: "agent_settled" },
+      context(mixedInFlightValidatedEvents(inFlightStatus).map((data) => ({ customType: "pi-plan-event-v1", data }))),
+    );
+    assert.deepEqual(messages, [{
+      message: { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: "release-11" } },
+      options: { triggerTurn: true, deliverAs: "followUp" },
+    }]);
+    const contents = messages.map(({ message }) => message.content).join("\n");
+    assert.doesNotMatch(contents, /subagent_wait|Supervisor pending|executor-control-loop/);
+  });
+}
 
 test("agent_settled uses a valid custom follow-up payload for runnable work", async () => {
   const { handlers, messages } = setup({ canContinue: () => true });
