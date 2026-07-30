@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -731,6 +732,48 @@ test("does not acknowledge a durable reply when matching resolution evidence has
   const freshCtx = context(repo.worktree, [createdEvent, ...entries].map((data) => ({ customType: "pi-plan-event-v1", data })));
   assert.deepEqual(await fresh.processAttentionReplies({ binding, ctx: freshCtx }), []);
   assert.deepEqual(await control.readAttentionReplies(repo.planId), [command]);
+});
+
+test("fresh Attention recovery acknowledges a durable reply with matching resolution evidence", async (t) => {
+  const repo = await fixture();
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  const entries = [];
+  const deps = runnerDependencies(repo, {
+    pi: { appendEntry(_type, data) { entries.push(data); } },
+    executionBackend: backend(),
+    allocateAttemptWorkspace: async (input) => fakeAllocator(input),
+  });
+  const createdEvent = created(binding);
+  const ctx = context(repo.worktree, [{ customType: "pi-plan-event-v1", data: createdEvent }]);
+  await deps.continuePlan({}, { ctx });
+  const attention = await deps.recordSupervisorRequest({
+    customType: "subagent_supervisor_request",
+    content: "Choose target",
+    display: true,
+    details: { id: "request-1", reason: "need_decision", expectsReply: true, runId: "run-1", agent: "executor", childIndex: 0 },
+  }, { ctx });
+  const command = { planId: repo.planId, requestId: "request-1", taskId: "task-1", attemptId: attention.attemptId, runId: "run-1", expectedProjectionVersion: attention.projectionVersion, message: "Use target A", occurredAt: "2026-07-26T00:00:01.000Z" };
+  await deps.appendPlanEvent(ctx, "attempt.attention-resolved", {
+    attemptId: attention.attemptId, requestId: command.requestId, runId: command.runId,
+    expectedProjectionVersion: command.expectedProjectionVersion,
+    resolutionSha256: createHash("sha256").update(command.message).digest("hex"),
+  }, attention.projectionVersion, repo.planId);
+  const control = createPlanControl({ stateRoot: repo.origin });
+  await control.writeAttentionReply(command);
+  let sentMessages = 0;
+  let appendedEntries = 0;
+  const fresh = runnerDependencies(repo, {
+    pi: {
+      sendMessage() { sentMessages += 1; },
+      appendEntry() { appendedEntries += 1; },
+    },
+  });
+  const freshCtx = context(repo.worktree, [createdEvent, ...entries].map((data) => ({ customType: "pi-plan-event-v1", data })));
+  assert.deepEqual(await fresh.processAttentionReplies({ binding, ctx: freshCtx }), []);
+  assert.equal(sentMessages, 0);
+  assert.equal(appendedEntries, 0);
+  assert.deepEqual(await control.readAttentionReplies(repo.planId), []);
 });
 
 test("rejects an otherwise valid binding after its worktree HEAD advances", async (t) => {
