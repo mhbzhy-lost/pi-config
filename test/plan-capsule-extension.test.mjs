@@ -395,6 +395,27 @@ test("capsule resolves only the authorized successful project Supervisor reply",
   assert.equal(resolved[0].message, "Use target A");
 });
 
+test("capsule retains a Supervisor authorization when result resolution fails and retries it once", async () => {
+  let resolveCalls = 0;
+  const { handlers } = setup({
+    authorizeSupervisorReply: async (input) => ({ requestId: input.replyTo, runId: "run-1" }),
+    resolveSupervisorReply: async () => {
+      resolveCalls++;
+      if (resolveCalls === 1) throw new Error("ack unavailable");
+    },
+  });
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
+  await handlers.get("session_start")({ type: "session_start" }, ctx);
+  const input = { action: "reply", replyTo: "request-1", to: "executor", message: "Use target A" };
+  const call = { toolName: "plan_executor_supervisor", toolCallId: "reply-call-retry", input };
+  const result = { toolName: "plan_executor_supervisor", toolCallId: "reply-call-retry", input, isError: false };
+  assert.equal(await handlers.get("tool_call")(call, ctx), undefined);
+  await assert.rejects(handlers.get("tool_result")(result, ctx), /ack unavailable/);
+  await handlers.get("tool_result")(result, ctx);
+  await handlers.get("tool_result")(result, ctx);
+  assert.equal(resolveCalls, 2);
+});
+
 test("capsule blocks legacy Supervisor pending and reply without invoking its authorizer", async () => {
   const authorized = [];
   const { handlers } = setup({ authorizeSupervisorReply: async (input) => authorized.push(input) });
