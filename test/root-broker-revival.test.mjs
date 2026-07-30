@@ -228,6 +228,29 @@ test("grants the revived actual plan-runner while retaining its stable logical a
   assert.deepEqual([...server.callers.keys()], ["plan-runner-1"]);
 });
 
+test("closes and removes the old actual subscription when its alias activates", async () => {
+  const { ownedRun, proof, request, server } = await createRevivalFixture();
+  let destroyCalls = 0;
+  const socket = {
+    destroyed: false,
+    destroy() {
+      destroyCalls += 1;
+      this.destroyed = true;
+    },
+  };
+  server.subscriptions.set("plan-runner-1", new Set([socket]));
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(destroyCalls, 1);
+  assert.equal(socket.destroyed, true);
+  assert.equal(server.subscriptions.has("plan-runner-1"), false);
+  assert.deepEqual(server.logicalCallers.get("plan-runner-1"), { activeRunId: "plan-runner-2", generation: 1 });
+  assert.deepEqual(server.principals.get("plan-runner-2"), { role: "plan-runner", callerToken: "b".repeat(64) });
+});
+
 test("routes an active plan-runner alias follow-up to its stable logical state", async () => {
   const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture();
 
