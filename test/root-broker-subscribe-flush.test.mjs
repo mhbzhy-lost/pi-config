@@ -21,7 +21,7 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-test("respond activates a subscription only after its success ACK write callback", async () => {
+async function createSubscriptionFixture() {
   const callerToken = "a".repeat(64);
   const server = new RootBrokerServer({
     rootSessionId: "root-session-1",
@@ -49,6 +49,12 @@ test("respond activates a subscription only after its success ACK write callback
     params: {},
   }));
 
+  return { server, socket };
+}
+
+test("respond activates a subscription only after its success ACK write callback", async () => {
+  const { server, socket } = await createSubscriptionFixture();
+
   assert.deepEqual(socket.writes.map(({ frame }) => frame), [{
     schemaVersion: "pi-root-subagent-broker-response.v1",
     requestId: "subscribe-1",
@@ -62,4 +68,22 @@ test("respond activates a subscription only after its success ACK write callback
   socket.writes[0].callback();
 
   assert.equal(server.subscriptions.get("plan-runner-1")?.has(socket) ?? false, true);
+});
+
+test("respond does not activate a subscription when its ACK write callback fails", async () => {
+  const { server, socket } = await createSubscriptionFixture();
+
+  socket.writes[0].callback(new Error("ack failed"));
+
+  assert.equal(server.subscriptions.get("plan-runner-1")?.has(socket) ?? false, false);
+  assert.equal(socket.destroyed, true);
+});
+
+test("respond does not activate a subscription when the root closes before its ACK write callback", async () => {
+  const { server, socket } = await createSubscriptionFixture();
+
+  server.closed = true;
+  socket.writes[0].callback();
+
+  assert.equal(server.subscriptions.get("plan-runner-1")?.has(socket) ?? false, false);
 });
