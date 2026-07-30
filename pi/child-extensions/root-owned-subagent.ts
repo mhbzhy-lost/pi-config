@@ -2,7 +2,8 @@ import { createTypedSubagentExtension } from "../../scripts/lib/subagent-dispatc
 import { createRootBrokerClient } from "../../scripts/lib/subagent-dispatch/root-broker-client.ts";
 import { createSupervisorTool } from "../../scripts/lib/subagent-dispatch/supervisor-adapter.ts";
 
-export function installRootOwnedSubagent(pi: any, { rootSessionId = process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID, callerRunId = process.env.PI_SUBAGENT_RUN_ID, createClient = createRootBrokerClient } = {}) {
+export function installRootOwnedSubagent(pi: any, { rootSessionId = process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID, callerRunId = process.env.PI_SUBAGENT_RUN_ID, createClient = createRootBrokerClient, lifecycleDedupeLimit = 1024 } = {}) {
+  if (!Number.isSafeInteger(lifecycleDedupeLimit) || lifecycleDedupeLimit <= 0) throw new Error("Lifecycle dedupe limit must be a positive safe integer");
   if (!rootSessionId || !callerRunId) throw new Error("Root-owned subagent requires PI_SUBAGENT_RUN_ID and PI_SUBAGENT_ORCHESTRATOR_SESSION_ID");
   const rpc = createClient({ rootSessionId, callerRunId });
   const typed = createTypedSubagentExtension(pi, { rpc });
@@ -15,5 +16,35 @@ export function installRootOwnedSubagent(pi: any, { rootSessionId = process.env.
     },
   }, { name: "plan_executor_supervisor", label: "Plan Executor Supervisor" });
   pi.registerTool(supervisorTool);
-  return Object.freeze({ rpc, ...typed, supervisorTool });
+  let disposed = false;
+  let subscription: any;
+  let subscribing: Promise<void> | undefined;
+  const dedupe = new Set<string>();
+  const onPush = (push: any) => {
+    if (!push || (push.type !== "execution.started" && push.type !== "execution.completed")) return;
+    const data = push.data;
+    const key = `${push.type}\u0000${data?.dispatchId}\u0000${data?.runId}\u0000${data?.state}`;
+    if (dedupe.has(key)) return;
+    dedupe.add(key);
+    if (dedupe.size > lifecycleDedupeLimit) dedupe.delete(dedupe.values().next().value!);
+    pi.events.emit(push.type === "execution.started" ? "subagent:async-started" : "subagent:async-complete", data);
+    pi.sendMessage({ customType: "pi-root-subagent-lifecycle-v1", content: "A lifecycle update arrived. Call plan_status.", details: { dispatchId: data.dispatchId, runId: data.runId, state: data.state } }, { triggerTurn: true, deliverAs: "followUp" });
+  };
+  const startLifecycleSubscription = () => {
+    if (subscription) return Promise.resolve();
+    if (subscribing) return subscribing;
+    subscribing = rpc.subscribe(onPush).then((handle: any) => {
+      subscription = handle;
+      handle.closed?.catch(() => undefined);
+      if (disposed) handle.dispose();
+    }).finally(() => { subscribing = undefined; });
+    return subscribing;
+  };
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    subscription?.dispose();
+    typed.dispose();
+  };
+  return Object.freeze({ rpc, ...typed, dispose, startLifecycleSubscription, supervisorTool });
 }

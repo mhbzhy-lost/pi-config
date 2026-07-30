@@ -9,6 +9,7 @@ import {
   createBrokerSuccessResponse,
   ensureBrokerSocketDirectory,
   parseBrokerRequest,
+  parseBrokerPush,
   setBrokerSocketPermissions,
   writeBrokerGrant,
 } from "./root-broker-protocol.ts";
@@ -17,7 +18,7 @@ type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: (
 type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; events?: { on(channel: string, listener: (event: any) => void): () => void } };
-type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; promise?: Promise<any>; reply?: any; binding?: any };
+type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; delivered: Set<string> };
 
 const FORBIDDEN_SPAWN_FIELDS = new Set(["caller", "root", "token", "parent", "depth", "path", "fanout", "callerRunId", "callerToken", "rootSessionId", "parentRunId", "parentDepth", "parentPath"]);
 const MAX_BUFFER = 64 * 1024;
@@ -59,6 +60,8 @@ export class RootBrokerServer {
   callerGrants = new Map<string, Promise<{ callerToken: string }>>();
   spawnLedger = new Map<string, SpawnLedgerEntry>();
   unsubscribeStarted: (() => void) | undefined;
+  unsubscribeComplete: (() => void) | undefined;
+  unsubscribeTerminal: (() => void) | undefined;
   server: ReturnType<typeof createServer> | undefined;
   closed = false;
   closePromise: Promise<void> | undefined;
@@ -94,7 +97,10 @@ export class RootBrokerServer {
         if (typeof runId === "string" && ["executor", "spark"].includes(event?.agent)) {
           void this.ensureExecutorOwner(runId).catch(() => undefined);
         }
+        this.lifecycle(event, "execution.started");
       });
+      this.unsubscribeComplete = this.events?.on("subagent:async-complete", (event) => this.lifecycle(event, "execution.completed"));
+      this.unsubscribeTerminal = this.events?.on("subagent:process-terminal", (event) => this.lifecycle(event, "execution.completed"));
     } catch (error) {
       this.server = undefined;
       await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
@@ -202,7 +208,7 @@ export class RootBrokerServer {
       }
       if (request.method === "ping") {
         const data = await this.upstream.ping();
-        return createBrokerSuccessResponse({ ...request, data: { ...data, session: { ...(data?.session ?? {}), cwd: caller.cwd }, planRuntime: { originRoot: caller.originRoot, stateRoot: caller.stateRoot } } });
+        return createBrokerSuccessResponse({ ...request, data: { ...data, methods: [...new Set([...(Array.isArray(data?.methods) ? data.methods : []), "spawn.lookup"])], session: { ...(data?.session ?? {}), cwd: caller.cwd }, planRuntime: { originRoot: caller.originRoot, stateRoot: caller.stateRoot } } });
       }
       if (request.method === "spawn") return await this.spawn(request, caller);
       if (request.method === "spawn.lookup") return this.lookupSpawn(request, caller);
@@ -235,11 +241,12 @@ export class RootBrokerServer {
       if (existing.state === "not-started" || existing.state === "cleaned") return await this.startSpawn(request, caller, normalizedSpawn(params), key, existing);
       return failure(request, "spawn_uncertain", "Spawn outcome is uncertain and cannot be retried");
     }
-    return await this.startSpawn(request, caller, normalizedSpawn(params), key, { hash, state: "not-started" });
+    return await this.startSpawn(request, caller, normalizedSpawn(params), key, { hash, state: "not-started", spawnKey, callerRunId: request.callerRunId, params: normalizedSpawn(params), pending: [], delivered: new Set() });
   }
 
   async startSpawn(request: any, caller: Caller, params: Record<string, unknown>, key: string, entry: SpawnLedgerEntry) {
     entry.state = "spawning";
+    entry.params = { ...params, cwd: params.cwd ?? caller.cwd };
     delete entry.reply;
     delete entry.binding;
     this.spawnLedger.set(key, entry);
@@ -292,8 +299,49 @@ export class RootBrokerServer {
       entry.state = "spawned";
       entry.reply = reply;
       entry.binding = details;
+      entry.callerRunId = request.callerRunId;
+      entry.params = params;
+      entry.pending ??= [];
+      entry.delivered ??= new Set();
+      for (const pending of entry.pending.splice(0)) this.lifecycle(pending.event, pending.type, entry);
     }
     return createBrokerSuccessResponse({ ...request, data: reply });
+  }
+
+  lifecycle(event: any, type: "execution.started" | "execution.completed", known?: SpawnLedgerEntry) {
+    const runId = event?.runId ?? event?.id;
+    let entry = known;
+    if (!entry && typeof runId === "string") entry = [...this.spawnLedger.values()].find((candidate) => candidate.binding?.runId === runId);
+    if (!entry && type === "execution.started") {
+      const candidates = [...this.spawnLedger.values()].filter((candidate) => candidate.state === "spawning" && candidate.params?.agent === event?.agent && candidate.params?.cwd === event?.cwd);
+      if (candidates.length === 1) { candidates[0].pending.push({ event, type }); candidates[0].started = event; }
+      return;
+    }
+    if (!entry && type === "execution.completed") {
+      const candidates = [...this.spawnLedger.values()].filter((candidate) => candidate.state === "spawning" && candidate.started && (candidate.started.runId ?? candidate.started.id) === runId);
+      if (candidates.length === 1) candidates[0].pending.push({ event, type });
+      return;
+    }
+    if (!entry || !entry.binding || !entry.callerRunId || typeof runId !== "string") return;
+    if (type === "execution.started") entry.started = event;
+    const started = entry.started;
+    const data: any = type === "execution.started"
+      ? { dispatchId: entry.spawnKey, runId, asyncDir: event?.asyncDir, cwd: event?.cwd, sessionId: event?.sessionId, state: "running" }
+      : { dispatchId: entry.spawnKey, runId, asyncDir: event?.asyncDir ?? started?.asyncDir ?? entry.binding.asyncDir, cwd: event?.cwd ?? started?.cwd ?? entry.params?.cwd, sessionId: event?.sessionId ?? started?.sessionId, state: event?.state ?? "complete" };
+    if (event?.version === 1) {
+      data.state = event.state ?? "unknown";
+      const { runId: _runId, ...proof } = event;
+      data.processTerminal = proof;
+    }
+    try {
+      const push = parseBrokerPush({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: entry.callerRunId, type, data });
+      const dedupe = `${type}\u0000${JSON.stringify(data)}`;
+      if (entry.delivered.has(dedupe)) return;
+      entry.delivered.add(dedupe);
+      for (const socket of this.subscriptions.get(entry.callerRunId) ?? []) {
+        try { if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`); } catch { /* isolate subscriber failures */ }
+      }
+    } catch { /* malformed upstream lifecycle facts are not forwarded */ }
   }
 
   async control(request: any, caller: Caller) {
@@ -307,6 +355,8 @@ export class RootBrokerServer {
     this.closed = true;
     this.unsubscribeStarted?.();
     this.unsubscribeStarted = undefined;
+    this.unsubscribeComplete?.(); this.unsubscribeComplete = undefined;
+    this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
     this.closePromise = (async () => {
       try {
         await Promise.allSettled([...this.executorGrants.values(), ...this.callerGrants.values()]);

@@ -11,7 +11,7 @@ import { installRootOwnedSubagent } from "./root-owned-subagent.ts";
 import { installRootSessionOwnerLifecycle } from "./root-session-owner.ts";
 
 const REQUIRED_RUNTIME_TOOLS: string[] = [];
-const REQUIRED_RPC_METHODS = ["ping", "spawn", "status", "interrupt", "stop"];
+const REQUIRED_RPC_METHODS = ["ping", "spawn", "spawn.lookup", "status", "interrupt", "stop"];
 const GRANT_RETRY_MS = 25;
 const GRANT_TIMEOUT_MS = 5_000;
 
@@ -52,6 +52,7 @@ export default async function planRunner(pi: ExtensionAPI) {
   const rpc = rootOwned.rpc;
   try {
     const roots = await bootstrapRuntimeRoots(rpc);
+    await rootOwned.startLifecycleSubscription();
     const boundary = createPlanExecutorToolBoundary();
     const executionBackend = createPiSubagentsExecutionBackend({
       rpc,

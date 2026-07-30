@@ -8,6 +8,7 @@ const GRANT_SCHEMA_VERSION = "pi-root-subagent-broker-grant.v1";
 const RESPONSE_SCHEMA_VERSION = "pi-root-subagent-broker-response.v1";
 const SOCKET_PATH_LIMIT = 103;
 const ERROR_MESSAGE_LIMIT = 1024;
+const PUSH_PROOF_LIMIT = 64 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const METHODS = Object.freeze(["ping", "spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "subscribe"] as const);
@@ -212,6 +213,24 @@ export function parseBrokerPush(value) {
   identity(push.callerRunId, "callerRunId");
   if (typeof push.type !== "string" || !PUSH_TYPES.includes(push.type)) fail("push.type is unsupported");
   record(push.data, "push.data");
+  if (push.type === "execution.started" || push.type === "execution.completed") {
+    const required = ["dispatchId", "runId", "asyncDir", "cwd", "sessionId", "state"];
+    const allowed = push.type === "execution.completed" ? [...required, "processTerminal"] : required;
+    for (const key of Object.keys(push.data)) if (!allowed.includes(key)) fail(`push.data contains unknown field ${key}`);
+    for (const key of required) {
+      if (!Object.hasOwn(push.data, key)) fail(`push.data is missing required field ${key}`);
+      if (["dispatchId", "runId", "state"].includes(key)) identity(push.data[key], `push.data.${key}`);
+      else if (typeof push.data[key] !== "string" || push.data[key].length === 0) fail(`push.data.${key} must be a non-empty string`);
+    }
+    if (Object.hasOwn(push.data, "processTerminal")) {
+      try {
+        if (Buffer.byteLength(JSON.stringify(push.data.processTerminal), "utf8") > PUSH_PROOF_LIMIT) fail("push.data.processTerminal exceeds size limit");
+      } catch (error) {
+        if (error instanceof BrokerProtocolError) throw error;
+        fail("push.data.processTerminal must be JSON serializable");
+      }
+    }
+  }
   if (push.type === "supervisor.request") {
     identity(push.data.requestId, "push.data.requestId");
     identity(push.data.executorRunId, "push.data.executorRunId");

@@ -199,10 +199,11 @@ export function createPiSubagentsExecutionBackend({
 
   function candidatesFor(event, completed) {
     const runId = event?.runId ?? event?.id;
-    return [...pending.values()].filter((entry) => {
+    const dispatchId = nonempty(event?.dispatchId) ? event.dispatchId : null;
+    const entries = dispatchId ? [pending.get(dispatchId)].filter(Boolean) : [...pending.values()].filter((entry) => entry.request.cwd === event?.cwd);
+    return entries.filter((entry) => {
       if (entry.request.cwd !== event?.cwd) return false;
-      if (!completed) return true;
-      return entry.binding?.runId === runId;
+      return !completed || entry.binding?.runId === runId;
     });
   }
 
