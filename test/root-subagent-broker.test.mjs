@@ -1271,25 +1271,46 @@ async function routeSupervisorRequestOrSeedLedger(broker, ingress) {
   return undefined;
 }
 
+async function waitForCondition(predicate, expected, { timeoutMs = 250, pollMs = 5, stablePolls = 1 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let consecutiveMatches = 0;
+  while (Date.now() <= deadline) {
+    if (predicate()) {
+      consecutiveMatches += 1;
+      if (consecutiveMatches >= stablePolls) return;
+    } else {
+      consecutiveMatches = 0;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  throw new Error(`Timed out waiting for ${expected}`);
+}
+
 test("routes Supervisor requests only to the Executor owner in stable owner order", async (t) => {
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
-  await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.start();
   const grantA = await broker.grantCaller({ callerRunId: "supervisor-plan-a", planId: "supervisor-a", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const grantB = await broker.grantCaller({ callerRunId: "supervisor-plan-b", planId: "supervisor-b", cwd: "/other", originRoot: "/other", stateRoot: "/state-b", role: "plan-runner" });
   broker.runOwners.set("supervisor-executor-a", "supervisor-plan-a");
   broker.runOwners.set("supervisor-executor-b", "supervisor-plan-b");
   const a = createRootBrokerClient({ rootSessionId, callerRunId: "supervisor-plan-a" });
   const b = createRootBrokerClient({ rootSessionId, callerRunId: "supervisor-plan-b" });
-  t.after(() => { a.dispose(); b.dispose(); });
   const pushedA = []; const pushedB = [];
   const subscriptionA = await a.subscribe((push) => pushedA.push(push));
   const subscriptionB = await b.subscribe((push) => pushedB.push(push));
-  t.after(() => { subscriptionA.dispose(); subscriptionB.dispose(); });
+  const closedA = subscriptionA.closed.catch((error) => error);
+  const closedB = subscriptionB.closed.catch((error) => error);
+  t.after(async () => {
+    subscriptionA.dispose(); subscriptionB.dispose();
+    a.dispose(); b.dispose();
+    await Promise.all([closedA, closedB]);
+    await broker.closeRootSession();
+  });
   const route = typeof broker.routeSupervisorRequest === "function" ? broker.routeSupervisorRequest.bind(broker) : async () => undefined;
   await route(supervisorIngress({ id: "A1", runId: "supervisor-executor-a" }));
   await route(supervisorIngress({ id: "B2", runId: "supervisor-executor-b" }));
   await route(supervisorIngress({ id: "A2", runId: "supervisor-executor-a" }));
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitForCondition(() => pushedA.length === 2 && pushedB.length === 1, "two owner A pushes and one owner B push");
   assert.deepEqual(pushedA.map((push) => push.data), [
     { requestId: "A1", executorRunId: "supervisor-executor-a", content: "Need approval", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 0 },
     { requestId: "A2", executorRunId: "supervisor-executor-a", content: "Need approval", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 0 },
@@ -1333,18 +1354,25 @@ test("Supervisor reply fences ownership, strips Plan routing, and consumes reque
 });
 
 test("rejects conflicting Supervisor ingress without changing the original owner", async (t) => {
-  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() }); await broker.start(); t.after(() => broker.closeRootSession());
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() }); await broker.start();
   await broker.grantCaller({ callerRunId: "owner-a", planId: "ingress-a", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
-  const client = createRootBrokerClient({ rootSessionId, callerRunId: "owner-a" }); t.after(() => client.dispose());
-  const pushed = []; const subscription = await client.subscribe((push) => pushed.push(push)); t.after(() => subscription.dispose());
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: "owner-a" });
+  const pushed = []; const subscription = await client.subscribe((push) => pushed.push(push));
+  const closed = subscription.closed.catch((error) => error);
+  t.after(async () => {
+    subscription.dispose();
+    client.dispose();
+    await closed;
+    await broker.closeRootSession();
+  });
   broker.runOwners.set("ingress-a", "owner-a"); broker.runOwners.set("ingress-b", "owner-b");
   const route = typeof broker.routeSupervisorRequest === "function" ? broker.routeSupervisorRequest.bind(broker) : async () => undefined;
   await route(supervisorIngress({ id: "ingress-1", runId: "unknown-run" }));
-  await new Promise((resolve) => setImmediate(resolve)); assert.equal(pushed.length, 0);
+  await waitForCondition(() => pushed.length === 0, "no push for unknown ingress", { stablePolls: 2 });
   await route(supervisorIngress({ id: "ingress-1", runId: "ingress-a", content: "first" }));
-  await new Promise((resolve) => setImmediate(resolve)); assert.equal(pushed.length, 1);
+  await waitForCondition(() => pushed.length === 1, "one push for the first valid ingress");
   await route(supervisorIngress({ id: "ingress-1", runId: "ingress-a", content: "first" }));
-  await new Promise((resolve) => setImmediate(resolve)); assert.equal(pushed.length, 1);
+  await waitForCondition(() => pushed.length === 1, "one stable push after the exact duplicate ingress", { stablePolls: 2 });
   const conflict = await route(supervisorIngress({ id: "ingress-1", runId: "ingress-b", content: "conflict" }));
   assert.equal(conflict?.code, "supervisor_request_conflict");
   assert.equal(pushed.length, 1);
