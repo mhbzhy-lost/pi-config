@@ -1860,7 +1860,7 @@ function officialErrorText(error) {
   return [error?.message, ...(error?.errors ?? []).map((entry) => entry?.message)].filter(Boolean).join("\\n");
 }
 
-async function officialArtifactFixture({ sidecar, status, artifactPollIntervalMs } = {}) {
+async function officialArtifactFixture({ sidecar, status, artifactPollIntervalMs, stop } = {}) {
   const events = startedEventBus();
   const root = `official-artifact-root-${++officialArtifactFixtureNumber}`;
   const asyncRoot = `/trusted/official-artifact-${officialArtifactFixtureNumber}`;
@@ -1886,7 +1886,10 @@ async function officialArtifactFixture({ sidecar, status, artifactPollIntervalMs
   };
   const upstream = {
     ...fakeUpstream(),
-    async stop({ runId, dir }) { stops.push({ runId, dir }); return { stopped: true }; },
+    async stop({ runId, dir }) {
+      stops.push({ runId, dir });
+      return stop?.({ runId, dir, events }) ?? { stopped: true };
+    },
     dispose() { disposed = true; },
   };
   const broker = new RootBrokerServer({
@@ -1911,6 +1914,49 @@ async function officialArtifactFixture({ sidecar, status, artifactPollIntervalMs
   };
   return { asyncRoot, broker, cleanup, events, reads, root, stops, disposed: () => disposed };
 }
+
+test("Root terminal polling review kicks off stop before artifact reads when event is synchronous", async () => {
+  const subject = await officialArtifactFixture({
+    sidecar: () => ({ invalid: true }),
+    stop: ({ runId, events }) => {
+      events.emit("subagent:process-terminal", officialObservedProof(runId));
+      return { stopped: true };
+    },
+  });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 70);
+    assert.equal(outcome.state, "resolved");
+    assert.deepEqual(subject.stops.map(({ runId }) => runId), ["executor-a", "executor-b", "plan-runner"]);
+    assert.deepEqual(subject.reads, { sidecar: 0, status: 0, candidate: 0 });
+  } finally {
+    await subject.cleanup();
+  }
+});
+
+test("Root terminal polling review includes delayed stop rejection in deadline debt", async () => {
+  const subject = await officialArtifactFixture({
+    sidecar: () => undefined,
+    status: () => undefined,
+    artifactPollIntervalMs: 2,
+    stop: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      throw new Error("delayed stop failure");
+    },
+  });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 70);
+    assert.notEqual(outcome.state, "watchdog");
+    assert.equal(outcome.state, "rejected");
+    assert.ok(outcome.error instanceof AggregateError);
+    assert.match(officialErrorText(outcome.error), /delayed stop failure/);
+    assert.ok(subject.reads.sidecar > 0, "official artifacts are read while no event proof exists");
+    assert.equal(subject.broker.server?.listening, true);
+    assert.equal(typeof subject.broker.unsubscribeTerminal, "function");
+    assert.equal(subject.disposed(), false);
+  } finally {
+    await subject.cleanup();
+  }
+});
 
 test("Root official terminal artifact drains Executors before Plan Runner from observed sidecars", async () => {
   const subject = await officialArtifactFixture({ sidecar: (read, file) => officialObservedProof(file.split("/").at(-2)) });
