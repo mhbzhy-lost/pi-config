@@ -35,6 +35,32 @@ test("authorizes exactly one matching typed Executor dispatch", () => {
   assert.deepEqual(createPlanExecutorToolBoundary().authorize(exact.contract, { projection: projectionFor(exact), toolCallId: "call-1" }), { attemptId: "attempt-1", dispatchId: "dispatch-1", contractHash: exact.contractHash, toolCallId: "call-1", state: "executing" });
 });
 
+test("resolves the authorized dispatch into its durable spawn identity exactly once", () => {
+  const exact = contract(); const boundary = createPlanExecutorToolBoundary();
+  assert.equal(typeof boundary.resolveCodingSpawnIdentity, "function", "Boundary must expose resolveCodingSpawnIdentity");
+  const authorization = boundary.authorize(exact.contract, { projection: projectionFor(exact), toolCallId: "identity-call" });
+  const input = { toolCallId: "identity-call", contract: exact.contract, contractHash: exact.contractHash };
+  assert.deepEqual(boundary.resolveCodingSpawnIdentity(input), { requestId: authorization.dispatchId, spawnKey: authorization.dispatchId });
+  assert.throws(() => boundary.resolveCodingSpawnIdentity(input), /resolved|one.?shot|replay/i);
+});
+
+for (const [name, resolverInput] of [
+  ["unknown tool call", (exact) => ({ toolCallId: "unknown-call", contract: exact.contract, contractHash: exact.contractHash })],
+  ["raw contract mismatch", (exact) => ({ toolCallId: "authorized-call", contract: { ...exact.contract, title: ` ${exact.contract.title} ` }, contractHash: exact.contractHash })],
+  ["contract hash mismatch", (exact) => ({ toolCallId: "authorized-call", contract: exact.contract, contractHash: hash("wrong-hash") })],
+]) {
+  test(`rejects ${name} without consuming an authorized spawn identity`, () => {
+    const exact = contract(); const boundary = createPlanExecutorToolBoundary();
+    assert.equal(typeof boundary.resolveCodingSpawnIdentity, "function", "Boundary must expose resolveCodingSpawnIdentity");
+    boundary.authorize(exact.contract, { projection: projectionFor(exact), toolCallId: "authorized-call" });
+    assert.throws(() => boundary.resolveCodingSpawnIdentity(resolverInput(exact)), /toolCallId|authorized|exact contract|contract identity|contract hash|identity|hash mismatch/i);
+    assert.deepEqual(
+      boundary.resolveCodingSpawnIdentity({ toolCallId: "authorized-call", contract: exact.contract, contractHash: exact.contractHash }),
+      { requestId: "dispatch-1", spawnKey: "dispatch-1" },
+    );
+  });
+}
+
 test("rejects canonical-equivalent raw contract mutations without consuming the dispatch", async (t) => {
   const exact = contract();
   const mutations = [

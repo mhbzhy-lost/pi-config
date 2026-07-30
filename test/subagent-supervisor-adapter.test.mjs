@@ -4,6 +4,7 @@ import test from "node:test";
 import { createHeadlessSubagentApi } from "../scripts/lib/subagent-dispatch/runtime-membrane.ts";
 import { installHeadlessTypedSubagentRuntime } from "../scripts/lib/subagent-dispatch/extension.ts";
 import { installRootOwnedSubagent } from "../pi/child-extensions/root-owned-subagent.ts";
+import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 
 let supervisor = {};
 try {
@@ -214,6 +215,35 @@ test("root-owned project supervisor calls only the broker and never the native s
   await project.execute("reply", { action: "reply", replyTo: "request-1", message: "go" });
   assert.deepEqual(calls, ["pending", "pending", { action: "reply", replyTo: "request-1", message: "go" }]);
   assert.equal(nativeExecutions, 0);
+});
+
+test("root-owned subagent passes its coding spawn identity resolver to the registered tool", async () => {
+  const pi = createPi(); const resolverCalls = []; const spawnCalls = [];
+  const rpc = {
+    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session", sessionFile: "/tmp/root-session", cwd: "/repo" } }; },
+    async spawn(params, options) { spawnCalls.push({ params, options }); return { details: { runId: "rpc-run", asyncDir: "/tmp/rpc-run" } }; },
+    async subscribe() { return { dispose() {} }; },
+    supervisorPending() { return { pending: [] }; }, supervisorReply() { return { replied: true }; }, dispose() {},
+  };
+  const contract = {
+    version: "dispatch-ir.v1", taskId: "durable-task", title: "Use durable identity", agent: "executor", risk: "normal", objective: "Preserve root-owned identity.", workflow: { mode: "tdd" }, requirements: ["Use the resolver."],
+    context: { knownFacts: [], decisions: [], relevantFiles: ["test/subagent-supervisor-adapter.test.mjs"] }, boundaries: { writePaths: ["test/subagent-supervisor-adapter.test.mjs"], excludedWork: [], forbiddenActions: [] },
+    acceptance: { criteria: ["identity"], commands: ["node --test"] }, execution: { cwd: "/repo", timeoutMs: 1000 },
+  };
+  const compiled = compileCodingDispatchIR(contract, { cwd: "/repo" });
+  installRootOwnedSubagent(pi, {
+    rootSessionId: "root", callerRunId: "run", createClient: () => rpc,
+    resolveCodingSpawnIdentity(value) { resolverCalls.push(value); return { requestId: "durable-dispatch", spawnKey: "durable-dispatch" }; },
+  });
+  const tool = pi.tools.find((candidate) => candidate.name === "subagent");
+  assert.ok(tool);
+  const result = await tool.execute("root-tool-call", contract, undefined, undefined, { cwd: "/repo" });
+  assert.equal(result.isError, false);
+  assert.deepEqual(resolverCalls, [{ toolCallId: "root-tool-call", contract, contractHash: compiled.hash }]);
+  assert.deepEqual(spawnCalls[0].options, { requestId: "durable-dispatch", spawnKey: "durable-dispatch" });
+  assert.equal(result.details.dispatchId, "durable-dispatch");
+  assert.equal(result.details.runId, "rpc-run");
+  assert.equal(result.details.asyncDir, "/tmp/rpc-run");
 });
 
 test("delegates every execution argument and the resolved result unchanged", async () => {

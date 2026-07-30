@@ -28,6 +28,9 @@ test("coding spawn resolves durable metadata exactly once", async () => {
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-1", spawnKey: "durable-dispatch-1" }; } });
   const result = await tools[0].execute("tool-call-identity-1", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(result.isError, false); assert.equal(resolved.length, 1); assert.equal(calls.length, 1);
+  assert.equal(result.details.dispatchId, "durable-dispatch-1");
+  assert.equal(result.details.runId, "run-1");
+  assert.equal(result.details.asyncDir, "/tmp/run-1");
 });
 
 test("coding spawn resolver receives the raw contract", async () => {
