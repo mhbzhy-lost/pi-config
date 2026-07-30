@@ -17,13 +17,15 @@ import {
   setBrokerSocketPermissions,
   writeBrokerGrant,
 } from "./root-broker-protocol.ts";
+import type { BrokerPush } from "./root-broker-protocol.ts";
 
 type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: () => void | Promise<void> };
 type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type FollowUpIntent = { wakeId: string; reason: "plan-opened" };
 type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number };
-type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; delivered: Set<string> };
+type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; queued?: Set<string>; delivered: Set<string> };
+type QueuedCallerPush = { push: BrokerPush; onDelivered?: () => void };
 type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
 type OwnedRun = { rootSessionId: string; runId: string; role: "plan-runner" | "executor"; asyncDir: string; sessionId: string; pid: number; birthIdentity: string | null; identityState: "verified" | "unavailable" | "conflict" };
 type StartedFacts = Pick<OwnedRun, "runId" | "role" | "asyncDir" | "sessionId" | "pid">;
@@ -64,6 +66,7 @@ export class RootBrokerServer {
   upstream: Upstream;
   callers = new Map<string, Caller>();
   callerFollowUps = new Map<string, FollowUpIntent[]>();
+  callerPushQueues = new Map<string, QueuedCallerPush[]>();
   principals = new Map<string, Principal>();
   runOwners = new Map<string, string>();
   subscriptions = new Map<string, Set<Socket>>();
@@ -424,6 +427,7 @@ export class RootBrokerServer {
     const pending = (async () => {
       this.callers.set(callerRunId, caller);
       this.callerFollowUps.set(callerRunId, []);
+      this.callerPushQueues.set(callerRunId, []);
       this.principals.set(callerRunId, { role, callerToken });
       try {
         const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId: callerRunId, callerToken, role });
@@ -431,6 +435,7 @@ export class RootBrokerServer {
         if (this.closed) {
           this.callers.delete(callerRunId);
           this.callerFollowUps.delete(callerRunId);
+          this.callerPushQueues.delete(callerRunId);
           this.principals.delete(callerRunId);
           throw new Error("Root subagent broker is closing");
         }
@@ -438,6 +443,7 @@ export class RootBrokerServer {
       } catch (error) {
         this.callers.delete(callerRunId);
         this.callerFollowUps.delete(callerRunId);
+        this.callerPushQueues.delete(callerRunId);
         this.principals.delete(callerRunId);
         throw error;
       }
@@ -600,6 +606,7 @@ export class RootBrokerServer {
       entry.callerRunId = request.callerRunId;
       entry.params = params;
       entry.pending ??= [];
+      entry.queued ??= new Set();
       entry.delivered ??= new Set();
       for (const pending of entry.pending.splice(0)) this.lifecycle(pending.event, pending.type, entry);
     }
@@ -634,12 +641,28 @@ export class RootBrokerServer {
     try {
       const push = parseBrokerPush({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: entry.callerRunId, type, data });
       const dedupe = `${type}\u0000${JSON.stringify(data)}`;
-      if (entry.delivered.has(dedupe)) return;
-      entry.delivered.add(dedupe);
-      for (const socket of this.subscriptions.get(entry.callerRunId) ?? []) {
-        try { if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`); } catch { /* isolate subscriber failures */ }
-      }
+      entry.queued ??= new Set();
+      if (entry.delivered.has(dedupe) || entry.queued.has(dedupe)) return;
+      if (!this.deliverOrQueuePush(entry.callerRunId, push, () => {
+        entry.queued?.delete(dedupe);
+        entry.delivered.add(dedupe);
+      })) entry.queued.add(dedupe);
     } catch { /* malformed upstream lifecycle facts are not forwarded */ }
+  }
+
+  deliverOrQueuePush(callerRunId: string, push: BrokerPush, onDelivered?: () => void) {
+    const sockets = [...(this.subscriptions.get(callerRunId) ?? [])].filter((socket) => !socket.destroyed);
+    if (sockets.length === 0) {
+      const queue = this.callerPushQueues.get(callerRunId);
+      if (!queue) return false;
+      queue.push({ push, onDelivered });
+      return false;
+    }
+    for (const socket of sockets) {
+      try { socket.write(`${JSON.stringify(push)}\n`); } catch { /* isolate subscriber failures */ }
+    }
+    onDelivered?.();
+    return true;
   }
 
   async control(request: any, caller: Caller) {
@@ -784,7 +807,7 @@ export class RootBrokerServer {
       this.unsubscribeStarted?.(); this.unsubscribeStarted = undefined;
       this.unsubscribeComplete?.(); this.unsubscribeComplete = undefined;
       this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
-      this.callers.clear(); this.callerFollowUps.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
+      this.callers.clear(); this.callerFollowUps.clear(); this.callerPushQueues.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
       this.grantPaths.clear(); this.executorGrants.clear(); this.callerGrants.clear(); this.spawnLedger.clear(); this.supervisorRequests.clear();
       this.ownedRuns.clear(); this.terminalProofs.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
       this.transportSockets.clear(); this.closingSockets.clear(); this.endedSockets.clear(); this.cleanedGrantPaths.clear(); this.server = undefined;
