@@ -133,6 +133,40 @@ Consume the bounded receipt.
 `, "/plans/v3-dependency-coordinator.md");
 }
 
+function v3ParallelPlan() {
+  return parsePlanDocument(`# Parallel v3
+
+## Execution Contract
+
+\`\`\`json
+${JSON.stringify({
+    schemaVersion: "pi-plan.v3", revision: 1, parentPlanHash: null,
+    verification: [{ id: "test", command: "true", cwd: ".", timeoutMs: 900000 }],
+    requiredGates: ["deterministic", "plan-audit", "external-review", "final-completeness"], resourceCapacities: {},
+    executionDefaults: { agent: "executor", risk: "normal", workflow: { mode: "inherit-repository" }, timeoutMs: 321000 },
+    taskExecution: { "task-1": {}, "task-2": {} },
+    taskAcceptance: { "task-1": { strategy: "commands", commandIds: ["test"] }, "task-2": { strategy: "commands", commandIds: ["test"] } },
+  })}
+\`\`\`
+
+Keep parallel execution contracts exact.
+
+### Task 1: One
+
+**Files:**
+- Modify: \`src/one.mjs\`
+
+One.
+
+### Task 2: Two
+
+**Files:**
+- Modify: \`src/two.mjs\`
+
+Two.
+`, "/plans/parallel-v3.md");
+}
+
 function createdV3Entry(ir) {
   return {
     ...createdEntry(ir.nodes.map(({ id }) => id)),
@@ -272,9 +306,10 @@ function harness({ approvedPlan = plan(), entries, backend: backendOverrides = {
     },
     ...backendOverrides,
   };
+  const ir = compilePlanToIR(approvedPlan);
   const result = createPlanCoordinator({
-    ir: compilePlanToIR(approvedPlan),
-    entries: entries ?? [createdEntry(approvedPlan.tasks.map(({ id }) => id))],
+    ir,
+    entries: entries ?? [ir.source?.schemaVersion === "pi-plan.v3" ? createdV3Entry(ir) : createdEntry(approvedPlan.tasks.map(({ id }) => id))],
     append: (entry) => appended.push(entry),
     allocateWorkspace: async (input) => {
       allocations.push(input);
@@ -933,6 +968,15 @@ test("Task5A2 rejects a replayed pending stale dispatch context while reducer pr
   await assert.rejects(context.coordinator.prepareAuthorizedDispatches(), /stale revision\/context/);
 });
 
+test("Task5A2 rejects v3 preparation without current revision identity", async () => {
+  const approvedPlan = v3Plan();
+  const subject = harness({ approvedPlan, entries: [createdEntry(["task-1"])] });
+
+  await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /stale revision\/context/);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.appended.length, 0);
+});
+
 test("Task5A2 resumes a workspace-allocated crash without allocating a second lease", async () => {
   const approvedPlan = v3Plan();
   const ir = compilePlanToIR(approvedPlan);
@@ -963,14 +1007,7 @@ test("Task5A2 rejects a stale workspace-allocated recovery candidate", async () 
 });
 
 test("Task5A2 prepares every independent v3 frontier without spawning", async () => {
-  const approvedPlan = parsePlanDocument(`# Parallel v3\n\n## Execution Contract\n\n\`\`\`json\n${JSON.stringify({
-    schemaVersion: "pi-plan.v3", revision: 1, parentPlanHash: null,
-    verification: [{ id: "test", command: "true", cwd: ".", timeoutMs: 900000 }],
-    requiredGates: ["deterministic", "plan-audit", "external-review", "final-completeness"], resourceCapacities: {},
-    executionDefaults: { agent: "executor", risk: "normal", workflow: { mode: "inherit-repository" }, timeoutMs: 321000 },
-    taskExecution: { "task-1": {}, "task-2": {} },
-    taskAcceptance: { "task-1": { strategy: "commands", commandIds: ["test"] }, "task-2": { strategy: "commands", commandIds: ["test"] } },
-  })}\n\`\`\`\n\nKeep parallel execution contracts exact.\n\n### Task 1: One\n\n**Files:**\n- Modify: \`src/one.mjs\`\n\nOne.\n\n### Task 2: Two\n\n**Files:**\n- Modify: \`src/two.mjs\`\n\nTwo.\n`, "/plans/parallel-v3.md");
+  const approvedPlan = v3ParallelPlan();
   const ir = compilePlanToIR(approvedPlan);
   const subject = harness({ approvedPlan, entries: [createdV3Entry(ir)], backend: { async spawn() { throw new Error("must not spawn"); } } });
 
@@ -979,6 +1016,27 @@ test("Task5A2 prepares every independent v3 frontier without spawning", async ()
   assert.deepEqual(result.dispatches.map(({ contract }) => contract.taskId), ["task-1", "task-2"]);
   assert.deepEqual(subject.appended.map(({ type }) => type), ["attempt.workspace-allocated", "attempt.dispatch-requested", "attempt.workspace-allocated", "attempt.dispatch-requested"]);
   assert.equal(subject.spawned.length, 0);
+});
+
+test("Task5A2 replays all durable pending intents before integration drain", async () => {
+  const approvedPlan = v3ParallelPlan();
+  const ir = compilePlanToIR(approvedPlan);
+  const first = harness({ approvedPlan, entries: [createdV3Entry(ir)] });
+  const initial = await first.coordinator.prepareAuthorizedDispatches();
+  const calls = [];
+  const replayed = harness({
+    approvedPlan,
+    entries: [createdV3Entry(ir), ...first.appended],
+    options: { integrationQueue: { async drain() { calls.push("drain"); throw new Error("must not drain pending intents"); } } },
+  });
+
+  const repeated = await replayed.coordinator.prepareAuthorizedDispatches();
+
+  assert.deepEqual(repeated.dispatches.map(({ contract }) => contract.taskId), ["task-1", "task-2"]);
+  assert.deepEqual(repeated.dispatches, initial.dispatches);
+  assert.deepEqual(calls, []);
+  assert.equal(replayed.allocations.length, 0);
+  assert.equal(replayed.appended.length, 0);
 });
 
 test("Task5A2 binds redacted integrated dependency receipts into the dispatch context", async () => {
@@ -1056,6 +1114,13 @@ test("Task5A2 preserves verification commands rooted in a safe subdirectory", as
   assert.deepEqual(result.dispatches[0].contract.acceptance.commands, ["cd -- 'test/unit' && node --test"]);
 });
 
+test("Task5A2 shell-quotes apostrophes in verification cwd", async () => {
+  const subject = harness({ approvedPlan: v3Plan({ verification: [{ id: "test", command: "node --test", cwd: "test/it's", timeoutMs: 900000 }] }) });
+  const result = await subject.coordinator.prepareAuthorizedDispatches();
+
+  assert.deepEqual(result.dispatches[0].contract.acceptance.commands, ["cd -- 'test/it'\"'\"'s' && node --test"]);
+});
+
 test("Task5A2 preserves non-command acceptance JSON with the base diff command", async () => {
   const subject = harness({ approvedPlan: v3Plan({ taskAcceptance: { "task-1": { strategy: "inherit-final", reason: "final integration" } } }) });
   const result = await subject.coordinator.prepareAuthorizedDispatches();
@@ -1085,6 +1150,29 @@ test("Task5A2 chunks 5000-byte requirements and plan instruction facts without t
   assert.equal(contract.requirements.every((value) => Buffer.byteLength(value) <= 4096), true);
   assert.equal(instructionFacts.every((value) => Buffer.byteLength(value) <= 4096), true);
   assert.equal(subject.allocations.length, 1);
+});
+
+test("Task5A2 preserves whitespace at dispatch chunk boundaries", async () => {
+  const probeBody = "probe-body";
+  const probeInstructions = "probe-instructions";
+  const probe = compilePlanToIR(v3Plan({ instructions: probeInstructions, body: probeBody }));
+  const bodyPrefix = Buffer.byteLength(probe.nodes[0].body) - Buffer.byteLength(probeBody);
+  const instructionsPrefix = Buffer.byteLength(probe.instructions) - Buffer.byteLength(probeInstructions);
+  const body = "x".repeat(4095 - bodyPrefix) + " " + "body-tail";
+  const instructions = "x".repeat(3999 - instructionsPrefix) + " " + "instructions-tail";
+  const approvedPlan = v3Plan({ instructions, body });
+  const ir = compilePlanToIR(approvedPlan);
+  const subject = harness({ approvedPlan });
+
+  const result = await subject.coordinator.prepareAuthorizedDispatches();
+  const contract = result.dispatches[0].contract;
+  const instructionFacts = contract.context.knownFacts.filter((fact) => fact.startsWith("Plan instructions ("));
+  const reconstructed = {
+    body: contract.requirements.join(""),
+    instructions: instructionFacts.map((fact) => fact.slice(fact.indexOf(": ") + 2)).join(""),
+  };
+
+  assert.deepEqual(reconstructed, { body: ir.nodes[0].body, instructions: ir.instructions });
 });
 
 test("Task5A2 rejects total dispatch expression capacity before workspace allocation", async () => {
