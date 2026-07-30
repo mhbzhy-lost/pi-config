@@ -161,21 +161,26 @@ export function createPlanRunnerDependencies({
 
   function matchingAttentionResolution(ctx, command, { expectedProjectionVersion } = {}) {
     const resolutionSha256 = createHash("sha256").update(command.message).digest("hex");
-    const entries = combinedEvents(ctx);
-    const requested = entries.some((entry) => entry.type === "attempt.attention-requested"
-      && entry.planId === command.planId
-      && entry.data?.requestId === command.requestId
-      && entry.data?.taskId === command.taskId
-      && entry.data?.attemptId === command.attemptId
-      && entry.data?.runId === command.runId);
-    if (!requested) return false;
-    return entries.some((entry) => entry.type === "attempt.attention-resolved"
-      && entry.planId === command.planId
-      && entry.data?.requestId === command.requestId
-      && entry.data?.attemptId === command.attemptId
-      && entry.data?.runId === command.runId
-      && entry.data?.resolutionSha256 === resolutionSha256
-      && (expectedProjectionVersion === undefined || entry.data?.expectedProjectionVersion === expectedProjectionVersion));
+    let projection = createProjection();
+    for (const entry of combinedEvents(ctx)) {
+      if (entry.type === "attempt.attention-resolved") {
+        const attempt = projection.attempts.get(command.attemptId);
+        if (entry.planId === command.planId
+          && entry.data?.requestId === command.requestId
+          && entry.data?.attemptId === command.attemptId
+          && entry.data?.runId === command.runId
+          && entry.data?.resolutionSha256 === resolutionSha256
+          && (expectedProjectionVersion === undefined || entry.data?.expectedProjectionVersion === expectedProjectionVersion)
+          && attempt?.status === "waiting-attention"
+          && attempt.taskId === command.taskId
+          && attempt.runId === command.runId
+          && attempt.attention?.requestId === command.requestId
+          && attempt.attention.status === "pending"
+          && attempt.attention.projectionVersion === command.expectedProjectionVersion) return true;
+      }
+      projection = applyEvent(projection, entry);
+    }
+    return false;
   }
 
   const writer = createPlanEventWriter({
