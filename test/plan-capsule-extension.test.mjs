@@ -179,7 +179,7 @@ test("plan_open validates then persists and activates the lifecycle tools", asyn
   assert.deepEqual([...tools.keys()], ["plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend"]);
   assert.deepEqual(activeTools(), [
     "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
-    "subagent_wait", "subagent_supervisor", "read", "grep",
+    "subagent", "plan_executor_supervisor", "read", "grep",
   ]);
 });
 
@@ -284,20 +284,31 @@ test("session shutdown runs both cleanups best-effort without throwing", async (
   assert.deepEqual(calls, ["control", "runs", "runs-done", "backend"]);
 });
 
-test("capsule blocks every subagent and contact_supervisor call inside an opened Plan Session", async () => {
-  const { handlers } = setup();
+test("capsule authorizes only exact Executor subagent dispatches inside an opened Plan Session", async () => {
+  const calls = [];
+  const { handlers } = setup({
+    authorizeExecutorDispatch: async (input, value) => { calls.push([input, value]); },
+  });
   const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
   await handlers.get("session_start")({ type: "session_start" }, ctx);
 
   for (const event of [
-    { toolName: "subagent", input: { agent: "executor" } },
     { toolName: "subagent", input: { action: "status", id: "run-1" } },
     { toolName: "contact_supervisor", input: { message: "bypass" } },
+    { toolName: "bash", input: { command: "true" } },
     { toolName: "subagent_supervisor", input: { action: "send", to: "other", message: "bypass" } },
   ]) {
     const denied = await handlers.get("tool_call")(event, ctx);
     assert.equal(denied.block, true);
   }
+
+  const input = { agent: "executor", task: "exact contract" };
+  assert.equal(await handlers.get("tool_call")({ toolName: "subagent", toolCallId: "dispatch-1", input }, ctx), undefined);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], input);
+  assert.equal(calls[0][1].toolCallId, "dispatch-1");
+  assert.equal(calls[0][1].ctx, ctx);
+  assert.equal(calls[0][1].projection.attempts.get("attempt-1").dispatchId, "dispatch-1");
 });
 
 test("capsule blocking reason names the Plan dispatch authorization boundary", async () => {
