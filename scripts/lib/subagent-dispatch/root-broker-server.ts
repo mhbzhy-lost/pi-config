@@ -551,14 +551,37 @@ export class RootBrokerServer {
     let request: any;
     try { request = parseBrokerRequest(JSON.parse(line)); } catch { socket.destroy(); return; }
     try {
-      const response = await this.dispatch(request, socket);
-      if (!socket.destroyed) socket.write(`${JSON.stringify(response)}\n`, () => { if (request.method !== "subscribe") socket.end(); });
+      const response = await this.dispatch(request, socket, { deferSubscription: request.method === "subscribe" });
+      if (!socket.destroyed) socket.write(`${JSON.stringify(response)}\n`, () => {
+        if (request.method === "subscribe") {
+          if (response.success) this.activateSubscription(request, socket);
+          else socket.end();
+        } else socket.end();
+      });
     } catch (error) {
       try { if (!socket.destroyed) socket.end(`${JSON.stringify(failure(request, "broker_failed", error instanceof Error ? error.message : String(error)))}\n`); } catch { socket.destroy(); }
     }
   }
 
-  async dispatch(request: any, socket: Socket) {
+  registerSubscription(callerRunId: string, socket: Socket) {
+    const subscribers = this.subscriptions.get(callerRunId) ?? new Set<Socket>();
+    subscribers.add(socket);
+    this.subscriptions.set(callerRunId, subscribers);
+    socket.once("close", () => subscribers.delete(socket));
+  }
+
+  activateSubscription(request: any, socket: Socket) {
+    if (socket.destroyed) return;
+    const principal = this.principals.get(request.callerRunId);
+    if (!principal || principal.callerToken !== request.callerToken) return;
+    if (principal.role === "plan-runner") {
+      const logicalCallerRunId = this.callerAliases.get(request.callerRunId);
+      if (!logicalCallerRunId || this.logicalCallers.get(logicalCallerRunId)?.activeRunId !== request.callerRunId) return;
+    }
+    this.registerSubscription(request.callerRunId, socket);
+  }
+
+  async dispatch(request: any, socket: Socket, { deferSubscription = false }: { deferSubscription?: boolean } = {}) {
     if (this.closed) return failure(request, "root_closing", "Root session is closing");
     if (request.rootSessionId !== this.rootSessionId) return failure(request, "root_mismatch", "Root session does not match");
     const principal = this.principals.get(request.callerRunId);
@@ -576,10 +599,7 @@ export class RootBrokerServer {
     if (principal.role === "plan-runner" && !caller) return failure(request, "caller_unauthorized", "Caller is not granted");
     try {
       if (request.method === "subscribe") {
-        const subscribers = this.subscriptions.get(request.callerRunId) ?? new Set<Socket>();
-        subscribers.add(socket);
-        this.subscriptions.set(request.callerRunId, subscribers);
-        socket.once("close", () => subscribers.delete(socket));
+        if (!deferSubscription) this.registerSubscription(request.callerRunId, socket);
         return createBrokerSuccessResponse({ ...request, data: { subscribed: true } });
       }
       if (request.method === "ping") {
