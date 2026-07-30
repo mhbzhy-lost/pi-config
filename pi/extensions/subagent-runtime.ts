@@ -14,6 +14,20 @@ import { resolveRootSessionId } from "../../scripts/lib/subagent-dispatch/root-b
 import { requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
+export function createRootBrokerUpstream({ rpc, executeSupervisor }: { rpc: any; executeSupervisor: (...args: any[]) => any }) {
+  return Object.freeze({
+    ping: (...args: any[]) => rpc.ping(...args),
+    spawn: (...args: any[]) => rpc.spawn(...args),
+    status: (...args: any[]) => rpc.status(...args),
+    resume: (...args: any[]) => rpc.resume(...args),
+    steer: (...args: any[]) => rpc.steer(...args),
+    interrupt: (...args: any[]) => rpc.interrupt(...args),
+    stop: (...args: any[]) => rpc.stop(...args),
+    dispose: (...args: any[]) => rpc.dispose(...args),
+    executeSupervisor: (...args: any[]) => executeSupervisor(...args),
+  });
+}
+
 function notificationColor(text: string): "error" | "warning" | "success" {
   if (text.split("\n").some((line) => line.startsWith("✗"))) return "error";
   if (text.split("\n").some((line) => line.startsWith("Ⅱ"))) return "warning";
@@ -60,11 +74,9 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     rpc.renew();
     if (brokerStarted) throw new Error("Root subagent broker is already started");
     const rootSessionId = resolveRootSessionId(ctx.sessionManager);
-    const upstream = Object.freeze({
-      ping: (...args: any[]) => rpc.ping(...args), spawn: (...args: any[]) => rpc.spawn(...args),
-      status: (...args: any[]) => rpc.status(...args), steer: (...args: any[]) => rpc.steer(...args),
-      interrupt: (...args: any[]) => rpc.interrupt(...args), stop: (...args: any[]) => rpc.stop(...args),
-      dispose: () => rpc.dispose(), executeSupervisor: (params: any, context: any) => runtime.executeSupervisor(params, context),
+    const upstream = createRootBrokerUpstream({
+      rpc,
+      executeSupervisor: (params: any, context: any) => runtime.executeSupervisor(params, context),
     });
     const broker = new RootBrokerServer({ rootSessionId, upstream, events: pi.events });
     previousBrokerMarker = process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
