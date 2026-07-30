@@ -19,10 +19,14 @@ const compatibleReport = {
   typeboxCompileResolvable: true,
   rpcVersion: 1,
   methods: ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"],
-  events: ["subagent:async-started", "subagent:async-complete"],
+  events: ["subagent:async-started", "subagent:async-complete", "subagent:process-terminal"],
   standaloneRootService: true,
   standaloneNoChildEnv: true,
   standaloneSessionRebased: true,
+  rootBrokerReady: true,
+  flatRuntimeDepth: 1,
+  childAdapterRegistered: true,
+  noFanoutExtension: true,
   exactCwd: true,
   worktreeDisabled: true,
   waitWakesOnCompletion: true,
@@ -213,8 +217,18 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
   }
 });
 
-test("accepts the standalone Plan Harness compatibility report", () => {
+test("accepts the flat runtime compatibility report during standalone transition", () => {
   assert.deepEqual(evaluate(compatibleReport), { ok: true, failures: [] });
+});
+
+test("accepts a flat runtime report without standalone transition fields", () => {
+  const {
+    standaloneRootService,
+    standaloneNoChildEnv,
+    standaloneSessionRebased,
+    ...flatOnlyReport
+  } = compatibleReport;
+  assert.deepEqual(evaluate(flatOnlyReport), { ok: true, failures: [] });
 });
 
 test("rejects runtime versions outside the explicit support set", () => {
@@ -232,21 +246,39 @@ test("requires TypeBox compiler resolution from pi-subagents", () => {
   ]);
 });
 
-test("requires RPC v1 methods and lifecycle events", () => {
+test("requires RPC v1 methods and existing lifecycle events", () => {
   assert.deepEqual(evaluate({ ...compatibleReport, rpcVersion: 2 }).failures, ["unexpected RPC version: 2"]);
   assert.deepEqual(evaluate({ ...compatibleReport, methods: compatibleReport.methods.filter((method) => method !== "resume") }).failures, [
     "missing RPC method: resume",
   ]);
-  assert.deepEqual(evaluate({ ...compatibleReport, events: ["subagent:async-started"] }).failures, [
+  assert.deepEqual(evaluate({ ...compatibleReport, events: compatibleReport.events.filter((event) => event !== "subagent:async-started") }).failures, [
+    "missing lifecycle event: subagent:async-started",
+  ]);
+  assert.deepEqual(evaluate({ ...compatibleReport, events: compatibleReport.events.filter((event) => event !== "subagent:async-complete") }).failures, [
     "missing lifecycle event: subagent:async-complete",
   ]);
 });
 
-test("requires every standalone runtime boundary", () => {
+test("requires the process-terminal lifecycle event", () => {
+  assert.deepEqual(evaluate({
+    ...compatibleReport,
+    events: compatibleReport.events.filter((event) => event !== "subagent:process-terminal"),
+  }).failures, ["missing lifecycle event: subagent:process-terminal"]);
+});
+
+for (const [field, value, message] of [
+  ["rootBrokerReady", false, "Root subagent broker is not ready"],
+  ["flatRuntimeDepth", 2, "unexpected flat runtime depth: 2"],
+  ["childAdapterRegistered", false, "project child adapter is not registered"],
+  ["noFanoutExtension", false, "fanout-child extension is active"],
+]) {
+  test(`requires flat runtime boundary: ${field}`, () => {
+    assert.deepEqual(evaluate({ ...compatibleReport, [field]: value }).failures, [message]);
+  });
+}
+
+test("requires Executor/runtime boundaries", () => {
   const requirements = [
-    ["standaloneRootService", "Standalone Plan Runner did not load the root service"],
-    ["standaloneNoChildEnv", "Standalone Plan Runner inherited child mode"],
-    ["standaloneSessionRebased", "Standalone Plan Runner retained the inherited parent session route"],
     ["exactCwd", "Executor did not use the authorized cwd"],
     ["worktreeDisabled", "pi-subagents created an unauthorized worktree"],
     ["waitWakesOnCompletion", "wait did not wake on completion"],
@@ -261,21 +293,42 @@ test("requires every standalone runtime boundary", () => {
   }
 });
 
-test("rejects nested event files on the standalone executor path", () => {
+test("rejects nested event files on the executor path", () => {
   assert.deepEqual(evaluate({ ...compatibleReport, nestedEventFiles: 1 }).failures, ["unexpected nested event files: 1"]);
 });
 
-test("builds a standalone environment without inheriting a parent session route", () => {
-  assert.equal(typeof compat.buildStandaloneRuntimeEnv, "function");
-  assert.deepEqual(compat.buildStandaloneRuntimeEnv({
+test("retires standalone compatibility environment API", () => {
+  assert.equal(compat.buildStandaloneRuntimeEnv, undefined);
+});
+
+test("builds a top-level runtime environment without inherited child markers", () => {
+  assert.equal(typeof compat.buildTopLevelRuntimeEnv, "function");
+  assert.deepEqual(compat.buildTopLevelRuntimeEnv({
     PATH: "/test/bin",
     PI_SUBAGENT_PARENT_SESSION: "parent-session",
   }), { PATH: "/test/bin" });
+  assert.throws(() => compat.buildTopLevelRuntimeEnv({ PI_SUBAGENT_CHILD: "1" }), /PI_SUBAGENT_CHILD/);
+  assert.throws(() => compat.buildTopLevelRuntimeEnv({ PI_SUBAGENT_FANOUT_CHILD: "1" }), /PI_SUBAGENT_FANOUT_CHILD/);
 });
 
-test("fails closed instead of clearing child execution markers", () => {
-  assert.throws(() => compat.buildStandaloneRuntimeEnv({ PI_SUBAGENT_CHILD: "1" }), /PI_SUBAGENT_CHILD/);
-  assert.throws(() => compat.buildStandaloneRuntimeEnv({ PI_SUBAGENT_FANOUT_CHILD: "1" }), /PI_SUBAGENT_FANOUT_CHILD/);
+test("flat runtime compat probe source retires standalone boundaries", async () => {
+  const source = await readFile(join(repoRoot, "scripts/probes/pi-subagents-compat.mjs"), "utf8");
+  for (const removedName of [
+    "buildStandaloneRuntimeEnv",
+    "standaloneRootService",
+    "standaloneNoChildEnv",
+    "standaloneSessionRebased",
+  ]) {
+    assert.doesNotMatch(source, new RegExp(`\\b${removedName}\\b`));
+  }
+  for (const flatField of [
+    "rootBrokerReady",
+    "flatRuntimeDepth",
+    "childAdapterRegistered",
+    "noFanoutExtension",
+  ]) {
+    assert.match(source, new RegExp(`\\b${flatField}\\b`));
+  }
 });
 
 test("builds the exact top-level runtime dependency install command", async () => {
