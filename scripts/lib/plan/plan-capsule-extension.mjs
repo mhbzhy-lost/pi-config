@@ -5,7 +5,7 @@ const EMPTY_OBJECT = { type: "object", properties: {}, additionalProperties: fal
 const OPEN_KEYS = ["allowPlanCommits", "baseCommit", "manifestSha256", "planId", "planIrHash", "revision", "worktree"];
 const PLAN_ACTIVE_TOOLS = [
   "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
-  "subagent_wait", "subagent_supervisor", "read", "grep",
+  "subagent", "plan_executor_supervisor", "read", "grep",
 ];
 
 function result(value, isError = false) {
@@ -161,8 +161,19 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   });
   pi.on("tool_call", async (event, ctx) => {
     if (!opened) return undefined;
-    if (["subagent", "contact_supervisor", "bash"].includes(event?.toolName)) {
+    if (["contact_supervisor", "bash"].includes(event?.toolName)) {
       return { block: true, reason: "Plan dispatch authorization boundary owns Harness dispatch and supervision." };
+    }
+    if (event?.toolName === "subagent") {
+      if (typeof options.authorizeExecutorDispatch !== "function") {
+        return { block: true, reason: "Plan dispatch authorization boundary unavailable; it owns Executor dispatch authorization." };
+      }
+      try {
+        await options.authorizeExecutorDispatch(event.input, { projection: projectionFrom(ctx), toolCallId: event.toolCallId, ctx });
+        return undefined;
+      } catch (error) {
+        return { block: true, reason: error instanceof Error ? error.message : "Executor dispatch is not authorized." };
+      }
     }
     if (event?.toolName !== "subagent_supervisor") return undefined;
     if (!["pending", "reply"].includes(event?.input?.action)) {
