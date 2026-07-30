@@ -31,6 +31,23 @@ function safeRequestId(createId: () => string) {
   return id;
 }
 
+export function createBrokerFrameDecoder() {
+  let buffer = "";
+  return {
+    push(chunk: Buffer | string) {
+      buffer += chunk.toString("utf8");
+      if (Buffer.byteLength(buffer, "utf8") > BROKER_FRAME_LIMIT_BYTES) throw clientError("Root broker subscription is too large", "BROKER_RESPONSE_TOO_LARGE");
+      const lines: string[] = [];
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return lines;
+        lines.push(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+      }
+    },
+  };
+}
+
 export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs = 10_000, randomUUID: createId = randomUUID }: ClientOptions) {
   let disposed = false;
   const sockets = new Set<Socket>();
@@ -107,7 +124,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
     return await new Promise<Subscription>((resolve, reject) => {
       const socket = connect(brokerSocketPath(rootSessionId));
       sockets.add(socket);
-      let buffer = "";
+      const decoder = createBrokerFrameDecoder();
       let acknowledged = false;
       let localDispose = false;
       let settleClosed!: () => void;
@@ -136,13 +153,9 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
       socket.once("error", (error) => fail(clientError(`Root broker disconnected: ${error.message}`, "BROKER_DISCONNECTED")));
       socket.once("close", () => fail(clientError("Root broker subscription disconnected", "BROKER_DISCONNECTED")));
       socket.on("data", (chunk) => {
-        buffer += chunk.toString("utf8");
-        if (Buffer.byteLength(buffer, "utf8") > BROKER_FRAME_LIMIT_BYTES) { socket.destroy(clientError("Root broker subscription is too large", "BROKER_RESPONSE_TOO_LARGE")); return; }
-        for (;;) {
-          const newline = buffer.indexOf("\n");
-          if (newline < 0) break;
-          const line = buffer.slice(0, newline);
-          buffer = buffer.slice(newline + 1);
+        let lines: string[];
+        try { lines = decoder.push(chunk); } catch (error) { socket.destroy(error as Error); return; }
+        for (const line of lines) {
           try {
             if (!acknowledged) {
               const response = parseBrokerResponse(JSON.parse(line), value);
