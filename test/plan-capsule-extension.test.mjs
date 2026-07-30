@@ -149,7 +149,7 @@ test("plan-runner alone uses the real subagentOnlyExtensions profile field", asy
 test("capsule statically registers plan lifecycle tools and declares actual bootstrap fields", () => {
   const { tools } = setup();
   assert.deepEqual([...tools.keys()], [
-    "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend", "plan_open",
+    "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
   ]);
   assert.deepEqual(Object.keys(tools.get("plan_open").parameters.properties).sort(), ["allowPlanCommits", "baseCommit", "manifestSha256", "planId", "planIrHash", "revision", "worktree"]);
 });

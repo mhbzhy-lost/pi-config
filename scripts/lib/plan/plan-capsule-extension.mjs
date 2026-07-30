@@ -57,7 +57,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     runtimeCapabilitiesReady = true;
   }
 
-  function activateTools() {
+  function registerLifecycleTools() {
     if (lifecycleRegistered) return;
     lifecycleRegistered = true;
     register(pi, {
@@ -131,6 +131,9 @@ export function createPlanCapsuleExtension(pi, options = {}) {
         try { return result(await options.amendPlan(params, { ctx })); } catch (error) { return result(error instanceof Error ? error.message : "Plan amendment failed.", true); }
       },
     });
+  }
+
+  function activateTools() {
     pi.setActiveTools([...PLAN_ACTIVE_TOOLS]);
   }
 
@@ -329,6 +332,8 @@ export function createPlanCapsuleExtension(pi, options = {}) {
       }
     },
   });
+  registerLifecycleTools();
+  pi.setActiveTools(["plan_open", "read", "grep"]);
 }
 
 createPlanCapsuleExtension.acceptanceVerify = function acceptanceVerify(status) {
