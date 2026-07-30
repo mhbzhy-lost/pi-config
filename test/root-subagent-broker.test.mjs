@@ -2262,19 +2262,40 @@ function forceReviewProof(runId, runnerProcessInstanceId) {
   };
 }
 
-test("Root force terminal review cleans each observation before the next phase", async () => {
-  const gracefulRead = deferred();
-  const forceRead = deferred();
-  const eventProof = forceReviewProof("executor-a", "executor-a-event-runner");
-  const lateArtifactProof = forceReviewProof("executor-a", "executor-a-late-artifact-runner");
+test("Root force terminal review cleans graceful observation before force recapture", async () => {
   let recaptureSawWaiter;
-  let deathSawProof;
   let subject;
   subject = await verifiedForceCleanupFixture({
     captures: {
       "executor-a": [
         "executor-a-birth",
         ({ runId }) => { recaptureSawWaiter = subject.broker.terminalWaiters.has(runId); return "executor-a-birth"; },
+        "unavailable",
+      ],
+    },
+    onKill: ({ runId, emitProof }) => emitProof(runId, forceReviewProof(runId, "executor-a-force-runner")),
+  });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.equal(outcome.state, "resolved");
+    assert.deepEqual(subject.signals, [{ pid: -9401, signal: "SIGKILL" }]);
+    assert.equal(recaptureSawWaiter, false);
+  } finally {
+    await subject.cleanup();
+  }
+});
+
+test("Root force terminal review cleans force observation before death verification", async () => {
+  const forceRead = deferred();
+  const eventProof = forceReviewProof("executor-a", "executor-a-event-runner");
+  const lateArtifactProof = forceReviewProof("executor-a", "executor-a-late-artifact-runner");
+  let deathSawProof;
+  let subject;
+  subject = await verifiedForceCleanupFixture({
+    captures: {
+      "executor-a": [
+        "executor-a-birth",
+        "executor-a-birth",
         async ({ runId }) => {
           forceRead.release(JSON.stringify(lateArtifactProof));
           await Promise.resolve();
@@ -2285,22 +2306,19 @@ test("Root force terminal review cleans each observation before the next phase",
       ],
     },
     readArtifact: async ({ reads }) => {
-      if (reads.length === 1) return gracefulRead.promise;
-      if (reads.length === 2) {
-        subject.emitProof("executor-a", eventProof);
-        return forceRead.promise;
-      }
-      throw Object.assign(new Error("unexpected artifact read"), { code: "ENOENT" });
+      assert.equal(reads.length, 1);
+      subject.emitProof("executor-a", eventProof);
+      return forceRead.promise;
     },
   });
   try {
-    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    const run = subject.broker.ownedRuns.get("executor-a");
+    assert.ok(run, "fixture must register executor-a as an owned run");
+    const outcome = await closeOutcome(subject.broker.forceCleanup(run, new Error("missing official proof for run executor-a")), 100);
     assert.equal(outcome.state, "resolved");
     assert.deepEqual(subject.signals, [{ pid: -9401, signal: "SIGKILL" }]);
-    assert.equal(recaptureSawWaiter, false);
     assert.equal(deathSawProof, eventProof.runnerProcessInstanceId);
   } finally {
-    gracefulRead.release(JSON.stringify(lateArtifactProof));
     forceRead.release(JSON.stringify(lateArtifactProof));
     await subject.cleanup();
   }
