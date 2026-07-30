@@ -190,6 +190,26 @@ test("starts immediately and renews the underlying RPC client after a session sh
   client.dispose();
 });
 
+test("renewable client forwards resume to the active generation", async () => {
+  const events = createEvents();
+  const client = createRenewableTypedSubagentRpcClient(() => createTypedSubagentRpcClient(events, {
+    randomUUID: () => "renewable-resume-1",
+  }));
+  const params = { id: "plan-runner-1", message: "A durable Root broker wake is pending." };
+  const request = client.resume(params);
+
+  assert.equal(events.emitted[0].value.method, "resume");
+  assert.deepEqual(events.emitted[0].value.params, params);
+  events.emit("subagents:rpc:v1:reply:renewable-resume-1", {
+    version: 1,
+    requestId: "renewable-resume-1",
+    success: true,
+    data: { ok: true },
+  });
+  assert.deepEqual(await request, { ok: true });
+  client.dispose();
+});
+
 test("recovers lazily when an eager renew factory call fails", async () => {
   const events = createEvents();
   let factoryCalls = 0;
