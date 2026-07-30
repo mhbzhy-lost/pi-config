@@ -2076,3 +2076,172 @@ test("Root official terminal artifact does not combine stop ACK async-complete a
     await subject.cleanup();
   }
 });
+
+let verifiedForceCleanupFixtureNumber = 0;
+
+function birthIdentityUnavailable() {
+  return Object.assign(new Error("process birth identity unavailable"), { code: "PROCESS_BIRTH_IDENTITY_UNAVAILABLE" });
+}
+
+async function verifiedForceCleanupFixture({ runs = ["executor-a"], captures = {}, onKill } = {}) {
+  const events = startedEventBus();
+  const root = `verified-force-cleanup-root-${++verifiedForceCleanupFixtureNumber}`;
+  const captureCalls = [];
+  const signals = [];
+  const stops = [];
+  const artifactReads = [];
+  let disposed = false;
+  const identities = new Map(runs.map((runId, index) => [runId, { pid: 9401 + index, birth: `${runId}-birth` }]));
+  const captureProcessBirthIdentity = async (pid) => {
+    captureCalls.push(pid);
+    const runId = [...identities].find(([, identity]) => identity.pid === pid)?.[0];
+    const behavior = captures[runId] ?? [];
+    const next = behavior.shift() ?? identities.get(runId)?.birth;
+    if (next === "unavailable") throw birthIdentityUnavailable();
+    return next;
+  };
+  const readFile = async (file) => {
+    artifactReads.push(file);
+    throw Object.assign(new Error(`missing ${file}`), { code: "ENOENT" });
+  };
+  const upstream = {
+    ...fakeUpstream(),
+    async stop({ runId, dir }) { stops.push({ runId, dir }); return { stopped: true }; },
+    dispose() { disposed = true; },
+  };
+  const emitProof = (runId) => events.emit("subagent:process-terminal", officialObservedProof(runId));
+  const broker = new RootBrokerServer({
+    rootSessionId: root, upstream, events, terminalTimeoutMs: 12, artifactPollIntervalMs: 2,
+    captureProcessBirthIdentity,
+    // This narrow dependency is intentionally ignored by current production.
+    killProcess: (pid, signal) => {
+      signals.push({ pid, signal });
+      return onKill?.({ pid, signal, runId: [...identities].find(([, identity]) => identity.pid === -pid)?.[0], emitProof });
+    },
+    readFile,
+    writeGrant: async (grant) => `/tmp/${root}-${grant.runId}.json`,
+  });
+  await broker.start();
+  for (const runId of runs) {
+    const { pid } = identities.get(runId);
+    events.emit("subagent:async-started", { id: runId, pid, agent: "executor", sessionId: root, cwd: "/trusted", asyncDir: `/trusted/${runId}` });
+  }
+  await events.settled();
+  const cleanup = async () => {
+    for (const runId of runs) emitProof(runId);
+    await events.settled();
+    await broker.closeRootSession().catch(() => undefined);
+    await broker.closeRootSession().catch(() => undefined);
+  };
+  return { artifactReads, broker, captureCalls, cleanup, disposed: () => disposed, emitProof, events, identities, root, signals, stops };
+}
+
+function retainedForceCleanupResources(subject) {
+  assert.equal(subject.broker.server?.listening, true);
+  assert.equal(typeof subject.broker.unsubscribeTerminal, "function");
+  assert.equal(subject.disposed(), false);
+}
+
+test("Root verified force cleanup exact success requires force and post-proof death check", async () => {
+  const subject = await verifiedForceCleanupFixture({
+    captures: { "executor-a": ["executor-a-birth", "executor-a-birth", "unavailable"] },
+    onKill: ({ runId, emitProof }) => emitProof(runId),
+  });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.notEqual(outcome.state, "watchdog");
+    assert.equal(outcome.state, "resolved");
+    assert.equal(subject.captureCalls.length, 3);
+    assert.deepEqual(subject.signals, [{ pid: -9401, signal: "SIGKILL" }]);
+  } finally { await subject.cleanup(); }
+});
+
+test("Root verified force cleanup rejects force success without official proof", async () => {
+  const subject = await verifiedForceCleanupFixture({ captures: { "executor-a": ["executor-a-birth", "executor-a-birth"] } });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.notEqual(outcome.state, "watchdog"); assert.equal(outcome.state, "rejected");
+    assert.ok(outcome.error instanceof AggregateError);
+    assert.deepEqual(subject.signals, [{ pid: -9401, signal: "SIGKILL" }]);
+    assert.match(officialErrorText(outcome.error), /force.*official proof|official proof.*force/i);
+    retainedForceCleanupResources(subject);
+  } finally { await subject.cleanup(); }
+});
+
+test("Root verified force cleanup rejects a process still alive after proof", async () => {
+  const subject = await verifiedForceCleanupFixture({
+    captures: { "executor-a": ["executor-a-birth", "executor-a-birth", "executor-a-birth", "unavailable"] },
+    onKill: ({ runId, emitProof }) => emitProof(runId),
+  });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.notEqual(outcome.state, "watchdog"); assert.equal(outcome.state, "rejected");
+    assert.deepEqual(subject.signals, [{ pid: -9401, signal: "SIGKILL" }]);
+    assert.match(officialErrorText(outcome.error), /still alive|birth identity/i);
+    retainedForceCleanupResources(subject);
+  } finally { await subject.cleanup(); }
+});
+
+test("Root verified force cleanup rejects stale recapture mismatch without signaling", async () => {
+  const subject = await verifiedForceCleanupFixture({ captures: { "executor-a": ["executor-a-birth", "different-birth"] } });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.equal(outcome.state, "rejected"); assert.equal(subject.captureCalls.length, 2); assert.deepEqual(subject.signals, []);
+    assert.match(officialErrorText(outcome.error), /stale|mismatch/i); retainedForceCleanupResources(subject);
+  } finally { await subject.cleanup(); }
+});
+
+test("Root verified force cleanup rejects initial identity unavailability without recapture", async () => {
+  const subject = await verifiedForceCleanupFixture({ captures: { "executor-a": ["unavailable"] } });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.equal(outcome.state, "rejected"); assert.equal(subject.captureCalls.length, 1); assert.deepEqual(subject.signals, []);
+    assert.match(officialErrorText(outcome.error), /identity unavailable/i); retainedForceCleanupResources(subject);
+  } finally { await subject.cleanup(); }
+});
+
+test("Root verified force cleanup rejects recapture identity unavailability without signaling", async () => {
+  const subject = await verifiedForceCleanupFixture({ captures: { "executor-a": ["executor-a-birth", "unavailable"] } });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.equal(outcome.state, "rejected"); assert.equal(subject.captureCalls.length, 2); assert.deepEqual(subject.signals, []);
+    assert.match(officialErrorText(outcome.error), /recapture.*identity unavailable|identity unavailable.*recapture/i); retainedForceCleanupResources(subject);
+  } finally { await subject.cleanup(); }
+});
+
+test("Root verified force cleanup rejects conflicting owned identity without recapture", async () => {
+  const subject = await verifiedForceCleanupFixture();
+  try {
+    subject.events.emit("subagent:async-started", { id: "executor-a", pid: 9501, agent: "executor", sessionId: subject.root, cwd: "/trusted", asyncDir: "/trusted/conflict" });
+    await subject.events.settled();
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.equal(outcome.state, "rejected"); assert.equal(subject.captureCalls.length, 1); assert.deepEqual(subject.signals, []);
+    assert.match(officialErrorText(outcome.error), /conflict/i); retainedForceCleanupResources(subject);
+  } finally { await subject.cleanup(); }
+});
+
+test("Root verified force cleanup settles all Executors and retries only force debt", async () => {
+  let aKills = 0;
+  const subject = await verifiedForceCleanupFixture({
+    runs: ["executor-a", "executor-b"],
+    captures: {
+      "executor-a": ["executor-a-birth", "executor-a-birth", "executor-a-birth", "unavailable"],
+      "executor-b": ["executor-b-birth", "executor-b-birth", "unavailable"],
+    },
+    onKill: ({ runId, emitProof }) => {
+      if (runId === "executor-a" && aKills++ === 0) throw new Error("controlled force failure");
+      emitProof(runId);
+    },
+  });
+  try {
+    const first = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.equal(first.state, "rejected"); assert.ok(first.error instanceof AggregateError);
+    assert.deepEqual(subject.stops.map(({ runId }) => runId), ["executor-a", "executor-b"]);
+    assert.deepEqual(subject.signals, [{ pid: -9401, signal: "SIGKILL" }, { pid: -9402, signal: "SIGKILL" }]);
+    assert.equal(subject.broker.terminalProofs.has("executor-b"), true);
+    const second = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.equal(second.state, "resolved");
+    assert.deepEqual(subject.stops.map(({ runId }) => runId), ["executor-a", "executor-b", "executor-a"]);
+    assert.deepEqual(subject.signals, [{ pid: -9401, signal: "SIGKILL" }, { pid: -9402, signal: "SIGKILL" }, { pid: -9401, signal: "SIGKILL" }]);
+  } finally { await subject.cleanup(); }
+});
