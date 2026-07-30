@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,7 +21,7 @@ function brokerSocketPath(sessionId) {
 function withoutSubagentEnvironment(env) {
   return Object.fromEntries(Object.entries(env).filter(([name]) => ![
     "PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION",
-    "PI_SUBAGENT_RUN_ID", "PI_SUBAGENT_ORCHESTRATOR", "PI_ROOT_SUBAGENT_BROKER_ENABLED",
+    "PI_SUBAGENT_RUN_ID", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_ROOT_SUBAGENT_BROKER_ENABLED",
   ].includes(name)));
 }
 
@@ -30,10 +30,12 @@ test("persisted root session shares its broker registry with an independent Jiti
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-root-broker-registry-"));
   const sessions = path.join(root, "sessions");
   const runtimeTmp = path.join(root, "tmp");
+  const agentDir = path.join(root, "agent");
   const output = path.join(root, "probe.json");
   const sessionId = "root-broker-registry-probe";
   const socket = brokerSocketPath(sessionId);
   try {
+    await mkdir(agentDir);
     const result = spawnSync(piBinary, [
       "--mode", "rpc", "--session-dir", sessions, "--session-id", sessionId,
       "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
@@ -47,7 +49,7 @@ test("persisted root session shares its broker registry with an independent Jiti
       input: `${JSON.stringify({ id: "root-broker-registry-commands", type: "get_commands" })}\n`,
       env: {
         ...withoutSubagentEnvironment(process.env),
-        PI_CODING_AGENT_DIR: path.join(repoRoot, "pi"),
+        PI_CODING_AGENT_DIR: agentDir,
         PI_ROOT_BROKER_PROBE_OUTPUT: output,
         TMPDIR: runtimeTmp,
         OPENAI_API_KEY: "not-used",
@@ -67,12 +69,11 @@ test("persisted root session shares its broker registry with an independent Jiti
     assert.notEqual(facts.getSessionId, facts.getSessionFile, JSON.stringify(facts));
     assert.ok(facts.allToolNames.includes("subagent"), JSON.stringify(facts));
     assert.ok(facts.activeToolNames.includes("subagent"), JSON.stringify(facts));
-    assert.equal(facts.error, "Root subagent broker is unavailable", JSON.stringify(facts));
-    assert.equal(facts.brokerRootSessionId, null, JSON.stringify(facts));
-    assert.equal(facts.brokerServerExists, false, JSON.stringify(facts));
-    t.diagnostic(`intended-red=${facts.error}; marker/tools/session facts are green`);
+    assert.equal(facts.error, null, JSON.stringify(facts));
+    assert.equal(facts.brokerRootSessionId, sessionId, JSON.stringify(facts));
+    assert.equal(facts.brokerServerExists, true, JSON.stringify(facts));
 
-    await assert.rejects(access(socket), /ENOENT/);
+    await access(socket);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
