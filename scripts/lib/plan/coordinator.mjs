@@ -218,7 +218,7 @@ export function createPlanCoordinator({
     if (originalError) throw originalError;
   }
 
-  async function bindOrCleanupSpawnedAttempt({ attemptId, taskId, dispatchId, binding }) {
+  async function bindOrCleanupSpawnedAttempt({ attemptId, taskId, dispatchId, binding }, { stopOnPersistenceError = true } = {}) {
     const bound = {
       attemptId,
       taskId,
@@ -249,6 +249,7 @@ export function createPlanCoordinator({
       } catch (error) {
         await refreshProjection();
         if (error?.code === "PROJECTION_CONFLICT") continue;
+        if (!stopOnPersistenceError) throw error;
         await stopSpawnedBinding(binding, error);
       }
     }
@@ -811,7 +812,7 @@ export function createPlanCoordinator({
     coordinator: Object.freeze({
       dispatchAuthorized,
       prepareAuthorizedDispatches,
-      bindAuthorizedDispatch: bindOrCleanupSpawnedAttempt,
+      bindAuthorizedDispatch: (input) => bindOrCleanupSpawnedAttempt(input, { stopOnPersistenceError: false }),
       recover,
       settleBoundAttempt,
       setIntegrationQueue(queue) {
