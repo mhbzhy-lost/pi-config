@@ -42,6 +42,7 @@ export function createRenewableTypedSubagentRpcClient(createClient) {
     ping: (...args) => active().ping(...args),
     spawn: (...args) => active().spawn(...args),
     status: (...args) => active().status(...args),
+    resume: (...args) => active().resume(...args),
     steer: (...args) => active().steer(...args),
     interrupt: (...args) => active().interrupt(...args),
     stop: (...args) => active().stop(...args),
