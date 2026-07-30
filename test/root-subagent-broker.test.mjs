@@ -1765,6 +1765,7 @@ async function boundedWaitFixture({ pendingStop = false, pendingCapture = false 
       if (pendingCapture) await capture.promise;
       return "bounded-wait-birth";
     },
+    killProcess: () => { throw new Error("test force signal disabled"); },
   });
   const terminal = (runId = "executor") => {
     const runnerProcessInstanceId = `${runId}-instance`;
@@ -1898,6 +1899,7 @@ async function officialArtifactFixture({ sidecar, status, artifactPollIntervalMs
     events,
     terminalTimeoutMs: 18,
     captureProcessBirthIdentity: async (pid) => `verified-birth-${pid}`,
+    killProcess: () => { throw new Error("test force signal disabled"); },
     writeGrant: async (grant) => `/tmp/${root}-${grant.runId}.json`,
     readFile,
     artifactPollIntervalMs,

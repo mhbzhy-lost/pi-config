@@ -21,7 +21,7 @@ import {
 type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: () => void | Promise<void> };
 type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
-type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number };
+type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; delivered: Set<string> };
 type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
 type OwnedRun = { rootSessionId: string; runId: string; role: "plan-runner" | "executor"; asyncDir: string; sessionId: string; pid: number; birthIdentity: string | null; identityState: "verified" | "unavailable" | "conflict" };
@@ -29,6 +29,10 @@ type StartedFacts = Pick<OwnedRun, "runId" | "role" | "asyncDir" | "sessionId" |
 
 const FORBIDDEN_SPAWN_FIELDS = new Set(["caller", "root", "token", "parent", "depth", "path", "fanout", "callerRunId", "callerToken", "rootSessionId", "parentRunId", "parentDepth", "parentPath"]);
 const MAX_BUFFER = 64 * 1024;
+
+class TerminalDeadlineError extends Error {
+  code = "ROOT_TERMINAL_DEADLINE";
+}
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -69,6 +73,7 @@ export class RootBrokerServer {
   supervisorRequests = new Map<string, SupervisorRequest>();
   ownedRuns = new Map<string, OwnedRun>();
   terminalProofs = new Map<string, any>();
+  forcePendingRuns = new Set<string>();
   terminalWaiters = new Map<string, Set<(proof: any) => void>>();
   startedObservations = new Map<string, Promise<void>>();
   unsubscribeStarted: (() => void) | undefined;
@@ -80,12 +85,13 @@ export class RootBrokerServer {
   writeGrant: typeof writeBrokerGrant;
   randomToken: () => string;
   captureProcessBirthIdentity: typeof captureProcessBirthIdentity;
+  killProcess: (pid: number, signal: "SIGKILL") => void;
   events: Dependencies["events"];
   terminalTimeoutMs: number;
   readFile: typeof nodeReadFile;
   artifactPollIntervalMs: number;
 
-  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50 }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
+  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, killProcess = process.kill, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50 }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
     this.rootSessionId = rootSessionId;
@@ -93,6 +99,7 @@ export class RootBrokerServer {
     this.writeGrant = writeGrant;
     this.randomToken = randomToken;
     this.captureProcessBirthIdentity = captureBirthIdentity;
+    this.killProcess = killProcess;
     this.events = events;
     this.terminalTimeoutMs = terminalTimeoutMs;
     this.readFile = readFile;
@@ -245,7 +252,86 @@ export class RootBrokerServer {
     };
   }
 
+  async observeOfficialProof(run: OwnedRun, deadlineMessage: string) {
+    const waiter = this.waitForTerminal(run.runId);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    let cancelSleep: (() => void) | undefined;
+    try {
+      if (this.terminalProofs.has(run.runId)) return;
+      const deadline = new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new TerminalDeadlineError(deadlineMessage)), this.terminalTimeoutMs); });
+      const artifact = this.pollTerminalArtifact(run, () => cancelled, (cancel) => { cancelSleep = cancel; });
+      void artifact.catch(() => undefined);
+      const proof = await Promise.race([waiter.promise, artifact, deadline]);
+      if (!proof) throw new TerminalDeadlineError(deadlineMessage);
+    } finally {
+      cancelled = true;
+      cancelSleep?.();
+      if (timeout) clearTimeout(timeout);
+      waiter.cancel();
+    }
+  }
+
+  async verifyForcedDeath(run: OwnedRun) {
+    let identity: string;
+    try {
+      identity = await this.captureProcessBirthIdentity(run.pid);
+    } catch (error: any) {
+      if (error?.code === "PROCESS_BIRTH_IDENTITY_UNAVAILABLE") {
+        this.forcePendingRuns.delete(run.runId);
+        return;
+      }
+      throw new Error(`force death verification unavailable for run ${run.runId}: ${String(error?.message ?? error).slice(0, 512)}`);
+    }
+    if (identity === run.birthIdentity) throw new Error(`forced run ${run.runId} is still alive with birth identity`);
+    throw new Error(`forced run ${run.runId} birth identity reused or mismatch`);
+  }
+
+  async forceCleanup(run: OwnedRun, deadlineError: Error) {
+    if (run.identityState !== "verified" || !run.birthIdentity || !Number.isSafeInteger(run.pid) || run.pid <= 0) {
+      const reason = run.identityState === "conflict" ? "conflict" : "identity unavailable";
+      throw new Error(`force cleanup ${reason} for run ${run.runId}: ${deadlineError.message}`);
+    }
+    let recaptured: string;
+    try {
+      recaptured = await this.captureProcessBirthIdentity(run.pid);
+    } catch (error: any) {
+      if (error?.code === "PROCESS_BIRTH_IDENTITY_UNAVAILABLE") throw new Error(`force cleanup recapture identity unavailable for run ${run.runId}: ${deadlineError.message}`);
+      throw new Error(`force cleanup recapture failed for run ${run.runId}: ${String(error?.message ?? error).slice(0, 512)}`);
+    }
+    if (recaptured !== run.birthIdentity) throw new Error(`force cleanup stale birth identity mismatch for run ${run.runId}`);
+
+    const waiter = this.waitForTerminal(run.runId); // Install before SIGKILL: it may emit synchronously.
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    let cancelSleep: (() => void) | undefined;
+    try {
+      try { this.killProcess(-run.pid, "SIGKILL"); } catch (error: any) {
+        throw new Error(`force cleanup signal failed for run ${run.runId}: ${String(error?.message ?? error).slice(0, 512)}; ${deadlineError.message}`);
+      }
+      this.forcePendingRuns.add(run.runId);
+      if (!this.terminalProofs.has(run.runId)) {
+        const deadline = new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new TerminalDeadlineError(`force missing official proof for run ${run.runId}`)), this.terminalTimeoutMs); });
+        const artifact = this.pollTerminalArtifact(run, () => cancelled, (cancel) => { cancelSleep = cancel; });
+        void artifact.catch(() => undefined);
+        await Promise.race([waiter.promise, artifact, deadline]);
+      }
+      if (!this.terminalProofs.has(run.runId)) throw new TerminalDeadlineError(`force missing official proof for run ${run.runId}`);
+      await this.verifyForcedDeath(run);
+    } finally {
+      cancelled = true;
+      cancelSleep?.();
+      if (timeout) clearTimeout(timeout);
+      waiter.cancel();
+    }
+  }
+
   async drainRun(run: OwnedRun) {
+    if (this.forcePendingRuns.has(run.runId)) {
+      if (this.terminalProofs.has(run.runId)) return this.verifyForcedDeath(run);
+      await this.observeOfficialProof(run, `force missing official proof for run ${run.runId}`);
+      return this.verifyForcedDeath(run);
+    }
     if (this.terminalProofs.has(run.runId)) return;
     const waiter = this.waitForTerminal(run.runId); // Install before stop: it may emit synchronously.
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -258,32 +344,25 @@ export class RootBrokerServer {
       const deadline = new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
           const suffix = stopFailed ? ` after stop failure: ${stopError?.message ?? "unknown stop failure"}` : "";
-          reject(new Error(`missing official proof for run ${run.runId}${suffix}`));
+          reject(new TerminalDeadlineError(`missing official proof for run ${run.runId}${suffix}`));
         }, this.terminalTimeoutMs);
       });
       let stopPromise: Promise<any>;
-      try {
-        stopPromise = Promise.resolve(this.upstream.stop({ runId: run.runId, dir: run.asyncDir }));
-      } catch (error) {
-        stopPromise = Promise.reject(error);
-      }
+      try { stopPromise = Promise.resolve(this.upstream.stop({ runId: run.runId, dir: run.asyncDir })); } catch (error) { stopPromise = Promise.reject(error); }
       void stopPromise.then(
         () => { stopSettled = true; },
-        (error) => {
-          stopSettled = true;
-          stopFailed = true;
-          stopError = error instanceof Error ? error : new Error(String(error).slice(0, 1024) || "unknown stop failure");
-        },
+        (error) => { stopSettled = true; stopFailed = true; stopError = error instanceof Error ? error : new Error(String(error).slice(0, 1024) || "unknown stop failure"); },
       );
-      // Preserve immediate stop failures as debt even when stop synchronously emits proof.
       await Promise.resolve();
       if (stopSettled && stopFailed) throw stopError;
       if (this.terminalProofs.has(run.runId)) return;
       const artifact = this.pollTerminalArtifact(run, () => cancelled, (cancel) => { cancelSleep = cancel; });
       void artifact.catch(() => undefined);
-      const terminal = Promise.race([waiter.promise, artifact, deadline]);
-      const proof = await terminal;
-      if (!proof) throw new Error(`missing official proof for run ${run.runId}`);
+      const proof = await Promise.race([waiter.promise, artifact, deadline]);
+      if (!proof) throw new TerminalDeadlineError(`missing official proof for run ${run.runId}`);
+    } catch (error) {
+      if (error instanceof TerminalDeadlineError && error.code === "ROOT_TERMINAL_DEADLINE") await this.forceCleanup(run, error);
+      else throw error;
     } finally {
       cancelled = true;
       cancelSleep?.();
@@ -616,7 +695,7 @@ export class RootBrokerServer {
         }
       }
       const drainPhase = async (role: OwnedRun["role"]) => {
-        const runs = [...this.ownedRuns.values()].filter((run) => run.role === role && !this.terminalProofs.has(run.runId));
+        const runs = [...this.ownedRuns.values()].filter((run) => run.role === role && (this.forcePendingRuns.has(run.runId) || !this.terminalProofs.has(run.runId)));
         const settled = await Promise.allSettled(runs.map((run) => this.drainRun(run)));
         const errors = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected").map((result) => result.reason);
         if (errors.length) throw new AggregateError(errors, `Root subagent broker ${role} drain failed`);
@@ -661,6 +740,7 @@ export class RootBrokerServer {
           this.supervisorRequests.clear();
           this.ownedRuns.clear();
           this.terminalProofs.clear();
+          this.forcePendingRuns.clear();
           this.terminalWaiters.clear();
           this.startedObservations.clear();
         }
