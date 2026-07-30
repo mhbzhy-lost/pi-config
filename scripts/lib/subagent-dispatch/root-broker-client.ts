@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { connect, Socket } from "node:net";
+import { StringDecoder } from "node:string_decoder";
 
 import {
   BROKER_FRAME_LIMIT_BYTES,
@@ -33,17 +34,21 @@ function safeRequestId(createId: () => string) {
 
 export function createBrokerFrameDecoder() {
   let buffer = "";
+  const decoder = new StringDecoder("utf8");
   return {
     push(chunk: Buffer | string) {
-      buffer += chunk.toString("utf8");
-      if (Buffer.byteLength(buffer, "utf8") > BROKER_FRAME_LIMIT_BYTES) throw clientError("Root broker subscription is too large", "BROKER_RESPONSE_TOO_LARGE");
+      buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
       const lines: string[] = [];
       for (;;) {
         const newline = buffer.indexOf("\n");
-        if (newline < 0) return lines;
-        lines.push(buffer.slice(0, newline));
+        if (newline < 0) break;
+        const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
+        if (Buffer.byteLength(`${line}\n`, "utf8") > BROKER_FRAME_LIMIT_BYTES) throw clientError("Root broker subscription is too large", "BROKER_RESPONSE_TOO_LARGE");
+        lines.push(line);
       }
+      if (Buffer.byteLength(buffer, "utf8") > BROKER_FRAME_LIMIT_BYTES) throw clientError("Root broker subscription is too large", "BROKER_RESPONSE_TOO_LARGE");
+      return lines;
     },
   };
 }
