@@ -213,6 +213,14 @@ function spawnBinding(reply) {
   return { runId, asyncDir };
 }
 
+function assertCodingSpawnIdentity(identity) {
+  if (!isRecord(identity) || !nonempty(identity.requestId) || !nonempty(identity.spawnKey) || identity.requestId !== identity.spawnKey) {
+    const error = new Error("coding spawn identity must provide matching non-empty requestId and spawnKey");
+    error.code = "SPAWN_IDENTITY_INVALID";
+    throw error;
+  }
+}
+
 function codingSpawnParams(ir, prompt) {
   return {
     agent: ir.agent,
@@ -250,14 +258,16 @@ async function executeCoding(toolCallId, input, ctx, rpc, createId, titleRegistr
   const prompt = renderCodingDispatchPrompt(ir);
   titleRegistry.prepare({ agent: ir.agent, task: prompt, title: ir.title });
   assertSpawnCapabilities(await rpc.ping(), ctx.cwd);
-  const identity = typeof resolveCodingSpawnIdentity === "function"
+  const hasSpawnIdentityResolver = typeof resolveCodingSpawnIdentity === "function";
+  const identity = hasSpawnIdentityResolver
     ? await resolveCodingSpawnIdentity({ toolCallId, contract: input, contractHash: ir.hash })
     : undefined;
+  if (hasSpawnIdentityResolver) assertCodingSpawnIdentity(identity);
   const binding = spawnBinding(await rpc.spawn(codingSpawnParams(ir, prompt), identity));
   titleRegistry.remember(binding.runId, ir.title);
   const handle = {
     version: "coding-dispatch-handle.v1",
-    dispatchId: createId(),
+    dispatchId: identity?.spawnKey ?? createId(),
     taskId: ir.taskId,
     agent: ir.agent,
     title: ir.title,

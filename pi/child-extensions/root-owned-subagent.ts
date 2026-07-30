@@ -2,11 +2,11 @@ import { createTypedSubagentExtension } from "../../scripts/lib/subagent-dispatc
 import { createRootBrokerClient } from "../../scripts/lib/subagent-dispatch/root-broker-client.ts";
 import { createSupervisorTool } from "../../scripts/lib/subagent-dispatch/supervisor-adapter.ts";
 
-export function installRootOwnedSubagent(pi: any, { rootSessionId = process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID, callerRunId = process.env.PI_SUBAGENT_RUN_ID, createClient = createRootBrokerClient, lifecycleDedupeLimit = 1024 } = {}) {
+export function installRootOwnedSubagent(pi: any, { rootSessionId = process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID, callerRunId = process.env.PI_SUBAGENT_RUN_ID, createClient = createRootBrokerClient, lifecycleDedupeLimit = 1024, resolveCodingSpawnIdentity } = {}) {
   if (!Number.isSafeInteger(lifecycleDedupeLimit) || lifecycleDedupeLimit <= 0) throw new Error("Lifecycle dedupe limit must be a positive safe integer");
   if (!rootSessionId || !callerRunId) throw new Error("Root-owned subagent requires PI_SUBAGENT_RUN_ID and PI_SUBAGENT_ORCHESTRATOR_SESSION_ID");
   const rpc = createClient({ rootSessionId, callerRunId });
-  const typed = createTypedSubagentExtension(pi, { rpc });
+  const typed = createTypedSubagentExtension(pi, { rpc, resolveCodingSpawnIdentity });
   const supervisorTool = createSupervisorTool({
     async execute(_toolCallId: string, params: Record<string, unknown>) {
       if (params.action === "pending") return rpc.supervisorPending();

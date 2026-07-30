@@ -19,6 +19,16 @@ function compile(input, cwd) {
   }
 }
 
+function cloneContract(contract) {
+  return JSON.parse(JSON.stringify(contract));
+}
+
+function exactResolverInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const keys = Reflect.ownKeys(input).sort((left, right) => String(left).localeCompare(String(right)));
+  return keys.length === 3 && keys[0] === "contract" && keys[1] === "contractHash" && keys[2] === "toolCallId";
+}
+
 export function createPlanExecutorToolBoundary() {
   const authorized = new Map();
   const authorizedToolCallIds = new Map();
@@ -74,10 +84,28 @@ export function createPlanExecutorToolBoundary() {
       const key = `${attempt.dispatchId}:${compiled.hash}`;
       required(!authorized.has(key), "Executor dispatch already authorized (replay)");
       required(!authorizedToolCallIds.has(toolCallId), "Executor dispatch toolCallId already authorized (duplicate)");
-      const authorization = { attemptId, dispatchId: attempt.dispatchId, contractHash: compiled.hash, toolCallId, state: "executing" };
+      const authorization = {
+        attemptId,
+        dispatchId: attempt.dispatchId,
+        contractHash: compiled.hash,
+        toolCallId,
+        state: "executing",
+        contract: cloneContract(input),
+      };
       authorized.set(key, authorization);
       authorizedToolCallIds.set(toolCallId, authorization);
-      return authorization;
+      return { attemptId, dispatchId: attempt.dispatchId, contractHash: compiled.hash, toolCallId, state: "executing" };
+    },
+    resolveCodingSpawnIdentity(input) {
+      required(exactResolverInput(input), "Executor spawn identity requires exact toolCallId, contract, and contractHash");
+      required(typeof input.toolCallId === "string" && input.toolCallId.trim(), "Executor spawn identity toolCallId is required");
+      const authorization = authorizedToolCallIds.get(input.toolCallId);
+      required(authorization, "Executor spawn identity toolCallId is not authorized");
+      required(authorization.state === "executing", "Executor spawn identity already resolved (one-shot replay)");
+      required(isDeepStrictEqual(input.contract, authorization.contract), "Executor spawn identity exact contract mismatch");
+      required(input.contractHash === authorization.contractHash, "Executor spawn identity contract hash mismatch");
+      authorization.state = "identity-resolved";
+      return Object.freeze({ requestId: authorization.dispatchId, spawnKey: authorization.dispatchId });
     },
   };
 }
