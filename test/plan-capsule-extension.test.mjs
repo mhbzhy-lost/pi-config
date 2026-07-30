@@ -250,6 +250,22 @@ test("plan_open validates then persists and activates the lifecycle tools", asyn
   ]);
 });
 
+test("plan_open tool result queues a coordinator follow-up during streaming", async () => {
+  const binding = openBinding();
+  const { tools, handlers, messages } = setup({
+    validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
+  });
+  const result = await execute(tools.get("plan_open"), binding);
+  assert.equal(result.isError, false, result.content[0].text);
+
+  await handlers.get("tool_result")({ toolName: "plan_open", isError: false }, context());
+
+  assert.deepEqual(messages, [{
+    message: { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: "release-11" } },
+    options: { triggerTurn: true, deliverAs: "followUp" },
+  }]);
+});
+
 test("plan_open appends plan.created before writing the current revision", async () => {
   const calls = [];
   const { tools } = setup({
