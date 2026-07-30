@@ -7,9 +7,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { BROKER_METHODS, brokerGrantPath, brokerSocketPath, parseBrokerPush, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
+import { BROKER_FRAME_LIMIT_BYTES, BROKER_METHODS, brokerGrantPath, brokerSocketPath, parseBrokerPush, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
-import { createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
+import { createBrokerFrameDecoder, createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
 import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 import { bootstrapRuntimeRoots, default as planRunner } from "../pi/child-extensions/plan-runner.ts";
 import { installRootSessionOwner, installRootSessionOwnerLifecycle } from "../pi/child-extensions/root-session-owner.ts";
@@ -1045,6 +1045,27 @@ function observedProcessTerminal() {
     canonicalSession: { canonicalSessionId: "canonical-session-protocol", leaseDisposition: "released", freeAtObservation: true, canonicalSessionLeaseReleased: true },
   };
 }
+
+test("frame decoder accepts multiple valid frames across chunks", () => {
+  const small = lifecycleCompletedPush({ version: 1, runnerProcessInstanceId: "runner-small-frame", state: "pending" });
+  const large1 = lifecycleCompletedPush({ version: 1, runnerProcessInstanceId: "runner-large-frame-1", state: "unknown", reason: "observer-unavailable", diagnostic: "x".repeat(40 * 1024) });
+  const large2 = lifecycleCompletedPush({ version: 1, runnerProcessInstanceId: "runner-large-frame-2", state: "unknown", reason: "observer-unavailable", diagnostic: "y".repeat(40 * 1024) });
+  const smallFrame = `${JSON.stringify(small)}\n`;
+  const large1Frame = `${JSON.stringify(large1)}\n`;
+  const large2Frame = `${JSON.stringify(large2)}\n`;
+  const prefixLength = Math.floor(large1Frame.length / 4);
+  const large1Prefix = large1Frame.slice(0, prefixLength);
+  const large1Suffix = large1Frame.slice(prefixLength);
+
+  for (const push of [small, large1, large2]) assert.deepEqual(parseBrokerPush(push), push);
+  for (const frame of [smallFrame, large1Frame, large2Frame]) assert.ok(Buffer.byteLength(frame, "utf8") <= BROKER_FRAME_LIMIT_BYTES);
+  assert.equal(large1Prefix.includes("\n"), false);
+
+  const decoder = createBrokerFrameDecoder();
+  assert.deepEqual(decoder.push(`${smallFrame}${large1Prefix}`), [smallFrame.trimEnd()]);
+  assert.ok(Buffer.byteLength(`${large1Prefix}${large1Suffix}${large2Frame}`, "utf8") > BROKER_FRAME_LIMIT_BYTES);
+  assert.deepEqual(decoder.push(`${large1Suffix}${large2Frame}`), [large1Frame.trimEnd(), large2Frame.trimEnd()]);
+});
 
 test("lifecycle push protocol accepts pinned observed, unknown, pending, and not-started terminals", () => {
   const terminals = [
