@@ -204,6 +204,21 @@ test("before_agent_start checks capabilities before recovering an opened Plan", 
   assert.deepEqual(calls, ["capabilities", "recovery"]);
 });
 
+test("before_agent_start reactivates tools from a revived durable Plan", async () => {
+  const { activeTools, handlers } = setup();
+  const ctx = context([{
+    customType: "pi-plan-event-v1",
+    data: created,
+  }]);
+
+  await handlers.get("before_agent_start")({}, ctx);
+
+  assert.deepEqual(activeTools(), [
+    "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
+    "subagent", "plan_executor_supervisor", "read", "grep",
+  ]);
+});
+
 test("plan_open fails before binding when runtime capability remains unavailable", async () => {
   const binding = openBinding();
   let bindingCalled = false;
