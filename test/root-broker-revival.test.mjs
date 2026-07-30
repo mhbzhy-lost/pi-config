@@ -101,6 +101,54 @@ const expectedResume = [{
   message: "A durable Root broker wake is pending.",
 }];
 
+const supervisorMessage = {
+  customType: "subagent_supervisor_request",
+  content: "Need approval",
+  details: {
+    id: "attention-1",
+    runId: "executor-1",
+    reason: "need_decision",
+    expectsReply: true,
+    agent: "executor",
+    childIndex: 0,
+  },
+};
+
+const supervisorContext = { source: "revival-test" };
+
+const expectedPendingSupervisorData = {
+  requestId: "attention-1",
+  executorRunId: "executor-1",
+  reason: "need_decision",
+  expectsReply: true,
+  agent: "executor",
+  childIndex: 0,
+  content: "Need approval",
+};
+
+async function createRevivedSupervisorFixture({ executeSupervisor } = {}) {
+  const fixture = await createRevivalFixture();
+  const { ownedRun, proof, request, server } = fixture;
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const spawnResponse = await server.dispatch(parseBrokerRequest({
+    ...request,
+    requestId: "request-spawn-supervisor-revival-1",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    method: "spawn",
+    params: { agent: "executor", task: "run", spawnKey: "supervisor-revival-1" },
+  }), {});
+  assert.equal(spawnResponse.success, true);
+  server.upstream.executeSupervisor = executeSupervisor;
+  await server.routeSupervisorRequest(supervisorMessage, supervisorContext);
+
+  return fixture;
+}
+
 test("revives a pending plan-runner wake only after its observed terminal proof", async () => {
   const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture();
 
@@ -397,4 +445,58 @@ test("allows an active plan-runner alias to control its executor", async () => {
     data: { state: "running", runId: "executor-1" },
   });
   assert.deepEqual(statusCalls, [{ runId: "executor-1" }]);
+});
+
+test("lists a revived executor supervisor request for its active plan-runner alias", async () => {
+  const { request, server } = await createRevivedSupervisorFixture();
+
+  const response = await server.dispatch(parseBrokerRequest({
+    ...request,
+    requestId: "request-supervisor-pending-active-alias-1",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    method: "supervisor.pending",
+    params: {},
+  }), {});
+
+  assert.deepEqual(response, {
+    schemaVersion: "pi-root-subagent-broker-response.v1",
+    requestId: "request-supervisor-pending-active-alias-1",
+    rootSessionId: "root-session-1",
+    callerRunId: "plan-runner-2",
+    success: true,
+    data: { pending: [expectedPendingSupervisorData] },
+  });
+});
+
+test("replies to a revived executor supervisor request from its active plan-runner alias", async () => {
+  const calls = [];
+  const { request, server } = await createRevivedSupervisorFixture({
+    executeSupervisor: async (params, context) => {
+      calls.push({ params, context });
+      return { accepted: true };
+    },
+  });
+
+  const response = await server.dispatch(parseBrokerRequest({
+    ...request,
+    requestId: "request-supervisor-reply-active-alias-1",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    method: "supervisor.reply",
+    params: { replyTo: "attention-1", message: "Proceed" },
+  }), {});
+
+  assert.deepEqual(response, {
+    schemaVersion: "pi-root-subagent-broker-response.v1",
+    requestId: "request-supervisor-reply-active-alias-1",
+    rootSessionId: "root-session-1",
+    callerRunId: "plan-runner-2",
+    success: true,
+    data: { accepted: true },
+  });
+  assert.deepEqual(calls, [{
+    params: { action: "reply", replyTo: "attention-1", message: "Proceed" },
+    context: supervisorContext,
+  }]);
 });
