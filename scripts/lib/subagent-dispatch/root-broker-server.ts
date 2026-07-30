@@ -300,30 +300,34 @@ export class RootBrokerServer {
       throw new Error(`force cleanup recapture failed for run ${run.runId}: ${String(error?.message ?? error).slice(0, 512)}`);
     }
     if (recaptured !== run.birthIdentity) throw new Error(`force cleanup stale birth identity mismatch for run ${run.runId}`);
+    if (this.terminalProofs.has(run.runId)) return;
 
     const waiter = this.waitForTerminal(run.runId); // Install before SIGKILL: it may emit synchronously.
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let cancelled = false;
     let cancelSleep: (() => void) | undefined;
+    let shouldVerifyDeath = false;
     try {
+      const deadline = new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new TerminalDeadlineError(`force missing official proof for run ${run.runId}`)), this.terminalTimeoutMs); });
+      if (this.terminalProofs.has(run.runId)) return;
       try { this.killProcess(-run.pid, "SIGKILL"); } catch (error: any) {
         throw new Error(`force cleanup signal failed for run ${run.runId}: ${String(error?.message ?? error).slice(0, 512)}; ${deadlineError.message}`);
       }
       this.forcePendingRuns.add(run.runId);
       if (!this.terminalProofs.has(run.runId)) {
-        const deadline = new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new TerminalDeadlineError(`force missing official proof for run ${run.runId}`)), this.terminalTimeoutMs); });
         const artifact = this.pollTerminalArtifact(run, () => cancelled, (cancel) => { cancelSleep = cancel; });
         void artifact.catch(() => undefined);
         await Promise.race([waiter.promise, artifact, deadline]);
       }
       if (!this.terminalProofs.has(run.runId)) throw new TerminalDeadlineError(`force missing official proof for run ${run.runId}`);
-      await this.verifyForcedDeath(run);
+      shouldVerifyDeath = true;
     } finally {
       cancelled = true;
       cancelSleep?.();
       if (timeout) clearTimeout(timeout);
       waiter.cancel();
     }
+    if (shouldVerifyDeath) await this.verifyForcedDeath(run);
   }
 
   async drainRun(run: OwnedRun) {
@@ -339,6 +343,7 @@ export class RootBrokerServer {
     let cancelSleep: (() => void) | undefined;
     let stopFailed = false;
     let stopError: Error | undefined;
+    let deadlineError: TerminalDeadlineError | undefined;
     try {
       let stopSettled = false;
       const deadline = new Promise<never>((_, reject) => {
@@ -361,7 +366,7 @@ export class RootBrokerServer {
       const proof = await Promise.race([waiter.promise, artifact, deadline]);
       if (!proof) throw new TerminalDeadlineError(`missing official proof for run ${run.runId}`);
     } catch (error) {
-      if (error instanceof TerminalDeadlineError && error.code === "ROOT_TERMINAL_DEADLINE") await this.forceCleanup(run, error);
+      if (error instanceof TerminalDeadlineError && error.code === "ROOT_TERMINAL_DEADLINE") deadlineError = error;
       else throw error;
     } finally {
       cancelled = true;
@@ -369,6 +374,7 @@ export class RootBrokerServer {
       if (timeout) clearTimeout(timeout);
       waiter.cancel();
     }
+    if (deadlineError) await this.forceCleanup(run, deadlineError);
   }
 
   async ensureExecutorOwner(runId: string) {
