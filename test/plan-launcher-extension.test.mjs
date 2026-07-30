@@ -200,7 +200,7 @@ test("launch fence rejects concurrent same planId requests", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("plan-status forwards pending Attention using the Host event contract once", async () => {
+test("plan-status forwards pending Attention using the Root notification contract once", async () => {
   const { root } = await fixture();
   const calls = [];
   try {
@@ -395,7 +395,7 @@ test("terminal runner stops poller when sendMessage throws after valid Attention
   const { root, planPath } = await fixture(); const calls = []; const cancelled = []; let poll;
   try {
     const terminalBroker = broker(calls); terminalBroker.upstream.status = async () => ({ state: "failed" });
-    const { commands } = setup(options(root, calls, { rootBroker: terminalBroker, schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer), sendMessage: async () => { throw new Error("Host send failed"); } }));
+    const { commands } = setup(options(root, calls, { rootBroker: terminalBroker, schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer), sendMessage: async () => { throw new Error("notification send failed"); } }));
     await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
     const body = "Choose the deployment target."; const bodySha256 = createHash("sha256").update(body).digest("hex");
     const dir = await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256 } } }] }] });
@@ -408,7 +408,7 @@ test("terminal runner stops poller when sendMessage throws after valid Attention
 test("nonterminal sendMessage failure retains poller and retries on the next poll", async () => {
   const { root, planPath } = await fixture(); const calls = []; const cancelled = []; let poll; let sends = 0;
   try {
-    const { commands, messages } = setup(options(root, calls, { schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer), sendMessage: async (message, sendOptions, recorded) => { sends += 1; if (sends === 1) throw new Error("Host send failed"); recorded.push({ message, options: sendOptions }); } }));
+    const { commands, messages } = setup(options(root, calls, { schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer), sendMessage: async (message, sendOptions, recorded) => { sends += 1; if (sends === 1) throw new Error("notification send failed"); recorded.push({ message, options: sendOptions }); } }));
     await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
     const body = "Choose the deployment target."; const bodySha256 = createHash("sha256").update(body).digest("hex");
     const dir = await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256 } } }] }] });
