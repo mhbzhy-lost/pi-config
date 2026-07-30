@@ -35,6 +35,37 @@ test("authorizes exactly one matching typed Executor dispatch", () => {
   assert.deepEqual(createPlanExecutorToolBoundary().authorize(exact.contract, { projection: projectionFor(exact), toolCallId: "call-1" }), { attemptId: "attempt-1", dispatchId: "dispatch-1", contractHash: exact.contractHash, toolCallId: "call-1", state: "executing" });
 });
 
+test("rejects canonical-equivalent raw contract mutations without consuming the dispatch", async (t) => {
+  const exact = contract();
+  const mutations = [
+    ["title whitespace", { ...exact.contract, title: ` ${exact.contract.title} ` }],
+    ["duplicate requirement", { ...exact.contract, requirements: [...exact.contract.requirements, exact.contract.requirements[0]] }],
+    ["lexical cwd alias", { ...exact.contract, execution: { ...exact.contract.execution, cwd: `${exact.contract.execution.cwd}/.` } }],
+  ];
+  for (const [name, mutated] of mutations) {
+    await t.test(name, () => {
+      assert.equal(compileCodingDispatchIR(mutated, { cwd: "/repo" }).hash, exact.contractHash);
+      const boundary = createPlanExecutorToolBoundary();
+      const projection = projectionFor(exact);
+      assert.throws(
+        () => boundary.authorize(mutated, { projection, toolCallId: `mutated-${name}` }),
+        /exact contract|contract identity|contract hash/i,
+      );
+      assert.equal(boundary.authorize(exact.contract, { projection, toolCallId: `valid-${name}` }).state, "executing");
+    });
+  }
+});
+
+test("requires a non-blank toolCallId without consuming the dispatch", async (t) => {
+  for (const [name, toolCallId] of [["missing", undefined], ["empty", ""], ["whitespace", "   "]]) {
+    await t.test(name, () => {
+      const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+      assert.throws(() => boundary.authorize(exact.contract, { projection, toolCallId }), /toolCallId|required|identity/i);
+      assert.equal(boundary.authorize(exact.contract, { projection, toolCallId: `valid-${name}` }).state, "executing");
+    });
+  }
+});
+
 test("rejects a current revision IR hash mismatch without consuming the authorization", () => {
   const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
   const tampered = { ...projection, revision: { ...projection.revision, irHash: hash("other-ir") } };
@@ -64,4 +95,14 @@ test("authorizes independent requested Attempts once each", () => {
   const one = projectionFor(first); const two = projectionFor({ ...second, attemptId: "attempt-2", taskId: "task-2", dispatchId: "dispatch-2" });
   const projection = { ...one, tasks: new Map([...one.tasks, ...two.tasks]), attempts: new Map([...one.attempts, ...two.attempts]), revision: { ...one.revision, taskHashes: { ...one.revision.taskHashes, ...two.revision.taskHashes } } }; const boundary = createPlanExecutorToolBoundary();
   assert.equal(boundary.authorize(first.contract, { projection, toolCallId: "call-1" }).attemptId, "attempt-1"); assert.equal(boundary.authorize(second.contract, { projection, toolCallId: "call-2" }).attemptId, "attempt-2");
+});
+
+test("rejects a toolCallId reused by a separate requested Attempt without consuming it", () => {
+  const first = contract(); const second = contract({ taskId: "task-2", execution: { timeoutMs: 1000, cwd: "/attempts/attempt-2" } });
+  const one = projectionFor(first); const two = projectionFor({ ...second, attemptId: "attempt-2", taskId: "task-2", dispatchId: "dispatch-2" });
+  const projection = { ...one, tasks: new Map([...one.tasks, ...two.tasks]), attempts: new Map([...one.attempts, ...two.attempts]), revision: { ...one.revision, taskHashes: { ...one.revision.taskHashes, ...two.revision.taskHashes } } };
+  const boundary = createPlanExecutorToolBoundary();
+  assert.equal(boundary.authorize(first.contract, { projection, toolCallId: "shared-call" }).attemptId, "attempt-1");
+  assert.throws(() => boundary.authorize(second.contract, { projection, toolCallId: "shared-call" }), /toolCallId.*already|duplicate.*toolCallId/i);
+  assert.equal(boundary.authorize(second.contract, { projection, toolCallId: "call-2" }).attemptId, "attempt-2");
 });

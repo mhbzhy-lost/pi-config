@@ -334,6 +334,7 @@ test("capsule blocks generic subagent and non-Supervisor control tools", async (
     { toolName: "subagent", input: { action: "status", id: "run-1" } },
     { toolName: "contact_supervisor", input: { message: "bypass" } },
     { toolName: "bash", input: { command: "true" } },
+    { toolName: "subagent_wait", input: { timeoutMs: 1000 } },
     { toolName: "subagent_supervisor", input: { action: "send", to: "other", message: "bypass" } },
   ]) {
     const denied = await handlers.get("tool_call")(event, ctx);
@@ -369,7 +370,7 @@ test("capsule persists native Supervisor requests through the injected Attention
   assert.deepEqual(recorded, [{ request: message, ctx }]);
 });
 
-test("capsule resolves only the authorized successful native Supervisor reply", async () => {
+test("capsule resolves only the authorized successful project Supervisor reply", async () => {
   const authorized = [];
   const resolved = [];
   const { handlers } = setup({
@@ -382,9 +383,9 @@ test("capsule resolves only the authorized successful native Supervisor reply", 
   const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
   await handlers.get("session_start")({ type: "session_start" }, ctx);
   const input = { action: "reply", replyTo: "request-1", to: "executor", message: "Use target A" };
-  const call = { toolName: "subagent_supervisor", toolCallId: "reply-call-1", input };
+  const call = { toolName: "plan_executor_supervisor", toolCallId: "reply-call-1", input };
   assert.equal(await handlers.get("tool_call")(call, ctx), undefined);
-  const result = { toolName: "subagent_supervisor", toolCallId: "reply-call-1", input, isError: false };
+  const result = { toolName: "plan_executor_supervisor", toolCallId: "reply-call-1", input, isError: false };
   await handlers.get("tool_result")(result, ctx);
   await handlers.get("tool_result")(result, ctx);
 
@@ -392,6 +393,41 @@ test("capsule resolves only the authorized successful native Supervisor reply", 
   assert.equal(resolved.length, 1);
   assert.equal(resolved[0].requestId, "request-1");
   assert.equal(resolved[0].message, "Use target A");
+});
+
+test("capsule blocks legacy Supervisor pending and reply without invoking its authorizer", async () => {
+  const authorized = [];
+  const { handlers } = setup({ authorizeSupervisorReply: async (input) => authorized.push(input) });
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
+  await handlers.get("session_start")({}, ctx);
+  for (const input of [
+    { action: "pending" },
+    { action: "reply", replyTo: "request-1", to: "executor", message: "Use target A" },
+  ]) {
+    const denied = await handlers.get("tool_call")({ toolName: "subagent_supervisor", toolCallId: `legacy-${input.action}`, input }, ctx);
+    assert.equal(denied.block, true);
+    assert.match(denied.reason, /authorization boundary|limited to pending and fenced reply/i);
+  }
+  assert.deepEqual(authorized, []);
+});
+
+test("project Supervisor preserves authorizer errors while pending bypasses reply authorization", async () => {
+  const authorized = [];
+  const { handlers } = setup({
+    authorizeSupervisorReply: async (input) => {
+      authorized.push(input);
+      throw new Error("project Supervisor authorization failed");
+    },
+  });
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
+  await handlers.get("session_start")({}, ctx);
+  assert.equal(await handlers.get("tool_call")({ toolName: "plan_executor_supervisor", toolCallId: "pending-1", input: { action: "pending" } }, ctx), undefined);
+  assert.deepEqual(authorized, []);
+  assert.deepEqual(
+    await handlers.get("tool_call")({ toolName: "plan_executor_supervisor", toolCallId: "reply-1", input: { action: "reply", replyTo: "request-1", to: "executor", message: "Use target A" } }, ctx),
+    { block: true, reason: "project Supervisor authorization failed" },
+  );
+  assert.equal(authorized.length, 1);
 });
 
 test("plan revision tools use exact schemas and forward only params plus context", async () => {
