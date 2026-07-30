@@ -251,16 +251,16 @@ export class RootBrokerServer {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let cancelled = false;
     let cancelSleep: (() => void) | undefined;
+    let stopFailed = false;
+    let stopError: Error | undefined;
     try {
-      const artifact = this.pollTerminalArtifact(run, () => cancelled, (cancel) => { cancelSleep = cancel; });
-      void artifact.catch(() => undefined);
-      const terminal = Promise.race([
-        waiter.promise,
-        artifact,
-        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error(`missing official proof for run ${run.runId}`)), this.terminalTimeoutMs); }),
-      ]);
-      let stopError: unknown;
       let stopSettled = false;
+      const deadline = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          const suffix = stopFailed ? ` after stop failure: ${stopError?.message ?? "unknown stop failure"}` : "";
+          reject(new Error(`missing official proof for run ${run.runId}${suffix}`));
+        }, this.terminalTimeoutMs);
+      });
       let stopPromise: Promise<any>;
       try {
         stopPromise = Promise.resolve(this.upstream.stop({ runId: run.runId, dir: run.asyncDir }));
@@ -269,11 +269,19 @@ export class RootBrokerServer {
       }
       void stopPromise.then(
         () => { stopSettled = true; },
-        (error) => { stopSettled = true; stopError = error; },
+        (error) => {
+          stopSettled = true;
+          stopFailed = true;
+          stopError = error instanceof Error ? error : new Error(String(error).slice(0, 1024) || "unknown stop failure");
+        },
       );
       // Preserve immediate stop failures as debt even when stop synchronously emits proof.
       await Promise.resolve();
-      if (stopSettled && stopError !== undefined) throw stopError;
+      if (stopSettled && stopFailed) throw stopError;
+      if (this.terminalProofs.has(run.runId)) return;
+      const artifact = this.pollTerminalArtifact(run, () => cancelled, (cancel) => { cancelSleep = cancel; });
+      void artifact.catch(() => undefined);
+      const terminal = Promise.race([waiter.promise, artifact, deadline]);
       const proof = await terminal;
       if (!proof) throw new Error(`missing official proof for run ${run.runId}`);
     } finally {
