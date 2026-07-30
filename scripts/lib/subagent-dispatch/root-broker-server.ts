@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, Socket } from "node:net";
-import { rm } from "node:fs/promises";
+import { readFile as nodeReadFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { captureProcessBirthIdentity } from "./process-birth-identity.ts";
@@ -12,6 +12,7 @@ import {
   ensureBrokerSocketDirectory,
   parseBrokerRequest,
   parseBrokerPush,
+  parseProcessTerminal,
   createSupervisorRequestPush,
   setBrokerSocketPermissions,
   writeBrokerGrant,
@@ -20,7 +21,7 @@ import {
 type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: () => void | Promise<void> };
 type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
-type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number };
+type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; delivered: Set<string> };
 type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
 type OwnedRun = { rootSessionId: string; runId: string; role: "plan-runner" | "executor"; asyncDir: string; sessionId: string; pid: number; birthIdentity: string | null; identityState: "verified" | "unavailable" | "conflict" };
@@ -81,9 +82,12 @@ export class RootBrokerServer {
   captureProcessBirthIdentity: typeof captureProcessBirthIdentity;
   events: Dependencies["events"];
   terminalTimeoutMs: number;
+  readFile: typeof nodeReadFile;
+  artifactPollIntervalMs: number;
 
-  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, events, terminalTimeoutMs = 5_000 }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
+  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50 }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
+    if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
     this.rootSessionId = rootSessionId;
     this.upstream = upstream;
     this.writeGrant = writeGrant;
@@ -91,6 +95,8 @@ export class RootBrokerServer {
     this.captureProcessBirthIdentity = captureBirthIdentity;
     this.events = events;
     this.terminalTimeoutMs = terminalTimeoutMs;
+    this.readFile = readFile;
+    this.artifactPollIntervalMs = artifactPollIntervalMs;
   }
 
   async start() {
@@ -158,32 +164,64 @@ export class RootBrokerServer {
     return observation.catch(() => undefined);
   }
 
+  acceptTerminalProof(run: OwnedRun, value: any) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid official terminal: proof must be an object");
+    const actual = value.runId;
+    if (typeof actual !== "string" || actual.length === 0 || actual !== run.runId) {
+      throw new Error(`official terminal runId mismatch: expected ${run.runId}, actual ${String(actual)}`);
+    }
+    const { runId: _runId, ...terminal } = value;
+    try { parseProcessTerminal(terminal); } catch (error) { throw new Error(`invalid official terminal: ${error instanceof Error ? error.message : String(error)}`); }
+    if (terminal.state !== "observed") throw new Error(`official terminal is non-observed (${String(terminal.state)})`);
+    this.terminalProofs.set(run.runId, value);
+    const waiters = this.terminalWaiters.get(run.runId);
+    this.terminalWaiters.delete(run.runId);
+    for (const resolve of waiters ?? []) resolve(value);
+    return value;
+  }
+
   observeTerminal(event: any) {
     const runId = event?.runId;
     const owned = typeof runId === "string" ? this.ownedRuns.get(runId) : undefined;
-    const instances = event?.instances;
-    const runner = Array.isArray(instances)
-      ? instances.find((instance: any) => instance?.kind === "runner" && instance?.processInstanceId === event?.runnerProcessInstanceId)
-      : undefined;
-    if (!owned
-      || event?.version !== 1 || event?.state !== "observed"
-      || typeof runId !== "string" || runId.length === 0
-      || typeof event?.runnerProcessInstanceId !== "string" || event.runnerProcessInstanceId.length === 0
-      || typeof event?.observedAt !== "number" || !Number.isFinite(event.observedAt)
-      || !Array.isArray(instances)
-      || instances.some((instance: any) => !instance || typeof instance.processInstanceId !== "string" || instance.processInstanceId.length === 0
-        || !["runner", "pi-writer"].includes(instance.kind)
-        || typeof instance.closeObservedAt !== "number" || !Number.isFinite(instance.closeObservedAt)
-        || (typeof instance.exitCode !== "number" && instance.exitCode !== null)
-        || (typeof instance.signal !== "string" && instance.signal !== null)
-        || (instance.kind === "runner" ? instance.attempt !== undefined : !Number.isSafeInteger(instance.attempt) || instance.attempt < 0))
-      || !runner || typeof runner.closeObservedAt !== "number" || !Number.isFinite(runner.closeObservedAt)
-      || (typeof runner.exitCode !== "number" && runner.exitCode !== null)
-      || (typeof runner.signal !== "string" && runner.signal !== null)) return;
-    this.terminalProofs.set(runId, event);
-    const waiters = this.terminalWaiters.get(runId);
-    this.terminalWaiters.delete(runId);
-    for (const resolve of waiters ?? []) resolve(event);
+    if (!owned) return;
+    try { this.acceptTerminalProof(owned, event); } catch { /* only strict observed events are authority */ }
+  }
+
+  async pollTerminalArtifact(run: OwnedRun, cancelled: () => boolean, setCancelSleep: (cancel: () => void) => void) {
+    const readJson = async (file: string) => JSON.parse(await this.readFile(file, "utf8"));
+    while (!cancelled()) {
+      try {
+        const sidecar = await readJson(path.join(run.asyncDir, "process-terminal.json"));
+        if (cancelled()) return undefined;
+        return this.acceptTerminalProof(run, sidecar);
+      } catch (error: any) {
+        if (error?.code !== "ENOENT") {
+          if (error instanceof Error && /official terminal/.test(error.message)) throw error;
+          throw new Error(`invalid official terminal: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      try {
+        const status = await readJson(path.join(run.asyncDir, "status.json"));
+        if (!status || typeof status !== "object" || Array.isArray(status)) throw new Error("invalid official terminal: status must be an object");
+        if (Object.hasOwn(status, "runId") && status.runId !== run.runId) throw new Error(`official terminal runId mismatch: expected ${run.runId}, actual ${String(status.runId)}`);
+        if (Object.hasOwn(status, "processTerminal")) {
+          const proof = status.processTerminal;
+          if (!proof || typeof proof !== "object" || Array.isArray(proof)) throw new Error("invalid official terminal: proof must be an object");
+          if (cancelled()) return undefined;
+          return this.acceptTerminalProof(run, proof);
+        }
+      } catch (error: any) {
+        if (error?.code !== "ENOENT") {
+          if (error instanceof Error && /official terminal/.test(error.message)) throw error;
+          throw new Error(`invalid official terminal: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, this.artifactPollIntervalMs);
+        setCancelSleep(() => { clearTimeout(timer); resolve(); });
+      });
+    }
+    return undefined;
   }
 
   waitForTerminal(runId: string): { promise: Promise<any>; cancel: () => void } {
@@ -211,10 +249,15 @@ export class RootBrokerServer {
     if (this.terminalProofs.has(run.runId)) return;
     const waiter = this.waitForTerminal(run.runId); // Install before stop: it may emit synchronously.
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    let cancelSleep: (() => void) | undefined;
     try {
+      const artifact = this.pollTerminalArtifact(run, () => cancelled, (cancel) => { cancelSleep = cancel; });
+      void artifact.catch(() => undefined);
       const terminal = Promise.race([
         waiter.promise,
-        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error(`Root subagent broker terminal proof timed out for run ${run.runId}`)), this.terminalTimeoutMs); }),
+        artifact,
+        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error(`missing official proof for run ${run.runId}`)), this.terminalTimeoutMs); }),
       ]);
       let stopError: unknown;
       let stopSettled = false;
@@ -231,8 +274,11 @@ export class RootBrokerServer {
       // Preserve immediate stop failures as debt even when stop synchronously emits proof.
       await Promise.resolve();
       if (stopSettled && stopError !== undefined) throw stopError;
-      await terminal;
+      const proof = await terminal;
+      if (!proof) throw new Error(`missing official proof for run ${run.runId}`);
     } finally {
+      cancelled = true;
+      cancelSleep?.();
       if (timeout) clearTimeout(timeout);
       waiter.cancel();
     }

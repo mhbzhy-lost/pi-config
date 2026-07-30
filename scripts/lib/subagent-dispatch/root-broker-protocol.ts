@@ -140,7 +140,7 @@ function exactOptionalObject(value, name, required, optional = []) {
   return value;
 }
 
-function processTerminal(value) {
+export function parseProcessTerminal(value) {
   const terminal = exactOptionalObject(value, "push.data.processTerminal", ["version", "runnerProcessInstanceId", "state"], ["childIndex", "resumeDisposition", "observedAt", "instances", "canonicalSession", "reason", "diagnostic"]);
   if (terminal.version !== 1) fail("push.data.processTerminal.version must equal 1");
   nonEmptyString(terminal.runnerProcessInstanceId, "push.data.processTerminal.runnerProcessInstanceId");
@@ -311,7 +311,7 @@ export function parseBrokerPush(value) {
       else if (typeof push.data[key] !== "string" || push.data[key].length === 0) fail(`push.data.${key} must be a non-empty string`);
     }
     if (Object.hasOwn(push.data, "processTerminal")) {
-      processTerminal(push.data.processTerminal);
+      parseProcessTerminal(push.data.processTerminal);
       if (push.data.processTerminal.state !== push.data.state) fail("push.data.processTerminal.state must match push.data.state");
     }
   }
