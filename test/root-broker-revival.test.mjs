@@ -227,3 +227,29 @@ test("grants the revived actual plan-runner while retaining its stable logical a
   assert.deepEqual(server.principals.get("plan-runner-2"), { role: "plan-runner", callerToken: "b".repeat(64) });
   assert.deepEqual([...server.callers.keys()], ["plan-runner-1"]);
 });
+
+test("rejects an old actual plan-runner after its revived alias is active", async () => {
+  const { ownedRun, proof, request, server } = await createRevivalFixture();
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const staleRequest = parseBrokerRequest({
+    ...request,
+    requestId: "request-followup-stale-1",
+    params: { wakeId: "plan-opened-stale-1", reason: "plan-opened" },
+  });
+
+  const response = await server.dispatch(staleRequest, {});
+
+  assert.deepEqual(response, {
+    schemaVersion: "pi-root-subagent-broker-response.v1",
+    requestId: "request-followup-stale-1",
+    rootSessionId: "root-session-1",
+    callerRunId: "plan-runner-1",
+    success: false,
+    error: { code: "caller_stale", message: "Caller generation is stale" },
+  });
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), []);
+});
