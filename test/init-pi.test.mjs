@@ -38,12 +38,12 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const fakeNpm = join(fakeBin, "npm");
     await writeFile(
       fakeNpm,
-      "#!/usr/bin/env bash\nprintf 'npm %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"--prefix\" && \"$3\" == \"run\" && \"$4\" == \"setup:plan-runtime\" ]]; then mkdir -p \"$2/pi/npm/node_modules/typebox\"; printf '{\\\"version\\\":\\\"1.1.38\\\"}' > \"$2/pi/npm/node_modules/typebox/package.json\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"--prefix\" && \"$3\" == \"run\" && \"$4\" == \"setup:plan-runtime\" ]]; then mkdir -p \"$2/pi/npm/node_modules/typebox\"; printf '{\\\"version\\\":\\\"1.1.38\\\"}' > \"$2/pi/npm/node_modules/typebox/package.json\"; fi\n",
     );
     await chmod(fakeNpm, 0o755);
     await writeFile(
       fakePi,
-      "#!/usr/bin/env bash\nprintf 'pi-real %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" && \"$2\" == \"npm:pi-subagents@0.37.2\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.37.2\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'pi-real registry=%s %s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" && \"$2\" == \"npm:pi-subagents@0.37.2\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.37.2\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
     );
     await chmod(fakePi, 0o755);
 
@@ -91,15 +91,15 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     const commands = await readFile(commandLog, "utf8");
     assert.match(commands, /git -C .* submodule update --init --recursive/);
-    assert.match(commands, /npm install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.83\.0/);
-    assert.match(commands, /pi-real install npm:pi-subagents@0\.37\.2/);
-    assert.match(commands, /pi-real install npm:@juicesharp\/rpiv-todo@2\.2\.0/);
-    assert.match(commands, /npm --prefix .* run setup:plan-runtime/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.83\.0/);
+    assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:pi-subagents@0\.37\.2/);
+    assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:@juicesharp\/rpiv-todo@2\.2\.0/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:plan-runtime/);
     const typeboxPackage = JSON.parse(await readFile(join(fixtureRepo, "pi", "npm", "node_modules", "typebox", "package.json"), "utf8"));
     assert.equal(typeboxPackage.version, "1.1.38");
-    assert.match(commands, /npm test/);
-    assert.match(commands, /npm run doctor/);
-    assert.match(commands, /npm run test:integration/);
+    assert.match(commands, /npm registry= test/);
+    assert.match(commands, /npm registry= run doctor/);
+    assert.match(commands, /npm registry= run test:integration/);
     assert.match(commands, /uv tool install --force basic-memory==0\.22\.1/);
   } finally {
     await rm(root, { recursive: true, force: true });

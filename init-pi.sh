@@ -6,6 +6,7 @@ PI_VERSION="0.83.0"
 PI_PACKAGE="@earendil-works/pi-coding-agent@$PI_VERSION"
 PI_SUBAGENTS_VERSION="0.37.2"
 RPIV_TODO_VERSION="2.2.0"
+NPM_REGISTRY="https://registry.npmjs.org"
 BASIC_MEMORY_VERSION="0.22.1"
 ZSHRC_PATH="${ZDOTDIR:-$HOME}/.zshrc"
 SHELL_INTEGRATION="$SCRIPT_DIR/scripts/pi-shell.zsh"
@@ -35,7 +36,7 @@ if [[ -n "$pi_binary" && -x "$pi_binary" ]]; then
   installed_version="$($pi_binary --version 2>/dev/null || true)"
 fi
 if [[ "$installed_version" != "$PI_VERSION" ]]; then
-  npm install -g --ignore-scripts "$PI_PACKAGE"
+  NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm install -g --ignore-scripts "$PI_PACKAGE"
   pi_binary="${PI_REAL_BIN:-$(command -v pi || true)}"
 fi
 if [[ -z "$pi_binary" || ! -x "$pi_binary" ]]; then
@@ -43,9 +44,9 @@ if [[ -z "$pi_binary" || ! -x "$pi_binary" ]]; then
   exit 1
 fi
 
-PI_CODING_AGENT_DIR="$SCRIPT_DIR/pi" "$pi_binary" install "npm:pi-subagents@$PI_SUBAGENTS_VERSION"
-PI_CODING_AGENT_DIR="$SCRIPT_DIR/pi" "$pi_binary" install "npm:@juicesharp/rpiv-todo@$RPIV_TODO_VERSION"
-npm --prefix "$SCRIPT_DIR" run setup:plan-runtime
+NPM_CONFIG_REGISTRY="$NPM_REGISTRY" PI_CODING_AGENT_DIR="$SCRIPT_DIR/pi" "$pi_binary" install "npm:pi-subagents@$PI_SUBAGENTS_VERSION"
+NPM_CONFIG_REGISTRY="$NPM_REGISTRY" PI_CODING_AGENT_DIR="$SCRIPT_DIR/pi" "$pi_binary" install "npm:@juicesharp/rpiv-todo@$RPIV_TODO_VERSION"
+NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm --prefix "$SCRIPT_DIR" run setup:plan-runtime
 
 mkdir -p "$(dirname -- "$ZSHRC_PATH")"
 node - "$ZSHRC_PATH" "$SHELL_INTEGRATION" <<'NODE'
