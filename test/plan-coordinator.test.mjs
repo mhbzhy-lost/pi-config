@@ -7,6 +7,7 @@ import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mj
 import { createPlanCoordinator } from "../scripts/lib/plan/coordinator.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
+import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 
 test("requires a compiled Plan IR instead of compiling a parsed plan", () => {
   assert.throws(
@@ -184,6 +185,37 @@ function lease(input) {
     ownerToken: `${input.attemptId}-owner`,
   };
 }
+
+test("prepareAuthorizedDispatches persists a durable Executor intent without spawning", async () => {
+  const approvedPlan = v3Plan({
+    instructions: "Preserve the approved Plan instructions.",
+    body: "Keep this complete task body in the durable contract.",
+    taskExecution: { risk: "high", timeoutMs: 123000, workflow: { mode: "inherit-repository" } },
+  });
+  const subject = harness({
+    approvedPlan,
+    backend: { async spawn() { throw new Error("prepare must not spawn"); } },
+  });
+
+  const result = await subject.coordinator.prepareAuthorizedDispatches();
+
+  assert.equal(result.state, "dispatch-required");
+  assert.equal(result.dispatches.length, 1);
+  assert.equal(subject.spawned.length, 0);
+  assert.deepEqual(subject.appended.map((entry) => entry.type), ["attempt.workspace-allocated", "attempt.dispatch-requested"]);
+  const intent = subject.appended.at(-1).data;
+  const dispatch = result.dispatches[0];
+  assert.deepEqual(dispatch.contract, intent.tool.contract);
+  assert.equal(dispatch.contractHash, intent.toolHash);
+  assert.equal(dispatch.contract.execution.cwd, "/attempts/attempt-plan-1-task-1-1");
+  assert.equal(dispatch.contract.risk, "high");
+  assert.equal(dispatch.contract.execution.timeoutMs, 123000);
+  assert.deepEqual(dispatch.contract.workflow, { mode: "tdd" });
+  assert.match(dispatch.contract.requirements.join("\n"), /complete task body/);
+  assert.match(dispatch.contract.context.knownFacts.join("\n"), /Plan instructions/);
+  assert.deepEqual(dispatch.contract.boundaries.writePaths, ["src/exact.mjs"]);
+  assert.deepEqual(compileCodingDispatchIR(dispatch.contract, { cwd: "/repo" }).hash, dispatch.contractHash);
+});
 
 function replay(entries) {
   let projection = createProjection();
