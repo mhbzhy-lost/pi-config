@@ -206,6 +206,7 @@ export class RootBrokerServer {
   async grantRevivedCaller(logicalRunId: string, actualRunId: string) {
     const logical = this.logicalCallers.get(logicalRunId);
     if (this.closed || !logical || logical.activeRunId === actualRunId || this.principals.has(actualRunId) || this.callerAliases.has(actualRunId)) throw new Error("Root subagent broker revived caller is invalid");
+    const previousActualRunId = logical.activeRunId;
     const generation = logical.generation;
     const callerToken = this.randomToken();
     const pending = (async () => {
@@ -215,6 +216,11 @@ export class RootBrokerServer {
       this.principals.set(actualRunId, { role: "plan-runner", callerToken });
       this.callerAliases.set(actualRunId, logicalRunId);
       this.logicalCallers.set(logicalRunId, { activeRunId: actualRunId, generation: generation + 1 });
+      const previousSubscriptions = this.subscriptions.get(previousActualRunId);
+      this.subscriptions.delete(previousActualRunId);
+      for (const socket of previousSubscriptions ?? []) {
+        try { if (!socket.destroyed) socket.destroy(); } catch { /* isolate subscriber failures */ }
+      }
       return { callerToken };
     })();
     this.callerGrants.set(actualRunId, pending);
