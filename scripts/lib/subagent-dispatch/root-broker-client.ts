@@ -26,7 +26,7 @@ function clientError(message: string, code?: string) {
 }
 
 function safeRequestId(createId: () => string) {
-  const id = createId().replace(/[^A-Za-z0-9._-]/g, "-");
+  const id = createId();
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(id)) throw clientError("Broker request id is invalid", "REQUEST_ID_INVALID");
   return id;
 }

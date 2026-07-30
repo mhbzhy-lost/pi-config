@@ -334,7 +334,7 @@ export function createPiSubagentsExecutionBackend({
       const entry = createEntry(request);
       pending.set(request.dispatchId, entry);
       try {
-        const reply = await rpc.spawn(executionSpawnRpcParams(request), { requestId: request.dispatchId });
+        const reply = await rpc.spawn(executionSpawnRpcParams(request), { requestId: request.dispatchId, spawnKey: request.dispatchId });
         const observed = replyBinding(reply);
         if (entry.binding && (entry.binding.runId !== observed.runId || entry.binding.asyncDir !== observed.asyncDir)) {
           violation("SPAWN_REPLY_BINDING_MISMATCH", "Spawn reply disagrees with lifecycle start", {

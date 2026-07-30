@@ -17,7 +17,7 @@ type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: (
 type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; events?: { on(channel: string, listener: (event: any) => void): () => void } };
-type SpawnLedgerEntry = { hash: string; state: "spawning" | "spawned" | "uncertain"; promise: Promise<any>; reply?: any; binding?: any };
+type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; promise?: Promise<any>; reply?: any; binding?: any };
 
 const FORBIDDEN_SPAWN_FIELDS = new Set(["caller", "root", "token", "parent", "depth", "path", "fanout", "callerRunId", "callerToken", "rootSessionId", "parentRunId", "parentDepth", "parentPath"]);
 const MAX_BUFFER = 64 * 1024;
@@ -230,16 +230,26 @@ export class RootBrokerServer {
     const existing = this.spawnLedger.get(key);
     if (existing) {
       if (existing.hash !== hash) return failure(request, "spawn_conflict", "Spawn key conflicts with existing parameters");
-      if (existing.state === "spawning") return replay(request, await existing.promise);
+      if (existing.state === "spawning" && existing.promise) return replay(request, await existing.promise);
       if (existing.state === "spawned") return createBrokerSuccessResponse({ ...request, data: existing.reply });
+      if (existing.state === "not-started" || existing.state === "cleaned") return await this.startSpawn(request, caller, normalizedSpawn(params), key, existing);
       return failure(request, "spawn_uncertain", "Spawn outcome is uncertain and cannot be retried");
     }
-    const entry = {} as SpawnLedgerEntry;
-    entry.hash = hash;
+    return await this.startSpawn(request, caller, normalizedSpawn(params), key, { hash, state: "not-started" });
+  }
+
+  async startSpawn(request: any, caller: Caller, params: Record<string, unknown>, key: string, entry: SpawnLedgerEntry) {
     entry.state = "spawning";
-    entry.promise = this.spawnLegacy(request, caller, normalizedSpawn(params), entry);
+    delete entry.reply;
+    delete entry.binding;
     this.spawnLedger.set(key, entry);
-    return await entry.promise;
+    const attempt = this.spawnLegacy(request, caller, params, entry);
+    entry.promise = attempt;
+    void attempt.then(
+      () => { if (entry.promise === attempt) entry.promise = undefined; },
+      () => { if (entry.promise === attempt) entry.promise = undefined; },
+    );
+    return await attempt;
   }
 
   async spawnLegacy(request: any, caller: Caller, params: Record<string, unknown>, entry?: SpawnLedgerEntry) {
@@ -247,7 +257,7 @@ export class RootBrokerServer {
     try {
       reply = await this.upstream.spawn(params);
     } catch (error) {
-      if (entry) entry.state = "uncertain";
+      if (entry) entry.state = (error as any)?.detail?.spawnDisposition === "not-started" ? "not-started" : "uncertain";
       return failure(request, "upstream_failed", error instanceof Error ? error.message : String(error));
     }
     const details = reply?.details ?? reply;
@@ -263,9 +273,20 @@ export class RootBrokerServer {
       caller.ownedRunIds.add(runId);
       this.runOwners.set(runId, request.callerRunId);
     } catch (error) {
-      if (entry) entry.state = "uncertain";
-      try { await this.upstream.stop({ runId, dir: asyncDir }); } catch (stopError) { return failure(request, "spawn_cleanup", stopError instanceof Error ? stopError.message : String(stopError)); }
-      return failure(request, "spawn_cleanup", error instanceof Error ? error.message : String(error));
+      const grantMessage = error instanceof Error ? error.message : String(error);
+      try {
+        await this.upstream.stop({ runId, dir: asyncDir });
+        if (entry) {
+          entry.state = "cleaned";
+          delete entry.reply;
+          delete entry.binding;
+        }
+      } catch (stopError) {
+        if (entry) entry.state = "uncertain";
+        const stopMessage = stopError instanceof Error ? stopError.message : String(stopError);
+        return failure(request, "spawn_cleanup", `Executor grant failed: ${grantMessage}; executor stop failed: ${stopMessage}`);
+      }
+      return failure(request, "spawn_cleanup", grantMessage);
     }
     if (entry) {
       entry.state = "spawned";
