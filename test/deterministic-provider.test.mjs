@@ -80,6 +80,58 @@ function flatPlanPrompt() {
   return user(`Open the approved Plan revision by calling plan_open exactly once with ${JSON.stringify(flatBootstrap)}.`);
 }
 
+const rootMainTools = ["plan_run", "plan_attention_reply"];
+const rootMainPlanPaths = ["/tmp/root-main-first.plan.md", "/tmp/root-main-second.plan.md"];
+function rootMainPrompt() {
+  return user(`PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths: rootMainPlanPaths })}`);
+}
+
+function planRunResult(planPath) {
+  return toolResult("plan_run", "launched", {
+    schemaVersion: "pi-plan-handle.v4",
+    planPath,
+    planRunnerRunId: `run-${planPath.split("/").at(-1)}`,
+  });
+}
+
+test("Root Main launches the first declared plan before any tool result", () => {
+  assert.deepEqual(decide([rootMainPrompt()], rootMainTools), {
+    tool: { name: "plan_run", arguments: { planPath: rootMainPlanPaths[0] } },
+  });
+});
+
+test("Root Main launches the second declared plan after the first launch result", () => {
+  assert.deepEqual(decide([
+    rootMainPrompt(),
+    planRunResult(rootMainPlanPaths[0]),
+  ], rootMainTools), {
+    tool: { name: "plan_run", arguments: { planPath: rootMainPlanPaths[1] } },
+  });
+});
+
+test("Root Main stops waiting after both declared plan launches without polling", () => {
+  const turn = decide([
+    rootMainPrompt(),
+    planRunResult(rootMainPlanPaths[0]),
+    planRunResult(rootMainPlanPaths[1]),
+  ], rootMainTools);
+
+  assert.deepEqual(turn, { text: "PLAN_ROOT_WAITING" });
+  assert.equal(turn?.tool, undefined);
+});
+
+test("Root Main provider stream stops waiting after both declared plan launches", async () => {
+  const done = await streamDone([
+    rootMainPrompt(),
+    planRunResult(rootMainPlanPaths[0]),
+    planRunResult(rootMainPlanPaths[1]),
+  ], rootMainTools.map((name) => ({ name })));
+
+  assert.equal(done.reason, "stop");
+  assert.equal(done.message.stopReason, "stop");
+  assert.deepEqual(done.message.content, [{ type: "text", text: "PLAN_ROOT_WAITING" }]);
+});
+
 test("provider stream waits for lifecycle instead of falling through to plan_verify", async () => {
   const dispatch = toolResult("plan_continue", JSON.stringify({
     state: "dispatch-required", dispatches: [{ contract: { task: "task-10a" } }],
