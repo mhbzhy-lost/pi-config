@@ -1256,3 +1256,62 @@ test("lifecycle push protocol rejects unknown terminals with an invalid reason",
   const terminal = { version: 1, runnerProcessInstanceId: "runner-reason-protocol", state: "unknown", reason: "not-a-pinned-reason" };
   assert.throws(() => parseBrokerPush(lifecycleCompletedPush(terminal)), /terminal|reason|process|proof/i);
 });
+
+function supervisorIngress({ id, runId, content = "Need approval", reason = "approval", expectsReply = true, agent = "executor", childIndex = 0 }) {
+  return { customType: "subagent_supervisor_request", content, details: { id, runId, reason, expectsReply, agent, childIndex } };
+}
+
+test("routes Supervisor requests only to the Executor owner in stable owner order", async (t) => {
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
+  await broker.start(); t.after(() => broker.closeRootSession());
+  const grantA = await broker.grantCaller({ callerRunId: "supervisor-plan-a", planId: "supervisor-a", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const grantB = await broker.grantCaller({ callerRunId: "supervisor-plan-b", planId: "supervisor-b", cwd: "/other", originRoot: "/other", stateRoot: "/state-b", role: "plan-runner" });
+  broker.runOwners.set("supervisor-executor-a", "supervisor-plan-a");
+  broker.runOwners.set("supervisor-executor-b", "supervisor-plan-b");
+  const a = createRootBrokerClient({ rootSessionId, callerRunId: "supervisor-plan-a" });
+  const b = createRootBrokerClient({ rootSessionId, callerRunId: "supervisor-plan-b" });
+  t.after(() => { a.dispose(); b.dispose(); });
+  const pushedA = []; const pushedB = [];
+  const subscriptionA = await a.subscribe((push) => pushedA.push(push));
+  const subscriptionB = await b.subscribe((push) => pushedB.push(push));
+  t.after(() => { subscriptionA.dispose(); subscriptionB.dispose(); });
+  const route = typeof broker.routeSupervisorRequest === "function" ? broker.routeSupervisorRequest.bind(broker) : async () => undefined;
+  await route(supervisorIngress({ id: "A1", runId: "supervisor-executor-a" }));
+  await route(supervisorIngress({ id: "B2", runId: "supervisor-executor-b" }));
+  await route(supervisorIngress({ id: "A2", runId: "supervisor-executor-a" }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(pushedA.map((push) => push.data), [
+    { requestId: "A1", executorRunId: "supervisor-executor-a", content: "Need approval", reason: "approval", expectsReply: true, agent: "executor", childIndex: 0 },
+    { requestId: "A2", executorRunId: "supervisor-executor-a", content: "Need approval", reason: "approval", expectsReply: true, agent: "executor", childIndex: 0 },
+  ]);
+  assert.deepEqual(pushedB.map((push) => push.data), [{ requestId: "B2", executorRunId: "supervisor-executor-b", content: "Need approval", reason: "approval", expectsReply: true, agent: "executor", childIndex: 0 }]);
+});
+
+test("Supervisor pending and reply are fenced to the request owner", async (t) => {
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() }); await broker.start(); t.after(() => broker.closeRootSession());
+  const a = await broker.grantCaller({ callerRunId: "pending-a", planId: "pending-a", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const b = await broker.grantCaller({ callerRunId: "pending-b", planId: "pending-b", cwd: "/other", originRoot: "/other", stateRoot: "/state-b", role: "plan-runner" });
+  broker.runOwners.set("pending-executor-a", "pending-a"); broker.runOwners.set("pending-executor-b", "pending-b");
+  const route = typeof broker.routeSupervisorRequest === "function" ? broker.routeSupervisorRequest.bind(broker) : async () => undefined;
+  await route(supervisorIngress({ id: "pending-A", runId: "pending-executor-a" })); await route(supervisorIngress({ id: "pending-B", runId: "pending-executor-b" }));
+  const pendingA = await broker.dispatch(request({ callerRunId: "pending-a", callerToken: a.callerToken, method: "supervisor.pending", params: {} }), {});
+  const pendingB = await broker.dispatch(request({ callerRunId: "pending-b", callerToken: b.callerToken, method: "supervisor.pending", params: {} }), {});
+  assert.deepEqual(pendingA.data?.pending?.map((entry) => entry.requestId), ["pending-A"]);
+  assert.deepEqual(pendingB.data?.pending?.map((entry) => entry.requestId), ["pending-B"]);
+  const denied = await broker.dispatch(request({ callerRunId: "pending-b", callerToken: b.callerToken, method: "supervisor.reply", params: { replyTo: "pending-A", message: "no" } }), {});
+  assert.equal(denied.error?.code, "supervisor_not_owned");
+  const replied = await broker.dispatch(request({ callerRunId: "pending-a", callerToken: a.callerToken, method: "supervisor.reply", params: { replyTo: "pending-A", message: "yes" } }), {});
+  assert.equal(replied.success, true);
+});
+
+test("rejects conflicting Supervisor ingress without changing the original owner", async (t) => {
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() }); await broker.start(); t.after(() => broker.closeRootSession());
+  broker.runOwners.set("ingress-a", "owner-a"); broker.runOwners.set("ingress-b", "owner-b");
+  const route = typeof broker.routeSupervisorRequest === "function" ? broker.routeSupervisorRequest.bind(broker) : async () => undefined;
+  await route(supervisorIngress({ id: "ingress-1", runId: "unknown-run" }));
+  await route(supervisorIngress({ id: "ingress-1", runId: "ingress-a", content: "first" }));
+  await route(supervisorIngress({ id: "ingress-1", runId: "ingress-a", content: "first" }));
+  const conflict = await route(supervisorIngress({ id: "ingress-1", runId: "ingress-b", content: "conflict" }));
+  assert.equal(conflict?.code, "supervisor_request_conflict");
+  assert.equal(broker.supervisorRequests?.get("ingress-1")?.ownerRunId, "owner-a");
+});

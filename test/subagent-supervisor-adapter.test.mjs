@@ -356,3 +356,15 @@ test("root-owned lifecycle propagates initial subscription rejection", async () 
   const subject = lifecycleFixture({ subscribeError: new Error("initial subscribe failed") });
   await assert.rejects(async () => subject.installed.startLifecycleSubscription?.(), /initial subscribe failed/);
 });
+
+test("mirrors Supervisor request pushes as Plan Attention exactly once", async () => {
+  const subject = lifecycleFixture();
+  await subject.installed.startLifecycleSubscription?.();
+  const push = { type: "supervisor.request", callerRunId: "run", data: { requestId: "request-1", executorRunId: "executor-1", content: "Approve the change.", reason: "approval", expectsReply: true, agent: "executor", childIndex: 2 } };
+  subject.rpc.onPush?.(push); subject.rpc.onPush?.(push);
+  assert.deepEqual(subject.emitted, []);
+  assert.deepEqual(subject.messages, [{
+    message: { customType: "subagent_supervisor_request", content: "Approve the change.", display: true, details: { id: "request-1", reason: "approval", expectsReply: true, runId: "executor-1", agent: "executor", childIndex: 2 } },
+    options: { triggerTurn: true },
+  }]);
+});

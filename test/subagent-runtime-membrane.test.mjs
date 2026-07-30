@@ -571,3 +571,25 @@ test("reload and shutdown dispose only the current RPC client", async () => {
   await secondShutdown();
   assert.equal(second.disposed(), 1);
 });
+
+test("internal Supervisor target forwards exact params and context", async () => {
+  const pi = createPi();
+  const params = { action: "reply", replyTo: "native-1", message: "Proceed." };
+  const context = { cwd: "/repo", request: "exact" };
+  const result = { content: [{ type: "text", text: "native result" }] };
+  let received;
+  const installed = installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) {
+      api.registerTool({ name: "subagent_supervisor", execute(...args) { received = args; return result; } });
+    },
+    rpc: createRpc(), cleanupStore: {},
+  });
+  const executeSupervisor = typeof installed.executeSupervisor === "function"
+    ? installed.executeSupervisor.bind(installed)
+    : async () => undefined;
+  const actual = await executeSupervisor(params, context);
+  assert.strictEqual(actual, result, "runtime must expose its internal Supervisor target");
+  assert.deepEqual(received, [params, context]);
+  assert.strictEqual(received?.[0], params);
+  assert.strictEqual(received?.[1], context);
+});
