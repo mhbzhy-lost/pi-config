@@ -734,7 +734,7 @@ test("preserves queued Supervisor order after mailbox route failure", async () =
   mailbox.handle(third, {});
   await mailbox.activate();
 
-  assert.deepEqual(calls, [1, 2, 3], "retry must preserve queue order and retry the failed first request");
+  assert.deepEqual(calls, [1, 2, 3], "reactivation must preserve the remaining queue order after the failed request");
 });
 
 test("keeps in-flight Supervisor routing isolated from mailbox deactivation", async () => {
