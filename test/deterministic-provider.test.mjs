@@ -39,87 +39,85 @@ test("deterministic Executor waits for a supervisor decision before writing its 
   assert.deepEqual(decide([prompt, replied, toolResult("bash", "committed")], tools), { text: "PLAN_EXECUTOR_DECISION_DONE" });
 });
 
-test("deterministic Plan Harness drives open, bounded wait, integration, and verify", () => {
-  const prompt = user('PI_PLAN_HARNESS_STANDALONE\nexact bootstrap JSON:\n{"planId":"plan-1"}');
-  const tools = ["plan_open", "plan_continue", "plan_status", "plan_verify", "subagent_wait", "subagent_supervisor"];
-  const opened = toolResult("plan_open", "opened");
-  const continued = toolResult("plan_continue", '{"state":"waiting-executors"}');
-  const pendingOne = toolResult("subagent_supervisor", "none");
-  const waited = toolResult("subagent_wait", "complete");
-  const pendingTwo = toolResult("subagent_supervisor", "none");
-  const activeStatus = toolResult("plan_status", '{"tasks":[{"status":"pending","attempts":[{"status":"active"}]}]}');
-  assert.deepEqual(decide([prompt, opened, continued, pendingOne, waited, pendingTwo, activeStatus], tools), { tool: { name: "subagent_supervisor", arguments: { action: "pending" } } });
+const flatPlanTools = ["plan_open", "plan_continue", "plan_status", "plan_verify", "subagent", "plan_executor_supervisor"];
+const flatBootstrap = {
+  planId: "plan-1",
+  revision: 3,
+  manifestSha256: "a".repeat(64),
+  planIrHash: "b".repeat(64),
+  baseCommit: "ec66a16",
+  worktree: "/tmp/plan-1",
+  allowPlanCommits: true,
+};
+function flatPlanPrompt() {
+  return user(`Open the approved Plan revision by calling plan_open exactly once with ${JSON.stringify(flatBootstrap)}.`);
+}
 
-  const waitingAttention = toolResult("plan_status", '{"tasks":[{"attempts":[{"status":"waiting-attention"}]}]}');
-  assert.deepEqual(
-    decide([prompt, opened, continued, pendingOne, waited, pendingTwo, waitingAttention], tools),
-    { text: "PLAN_HARNESS_WAITING_ATTENTION" },
-  );
+test("flat Plan Runner parses the production bootstrap and opens the exact revision", () => {
+  assert.deepEqual(decide([flatPlanPrompt()], flatPlanTools), {
+    tool: { name: "plan_open", arguments: flatBootstrap },
+  });
+});
 
+test("flat Plan Runner forwards each dispatch-required contract unchanged to subagent", () => {
+  const contract = { task: "task-10a", agent: "executor", runId: "executor-run-1", prompt: "Implement only the approved task." };
+  assert.deepEqual(decide([
+    flatPlanPrompt(),
+    toolResult("plan_open", "opened"),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract }] })),
+  ], flatPlanTools), { tool: { name: "subagent", arguments: contract } });
+});
+
+test("flat Plan Runner waits for a lifecycle follow-up after subagent starts", () => {
+  const dispatched = toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: { task: "task-10a" } }] }));
+  assert.deepEqual(decide([
+    flatPlanPrompt(), toolResult("plan_open", "opened"), dispatched, toolResult("subagent", "started"),
+  ], flatPlanTools), { text: "PLAN_RUNNER_WAITING_LIFECYCLE" });
+
+  assert.deepEqual(decide([
+    flatPlanPrompt(), toolResult("plan_open", "opened"), dispatched, toolResult("subagent", "started"),
+    { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "A lifecycle update arrived. Call plan_status.", details: { dispatchId: "dispatch-1", runId: "executor-run-1", state: "started" } },
+  ], flatPlanTools), { tool: { name: "plan_status", arguments: {} } });
+});
+
+test("flat Plan Runner reconciles Attention requests through plan_status", () => {
+  assert.deepEqual(decide([
+    flatPlanPrompt(),
+    { role: "custom", customType: "subagent_supervisor_request", content: "Approve the change.", details: { id: "request-1", runId: "executor-run-1" } },
+  ], flatPlanTools), { tool: { name: "plan_status", arguments: {} } });
+});
+
+test("flat Plan Runner fences durable Attention replies through plan_executor_supervisor", () => {
+  assert.deepEqual(decide([
+    flatPlanPrompt(),
+    { role: "custom", customType: "pi-plan-attention-reply-v1", content: "APPROVED", details: { requestId: "request-1", executorRunId: "executor-run-1" } },
+  ], flatPlanTools), {
+    tool: { name: "plan_executor_supervisor", arguments: { action: "reply", replyTo: "request-1", to: "executor-run-1", message: "APPROVED" } },
+  });
+});
+
+test("flat Plan Runner integrates validated work then verifies and stops", () => {
   const status = toolResult("plan_status", '{"tasks":[{"status":"pending","attempts":[{"status":"validated"}]}]}');
   const integrated = toolResult("plan_continue", '{"state":"ready-to-verify"}');
-
-  assert.deepEqual(decide([prompt], tools), { tool: { name: "plan_open", arguments: { planId: "plan-1" } } });
-  assert.deepEqual(decide([prompt, opened], tools), { tool: { name: "plan_continue", arguments: { reason: "harness" } } });
-  assert.deepEqual(decide([prompt, opened, continued], tools), { tool: { name: "subagent_supervisor", arguments: { action: "pending" } } });
-  assert.deepEqual(decide([prompt, opened, continued, pendingOne], tools), { tool: { name: "subagent_wait", arguments: { all: false, timeoutMs: 1000 } } });
-  assert.deepEqual(decide([prompt, opened, continued, pendingOne, waited], tools), { tool: { name: "subagent_supervisor", arguments: { action: "pending" } } });
-  assert.deepEqual(decide([prompt, opened, continued, pendingOne, waited, pendingTwo], tools), { tool: { name: "plan_status", arguments: {} } });
-  assert.deepEqual(decide([prompt, opened, continued, pendingOne, waited, pendingTwo, status], tools), { tool: { name: "plan_continue", arguments: { reason: "integrate" } } });
-  assert.deepEqual(decide([prompt, opened, continued, pendingOne, waited, pendingTwo, status, integrated], tools), { tool: { name: "plan_verify", arguments: {} } });
-  assert.deepEqual(decide([prompt, opened, continued, pendingOne, waited, pendingTwo, status, integrated, toolResult("plan_verify", "validated")], tools), { text: "PLAN_HARNESS_DONE" });
-});
-
-test("deterministic Plan Runner delivers only a durable Root Attention reply", () => {
-  const prompt = user('PI_PLAN_HARNESS_STANDALONE\nexact bootstrap JSON:\n{"planId":"plan-1"}');
-  const rootReply = {
-    role: "custom",
-    customType: "pi-plan-attention-reply-v1",
-    content: "APPROVED",
-    details: { requestId: "request-1" },
-  };
-  assert.deepEqual(
-    decide([prompt, rootReply], ["subagent_supervisor"]),
-    { tool: { name: "subagent_supervisor", arguments: { action: "reply", replyTo: "request-1", message: "APPROVED" } } },
-  );
-});
-
-test("deterministic Plan Runner recognizes Pi-converted durable Attention replies", () => {
-  const prompt = user('PI_PLAN_HARNESS_STANDALONE\nexact bootstrap JSON:\n{"planId":"plan-1"}');
-  const waiting = toolResult("plan_status", '{"tasks":[{"attempts":[{"status":"waiting-attention"}]}]}');
-  const pending = toolResult("subagent_supervisor", "pending", {
-    pending: [{ id: "request-converted", runId: "run-1" }],
+  assert.deepEqual(decide([flatPlanPrompt(), status], flatPlanTools), {
+    tool: { name: "plan_continue", arguments: { reason: "integrate" } },
   });
-  const convertedReply = user("APPROVED");
-
-  assert.deepEqual(
-    decide([prompt, waiting, pending, convertedReply], ["subagent_supervisor"]),
-    {
-      tool: {
-        name: "subagent_supervisor",
-        arguments: { action: "reply", replyTo: "request-converted", message: "APPROVED" },
-      },
-    },
-  );
-
-  const delivered = toolResult("subagent_supervisor", "delivered", { replyTo: "request-converted" });
-  assert.deepEqual(
-    decide(
-      [prompt, waiting, pending, convertedReply, delivered],
-      ["subagent_supervisor", "subagent_wait", "plan_status"],
-    ),
-    { tool: { name: "subagent_supervisor", arguments: { action: "pending" } } },
-  );
+  assert.deepEqual(decide([flatPlanPrompt(), status, integrated], flatPlanTools), {
+    tool: { name: "plan_verify", arguments: {} },
+  });
+  assert.deepEqual(decide([flatPlanPrompt(), status, integrated, toolResult("plan_verify", "validated")], flatPlanTools), {
+    text: "PLAN_RUNNER_DONE",
+  });
 });
 
-test("standalone compatibility child completes with its exact tool inventory", () => {
+test("top-level compatibility child completes with its exact tool inventory", () => {
   assert.deepEqual(
     decide([user("PI_SUBAGENTS_COMPAT_CHILD_COMPLETE")], ["contact_supervisor", "read"]),
     { text: "COMPAT_OK tools=contact_supervisor,read" },
   );
 });
 
-test("standalone compatibility attention child asks its direct supervisor", () => {
+test("top-level compatibility attention child asks its direct supervisor", () => {
   assert.deepEqual(
     decide([user("PI_SUBAGENTS_COMPAT_CHILD_ATTENTION")], ["contact_supervisor", "read"]),
     {
@@ -134,7 +132,7 @@ test("standalone compatibility attention child asks its direct supervisor", () =
   );
 });
 
-test("standalone compatibility attention child completes after supervisor reply", () => {
+test("top-level compatibility attention child completes after supervisor reply", () => {
   assert.deepEqual(
     decide([
       user("PI_SUBAGENTS_COMPAT_CHILD_ATTENTION"),
@@ -157,7 +155,7 @@ function toolResult(toolName, text = "ok", details) {
   };
 }
 
-test("standalone completion parent spawns through the harness tool then uses official wait", () => {
+test("top-level completion parent spawns through the harness tool then uses official wait", () => {
   const prompt = user("PI_SUBAGENTS_COMPAT_PARENT_COMPLETE");
   assert.deepEqual(decide([prompt], ["compat_spawn", "subagent_wait"]), {
     tool: { name: "compat_spawn", arguments: { mode: "complete" } },
@@ -172,7 +170,7 @@ test("standalone completion parent spawns through the harness tool then uses off
   ], ["compat_spawn", "subagent_wait"]), { text: "COMPAT_PARENT_DONE" });
 });
 
-test("standalone attention parent resolves the exact supervisor request and waits again", () => {
+test("top-level attention parent resolves the exact supervisor request and waits again", () => {
   const prompt = user("PI_SUBAGENTS_COMPAT_PARENT_ATTENTION");
   const tools = ["compat_spawn", "compat_status", "compat_inspect_nested_events", "compat_pause", "subagent_wait", "subagent_supervisor"];
   const spawned = toolResult("compat_spawn");
