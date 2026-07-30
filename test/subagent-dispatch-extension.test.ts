@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createTypedSubagentExtension } from "../scripts/lib/subagent-dispatch/extension.ts";
+import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 
 const contract = {
   version: "dispatch-ir.v1", taskId: "identity-ledger", title: "Bind durable spawn identity", agent: "executor", risk: "normal",
@@ -22,13 +23,31 @@ function setup() {
   return { pi, rpc, calls, tools };
 }
 
-test("coding spawn resolver binds toolCallId and exact contract to durable raw RPC metadata", async () => {
+test("coding spawn resolves durable metadata exactly once", async () => {
   const { pi, rpc, calls, tools } = setup(); const resolved = [];
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-1", spawnKey: "durable-dispatch-1" }; } });
   const result = await tools[0].execute("tool-call-identity-1", contract, undefined, undefined, { cwd: "/repo" });
-  assert.equal(result.isError, false); assert.equal(resolved.length, 1);
-  assert.equal(resolved[0].toolCallId, "tool-call-identity-1"); assert.strictEqual(resolved[0].contract, contract); assert.match(resolved[0].contractHash, /^[a-f0-9]{64}$/);
-  assert.deepEqual(calls[0].options, { requestId: "durable-dispatch-1", spawnKey: "durable-dispatch-1" }); assert.equal(calls[0].params.spawnKey, undefined);
+  assert.equal(result.isError, false); assert.equal(resolved.length, 1); assert.equal(calls.length, 1);
+});
+
+test("coding spawn resolver receives the raw contract, tool call id, and exact compiled hash", async () => {
+  const { pi, rpc, tools } = setup(); const resolved = [];
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
+  await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
+  assert.equal(resolved.length, 1);
+  assert.strictEqual(resolved[0].contract, contract);
+  assert.equal(resolved[0].toolCallId, "tool-call-identity-2");
+  assert.equal(resolved[0].contractHash, compileCodingDispatchIR(contract, { cwd: "/repo" }).hash);
+});
+
+test("coding spawn forwards resolver metadata raw as RPC options and excludes spawnKey from params", async () => {
+  const { pi, rpc, calls, tools } = setup();
+  const metadata = { requestId: "durable-dispatch-3", spawnKey: "durable-dispatch-3" };
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity() { return metadata; } });
+  await tools[0].execute("tool-call-identity-3", contract, undefined, undefined, { cwd: "/repo" });
+  assert.equal(calls.length, 1);
+  assert.strictEqual(calls[0].options, metadata);
+  assert.equal(Object.hasOwn(calls[0].params, "spawnKey"), false);
 });
 
 test("generic and control dispatches never resolve coding spawn identity", async () => {

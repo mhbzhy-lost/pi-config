@@ -601,12 +601,16 @@ test("root broker startup rolls back only its failed reservation and closes it",
   assert.throws(() => requireRootBroker(pi));
 });
 
-test("broker client binds trusted spawn metadata and rejects model spawnKey injection", async (t) => {
+test("broker client uses trusted spawn metadata for its ledger and strips spawnKey upstream", async (t) => {
   const upstream = fakeUpstream(); const broker = new RootBrokerServer({ rootSessionId, upstream }); await broker.start(); t.after(() => broker.closeRootSession());
   await broker.grantCaller({ callerRunId: "plan-client", planId: "plan", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const client = createRootBrokerClient({ rootSessionId, callerRunId: "plan-client", randomUUID: () => "generated" }); t.after(() => client.dispose());
   await client.spawn({ agent: "executor", task: "run", spawnKey: "model-key" }, { requestId: "dispatch-client", spawnKey: "dispatch-client" });
-  assert.deepEqual(upstream.calls, [{ method: "spawn", params: { agent: "executor", task: "run", spawnKey: "dispatch-client", async: true, clarify: false } }]);
+  assert.deepEqual(upstream.calls, [{ method: "spawn", params: { agent: "executor", task: "run", async: true, clarify: false } }]);
+  const spawned = await client.lookupSpawn({ spawnKey: "dispatch-client" });
+  assert.equal(spawned.state, "spawned");
+  const modelKey = await client.lookupSpawn({ spawnKey: "model-key" });
+  assert.equal(modelKey.state, "not-started");
 });
 
 test("broker protocol capability includes spawn.lookup", () => { assert.equal(BROKER_METHODS.includes("spawn.lookup"), true); });
@@ -626,15 +630,18 @@ async function ledgerBroker(t, runId, upstream = fakeUpstream()) {
 }
 
 test("sequential equivalent durable spawns replay one exact binding", async (t) => {
-  const { upstream, call } = await ledgerBroker(t, "plan-sequential"); const params = { agent: "executor", task: "run", spawnKey: "dispatch-sequential" };
-  const first = await call("spawn", params, "dispatch-sequential"); const second = await call("spawn", params, "dispatch-sequential");
+  const { upstream, call } = await ledgerBroker(t, "plan-sequential");
+  const spawnRequest = { agent: "executor", task: "run", spawnKey: "dispatch-sequential" };
+  const first = await call("spawn", spawnRequest, "dispatch-sequential"); const second = await call("spawn", spawnRequest, "dispatch-sequential");
   assert.deepEqual(second.reply.data, first.reply.data); assert.equal(upstream.calls.filter((x) => x.method === "spawn").length, 1);
 });
 
 test("concurrent equivalent durable spawns share one deferred upstream request", async (t) => {
   let release; let entered; const blocked = new Promise((resolve) => { release = resolve; }); const enteredUpstream = new Promise((resolve) => { entered = resolve; }); const upstream = fakeUpstream(); upstream.spawn = async (params) => { upstream.calls.push({ method: "spawn", params }); entered(); await blocked; return { details: { runId: "concurrent-run", asyncDir: "/async/concurrent" } }; };
-  const { dispatch } = await ledgerBroker(t, "plan-concurrent", upstream); const params = { agent: "executor", task: "run", spawnKey: "dispatch-concurrent" };
-  const left = dispatch("spawn", params, "dispatch-concurrent"); await enteredUpstream; const right = dispatch("spawn", params, "dispatch-concurrent");
+  const { dispatch } = await ledgerBroker(t, "plan-concurrent", upstream);
+  const spawnRequest = { agent: "executor", task: "run", spawnKey: "dispatch-concurrent" };
+  t.after(() => release?.());
+  const left = dispatch("spawn", spawnRequest, "dispatch-concurrent"); await enteredUpstream; const right = dispatch("spawn", spawnRequest, "dispatch-concurrent");
   const calls = upstream.calls.length; release(); const [first, second] = await Promise.all([left, right]); assert.equal(calls, 1); assert.deepEqual(first.data, second.data);
 });
 
@@ -642,26 +649,43 @@ test("conflicting durable spawn parameters return stable conflict without respaw
   const { upstream, call } = await ledgerBroker(t, "plan-conflict");
   assert.equal((await call("spawn", { agent: "executor", task: "one", spawnKey: "dispatch-conflict" }, "dispatch-conflict")).reply.success, true);
   const conflict = await call("spawn", { agent: "executor", task: "two", spawnKey: "dispatch-conflict" }, "dispatch-conflict");
-  assert.equal(conflict.reply.error.code, "spawn_conflict"); assert.equal(upstream.calls.length, 1);
+  assert.equal(conflict.reply.success, false); assert.equal(conflict.reply.error?.code, "spawn_conflict"); assert.equal(upstream.calls.length, 1);
 });
 
-test("lookup returns spawned binding, not-started, and isolates callers", async (t) => {
-  const { call, lookup, broker } = await ledgerBroker(t, "plan-lookup-a"); const other = await broker.grantCaller({ callerRunId: "plan-lookup-b", planId: "b", cwd: "/other", originRoot: "/other", stateRoot: "/other-state", role: "plan-runner" });
+test("lookup returns the caller's spawned durable binding", async (t) => {
+  const { call, lookup } = await ledgerBroker(t, "plan-lookup-spawned");
   const spawned = await call("spawn", { agent: "executor", spawnKey: "dispatch-lookup" }, "dispatch-lookup");
-  const found = await lookup({ spawnKey: "dispatch-lookup" }); const unknown = await lookup({ spawnKey: "unknown" });
-  const isolated = await broker.dispatch(request({ callerRunId: "plan-lookup-b", callerToken: other.callerToken, method: "spawn.lookup", params: { spawnKey: "dispatch-lookup" } }), {});
-  assert.deepEqual(found.reply.data.binding, spawned.reply.data.details); assert.equal(unknown.reply.data.state, "not-started"); assert.equal(isolated.reply.data.state, "not-started");
+  const found = await lookup({ spawnKey: "dispatch-lookup" });
+  assert.equal(found.success, true); assert.equal(found.data?.state, "spawned"); assert.deepEqual(found.data?.binding, spawned.reply.data.details);
+});
+
+test("lookup reports not-started for an unknown durable key", async (t) => {
+  const { lookup } = await ledgerBroker(t, "plan-lookup-unknown");
+  const unknown = await lookup({ spawnKey: "unknown" });
+  assert.equal(unknown.success, true); assert.equal(unknown.data?.state, "not-started");
+});
+
+test("lookup isolates a caller from another caller's durable binding", async (t) => {
+  const { call, broker } = await ledgerBroker(t, "plan-lookup-a"); const other = await broker.grantCaller({ callerRunId: "plan-lookup-b", planId: "b", cwd: "/other", originRoot: "/other", stateRoot: "/other-state", role: "plan-runner" });
+  await call("spawn", { agent: "executor", spawnKey: "dispatch-lookup" }, "dispatch-lookup");
+  const lookupParams = { spawnKey: "dispatch-lookup" };
+  const isolated = await broker.dispatch(request({ callerRunId: "plan-lookup-b", callerToken: other.callerToken, method: "spawn.lookup", params: lookupParams }), {});
+  assert.equal(isolated.success, true); assert.equal(isolated.data?.state, "not-started");
 });
 
 test("pre-spawn rejection does not poison a durable key", async (t) => {
   const { call, lookup } = await ledgerBroker(t, "plan-preflight");
-  assert.equal((await call("spawn", { agent: "reviewer", spawnKey: "dispatch-preflight" }, "dispatch-preflight")).reply.error.code, "spawn_unauthorized");
+  const invalid = await call("spawn", { agent: "reviewer", spawnKey: "dispatch-preflight" }, "dispatch-preflight");
+  assert.equal(invalid.reply.success, false); assert.equal(invalid.reply.error?.code, "spawn_unauthorized");
   assert.equal((await call("spawn", { agent: "executor", spawnKey: "dispatch-preflight" }, "dispatch-preflight")).reply.success, true);
-  assert.equal((await lookup({ spawnKey: "dispatch-preflight" })).data.state, "spawned");
+  const found = await lookup({ spawnKey: "dispatch-preflight" });
+  assert.equal(found.success, true); assert.equal(found.data?.state, "spawned");
 });
 
 test("upstream failure records uncertain and blocks a second spawn", async (t) => {
   let attempts = 0; const upstream = { ...fakeUpstream(), async spawn() { attempts += 1; throw new Error("connection lost"); } }; const { call, lookup } = await ledgerBroker(t, "plan-uncertain", upstream);
   const params = { agent: "executor", spawnKey: "dispatch-uncertain" }; const first = await call("spawn", params, "dispatch-uncertain"); const second = await call("spawn", params, "dispatch-uncertain"); const found = await lookup({ spawnKey: "dispatch-uncertain" });
-  assert.equal(first.reply.error.code, "upstream_failed"); assert.equal(second.reply.error.code, "spawn_uncertain"); assert.equal(attempts, 1); assert.equal(found.data.state, "uncertain"); assert.equal(Object.hasOwn(found.data, "binding"), false);
+  assert.equal(first.reply.success, false); assert.equal(first.reply.error?.code, "upstream_failed");
+  assert.equal(second.reply.success, false); assert.equal(second.reply.error?.code, "spawn_uncertain"); assert.equal(attempts, 1);
+  assert.equal(found.success, true); assert.equal(found.data?.state, "uncertain"); assert.equal(Object.hasOwn(found.data ?? {}, "binding"), false);
 });
