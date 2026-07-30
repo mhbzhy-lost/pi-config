@@ -586,7 +586,7 @@ export class RootBrokerServer {
         const data = await this.upstream.ping();
         return createBrokerSuccessResponse({ ...request, data: { ...data, methods: [...new Set([...(Array.isArray(data?.methods) ? data.methods : []), "spawn.lookup"])], session: { ...(data?.session ?? {}), cwd: caller.cwd }, planRuntime: { originRoot: caller.originRoot, stateRoot: caller.stateRoot } } });
       }
-      if (request.method === "spawn") return await this.spawn(request, caller);
+      if (request.method === "spawn") return await this.spawn(request, caller, logicalCallerRunId);
       if (request.method === "caller.followup") return this.registerCallerFollowUp(request, logicalCallerRunId);
       if (request.method === "spawn.lookup") return this.lookupSpawn(request, caller);
       if (request.method === "supervisor.pending") return this.pendingSupervisor(request, caller);
@@ -612,12 +612,12 @@ export class RootBrokerServer {
     return createBrokerSuccessResponse({ ...request, data: { accepted: true, wakeId: intent.wakeId } });
   }
 
-  async spawn(request: any, caller: Caller) {
+  async spawn(request: any, caller: Caller, logicalCallerRunId: string) {
     const params = request.params;
     if (caller.role !== "plan-runner" || !["executor", "spark"].includes(params.agent)) return failure(request, "spawn_unauthorized", "Caller may only spawn executor or spark");
     for (const key of Object.keys(params)) if (FORBIDDEN_SPAWN_FIELDS.has(key)) return failure(request, "spawn_invalid", `Spawn parameter ${key} is forbidden`);
     const spawnKey = params.spawnKey;
-    if (spawnKey === undefined) return await this.spawnLegacy(request, caller, normalizedSpawn(params));
+    if (spawnKey === undefined) return await this.spawnLegacy(request, caller, logicalCallerRunId, normalizedSpawn(params));
     if (typeof spawnKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(spawnKey) || spawnKey === "." || spawnKey === "..") return failure(request, "spawn_invalid", "Spawn key is invalid");
     const key = `${caller.planId}\u0000${spawnKey}`;
     const hash = createHash("sha256").update(stableJson(normalizedSpawn(params)), "utf8").digest("hex");
@@ -626,21 +626,22 @@ export class RootBrokerServer {
       if (existing.hash !== hash) return failure(request, "spawn_conflict", "Spawn key conflicts with existing parameters");
       if (existing.state === "spawning" && existing.promise) return replay(request, await existing.promise);
       if (existing.state === "spawned") return createBrokerSuccessResponse({ ...request, data: existing.reply });
-      if (existing.state === "not-started" || existing.state === "cleaned") return await this.startSpawn(request, caller, normalizedSpawn(params), key, existing);
+      if (existing.state === "not-started" || existing.state === "cleaned") return await this.startSpawn(request, caller, logicalCallerRunId, normalizedSpawn(params), key, existing);
       return failure(request, "spawn_uncertain", "Spawn outcome is uncertain and cannot be retried");
     }
-    return await this.startSpawn(request, caller, normalizedSpawn(params), key, { hash, state: "not-started", spawnKey, callerRunId: request.callerRunId, params: normalizedSpawn(params), pending: [], delivered: new Set() });
+    return await this.startSpawn(request, caller, logicalCallerRunId, normalizedSpawn(params), key, { hash, state: "not-started", spawnKey, callerRunId: logicalCallerRunId, params: normalizedSpawn(params), pending: [], delivered: new Set() });
   }
 
-  async startSpawn(request: any, caller: Caller, params: Record<string, unknown>, key: string, entry: SpawnLedgerEntry) {
+  async startSpawn(request: any, caller: Caller, logicalCallerRunId: string, params: Record<string, unknown>, key: string, entry: SpawnLedgerEntry) {
     entry.state = "spawning";
+    entry.callerRunId = logicalCallerRunId;
     entry.params = { ...params, cwd: params.cwd ?? caller.cwd };
     delete entry.started;
     entry.pending = [];
     delete entry.reply;
     delete entry.binding;
     this.spawnLedger.set(key, entry);
-    const attempt = this.spawnLegacy(request, caller, params, entry);
+    const attempt = this.spawnLegacy(request, caller, logicalCallerRunId, params, entry);
     entry.promise = attempt;
     void attempt.then(
       () => { if (entry.promise === attempt) entry.promise = undefined; },
@@ -649,7 +650,7 @@ export class RootBrokerServer {
     return await attempt;
   }
 
-  async spawnLegacy(request: any, caller: Caller, params: Record<string, unknown>, entry?: SpawnLedgerEntry) {
+  async spawnLegacy(request: any, caller: Caller, logicalCallerRunId: string, params: Record<string, unknown>, entry?: SpawnLedgerEntry) {
     let reply;
     try {
       reply = await this.upstream.spawn(params);
@@ -668,7 +669,7 @@ export class RootBrokerServer {
     try {
       await this.ensureExecutorOwner(runId);
       caller.ownedRunIds.add(runId);
-      this.runOwners.set(runId, request.callerRunId);
+      this.runOwners.set(runId, logicalCallerRunId);
     } catch (error) {
       const grantMessage = error instanceof Error ? error.message : String(error);
       try {
@@ -689,7 +690,7 @@ export class RootBrokerServer {
       entry.state = "spawned";
       entry.reply = reply;
       entry.binding = details;
-      entry.callerRunId = request.callerRunId;
+      entry.callerRunId = logicalCallerRunId;
       entry.params = params;
       entry.pending ??= [];
       entry.queued ??= new Set();
