@@ -36,13 +36,13 @@ export async function assertBrowserTranscriptCompatibility({
   }
 }
 
-export function buildStandaloneRuntimeEnv(env = process.env) {
+export function buildTopLevelRuntimeEnv(env = process.env) {
   for (const marker of ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD"]) {
-    if (env[marker]) throw new Error(`Standalone Plan Runner cannot start with ${marker}`);
+    if (env[marker]) throw new Error(`top-level runtime cannot start with ${marker}`);
   }
-  const standalone = { ...env };
-  delete standalone.PI_SUBAGENT_PARENT_SESSION;
-  return standalone;
+  const topLevel = { ...env };
+  delete topLevel.PI_SUBAGENT_PARENT_SESSION;
+  return topLevel;
 }
 
 export function createSubagentsRpcClient(events, { randomUUID = () => crypto.randomUUID(), timeoutMs = 5000 } = {}) {
@@ -93,13 +93,13 @@ export function evaluatePlanHarnessCompatibility(report) {
   for (const method of REQUIRED_METHODS) {
     if (!report.methods?.includes(method)) failures.push(`missing RPC method: ${method}`);
   }
-  for (const event of ["subagent:async-started", "subagent:async-complete"]) {
+  for (const event of ["subagent:async-started", "subagent:async-complete", "subagent:process-terminal"]) {
     if (!report.events?.includes(event)) failures.push(`missing lifecycle event: ${event}`);
   }
   for (const [field, message] of [
-    ["standaloneRootService", "Standalone Plan Runner did not load the root service"],
-    ["standaloneNoChildEnv", "Standalone Plan Runner inherited child mode"],
-    ["standaloneSessionRebased", "Standalone Plan Runner retained the inherited parent session route"],
+    ["rootBrokerReady", "Root subagent broker is not ready"],
+    ["childAdapterRegistered", "project child adapter is not registered"],
+    ["noFanoutExtension", "fanout-child extension is active"],
     ["exactCwd", "Executor did not use the authorized cwd"],
     ["worktreeDisabled", "pi-subagents created an unauthorized worktree"],
     ["waitWakesOnCompletion", "wait did not wake on completion"],
@@ -110,6 +110,7 @@ export function evaluatePlanHarnessCompatibility(report) {
   ]) {
     if (report[field] !== true) failures.push(message);
   }
+  if (report.flatRuntimeDepth !== 1) failures.push(`unexpected flat runtime depth: ${report.flatRuntimeDepth}`);
   if (report.nestedEventFiles !== 0) failures.push(`unexpected nested event files: ${report.nestedEventFiles}`);
 
   return { ok: failures.length === 0, failures };

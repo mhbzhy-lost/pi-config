@@ -20,9 +20,6 @@ const compatibleReport = {
   rpcVersion: 1,
   methods: ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"],
   events: ["subagent:async-started", "subagent:async-complete", "subagent:process-terminal"],
-  standaloneRootService: true,
-  standaloneNoChildEnv: true,
-  standaloneSessionRebased: true,
   rootBrokerReady: true,
   flatRuntimeDepth: 1,
   childAdapterRegistered: true,
@@ -217,18 +214,8 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
   }
 });
 
-test("accepts the flat runtime compatibility report during standalone transition", () => {
+test("accepts the flat runtime compatibility report", () => {
   assert.deepEqual(evaluate(compatibleReport), { ok: true, failures: [] });
-});
-
-test("accepts a flat runtime report without standalone transition fields", () => {
-  const {
-    standaloneRootService,
-    standaloneNoChildEnv,
-    standaloneSessionRebased,
-    ...flatOnlyReport
-  } = compatibleReport;
-  assert.deepEqual(evaluate(flatOnlyReport), { ok: true, failures: [] });
 });
 
 test("rejects runtime versions outside the explicit support set", () => {
@@ -298,7 +285,7 @@ test("rejects nested event files on the executor path", () => {
 });
 
 test("retires standalone compatibility environment API", () => {
-  assert.equal(compat.buildStandaloneRuntimeEnv, undefined);
+  assert.equal(typeof compat.buildTopLevelRuntimeEnv, "function");
 });
 
 test("builds a top-level runtime environment without inherited child markers", () => {
@@ -311,16 +298,9 @@ test("builds a top-level runtime environment without inherited child markers", (
   assert.throws(() => compat.buildTopLevelRuntimeEnv({ PI_SUBAGENT_FANOUT_CHILD: "1" }), /PI_SUBAGENT_FANOUT_CHILD/);
 });
 
-test("flat runtime compat probe source retires standalone boundaries", async () => {
+test("flat runtime compat probe source uses flat boundaries", async () => {
   const source = await readFile(join(repoRoot, "scripts/probes/pi-subagents-compat.mjs"), "utf8");
-  for (const removedName of [
-    "buildStandaloneRuntimeEnv",
-    "standaloneRootService",
-    "standaloneNoChildEnv",
-    "standaloneSessionRebased",
-  ]) {
-    assert.doesNotMatch(source, new RegExp(`\\b${removedName}\\b`));
-  }
+  assert.match(source, /\bbuildTopLevelRuntimeEnv\b/);
   for (const flatField of [
     "rootBrokerReady",
     "flatRuntimeDepth",

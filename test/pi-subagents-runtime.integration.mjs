@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { buildStandaloneRuntimeEnv, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.mjs";
+import { buildTopLevelRuntimeEnv, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;
@@ -96,17 +96,17 @@ function spawnedDetails(records) {
 }
 
 async function runScenario(mode) {
-  const packageRoot = await mkdtemp(join(tmpdir(), "pi-subagents-standalone-probe-"));
-  const projectRoot = await mkdtemp(join(tmpdir(), "pi-subagents-standalone-project-"));
-  const runtimeTmp = await mkdtemp(join(tmpdir(), "pi-subagents-standalone-runtime-"));
-  const probe = join(packageRoot, "standalone-probe.mjs");
+  const packageRoot = await mkdtemp(join(tmpdir(), "pi-subagents-top-level-probe-"));
+  const projectRoot = await mkdtemp(join(tmpdir(), "pi-subagents-top-level-project-"));
+  const runtimeTmp = await mkdtemp(join(tmpdir(), "pi-subagents-top-level-runtime-"));
+  const probe = join(packageRoot, "top-level-rpc-probe.mjs");
   const outputPath = join(projectRoot, `${mode}-output.txt`);
 
   try {
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, ".pi", "agents", "compat-worker.md"), `---
 name: compat-worker
-description: deterministic standalone compatibility worker
+description: deterministic top-level RPC compatibility worker
 model: fake/deterministic
 tools: contact_supervisor, read
 extensions: ""
@@ -249,7 +249,7 @@ Use the deterministic compatibility marker from the assigned task.
           ])]);
         });
         pi.on("tool_call", (event) => event.toolName === "subagent"
-          ? { block: true, reason: "Standalone Plan Runner cannot call subagent directly." }
+          ? { block: true, reason: "top-level RPC compatibility probe cannot call subagent directly." }
           : undefined);
       }
     `);
@@ -270,12 +270,12 @@ Use the deterministic compatibility marker from the assigned task.
       {
         cwd: projectRoot,
         env: {
-          ...buildStandaloneRuntimeEnv(process.env),
+          ...buildTopLevelRuntimeEnv(process.env),
           TMPDIR: runtimeTmp,
           PI_CODING_AGENT_DIR: join(repoRoot, "pi"),
           OPENAI_API_KEY: "not-used",
         },
-        input: JSON.stringify({ id: `standalone-${mode}`, type: "prompt", message: prompt }),
+        input: JSON.stringify({ id: `top-level-rpc-${mode}`, type: "prompt", message: prompt }),
         until: (record) => {
           const text = assistantText(record);
           return text.includes("COMPAT_PARENT_DONE") || text.includes("COMPAT_PARENT_PENDING_MISSING");
@@ -348,10 +348,10 @@ test("installed runtime resolves a supported Pi and exact dependency versions", 
   assert.equal(typeboxPackage.version, "1.1.38");
 });
 
-test("Standalone Plan Runner waits for a completing executor without nested events", async () => {
+test("top-level RPC compatibility waits for a completing executor without nested events", async () => {
   await runScenario("complete");
 });
 
-test("Standalone Plan Runner observes attention, replies, and resumes the executor", async () => {
+test("top-level RPC compatibility observes attention, replies, and resumes the executor", async () => {
   await runScenario("attention");
 });
