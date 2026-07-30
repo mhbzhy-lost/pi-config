@@ -78,6 +78,7 @@ export class RootBrokerServer {
   supervisorRequests = new Map<string, SupervisorRequest>();
   ownedRuns = new Map<string, OwnedRun>();
   terminalProofs = new Map<string, any>();
+  reviveResults = new Map<string, any>();
   forcePendingRuns = new Set<string>();
   terminalWaiters = new Map<string, Set<(proof: any) => void>>();
   startedObservations = new Map<string, Promise<void>>();
@@ -194,7 +195,22 @@ export class RootBrokerServer {
     const waiters = this.terminalWaiters.get(run.runId);
     this.terminalWaiters.delete(run.runId);
     for (const resolve of waiters ?? []) resolve(value);
+    void this.reviveCallerAfterProof(run.runId).catch(() => undefined);
     return value;
+  }
+
+  async reviveCallerAfterProof(actualRunId: string) {
+    if (this.closed) return;
+    const run = this.ownedRuns.get(actualRunId);
+    if (!run || run.role !== "plan-runner" || !this.terminalProofs.has(actualRunId)) return;
+    const caller = this.callers.get(actualRunId);
+    const followUps = this.callerFollowUps.get(actualRunId);
+    if (!caller || caller.role !== "plan-runner" || !followUps?.length) return;
+    const wakeIds = followUps.map((followUp) => followUp.wakeId);
+    const result = await this.upstream.resume({ id: actualRunId, message: "A durable Root broker wake is pending." });
+    this.reviveResults.set(actualRunId, result);
+    const currentFollowUps = this.callerFollowUps.get(actualRunId);
+    if (currentFollowUps) this.callerFollowUps.set(actualRunId, currentFollowUps.filter((followUp) => !wakeIds.includes(followUp.wakeId)));
   }
 
   observeTerminal(event: any) {
@@ -807,7 +823,7 @@ export class RootBrokerServer {
       this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
       this.callers.clear(); this.callerFollowUps.clear(); this.callerPushQueues.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
       this.grantPaths.clear(); this.executorGrants.clear(); this.callerGrants.clear(); this.spawnLedger.clear(); this.supervisorRequests.clear();
-      this.ownedRuns.clear(); this.terminalProofs.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
+      this.ownedRuns.clear(); this.terminalProofs.clear(); this.reviveResults.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
       this.transportSockets.clear(); this.closingSockets.clear(); this.endedSockets.clear(); this.cleanedGrantPaths.clear(); this.server = undefined;
       this.teardown.released = true;
     })();
