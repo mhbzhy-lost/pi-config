@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,19 @@ const isolatedSubagentPackage = {
   prompts: [],
   themes: [],
 };
+
+function runDoctor() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["scripts/doctor.mjs"], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => child.kill("SIGTERM"), 10_000);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code, signal) => { clearTimeout(timer); resolve({ code, signal, stdout, stderr }); });
+  });
+}
 
 test("inspectConfiguration rejects pi-subagents package resource autoload", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
@@ -67,9 +81,11 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     await writeFile(join(root, "pi", "extensions", "plan-launcher.ts"), "");
     await writeFile(join(root, "pi", "child-extensions", "plan-runner.ts"), "");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
-    await mkdir(join(root, "scripts", "lib", "plan"), { recursive: true });
-    await writeFile(join(root, "scripts", "lib", "plan", "parent-lifecycle.mjs"), "");
-    await writeFile(join(root, "scripts", "lib", "plan", "plan-host-runtime.mjs"), "PI_SUBAGENT_CHILD PI_SUBAGENT_FANOUT_CHILD delete childEnv.PI_SUBAGENT_PARENT_SESSION\n");
+    await mkdir(join(root, "scripts", "lib", "subagent-dispatch"), { recursive: true });
+    for (const source of ["root-broker-server.ts", "root-broker-client.ts", "root-broker-protocol.ts", "root-broker-registry.ts"]) {
+      await writeFile(join(root, "scripts", "lib", "subagent-dispatch", source), "");
+    }
+    await writeFile(join(root, "pi", "child-extensions", "root-session-owner.ts"), "");
     await writeFile(join(root, ".gitignore"), "/var/\n");
     for (const [name, model, tools] of [
       ["executor", "codex-pool/gpt-5.6-terra", "read"],
@@ -129,7 +145,7 @@ test("inspectConfiguration accepts additional valid local skills", async () => {
   }
 });
 
-test("inspectConfiguration requires the Parent-owned Plan lifecycle helper", async () => {
+test("inspectConfiguration requires every Root broker readiness component", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
@@ -141,7 +157,7 @@ test("inspectConfiguration requires the Parent-owned Plan lifecycle helper", asy
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
-    assert.ok(issues.includes("missing Parent-owned Plan lifecycle helper"));
+    assert.ok(issues.includes("missing Root subagent broker component: scripts/lib/subagent-dispatch/root-broker-server.ts"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -280,4 +296,12 @@ test("no issue when basic-memory version matches", async () => {
     readBasicMemoryVersion: async () => "0.22.1",
   });
   assert.ok(!issues.some((i) => i.includes("basic-memory")));
+});
+
+test("doctor CLI reports Root broker readiness without retired Host terminology", async () => {
+  const result = await runDoctor();
+  assert.equal(result.code, 0);
+  assert.equal(result.signal, null);
+  assert.match(result.stdout, /Root subagent broker: ready/);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Standalone|detached|thin Host/i);
 });

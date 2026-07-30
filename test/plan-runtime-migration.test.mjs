@@ -22,25 +22,50 @@ test("legacy generic Executor runtime and its tests are absent", async () => {
   ]) await missing(relative);
 });
 
-test("only the thin Host owns Plan Runner process control and no Executor path imports it", async () => {
-  const host = await readFile(path.join(root, "scripts/lib/plan/plan-host-runtime.mjs"), "utf8");
-  const coordinator = await readFile(path.join(root, "scripts/lib/plan/coordinator.mjs"), "utf8");
-  const dependencies = await readFile(path.join(root, "scripts/lib/plan/plan-runner-dependencies.mjs"), "utf8");
-  const backend = await readFile(path.join(root, "scripts/lib/plan/pi-subagents-execution-backend.mjs"), "utf8");
-
-  assert.match(host, /node:child_process/);
-  assert.doesNotMatch(host, /lib\/runtime|runtime\/spawn|spawnPiAgent|createMonitor|PI_SUBAGENT_DEPTH/);
-  assert.doesNotMatch(host, /spawnExecutor|attemptId|executorCwd/);
-  for (const source of [coordinator, dependencies, backend]) {
-    assert.doesNotMatch(source, /spawnPiAgent|createMonitor|stopAgent|interruptAgent|import\s*\{\s*spawn\s*\}\s*from\s*["']node:child_process/);
-  }
+test("Standalone Plan Host runtime and its test are absent", async () => {
+  for (const relative of ["scripts/lib/plan/plan-host-runtime.mjs", "test/plan-host-runtime.test.mjs"]) await missing(relative);
 });
 
-test("Plan widget reads typed projections instead of process stdout", async () => {
+test("unused Parent lifecycle source and test are absent", async () => {
+  for (const relative of ["scripts/lib/plan/parent-lifecycle.mjs", "test/parent-lifecycle.test.mjs"]) await missing(relative);
+});
+
+test("Launcher no longer retains Host implementation identifiers", async () => {
+  const source = await readFile(path.join(root, "scripts/lib/plan/plan-launcher-extension.mjs"), "utf8");
+  assert.doesNotMatch(source, /spawnPlanRunner|processIdentity|host-handle\.json|pi-plan-host-keeper/);
+});
+
+test("Widget no longer retains Host implementation identifiers", async () => {
   const widget = await readFile(path.join(root, "scripts/lib/plan/tui/plan-widget.mjs"), "utf8");
   assert.match(widget, /status\.json/);
-  assert.match(widget, /host-handle\.json/);
-  assert.doesNotMatch(widget, /stdout|createProcessFleetView|createOutputStream|createMonitor/);
+  assert.doesNotMatch(widget, /host-handle\.json|hostRunId|Host:/);
+});
+
+test("Plan runtime tools no longer retain Standalone Runner terminology", async () => {
+  const source = await readFile(path.join(root, "scripts/lib/plan/plan-runtime-tools.mjs"), "utf8");
+  assert.doesNotMatch(source, /Standalone Plan Runner/);
+});
+
+test("Widget only projects status and broker-owned Executor facts", async () => {
+  const widget = await readFile(path.join(root, "scripts/lib/plan/tui/plan-widget.mjs"), "utf8");
+  assert.match(widget, /executorRuns/);
+  assert.doesNotMatch(widget, /host-handle|hostRunId|Host:/i);
+});
+
+test("flat runtime architecture document states the six retirement boundaries", async () => {
+  const source = await readFile(path.join(root, "docs/architecture/plan-runner-flat-runtime.md"), "utf8");
+  for (const term of ["topology", "lifecycle", "dispatch", "authorization", "Supervisor", "retirement"]) assert.match(source, new RegExp(term, "i"));
+});
+
+test("capsule documentation no longer describes the retired Host topology", async () => {
+  const source = await readFile(path.join(root, "docs/pi-plan-execution-capsule.md"), "utf8");
+  assert.doesNotMatch(source, /thin Host|Standalone runner|host handle/i);
+});
+
+test("architecture audit preserves facts and appends its superseding decision", async () => {
+  const source = await readFile(path.join(root, "docs/audits/2026-07-29-plan-runner-architecture-audit.md"), "utf8");
+  assert.match(source, /Superseding Decision/);
+  assert.match(source, /audit/i);
 });
 
 test("remaining fleet modules do not import the retired runtime directory", async () => {

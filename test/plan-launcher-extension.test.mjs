@@ -90,12 +90,18 @@ test("plan-run launches a session-local Root Plan Runner and never persists a ha
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("launcher retires plan-recover while retaining active Root management commands", () => {
+  const { commands } = setup();
+  assert.equal(commands.has("plan-recover"), false);
+  for (const name of ["plan-status", "plan-cancel", "plan-open", "plan-pause"]) assert.equal(commands.has(name), true);
+});
+
 test("Root B rejects management of Root A's Plan Runner without Root RPC", async () => {
   const { root } = await fixture(); const calls = [];
   try {
     const handle = { schemaVersion: "pi-plan-handle.v4", planId: "plan-one", revision: 1, manifestSha256: hashes.manifestSha256, sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, planIrHash: hashes.irHash, rootSessionId: "root-session-A", planRunnerRunId: "run-A", asyncDir: "/async/A", worktree: path.join(root, "var", "plan-worktrees", "plan-one"), baseCommit: "e".repeat(40) };
     const { commands, tools } = setup(options(root, calls, { rootSessionId: "root-session-B", findHandle: async () => handle }));
-    for (const name of ["plan-status", "plan-cancel", "plan-open", "plan-pause", "plan-recover"]) await assert.rejects(commands.get(name).handler("plan-one", {}), /belongs to another Root session/);
+    for (const name of ["plan-status", "plan-cancel", "plan-open", "plan-pause"]) await assert.rejects(commands.get(name).handler("plan-one", {}), /belongs to another Root session/);
     const reply = await tools.get("plan_attention_reply").execute("id", { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 1, message: "Proceed." }, undefined, undefined, {});
     assert.equal(reply.isError, true);
     assert.deepEqual(calls, []);
@@ -114,7 +120,7 @@ test("grant failure stops the spawned runner and rolls back", async () => {
 
 test("management uses Root RPC and cancellation records intent first", async () => {
   const { root } = await fixture(); const calls = []; const handle = { schemaVersion: "pi-plan-handle.v4", planId: "plan-one", revision: 1, manifestSha256: hashes.manifestSha256, sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, planIrHash: hashes.irHash, rootSessionId: "root-session-1", planRunnerRunId: "run-1", asyncDir: "/async/1", worktree: path.join(root, "var", "plan-worktrees", "plan-one"), baseCommit: "e".repeat(40) };
-  try { const { commands } = setup(options(root, calls, { findHandle: async () => handle, recordCancelIntent: async () => calls.push(["intent"]) })); await commands.get("plan-status").handler("plan-one", {}); await commands.get("plan-pause").handler("plan-one", {}); await commands.get("plan-open").handler("plan-one", {}); await commands.get("plan-recover").handler("plan-one", {}); await commands.get("plan-cancel").handler("plan-one", {}); assert.deepEqual(calls.map(([name]) => name), ["status", "interrupt", "status", "status", "intent", "stop"]); assert.deepEqual(calls.at(-1)[1], { runId: "run-1", dir: "/async/1" }); } finally { await rm(root, { recursive: true, force: true }); }
+  try { const { commands } = setup(options(root, calls, { findHandle: async () => handle, recordCancelIntent: async () => calls.push(["intent"]) })); await commands.get("plan-status").handler("plan-one", {}); await commands.get("plan-pause").handler("plan-one", {}); await commands.get("plan-open").handler("plan-one", {}); await commands.get("plan-cancel").handler("plan-one", {}); assert.deepEqual(calls.map(([name]) => name), ["status", "interrupt", "status", "intent", "stop"]); assert.deepEqual(calls.at(-1)[1], { runId: "run-1", dir: "/async/1" }); } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("plan runner entry remains child-safe and uses the Root-owned adapter", async () => {
@@ -159,7 +165,7 @@ test("legacy v3 handle is rejected with the flat runtime migration diagnostic be
   try {
     const { commands, tools } = setup(options(root, calls, { findHandle: async () => ({ schemaVersion: "pi-plan-handle.v3", planId: "plan-one" }) }));
     const diagnostic = "Standalone Host handles are unsupported after flat runtime migration";
-    for (const name of ["plan-status", "plan-cancel", "plan-open", "plan-pause", "plan-recover"]) await assert.rejects(commands.get(name).handler("plan-one", {}), (error) => error?.message === diagnostic);
+    for (const name of ["plan-status", "plan-cancel", "plan-open", "plan-pause"]) await assert.rejects(commands.get(name).handler("plan-one", {}), (error) => error?.message === diagnostic);
     const reply = await tools.get("plan_attention_reply").execute("id", { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 1, message: "Proceed." }, undefined, undefined, {});
     assert.equal(reply.isError, true);
     assert.equal(reply.content[0].text, diagnostic);
@@ -421,9 +427,6 @@ test("terminal runner stops poller when Attention forwarding fails or projection
     const dir = await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256: createHash("sha256").update("original").digest("hex") } } }] }] });
     await (await import("node:fs/promises")).mkdir(path.join(dir, "attention"), { recursive: true }); await writeFile(path.join(dir, "attention", "request-1.md"), "tampered");
     await poll(); assert.deepEqual(cancelled, ["timer-1"]);
-    await commands.get("plan-recover").handler("plan-one", {}); cancelled.length = 0;
-    await rm(path.join(root, "var", "plan-runs", "plan-one", "status.json")); await poll();
-    assert.deepEqual(cancelled, ["timer-1"]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
