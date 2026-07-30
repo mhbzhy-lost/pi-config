@@ -16,9 +16,9 @@
 
 领域关系是 `Main -> Plan Runner -> Executor`：Main 批准 Plan，Plan Runner 解释批准的 DAG、路径和资源，再为 Executor 创建固定合同。运行时关系则是同一个 Root 下的 siblings：Root 分别持有 Plan Runner 与 Executor；这不改变领域中的父子职责。
 
-Root session 是唯一生命周期 owner。`root-session-owner.ts` 保存 session-local v4 handle，handle 只在该 Root 内有效；其他 Root 不恢复，也不接管已有运行。每个派发的 `spawnKey` 是 Root 私有键，不可作为跨 Root 标识或恢复依据。
+Root session 是唯一生命周期 owner。Launcher 通过 `pi.appendEntry(HANDLE_TYPE, handle)` 将 session-local v4 handle 写入当前 Root session branch，handle 只在该 Root 内有效；`root-session-owner.ts` 不保存 handle，它在 child 中订阅 `root.closing` 与 ownership EOF，并以 `SIGTERM` 终止该 child。其他 Root 不恢复，也不接管已有运行。每个派发的 `spawnKey` 是 Root 私有键，不可作为跨 Root 标识或恢复依据。
 
-Plan Capsule 不调用 `subagent`。工具经 child adapter 将请求交给 Root broker，broker 通过本地 `pi-subagents` RPC 派发并持有 Executor 的运行所有权。Executor 只能在已分配 Attempt worktree 中运行，不能改变 DAG、cwd、allowed paths、资源或集成顺序，也不能继续派发 Agent。
+Plan Runner 模型原样调用项目 `subagent` 工具。Plan Capsule 只在该 tool call 上执行一次性授权，child adapter（`root-owned-subagent`）再将已授权请求交给 Root broker，broker 调用本地 `pi-subagents` RPC 并持有 Executor 的运行所有权；Capsule 既不直接 spawn，也不禁止该工具调用。Executor 只能在已分配 Attempt worktree 中运行，不能改变 DAG、cwd、allowed paths、资源或集成顺序，也不能继续派发 Agent。
 
 ## 三类事实
 
@@ -36,7 +36,7 @@ Harness 先重放活动 Attempt 的资源 claim，再按 Plan 顺序选择 front
 
 `attempt.dispatch-requested` 绑定 dispatch event 与一次性 contract hash。其后的非协议 spawn 异常直接视为不确定；若无法从 started event、spawn reply 和官方 artifact 唯一绑定 run，Plan 进入 `dispatch_uncertain` 并保留现场，禁止自动重复 spawn。已绑定 run 只在同一 Root 内依据 session file、runId、asyncDir、cwd 和授权 output 继续对账。
 
-关闭顺序受同一 Root 管理：先停止新的派发，再中断并等待 Executor 的官方 terminal proof，然后停止 Plan Runner，最后释放 Root broker 的本地资源。跨 Root 请求一律拒绝，避免其他 session 改写所有权或复用运行。
+关闭顺序受同一 Root 管理：先停止新的派发，对 Executors 请求 `stop` 并等待各自官方 terminal proof，再对 Plan Runner 请求 `stop` 并等待 proof，最后关闭 broker transport 并 dispose upstream。`interrupt` 不是 shutdown 控制。跨 Root 请求一律拒绝，避免其他 session 改写所有权或复用运行。
 
 Executor 完成不等于结果可接受。Attempt 必须通过以下检查：
 
@@ -48,13 +48,13 @@ Executor 完成不等于结果可接受。Attempt 必须通过以下检查：
 
 ## Attention
 
-Executor 经 broker ownership routing 向当前 Root 请求输入。Plan Runner 执行固定控制循环：
+Executor 的 native supervisor request 经 broker ownership routing 只交给 owning Plan Runner，不能直接向 Root 请求输入。Plan Runner 持久化 Attention，并执行固定控制循环：
 
 ```text
 pending -> 1000ms bounded wait -> pending -> plan_status
 ```
 
-blocking 请求一旦持久化为 `waiting-attention`，Plan Runner 就不得再自行回复，包括计划已明确 fail-closed 结果的情况。请求正文写入 0600 Markdown 和 durable Attention event；当前 Root 收到通知后以 fenced reply 提交用户明确决策。工具从当前 projection 派生并写入 taskId、attemptId、runId 完整的 durable command。
+blocking 请求一旦持久化为 `waiting-attention`，Plan Runner 就不得再自行回复，包括计划已明确 fail-closed 结果的情况。请求正文写入 0600 Markdown 和 durable Attention event；当前 Root 的 Launcher projection 通知桥将通知发给 Main。Main 获得用户明确决策后调用 `plan_attention_reply`，该工具从当前 projection 派生并写入 taskId、attemptId、runId 完整的 durable command。Plan Runner 随后以 fenced `plan_executor_supervisor` reply 投递该命令。
 
 command 版本绑定不可变 Attention 请求，native delivery authorization 另行绑定当前 Plan version，因此并行 Task 的无关事件不会让用户回复 stale。command 缺失、过期或不匹配时 native reply 必须拒绝；只有 native reply 成功后才能 resolve。`waiting-attention` 不是终态，同一 Root 生命周期内从 event 和 command inbox 继续处理，不重复通知、不串线。
 
