@@ -3,6 +3,8 @@ import { createServer, Socket } from "node:net";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 
+import { captureProcessBirthIdentity } from "./process-birth-identity.ts";
+
 import {
   brokerSocketPath,
   createBrokerFailureResponse,
@@ -18,9 +20,11 @@ import {
 type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: () => void | Promise<void> };
 type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
-type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; events?: { on(channel: string, listener: (event: any) => void): () => void } };
+type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void } };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; delivered: Set<string> };
 type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
+type OwnedRun = { rootSessionId: string; runId: string; role: "plan-runner" | "executor"; asyncDir: string; sessionId: string; pid: number; birthIdentity: string | null; identityState: "verified" | "unavailable" | "conflict" };
+type StartedFacts = Pick<OwnedRun, "runId" | "role" | "asyncDir" | "sessionId" | "pid">;
 
 const FORBIDDEN_SPAWN_FIELDS = new Set(["caller", "root", "token", "parent", "depth", "path", "fanout", "callerRunId", "callerToken", "rootSessionId", "parentRunId", "parentDepth", "parentPath"]);
 const MAX_BUFFER = 64 * 1024;
@@ -62,6 +66,8 @@ export class RootBrokerServer {
   callerGrants = new Map<string, Promise<{ callerToken: string }>>();
   spawnLedger = new Map<string, SpawnLedgerEntry>();
   supervisorRequests = new Map<string, SupervisorRequest>();
+  ownedRuns = new Map<string, OwnedRun>();
+  startedObservations = new Map<string, Promise<void>>();
   unsubscribeStarted: (() => void) | undefined;
   unsubscribeComplete: (() => void) | undefined;
   unsubscribeTerminal: (() => void) | undefined;
@@ -70,13 +76,15 @@ export class RootBrokerServer {
   closePromise: Promise<void> | undefined;
   writeGrant: typeof writeBrokerGrant;
   randomToken: () => string;
+  captureProcessBirthIdentity: typeof captureProcessBirthIdentity;
   events: Dependencies["events"];
 
-  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), events }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
+  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, events }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     this.rootSessionId = rootSessionId;
     this.upstream = upstream;
     this.writeGrant = writeGrant;
     this.randomToken = randomToken;
+    this.captureProcessBirthIdentity = captureBirthIdentity;
     this.events = events;
   }
 
@@ -95,13 +103,7 @@ export class RootBrokerServer {
         server!.listen(socketPath, () => { server?.off("error", fail); resolve(); });
       });
       await setBrokerSocketPermissions(socketPath);
-      this.unsubscribeStarted = this.events?.on("subagent:async-started", (event) => {
-        const runId = event?.runId ?? event?.id;
-        if (typeof runId === "string" && ["executor", "spark"].includes(event?.agent)) {
-          void this.ensureExecutorOwner(runId).catch(() => undefined);
-        }
-        this.lifecycle(event, "execution.started");
-      });
+      this.unsubscribeStarted = this.events?.on("subagent:async-started", (event) => this.observeStarted(event));
       this.unsubscribeComplete = this.events?.on("subagent:async-complete", (event) => this.lifecycle(event, "execution.completed"));
       this.unsubscribeTerminal = this.events?.on("subagent:process-terminal", (event) => this.lifecycle(event, "execution.completed"));
     } catch (error) {
@@ -110,6 +112,42 @@ export class RootBrokerServer {
       await rm(socketPath, { force: true });
       throw error;
     }
+  }
+
+  startedFacts(event: any): StartedFacts | undefined {
+    const runId = event?.runId ?? event?.id;
+    if (typeof runId !== "string" || runId.length === 0
+      || (event?.runId !== undefined && event?.id !== undefined && event.runId !== event.id)
+      || !["plan-runner", "executor", "spark"].includes(event?.agent)
+      || !Number.isSafeInteger(event?.pid) || event.pid <= 0
+      || typeof event?.asyncDir !== "string" || !path.isAbsolute(event.asyncDir)
+      || event?.sessionId !== this.rootSessionId) return;
+    return { runId, role: event.agent === "spark" ? "executor" : event.agent, asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid };
+  }
+
+  observeStarted(event: any): Promise<void> {
+    const facts = this.startedFacts(event);
+    if (!facts) return Promise.resolve();
+    const existing = this.ownedRuns.get(facts.runId);
+    if (existing) {
+      if (existing.role !== facts.role || existing.sessionId !== facts.sessionId || existing.pid !== facts.pid || existing.asyncDir !== facts.asyncDir) {
+        this.ownedRuns.set(facts.runId, { ...existing, identityState: "conflict" });
+      }
+      return this.startedObservations.get(facts.runId) ?? Promise.resolve();
+    }
+    const initial: OwnedRun = { rootSessionId: this.rootSessionId, ...facts, birthIdentity: null, identityState: "unavailable" };
+    this.ownedRuns.set(facts.runId, initial);
+    const observation = (async () => {
+      let birthIdentity: string | null = null;
+      let identityState: OwnedRun["identityState"] = "verified";
+      try { birthIdentity = await this.captureProcessBirthIdentity(facts.pid); } catch { identityState = "unavailable"; }
+      const current = this.ownedRuns.get(facts.runId) ?? initial;
+      this.ownedRuns.set(facts.runId, { ...current, birthIdentity, identityState: current.identityState === "conflict" ? "conflict" : identityState });
+      if (facts.role === "executor") await this.ensureExecutorOwner(facts.runId);
+      this.lifecycle(event, "execution.started");
+    })();
+    this.startedObservations.set(facts.runId, observation);
+    return observation.catch(() => undefined);
   }
 
   async ensureExecutorOwner(runId: string) {
@@ -412,7 +450,7 @@ export class RootBrokerServer {
     this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
     this.closePromise = (async () => {
       try {
-        await Promise.allSettled([...this.executorGrants.values(), ...this.callerGrants.values()]);
+        await Promise.allSettled([...this.startedObservations.values(), ...this.executorGrants.values(), ...this.callerGrants.values()]);
         for (const [callerRunId, sockets] of this.subscriptions) {
           const push = { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "root.closing", data: {} };
           for (const socket of sockets) if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);
@@ -437,6 +475,8 @@ export class RootBrokerServer {
         this.callerGrants.clear();
         this.spawnLedger.clear();
         this.supervisorRequests.clear();
+        this.ownedRuns.clear();
+        this.startedObservations.clear();
       }
     })();
     return this.closePromise;
