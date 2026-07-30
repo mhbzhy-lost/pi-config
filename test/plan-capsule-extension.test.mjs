@@ -86,12 +86,16 @@ function setup(options = {}) {
   const entries = [];
   const messages = [];
   let activeTools = options.activeTools ?? ["read", "grep", "bash", "subagent", "contact_supervisor", "subagent_wait", "subagent_supervisor", "plan_open"];
+  let extensionLoading = options.rejectActionMethodsDuringLoading === true;
   const pi = {
     registerTool(tool) { tools.set(tool.name, tool); },
     on(name, handler) { handlers.set(name, handler); },
     appendEntry(customType, data) { entries.push({ customType, data }); },
     getActiveTools() { return activeTools; },
-    setActiveTools(next) { activeTools = next; },
+    setActiveTools(next) {
+      if (extensionLoading) throw new Error("Extension runtime not initialized. Action methods cannot be called during extension loading.");
+      activeTools = next;
+    },
     sendMessage(message, sendOptions) { messages.push({ message, options: sendOptions }); },
   };
   createPlanCapsuleExtension(pi, {
@@ -106,6 +110,7 @@ function setup(options = {}) {
     writeCurrentRevision: async () => {},
     ...options,
   });
+  extensionLoading = false;
   return { tools, handlers, entries, messages, activeTools: () => activeTools };
 }
 
@@ -154,8 +159,13 @@ test("capsule statically registers plan lifecycle tools and declares actual boot
   assert.deepEqual(Object.keys(tools.get("plan_open").parameters.properties).sort(), ["allowPlanCommits", "baseCommit", "manifestSha256", "planId", "planIrHash", "revision", "worktree"]);
 });
 
-test("capsule pre-open active tools are limited to plan_open and read-only tools", () => {
-  const { activeTools } = setup();
+test("capsule factory does not call action methods during extension loading", () => {
+  assert.doesNotThrow(() => setup({ rejectActionMethodsDuringLoading: true }));
+});
+
+test("capsule pre-open active tools are limited to plan_open and read-only tools", async () => {
+  const { activeTools, handlers } = setup();
+  await handlers.get("session_start")({}, context());
   assert.deepEqual(activeTools(), ["plan_open", "read", "grep"]);
 });
 
