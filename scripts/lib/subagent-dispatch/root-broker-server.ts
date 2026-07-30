@@ -443,7 +443,6 @@ export class RootBrokerServer {
 
   handleSocket(socket: Socket) {
     this.sockets.add(socket);
-    this.transportSockets.add(socket);
     socket.once("close", () => this.sockets.delete(socket));
     let buffer = "";
     let handled = false;
@@ -483,7 +482,6 @@ export class RootBrokerServer {
       if (request.method === "subscribe") {
         const subscribers = this.subscriptions.get(request.callerRunId) ?? new Set<Socket>();
         subscribers.add(socket);
-        this.transportSockets.add(socket);
         this.subscriptions.set(request.callerRunId, subscribers);
         socket.once("close", () => subscribers.delete(socket));
         return createBrokerSuccessResponse({ ...request, data: { subscribed: true } });
@@ -726,10 +724,13 @@ export class RootBrokerServer {
         this.teardown.grants = true;
       }
       if (!this.teardown.transport) {
+        for (const socket of this.sockets) this.transportSockets.add(socket);
+        for (const sockets of this.subscriptions.values()) {
+          for (const socket of sockets) this.transportSockets.add(socket);
+        }
         for (const [callerRunId, sockets] of this.subscriptions) {
           const push = { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "root.closing", data: {} };
           for (const socket of sockets) {
-            this.transportSockets.add(socket);
             if (this.closingSockets.has(socket)) continue;
             this.closingSockets.add(socket);
             if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);
