@@ -393,6 +393,7 @@ export function createTypedSubagentExtension(
     renderSubagentResult,
     resolveCodingSpawnIdentity,
     beforeDispose = async () => {},
+    retainOnBeforeDisposeFailure = false,
     onSupervisorRequest,
   } = {},
 ) {
@@ -454,6 +455,12 @@ export function createTypedSubagentExtension(
 
   pi.on("session_shutdown", async () => {
     if (registry.get(pi)?.token !== token) return;
+    if (retainOnBeforeDisposeFailure) {
+      await beforeDispose();
+      dispose();
+      registry.delete(pi);
+      return;
+    }
     try {
       await beforeDispose();
     } finally {

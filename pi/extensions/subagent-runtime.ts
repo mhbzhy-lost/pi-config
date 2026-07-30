@@ -44,18 +44,16 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       mailbox.deactivate();
       if (!brokerStarted) return;
       const broker = requireRootBroker(pi);
-      try {
-        await broker.closeRootSession();
-      } finally {
-        unbindRootBroker(pi, broker);
-        if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
-        else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
-        previousBrokerMarker = undefined;
-        brokerStarted = false;
-      }
+      await broker.closeRootSession();
+      unbindRootBroker(pi, broker);
+      if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
+      else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
+      previousBrokerMarker = undefined;
+      brokerStarted = false;
     },
     renderSubagentResult,
     rpc,
+    retainOnBeforeDisposeFailure: true,
     onSupervisorRequest: mailbox.handle,
   });
   pi.on("session_start", async (_event, ctx) => {
@@ -78,12 +76,9 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     } catch (error) {
       mailbox.deactivate();
       if (brokerStarted) {
-        try {
-          await broker.closeRootSession();
-        } finally {
-          unbindRootBroker(pi, broker);
-          brokerStarted = false;
-        }
+        await broker.closeRootSession();
+        unbindRootBroker(pi, broker);
+        brokerStarted = false;
       }
       if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
       else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
