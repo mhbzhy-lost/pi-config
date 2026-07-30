@@ -752,6 +752,30 @@ export class RootBrokerServer {
     return true;
   }
 
+  resolveActiveCaller(logicalRunId: string) {
+    if (this.closed) throw new Error("Root subagent broker is closing");
+    const logical = this.logicalCallers.get(logicalRunId);
+    const caller = this.callers.get(logicalRunId);
+    const activeRunId = logical?.activeRunId;
+    const principal = activeRunId ? this.principals.get(activeRunId) : undefined;
+    if (!logical || !caller || caller.role !== "plan-runner" || !activeRunId || this.callerAliases.get(activeRunId) !== logicalRunId || principal?.role !== "plan-runner") {
+      throw new Error("Root subagent broker caller is invalid");
+    }
+    return activeRunId;
+  }
+
+  async statusCaller(logicalRunId: string) {
+    return await this.upstream.status({ runId: this.resolveActiveCaller(logicalRunId) });
+  }
+
+  async interruptCaller(logicalRunId: string) {
+    return await this.upstream.interrupt({ runId: this.resolveActiveCaller(logicalRunId) });
+  }
+
+  async stopCaller(logicalRunId: string) {
+    return await this.upstream.stop({ runId: this.resolveActiveCaller(logicalRunId) });
+  }
+
   async control(request: any, caller: Caller, logicalCallerRunId: string) {
     const runId = request.params.runId ?? request.params.id;
     if (typeof runId !== "string" || !caller.ownedRunIds.has(runId) || this.runOwners.get(runId) !== logicalCallerRunId) return failure(request, "run_not_owned", "Run is not owned by caller");
