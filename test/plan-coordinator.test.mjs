@@ -995,8 +995,16 @@ test("Task5A2 binds redacted integrated dependency receipts into the dispatch co
     attemptId: result.dispatches[0].attemptId, baseCommit: "dependency-head", output: `/results/${result.dispatches[0].attemptId}.json`,
     dependencyReceipts: subject.appended[1].data.tool.dependencyReceipts,
   })).digest("hex"));
+  const currentWorkspace = `/attempts/${result.dispatches[0].attemptId}`;
+  assert.equal(subject.appended[1].data.tool.cwd, currentWorkspace);
+  assert.equal(subject.appended[1].data.tool.contract.execution.cwd, currentWorkspace);
+  const publicDependencyProjections = [
+    subject.appended[1].data.tool.dependencyReceipts,
+    receipt,
+    subject.appended[1].data.tool.task,
+  ].map((projection) => JSON.stringify(projection));
   for (const privateValue of ["private stdout", "private stderr", "/private/transcript", "/private/evidence.json", "/private/local-transcript", "/attempts/"]) {
-    assert.equal(JSON.stringify(subject.appended[1].data.tool).includes(privateValue), false);
+    for (const projection of publicDependencyProjections) assert.equal(projection.includes(privateValue), false);
   }
 });
 
