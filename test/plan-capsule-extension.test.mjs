@@ -281,6 +281,23 @@ test("plan_open tool result registers a durable Root wake", async () => {
   assert.deepEqual(messages, []);
 });
 
+test("plan_open tool result deduplicates repeated durable Root wakes", async () => {
+  const binding = openBinding();
+  const calls = [];
+  const { tools, handlers, messages } = setup({
+    validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
+    requestCallerFollowUp: async (request) => calls.push(request),
+  });
+  const result = await execute(tools.get("plan_open"), binding);
+  assert.equal(result.isError, false, result.content[0].text);
+
+  await handlers.get("tool_result")({ toolName: "plan_open", isError: false }, context());
+  await handlers.get("tool_result")({ toolName: "plan_open", isError: false }, context());
+
+  assert.deepEqual(calls, [{ wakeId: "plan-opened", reason: "plan-opened" }]);
+  assert.deepEqual(messages, []);
+});
+
 test("plan_open appends plan.created before writing the current revision", async () => {
   const calls = [];
   const { tools } = setup({
