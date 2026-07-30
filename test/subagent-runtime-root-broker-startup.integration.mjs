@@ -61,6 +61,7 @@ test("persisted root session shares its broker registry with an independent Jiti
     assert.ok(records.some((record) => record.type === "response" && record.command === "get_commands" && record.success === true), result.stdout);
     assert.ok(!records.some((record) => record.type === "extension_error"), result.stdout);
     assert.doesNotMatch(result.stderr, /rootSessionId.*safe non-path identity|extension (?:failed|error)|failed to load extension/i);
+    await assert.rejects(access(socket), /ENOENT/);
 
     const facts = JSON.parse(await readFile(output, "utf8"));
     assert.notEqual(facts.eventReason, null, JSON.stringify(facts));
@@ -72,8 +73,6 @@ test("persisted root session shares its broker registry with an independent Jiti
     assert.equal(facts.error, null, JSON.stringify(facts));
     assert.equal(facts.brokerRootSessionId, sessionId, JSON.stringify(facts));
     assert.equal(facts.brokerServerExists, true, JSON.stringify(facts));
-
-    await access(socket);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
