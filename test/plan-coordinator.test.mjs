@@ -31,6 +31,78 @@ test("publicly binds an exact requested Executor dispatch once", async () => {
   assert.equal(subject.appended.length, 1);
 });
 
+test("public binding preserves a spawned result after ordinary persistence failure for retry", async () => {
+  const entries = requestedEntries();
+  const stops = [];
+  const sharedWriter = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => { entries.push(entry); },
+    id: (() => { let index = 0; return () => `retry-${++index}`; })(),
+    now: () => "2026-07-15T00:00:03.000Z",
+  });
+  let failBoundAppend = true;
+  const writer = {
+    async append(input) {
+      if (input.type === "attempt.bound" && failBoundAppend) {
+        failBoundAppend = false;
+        throw Object.assign(new Error("binding persist failed"), { code: "EIO" });
+      }
+      return await sharedWriter.append(input);
+    },
+  };
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries,
+    backend: { async stop(target) { stops.push(target); } },
+    options: { writer, readEntries: async () => entries, readProjection: () => replay(entries) },
+  });
+  const input = {
+    attemptId: "attempt-plan-1-task-1-1",
+    taskId: "task-1",
+    dispatchId: "attempt-plan-1-task-1-1.dispatch.1",
+    binding: { runId: "run-retry-bind", asyncDir: "/async/retry-bind", sessionFile: "/sessions/retry-bind.jsonl" },
+  };
+
+  await assert.rejects(bindAuthorizedDispatch(subject.coordinator, input), { code: "EIO", message: "binding persist failed" });
+  assert.deepEqual(stops, []);
+  assert.equal(replay(entries).attempts.get(input.attemptId).status, "dispatch-requested");
+  assert.equal(entries.filter(({ type }) => type === "attempt.bound").length, 0);
+
+  await bindAuthorizedDispatch(subject.coordinator, input);
+  const attempt = replay(entries).attempts.get(input.attemptId);
+  assert.deepEqual(stops, []);
+  assert.equal(entries.filter(({ type }) => type === "attempt.bound").length, 1);
+  assert.equal(attempt.status, "active");
+  assert.equal(attempt.runId, input.binding.runId);
+  assert.equal(attempt.asyncDir, input.binding.asyncDir);
+});
+
+test("legacy direct binding stops a spawned result after ordinary persistence failure", async () => {
+  const entries = [createdEntry(["task-1"])];
+  const stops = [];
+  const sharedWriter = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => { entries.push(entry); },
+    id: (() => { let index = 0; return () => `legacy-${++index}`; })(),
+    now: () => "2026-07-15T00:00:01.000Z",
+  });
+  const writer = {
+    async append(input) {
+      if (input.type === "attempt.bound") throw Object.assign(new Error("binding persist failed"), { code: "EIO" });
+      return await sharedWriter.append(input);
+    },
+  };
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries,
+    backend: { async stop(target) { stops.push(target); } },
+    options: { writer, readEntries: async () => entries, readProjection: () => replay(entries) },
+  });
+
+  await assert.rejects(subject.coordinator.dispatchAuthorized(), { code: "EIO", message: "binding persist failed" });
+  assert.deepEqual(stops, [{ runId: "run-1", asyncDir: "/async/run-1" }]);
+});
+
 test("public binding stops a spawned result after requested projection becomes terminal", async () => {
   const stops = []; const entries = [...requestedEntries(), event("plan.cancelled", { reason: "cancelled" }, 4)];
   const subject = harness({ entries, backend: { async stop(binding) { stops.push(binding); } } });
