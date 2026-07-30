@@ -7,6 +7,7 @@ import { applyEvent, createProjection } from "../scripts/lib/plan/plan-events.mj
 import { createPlanCoordinator } from "../scripts/lib/plan/coordinator.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
+import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 
 test("requires a compiled Plan IR instead of compiling a parsed plan", () => {
   assert.throws(
@@ -755,6 +756,71 @@ test("v3 dispatch emits the complete exact prompt and canonical identity context
   };
   assert.equal(event.data.dispatchContextHash, createHash("sha256").update(JSON.stringify(canonical)).digest("hex"));
   assert.equal(event.data.toolHash, createHash("sha256").update(JSON.stringify(event.data.tool)).digest("hex"));
+});
+
+test("prepareAuthorizedDispatches persists a new durable Executor intent", async () => {
+  const approvedPlan = v3Plan();
+  const ir = compilePlanToIR(approvedPlan);
+  const subject = harness({
+    approvedPlan,
+    entries: [createdV3Entry(ir)],
+    backend: { async spawn() { throw new Error("backend.spawn must not be called"); } },
+  });
+
+  const result = await subject.coordinator.prepareAuthorizedDispatches();
+
+  assert.equal(result.state, "dispatch-required");
+  assert.equal(result.dispatches.length, 1);
+  const [dispatch] = result.dispatches;
+  assert.equal(dispatch.attemptId, "attempt-plan-1-task-1-1");
+  assert.equal(dispatch.dispatchId, "attempt-plan-1-task-1-1.dispatch.1");
+  assert.equal(typeof dispatch.contractHash, "string");
+  assert.match(dispatch.contractHash, /^[a-f0-9]{64}$/);
+  assert.equal("hash" in dispatch.contract, false);
+  assert.deepEqual(subject.spawned, []);
+  assert.deepEqual(subject.appended.map(({ type }) => type), [
+    "attempt.workspace-allocated",
+    "attempt.dispatch-requested",
+  ]);
+
+  const intent = subject.appended[1];
+  assert.equal(intent.data.attemptId, dispatch.attemptId);
+  assert.equal(intent.data.dispatchId, dispatch.dispatchId);
+  assert.equal(intent.data.toolHash, dispatch.contractHash);
+  assert.deepEqual(intent.data.tool.contract, dispatch.contract);
+  assert.deepEqual(intent.data.tool.dependencyReceipts, []);
+  assert.equal(intent.data.tool.cwd, "/attempts/attempt-plan-1-task-1-1");
+  assert.equal(intent.data.tool.timeoutMs, 321000);
+
+  assert.deepEqual(dispatch.contract, {
+    version: "dispatch-ir.v1",
+    taskId: "task-1",
+    title: "Exact task",
+    agent: "executor",
+    risk: "normal",
+    objective: "dispatch the exact approved task",
+    workflow: { mode: "tdd" },
+    requirements: ["Implement the approved change."],
+    context: {
+      knownFacts: ["Plan instructions: Keep the execution contract intact."],
+      decisions: [],
+      relevantFiles: ["src/exact.mjs"],
+    },
+    boundaries: {
+      writePaths: ["src/exact.mjs"],
+      excludedWork: [],
+      forbiddenActions: [],
+    },
+    acceptance: {
+      criteria: ["Run the selected verification command successfully."],
+      commands: ["true"],
+    },
+    execution: { cwd: ".", timeoutMs: 321000 },
+  });
+  const compiled = compileCodingDispatchIR(dispatch.contract, { cwd: "/repo" });
+  assert.equal(compiled.hash, dispatch.contractHash);
+  assert.equal(compiled.execution.cwd, "/repo");
+  assert.equal(compiled.execution.timeoutMs, 321000);
 });
 
 test("v3 dispatch carries body-only IR hash changes while scheduling remains stable", async () => {
