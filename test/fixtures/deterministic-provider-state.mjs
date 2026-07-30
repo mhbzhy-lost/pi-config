@@ -131,7 +131,8 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
     if (continues.length === 0 && toolNames.includes("plan_continue")) {
       return { tool: { name: "plan_continue", arguments: { reason: "harness" } } };
     }
-    const latestContinue = textParts(continues.at(-1));
+    const latestContinueIndex = messages.findLastIndex((message) => message?.role === "toolResult" && message.toolName === "plan_continue");
+    const latestContinue = textParts(messages[latestContinueIndex]);
     let continueState;
     let dispatches = [];
     try {
@@ -143,16 +144,17 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
       return { tool: { name: "plan_verify", arguments: {} } };
     }
     if (continueState === "dispatch-required") {
-      const dispatched = resultsFor("subagent").length;
+      const dispatched = messages.filter((message, index) => index > latestContinueIndex
+        && message?.role === "toolResult" && message.toolName === "subagent").length;
       if (dispatched < dispatches.length && toolNames.includes("subagent")) {
         return { tool: { name: "subagent", arguments: dispatches[dispatched].contract } };
       }
-      return { text: "PLAN_RUNNER_WAITING_LIFECYCLE" };
+      if (latestStatusIndex <= latestContinueIndex) return { text: "PLAN_RUNNER_WAITING_LIFECYCLE" };
     }
     const latestStatus = latestStatusIndex >= 0 ? textParts(messages[latestStatusIndex]) : "";
     if (/"status":\s*"waiting-attention"/.test(latestStatus)) return { text: "PLAN_RUNNER_WAITING_ATTENTION" };
     if (/"status":\s*"active"|"status":\s*"started"/.test(latestStatus)) return { text: "PLAN_RUNNER_WAITING_LIFECYCLE" };
-    if (/"status":\s*"validated"|"status":\s*"succeeded"/.test(latestStatus) && continues.length === 1 && toolNames.includes("plan_continue")) {
+    if (/"status":\s*"validated"|"status":\s*"succeeded"/.test(latestStatus) && latestStatusIndex > latestContinueIndex && toolNames.includes("plan_continue")) {
       return { tool: { name: "plan_continue", arguments: { reason: "integrate" } } };
     }
     if (/"status":\s*"accepted"|"status":\s*"integrated"/.test(latestStatus) && toolNames.includes("plan_verify")) {
