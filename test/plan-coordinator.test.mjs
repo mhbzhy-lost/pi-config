@@ -1058,14 +1058,22 @@ test("Task5A2 preserves non-command acceptance JSON with the base diff command",
 
 test("Task5A2 chunks 5000-byte requirements and plan instruction facts without truncation", async () => {
   const longText = "x".repeat(5000);
-  const subject = harness({ approvedPlan: v3Plan({ instructions: longText, body: longText }) });
+  const approvedPlan = v3Plan({ instructions: longText, body: longText });
+  const ir = compilePlanToIR(approvedPlan);
+  const subject = harness({ approvedPlan });
 
   const result = await subject.coordinator.prepareAuthorizedDispatches();
   const contract = result.dispatches[0].contract;
-  assert.equal(contract.requirements.join(""), longText);
-  assert.equal(contract.context.knownFacts.filter((fact) => fact.startsWith("Plan instructions: ")).join("").replace(/^Plan instructions: /, ""), longText);
+  assert.equal(contract.requirements.join(""), ir.nodes[0].body);
+  const instructionFacts = contract.context.knownFacts.filter((fact) => fact.startsWith("Plan instructions ("));
+  assert.equal(instructionFacts.length > 1, true);
+  assert.equal(instructionFacts.map((fact, index) => {
+    const prefix = `Plan instructions (${index + 1}/${instructionFacts.length}): `;
+    assert.equal(fact.startsWith(prefix), true);
+    return fact.slice(prefix.length);
+  }).join(""), ir.instructions);
   assert.equal(contract.requirements.every((value) => Buffer.byteLength(value) <= 4096), true);
-  assert.equal(contract.context.knownFacts.every((value) => Buffer.byteLength(value) <= 4096), true);
+  assert.equal(instructionFacts.every((value) => Buffer.byteLength(value) <= 4096), true);
   assert.equal(subject.allocations.length, 1);
 });
 
