@@ -87,6 +87,7 @@ test("exposes only the approved RPC v1 methods", () => {
     "dispose",
     "interrupt",
     "ping",
+    "resume",
     "spawn",
     "status",
     "steer",
@@ -102,6 +103,7 @@ test("maps control calls to their same-named RPC methods", async () => {
 
   for (const [method, params] of [
     ["status", { id: "run-1" }],
+    ["resume", { id: "plan-runner-1", message: "A durable Root broker wake is pending." }],
     ["steer", { id: "run-1", message: "Use the approved decision." }],
     ["interrupt", { id: "run-1" }],
     ["stop", { id: "run-1" }],
