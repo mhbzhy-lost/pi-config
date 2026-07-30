@@ -81,13 +81,9 @@ function flatPlanPrompt() {
 }
 
 const rootMainTools = ["plan_run", "plan_attention_reply"];
-const transitionalRootMainTools = [...rootMainTools, "compat_spawn"];
 const rootMainPlanPaths = ["/tmp/root-main-first.plan.md", "/tmp/root-main-second.plan.md"];
 function rootMainPrompt() {
   return user(`PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths: rootMainPlanPaths })}`);
-}
-function transitionalRootMainPrompt() {
-  return user(`PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths: rootMainPlanPaths })}\nPI_SUBAGENTS_COMPAT_PARENT_COMPLETE`);
 }
 
 function planRunResult(planPath) {
@@ -106,19 +102,19 @@ test("Root Main launches the first declared plan before any tool result", () => 
 
 test("Root Main launches the second declared plan after the first launch result", () => {
   assert.deepEqual(decide([
-    transitionalRootMainPrompt(),
+    rootMainPrompt(),
     planRunResult(rootMainPlanPaths[0]),
-  ], transitionalRootMainTools), {
+  ], rootMainTools), {
     tool: { name: "plan_run", arguments: { planPath: rootMainPlanPaths[1] } },
   });
 });
 
 test("Root Main stops waiting after both declared plan launches without polling", () => {
   const turn = decide([
-    transitionalRootMainPrompt(),
+    rootMainPrompt(),
     planRunResult(rootMainPlanPaths[0]),
     planRunResult(rootMainPlanPaths[1]),
-  ], transitionalRootMainTools);
+  ], rootMainTools);
 
   assert.deepEqual(turn, { text: "PLAN_ROOT_WAITING" });
   assert.equal(turn?.tool, undefined);
@@ -126,14 +122,21 @@ test("Root Main stops waiting after both declared plan launches without polling"
 
 test("Root Main provider stream stops waiting after both declared plan launches", async () => {
   const done = await streamDone([
-    transitionalRootMainPrompt(),
+    rootMainPrompt(),
     planRunResult(rootMainPlanPaths[0]),
     planRunResult(rootMainPlanPaths[1]),
-  ], transitionalRootMainTools.map((name) => ({ name })));
+  ], rootMainTools.map((name) => ({ name })));
 
   assert.equal(done.reason, "stop");
   assert.equal(done.message.stopReason, "stop");
   assert.deepEqual(done.message.content, [{ type: "text", text: "PLAN_ROOT_WAITING" }]);
+});
+
+test("Root Main stops launching after a failed plan_run", () => {
+  assert.deepEqual(decide([
+    rootMainPrompt(),
+    { ...planRunResult(rootMainPlanPaths[0]), isError: true },
+  ], rootMainTools), { text: "PLAN_ROOT_LAUNCH_FAILED" });
 });
 
 test("provider stream waits for lifecycle instead of falling through to plan_verify", async () => {

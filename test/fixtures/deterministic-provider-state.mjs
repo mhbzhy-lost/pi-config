@@ -19,6 +19,25 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
   const toolInventory = toolNames.join(",");
 
   const toolResults = messages.filter((message) => message?.role === "toolResult");
+  const rootHarnessMarker = "PI_PLAN_FLAT_ROOT_HARNESS";
+  const rootHarnessMarkerIndex = userText.indexOf(rootHarnessMarker);
+  if (rootHarnessMarkerIndex >= 0) {
+    const rootHarnessLines = userText.slice(rootHarnessMarkerIndex + rootHarnessMarker.length).split("\n");
+    const rootHarnessJson = rootHarnessLines[1];
+    let planPaths;
+    try {
+      planPaths = JSON.parse(rootHarnessJson).planPaths;
+    } catch {}
+    if (Array.isArray(planPaths) && planPaths.length > 0 && planPaths.every((planPath) => typeof planPath === "string" && planPath)) {
+      const planRunResults = toolResults.filter((message) => message.toolName === "plan_run");
+      if (planRunResults.some((message) => message.isError)) return { text: "PLAN_ROOT_LAUNCH_FAILED" };
+      if (planRunResults.length >= planPaths.length) return { text: "PLAN_ROOT_WAITING" };
+      if (toolNames.includes("plan_run")) {
+        return { tool: { name: "plan_run", arguments: { planPath: planPaths[planRunResults.length] } } };
+      }
+    }
+  }
+
   if (/^Allowed paths: decision\.txt$/m.test(userText)) {
     const supervisorReplied = toolResults.some((message) => message.toolName === "contact_supervisor");
     const committed = toolResults.some((message) => message.toolName === "bash");
