@@ -452,6 +452,27 @@ test("capsule retains a Supervisor authorization when result resolution fails an
   assert.equal(resolveCalls, 2);
 });
 
+test("capsule submits one Executor tool result and retries an unresolved result", async () => {
+  let calls = 0;
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
+  const { handlers } = setup({
+    authorizeExecutorDispatch: async () => {},
+    resolveExecutorDispatchResult: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("result persistence unavailable");
+    },
+  });
+  await handlers.get("session_start")({}, ctx);
+  const { input } = executorContract();
+  const call = { toolName: "subagent", toolCallId: "executor-result-call", input };
+  assert.equal(await handlers.get("tool_call")(call, ctx), undefined);
+  const event = { ...call, isError: false, details: { runId: "run-1", asyncDir: "/async/run-1" } };
+  await assert.rejects(handlers.get("tool_result")(event, ctx), /result persistence unavailable/);
+  await handlers.get("tool_result")(event, ctx);
+  await handlers.get("tool_result")(event, ctx);
+  assert.equal(calls, 2);
+});
+
 test("capsule blocks legacy Supervisor pending and reply without invoking its authorizer", async () => {
   const authorized = [];
   const { handlers } = setup({ authorizeSupervisorReply: async (input) => authorized.push(input) });

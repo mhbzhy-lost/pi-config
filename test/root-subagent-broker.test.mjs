@@ -399,6 +399,25 @@ test("executor grant publishes before write, rolls back, and can retry", async (
   assert.equal(broker.grantPaths.has("/tmp/executor-grant"), true);
 });
 
+test("cleaned tool result lookup releases the durable dispatch for a new Executor tool call", async (t) => {
+  let writes = 0;
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: fakeUpstream(),
+    writeGrant: async (grant) => {
+      if (grant.role === "executor" && writes++ === 0) throw new Error("executor grant write failed");
+      return `/tmp/${grant.runId}`;
+    },
+  });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  const caller = await broker.grantCaller({ callerRunId: "plan-cleaned-result", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
+  const failed = await broker.dispatch(request({ callerRunId: "plan-cleaned-result", callerToken: caller.callerToken, method: "spawn", requestId: "dispatch-cleaned", params: { agent: "executor", spawnKey: "dispatch-cleaned" } }), {});
+  assert.equal(failed.success, false);
+  const lookup = await broker.dispatch(request({ callerRunId: "plan-cleaned-result", callerToken: caller.callerToken, method: "spawn.lookup", requestId: "lookup-cleaned", params: { spawnKey: "dispatch-cleaned" } }), {});
+  assert.equal(lookup.data?.state, "cleaned");
+});
+
 test("caller grant never overwrites a principal collision or writes a grant", async () => {
   let writes = 0;
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), writeGrant: async () => { writes += 1; return "/tmp/grant"; } });

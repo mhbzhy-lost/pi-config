@@ -148,3 +148,22 @@ test("rejects a toolCallId reused by a separate requested Attempt without consum
   assert.throws(() => boundary.authorize(second.contract, { projection, toolCallId: "shared-call" }), /toolCallId.*already|duplicate.*toolCallId/i);
   assert.equal(boundary.authorize(second.contract, { projection, toolCallId: "call-2" }).attemptId, "attempt-2");
 });
+
+test("resolves an authorized Executor result into the exact durable binding", () => {
+  const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+  boundary.authorize(exact.contract, { projection, toolCallId: "result-call" });
+  boundary.resolveCodingSpawnIdentity({ toolCallId: "result-call", contract: exact.contract, contractHash: exact.contractHash });
+  assert.equal(typeof boundary.resolveExecutorToolResult, "function", "Boundary must expose resolveExecutorToolResult");
+  assert.deepEqual(boundary.resolveExecutorToolResult({
+    toolName: "subagent", toolCallId: "result-call", input: exact.contract, isError: false,
+    details: { version: "coding-dispatch-handle.v1", dispatchId: "dispatch-1", taskId: "task-1", agent: "executor", title: "Execute task", contractHash: exact.contractHash, runId: "run-1", asyncDir: "/async/run-1" },
+  }), { status: "spawned", binding: { runId: "run-1", asyncDir: "/async/run-1" } });
+});
+
+test("releases a cleaned Executor authorization so the same contract can be retried", () => {
+  const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+  boundary.authorize(exact.contract, { projection, toolCallId: "cleaned-call" });
+  assert.equal(typeof boundary.releaseExecutorToolCall, "function", "Boundary must expose releaseExecutorToolCall");
+  assert.deepEqual(boundary.releaseExecutorToolCall("cleaned-call", "cleaned"), { state: "released", disposition: "cleaned" });
+  assert.equal(boundary.authorize(exact.contract, { projection, toolCallId: "retry-call" }).toolCallId, "retry-call");
+});

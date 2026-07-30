@@ -16,6 +16,15 @@ test("requires a compiled Plan IR instead of compiling a parsed plan", () => {
   );
 });
 
+test("publicly binds an exact requested Executor dispatch once", async () => {
+  const subject = harness({ approvedPlan: plan([task("task-1")]), entries: requestedEntries() });
+  assert.equal(typeof subject.coordinator.bindAuthorizedDispatch, "function", "Coordinator must expose bindAuthorizedDispatch");
+  const binding = { runId: "run-public-bind", asyncDir: "/async/public-bind", sessionFile: "/sessions/public-bind.jsonl" };
+  await subject.coordinator.bindAuthorizedDispatch({ attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", dispatchId: "attempt-plan-1-task-1-1.dispatch.1", binding });
+  assert.deepEqual(subject.appended.map(({ type }) => type), ["attempt.bound"]);
+  assert.deepEqual(subject.appended[0].data, { attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", dispatchId: "attempt-plan-1-task-1-1.dispatch.1", ...binding });
+});
+
 const workspace = {
   originRoot: "/repo",
   worktree: "/accumulator",
