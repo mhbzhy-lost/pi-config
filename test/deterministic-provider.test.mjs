@@ -40,7 +40,6 @@ test("deterministic Executor waits for a supervisor decision before writing its 
 });
 
 const flatPlanTools = ["plan_open", "plan_continue", "plan_status", "plan_verify", "subagent", "plan_executor_supervisor"];
-const flatLegacySupervisorTools = [...flatPlanTools, "subagent_supervisor"];
 const flatBootstrap = {
   planId: "plan-1",
   revision: 3,
@@ -54,13 +53,6 @@ function flatPlanPrompt() {
   return user(`Open the approved Plan revision by calling plan_open exactly once with ${JSON.stringify(flatBootstrap)}.`);
 }
 
-function transitionalFlatPlanPrompt() {
-  return user(`${flatPlanPrompt().content[0].text}
-PI_PLAN_HARNESS_STANDALONE
-exact bootstrap JSON:
-${JSON.stringify(flatBootstrap)}`);
-}
-
 test("flat Plan Runner parses the production bootstrap and opens the exact revision", () => {
   assert.deepEqual(decide([flatPlanPrompt()], flatPlanTools), {
     tool: { name: "plan_open", arguments: flatBootstrap },
@@ -70,7 +62,7 @@ test("flat Plan Runner parses the production bootstrap and opens the exact revis
 test("flat Plan Runner forwards each dispatch-required contract unchanged to subagent", () => {
   const contract = { task: "task-10a", agent: "executor", runId: "executor-run-1", prompt: "Implement only the approved task." };
   assert.deepEqual(decide([
-    transitionalFlatPlanPrompt(),
+    flatPlanPrompt(),
     toolResult("plan_open", "opened"),
     toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract }] })),
   ], flatPlanTools), { tool: { name: "subagent", arguments: contract } });
@@ -79,47 +71,49 @@ test("flat Plan Runner forwards each dispatch-required contract unchanged to sub
 test("flat Plan Runner waits for a lifecycle follow-up after subagent starts", () => {
   const dispatched = toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: { task: "task-10a" } }] }));
   assert.deepEqual(decide([
-    transitionalFlatPlanPrompt(), toolResult("plan_open", "opened"), dispatched, toolResult("subagent", "started"),
+    flatPlanPrompt(), toolResult("plan_open", "opened"), dispatched, toolResult("subagent", "started"),
   ], flatPlanTools), { text: "PLAN_RUNNER_WAITING_LIFECYCLE" });
 });
 
 test("flat Plan Runner polls plan_status after a lifecycle follow-up arrives", () => {
   const dispatched = toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: { task: "task-10a" } }] }));
   assert.deepEqual(decide([
-    transitionalFlatPlanPrompt(), toolResult("plan_open", "opened"), dispatched, toolResult("subagent", "started"),
+    flatPlanPrompt(), toolResult("plan_open", "opened"), dispatched, toolResult("subagent", "started"),
     { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "A lifecycle update arrived. Call plan_status.", details: { dispatchId: "dispatch-1", runId: "executor-run-1", state: "started" } },
   ], flatPlanTools), { tool: { name: "plan_status", arguments: {} } });
 });
 
 test("flat Plan Runner reconciles Attention requests through plan_status", () => {
   assert.deepEqual(decide([
-    transitionalFlatPlanPrompt(),
+    flatPlanPrompt(),
     toolResult("plan_open", "opened"),
     { role: "custom", customType: "subagent_supervisor_request", content: "Approve the change.", details: { id: "request-1", runId: "executor-run-1" } },
   ], flatPlanTools), { tool: { name: "plan_status", arguments: {} } });
 });
 
 test("flat Plan Runner fences durable Attention replies through plan_executor_supervisor", () => {
-  assert.deepEqual(decide([
-    transitionalFlatPlanPrompt(),
-    toolResult("plan_open", "opened"),
-    { role: "custom", customType: "pi-plan-attention-reply-v1", content: "APPROVED", details: { requestId: "request-1", runId: "executor-run-1" } },
-  ], flatLegacySupervisorTools), {
+  const reply = { role: "custom", customType: "pi-plan-attention-reply-v1", content: "APPROVED", details: { requestId: "request-1", runId: "executor-run-1" } };
+  const messages = [flatPlanPrompt(), toolResult("plan_open", "opened"), reply];
+  const expected = {
     tool: { name: "plan_executor_supervisor", arguments: { action: "reply", replyTo: "request-1", to: "executor-run-1", message: "APPROVED" } },
+  };
+  assert.deepEqual(decide(messages, flatPlanTools), expected);
+  assert.deepEqual(decide([...messages, toolResult("plan_executor_supervisor", "replied", { replyTo: "request-1" })], flatPlanTools), {
+    tool: { name: "plan_continue", arguments: { reason: "harness" } },
   });
 });
 
 test("flat Plan Runner integrates validated work", () => {
   const status = toolResult("plan_status", '{"tasks":[{"status":"pending","attempts":[{"status":"validated"}]}]}');
-  assert.deepEqual(decide([transitionalFlatPlanPrompt(), toolResult("plan_open", "opened"), status], flatPlanTools), {
-    tool: { name: "plan_continue", arguments: { reason: "harness" } },
+  assert.deepEqual(decide([flatPlanPrompt(), toolResult("plan_open", "opened"), toolResult("plan_continue", "started"), status], flatPlanTools), {
+    tool: { name: "plan_continue", arguments: { reason: "integrate" } },
   });
 });
 
 test("flat Plan Runner verifies after integration", () => {
   const status = toolResult("plan_status", '{"tasks":[{"status":"pending","attempts":[{"status":"validated"}]}]}');
   const integrated = toolResult("plan_continue", '{"state":"ready-to-verify"}');
-  assert.deepEqual(decide([transitionalFlatPlanPrompt(), toolResult("plan_open", "opened"), status, integrated], flatPlanTools), {
+  assert.deepEqual(decide([flatPlanPrompt(), toolResult("plan_open", "opened"), status, integrated], flatPlanTools), {
     tool: { name: "plan_verify", arguments: {} },
   });
 });
@@ -127,8 +121,8 @@ test("flat Plan Runner verifies after integration", () => {
 test("flat Plan Runner stops after verification", () => {
   const status = toolResult("plan_status", '{"tasks":[{"status":"pending","attempts":[{"status":"validated"}]}]}');
   const integrated = toolResult("plan_continue", '{"state":"ready-to-verify"}');
-  assert.deepEqual(decide([transitionalFlatPlanPrompt(), toolResult("plan_open", "opened"), status, integrated, toolResult("plan_verify", "validated")], flatPlanTools), {
-    text: "PLAN_HARNESS_DONE",
+  assert.deepEqual(decide([flatPlanPrompt(), toolResult("plan_open", "opened"), status, integrated, toolResult("plan_verify", "validated")], flatPlanTools), {
+    text: "PLAN_RUNNER_DONE",
   });
 });
 

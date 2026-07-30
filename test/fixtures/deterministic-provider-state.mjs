@@ -95,71 +95,70 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
     return { text: "COMPAT_PARENT_DONE" };
   }
 
-  if (userText.includes("PI_PLAN_HARNESS_STANDALONE")) {
-    const bootstrap = userText.match(/exact bootstrap JSON:\s*\n(\{[^\n]+\})/)?.[1];
+  const bootstrap = userText.match(/Open the approved Plan revision by calling plan_open exactly once with (\{[^\n]+\})\./)?.[1];
+  if (bootstrap) {
     const resultsFor = (name) => toolResults.filter((message) => message.toolName === name);
-    const customDurableReply = messages.find((message) => message?.role === "custom"
+    const customDurableReply = [...messages].reverse().find((message) => message?.role === "custom"
       && message.customType === "pi-plan-attention-reply-v1");
-    const convertedDurableReply = [...messages].reverse().find((message) => message?.role === "user"
-      && textParts(message).trim() === "APPROVED");
-    const latestPending = [...toolResults].reverse().find((message) => message.toolName === "subagent_supervisor"
-      && Array.isArray(message.details?.pending) && message.details.pending.length > 0);
-    const durableRequestId = customDurableReply?.details?.requestId ?? latestPending?.details?.pending?.[0]?.id;
-    const durableMessage = customDurableReply
-      ? (typeof customDurableReply.content === "string" ? customDurableReply.content : textParts(customDurableReply))
-      : textParts(convertedDurableReply);
+    const durableRequestId = customDurableReply?.details?.requestId;
+    const durableRunId = customDurableReply?.details?.runId;
+    const durableMessage = typeof customDurableReply?.content === "string"
+      ? customDurableReply.content : textParts(customDurableReply);
     const delivered = typeof durableRequestId === "string" && durableRequestId
-      ? resultsFor("subagent_supervisor").some((message) => message.details?.replyTo === durableRequestId)
+      ? resultsFor("plan_executor_supervisor").some((message) => message.details?.replyTo === durableRequestId)
       : false;
-    if (typeof durableRequestId === "string" && durableRequestId && durableMessage.trim()
-      && !delivered && toolNames.includes("subagent_supervisor")) {
+    if (typeof durableRequestId === "string" && durableRequestId && typeof durableRunId === "string" && durableRunId
+      && durableMessage.trim() && !delivered && toolNames.includes("plan_executor_supervisor")) {
       return {
         tool: {
-          name: "subagent_supervisor",
-          arguments: { action: "reply", replyTo: durableRequestId, message: durableMessage },
+          name: "plan_executor_supervisor",
+          arguments: { action: "reply", replyTo: durableRequestId, to: durableRunId, message: durableMessage },
         },
       };
     }
-    if (resultsFor("plan_open").length === 0 && bootstrap && toolNames.includes("plan_open")) {
+    if (resultsFor("plan_open").length === 0 && toolNames.includes("plan_open")) {
       return { tool: { name: "plan_open", arguments: JSON.parse(bootstrap) } };
+    }
+    const latestPushIndex = messages.findLastIndex((message) => message?.role === "custom"
+      && ["pi-root-subagent-lifecycle-v1", "subagent_supervisor_request"].includes(message.customType));
+    const latestStatusIndex = messages.findLastIndex((message) => message?.role === "toolResult" && message.toolName === "plan_status");
+    if (latestPushIndex > latestStatusIndex && toolNames.includes("plan_status")) {
+      return { tool: { name: "plan_status", arguments: {} } };
     }
     const continues = resultsFor("plan_continue");
     const verifies = resultsFor("plan_verify");
-    if (verifies.length > 0) return { text: "PLAN_HARNESS_DONE" };
+    if (verifies.length > 0) return { text: "PLAN_RUNNER_DONE" };
     if (continues.length === 0 && toolNames.includes("plan_continue")) {
       return { tool: { name: "plan_continue", arguments: { reason: "harness" } } };
     }
     const latestContinue = textParts(continues.at(-1));
-    if (/ready-to-verify/.test(latestContinue) && toolNames.includes("plan_verify")) {
+    let continueState;
+    let dispatches = [];
+    try {
+      const parsed = JSON.parse(latestContinue);
+      continueState = parsed.state;
+      dispatches = parsed.dispatches ?? [];
+    } catch {}
+    if (continueState === "ready-to-verify" && toolNames.includes("plan_verify")) {
       return { tool: { name: "plan_verify", arguments: {} } };
     }
-    const supervisorResults = resultsFor("subagent_supervisor");
-    const waits = resultsFor("subagent_wait");
-    const statuses = resultsFor("plan_status");
-    const latestStatus = textParts(statuses.at(-1));
-    if (/"status":\s*"waiting-attention"/.test(latestStatus) && !delivered) {
-      return { text: "PLAN_HARNESS_WAITING_ATTENTION" };
+    if (continueState === "dispatch-required") {
+      const dispatched = resultsFor("subagent").length;
+      if (dispatched < dispatches.length && toolNames.includes("subagent")) {
+        return { tool: { name: "subagent", arguments: dispatches[dispatched].contract } };
+      }
+      return { text: "PLAN_RUNNER_WAITING_LIFECYCLE" };
     }
-    if (/"status":\s*"validated"|"status":\s*"succeeded"/.test(latestStatus) && toolNames.includes("plan_continue")) {
+    const latestStatus = latestStatusIndex >= 0 ? textParts(messages[latestStatusIndex]) : "";
+    if (/"status":\s*"waiting-attention"/.test(latestStatus)) return { text: "PLAN_RUNNER_WAITING_ATTENTION" };
+    if (/"status":\s*"active"|"status":\s*"started"/.test(latestStatus)) return { text: "PLAN_RUNNER_WAITING_LIFECYCLE" };
+    if (/"status":\s*"validated"|"status":\s*"succeeded"/.test(latestStatus) && continues.length === 1 && toolNames.includes("plan_continue")) {
       return { tool: { name: "plan_continue", arguments: { reason: "integrate" } } };
     }
     if (/"status":\s*"accepted"|"status":\s*"integrated"/.test(latestStatus) && toolNames.includes("plan_verify")) {
       return { tool: { name: "plan_verify", arguments: {} } };
     }
-    const round = statuses.length;
-    if (supervisorResults.length < round * 2 + 1 && toolNames.includes("subagent_supervisor")) {
-      return { tool: { name: "subagent_supervisor", arguments: { action: "pending" } } };
-    }
-    if (waits.length < round + 1 && toolNames.includes("subagent_wait")) {
-      return { tool: { name: "subagent_wait", arguments: { all: false, timeoutMs: 1000 } } };
-    }
-    if (supervisorResults.length < round * 2 + 2 && toolNames.includes("subagent_supervisor")) {
-      return { tool: { name: "subagent_supervisor", arguments: { action: "pending" } } };
-    }
-    if (toolNames.includes("plan_status")) {
-      return { tool: { name: "plan_status", arguments: {} } };
-    }
-    return { text: "PLAN_HARNESS_WAITING" };
+    return { text: "PLAN_RUNNER_WAITING_LIFECYCLE" };
   }
 
   if (userText.includes("PI_SUBAGENTS_COMPAT_CHILD_COMPLETE")) {
