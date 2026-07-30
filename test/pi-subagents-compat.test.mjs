@@ -285,6 +285,8 @@ test("rejects nested event files on the executor path", () => {
 });
 
 test("retires standalone compatibility environment API", () => {
+  const retiredExport = ["build", "Standalone", "RuntimeEnv"].join("");
+  assert.equal(compat[retiredExport], undefined);
   assert.equal(typeof compat.buildTopLevelRuntimeEnv, "function");
 });
 
@@ -298,8 +300,16 @@ test("builds a top-level runtime environment without inherited child markers", (
   assert.throws(() => compat.buildTopLevelRuntimeEnv({ PI_SUBAGENT_FANOUT_CHILD: "1" }), /PI_SUBAGENT_FANOUT_CHILD/);
 });
 
-test("flat runtime compat probe source uses flat boundaries", async () => {
+test("flat runtime compat probe source retires standalone boundaries", async () => {
   const source = await readFile(join(repoRoot, "scripts/probes/pi-subagents-compat.mjs"), "utf8");
+  for (const removedName of [
+    ["build", "Standalone", "RuntimeEnv"],
+    ["standalone", "Root", "Service"],
+    ["standalone", "No", "Child", "Env"],
+    ["standalone", "Session", "Rebased"],
+  ].map((parts) => parts.join(""))) {
+    assert.doesNotMatch(source, new RegExp(`\\b${removedName}\\b`));
+  }
   assert.match(source, /\bbuildTopLevelRuntimeEnv\b/);
   for (const flatField of [
     "rootBrokerReady",
