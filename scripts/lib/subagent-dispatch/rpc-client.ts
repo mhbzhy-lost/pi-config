@@ -35,6 +35,7 @@ export function createRenewableTypedSubagentRpcClient(createClient) {
   return Object.freeze({
     renew() {
       current?.dispose?.();
+      current = undefined;
       current = createClient();
       return current;
     },

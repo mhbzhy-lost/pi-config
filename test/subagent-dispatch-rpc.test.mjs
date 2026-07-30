@@ -188,6 +188,28 @@ test("starts immediately and renews the underlying RPC client after a session sh
   client.dispose();
 });
 
+test("recovers lazily when an eager renew factory call fails", async () => {
+  const events = createEvents();
+  let factoryCalls = 0;
+  const client = createRenewableTypedSubagentRpcClient(() => {
+    factoryCalls += 1;
+    if (factoryCalls === 2) throw new Error("factory unavailable");
+    return createTypedSubagentRpcClient(events, { randomUUID: () => "recovered-session" });
+  });
+
+  assert.throws(() => client.renew(), /factory unavailable/);
+  const recovered = client.ping();
+  events.emit("subagents:rpc:v1:reply:recovered-session", {
+    version: 1,
+    requestId: "recovered-session",
+    success: true,
+    data: { recovered: true },
+  });
+  assert.deepEqual(await recovered, { recovered: true });
+  assert.equal(factoryCalls, 3);
+  client.dispose();
+});
+
 test("dispose rejects pending calls and fences invalid request ids", async () => {
   const events = createEvents();
   const client = createTypedSubagentRpcClient(events);

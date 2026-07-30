@@ -21,7 +21,8 @@ disposed: typed subagent RPC client is disposed
 - Pi 的 extension 实例和已注册工具会跨 session replacement 复用；`session_shutdown` 后会在同一个 extension runtime 上再次触发 `session_start`。
 - `pi/extensions/subagent-runtime.ts` 只在 extension 初始化时创建一次旧版 `rpc`；第一次修复又错误地把初始创建推迟到 `session_start`。Pi 某些启动路径会在 extension 加载前完成首次 `session_start`，因此用户复验得到 `not_started`。
 - Pi 的 session event 顺序不保证 extension 能观察到成对的 `session_shutdown -> session_start`；用户在 eager-first-generation 修复后仍复现 `not_started`，证明某条 replacement 路径只让当前 facade 观察到了 shutdown。
-- 正确模型是 extension 加载时立即创建第一代 client，`session_start` 主动 renew，并在工具调用时对空 generation 做惰性创建。
+- 外部评审进一步发现：`renew()` 先 dispose、再直接赋值 factory 结果；如果 factory 抛错，JavaScript 会保留赋值前的 disposed 引用，使 lazy recovery 因 `current` 非空而永远无法启动。
+- 正确模型是 extension 加载时立即创建第一代 client，`session_start` 主动 renew，并在工具调用时对空 generation 做惰性创建；renew 必须在调用 factory 前先清空旧 generation。
 - `RootBrokerServer.closeRootSession()` 也会调用共享的 `upstream.dispose()`，因此 broker shutdown 与 typed 工具都会关闭同一个 client。
 - 用户在完整退出后执行 `pi -c`，新进程继续旧 session 仍稳定复现；这推翻了“仅旧进程残留”和 npm `ETARGET` 升级窗口假设。
 - 单 session 的 fresh integration 测试通过，只能证明首次 `session_start`，没有覆盖 `session_shutdown -> session_start`。
@@ -42,7 +43,8 @@ disposed: typed subagent RPC client is disposed
 - TDD RED 1：缺少 renewable facade。
 - 用户复验 RED 2：修复后返回 `not_started`；新增“facade 构造后立即可调用”测试，按预期失败于该错误。
 - 用户复验 RED 3：eager 初始化后仍返回 `not_started`；测试改为 dispose 后不显式 renew，下一次调用必须惰性建立第二代 client，并按预期失败。
-- 最终 GREEN：RPC 与 membrane 测试 `34/34` 通过，覆盖首次立即可用、显式 renew 和事件缺失时的惰性 renew。
+- 外部评审 RED 4：renew factory 抛错后，下一次 `ping()` 返回旧 client 的 `disposed`，证明失败赋值保留了旧引用。
+- 最终 GREEN：RPC 与 membrane 测试覆盖首次立即可用、显式 renew、事件缺失时的惰性 renew，以及 factory 瞬时失败后的恢复。
 - typed runtime/membrane 与非 Plan Broker 回归通过；Root Broker ordered-drain 的 5 项 Task 8 intentional RED 保持不变。
 - `PI_REAL_BIN="$(command -v pi)" npm run test:subagents`：`3/3` 通过。
 - `npm run doctor` 和 `git diff --check` 通过。
