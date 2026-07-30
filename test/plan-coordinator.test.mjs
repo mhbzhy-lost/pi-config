@@ -938,7 +938,9 @@ test("Task5A2 resumes a workspace-allocated crash without allocating a second le
   const ir = compilePlanToIR(approvedPlan);
   const allocated = harness({ approvedPlan, entries: [createdV3Entry(ir)] });
   await allocated.coordinator.prepareAuthorizedDispatches().catch(() => {});
-  const replayed = harness({ approvedPlan, entries: [createdV3Entry(ir), allocated.appended[0]] });
+  const allocatedBeforeCrash = structuredClone(allocated.appended[0]);
+  allocatedBeforeCrash.eventId = "allocated-before-crash";
+  const replayed = harness({ approvedPlan, entries: [createdV3Entry(ir), allocatedBeforeCrash] });
 
   const result = await replayed.coordinator.prepareAuthorizedDispatches();
 
