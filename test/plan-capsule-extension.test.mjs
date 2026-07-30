@@ -283,10 +283,8 @@ test("plan_open tool result registers a durable Root wake", async () => {
 
 test("deduplicates repeated plan_open tool results within a session", async () => {
   const binding = openBinding();
-  const calls = [];
   const { tools, handlers, messages } = setup({
     validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
-    requestCallerFollowUp: async (request) => calls.push(request),
   });
   const result = await execute(tools.get("plan_open"), binding);
   assert.equal(result.isError, false, result.content[0].text);
@@ -295,32 +293,11 @@ test("deduplicates repeated plan_open tool results within a session", async () =
   await handlers.get("tool_result")(event, context());
   await handlers.get("tool_result")(event, context());
 
-  assert.deepEqual(calls, [{ wakeId: "plan-opened", reason: "plan-opened" }]);
-  assert.deepEqual(messages, []);
-});
-
-test("retries a durable Root wake after request failure", async () => {
-  const binding = openBinding();
-  const calls = [];
-  const { tools, handlers, messages } = setup({
-    validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
-    requestCallerFollowUp: async (request) => {
-      calls.push(request);
-      if (calls.length === 1) throw new Error("wake unavailable");
-    },
+  assert.equal(messages.length, 1);
+  assert.deepEqual(messages[0], {
+    message: { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: "release-11" } },
+    options: { triggerTurn: true, deliverAs: "followUp" },
   });
-  const result = await execute(tools.get("plan_open"), binding);
-  assert.equal(result.isError, false, result.content[0].text);
-
-  const event = { toolName: "plan_open", isError: false };
-  await assert.rejects(handlers.get("tool_result")(event, context()), /wake unavailable/);
-  await handlers.get("tool_result")(event, context());
-
-  assert.deepEqual(calls, [
-    { wakeId: "plan-opened", reason: "plan-opened" },
-    { wakeId: "plan-opened", reason: "plan-opened" },
-  ]);
-  assert.deepEqual(messages, []);
 });
 
 test("plan_open appends plan.created before writing the current revision", async () => {
