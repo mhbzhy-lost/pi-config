@@ -37,3 +37,40 @@ test("registers a plan-runner caller.followup wake intent", async () => {
     { wakeId: "plan-opened-1", reason: "plan-opened" },
   ]);
 });
+
+test("deduplicates identical plan-runner caller.followup wake intents", async () => {
+  const callerToken = "a".repeat(64);
+  const server = new RootBrokerServer({
+    rootSessionId: "root-session-1",
+    upstream: {},
+    writeGrant: async () => "/tmp/followup-grant",
+    randomToken: () => callerToken,
+  });
+  await server.grantCaller({
+    callerRunId: "plan-runner-1",
+    planId: "plan-1",
+    cwd: "/workspace",
+    originRoot: "/origin",
+    stateRoot: "/state",
+    role: "plan-runner",
+  });
+
+  const request = (requestId) =>
+    parseBrokerRequest({
+      schemaVersion: "pi-root-subagent-broker-request.v1",
+      requestId,
+      rootSessionId: "root-session-1",
+      callerRunId: "plan-runner-1",
+      callerToken,
+      method: "caller.followup",
+      params: { wakeId: "plan-opened-1", reason: "plan-opened" },
+    });
+  const firstResponse = await server.dispatch(request("request-followup-1"), {});
+  const secondResponse = await server.dispatch(request("request-followup-2"), {});
+
+  assert.deepEqual(firstResponse.data, { accepted: true, wakeId: "plan-opened-1" });
+  assert.deepEqual(secondResponse.data, { accepted: true, wakeId: "plan-opened-1" });
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [
+    { wakeId: "plan-opened-1", reason: "plan-opened" },
+  ]);
+});
