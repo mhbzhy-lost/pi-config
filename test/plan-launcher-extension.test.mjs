@@ -126,6 +126,7 @@ test("management uses Root RPC and cancellation records intent first", async () 
 test("plan runner entry remains child-safe and uses the Root-owned adapter", async () => {
   const source = await readFile(new URL("../pi/child-extensions/plan-runner.ts", import.meta.url), "utf8");
   assert.match(source, /installRootOwnedSubagent/); assert.match(source, /installRootSessionOwnerLifecycle/); assert.match(source, /createPlanCapsuleExtension/);
+  assert.match(source, /requestCallerFollowUp[\s\S]{0,120}rpc\.callerFollowUp/);
   assert.doesNotMatch(source, /PI_SUBAGENT_CHILD.*return/); assert.doesNotMatch(source, /createSubagentsRpcClient|spawnPiAgent|createMonitor/);
 });
 
