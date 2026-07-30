@@ -458,6 +458,34 @@ test("broker disposes upstream when grant cleanup fails", async (t) => {
   assert.equal(disposed, 1);
 });
 
+test("broker normal close removes grants and releases every authorization collection", async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "root-broker-close-"));
+  const callerGrant = path.join(directory, "caller-grant.json");
+  const executorGrant = path.join(directory, "executor-grant.json");
+  let disposed = 0;
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: { ...fakeUpstream(), dispose() { disposed += 1; } },
+    writeGrant: async (grant) => {
+      const grantPath = grant.role === "executor" ? executorGrant : callerGrant;
+      await writeFile(grantPath, JSON.stringify(grant));
+      return grantPath;
+    },
+  });
+  t.after(() => removePath(directory, { recursive: true, force: true }));
+  await broker.start();
+  await broker.grantCaller({ callerRunId: "plan-run-close-cleanup", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
+  await broker.ensureExecutorOwner("executor-run-close-cleanup");
+  broker.runOwners.set("executor-run-close-cleanup", "plan-run-close-cleanup");
+
+  await broker.closeRootSession();
+
+  await assert.rejects(stat(callerGrant));
+  await assert.rejects(stat(executorGrant));
+  for (const collection of [broker.callers, broker.principals, broker.runOwners, broker.subscriptions, broker.sockets, broker.grantPaths, broker.executorGrants, broker.callerGrants]) assert.equal(collection.size, 0);
+  assert.equal(disposed, 1);
+});
+
 test("broker cleans failed spawn grants and bounds failure messages", async () => {
   const stops = [];
   let grants = 0;

@@ -224,19 +224,30 @@ export class RootBrokerServer {
     this.unsubscribeStarted?.();
     this.unsubscribeStarted = undefined;
     this.closePromise = (async () => {
-      await Promise.allSettled([...this.executorGrants.values(), ...this.callerGrants.values()]);
-      for (const [callerRunId, sockets] of this.subscriptions) {
-        const push = { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "root.closing", data: {} };
-        for (const socket of sockets) if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);
-      }
-      for (const socket of this.sockets) if (!socket.destroyed) socket.end();
-      setTimeout(() => { for (const socket of this.sockets) if (!socket.destroyed) socket.destroy(); }, 25).unref?.();
-      await new Promise<void>((resolve) => this.server ? this.server.close(() => resolve()) : resolve());
       try {
-        await rm(brokerSocketPath(this.rootSessionId), { force: true });
-        await Promise.all([...this.grantPaths].map((grantPath) => rm(grantPath, { force: true })));
+        await Promise.allSettled([...this.executorGrants.values(), ...this.callerGrants.values()]);
+        for (const [callerRunId, sockets] of this.subscriptions) {
+          const push = { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "root.closing", data: {} };
+          for (const socket of sockets) if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);
+        }
+        for (const socket of this.sockets) if (!socket.destroyed) socket.end();
+        setTimeout(() => { for (const socket of this.sockets) if (!socket.destroyed) socket.destroy(); }, 25).unref?.();
+        await new Promise<void>((resolve) => this.server ? this.server.close(() => resolve()) : resolve());
+        try {
+          await rm(brokerSocketPath(this.rootSessionId), { force: true });
+          await Promise.all([...this.grantPaths].map((grantPath) => rm(grantPath, { force: true })));
+        } finally {
+          await this.upstream.dispose?.();
+        }
       } finally {
-        await this.upstream.dispose?.();
+        this.callers.clear();
+        this.principals.clear();
+        this.runOwners.clear();
+        this.subscriptions.clear();
+        this.sockets.clear();
+        this.grantPaths.clear();
+        this.executorGrants.clear();
+        this.callerGrants.clear();
       }
     })();
     return this.closePromise;
