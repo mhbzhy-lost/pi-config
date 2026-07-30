@@ -272,11 +272,13 @@ test("persists sanitized revival diagnostics in proof-first order", async () => 
   assert.equal(diagnostics[1].data.reason, "wake-missing");
   for (const entry of diagnostics) {
     assertRevivalDiagnostic(entry, {
-      activeRunId: entry.data.phase === "proof.accepted" || entry.data.phase === "revival.blocked" || entry.data.phase === "followup.accepted" || entry.data.phase === "revival.started" || entry.data.phase === "resume.invoked" ? "plan-runner-1" : "plan-runner-2",
-      generation: entry.data.phase === "resume.succeeded" || entry.data.phase === "grant.issued" || entry.data.phase === "revival.succeeded" ? 1 : 0,
+      activeRunId: entry.data.phase === "grant.issued" || entry.data.phase === "revival.succeeded" ? "plan-runner-2" : "plan-runner-1",
+      generation: entry.data.phase === "grant.issued" || entry.data.phase === "revival.succeeded" ? 1 : 0,
       wakeId: entry.data.phase === "proof.accepted" || entry.data.phase === "revival.blocked" ? undefined : "plan-opened-1",
     });
   }
+  const resumeSucceeded = diagnostics.find(({ data }) => data.phase === "resume.succeeded");
+  assert.equal(resumeSucceeded?.data.revivedRunId, "plan-runner-2");
 });
 
 test("bounds and sanitizes revival failure diagnostics", async () => {
