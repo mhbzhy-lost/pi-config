@@ -1353,6 +1353,42 @@ test("Supervisor reply fences ownership, strips Plan routing, and consumes reque
   assert.equal(calls.length, 1);
 });
 
+test("rejects oversized Supervisor final frames", async (t) => {
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() }); await broker.start();
+  await broker.grantCaller({ callerRunId: "frame-owner", planId: "frame-owner", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: "frame-owner" });
+  const subscription = await client.subscribe(() => {});
+  const closed = subscription.closed.catch((error) => error);
+  t.after(async () => {
+    subscription.dispose();
+    client.dispose();
+    await closed;
+    await broker.closeRootSession();
+  });
+  broker.runOwners.set("frame-executor", "frame-owner");
+
+  const result = await broker.routeSupervisorRequest(supervisorIngress({ id: "frame-limit", runId: "frame-executor", content: "x".repeat(BROKER_FRAME_LIMIT_BYTES) }));
+
+  assert.equal(result?.code, "supervisor_request_invalid");
+  assert.equal(broker.supervisorRequests?.has("frame-limit") ?? false, false);
+});
+
+test("does not authorize replies to Supervisor progress updates", async (t) => {
+  const calls = [];
+  const upstream = { ...fakeUpstream(), async executeSupervisor(params) { calls.push(params); return { content: [] }; } };
+  const broker = new RootBrokerServer({ rootSessionId, upstream }); await broker.start(); t.after(() => broker.closeRootSession());
+  const owner = await broker.grantCaller({ callerRunId: "progress-owner", planId: "progress-owner", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  broker.runOwners.set("progress-executor", "progress-owner");
+
+  await broker.routeSupervisorRequest(supervisorIngress({ id: "progress-update", runId: "progress-executor", reason: "progress_update", expectsReply: false }));
+  const pending = await broker.dispatch(request({ callerRunId: "progress-owner", callerToken: owner.callerToken, method: "supervisor.pending", params: {} }), {});
+  const reply = await broker.dispatch(request({ callerRunId: "progress-owner", callerToken: owner.callerToken, method: "supervisor.reply", params: { replyTo: "progress-update", message: "acknowledged" } }), {});
+
+  assert.deepEqual(pending.data?.pending, []);
+  assert.equal(reply.error?.code, "supervisor_request_unknown");
+  assert.deepEqual(calls, []);
+});
+
 test("rejects conflicting Supervisor ingress without changing the original owner", async (t) => {
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() }); await broker.start();
   await broker.grantCaller({ callerRunId: "owner-a", planId: "ingress-a", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
