@@ -1168,18 +1168,75 @@ test("broker leaves no executor principal after invalid spawn reply", async () =
   assert.equal(broker.principals?.has("executor-run-invalid") ?? false, false);
 });
 
-test("root broker registry isolates Pis and has bind/require/unbind contracts", () => {
+test("root broker registry shares brokers for Pis with the same events identity", () => {
+  const events = {};
+  const first = { events };
+  const second = { events };
+  const broker = {};
+  bindRootBroker(first, broker);
+  assert.equal(requireRootBroker(second), broker);
+  assert.throws(() => bindRootBroker(second, {}), /already bound/);
+  unbindRootBroker(second);
+  assert.throws(() => requireRootBroker(first), /unavailable/);
+});
+
+test("root broker registry isolates Pis with different events identities", () => {
+  const first = { events: {} };
+  const second = { events: {} };
+  const broker = {};
+  bindRootBroker(first, broker);
+  try {
+    assert.throws(() => requireRootBroker(second), /unavailable/);
+  } finally {
+    unbindRootBroker(first, broker);
+  }
+});
+
+test("root broker registry falls back to Pi identity when events is absent", () => {
   const first = {};
   const second = {};
   const broker = {};
-  assert.throws(() => requireRootBroker(first));
   bindRootBroker(first, broker);
-  assert.equal(requireRootBroker(first), broker);
-  assert.throws(() => bindRootBroker(first, broker));
-  assert.throws(() => requireRootBroker(second));
-  unbindRootBroker(first);
-  unbindRootBroker(first);
-  assert.throws(() => requireRootBroker(first));
+  try {
+    assert.equal(requireRootBroker(first), broker);
+    assert.throws(() => requireRootBroker(second), /unavailable/);
+  } finally {
+    unbindRootBroker(first, broker);
+  }
+});
+
+for (const [label, events] of [
+  ["null", null],
+  ["undefined", undefined],
+  ["a string", "events"],
+  ["a number", 1],
+  ["a boolean", false],
+]) {
+  test(`root broker registry rejects ${label} events identity`, () => {
+    assert.throws(
+      () => bindRootBroker({ events }, {}),
+      /Root subagent broker events identity is invalid/,
+    );
+  });
+}
+
+test("root broker registry reads an events getter once when binding", () => {
+  const events = {};
+  let reads = 0;
+  const pi = {
+    get events() {
+      reads += 1;
+      return events;
+    },
+  };
+  const broker = {};
+  bindRootBroker(pi, broker);
+  try {
+    assert.equal(reads, 1);
+  } finally {
+    unbindRootBroker({ events }, broker);
+  }
+  assert.equal(reads, 1);
 });
 
 test("root broker startup keeps an existing binding and closes the rejected broker", async () => {
