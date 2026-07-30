@@ -679,26 +679,38 @@ export class RootBrokerServer {
     if (this.closePromise) return this.closePromise;
     if (this.closed && !this.server) return;
     this.closed = true;
-    const startupBarrier = [
-      ...this.startedObservations.values(),
-      ...this.executorGrants.values(),
-      ...this.callerGrants.values(),
-      ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise)),
-    ];
     const closing = (async () => {
-      if (startupBarrier.length > 0) {
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        const settled = Promise.allSettled(startupBarrier);
-        try {
-          await Promise.race([
-            settled,
-            new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new AggregateError([], "Root subagent broker startup barrier deadline exceeded")), this.terminalTimeoutMs); }),
-          ]);
-        } finally {
-          if (timeout) clearTimeout(timeout);
+      let startupTimeout: ReturnType<typeof setTimeout> | undefined;
+      const startupDeadline = new Promise<never>((_, reject) => {
+        startupTimeout = setTimeout(() => reject(new AggregateError([], "Root subagent broker startup barrier deadline exceeded")), this.terminalTimeoutMs);
+      });
+      const collectStartupBarrier = () => [
+        ...this.startedObservations.values(),
+        ...this.executorGrants.values(),
+        ...this.callerGrants.values(),
+        ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise)),
+      ];
+      let observedStartupWork = false;
+      try {
+        for (;;) {
+          const startupBarrier = collectStartupBarrier();
+          if (startupBarrier.length === 0) {
+            if (!observedStartupWork) break;
+            await Promise.resolve();
+            if (collectStartupBarrier().length === 0) break;
+            continue;
+          }
+          observedStartupWork = true;
+          const settled = Promise.allSettled(startupBarrier);
           // Keep observing late startup settlements after a bounded close attempt.
           void settled.then(() => undefined);
+          await Promise.race([
+            settled,
+            startupDeadline,
+          ]);
         }
+      } finally {
+        if (startupTimeout) clearTimeout(startupTimeout);
       }
       const drainPhase = async (role: OwnedRun["role"]) => {
         const runs = [...this.ownedRuns.values()].filter((run) => run.role === role && (this.forcePendingRuns.has(run.runId) || !this.terminalProofs.has(run.runId)));
