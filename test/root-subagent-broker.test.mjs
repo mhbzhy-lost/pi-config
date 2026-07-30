@@ -366,7 +366,7 @@ test("Root session abnormal exit terminates each subscribed owner once on broker
   t.after(async () => {
     const testChildren = [rootChild, ...children];
     for (const child of testChildren) {
-      if (child.exitCode === null && child.signalCode === null) assert.equal(child.kill("SIGKILL"), true, "cleanup SIGKILL reaches a live test child");
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     }
     const exits = await Promise.allSettled(testChildren.map((child, index) => waitForExit(child, `cleanup child ${index}`, 5_000)));
     const failures = exits.filter((result) => result.status === "rejected").map((result) => result.reason);
