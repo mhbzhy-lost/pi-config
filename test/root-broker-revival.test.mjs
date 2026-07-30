@@ -354,3 +354,47 @@ test("assigns revived executor domain ownership to the stable logical caller", a
   assert.equal(queue[0].push.callerRunId, "plan-runner-1");
   assert.equal(server.callerPushQueues.has("plan-runner-2"), false);
 });
+
+test("allows an active plan-runner alias to control its executor", async () => {
+  const { ownedRun, proof, request, server } = await createRevivalFixture();
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const spawnResponse = await server.dispatch(parseBrokerRequest({
+    ...request,
+    requestId: "request-spawn-active-alias-1",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    method: "spawn",
+    params: { agent: "executor", task: "run", spawnKey: "active-alias-control-1" },
+  }), {});
+  assert.equal(spawnResponse.success, true);
+
+  const statusCalls = [];
+  server.upstream.status = async (params) => {
+    statusCalls.push(params);
+    return { state: "running", runId: "executor-1" };
+  };
+  const statusRequest = parseBrokerRequest({
+    ...request,
+    requestId: "request-status-active-alias-1",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    method: "status",
+    params: { runId: "executor-1" },
+  });
+
+  const response = await server.dispatch(statusRequest, {});
+
+  assert.deepEqual(response, {
+    schemaVersion: "pi-root-subagent-broker-response.v1",
+    requestId: "request-status-active-alias-1",
+    rootSessionId: "root-session-1",
+    callerRunId: "plan-runner-2",
+    success: true,
+    data: { state: "running", runId: "executor-1" },
+  });
+  assert.deepEqual(statusCalls, [{ runId: "executor-1" }]);
+});
