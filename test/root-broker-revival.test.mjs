@@ -4,10 +4,11 @@ import test from "node:test";
 import { parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
-async function createRevivalFixture({ resume } = {}) {
+async function createRevivalFixture({ resume, spawn } = {}) {
   const callerToken = "a".repeat(64);
   const revivedCallerToken = "b".repeat(64);
-  const tokens = [callerToken, revivedCallerToken];
+  const executorToken = "c".repeat(64);
+  const tokens = [callerToken, revivedCallerToken, executorToken];
   const grants = [];
   const resumeCalls = [];
   const server = new RootBrokerServer({
@@ -25,6 +26,10 @@ async function createRevivalFixture({ resume } = {}) {
             asyncDir: "/async/plan-runner-2",
           },
         };
+      },
+      spawn: async (params) => {
+        if (spawn) return await spawn(params);
+        return { runId: "executor-1", asyncDir: "/async/executor-1" };
       },
     },
     writeGrant: async (grant) => {
@@ -305,4 +310,47 @@ test("rejects an old actual plan-runner after its revived alias is active", asyn
     error: { code: "caller_stale", message: "Caller generation is stale" },
   });
   assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), []);
+});
+
+test("assigns revived executor domain ownership to the stable logical caller", async () => {
+  const { grants, ownedRun, proof, request, server } = await createRevivalFixture();
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const response = await server.dispatch(parseBrokerRequest({
+    ...request,
+    requestId: "request-dispatch-revived-1",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    method: "spawn",
+    params: { agent: "executor", task: "run", spawnKey: "dispatch-revived-1" },
+  }), {});
+
+  assert.equal(response.success, true);
+  assert.deepEqual(grants.at(-1), {
+    schemaVersion: "pi-root-subagent-broker-grant.v1",
+    rootSessionId: "root-session-1",
+    runId: "executor-1",
+    callerToken: "c".repeat(64),
+    role: "executor",
+  });
+  assert.equal(server.runOwners.get("executor-1"), "plan-runner-1");
+  assert.equal(server.callers.get("plan-runner-1").ownedRunIds.has("executor-1"), true);
+  const entry = server.spawnLedger.get("plan-1\u0000dispatch-revived-1");
+  assert.equal(entry.callerRunId, "plan-runner-1");
+
+  server.lifecycle({
+    runId: "executor-1",
+    agent: "executor",
+    asyncDir: "/async/executor-1",
+    cwd: "/workspace",
+    sessionId: "root-session-1",
+  }, "execution.started", entry);
+
+  const queue = server.callerPushQueues.get("plan-runner-1");
+  assert.equal(queue.length, 1);
+  assert.equal(queue[0].push.callerRunId, "plan-runner-1");
+  assert.equal(server.callerPushQueues.has("plan-runner-2"), false);
 });
