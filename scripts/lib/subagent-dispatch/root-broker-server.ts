@@ -557,14 +557,16 @@ export class RootBrokerServer {
     if (request.rootSessionId !== this.rootSessionId) return failure(request, "root_mismatch", "Root session does not match");
     const principal = this.principals.get(request.callerRunId);
     if (!principal || principal.callerToken !== request.callerToken) return failure(request, "caller_unauthorized", "Caller is not granted");
+    let logicalCallerRunId = request.callerRunId;
     if (principal.role === "plan-runner") {
-      const logicalCallerRunId = this.callerAliases.get(request.callerRunId);
-      const logicalCaller = logicalCallerRunId ? this.logicalCallers.get(logicalCallerRunId) : undefined;
-      if (!logicalCallerRunId || !logicalCaller) return failure(request, "caller_unauthorized", "Caller is not granted");
+      const resolvedLogicalCallerRunId = this.callerAliases.get(request.callerRunId);
+      const logicalCaller = resolvedLogicalCallerRunId ? this.logicalCallers.get(resolvedLogicalCallerRunId) : undefined;
+      if (!resolvedLogicalCallerRunId || !logicalCaller) return failure(request, "caller_unauthorized", "Caller is not granted");
       if (logicalCaller.activeRunId !== request.callerRunId) return failure(request, "caller_stale", "Caller generation is stale");
+      logicalCallerRunId = resolvedLogicalCallerRunId;
     }
     if (principal.role === "executor" && request.method !== "subscribe") return failure(request, "role_unauthorized", "Executor may only subscribe");
-    const caller = this.callers.get(request.callerRunId);
+    const caller = this.callers.get(logicalCallerRunId);
     if (principal.role === "plan-runner" && !caller) return failure(request, "caller_unauthorized", "Caller is not granted");
     try {
       if (request.method === "subscribe") {
@@ -579,7 +581,7 @@ export class RootBrokerServer {
         return createBrokerSuccessResponse({ ...request, data: { ...data, methods: [...new Set([...(Array.isArray(data?.methods) ? data.methods : []), "spawn.lookup"])], session: { ...(data?.session ?? {}), cwd: caller.cwd }, planRuntime: { originRoot: caller.originRoot, stateRoot: caller.stateRoot } } });
       }
       if (request.method === "spawn") return await this.spawn(request, caller);
-      if (request.method === "caller.followup") return this.registerCallerFollowUp(request);
+      if (request.method === "caller.followup") return this.registerCallerFollowUp(request, logicalCallerRunId);
       if (request.method === "spawn.lookup") return this.lookupSpawn(request, caller);
       if (request.method === "supervisor.pending") return this.pendingSupervisor(request, caller);
       if (request.method === "supervisor.reply") return await this.replySupervisor(request, caller);
@@ -595,12 +597,12 @@ export class RootBrokerServer {
     return createBrokerSuccessResponse({ ...request, data: { state: entry.state } });
   }
 
-  registerCallerFollowUp(request: any) {
-    const followUps = this.callerFollowUps.get(request.callerRunId);
+  registerCallerFollowUp(request: any, logicalCallerRunId: string) {
+    const followUps = this.callerFollowUps.get(logicalCallerRunId);
     if (!followUps) return failure(request, "caller_unauthorized", "Caller is not granted");
     const intent: FollowUpIntent = { ...request.params };
     if (!followUps.some((followUp) => followUp.wakeId === intent.wakeId)) followUps.push(intent);
-    void this.reviveCallerAfterProof(this.callerAliases.get(request.callerRunId) ?? request.callerRunId).catch(() => undefined);
+    void this.reviveCallerAfterProof(logicalCallerRunId).catch(() => undefined);
     return createBrokerSuccessResponse({ ...request, data: { accepted: true, wakeId: intent.wakeId } });
   }
 
