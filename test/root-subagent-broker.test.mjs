@@ -1853,6 +1853,8 @@ async function lateStartFenceFixture(t, { terminalTimeoutMs = 200 } = {}) {
   const captureRelease = deferred();
   const stops = [];
   let disposeCount = 0;
+  let disposeTimeProof;
+  let broker;
   const proof = () => officialObservedProof("late-start-executor");
   const upstream = {
     async spawn() {
@@ -1867,9 +1869,12 @@ async function lateStartFenceFixture(t, { terminalTimeoutMs = 200 } = {}) {
       events.emit("subagent:process-terminal", proof());
       return { stopped: true };
     },
-    dispose() { disposeCount += 1; },
+    dispose() {
+      disposeTimeProof = broker.terminalProofs.get("late-start-executor");
+      disposeCount += 1;
+    },
   };
-  const broker = new RootBrokerServer({
+  broker = new RootBrokerServer({
     rootSessionId: root,
     upstream,
     events,
@@ -1897,7 +1902,7 @@ async function lateStartFenceFixture(t, { terminalTimeoutMs = 200 } = {}) {
     await broker.closeRootSession().catch(() => undefined);
     await removePath(grantDirectory, { recursive: true, force: true });
   });
-  return { broker, captureRelease, events, proof, spawn, spawnRelease, stops, disposeCount: () => disposeCount };
+  return { broker, captureRelease, disposeTimeProof: () => disposeTimeProof, events, proof, spawn, spawnRelease, stops, disposeCount: () => disposeCount };
 }
 
 test("Root late-start fence waits for an observation registered by the startup barrier", async (t) => {
@@ -1917,7 +1922,9 @@ test("Root late-start fence waits for an observation registered by the startup b
     const outcome = await closeOutcome(closing, 120);
     assert.equal(outcome.state, "resolved");
     assert.deepEqual(subject.stops, [{ runId: "late-start-executor", dir: "/trusted/late-start-executor" }]);
-    assert.equal(subject.broker.terminalProofs.get("late-start-executor")?.runId, "late-start-executor");
+    assert.equal(subject.disposeTimeProof()?.runId, "late-start-executor");
+    assert.equal(subject.disposeTimeProof()?.runnerProcessInstanceId, "late-start-executor-official-runner");
+    assert.equal(subject.broker.terminalProofs.size, 0);
     assert.equal(subject.disposeCount(), 1);
   } finally {
     subject.captureRelease.release();
