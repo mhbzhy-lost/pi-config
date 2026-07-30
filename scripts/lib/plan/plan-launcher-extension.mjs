@@ -120,6 +120,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
     const timer = schedule(async () => {
       if (polling) return;
       polling = true;
+      let shouldStop = false;
       let plan;
       let runner;
       try {
@@ -128,15 +129,17 @@ export function createPlanLauncherExtension(pi, options = {}) {
           rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }),
         ]);
         runner = results[1].status === "fulfilled" ? results[1].value : undefined;
-        const runnerTerminal = ["complete", "failed", "stopped"].includes(runner?.state);
+        shouldStop ||= ["complete", "failed", "stopped"].includes(runner?.state);
         if (results[0].status === "fulfilled") {
           plan = JSON.parse(results[0].value);
+          shouldStop ||= ["validated", "blocked", "cancelled", "interrupted"].includes(plan?.lifecycle);
           await forwardAttention(handle, plan);
         }
-        const planTerminal = ["validated", "blocked", "cancelled", "interrupted"].includes(plan?.lifecycle);
-        if (runnerTerminal || planTerminal) stopAttentionPoller(handle.planId);
       } catch { /* Durable projection or Root RPC may be transiently unavailable. */ }
-      finally { polling = false; }
+      finally {
+        if (shouldStop) stopAttentionPoller(handle.planId);
+        polling = false;
+      }
     }, options.attentionPollIntervalMs ?? 1_000);
     timer?.unref?.();
     attentionPollers.set(handle.planId, timer);

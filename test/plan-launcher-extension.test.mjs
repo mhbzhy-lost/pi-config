@@ -28,7 +28,10 @@ function setup(options = {}) {
     registerTool: (tool) => tools.set(tool.name, tool),
     on: (name, handler) => events.set(name, handler),
     appendEntry: (customType, data) => entries.push({ customType, data }),
-    sendMessage: async (message, sendOptions) => messages.push({ message, options: sendOptions }),
+    sendMessage: async (message, sendOptions) => {
+      if (typeof options.sendMessage === "function") return options.sendMessage(message, sendOptions, messages);
+      messages.push({ message, options: sendOptions });
+    },
   };
   createPlanLauncherExtension(pi, options);
   return { commands, tools, entries, events, messages };
@@ -302,6 +305,33 @@ test("plan-status rejects a tampered Attention body without forwarding it", asyn
     const { commands, messages } = setup(options(root, calls, { findHandle: async () => handle(root) }));
     await assert.rejects(commands.get("plan-status").handler("plan-one", {}), /evidence is invalid/);
     assert.deepEqual(messages, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("terminal runner stops poller when sendMessage throws after valid Attention forwarding", async () => {
+  const { root, planPath } = await fixture(); const calls = []; const cancelled = []; let poll;
+  try {
+    const terminalBroker = broker(calls); terminalBroker.upstream.status = async () => ({ state: "failed" });
+    const { commands } = setup(options(root, calls, { rootBroker: terminalBroker, schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer), sendMessage: async () => { throw new Error("Host send failed"); } }));
+    await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+    const body = "Choose the deployment target."; const bodySha256 = createHash("sha256").update(body).digest("hex");
+    const dir = await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256 } } }] }] });
+    await (await import("node:fs/promises")).mkdir(path.join(dir, "attention"), { recursive: true }); await writeFile(path.join(dir, "attention", "request-1.md"), body);
+    await poll();
+    assert.deepEqual(cancelled, ["timer-1"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("nonterminal sendMessage failure retains poller and retries on the next poll", async () => {
+  const { root, planPath } = await fixture(); const calls = []; const cancelled = []; let poll; let sends = 0;
+  try {
+    const { commands, messages } = setup(options(root, calls, { schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer), sendMessage: async (message, sendOptions, recorded) => { sends += 1; if (sends === 1) throw new Error("Host send failed"); recorded.push({ message, options: sendOptions }); } }));
+    await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+    const body = "Choose the deployment target."; const bodySha256 = createHash("sha256").update(body).digest("hex");
+    const dir = await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256 } } }] }] });
+    await (await import("node:fs/promises")).mkdir(path.join(dir, "attention"), { recursive: true }); await writeFile(path.join(dir, "attention", "request-1.md"), body);
+    await poll(); assert.deepEqual(cancelled, []);
+    await poll(); assert.equal(sends, 2); assert.equal(messages.length, 1); assert.deepEqual(cancelled, []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

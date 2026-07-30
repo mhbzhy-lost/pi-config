@@ -345,13 +345,14 @@ test("caller grant never overwrites a principal collision or writes a grant", as
 });
 
 test("caller grants reject after close and close owns a concurrent successful grant path", async () => {
-  let releaseWrite; const directory = await mkdtemp(path.join(tmpdir(), "root-broker-close-")); const grantPath = path.join(directory, "grant.json");
+  let releaseWrite; let writes = 0; const directory = await mkdtemp(path.join(tmpdir(), "root-broker-close-")); const grantPath = path.join(directory, "grant.json");
   const pendingWrite = new Promise((resolve) => { releaseWrite = resolve; });
-  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), writeGrant: async () => { await pendingWrite; await writeFile(grantPath, "grant"); return grantPath; } });
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), writeGrant: async () => { writes += 1; await pendingWrite; await writeFile(grantPath, "grant"); return grantPath; } });
   const pending = broker.grantCaller({ callerRunId: "plan-run-close", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
   const closing = broker.closeRootSession(); releaseWrite();
   await assert.rejects(pending, /closing/); await closing; await assert.rejects(stat(grantPath));
-  assert.equal(broker.callers.size, 0); assert.equal(broker.principals.size, 0);
+  await assert.rejects(broker.grantCaller({ callerRunId: "plan-run-after-close", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" }), /closed|closing/);
+  assert.equal(writes, 1); assert.equal(broker.callers.size, 0); assert.equal(broker.principals.size, 0);
   await removePath(directory, { recursive: true, force: true });
 });
 
