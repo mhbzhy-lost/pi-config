@@ -1003,6 +1003,7 @@ test("public continuePlan replays the current revision IR after an authorized am
   const facts = [];
   const deps = createPlanRunnerDependencies({
     pi, originRoot: origin, stateRoot, revisionStore,
+    legacyDirectDispatch: true,
     takeExecutionFacts: () => facts.splice(0),
     allocateAttemptWorkspace: async (input) => fakeAllocator(input),
     releaseAttemptWorkspace: async (workspace, options) => { releases.push({ workspace, options }); },
@@ -1036,7 +1037,7 @@ test("public continuePlan replays the current revision IR after an authorized am
     data: { workspace: { originRoot: origin, worktree, baseCommit, headCommit: baseCommit }, tasks: revisionOne.plan.tasks.map((task) => task.id), revision: identity(revisionOne) },
   });
 
-  const first = await deps.continuePlan({ legacyDirectDispatch: true }, { ctx });
+  const first = await deps.continuePlan({}, { ctx });
   assert.deepEqual(first.dispatched.map(({ taskId }) => taskId), ["task-1", "task-2"]);
   const firstTaskTwoAttempt = first.dispatched.find(({ taskId }) => taskId === "task-2");
   assert.ok(firstTaskTwoAttempt);
@@ -1108,7 +1109,7 @@ test("public continuePlan replays the current revision IR after an authorized am
   assert.notEqual((await deps.status({ ctx })).lifecycle, "blocked");
 
   reads.length = 0;
-  const second = await deps.continuePlan({ legacyDirectDispatch: true }, { ctx });
+  const second = await deps.continuePlan({}, { ctx });
   assert.deepEqual(second.dispatched.map(({ taskId }) => taskId), ["task-2"]);
   assert.deepEqual(reads, [[planId, 2], [planId, 2]]);
   assert.equal(spawns.length, 3);
