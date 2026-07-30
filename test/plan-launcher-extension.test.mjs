@@ -67,7 +67,7 @@ function broker(calls, overrides = {}) {
     async spawn(input) { calls.push(["spawn", input]); return overrides.spawnReply ?? { details: { runId: "plan-runner-run-1", asyncDir: "/async/plan-runner-run-1" } }; },
     async status(input) { calls.push(["status", input]); return { state: "running" }; },
     async interrupt(input) { calls.push(["interrupt", input]); }, async stop(input) { calls.push(["stop", input]); },
-  }, async grantCaller(input) { calls.push(["grant", input]); if (overrides.grantError) throw overrides.grantError; }, ...overrides };
+  }, async grantCaller(input) { calls.push(["grant", input]); if (overrides.grantError) throw overrides.grantError; }, async statusCaller(logicalId) { calls.push(["statusCaller", logicalId]); return { state: "running" }; }, async interruptCaller(logicalId) { calls.push(["interruptCaller", logicalId]); }, async stopCaller(logicalId) { calls.push(["stopCaller", logicalId]); }, ...overrides };
 }
 
 function options(root, calls, extra = {}) {
@@ -118,9 +118,28 @@ test("grant failure stops the spawned runner and rolls back", async () => {
   try { const { commands } = setup(options(root, calls, { grantError: new Error("grant denied") })); await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /grant denied/); assert.deepEqual(calls.map(([name]) => name), ["spawn", "grant", "stop", "rollback"]); } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("management uses Root RPC and cancellation records intent first", async () => {
-  const { root } = await fixture(); const calls = []; const handle = { schemaVersion: "pi-plan-handle.v4", planId: "plan-one", revision: 1, manifestSha256: hashes.manifestSha256, sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, planIrHash: hashes.irHash, rootSessionId: "root-session-1", planRunnerRunId: "run-1", asyncDir: "/async/1", worktree: path.join(root, "var", "plan-worktrees", "plan-one"), baseCommit: "e".repeat(40) };
-  try { const { commands } = setup(options(root, calls, { findHandle: async () => handle, recordCancelIntent: async () => calls.push(["intent"]) })); await commands.get("plan-status").handler("plan-one", {}); await commands.get("plan-pause").handler("plan-one", {}); await commands.get("plan-open").handler("plan-one", {}); await commands.get("plan-cancel").handler("plan-one", {}); assert.deepEqual(calls.map(([name]) => name), ["status", "interrupt", "status", "intent", "stop"]); assert.deepEqual(calls.at(-1)[1], { runId: "run-1", dir: "/async/1" }); } finally { await rm(root, { recursive: true, force: true }); }
+test("plan-status uses the Broker logical status caller", async () => {
+  const { root } = await fixture(); const calls = []; const runnerHandle = handle(root);
+  try { const { commands } = setup(options(root, calls, { findHandle: async () => runnerHandle })); await commands.get("plan-status").handler("plan-one", {}); assert.deepEqual(calls, [["statusCaller", "run-1"]]); } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("plan-pause uses the Broker logical interrupt caller", async () => {
+  const { root } = await fixture(); const calls = []; const runnerHandle = handle(root);
+  try { const { commands } = setup(options(root, calls, { findHandle: async () => runnerHandle })); await commands.get("plan-pause").handler("plan-one", {}); assert.deepEqual(calls, [["interruptCaller", "run-1"]]); } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("plan-cancel records intent before using the Broker logical stop caller", async () => {
+  const { root } = await fixture(); const calls = []; const runnerHandle = handle(root);
+  try { const { commands } = setup(options(root, calls, { findHandle: async () => runnerHandle, recordCancelIntent: async () => calls.push(["intent"]) })); await commands.get("plan-cancel").handler("plan-one", {}); assert.deepEqual(calls, [["intent"], ["stopCaller", "run-1"]]); } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("plan-open uses the Broker logical status caller and its current asyncDir", async () => {
+  const { root } = await fixture(); const calls = []; const runnerHandle = handle(root);
+  try {
+    const { commands } = setup(options(root, calls, { findHandle: async () => runnerHandle, statusCaller: async (logicalId) => { calls.push(["statusCaller", logicalId]); return { state: "running", asyncDir: "/async/current" }; } }));
+    assert.deepEqual(await commands.get("plan-open").handler("plan-one", {}), { asyncDir: "/async/current", worktree: runnerHandle.worktree, status: { state: "running", asyncDir: "/async/current" } });
+    assert.deepEqual(calls, [["statusCaller", "run-1"]]);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("plan runner entry remains child-safe and uses the Root-owned adapter", async () => {
@@ -348,7 +367,7 @@ test("current Root rejects an untrusted worktree before RPC or attention writes"
 test("terminal poller cancels once without stopping the runner", async () => {
   const { root, planPath } = await fixture(); const calls = []; const cancelled = []; let poll;
   try {
-    const terminalBroker = broker(calls); terminalBroker.upstream.status = async (input) => { calls.push(["status", input]); return { state: "failed" }; };
+    const terminalBroker = broker(calls); terminalBroker.statusCaller = async (logicalId) => { calls.push(["statusCaller", logicalId]); return { state: "failed" }; };
     const { commands } = setup(options(root, calls, { rootBroker: terminalBroker, schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer) }));
     await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
     await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [] });
@@ -360,7 +379,7 @@ test("terminal poller cancels once without stopping the runner", async () => {
 test("terminal Plan stops the poller when runner status fails", async () => {
   const { root, planPath } = await fixture(); const calls = []; const cancelled = []; let poll;
   try {
-    const failingBroker = broker(calls); failingBroker.upstream.status = async () => { throw new Error("status unavailable"); };
+    const failingBroker = broker(calls); failingBroker.statusCaller = async () => { throw new Error("status unavailable"); };
     const { commands } = setup(options(root, calls, { rootBroker: failingBroker, schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer) }));
     await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
     await writeProjection(root, { planId: "plan-one", lifecycle: "validated", tasks: [] }); await poll();
@@ -395,7 +414,7 @@ test("plan-status rejects a tampered Attention body without forwarding it", asyn
 test("terminal runner stops poller when sendMessage throws after valid Attention forwarding", async () => {
   const { root, planPath } = await fixture(); const calls = []; const cancelled = []; let poll;
   try {
-    const terminalBroker = broker(calls); terminalBroker.upstream.status = async () => ({ state: "failed" });
+    const terminalBroker = broker(calls); terminalBroker.statusCaller = async () => ({ state: "failed" });
     const { commands } = setup(options(root, calls, { rootBroker: terminalBroker, schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer), sendMessage: async () => { throw new Error("notification send failed"); } }));
     await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
     const body = "Choose the deployment target."; const bodySha256 = createHash("sha256").update(body).digest("hex");
@@ -422,7 +441,7 @@ test("nonterminal sendMessage failure retains poller and retries on the next pol
 test("terminal runner stops poller when Attention forwarding fails or projection is missing", async () => {
   const { root, planPath } = await fixture(); const calls = []; const cancelled = []; let poll;
   try {
-    const terminalBroker = broker(calls); terminalBroker.upstream.status = async () => ({ state: "failed" });
+    const terminalBroker = broker(calls); terminalBroker.statusCaller = async () => ({ state: "failed" });
     const { commands } = setup(options(root, calls, { rootBroker: terminalBroker, schedule: (callback) => { poll = callback; return "timer-1"; }, cancelSchedule: (timer) => cancelled.push(timer) }));
     await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
     const dir = await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256: createHash("sha256").update("original").digest("hex") } } }] }] });
