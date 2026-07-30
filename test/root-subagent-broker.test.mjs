@@ -344,6 +344,25 @@ test("caller grant never overwrites a principal collision or writes a grant", as
   assert.equal(writes, 0);
 });
 
+test("caller grants reject after close and close owns a concurrent successful grant path", async () => {
+  let releaseWrite; const directory = await mkdtemp(path.join(tmpdir(), "root-broker-close-")); const grantPath = path.join(directory, "grant.json");
+  const pendingWrite = new Promise((resolve) => { releaseWrite = resolve; });
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), writeGrant: async () => { await pendingWrite; await writeFile(grantPath, "grant"); return grantPath; } });
+  const pending = broker.grantCaller({ callerRunId: "plan-run-close", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
+  const closing = broker.closeRootSession(); releaseWrite();
+  await assert.rejects(pending, /closing/); await closing; await assert.rejects(stat(grantPath));
+  assert.equal(broker.callers.size, 0); assert.equal(broker.principals.size, 0);
+  await removePath(directory, { recursive: true, force: true });
+});
+
+test("caller grant validates each root field before writing", async () => {
+  for (const key of ["cwd", "originRoot", "stateRoot"]) for (const value of [undefined, "", "relative"]) {
+    let writes = 0; const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), writeGrant: async () => { writes += 1; return "/tmp/grant"; } });
+    await assert.rejects(broker.grantCaller({ callerRunId: `${key}-${String(value)}`, planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner", [key]: value }));
+    assert.equal(writes, 0, `${key}=${String(value)}`);
+  }
+});
+
 test("root broker grants direct async executor runs idempotently", async (t) => {
   const grants = [];
   const events = { on(_channel, listener) { this.listener = listener; return () => { this.unsubscribed = true; }; } };

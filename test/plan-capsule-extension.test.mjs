@@ -300,6 +300,15 @@ test("capsule blocks every subagent and contact_supervisor call inside an opened
   }
 });
 
+test("capsule blocking reason names the Plan dispatch authorization boundary", async () => {
+  const { handlers } = setup();
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
+  await handlers.get("session_start")({}, ctx);
+  const denied = await handlers.get("tool_call")({ toolName: "subagent", input: { agent: "executor" } }, ctx);
+  assert.match(denied.reason, /Plan dispatch authorization boundary/);
+  assert.doesNotMatch(denied.reason, /Standalone/);
+});
+
 test("capsule persists native Supervisor requests through the injected Attention boundary", async () => {
   const recorded = [];
   const { handlers } = setup({

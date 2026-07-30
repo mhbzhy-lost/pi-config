@@ -35,6 +35,7 @@ export class RootBrokerServer {
   sockets = new Set<Socket>();
   grantPaths = new Set<string>();
   executorGrants = new Map<string, Promise<{ callerToken: string }>>();
+  callerGrants = new Map<string, Promise<{ callerToken: string }>>();
   unsubscribeStarted: (() => void) | undefined;
   server: ReturnType<typeof createServer> | undefined;
   closed = false;
@@ -102,6 +103,7 @@ export class RootBrokerServer {
   }
 
   async grantCaller({ callerRunId, planId, cwd, originRoot, stateRoot, role }: { callerRunId: string; planId: string; cwd: string; originRoot: string; stateRoot: string; role: unknown }) {
+    if (this.closed) throw new Error("Root subagent broker is closing");
     if (role !== "plan-runner" || typeof planId !== "string" || planId.length === 0
       || [cwd, originRoot, stateRoot].some((value) => typeof value !== "string" || value.length === 0 || !path.isAbsolute(value))) {
       throw new Error("Root subagent broker caller grant is invalid");
@@ -109,17 +111,26 @@ export class RootBrokerServer {
     if (this.callers.has(callerRunId) || this.principals.has(callerRunId)) throw new Error("Root subagent broker caller is already granted");
     const callerToken = this.randomToken();
     const caller: Caller = { planId, cwd, originRoot, stateRoot, role, callerToken, ownedRunIds: new Set() };
-    this.callers.set(callerRunId, caller);
-    this.principals.set(callerRunId, { role, callerToken });
-    try {
-      const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId: callerRunId, callerToken, role });
-      this.grantPaths.add(grantPath);
-      return { callerToken };
-    } catch (error) {
-      this.callers.delete(callerRunId);
-      this.principals.delete(callerRunId);
-      throw error;
-    }
+    const pending = (async () => {
+      this.callers.set(callerRunId, caller);
+      this.principals.set(callerRunId, { role, callerToken });
+      try {
+        const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId: callerRunId, callerToken, role });
+        this.grantPaths.add(grantPath);
+        if (this.closed) {
+          this.callers.delete(callerRunId);
+          this.principals.delete(callerRunId);
+          throw new Error("Root subagent broker is closing");
+        }
+        return { callerToken };
+      } catch (error) {
+        this.callers.delete(callerRunId);
+        this.principals.delete(callerRunId);
+        throw error;
+      }
+    })();
+    this.callerGrants.set(callerRunId, pending);
+    try { return await pending; } finally { this.callerGrants.delete(callerRunId); }
   }
 
   handleSocket(socket: Socket) {
@@ -213,7 +224,7 @@ export class RootBrokerServer {
     this.unsubscribeStarted?.();
     this.unsubscribeStarted = undefined;
     this.closePromise = (async () => {
-      await Promise.allSettled([...this.executorGrants.values()]);
+      await Promise.allSettled([...this.executorGrants.values(), ...this.callerGrants.values()]);
       for (const [callerRunId, sockets] of this.subscriptions) {
         const push = { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "root.closing", data: {} };
         for (const socket of sockets) if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);

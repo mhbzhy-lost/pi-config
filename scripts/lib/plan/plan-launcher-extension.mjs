@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { createPlanRevisionStore } from "./plan-revision-store.mjs";
@@ -95,7 +96,11 @@ export function createPlanLauncherExtension(pi, options = {}) {
         if (failClosed) throw new Error("Plan Attention evidence is invalid");
         continue;
       }
-      await readFile(absoluteBodyPath, "utf8");
+      const body = await readFile(absoluteBodyPath);
+      if (createHash("sha256").update(body).digest("hex") !== bodySha256) {
+        if (failClosed) throw new Error("Plan Attention evidence is invalid");
+        continue;
+      }
       await pi.sendMessage?.({
         customType: "pi-plan-attention-v1",
         content: [
@@ -105,7 +110,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
           "Do not infer or submit a decision on the user's behalf.",
         ].join("\n"),
         details: { planId: handle.planId, requestId: attention.requestId, expectedProjectionVersion: attention.projectionVersion, bodyPath, bodySha256 },
-      });
+      }, { triggerTurn: true, deliverAs: "followUp" });
       forwardedAttention.add(key);
     }
   };
@@ -115,11 +120,21 @@ export function createPlanLauncherExtension(pi, options = {}) {
     const timer = schedule(async () => {
       if (polling) return;
       polling = true;
+      let plan;
+      let runner;
       try {
-        const [raw, runner] = await Promise.all([readFile(path.join(stateRoot, "var", "plan-runs", handle.planId, "status.json"), "utf8"), rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir })]);
-        const plan = JSON.parse(raw);
-        await forwardAttention(handle, plan);
-        if (["validated", "blocked", "cancelled", "interrupted"].includes(plan?.lifecycle) || ["complete", "failed", "stopped"].includes(runner?.state)) stopAttentionPoller(handle.planId);
+        const results = await Promise.allSettled([
+          readFile(path.join(stateRoot, "var", "plan-runs", handle.planId, "status.json"), "utf8"),
+          rootIdentity().upstream.status({ runId: handle.planRunnerRunId, dir: handle.asyncDir }),
+        ]);
+        runner = results[1].status === "fulfilled" ? results[1].value : undefined;
+        const runnerTerminal = ["complete", "failed", "stopped"].includes(runner?.state);
+        if (results[0].status === "fulfilled") {
+          plan = JSON.parse(results[0].value);
+          await forwardAttention(handle, plan);
+        }
+        const planTerminal = ["validated", "blocked", "cancelled", "interrupted"].includes(plan?.lifecycle);
+        if (runnerTerminal || planTerminal) stopAttentionPoller(handle.planId);
       } catch { /* Durable projection or Root RPC may be transiently unavailable. */ }
       finally { polling = false; }
     }, options.attentionPollIntervalMs ?? 1_000);
@@ -173,11 +188,21 @@ export function createPlanLauncherExtension(pi, options = {}) {
       const handle = trustedHandle({ schemaVersion: HANDLE_SCHEMA, planId, revision: prepared.revision, manifestSha256: prepared.manifestSha256, sourceBytesSha256: prepared.manifest.sourceBytesSha256, planHash: prepared.manifest.planHash, planIrHash: prepared.manifest.irHash, rootSessionId: broker.rootSessionId, planRunnerRunId: binding.runId, asyncDir: binding.asyncDir, worktree, baseCommit });
       pi.appendEntry(HANDLE_TYPE, handle); activeHandles.set(planId, handle); startAttentionPoller(handle); ctx.ui?.notify?.(`${HANDLE_PREFIX}${JSON.stringify(handle)}`, "info"); return handle;
     } catch (error) {
-      const partial = binding ?? error?.binding; const cleanup = [];
-      if (partial?.runId) cleanup.push(stopIfBound(partial, broker));
-      if (lease) cleanup.push((options.rollbackWorkspace ?? rollbackPlanWorkspace)(lease));
-      const settled = await Promise.allSettled(cleanup); const failures = settled.filter((item) => item.status === "rejected").map((item) => item.reason);
-      if (failures.length) throw new AggregateError([error, ...failures], "Plan launch failed and cleanup failed", { cause: error });
+      const partial = binding ?? error?.binding;
+      if (partial?.runId) {
+        try {
+          await stopIfBound(partial, broker);
+        } catch (stopError) {
+          throw new AggregateError([error, stopError], "Plan launch failed and cleanup failed", { cause: error });
+        }
+      }
+      if (lease) {
+        try {
+          await (options.rollbackWorkspace ?? rollbackPlanWorkspace)(lease);
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], "Plan launch failed and cleanup failed", { cause: error });
+        }
+      }
       throw error;
     }
     })();
