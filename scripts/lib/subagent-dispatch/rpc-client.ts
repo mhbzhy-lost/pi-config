@@ -156,6 +156,9 @@ export function createTypedSubagentRpcClient(
     status(params, options) {
       return call("status", params, options);
     },
+    resume(params, options) {
+      return call("resume", params, options);
+    },
     steer(params, options) {
       return call("steer", params, options);
     },
