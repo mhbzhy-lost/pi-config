@@ -148,7 +148,7 @@ export default function (pi) {
         }
         return undefined;
       })();
-      const next = amendmentTurn ?? (amendmentOwnsTurn ? undefined : compatTurn?.tool ?? (() => {
+      const next = amendmentTurn ?? (amendmentOwnsTurn ? undefined : compatTurn === undefined ? (() => {
         if (toolResults.some((message) => message?.toolName === "plan_verify")) return undefined;
         if (bootstrap && availableTools.has("plan_open") && toolResults.length === 0) {
           return { name: "plan_open", arguments: JSON.parse(bootstrap) };
@@ -173,7 +173,7 @@ export default function (pi) {
           if (command) return { name: "bash", arguments: { command } };
         }
         return undefined;
-      })());
+      })() : compatTurn.tool);
       const responseText = amendmentOwnsTurn && !next ? "amendment revision2 waiting" : compatTurn?.text ?? "deterministic";
       const usage = {
         input: 0,
