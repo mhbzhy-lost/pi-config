@@ -557,6 +557,12 @@ export class RootBrokerServer {
     if (request.rootSessionId !== this.rootSessionId) return failure(request, "root_mismatch", "Root session does not match");
     const principal = this.principals.get(request.callerRunId);
     if (!principal || principal.callerToken !== request.callerToken) return failure(request, "caller_unauthorized", "Caller is not granted");
+    if (principal.role === "plan-runner") {
+      const logicalCallerRunId = this.callerAliases.get(request.callerRunId);
+      const logicalCaller = logicalCallerRunId ? this.logicalCallers.get(logicalCallerRunId) : undefined;
+      if (!logicalCallerRunId || !logicalCaller) return failure(request, "caller_unauthorized", "Caller is not granted");
+      if (logicalCaller.activeRunId !== request.callerRunId) return failure(request, "caller_stale", "Caller generation is stale");
+    }
     if (principal.role === "executor" && request.method !== "subscribe") return failure(request, "role_unauthorized", "Executor may only subscribe");
     const caller = this.callers.get(request.callerRunId);
     if (principal.role === "plan-runner" && !caller) return failure(request, "caller_unauthorized", "Caller is not granted");
