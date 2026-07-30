@@ -266,6 +266,13 @@ export function parseBrokerRequest(value, { supervisorRequestId } = {}) {
     exactObject(request.params, "params", ["spawnKey"]);
     identity(request.params.spawnKey, "params.spawnKey");
   }
+  if (request.method === "caller.followup") {
+    if (!Object.hasOwn(request.params, "wakeId")) fail("params.wakeId is required");
+    if (!Object.hasOwn(request.params, "reason")) fail("params.reason is required");
+    exactObject(request.params, "params", ["wakeId", "reason"]);
+    identity(request.params.wakeId, "params.wakeId");
+    if (request.params.reason !== "plan-opened") fail("params.reason is unsupported");
+  }
   if (request.method === "supervisor.reply") {
     identity(request.params.replyTo, "params.replyTo");
     if (supervisorRequestId !== undefined && request.params.replyTo !== identity(supervisorRequestId, "supervisorRequestId")) {
