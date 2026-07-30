@@ -727,7 +727,7 @@ test("upstream failure lookup reports an unbound uncertain durable spawn", async
   assert.equal(found.success, true); assert.equal(found.data?.state, "uncertain"); assert.equal(Object.hasOwn(found.data ?? {}, "binding"), false);
 });
 
-test("an explicit detail spawnDisposition not-started permits a durable retry", async (t) => {
+async function notStartedLedgerBroker(t, runId) {
   let attempts = 0;
   const upstream = {
     ...fakeUpstream(),
@@ -741,19 +741,10 @@ test("an explicit detail spawnDisposition not-started permits a durable retry", 
       return { details: { runId: "not-started-retry", asyncDir: "/async/not-started-retry" } };
     },
   };
-  const { call, lookup } = await ledgerBroker(t, "plan-not-started-retry", upstream);
-  const params = { agent: "executor", spawnKey: "dispatch-not-started" };
-  const first = await call("spawn", params, "dispatch-not-started");
-  const afterFailure = await lookup({ spawnKey: "dispatch-not-started" });
-  const second = await call("spawn", params, "dispatch-not-started");
+  return { ...await ledgerBroker(t, runId, upstream), attempts: () => attempts };
+}
 
-  assert.equal(first.reply.success, false);
-  assert.equal(afterFailure.data?.state, "not-started");
-  assert.equal(second.reply.success, true);
-  assert.equal(attempts, 2);
-});
-
-test("a cleaned grant failure permits a durable retry after the executor grant recovers", async (t) => {
+async function cleanedGrantFailureBroker(t, runId) {
   let executorGrants = 0;
   let spawns = 0;
   const stops = [];
@@ -772,22 +763,12 @@ test("a cleaned grant failure permits a durable retry after the executor grant r
   });
   await broker.start();
   t.after(() => broker.closeRootSession());
-  const caller = await broker.grantCaller({ callerRunId: "plan-cleaned-retry", planId: "plan-cleaned-retry", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
-  const dispatch = (method, params, requestId = "request-1") => broker.dispatch(request({ callerRunId: "plan-cleaned-retry", callerToken: caller.callerToken, method, params, requestId }), {});
-  const params = { agent: "executor", spawnKey: "dispatch-cleaned" };
-  const first = await dispatch("spawn", params, "dispatch-cleaned");
-  const afterFailure = await dispatch("spawn.lookup", { spawnKey: "dispatch-cleaned" });
-  const second = await dispatch("spawn", params, "dispatch-cleaned");
+  const caller = await broker.grantCaller({ callerRunId: runId, planId: runId, cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const dispatch = (method, params, requestId = "request-1") => broker.dispatch(request({ callerRunId: runId, callerToken: caller.callerToken, method, params, requestId }), {});
+  return { dispatch, spawns: () => spawns, stops: () => stops.length };
+}
 
-  assert.equal(first.success, false);
-  assert.equal(afterFailure.data?.state, "cleaned");
-  assert.equal(Object.hasOwn(afterFailure.data ?? {}, "binding"), false);
-  assert.equal(second.success, true);
-  assert.equal(spawns, 2);
-  assert.equal(stops.length, 1);
-});
-
-test("a grant and cleanup failure remains uncertain with both error causes", async (t) => {
+async function uncertainCleanupBroker(t, runId) {
   let spawns = 0;
   let stops = 0;
   const upstream = {
@@ -805,19 +786,84 @@ test("a grant and cleanup failure remains uncertain with both error causes", asy
   });
   await broker.start();
   t.after(() => broker.closeRootSession());
-  const caller = await broker.grantCaller({ callerRunId: "plan-uncertain-cleanup", planId: "plan-uncertain-cleanup", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
-  const dispatch = (method, params, requestId = "request-1") => broker.dispatch(request({ callerRunId: "plan-uncertain-cleanup", callerToken: caller.callerToken, method, params, requestId }), {});
+  const caller = await broker.grantCaller({ callerRunId: runId, planId: runId, cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const dispatch = (method, params, requestId = "request-1") => broker.dispatch(request({ callerRunId: runId, callerToken: caller.callerToken, method, params, requestId }), {});
+  return { dispatch, spawns: () => spawns, stops: () => stops };
+}
+
+test("an explicit not-started spawn is recorded as not-started", async (t) => {
+  const { call, lookup } = await notStartedLedgerBroker(t, "plan-not-started-lookup");
+  const params = { agent: "executor", spawnKey: "dispatch-not-started" };
+  await call("spawn", params, "dispatch-not-started");
+  const result = await lookup({ spawnKey: "dispatch-not-started" });
+
+  assert.equal(result.data?.state, "not-started");
+});
+
+test("an explicit not-started spawn retries the same key", async (t) => {
+  const { call, attempts } = await notStartedLedgerBroker(t, "plan-not-started-retry");
+  const params = { agent: "executor", spawnKey: "dispatch-not-started" };
+  await call("spawn", params, "dispatch-not-started");
+  const second = await call("spawn", params, "dispatch-not-started");
+
+  assert.equal(second.reply.success, true);
+  assert.equal(attempts(), 2);
+});
+
+test("a cleaned grant failure is recorded without a binding", async (t) => {
+  const { dispatch } = await cleanedGrantFailureBroker(t, "plan-cleaned-lookup");
+  const params = { agent: "executor", spawnKey: "dispatch-cleaned" };
+  await dispatch("spawn", params, "dispatch-cleaned");
+  const result = await dispatch("spawn.lookup", { spawnKey: "dispatch-cleaned" });
+
+  assert.equal(result.data?.state, "cleaned");
+  assert.equal(Object.hasOwn(result.data ?? {}, "binding"), false);
+});
+
+test("a cleaned grant failure retries after the executor grant recovers", async (t) => {
+  const { dispatch, spawns, stops } = await cleanedGrantFailureBroker(t, "plan-cleaned-retry");
+  const params = { agent: "executor", spawnKey: "dispatch-cleaned" };
+  await dispatch("spawn", params, "dispatch-cleaned");
+  const second = await dispatch("spawn", params, "dispatch-cleaned");
+
+  assert.equal(second.success, true);
+  assert.equal(spawns(), 2);
+  assert.equal(stops(), 1);
+});
+
+test("a grant and cleanup failure response includes the grant error", async (t) => {
+  const { dispatch } = await uncertainCleanupBroker(t, "plan-uncertain-grant-message");
   const params = { agent: "executor", spawnKey: "dispatch-uncertain-cleanup" };
   const first = await dispatch("spawn", params, "dispatch-uncertain-cleanup");
-  const afterFailure = await dispatch("spawn.lookup", { spawnKey: "dispatch-uncertain-cleanup" });
+
+  assert.match(first.error?.message ?? "", /executor grant write failed/);
+});
+
+test("a grant and cleanup failure response includes the stop error", async (t) => {
+  const { dispatch } = await uncertainCleanupBroker(t, "plan-uncertain-stop-message");
+  const params = { agent: "executor", spawnKey: "dispatch-uncertain-cleanup" };
+  const first = await dispatch("spawn", params, "dispatch-uncertain-cleanup");
+
+  assert.match(first.error?.message ?? "", /executor stop failed/);
+});
+
+test("a grant and cleanup failure is recorded as uncertain", async (t) => {
+  const { dispatch } = await uncertainCleanupBroker(t, "plan-uncertain-lookup");
+  const params = { agent: "executor", spawnKey: "dispatch-uncertain-cleanup" };
+  await dispatch("spawn", params, "dispatch-uncertain-cleanup");
+  const result = await dispatch("spawn.lookup", { spawnKey: "dispatch-uncertain-cleanup" });
+
+  assert.equal(result.data?.state, "uncertain");
+});
+
+test("a grant and cleanup failure prevents a second durable spawn", async (t) => {
+  const { dispatch, spawns, stops } = await uncertainCleanupBroker(t, "plan-uncertain-retry");
+  const params = { agent: "executor", spawnKey: "dispatch-uncertain-cleanup" };
+  await dispatch("spawn", params, "dispatch-uncertain-cleanup");
   const second = await dispatch("spawn", params, "dispatch-uncertain-cleanup");
 
-  assert.equal(first.success, false);
-  assert.match(first.error?.message ?? "", /executor grant write failed/);
-  assert.match(first.error?.message ?? "", /executor stop failed/);
-  assert.equal(afterFailure.data?.state, "uncertain");
   assert.equal(second.success, false);
   assert.equal(second.error?.code, "spawn_uncertain");
-  assert.equal(spawns, 1);
-  assert.equal(stops, 1);
+  assert.equal(spawns(), 1);
+  assert.equal(stops(), 1);
 });
