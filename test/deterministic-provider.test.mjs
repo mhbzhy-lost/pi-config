@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+
+const jiti = createJiti(import.meta.url, {
+  moduleCache: false,
+  alias: {
+    "@earendil-works/pi-ai": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js",
+  },
+});
 
 let state = {};
 try {
@@ -13,6 +21,25 @@ function decide(messages, toolNames = []) {
 
 function user(text) {
   return { role: "user", content: [{ type: "text", text }] };
+}
+
+async function deterministicProvider() {
+  let provider;
+  const fixture = await jiti.import("./fixtures/deterministic-provider.mjs");
+  fixture.default({ registerProvider(_name, definition) { provider = definition; } });
+  assert.ok(provider?.streamSimple);
+  return provider;
+}
+
+async function streamDone(messages, tools) {
+  const provider = await deterministicProvider();
+  let done;
+  const model = { ...provider.models[0], api: provider.api, provider: "fake" };
+  for await (const event of provider.streamSimple(model, { messages, tools })) {
+    if (event.type === "done") done = event;
+  }
+  assert.ok(done, "provider stream emits done");
+  return done;
 }
 
 test("deterministic executors map only approved harness paths to fixed commands", () => {
@@ -52,6 +79,40 @@ const flatBootstrap = {
 function flatPlanPrompt() {
   return user(`Open the approved Plan revision by calling plan_open exactly once with ${JSON.stringify(flatBootstrap)}.`);
 }
+
+test("provider stream waits for lifecycle instead of falling through to plan_verify", async () => {
+  const dispatch = toolResult("plan_continue", JSON.stringify({
+    state: "dispatch-required", dispatches: [{ contract: { task: "task-10a" } }],
+  }));
+  const done = await streamDone([
+    flatPlanPrompt(), toolResult("plan_open", "opened"), dispatch, toolResult("subagent", "started"),
+  ], flatPlanTools.map((name) => ({ name })));
+
+  assert.deepEqual(done.message.content, [{ type: "text", text: "PLAN_RUNNER_WAITING_LIFECYCLE" }]);
+  assert.equal(done.reason, "stop");
+  assert.equal(done.message.stopReason, "stop");
+  assert.equal(done.message.content.some((part) => part.type === "toolCall"), false);
+});
+
+test("provider stream polls plan_status when a lifecycle follow-up arrives", async () => {
+  const dispatch = toolResult("plan_continue", JSON.stringify({
+    state: "dispatch-required", dispatches: [{ contract: { task: "task-10a" } }],
+  }));
+  const done = await streamDone([
+    flatPlanPrompt(), toolResult("plan_open", "opened"), dispatch, toolResult("subagent", "started"),
+    { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "started", details: {} },
+  ], flatPlanTools.map((name) => ({ name })));
+
+  assert.equal(done.reason, "toolUse");
+  assert.deepEqual(done.message.content.map((part) => part.name), ["plan_status"]);
+});
+
+test("provider stream preserves executor bash fallback when state is undefined", async () => {
+  const done = await streamDone([user("Allowed paths: README.md")], [{ name: "bash" }]);
+
+  assert.equal(done.reason, "toolUse");
+  assert.deepEqual(done.message.content.map((part) => part.name), ["bash"]);
+});
 
 test("flat Plan Runner parses the production bootstrap and opens the exact revision", () => {
   assert.deepEqual(decide([flatPlanPrompt()], flatPlanTools), {
