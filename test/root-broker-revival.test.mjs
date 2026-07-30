@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
+import { BROKER_METHODS, parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
 async function createRevivalFixture({ resume, spawn } = {}) {
@@ -84,6 +84,17 @@ async function createRevivalFixture({ resume, spawn } = {}) {
   };
 
   return { grants, ownedRun, proof, request, resumeCalls, server };
+}
+
+async function createActiveRevivedAliasFixture() {
+  const fixture = await createRevivalFixture();
+  const { ownedRun, proof, request, server } = fixture;
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  return fixture;
 }
 
 const revivedResult = {
@@ -445,6 +456,43 @@ test("allows an active plan-runner alias to control its executor", async () => {
     data: { state: "running", runId: "executor-1" },
   });
   assert.deepEqual(statusCalls, [{ runId: "executor-1" }]);
+});
+
+test("resolves statusCaller through a revived plan-runner alias", async () => {
+  const { server } = await createActiveRevivedAliasFixture();
+  const calls = [];
+  server.upstream.status = async (params) => {
+    calls.push(params);
+    return { state: "status-result" };
+  };
+
+  assert.deepEqual(BROKER_METHODS, ["ping", "spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "caller.followup", "subscribe"]);
+  assert.deepEqual(await server.statusCaller("plan-runner-1"), { state: "status-result" });
+  assert.deepEqual(calls, [{ runId: "plan-runner-2" }]);
+});
+
+test("resolves interruptCaller through a revived plan-runner alias", async () => {
+  const { server } = await createActiveRevivedAliasFixture();
+  const calls = [];
+  server.upstream.interrupt = async (params) => {
+    calls.push(params);
+    return { state: "interrupt-result" };
+  };
+
+  assert.deepEqual(await server.interruptCaller("plan-runner-1"), { state: "interrupt-result" });
+  assert.deepEqual(calls, [{ runId: "plan-runner-2" }]);
+});
+
+test("resolves stopCaller through a revived plan-runner alias", async () => {
+  const { server } = await createActiveRevivedAliasFixture();
+  const calls = [];
+  server.upstream.stop = async (params) => {
+    calls.push(params);
+    return { state: "stop-result" };
+  };
+
+  assert.deepEqual(await server.stopCaller("plan-runner-1"), { state: "stop-result" });
+  assert.deepEqual(calls, [{ runId: "plan-runner-2" }]);
 });
 
 test("lists a revived executor supervisor request for its active plan-runner alias", async () => {
