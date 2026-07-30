@@ -34,7 +34,7 @@ function validHandle(handle) {
     && [handle.manifestSha256, handle.sourceBytesSha256, handle.planHash, handle.planIrHash].every((value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value))
     && [handle.rootSessionId, handle.planRunnerRunId, handle.asyncDir, handle.worktree, handle.baseCommit].every((value) => typeof value === "string" && value.length > 0);
 }
-function trustedHandle(handle) { if (!validHandle(handle)) throw new Error("Plan handle must be pi-plan-handle.v4"); return handle; }
+function trustedHandle(handle) { if (handle?.schemaVersion === "pi-plan-handle.v3") throw new Error("Standalone Host handles are unsupported after flat runtime migration"); if (!validHandle(handle)) throw new Error("Plan handle must be pi-plan-handle.v4"); return handle; }
 function toolResult(value, isError = false) {
   return { content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }], ...(isError ? { isError: true } : {}) };
 }
