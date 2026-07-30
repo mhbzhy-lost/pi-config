@@ -601,16 +601,30 @@ test("root broker startup rolls back only its failed reservation and closes it",
   assert.throws(() => requireRootBroker(pi));
 });
 
-test("broker client uses trusted spawn metadata for its ledger and strips spawnKey upstream", async (t) => {
+test("broker client excludes model spawnKey from upstream params", async (t) => {
   const upstream = fakeUpstream(); const broker = new RootBrokerServer({ rootSessionId, upstream }); await broker.start(); t.after(() => broker.closeRootSession());
   await broker.grantCaller({ callerRunId: "plan-client", planId: "plan", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const client = createRootBrokerClient({ rootSessionId, callerRunId: "plan-client", randomUUID: () => "generated" }); t.after(() => client.dispose());
   await client.spawn({ agent: "executor", task: "run", spawnKey: "model-key" }, { requestId: "dispatch-client", spawnKey: "dispatch-client" });
   assert.deepEqual(upstream.calls, [{ method: "spawn", params: { agent: "executor", task: "run", async: true, clarify: false } }]);
-  const spawned = await client.lookupSpawn({ spawnKey: "dispatch-client" });
-  assert.equal(spawned.state, "spawned");
-  const modelKey = await client.lookupSpawn({ spawnKey: "model-key" });
-  assert.equal(modelKey.state, "not-started");
+});
+
+test("broker client lookup finds the trusted durable key as spawned", async (t) => {
+  const upstream = fakeUpstream(); const broker = new RootBrokerServer({ rootSessionId, upstream }); await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.grantCaller({ callerRunId: "plan-client-durable", planId: "plan", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: "plan-client-durable", randomUUID: () => "generated" }); t.after(() => client.dispose());
+  await client.spawn({ agent: "executor", task: "run", spawnKey: "model-key" }, { requestId: "dispatch-client", spawnKey: "dispatch-client" });
+  const result = await client.lookupSpawn?.({ spawnKey: "dispatch-client" });
+  assert.equal(result?.state, "spawned");
+});
+
+test("broker client lookup reports a model key as not-started", async (t) => {
+  const upstream = fakeUpstream(); const broker = new RootBrokerServer({ rootSessionId, upstream }); await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.grantCaller({ callerRunId: "plan-client-model", planId: "plan", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: "plan-client-model", randomUUID: () => "generated" }); t.after(() => client.dispose());
+  await client.spawn({ agent: "executor", task: "run", spawnKey: "model-key" }, { requestId: "dispatch-client", spawnKey: "dispatch-client" });
+  const result = await client.lookupSpawn?.({ spawnKey: "model-key" });
+  assert.equal(result?.state, "not-started");
 });
 
 test("broker protocol capability includes spawn.lookup", () => { assert.equal(BROKER_METHODS.includes("spawn.lookup"), true); });
@@ -674,18 +688,22 @@ test("lookup isolates a caller from another caller's durable binding", async (t)
 });
 
 test("pre-spawn rejection does not poison a durable key", async (t) => {
-  const { call, lookup } = await ledgerBroker(t, "plan-preflight");
+  const { call, upstream } = await ledgerBroker(t, "plan-preflight");
   const invalid = await call("spawn", { agent: "reviewer", spawnKey: "dispatch-preflight" }, "dispatch-preflight");
   assert.equal(invalid.reply.success, false); assert.equal(invalid.reply.error?.code, "spawn_unauthorized");
   assert.equal((await call("spawn", { agent: "executor", spawnKey: "dispatch-preflight" }, "dispatch-preflight")).reply.success, true);
-  const found = await lookup({ spawnKey: "dispatch-preflight" });
-  assert.equal(found.success, true); assert.equal(found.data?.state, "spawned");
+  assert.equal(upstream.calls.filter((call) => call.method === "spawn").length, 1);
 });
 
-test("upstream failure records uncertain and blocks a second spawn", async (t) => {
-  let attempts = 0; const upstream = { ...fakeUpstream(), async spawn() { attempts += 1; throw new Error("connection lost"); } }; const { call, lookup } = await ledgerBroker(t, "plan-uncertain", upstream);
-  const params = { agent: "executor", spawnKey: "dispatch-uncertain" }; const first = await call("spawn", params, "dispatch-uncertain"); const second = await call("spawn", params, "dispatch-uncertain"); const found = await lookup({ spawnKey: "dispatch-uncertain" });
+test("upstream failure makes a second durable spawn uncertain without retrying", async (t) => {
+  let attempts = 0; const upstream = { ...fakeUpstream(), async spawn() { attempts += 1; throw new Error("connection lost"); } }; const { call } = await ledgerBroker(t, "plan-uncertain-retry", upstream);
+  const params = { agent: "executor", spawnKey: "dispatch-uncertain" }; const first = await call("spawn", params, "dispatch-uncertain"); const second = await call("spawn", params, "dispatch-uncertain");
   assert.equal(first.reply.success, false); assert.equal(first.reply.error?.code, "upstream_failed");
   assert.equal(second.reply.success, false); assert.equal(second.reply.error?.code, "spawn_uncertain"); assert.equal(attempts, 1);
+});
+
+test("upstream failure lookup reports an unbound uncertain durable spawn", async (t) => {
+  const upstream = { ...fakeUpstream(), async spawn() { throw new Error("connection lost"); } }; const { call, lookup } = await ledgerBroker(t, "plan-uncertain-lookup", upstream);
+  const params = { agent: "executor", spawnKey: "dispatch-uncertain" }; await call("spawn", params, "dispatch-uncertain"); const found = await lookup({ spawnKey: "dispatch-uncertain" });
   assert.equal(found.success, true); assert.equal(found.data?.state, "uncertain"); assert.equal(Object.hasOwn(found.data ?? {}, "binding"), false);
 });
