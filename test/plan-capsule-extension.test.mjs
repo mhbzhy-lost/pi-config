@@ -135,7 +135,7 @@ test("plan-runner alone uses the real subagentOnlyExtensions profile field", asy
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const profiles = await Promise.all(["plan-runner", "plan-reviewer", "executor", "spark"].map((name) => readFile(resolve(root, "pi", "agents", `${name}.md`), "utf8")));
   assert.match(profiles[0], /^subagentOnlyExtensions: \.pi-subagents\/plan-runner-entry\.mjs$/m);
-  assert.match(profiles[0], /^tools: plan_open,plan_status,plan_continue,plan_verify,plan_block,plan_read_revision,plan_amend,read,grep$/m);
+  assert.match(profiles[0], /^tools: plan_open,read,grep$/m);
   assert.match(profiles[0], /plan_read_revision[\s\S]*plan_amend/);
   assert.doesNotMatch(profiles[0], /\bbash\b|approvedHash|contact_supervisor/);
   assert.doesNotMatch(profiles[0], /(?:check|Supervisor)\s+Supervisor pending|subagent_wait with timeoutMs 1000ms|timeoutMs: 1000/);
