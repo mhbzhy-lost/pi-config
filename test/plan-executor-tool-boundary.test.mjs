@@ -200,6 +200,10 @@ test("rejects every mismatched result field without consuming its tool call", as
     ["taskId", (event) => ({ ...event, details: { ...event.details, taskId: "other" } })],
     ["agent", (event) => ({ ...event, details: { ...event.details, agent: "reviewer" } })],
     ["contractHash", (event) => ({ ...event, details: { ...event.details, contractHash: hash("other") } })],
+    ["unsupported version", (event) => ({ ...event, details: { ...event.details, version: "coding-dispatch-handle.v2" } })],
+    ["missing version", (event) => { const { version, ...details } = event.details; return { ...event, details }; }],
+    ["mismatched title", (event) => ({ ...event, details: { ...event.details, title: "Other task" } })],
+    ["details extra field", (event) => ({ ...event, details: { ...event.details, extra: true } })],
     ["blank runId", (event) => ({ ...event, details: { ...event.details, runId: " " } })],
     ["blank asyncDir", (event) => ({ ...event, details: { ...event.details, asyncDir: "" } })],
   ]) await t.test(name, () => {
