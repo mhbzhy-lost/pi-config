@@ -689,9 +689,7 @@ export class RootBrokerServer {
     if (!ownerRunId || !this.callers.has(ownerRunId)) return;
     const entry: SupervisorRequest = { requestId: push.data.requestId as string, ownerRunId, executorRunId: push.data.executorRunId as string, data: push.data, context, expectsReply: push.data.expectsReply === true, state: "pending" };
     this.supervisorRequests.set(entry.requestId, entry);
-    for (const socket of this.subscriptions.get(ownerRunId) ?? []) {
-      try { if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`); } catch { /* isolate subscriber failures */ }
-    }
+    this.deliverOrQueuePush(ownerRunId, push);
   }
 
   pendingSupervisor(request: any, _caller: Caller) {
