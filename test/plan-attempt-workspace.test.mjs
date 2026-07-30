@@ -135,6 +135,21 @@ test("Task5A2 rejects replacement repository at authoritative workspace path bef
   });
 });
 
+test("Task5A2 inspect rejects a replacement repository after allocation event", async () => {
+  await withRepository(async (repository) => {
+    const first = await allocateAttemptWorkspace(input(repository));
+    const authoritativeLease = await readFile(first.leasePath, "utf8");
+    await rm(first.path, { recursive: true, force: true });
+    await git(repository.originRoot, "clone", "--branch", first.branch, repository.originRoot, first.path);
+
+    assert.equal(await git(first.path, "branch", "--show-current"), first.branch);
+    assert.equal(await git(first.path, "rev-parse", "HEAD"), repository.baseCommit);
+    assert.equal(await git(first.path, "status", "--porcelain"), "");
+    await assert.rejects(inspectAttemptWorkspace(first), /origin|repository|identity|worktree/i);
+    assert.equal(await readFile(first.leasePath, "utf8"), authoritativeLease);
+  });
+});
+
 test("Task5A2 rejects dirty orphan workspace recovery before allocation event", async () => {
   await withRepository(async (repository) => {
     const first = await allocateAttemptWorkspace(input(repository));

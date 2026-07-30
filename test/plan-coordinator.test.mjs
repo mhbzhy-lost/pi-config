@@ -291,7 +291,7 @@ function harness({ approvedPlan = plan(), entries, backend: backendOverrides = {
   const { inspectWorkspace: suppliedInspectWorkspace, ...coordinatorOptions } = options;
   const inspectWorkspace = async (candidate) => {
     inspections.push(candidate);
-    return suppliedInspectWorkspace?.(candidate);
+    return suppliedInspectWorkspace?.(candidate) ?? { headCommit: candidate.baseCommit, clean: true };
   };
   let run = 0;
   const backend = {
@@ -1135,6 +1135,35 @@ test("Task5A2 resumes a workspace-allocated crash without allocating a second le
   assert.equal(result.dispatches[0].attemptId, "attempt-plan-1-task-1-1");
   assert.equal(replayed.allocations.length, 0);
   assert.deepEqual(replayed.appended.map(({ type }) => type), ["attempt.dispatch-requested"]);
+});
+
+test("Task5A2 rejects non-pristine workspace-allocated recovery before dispatch intent", async (t) => {
+  for (const [name, inspection] of [
+    ["advanced HEAD", { headCommit: "advanced", clean: true }],
+    ["dirty workspace", { headCommit: "base", clean: false }],
+  ]) {
+    await t.test(name, async () => {
+      const approvedPlan = v3Plan();
+      const ir = compilePlanToIR(approvedPlan);
+      const attemptId = "attempt-plan-1-task-1-1";
+      const allocated = event("attempt.workspace-allocated", {
+        attemptId,
+        taskId: "task-1",
+        baseCommit: "base",
+        workspace: lease({ planId: "plan-1", taskId: "task-1", attemptId, baseCommit: "base" }),
+      }, 1);
+      const subject = harness({
+        approvedPlan,
+        entries: [createdV3Entry(ir), allocated],
+        options: { async inspectWorkspace() { return inspection; } },
+      });
+
+      await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /workspace|head|clean|stale|identity/i);
+      assert.equal(subject.inspections.length, 1);
+      assert.equal(subject.allocations.length, 0);
+      assert.equal(subject.appended.length, 0);
+    });
+  }
 });
 
 test("Task5A2 rejects a stale workspace-allocated recovery candidate", async () => {
