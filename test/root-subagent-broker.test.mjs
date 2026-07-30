@@ -21,7 +21,14 @@ function fakeUpstream() {
   const calls = [];
   return {
     calls,
-    async ping() { return { version: 1, methods: ["ping", "spawn", "spawn.lookup", "status", "interrupt", "stop"], session: { sessionId: "root-session-uuid", sessionFile: "/sessions/root-session.jsonl", cwd: "/root" } }; },
+    failNextPing: false,
+    async ping() {
+      if (this.failNextPing) {
+        this.failNextPing = false;
+        throw new Error("controlled pre-resolver ping failure");
+      }
+      return { version: 1, methods: ["ping", "spawn", "spawn.lookup", "status", "interrupt", "stop"], session: { sessionId: "root-session-uuid", sessionFile: "/sessions/root-session.jsonl", cwd: "/root" } };
+    },
     async spawn(params) { calls.push({ method: "spawn", params }); return { details: { runId: "executor-run-1", asyncDir: "/async/1" } }; },
     async stop(params) { calls.push({ method: "stop", params }); return { stopped: true }; },
   };
@@ -450,6 +457,58 @@ test("cleaned tool result lookup releases the durable dispatch for a new Executo
   const toolResult = { toolName: "subagent", toolCallId: "dispatch-tool-call-1", input: dispatch.contract, content: handle.content, isError: handle.isError, details: handle.details };
   for (const handler of handlers.get("tool_result") ?? []) await handler(toolResult, ctx);
   assert.equal(await capsuleToolCall({ toolName: "subagent", toolCallId: "dispatch-tool-call-2", input: dispatch.contract }, ctx), undefined);
+});
+
+test("pre-resolver ping failure releases the durable Executor authorization", async (t) => {
+  const runId = "pre-resolver-plan-run";
+  const environment = ["PI_PLAN_ORIGIN_ROOT", "PI_PLAN_STATE_ROOT", "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_SUBAGENT_RUN_ID"]
+    .map((key) => [key, Object.hasOwn(process.env, key), process.env[key]]);
+  const handlers = new Map();
+  const tools = new Map();
+  const pi = {
+    events: { on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); return () => {}; } },
+    on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); },
+    registerTool(tool) { tools.set(tool.name, tool); },
+    getAllTools() { return [...tools.values()]; },
+    getActiveTools() { return []; }, setActiveTools() {}, sendMessage() {}, appendEntry() {},
+  };
+  const upstream = fakeUpstream();
+  const broker = new RootBrokerServer({ rootSessionId, upstream });
+  await broker.start();
+  t.after(async () => {
+    for (const handler of handlers.get("session_shutdown") ?? []) await handler();
+    await broker.closeRootSession();
+    for (const [key, existed, value] of environment) {
+      if (existed) process.env[key] = value; else delete process.env[key];
+    }
+  });
+  delete process.env.PI_PLAN_ORIGIN_ROOT;
+  delete process.env.PI_PLAN_STATE_ROOT;
+  process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = "1";
+  process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID = rootSessionId;
+  process.env.PI_SUBAGENT_RUN_ID = runId;
+  const factory = planRunner(pi);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await broker.grantCaller({ callerRunId: runId, planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
+  await factory;
+  const dispatch = v3DispatchBranch();
+  const ctx = { cwd: "/repo", sessionManager: { getBranch: () => dispatch.branch.map((data) => ({ customType: "pi-plan-event-v1", data })) } };
+  await handlers.get("before_agent_start").at(-1)({}, { cwd: "/repo", sessionManager: { getBranch: () => [] } });
+  for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx);
+  const capsuleToolCall = handlers.get("tool_call").at(-1);
+  assert.equal(await capsuleToolCall({ toolName: "subagent", toolCallId: "dispatch-tool-call-1", input: dispatch.contract }, ctx), undefined);
+  upstream.failNextPing = true;
+  const handle = await tools.get("subagent").execute("dispatch-tool-call-1", dispatch.contract, undefined, undefined, ctx);
+  assert.equal(handle.isError, true);
+  assert.equal(broker.spawnLedger.has("plan\u0000dispatch-1"), false);
+  assert.equal(upstream.calls.filter((call) => call.method === "spawn").length, 0);
+  const toolResult = { toolName: "subagent", toolCallId: "dispatch-tool-call-1", input: dispatch.contract, content: handle.content, isError: handle.isError, details: handle.details };
+  const handlerErrors = [];
+  for (const handler of handlers.get("tool_result") ?? []) {
+    try { await handler(toolResult, ctx); } catch (error) { handlerErrors.push(error); }
+  }
+  assert.equal(await capsuleToolCall({ toolName: "subagent", toolCallId: "dispatch-tool-call-2", input: dispatch.contract }, ctx), undefined);
+  assert.deepEqual(handlerErrors, []);
 });
 
 test("caller grant never overwrites a principal collision or writes a grant", async () => {

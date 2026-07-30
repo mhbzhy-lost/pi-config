@@ -193,6 +193,17 @@ test("returns error without accepting a spawn binding from an authorized Executo
   assert.deepEqual(boundaryMethod(fixture.boundary, "resolveExecutorToolResult")({ ...validResult(fixture), isError: true, details: { runId: "untrusted-run", asyncDir: "/untrusted" } }), { status: "error" });
 });
 
+test("pre-resolver ping failure releases an authorized Executor dispatch", () => {
+  const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+  boundary.authorize(exact.contract, { projection, toolCallId: "pre-resolver-call-1" });
+  assert.deepEqual(
+    boundaryMethod(boundary, "resolveExecutorToolResult")({ toolName: "subagent", toolCallId: "pre-resolver-call-1", input: exact.contract, isError: true }),
+    { status: "not-started" },
+  );
+  assert.deepEqual(boundaryMethod(boundary, "releaseExecutorToolCall")("pre-resolver-call-1", "not-started"), { state: "released", disposition: "not-started" });
+  assert.equal(boundary.authorize(exact.contract, { projection, toolCallId: "pre-resolver-call-2" }).toolCallId, "pre-resolver-call-2");
+});
+
 test("rejects every mismatched result field without consuming its tool call", async (t) => {
   for (const [name, mutate] of [
     ["raw input", (event) => ({ ...event, input: { ...event.input, title: "forged" } })],
