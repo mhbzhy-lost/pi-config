@@ -572,6 +572,35 @@ test("reload and shutdown dispose only the current RPC client", async () => {
   assert.equal(second.disposed(), 1);
 });
 
+test("routes native Supervisor messages through the Root ingress callback", async () => {
+  const pi = createPi();
+  const calls = [];
+  const ignoredMessage = { customType: "subagent-notify", content: "Unrelated" };
+  const supervisorMessage = {
+    customType: "subagent_supervisor_request",
+    content: "Choose the target.",
+    details: { id: "request-1", runId: "run-1" },
+  };
+  const ignoredContext = { cwd: "/ignored" };
+  const supervisorContext = { cwd: "/repo", request: "exact" };
+
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) {
+      api.registerTool({ name: "subagent_supervisor", execute() {} });
+    },
+    onSupervisorRequest(message, context) { calls.push({ message, context }); },
+    rpc: createRpc(), cleanupStore: {},
+  });
+
+  assert.deepEqual(pi.tools.map((tool) => tool.name), ["subagent", "subagent_supervisor"]);
+  for (const handler of pi.handlers.get("message_end") ?? []) await handler({ message: ignoredMessage }, ignoredContext);
+  assert.deepEqual(calls, [], "unrelated native messages must be ignored");
+  for (const handler of pi.handlers.get("message_end") ?? []) await handler({ message: supervisorMessage }, supervisorContext);
+  assert.equal(calls.length, 1, "Root ingress must receive one native Supervisor message");
+  assert.strictEqual(calls[0].message, supervisorMessage);
+  assert.strictEqual(calls[0].context, supervisorContext);
+});
+
 test("internal Supervisor target forwards the public two-argument handle through the native five-argument closure", async () => {
   const pi = createPi();
   const params = { action: "reply", replyTo: "native-1", message: "Proceed." };
