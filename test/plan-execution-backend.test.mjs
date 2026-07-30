@@ -434,6 +434,28 @@ test("recoverDispatch is exact, idempotent, never spawns, and fences a late life
   backend.dispose();
 });
 
+test("dispatchId selects its exact recovered dispatch when cwd candidates differ", async () => {
+  const events = createEvents(); const facts = [];
+  const backend = createPiSubagentsExecutionBackend({ events, emitFact: (fact) => facts.push(fact), now: () => "observed", rpc: { async ping() { return capabilities(); }, dispose() {} } });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  await backend.recoverDispatch(spawnInput({ dispatchId: "D1" }));
+  await backend.recoverDispatch(spawnInput({ dispatchId: "D2", attemptId: "attempt-2" }));
+  events.emit("subagent:async-started", { dispatchId: "D2", id: "run-d2", asyncDir: "/async/d2", cwd: "/attempts/attempt-1", sessionId: "/sessions/plan-session-1.jsonl" });
+  assert.deepEqual(facts, [{ type: "execution.started", dispatchId: "D2", attemptId: "attempt-2", runId: "run-d2", asyncDir: "/async/d2", cwd: "/attempts/attempt-1", state: "running", observedAt: "observed" }]);
+  backend.dispose();
+});
+
+test("stale lifecycle dispatchId never falls back to the only cwd candidate", async () => {
+  const events = createEvents(); const facts = [];
+  const backend = createPiSubagentsExecutionBackend({ events, emitFact: (fact) => facts.push(fact), rpc: { async ping() { return capabilities(); }, dispose() {} } });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  await backend.recoverDispatch(spawnInput({ dispatchId: "D1" }));
+  events.emit("subagent:async-started", { dispatchId: "D2", id: "stale", asyncDir: "/async/stale", cwd: "/attempts/attempt-1", sessionId: "/sessions/plan-session-1.jsonl" });
+  assert.equal(facts[0].type, "execution.protocol-violation");
+  assert.match(facts[0].code, /BINDING_(NOT_FOUND|MISMATCH)/);
+  backend.dispose();
+});
+
 test("rejects mixed constructor sessions", () => {
   const binding = { dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1", cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl" };
   assert.throws(() => createPiSubagentsExecutionBackend({ events: createEvents(), rpc: { ping() {} }, bindings: [binding, { ...binding, dispatchId: "attempt-2.dispatch.1", runId: "run-2", sessionId: "other", sessionFile: "other" }] }), (error) => error.code === "EXECUTION_CAPABILITY_MISMATCH");

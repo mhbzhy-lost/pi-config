@@ -249,3 +249,41 @@ test("fails closed before binding, on duplicate binding, and after dispose", asy
   adapter.dispose();
   await assert.rejects(adapter.execute("tool-1", { action: "status" }), /SUPERVISOR_TARGET_UNAVAILABLE/);
 });
+
+test("root-owned lifecycle subscription subscribes once and mirrors broker pushes", async () => {
+  const emitted = []; const messages = []; let subscribeCalls = 0;
+  const listeners = new Map();
+  const pi = createPi();
+  pi.events = {
+    on(channel, listener) { const values = listeners.get(channel) ?? new Set(); values.add(listener); listeners.set(channel, values); return () => values.delete(listener); },
+    emit(channel, event) { emitted.push([channel, event]); for (const listener of listeners.get(channel) ?? []) listener(event); },
+  };
+  pi.sendMessage = (message) => messages.push(message);
+  const rpc = { dispose() {}, async subscribe(onPush) { subscribeCalls += 1; this.onPush = onPush; }, supervisorPending() {}, supervisorReply() {} };
+  const installed = installRootOwnedSubagent(pi, { rootSessionId: "root", callerRunId: "run", createClient: () => rpc });
+  assert.equal(typeof installed.startLifecycleSubscription, "function");
+  await installed.startLifecycleSubscription(); await installed.startLifecycleSubscription();
+  assert.equal(subscribeCalls, 1);
+  const started = { type: "execution.started", callerRunId: "run", data: { dispatchId: "D1", runId: "R1", state: "running" } };
+  const completed = { type: "execution.completed", callerRunId: "run", data: { dispatchId: "D1", runId: "R1", state: "complete" } };
+  rpc.onPush(started); rpc.onPush(completed);
+  assert.deepEqual(emitted, [["subagent:async-started", started.data], ["subagent:async-complete", completed.data]]);
+  assert.equal(messages.length, 2);
+});
+
+test("root-owned lifecycle dedupe is bounded and cleanup consumes subscription rejection", async () => {
+  const pi = createPi(); const messages = []; let disposed = 0;
+  pi.sendMessage = (message) => messages.push(message);
+  const rpc = { dispose() {}, subscribe() { return Promise.reject(new Error("closed")); }, supervisorPending() {}, supervisorReply() {} };
+  const installed = installRootOwnedSubagent(pi, { rootSessionId: "root", callerRunId: "run", createClient: () => rpc, lifecycleDedupeLimit: 2 });
+  assert.equal(typeof installed.startLifecycleSubscription, "function");
+  const unhandled = []; const listener = (error) => unhandled.push(error); process.on("unhandledRejection", listener);
+  try {
+    await installed.startLifecycleSubscription();
+    assert.equal(unhandled.length, 0);
+    assert.equal(typeof installed.dispose, "function");
+    installed.dispose(); installed.dispose();
+    assert.equal(disposed, 0);
+    assert.equal(messages.length, 0);
+  } finally { process.off("unhandledRejection", listener); }
+});
