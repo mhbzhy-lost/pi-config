@@ -81,9 +81,13 @@ function flatPlanPrompt() {
 }
 
 const rootMainTools = ["plan_run", "plan_attention_reply"];
+const transitionalRootMainTools = [...rootMainTools, "compat_spawn"];
 const rootMainPlanPaths = ["/tmp/root-main-first.plan.md", "/tmp/root-main-second.plan.md"];
 function rootMainPrompt() {
   return user(`PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths: rootMainPlanPaths })}`);
+}
+function transitionalRootMainPrompt() {
+  return user(`PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths: rootMainPlanPaths })}\nPI_SUBAGENTS_COMPAT_PARENT_COMPLETE`);
 }
 
 function planRunResult(planPath) {
@@ -102,19 +106,19 @@ test("Root Main launches the first declared plan before any tool result", () => 
 
 test("Root Main launches the second declared plan after the first launch result", () => {
   assert.deepEqual(decide([
-    rootMainPrompt(),
+    transitionalRootMainPrompt(),
     planRunResult(rootMainPlanPaths[0]),
-  ], rootMainTools), {
+  ], transitionalRootMainTools), {
     tool: { name: "plan_run", arguments: { planPath: rootMainPlanPaths[1] } },
   });
 });
 
 test("Root Main stops waiting after both declared plan launches without polling", () => {
   const turn = decide([
-    rootMainPrompt(),
+    transitionalRootMainPrompt(),
     planRunResult(rootMainPlanPaths[0]),
     planRunResult(rootMainPlanPaths[1]),
-  ], rootMainTools);
+  ], transitionalRootMainTools);
 
   assert.deepEqual(turn, { text: "PLAN_ROOT_WAITING" });
   assert.equal(turn?.tool, undefined);
@@ -122,10 +126,10 @@ test("Root Main stops waiting after both declared plan launches without polling"
 
 test("Root Main provider stream stops waiting after both declared plan launches", async () => {
   const done = await streamDone([
-    rootMainPrompt(),
+    transitionalRootMainPrompt(),
     planRunResult(rootMainPlanPaths[0]),
     planRunResult(rootMainPlanPaths[1]),
-  ], rootMainTools.map((name) => ({ name })));
+  ], transitionalRootMainTools.map((name) => ({ name })));
 
   assert.equal(done.reason, "stop");
   assert.equal(done.message.stopReason, "stop");
