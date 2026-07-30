@@ -4,7 +4,7 @@ import test from "node:test";
 import { parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
-async function createRevivalFixture() {
+async function createRevivalFixture({ resume } = {}) {
   const callerToken = "a".repeat(64);
   const resumeCalls = [];
   const server = new RootBrokerServer({
@@ -12,6 +12,7 @@ async function createRevivalFixture() {
     upstream: {
       resume: async (params) => {
         resumeCalls.push(params);
+        if (resume) return await resume(params);
         return { runId: "plan-runner-2", asyncDir: "/async/plan-runner-2" };
       },
     },
@@ -95,4 +96,40 @@ test("revives when a pending plan-runner wake follows its observed terminal proo
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(resumeCalls, expectedResume);
+});
+
+test("coalesces concurrent pending wakes for the same plan-runner revival", async (t) => {
+  let resolveResume;
+  const result = { runId: "plan-runner-2", asyncDir: "/async/plan-runner-2" };
+  const resumeDeferred = new Promise((resolve) => { resolveResume = resolve; });
+  t.after(() => resolveResume(result));
+
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture({
+    resume: () => resumeDeferred,
+  });
+  const secondRequest = parseBrokerRequest({
+    ...request,
+    requestId: "request-followup-2",
+  });
+
+  server.acceptTerminalProof(ownedRun, proof);
+  const responses = await Promise.all([
+    server.dispatch(request, {}),
+    server.dispatch(secondRequest, {}),
+  ]);
+  assert.deepEqual(responses.map((response) => response.data), [
+    { accepted: true, wakeId: "plan-opened-1" },
+    { accepted: true, wakeId: "plan-opened-1" },
+  ]);
+  await Promise.resolve();
+
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.equal(server.revivePromises.size, 1);
+
+  resolveResume(result);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(server.revivePromises.size, 0);
+  assert.deepEqual(server.callerFollowUps.get(ownedRun.runId), []);
+  assert.deepEqual(server.reviveResults.get(ownedRun.runId), result);
 });
