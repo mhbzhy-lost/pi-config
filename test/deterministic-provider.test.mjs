@@ -80,7 +80,7 @@ test("flat Plan Runner dispatches the second dispatch wave with its raw contract
     task: "task-10a", agent: "executor", runId: "executor-run-1", prompt: "Implement the first approved task only.",
   };
   const contractB = {
-    task: "task-10b", agent: "reviewer", runId: "reviewer-run-2", prompt: "Review the integrated first task before proceeding.",
+    task: "task-10b", agent: "executor", runId: "executor-run-2", prompt: "Implement the second approved task after integrating the first.",
   };
   const secondDispatch = toolResult("plan_continue", JSON.stringify({
     state: "dispatch-required", dispatches: [{ contract: contractB }],
@@ -102,7 +102,7 @@ test("flat Plan Runner integrates after the second validated wave", () => {
     task: "task-10a", agent: "executor", runId: "executor-run-1", prompt: "Implement the first approved task only.",
   };
   const contractB = {
-    task: "task-10b", agent: "reviewer", runId: "reviewer-run-2", prompt: "Review the integrated first task before proceeding.",
+    task: "task-10b", agent: "executor", runId: "executor-run-2", prompt: "Implement the second approved task after integrating the first.",
   };
 
   assert.deepEqual(decide([
@@ -114,7 +114,7 @@ test("flat Plan Runner integrates after the second validated wave", () => {
     toolResult("plan_status", '{"tasks":[{"status":"validated","attempts":[{"status":"validated"}]}]}'),
     toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractB }] })),
     toolResult("subagent", "second task completed"),
-    { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "Second lifecycle update.", details: { dispatchId: "dispatch-2", runId: "reviewer-run-2", state: "completed" } },
+    { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "Second lifecycle update.", details: { dispatchId: "dispatch-2", runId: "executor-run-2", state: "completed" } },
     toolResult("plan_status", '{"tasks":[{"status":"validated","attempts":[{"status":"validated"}]},{"status":"validated","attempts":[{"status":"validated"}]}]}'),
   ], flatPlanTools), { tool: { name: "plan_continue", arguments: { reason: "integrate" } } });
 });
