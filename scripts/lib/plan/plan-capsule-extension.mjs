@@ -46,7 +46,6 @@ function assertExactOpenInput(input) {
 export function createPlanCapsuleExtension(pi, options = {}) {
   let opened = false;
   let openedPlanId;
-  let planOpenFollowUpSent = false;
   let lifecycleRegistered = false;
   let runtimeCapabilitiesReady = false;
   let stopPlanControl;
@@ -208,12 +207,11 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   });
   pi.on("tool_result", async (event, ctx) => {
     if (event?.toolName === "plan_open") {
-      if (event.isError === true || !opened || !openedPlanId || planOpenFollowUpSent) return;
-      planOpenFollowUpSent = true;
-      pi.sendMessage(
-        { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: openedPlanId } },
-        { triggerTurn: true, deliverAs: "followUp" },
-      );
+      if (event.isError === true || !opened || !openedPlanId) return;
+      if (typeof options.requestCallerFollowUp !== "function") {
+        throw new Error("Caller follow-up request capability is unavailable.");
+      }
+      await options.requestCallerFollowUp({ wakeId: "plan-opened", reason: "plan-opened" });
       return;
     }
     if (event?.toolName === "subagent") {
