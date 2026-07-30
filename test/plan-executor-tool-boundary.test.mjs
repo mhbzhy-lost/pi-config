@@ -35,6 +35,21 @@ test("authorizes exactly one matching typed Executor dispatch", () => {
   assert.deepEqual(createPlanExecutorToolBoundary().authorize(exact.contract, { projection: projectionFor(exact), toolCallId: "call-1" }), { attemptId: "attempt-1", dispatchId: "dispatch-1", contractHash: exact.contractHash, toolCallId: "call-1", state: "executing" });
 });
 
+test("rejects a current revision IR hash mismatch without consuming the authorization", () => {
+  const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+  const tampered = { ...projection, revision: { ...projection.revision, irHash: hash("other-ir") } };
+  assert.throws(() => boundary.authorize(exact.contract, { projection: tampered, toolCallId: "call-1" }), /revision|plan IR|identity|hash mismatch/);
+  assert.equal(boundary.authorize(exact.contract, { projection, toolCallId: "call-1" }).state, "executing");
+});
+
+test("rejects a dispatch context hash mismatch without consuming the authorization", () => {
+  const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+  const attempt = projection.attempts.get("attempt-1");
+  const tampered = { ...projection, attempts: new Map([...projection.attempts, ["attempt-1", { ...attempt, dispatchContextHash: hash("other-context") }]]) };
+  assert.throws(() => boundary.authorize(exact.contract, { projection: tampered, toolCallId: "call-1" }), /dispatch context|context hash|identity/);
+  assert.equal(boundary.authorize(exact.contract, { projection, toolCallId: "call-1" }).state, "executing");
+});
+
 test("fails closed for mutated, replayed, unsupported, stale, terminal, workspace, and ambiguous dispatches", () => {
   const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact); const mutated = contract({ risk: "high" });
   const cases = [[mutated.contract, projection, "contract hash mismatch"], [{ agent: "executor" }, projection, "Executor dispatch contract|required|unsupported"], [{ action: "status", id: "run-1" }, projection, "Executor dispatch contract|required|unsupported"], [exact.contract, { ...projection, lifecycle: "cancelled" }, "terminal|cancelled"], [exact.contract, projectionFor({ ...exact, taskId: "task-2" }), "requested|contract hash mismatch|task mismatch"], [exact.contract, projectionFor({ ...exact, attemptId: "other-attempt" }), "workspace|context"], [exact.contract, { ...projection, attempts: new Map() }, "requested"], [exact.contract, { ...projection, attempts: new Map([...projection.attempts, ["another", projection.attempts.get("attempt-1")]]) }, "requested|multiple"]];
