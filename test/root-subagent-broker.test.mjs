@@ -1715,3 +1715,122 @@ test("Root session ordered drain is single-flight and idempotent", async (t) => 
   assert.equal(subject.timeline.filter((entry) => entry.action === "socket.end").length, 1);
   assert.equal(subject.timeline.filter((entry) => entry.action === "upstream.dispose").length, 1);
 });
+
+function deferred() {
+  let release;
+  const promise = new Promise((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+async function closeOutcome(close, watchdogMs) {
+  return Promise.race([
+    close.then(() => ({ state: "resolved" }), (error) => ({ state: "rejected", error })),
+    new Promise((resolve) => setTimeout(() => resolve({ state: "watchdog" }), watchdogMs)),
+  ]);
+}
+
+let boundedWaitFixtureNumber = 0;
+
+async function boundedWaitFixture({ pendingStop = false, pendingCapture = false } = {}) {
+  const events = startedEventBus();
+  const root = `bounded-wait-root-${++boundedWaitFixtureNumber}`;
+  const stop = deferred();
+  const capture = deferred();
+  const stops = [];
+  let disposed = false;
+  const upstream = {
+    ...fakeUpstream(),
+    async stop({ runId, dir }) {
+      stops.push({ runId, dir });
+      if (!pendingStop) {
+        terminal(runId);
+        return { stopped: true };
+      }
+      await stop.promise;
+      return { stopped: true };
+    },
+    dispose() { disposed = true; },
+  };
+  const broker = new RootBrokerServer({
+    rootSessionId: root,
+    upstream,
+    events,
+    terminalTimeoutMs: 20,
+    captureProcessBirthIdentity: async () => {
+      if (pendingCapture) await capture.promise;
+      return "bounded-wait-birth";
+    },
+  });
+  const terminal = (runId = "executor") => {
+    const runnerProcessInstanceId = `${runId}-instance`;
+    const observedAt = Date.now();
+    events.emit("subagent:process-terminal", {
+      version: 1,
+      state: "observed",
+      runId,
+      runnerProcessInstanceId,
+      observedAt,
+      instances: [{ processInstanceId: runnerProcessInstanceId, kind: "runner", closeObservedAt: observedAt, exitCode: 0, signal: null }],
+    });
+  };
+  await broker.start();
+  events.emit("subagent:async-started", { id: "executor", pid: 9001, agent: "executor", sessionId: root, cwd: "/trusted", asyncDir: "/trusted/executor" });
+  await events.settled();
+  return { broker, capture, disposed: () => disposed, events, root, stop, stops, terminal };
+}
+
+test("Root shutdown bounded wait accepts observed terminal while stop RPC remains pending", async () => {
+  const subject = await boundedWaitFixture({ pendingStop: true });
+  const closing = subject.broker.closeRootSession();
+  try {
+    await waitForCondition(() => subject.stops.length === 1, "pending stop request", { timeoutMs: 40, pollMs: 2 });
+    subject.terminal();
+    const outcome = await closeOutcome(closing, 90);
+    assert.notEqual(outcome.state, "watchdog", "official observed terminal proof completes drain near terminalTimeoutMs without awaiting stop ACK");
+    assert.equal(outcome.state, "resolved");
+  } finally {
+    subject.terminal();
+    subject.stop.release();
+    await closing.catch(() => undefined);
+  }
+});
+
+test("Root shutdown bounded wait forms cleanup debt while stop RPC remains pending", async () => {
+  const subject = await boundedWaitFixture({ pendingStop: true });
+  const closing = subject.broker.closeRootSession();
+  try {
+    const outcome = await closeOutcome(closing, 90);
+    assert.notEqual(outcome.state, "watchdog", "terminalTimeoutMs rejects cleanup debt without waiting for stop ACK");
+    assert.equal(outcome.state, "rejected");
+    assert.ok(outcome.error instanceof AggregateError);
+    assert.deepEqual(subject.stops.map(({ runId }) => runId), ["executor"], "only one stop is sent before the first deadline");
+    assert.equal(subject.broker.server?.listening, true);
+    assert.equal(typeof subject.broker.unsubscribeTerminal, "function");
+    assert.equal(subject.disposed(), false);
+  } finally {
+    subject.terminal();
+    subject.stop.release();
+    await closing.catch(() => undefined);
+    await subject.broker.closeRootSession();
+  }
+});
+
+test("Root shutdown bounded wait forms cleanup debt when startup observation remains pending", async () => {
+  const subject = await boundedWaitFixture({ pendingCapture: true });
+  const closing = subject.broker.closeRootSession();
+  try {
+    const outcome = await closeOutcome(closing, 90);
+    assert.notEqual(outcome.state, "watchdog", "startup observation has the fixed close deadline");
+    assert.equal(outcome.state, "rejected");
+    assert.ok(outcome.error instanceof AggregateError);
+    assert.deepEqual(subject.stops, [], "startup cleanup debt must not stop before the observation settles");
+    assert.equal(subject.broker.server?.listening, true);
+    assert.equal(typeof subject.broker.unsubscribeTerminal, "function");
+    assert.equal(subject.disposed(), false);
+  } finally {
+    subject.capture.release();
+    await subject.events.settled();
+    await closing.catch(() => undefined);
+    await subject.broker.closeRootSession();
+  }
+});
