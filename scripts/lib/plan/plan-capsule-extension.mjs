@@ -212,8 +212,8 @@ export function createPlanCapsuleExtension(pi, options = {}) {
       if (typeof options.requestCallerFollowUp !== "function") {
         throw new Error("Caller follow-up request capability is unavailable.");
       }
-      planOpenFollowUpSent = true;
       await options.requestCallerFollowUp({ wakeId: "plan-opened", reason: "plan-opened" });
+      planOpenFollowUpSent = true;
       return;
     }
     if (event?.toolName === "subagent") {
