@@ -27,7 +27,7 @@ function runtime({ registered, active, ignoreActivation = false }) {
   };
 }
 
-test("activates registered native Plan Runner runtime tools for a standalone session", () => {
+test("activates registered native Plan Runner runtime tools for a Plan Session", () => {
   const subject = runtime({
     registered: ["read", "subagent_wait", "subagent_supervisor"],
     active: ["read", "subagent_wait"],

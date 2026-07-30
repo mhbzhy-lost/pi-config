@@ -13,19 +13,18 @@ async function readJson(file) {
 export function createPlanWidget(pi, { planId, stateRoot = process.cwd(), executorRuns = new Map(), refreshIntervalMs = 1_000 } = {}) {
   const planRoot = path.join(stateRoot, "var", "plan-runs", planId);
   const statusPath = path.join(planRoot, "status.json");
-  const hostHandlePath = path.join(planRoot, "host-handle.json");
   const widgetKey = `pi-plan-${planId}`;
   let timer;
   let disposed = false;
 
   async function snapshot() {
-    const [plan, host] = await Promise.all([readJson(statusPath), readJson(hostHandlePath)]);
+    const plan = await readJson(statusPath);
     const executors = [];
     for (const [runId, binding] of executorRuns) {
       const artifact = binding?.asyncDir ? await readJson(path.join(binding.asyncDir, "status.json")) : null;
       executors.push({ runId, taskId: binding?.taskId ?? null, state: artifact?.state ?? "unknown" });
     }
-    return { plan, host, executors };
+    return { plan, executors };
   }
 
   async function refresh() {
@@ -36,7 +35,6 @@ export function createPlanWidget(pi, { planId, stateRoot = process.cwd(), execut
       const value = await snapshot();
       const lines = [
         `Plan ${planId}: ${value.plan?.lifecycle ?? "not-started"}`,
-        `Host: ${value.host?.hostRunId ?? "unbound"}`,
       ];
       for (const task of value.plan?.tasks ?? []) {
         lines.push(`${task.taskId}: ${task.status}`);
