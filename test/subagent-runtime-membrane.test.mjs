@@ -6,6 +6,7 @@ import {
   createTypedSubagentExtension,
   installHeadlessTypedSubagentRuntime,
 } from "../scripts/lib/subagent-dispatch/extension.ts";
+import * as subagentDispatchExtension from "../scripts/lib/subagent-dispatch/extension.ts";
 
 function codingContract(overrides = {}) {
   const base = {
@@ -128,6 +129,18 @@ const signal = new AbortController().signal;
 
 async function execute(tool, params, context = ctx) {
   return tool.execute("tool-call-1", params, signal, undefined, context);
+}
+
+function createTestSupervisorRequestMailbox(route, options) {
+  const createMailbox = typeof subagentDispatchExtension.createSupervisorRequestMailbox === "function"
+    ? subagentDispatchExtension.createSupervisorRequestMailbox
+    : () => ({
+      handle() {},
+      async activate() {},
+      deactivate() {},
+      dispose() {},
+    });
+  return createMailbox(route, options);
 }
 
 test("the headless membrane decorates lifecycle and grouped completion messages by run title", () => {
@@ -624,4 +637,91 @@ test("internal Supervisor target forwards the public two-argument handle through
   assert.strictEqual(received?.[2], undefined);
   assert.strictEqual(received?.[3], undefined);
   assert.strictEqual(received?.[4], context);
+});
+
+test("buffers Supervisor requests until mailbox activation", async () => {
+  const calls = [];
+  let releaseFirst;
+  const firstRouted = new Promise((resolve) => { releaseFirst = resolve; });
+  const first = { id: "first" };
+  const second = { id: "second" };
+  const firstContext = { request: "first" };
+  const secondContext = { request: "second" };
+  const mailbox = createTestSupervisorRequestMailbox(async (message, context) => {
+    calls.push({ message, context });
+    if (message === first) await firstRouted;
+  });
+
+  mailbox.handle(first, firstContext);
+  mailbox.handle(second, secondContext);
+  assert.deepEqual(calls, []);
+
+  const activation = mailbox.activate();
+  await Promise.resolve();
+  assert.equal(calls.length, 1, "activation must route the first queued request before the second");
+  assert.strictEqual(calls[0].message, first);
+  assert.strictEqual(calls[0].context, firstContext);
+  releaseFirst();
+  await activation;
+  assert.equal(calls.length, 2);
+  assert.strictEqual(calls[1].message, second);
+  assert.strictEqual(calls[1].context, secondContext);
+});
+
+test("routes Supervisor requests immediately after mailbox activation", async () => {
+  const calls = [];
+  const message = { id: "active" };
+  const context = { request: "active" };
+  const mailbox = createTestSupervisorRequestMailbox((receivedMessage, receivedContext) => {
+    calls.push({ message: receivedMessage, context: receivedContext });
+  });
+
+  await mailbox.activate();
+  mailbox.handle(message, context);
+  await Promise.resolve();
+
+  assert.equal(calls.length, 1);
+  assert.strictEqual(calls[0].message, message);
+  assert.strictEqual(calls[0].context, context);
+});
+
+test("drops old-session Supervisor requests on mailbox deactivation", async () => {
+  const calls = [];
+  const oldMessage = { id: "old" };
+  const oldContext = { request: "old" };
+  const newMessage = { id: "new" };
+  const newContext = { request: "new" };
+  const mailbox = createTestSupervisorRequestMailbox((message, context) => {
+    calls.push({ message, context });
+  });
+
+  mailbox.handle(oldMessage, oldContext);
+  mailbox.deactivate();
+  mailbox.handle(newMessage, newContext);
+  await mailbox.activate();
+
+  assert.equal(calls.length, 1);
+  assert.strictEqual(calls[0].message, newMessage);
+  assert.strictEqual(calls[0].context, newContext);
+});
+
+test("fails closed when the Supervisor startup mailbox is full", async () => {
+  const calls = [];
+  const first = { id: "first" };
+  const second = { id: "second" };
+  const third = { id: "third" };
+  const mailbox = createTestSupervisorRequestMailbox((message, context) => {
+    calls.push({ message, context });
+  }, { limit: 2 });
+
+  mailbox.handle(first, { request: "first" });
+  mailbox.handle(second, { request: "second" });
+  assert.throws(
+    () => mailbox.handle(third, { request: "third" }),
+    (error) => error?.code === "SUPERVISOR_REQUEST_QUEUE_FULL"
+      && error.message.includes("SUPERVISOR_REQUEST_QUEUE_FULL"),
+  );
+
+  await mailbox.activate();
+  assert.deepEqual(calls.map(({ message }) => message), [first, second]);
 });
