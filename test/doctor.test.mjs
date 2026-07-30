@@ -22,11 +22,22 @@ function runDoctor() {
     const child = spawn(process.execPath, ["scripts/doctor.mjs"], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => child.kill("SIGTERM"), 10_000);
+    let settled = false;
+    let timer;
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch {}
+      settle(reject, new Error("doctor CLI timed out after 10000ms"));
+    }, 10_000);
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => { clearTimeout(timer); reject(error); });
-    child.on("close", (code, signal) => { clearTimeout(timer); resolve({ code, signal, stdout, stderr }); });
+    child.on("error", (error) => settle(reject, error));
+    child.on("close", (code, signal) => settle(resolve, { code, signal, stdout, stderr }));
   });
 }
 

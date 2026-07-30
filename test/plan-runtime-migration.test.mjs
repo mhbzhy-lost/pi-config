@@ -35,12 +35,6 @@ test("Launcher no longer retains Host implementation identifiers", async () => {
   assert.doesNotMatch(source, /spawnPlanRunner|processIdentity|host-handle\.json|pi-plan-host-keeper/);
 });
 
-test("Widget no longer retains Host implementation identifiers", async () => {
-  const widget = await readFile(path.join(root, "scripts/lib/plan/tui/plan-widget.mjs"), "utf8");
-  assert.match(widget, /status\.json/);
-  assert.doesNotMatch(widget, /host-handle\.json|hostRunId|Host:/);
-});
-
 test("Plan runtime tools no longer retain Standalone Runner terminology", async () => {
   const source = await readFile(path.join(root, "scripts/lib/plan/plan-runtime-tools.mjs"), "utf8");
   assert.doesNotMatch(source, /Standalone Plan Runner/);
@@ -48,13 +42,22 @@ test("Plan runtime tools no longer retain Standalone Runner terminology", async 
 
 test("Widget only projects status and broker-owned Executor facts", async () => {
   const widget = await readFile(path.join(root, "scripts/lib/plan/tui/plan-widget.mjs"), "utf8");
+  assert.match(widget, /status\.json/);
   assert.match(widget, /executorRuns/);
-  assert.doesNotMatch(widget, /host-handle|hostRunId|Host:/i);
+  assert.doesNotMatch(widget, /host-handle\.json|hostRunId|Host:/);
 });
 
-test("flat runtime architecture document states the six retirement boundaries", async () => {
-  const source = await readFile(path.join(root, "docs/architecture/plan-runner-flat-runtime.md"), "utf8");
-  for (const term of ["topology", "lifecycle", "dispatch", "authorization", "Supervisor", "retirement"]) assert.match(source, new RegExp(term, "i"));
+test("flat runtime plan states the seven architecture boundaries", async () => {
+  const source = await readFile(path.join(root, "docs/superpowers/plans/2026-07-29-plan-runner-flat-rpc-remove-thin-host.md"), "utf8");
+  for (const boundary of [
+    "领域拓扑: Main -> Plan Runner -> Executor",
+    "runtime 拓扑: Root -> [Plan Runner, Executor]",
+    "生命周期: Root session 单一 owner，其他 Root 不恢复",
+    "dispatch: tool -> child adapter -> Root broker -> local pi-subagents RPC",
+    "授权: dispatch event + one-shot contract hash",
+    "Supervisor: broker ownership routing",
+    "淘汰: Standalone Host、re-root、fanout-child、跨 Root attach",
+  ]) assert.match(source, new RegExp(boundary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("capsule documentation no longer describes the retired Host topology", async () => {
@@ -64,8 +67,22 @@ test("capsule documentation no longer describes the retired Host topology", asyn
 
 test("architecture audit preserves facts and appends its superseding decision", async () => {
   const source = await readFile(path.join(root, "docs/audits/2026-07-29-plan-runner-architecture-audit.md"), "utf8");
-  assert.match(source, /Superseding Decision/);
-  assert.match(source, /audit/i);
+  assert.match(source, /`scripts\/lib\/plan\/plan-host-runtime\.mjs` 仍是当前 runtime。Host retirement、flat runtime 和确定性控制面替换是下一份计划，不应宣称已完成。/);
+  assert.match(source, /\*\*\[运行时迁移\]\*\*：保留当前 Host，后续单独退役。/);
+  assert.match(source, /^## Superseding Decision$/m);
+});
+
+test("Root broker is the only Plan process-control adapter", async () => {
+  const sources = await Promise.all([
+    readFile(path.join(root, "pi/extensions/subagent-runtime.ts"), "utf8"),
+    readFile(path.join(root, "scripts/lib/plan/plan-launcher-extension.mjs"), "utf8"),
+    readFile(path.join(root, "scripts/lib/plan/coordinator.mjs"), "utf8"),
+    readFile(path.join(root, "scripts/lib/plan/plan-runner-dependencies.mjs"), "utf8"),
+    readFile(path.join(root, "scripts/lib/plan/pi-subagents-execution-backend.mjs"), "utf8"),
+  ]);
+  assert.match(sources[0], /new RootBrokerServer\(/);
+  assert.match(sources[1], /requireRootBroker\(/);
+  for (const source of sources.slice(2)) assert.doesNotMatch(source, /spawnPlanRunner|processIdentity|host-handle\.json|createPlanHostRuntime/);
 });
 
 test("remaining fleet modules do not import the retired runtime directory", async () => {
