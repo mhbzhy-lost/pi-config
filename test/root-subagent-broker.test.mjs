@@ -1842,6 +1842,114 @@ test("Root shutdown bounded wait forms cleanup debt when startup observation rem
   }
 });
 
+let lateStartFenceFixtureNumber = 0;
+
+async function lateStartFenceFixture(t, { terminalTimeoutMs = 200 } = {}) {
+  const events = startedEventBus();
+  const root = `late-start-fence-root-${++lateStartFenceFixtureNumber}`;
+  const grantDirectory = await mkdtemp(path.join(tmpdir(), `${root}-`));
+  const grantPath = path.join(grantDirectory, "grant.json");
+  const spawnRelease = deferred();
+  const captureRelease = deferred();
+  const stops = [];
+  let disposeCount = 0;
+  const proof = () => officialObservedProof("late-start-executor");
+  const upstream = {
+    async spawn() {
+      await spawnRelease.promise;
+      events.emit("subagent:async-started", {
+        id: "late-start-executor", pid: 9401, agent: "executor", sessionId: root, cwd: "/trusted", asyncDir: "/trusted/late-start-executor",
+      });
+      return { details: { runId: "late-start-executor", asyncDir: "/trusted/late-start-executor" } };
+    },
+    async stop({ runId, dir }) {
+      stops.push({ runId, dir });
+      events.emit("subagent:process-terminal", proof());
+      return { stopped: true };
+    },
+    dispose() { disposeCount += 1; },
+  };
+  const broker = new RootBrokerServer({
+    rootSessionId: root,
+    upstream,
+    events,
+    terminalTimeoutMs,
+    captureProcessBirthIdentity: async () => { await captureRelease.promise; return "late-start-birth"; },
+    writeGrant: async () => grantPath,
+    killProcess: () => { throw new Error("test force signal disabled"); },
+  });
+  broker.ensureExecutorOwner = async () => ({ callerToken: "late-start-executor-token" });
+  await broker.start();
+  const caller = await broker.grantCaller({ callerRunId: "late-start-plan", planId: "late-start-plan", cwd: "/trusted", originRoot: "/trusted", stateRoot: "/state", role: "plan-runner" });
+  const spawn = broker.dispatch(request({
+    root,
+    callerRunId: "late-start-plan",
+    callerToken: caller.callerToken,
+    method: "spawn",
+    params: { agent: "executor", task: "late start", spawnKey: "late-start-fence" },
+  }), {});
+  await waitForCondition(() => broker.spawnLedger.get("late-start-plan\u0000late-start-fence")?.state === "spawning", "durable spawn ledger entry", { timeoutMs: 40, pollMs: 2 });
+  t.after(async () => {
+    captureRelease.release();
+    spawnRelease.release();
+    await events.settled();
+    await spawn.catch(() => undefined);
+    await broker.closeRootSession().catch(() => undefined);
+    await removePath(grantDirectory, { recursive: true, force: true });
+  });
+  return { broker, captureRelease, events, proof, spawn, spawnRelease, stops, disposeCount: () => disposeCount };
+}
+
+test("Root late-start fence waits for an observation registered by the startup barrier", async (t) => {
+  const subject = await lateStartFenceFixture(t);
+  const closing = subject.broker.closeRootSession();
+  try {
+    subject.spawnRelease.release();
+    const reply = await subject.spawn;
+    await subject.events.settled();
+    assert.equal(reply.success, true, "durable spawn reply is valid");
+    assert.deepEqual(subject.stops, [], "late observation must settle before its Executor is stopped");
+    assert.equal(subject.disposeCount(), 0);
+    assert.equal((await closeOutcome(closing, 30)).state, "watchdog", "close remains pending while the late capture is pending");
+    assert.equal(subject.broker.server?.listening, true);
+
+    subject.captureRelease.release();
+    const outcome = await closeOutcome(closing, 120);
+    assert.equal(outcome.state, "resolved");
+    assert.deepEqual(subject.stops, [{ runId: "late-start-executor", dir: "/trusted/late-start-executor" }]);
+    assert.equal(subject.broker.terminalProofs.get("late-start-executor")?.runId, "late-start-executor");
+    assert.equal(subject.disposeCount(), 1);
+  } finally {
+    subject.captureRelease.release();
+    await closing.catch(() => undefined);
+  }
+});
+
+test("Root late-start fence keeps one fixed startup deadline across barrier waves", async (t) => {
+  const subject = await lateStartFenceFixture(t, { terminalTimeoutMs: 200 });
+  const closing = subject.broker.closeRootSession();
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    subject.spawnRelease.release();
+    const reply = await subject.spawn;
+    await subject.events.settled();
+    assert.equal(reply.success, true, "durable spawn reply is valid");
+    const outcome = await closeOutcome(closing, 160);
+    assert.notEqual(outcome.state, "watchdog", "the original close deadline, rather than a renewed barrier-wave deadline, settles startup debt");
+    assert.equal(outcome.state, "rejected");
+    assert.ok(outcome.error instanceof AggregateError);
+    assert.match(officialErrorText(outcome.error), /startup barrier/i);
+    assert.deepEqual(subject.stops, []);
+    assert.equal(subject.disposeCount(), 0);
+    assert.equal(subject.broker.server?.listening, true);
+  } finally {
+    subject.captureRelease.release();
+    await subject.events.settled();
+    await closing.catch(() => undefined);
+    await subject.broker.closeRootSession();
+  }
+});
+
 let officialArtifactFixtureNumber = 0;
 
 function officialObservedProof(runId) {
