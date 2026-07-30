@@ -553,6 +553,24 @@ function ownedRun(broker, runId) {
   return broker.ownedRuns?.get(runId);
 }
 
+async function closeOwnedRuns(broker, events) {
+  for (const run of broker.ownedRuns?.values?.() ?? []) {
+    if (broker.terminalProofs?.has(run.runId)) continue;
+    const runnerProcessInstanceId = `${run.runId}-cleanup-runner`;
+    const observedAt = Date.now();
+    events.emit("subagent:process-terminal", {
+      version: 1,
+      state: "observed",
+      runId: run.runId,
+      runnerProcessInstanceId,
+      observedAt,
+      instances: [{ processInstanceId: runnerProcessInstanceId, kind: "runner", closeObservedAt: observedAt, exitCode: 0, signal: null }],
+    });
+  }
+  await events.settled?.();
+  await broker.closeRootSession();
+}
+
 function installMissingOwnedRunsFallback(broker, events, captureProcessBirthIdentity, behavior) {
   if (broker.ownedRuns instanceof Map) return;
   const ownedRuns = new Map();
@@ -589,7 +607,7 @@ test("root broker grants direct async executor runs idempotently", async (t) => 
     randomToken: () => "a".repeat(64),
   });
   await broker.start();
-  t.after(() => broker.closeRootSession());
+  t.after(() => closeOwnedRuns(broker, events));
   await Promise.all([
     events.emit("subagent:async-started", { id: "direct-executor", pid: 101, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/direct-executor" }),
     events.emit("subagent:async-started", { id: "direct-executor", pid: 101, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/direct-executor" }),
@@ -597,7 +615,7 @@ test("root broker grants direct async executor runs idempotently", async (t) => 
   await events.settled();
   assert.deepEqual(grants, [{ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId, runId: "direct-executor", callerToken: "a".repeat(64), role: "executor" }]);
   assert.equal(broker.principals.get("direct-executor").role, "executor");
-  await broker.closeRootSession();
+  await closeOwnedRuns(broker, events);
   assert.equal(events.unsubscribed, true);
 });
 
@@ -606,7 +624,7 @@ test("started ownership records an exact verified executor entry from id-only ev
   const captureProcessBirthIdentity = async (pid) => { captures.push(pid); return "birth-701"; };
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity, writeGrant: async () => "/tmp/grant" });
   installMissingOwnedRunsFallback(broker, events, captureProcessBirthIdentity);
-  await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.start(); t.after(() => closeOwnedRuns(broker, events));
   events.emit("subagent:async-started", { id: "executor-701", pid: 701, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/executor-701" });
   await events.settled();
   assert.deepEqual(captures, [701]);
@@ -618,7 +636,7 @@ test("started ownership records plan-runner identity without executor principal 
   const captureProcessBirthIdentity = async (pid) => { captures.push(pid); return "birth-plan"; };
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity, writeGrant: async (grant) => { grants.push(grant); return "/tmp/grant"; } });
   installMissingOwnedRunsFallback(broker, events, captureProcessBirthIdentity);
-  await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.start(); t.after(() => closeOwnedRuns(broker, events));
   events.emit("subagent:async-started", { id: "plan-run-702", pid: 702, sessionId: rootSessionId, agent: "plan-runner", cwd: "/repo", asyncDir: "/async/plan-run-702" });
   await events.settled();
   assert.deepEqual(captures, [702]); assert.deepEqual(grants, []); assert.equal(broker.principals.has("plan-run-702"), false);
@@ -630,7 +648,7 @@ test("birth identity unavailable records ownership but retains executor EOF gran
   const captureProcessBirthIdentity = async () => { throw unavailable; };
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity, writeGrant: async () => "/tmp/grant" });
   installMissingOwnedRunsFallback(broker, events, captureProcessBirthIdentity, "unavailable");
-  await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.start(); t.after(() => closeOwnedRuns(broker, events));
   events.emit("subagent:async-started", { id: "executor-703", pid: 703, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/executor-703" });
   await events.settled();
   assert.equal(broker.principals.get("executor-703")?.role, "executor");
@@ -640,7 +658,7 @@ test("birth identity unavailable records ownership but retains executor EOF gran
 test("started ownership fails closed for malformed events before capture or grant", async (t) => {
   const captures = []; const grants = []; const events = startedEventBus();
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity: async (pid) => { captures.push(pid); return "birth"; }, writeGrant: async (grant) => { grants.push(grant); return "/tmp/grant"; } });
-  await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.start(); t.after(() => closeOwnedRuns(broker, events));
   for (const event of [
     { id: "missing-pid", sessionId: rootSessionId, agent: "executor", asyncDir: "/async/missing-pid" },
     { id: "unsafe-pid", pid: 0, sessionId: rootSessionId, agent: "executor", asyncDir: "/async/unsafe-pid" },
@@ -656,7 +674,7 @@ test("started ownership fails closed for malformed events before capture or gran
 test("started ownership fails closed for foreign root session events before capture or grant", async (t) => {
   const captures = []; const grants = []; const events = startedEventBus();
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity: async (pid) => { captures.push(pid); return "birth"; }, writeGrant: async (grant) => { grants.push(grant); return "/tmp/grant"; } });
-  await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.start(); t.after(() => closeOwnedRuns(broker, events));
   events.emit("subagent:async-started", { id: "foreign-706", pid: 706, sessionId: "foreign-root", agent: "executor", cwd: "/repo", asyncDir: "/async/foreign-706" });
   await events.settled();
   assert.deepEqual(captures, []); assert.deepEqual(grants, []); assert.equal(broker.principals.size, 0); assert.equal(broker.ownedRuns?.size ?? 0, 0);
@@ -667,7 +685,7 @@ test("started ownership deduplicates exact events with one birth probe", async (
   const captureProcessBirthIdentity = async (pid) => { captures.push(pid); return "birth-707"; };
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity, writeGrant: async () => "/tmp/grant" });
   installMissingOwnedRunsFallback(broker, events, captureProcessBirthIdentity, "duplicate");
-  await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.start(); t.after(() => closeOwnedRuns(broker, events));
   const first = { id: "executor-707", pid: 707, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/executor-707" };
   events.emit("subagent:async-started", first); events.emit("subagent:async-started", { ...first });
   await events.settled();
@@ -680,7 +698,7 @@ test("started ownership preserves first facts and marks conflicting identity wit
   const captureProcessBirthIdentity = async (pid) => { captures.push(pid); return "birth-707"; };
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity, writeGrant: async () => "/tmp/grant" });
   installMissingOwnedRunsFallback(broker, events, captureProcessBirthIdentity, "conflict");
-  await broker.start(); t.after(() => broker.closeRootSession());
+  await broker.start(); t.after(() => closeOwnedRuns(broker, events));
   const first = { id: "executor-707", pid: 707, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/executor-707" };
   events.emit("subagent:async-started", first); await events.settled();
   events.emit("subagent:async-started", { ...first, pid: 708, asyncDir: "/async/conflict-707" });
@@ -1150,7 +1168,7 @@ async function lifecycleBroker(t, eventDuringSpawn) {
   };
   const broker = new RootBrokerServer({ rootSessionId, upstream, events, captureProcessBirthIdentity: async () => "lifecycle-birth-identity" });
   await broker.start();
-  t.after(() => broker.closeRootSession());
+  t.after(() => closeOwnedRuns(broker, events));
   const a = await broker.grantCaller({ callerRunId: "caller-a", planId: "plan-a", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const b = await broker.grantCaller({ callerRunId: "caller-b", planId: "plan-b", cwd: "/other", originRoot: "/other", stateRoot: "/state-b", role: "plan-runner" });
   const aSocket = lifecycleSocket(); const bSocket = lifecycleSocket();
@@ -1187,7 +1205,7 @@ async function cleanedLifecycleBroker(t) {
     },
   });
   await broker.start();
-  t.after(() => broker.closeRootSession());
+  t.after(() => closeOwnedRuns(broker, events));
   const a = await broker.grantCaller({ callerRunId: "caller-a", planId: "plan-cleaned-lifecycle", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const b = await broker.grantCaller({ callerRunId: "caller-b", planId: "plan-cleaned-other", cwd: "/other", originRoot: "/other", stateRoot: "/state-b", role: "plan-runner" });
   const aSocket = lifecycleSocket(); const bSocket = lifecycleSocket();
@@ -1611,7 +1629,7 @@ async function orderedDrainFixture(t, { emitTerminalOnStop = false, unavailableB
   }
   await events.settled();
   broker.subscriptions.set("plan-runner", new Set([socket]));
-  t.after(async () => { await broker.closeRootSession().catch(() => undefined); });
+  t.after(async () => { await closeOwnedRuns(broker, events).catch(() => undefined); });
   return { broker, events, root, socket, stopOrder, terminal, timeline };
 }
 
