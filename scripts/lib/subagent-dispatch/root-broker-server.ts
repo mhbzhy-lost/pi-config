@@ -539,6 +539,7 @@ export class RootBrokerServer {
     if (!followUps) return failure(request, "caller_unauthorized", "Caller is not granted");
     const intent: FollowUpIntent = { ...request.params };
     if (!followUps.some((followUp) => followUp.wakeId === intent.wakeId)) followUps.push(intent);
+    void this.reviveCallerAfterProof(request.callerRunId).catch(() => undefined);
     return createBrokerSuccessResponse({ ...request, data: { accepted: true, wakeId: intent.wakeId } });
   }
 
