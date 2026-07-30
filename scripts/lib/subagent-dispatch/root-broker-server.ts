@@ -552,7 +552,11 @@ export class RootBrokerServer {
     try { request = parseBrokerRequest(JSON.parse(line)); } catch { socket.destroy(); return; }
     try {
       const response = await this.dispatch(request, socket, { deferSubscription: request.method === "subscribe" });
-      if (!socket.destroyed) socket.write(`${JSON.stringify(response)}\n`, () => {
+      if (!socket.destroyed) socket.write(`${JSON.stringify(response)}\n`, (error) => {
+        if (error) {
+          try { socket.destroy(); } catch { /* isolate socket destruction failures */ }
+          return;
+        }
         if (request.method === "subscribe") {
           if (response.success) this.activateSubscription(request, socket);
           else socket.end();
@@ -571,7 +575,7 @@ export class RootBrokerServer {
   }
 
   activateSubscription(request: any, socket: Socket) {
-    if (socket.destroyed) return;
+    if (this.closed || socket.destroyed) return;
     const principal = this.principals.get(request.callerRunId);
     if (!principal || principal.callerToken !== request.callerToken) return;
     if (principal.role === "plan-runner") {
