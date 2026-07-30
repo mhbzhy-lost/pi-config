@@ -5,7 +5,6 @@ import { applyEvent, createProjection } from "./plan-events.mjs";
 import { authorizedFrontier } from "./ir/frontier.mjs";
 import { selectExecutionView, selectSchedulingView } from "./ir/views.mjs";
 import { hashValidatedAttempt } from "./integration-queue.mjs";
-import { compileCodingDispatchIR } from "../subagent-dispatch/ir.ts";
 
 function sha256(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -130,67 +129,6 @@ function stateFor(projection) {
   if (activeAttempts(projection).length > 0 || requestedAttempts(projection).length > 0) return "waiting-executors";
   return "waiting-resources";
 }
-
-function chunkText(value) {
-  const chunks = [];
-  let chunk = "";
-  for (const point of value) {
-    if (Buffer.byteLength(chunk + point, "utf8") > 4096) {
-      if (!chunk || chunks.length === 32) throw new Error("dispatch contract text exceeds capacity");
-      chunks.push(chunk);
-      chunk = point;
-    } else chunk += point;
-  }
-  if (chunk) chunks.push(chunk);
-  if (chunks.length > 32) throw new Error("dispatch contract text exceeds capacity");
-  return chunks;
-}
-
-function shellQuote(value) {
-  return `'${value.replaceAll("'", "'\\\"'\\\"'")}'`;
-}
-
-function dispatchWorkflow(execution) {
-  const workflow = execution?.workflow;
-  if (!workflow || workflow.mode === "inherit-repository" || workflow.mode === "tdd") return { mode: "tdd" };
-  return { mode: workflow.mode, reason: workflow.reason };
-}
-
-function sourceContract(view, { cwd, receipts, legacyTimeout }) {
-  const { plan, task } = view;
-  const verification = plan?.verification?.commands ?? [];
-  const selected = task.acceptance?.strategy === "commands"
-    ? verification.filter((entry) => task.acceptance.commandIds.includes(entry.id))
-    : verification;
-  const commands = selected.map((entry) => entry.cwd === "." ? entry.command : `cd -- ${shellQuote(entry.cwd)} && ${entry.command}`);
-  const criteria = task.acceptance?.strategy === "commands"
-    ? [`Selected verification commands for ${task.id}.`]
-    : [JSON.stringify(task.acceptance ?? { strategy: "manual" })];
-  const requirements = chunkText(task.body || task.title);
-  const instructions = plan ? chunkText(`Plan instructions:\n${plan.instructions}`) : [];
-  const receiptFacts = receipts.map((receipt) => JSON.stringify(receipt));
-  const timeoutMs = task.execution?.timeoutMs ?? legacyTimeout;
-  return {
-    version: "dispatch-ir.v1",
-    taskId: task.id,
-    title: task.title,
-    agent: task.execution?.agent ?? task.agent ?? "executor",
-    risk: task.execution?.risk ?? "normal",
-    objective: task.title,
-    workflow: dispatchWorkflow(task.execution),
-    requirements,
-    context: { knownFacts: [...instructions, ...receiptFacts], decisions: [], relevantFiles: [...(task.allowedPaths ?? task.files ?? [])] },
-    boundaries: { writePaths: [...(task.allowedPaths ?? task.files ?? [])], excludedWork: [], forbiddenActions: [] },
-    acceptance: { criteria, commands: commands.length ? commands : ["git diff --check"] },
-    execution: { cwd, timeoutMs },
-  };
-}
-
-function canonicalContract(compiled) {
-  const { hash, ...contract } = compiled;
-  return contract;
-}
-
 
 export function createPlanCoordinator({
   ir,
@@ -402,107 +340,6 @@ export function createPlanCoordinator({
     return { attemptId, outcome, resultCommit: resultCommit ?? null, validation, projectionVersion: projection.version };
   }
 
-  async function prepareAuthorizedDispatches() {
-    await refreshProjection();
-    if (!projection.planId || ["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
-      throw new Error("Plan cannot dispatch executors");
-    }
-    if (typeof allocateWorkspace !== "function") throw new Error("Attempt workspace allocator is required");
-    if (integrationQueue) {
-      const integration = await integrationQueue.drain({ expectedHead: projection.workspace.headCommit, ownerToken: integrationOwnerToken });
-      if (integration?.state === "blocked") return { state: "blocked", dispatches: [], projectionVersion: projection.version };
-      await refreshProjection();
-    }
-
-    const replayed = [];
-    for (const attempt of requestedAttempts(projection)) {
-      const contract = attempt.tool?.contract;
-      if (!contract) throw new Error(`dispatch intent contract is missing: ${attempt.attemptId}`);
-      const compiled = compileCodingDispatchIR(contract, { cwd: projection.workspace.originRoot });
-      const expected = projection.revision?.taskHashes[attempt.taskId];
-      const contextHash = sha256({
-        planIrHash: attempt.planIrHash, taskHash: attempt.taskHash, schedulingHash: attempt.schedulingHash,
-        attemptId: attempt.attemptId, baseCommit: attempt.baseCommit, output: attempt.tool.output,
-        dependencyReceipts: attempt.tool.dependencyReceipts ?? [],
-      });
-      if (compiled.hash !== attempt.toolHash || compiled.execution.cwd !== attempt.workspace.path
-        || (projection.revision && (attempt.planIrHash !== projection.revision.irHash
-          || attempt.taskHash !== expected?.effective || attempt.schedulingHash !== expected?.scheduling
-          || attempt.dispatchContextHash !== contextHash))) {
-        throw new Error(`dispatch intent does not match current revision: ${attempt.attemptId}`);
-      }
-      replayed.push({ attemptId: attempt.attemptId, dispatchId: attempt.dispatchId, contract: canonicalContract(compiled), contractHash: compiled.hash });
-    }
-    if (replayed.length) return { state: "dispatch-required", dispatches: replayed, projectionVersion: projection.version };
-
-    const authorization = authorizedFrontier(selectSchedulingView(ir), projection);
-    if (!Array.isArray(authorization)) {
-      const blocked = await block("authorization_deadlock", authorization);
-      return { ...blocked, dispatches: [] };
-    }
-    const allocatedNodes = [...projection.attempts.entries()]
-      .filter(([, attempt]) => attempt.status === "workspace-allocated")
-      .map(([attemptId, attempt]) => {
-        const node = selectSchedulingView(ir).nodes.find((candidate) => candidate.id === attempt.taskId);
-        if (!node) throw new Error(`allocated attempt references unknown task: ${attemptId}`);
-        return node;
-      });
-    const frontier = [...authorization, ...allocatedNodes.filter((node) => !authorization.some((candidate) => candidate.id === node.id))]
-      .filter((node) => !attemptsForTask(projection, node.id)
-        .some((attempt) => ["succeeded", "validated", "integration-requested", "integrated"].includes(attempt.status)));
-    if (!frontier.length) return { state: stateFor(projection), dispatches: [], projectionVersion: projection.version };
-
-    const dispatches = [];
-    for (const node of frontier) {
-      const execution = ir.version === "plan-ir.v3" ? selectExecutionView(ir, node.id) : legacyExecutionView(ir, node.id);
-      const receipts = ir.version === "plan-ir.v3" ? collectDependencyReceipts(projection, execution.task) : Object.freeze([]);
-      // Validate every non-workspace contract field before acquiring a worktree lease.
-      compileCodingDispatchIR(sourceContract(execution, {
-        cwd: projection.workspace.originRoot, receipts, legacyTimeout: timeoutMs,
-      }), { cwd: projection.workspace.originRoot });
-      const candidates = attemptsForTask(projection, node.id).filter((attempt) => attempt.status === "workspace-allocated");
-      if (candidates.length > 1) throw new Error(`multiple allocated attempts for task: ${node.id}`);
-      let attempt = candidates[0];
-      let attemptId;
-      let workspaceLease;
-      let baseCommit;
-      if (attempt) {
-        attemptId = attempt.attemptId;
-        workspaceLease = attempt.workspace;
-        baseCommit = attempt.baseCommit;
-        if (baseCommit !== projection.workspace.headCommit) throw new Error(`allocated attempt base commit is stale: ${attemptId}`);
-      } else {
-        attemptId = nextAttemptId(projection, node.id);
-        baseCommit = projection.workspace.headCommit;
-        workspaceLease = await allocateWorkspace({ originRoot: projection.workspace.originRoot, stateRoot, planId: projection.planId, taskId: node.id, attemptId, baseCommit });
-        await appendEvent("attempt.workspace-allocated", { attemptId, taskId: node.id, baseCommit, workspace: workspaceLease });
-      }
-      const output = outputForAttempt(attemptId);
-      const compiled = compileCodingDispatchIR(sourceContract(execution, {
-        cwd: workspaceLease.path, receipts, legacyTimeout: timeoutMs,
-      }), { cwd: projection.workspace.originRoot });
-      const contract = canonicalContract(compiled);
-      const dispatchId = `${attemptId}.dispatch.1`;
-      const identity = projection.revision ? {
-        planIrHash: projection.revision.irHash,
-        taskHash: projection.revision.taskHashes[node.id].effective,
-        schedulingHash: projection.revision.taskHashes[node.id].scheduling,
-      } : {};
-      const tool = {
-        agent: contract.agent, task: buildExecutionPrompt(execution, { attemptId, baseCommit, output, receipts }), cwd: workspaceLease.path,
-        context: "fresh", async: true, clarify: false, worktree: false, output, outputMode: "file-only", acceptance: false,
-        artifacts: true, timeoutMs: contract.execution.timeoutMs, contract, dependencyReceipts: receipts,
-      };
-      const dispatchContextHash = projection.revision ? sha256({ ...identity, attemptId, baseCommit, output, dependencyReceipts: receipts }) : undefined;
-      await appendEvent("attempt.dispatch-requested", {
-        attemptId, taskId: node.id, dispatchId, baseCommit, workspace: workspaceLease, tool, toolHash: compiled.hash,
-        ...identity, ...(projection.revision ? { dispatchContextHash } : {}),
-      });
-      dispatches.push({ attemptId, dispatchId, contract, contractHash: compiled.hash });
-    }
-    return { state: "dispatch-required", dispatches, projectionVersion: projection.version };
-  }
-
   async function dispatchAuthorized() {
     await refreshProjection();
     if (!projection.planId || ["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
@@ -675,7 +512,6 @@ export function createPlanCoordinator({
   return {
     coordinator: Object.freeze({
       dispatchAuthorized,
-      prepareAuthorizedDispatches,
       recover,
       settleBoundAttempt,
       setIntegrationQueue(queue) {
