@@ -1369,8 +1369,13 @@ test("rejects oversized Supervisor final frames", async (t) => {
 
   const result = await broker.routeSupervisorRequest(supervisorIngress({ id: "frame-limit", runId: "frame-executor", content: "x".repeat(BROKER_FRAME_LIMIT_BYTES) }));
 
-  assert.equal(result?.code, "supervisor_request_invalid");
-  assert.equal(broker.supervisorRequests?.has("frame-limit") ?? false, false);
+  assert.deepEqual({
+    code: result?.code,
+    registered: broker.supervisorRequests.has("frame-limit"),
+  }, {
+    code: "supervisor_request_invalid",
+    registered: false,
+  });
 });
 
 test("does not authorize replies to Supervisor progress updates", async (t) => {
@@ -1384,9 +1389,15 @@ test("does not authorize replies to Supervisor progress updates", async (t) => {
   const pending = await broker.dispatch(request({ callerRunId: "progress-owner", callerToken: owner.callerToken, method: "supervisor.pending", params: {} }), {});
   const reply = await broker.dispatch(request({ callerRunId: "progress-owner", callerToken: owner.callerToken, method: "supervisor.reply", params: { replyTo: "progress-update", message: "acknowledged" } }), {});
 
-  assert.deepEqual(pending.data?.pending, []);
-  assert.equal(reply.error?.code, "supervisor_request_unknown");
-  assert.deepEqual(calls, []);
+  assert.deepEqual({
+    pending: pending.data?.pending,
+    replyCode: reply.error?.code,
+    calls,
+  }, {
+    pending: [],
+    replyCode: "supervisor_request_unknown",
+    calls: [],
+  });
 });
 
 test("rejects conflicting Supervisor ingress without changing the original owner", async (t) => {
