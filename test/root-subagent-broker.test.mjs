@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { connect } from "node:net";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm as removePath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import test from "node:test";
 import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
+import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 import { bootstrapRuntimeRoots, default as planRunner } from "../pi/child-extensions/plan-runner.ts";
 import { installRootSessionOwner, installRootSessionOwnerLifecycle } from "../pi/child-extensions/root-session-owner.ts";
 import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
@@ -27,6 +29,31 @@ function fakeUpstream() {
 
 function request({ callerRunId, callerToken, method, params, requestId = "request-1", root = rootSessionId }) {
   return { schemaVersion: "pi-root-subagent-broker-request.v1", requestId, rootSessionId: root, callerRunId, callerToken, method, params };
+}
+
+function v3DispatchBranch() {
+  const originRoot = "/origin";
+  const workspace = { path: "/attempts/attempt-1", branch: "pi-plan-attempt/plan/task-1/1", ownerToken: "owner-1" };
+  const compiled = compileCodingDispatchIR({
+    version: "dispatch-ir.v1", taskId: "task-1", title: "Executor authorization", agent: "executor", risk: "normal", objective: "Apply the approved task.",
+    requirements: ["Modify the declared file."], context: { knownFacts: [], decisions: [], relevantFiles: ["src/task.mjs"] },
+    boundaries: { writePaths: ["src/task.mjs"], excludedWork: [], forbiddenActions: [] }, workflow: { mode: "tdd" },
+    acceptance: { criteria: ["Focused tests pass."], commands: ["node --test"] }, execution: { timeoutMs: 1000, cwd: workspace.path },
+  }, { cwd: workspace.path });
+  const { hash: contractHash, ...contract } = compiled;
+  const planIrHash = "a".repeat(64); const taskHash = "b".repeat(64); const schedulingHash = "c".repeat(64);
+  const dispatchContextHash = createHash("sha256").update(JSON.stringify({
+    planIrHash, taskHash, schedulingHash, attemptId: "attempt-1", baseCommit: "base", output: "/results/attempt-1.json", dependencyReceipts: [],
+  })).digest("hex");
+  const event = (eventId, type, data) => ({ schemaVersion: "pi-plan-event.v1", eventId, planId: "plan", occurredAt: `2026-07-29T00:00:0${eventId}.000Z`, type, data });
+  return {
+    contract,
+    branch: [
+      event("1", "plan.created", { workspace: { originRoot, worktree: "/repo", baseCommit: "base", headCommit: "base" }, tasks: ["task-1"], revision: { number: 1, manifestSha256: "d".repeat(64), sourceBytesSha256: "e".repeat(64), planHash: "f".repeat(64), irVersion: "plan-ir.v3", irHash: planIrHash, taskHashes: { "task-1": { full: "1".repeat(64), effective: taskHash, scheduling: schedulingHash } } } }),
+      event("2", "attempt.workspace-allocated", { attemptId: "attempt-1", taskId: "task-1", baseCommit: "base", workspace }),
+      event("3", "attempt.dispatch-requested", { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", baseCommit: "base", workspace, planIrHash, taskHash, schedulingHash, dispatchContextHash, toolHash: contractHash, tool: { agent: "executor", task: "Apply the approved task.", cwd: workspace.path, context: "fresh", async: true, clarify: false, worktree: false, timeoutMs: 1000, output: "/results/attempt-1.json", dependencyReceipts: [], contract } }),
+    ],
+  };
 }
 
 test("bootstrap runtime roots loads and accepts only an exact absolute-root projection", async () => {
@@ -106,6 +133,14 @@ test("default plan runner bootstraps from a delayed real broker grant without PI
   await new Promise((resolve) => setTimeout(resolve, 30));
   await broker.grantCaller({ callerRunId: runId, planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
   await factory;
+  const dispatch = v3DispatchBranch();
+  const ctx = { cwd: "/repo", sessionManager: { getBranch: () => dispatch.branch.map((data) => ({ customType: "pi-plan-event-v1", data })) } };
+  for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx);
+  const capsuleToolCall = handlers.get("tool_call").at(-1);
+  assert.equal(await capsuleToolCall({ toolName: "subagent", toolCallId: "dispatch-tool-call-1", input: dispatch.contract }, ctx), undefined);
+  const replay = await capsuleToolCall({ toolName: "subagent", toolCallId: "dispatch-tool-call-2", input: dispatch.contract }, ctx);
+  assert.equal(replay.block, true);
+  assert.match(replay.reason, /replay|already authorized/i);
   assert.equal(tools.has("plan_open"), true);
   assert.equal(tools.has("subagent"), true);
   assert.equal(tools.has("plan_executor_supervisor"), true);

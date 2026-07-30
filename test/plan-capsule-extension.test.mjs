@@ -103,6 +103,11 @@ test("plan-runner alone uses the real subagentOnlyExtensions profile field", asy
   assert.match(profiles[0], /plan_read_revision[\s\S]*plan_amend/);
   assert.doesNotMatch(profiles[0], /\bbash\b|approvedHash|contact_supervisor/);
   assert.doesNotMatch(profiles[0], /\bpending\b|timeoutMs: 1000/);
+  for (const value of ["plan_continue", "dispatch-required", "dispatches", "subagent", "contract"]) assert.match(profiles[0], new RegExp(`\\b${value}\\b`));
+  assert.match(profiles[0], /each[\s\S]*dispatch[\s\S]*subagent[\s\S]*exact[\s\S]*contract/i);
+  assert.match(profiles[0], /no pending dispatch[\s\S]*not call/i);
+  assert.doesNotMatch(profiles[0], /attemptId|dispatchId|contractHash/);
+  assert.doesNotMatch(profiles[0], /subagent_wait|local wait loop/i);
   assert.doesNotMatch(profiles[0], /^tools:.*(?:^|,)subagent(?:,|$)/m);
   assert.match(profiles[2], /^tools: .*contact_supervisor$/m);
   assert.doesNotMatch(profiles[2], /^tools:.*(?:^|,)subagent(?:,|$)/m);
@@ -542,15 +547,22 @@ test("session tree with no plan stops coordination and records recovery needed",
   assert.deepEqual(recovery, [true]);
 });
 
-test("agent_settled routes active Attempts to the bounded Supervisor-wait control loop", async () => {
+test("agent_settled stays idle while an Attempt is active", async () => {
   const { handlers, messages } = setup({ canContinue: () => true });
   await handlers.get("agent_settled")(
     { type: "agent_settled" },
     context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data }))),
   );
-  assert.equal(messages.length, 1);
-  assert.equal(messages[0].message.details.enforcement, "executor-control-loop");
-  assert.match(messages[0].message.content, /supervisor pending.*1000ms.*supervisor pending/i);
+  assert.deepEqual(messages, []);
+});
+
+test("agent_settled stays idle while an Attempt awaits dispatch execution", async () => {
+  const { handlers, messages } = setup({ canContinue: () => true });
+  await handlers.get("agent_settled")(
+    { type: "agent_settled" },
+    context(activeEvents.slice(0, 3).map((data) => ({ customType: "pi-plan-event-v1", data }))),
+  );
+  assert.deepEqual(messages, []);
 });
 
 test("agent_settled stays idle while every active Attempt waits for Root Attention", async () => {

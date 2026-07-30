@@ -419,7 +419,7 @@ test("one coordinator step dispatches parallel roots to distinct workspaces", as
   assert.equal(spawns.every(({ agent }) => agent === "executor"), true);
 });
 
-test("public continuePlan gives the queue current v3 IR topology for a forward dependency", async (t) => {
+test("public v3 continuePlan returns the exact forward-dependency dispatch intent without spawning", async (t) => {
   const repo = await fixture(forwardDependencySource(), { separateStateRoot: true });
   t.after(() => rm(repo.origin, { recursive: true, force: true }));
   const store = createPlanRevisionStore({ stateRoot: repo.stateRoot });
@@ -483,12 +483,28 @@ test("public continuePlan gives the queue current v3 IR topology for a forward d
     },
   });
 
-  const result = await deps.continuePlan({}, { ctx: context(repo.worktree, branch) });
+  const ctx = context(repo.worktree, branch);
+  const result = await deps.continuePlan({}, { ctx });
 
   assert.deepEqual(revision.ir.nodes.map((node) => node.id), ["task-2", "task-1"]);
   assert.deepEqual(captured.nodeOrder, revision.ir.nodes.map((node) => node.id));
-  assert.deepEqual(result.dispatched.map(({ taskId }) => taskId), ["task-2"]);
+  assert.equal(result.state, "dispatch-required");
+  assert.equal(result.dispatches.length, 1);
+  assert.equal(result.dispatches[0].contract.taskId, "task-2");
+  assert.equal(Object.hasOwn(result.dispatches[0].contract, "hash"), false);
+  const requested = appended.find((entry) => entry.type === "attempt.dispatch-requested" && entry.data.taskId === "task-2");
+  assert.deepEqual(result.dispatches[0].contract, requested.data.tool.contract);
+  assert.equal(result.dispatches[0].contractHash, requested.data.toolHash);
+  assert.equal(spawns.length, 0);
   assert.equal(appended.some((entry) => entry.type === "attempt.dispatch-requested" && entry.data.taskId === "task-1"), false);
+  assert.deepEqual(appended.map((entry) => entry.type), ["plan.created", "attempt.workspace-allocated", "attempt.dispatch-requested"]);
+
+  const eventCount = appended.length;
+  const replay = await deps.continuePlan({}, { ctx });
+  assert.equal(replay.state, "dispatch-required");
+  assert.deepEqual(replay.dispatches, result.dispatches);
+  assert.equal(appended.length, eventCount);
+  assert.equal(spawns.length, 0);
 });
 
 test("session shutdown stops each bound backend run once", async (t) => {
@@ -1020,7 +1036,7 @@ test("public continuePlan replays the current revision IR after an authorized am
     data: { workspace: { originRoot: origin, worktree, baseCommit, headCommit: baseCommit }, tasks: revisionOne.plan.tasks.map((task) => task.id), revision: identity(revisionOne) },
   });
 
-  const first = await deps.continuePlan({}, { ctx });
+  const first = await deps.continuePlan({ legacyDirectDispatch: true }, { ctx });
   assert.deepEqual(first.dispatched.map(({ taskId }) => taskId), ["task-1", "task-2"]);
   const firstTaskTwoAttempt = first.dispatched.find(({ taskId }) => taskId === "task-2");
   assert.ok(firstTaskTwoAttempt);
@@ -1092,7 +1108,7 @@ test("public continuePlan replays the current revision IR after an authorized am
   assert.notEqual((await deps.status({ ctx })).lifecycle, "blocked");
 
   reads.length = 0;
-  const second = await deps.continuePlan({}, { ctx });
+  const second = await deps.continuePlan({ legacyDirectDispatch: true }, { ctx });
   assert.deepEqual(second.dispatched.map(({ taskId }) => taskId), ["task-2"]);
   assert.deepEqual(reads, [[planId, 2], [planId, 2]]);
   assert.equal(spawns.length, 3);
