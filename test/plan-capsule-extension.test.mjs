@@ -146,10 +146,17 @@ test("plan-runner alone uses the real subagentOnlyExtensions profile field", asy
   for (const profile of profiles.slice(1)) assert.doesNotMatch(profile, /plan-capsule/);
 });
 
-test("capsule registers only plan_open and declares actual bootstrap fields", () => {
+test("capsule statically registers plan lifecycle tools and declares actual bootstrap fields", () => {
   const { tools } = setup();
-  assert.deepEqual([...tools.keys()], ["plan_open"]);
+  assert.deepEqual([...tools.keys()], [
+    "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend", "plan_open",
+  ]);
   assert.deepEqual(Object.keys(tools.get("plan_open").parameters.properties).sort(), ["allowPlanCommits", "baseCommit", "manifestSha256", "planId", "planIrHash", "revision", "worktree"]);
+});
+
+test("capsule pre-open active tools are limited to plan_open and read-only tools", () => {
+  const { activeTools } = setup();
+  assert.deepEqual(activeTools(), ["plan_open", "read", "grep"]);
 });
 
 test("runtime capability check waits until plan_open after extension session handlers settle", async () => {
