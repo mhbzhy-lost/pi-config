@@ -2085,7 +2085,7 @@ function birthIdentityUnavailable() {
   return Object.assign(new Error("process birth identity unavailable"), { code: "PROCESS_BIRTH_IDENTITY_UNAVAILABLE" });
 }
 
-async function verifiedForceCleanupFixture({ runs = ["executor-a"], captures = {}, onKill } = {}) {
+async function verifiedForceCleanupFixture({ runs = ["executor-a"], captures = {}, onKill, readArtifact } = {}) {
   const events = startedEventBus();
   const root = `verified-force-cleanup-root-${++verifiedForceCleanupFixtureNumber}`;
   const captureCalls = [];
@@ -2099,11 +2099,13 @@ async function verifiedForceCleanupFixture({ runs = ["executor-a"], captures = {
     const runId = [...identities].find(([, identity]) => identity.pid === pid)?.[0];
     const behavior = captures[runId] ?? [];
     const next = behavior.shift() ?? identities.get(runId)?.birth;
+    if (typeof next === "function") return await next({ pid, runId });
     if (next === "unavailable") throw birthIdentityUnavailable();
     return next;
   };
-  const readFile = async (file) => {
+  const readFile = async (file, encoding) => {
     artifactReads.push(file);
+    if (readArtifact) return await readArtifact({ file, encoding, reads: artifactReads });
     throw Object.assign(new Error(`missing ${file}`), { code: "ENOENT" });
   };
   const upstream = {
@@ -2111,7 +2113,7 @@ async function verifiedForceCleanupFixture({ runs = ["executor-a"], captures = {
     async stop({ runId, dir }) { stops.push({ runId, dir }); return { stopped: true }; },
     dispose() { disposed = true; },
   };
-  const emitProof = (runId) => events.emit("subagent:process-terminal", officialObservedProof(runId));
+  const emitProof = (runId, proof = officialObservedProof(runId)) => events.emit("subagent:process-terminal", proof);
   const broker = new RootBrokerServer({
     rootSessionId: root, upstream, events, terminalTimeoutMs: 12, artifactPollIntervalMs: 2,
     captureProcessBirthIdentity,
@@ -2245,5 +2247,82 @@ test("Root verified force cleanup settles all Executors and retries only force d
     assert.equal(second.state, "resolved");
     assert.deepEqual(subject.stops.map(({ runId }) => runId), ["executor-a", "executor-b", "executor-a"]);
     assert.deepEqual(subject.signals, [{ pid: -9401, signal: "SIGKILL" }, { pid: -9402, signal: "SIGKILL" }, { pid: -9401, signal: "SIGKILL" }]);
+  } finally { await subject.cleanup(); }
+});
+
+function forceReviewProof(runId, runnerProcessInstanceId) {
+  const observedAt = Date.now();
+  return {
+    version: 1,
+    state: "observed",
+    runId,
+    runnerProcessInstanceId,
+    observedAt,
+    instances: [{ processInstanceId: runnerProcessInstanceId, kind: "runner", closeObservedAt: observedAt, exitCode: 0, signal: null }],
+  };
+}
+
+test("Root force terminal review cleans each observation before the next phase", async () => {
+  const gracefulRead = deferred();
+  const forceRead = deferred();
+  const eventProof = forceReviewProof("executor-a", "executor-a-event-runner");
+  const lateArtifactProof = forceReviewProof("executor-a", "executor-a-late-artifact-runner");
+  let recaptureSawWaiter;
+  let deathSawProof;
+  let subject;
+  subject = await verifiedForceCleanupFixture({
+    captures: {
+      "executor-a": [
+        "executor-a-birth",
+        ({ runId }) => { recaptureSawWaiter = subject.broker.terminalWaiters.has(runId); return "executor-a-birth"; },
+        async ({ runId }) => {
+          forceRead.release(JSON.stringify(lateArtifactProof));
+          await Promise.resolve();
+          await new Promise((resolve) => setImmediate(resolve));
+          deathSawProof = subject.broker.terminalProofs.get(runId)?.runnerProcessInstanceId;
+          throw birthIdentityUnavailable();
+        },
+      ],
+    },
+    readArtifact: async ({ reads }) => {
+      if (reads.length === 1) return gracefulRead.promise;
+      if (reads.length === 2) {
+        subject.emitProof("executor-a", eventProof);
+        return forceRead.promise;
+      }
+      throw Object.assign(new Error("unexpected artifact read"), { code: "ENOENT" });
+    },
+  });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.equal(outcome.state, "resolved");
+    assert.deepEqual(subject.signals, [{ pid: -9401, signal: "SIGKILL" }]);
+    assert.equal(recaptureSawWaiter, false);
+    assert.equal(deathSawProof, eventProof.runnerProcessInstanceId);
+  } finally {
+    gracefulRead.release(JSON.stringify(lateArtifactProof));
+    forceRead.release(JSON.stringify(lateArtifactProof));
+    await subject.cleanup();
+  }
+});
+
+test("Root force terminal review skips signal when proof arrives during recapture", async () => {
+  const officialProof = forceReviewProof("executor-a", "executor-a-recapture-runner");
+  let subject;
+  subject = await verifiedForceCleanupFixture({
+    captures: {
+      "executor-a": [
+        "executor-a-birth",
+        ({ runId }) => { subject.emitProof(runId, officialProof); return "executor-a-birth"; },
+        "unavailable",
+      ],
+    },
+  });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
+    assert.equal(outcome.state, "resolved");
+    assert.equal(subject.captureCalls.length, 2);
+    assert.deepEqual(subject.signals, []);
+    assert.equal(subject.broker.forcePendingRuns.has("executor-a"), false);
   } finally { await subject.cleanup(); }
 });
