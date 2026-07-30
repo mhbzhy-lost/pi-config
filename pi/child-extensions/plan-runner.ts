@@ -3,6 +3,7 @@ import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createPlanCapsuleExtension } from "../../scripts/lib/plan/plan-capsule-extension.mjs";
 import { createPlanRunnerDependencies } from "../../scripts/lib/plan/plan-runner-dependencies.mjs";
+import { createPlanExecutorToolBoundary } from "../../scripts/lib/plan/plan-executor-tool-boundary.mjs";
 import { ensurePlanRuntimeTools } from "../../scripts/lib/plan/plan-runtime-tools.mjs";
 import { createPiSubagentsExecutionBackend } from "../../scripts/lib/plan/pi-subagents-execution-backend.mjs";
 import { createExternalReviewAdapter } from "../../scripts/lib/plan/external-review-adapter.mjs";
@@ -51,6 +52,7 @@ export default async function planRunner(pi: ExtensionAPI) {
   const rpc = rootOwned.rpc;
   try {
     const roots = await bootstrapRuntimeRoots(rpc);
+    const boundary = createPlanExecutorToolBoundary();
     const executionBackend = createPiSubagentsExecutionBackend({
       rpc,
       events: pi.events,
@@ -66,6 +68,9 @@ export default async function planRunner(pi: ExtensionAPI) {
 
     createPlanCapsuleExtension(pi, {
       ...deps,
+      authorizeExecutorDispatch(input: unknown, context: unknown) {
+        return boundary.authorize(input, context);
+      },
       async assertRuntimeCapabilities() {
         ensurePlanRuntimeTools(pi, REQUIRED_RUNTIME_TOOLS);
         await executionBackend.assertCapabilities({ rpcVersion: 1, methods: REQUIRED_RPC_METHODS });

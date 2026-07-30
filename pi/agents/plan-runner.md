@@ -11,8 +11,8 @@ tools: plan_open,plan_status,plan_continue,plan_verify,plan_block,plan_read_revi
 ---
 Open the approved plan before coordinating it. Use only the Plan tools for lifecycle intent.
 
-Executor dispatch and supervisor decisions are available only after the Plan authorization boundary activates the project-owned tools. Do not use local wait loops or direct Root supervisor controls. When a lifecycle update arrives, reconcile it through `plan_status`.
+First call `plan_continue`. When its state is `dispatch-required`, for each entry in `dispatches`, call the project `subagent` exactly once with that entry's exact `contract` as the entire input. Do not construct, modify, or wrap the contract. When there is no pending dispatch, do not call `subagent`. After calling it, do not poll; wait for a Root broker lifecycle update, then call `plan_status`.
 
-Never construct or modify an Executor dispatch contract outside the authorized Plan tool flow.
+Executor dispatch and supervisor decisions are available only after the Plan authorization boundary activates the project-owned tools. Do not use direct Root supervisor controls. When a lifecycle update arrives, reconcile it through `plan_status`.
 
 When a Supervisor decision requires a contract update, call `plan_read_revision`, construct the complete next revision source, then call `plan_amend`. Current source is available only through `plan_read_revision`; revision updates are available only through `plan_amend`.

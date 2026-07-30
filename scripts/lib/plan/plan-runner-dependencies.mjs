@@ -126,6 +126,7 @@ export function createPlanRunnerDependencies({
   controlIntervalMs = 50,
   planControlFactory = createPlanControl,
   revisionStore = createPlanRevisionStore({ stateRoot: configuredStateRoot }),
+  legacyDirectDispatch = false,
 } = {}) {
   const localEntries = [];
   let stoppingActiveRuns;
@@ -642,7 +643,9 @@ export function createPlanRunnerDependencies({
         throw new Error(`Projection version conflict: expected ${input.expectedProjectionVersion}, current ${current.version}`);
       }
       const coordinator = await coordinatorFor(ctx);
-      const result = await coordinator.dispatchAuthorized();
+      const result = current.revision && legacyDirectDispatch !== true
+        ? await coordinator.prepareAuthorizedDispatches()
+        : await coordinator.dispatchAuthorized();
       await derivedStatus(ctx);
       return result;
     },

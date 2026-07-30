@@ -233,20 +233,9 @@ export function createPlanCapsuleExtension(pi, options = {}) {
       pi.sendMessage({ customType: "pi-plan-summary-v1", content: `Plan ${projection.planId} ${projection.lifecycle}.`, details: { planId: projection.planId, lifecycle: projection.lifecycle } });
       return;
     }
-    const hasActiveAttempt = [...projection.attempts.values()].some((attempt) => attempt.status === "active");
-    const hasWaitingAttention = [...projection.attempts.values()].some((attempt) => attempt.status === "waiting-attention");
-    if (hasActiveAttempt) {
-      pi.sendMessage(
-        {
-          customType: "pi-plan-follow-up-v1",
-          content: "Run the executor control loop: check Supervisor pending; when empty call subagent_wait with timeoutMs 1000ms; then check Supervisor pending again.",
-          details: { planId: projection.planId, enforcement: "executor-control-loop" },
-        },
-        { triggerTurn: true, deliverAs: "followUp" },
-      );
-      return;
-    }
-    if (hasWaitingAttention) return;
+    const hasInFlightAttempt = [...projection.attempts.values()]
+      .some((attempt) => ["dispatch-requested", "active", "waiting-attention"].includes(attempt.status));
+    if (hasInFlightAttempt) return;
     if (options.canContinue?.(projection) === true) {
       pi.sendMessage(
         { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: projection.planId } },
