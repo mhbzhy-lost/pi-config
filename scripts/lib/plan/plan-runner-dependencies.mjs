@@ -124,6 +124,7 @@ export function createPlanRunnerDependencies({
   id = () => crypto.randomUUID(),
   now = () => new Date().toISOString(),
   controlIntervalMs = 50,
+  planControlFactory = createPlanControl,
   revisionStore = createPlanRevisionStore({ stateRoot: configuredStateRoot }),
 } = {}) {
   const localEntries = [];
@@ -156,6 +157,25 @@ export function createPlanRunnerDependencies({
     let value = createProjection();
     for (const entry of combinedEvents(ctx)) value = applyEvent(value, entry);
     return value;
+  }
+
+  function matchingAttentionResolution(ctx, command, { expectedProjectionVersion } = {}) {
+    const resolutionSha256 = createHash("sha256").update(command.message).digest("hex");
+    const entries = combinedEvents(ctx);
+    const requested = entries.some((entry) => entry.type === "attempt.attention-requested"
+      && entry.planId === command.planId
+      && entry.data?.requestId === command.requestId
+      && entry.data?.taskId === command.taskId
+      && entry.data?.attemptId === command.attemptId
+      && entry.data?.runId === command.runId);
+    if (!requested) return false;
+    return entries.some((entry) => entry.type === "attempt.attention-resolved"
+      && entry.planId === command.planId
+      && entry.data?.requestId === command.requestId
+      && entry.data?.attemptId === command.attemptId
+      && entry.data?.runId === command.runId
+      && entry.data?.resolutionSha256 === resolutionSha256
+      && (expectedProjectionVersion === undefined || entry.data?.expectedProjectionVersion === expectedProjectionVersion));
   }
 
   const writer = createPlanEventWriter({
@@ -400,7 +420,7 @@ export function createPlanRunnerDependencies({
   }
 
   function controlFor(binding) {
-    return createPlanControl({ stateRoot: binding.stateRoot, id, now });
+    return planControlFactory({ stateRoot: binding.stateRoot, id, now });
   }
 
   async function processCancelControl({ binding, ctx }) {
@@ -428,11 +448,17 @@ export function createPlanRunnerDependencies({
 
   async function processAttentionReplies({ binding, ctx }) {
     const current = currentProjection(ctx);
-    const commands = await controlFor(binding).readAttentionReplies(binding.planId);
+    const control = controlFor(binding);
+    const commands = await control.readAttentionReplies(binding.planId);
     const ready = [];
     for (const command of commands) {
+      if (matchingAttentionResolution(ctx, command)) {
+        await control.writeAttentionAck({ ...command, result: "delivered", deliveredAt: now() });
+        announcedAttentionReplies.delete(command.requestId);
+        continue;
+      }
       const attempt = current.attempts.get(command.attemptId);
-      if (!attempt || attempt.status !== "waiting-attention"
+      if (command.planId !== binding.planId || !attempt || attempt.status !== "waiting-attention"
         || attempt.attention?.requestId !== command.requestId
         || attempt.runId !== command.runId) continue;
       if (command.expectedProjectionVersion !== attempt.attention.projectionVersion) continue;
@@ -523,7 +549,7 @@ export function createPlanRunnerDependencies({
       if (!match) throw new Error("Supervisor reply does not match pending Attention");
       const [attemptId, attempt] = match;
       const { stateRoot } = await rootsFor(ctx, current.planId);
-      const control = createPlanControl({ stateRoot, id, now });
+      const control = planControlFactory({ stateRoot, id, now });
       const commands = await control.readAttentionReplies(current.planId);
       const command = commands.find((candidate) => candidate.requestId === input.replyTo);
       if (!command) throw new Error("Durable Root Attention reply is required before native Supervisor delivery");
@@ -544,19 +570,27 @@ export function createPlanRunnerDependencies({
     },
     async resolveSupervisorReply(authorization, { ctx }) {
       const current = currentProjection(ctx);
-      if (authorization?.expectedProjectionVersion !== current.version) throw new Error("Supervisor reply projection version is stale");
-      await appendEvent(ctx, "attempt.attention-resolved", {
-        attemptId: authorization.attemptId,
-        requestId: authorization.requestId,
-        runId: authorization.runId,
-        expectedProjectionVersion: authorization.expectedProjectionVersion,
-        resolutionSha256: authorization.resolutionSha256,
-      }, current.version);
-      if (authorization.command) {
-        const { stateRoot } = await rootsFor(ctx, current.planId);
-        const control = createPlanControl({ stateRoot, id, now });
-        await control.writeAttentionAck({ ...authorization.command, result: "delivered", deliveredAt: now() });
+      const command = authorization?.command;
+      if (!command || command.planId !== authorization.planId || command.taskId !== authorization.taskId
+        || command.attemptId !== authorization.attemptId || command.requestId !== authorization.requestId
+        || command.runId !== authorization.runId
+        || createHash("sha256").update(command.message ?? "").digest("hex") !== authorization.resolutionSha256) {
+        throw new Error("Supervisor reply authorization command does not match");
       }
+      if (authorization.planId !== current.planId) throw new Error("Supervisor reply plan does not match");
+      if (!matchingAttentionResolution(ctx, command, { expectedProjectionVersion: authorization.expectedProjectionVersion })) {
+        if (authorization.expectedProjectionVersion !== current.version) throw new Error("Supervisor reply projection version is stale");
+        await appendEvent(ctx, "attempt.attention-resolved", {
+          attemptId: authorization.attemptId,
+          requestId: authorization.requestId,
+          runId: authorization.runId,
+          expectedProjectionVersion: authorization.expectedProjectionVersion,
+          resolutionSha256: authorization.resolutionSha256,
+        }, current.version);
+      }
+      const { stateRoot } = await rootsFor(ctx, current.planId);
+      const control = planControlFactory({ stateRoot, id, now });
+      await control.writeAttentionAck({ ...command, result: "delivered", deliveredAt: now() });
       announcedAttentionReplies.delete(authorization.requestId);
       await derivedStatus(ctx);
       return { resolved: true, requestId: authorization.requestId, projectionVersion: currentProjection(ctx).version };
