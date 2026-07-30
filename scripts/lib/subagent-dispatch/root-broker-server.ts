@@ -903,7 +903,7 @@ export class RootBrokerServer {
       const startupDeadline = new Promise<never>((_, reject) => {
         startupTimeout = setTimeout(() => reject(new AggregateError([], "Root subagent broker startup barrier deadline exceeded")), this.terminalTimeoutMs);
       });
-      const collectStartupBarrier = () => [...this.startedObservations.values(), ...this.executorGrants.values(), ...this.callerGrants.values(), ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise))];
+      const collectStartupBarrier = () => [...this.startedObservations.values(), ...this.executorGrants.values(), ...this.callerGrants.values(), ...this.revivePromises.values(), ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise))];
       let observedStartupWork = false;
       try {
         for (;;) {
