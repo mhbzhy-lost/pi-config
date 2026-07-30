@@ -244,6 +244,25 @@ test("child-safe client reads its grant, authenticates each request, and rejects
   await assert.rejects(client.ping(), /disposed/i);
 });
 
+for (const requestId of ["dispatch/a", "dispatch?a"]) {
+  test(`broker client rejects the invalid requestId ${requestId} without spawning`, async (t) => {
+    const upstream = fakeUpstream();
+    const broker = new RootBrokerServer({ rootSessionId, upstream });
+    await broker.start();
+    t.after(() => broker.closeRootSession());
+    const callerRunId = `plan-invalid-request-id-${requestId.length}`;
+    await broker.grantCaller({ callerRunId, planId: "plan", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+    const client = createRootBrokerClient({ rootSessionId, callerRunId });
+    t.after(() => client.dispose());
+
+    await assert.rejects(
+      client.spawn({ agent: "executor", task: "run" }, { requestId, spawnKey: "dispatch-strict" }),
+      (error) => error.code === "REQUEST_ID_INVALID",
+    );
+    assert.equal(upstream.calls.filter((call) => call.method === "spawn").length, 0);
+  });
+}
+
 test("child-safe subscription distinguishes local disposal from remote EOF", async (t) => {
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
   await broker.start();
@@ -706,4 +725,99 @@ test("upstream failure lookup reports an unbound uncertain durable spawn", async
   const upstream = { ...fakeUpstream(), async spawn() { throw new Error("connection lost"); } }; const { call, lookup } = await ledgerBroker(t, "plan-uncertain-lookup", upstream);
   const params = { agent: "executor", spawnKey: "dispatch-uncertain" }; await call("spawn", params, "dispatch-uncertain"); const found = await lookup({ spawnKey: "dispatch-uncertain" });
   assert.equal(found.success, true); assert.equal(found.data?.state, "uncertain"); assert.equal(Object.hasOwn(found.data ?? {}, "binding"), false);
+});
+
+test("an explicit detail spawnDisposition not-started permits a durable retry", async (t) => {
+  let attempts = 0;
+  const upstream = {
+    ...fakeUpstream(),
+    async spawn() {
+      attempts += 1;
+      if (attempts === 1) {
+        const error = new Error("request was not started");
+        error.detail = { spawnDisposition: "not-started" };
+        throw error;
+      }
+      return { details: { runId: "not-started-retry", asyncDir: "/async/not-started-retry" } };
+    },
+  };
+  const { call, lookup } = await ledgerBroker(t, "plan-not-started-retry", upstream);
+  const params = { agent: "executor", spawnKey: "dispatch-not-started" };
+  const first = await call("spawn", params, "dispatch-not-started");
+  const afterFailure = await lookup({ spawnKey: "dispatch-not-started" });
+  const second = await call("spawn", params, "dispatch-not-started");
+
+  assert.equal(first.reply.success, false);
+  assert.equal(afterFailure.data?.state, "not-started");
+  assert.equal(second.reply.success, true);
+  assert.equal(attempts, 2);
+});
+
+test("a cleaned grant failure permits a durable retry after the executor grant recovers", async (t) => {
+  let executorGrants = 0;
+  let spawns = 0;
+  const stops = [];
+  const upstream = {
+    ...fakeUpstream(),
+    async spawn() { spawns += 1; return { details: { runId: `cleaned-run-${spawns}`, asyncDir: `/async/cleaned-${spawns}` } }; },
+    async stop(params) { stops.push(params); return { stopped: true }; },
+  };
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream,
+    writeGrant: async (grant) => {
+      if (grant.role === "executor" && executorGrants++ === 0) throw new Error("executor grant write failed");
+      return `/tmp/${grant.runId}.json`;
+    },
+  });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  const caller = await broker.grantCaller({ callerRunId: "plan-cleaned-retry", planId: "plan-cleaned-retry", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const dispatch = (method, params, requestId = "request-1") => broker.dispatch(request({ callerRunId: "plan-cleaned-retry", callerToken: caller.callerToken, method, params, requestId }), {});
+  const params = { agent: "executor", spawnKey: "dispatch-cleaned" };
+  const first = await dispatch("spawn", params, "dispatch-cleaned");
+  const afterFailure = await dispatch("spawn.lookup", { spawnKey: "dispatch-cleaned" });
+  const second = await dispatch("spawn", params, "dispatch-cleaned");
+
+  assert.equal(first.success, false);
+  assert.equal(afterFailure.data?.state, "cleaned");
+  assert.equal(Object.hasOwn(afterFailure.data ?? {}, "binding"), false);
+  assert.equal(second.success, true);
+  assert.equal(spawns, 2);
+  assert.equal(stops.length, 1);
+});
+
+test("a grant and cleanup failure remains uncertain with both error causes", async (t) => {
+  let spawns = 0;
+  let stops = 0;
+  const upstream = {
+    ...fakeUpstream(),
+    async spawn() { spawns += 1; return { details: { runId: "uncertain-cleanup-run", asyncDir: "/async/uncertain-cleanup" } }; },
+    async stop() { stops += 1; throw new Error("executor stop failed"); },
+  };
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream,
+    writeGrant: async (grant) => {
+      if (grant.role === "executor") throw new Error("executor grant write failed");
+      return `/tmp/${grant.runId}.json`;
+    },
+  });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  const caller = await broker.grantCaller({ callerRunId: "plan-uncertain-cleanup", planId: "plan-uncertain-cleanup", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const dispatch = (method, params, requestId = "request-1") => broker.dispatch(request({ callerRunId: "plan-uncertain-cleanup", callerToken: caller.callerToken, method, params, requestId }), {});
+  const params = { agent: "executor", spawnKey: "dispatch-uncertain-cleanup" };
+  const first = await dispatch("spawn", params, "dispatch-uncertain-cleanup");
+  const afterFailure = await dispatch("spawn.lookup", { spawnKey: "dispatch-uncertain-cleanup" });
+  const second = await dispatch("spawn", params, "dispatch-uncertain-cleanup");
+
+  assert.equal(first.success, false);
+  assert.match(first.error?.message ?? "", /executor grant write failed/);
+  assert.match(first.error?.message ?? "", /executor stop failed/);
+  assert.equal(afterFailure.data?.state, "uncertain");
+  assert.equal(second.success, false);
+  assert.equal(second.error?.code, "spawn_uncertain");
+  assert.equal(spawns, 1);
+  assert.equal(stops, 1);
 });

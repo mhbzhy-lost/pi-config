@@ -86,7 +86,7 @@ test("asserts capabilities and emits the exact asynchronous executor RPC envelop
       artifacts: true,
       timeoutMs: 900_000,
     },
-    options: { requestId: "attempt-1.dispatch.1" },
+    options: { requestId: "attempt-1.dispatch.1", spawnKey: "attempt-1.dispatch.1" },
   }]);
   assert.deepEqual(binding, {
     dispatchId: "attempt-1.dispatch.1",
