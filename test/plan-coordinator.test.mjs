@@ -761,6 +761,14 @@ test("v3 dispatch emits the complete exact prompt and canonical identity context
 test("prepareAuthorizedDispatches persists a new durable Executor intent", async () => {
   const approvedPlan = v3Plan();
   const ir = compilePlanToIR(approvedPlan);
+  const execution = {
+    plan: {
+      title: ir.title,
+      instructions: ir.instructions,
+      executionPolicy: ir.executionPolicy,
+    },
+    task: ir.nodes[0],
+  };
   const subject = harness({
     approvedPlan,
     entries: [createdV3Entry(ir)],
@@ -788,22 +796,22 @@ test("prepareAuthorizedDispatches persists a new durable Executor intent", async
   assert.equal(intent.data.dispatchId, dispatch.dispatchId);
   assert.equal(intent.data.toolHash, dispatch.contractHash);
   assert.deepEqual(intent.data.tool.contract, dispatch.contract);
-  assert.deepEqual(intent.data.tool.dependencyReceipts, []);
-  assert.equal(intent.data.tool.cwd, "/attempts/attempt-plan-1-task-1-1");
-  assert.equal(intent.data.tool.timeoutMs, 321000);
-
-  assert.deepEqual(dispatch.contract, {
+  const expectedContract = {
     version: "dispatch-ir.v1",
     taskId: "task-1",
     title: "Exact task",
     agent: "executor",
     risk: "normal",
-    objective: "dispatch the exact approved task",
+    objective: "Complete approved plan task task-1: Exact task.",
     workflow: { mode: "tdd" },
-    requirements: ["Implement the approved change."],
+    requirements: [execution.task.body],
     context: {
-      knownFacts: ["Plan instructions: Keep the execution contract intact."],
-      decisions: [],
+      knownFacts: [
+        `Plan title: ${execution.plan.title}`,
+        `Plan instructions: ${execution.plan.instructions}`,
+        `Task resources: ${JSON.stringify(execution.task.resources)}`,
+      ],
+      decisions: [JSON.stringify(execution.plan.executionPolicy)],
       relevantFiles: ["src/exact.mjs"],
     },
     boundaries: {
@@ -812,14 +820,62 @@ test("prepareAuthorizedDispatches persists a new durable Executor intent", async
       forbiddenActions: [],
     },
     acceptance: {
-      criteria: ["Run the selected verification command successfully."],
+      criteria: [JSON.stringify(execution.task.acceptance)],
       commands: ["true"],
     },
-    execution: { cwd: ".", timeoutMs: 321000 },
+    execution: { cwd: "/attempts/attempt-plan-1-task-1-1", timeoutMs: 321000 },
+  };
+  assert.deepEqual(dispatch.contract, expectedContract);
+  const expectedTask = [
+    `Plan: ${execution.plan.title}`,
+    `Plan instructions:\n${execution.plan.instructions}`,
+    `Task: ${execution.task.id} ${execution.task.title}`,
+    `Task body:\n${execution.task.body}`,
+    "Dependency receipts:\n[]",
+    `Allowed paths: ${execution.task.allowedPaths.join(", ")}`,
+    `Resources: ${JSON.stringify(execution.task.resources)}`,
+    `Execution: ${JSON.stringify(execution.task.execution)}`,
+    `Acceptance: ${execution.task.acceptance.strategy}`,
+    JSON.stringify(execution.task.acceptance),
+    "Attempt: attempt-plan-1-task-1-1",
+    "Base commit: base",
+    "Authoritative output: /results/attempt-plan-1-task-1-1.json",
+    `Result contract: ${execution.plan.executionPolicy.resultContract}`,
+    `Blocked result shape: ${JSON.stringify({ attempt_id: "attempt-plan-1-task-1-1", task_id: "task-1", status: "blocked", reason: "<code>", blockers: ["<sorted-code>"], changed_files: [], commit: null })}`,
+  ].join("\n");
+  assert.deepEqual(intent.data.tool, {
+    agent: "executor",
+    task: expectedTask,
+    cwd: "/attempts/attempt-plan-1-task-1-1",
+    context: "fresh",
+    async: true,
+    clarify: false,
+    worktree: false,
+    output: "/results/attempt-plan-1-task-1-1.json",
+    outputMode: "file-only",
+    acceptance: false,
+    artifacts: true,
+    timeoutMs: 321000,
+    contract: expectedContract,
+    dependencyReceipts: [],
   });
+  assert.equal(typeof intent.data.tool.task, "string");
+  assert.equal(intent.data.planIrHash, ir.hash);
+  assert.equal(intent.data.taskHash, execution.task.hashes.effective);
+  assert.equal(intent.data.schedulingHash, execution.task.hashes.scheduling);
+  assert.equal(intent.data.dispatchContextHash, createHash("sha256").update(JSON.stringify({
+    planIrHash: ir.hash,
+    taskHash: execution.task.hashes.effective,
+    schedulingHash: execution.task.hashes.scheduling,
+    attemptId: dispatch.attemptId,
+    baseCommit: "base",
+    output: "/results/attempt-plan-1-task-1-1.json",
+    dependencyReceipts: [],
+  })).digest("hex"));
   const compiled = compileCodingDispatchIR(dispatch.contract, { cwd: "/repo" });
   assert.equal(compiled.hash, dispatch.contractHash);
-  assert.equal(compiled.execution.cwd, "/repo");
+  assert.equal(intent.data.toolHash, compiled.hash);
+  assert.equal(compiled.execution.cwd, "/attempts/attempt-plan-1-task-1-1");
   assert.equal(compiled.execution.timeoutMs, 321000);
 });
 
