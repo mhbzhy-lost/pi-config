@@ -1552,3 +1552,116 @@ test("rejects conflicting Supervisor ingress without changing the original owner
   assert.equal(pushed.length, 1);
   assert.equal(broker.supervisorRequests?.get("ingress-1")?.ownerRunId, "owner-a");
 });
+
+let orderedDrainFixtureNumber = 0;
+
+async function orderedDrainFixture(t, { emitTerminalOnStop = false, unavailableBirthIdentity = false, failStopOnce } = {}) {
+  const events = startedEventBus();
+  const root = `ordered-drain-root-${++orderedDrainFixtureNumber}`;
+  const stopOrder = [];
+  const timeline = [];
+  const socket = {
+    destroyed: false,
+    write(frame) { timeline.push({ action: "socket.write", frame: JSON.parse(frame), at: Date.now() }); return true; },
+    end() { timeline.push({ action: "socket.end", at: Date.now() }); },
+    destroy() { this.destroyed = true; timeline.push({ action: "socket.destroy", at: Date.now() }); },
+  };
+  const terminal = (runId, state = "observed") => events.emit("subagent:process-terminal", {
+    version: 1, state, runId, runnerProcessInstanceId: `${runId}-instance`, observedAt: new Date().toISOString(),
+    sessionId: root, asyncDir: `/trusted/${runId}`,
+  });
+  const upstream = {
+    ...fakeUpstream(),
+    async stop({ runId, dir }) {
+      stopOrder.push({ runId, dir, at: Date.now() });
+      if (failStopOnce === runId && stopOrder.filter((entry) => entry.runId === runId).length === 1) throw new Error(`controlled stop failure for ${runId}`);
+      if (emitTerminalOnStop) terminal(runId);
+      return { stopped: true };
+    },
+    dispose() { timeline.push({ action: "upstream.dispose", at: Date.now() }); },
+  };
+  const broker = new RootBrokerServer({
+    rootSessionId: root,
+    upstream,
+    events,
+    terminalTimeoutMs: 50,
+    captureProcessBirthIdentity: async () => {
+      if (unavailableBirthIdentity) throw Object.assign(new Error("birth identity unavailable"), { code: "PROCESS_BIRTH_IDENTITY_UNAVAILABLE" });
+      return "trusted-birth";
+    },
+    writeGrant: async (grant) => `/tmp/${root}-${grant.runId}.json`,
+  });
+  await broker.start();
+  for (const [id, pid, agent] of [["executor-a", 8101, "executor"], ["executor-b", 8102, "executor"], ["plan-runner", 8103, "plan-runner"]]) {
+    events.emit("subagent:async-started", { id, pid, agent, sessionId: root, cwd: "/trusted", asyncDir: `/trusted/${id}` });
+  }
+  await events.settled();
+  broker.subscriptions.set("plan-runner", new Set([socket]));
+  t.after(async () => { await broker.closeRootSession().catch(() => undefined); });
+  return { broker, events, root, socket, stopOrder, terminal, timeline };
+}
+
+test("Root session ordered drain stops Executors, observes terminals, then stops Plan Runner", async (t) => {
+  const subject = await orderedDrainFixture(t, { emitTerminalOnStop: true });
+  await subject.broker.closeRootSession();
+  assert.deepEqual(subject.stopOrder.map(({ runId, dir }) => ({ runId, dir })), [
+    { runId: "executor-a", dir: "/trusted/executor-a" },
+    { runId: "executor-b", dir: "/trusted/executor-b" },
+    { runId: "plan-runner", dir: "/trusted/plan-runner" },
+  ], "stopOrder installs terminal waiters before synchronous stop emits and drains Executors before Plan Runner");
+  const planStop = subject.stopOrder.find((entry) => entry.runId === "plan-runner").at;
+  assert.equal(subject.timeline.find((entry) => entry.action === "socket.write").at >= planStop, true);
+  assert.equal(subject.timeline.find((entry) => entry.action === "socket.end").at >= planStop, true);
+  assert.equal(subject.timeline.find((entry) => entry.action === "upstream.dispose").at >= planStop, true);
+});
+
+test("Root session ordered drain remains pending until exact observed process terminals", async (t) => {
+  const subject = await orderedDrainFixture(t);
+  let settled = false;
+  const closing = subject.broker.closeRootSession().then(() => { settled = true; });
+  subject.events.emit("subagent:async-complete", { runId: "executor-a", sessionId: subject.root });
+  subject.events.emit("subagent:process-terminal", { version: 1, state: "unknown", runId: "executor-a", reason: "not proof" });
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  assert.equal(settled, false, "async-complete and unknown terminal must not unlock the terminal waiter before the bounded deadline");
+  subject.terminal("executor-a"); subject.terminal("executor-b");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "Plan Runner remains pending after both Executor proofs");
+  subject.terminal("plan-runner");
+  await closing;
+});
+
+test("Root session ordered drain retains cleanup debt after unknown terminal without birth identity", async (t) => {
+  const subject = await orderedDrainFixture(t, { unavailableBirthIdentity: true });
+  subject.terminal("executor-a", "unknown");
+  await assert.rejects(
+    () => subject.broker.closeRootSession(),
+    (error) => error instanceof AggregateError,
+    "unknown terminal with unavailable birth identity leaves cleanup debt",
+  );
+  assert.deepEqual(subject.stopOrder, []);
+  assert.equal(subject.timeline.some((entry) => entry.action === "socket.write"), false);
+  assert.equal(subject.timeline.some((entry) => entry.action === "socket.end"), false);
+  assert.equal(subject.timeline.some((entry) => entry.action === "upstream.dispose"), false);
+  subject.terminal("executor-a"); subject.terminal("executor-b"); subject.terminal("plan-runner");
+  await subject.broker.closeRootSession();
+});
+
+test("Root session ordered drain aggregates Executor stop failures and retries only debt", async (t) => {
+  const subject = await orderedDrainFixture(t, { emitTerminalOnStop: true, failStopOnce: "executor-a" });
+  await assert.rejects(() => subject.broker.closeRootSession(), AggregateError);
+  assert.deepEqual(subject.stopOrder.map((entry) => entry.runId), ["executor-a", "executor-b"], "all-settled drains the second Executor after the first stop failure");
+  assert.equal(subject.stopOrder.some((entry) => entry.runId === "plan-runner"), false);
+  assert.equal(subject.timeline.some((entry) => entry.action === "upstream.dispose"), false);
+  await subject.broker.closeRootSession();
+  assert.deepEqual(subject.stopOrder.map((entry) => entry.runId), ["executor-a", "executor-b", "executor-a", "plan-runner"]);
+});
+
+test("Root session ordered drain is single-flight and idempotent", async (t) => {
+  const subject = await orderedDrainFixture(t, { emitTerminalOnStop: true });
+  await Promise.all([subject.broker.closeRootSession(), subject.broker.closeRootSession()]);
+  await subject.broker.closeRootSession();
+  assert.deepEqual(subject.stopOrder.map((entry) => entry.runId), ["executor-a", "executor-b", "plan-runner"]);
+  assert.equal(subject.timeline.filter((entry) => entry.action === "socket.write" && entry.frame.type === "root.closing").length, 1);
+  assert.equal(subject.timeline.filter((entry) => entry.action === "socket.end").length, 1);
+  assert.equal(subject.timeline.filter((entry) => entry.action === "upstream.dispose").length, 1);
+});
