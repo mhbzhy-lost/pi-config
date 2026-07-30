@@ -591,7 +591,7 @@ export class RootBrokerServer {
       if (request.method === "spawn.lookup") return this.lookupSpawn(request, caller);
       if (request.method === "supervisor.pending") return this.pendingSupervisor(request, caller);
       if (request.method === "supervisor.reply") return await this.replySupervisor(request, caller);
-      if (["status", "steer", "interrupt", "stop"].includes(request.method)) return await this.control(request, caller);
+      if (["status", "steer", "interrupt", "stop"].includes(request.method)) return await this.control(request, caller, logicalCallerRunId);
       return failure(request, "unsupported", `Broker method ${request.method} is unsupported`);
     } catch (error) { return failure(request, "upstream_failed", error instanceof Error ? error.message : String(error)); }
   }
@@ -752,9 +752,9 @@ export class RootBrokerServer {
     return true;
   }
 
-  async control(request: any, caller: Caller) {
+  async control(request: any, caller: Caller, logicalCallerRunId: string) {
     const runId = request.params.runId ?? request.params.id;
-    if (typeof runId !== "string" || !caller.ownedRunIds.has(runId) || this.runOwners.get(runId) !== request.callerRunId) return failure(request, "run_not_owned", "Run is not owned by caller");
+    if (typeof runId !== "string" || !caller.ownedRunIds.has(runId) || this.runOwners.get(runId) !== logicalCallerRunId) return failure(request, "run_not_owned", "Run is not owned by caller");
     return createBrokerSuccessResponse({ ...request, data: await this.upstream[request.method](request.params) });
   }
 
