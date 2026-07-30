@@ -1555,36 +1555,50 @@ test("rejects conflicting Supervisor ingress without changing the original owner
 
 let orderedDrainFixtureNumber = 0;
 
-async function orderedDrainFixture(t, { emitTerminalOnStop = false, unavailableBirthIdentity = false, failStopOnce } = {}) {
+async function orderedDrainFixture(t, { emitTerminalOnStop = false, unavailableBirthIdentity = false, failStopOnce, terminalTimeoutMs = 250 } = {}) {
   const events = startedEventBus();
   const root = `ordered-drain-root-${++orderedDrainFixtureNumber}`;
   const stopOrder = [];
   const timeline = [];
+  let timelineSequence = 0;
+  const record = (entry) => timeline.push({ ...entry, at: Date.now(), sequence: ++timelineSequence });
   const socket = {
     destroyed: false,
-    write(frame) { timeline.push({ action: "socket.write", frame: JSON.parse(frame), at: Date.now() }); return true; },
-    end() { timeline.push({ action: "socket.end", at: Date.now() }); },
-    destroy() { this.destroyed = true; timeline.push({ action: "socket.destroy", at: Date.now() }); },
+    write(frame) { record({ action: "socket.write", frame: JSON.parse(frame) }); return true; },
+    end() { record({ action: "socket.end" }); },
+    destroy() { this.destroyed = true; record({ action: "socket.destroy" }); },
   };
-  const terminal = (runId, state = "observed") => events.emit("subagent:process-terminal", {
-    version: 1, state, runId, runnerProcessInstanceId: `${runId}-instance`, observedAt: new Date().toISOString(),
-    sessionId: root, asyncDir: `/trusted/${runId}`,
-  });
+  const terminal = (runId, state = "observed") => {
+    const runnerProcessInstanceId = `${runId}-instance`;
+    const processTerminal = state === "observed"
+      ? {
+        version: 1,
+        state: "observed",
+        runId,
+        runnerProcessInstanceId,
+        observedAt: Date.now(),
+        instances: [{ processInstanceId: runnerProcessInstanceId, kind: "runner", closeObservedAt: Date.now(), exitCode: 0, signal: null }],
+      }
+      : { version: 1, state: "unknown", runId, runnerProcessInstanceId, reason: "observer-unavailable" };
+    record({ action: "terminal.event", runId, state: processTerminal.state });
+    events.emit("subagent:process-terminal", processTerminal);
+  };
   const upstream = {
     ...fakeUpstream(),
     async stop({ runId, dir }) {
-      stopOrder.push({ runId, dir, at: Date.now() });
-      if (failStopOnce === runId && stopOrder.filter((entry) => entry.runId === runId).length === 1) throw new Error(`controlled stop failure for ${runId}`);
+      const entry = { runId, dir, at: Date.now() };
+      stopOrder.push(entry); record({ action: "upstream.stop", ...entry });
+      if (failStopOnce === runId && stopOrder.filter((item) => item.runId === runId).length === 1) throw new Error(`controlled stop failure for ${runId}`);
       if (emitTerminalOnStop) terminal(runId);
       return { stopped: true };
     },
-    dispose() { timeline.push({ action: "upstream.dispose", at: Date.now() }); },
+    dispose() { record({ action: "upstream.dispose" }); },
   };
   const broker = new RootBrokerServer({
     rootSessionId: root,
     upstream,
     events,
-    terminalTimeoutMs: 50,
+    terminalTimeoutMs,
     captureProcessBirthIdentity: async () => {
       if (unavailableBirthIdentity) throw Object.assign(new Error("birth identity unavailable"), { code: "PROCESS_BIRTH_IDENTITY_UNAVAILABLE" });
       return "trusted-birth";
@@ -1601,6 +1615,10 @@ async function orderedDrainFixture(t, { emitTerminalOnStop = false, unavailableB
   return { broker, events, root, socket, stopOrder, terminal, timeline };
 }
 
+function terminalEntries(subject, runId) {
+  return subject.timeline.filter((entry) => entry.action === "terminal.event" && entry.runId === runId);
+}
+
 test("Root session ordered drain stops Executors, observes terminals, then stops Plan Runner", async (t) => {
   const subject = await orderedDrainFixture(t, { emitTerminalOnStop: true });
   await subject.broker.closeRootSession();
@@ -1608,42 +1626,56 @@ test("Root session ordered drain stops Executors, observes terminals, then stops
     { runId: "executor-a", dir: "/trusted/executor-a" },
     { runId: "executor-b", dir: "/trusted/executor-b" },
     { runId: "plan-runner", dir: "/trusted/plan-runner" },
-  ], "stopOrder installs terminal waiters before synchronous stop emits and drains Executors before Plan Runner");
-  const planStop = subject.stopOrder.find((entry) => entry.runId === "plan-runner").at;
-  assert.equal(subject.timeline.find((entry) => entry.action === "socket.write").at >= planStop, true);
-  assert.equal(subject.timeline.find((entry) => entry.action === "socket.end").at >= planStop, true);
-  assert.equal(subject.timeline.find((entry) => entry.action === "upstream.dispose").at >= planStop, true);
+  ], "stopOrder drains Executors before Plan Runner");
+  const executorTerminals = ["executor-a", "executor-b"].flatMap((runId) => terminalEntries(subject, runId));
+  const planTerminal = terminalEntries(subject, "plan-runner").at(-1);
+  const closing = subject.timeline.filter((entry) => entry.action === "socket.write" && entry.frame.type === "root.closing").at(-1);
+  const socketEnd = subject.timeline.find((entry) => entry.action === "socket.end");
+  const dispose = subject.timeline.find((entry) => entry.action === "upstream.dispose");
+  assert.equal(executorTerminals.length, 2, "both Executor terminal events are recorded");
+  assert.ok(executorTerminals.every((entry) => entry.sequence < planTerminal.sequence && entry.at <= planTerminal.at));
+  assert.ok(planTerminal.sequence < closing.sequence && planTerminal.at <= closing.at);
+  assert.ok(planTerminal.sequence < socketEnd.sequence && planTerminal.at <= socketEnd.at);
+  assert.ok(planTerminal.sequence < dispose.sequence && planTerminal.at <= dispose.at);
+  assert.equal(subject.timeline.filter((entry) => entry.action === "socket.write").at(-1).frame.type, "root.closing");
 });
 
 test("Root session ordered drain remains pending until exact observed process terminals", async (t) => {
-  const subject = await orderedDrainFixture(t);
-  let settled = false;
-  const closing = subject.broker.closeRootSession().then(() => { settled = true; });
+  const subject = await orderedDrainFixture(t, { terminalTimeoutMs: 250 });
+  let outcome;
+  const closing = subject.broker.closeRootSession().then(
+    () => { outcome = { status: "resolved" }; },
+    (error) => { outcome = { status: "rejected", error }; },
+  );
   subject.events.emit("subagent:async-complete", { runId: "executor-a", sessionId: subject.root });
-  subject.events.emit("subagent:process-terminal", { version: 1, state: "unknown", runId: "executor-a", reason: "not proof" });
-  await new Promise((resolve) => setTimeout(resolve, 75));
-  assert.equal(settled, false, "async-complete and unknown terminal must not unlock the terminal waiter before the bounded deadline");
+  subject.terminal("executor-a", "unknown");
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(outcome, undefined, "async-complete plus unknown must remain pending inside its 250ms terminal deadline");
   subject.terminal("executor-a"); subject.terminal("executor-b");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(settled, false, "Plan Runner remains pending after both Executor proofs");
+  await waitForCondition(() => subject.stopOrder.some((entry) => entry.runId === "plan-runner"), "Plan Runner stop after Executor observations", { timeoutMs: 40, pollMs: 2 });
+  assert.equal(outcome, undefined, "Plan Runner stop request is not its terminal proof");
   subject.terminal("plan-runner");
   await closing;
+  assert.deepEqual(outcome, { status: "resolved" });
 });
 
 test("Root session ordered drain retains cleanup debt after unknown terminal without birth identity", async (t) => {
-  const subject = await orderedDrainFixture(t, { unavailableBirthIdentity: true });
+  const subject = await orderedDrainFixture(t, { unavailableBirthIdentity: true, terminalTimeoutMs: 50 });
+  const closing = subject.broker.closeRootSession();
+  assert.deepEqual(subject.stopOrder.map((entry) => entry.runId), ["executor-a", "executor-b"], "cleanup debt attempts both Executor stops before terminal proof failure");
   subject.terminal("executor-a", "unknown");
-  await assert.rejects(
-    () => subject.broker.closeRootSession(),
-    (error) => error instanceof AggregateError,
-    "unknown terminal with unavailable birth identity leaves cleanup debt",
-  );
-  assert.deepEqual(subject.stopOrder, []);
+  await assert.rejects(() => closing, (error) => error instanceof AggregateError, "unknown terminal with unavailable birth identity leaves cleanup debt");
+  assert.equal(subject.stopOrder.some((entry) => entry.runId === "plan-runner"), false);
+  assert.equal(subject.broker.server?.listening, true);
+  assert.equal(typeof subject.broker.unsubscribeTerminal, "function");
   assert.equal(subject.timeline.some((entry) => entry.action === "socket.write"), false);
   assert.equal(subject.timeline.some((entry) => entry.action === "socket.end"), false);
   assert.equal(subject.timeline.some((entry) => entry.action === "upstream.dispose"), false);
-  subject.terminal("executor-a"); subject.terminal("executor-b"); subject.terminal("plan-runner");
-  await subject.broker.closeRootSession();
+  subject.terminal("executor-a"); subject.terminal("executor-b");
+  const retry = subject.broker.closeRootSession();
+  await waitForCondition(() => subject.stopOrder.some((entry) => entry.runId === "plan-runner"), "Plan Runner stop on debt retry", { timeoutMs: 40, pollMs: 2 });
+  subject.terminal("plan-runner");
+  await retry;
 });
 
 test("Root session ordered drain aggregates Executor stop failures and retries only debt", async (t) => {
