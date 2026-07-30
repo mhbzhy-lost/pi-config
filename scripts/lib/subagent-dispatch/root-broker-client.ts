@@ -192,6 +192,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
     stop: (params: Record<string, unknown>) => request("stop", params),
     supervisorPending: () => request("supervisor.pending"),
     supervisorReply: (params: Record<string, unknown>) => request("supervisor.reply", params),
+    callerFollowUp: (params: Record<string, unknown>) => request("caller.followup", params),
     subscribe,
     dispose() {
       if (disposed) return;
