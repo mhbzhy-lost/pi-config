@@ -578,11 +578,13 @@ export class RootBrokerServer {
     if (this.closed || socket.destroyed) return;
     const principal = this.principals.get(request.callerRunId);
     if (!principal || principal.callerToken !== request.callerToken) return;
+    let logicalCallerRunId: string | undefined;
     if (principal.role === "plan-runner") {
-      const logicalCallerRunId = this.callerAliases.get(request.callerRunId);
+      logicalCallerRunId = this.callerAliases.get(request.callerRunId);
       if (!logicalCallerRunId || this.logicalCallers.get(logicalCallerRunId)?.activeRunId !== request.callerRunId) return;
     }
     this.registerSubscription(request.callerRunId, socket);
+    if (logicalCallerRunId) this.flushCallerPushQueue(logicalCallerRunId, request.callerRunId, socket);
   }
 
   async dispatch(request: any, socket: Socket, { deferSubscription = false }: { deferSubscription?: boolean } = {}) {
@@ -761,18 +763,60 @@ export class RootBrokerServer {
     } catch { /* malformed upstream lifecycle facts are not forwarded */ }
   }
 
-  deliverOrQueuePush(callerRunId: string, push: BrokerPush, onDelivered?: () => void) {
-    const sockets = [...(this.subscriptions.get(callerRunId) ?? [])].filter((socket) => !socket.destroyed);
-    if (sockets.length === 0) {
-      const queue = this.callerPushQueues.get(callerRunId);
+  outboundPush(push: BrokerPush, actualCallerRunId: string) {
+    return parseBrokerPush({ ...push, callerRunId: actualCallerRunId });
+  }
+
+  flushCallerPushQueue(logicalCallerRunId: string, actualCallerRunId: string, socket: Socket) {
+    const queue = this.callerPushQueues.get(logicalCallerRunId);
+    if (!queue) return false;
+    let flushed = false;
+    while (queue.length > 0) {
+      if (this.closed || socket.destroyed || this.logicalCallers.get(logicalCallerRunId)?.activeRunId !== actualCallerRunId) return flushed;
+      const queued = queue[0];
+      let outbound: BrokerPush;
+      try { outbound = this.outboundPush(queued.push, actualCallerRunId); } catch { return flushed; }
+      try { socket.write(`${JSON.stringify(outbound)}\n`); } catch { return flushed; }
+      queue.shift();
+      flushed = true;
+      try { queued.onDelivered?.(); } catch { /* delivery observers must not interrupt FIFO */ }
+    }
+    return flushed;
+  }
+
+  deliverOrQueuePush(logicalCallerRunId: string, push: BrokerPush, onDelivered?: () => void) {
+    const queue = this.callerPushQueues.get(logicalCallerRunId);
+    const actualCallerRunId = this.logicalCallers.get(logicalCallerRunId)?.activeRunId;
+    const sockets = actualCallerRunId
+      ? [...(this.subscriptions.get(actualCallerRunId) ?? [])].filter((socket) => !socket.destroyed)
+      : [];
+    if (!queue || !actualCallerRunId || sockets.length === 0) {
       if (!queue) return false;
       queue.push({ push, onDelivered });
       return false;
     }
     for (const socket of sockets) {
-      try { socket.write(`${JSON.stringify(push)}\n`); } catch { /* isolate subscriber failures */ }
+      if (queue.length === 0) break;
+      this.flushCallerPushQueue(logicalCallerRunId, actualCallerRunId, socket);
     }
-    onDelivered?.();
+    if (queue.length > 0) {
+      queue.push({ push, onDelivered });
+      return false;
+    }
+    let outbound: BrokerPush;
+    try { outbound = this.outboundPush(push, actualCallerRunId); } catch {
+      queue.push({ push, onDelivered });
+      return false;
+    }
+    let delivered = false;
+    for (const socket of sockets) {
+      try { socket.write(`${JSON.stringify(outbound)}\n`); delivered = true; } catch { /* isolate subscriber failures */ }
+    }
+    if (!delivered) {
+      queue.push({ push, onDelivered });
+      return false;
+    }
+    try { onDelivered?.(); } catch { /* delivery observers must not interrupt push routing */ }
     return true;
   }
 
