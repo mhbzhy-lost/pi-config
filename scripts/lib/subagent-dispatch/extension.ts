@@ -328,6 +328,54 @@ function deactivateSupervisorTool(pi) {
   pi.setActiveTools(activeTools.filter((name) => name !== "subagent_supervisor"));
 }
 
+export function createSupervisorRequestMailbox(route, { limit = 1024 } = {}) {
+  if (typeof route !== "function") throw new TypeError("Supervisor request mailbox route must be a function");
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new TypeError("Supervisor request mailbox limit must be a positive safe integer");
+  }
+
+  let active = false;
+  let disposed = false;
+  let draining;
+  const queue = [];
+
+  const drain = async () => {
+    while (active && queue.length > 0) {
+      const { message, context } = queue.shift();
+      await route(message, context);
+    }
+  };
+
+  return Object.freeze({
+    handle(message, context) {
+      if (disposed) return;
+      if (active && !draining) return route(message, context);
+      if (queue.length >= limit) {
+        const error = new Error("SUPERVISOR_REQUEST_QUEUE_FULL: Supervisor startup mailbox is full");
+        error.code = "SUPERVISOR_REQUEST_QUEUE_FULL";
+        throw error;
+      }
+      queue.push({ message, context });
+    },
+    activate() {
+      if (disposed) return Promise.resolve();
+      active = true;
+      if (draining) return draining;
+      draining = drain().finally(() => { draining = undefined; });
+      return draining;
+    },
+    deactivate() {
+      active = false;
+      queue.length = 0;
+    },
+    dispose() {
+      disposed = true;
+      active = false;
+      queue.length = 0;
+    },
+  });
+}
+
 export function createTypedSubagentExtension(
   pi,
   {
