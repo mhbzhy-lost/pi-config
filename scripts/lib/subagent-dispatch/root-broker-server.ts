@@ -210,14 +210,28 @@ export class RootBrokerServer {
   async drainRun(run: OwnedRun) {
     if (this.terminalProofs.has(run.runId)) return;
     const waiter = this.waitForTerminal(run.runId); // Install before stop: it may emit synchronously.
-    let stopError: unknown;
-    try { await this.upstream.stop({ runId: run.runId, dir: run.asyncDir }); } catch (error) { stopError = error; }
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
+      const terminal = Promise.race([
         waiter.promise,
-        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error(`Root subagent broker terminal proof timed out for run ${run.runId}${stopError ? ` after stop failure: ${stopError instanceof Error ? stopError.message : String(stopError)}` : ""}`)), this.terminalTimeoutMs); }),
+        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error(`Root subagent broker terminal proof timed out for run ${run.runId}`)), this.terminalTimeoutMs); }),
       ]);
+      let stopError: unknown;
+      let stopSettled = false;
+      let stopPromise: Promise<any>;
+      try {
+        stopPromise = Promise.resolve(this.upstream.stop({ runId: run.runId, dir: run.asyncDir }));
+      } catch (error) {
+        stopPromise = Promise.reject(error);
+      }
+      void stopPromise.then(
+        () => { stopSettled = true; },
+        (error) => { stopSettled = true; stopError = error; },
+      );
+      // Preserve immediate stop failures as debt even when stop synchronously emits proof.
+      await Promise.resolve();
+      if (stopSettled && stopError !== undefined) throw stopError;
+      await terminal;
     } finally {
       if (timeout) clearTimeout(timeout);
       waiter.cancel();
@@ -533,7 +547,20 @@ export class RootBrokerServer {
       ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise)),
     ];
     const closing = (async () => {
-      if (startupBarrier.length > 0) await Promise.allSettled(startupBarrier);
+      if (startupBarrier.length > 0) {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const settled = Promise.allSettled(startupBarrier);
+        try {
+          await Promise.race([
+            settled,
+            new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new AggregateError([], "Root subagent broker startup barrier deadline exceeded")), this.terminalTimeoutMs); }),
+          ]);
+        } finally {
+          if (timeout) clearTimeout(timeout);
+          // Keep observing late startup settlements after a bounded close attempt.
+          void settled.then(() => undefined);
+        }
+      }
       const drainPhase = async (role: OwnedRun["role"]) => {
         const runs = [...this.ownedRuns.values()].filter((run) => run.role === role && !this.terminalProofs.has(run.runId));
         const settled = await Promise.allSettled(runs.map((run) => this.drainRun(run)));
