@@ -10,7 +10,7 @@ const SOCKET_PATH_LIMIT = 103;
 const ERROR_MESSAGE_LIMIT = 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
-const METHODS = Object.freeze(["ping", "spawn", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "subscribe"] as const);
+const METHODS = Object.freeze(["ping", "spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "subscribe"] as const);
 const PUSH_TYPES = Object.freeze(["execution.started", "execution.completed", "supervisor.request", "root.closing"] as const);
 const GRANT_ROLES = Object.freeze(["plan-runner", "executor"] as const);
 
@@ -173,6 +173,10 @@ export function parseBrokerRequest(value, { supervisorRequestId } = {}) {
   callerToken(request.callerToken);
   if (typeof request.method !== "string" || !METHODS.includes(request.method)) fail("request.method is unsupported");
   record(request.params, "request.params");
+  if (request.method === "spawn.lookup") {
+    exactObject(request.params, "params", ["spawnKey"]);
+    identity(request.params.spawnKey, "params.spawnKey");
+  }
   if (request.method === "supervisor.reply") {
     identity(request.params.replyTo, "params.replyTo");
     if (supervisorRequestId !== undefined && request.params.replyTo !== identity(supervisorRequestId, "supervisorRequestId")) {

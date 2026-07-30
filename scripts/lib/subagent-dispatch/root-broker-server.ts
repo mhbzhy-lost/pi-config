@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer, Socket } from "node:net";
 import { rm } from "node:fs/promises";
 import path from "node:path";
@@ -17,12 +17,33 @@ type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: (
 type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; events?: { on(channel: string, listener: (event: any) => void): () => void } };
+type SpawnLedgerEntry = { hash: string; state: "spawning" | "spawned" | "uncertain"; promise: Promise<any>; reply?: any; binding?: any };
 
 const FORBIDDEN_SPAWN_FIELDS = new Set(["caller", "root", "token", "parent", "depth", "path", "fanout", "callerRunId", "callerToken", "rootSessionId", "parentRunId", "parentDepth", "parentPath"]);
 const MAX_BUFFER = 64 * 1024;
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function normalizedSpawn(params: Record<string, unknown>) {
+  const { spawnKey: _spawnKey, ...rest } = params;
+  return { ...rest, async: true, clarify: false };
+}
+
 function failure(request: any, code: string, message: string) {
   return createBrokerFailureResponse({ requestId: request?.requestId ?? "invalid-request", rootSessionId: request?.rootSessionId ?? "invalid-root", callerRunId: request?.callerRunId ?? "invalid-caller", code, message: String(message).slice(0, 1024) || "Broker request failed" });
+}
+
+function replay(request: any, response: any) {
+  return response.success
+    ? createBrokerSuccessResponse({ ...request, data: response.data })
+    : failure(request, response.error.code, response.error.message);
 }
 
 export class RootBrokerServer {
@@ -36,6 +57,7 @@ export class RootBrokerServer {
   grantPaths = new Set<string>();
   executorGrants = new Map<string, Promise<{ callerToken: string }>>();
   callerGrants = new Map<string, Promise<{ callerToken: string }>>();
+  spawnLedger = new Map<string, SpawnLedgerEntry>();
   unsubscribeStarted: (() => void) | undefined;
   server: ReturnType<typeof createServer> | undefined;
   closed = false;
@@ -183,31 +205,72 @@ export class RootBrokerServer {
         return createBrokerSuccessResponse({ ...request, data: { ...data, session: { ...(data?.session ?? {}), cwd: caller.cwd }, planRuntime: { originRoot: caller.originRoot, stateRoot: caller.stateRoot } } });
       }
       if (request.method === "spawn") return await this.spawn(request, caller);
+      if (request.method === "spawn.lookup") return this.lookupSpawn(request, caller);
       if (["status", "steer", "interrupt", "stop"].includes(request.method)) return await this.control(request, caller);
       return failure(request, "unsupported", `Broker method ${request.method} is unsupported`);
     } catch (error) { return failure(request, "upstream_failed", error instanceof Error ? error.message : String(error)); }
+  }
+
+  lookupSpawn(request: any, caller: Caller) {
+    const entry = this.spawnLedger.get(`${caller.planId}\u0000${request.params.spawnKey}`);
+    if (!entry) return createBrokerSuccessResponse({ ...request, data: { state: "not-started" } });
+    if (entry.state === "spawned") return createBrokerSuccessResponse({ ...request, data: { state: "spawned", binding: entry.binding } });
+    return createBrokerSuccessResponse({ ...request, data: { state: entry.state } });
   }
 
   async spawn(request: any, caller: Caller) {
     const params = request.params;
     if (caller.role !== "plan-runner" || !["executor", "spark"].includes(params.agent)) return failure(request, "spawn_unauthorized", "Caller may only spawn executor or spark");
     for (const key of Object.keys(params)) if (FORBIDDEN_SPAWN_FIELDS.has(key)) return failure(request, "spawn_invalid", `Spawn parameter ${key} is forbidden`);
-    const reply = await this.upstream.spawn({ ...params, async: true, clarify: false });
+    const spawnKey = params.spawnKey;
+    if (spawnKey === undefined) return await this.spawnLegacy(request, caller, normalizedSpawn(params));
+    if (typeof spawnKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(spawnKey) || spawnKey === "." || spawnKey === "..") return failure(request, "spawn_invalid", "Spawn key is invalid");
+    const key = `${caller.planId}\u0000${spawnKey}`;
+    const hash = createHash("sha256").update(stableJson(normalizedSpawn(params)), "utf8").digest("hex");
+    const existing = this.spawnLedger.get(key);
+    if (existing) {
+      if (existing.hash !== hash) return failure(request, "spawn_conflict", "Spawn key conflicts with existing parameters");
+      if (existing.state === "spawning") return replay(request, await existing.promise);
+      if (existing.state === "spawned") return createBrokerSuccessResponse({ ...request, data: existing.reply });
+      return failure(request, "spawn_uncertain", "Spawn outcome is uncertain and cannot be retried");
+    }
+    const entry = {} as SpawnLedgerEntry;
+    entry.hash = hash;
+    entry.state = "spawning";
+    entry.promise = this.spawnLegacy(request, caller, normalizedSpawn(params), entry);
+    this.spawnLedger.set(key, entry);
+    return await entry.promise;
+  }
+
+  async spawnLegacy(request: any, caller: Caller, params: Record<string, unknown>, entry?: SpawnLedgerEntry) {
+    let reply;
+    try {
+      reply = await this.upstream.spawn(params);
+    } catch (error) {
+      if (entry) entry.state = "uncertain";
+      return failure(request, "upstream_failed", error instanceof Error ? error.message : String(error));
+    }
     const details = reply?.details ?? reply;
     const runId = details?.runId;
     const asyncDir = details?.asyncDir;
     if (typeof runId !== "string" || typeof asyncDir !== "string") {
       if (typeof runId === "string") await this.upstream.stop({ runId, dir: asyncDir }).catch(() => undefined);
+      if (entry) entry.state = "uncertain";
       return failure(request, "spawn_invalid", "Upstream spawn reply is missing runId or asyncDir");
     }
     try {
-      const owner = await this.ensureExecutorOwner(runId);
-      const callerToken = owner.callerToken;
+      await this.ensureExecutorOwner(runId);
       caller.ownedRunIds.add(runId);
       this.runOwners.set(runId, request.callerRunId);
     } catch (error) {
+      if (entry) entry.state = "uncertain";
       try { await this.upstream.stop({ runId, dir: asyncDir }); } catch (stopError) { return failure(request, "spawn_cleanup", stopError instanceof Error ? stopError.message : String(stopError)); }
       return failure(request, "spawn_cleanup", error instanceof Error ? error.message : String(error));
+    }
+    if (entry) {
+      entry.state = "spawned";
+      entry.reply = reply;
+      entry.binding = details;
     }
     return createBrokerSuccessResponse({ ...request, data: reply });
   }
@@ -248,6 +311,7 @@ export class RootBrokerServer {
         this.grantPaths.clear();
         this.executorGrants.clear();
         this.callerGrants.clear();
+        this.spawnLedger.clear();
       }
     })();
     return this.closePromise;

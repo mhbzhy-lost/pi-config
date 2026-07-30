@@ -245,12 +245,15 @@ function codingSpawnParams(ir, prompt) {
   };
 }
 
-async function executeCoding(input, ctx, rpc, createId, titleRegistry) {
+async function executeCoding(toolCallId, input, ctx, rpc, createId, titleRegistry, resolveCodingSpawnIdentity) {
   const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
   const prompt = renderCodingDispatchPrompt(ir);
   titleRegistry.prepare({ agent: ir.agent, task: prompt, title: ir.title });
   assertSpawnCapabilities(await rpc.ping(), ctx.cwd);
-  const binding = spawnBinding(await rpc.spawn(codingSpawnParams(ir, prompt)));
+  const identity = typeof resolveCodingSpawnIdentity === "function"
+    ? await resolveCodingSpawnIdentity({ toolCallId, contract: input, contractHash: ir.hash })
+    : undefined;
+  const binding = spawnBinding(await rpc.spawn(codingSpawnParams(ir, prompt), identity));
   titleRegistry.remember(binding.runId, ir.title);
   const handle = {
     version: "coding-dispatch-handle.v1",
@@ -325,6 +328,7 @@ export function createTypedSubagentExtension(
     titleRegistry = getTitleRegistry(cleanupStore),
     extraDisposables = [],
     renderSubagentResult,
+    resolveCodingSpawnIdentity,
     beforeDispose = async () => {},
   } = {},
 ) {
@@ -349,11 +353,11 @@ export function createTypedSubagentExtension(
     description: TYPED_SUBAGENT_DESCRIPTION,
     parameters: TYPED_SUBAGENT_PARAMETERS,
     ...(typeof renderSubagentResult === "function" ? { renderResult: renderSubagentResult } : {}),
-    async execute(_id, input, _signal, _onUpdate, ctx) {
+    async execute(toolCallId, input, _signal, _onUpdate, ctx) {
       try {
         if (!isRecord(input)) return failure("INVALID_DISPATCH", "subagent input must be an object");
         if (Object.hasOwn(input, "action")) return await executeControl(input, rpc);
-        if (Object.hasOwn(input, "version")) return await executeCoding(input, ctx, rpc, createId, titleRegistry);
+        if (Object.hasOwn(input, "version")) return await executeCoding(toolCallId, input, ctx, rpc, createId, titleRegistry, resolveCodingSpawnIdentity);
         return await executeGeneric(input, ctx, rpc, titleRegistry);
       } catch (error) {
         const code = error?.code

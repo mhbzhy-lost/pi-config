@@ -50,12 +50,12 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
     }
   };
 
-  const envelope = async (method: string, params: Record<string, unknown>) => {
+  const envelope = async (method: string, params: Record<string, unknown>, requestId?: string) => {
     const current = await grant();
     assertLive();
     return {
       schemaVersion: "pi-root-subagent-broker-request.v1",
-      requestId: safeRequestId(createId),
+      requestId: requestId === undefined ? safeRequestId(createId) : safeRequestId(() => requestId),
       rootSessionId,
       callerRunId,
       callerToken: current.callerToken,
@@ -64,9 +64,9 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
     };
   };
 
-  const request = async (method: string, params: Record<string, unknown> = {}) => {
+  const request = async (method: string, params: Record<string, unknown> = {}, options: { requestId?: string } = {}) => {
     assertLive();
-    const value = await envelope(method, params);
+    const value = await envelope(method, params, options.requestId);
     return await new Promise<unknown>((resolve, reject) => {
       const socket = connect(brokerSocketPath(rootSessionId));
       sockets.add(socket);
@@ -163,7 +163,11 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
 
   const api = {
     ping: () => request("ping"),
-    spawn: (params: Record<string, unknown>) => request("spawn", { ...params, async: true, clarify: false }),
+    spawn: (params: Record<string, unknown>, options: { requestId?: string; spawnKey?: string } = {}) => {
+      const { spawnKey: _modelSpawnKey, ...clean } = params;
+      return request("spawn", { ...clean, async: true, clarify: false, ...(options.spawnKey !== undefined ? { spawnKey: options.spawnKey } : {}) }, options);
+    },
+    lookupSpawn: ({ spawnKey }: { spawnKey: string }) => request("spawn.lookup", { spawnKey }),
     status: (params: Record<string, unknown>) => request("status", params),
     steer: (params: Record<string, unknown>) => request("steer", params),
     interrupt: (params: Record<string, unknown>) => request("interrupt", params),
