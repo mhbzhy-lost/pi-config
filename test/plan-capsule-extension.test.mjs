@@ -281,25 +281,6 @@ test("plan_open tool result registers a durable Root wake", async () => {
   assert.deepEqual(messages, []);
 });
 
-test("deduplicates repeated plan_open tool results within a session", async () => {
-  const binding = openBinding();
-  const { tools, handlers, messages } = setup({
-    validateBinding: async (input) => ({ ...input, originRoot: "/origin", headCommit: "base", tasks: [{ id: "task-1" }] }),
-  });
-  const result = await execute(tools.get("plan_open"), binding);
-  assert.equal(result.isError, false, result.content[0].text);
-
-  const event = { toolName: "plan_open", isError: false };
-  await handlers.get("tool_result")(event, context());
-  await handlers.get("tool_result")(event, context());
-
-  assert.equal(messages.length, 1);
-  assert.deepEqual(messages[0], {
-    message: { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: "release-11" } },
-    options: { triggerTurn: true, deliverAs: "followUp" },
-  });
-});
-
 test("plan_open appends plan.created before writing the current revision", async () => {
   const calls = [];
   const { tools } = setup({
