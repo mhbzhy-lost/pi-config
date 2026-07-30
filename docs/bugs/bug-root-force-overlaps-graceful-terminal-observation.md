@@ -13,7 +13,7 @@
 - graceful `Promise.race()` 先以 `TerminalDeadlineError` 拒绝，且该 run 尚无 official proof。
 - 当前 `drainRun()` 的 `catch` 在外围 `finally` 前 `await this.forceCleanup(run, error)`；外围 `finally` 才执行 `cancelled = true`、`cancelSleep?.()`、`clearTimeout(timeout)` 与 `waiter.cancel()`。
 - exact force success RED：在 `captureProcessBirthIdentity()` 的 recapture callback 中观察 `terminalWaiters`，当前仍含该 run，断言为 `true`；GREEN 应为 `false`。
-- signal 同步发出 proof 的 RED：在 `killProcess()` 同步 proof 后的 death probe 中观察 `terminalWaiters`，当前仍含该 run，断言为 `true`；GREEN 应为 `false`。
+- late force artifact continuation RED：保持 force artifact read pending；`killProcess()` 同步发出 matching official event，使 event proof 先赢得 proof race。death probe 中释放一个同 run、但 `runnerProcessInstanceId` 不同且有效的 late artifact read。当前 force observation 的 `finally` 尚未执行，late read 会被接受并覆盖 `terminalProof`；GREEN 必须在 death probe 前取消 force observation，使 late read 看到 `cancelled` 且不得修改 proof。
 
 ## 4. 根因
 
@@ -31,5 +31,5 @@
 本文件为 docs-only 缺陷记录，不修改 production 或 tests。future GREEN 至少覆盖以下独立 RED：
 
 - exact force success：recapture callback 观察 `terminalWaiters.has(runId)` 为 `false`。
-- signal 同步 proof 后的 death probe：观察 `terminalWaiters.has(runId)` 为 `false`。
-- 两项均从当前 `true/true` 变为 GREEN 的 `false/false`，并保持 existing exact force、official proof 与 death-probe 语义不变。
+- force artifact continuation：保持 artifact read pending，令 matching official event 先取得 event proof；death probe 中释放同 run、不同 `runnerProcessInstanceId` 的有效 late read。GREEN 在 probe 前取消 force observation，late read 返回后看到 `cancelled`，不接受该 artifact，death callback 观察到的 `terminalProof` 仍是 event proof 而非 late artifact proof。
+- recapture waiter 从当前 `true` 变为 GREEN 的 `false`；late read proof 污染从当前会覆盖 event proof 变为 GREEN 的隔离，且保持 existing exact force、official proof 与 death-probe 语义不变。
