@@ -21,6 +21,15 @@ export function installRootOwnedSubagent(pi: any, { rootSessionId = process.env.
   let subscribing: Promise<void> | undefined;
   const dedupe = new Set<string>();
   const onPush = (push: any) => {
+    if (push?.type === "supervisor.request") {
+      const data = push.data;
+      const key = `supervisor.request\u0000${data?.requestId}`;
+      if (dedupe.has(key)) return;
+      dedupe.add(key);
+      if (dedupe.size > lifecycleDedupeLimit) dedupe.delete(dedupe.values().next().value!);
+      pi.sendMessage({ customType: "subagent_supervisor_request", content: data.content, display: true, details: { id: data.requestId, reason: data.reason, expectsReply: data.expectsReply, runId: data.executorRunId, agent: data.agent, childIndex: data.childIndex } }, { triggerTurn: true });
+      return;
+    }
     if (!push || (push.type !== "execution.started" && push.type !== "execution.completed")) return;
     const data = push.data;
     const key = `${push.type}\u0000${data?.dispatchId}\u0000${data?.runId}\u0000${data?.state}`;

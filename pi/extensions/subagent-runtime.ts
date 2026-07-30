@@ -28,7 +28,9 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   };
   let brokerStarted = false;
   let previousBrokerMarker: string | undefined;
-  installHeadlessTypedSubagentRuntime(pi, {
+  const rpc = createTypedSubagentRpcClient(pi.events);
+  let runtime: any;
+  runtime = installHeadlessTypedSubagentRuntime(pi, {
     bootstrap: upstreamSubagentRuntime,
     completionNotifierFactory(api: ExtensionAPI, state: { currentSessionId: string | null }) {
       return registerSubagentNotify(api, state, { batchConfig: completionBatch });
@@ -48,11 +50,21 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       }
     },
     renderSubagentResult,
+    rpc,
+    onSupervisorRequest(message, context) {
+      if (brokerStarted) return requireRootBroker(pi).routeSupervisorRequest(message, context);
+    },
   });
   pi.on("session_start", async (_event, ctx) => {
     if (brokerStarted) throw new Error("Root subagent broker is already started");
     const rootSessionId = resolveCurrentSessionId(ctx.sessionManager);
-    const broker = new RootBrokerServer({ rootSessionId, upstream: createTypedSubagentRpcClient(pi.events), events: pi.events });
+    const upstream = Object.freeze({
+      ping: (...args: any[]) => rpc.ping(...args), spawn: (...args: any[]) => rpc.spawn(...args),
+      status: (...args: any[]) => rpc.status(...args), steer: (...args: any[]) => rpc.steer(...args),
+      interrupt: (...args: any[]) => rpc.interrupt(...args), stop: (...args: any[]) => rpc.stop(...args),
+      dispose: () => rpc.dispose(), executeSupervisor: (params: any, context: any) => runtime.executeSupervisor(params, context),
+    });
+    const broker = new RootBrokerServer({ rootSessionId, upstream, events: pi.events });
     previousBrokerMarker = process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
     await startAndBindRootBroker(pi, broker);
     process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = "1";

@@ -340,6 +340,7 @@ export function createTypedSubagentExtension(
     renderSubagentResult,
     resolveCodingSpawnIdentity,
     beforeDispose = async () => {},
+    onSupervisorRequest,
   } = {},
 ) {
   const registry = cleanupRegistry(cleanupStore);
@@ -378,6 +379,14 @@ export function createTypedSubagentExtension(
   };
   pi.registerTool(tool);
 
+  if (typeof onSupervisorRequest === "function") {
+    pi.on("message_end", async (event, ctx) => {
+      if (disposed || registry.get(pi)?.token !== token) return;
+      const message = event?.message;
+      if (message?.customType === "subagent_supervisor_request") await onSupervisorRequest(message, ctx);
+    });
+  }
+
   const supervisorTool = supervisorAdapter ? createSupervisorTool(supervisorAdapter) : undefined;
   if (supervisorTool) {
     pi.registerTool(supervisorTool);
@@ -400,7 +409,8 @@ export function createTypedSubagentExtension(
     }
   });
 
-  return Object.freeze({ tool, supervisorTool, dispose });
+  const executeSupervisor = async (params, ctx) => supervisorAdapter.execute(randomUUID(), params, undefined, undefined, ctx);
+  return Object.freeze({ tool, supervisorTool, executeSupervisor, dispose });
 }
 
 export function installHeadlessTypedSubagentRuntime(pi, {

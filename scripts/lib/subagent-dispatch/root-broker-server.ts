@@ -10,6 +10,7 @@ import {
   ensureBrokerSocketDirectory,
   parseBrokerRequest,
   parseBrokerPush,
+  createSupervisorRequestPush,
   setBrokerSocketPermissions,
   writeBrokerGrant,
 } from "./root-broker-protocol.ts";
@@ -19,6 +20,7 @@ type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: stri
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; events?: { on(channel: string, listener: (event: any) => void): () => void } };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; delivered: Set<string> };
+type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
 
 const FORBIDDEN_SPAWN_FIELDS = new Set(["caller", "root", "token", "parent", "depth", "path", "fanout", "callerRunId", "callerToken", "rootSessionId", "parentRunId", "parentDepth", "parentPath"]);
 const MAX_BUFFER = 64 * 1024;
@@ -59,6 +61,7 @@ export class RootBrokerServer {
   executorGrants = new Map<string, Promise<{ callerToken: string }>>();
   callerGrants = new Map<string, Promise<{ callerToken: string }>>();
   spawnLedger = new Map<string, SpawnLedgerEntry>();
+  supervisorRequests = new Map<string, SupervisorRequest>();
   unsubscribeStarted: (() => void) | undefined;
   unsubscribeComplete: (() => void) | undefined;
   unsubscribeTerminal: (() => void) | undefined;
@@ -212,6 +215,8 @@ export class RootBrokerServer {
       }
       if (request.method === "spawn") return await this.spawn(request, caller);
       if (request.method === "spawn.lookup") return this.lookupSpawn(request, caller);
+      if (request.method === "supervisor.pending") return this.pendingSupervisor(request, caller);
+      if (request.method === "supervisor.reply") return await this.replySupervisor(request, caller);
       if (["status", "steer", "interrupt", "stop"].includes(request.method)) return await this.control(request, caller);
       return failure(request, "unsupported", `Broker method ${request.method} is unsupported`);
     } catch (error) { return failure(request, "upstream_failed", error instanceof Error ? error.message : String(error)); }
@@ -352,6 +357,52 @@ export class RootBrokerServer {
     return createBrokerSuccessResponse({ ...request, data: await this.upstream[request.method](request.params) });
   }
 
+  async routeSupervisorRequest(message: any, context?: any) {
+    if (this.closed || message?.customType !== "subagent_supervisor_request") return;
+    const details = message.details;
+    const { parent: _parent, depth: _depth, path: _path, ...upstreamDetails } = details ?? {};
+    const executorRunId = upstreamDetails.runId;
+    const ownerRunId = typeof executorRunId === "string" ? this.runOwners.get(executorRunId) : undefined;
+    let push;
+    try {
+      push = createSupervisorRequestPush({ rootSessionId: this.rootSessionId, callerRunId: ownerRunId ?? "owner", upstreamDetails: { ...upstreamDetails, content: message.content } });
+    } catch { return { code: "supervisor_request_invalid" }; }
+    const existing = this.supervisorRequests.get(push.data.requestId as string);
+    if (existing) {
+      if (stableJson({ ownerRunId: existing.ownerRunId, data: existing.data }) !== stableJson({ ownerRunId, data: push.data })) return { code: "supervisor_request_conflict" };
+      return;
+    }
+    if (!ownerRunId || !this.callers.has(ownerRunId)) return;
+    const entry: SupervisorRequest = { requestId: push.data.requestId as string, ownerRunId, executorRunId: push.data.executorRunId as string, data: push.data, context, expectsReply: push.data.expectsReply === true, state: "pending" };
+    this.supervisorRequests.set(entry.requestId, entry);
+    for (const socket of this.subscriptions.get(ownerRunId) ?? []) {
+      try { if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`); } catch { /* isolate subscriber failures */ }
+    }
+  }
+
+  pendingSupervisor(request: any, _caller: Caller) {
+    const pending = [...this.supervisorRequests.values()]
+      .filter((entry) => entry.ownerRunId === request.callerRunId && entry.expectsReply && entry.state === "pending")
+      .map((entry) => entry.data);
+    return createBrokerSuccessResponse({ ...request, data: { pending } });
+  }
+
+  async replySupervisor(request: any, _caller: Caller) {
+    const entry = this.supervisorRequests.get(request.params.replyTo);
+    if (!entry || entry.expectsReply !== true || entry.state === "consumed") return failure(request, "supervisor_request_unknown", "Supervisor request is unknown");
+    if (entry.ownerRunId !== request.callerRunId) return failure(request, "supervisor_not_owned", "Supervisor request is not owned by caller");
+    if (entry.state === "replying") return failure(request, "supervisor_request_unknown", "Supervisor request is unavailable");
+    entry.state = "replying";
+    try {
+      const data = await this.upstream.executeSupervisor({ action: "reply", replyTo: request.params.replyTo, message: request.params.message }, entry.context);
+      entry.state = "consumed";
+      return createBrokerSuccessResponse({ ...request, data });
+    } catch (error) {
+      entry.state = "pending";
+      return failure(request, "upstream_failed", error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async closeRootSession() {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
@@ -385,6 +436,7 @@ export class RootBrokerServer {
         this.executorGrants.clear();
         this.callerGrants.clear();
         this.spawnLedger.clear();
+        this.supervisorRequests.clear();
       }
     })();
     return this.closePromise;
