@@ -75,6 +75,50 @@ test("flat Plan Runner waits for a lifecycle follow-up after subagent starts", (
   ], flatPlanTools), { text: "PLAN_RUNNER_WAITING_LIFECYCLE" });
 });
 
+test("flat Plan Runner dispatches the second dispatch wave with its raw contract", () => {
+  const contractA = {
+    task: "task-10a", agent: "executor", runId: "executor-run-1", prompt: "Implement the first approved task only.",
+  };
+  const contractB = {
+    task: "task-10b", agent: "reviewer", runId: "reviewer-run-2", prompt: "Review the integrated first task before proceeding.",
+  };
+  const secondDispatch = toolResult("plan_continue", JSON.stringify({
+    state: "dispatch-required", dispatches: [{ contract: contractB }],
+  }));
+
+  assert.deepEqual(decide([
+    flatPlanPrompt(),
+    toolResult("plan_open", "opened"),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractA }] })),
+    toolResult("subagent", "first task completed"),
+    { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "First lifecycle update.", details: { dispatchId: "dispatch-1", runId: "executor-run-1", state: "completed" } },
+    toolResult("plan_status", '{"tasks":[{"status":"validated","attempts":[{"status":"validated"}]}]}'),
+    secondDispatch,
+  ], flatPlanTools), { tool: { name: "subagent", arguments: contractB } });
+});
+
+test("flat Plan Runner integrates after the second validated wave", () => {
+  const contractA = {
+    task: "task-10a", agent: "executor", runId: "executor-run-1", prompt: "Implement the first approved task only.",
+  };
+  const contractB = {
+    task: "task-10b", agent: "reviewer", runId: "reviewer-run-2", prompt: "Review the integrated first task before proceeding.",
+  };
+
+  assert.deepEqual(decide([
+    flatPlanPrompt(),
+    toolResult("plan_open", "opened"),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractA }] })),
+    toolResult("subagent", "first task completed"),
+    { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "First lifecycle update.", details: { dispatchId: "dispatch-1", runId: "executor-run-1", state: "completed" } },
+    toolResult("plan_status", '{"tasks":[{"status":"validated","attempts":[{"status":"validated"}]}]}'),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractB }] })),
+    toolResult("subagent", "second task completed"),
+    { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "Second lifecycle update.", details: { dispatchId: "dispatch-2", runId: "reviewer-run-2", state: "completed" } },
+    toolResult("plan_status", '{"tasks":[{"status":"validated","attempts":[{"status":"validated"}]},{"status":"validated","attempts":[{"status":"validated"}]}]}'),
+  ], flatPlanTools), { tool: { name: "plan_continue", arguments: { reason: "integrate" } } });
+});
+
 test("flat Plan Runner polls plan_status after a lifecycle follow-up arrives", () => {
   const dispatched = toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: { task: "task-10a" } }] }));
   assert.deepEqual(decide([
