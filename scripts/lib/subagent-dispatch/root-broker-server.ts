@@ -24,7 +24,7 @@ type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: stri
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type LogicalCaller = { activeRunId: string; generation: number };
 type FollowUpIntent = { wakeId: string; reason: "plan-opened" };
-type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number; recordRevivalDiagnostic?: (customType: "pi-root-broker-revival-v1", data: Record<string, unknown>) => unknown };
+type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number; recordRevivalDiagnostic?: (customType: "pi-root-broker-revival-v1", data: Record<string, unknown>) => unknown; lifecycleSessionId?: string };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; queued?: Set<string>; delivered: Set<string> };
 type QueuedCallerPush = { push: BrokerPush; onDelivered?: () => void };
 type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
@@ -64,6 +64,7 @@ function replay(request: any, response: any) {
 
 export class RootBrokerServer {
   rootSessionId: string;
+  lifecycleSessionId: string;
   upstream: Upstream;
   callers = new Map<string, Caller>();
   logicalCallers = new Map<string, LogicalCaller>();
@@ -107,10 +108,11 @@ export class RootBrokerServer {
   artifactPollIntervalMs: number;
   recordRevivalDiagnostic: Dependencies["recordRevivalDiagnostic"];
 
-  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, killProcess = process.kill, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50, recordRevivalDiagnostic }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
+  constructor({ rootSessionId, lifecycleSessionId = rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, killProcess = process.kill, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50, recordRevivalDiagnostic }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
     this.rootSessionId = rootSessionId;
+    this.lifecycleSessionId = lifecycleSessionId;
     this.upstream = upstream;
     this.writeGrant = writeGrant;
     this.randomToken = randomToken;
@@ -169,7 +171,7 @@ export class RootBrokerServer {
       || !["plan-runner", "executor", "spark"].includes(event?.agent)
       || !Number.isSafeInteger(event?.pid) || event.pid <= 0
       || typeof event?.asyncDir !== "string" || !path.isAbsolute(event.asyncDir)
-      || event?.sessionId !== this.rootSessionId) return;
+      || event?.sessionId !== this.lifecycleSessionId) return;
     return { runId, role: event.agent === "spark" ? "executor" : event.agent, asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid };
   }
 
