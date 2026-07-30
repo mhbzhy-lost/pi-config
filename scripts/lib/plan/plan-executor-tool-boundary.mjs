@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { compileCodingDispatchIR } from "../subagent-dispatch/ir.ts";
 
@@ -20,9 +21,11 @@ function compile(input, cwd) {
 
 export function createPlanExecutorToolBoundary() {
   const authorized = new Map();
+  const authorizedToolCallIds = new Map();
 
   return {
     authorize(input, { projection, toolCallId } = {}) {
+      required(typeof toolCallId === "string" && toolCallId.trim(), "Executor dispatch toolCallId is required");
       const originRoot = projection?.workspace?.originRoot;
       required(typeof originRoot === "string" && originRoot, "Executor dispatch requested workspace is unavailable");
       const compiled = compile(input, originRoot);
@@ -56,6 +59,7 @@ export function createPlanExecutorToolBoundary() {
 
       const stored = compile(attempt.tool.contract, originRoot);
       required(stored.hash === attempt.toolHash && stored.hash === compiled.hash, "contract hash mismatch");
+      required(isDeepStrictEqual(input, attempt.tool.contract), "exact contract identity mismatch");
       const contextHash = sha256({
         planIrHash: attempt.planIrHash,
         taskHash: attempt.taskHash,
@@ -69,8 +73,11 @@ export function createPlanExecutorToolBoundary() {
 
       const key = `${attempt.dispatchId}:${compiled.hash}`;
       required(!authorized.has(key), "Executor dispatch already authorized (replay)");
-      authorized.set(key, true);
-      return { attemptId, dispatchId: attempt.dispatchId, contractHash: compiled.hash, toolCallId, state: "executing" };
+      required(!authorizedToolCallIds.has(toolCallId), "Executor dispatch toolCallId already authorized (duplicate)");
+      const authorization = { attemptId, dispatchId: attempt.dispatchId, contractHash: compiled.hash, toolCallId, state: "executing" };
+      authorized.set(key, authorization);
+      authorizedToolCallIds.set(toolCallId, authorization);
+      return authorization;
     },
   };
 }

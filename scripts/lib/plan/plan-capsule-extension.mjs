@@ -161,7 +161,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   });
   pi.on("tool_call", async (event, ctx) => {
     if (!opened) return undefined;
-    if (["contact_supervisor", "bash"].includes(event?.toolName)) {
+    if (["contact_supervisor", "bash", "subagent_wait", "subagent_supervisor"].includes(event?.toolName)) {
       return { block: true, reason: "Plan dispatch authorization boundary owns Harness dispatch and supervision." };
     }
     if (event?.toolName === "subagent") {
@@ -175,7 +175,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
         return { block: true, reason: error instanceof Error ? error.message : "Executor dispatch is not authorized." };
       }
     }
-    if (event?.toolName !== "subagent_supervisor") return undefined;
+    if (event?.toolName !== "plan_executor_supervisor") return undefined;
     if (!["pending", "reply"].includes(event?.input?.action)) {
       return { block: true, reason: "Plan Runner Supervisor access is limited to pending and fenced reply operations." };
     }
@@ -196,7 +196,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     }
   });
   pi.on("tool_result", async (event, ctx) => {
-    if (event?.toolName !== "subagent_supervisor" || event?.input?.action !== "reply") return;
+    if (event?.toolName !== "plan_executor_supervisor" || event?.input?.action !== "reply") return;
     const key = event.toolCallId ?? `${event.input.replyTo}:${event.input.to}`;
     const authorization = authorizedSupervisorReplies.get(key);
     if (!authorization || resolvedSupervisorCalls.has(key)) return;
