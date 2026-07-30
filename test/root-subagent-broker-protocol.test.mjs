@@ -16,6 +16,7 @@ import {
   parseBrokerRequest,
   parseBrokerResponse,
   readBrokerGrant,
+  resolveRootSessionId,
   serializeBrokerGrant,
   setBrokerSocketPermissions,
   writeBrokerGrant,
@@ -148,6 +149,15 @@ test("fixes supervisor push and reply identities to upstream request identity", 
   expectInvalid(() => parseBrokerRequest(request({ method: "supervisor.reply", params: { replyTo: "broker-request-1", answer: "yes" } }), { supervisorRequestId: "upstream-request-1" }), /replyTo/);
   expectInvalid(() => parseBrokerPush({ ...push, data: { ...push.data, brokerRequestId: "second-id" } }), /unknown|additional|secondary identity/i);
   expectInvalid(() => createSupervisorRequestPush({ rootSessionId, callerRunId, upstreamDetails: { id: "upstream-request-1", runId: "executor/run" } }), /runId/);
+});
+
+test("reload identity uses the safe session ID instead of the session file path", () => {
+  const sessionManager = {
+    getSessionFile: () => "/tmp/pi/sessions/2026-07-30_root-session-1.jsonl",
+    getSessionId: () => rootSessionId,
+  };
+
+  assert.equal(resolveRootSessionId(sessionManager), rootSessionId);
 });
 
 test("uses deterministic short socket paths and enforces directory and socket permissions", async () => {

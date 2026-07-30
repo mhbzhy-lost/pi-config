@@ -228,6 +228,11 @@ function assertShortPath(value) {
   return value;
 }
 
+export function resolveRootSessionId(sessionManager) {
+  const sessionId = sessionManager?.getSessionId?.();
+  return identity(sessionId, "rootSessionId");
+}
+
 export function brokerSocketPath(rootSessionId) {
   return assertShortPath(path.posix.join(shortRoot(), `${digest(identity(rootSessionId, "rootSessionId"))}.sock`));
 }
