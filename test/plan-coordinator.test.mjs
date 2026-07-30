@@ -287,6 +287,12 @@ function harness({ approvedPlan = plan(), entries, backend: backendOverrides = {
   const appended = [];
   const spawned = [];
   const allocations = [];
+  const inspections = [];
+  const { inspectWorkspace: suppliedInspectWorkspace, ...coordinatorOptions } = options;
+  const inspectWorkspace = async (candidate) => {
+    inspections.push(candidate);
+    return suppliedInspectWorkspace?.(candidate);
+  };
   let run = 0;
   const backend = {
     async spawn(input) {
@@ -321,9 +327,10 @@ function harness({ approvedPlan = plan(), entries, backend: backendOverrides = {
     outputForAttempt: (attemptId) => `/results/${attemptId}.json`,
     id: (() => { let index = 0; return () => `event-${++index}`; })(),
     now: () => "2026-07-15T00:00:01.000Z",
-    ...options,
+    inspectWorkspace,
+    ...coordinatorOptions,
   });
-  return { ...result, appended, spawned, allocations, backend };
+  return { ...result, appended, spawned, allocations, inspections, backend };
 }
 
 function selfConsistentContractTamper(events, index = 1) {
@@ -972,6 +979,65 @@ test("Task5A2 rejects a self-consistent pending contract tamper before allocatio
 
   assert.equal(replay([createdV3Entry(ir), ...tampered]).attempts.size, 1);
   await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /contract hash mismatch/);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.appended.length, 0);
+});
+
+test("Task5A2 rejects self-consistent pending durable tool execution field tampering", async (t) => {
+  for (const [field, value] of [
+    ["task", "forged but valid execution prompt"],
+    ["agent", "reviewer"],
+    ["timeoutMs", 654_000],
+  ]) {
+    await t.test(field, async () => {
+      const approvedPlan = v3Plan();
+      const ir = compilePlanToIR(approvedPlan);
+      const initial = harness({ approvedPlan, entries: [createdV3Entry(ir)] });
+      await initial.coordinator.prepareAuthorizedDispatches();
+      const tampered = structuredClone(initial.appended);
+      tampered[1].data.tool[field] = value;
+      const subject = harness({ approvedPlan, entries: [createdV3Entry(ir), ...tampered] });
+
+      assert.equal(replay([createdV3Entry(ir), ...tampered]).attempts.size, 1);
+      await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /stale revision\/context|tool/);
+      assert.equal(subject.allocations.length, 0);
+      assert.equal(subject.appended.length, 0);
+    });
+  }
+});
+
+test("Task5A2 rejects a self-consistent pending workspace that differs from the authoritative lease", async () => {
+  const approvedPlan = v3Plan();
+  const ir = compilePlanToIR(approvedPlan);
+  const initial = harness({ approvedPlan, entries: [createdV3Entry(ir)] });
+  await initial.coordinator.prepareAuthorizedDispatches();
+  const tampered = structuredClone(initial.appended);
+  const actualLease = structuredClone(tampered[0].data.workspace);
+  const forgedWorkspace = {
+    ...actualLease,
+    path: "/attempts/forged-pending-workspace",
+    ownerToken: "forged-pending-owner",
+  };
+  tampered[0].data.workspace = forgedWorkspace;
+  tampered[1].data.workspace = structuredClone(forgedWorkspace);
+  tampered[1].data.tool.cwd = forgedWorkspace.path;
+  tampered[1].data.tool.contract.execution.cwd = forgedWorkspace.path;
+  tampered[1].data.toolHash = compileCodingDispatchIR(tampered[1].data.tool.contract, { cwd: "/repo" }).hash;
+  const subject = harness({
+    approvedPlan,
+    entries: [createdV3Entry(ir), ...tampered],
+    options: {
+      async inspectWorkspace(candidate) {
+        if (candidate.path !== actualLease.path || candidate.ownerToken !== actualLease.ownerToken) {
+          throw new Error("workspace lease mismatch");
+        }
+      },
+    },
+  });
+
+  assert.equal(replay([createdV3Entry(ir), ...tampered]).attempts.size, 1);
+  await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /workspace lease mismatch/);
+  assert.equal(subject.inspections.length, 1);
   assert.equal(subject.allocations.length, 0);
   assert.equal(subject.appended.length, 0);
 });
