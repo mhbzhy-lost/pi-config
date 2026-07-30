@@ -201,7 +201,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
     try {
       lease = await (options.createWorkspace ?? createPlanWorkspace)({ originRoot, stateRoot, planId, baseCommit });
       const worktree = lease.workspacePath;
-      const reply = await broker.upstream.spawn({ agent: "plan-runner", title: `Plan ${planId}`, task: bootstrapRevisionIdentity(prepared, { planId, baseCommit, worktree }), cwd: worktree, context: "fresh", async: true, clarify: false, artifacts: true, output: false, timeoutMs: options.planRunnerTimeoutMs ?? DEFAULT_TIMEOUT_MS });
+      const reply = await broker.upstream.spawn({ agent: "plan-runner", title: `Plan ${planId}`, task: bootstrapRevisionIdentity(prepared, { planId, baseCommit, worktree }), cwd: worktree, context: "fresh", async: true, clarify: false, artifacts: true, output: false, acceptance: { level: "none", reason: "Plan Runner generations persist progress through durable Plan events and Root lifecycle." }, timeoutMs: options.planRunnerTimeoutMs ?? DEFAULT_TIMEOUT_MS });
       binding = requireAsyncBinding(reply);
       await broker.grantCaller({ callerRunId: binding.runId, planId, cwd: worktree, originRoot, stateRoot, role: "plan-runner" });
       const handle = trustedHandle({ schemaVersion: HANDLE_SCHEMA, planId, revision: prepared.revision, manifestSha256: prepared.manifestSha256, sourceBytesSha256: prepared.manifest.sourceBytesSha256, planHash: prepared.manifest.planHash, planIrHash: prepared.manifest.irHash, rootSessionId: broker.rootSessionId, planRunnerRunId: binding.runId, asyncDir: binding.asyncDir, worktree, baseCommit });
