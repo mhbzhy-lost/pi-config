@@ -133,6 +133,7 @@ test("default plan runner bootstraps from a delayed real broker grant without PI
   await new Promise((resolve) => setTimeout(resolve, 30));
   await broker.grantCaller({ callerRunId: runId, planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
   await factory;
+  assert.equal(broker.subscriptions.get(runId)?.size, 1);
   const dispatch = v3DispatchBranch();
   const ctx = { cwd: "/repo", sessionManager: { getBranch: () => dispatch.branch.map((data) => ({ customType: "pi-plan-event-v1", data })) } };
   for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx);
