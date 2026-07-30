@@ -2157,7 +2157,7 @@ test("Root verified force cleanup exact success requires force and post-proof de
 });
 
 test("Root verified force cleanup rejects force success without official proof", async () => {
-  const subject = await verifiedForceCleanupFixture({ captures: { "executor-a": ["executor-a-birth", "executor-a-birth"] } });
+  const subject = await verifiedForceCleanupFixture({ captures: { "executor-a": ["executor-a-birth", "executor-a-birth", "unavailable"] } });
   try {
     const outcome = await closeOutcome(subject.broker.closeRootSession(), 100);
     assert.notEqual(outcome.state, "watchdog"); assert.equal(outcome.state, "rejected");
