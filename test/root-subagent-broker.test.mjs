@@ -1928,9 +1928,14 @@ test("Root official terminal artifact drains Executors before Plan Runner from o
 });
 
 test("Root official terminal artifact uses status mirror only after sidecar ENOENT", async () => {
+  const statusReads = new Map();
   const subject = await officialArtifactFixture({
     sidecar: () => undefined,
-    status: (read, file) => ({ state: "stopped", ...(read > 1 ? { processTerminal: officialObservedProof(file.split("/").at(-2)) } : {}) }),
+    status: (_read, file) => {
+      const read = (statusReads.get(file) ?? 0) + 1;
+      statusReads.set(file, read);
+      return { state: "stopped", ...(read > 1 ? { processTerminal: officialObservedProof(file.split("/").at(-2)) } : {}) };
+    },
     artifactPollIntervalMs: 2,
   });
   try {
@@ -1939,6 +1944,8 @@ test("Root official terminal artifact uses status mirror only after sidecar ENOE
     assert.equal(outcome.state, "resolved", "stopped status alone does not unlock before its observed mirror appears");
     assert.ok(counters.sidecar >= 3);
     assert.ok(counters.status >= 6);
+    assert.equal(statusReads.size, 3, "each owned run reads its own status file");
+    for (const reads of statusReads.values()) assert.ok(reads >= 2, "each status file is read until its observed mirror appears");
   } finally {
     await subject.cleanup();
   }
