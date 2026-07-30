@@ -796,7 +796,7 @@ test("Root cleanup ownership retains grants and upstream disposal until grant cl
 
 test("Root cleanup ownership retains teardown state after upstream disposal failure and retries transport once", async (t) => {
   let disposeCalls = 0;
-  const grantDirectory = await mkdtemp(path.join(tmpdir(), "root-broker-dispose-"));
+  const callerRunId = "dispose-plan";
   const events = startedEventBus();
   const broker = new RootBrokerServer({
     rootSessionId,
@@ -807,18 +807,17 @@ test("Root cleanup ownership retains teardown state after upstream disposal fail
   const socket = { destroyed: false, write(value) { writes.push(value); return true; }, endCalls: 0, end() { this.endCalls += 1; this.destroyed = true; }, destroy() { this.destroyed = true; } };
   await broker.start();
   t.after(async () => {
-    await removePath(grantDirectory, { recursive: true, force: true });
     const outcome = await closeOutcome(broker.closeRootSession(), 100);
     assert.notEqual(outcome.state, "watchdog", "dispose cleanup teardown must not hang");
     if (outcome.state === "rejected") throw outcome.error;
   });
-  const caller = await broker.grantCaller({ callerRunId: "dispose-plan", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
-  broker.subscriptions.set(caller.runId, new Set([socket]));
+  const caller = await broker.grantCaller({ callerRunId, planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
+  const retainedGrantPath = [...broker.grantPaths][0];
+  broker.subscriptions.set(callerRunId, new Set([socket]));
   broker.sockets.add(socket);
   broker.spawnLedger.set("plan\u0000dispose", { promise: undefined, state: "done" });
   broker.ownedRuns.set("dispose-executor", { rootSessionId, runId: "dispose-executor", role: "executor", asyncDir: "/async/dispose", sessionId: rootSessionId, pid: 1, birthIdentity: null, identityState: "unavailable" });
   broker.terminalProofs.set("dispose-executor", officialObservedProof("dispose-executor"));
-  broker.grantPaths.add(grantDirectory);
 
   const server = broker.server;
   await assert.rejects(() => broker.closeRootSession(), /controlled dispose failure/);
@@ -827,8 +826,8 @@ test("Root cleanup ownership retains teardown state after upstream disposal fail
   assert.equal(broker.subscriptions.size, 1);
   assert.equal(broker.spawnLedger.size, 1);
   assert.equal(broker.ownedRuns.size, 1);
-  assert.equal(broker.grantPaths.has(grantDirectory), true);
-  assert.equal(broker.callers.has(caller.runId), true);
+  assert.equal(broker.grantPaths.has(retainedGrantPath), true);
+  assert.equal(broker.callers.has(callerRunId), true);
   assert.equal(events.unsubscribed, undefined);
   assert.equal(writes.filter((value) => value.includes("root.closing")).length, 1);
   assert.equal(socket.endCalls, 1);
@@ -839,6 +838,115 @@ test("Root cleanup ownership retains teardown state after upstream disposal fail
   assert.equal(broker.server, undefined);
   assert.equal(events.unsubscribed, true);
   for (const collection of [broker.subscriptions, broker.spawnLedger, broker.ownedRuns, broker.grantPaths, broker.callers]) assert.equal(collection.size, 0);
+});
+
+test("Root cleanup review returns an exact caller grant response", async (t) => {
+  const callerToken = "a".repeat(64);
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: fakeUpstream(),
+    randomToken: () => callerToken,
+    writeGrant: async () => "/tmp/root-cleanup-review-exact-grant.json",
+  });
+  t.after(() => broker.closeRootSession());
+
+  const grant = await broker.grantCaller({ callerRunId: "review-exact-grant", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
+  assert.deepEqual(grant, { callerToken });
+});
+
+test("Root cleanup review re-drains a late Executor before release after grant cleanup debt", async (t) => {
+  const events = startedEventBus();
+  const grantDirectory = await mkdtemp(path.join(tmpdir(), "root-cleanup-review-debt-"));
+  const order = [];
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    events,
+    captureProcessBirthIdentity: async () => "review-late-birth",
+    upstream: {
+      ...fakeUpstream(),
+      async stop({ runId, dir }) {
+        order.push(`stop:${runId}:${dir}`);
+        events.emit("subagent:process-terminal", officialObservedProof(runId));
+        return { stopped: true };
+      },
+      dispose() { order.push("dispose"); },
+    },
+  });
+  await broker.start();
+  t.after(async () => {
+    await removePath(grantDirectory, { recursive: true, force: true });
+    const outcome = await closeOutcome(broker.closeRootSession(), 100);
+    assert.notEqual(outcome.state, "watchdog", "late Executor cleanup must not hang");
+    if (outcome.state === "rejected") throw outcome.error;
+  });
+  broker.grantPaths.add(grantDirectory);
+
+  await assert.rejects(() => broker.closeRootSession());
+  assert.equal(broker.server?.listening, true);
+  assert.notEqual(broker.unsubscribeStarted, undefined);
+  events.emit("subagent:async-started", { id: "review-late-executor", pid: 821, agent: "executor", sessionId: rootSessionId, cwd: "/repo", asyncDir: "/async/review-late-executor" });
+  await events.settled();
+  assert.equal(broker.ownedRuns.has("review-late-executor"), true);
+
+  await removePath(grantDirectory, { recursive: true, force: true });
+  await broker.closeRootSession();
+  assert.deepEqual(order, ["stop:review-late-executor:/async/review-late-executor", "dispose"]);
+});
+
+test("Root cleanup review records a throwing closing write before retry", async (t) => {
+  let writeCalls = 0;
+  let endCalls = 0;
+  let disposeCalls = 0;
+  const events = startedEventBus();
+  const socket = {
+    destroyed: false,
+    write() { writeCalls += 1; if (writeCalls === 1) throw new Error("controlled closing write failure"); return true; },
+    end() { endCalls += 1; this.destroyed = true; },
+    destroy() { this.destroyed = true; },
+  };
+  const broker = new RootBrokerServer({ rootSessionId, events, upstream: { ...fakeUpstream(), dispose() { disposeCalls += 1; } } });
+  await broker.start();
+  t.after(async () => {
+    const outcome = await closeOutcome(broker.closeRootSession(), 100);
+    assert.notEqual(outcome.state, "watchdog", "throwing write cleanup must not hang");
+    if (outcome.state === "rejected") throw outcome.error;
+  });
+  broker.subscriptions.set("review-write", new Set([socket]));
+  broker.sockets.add(socket);
+
+  await assert.rejects(() => broker.closeRootSession(), /controlled closing write failure/);
+  assert.equal(broker.server?.listening, true);
+  assert.notEqual(broker.unsubscribeStarted, undefined);
+  await broker.closeRootSession();
+  assert.deepEqual({ writeCalls, endCalls, disposeCalls }, { writeCalls: 1, endCalls: 1, disposeCalls: 1 });
+});
+
+test("Root cleanup review records a throwing socket end before retry", async (t) => {
+  let writeCalls = 0;
+  let endCalls = 0;
+  let disposeCalls = 0;
+  const events = startedEventBus();
+  const socket = {
+    destroyed: false,
+    write(value) { writeCalls += 1; assert.match(value, /root\.closing/); return true; },
+    end() { endCalls += 1; if (endCalls === 1) throw new Error("controlled end failure"); this.destroyed = true; },
+    destroy() { this.destroyed = true; },
+  };
+  const broker = new RootBrokerServer({ rootSessionId, events, upstream: { ...fakeUpstream(), dispose() { disposeCalls += 1; } } });
+  await broker.start();
+  t.after(async () => {
+    const outcome = await closeOutcome(broker.closeRootSession(), 100);
+    assert.notEqual(outcome.state, "watchdog", "throwing end cleanup must not hang");
+    if (outcome.state === "rejected") throw outcome.error;
+  });
+  broker.subscriptions.set("review-end", new Set([socket]));
+  broker.sockets.add(socket);
+
+  await assert.rejects(() => broker.closeRootSession(), /controlled end failure/);
+  assert.equal(broker.server?.listening, true);
+  assert.notEqual(broker.unsubscribeStarted, undefined);
+  await broker.closeRootSession();
+  assert.deepEqual({ writeCalls, endCalls, disposeCalls }, { writeCalls: 1, endCalls: 1, disposeCalls: 1 });
 });
 
 test("Root cleanup ownership keeps the real runtime broker bound until close retry succeeds", async () => {
