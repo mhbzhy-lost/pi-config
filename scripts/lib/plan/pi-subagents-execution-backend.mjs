@@ -41,6 +41,15 @@ function exactSpawnRequest(input) {
   return normalizeExecutionSpawn(input);
 }
 
+function exactDispatchBinding(input) {
+  const keys = ["dispatchId", "attemptId", "runId", "asyncDir"];
+  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== keys.length || !keys.every((key) => Object.hasOwn(input, key))
+    || !keys.every((key) => nonempty(input[key]))) {
+    throw new ExecutionProtocolError("INVALID_EXECUTION_REQUEST", "Dispatch binding input must contain exactly dispatchId, attemptId, runId, and asyncDir");
+  }
+  return input;
+}
+
 function nonempty(value) {
   return typeof value === "string" && value.length > 0;
 }
@@ -385,12 +394,55 @@ export function createPiSubagentsExecutionBackend({
       const request = exactSpawnRequest(input);
       const existing = pending.get(request.dispatchId);
       if (existing) {
-        if (!existing.binding && stableJson(existing.request) === stableJson(request)) return existing.request;
+        if (stableJson(existing.request) === stableJson(request)) return existing.request;
         throw new ExecutionProtocolError("EXECUTION_DISPATCH_CONFLICT", "Recovered dispatch conflicts with an existing dispatch", request.dispatchId);
       }
       const entry = createEntry(request);
       pending.set(request.dispatchId, entry);
       return entry.request;
+    },
+    async bindDispatch(input) {
+      ensureReady();
+      const target = exactDispatchBinding(input);
+      const entry = pending.get(target.dispatchId);
+      if (!entry) throw new ExecutionProtocolError("EXECUTION_DISPATCH_NOT_FOUND", "Dispatch is not known", target.dispatchId);
+      if (entry.request.attemptId !== target.attemptId) {
+        throw new ExecutionProtocolError("EXECUTION_DISPATCH_MISMATCH", "Dispatch does not belong to the supplied attempt", target.dispatchId);
+      }
+      const existingRun = byRunId.get(target.runId);
+      if (existingRun && existingRun.dispatchId !== target.dispatchId) {
+        throw new ExecutionProtocolError("EXECUTION_BINDING_CONFLICT", "Run is already bound to another dispatch", target.runId);
+      }
+      const binding = Object.freeze({
+        dispatchId: target.dispatchId,
+        attemptId: target.attemptId,
+        runId: target.runId,
+        asyncDir: target.asyncDir,
+        cwd: entry.request.cwd,
+        output: entry.request.output,
+        sessionId,
+        sessionFile: sessionId,
+      });
+      if (entry.binding) {
+        if (stableJson(entry.binding) === stableJson(binding)) return entry.binding;
+        throw new ExecutionProtocolError("EXECUTION_BINDING_MISMATCH", "Dispatch is already bound to a different run", target.dispatchId);
+      }
+      bind(entry, binding);
+      return binding;
+    },
+    async abandonDispatch(input) {
+      ensureReady();
+      const request = supersedeRequest(input);
+      const entry = pending.get(request.dispatchId);
+      if (!entry) return;
+      if (entry.request.attemptId !== request.attemptId) {
+        throw new ExecutionProtocolError("EXECUTION_DISPATCH_MISMATCH", "Dispatch does not belong to the supplied attempt", request.dispatchId);
+      }
+      if (entry.binding) {
+        throw new ExecutionProtocolError("EXECUTION_DISPATCH_BOUND", "Bound dispatch cannot be abandoned", request.dispatchId);
+      }
+      pending.delete(request.dispatchId);
+      entry.bindingWait.reject(new ExecutionProtocolError("EXECUTION_DISPATCH_ABANDONED", "Dispatch recovery was abandoned", request.dispatchId));
     },
     async supersede(input) {
       ensureReady();

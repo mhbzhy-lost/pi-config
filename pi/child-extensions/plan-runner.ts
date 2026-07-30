@@ -45,7 +45,26 @@ export async function bootstrapRuntimeRoots(rpc: { ping(): Promise<unknown> }, {
 }
 
 export default async function planRunner(pi: ExtensionAPI) {
-  const rootOwned = installRootOwnedSubagent(pi);
+  const boundary = createPlanExecutorToolBoundary();
+  let executionBackend: ReturnType<typeof createPiSubagentsExecutionBackend> | undefined;
+  let assertExecutionRuntime: (() => Promise<void>) | undefined;
+  const executionDispatchError = (code: string, message: string) => Object.assign(new Error(message), { code });
+  const rootOwned = installRootOwnedSubagent(pi, {
+    async resolveCodingSpawnIdentity(input: unknown) {
+      if (!executionBackend || !assertExecutionRuntime) throw executionDispatchError("EXECUTION_DISPATCH_INVALID", "Execution backend is not initialized");
+      await assertExecutionRuntime();
+      const identity = boundary.resolveCodingSpawnIdentity(input);
+      const request = boundary.executionRequestForToolCall((input as { toolCallId?: unknown })?.toolCallId as string);
+      await executionBackend.recoverDispatch(request);
+      const lookup = await rootOwned.rpc.lookupSpawn?.({ spawnKey: identity.spawnKey });
+      const state = (lookup as { state?: unknown })?.state;
+      if (state === "uncertain") throw executionDispatchError("EXECUTION_DISPATCH_UNCERTAIN", "Durable dispatch lookup is uncertain");
+      if (!new Set(["not-started", "cleaned", "spawning", "spawned"]).has(state as string)) {
+        throw executionDispatchError("EXECUTION_DISPATCH_INVALID", "Durable dispatch lookup is invalid");
+      }
+      return identity;
+    },
+  });
   installRootSessionOwnerLifecycle(pi);
 
   const executionFacts: unknown[] = [];
@@ -53,12 +72,15 @@ export default async function planRunner(pi: ExtensionAPI) {
   try {
     const roots = await bootstrapRuntimeRoots(rpc);
     await rootOwned.startLifecycleSubscription();
-    const boundary = createPlanExecutorToolBoundary();
-    const executionBackend = createPiSubagentsExecutionBackend({
+    executionBackend = createPiSubagentsExecutionBackend({
       rpc,
       events: pi.events,
       emitFact: (fact: unknown) => executionFacts.push(fact),
     });
+    assertExecutionRuntime = async () => {
+      ensurePlanRuntimeTools(pi, REQUIRED_RUNTIME_TOOLS);
+      await executionBackend!.assertCapabilities({ rpcVersion: 1, methods: REQUIRED_RPC_METHODS });
+    };
     const deps = createPlanRunnerDependencies({
       pi,
       ...roots,
@@ -73,8 +95,7 @@ export default async function planRunner(pi: ExtensionAPI) {
         return boundary.authorize(input, context);
       },
       async assertRuntimeCapabilities() {
-        ensurePlanRuntimeTools(pi, REQUIRED_RUNTIME_TOOLS);
-        await executionBackend.assertCapabilities({ rpcVersion: 1, methods: REQUIRED_RPC_METHODS });
+        await assertExecutionRuntime!();
       },
       disposeExecutionBackend() {
         executionBackend.dispose();

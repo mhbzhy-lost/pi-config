@@ -91,6 +91,15 @@ export function createPlanExecutorToolBoundary() {
         toolCallId,
         state: "executing",
         contract: cloneContract(input),
+        executionRequest: Object.freeze({
+          dispatchId: attempt.dispatchId,
+          attemptId,
+          agent: attempt.tool.agent,
+          task: attempt.tool.task,
+          cwd: attempt.tool.cwd,
+          output: attempt.tool.output,
+          timeoutMs: attempt.tool.timeoutMs,
+        }),
       };
       authorized.set(key, authorization);
       authorizedToolCallIds.set(toolCallId, authorization);
@@ -106,6 +115,13 @@ export function createPlanExecutorToolBoundary() {
       required(input.contractHash === authorization.contractHash, "Executor spawn identity contract hash mismatch");
       authorization.state = "identity-resolved";
       return Object.freeze({ requestId: authorization.dispatchId, spawnKey: authorization.dispatchId });
+    },
+    executionRequestForToolCall(toolCallId) {
+      required(typeof toolCallId === "string" && toolCallId.trim(), "Executor execution request toolCallId is required");
+      const authorization = authorizedToolCallIds.get(toolCallId);
+      required(authorization, "Executor execution request toolCallId is not authorized");
+      required(authorization.state === "identity-resolved", "Executor execution request requires resolved spawn identity");
+      return authorization.executionRequest;
     },
   };
 }
