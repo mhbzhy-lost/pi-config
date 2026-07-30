@@ -377,3 +377,19 @@ test("deduplicates Supervisor request pushes into one Plan Attention", async () 
   assert.equal(subject.messages.length, 1);
   assert.equal(subject.messages[0].message.customType, "subagent_supervisor_request");
 });
+
+test("does not let lifecycle churn evict Supervisor request dedupe", async () => {
+  const subject = lifecycleFixture({ lifecycleDedupeLimit: 2 });
+  const supervisor = { type: "supervisor.request", callerRunId: "run", data: { requestId: "request-1", executorRunId: "R1", content: "Approve.", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 0 } };
+  await subject.installed.startLifecycleSubscription?.();
+  subject.rpc.onPush?.(supervisor);
+  subject.rpc.onPush?.(completed("D1"));
+  subject.rpc.onPush?.(completed("D2"));
+  subject.rpc.onPush?.(supervisor);
+
+  assert.deepEqual({
+    supervisor: subject.messages.filter(({ message }) => message.customType === "subagent_supervisor_request").length,
+    lifecycleEmitted: subject.emitted.length,
+    lifecycleFollowUps: subject.messages.filter(({ message }) => message.customType === "pi-root-subagent-lifecycle-v1").length,
+  }, { supervisor: 1, lifecycleEmitted: 2, lifecycleFollowUps: 2 });
+});

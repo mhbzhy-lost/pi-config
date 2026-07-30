@@ -3,10 +3,10 @@ import test from "node:test";
 
 import { createHeadlessSubagentApi } from "../scripts/lib/subagent-dispatch/runtime-membrane.ts";
 import {
+  createSupervisorRequestMailbox,
   createTypedSubagentExtension,
   installHeadlessTypedSubagentRuntime,
 } from "../scripts/lib/subagent-dispatch/extension.ts";
-import * as subagentDispatchExtension from "../scripts/lib/subagent-dispatch/extension.ts";
 
 function codingContract(overrides = {}) {
   const base = {
@@ -129,18 +129,6 @@ const signal = new AbortController().signal;
 
 async function execute(tool, params, context = ctx) {
   return tool.execute("tool-call-1", params, signal, undefined, context);
-}
-
-function createTestSupervisorRequestMailbox(route, options) {
-  const createMailbox = typeof subagentDispatchExtension.createSupervisorRequestMailbox === "function"
-    ? subagentDispatchExtension.createSupervisorRequestMailbox
-    : () => ({
-      handle() {},
-      async activate() {},
-      deactivate() {},
-      dispose() {},
-    });
-  return createMailbox(route, options);
 }
 
 test("the headless membrane decorates lifecycle and grouped completion messages by run title", () => {
@@ -647,7 +635,7 @@ test("buffers Supervisor requests until mailbox activation", async () => {
   const second = { id: "second" };
   const firstContext = { request: "first" };
   const secondContext = { request: "second" };
-  const mailbox = createTestSupervisorRequestMailbox(async (message, context) => {
+  const mailbox = createSupervisorRequestMailbox(async (message, context) => {
     calls.push({ message, context });
     if (message === first) await firstRouted;
   });
@@ -672,7 +660,7 @@ test("routes Supervisor requests immediately after mailbox activation", async ()
   const calls = [];
   const message = { id: "active" };
   const context = { request: "active" };
-  const mailbox = createTestSupervisorRequestMailbox((receivedMessage, receivedContext) => {
+  const mailbox = createSupervisorRequestMailbox((receivedMessage, receivedContext) => {
     calls.push({ message: receivedMessage, context: receivedContext });
   });
 
@@ -691,7 +679,7 @@ test("drops old-session Supervisor requests on mailbox deactivation", async () =
   const oldContext = { request: "old" };
   const newMessage = { id: "new" };
   const newContext = { request: "new" };
-  const mailbox = createTestSupervisorRequestMailbox((message, context) => {
+  const mailbox = createSupervisorRequestMailbox((message, context) => {
     calls.push({ message, context });
   });
 
@@ -710,7 +698,7 @@ test("fails closed when the Supervisor startup mailbox is full", async () => {
   const first = { id: "first" };
   const second = { id: "second" };
   const third = { id: "third" };
-  const mailbox = createTestSupervisorRequestMailbox((message, context) => {
+  const mailbox = createSupervisorRequestMailbox((message, context) => {
     calls.push({ message, context });
   }, { limit: 2 });
 
@@ -724,4 +712,49 @@ test("fails closed when the Supervisor startup mailbox is full", async () => {
 
   await mailbox.activate();
   assert.deepEqual(calls.map(({ message }) => message), [first, second]);
+});
+
+test("preserves queued Supervisor order after mailbox route failure", async () => {
+  const calls = [];
+  const first = { id: 1 };
+  const second = { id: 2 };
+  const third = { id: 3 };
+  let rejectFirst = true;
+  const mailbox = createSupervisorRequestMailbox(async (message) => {
+    calls.push(message.id);
+    if (message === first && rejectFirst) {
+      rejectFirst = false;
+      throw new Error("controlled route failure");
+    }
+  });
+
+  mailbox.handle(first, {});
+  mailbox.handle(second, {});
+  await assert.rejects(mailbox.activate(), /controlled route failure/);
+  mailbox.handle(third, {});
+  await mailbox.activate();
+
+  assert.deepEqual(calls, [1, 2, 3], "retry must preserve queue order and retry the failed first request");
+});
+
+test("keeps in-flight Supervisor routing isolated from mailbox deactivation", async () => {
+  const calls = [];
+  let releaseFirst;
+  const firstRouted = new Promise((resolve) => { releaseFirst = resolve; });
+  const mailbox = createSupervisorRequestMailbox(async (message) => {
+    calls.push(message.id);
+    if (message.id === 1) await firstRouted;
+  });
+
+  mailbox.handle({ id: 1 }, {});
+  mailbox.handle({ id: 2 }, {});
+  const activation = mailbox.activate();
+  await Promise.resolve();
+  mailbox.deactivate();
+  releaseFirst();
+  await activation;
+  mailbox.handle({ id: 3 }, {});
+  await mailbox.activate();
+
+  assert.deepEqual(calls, [1, 3]);
 });
