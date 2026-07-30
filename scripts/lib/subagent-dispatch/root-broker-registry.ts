@@ -21,15 +21,20 @@ function rootBrokerRegistry(): WeakMap<object, RootBrokerServer> {
 }
 
 function registryKey(pi: object): object {
-  const events = (pi as { events?: unknown }).events;
-  return events !== null && (typeof events === "object" || typeof events === "function") ? events : pi;
+  if (!("events" in pi)) return pi;
+  const events = (pi as { events: unknown }).events;
+  if (events === null || (typeof events !== "object" && typeof events !== "function")) {
+    throw new Error("Root subagent broker events identity is invalid");
+  }
+  return events;
 }
 
 const brokers = rootBrokerRegistry();
 
 export function bindRootBroker(pi: object, broker: RootBrokerServer): void {
-  if (brokers.has(registryKey(pi))) throw new Error("Root subagent broker is already bound");
-  brokers.set(registryKey(pi), broker);
+  const key = registryKey(pi);
+  if (brokers.has(key)) throw new Error("Root subagent broker is already bound");
+  brokers.set(key, broker);
 }
 
 export function requireRootBroker(pi: object): RootBrokerServer {
