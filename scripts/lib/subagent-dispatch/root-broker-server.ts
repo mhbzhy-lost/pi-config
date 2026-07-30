@@ -82,8 +82,9 @@ export class RootBrokerServer {
   server: ReturnType<typeof createServer> | undefined;
   closed = false;
   closePromise: Promise<void> | undefined;
-  teardown = { drained: false, grants: false, transport: false, upstream: false, released: false };
+  teardown = { grants: false, transport: false, upstream: false, released: false };
   cleanedGrantPaths = new Set<string>();
+  transportSockets = new Set<Socket>();
   closingSockets = new Set<Socket>();
   endedSockets = new Set<Socket>();
   writeGrant: typeof writeBrokerGrant;
@@ -429,7 +430,7 @@ export class RootBrokerServer {
           this.principals.delete(callerRunId);
           throw new Error("Root subagent broker is closing");
         }
-        return { callerToken, runId: callerRunId };
+        return { callerToken };
       } catch (error) {
         this.callers.delete(callerRunId);
         this.principals.delete(callerRunId);
@@ -442,6 +443,7 @@ export class RootBrokerServer {
 
   handleSocket(socket: Socket) {
     this.sockets.add(socket);
+    this.transportSockets.add(socket);
     socket.once("close", () => this.sockets.delete(socket));
     let buffer = "";
     let handled = false;
@@ -481,6 +483,7 @@ export class RootBrokerServer {
       if (request.method === "subscribe") {
         const subscribers = this.subscriptions.get(request.callerRunId) ?? new Set<Socket>();
         subscribers.add(socket);
+        this.transportSockets.add(socket);
         this.subscriptions.set(request.callerRunId, subscribers);
         socket.once("close", () => subscribers.delete(socket));
         return createBrokerSuccessResponse({ ...request, data: { subscribed: true } });
@@ -684,70 +687,76 @@ export class RootBrokerServer {
     if (this.teardown.released) return;
     this.closed = true;
     const closing = (async () => {
-      if (!this.teardown.drained) {
-        let startupTimeout: ReturnType<typeof setTimeout> | undefined;
-        const startupDeadline = new Promise<never>((_, reject) => {
-          startupTimeout = setTimeout(() => reject(new AggregateError([], "Root subagent broker startup barrier deadline exceeded")), this.terminalTimeoutMs);
-        });
-        const collectStartupBarrier = () => [...this.startedObservations.values(), ...this.executorGrants.values(), ...this.callerGrants.values(), ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise))];
-        let observedStartupWork = false;
-        try {
-          for (;;) {
-            const startupBarrier = collectStartupBarrier();
-            if (startupBarrier.length === 0) {
-              if (!observedStartupWork) break;
-              await Promise.resolve();
-              if (collectStartupBarrier().length === 0) break;
-              continue;
-            }
-            observedStartupWork = true;
-            const settled = Promise.allSettled(startupBarrier);
-            void settled.then(() => undefined);
-            await Promise.race([settled, startupDeadline]);
+      let startupTimeout: ReturnType<typeof setTimeout> | undefined;
+      const startupDeadline = new Promise<never>((_, reject) => {
+        startupTimeout = setTimeout(() => reject(new AggregateError([], "Root subagent broker startup barrier deadline exceeded")), this.terminalTimeoutMs);
+      });
+      const collectStartupBarrier = () => [...this.startedObservations.values(), ...this.executorGrants.values(), ...this.callerGrants.values(), ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise))];
+      let observedStartupWork = false;
+      try {
+        for (;;) {
+          const startupBarrier = collectStartupBarrier();
+          if (startupBarrier.length === 0) {
+            if (!observedStartupWork) break;
+            await Promise.resolve();
+            if (collectStartupBarrier().length === 0) break;
+            continue;
           }
-        } finally { if (startupTimeout) clearTimeout(startupTimeout); }
-        const drainPhase = async (role: OwnedRun["role"]) => {
-          const runs = [...this.ownedRuns.values()].filter((run) => run.role === role && (this.forcePendingRuns.has(run.runId) || !this.terminalProofs.has(run.runId)));
-          const settled = await Promise.allSettled(runs.map((run) => this.drainRun(run)));
-          const errors = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected").map((result) => result.reason);
-          if (errors.length) throw new AggregateError(errors, `Root subagent broker ${role} drain failed`);
-        };
-        await drainPhase("executor");
-        await drainPhase("plan-runner");
-        this.teardown.drained = true;
-      }
+          observedStartupWork = true;
+          const settled = Promise.allSettled(startupBarrier);
+          void settled.then(() => undefined);
+          await Promise.race([settled, startupDeadline]);
+        }
+      } finally { if (startupTimeout) clearTimeout(startupTimeout); }
+      const drainPhase = async (role: OwnedRun["role"]) => {
+        const runs = [...this.ownedRuns.values()].filter((run) => run.role === role && (this.forcePendingRuns.has(run.runId) || !this.terminalProofs.has(run.runId)));
+        const settled = await Promise.allSettled(runs.map((run) => this.drainRun(run)));
+        const errors = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected").map((result) => result.reason);
+        if (errors.length) throw new AggregateError(errors, `Root subagent broker ${role} drain failed`);
+      };
+      await drainPhase("executor");
+      await drainPhase("plan-runner");
       if (!this.teardown.grants) {
         for (const grantPath of [...this.grantPaths]) {
           if (this.cleanedGrantPaths.has(grantPath)) continue;
-          try { await rm(grantPath, { force: true, recursive: this.callers.size > 0 }); }
+          try { await rm(grantPath, { force: true }); }
           catch (error: any) { if (error?.code !== "ENOENT") throw error; }
           this.cleanedGrantPaths.add(grantPath);
         }
         this.teardown.grants = true;
       }
       if (!this.teardown.transport) {
-        const transportSockets = new Set<Socket>(this.sockets);
         for (const [callerRunId, sockets] of this.subscriptions) {
           const push = { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "root.closing", data: {} };
           for (const socket of sockets) {
-            transportSockets.add(socket);
-            if (!this.closingSockets.has(socket) && !socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);
+            this.transportSockets.add(socket);
+            if (this.closingSockets.has(socket)) continue;
             this.closingSockets.add(socket);
+            if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);
           }
         }
-        for (const socket of transportSockets) {
-          if (!this.endedSockets.has(socket) && !socket.destroyed && typeof (socket as any).end === "function") socket.end();
+        for (const socket of this.transportSockets) {
+          if (this.endedSockets.has(socket)) continue;
           this.endedSockets.add(socket);
+          if (!socket.destroyed && typeof (socket as any).end === "function") socket.end();
         }
         const destroyTimer = setTimeout(() => {
-          for (const socket of transportSockets) if (!socket.destroyed && typeof (socket as any).destroy === "function") socket.destroy();
+          for (const socket of this.transportSockets) if (!socket.destroyed && typeof (socket as any).destroy === "function") socket.destroy();
         }, 25);
         try {
           await new Promise<void>((resolve, reject) => {
-            if (!this.server) return resolve();
-            const fail = (error: Error) => { this.server?.off("error", fail); reject(error); };
-            this.server.once("error", fail);
-            this.server.close(() => { this.server?.off("error", fail); resolve(); });
+            const server = this.server;
+            if (!server) return resolve();
+            let settled = false;
+            const finish = (callback: (value?: any) => void, value?: any) => {
+              if (settled) return;
+              settled = true;
+              server.off("error", fail);
+              callback(value);
+            };
+            const fail = (error: Error) => finish(reject, error);
+            server.once("error", fail);
+            try { server.close(() => finish(resolve)); } catch (error) { finish(reject, error); }
           });
         } finally { clearTimeout(destroyTimer); }
         await rm(brokerSocketPath(this.rootSessionId), { force: true });
@@ -763,7 +772,7 @@ export class RootBrokerServer {
       this.callers.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
       this.grantPaths.clear(); this.executorGrants.clear(); this.callerGrants.clear(); this.spawnLedger.clear(); this.supervisorRequests.clear();
       this.ownedRuns.clear(); this.terminalProofs.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
-      this.closingSockets.clear(); this.endedSockets.clear(); this.cleanedGrantPaths.clear(); this.server = undefined;
+      this.transportSockets.clear(); this.closingSockets.clear(); this.endedSockets.clear(); this.cleanedGrantPaths.clear(); this.server = undefined;
       this.teardown.released = true;
     })();
     this.closePromise = closing;
