@@ -228,6 +228,36 @@ test("grants the revived actual plan-runner while retaining its stable logical a
   assert.deepEqual([...server.callers.keys()], ["plan-runner-1"]);
 });
 
+test("routes an active plan-runner alias follow-up to its stable logical state", async () => {
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture();
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const activeRequest = parseBrokerRequest({
+    ...request,
+    requestId: "request-followup-fresh-1",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    params: { wakeId: "plan-opened-next", reason: "plan-opened" },
+  });
+
+  const response = await server.dispatch(activeRequest, {});
+
+  assert.deepEqual(response, {
+    schemaVersion: "pi-root-subagent-broker-response.v1",
+    requestId: "request-followup-fresh-1",
+    rootSessionId: "root-session-1",
+    callerRunId: "plan-runner-2",
+    success: true,
+    data: { accepted: true, wakeId: "plan-opened-next" },
+  });
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [{ wakeId: "plan-opened-next", reason: "plan-opened" }]);
+  assert.equal(server.callerFollowUps.has("plan-runner-2"), false);
+  assert.deepEqual(resumeCalls, expectedResume);
+});
+
 test("rejects an old actual plan-runner after its revived alias is active", async () => {
   const { ownedRun, proof, request, server } = await createRevivalFixture();
 
