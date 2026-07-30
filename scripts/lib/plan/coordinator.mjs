@@ -248,6 +248,10 @@ export function createPlanCoordinator({
         return { state: null };
       } catch (error) {
         await refreshProjection();
+        if (["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
+          await stopSpawnedBinding(binding);
+          return { state: projection.lifecycle };
+        }
         if (error?.code === "PROJECTION_CONFLICT") continue;
         if (!stopOnPersistenceError) throw error;
         await stopSpawnedBinding(binding, error);
