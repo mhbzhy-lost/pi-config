@@ -764,6 +764,24 @@ test("broker closes idle sockets, disposes upstream once, and validates caller g
   assert.deepEqual(order, ["upstream.dispose"]);
 });
 
+test("Root transport snapshot forgets a closed short-lived client before teardown", async (t) => {
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
+  await broker.start();
+  t.after(async () => {
+    const outcome = await closeOutcome(broker.closeRootSession(), 100);
+    assert.notEqual(outcome.state, "watchdog", "transport snapshot teardown must not hang");
+    if (outcome.state === "rejected") throw outcome.error;
+  });
+
+  const socket = connect(brokerSocketPath(rootSessionId));
+  await once(socket, "connect");
+  socket.end();
+  await once(socket, "close");
+  await waitForCondition(() => broker.sockets.size === 0, "closed client removal from live sockets");
+  assert.equal(broker.sockets.size, 0);
+  assert.equal(broker.transportSockets.size, 0);
+});
+
 test("Root cleanup ownership retains grants and upstream disposal until grant cleanup can succeed", async (t) => {
   let disposed = 0;
   const grantDirectory = await mkdtemp(path.join(tmpdir(), "root-broker-grant-"));
