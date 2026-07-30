@@ -931,6 +931,14 @@ test("broker reconstructs process-terminal lifecycle identity from its spawn led
   await subject.broker.dispatch(request({ callerRunId: "caller-a", callerToken: subject.a.callerToken, method: "spawn", params: { agent: "executor", task: "run", spawnKey: "dispatch-terminal" } }), {});
   subject.events.emit("subagent:async-started", { runId: "lifecycle-run", agent: "executor", asyncDir: "/async/lifecycle", cwd: "/repo", sessionId: "/sessions/1" });
   subject.aSocket.lines.length = 0;
-  subject.events.emit("subagent:process-terminal", { runId: "lifecycle-run", state: "terminal", proof: { code: 0 } });
-  assert.deepEqual(subject.aSocket.lines, [{ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, type: "execution.completed", callerRunId: "caller-a", data: { dispatchId: "dispatch-terminal", runId: "lifecycle-run", asyncDir: "/async/lifecycle", cwd: "/repo", sessionId: "/sessions/1", state: "terminal", processTerminal: { code: 0 } } }]);
+  subject.events.emit("subagent:process-terminal", {
+    version: 1,
+    runId: "lifecycle-run",
+    runnerProcessInstanceId: "runner-process-1",
+    state: "observed",
+    observedAt: 1_700_000_000_000,
+    instances: [{ processInstanceId: "runner-process-1", kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 0, signal: null }],
+  });
+  assert.deepEqual(subject.aSocket.lines, [{ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, type: "execution.completed", callerRunId: "caller-a", data: { dispatchId: "dispatch-terminal", runId: "lifecycle-run", asyncDir: "/async/lifecycle", cwd: "/repo", sessionId: "/sessions/1", state: "observed", processTerminal: { version: 1, runnerProcessInstanceId: "runner-process-1", state: "observed", observedAt: 1_700_000_000_000, instances: [{ processInstanceId: "runner-process-1", kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 0, signal: null }] } } }]);
+  assert.deepEqual(subject.bSocket.lines, []);
 });
