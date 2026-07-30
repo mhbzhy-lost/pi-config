@@ -216,6 +216,34 @@ test("concurrent plan-status calls forward one Attention and retry after send fa
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("plan-status revalidates a tampered Attention body while a poller send is in flight", async () => {
+  const { root, planPath } = await fixture(); const calls = []; let poll; let releaseSend; let enteredSend; let sends = 0;
+  try {
+    const body = "Choose the deployment target."; const bodySha256 = createHash("sha256").update(body).digest("hex");
+    const sendBarrier = new Promise((resolve) => { releaseSend = resolve; });
+    const enteredBarrier = new Promise((resolve) => { enteredSend = resolve; });
+    const { commands } = setup(options(root, calls, {
+      schedule: (callback) => { poll = callback; return "timer-1"; },
+      cancelSchedule: () => {},
+      sendMessage: async () => { sends += 1; enteredSend(); await sendBarrier; },
+    }));
+    await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+    const dir = await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256 } } }] }] });
+    const bodyFile = path.join(dir, "attention", "request-1.md");
+    await (await import("node:fs/promises")).mkdir(path.dirname(bodyFile), { recursive: true }); await writeFile(bodyFile, body);
+    const poller = poll();
+    await enteredBarrier;
+    await writeFile(bodyFile, "tampered");
+    const status = commands.get("plan-status").handler("plan-one", {});
+    const rejectedStatus = assert.rejects(status, /evidence is invalid/);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseSend();
+    await rejectedStatus;
+    assert.equal(sends, 1);
+    await poller;
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("plan_attention_reply fences projection and is idempotent", async () => {
   const { root } = await fixture(); const calls = []; const writes = [];
   try {

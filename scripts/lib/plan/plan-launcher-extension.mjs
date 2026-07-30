@@ -91,35 +91,36 @@ export function createPlanLauncherExtension(pi, options = {}) {
       }
       const key = `${handle.planId}:${attention.requestId}:${attention.projectionVersion}`;
       if (forwardedAttention.has(key)) continue;
+      const runsRoot = path.resolve(stateRoot, "var", "plan-runs", handle.planId);
+      const absoluteBodyPath = path.resolve(runsRoot, bodyPath);
+      const relative = path.relative(runsRoot, absoluteBodyPath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        if (failClosed) throw new Error("Plan Attention evidence is invalid");
+        continue;
+      }
+      const body = await readFile(absoluteBodyPath);
+      if (createHash("sha256").update(body).digest("hex") !== bodySha256) {
+        if (failClosed) throw new Error("Plan Attention evidence is invalid");
+        continue;
+      }
+      if (forwardedAttention.has(key)) continue;
       const pending = forwardingAttention.get(key);
       if (pending) {
         await pending;
         continue;
       }
       const forwarding = (async () => {
-        const runsRoot = path.resolve(stateRoot, "var", "plan-runs", handle.planId);
-      const absoluteBodyPath = path.resolve(runsRoot, bodyPath);
-      const relative = path.relative(runsRoot, absoluteBodyPath);
-      if (relative.startsWith("..") || path.isAbsolute(relative)) {
-        if (failClosed) throw new Error("Plan Attention evidence is invalid");
-        return;
-      }
-      const body = await readFile(absoluteBodyPath);
-      if (createHash("sha256").update(body).digest("hex") !== bodySha256) {
-        if (failClosed) throw new Error("Plan Attention evidence is invalid");
-        return;
-      }
-      await pi.sendMessage?.({
-        customType: "pi-plan-attention-v1",
-        content: [
-          `Plan ${handle.planId} requires user input for Attention ${attention.requestId}.`,
-          `Read the private Attention body with the read tool at ${absoluteBodyPath}, summarize it to the user, and wait for an explicit decision.`,
-          `After the user decides, call plan_attention_reply with planId=${handle.planId}, requestId=${attention.requestId}, and expectedProjectionVersion=${attention.projectionVersion}.`,
-          "Do not infer or submit a decision on the user's behalf.",
-        ].join("\n"),
-        details: { planId: handle.planId, requestId: attention.requestId, expectedProjectionVersion: attention.projectionVersion, bodyPath, bodySha256 },
-      }, { triggerTurn: true, deliverAs: "followUp" });
-      forwardedAttention.add(key);
+        await pi.sendMessage?.({
+          customType: "pi-plan-attention-v1",
+          content: [
+            `Plan ${handle.planId} requires user input for Attention ${attention.requestId}.`,
+            `Read the private Attention body with the read tool at ${absoluteBodyPath}, summarize it to the user, and wait for an explicit decision.`,
+            `After the user decides, call plan_attention_reply with planId=${handle.planId}, requestId=${attention.requestId}, and expectedProjectionVersion=${attention.projectionVersion}.`,
+            "Do not infer or submit a decision on the user's behalf.",
+          ].join("\n"),
+          details: { planId: handle.planId, requestId: attention.requestId, expectedProjectionVersion: attention.projectionVersion, bodyPath, bodySha256 },
+        }, { triggerTurn: true, deliverAs: "followUp" });
+        forwardedAttention.add(key);
       })();
       forwardingAttention.set(key, forwarding);
       try {
