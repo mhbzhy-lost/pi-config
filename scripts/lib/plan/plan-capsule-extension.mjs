@@ -270,6 +270,10 @@ export function createPlanCapsuleExtension(pi, options = {}) {
       .some((attempt) => ["validated", "workspace-allocated"].includes(attempt.status));
     if (hasInFlightAttempt && !hasCoordinatorWork) return;
     if (options.canContinue?.(projection) === true) {
+      if (typeof options.requestCallerFollowUp === "function") {
+        await options.requestCallerFollowUp({ wakeId: "plan-opened", reason: "plan-opened" });
+        return;
+      }
       pi.sendMessage(
         { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: projection.planId } },
         { triggerTurn: true, deliverAs: "followUp" },
@@ -290,6 +294,10 @@ export function createPlanCapsuleExtension(pi, options = {}) {
         const reason = headCheckFailed
           ? "Cannot determine worktree HEAD (git failed). Assuming work exists."
           : `Worktree HEAD advanced to ${currentHead} but plan lifecycle is still running.`;
+        if (typeof options.requestCallerFollowUp === "function") {
+          await options.requestCallerFollowUp({ wakeId: "plan-opened", reason: "plan-opened" });
+          return;
+        }
         pi.sendMessage(
           { customType: "pi-plan-follow-up-v1", content: `${reason} You MUST call plan_verify now. If verification fails, call plan_block with the reason. You cannot exit without reaching a terminal lifecycle state (validated or blocked).`, details: { planId: projection.planId, enforcement: "gate-required" } },
           { triggerTurn: true, deliverAs: "followUp" },
