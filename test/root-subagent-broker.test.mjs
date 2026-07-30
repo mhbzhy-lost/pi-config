@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { connect } from "node:net";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm as removePath, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm as removePath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -323,6 +324,64 @@ test("root ownership guard retries only a missing grant and terminates once on r
   assert.deepEqual(signals, [{ pid: 42, signal: "SIGTERM" }]);
   assert.equal(messages[0].customType, "pi-root-session-closing-v1");
   owner.dispose();
+});
+
+test("Root session abnormal exit terminates each subscribed owner once on broker EOF", async (t) => {
+  const sessionId = `root-eof-${crypto.randomUUID()}`;
+  const reportRoot = await mkdtemp(path.join(tmpdir(), "root-session-owner-eof-"));
+  const rootServer = new URL("../scripts/lib/subagent-dispatch/root-broker-server.ts", import.meta.url).href;
+  const ownerFixture = new URL("./fixtures/root-session-owner-child.ts", import.meta.url);
+  const rootChild = spawn(process.execPath, ["--input-type=module", "--eval", `
+    import { RootBrokerServer } from ${JSON.stringify(rootServer)};
+    const broker = new RootBrokerServer({ rootSessionId: process.env.ROOT_SESSION_ID, upstream: { async ping() { return {}; } } });
+    await broker.start();
+    process.send({ type: "root-ready" });
+    process.on("message", async ({ type, runId }) => {
+      if (type !== "grant") return;
+      if (runId === "executor-owner") await broker.ensureExecutorOwner(runId);
+      else await broker.grantCaller({ callerRunId: runId, planId: "plan-one", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+      process.send({ type: "granted", runId });
+    });
+    setInterval(() => {}, 1_000);
+  `], { env: { ...process.env, ROOT_SESSION_ID: sessionId }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  const children = [];
+  const waitForMessage = (child, predicate, label) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`Timed out waiting for ${label}`)); }, 5_000);
+    const onMessage = (message) => { if (predicate(message)) { cleanup(); resolve(message); } };
+    const onError = (error) => { cleanup(); reject(error); };
+    const cleanup = () => { clearTimeout(timer); child.off("message", onMessage); child.off("error", onError); };
+    child.on("message", onMessage); child.once("error", onError);
+  });
+  const waitForExit = (child, label) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`Timed out waiting for ${label} exit`)); }, 5_000);
+    const onExit = (code, signal) => { cleanup(); resolve({ code, signal }); };
+    const onError = (error) => { cleanup(); reject(error); };
+    const cleanup = () => { clearTimeout(timer); child.off("exit", onExit); child.off("error", onError); };
+    child.once("exit", onExit); child.once("error", onError);
+  });
+  t.after(async () => {
+    for (const child of [rootChild, ...children]) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await Promise.allSettled([removePath(brokerSocketPath(sessionId), { force: true }), removePath(brokerGrantPath(sessionId, "plan-owner"), { force: true }), removePath(brokerGrantPath(sessionId, "executor-owner"), { force: true }), removePath(reportRoot, { recursive: true, force: true })]);
+  });
+  await waitForMessage(rootChild, (message) => message?.type === "root-ready", "root broker startup");
+  for (const runId of ["plan-owner", "executor-owner"]) {
+    rootChild.send({ type: "grant", runId });
+    await waitForMessage(rootChild, (message) => message?.type === "granted" && message.runId === runId, `${runId} grant`);
+  }
+  for (const runId of ["plan-owner", "executor-owner"]) {
+    const child = spawn(process.execPath, [ownerFixture.pathname], { env: { ...process.env, PI_ROOT_SUBAGENT_BROKER_ENABLED: "1", PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: sessionId, PI_SUBAGENT_RUN_ID: runId, ROOT_OWNER_REPORT: path.join(reportRoot, `${runId}.json`) }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    children.push(child);
+    await waitForMessage(child, (message) => message?.type === "owner-ready", `${runId} subscription`);
+  }
+  rootChild.kill("SIGKILL");
+  const exits = await Promise.all(children.map((child, index) => waitForExit(child, `${["plan-owner", "executor-owner"][index]}`)));
+  assert.deepEqual(exits.map(({ signal }) => signal), [null, null]);
+  for (const runId of ["plan-owner", "executor-owner"]) {
+    const report = JSON.parse(await readFile(path.join(reportRoot, `${runId}.json`), "utf8"));
+    assert.equal(report.messages, 1, `${runId} closing message count`);
+    assert.equal(report.sigterms, 1, `${runId} SIGTERM count`);
+  }
+  assert.equal(children.every((child) => child.exitCode !== null || child.signalCode !== null), true, "no owner child remains orphaned");
 });
 
 test("root ownership guard is a legacy no-op without the root broker capability marker", async () => {

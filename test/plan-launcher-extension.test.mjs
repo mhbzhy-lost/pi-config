@@ -154,6 +154,19 @@ test("invalid current Root handle fails closed before Root RPC", async () => {
   try { const { commands } = setup(options(root, calls, { findHandle: async () => ({ planId: "plan-one" }) })); await assert.rejects(commands.get("plan-status").handler("plan-one", {}), /pi-plan-handle.v4/); assert.deepEqual(calls, []); } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("legacy v3 handle is rejected with the flat runtime migration diagnostic before Root RPC", async () => {
+  const { root } = await fixture(); const calls = [];
+  try {
+    const { commands, tools } = setup(options(root, calls, { findHandle: async () => ({ schemaVersion: "pi-plan-handle.v3", planId: "plan-one" }) }));
+    const diagnostic = "Standalone Host handles are unsupported after flat runtime migration";
+    for (const name of ["plan-status", "plan-cancel", "plan-open", "plan-pause", "plan-recover"]) await assert.rejects(commands.get(name).handler("plan-one", {}), (error) => error?.message === diagnostic);
+    const reply = await tools.get("plan_attention_reply").execute("id", { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 1, message: "Proceed." }, undefined, undefined, {});
+    assert.equal(reply.isError, true);
+    assert.equal(reply.content[0].text, diagnostic);
+    assert.deepEqual(calls, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("non-Error tool failures are stringified", async () => {
   const { root, planPath } = await fixture(); const calls = [];
   try { const { tools } = setup(options(root, calls, { createWorkspace: async () => { throw "workspace unavailable"; } })); const result = await tools.get("plan_run").execute("id", { planPath }, undefined, undefined, {}); assert.equal(result.isError, true); assert.equal(result.content[0].text, "workspace unavailable"); } finally { await rm(root, { recursive: true, force: true }); }

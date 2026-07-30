@@ -43,6 +43,16 @@ test("exports the stable RPC v1 method and supported Pi contracts", () => {
   assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1", "0.83.0"]);
 });
 
+test("pinned process-terminal event is declared and emitted by async execution", async () => {
+  const packageRoot = join(repoRoot, "pi/npm/node_modules/pi-subagents");
+  const [types, execution] = await Promise.all([
+    readFile(join(packageRoot, "src/shared/types.ts"), "utf8"),
+    readFile(join(packageRoot, "src/runs/background/async-execution.ts"), "utf8"),
+  ]);
+  assert.match(types, /export const SUBAGENT_PROCESS_TERMINAL_EVENT = "subagent:process-terminal";/);
+  assert.match(execution, /ctx\.pi\.events\.emit\(SUBAGENT_PROCESS_TERMINAL_EVENT, proof\)/);
+});
+
 test("installed launch arguments keep project child agents outside fanout hierarchy", async () => {
   const jiti = createJiti(import.meta.url, { moduleCache: false });
   const piArgs = await jiti.import(join(repoRoot, "pi/npm/node_modules/pi-subagents/src/runs/shared/pi-args.ts"));
