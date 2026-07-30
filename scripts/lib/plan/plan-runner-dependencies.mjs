@@ -310,6 +310,7 @@ export function createPlanRunnerDependencies({
       readEntries: async () => combinedEvents(ctx),
       readProjection: () => currentProjection(ctx),
       allocateWorkspace: allocateAttemptWorkspace,
+      inspectWorkspace: inspectAttemptWorkspace,
       backend: executionBackend,
       stateRoot,
       outputForAttempt: (attemptId) => path.join(resultsDir, `${attemptId}.json`),

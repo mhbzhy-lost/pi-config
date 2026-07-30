@@ -88,6 +88,27 @@ function coreLease(lease) {
   };
 }
 
+async function assertRepositoryIdentity({ originRoot, path: workspacePath, branch }) {
+  try {
+    const commonDirectory = async (repository) => {
+      const directory = await runPlanGit(repository, "rev-parse", "--git-common-dir");
+      if (!directory) throw new Error("missing Git common directory");
+      return await realpath(path.resolve(repository, directory));
+    };
+    const [originCommonDirectory, workspaceCommonDirectory, workspaceBranch] = await Promise.all([
+      commonDirectory(originRoot),
+      commonDirectory(workspacePath),
+      runPlanGit(workspacePath, "branch", "--show-current"),
+    ]);
+    if (workspaceCommonDirectory !== originCommonDirectory || workspaceBranch !== branch) {
+      fail("Authoritative attempt workspace repository identity does not match origin");
+    }
+  } catch (error) {
+    if (error instanceof Error && /repository identity/.test(error.message)) throw error;
+    fail("Authoritative attempt workspace repository identity does not match origin");
+  }
+}
+
 async function readAuthoritativeLease(lease) {
   if (!lease || typeof lease !== "object") fail("Invalid attempt workspace lease");
   const planId = safeId(lease.planId, "planId");
@@ -108,6 +129,7 @@ async function readAuthoritativeLease(lease) {
     const resolvedRoot = await realpath(path.dirname(stored.path));
     const resolvedPath = await realpath(stored.path);
     if (path.relative(resolvedRoot, resolvedPath).startsWith("..")) fail("Attempt workspace path escapes owner root");
+    await assertRepositoryIdentity(stored);
   }
   return { ...stored, leasePath: paths.leasePath, failurePath: paths.failurePath, statusPath: paths.statusPath };
 }
@@ -129,6 +151,35 @@ async function inspectOwnedWorkspace(owner) {
   };
 }
 
+async function recoverExactLease({ planId, taskId, attemptId, originRoot, stateRoot, baseCommit, paths, branch }) {
+  let stored;
+  try {
+    stored = JSON.parse(await readFile(paths.leasePath, "utf8"));
+  } catch {
+    fail("Authoritative attempt workspace lease is invalid");
+  }
+  const expected = { planId, taskId, attemptId, originRoot, stateRoot, baseCommit, path: paths.workspacePath, branch };
+  for (const [field, value] of Object.entries(expected)) {
+    if (stored?.[field] !== value) fail("Authoritative attempt workspace lease does not match allocation");
+  }
+  if (typeof stored.ownerToken !== "string" || !stored.ownerToken || typeof stored.createdAt !== "string" || !stored.createdAt) {
+    fail("Authoritative attempt workspace lease is invalid");
+  }
+  if (!(await exists(stored.path))) fail("Attempt workspace is missing");
+  let workspaceHead;
+  let workspaceStatus;
+  try {
+    await assertRepositoryIdentity(stored);
+    workspaceHead = await runPlanGit(stored.path, "rev-parse", "HEAD");
+    workspaceStatus = await runPlanGit(stored.path, "status", "--porcelain=v1", "--untracked-files=all");
+  } catch {
+    fail("Authoritative attempt workspace repository identity does not match allocation");
+  }
+  if (workspaceHead !== stored.baseCommit) fail("Authoritative attempt workspace identity does not match allocation");
+  if (workspaceStatus) fail("Authoritative attempt workspace is not clean");
+  return { ...stored, leasePath: paths.leasePath };
+}
+
 export async function allocateAttemptWorkspace(input) {
   const planId = safeId(input?.planId, "planId");
   const taskId = safeId(input?.taskId, "taskId");
@@ -140,7 +191,10 @@ export async function allocateAttemptWorkspace(input) {
   const stateRoot = path.resolve(input.stateRoot);
   const paths = pathsFor(stateRoot, planId, attemptId);
   const branch = `pi-plan-attempt/${planId}/${taskId}/${attemptSequence(attemptId)}`;
-  if (await exists(paths.workspacePath) || await exists(paths.leasePath)) fail("Attempt workspace already exists");
+  if (await exists(paths.leasePath)) {
+    return recoverExactLease({ planId, taskId, attemptId, originRoot, stateRoot, baseCommit: input.baseCommit, paths, branch });
+  }
+  if (await exists(paths.workspacePath)) fail("Attempt workspace already exists");
   if (await runPlanGit(originRoot, "branch", "--list", branch)) fail(`Attempt branch already exists: ${branch}`);
   await runPlanGit(originRoot, "rev-parse", "--verify", `${input.baseCommit}^{commit}`);
   await mkdir(path.dirname(paths.workspacePath), { recursive: true });

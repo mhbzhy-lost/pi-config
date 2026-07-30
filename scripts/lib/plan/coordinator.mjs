@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { createPlanEventWriter } from "./plan-event-writer.mjs";
 import { applyEvent, createProjection } from "./plan-events.mjs";
@@ -139,6 +140,7 @@ export function createPlanCoordinator({
   readEntries,
   readProjection,
   allocateWorkspace,
+  inspectWorkspace,
   backend,
   stateRoot,
   outputForAttempt = (attemptId) => `${stateRoot}/var/plan-runs/results/${attemptId}.json`,
@@ -469,115 +471,298 @@ export function createPlanCoordinator({
   }
 
   async function prepareAuthorizedDispatches() {
+    return prepareDurableDispatches();
+  }
+
+  async function prepareDurableDispatches() {
     await refreshProjection();
     if (ir.version !== "plan-ir.v3") throw new Error("not implemented in initial intent path: legacy Plan IR");
     if (!projection.planId || ["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
       throw new Error("Plan cannot dispatch executors");
     }
-    if (typeof allocateWorkspace !== "function") throw new Error("Attempt workspace allocator is required");
-    if (integrationQueue) throw new Error("not implemented in initial intent path: integration drain");
-
-    const authorization = authorizedFrontier(selectSchedulingView(ir), projection);
-    if (!Array.isArray(authorization)) throw new Error("not implemented in initial intent path: authorization deadlock");
-    if (authorization.length !== 1) throw new Error("not implemented in initial intent path: frontier must contain exactly one task");
-    const node = authorization[0];
-    if (attemptsForTask(projection, node.id).length > 0) {
-      throw new Error("not implemented in initial intent path: existing attempt");
-    }
-
-    const execution = selectExecutionView(ir, node.id);
-    const { task, plan } = execution;
-    if (task.acceptance.strategy !== "commands") throw new Error("not implemented in initial intent path: non-commands acceptance");
-    const selectedCommands = ir.verification.commands.filter((command) => task.acceptance.commandIds.includes(command.id));
-    if (selectedCommands.length === 0) throw new Error("not implemented in initial intent path: selected verification command is unavailable");
-    if (selectedCommands.some((command) => command.cwd !== ".")) throw new Error("not implemented in initial intent path: verification cwd");
-    if (task.execution.workflow?.mode !== "inherit-repository") {
-      throw new Error("not implemented in initial intent path: workflow");
-    }
-
-    const attemptId = nextAttemptId(projection, node.id);
-    const baseCommit = projection.workspace.headCommit;
-    const output = outputForAttempt(attemptId);
-    const workspaceLease = await allocateWorkspace({
-      originRoot: projection.workspace.originRoot,
-      stateRoot,
-      planId: projection.planId,
-      taskId: node.id,
-      attemptId,
-      baseCommit,
-    });
-    await appendEvent("attempt.workspace-allocated", {
-      attemptId,
-      taskId: node.id,
-      baseCommit,
-      workspace: workspaceLease,
-    });
-
-    const source = {
-      version: "dispatch-ir.v1",
-      taskId: task.id,
-      title: task.title,
-      agent: task.execution.agent,
-      risk: task.execution.risk,
-      objective: `Complete approved plan task ${task.id}: ${task.title}.`,
-      workflow: { mode: "tdd" },
-      requirements: [task.body],
-      context: {
-        knownFacts: [
-          `Plan title: ${plan.title}`,
-          `Plan instructions: ${plan.instructions}`,
-          `Task resources: ${JSON.stringify(task.resources)}`,
-        ],
-        decisions: [JSON.stringify(plan.executionPolicy)],
-        relevantFiles: task.allowedPaths,
-      },
-      boundaries: { writePaths: task.allowedPaths, excludedWork: [], forbiddenActions: [] },
-      acceptance: { criteria: [JSON.stringify(task.acceptance)], commands: selectedCommands.map((command) => command.command) },
-      execution: { cwd: workspaceLease.path, timeoutMs: task.execution.timeoutMs },
+    const ensureRevision = () => {
+      const revision = projection.revision;
+      if (!revision || revision.irHash !== ir.hash
+        || revision.irVersion !== ir.version
+        || revision.number !== ir.source?.revision
+        || revision.planHash !== ir.source?.planHash) {
+        throw new Error("stale revision/context");
+      }
+      const taskIds = ir.nodes.map((task) => task.id).sort();
+      const revisionTaskIds = Object.keys(revision.taskHashes ?? {}).sort();
+      const projectionTaskIds = [...projection.tasks.keys()].sort();
+      if (revisionTaskIds.join("\0") !== taskIds.join("\0")
+        || projectionTaskIds.join("\0") !== taskIds.join("\0")) {
+        throw new Error("stale revision/context");
+      }
+      for (const task of ir.nodes) {
+        const hashes = revision.taskHashes[task.id];
+        if (!hashes || hashes.full !== task.hashes.full
+          || hashes.effective !== task.hashes.effective
+          || hashes.scheduling !== task.hashes.scheduling) {
+          throw new Error("stale revision/context");
+        }
+      }
     };
-    const compiled = compileCodingDispatchIR(source, { cwd: projection.workspace.originRoot });
-    const { hash: contractHash, ...contract } = compiled;
-    const receipts = [];
-    const dispatchId = `${attemptId}.dispatch.1`;
-    const prompt = buildExecutionPrompt(execution, { attemptId, baseCommit, output, receipts });
-    const tool = {
-      agent: task.execution.agent,
-      task: prompt,
-      cwd: workspaceLease.path,
-      context: "fresh",
-      async: true,
-      clarify: false,
-      worktree: false,
-      output,
-      outputMode: "file-only",
-      acceptance: false,
-      artifacts: true,
-      timeoutMs: task.execution.timeoutMs,
-      contract,
-      dependencyReceipts: receipts,
+    const split = (text, max = 4096) => {
+      if (/^\s|\s$/.test(text)) throw new Error("capacity");
+      const chars = Array.from(text);
+      const parts = [];
+      let start = 0;
+      while (start < chars.length) {
+        let end = start;
+        let bytes = 0;
+        while (end < chars.length) {
+          const size = Buffer.byteLength(chars[end]);
+          if (bytes + size > max) break;
+          bytes += size;
+          end += 1;
+        }
+        if (end === start) throw new Error("capacity");
+        if (end < chars.length) {
+          while (end > start && (/\s/.test(chars[end - 1]) || /\s/.test(chars[end]))) {
+            end -= 1;
+          }
+          if (end === start) throw new Error("capacity");
+        }
+        parts.push(chars.slice(start, end).join(""));
+        start = end;
+      }
+      return parts;
     };
-    await appendEvent("attempt.dispatch-requested", {
-      attemptId,
-      taskId: node.id,
-      dispatchId,
-      baseCommit,
-      workspace: workspaceLease,
-      tool,
-      toolHash: contractHash,
-      planIrHash: ir.hash,
-      taskHash: task.hashes.effective,
-      schedulingHash: task.hashes.scheduling,
-      dispatchContextHash: sha256({
+    const makeSource = (execution, attemptId, baseCommit, cwd, receipts) => {
+      const { task, plan } = execution;
+      const instructionParts = split(plan.instructions, 4000);
+      const instructionFacts = instructionParts.length === 1
+        ? [`Plan instructions: ${instructionParts[0]}`]
+        : instructionParts.map((part, index) => `Plan instructions (${index + 1}/${instructionParts.length}): ${part}`);
+      const selected = task.acceptance.strategy === "commands"
+        ? task.acceptance.commandIds
+          .map((id) => ir.verification.commands.find((command) => command.id === id))
+          .filter(Boolean)
+        : [];
+      const commands = task.acceptance.strategy === "commands"
+        ? selected.map((command) => command.cwd === "." ? command.command : `cd -- '${command.cwd.replaceAll("'", "'\"'\"'")}' && ${command.command}`)
+        : [`git diff --check ${baseCommit}..HEAD`];
+      const workflow = task.execution.workflow.mode === "inherit-repository"
+        ? { mode: "tdd" }
+        : task.execution.workflow;
+      const knownFacts = [
+        `Plan title: ${plan.title}`,
+        ...instructionFacts,
+        `Task resources: ${JSON.stringify(task.resources)}`,
+      ];
+      if (receipts.length) {
+        knownFacts.push(`Dependency receipts: ${JSON.stringify(receipts)}`);
+      }
+      const acceptance = task.acceptance.strategy === "commands"
+        ? task.acceptance
+        : Object.fromEntries(Object.entries(task.acceptance).filter(([key]) => key !== "commandIds"));
+      return {
+        version: "dispatch-ir.v1",
+        taskId: task.id,
+        title: task.title,
+        agent: task.execution.agent,
+        risk: task.execution.risk,
+        objective: `Complete approved plan task ${task.id}: ${task.title}.`,
+        workflow,
+        requirements: split(task.body),
+        context: {
+          knownFacts,
+          decisions: [JSON.stringify(plan.executionPolicy)],
+          relevantFiles: task.allowedPaths,
+        },
+        boundaries: {
+          writePaths: task.allowedPaths,
+          excludedWork: [],
+          forbiddenActions: [],
+        },
+        acceptance: {
+          criteria: [JSON.stringify(acceptance)],
+          commands,
+        },
+        execution: {
+          cwd,
+          timeoutMs: task.execution.timeoutMs,
+        },
+      };
+    };
+    const compile = (execution, attemptId, baseCommit, cwd, receipts) => {
+      try {
+        return compileCodingDispatchIR(
+          makeSource(execution, attemptId, baseCommit, cwd, receipts),
+          { cwd: projection.workspace.originRoot },
+        );
+      } catch (error) {
+        throw new Error(`capacity: ${error.message}`);
+      }
+    };
+    const makeDurableTool = (execution, attemptId, baseCommit, workspace, receipts) => {
+      const output = outputForAttempt(attemptId);
+      const { hash: contractHash, ...contract } = compile(execution, attemptId, baseCommit, workspace.path, receipts);
+      return {
+        agent: execution.task.execution.agent,
+        task: buildExecutionPrompt(execution, { attemptId, baseCommit, output, receipts }),
+        cwd: workspace.path,
+        context: "fresh",
+        async: true,
+        clarify: false,
+        worktree: false,
+        output,
+        outputMode: "file-only",
+        acceptance: false,
+        artifacts: true,
+        timeoutMs: execution.task.execution.timeoutMs,
+        contract,
+        dependencyReceipts: receipts,
+        contractHash,
+      };
+    };
+    const inspectAttemptLease = async (attemptId, attempt) => {
+      if (typeof inspectWorkspace !== "function") throw new Error("Attempt workspace inspector is required");
+      return await inspectWorkspace({
+        ...attempt.workspace,
+        planId: projection.planId,
+        taskId: attempt.taskId,
+        attemptId,
+        baseCommit: attempt.baseCommit,
+      });
+    };
+    const emit = async (execution, attemptId, baseCommit, workspace, allocation) => {
+      ensureRevision();
+      const receipts = collectDependencyReceipts(projection, execution.task);
+      const { contractHash, ...tool } = makeDurableTool(execution, attemptId, baseCommit, workspace, receipts);
+      const { contract } = tool;
+      const dispatchId = `${attemptId}.dispatch.1`;
+      const output = tool.output;
+      if (allocation) {
+        await appendEvent("attempt.workspace-allocated", {
+          attemptId,
+          taskId: execution.task.id,
+          baseCommit,
+          workspace,
+        });
+      }
+      await appendEvent("attempt.dispatch-requested", {
+        attemptId,
+        taskId: execution.task.id,
+        dispatchId,
+        baseCommit,
+        workspace,
+        tool,
+        toolHash: contractHash,
         planIrHash: ir.hash,
-        taskHash: task.hashes.effective,
-        schedulingHash: task.hashes.scheduling,
+        taskHash: execution.task.hashes.effective,
+        schedulingHash: execution.task.hashes.scheduling,
+        dispatchContextHash: sha256({
+          planIrHash: ir.hash,
+          taskHash: execution.task.hashes.effective,
+          schedulingHash: execution.task.hashes.scheduling,
+          attemptId,
+          baseCommit,
+          output,
+          dependencyReceipts: receipts,
+        }),
+      });
+      return { attemptId, dispatchId, contract, contractHash };
+    };
+    ensureRevision();
+    const pending = [];
+    for (const attempt of requestedAttempts(projection)) {
+      const execution = selectExecutionView(ir, attempt.taskId);
+      const output = outputForAttempt(attempt.attemptId);
+      const receipts = collectDependencyReceipts(projection, execution.task);
+      if (attempt.tool?.output !== output
+        || !Array.isArray(attempt.tool?.dependencyReceipts)
+        || !isDeepStrictEqual(attempt.tool.dependencyReceipts, receipts)) {
+        throw new Error("stale revision/context");
+      }
+      const expectedTool = makeDurableTool(execution, attempt.attemptId, attempt.baseCommit, attempt.workspace, receipts);
+      let stored;
+      try {
+        stored = compileCodingDispatchIR(attempt.tool?.contract, { cwd: projection.workspace.originRoot });
+      } catch {
+        throw new Error("contract hash mismatch");
+      }
+      if (stored.hash !== attempt.toolHash || attempt.toolHash !== expectedTool.contractHash) throw new Error("contract hash mismatch");
+      const contextHash = sha256({ planIrHash: ir.hash, taskHash: execution.task.hashes.effective, schedulingHash: execution.task.hashes.scheduling, attemptId: attempt.attemptId, baseCommit: attempt.baseCommit, output, dependencyReceipts: receipts });
+      if (attempt.dispatchContextHash !== contextHash) throw new Error("stale revision/context");
+      const { contractHash, ...expectedToolWithoutHash } = expectedTool;
+      if (!isDeepStrictEqual(attempt.tool, expectedToolWithoutHash)) throw new Error("stale revision/context");
+      await inspectAttemptLease(attempt.attemptId, attempt);
+      pending.push({ attemptId: attempt.attemptId, dispatchId: attempt.dispatchId, contract: expectedTool.contract, contractHash });
+    }
+    if (pending.length) {
+      return { state: "dispatch-required", dispatches: pending, projectionVersion: projection.version };
+    }
+    const recovery = [...projection.attempts.entries()].find(([, attempt]) => attempt.status === "workspace-allocated");
+    if (recovery) {
+      const [attemptId, attempt] = recovery;
+      if (attempt.baseCommit !== projection.workspace.headCommit || attempt.workspace.baseCommit !== projection.workspace.headCommit) {
+        throw new Error("stale base");
+      }
+      const inspection = await inspectAttemptLease(attemptId, attempt);
+      if (!inspection || typeof inspection !== "object"
+        || inspection.headCommit !== attempt.baseCommit || inspection.clean !== true) {
+        throw new Error("workspace recovery inspection head/clean stale identity check failed");
+      }
+      const dispatch = await emit(
+        selectExecutionView(ir, attempt.taskId),
+        attemptId,
+        attempt.baseCommit,
+        attempt.workspace,
+        false,
+      );
+      return {
+        state: "dispatch-required",
+        dispatches: [dispatch],
+        projectionVersion: projection.version,
+      };
+    }
+    if (integrationQueue) {
+      const drained = await integrationQueue.drain({
+        expectedHead: projection.workspace.headCommit,
+        ownerToken: integrationOwnerToken,
+      });
+      await refreshProjection();
+      if (drained?.state === "blocked" || drained?.state === "cancelled"
+        || ["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
+        const state = drained?.state === "blocked" || drained?.state === "cancelled"
+          ? drained.state
+          : projection.lifecycle;
+        return { state, dispatches: [], projectionVersion: projection.version };
+      }
+    }
+    ensureRevision();
+    if (typeof allocateWorkspace !== "function") throw new Error("Attempt workspace allocator is required");
+    const frontier = authorizedFrontier(selectSchedulingView(ir), projection);
+    if (!Array.isArray(frontier)) throw new Error("authorization deadlock");
+    const prepared = frontier.map((node) => {
+      const execution = selectExecutionView(ir, node.id);
+      const attemptId = nextAttemptId(projection, node.id);
+      compile(
+        execution,
+        attemptId,
+        projection.workspace.headCommit,
+        projection.workspace.originRoot,
+        collectDependencyReceipts(projection, execution.task),
+      );
+      return { execution, attemptId };
+    });
+    const dispatches = [];
+    for (const { execution, attemptId } of prepared) {
+      const baseCommit = projection.workspace.headCommit;
+      const workspace = await allocateWorkspace({
+        originRoot: projection.workspace.originRoot,
+        stateRoot,
+        planId: projection.planId,
+        taskId: execution.task.id,
         attemptId,
         baseCommit,
-        output,
-        dependencyReceipts: receipts,
-      }),
-    });
-    return { state: "dispatch-required", dispatches: [{ attemptId, dispatchId, contract, contractHash }], projectionVersion: projection.version };
+      });
+      dispatches.push(await emit(execution, attemptId, baseCommit, workspace, true));
+    }
+    return { state: dispatches.length ? "dispatch-required" : stateFor(projection), dispatches, projectionVersion: projection.version };
   }
 
   function matchingFacts(attempt, facts) {
