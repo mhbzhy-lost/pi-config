@@ -44,6 +44,22 @@ test("resolves the authorized dispatch into its durable spawn identity exactly o
   assert.throws(() => boundary.resolveCodingSpawnIdentity(input), /resolved|one.?shot|replay/i);
 });
 
+test("returns the frozen authoritative execution request only after resolving its tool call", () => {
+  const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+  boundary.authorize(exact.contract, { projection, toolCallId: "request-call" });
+
+  assert.equal(typeof boundary.executionRequestForToolCall, "function", "Boundary must expose executionRequestForToolCall");
+  assert.throws(() => boundary.executionRequestForToolCall("request-call"), /resolved|authorize|toolCallId/i);
+  boundary.resolveCodingSpawnIdentity({ toolCallId: "request-call", contract: exact.contract, contractHash: exact.contractHash });
+  const request = boundary.executionRequestForToolCall("request-call");
+  assert.deepEqual(request, {
+    dispatchId: "dispatch-1", attemptId: "attempt-1", agent: "executor", task: "Execute task",
+    cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", timeoutMs: 1000,
+  });
+  assert.equal(Object.isFrozen(request), true);
+  assert.throws(() => boundary.executionRequestForToolCall("unknown-call"), /authorized|toolCallId|unknown/i);
+});
+
 for (const [name, resolverInput] of [
   ["unknown tool call", (exact) => ({ toolCallId: "unknown-call", contract: exact.contract, contractHash: exact.contractHash })],
   ["raw contract mismatch", (exact) => ({ toolCallId: "authorized-call", contract: { ...exact.contract, title: ` ${exact.contract.title} ` }, contractHash: exact.contractHash })],

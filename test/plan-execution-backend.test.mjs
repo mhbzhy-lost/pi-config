@@ -445,6 +445,67 @@ test("dispatchId selects its exact recovered dispatch when cwd candidates differ
   backend.dispose();
 });
 
+test("bindDispatch completes a recovered request exactly once and fails closed on mismatches", async () => {
+  const backend = createPiSubagentsExecutionBackend({ events: createEvents(), rpc: { async ping() { return capabilities(); }, dispose() {} } });
+  assert.equal(typeof backend.bindDispatch, "function", "Backend must expose bindDispatch");
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  const request = spawnInput();
+  await backend.recoverDispatch(request);
+  const input = { dispatchId: request.dispatchId, attemptId: request.attemptId, runId: "run-1", asyncDir: "/async/run-1" };
+  const expected = { ...input, cwd: request.cwd, output: request.output, sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl" };
+  assert.deepEqual(await backend.bindDispatch(input), expected);
+  assert.deepEqual(await backend.bindDispatch(input), expected);
+  for (const change of [{ runId: "run-2" }, { asyncDir: "/async/run-2" }, { attemptId: "other-attempt" }]) {
+    await assert.rejects(backend.bindDispatch({ ...input, ...change }), (error) => /MISMATCH|CONFLICT/.test(error.code));
+    assert.deepEqual(await backend.bindDispatch(input), expected);
+  }
+  backend.dispose();
+});
+
+test("abandonDispatch removes only an exact unbound recovered request", async (t) => {
+  await t.test("exact unbound request can recover again", async () => {
+    const backend = createPiSubagentsExecutionBackend({ events: createEvents(), rpc: { async ping() { return capabilities(); }, dispose() {} } });
+    assert.equal(typeof backend.abandonDispatch, "function", "Backend must expose abandonDispatch");
+    await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+    const request = spawnInput(); await backend.recoverDispatch(request);
+    await backend.abandonDispatch({ dispatchId: request.dispatchId, attemptId: request.attemptId });
+    assert.deepEqual(await backend.recoverDispatch(request), request); backend.dispose();
+  });
+  await t.test("unknown is idempotent", async () => {
+    const backend = createPiSubagentsExecutionBackend({ events: createEvents(), rpc: { async ping() { return capabilities(); }, dispose() {} } });
+    assert.equal(typeof backend.abandonDispatch, "function", "Backend must expose abandonDispatch");
+    await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+    await backend.abandonDispatch({ dispatchId: "unknown", attemptId: "attempt-1" }); backend.dispose();
+  });
+  await t.test("attempt mismatch rejects", async () => {
+    const backend = createPiSubagentsExecutionBackend({ events: createEvents(), rpc: { async ping() { return capabilities(); }, dispose() {} } });
+    assert.equal(typeof backend.abandonDispatch, "function", "Backend must expose abandonDispatch");
+    await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+    const request = spawnInput(); await backend.recoverDispatch(request);
+    await assert.rejects(backend.abandonDispatch({ dispatchId: request.dispatchId, attemptId: "other-attempt" }), (error) => error.code === "EXECUTION_DISPATCH_MISMATCH"); backend.dispose();
+  });
+  await t.test("bound request cannot be abandoned", async () => {
+    const backend = createPiSubagentsExecutionBackend({ events: createEvents(), rpc: { async ping() { return capabilities(); }, dispose() {} } });
+    assert.equal(typeof backend.bindDispatch, "function", "Backend must expose bindDispatch");
+    assert.equal(typeof backend.abandonDispatch, "function", "Backend must expose abandonDispatch");
+    await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+    const request = spawnInput(); await backend.recoverDispatch(request);
+    await backend.bindDispatch({ dispatchId: request.dispatchId, attemptId: request.attemptId, runId: "run-1", asyncDir: "/async/run-1" });
+    await assert.rejects(backend.abandonDispatch({ dispatchId: request.dispatchId, attemptId: request.attemptId }), (error) => /BOUND|CONFLICT/.test(error.code)); backend.dispose();
+  });
+});
+
+test("recoverDispatch returns an exact request after its binding is durable", async () => {
+  const backend = createPiSubagentsExecutionBackend({ events: createEvents(), rpc: { async ping() { return capabilities(); }, dispose() {} } });
+  assert.equal(typeof backend.bindDispatch, "function", "Backend must expose bindDispatch");
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  const request = spawnInput(); await backend.recoverDispatch(request);
+  await backend.bindDispatch({ dispatchId: request.dispatchId, attemptId: request.attemptId, runId: "run-1", asyncDir: "/async/run-1" });
+  assert.deepEqual(await backend.recoverDispatch(request), request);
+  await assert.rejects(backend.recoverDispatch({ ...request, task: "conflicting" }), (error) => error.code === "EXECUTION_DISPATCH_CONFLICT");
+  backend.dispose();
+});
+
 test("stale lifecycle dispatchId never falls back to the only cwd candidate", async () => {
   const events = createEvents(); const facts = [];
   const backend = createPiSubagentsExecutionBackend({ events, emitFact: (fact) => facts.push(fact), rpc: { async ping() { return capabilities(); }, dispose() {} } });

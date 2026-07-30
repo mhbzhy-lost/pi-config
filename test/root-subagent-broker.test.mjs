@@ -21,7 +21,7 @@ function fakeUpstream() {
   const calls = [];
   return {
     calls,
-    async ping() { return { version: 1, methods: ["ping", "spawn", "stop"], session: { cwd: "/root" } }; },
+    async ping() { return { version: 1, methods: ["ping", "spawn", "spawn.lookup", "status", "interrupt", "stop"], session: { sessionId: "root-session-uuid", sessionFile: "/sessions/root-session.jsonl", cwd: "/root" } }; },
     async spawn(params) { calls.push({ method: "spawn", params }); return { details: { runId: "executor-run-1", asyncDir: "/async/1" } }; },
     async stop(params) { calls.push({ method: "stop", params }); return { stopped: true }; },
   };
@@ -113,6 +113,7 @@ test("default plan runner bootstraps from a delayed real broker grant without PI
     events: { on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); return () => {}; } },
     on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); },
     registerTool(tool) { tools.set(tool.name, tool); },
+    getAllTools() { return [...tools.values()]; },
     getActiveTools() { return []; }, setActiveTools() {}, sendMessage() {}, appendEntry() {},
   };
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() });
@@ -136,9 +137,16 @@ test("default plan runner bootstraps from a delayed real broker grant without PI
   assert.equal(broker.subscriptions.get(runId)?.size, 1);
   const dispatch = v3DispatchBranch();
   const ctx = { cwd: "/repo", sessionManager: { getBranch: () => dispatch.branch.map((data) => ({ customType: "pi-plan-event-v1", data })) } };
+  await handlers.get("before_agent_start").at(-1)({}, { cwd: "/repo", sessionManager: { getBranch: () => [] } });
   for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx);
   const capsuleToolCall = handlers.get("tool_call").at(-1);
   assert.equal(await capsuleToolCall({ toolName: "subagent", toolCallId: "dispatch-tool-call-1", input: dispatch.contract }, ctx), undefined);
+  const handle = await tools.get("subagent").execute("dispatch-tool-call-1", dispatch.contract, undefined, undefined, ctx);
+  assert.equal(handle.isError, false);
+  assert.equal(handle.details.dispatchId, "dispatch-1");
+  assert.deepEqual(broker.spawnLedger.get("plan\u0000dispatch-1")?.binding, { runId: "executor-run-1", asyncDir: "/async/1" });
+  const spawn = broker.upstream.calls[0].params;
+  for (const key of ["spawnKey", "requestId", "domain", "parent"]) assert.equal(Object.hasOwn(spawn, key), false);
   const replay = await capsuleToolCall({ toolName: "subagent", toolCallId: "dispatch-tool-call-2", input: dispatch.contract }, ctx);
   assert.equal(replay.block, true);
   assert.match(replay.reason, /replay|already authorized/i);
