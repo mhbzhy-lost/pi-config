@@ -326,6 +326,13 @@ function harness({ approvedPlan = plan(), entries, backend: backendOverrides = {
   return { ...result, appended, spawned, allocations, backend };
 }
 
+function selfConsistentContractTamper(events, index = 1) {
+  const tampered = structuredClone(events);
+  tampered[index].data.tool.contract.risk = "high";
+  tampered[index].data.toolHash = compileCodingDispatchIR(tampered[index].data.tool.contract, { cwd: "/repo" }).hash;
+  return tampered;
+}
+
 test("synchronously reflects an external cancellation and refuses dispatch before allocation", async () => {
   const entries = [createdEntry(["task-1"])];
   const appended = [];
@@ -955,6 +962,20 @@ test("Task5A2 rejects a replayed pending nested contract mismatch while reducer 
   await assert.rejects(nested.coordinator.prepareAuthorizedDispatches(), /contract hash mismatch/);
 });
 
+test("Task5A2 rejects a self-consistent pending contract tamper before allocation or append", async () => {
+  const approvedPlan = v3Plan();
+  const ir = compilePlanToIR(approvedPlan);
+  const initial = harness({ approvedPlan, entries: [createdV3Entry(ir)] });
+  await initial.coordinator.prepareAuthorizedDispatches();
+  const tampered = selfConsistentContractTamper(initial.appended);
+  const subject = harness({ approvedPlan, entries: [createdV3Entry(ir), ...tampered] });
+
+  assert.equal(replay([createdV3Entry(ir), ...tampered]).attempts.size, 1);
+  await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /contract hash mismatch/);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.appended.length, 0);
+});
+
 test("Task5A2 rejects a replayed pending stale dispatch context while reducer preserves the event", async () => {
   const approvedPlan = v3Plan();
   const ir = compilePlanToIR(approvedPlan);
@@ -976,6 +997,30 @@ test("Task5A2 rejects v3 preparation without current revision identity", async (
   assert.equal(subject.allocations.length, 0);
   assert.equal(subject.appended.length, 0);
 });
+
+for (const [name, tamper] of [
+  ["number", (entry) => { entry.data.revision.number = 2; }],
+  ["IR version", (entry) => { entry.data.revision.irVersion = "plan-ir.v2"; }],
+  ["plan hash", (entry) => { entry.data.revision.planHash = "c".repeat(64); }],
+  ["task full hash", (entry) => { entry.data.revision.taskHashes["task-1"].full = "c".repeat(64); }],
+  ["extra task identity", (entry) => {
+    entry.data.tasks.push("task-extra");
+    entry.data.revision.taskHashes["task-extra"] = { full: "c".repeat(64), effective: "c".repeat(64), scheduling: "c".repeat(64) };
+  }],
+]) {
+  test(`Task5A2 rejects a replayed stale revision ${name} before allocation or append`, async () => {
+    const approvedPlan = v3Plan();
+    const ir = compilePlanToIR(approvedPlan);
+    const entry = createdV3Entry(ir);
+    tamper(entry);
+    const subject = harness({ approvedPlan, entries: [entry] });
+
+    assert.equal(replay([entry]).revision.irHash, ir.hash);
+    await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /stale revision\/context/);
+    assert.equal(subject.allocations.length, 0);
+    assert.equal(subject.appended.length, 0);
+  });
+}
 
 test("Task5A2 resumes a workspace-allocated crash without allocating a second lease", async () => {
   const approvedPlan = v3Plan();
@@ -1039,6 +1084,20 @@ test("Task5A2 replays all durable pending intents before integration drain", asy
   assert.equal(replayed.appended.length, 0);
 });
 
+test("Task5A2 rejects all later parallel pending intents when one contract is self-consistently tampered", async () => {
+  const approvedPlan = v3ParallelPlan();
+  const ir = compilePlanToIR(approvedPlan);
+  const initial = harness({ approvedPlan, entries: [createdV3Entry(ir)] });
+  await initial.coordinator.prepareAuthorizedDispatches();
+  const tampered = selfConsistentContractTamper(initial.appended, 3);
+  const subject = harness({ approvedPlan, entries: [createdV3Entry(ir), ...tampered] });
+
+  assert.equal(replay([createdV3Entry(ir), ...tampered]).attempts.size, 2);
+  await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /contract hash mismatch/);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.appended.length, 0);
+});
+
 test("Task5A2 binds redacted integrated dependency receipts into the dispatch context", async () => {
   const approvedPlan = v3DependencyPlan();
   const ir = compilePlanToIR(approvedPlan);
@@ -1077,6 +1136,46 @@ test("Task5A2 returns a blocked empty preparation when integration drain blocks"
   const result = await subject.coordinator.prepareAuthorizedDispatches();
 
   assert.equal(result.state, "blocked");
+  assert.deepEqual(result.dispatches, []);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.appended.length, 0);
+});
+
+test("Task5A2 returns cancelled without allocation when integration drain cancels", async () => {
+  const subject = harness({
+    approvedPlan: v3Plan(),
+    options: { integrationQueue: { async drain() { return { state: "cancelled", integrated: [] }; } } },
+  });
+
+  const result = await subject.coordinator.prepareAuthorizedDispatches();
+
+  assert.equal(result.state, "cancelled");
+  assert.deepEqual(result.dispatches, []);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.appended.length, 0);
+});
+
+test("Task5A2 observes an external cancellation appended during integration drain before allocation", async () => {
+  const approvedPlan = v3Plan();
+  const ir = compilePlanToIR(approvedPlan);
+  const entries = [createdV3Entry(ir)];
+  const subject = harness({
+    approvedPlan,
+    entries,
+    options: {
+      readProjection: () => replay(entries),
+      integrationQueue: {
+        async drain() {
+          entries.push(event("plan.cancelled", { reason: "external" }, 99));
+          return { state: "waiting", integrated: [] };
+        },
+      },
+    },
+  });
+
+  const result = await subject.coordinator.prepareAuthorizedDispatches();
+
+  assert.equal(result.state, "cancelled");
   assert.deepEqual(result.dispatches, []);
   assert.equal(subject.allocations.length, 0);
   assert.equal(subject.appended.length, 0);

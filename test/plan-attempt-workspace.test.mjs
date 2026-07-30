@@ -98,6 +98,28 @@ test("allocates isolated attempt worktrees and writes private authoritative leas
   });
 });
 
+test("Task5A2 retries an identical allocation with the authoritative lease unchanged", async () => {
+  await withRepository(async (repository) => {
+    const first = await allocateAttemptWorkspace(input(repository));
+    const second = await allocateAttemptWorkspace(input(repository));
+
+    assert.deepEqual(second, first);
+    assert.equal(await git(repository.originRoot, "worktree", "list", "--porcelain").then((output) => output.match(/worktree /g).length), 2);
+    assert.equal(await git(repository.originRoot, "branch", "--list", first.branch), first.branch);
+  });
+});
+
+test("Task5A2 fails closed when an authoritative lease has no physical workspace", async () => {
+  await withRepository(async (repository) => {
+    const first = await allocateAttemptWorkspace(input(repository));
+    await rm(first.path, { recursive: true, force: true });
+
+    await assert.rejects(allocateAttemptWorkspace(input(repository)), /missing/i);
+    await access(first.leasePath);
+    assert.equal(await git(repository.originRoot, "branch", "--list", first.branch), first.branch);
+  });
+});
+
 test("rejects existing branches, escaped identities, and forged owner tokens", async () => {
   await withRepository(async (repository) => {
     await git(repository.originRoot, "branch", "pi-plan-attempt/plan-1/task-2/1", repository.baseCommit);
