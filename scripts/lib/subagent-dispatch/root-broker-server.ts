@@ -24,7 +24,7 @@ type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: stri
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type LogicalCaller = { activeRunId: string; generation: number };
 type FollowUpIntent = { wakeId: string; reason: "plan-opened" };
-type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number };
+type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number; recordRevivalDiagnostic?: (customType: "pi-root-broker-revival-v1", data: Record<string, unknown>) => unknown };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; queued?: Set<string>; delivered: Set<string> };
 type QueuedCallerPush = { push: BrokerPush; onDelivered?: () => void };
 type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
@@ -105,8 +105,9 @@ export class RootBrokerServer {
   terminalTimeoutMs: number;
   readFile: typeof nodeReadFile;
   artifactPollIntervalMs: number;
+  recordRevivalDiagnostic: Dependencies["recordRevivalDiagnostic"];
 
-  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, killProcess = process.kill, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50 }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
+  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, killProcess = process.kill, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50, recordRevivalDiagnostic }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
     this.rootSessionId = rootSessionId;
@@ -119,6 +120,20 @@ export class RootBrokerServer {
     this.terminalTimeoutMs = terminalTimeoutMs;
     this.readFile = readFile;
     this.artifactPollIntervalMs = artifactPollIntervalMs;
+    this.recordRevivalDiagnostic = recordRevivalDiagnostic;
+  }
+
+  recordDiagnostic(phase: string, logicalCallerRunId?: string, wakeId?: string, extra: Record<string, unknown> = {}) {
+    const logical = logicalCallerRunId ? this.logicalCallers.get(logicalCallerRunId) : undefined;
+    const data: Record<string, unknown> = { schemaVersion: "pi-root-broker-revival-diagnostic.v1", rootSessionId: this.rootSessionId, phase, observedAt: Date.now() };
+    if (logicalCallerRunId) data.logicalCallerRunId = logicalCallerRunId;
+    if (logical) { data.activeRunId = logical.activeRunId; data.generation = logical.generation; }
+    if (wakeId) data.wakeId = wakeId;
+    Object.assign(data, extra);
+    try {
+      const result = this.recordRevivalDiagnostic?.("pi-root-broker-revival-v1", data);
+      if (result && typeof (result as Promise<unknown>).then === "function") void Promise.resolve(result).catch(() => undefined);
+    } catch { /* diagnostics must not affect broker behavior */ }
   }
 
   async start() {
@@ -196,6 +211,7 @@ export class RootBrokerServer {
     try { parseProcessTerminal(terminal); } catch (error) { throw new Error(`invalid official terminal: ${error instanceof Error ? error.message : String(error)}`); }
     if (terminal.state !== "observed") throw new Error(`official terminal is non-observed (${String(terminal.state)})`);
     this.terminalProofs.set(run.runId, value);
+    this.recordDiagnostic("proof.accepted", this.callerAliases.get(run.runId) ?? run.runId);
     const waiters = this.terminalWaiters.get(run.runId);
     this.terminalWaiters.delete(run.runId);
     for (const resolve of waiters ?? []) resolve(value);
@@ -240,15 +256,27 @@ export class RootBrokerServer {
     const followUps = this.callerFollowUps.get(logicalRunId);
     if (!caller || caller.role !== "plan-runner" || !followUps?.length) return;
     const wakeIds = followUps.map((followUp) => followUp.wakeId);
-    const result = await this.upstream.resume({ id: actualRunId, message: "A durable Root broker wake is pending." });
+    const wakeId = wakeIds[0];
+    this.recordDiagnostic("revival.started", logicalRunId, wakeId);
+    this.recordDiagnostic("resume.invoked", logicalRunId, wakeId);
+    let result: any;
+    try {
+      result = await this.upstream.resume({ id: actualRunId, message: "A durable Root broker wake is pending." });
+    } catch (error) {
+      this.recordDiagnostic("revival.failed", logicalRunId, wakeId, { reason: "resume-failed", errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 512) });
+      throw error;
+    }
     if (!result || typeof result !== "object" || Array.isArray(result) || result instanceof Error || !result.details || typeof result.details !== "object" || Array.isArray(result.details)) throw new Error("Root subagent broker resume result is invalid");
     const revivedRunId = result.details.asyncId;
     const revivedAsyncDir = result.details.asyncDir;
     if (typeof revivedRunId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(revivedRunId) || revivedRunId === "." || revivedRunId === ".." || typeof revivedAsyncDir !== "string" || revivedAsyncDir.length === 0 || !path.isAbsolute(revivedAsyncDir) || revivedRunId === actualRunId || this.principals.has(revivedRunId) || this.callerAliases.has(revivedRunId)) throw new Error("Root subagent broker resume result is invalid");
+    this.recordDiagnostic("resume.succeeded", logicalRunId, wakeId, { revivedRunId });
     await this.grantRevivedCaller(logicalRunId, revivedRunId);
+    this.recordDiagnostic("grant.issued", logicalRunId, wakeId, { revivedRunId });
     this.reviveResults.set(logicalRunId, result);
     const currentFollowUps = this.callerFollowUps.get(logicalRunId);
     if (currentFollowUps) this.callerFollowUps.set(logicalRunId, currentFollowUps.filter((followUp) => !wakeIds.includes(followUp.wakeId)));
+    this.recordDiagnostic("revival.succeeded", logicalRunId, wakeId, { revivedRunId });
   }
 
   reviveCallerAfterProof(logicalRunId: string) {
@@ -258,7 +286,11 @@ export class RootBrokerServer {
     const run = logical ? this.ownedRuns.get(logical.activeRunId) : undefined;
     const caller = this.callers.get(logicalRunId);
     const followUps = this.callerFollowUps.get(logicalRunId);
-    if (this.closed || !logical || !run || run.role !== "plan-runner" || !this.terminalProofs.has(logical.activeRunId) || !caller || caller.role !== "plan-runner" || !followUps?.length) return Promise.resolve();
+    if (this.closed || !logical || !run || run.role !== "plan-runner" || !this.terminalProofs.has(logical.activeRunId) || !caller || caller.role !== "plan-runner" || !followUps?.length) {
+      const reason = this.closed ? "broker-closed" : !logical ? "caller-missing" : !run ? "run-missing" : run.role !== "plan-runner" ? "caller-not-plan-runner" : !this.terminalProofs.has(logical.activeRunId) ? "proof-missing" : !caller || caller.role !== "plan-runner" ? "caller-missing" : "wake-missing";
+      this.recordDiagnostic("revival.blocked", logicalRunId, undefined, { reason });
+      return Promise.resolve();
+    }
     const operation = this.performCallerRevive(logicalRunId);
     this.revivePromises.set(logicalRunId, operation);
     const cleanup = () => {
@@ -634,6 +666,7 @@ export class RootBrokerServer {
     if (!followUps) return failure(request, "caller_unauthorized", "Caller is not granted");
     const intent: FollowUpIntent = { ...request.params };
     if (!followUps.some((followUp) => followUp.wakeId === intent.wakeId)) followUps.push(intent);
+    this.recordDiagnostic("followup.accepted", logicalCallerRunId, intent.wakeId);
     void this.reviveCallerAfterProof(logicalCallerRunId).catch(() => undefined);
     return createBrokerSuccessResponse({ ...request, data: { accepted: true, wakeId: intent.wakeId } });
   }
@@ -898,6 +931,7 @@ export class RootBrokerServer {
     if (this.closePromise) return this.closePromise;
     if (this.teardown.released) return;
     this.closed = true;
+    this.recordDiagnostic("close.started");
     const closing = (async () => {
       let startupTimeout: ReturnType<typeof setTimeout> | undefined;
       const startupDeadline = new Promise<never>((_, reject) => {
@@ -989,6 +1023,7 @@ export class RootBrokerServer {
       this.ownedRuns.clear(); this.terminalProofs.clear(); this.reviveResults.clear(); this.revivePromises.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
       this.transportSockets.clear(); this.closingSockets.clear(); this.endedSockets.clear(); this.cleanedGrantPaths.clear(); this.server = undefined;
       this.teardown.released = true;
+      this.recordDiagnostic("close.completed");
     })();
     this.closePromise = closing;
     try {

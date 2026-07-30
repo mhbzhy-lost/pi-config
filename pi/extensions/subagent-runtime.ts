@@ -78,7 +78,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       rpc,
       executeSupervisor: (params: any, context: any) => runtime.executeSupervisor(params, context),
     });
-    const broker = new RootBrokerServer({ rootSessionId, upstream, events: pi.events });
+    const broker = new RootBrokerServer({ rootSessionId, upstream, events: pi.events, recordRevivalDiagnostic: (customType, data) => pi.appendEntry(customType, data) });
     previousBrokerMarker = process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
     try {
       await startAndBindRootBroker(pi, broker);
