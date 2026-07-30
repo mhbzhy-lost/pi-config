@@ -989,6 +989,39 @@ test("Task5A2 rejects a replayed pending stale dispatch context while reducer pr
   await assert.rejects(context.coordinator.prepareAuthorizedDispatches(), /stale revision\/context/);
 });
 
+test("Task5A2 rejects a pending durable output that differs from the authoritative output", async () => {
+  const approvedPlan = v3Plan();
+  const ir = compilePlanToIR(approvedPlan);
+  const initial = harness({ approvedPlan, entries: [createdV3Entry(ir)] });
+  await initial.coordinator.prepareAuthorizedDispatches();
+  const tampered = structuredClone(initial.appended);
+  tampered[1].data.tool.output = "/results/other-valid-output.json";
+  const subject = harness({ approvedPlan, entries: [createdV3Entry(ir), ...tampered] });
+
+  assert.equal(replay([createdV3Entry(ir), ...tampered]).attempts.size, 1);
+  await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /stale revision\/context/);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.appended.length, 0);
+});
+
+test("Task5A2 rejects pending durable dependency receipts that differ from current receipts", async () => {
+  const approvedPlan = v3Plan();
+  const ir = compilePlanToIR(approvedPlan);
+  const initial = harness({ approvedPlan, entries: [createdV3Entry(ir)] });
+  await initial.coordinator.prepareAuthorizedDispatches();
+  const tampered = structuredClone(initial.appended);
+  tampered[1].data.tool.dependencyReceipts = [{
+    taskId: "task-other", resultCommit: "result", integratedHead: "head",
+    changedPaths: ["src/other.mjs"], verificationSummary: [{ commandId: "test", exitCode: 0 }],
+  }];
+  const subject = harness({ approvedPlan, entries: [createdV3Entry(ir), ...tampered] });
+
+  assert.equal(replay([createdV3Entry(ir), ...tampered]).attempts.size, 1);
+  await assert.rejects(subject.coordinator.prepareAuthorizedDispatches(), /stale revision\/context/);
+  assert.equal(subject.allocations.length, 0);
+  assert.equal(subject.appended.length, 0);
+});
+
 test("Task5A2 rejects v3 preparation without current revision identity", async () => {
   const approvedPlan = v3Plan();
   const subject = harness({ approvedPlan, entries: [createdEntry(["task-1"])] });

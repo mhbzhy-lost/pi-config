@@ -105,7 +105,7 @@ test("Task5A2 retries an identical allocation with the authoritative lease uncha
 
     assert.deepEqual(second, first);
     assert.equal(await git(repository.originRoot, "worktree", "list", "--porcelain").then((output) => output.match(/worktree /g).length), 2);
-    assert.equal(await git(repository.originRoot, "branch", "--list", first.branch), first.branch);
+    assert.equal(await git(repository.originRoot, "rev-parse", "--verify", `refs/heads/${first.branch}`), repository.baseCommit);
   });
 });
 
@@ -116,7 +116,33 @@ test("Task5A2 fails closed when an authoritative lease has no physical workspace
 
     await assert.rejects(allocateAttemptWorkspace(input(repository)), /missing/i);
     await access(first.leasePath);
-    assert.equal(await git(repository.originRoot, "branch", "--list", first.branch), first.branch);
+    assert.equal(await git(repository.originRoot, "rev-parse", "--verify", `refs/heads/${first.branch}`), repository.baseCommit);
+  });
+});
+
+test("Task5A2 rejects dirty orphan workspace recovery before allocation event", async () => {
+  await withRepository(async (repository) => {
+    const first = await allocateAttemptWorkspace(input(repository));
+    const authoritativeLease = JSON.parse(await readFile(first.leasePath, "utf8"));
+    await writeFile(path.join(first.path, "tracked.txt"), "dirty\n");
+
+    await assert.rejects(allocateAttemptWorkspace(input(repository)), /clean|identity/i);
+
+    assert.deepEqual(JSON.parse(await readFile(first.leasePath, "utf8")), authoritativeLease);
+  });
+});
+
+test("Task5A2 rejects advanced orphan workspace HEAD before allocation event", async () => {
+  await withRepository(async (repository) => {
+    const first = await allocateAttemptWorkspace(input(repository));
+    const authoritativeLease = JSON.parse(await readFile(first.leasePath, "utf8"));
+    await writeFile(path.join(first.path, "descendant.txt"), "descendant\n");
+    await git(first.path, "add", "descendant.txt");
+    await git(first.path, "commit", "-m", "advance orphan workspace");
+
+    await assert.rejects(allocateAttemptWorkspace(input(repository)), /base|head|identity/i);
+
+    assert.deepEqual(JSON.parse(await readFile(first.leasePath, "utf8")), authoritativeLease);
   });
 });
 
