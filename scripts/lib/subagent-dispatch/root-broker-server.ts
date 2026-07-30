@@ -589,8 +589,8 @@ export class RootBrokerServer {
       if (request.method === "spawn") return await this.spawn(request, caller, logicalCallerRunId);
       if (request.method === "caller.followup") return this.registerCallerFollowUp(request, logicalCallerRunId);
       if (request.method === "spawn.lookup") return this.lookupSpawn(request, caller);
-      if (request.method === "supervisor.pending") return this.pendingSupervisor(request, caller);
-      if (request.method === "supervisor.reply") return await this.replySupervisor(request, caller);
+      if (request.method === "supervisor.pending") return this.pendingSupervisor(request, caller, logicalCallerRunId);
+      if (request.method === "supervisor.reply") return await this.replySupervisor(request, caller, logicalCallerRunId);
       if (["status", "steer", "interrupt", "stop"].includes(request.method)) return await this.control(request, caller, logicalCallerRunId);
       return failure(request, "unsupported", `Broker method ${request.method} is unsupported`);
     } catch (error) { return failure(request, "upstream_failed", error instanceof Error ? error.message : String(error)); }
@@ -779,17 +779,17 @@ export class RootBrokerServer {
     this.deliverOrQueuePush(ownerRunId, push);
   }
 
-  pendingSupervisor(request: any, _caller: Caller) {
+  pendingSupervisor(request: any, _caller: Caller, logicalCallerRunId: string) {
     const pending = [...this.supervisorRequests.values()]
-      .filter((entry) => entry.ownerRunId === request.callerRunId && entry.expectsReply && entry.state === "pending")
+      .filter((entry) => entry.ownerRunId === logicalCallerRunId && entry.expectsReply && entry.state === "pending")
       .map((entry) => entry.data);
     return createBrokerSuccessResponse({ ...request, data: { pending } });
   }
 
-  async replySupervisor(request: any, _caller: Caller) {
+  async replySupervisor(request: any, _caller: Caller, logicalCallerRunId: string) {
     const entry = this.supervisorRequests.get(request.params.replyTo);
     if (!entry || entry.expectsReply !== true || entry.state === "consumed") return failure(request, "supervisor_request_unknown", "Supervisor request is unknown");
-    if (entry.ownerRunId !== request.callerRunId) return failure(request, "supervisor_not_owned", "Supervisor request is not owned by caller");
+    if (entry.ownerRunId !== logicalCallerRunId) return failure(request, "supervisor_not_owned", "Supervisor request is not owned by caller");
     if (entry.state === "replying") return failure(request, "supervisor_request_unknown", "Supervisor request is unavailable");
     entry.state = "replying";
     try {
