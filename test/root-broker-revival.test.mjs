@@ -4,7 +4,7 @@ import test from "node:test";
 import { BROKER_METHODS, parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
-async function createRevivalFixture({ resume, spawn } = {}) {
+async function createRevivalFixture({ recordRevivalDiagnostic, resume, spawn } = {}) {
   const callerToken = "a".repeat(64);
   const revivedCallerToken = "b".repeat(64);
   const executorToken = "c".repeat(64);
@@ -37,6 +37,7 @@ async function createRevivalFixture({ resume, spawn } = {}) {
       return `/tmp/root-broker-revival-grant-${grant.runId}`;
     },
     randomToken: () => tokens.shift(),
+    recordRevivalDiagnostic,
   });
   await server.grantCaller({
     callerRunId: "plan-runner-1",
@@ -84,6 +85,17 @@ async function createRevivalFixture({ resume, spawn } = {}) {
   };
 
   return { grants, ownedRun, proof, request, resumeCalls, server };
+}
+
+function assertRevivalDiagnostic(entry, { activeRunId, generation, logicalCallerRunId = "plan-runner-1", wakeId } = {}) {
+  assert.equal(entry.customType, "pi-root-broker-revival-v1");
+  assert.equal(entry.data.schemaVersion, "pi-root-broker-revival-diagnostic.v1");
+  assert.equal(entry.data.rootSessionId, "root-session-1");
+  assert.equal(entry.data.logicalCallerRunId, logicalCallerRunId);
+  assert.equal(entry.data.activeRunId, activeRunId);
+  assert.equal(entry.data.generation, generation);
+  assert.equal(Number.isFinite(entry.data.observedAt), true);
+  if (wakeId !== undefined) assert.equal(entry.data.wakeId, wakeId);
 }
 
 async function createActiveRevivedAliasFixture() {
@@ -234,6 +246,107 @@ test("releases the revival single-flight after resume rejects", async () => {
   assert.deepEqual(resumeCalls, expectedResume);
   assert.deepEqual(server.callerFollowUps.get(ownedRun.runId), [{ wakeId: "plan-opened-1", reason: "plan-opened" }]);
   assert.equal(server.revivePromises.size, 0);
+});
+
+test("persists sanitized revival diagnostics in proof-first order", async () => {
+  const diagnostics = [];
+  const { ownedRun, proof, request, server } = await createRevivalFixture({
+    recordRevivalDiagnostic: (customType, data) => diagnostics.push({ customType, data }),
+  });
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await Promise.resolve();
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(diagnostics.map(({ data }) => data.phase), [
+    "proof.accepted",
+    "revival.blocked",
+    "followup.accepted",
+    "revival.started",
+    "resume.invoked",
+    "resume.succeeded",
+    "grant.issued",
+    "revival.succeeded",
+  ]);
+  assert.equal(diagnostics[1].data.reason, "wake-missing");
+  for (const entry of diagnostics) {
+    assertRevivalDiagnostic(entry, {
+      activeRunId: entry.data.phase === "proof.accepted" || entry.data.phase === "revival.blocked" || entry.data.phase === "followup.accepted" || entry.data.phase === "revival.started" || entry.data.phase === "resume.invoked" ? "plan-runner-1" : "plan-runner-2",
+      generation: entry.data.phase === "resume.succeeded" || entry.data.phase === "grant.issued" || entry.data.phase === "revival.succeeded" ? 1 : 0,
+      wakeId: entry.data.phase === "proof.accepted" || entry.data.phase === "revival.blocked" ? undefined : "plan-opened-1",
+    });
+  }
+});
+
+test("bounds and sanitizes revival failure diagnostics", async () => {
+  const diagnostics = [];
+  const secret = `resume-secret-${"x".repeat(1_500)}`;
+  const { ownedRun, proof, request, server } = await createRevivalFixture({
+    recordRevivalDiagnostic: (customType, data) => diagnostics.push({ customType, data }),
+    resume: async () => { throw new Error(secret); },
+  });
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const failure = diagnostics.at(-1);
+  assert.ok(failure, "expected revival.failed diagnostic");
+  assert.equal(failure.data.phase, "revival.failed");
+  assert.equal(failure.data.reason, "resume-failed");
+  assert.equal(failure.data.errorMessage.length <= 512, true);
+  assert.equal(JSON.stringify(diagnostics).includes(secret), false);
+  assert.equal(JSON.stringify(diagnostics).includes("callerToken"), false);
+  assert.equal(JSON.stringify(diagnostics).includes("params"), false);
+  assertRevivalDiagnostic(failure, { activeRunId: "plan-runner-1", generation: 0, wakeId: "plan-opened-1" });
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [{ wakeId: "plan-opened-1", reason: "plan-opened" }]);
+});
+
+test("isolates revival diagnostic sink failures", async () => {
+  const unhandled = [];
+  let sinkCalls = 0;
+  const onUnhandledRejection = (error) => unhandled.push(error);
+  process.on("unhandledRejection", onUnhandledRejection);
+  try {
+    const { grants, ownedRun, proof, request, server } = await createRevivalFixture({
+      recordRevivalDiagnostic: () => {
+        sinkCalls += 1;
+        throw new Error("diagnostic sink unavailable");
+      },
+    });
+
+    server.acceptTerminalProof(ownedRun, proof);
+    await server.dispatch(request, {});
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(server.reviveResults.get("plan-runner-1"), revivedResult);
+    assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), []);
+    assert.equal(grants.at(-1).runId, "plan-runner-2");
+    assert.equal(sinkCalls, 8);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+});
+
+test("records close diagnostics once across repeated close", async () => {
+  const diagnostics = [];
+  const { server } = await createRevivalFixture({
+    recordRevivalDiagnostic: (customType, data) => diagnostics.push({ customType, data }),
+  });
+  server.ownedRuns.clear();
+
+  await server.closeRootSession();
+  await server.closeRootSession();
+
+  assert.deepEqual(diagnostics.map(({ data }) => data.phase), ["close.started", "close.completed"]);
+  for (const entry of diagnostics) {
+    assert.equal(entry.customType, "pi-root-broker-revival-v1");
+    assert.equal(entry.data.schemaVersion, "pi-root-broker-revival-diagnostic.v1");
+    assert.equal(entry.data.rootSessionId, "root-session-1");
+    assert.equal(Number.isFinite(entry.data.observedAt), true);
+  }
 });
 
 test("retries a pending wake after the previous revival rejects", async () => {
