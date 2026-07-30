@@ -162,7 +162,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   pi.on("tool_call", async (event, ctx) => {
     if (!opened) return undefined;
     if (["subagent", "contact_supervisor", "bash"].includes(event?.toolName)) {
-      return { block: true, reason: "Plan dispatch authorization boundary owns dispatch and supervision." };
+      return { block: true, reason: "Plan Harness dispatch and supervision are owned by the Standalone Plan Runner control plane." };
     }
     if (event?.toolName !== "subagent_supervisor") return undefined;
     if (!["pending", "reply"].includes(event?.input?.action)) {
