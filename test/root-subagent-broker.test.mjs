@@ -352,16 +352,26 @@ test("Root session abnormal exit terminates each subscribed owner once on broker
     const cleanup = () => { clearTimeout(timer); child.off("message", onMessage); child.off("error", onError); };
     child.on("message", onMessage); child.once("error", onError);
   });
-  const waitForExit = (child, label) => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { cleanup(); reject(new Error(`Timed out waiting for ${label} exit`)); }, 5_000);
-    const onExit = (code, signal) => { cleanup(); resolve({ code, signal }); };
-    const onError = (error) => { cleanup(); reject(error); };
-    const cleanup = () => { clearTimeout(timer); child.off("exit", onExit); child.off("error", onError); };
-    child.once("exit", onExit); child.once("error", onError);
-  });
+  const waitForExit = (child, label, timeoutMs) => {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error(`${label} exit timeout must be a positive safe integer`);
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { cleanup(); reject(new Error(`Timed out waiting for ${label} exit`)); }, timeoutMs);
+      const onExit = (code, signal) => { cleanup(); resolve({ code, signal }); };
+      const onError = (error) => { cleanup(); reject(error); };
+      const cleanup = () => { clearTimeout(timer); child.off("exit", onExit); child.off("error", onError); };
+      child.once("exit", onExit); child.once("error", onError);
+    });
+  };
   t.after(async () => {
-    for (const child of [rootChild, ...children]) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    await Promise.allSettled([removePath(brokerSocketPath(sessionId), { force: true }), removePath(brokerGrantPath(sessionId, "plan-owner"), { force: true }), removePath(brokerGrantPath(sessionId, "executor-owner"), { force: true }), removePath(reportRoot, { recursive: true, force: true })]);
+    const testChildren = [rootChild, ...children];
+    for (const child of testChildren) {
+      if (child.exitCode === null && child.signalCode === null) assert.equal(child.kill("SIGKILL"), true, "cleanup SIGKILL reaches a live test child");
+    }
+    const exits = await Promise.allSettled(testChildren.map((child, index) => waitForExit(child, `cleanup child ${index}`, 5_000)));
+    const failures = exits.filter((result) => result.status === "rejected").map((result) => result.reason);
+    if (failures.length) throw new AggregateError(failures, "Test child cleanup did not observe every exit");
+    await Promise.all([removePath(brokerSocketPath(sessionId), { force: true }), removePath(brokerGrantPath(sessionId, "plan-owner"), { force: true }), removePath(brokerGrantPath(sessionId, "executor-owner"), { force: true }), removePath(reportRoot, { recursive: true, force: true })]);
   });
   await waitForMessage(rootChild, (message) => message?.type === "root-ready", "root broker startup");
   for (const runId of ["plan-owner", "executor-owner"]) {
@@ -373,8 +383,10 @@ test("Root session abnormal exit terminates each subscribed owner once on broker
     children.push(child);
     await waitForMessage(child, (message) => message?.type === "owner-ready", `${runId} subscription`);
   }
-  rootChild.kill("SIGKILL");
-  const exits = await Promise.all(children.map((child, index) => waitForExit(child, `${["plan-owner", "executor-owner"][index]}`)));
+  const rootExit = waitForExit(rootChild, "root broker", 5_000);
+  assert.equal(rootChild.kill("SIGKILL"), true, "Root SIGKILL reaches the broker child");
+  assert.deepEqual(await rootExit, { code: null, signal: "SIGKILL" });
+  const exits = await Promise.all(children.map((child, index) => waitForExit(child, `${["plan-owner", "executor-owner"][index]}`, 5_000)));
   assert.deepEqual(exits.map(({ signal }) => signal), [null, null]);
   for (const runId of ["plan-owner", "executor-owner"]) {
     const report = JSON.parse(await readFile(path.join(reportRoot, `${runId}.json`), "utf8"));
