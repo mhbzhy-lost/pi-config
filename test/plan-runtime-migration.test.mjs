@@ -47,8 +47,8 @@ test("Widget only projects status and broker-owned Executor facts", async () => 
   assert.doesNotMatch(widget, /host-handle\.json|hostRunId|Host:/);
 });
 
-test("flat runtime plan states the seven architecture boundaries", async () => {
-  const source = await readFile(path.join(root, "docs/superpowers/plans/2026-07-29-plan-runner-flat-rpc-remove-thin-host.md"), "utf8");
+test("flat runtime architecture document states the seven architecture boundaries", async () => {
+  const source = await readFile(path.join(root, "docs/architecture/plan-runner-flat-runtime.md"), "utf8");
   for (const boundary of [
     "领域拓扑: Main -> Plan Runner -> Executor",
     "runtime 拓扑: Root -> [Plan Runner, Executor]",
