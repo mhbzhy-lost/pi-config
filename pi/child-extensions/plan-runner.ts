@@ -92,6 +92,7 @@ export default async function planRunner(pi: ExtensionAPI) {
     async function resolveExecutorDispatchResult(event: any, { ctx }: { ctx: unknown }) {
       const parsed = boundary.resolveExecutorToolResult(event);
       if (parsed.status === "completed" || parsed.status === "uncertain") return parsed;
+      if (parsed.status === "not-started") return boundary.releaseExecutorToolCall(event.toolCallId, "not-started");
       const request = boundary.executionRequestForToolCall(event.toolCallId);
       const bind = async (binding: { runId: string; asyncDir: string }) => {
         const runtimeBinding = await executionBackend!.bindDispatch({

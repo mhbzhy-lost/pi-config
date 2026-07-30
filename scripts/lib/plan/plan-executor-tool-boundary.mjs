@@ -139,6 +139,10 @@ export function createPlanExecutorToolBoundary() {
       required(isDeepStrictEqual(event.input, authorization.contract), "Executor result exact contract mismatch");
       if (authorization.state === "completed") return { status: "completed" };
       if (authorization.state === "uncertain") return { status: "uncertain" };
+      if (authorization.state === "executing") {
+        required(event.isError, "Executor pre-resolver result must be an error");
+        return { status: "not-started" };
+      }
       required(authorization.state === "identity-resolved", "Executor result requires resolved spawn identity");
       if (event.isError) return { status: "error" };
       required(exactResultDetails(event.details), "Executor result details must be exact");
