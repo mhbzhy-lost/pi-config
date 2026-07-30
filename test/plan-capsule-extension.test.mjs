@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import test from "node:test";
 
 import { createPlanCapsuleExtension } from "../scripts/lib/plan/plan-capsule-extension.mjs";
+import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 
 const created = {
   schemaVersion: "pi-plan-event.v1", eventId: "one", planId: "release-11", occurredAt: "2026-07-15T00:00:00.000Z", type: "plan.created",
@@ -79,6 +80,19 @@ function setup(options = {}) {
 
 async function execute(tool, params, ctx = context()) {
   return tool.execute("call-1", params, undefined, undefined, ctx);
+}
+
+function executorContract() {
+  const compiled = compileCodingDispatchIR({
+    version: "dispatch-ir.v1", taskId: "task-1", title: "Execute task", agent: "executor", risk: "low", objective: "Execute the approved task.",
+    requirements: ["Change one file."], context: { knownFacts: [], decisions: [], relevantFiles: ["src/task-1.mjs"] },
+    boundaries: { writePaths: ["src/task-1.mjs"], excludedWork: [], forbiddenActions: [] }, workflow: { mode: "tdd" },
+    acceptance: { criteria: ["Tests pass."], commands: ["node --test"] }, execution: { timeoutMs: 1000, cwd: attemptWorkspace.path },
+  }, { cwd: attemptWorkspace.path });
+  const { hash, ...input } = compiled;
+  assert.equal(Object.hasOwn(input, "hash"), false);
+  assert.equal(compileCodingDispatchIR(input, { cwd: attemptWorkspace.path }).hash, hash);
+  return { input, hash };
 }
 
 test("plan-runner alone uses the real subagentOnlyExtensions profile field", async () => {
@@ -284,14 +298,38 @@ test("session shutdown runs both cleanups best-effort without throwing", async (
   assert.deepEqual(calls, ["control", "runs", "runs-done", "backend"]);
 });
 
-test("capsule authorizes only exact Executor subagent dispatches inside an opened Plan Session", async () => {
+test("capsule forwards one complete typed Executor contract and preserves authorizer errors", async (t) => {
   const calls = [];
   const { handlers } = setup({
     authorizeExecutorDispatch: async (input, value) => { calls.push([input, value]); },
   });
   const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
   await handlers.get("session_start")({ type: "session_start" }, ctx);
+  const { input, hash } = executorContract();
+  assert.equal(await handlers.get("tool_call")({ toolName: "subagent", toolCallId: "dispatch-1", input }, ctx), undefined);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], input);
+  assert.equal(calls[0][1].toolCallId, "dispatch-1");
+  assert.equal(calls[0][1].ctx, ctx);
+  assert.equal(calls[0][1].projection.attempts.get("attempt-1").dispatchId, "dispatch-1");
+  assert.equal(compileCodingDispatchIR(input, { cwd: attemptWorkspace.path }).hash, hash);
 
+  await t.test("returns the authorizer error unchanged", async () => {
+    const rejecting = setup({
+      authorizeExecutorDispatch: async () => { throw new Error("Executor dispatch contract required"); },
+    });
+    await rejecting.handlers.get("session_start")({}, ctx);
+    assert.deepEqual(
+      await rejecting.handlers.get("tool_call")({ toolName: "subagent", toolCallId: "dispatch-2", input }, ctx),
+      { block: true, reason: "Executor dispatch contract required" },
+    );
+  });
+});
+
+test("capsule blocks generic subagent and non-Supervisor control tools", async () => {
+  const { handlers } = setup();
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
+  await handlers.get("session_start")({}, ctx);
   for (const event of [
     { toolName: "subagent", input: { action: "status", id: "run-1" } },
     { toolName: "contact_supervisor", input: { message: "bypass" } },
@@ -300,15 +338,8 @@ test("capsule authorizes only exact Executor subagent dispatches inside an opene
   ]) {
     const denied = await handlers.get("tool_call")(event, ctx);
     assert.equal(denied.block, true);
+    assert.match(denied.reason, /authorization boundary|limited to pending and fenced reply/i);
   }
-
-  const input = { agent: "executor", task: "exact contract" };
-  assert.equal(await handlers.get("tool_call")({ toolName: "subagent", toolCallId: "dispatch-1", input }, ctx), undefined);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][0], input);
-  assert.equal(calls[0][1].toolCallId, "dispatch-1");
-  assert.equal(calls[0][1].ctx, ctx);
-  assert.equal(calls[0][1].projection.attempts.get("attempt-1").dispatchId, "dispatch-1");
 });
 
 test("capsule blocking reason names the Plan dispatch authorization boundary", async () => {
