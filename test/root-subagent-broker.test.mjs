@@ -714,6 +714,48 @@ test("started ownership records plan-runner identity without executor principal 
   assert.deepEqual(ownedRun(broker, "plan-run-702"), { rootSessionId, runId: "plan-run-702", role: "plan-runner", asyncDir: "/async/plan-run-702", sessionId: rootSessionId, pid: 702, birthIdentity: "birth-plan", identityState: "verified" });
 });
 
+test("accepts started ownership from the authoritative persisted lifecycle session", { concurrency: false }, async (t) => {
+  const lifecycleSessionId = "/sessions/root/session.jsonl";
+  const captures = []; const grants = []; const events = startedEventBus();
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId,
+    upstream: fakeUpstream(),
+    events,
+    captureProcessBirthIdentity: async (pid) => { captures.push(pid); return "birth-lifecycle-identity"; },
+    writeGrant: async (grant) => { grants.push(grant); return "/tmp/grant"; },
+  });
+  await broker.start(); t.after(() => closeOwnedRuns(broker, events));
+
+  events.emit("subagent:async-started", { id: "executor-lifecycle-identity", pid: 704, sessionId: lifecycleSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/executor-lifecycle-identity" });
+  await events.settled();
+
+  assert.deepEqual(ownedRun(broker, "executor-lifecycle-identity"), { rootSessionId, runId: "executor-lifecycle-identity", role: "executor", asyncDir: "/async/executor-lifecycle-identity", sessionId: lifecycleSessionId, pid: 704, birthIdentity: "birth-lifecycle-identity", identityState: "verified" });
+  assert.deepEqual(captures, [704]);
+  assert.deepEqual(grants.map(({ runId, role }) => ({ runId, role })), [{ runId: "executor-lifecycle-identity", role: "executor" }]);
+});
+
+test("rejects logical root identity when persisted lifecycle identity differs", { concurrency: false }, async (t) => {
+  const lifecycleSessionId = "/sessions/root/session.jsonl";
+  const captures = []; const grants = []; const events = startedEventBus();
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId,
+    upstream: fakeUpstream(),
+    events,
+    captureProcessBirthIdentity: async (pid) => { captures.push(pid); return "must-not-capture"; },
+    writeGrant: async (grant) => { grants.push(grant); return "/tmp/grant"; },
+  });
+  await broker.start(); t.after(() => closeOwnedRuns(broker, events));
+
+  events.emit("subagent:async-started", { id: "executor-logical-identity", pid: 705, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/executor-logical-identity" });
+  await events.settled();
+
+  assert.deepEqual(captures, []);
+  assert.deepEqual(grants, []);
+  assert.equal(ownedRun(broker, "executor-logical-identity"), undefined);
+});
+
 test("birth identity unavailable records ownership but retains executor EOF grant", async (t) => {
   const events = startedEventBus(); const unavailable = Object.assign(new Error("unavailable"), { code: "PROCESS_BIRTH_IDENTITY_UNAVAILABLE" });
   const captureProcessBirthIdentity = async () => { throw unavailable; };
