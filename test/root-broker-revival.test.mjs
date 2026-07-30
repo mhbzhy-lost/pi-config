@@ -6,6 +6,9 @@ import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-s
 
 async function createRevivalFixture({ resume } = {}) {
   const callerToken = "a".repeat(64);
+  const revivedCallerToken = "b".repeat(64);
+  const tokens = [callerToken, revivedCallerToken];
+  const grants = [];
   const resumeCalls = [];
   const server = new RootBrokerServer({
     rootSessionId: "root-session-1",
@@ -13,11 +16,22 @@ async function createRevivalFixture({ resume } = {}) {
       resume: async (params) => {
         resumeCalls.push(params);
         if (resume) return await resume(params);
-        return { runId: "plan-runner-2", asyncDir: "/async/plan-runner-2" };
+        return {
+          text: "Revived",
+          details: {
+            mode: "single",
+            results: [],
+            asyncId: "plan-runner-2",
+            asyncDir: "/async/plan-runner-2",
+          },
+        };
       },
     },
-    writeGrant: async () => "/tmp/root-broker-revival-grant",
-    randomToken: () => callerToken,
+    writeGrant: async (grant) => {
+      grants.push(grant);
+      return `/tmp/root-broker-revival-grant-${grant.runId}`;
+    },
+    randomToken: () => tokens.shift(),
   });
   await server.grantCaller({
     callerRunId: "plan-runner-1",
@@ -64,8 +78,18 @@ async function createRevivalFixture({ resume } = {}) {
     }],
   };
 
-  return { ownedRun, proof, request, resumeCalls, server };
+  return { grants, ownedRun, proof, request, resumeCalls, server };
 }
+
+const revivedResult = {
+  text: "Revived",
+  details: {
+    mode: "single",
+    results: [],
+    asyncId: "plan-runner-2",
+    asyncDir: "/async/plan-runner-2",
+  },
+};
 
 const expectedResume = [{
   id: "plan-runner-1",
@@ -100,7 +124,7 @@ test("revives when a pending plan-runner wake follows its observed terminal proo
 
 test("coalesces concurrent pending wakes for the same plan-runner revival", async (t) => {
   let resolveResume;
-  const result = { runId: "plan-runner-2", asyncDir: "/async/plan-runner-2" };
+  const result = revivedResult;
   const resumeDeferred = new Promise((resolve) => { resolveResume = resolve; });
   t.after(() => resolveResume(result));
 
@@ -149,7 +173,7 @@ test("releases the revival single-flight after resume rejects", async () => {
 });
 
 test("retries a pending wake after the previous revival rejects", async () => {
-  const result = { runId: "plan-runner-2", asyncDir: "/async/plan-runner-2" };
+  const result = revivedResult;
   let attempts = 0;
   const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture({
     resume: async () => {
@@ -172,4 +196,34 @@ test("retries a pending wake after the previous revival rejects", async () => {
   assert.deepEqual(resumeCalls, [...expectedResume, ...expectedResume]);
   assert.deepEqual(server.callerFollowUps.get(ownedRun.runId), []);
   assert.deepEqual(server.reviveResults.get(ownedRun.runId), result);
+});
+
+test("grants the revived actual plan-runner while retaining its stable logical alias", async () => {
+  const { grants, ownedRun, proof, request, server } = await createRevivalFixture();
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(grants, [
+    {
+      schemaVersion: "pi-root-subagent-broker-grant.v1",
+      rootSessionId: "root-session-1",
+      runId: "plan-runner-1",
+      callerToken: "a".repeat(64),
+      role: "plan-runner",
+    },
+    {
+      schemaVersion: "pi-root-subagent-broker-grant.v1",
+      rootSessionId: "root-session-1",
+      runId: "plan-runner-2",
+      callerToken: "b".repeat(64),
+      role: "plan-runner",
+    },
+  ]);
+  assert.deepEqual(server.logicalCallers.get("plan-runner-1"), { activeRunId: "plan-runner-2", generation: 1 });
+  assert.equal(server.callerAliases.get("plan-runner-1"), "plan-runner-1");
+  assert.equal(server.callerAliases.get("plan-runner-2"), "plan-runner-1");
+  assert.deepEqual(server.principals.get("plan-runner-2"), { role: "plan-runner", callerToken: "b".repeat(64) });
+  assert.deepEqual([...server.callers.keys()], ["plan-runner-1"]);
 });
