@@ -20,7 +20,7 @@ import {
 type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: () => void | Promise<void> };
 type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
-type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void } };
+type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; delivered: Set<string> };
 type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
 type OwnedRun = { rootSessionId: string; runId: string; role: "plan-runner" | "executor"; asyncDir: string; sessionId: string; pid: number; birthIdentity: string | null; identityState: "verified" | "unavailable" | "conflict" };
@@ -67,6 +67,8 @@ export class RootBrokerServer {
   spawnLedger = new Map<string, SpawnLedgerEntry>();
   supervisorRequests = new Map<string, SupervisorRequest>();
   ownedRuns = new Map<string, OwnedRun>();
+  terminalProofs = new Map<string, any>();
+  terminalWaiters = new Map<string, Set<(proof: any) => void>>();
   startedObservations = new Map<string, Promise<void>>();
   unsubscribeStarted: (() => void) | undefined;
   unsubscribeComplete: (() => void) | undefined;
@@ -78,14 +80,17 @@ export class RootBrokerServer {
   randomToken: () => string;
   captureProcessBirthIdentity: typeof captureProcessBirthIdentity;
   events: Dependencies["events"];
+  terminalTimeoutMs: number;
 
-  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, events }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
+  constructor({ rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, events, terminalTimeoutMs = 5_000 }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
+    if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     this.rootSessionId = rootSessionId;
     this.upstream = upstream;
     this.writeGrant = writeGrant;
     this.randomToken = randomToken;
     this.captureProcessBirthIdentity = captureBirthIdentity;
     this.events = events;
+    this.terminalTimeoutMs = terminalTimeoutMs;
   }
 
   async start() {
@@ -105,7 +110,7 @@ export class RootBrokerServer {
       await setBrokerSocketPermissions(socketPath);
       this.unsubscribeStarted = this.events?.on("subagent:async-started", (event) => this.observeStarted(event));
       this.unsubscribeComplete = this.events?.on("subagent:async-complete", (event) => this.lifecycle(event, "execution.completed"));
-      this.unsubscribeTerminal = this.events?.on("subagent:process-terminal", (event) => this.lifecycle(event, "execution.completed"));
+      this.unsubscribeTerminal = this.events?.on("subagent:process-terminal", (event) => { this.observeTerminal(event); this.lifecycle(event, "execution.completed"); });
     } catch (error) {
       this.server = undefined;
       await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
@@ -147,7 +152,76 @@ export class RootBrokerServer {
       this.lifecycle(event, "execution.started");
     })();
     this.startedObservations.set(facts.runId, observation);
+    void observation.finally(() => {
+      if (this.startedObservations.get(facts.runId) === observation) this.startedObservations.delete(facts.runId);
+    }).catch(() => undefined);
     return observation.catch(() => undefined);
+  }
+
+  observeTerminal(event: any) {
+    const runId = event?.runId;
+    const owned = typeof runId === "string" ? this.ownedRuns.get(runId) : undefined;
+    const instances = event?.instances;
+    const runner = Array.isArray(instances)
+      ? instances.find((instance: any) => instance?.kind === "runner" && instance?.processInstanceId === event?.runnerProcessInstanceId)
+      : undefined;
+    if (!owned
+      || event?.version !== 1 || event?.state !== "observed"
+      || typeof runId !== "string" || runId.length === 0
+      || typeof event?.runnerProcessInstanceId !== "string" || event.runnerProcessInstanceId.length === 0
+      || typeof event?.observedAt !== "number" || !Number.isFinite(event.observedAt)
+      || !Array.isArray(instances)
+      || instances.some((instance: any) => !instance || typeof instance.processInstanceId !== "string" || instance.processInstanceId.length === 0
+        || !["runner", "pi-writer"].includes(instance.kind)
+        || typeof instance.closeObservedAt !== "number" || !Number.isFinite(instance.closeObservedAt)
+        || (typeof instance.exitCode !== "number" && instance.exitCode !== null)
+        || (typeof instance.signal !== "string" && instance.signal !== null)
+        || (instance.kind === "runner" ? instance.attempt !== undefined : !Number.isSafeInteger(instance.attempt) || instance.attempt < 0))
+      || !runner || typeof runner.closeObservedAt !== "number" || !Number.isFinite(runner.closeObservedAt)
+      || (typeof runner.exitCode !== "number" && runner.exitCode !== null)
+      || (typeof runner.signal !== "string" && runner.signal !== null)) return;
+    this.terminalProofs.set(runId, event);
+    const waiters = this.terminalWaiters.get(runId);
+    this.terminalWaiters.delete(runId);
+    for (const resolve of waiters ?? []) resolve(event);
+  }
+
+  waitForTerminal(runId: string): { promise: Promise<any>; cancel: () => void } {
+    const proof = this.terminalProofs.get(runId);
+    if (proof) return { promise: Promise.resolve(proof), cancel: () => {} };
+    let resolveWaiter: (proof: any) => void;
+    const promise = new Promise<any>((resolve) => {
+      resolveWaiter = resolve;
+      const waiters = this.terminalWaiters.get(runId) ?? new Set();
+      waiters.add(resolveWaiter);
+      this.terminalWaiters.set(runId, waiters);
+    });
+    return {
+      promise,
+      cancel: () => {
+        const waiters = this.terminalWaiters.get(runId);
+        if (!waiters) return;
+        waiters.delete(resolveWaiter);
+        if (waiters.size === 0) this.terminalWaiters.delete(runId);
+      },
+    };
+  }
+
+  async drainRun(run: OwnedRun) {
+    if (this.terminalProofs.has(run.runId)) return;
+    const waiter = this.waitForTerminal(run.runId); // Install before stop: it may emit synchronously.
+    let stopError: unknown;
+    try { await this.upstream.stop({ runId: run.runId, dir: run.asyncDir }); } catch (error) { stopError = error; }
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        waiter.promise,
+        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error(`Root subagent broker terminal proof timed out for run ${run.runId}${stopError ? ` after stop failure: ${stopError instanceof Error ? stopError.message : String(stopError)}` : ""}`)), this.terminalTimeoutMs); }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      waiter.cancel();
+    }
   }
 
   async ensureExecutorOwner(runId: string) {
@@ -155,7 +229,11 @@ export class RootBrokerServer {
     const existing = this.executorGrants.get(runId);
     if (existing) return existing;
     const pending = (async () => {
-      if (this.principals.has(runId)) throw new Error("Root subagent broker principal is already granted");
+      const principal = this.principals.get(runId);
+      if (principal) {
+        if (principal.role !== "executor") throw new Error("Root subagent broker principal is already granted");
+        return { callerToken: principal.callerToken };
+      }
       const callerToken = this.randomToken();
       this.principals.set(runId, { role: "executor", callerToken });
       try {
@@ -168,7 +246,10 @@ export class RootBrokerServer {
       }
     })();
     this.executorGrants.set(runId, pending);
-    try { return await pending; } catch (error) { this.executorGrants.delete(runId); throw error; }
+    void pending.finally(() => {
+      if (this.executorGrants.get(runId) === pending) this.executorGrants.delete(runId);
+    }).catch(() => undefined);
+    return await pending;
   }
 
   async grantCaller({ callerRunId, planId, cwd, originRoot, stateRoot, role }: { callerRunId: string; planId: string; cwd: string; originRoot: string; stateRoot: string; role: unknown }) {
@@ -443,42 +524,75 @@ export class RootBrokerServer {
 
   async closeRootSession() {
     if (this.closePromise) return this.closePromise;
+    if (this.closed && !this.server) return;
     this.closed = true;
-    this.unsubscribeStarted?.();
-    this.unsubscribeStarted = undefined;
-    this.unsubscribeComplete?.(); this.unsubscribeComplete = undefined;
-    this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
-    this.closePromise = (async () => {
+    const startupBarrier = [
+      ...this.startedObservations.values(),
+      ...this.executorGrants.values(),
+      ...this.callerGrants.values(),
+      ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise)),
+    ];
+    const closing = (async () => {
+      if (startupBarrier.length > 0) await Promise.allSettled(startupBarrier);
+      const drainPhase = async (role: OwnedRun["role"]) => {
+        const runs = [...this.ownedRuns.values()].filter((run) => run.role === role && !this.terminalProofs.has(run.runId));
+        const settled = await Promise.allSettled(runs.map((run) => this.drainRun(run)));
+        const errors = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected").map((result) => result.reason);
+        if (errors.length) throw new AggregateError(errors, `Root subagent broker ${role} drain failed`);
+      };
+      await drainPhase("executor");
+      await drainPhase("plan-runner");
+
+      this.unsubscribeStarted?.(); this.unsubscribeStarted = undefined;
+      this.unsubscribeComplete?.(); this.unsubscribeComplete = undefined;
+      this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
+      let teardownError: unknown;
       try {
-        await Promise.allSettled([...this.startedObservations.values(), ...this.executorGrants.values(), ...this.callerGrants.values()]);
+        const transportSockets = new Set<Socket>(this.sockets);
         for (const [callerRunId, sockets] of this.subscriptions) {
           const push = { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "root.closing", data: {} };
-          for (const socket of sockets) if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);
+          for (const socket of sockets) {
+            transportSockets.add(socket);
+            if (!socket.destroyed) socket.write(`${JSON.stringify(push)}\n`);
+          }
         }
-        for (const socket of this.sockets) if (!socket.destroyed) socket.end();
-        setTimeout(() => { for (const socket of this.sockets) if (!socket.destroyed) socket.destroy(); }, 25).unref?.();
+        for (const socket of transportSockets) if (!socket.destroyed && typeof (socket as any).end === "function") socket.end();
+        setTimeout(() => { for (const socket of transportSockets) if (!socket.destroyed && typeof (socket as any).destroy === "function") socket.destroy(); }, 25).unref?.();
         await new Promise<void>((resolve) => this.server ? this.server.close(() => resolve()) : resolve());
-        try {
-          await rm(brokerSocketPath(this.rootSessionId), { force: true });
-          await Promise.all([...this.grantPaths].map((grantPath) => rm(grantPath, { force: true })));
-        } finally {
-          await this.upstream.dispose?.();
-        }
+        this.server = undefined;
+        await rm(brokerSocketPath(this.rootSessionId), { force: true });
+        await Promise.all([...this.grantPaths].map((grantPath) => rm(grantPath, { force: true })));
+      } catch (error) {
+        teardownError = error;
       } finally {
-        this.callers.clear();
-        this.principals.clear();
-        this.runOwners.clear();
-        this.subscriptions.clear();
-        this.sockets.clear();
-        this.grantPaths.clear();
-        this.executorGrants.clear();
-        this.callerGrants.clear();
-        this.spawnLedger.clear();
-        this.supervisorRequests.clear();
-        this.ownedRuns.clear();
-        this.startedObservations.clear();
+        try {
+          await this.upstream.dispose?.();
+        } finally {
+          this.callers.clear();
+          this.principals.clear();
+          this.runOwners.clear();
+          this.subscriptions.clear();
+          this.sockets.clear();
+          this.grantPaths.clear();
+          this.executorGrants.clear();
+          this.callerGrants.clear();
+          this.spawnLedger.clear();
+          this.supervisorRequests.clear();
+          this.ownedRuns.clear();
+          this.terminalProofs.clear();
+          this.terminalWaiters.clear();
+          this.startedObservations.clear();
+        }
       }
+      if (teardownError) throw teardownError;
     })();
-    return this.closePromise;
+    this.closePromise = closing;
+    try {
+      await closing;
+    } catch (error) {
+      if (this.closePromise === closing) this.closePromise = undefined;
+      throw error;
+    }
+    return closing;
   }
 }
