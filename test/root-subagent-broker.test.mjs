@@ -906,6 +906,51 @@ async function lifecycleBroker(t, eventDuringSpawn) {
   return { broker, events, a, aSocket, bSocket };
 }
 
+async function cleanedLifecycleBroker(t) {
+  const events = lifecycleEvents();
+  let spawns = 0;
+  let executorGrants = 0;
+  const stops = [];
+  const upstream = {
+    ...fakeUpstream(),
+    async spawn(params) {
+      spawns += 1;
+      upstream.calls.push({ method: "spawn", params });
+      if (spawns === 1) {
+        events.emit("subagent:async-started", { runId: "cleaned-run-1", agent: "executor", asyncDir: "/async/cleaned-1", cwd: "/repo", sessionId: "/sessions/cleaned-1" });
+      }
+      return { details: { runId: `cleaned-run-${spawns}`, asyncDir: `/async/cleaned-${spawns}` } };
+    },
+    async stop(params) { stops.push(params); return { stopped: true }; },
+  };
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream,
+    events,
+    writeGrant: async (grant) => {
+      if (grant.role === "executor" && executorGrants++ === 0) throw new Error("executor grant write failed");
+      return `/tmp/${grant.runId}.json`;
+    },
+  });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  const a = await broker.grantCaller({ callerRunId: "caller-a", planId: "plan-cleaned-lifecycle", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const b = await broker.grantCaller({ callerRunId: "caller-b", planId: "plan-cleaned-other", cwd: "/other", originRoot: "/other", stateRoot: "/state-b", role: "plan-runner" });
+  const aSocket = lifecycleSocket(); const bSocket = lifecycleSocket();
+  await broker.dispatch(request({ callerRunId: "caller-a", callerToken: a.callerToken, method: "subscribe", params: {} }), aSocket);
+  await broker.dispatch(request({ callerRunId: "caller-b", callerToken: b.callerToken, method: "subscribe", params: {} }), bSocket);
+  const spawn = () => broker.dispatch(request({ callerRunId: "caller-a", callerToken: a.callerToken, method: "spawn", params: { agent: "executor", task: "run", spawnKey: "dispatch-cleaned-lifecycle" } }), {});
+  const first = await spawn();
+  assert.equal(first.success, false);
+  assert.equal(stops.length, 1);
+  const second = await spawn();
+  assert.equal(second.success, true);
+  assert.equal(spawns, 2);
+  aSocket.lines.length = 0;
+  bSocket.lines.length = 0;
+  return { events, aSocket, bSocket };
+}
+
 test("broker defers owner-only started push until the durable spawn binding exists", async (t) => {
   const subject = await lifecycleBroker(t, (events, sockets) => {
     assert.deepEqual(sockets.aSocket.lines, []); assert.deepEqual(sockets.bSocket.lines, []);
@@ -942,5 +987,28 @@ test("broker reconstructs process-terminal lifecycle identity from its spawn led
     instances: [{ processInstanceId: "runner-process-1", kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 0, signal: null }],
   });
   assert.deepEqual(subject.aSocket.lines, [{ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, type: "execution.completed", callerRunId: "caller-a", data: { dispatchId: "dispatch-terminal", runId: "lifecycle-run", asyncDir: "/async/lifecycle", cwd: "/repo", sessionId: "/sessions/1", state: "observed", processTerminal: { version: 1, runnerProcessInstanceId: "runner-process-1", state: "observed", observedAt: 1_700_000_000_000, instances: [{ processInstanceId: "runner-process-1", kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 0, signal: null }] } } }]);
+  assert.deepEqual(subject.bSocket.lines, []);
+});
+
+test("a cleaned retry does not reuse old started evidence for a new process terminal", async (t) => {
+  const subject = await cleanedLifecycleBroker(t);
+  subject.events.emit("subagent:process-terminal", {
+    version: 1,
+    runId: "cleaned-run-2",
+    runnerProcessInstanceId: "runner-process-2",
+    state: "observed",
+    observedAt: 1_700_000_000_000,
+    instances: [{ processInstanceId: "runner-process-2", kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 0, signal: null }],
+  });
+
+  assert.deepEqual(subject.aSocket.lines, []);
+  assert.deepEqual(subject.bSocket.lines, []);
+});
+
+test("a cleaned retry publishes only its new started identity", async (t) => {
+  const subject = await cleanedLifecycleBroker(t);
+  subject.events.emit("subagent:async-started", { runId: "cleaned-run-2", agent: "executor", asyncDir: "/async/cleaned-2", cwd: "/repo", sessionId: "/sessions/cleaned-2" });
+
+  assert.deepEqual(subject.aSocket.lines, [{ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, type: "execution.started", callerRunId: "caller-a", data: { dispatchId: "dispatch-cleaned-lifecycle", runId: "cleaned-run-2", asyncDir: "/async/cleaned-2", cwd: "/repo", sessionId: "/sessions/cleaned-2", state: "running" } }]);
   assert.deepEqual(subject.bSocket.lines, []);
 });
