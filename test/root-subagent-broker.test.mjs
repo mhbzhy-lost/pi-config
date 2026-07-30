@@ -540,30 +540,109 @@ test("caller grant validates each root field before writing", async () => {
   }
 });
 
-test("root broker grants direct async executor runs idempotently", async (t) => {
-  const grants = [];
+function startedEventBus() {
   const listeners = new Map();
-  const events = {
+  return {
     on(channel, listener) { const values = listeners.get(channel) ?? new Set(); values.add(listener); listeners.set(channel, values); return () => { values.delete(listener); this.unsubscribed = true; }; },
     emit(channel, event) { for (const listener of listeners.get(channel) ?? []) listener(event); },
+    async settled() { await new Promise((resolve) => setImmediate(resolve)); },
   };
+}
+
+function ownedRun(broker, runId) {
+  return broker.ownedRuns?.get(runId);
+}
+
+test("root broker grants direct async executor runs idempotently", async (t) => {
+  const grants = [];
+  const events = startedEventBus();
   const broker = new RootBrokerServer({
     rootSessionId,
     upstream: fakeUpstream(),
     events,
+    captureProcessBirthIdentity: async () => "stable-birth-identity",
     writeGrant: async (grant) => { grants.push(grant); return `/tmp/${grant.runId}`; },
     randomToken: () => "a".repeat(64),
   });
   await broker.start();
   t.after(() => broker.closeRootSession());
   await Promise.all([
-    events.emit("subagent:async-started", { id: "direct-executor", agent: "executor" }),
-    events.emit("subagent:async-started", { runId: "direct-executor", agent: "executor" }),
+    events.emit("subagent:async-started", { id: "direct-executor", pid: 101, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/direct-executor" }),
+    events.emit("subagent:async-started", { id: "direct-executor", pid: 101, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/direct-executor" }),
   ]);
+  await events.settled();
   assert.deepEqual(grants, [{ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId, runId: "direct-executor", callerToken: "a".repeat(64), role: "executor" }]);
   assert.equal(broker.principals.get("direct-executor").role, "executor");
   await broker.closeRootSession();
   assert.equal(events.unsubscribed, true);
+});
+
+test("started ownership records an exact verified executor entry from id-only event", async (t) => {
+  const captures = []; const events = startedEventBus();
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity: async (pid) => { captures.push(pid); return "birth-701"; }, writeGrant: async () => "/tmp/grant" });
+  await broker.start(); t.after(() => broker.closeRootSession());
+  events.emit("subagent:async-started", { id: "executor-701", pid: 701, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/executor-701" });
+  await events.settled();
+  assert.deepEqual(captures, [701]);
+  assert.deepEqual(ownedRun(broker, "executor-701"), { rootSessionId, runId: "executor-701", role: "executor", asyncDir: "/async/executor-701", sessionId: rootSessionId, pid: 701, birthIdentity: "birth-701", identityState: "verified" });
+});
+
+test("started ownership records plan-runner identity without executor principal or grant", async (t) => {
+  const captures = []; const grants = []; const events = startedEventBus();
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity: async (pid) => { captures.push(pid); return "birth-plan"; }, writeGrant: async (grant) => { grants.push(grant); return "/tmp/grant"; } });
+  await broker.start(); t.after(() => broker.closeRootSession());
+  events.emit("subagent:async-started", { id: "plan-run-702", pid: 702, sessionId: rootSessionId, agent: "plan-runner", cwd: "/repo", asyncDir: "/async/plan-run-702" });
+  await events.settled();
+  assert.deepEqual(captures, [702]); assert.deepEqual(grants, []); assert.equal(broker.principals.has("plan-run-702"), false);
+  assert.deepEqual(ownedRun(broker, "plan-run-702"), { rootSessionId, runId: "plan-run-702", role: "plan-runner", asyncDir: "/async/plan-run-702", sessionId: rootSessionId, pid: 702, birthIdentity: "birth-plan", identityState: "verified" });
+});
+
+test("birth identity unavailable records ownership but retains executor EOF grant", async (t) => {
+  const events = startedEventBus(); const unavailable = Object.assign(new Error("unavailable"), { code: "PROCESS_BIRTH_IDENTITY_UNAVAILABLE" });
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity: async () => { throw unavailable; }, writeGrant: async () => "/tmp/grant" });
+  await broker.start(); t.after(() => broker.closeRootSession());
+  events.emit("subagent:async-started", { id: "executor-703", pid: 703, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/executor-703" });
+  await events.settled();
+  assert.equal(broker.principals.get("executor-703")?.role, "executor");
+  assert.deepEqual(ownedRun(broker, "executor-703"), { rootSessionId, runId: "executor-703", role: "executor", asyncDir: "/async/executor-703", sessionId: rootSessionId, pid: 703, birthIdentity: null, identityState: "unavailable" });
+});
+
+test("started ownership fails closed for malformed events before capture or grant", async (t) => {
+  const captures = []; const grants = []; const events = startedEventBus();
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity: async (pid) => { captures.push(pid); return "birth"; }, writeGrant: async (grant) => { grants.push(grant); return "/tmp/grant"; } });
+  await broker.start(); t.after(() => broker.closeRootSession());
+  for (const event of [
+    { id: "missing-pid", sessionId: rootSessionId, agent: "executor", asyncDir: "/async/missing-pid" },
+    { id: "unsafe-pid", pid: 0, sessionId: rootSessionId, agent: "executor", asyncDir: "/async/unsafe-pid" },
+    { id: "negative-pid", pid: -1, sessionId: rootSessionId, agent: "executor", asyncDir: "/async/negative-pid" },
+    { id: "non-safe-pid", pid: Number.MAX_SAFE_INTEGER + 1, sessionId: rootSessionId, agent: "executor", asyncDir: "/async/non-safe-pid" },
+    { id: "relative-dir", pid: 704, sessionId: rootSessionId, agent: "executor", asyncDir: "async/relative" },
+    { id: "missing-session", pid: 705, agent: "executor", asyncDir: "/async/missing-session" },
+  ]) events.emit("subagent:async-started", event);
+  await events.settled();
+  assert.deepEqual(captures, []); assert.deepEqual(grants, []); assert.equal(broker.principals.size, 0); assert.equal(broker.ownedRuns?.size ?? 0, 0);
+});
+
+test("started ownership fails closed for foreign root session events before capture or grant", async (t) => {
+  const captures = []; const grants = []; const events = startedEventBus();
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity: async (pid) => { captures.push(pid); return "birth"; }, writeGrant: async (grant) => { grants.push(grant); return "/tmp/grant"; } });
+  await broker.start(); t.after(() => broker.closeRootSession());
+  events.emit("subagent:async-started", { id: "foreign-706", pid: 706, sessionId: "foreign-root", agent: "executor", cwd: "/repo", asyncDir: "/async/foreign-706" });
+  await events.settled();
+  assert.deepEqual(captures, []); assert.deepEqual(grants, []); assert.equal(broker.principals.size, 0); assert.equal(broker.ownedRuns?.size ?? 0, 0);
+});
+
+test("started ownership deduplicates exact events and marks conflicting identity without reprobe", async (t) => {
+  const captures = []; const events = startedEventBus();
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), events, captureProcessBirthIdentity: async (pid) => { captures.push(pid); return "birth-707"; }, writeGrant: async () => "/tmp/grant" });
+  await broker.start(); t.after(() => broker.closeRootSession());
+  const first = { id: "executor-707", pid: 707, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/executor-707" };
+  events.emit("subagent:async-started", first); events.emit("subagent:async-started", { ...first });
+  await events.settled();
+  events.emit("subagent:async-started", { ...first, pid: 708, asyncDir: "/async/conflict-707" });
+  await events.settled();
+  assert.deepEqual(captures, [707]);
+  assert.deepEqual(ownedRun(broker, "executor-707"), { rootSessionId, runId: "executor-707", role: "executor", asyncDir: "/async/executor-707", sessionId: rootSessionId, pid: 707, birthIdentity: "birth-707", identityState: "conflict" });
 });
 
 test("executor grant subscribes with its own identity and cannot call other methods", async (t) => {
