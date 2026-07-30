@@ -65,7 +65,7 @@ async function waitForPlanOrRunner(statusPath, asyncDir) {
   throw new Error(`flat Harness timed out: ${JSON.stringify({ plan, runner })}`);
 }
 
-async function assertFutureGreen(handle, outcome, planPath) {
+async function assertFutureGreen(handle, outcome, planPath, runtimeTmp) {
   const { plan: status, runner: runnerAsyncStatus } = outcome;
   assert.equal(status.lifecycle, "validated"); assert.equal(status.tasks.length, 2);
   assert.ok(status.tasks.every((task) => task.status === "accepted" && task.attempts?.[0]?.status === "integrated"));
@@ -78,7 +78,14 @@ async function assertFutureGreen(handle, outcome, planPath) {
   assert.equal(new Set(runs.map((run) => run.runId)).size, 3);
   const asyncStatuses = [runnerAsyncStatus, ...await Promise.all(runs.slice(1).map((run) => readJson(path.join(run.asyncDir, "status.json"))))];
   const sessionIds = asyncStatuses.map((value) => value.sessionId);
-  assert.ok(asyncStatuses.every((value) => value?.isNested === false));
+  for (const [index, run] of runs.entries()) {
+    const resolvedAsyncDir = path.resolve(run.asyncDir);
+    assert.equal(path.basename(resolvedAsyncDir), run.runId);
+    assert.equal(path.basename(path.dirname(resolvedAsyncDir)), "async-subagent-runs");
+    assert.ok(resolvedAsyncDir.startsWith(`${path.resolve(runtimeTmp)}${path.sep}`));
+    assert.notEqual(path.basename(path.dirname(resolvedAsyncDir)), "nested-subagent-runs");
+    for (const field of ["parentRunId", "parentStepIndex", "depth", "path"]) assert.ok(!Object.hasOwn(asyncStatuses[index], field));
+  }
   assert.equal(new Set(sessionIds).size, 1);
   assert.match(path.basename(sessionIds[0]), new RegExp(handle.rootSessionId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.notEqual(path.basename(sessionIds[0]), handle.rootSessionId);
@@ -123,7 +130,7 @@ test("flat Root runtime Harness reaches the validated Plan Runner happy path", {
   try {
     await mkdir(path.join(origin, ".pi", "agents"), { recursive: true }); await mkdir(runtimeTmp); await mkdir(sessions); await git(origin, "init"); await git(origin, "config", "user.email", "harness@example.com"); await git(origin, "config", "user.name", "Flat Harness");
     await writeFile(path.join(origin, "README.md"), "base\n"); await mkdir(path.join(origin, "docs")); await copyFile(sourcePlan, path.join(origin, "docs", "plan.md"));
-    await writeFile(path.join(origin, ".pi", "agents", "plan-runner.md"), `---\nname: plan-runner\ndescription: deterministic flat Harness Plan Runner\nmodel: fake/deterministic\nthinking: off\ntemperature: 0\ntools: plan_open,plan_status,plan_continue,plan_verify,plan_block,plan_read_revision,read,grep\nsubagentOnlyExtensions: ${provider},${runnerExtension}\n---\nOpen and execute only the approved Plan revision.\n`);
+    await writeFile(path.join(origin, ".pi", "agents", "plan-runner.md"), `---\nname: plan-runner\ndescription: deterministic flat Harness Plan Runner\nmodel: fake/deterministic\nthinking: off\ntemperature: 0\ntools: plan_open,read,grep\nsubagentOnlyExtensions: ${provider},${runnerExtension}\n---\nOpen and execute only the approved Plan revision.\n`);
     await writeFile(path.join(origin, ".pi", "agents", "executor.md"), `---\nname: executor\ndescription: deterministic flat Harness executor\nmodel: fake/deterministic\nthinking: off\ntemperature: 0\ntools: bash,read,contact_supervisor\nsubagentOnlyExtensions: ${provider},${executorExtension},${rootOwner}\n---\nExecute only the approved task and commit the result.\n`);
     await writeFile(path.join(origin, "commit-message"), "test: 初始化 flat Harness\n"); await git(origin, "add", "."); await git(origin, "commit", "--file", "commit-message");
     const rootSessionId = `flat-${path.basename(root)}`;
@@ -134,7 +141,7 @@ test("flat Root runtime Harness reaches the validated Plan Runner happy path", {
     assert.deepEqual(Object.keys(handle).sort(), ["asyncDir", "baseCommit", "manifestSha256", "planHash", "planId", "planIrHash", "planRunnerRunId", "revision", "rootSessionId", "schemaVersion", "sourceBytesSha256", "worktree"]); assert.equal(handle.schemaVersion, "pi-plan-handle.v4"); assert.equal(handle.rootSessionId, rootSessionId);
     const statusPath = path.join(origin, "var", "plan-runs", handle.planId, "status.json");
     const outcome = await waitForPlanOrRunner(statusPath, handle.asyncDir);
-    await assertFutureGreen(handle, outcome, planPath);
+    await assertFutureGreen(handle, outcome, planPath, runtimeTmp);
   } catch (error) {
     primaryError = error;
     throw error;
