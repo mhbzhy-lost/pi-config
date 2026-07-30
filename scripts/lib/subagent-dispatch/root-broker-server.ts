@@ -247,6 +247,8 @@ export class RootBrokerServer {
   async startSpawn(request: any, caller: Caller, params: Record<string, unknown>, key: string, entry: SpawnLedgerEntry) {
     entry.state = "spawning";
     entry.params = { ...params, cwd: params.cwd ?? caller.cwd };
+    delete entry.started;
+    entry.pending = [];
     delete entry.reply;
     delete entry.binding;
     this.spawnLedger.set(key, entry);
