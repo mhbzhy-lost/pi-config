@@ -1067,6 +1067,25 @@ test("frame decoder accepts multiple valid frames across chunks", () => {
   assert.deepEqual(decoder.push(`${large1Suffix}${large2Frame}`), [large1Frame.trimEnd(), large2Frame.trimEnd()]);
 });
 
+test("frame decoder preserves UTF-8 split across chunks", () => {
+  const push = lifecycleCompletedPush({ version: 1, runnerProcessInstanceId: "runner-utf8-frame", state: "unknown", reason: "observer-unavailable", diagnostic: "中文 diagnostic" });
+  const frame = Buffer.from(`${JSON.stringify(push)}\n`, "utf8");
+  const chineseCharacter = Buffer.from("中", "utf8");
+  const splitIndex = frame.indexOf(chineseCharacter) + 1;
+
+  assert.deepEqual(parseBrokerPush(push), push);
+  assert.ok(Buffer.byteLength(frame) <= BROKER_FRAME_LIMIT_BYTES);
+  assert.ok(splitIndex > 0);
+  assert.equal(frame[splitIndex - 1] & 0xc0, 0xc0);
+  assert.equal(frame[splitIndex] & 0xc0, 0x80);
+
+  const decoder = createBrokerFrameDecoder();
+  assert.deepEqual(decoder.push(frame.subarray(0, splitIndex)), []);
+  const [line] = decoder.push(frame.subarray(splitIndex));
+  assert.equal(line, `${JSON.stringify(push)}`);
+  assert.deepEqual(JSON.parse(line), push);
+});
+
 test("lifecycle push protocol accepts pinned observed, unknown, pending, and not-started terminals", () => {
   const terminals = [
     observedProcessTerminal(),
