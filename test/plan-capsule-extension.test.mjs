@@ -297,6 +297,8 @@ test("capsule blocks every subagent and contact_supervisor call inside an opened
   ]) {
     const denied = await handlers.get("tool_call")(event, ctx);
     assert.equal(denied.block, true);
+    assert.doesNotMatch(denied.reason, /Standalone/);
+    if (event.toolName !== "subagent_supervisor") assert.match(denied.reason, /Plan dispatch authorization boundary/);
   }
 });
 

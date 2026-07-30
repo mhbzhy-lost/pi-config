@@ -315,6 +315,34 @@ test("caller grant publishes matching identities before the grant and rolls back
   assert.equal(broker.grantPaths.size, 0);
 });
 
+test("caller grants reject each invalid root field before write", async () => {
+  let writes = 0;
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), writeGrant: async () => { writes += 1; return "/tmp/grant"; } });
+  for (const field of ["cwd", "originRoot", "stateRoot"]) {
+    for (const value of [undefined, "", "relative"]) {
+      const grant = { callerRunId: `run-${field}-${String(value)}`, planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" };
+      grant[field] = value;
+      await assert.rejects(() => broker.grantCaller(grant));
+    }
+  }
+  assert.equal(writes, 0);
+});
+
+test("close fences a pending caller grant and removes its written file", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "root-broker-close-")); let releaseWrite;
+  try {
+    const grantPath = path.join(directory, "grant.json");
+    const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), writeGrant: async () => { await new Promise((resolve) => { releaseWrite = resolve; }); await writeFile(grantPath, "grant"); return grantPath; } });
+    const grant = broker.grantCaller({ callerRunId: "pending-run", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
+    while (!releaseWrite) await new Promise((resolve) => setImmediate(resolve));
+    const close = broker.closeRootSession(); releaseWrite();
+    await assert.rejects(grant, /closing/); await close;
+    await assert.rejects(stat(grantPath));
+    assert.equal(broker.callers.has("pending-run"), false); assert.equal(broker.principals.has("pending-run"), false);
+    await assert.rejects(() => broker.grantCaller({ callerRunId: "late", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" }), /closing/);
+  } finally { await removePath(directory, { recursive: true, force: true }); }
+});
+
 test("executor grant publishes before write, rolls back, and can retry", async () => {
   let broker;
   let writes = 0;
