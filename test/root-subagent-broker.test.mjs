@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { BROKER_METHODS, brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
+import { BROKER_METHODS, brokerGrantPath, brokerSocketPath, parseBrokerPush, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
 import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
@@ -1011,4 +1011,88 @@ test("a cleaned retry publishes only its new started identity", async (t) => {
 
   assert.deepEqual(subject.aSocket.lines, [{ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, type: "execution.started", callerRunId: "caller-a", data: { dispatchId: "dispatch-cleaned-lifecycle", runId: "cleaned-run-2", asyncDir: "/async/cleaned-2", cwd: "/repo", sessionId: "/sessions/cleaned-2", state: "running" } }]);
   assert.deepEqual(subject.bSocket.lines, []);
+});
+
+function lifecycleCompletedPush(processTerminal, state = typeof processTerminal === "object" && processTerminal !== null ? processTerminal.state : "unknown") {
+  return {
+    schemaVersion: "pi-root-subagent-broker-push.v1",
+    rootSessionId,
+    callerRunId: "caller-lifecycle-protocol",
+    type: "execution.completed",
+    data: {
+      dispatchId: "dispatch-lifecycle-protocol",
+      runId: "run-lifecycle-protocol",
+      asyncDir: "/async/lifecycle-protocol",
+      cwd: "/repo",
+      sessionId: "/sessions/lifecycle-protocol",
+      state,
+      processTerminal,
+    },
+  };
+}
+
+function observedProcessTerminal() {
+  return {
+    version: 1,
+    runnerProcessInstanceId: "runner-process-protocol",
+    resumeDisposition: "resumable",
+    state: "observed",
+    observedAt: 1_700_000_000_000,
+    instances: [
+      { processInstanceId: "runner-process-protocol", kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 0, signal: null },
+      { processInstanceId: "writer-process-protocol", kind: "pi-writer", attempt: 1, closeObservedAt: 1_700_000_000_001, exitCode: 0, signal: null },
+    ],
+    canonicalSession: { canonicalSessionId: "canonical-session-protocol", leaseDisposition: "released", freeAtObservation: true, canonicalSessionLeaseReleased: true },
+  };
+}
+
+test("lifecycle push protocol accepts pinned observed, unknown, pending, and not-started terminals", () => {
+  const terminals = [
+    observedProcessTerminal(),
+    { version: 1, childIndex: 2, runnerProcessInstanceId: "runner-unknown-protocol", resumeDisposition: "unavailable", state: "unknown", reason: "observer-unavailable", diagnostic: "observer disconnected" },
+    { version: 1, runnerProcessInstanceId: "runner-pending-protocol", state: "pending" },
+    { version: 1, runnerProcessInstanceId: "runner-not-started-protocol", state: "not-started" },
+  ];
+
+  for (const terminal of terminals) {
+    const push = lifecycleCompletedPush(terminal);
+    assert.deepEqual(parseBrokerPush(push), push);
+  }
+});
+
+test("lifecycle push protocol rejects a complete frame over 64 KiB", () => {
+  const processTerminal = { version: 1, runnerProcessInstanceId: "runner-frame-protocol", state: "unknown", reason: "observer-unavailable", diagnostic: "x".repeat(64 * 1024 - 256) };
+  const push = lifecycleCompletedPush(processTerminal);
+  assert.ok(Buffer.byteLength(JSON.stringify(processTerminal), "utf8") < 64 * 1024);
+  assert.ok(Buffer.byteLength(`${JSON.stringify(push)}\n`, "utf8") > 64 * 1024);
+  assert.throws(() => parseBrokerPush(push), /frame|size|large/i);
+});
+
+test("lifecycle push protocol rejects a non-object processTerminal", () => {
+  assert.throws(() => parseBrokerPush(lifecycleCompletedPush("not-a-terminal")), /terminal|process|proof/i);
+});
+
+test("lifecycle push protocol rejects unknown processTerminal fields", () => {
+  assert.throws(() => parseBrokerPush(lifecycleCompletedPush({ ...observedProcessTerminal(), extra: true })), /terminal|field|process|proof/i);
+});
+
+test("lifecycle push protocol rejects observed terminals without instances", () => {
+  const terminal = observedProcessTerminal();
+  delete terminal.instances;
+  assert.throws(() => parseBrokerPush(lifecycleCompletedPush(terminal)), /terminal|instances|process|proof/i);
+});
+
+test("lifecycle push protocol rejects observed terminals without the runner instance", () => {
+  const terminal = observedProcessTerminal();
+  terminal.instances[0].processInstanceId = "other-runner-process";
+  assert.throws(() => parseBrokerPush(lifecycleCompletedPush(terminal)), /terminal|runner|instances|process|proof/i);
+});
+
+test("lifecycle push protocol rejects terminal states that disagree with completion state", () => {
+  assert.throws(() => parseBrokerPush(lifecycleCompletedPush(observedProcessTerminal(), "complete")), /terminal|state|process|proof/i);
+});
+
+test("lifecycle push protocol rejects unknown terminals with an invalid reason", () => {
+  const terminal = { version: 1, runnerProcessInstanceId: "runner-reason-protocol", state: "unknown", reason: "not-a-pinned-reason" };
+  assert.throws(() => parseBrokerPush(lifecycleCompletedPush(terminal)), /terminal|reason|process|proof/i);
 });
