@@ -439,6 +439,7 @@ test("public v3 continuePlan returns the exact forward-dependency dispatch inten
   const branch = [];
   const appended = [];
   const spawns = [];
+  const inspections = [];
   const pi = { async appendEntry(type, data) {
     appended.push(data);
     branch.push({ customType: type, data });
@@ -451,6 +452,10 @@ test("public v3 continuePlan returns the exact forward-dependency dispatch inten
     revisionStore: store,
     executionBackend: backend({ spawns }),
     allocateAttemptWorkspace: async (input) => fakeAllocator(input),
+    inspectAttemptWorkspace: async (candidate) => {
+      inspections.push(candidate);
+      return { headCommit: candidate.baseCommit, clean: true };
+    },
     integrationQueueFactory(options) {
       captured = options;
       return createIntegrationQueue(options);
@@ -496,6 +501,7 @@ test("public v3 continuePlan returns the exact forward-dependency dispatch inten
   assert.deepEqual(result.dispatches[0].contract, requested.data.tool.contract);
   assert.equal(result.dispatches[0].contractHash, requested.data.toolHash);
   assert.equal(spawns.length, 0);
+  assert.deepEqual(inspections, []);
   assert.equal(appended.some((entry) => entry.type === "attempt.dispatch-requested" && entry.data.taskId === "task-1"), false);
   assert.deepEqual(appended.map((entry) => entry.type), ["plan.created", "attempt.workspace-allocated", "attempt.dispatch-requested"]);
 
@@ -505,6 +511,19 @@ test("public v3 continuePlan returns the exact forward-dependency dispatch inten
   assert.deepEqual(replay.dispatches, result.dispatches);
   assert.equal(appended.length, eventCount);
   assert.equal(spawns.length, 0);
+  assert.equal(inspections.length, 1);
+  const [candidate] = inspections;
+  const allocated = appended.find((entry) => entry.type === "attempt.workspace-allocated" && entry.data.taskId === "task-2");
+  assert.equal(candidate.path, result.dispatches[0].contract.execution.cwd);
+  assert.equal(candidate.path, allocated.data.workspace.path);
+  assert.equal(candidate.planId, repo.planId);
+  assert.equal(candidate.planId, allocated.data.workspace.planId);
+  assert.equal(candidate.taskId, result.dispatches[0].contract.taskId);
+  assert.equal(candidate.taskId, allocated.data.taskId);
+  assert.equal(candidate.attemptId, result.dispatches[0].attemptId);
+  assert.equal(candidate.attemptId, allocated.data.attemptId);
+  assert.equal(candidate.baseCommit, requested.data.baseCommit);
+  assert.equal(candidate.baseCommit, allocated.data.baseCommit);
 });
 
 test("session shutdown stops each bound backend run once", async (t) => {

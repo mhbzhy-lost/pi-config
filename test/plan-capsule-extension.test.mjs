@@ -102,7 +102,7 @@ test("plan-runner alone uses the real subagentOnlyExtensions profile field", asy
   assert.match(profiles[0], /^tools: plan_open,plan_status,plan_continue,plan_verify,plan_block,plan_read_revision,plan_amend,read,grep$/m);
   assert.match(profiles[0], /plan_read_revision[\s\S]*plan_amend/);
   assert.doesNotMatch(profiles[0], /\bbash\b|approvedHash|contact_supervisor/);
-  assert.doesNotMatch(profiles[0], /\bpending\b|timeoutMs: 1000/);
+  assert.doesNotMatch(profiles[0], /(?:check|Supervisor)\s+Supervisor pending|subagent_wait with timeoutMs 1000ms|timeoutMs: 1000/);
   for (const value of ["plan_continue", "dispatch-required", "dispatches", "subagent", "contract"]) assert.match(profiles[0], new RegExp(`\\b${value}\\b`));
   assert.match(profiles[0], /each[\s\S]*dispatch[\s\S]*subagent[\s\S]*exact[\s\S]*contract/i);
   assert.match(profiles[0], /no pending dispatch[\s\S]*not call/i);
