@@ -223,9 +223,10 @@ export class RootBrokerServer {
     if (this.closed || !run || run.role !== "plan-runner" || !this.terminalProofs.has(actualRunId) || !caller || caller.role !== "plan-runner" || !followUps?.length) return Promise.resolve();
     const operation = this.performCallerRevive(actualRunId);
     this.revivePromises.set(actualRunId, operation);
-    void operation.then(() => {
+    const cleanup = () => {
       if (this.revivePromises.get(actualRunId) === operation) this.revivePromises.delete(actualRunId);
-    }).catch(() => undefined);
+    };
+    void operation.then(cleanup, cleanup);
     return operation;
   }
 
