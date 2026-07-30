@@ -131,6 +131,9 @@ export default async function planRunner(pi: ExtensionAPI) {
 
     createPlanCapsuleExtension(pi, {
       ...deps,
+      requestCallerFollowUp(params: Record<string, unknown>) {
+        return rpc.callerFollowUp(params);
+      },
       authorizeExecutorDispatch(input: unknown, context: unknown) {
         return boundary.authorize(input, context);
       },
