@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import * as publicPiModule from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
 
-export const REQUIRED_METHODS = ["ping", "status", "spawn", "interrupt", "stop"];
-export const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1"];
+export const REQUIRED_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];
+export const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0"];
 
 export async function assertBrowserTranscriptCompatibility({
   packageRoot,
@@ -86,7 +86,7 @@ export function evaluatePlanHarnessCompatibility(report) {
   const failures = [];
 
   if (!SUPPORTED_PI_VERSIONS.includes(report.piVersion)) failures.push(`unsupported Pi version: ${report.piVersion}`);
-  if (report.version !== "0.37.0") failures.push(`unexpected pi-subagents version: ${report.version}`);
+  if (report.version !== "0.37.2") failures.push(`unexpected pi-subagents version: ${report.version}`);
   if (report.typeboxVersion !== "1.1.38") failures.push(`unexpected typebox version: ${report.typeboxVersion}`);
   if (report.typeboxCompileResolvable !== true) failures.push("typebox/compile is not resolvable from pi-subagents");
   if (report.rpcVersion !== 1) failures.push(`unexpected RPC version: ${report.rpcVersion}`);

@@ -9,7 +9,7 @@ import {
   formatCompactSubagentToolResult,
 } from "../../scripts/lib/subagent-dispatch/compact-rendering.ts";
 import { createSupervisorRequestMailbox, installHeadlessTypedSubagentRuntime } from "../../scripts/lib/subagent-dispatch/extension.ts";
-import { createTypedSubagentRpcClient } from "../../scripts/lib/subagent-dispatch/rpc-client.ts";
+import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../../scripts/lib/subagent-dispatch/rpc-client.ts";
 import { requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
@@ -28,7 +28,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   };
   let brokerStarted = false;
   let previousBrokerMarker: string | undefined;
-  const rpc = createTypedSubagentRpcClient(pi.events);
+  const rpc = createRenewableTypedSubagentRpcClient(() => createTypedSubagentRpcClient(pi.events));
   const mailbox = createSupervisorRequestMailbox((message, context) => (
     requireRootBroker(pi).routeSupervisorRequest(message, context)
   ));
@@ -58,6 +58,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     onSupervisorRequest: mailbox.handle,
   });
   pi.on("session_start", async (_event, ctx) => {
+    rpc.renew();
     if (brokerStarted) throw new Error("Root subagent broker is already started");
     const rootSessionId = resolveCurrentSessionId(ctx.sessionManager);
     const upstream = Object.freeze({

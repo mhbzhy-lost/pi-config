@@ -10,16 +10,14 @@ import { loadDesiredSkills, parseSkillList } from "./lib/skill-whitelist.mjs";
 
 const execFile = promisify(execFileCallback);
 
-const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1"];
-const PI_SUBAGENTS_VERSION = "0.37.0";
+const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0"];
+const PI_SUBAGENTS_VERSION = "0.37.2";
 const TYPEBOX_VERSION = "1.1.38";
 const BASIC_MEMORY_VERSION = "0.22.1";
 const EXPECTED_GLOBAL_SKILLS = [
   "external-llm-review",
   "git-commit-convention",
-  "systematic-debugging",
   "test-driven-development",
-  "receiving-code-review",
   "writing-skills",
   "writing-plans",
   "plan-runner-dispatch",
@@ -48,7 +46,7 @@ const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/stream.mjs",
   "scripts/lib/runtime/index.mjs",
 ];
-const REQUIRED_RPC_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop"];
+const REQUIRED_RPC_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];
 const LEGACY_TASK7_FILES = [
   "scripts/lib/subagent-jobs.mjs",
   "scripts/lib/subagent-extension.mjs",

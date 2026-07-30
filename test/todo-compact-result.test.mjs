@@ -137,11 +137,11 @@ test("rpiv-todo package extension is disabled because the tracked wrapper owns r
   const settings = JSON.parse(await readFile(new URL("../pi/settings.json", import.meta.url), "utf8"));
   const configured = settings.packages.find((entry) => {
     const source = typeof entry === "string" ? entry : entry.source;
-    return source === "npm:@juicesharp/rpiv-todo";
+    return source === "npm:@juicesharp/rpiv-todo@2.2.0";
   });
 
   assert.deepEqual(configured, {
-    source: "npm:@juicesharp/rpiv-todo",
+    source: "npm:@juicesharp/rpiv-todo@2.2.0",
     extensions: [],
   });
 });

@@ -13,12 +13,12 @@ import * as compat from "../scripts/probes/pi-subagents-compat.mjs";
 const { createSubagentsRpcClient, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } = compat;
 const repoRoot = process.cwd();
 const compatibleReport = {
-  piVersion: "0.82.1",
-  version: "0.37.0",
+  piVersion: "0.83.0",
+  version: "0.37.2",
   typeboxVersion: "1.1.38",
   typeboxCompileResolvable: true,
   rpcVersion: 1,
-  methods: ["ping", "status", "spawn", "interrupt", "stop"],
+  methods: ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"],
   events: ["subagent:async-started", "subagent:async-complete"],
   standaloneRootService: true,
   standaloneNoChildEnv: true,
@@ -39,8 +39,8 @@ function evaluate(report) {
 }
 
 test("exports the stable RPC v1 method and supported Pi contracts", () => {
-  assert.deepEqual(REQUIRED_METHODS, ["ping", "status", "spawn", "interrupt", "stop"]);
-  assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1"]);
+  assert.deepEqual(REQUIRED_METHODS, ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"]);
+  assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1", "0.83.0"]);
 });
 
 test("installed launch arguments keep project child agents outside fanout hierarchy", async () => {
@@ -65,6 +65,7 @@ test("installed launch arguments keep project child agents outside fanout hierar
     assert.equal(built.env.PI_SUBAGENT_PARENT_RUN_ID || undefined, undefined);
     assert.equal(built.env.PI_SUBAGENT_PARENT_PATH || undefined, undefined);
     assert.ok(built.args.includes(agents.executor.subagentOnlyExtensions));
+    assert.ok(built.args.includes("--no-context-files"));
   } finally { await rm(built.tempDir, { recursive: true, force: true }); }
 });
 
@@ -207,8 +208,10 @@ test("accepts the standalone Plan Harness compatibility report", () => {
 });
 
 test("rejects runtime versions outside the explicit support set", () => {
-  assert.deepEqual(evaluate({ ...compatibleReport, piVersion: "0.82.0" }), { ok: true, failures: [] });
-  assert.deepEqual(evaluate({ ...compatibleReport, piVersion: "0.83.0" }).failures, ["unsupported Pi version: 0.83.0"]);
+  for (const version of ["0.82.0", "0.82.1", "0.83.0"]) {
+    assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }), { ok: true, failures: [] });
+  }
+  assert.deepEqual(evaluate({ ...compatibleReport, piVersion: "0.83.1" }).failures, ["unsupported Pi version: 0.83.1"]);
   assert.deepEqual(evaluate({ ...compatibleReport, version: "0.35.1" }).failures, ["unexpected pi-subagents version: 0.35.1"]);
   assert.deepEqual(evaluate({ ...compatibleReport, typeboxVersion: "1.1.24" }).failures, ["unexpected typebox version: 1.1.24"]);
 });
@@ -221,8 +224,8 @@ test("requires TypeBox compiler resolution from pi-subagents", () => {
 
 test("requires RPC v1 methods and lifecycle events", () => {
   assert.deepEqual(evaluate({ ...compatibleReport, rpcVersion: 2 }).failures, ["unexpected RPC version: 2"]);
-  assert.deepEqual(evaluate({ ...compatibleReport, methods: compatibleReport.methods.filter((method) => method !== "stop") }).failures, [
-    "missing RPC method: stop",
+  assert.deepEqual(evaluate({ ...compatibleReport, methods: compatibleReport.methods.filter((method) => method !== "resume") }).failures, [
+    "missing RPC method: resume",
   ]);
   assert.deepEqual(evaluate({ ...compatibleReport, events: ["subagent:async-started"] }).failures, [
     "missing lifecycle event: subagent:async-complete",
@@ -275,7 +278,7 @@ test("builds the exact top-level runtime dependency install command", async () =
     command: "npm",
     args: [
       "install", "--prefix", "/tmp/pi/npm", "--save-exact",
-      "pi-subagents@0.37.0", "typebox@1.1.38",
+      "pi-subagents@0.37.2", "@juicesharp/rpiv-todo@2.2.0", "typebox@1.1.38",
     ],
   });
 });
@@ -292,7 +295,7 @@ test("installs the exact runtime dependencies through the injected process runne
 
   assert.deepEqual(calls, [[
     "npm",
-    ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "pi-subagents@0.37.0", "typebox@1.1.38"],
+    ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "pi-subagents@0.37.2", "@juicesharp/rpiv-todo@2.2.0", "typebox@1.1.38"],
     { env: { PATH: "/test/bin" } },
   ]]);
   assert.deepEqual(result, { piNpmDir: "/tmp/pi/npm" });

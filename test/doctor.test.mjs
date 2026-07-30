@@ -9,7 +9,7 @@ import { inspectConfiguration } from "../scripts/doctor.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const isolatedSubagentPackage = {
-  source: "npm:pi-subagents@0.37.0",
+  source: "npm:pi-subagents@0.37.2",
   extensions: [],
   skills: [],
   prompts: [],
@@ -23,7 +23,7 @@ test("inspectConfiguration rejects pi-subagents package resource autoload", asyn
     await writeFile(join(root, "skill-overrides", "skills.list"), "");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
-    await writeFile(join(root, "pi", "settings.json"), JSON.stringify({ packages: ["npm:pi-subagents@0.37.0"] }));
+    await writeFile(join(root, "pi", "settings.json"), JSON.stringify({ packages: ["npm:pi-subagents@0.37.2"] }));
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
@@ -39,13 +39,13 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    for (const skill of ["external-llm-review", "git-commit-convention", "systematic-debugging", "test-driven-development", "receiving-code-review", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "exa-search", "playwright", "browser-auth-session", "goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7"]) {
+    for (const skill of ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "exa-search", "playwright", "browser-auth-session", "goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7"]) {
       await mkdir(join(root, "skill-overrides", skill), { recursive: true });
       await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), "# test\n");
     }
     await writeFile(
       join(root, "skill-overrides", "skills.list"),
-      "external-llm-review\ngit-commit-convention\nsystematic-debugging\ntest-driven-development\nreceiving-code-review\nwriting-skills\nwriting-plans\nplan-runner-dispatch\nsubagent-dispatch\nexa-search\nplaywright\nbrowser-auth-session\n",
+      "external-llm-review\ngit-commit-convention\ntest-driven-development\nwriting-skills\nwriting-plans\nplan-runner-dispatch\nsubagent-dispatch\nexa-search\nplaywright\nbrowser-auth-session\n",
     );
     await writeFile(
       join(root, "skill-overrides", "skills.local.list"),
@@ -82,10 +82,10 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     }
     await writeFile(
       join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"),
-      JSON.stringify({ version: "0.37.0", pi: { extensions: ["./src/extension/index.ts"] } }),
+      JSON.stringify({ version: "0.37.2", pi: { extensions: ["./src/extension/index.ts"] } }),
     );
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "index.ts"), "");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "rpc.ts"), 'const methods = ["ping", "status", "spawn", "steer", "interrupt", "stop"];\n');
+    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "rpc.ts"), 'const methods = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];\n');
     await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "package.json"), JSON.stringify({ version: "1.1.38", type: "module", exports: { "./compile": "./build/compile/index.mjs" } }));
     await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "build", "compile", "index.mjs"), "export {};\n");
 
@@ -108,7 +108,7 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
 test("inspectConfiguration accepts additional valid local skills", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
-    const globalSkills = ["external-llm-review", "git-commit-convention", "systematic-debugging", "test-driven-development", "receiving-code-review", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "exa-search", "playwright", "browser-auth-session"];
+    const globalSkills = ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "exa-search", "playwright", "browser-auth-session"];
     const localSkills = ["goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7", "crash-analyzer-usage"];
     await mkdir(join(root, "skill-overrides"), { recursive: true });
     for (const skill of [...globalSkills, ...localSkills]) {
@@ -164,7 +164,7 @@ test("inspectConfiguration reports missing pi-subagents package", async () => {
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "unknown" });
-    assert.ok(issues.includes("missing Pi package: pi-subagents@0.37.0"));
+    assert.ok(issues.includes("missing Pi package: pi-subagents@0.37.2"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -172,11 +172,11 @@ test("inspectConfiguration reports missing pi-subagents package", async () => {
 
 test("inspectConfiguration reports the actual Pi executable version", async () => {
   const issues = await inspectConfiguration(repoRoot, { readPiVersion: async () => "0.80.9" });
-  assert.ok(issues.includes("unexpected Pi version: 0.80.9; supported 0.82.0, 0.82.1"));
+  assert.ok(issues.includes("unexpected Pi version: 0.80.9; supported 0.82.0, 0.82.1, 0.83.0"));
 });
 
 test("inspectConfiguration accepts every supported Pi version", async () => {
-  for (const version of ["0.82.0", "0.82.1"]) {
+  for (const version of ["0.82.0", "0.82.1", "0.83.0"]) {
     const issues = await inspectConfiguration(repoRoot, { readPiVersion: async () => version });
     assert.equal(issues.some((issue) => issue.startsWith("unexpected Pi version:")), false);
   }
@@ -196,7 +196,7 @@ test("inspectConfiguration reports an unexpected pi-subagents version", async ()
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.35.1" }));
 
     const issues = await inspectConfiguration(root);
-    assert.ok(issues.includes("unexpected pi-subagents version: 0.35.1; expected 0.37.0"));
+    assert.ok(issues.includes("unexpected pi-subagents version: 0.35.1; expected 0.37.2"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -213,7 +213,7 @@ test("inspectConfiguration reports a failed pi-subagents RPC probe", async () =>
     await writeFile(join(root, "pi", "settings.json"), "{}");
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.37.0" }));
+    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.37.2" }));
 
     const issues = await inspectConfiguration(root);
     assert.ok(issues.some((issue) => issue.startsWith("pi-subagents RPC probe failed:")));
@@ -240,12 +240,12 @@ test("inspectConfiguration reports the final plan execution contract gaps", asyn
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
     await mkdir(join(root, "scripts", "lib"), { recursive: true });
     await writeFile(join(root, "scripts", "lib", "subagent-jobs.mjs"), "legacy\n");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.37.0", pi: { extensions: ["./src/extension/index.ts"] } }));
+    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.37.2", pi: { extensions: ["./src/extension/index.ts"] } }));
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "index.ts"), "");
     await writeFile(join(root, ".gitignore"), "/var/plan-runs/\n");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "unknown" });
-    assert.ok(issues.includes("unexpected Pi version: unknown; supported 0.82.0, 0.82.1"));
+    assert.ok(issues.includes("unexpected Pi version: unknown; supported 0.82.0, 0.82.1, 0.83.0"));
     assert.ok(issues.includes("unexpected executor extension isolation"));
     assert.ok(issues.includes("missing required agent profile: plan-runner"));
     assert.ok(issues.includes("missing required Plan child extension: pi/child-extensions/plan-capsule.ts"));

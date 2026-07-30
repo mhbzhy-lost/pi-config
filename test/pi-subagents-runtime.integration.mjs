@@ -341,7 +341,7 @@ test("installed runtime resolves a supported Pi and exact dependency versions", 
   const piVersion = execFileSync(piBinary, ["--version"], { encoding: "utf8" }).trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi version: ${piVersion}`);
   const piSubagentsVersion = execFileSync("node", ["-p", `require(${JSON.stringify(join(extension, "package.json"))}).version`], { encoding: "utf8" }).trim();
-  assert.equal(piSubagentsVersion, "0.37.0");
+  assert.equal(piSubagentsVersion, "0.37.2");
   const requireFromExtension = createRequire(join(extension, "package.json"));
   assert.match(requireFromExtension.resolve("typebox/compile"), /typebox/);
   const typeboxPackage = JSON.parse(execFileSync("node", ["-e", `process.stdout.write(require('fs').readFileSync(${JSON.stringify(join(repoRoot, "pi", "npm", "node_modules", "typebox", "package.json"))}, 'utf8'))`], { encoding: "utf8" }));

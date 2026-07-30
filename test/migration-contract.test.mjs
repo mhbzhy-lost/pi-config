@@ -9,9 +9,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const expectedGlobalSkills = [
   "external-llm-review",
   "git-commit-convention",
-  "systematic-debugging",
   "test-driven-development",
-  "receiving-code-review",
   "writing-skills",
   "writing-plans",
   "plan-runner-dispatch",
@@ -20,6 +18,11 @@ const expectedGlobalSkills = [
   "playwright",
   "browser-auth-session",
 ];
+
+test("pins the official Superpowers release", async () => {
+  const packageJson = JSON.parse(await readFile(join(repoRoot, "vendor", "superpowers", "package.json"), "utf8"));
+  assert.equal(packageJson.version, "6.2.0");
+});
 
 test("migration exposes exactly the required global Skills", async () => {
   const { loadDesiredSkills } = await import("../scripts/lib/skill-whitelist.mjs");

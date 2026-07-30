@@ -16,7 +16,7 @@ test("keeps pi-subagents Pi-managed while disabling every upstream package resou
   });
 
   assert.deepEqual(entry, {
-    source: "npm:pi-subagents@0.37.0",
+    source: "npm:pi-subagents@0.37.2",
     extensions: [],
     skills: [],
     prompts: [],
@@ -48,7 +48,8 @@ test("retains exact dependency ownership in Pi package management", async () => 
   const runtimePackage = JSON.parse(await text("pi/npm/package.json"));
   const init = await text("init-pi.sh");
 
-  assert.equal(runtimePackage.dependencies["pi-subagents"], "0.37.0");
+  assert.equal(runtimePackage.dependencies["pi-subagents"], "0.37.2");
+  assert.equal(runtimePackage.dependencies["@juicesharp/rpiv-todo"], "2.2.0");
   assert.match(init, /PI_CODING_AGENT_DIR="\$SCRIPT_DIR\/pi" "\$pi_binary" install "npm:pi-subagents@\$PI_SUBAGENTS_VERSION"/);
   assert.doesNotMatch(init, /npm install[^\n]*pi-subagents/);
 });

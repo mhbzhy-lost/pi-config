@@ -43,7 +43,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await chmod(fakeNpm, 0o755);
     await writeFile(
       fakePi,
-      "#!/usr/bin/env bash\nprintf 'pi-real %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.37.0\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'pi-real %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" && \"$2\" == \"npm:pi-subagents@0.37.2\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.37.2\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
     );
     await chmod(fakePi, 0o755);
 
@@ -91,8 +91,9 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     const commands = await readFile(commandLog, "utf8");
     assert.match(commands, /git -C .* submodule update --init --recursive/);
-    assert.match(commands, /npm install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.82\.1/);
-    assert.match(commands, /pi-real install npm:pi-subagents@0\.37\.0/);
+    assert.match(commands, /npm install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.83\.0/);
+    assert.match(commands, /pi-real install npm:pi-subagents@0\.37\.2/);
+    assert.match(commands, /pi-real install npm:@juicesharp\/rpiv-todo@2\.2\.0/);
     assert.match(commands, /npm --prefix .* run setup:plan-runtime/);
     const typeboxPackage = JSON.parse(await readFile(join(fixtureRepo, "pi", "npm", "node_modules", "typebox", "package.json"), "utf8"));
     assert.equal(typeboxPackage.version, "1.1.38");

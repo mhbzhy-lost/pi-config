@@ -23,6 +23,34 @@ function validateRequestId(value) {
   return value;
 }
 
+export function createRenewableTypedSubagentRpcClient(createClient) {
+  if (typeof createClient !== "function") {
+    throw new TypedSubagentRpcError("invalid_factory", "typed subagent RPC client factory must be a function");
+  }
+  let current = createClient();
+  const active = () => {
+    current ??= createClient();
+    return current;
+  };
+  return Object.freeze({
+    renew() {
+      current?.dispose?.();
+      current = createClient();
+      return current;
+    },
+    ping: (...args) => active().ping(...args),
+    spawn: (...args) => active().spawn(...args),
+    status: (...args) => active().status(...args),
+    steer: (...args) => active().steer(...args),
+    interrupt: (...args) => active().interrupt(...args),
+    stop: (...args) => active().stop(...args),
+    dispose() {
+      current?.dispose?.();
+      current = undefined;
+    },
+  });
+}
+
 export function createTypedSubagentRpcClient(
   events,
   { timeoutMs = 5000, randomUUID: createId = randomUUID } = {},

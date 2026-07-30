@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   TypedSubagentRpcError,
+  createRenewableTypedSubagentRpcClient,
   createTypedSubagentRpcClient,
 } from "../scripts/lib/subagent-dispatch/rpc-client.ts";
 
@@ -154,6 +155,36 @@ test("times out, rejects duplicate caller ids, and removes reply listeners", asy
   });
   await assert.rejects(first, (error) => error.code === "timeout");
   assert.equal(events.listenerCount("subagents:rpc:v1:reply:fixed-id"), 0);
+  client.dispose();
+});
+
+test("starts immediately and renews the underlying RPC client after a session shutdown", async () => {
+  const events = createEvents();
+  let generation = 1;
+  const client = createRenewableTypedSubagentRpcClient(() => createTypedSubagentRpcClient(events, {
+    randomUUID: () => `session-${generation}`,
+  }));
+
+  const first = client.ping();
+  events.emit("subagents:rpc:v1:reply:session-1", {
+    version: 1,
+    requestId: "session-1",
+    success: true,
+    data: { session: 1 },
+  });
+  assert.deepEqual(await first, { session: 1 });
+
+  client.dispose();
+
+  generation = 2;
+  const second = client.ping();
+  events.emit("subagents:rpc:v1:reply:session-2", {
+    version: 1,
+    requestId: "session-2",
+    success: true,
+    data: { session: 2 },
+  });
+  assert.deepEqual(await second, { session: 2 });
   client.dispose();
 });
 

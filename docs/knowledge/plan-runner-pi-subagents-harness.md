@@ -2,7 +2,7 @@
 
 ## 目标
 
-Harness用于确定性执行已批准Plan，同时把计划权威、Executor运行事实和Git副作用分开。当前支持Pi `0.82.0`/`0.82.1`，精确锁定`pi-subagents@0.37.0`与`typebox@1.1.38`。
+Harness 用于确定性执行已批准 Plan，同时把计划权威、Executor 运行事实和 Git 副作用分开。当前支持 Pi `0.82.0`/`0.82.1`/`0.83.0`，精确锁定 `pi-subagents@0.37.2` 与 `typebox@1.1.38`；交互 Todo wrapper 锁定 `@juicesharp/rpiv-todo@2.2.0`。
 
 ## 角色
 
