@@ -77,6 +77,54 @@ test("public binding preserves a spawned result after ordinary persistence failu
   assert.equal(attempt.asyncDir, input.binding.asyncDir);
 });
 
+test("public binding cleans a concurrent terminal lifecycle after an EIO persistence failure", async () => {
+  const entries = requestedEntries();
+  const stops = [];
+  const sharedWriter = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => { entries.push(entry); },
+    id: (() => { let index = 0; return () => `terminal-${++index}`; })(),
+    now: () => "2026-07-15T00:00:03.000Z",
+  });
+  let failBoundAppend = true;
+  const writer = {
+    async append(input) {
+      if (input.type === "attempt.bound" && failBoundAppend) {
+        failBoundAppend = false;
+        await sharedWriter.append({
+          expectedProjectionVersion: 3,
+          planId: "plan-1",
+          type: "plan.cancelled",
+          data: { reason: "external" },
+        });
+        throw Object.assign(new Error("binding persist failed"), { code: "EIO" });
+      }
+      return await sharedWriter.append(input);
+    },
+  };
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]),
+    entries,
+    backend: { async stop(target) { stops.push(target); } },
+    options: { writer, readEntries: async () => entries, readProjection: () => replay(entries) },
+  });
+  const input = {
+    attemptId: "attempt-plan-1-task-1-1",
+    taskId: "task-1",
+    dispatchId: "attempt-plan-1-task-1-1.dispatch.1",
+    binding: { runId: "run-terminal-eio", asyncDir: "/async/terminal-eio", sessionFile: "/sessions/terminal-eio.jsonl" },
+  };
+
+  const result = await bindAuthorizedDispatch(subject.coordinator, input);
+
+  assert.equal(result.state, "cancelled");
+  assert.deepEqual(stops, [{ runId: input.binding.runId, asyncDir: input.binding.asyncDir }]);
+  assert.equal(replay(entries).lifecycle, "cancelled");
+  assert.equal(replay(entries).attempts.get(input.attemptId).status, "dispatch-requested");
+  assert.equal(entries.filter(({ type }) => type === "attempt.bound").length, 0);
+  assert.doesNotThrow(() => replay(entries));
+});
+
 test("legacy direct binding stops a spawned result after ordinary persistence failure", async () => {
   const entries = [createdEntry(["task-1"])];
   const stops = [];
