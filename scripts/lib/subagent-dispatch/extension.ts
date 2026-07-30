@@ -342,7 +342,12 @@ export function createSupervisorRequestMailbox(route, { limit = 1024 } = {}) {
   const drain = async () => {
     while (active && queue.length > 0) {
       const { message, context } = queue.shift();
-      await route(message, context);
+      try {
+        await route(message, context);
+      } catch (error) {
+        active = false;
+        throw error;
+      }
     }
   };
 

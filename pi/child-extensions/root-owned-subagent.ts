@@ -19,23 +19,24 @@ export function installRootOwnedSubagent(pi: any, { rootSessionId = process.env.
   let disposed = false;
   let subscription: any;
   let subscribing: Promise<void> | undefined;
-  const dedupe = new Set<string>();
+  const lifecycleDedupe = new Set<string>();
+  const supervisorRequestIds = new Set<string>();
   const onPush = (push: any) => {
+    if (disposed) return;
     if (push?.type === "supervisor.request") {
       const data = push.data;
-      const key = `supervisor.request\u0000${data?.requestId}`;
-      if (dedupe.has(key)) return;
-      dedupe.add(key);
-      if (dedupe.size > lifecycleDedupeLimit) dedupe.delete(dedupe.values().next().value!);
+      const requestId = data?.requestId;
+      if (supervisorRequestIds.has(requestId)) return;
+      supervisorRequestIds.add(requestId);
       pi.sendMessage({ customType: "subagent_supervisor_request", content: data.content, display: true, details: { id: data.requestId, reason: data.reason, expectsReply: data.expectsReply, runId: data.executorRunId, agent: data.agent, childIndex: data.childIndex } }, { triggerTurn: true });
       return;
     }
     if (!push || (push.type !== "execution.started" && push.type !== "execution.completed")) return;
     const data = push.data;
     const key = `${push.type}\u0000${data?.dispatchId}\u0000${data?.runId}\u0000${data?.state}`;
-    if (dedupe.has(key)) return;
-    dedupe.add(key);
-    if (dedupe.size > lifecycleDedupeLimit) dedupe.delete(dedupe.values().next().value!);
+    if (lifecycleDedupe.has(key)) return;
+    lifecycleDedupe.add(key);
+    if (lifecycleDedupe.size > lifecycleDedupeLimit) lifecycleDedupe.delete(lifecycleDedupe.values().next().value!);
     pi.events.emit(push.type === "execution.started" ? "subagent:async-started" : "subagent:async-complete", data);
     pi.sendMessage({ customType: "pi-root-subagent-lifecycle-v1", content: "A lifecycle update arrived. Call plan_status.", details: { dispatchId: data.dispatchId, runId: data.runId, state: data.state } }, { triggerTurn: true, deliverAs: "followUp" });
   };
@@ -52,6 +53,8 @@ export function installRootOwnedSubagent(pi: any, { rootSessionId = process.env.
   const dispose = () => {
     if (disposed) return;
     disposed = true;
+    supervisorRequestIds.clear();
+    lifecycleDedupe.clear();
     subscription?.dispose();
     typed.dispose();
   };
