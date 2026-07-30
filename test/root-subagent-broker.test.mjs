@@ -1723,10 +1723,15 @@ function deferred() {
 }
 
 async function closeOutcome(close, watchdogMs) {
-  return Promise.race([
-    close.then(() => ({ state: "resolved" }), (error) => ({ state: "rejected", error })),
-    new Promise((resolve) => setTimeout(() => resolve({ state: "watchdog" }), watchdogMs)),
-  ]);
+  let watchdog;
+  try {
+    return await Promise.race([
+      close.then(() => ({ state: "resolved" }), (error) => ({ state: "rejected", error })),
+      new Promise((resolve) => { watchdog = setTimeout(() => resolve({ state: "watchdog" }), watchdogMs); }),
+    ]);
+  } finally {
+    clearTimeout(watchdog);
+  }
 }
 
 let boundedWaitFixtureNumber = 0;
@@ -1815,6 +1820,7 @@ test("Root shutdown bounded wait forms cleanup debt while stop RPC remains pendi
   }
 });
 
+
 test("Root shutdown bounded wait forms cleanup debt when startup observation remains pending", async () => {
   const subject = await boundedWaitFixture({ pendingCapture: true });
   const closing = subject.broker.closeRootSession();
@@ -1832,5 +1838,188 @@ test("Root shutdown bounded wait forms cleanup debt when startup observation rem
     await subject.events.settled();
     await closing.catch(() => undefined);
     await subject.broker.closeRootSession();
+  }
+});
+
+let officialArtifactFixtureNumber = 0;
+
+function officialObservedProof(runId) {
+  const observedAt = Date.now();
+  const runnerProcessInstanceId = `${runId}-official-runner`;
+  return {
+    version: 1,
+    state: "observed",
+    runId,
+    runnerProcessInstanceId,
+    observedAt,
+    instances: [{ processInstanceId: runnerProcessInstanceId, kind: "runner", closeObservedAt: observedAt, exitCode: 0, signal: null }],
+  };
+}
+
+function officialErrorText(error) {
+  return [error?.message, ...(error?.errors ?? []).map((entry) => entry?.message)].filter(Boolean).join("\\n");
+}
+
+async function officialArtifactFixture({ sidecar, status, artifactPollIntervalMs } = {}) {
+  const events = startedEventBus();
+  const root = `official-artifact-root-${++officialArtifactFixtureNumber}`;
+  const asyncRoot = `/trusted/official-artifact-${officialArtifactFixtureNumber}`;
+  const reads = { sidecar: 0, status: 0, candidate: 0 };
+  const stops = [];
+  let disposed = false;
+  const readFile = async (file, encoding) => {
+    assert.equal(encoding, "utf8");
+    if (file.endsWith("/process-terminal.json")) {
+      reads.sidecar += 1;
+      const value = typeof sidecar === "function" ? sidecar(reads.sidecar, file) : sidecar?.[file];
+      if (value === undefined) throw Object.assign(new Error(`missing ${file}`), { code: "ENOENT" });
+      return JSON.stringify(value);
+    }
+    if (file.endsWith("/status.json")) {
+      reads.status += 1;
+      const value = typeof status === "function" ? status(reads.status, file) : status?.[file];
+      if (value === undefined) throw Object.assign(new Error(`missing ${file}`), { code: "ENOENT" });
+      return JSON.stringify(value);
+    }
+    if (file.endsWith("process-terminal-candidate.json")) reads.candidate += 1;
+    throw Object.assign(new Error(`unexpected artifact path ${file}`), { code: "ENOENT" });
+  };
+  const upstream = {
+    ...fakeUpstream(),
+    async stop({ runId, dir }) { stops.push({ runId, dir }); return { stopped: true }; },
+    dispose() { disposed = true; },
+  };
+  const broker = new RootBrokerServer({
+    rootSessionId: root,
+    upstream,
+    events,
+    terminalTimeoutMs: 18,
+    captureProcessBirthIdentity: async (pid) => `verified-birth-${pid}`,
+    writeGrant: async (grant) => `/tmp/${root}-${grant.runId}.json`,
+    readFile,
+    artifactPollIntervalMs,
+  });
+  await broker.start();
+  for (const [id, pid, agent] of [["executor-a", 9201, "executor"], ["executor-b", 9202, "executor"], ["plan-runner", 9203, "plan-runner"]]) {
+    events.emit("subagent:async-started", { id, pid, agent, sessionId: root, cwd: "/trusted", asyncDir: `${asyncRoot}/${id}` });
+  }
+  await events.settled();
+  const cleanup = async () => {
+    for (const runId of ["executor-a", "executor-b", "plan-runner"]) events.emit("subagent:process-terminal", officialObservedProof(runId));
+    await events.settled();
+    await broker.closeRootSession().catch(() => undefined);
+  };
+  return { asyncRoot, broker, cleanup, events, reads, root, stops, disposed: () => disposed };
+}
+
+test("Root official terminal artifact drains Executors before Plan Runner from observed sidecars", async () => {
+  const subject = await officialArtifactFixture({ sidecar: (read, file) => officialObservedProof(file.split("/").at(-2)) });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 70);
+    const counters = { ...subject.reads };
+    assert.equal(outcome.state, "resolved", "exact observed sidecars complete the close");
+    assert.equal(counters.sidecar, 3, "every owned run reads its official sidecar");
+    assert.equal(counters.status, 0, "status is not consulted while sidecars exist");
+    assert.equal(counters.candidate, 0, "candidate artifacts are never proof");
+    assert.deepEqual(subject.stops.map(({ runId }) => runId), ["executor-a", "executor-b", "plan-runner"]);
+  } finally {
+    await subject.cleanup();
+  }
+});
+
+test("Root official terminal artifact uses status mirror only after sidecar ENOENT", async () => {
+  const subject = await officialArtifactFixture({
+    sidecar: () => undefined,
+    status: (read, file) => ({ state: "stopped", ...(read > 1 ? { processTerminal: officialObservedProof(file.split("/").at(-2)) } : {}) }),
+    artifactPollIntervalMs: 2,
+  });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 70);
+    const counters = { ...subject.reads };
+    assert.equal(outcome.state, "resolved", "stopped status alone does not unlock before its observed mirror appears");
+    assert.ok(counters.sidecar >= 3);
+    assert.ok(counters.status >= 6);
+  } finally {
+    await subject.cleanup();
+  }
+});
+
+test("Root official terminal artifact rejects malformed sidecar without status fallback", async () => {
+  const subject = await officialArtifactFixture({
+    sidecar: () => ({ ...officialObservedProof("executor-a"), unexpected: true }),
+    status: () => ({ processTerminal: officialObservedProof("executor-a") }),
+  });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 70);
+    const counters = { ...subject.reads };
+    assert.equal(outcome.state, "rejected");
+    assert.ok(counters.sidecar > 0, "the malformed official sidecar is read");
+    assert.equal(counters.status, 0, "a malformed sidecar cannot fall back to status");
+    assert.match(officialErrorText(outcome.error), /invalid official terminal/i);
+    assert.equal(subject.broker.server?.listening, true);
+    assert.equal(typeof subject.broker.unsubscribeTerminal, "function");
+    assert.equal(subject.disposed(), false);
+  } finally {
+    await subject.cleanup();
+  }
+});
+
+test("Root official terminal artifact rejects mismatched run identity", async () => {
+  const subject = await officialArtifactFixture({ sidecar: () => officialObservedProof("other-run") });
+  try {
+    const outcome = await closeOutcome(subject.broker.closeRootSession(), 70);
+    const counters = { ...subject.reads };
+    assert.equal(outcome.state, "rejected");
+    assert.ok(counters.sidecar > 0);
+    assert.match(officialErrorText(outcome.error), /expected|actual|mismatch/i);
+    assert.equal(subject.stops.some(({ runId }) => runId === "plan-runner"), false);
+    assert.equal(subject.disposed(), false);
+  } finally {
+    await subject.cleanup();
+  }
+});
+
+for (const state of ["unknown", "pending", "not-started"]) {
+  test(`Root official terminal artifact keeps ${state} as cleanup debt`, async () => {
+    const subject = await officialArtifactFixture({
+      sidecar: (read, file) => {
+        const runId = file.split("/").at(-2);
+        const runnerProcessInstanceId = `${runId}-official-runner`;
+        return state === "unknown"
+          ? { version: 1, state, runId, runnerProcessInstanceId, reason: "observer-unavailable" }
+          : { version: 1, state, runId, runnerProcessInstanceId };
+      },
+    });
+    try {
+      const outcome = await closeOutcome(subject.broker.closeRootSession(), 70);
+      const counters = { ...subject.reads };
+      assert.equal(outcome.state, "rejected");
+      assert.ok(counters.sidecar > 0);
+      assert.match(officialErrorText(outcome.error), /non-observed|non-terminal/i);
+      assert.equal(subject.stops.some(({ runId }) => runId === "plan-runner"), false);
+      assert.equal(subject.broker.server?.listening, true);
+      assert.equal(typeof subject.broker.unsubscribeTerminal, "function");
+      assert.equal(subject.disposed(), false);
+    } finally {
+      await subject.cleanup();
+    }
+  });
+}
+
+test("Root official terminal artifact does not combine stop ACK async-complete and stopped status into proof", async () => {
+  const subject = await officialArtifactFixture({ sidecar: () => undefined, status: () => ({ state: "stopped", stopped: true }) });
+  try {
+    const closing = subject.broker.closeRootSession();
+    subject.events.emit("subagent:async-complete", { runId: "executor-a", sessionId: subject.root });
+    const outcome = await closeOutcome(closing, 70);
+    const counters = { ...subject.reads };
+    assert.equal(outcome.state, "rejected");
+    assert.ok(counters.sidecar > 0);
+    assert.ok(counters.status > 0);
+    assert.match(officialErrorText(outcome.error), /missing official proof/i);
+    assert.equal(subject.stops.some(({ runId }) => runId === "plan-runner"), false);
+    assert.equal(subject.disposed(), false);
+  } finally {
+    await subject.cleanup();
   }
 });
