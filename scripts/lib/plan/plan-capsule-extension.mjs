@@ -49,6 +49,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   let stopPlanControl;
   const authorizedSupervisorReplies = new Map();
   const resolvedSupervisorCalls = new Set();
+  const resolvedExecutorCalls = new Set();
 
   async function assertRuntimeCapabilities() {
     if (runtimeCapabilitiesReady) return;
@@ -196,6 +197,16 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     }
   });
   pi.on("tool_result", async (event, ctx) => {
+    if (event?.toolName === "subagent") {
+      const key = event.toolCallId;
+      if (resolvedExecutorCalls.has(key)) return;
+      if (typeof options.resolveExecutorDispatchResult !== "function") {
+        throw new Error("Executor result resolution capability is unavailable.");
+      }
+      await options.resolveExecutorDispatchResult(event, { projection: projectionFrom(ctx), ctx });
+      resolvedExecutorCalls.add(key);
+      return;
+    }
     if (event?.toolName !== "plan_executor_supervisor" || event?.input?.action !== "reply") return;
     const key = event.toolCallId ?? `${event.input.replyTo}:${event.input.to}`;
     const authorization = authorizedSupervisorReplies.get(key);

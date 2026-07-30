@@ -29,6 +29,13 @@ function exactResolverInput(input) {
   return keys.length === 3 && keys[0] === "contract" && keys[1] === "contractHash" && keys[2] === "toolCallId";
 }
 
+const RESULT_KEYS = ["agent", "asyncDir", "contractHash", "dispatchId", "runId", "taskId", "title", "version"];
+
+function exactResultDetails(details) {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return false;
+  return isDeepStrictEqual(Object.keys(details).sort(), RESULT_KEYS);
+}
+
 export function createPlanExecutorToolBoundary() {
   const authorized = new Map();
   const authorizedToolCallIds = new Map();
@@ -122,6 +129,52 @@ export function createPlanExecutorToolBoundary() {
       required(authorization, "Executor execution request toolCallId is not authorized");
       required(authorization.state === "identity-resolved", "Executor execution request requires resolved spawn identity");
       return authorization.executionRequest;
+    },
+    resolveExecutorToolResult(event) {
+      required(event?.toolName === "subagent", "Executor result toolName must be subagent");
+      required(typeof event.toolCallId === "string" && event.toolCallId.trim(), "Executor result toolCallId is required");
+      required(typeof event.isError === "boolean", "Executor result isError must be boolean");
+      const authorization = authorizedToolCallIds.get(event.toolCallId);
+      required(authorization, "Executor result toolCallId is not authorized");
+      required(isDeepStrictEqual(event.input, authorization.contract), "Executor result exact contract mismatch");
+      if (authorization.state === "completed") return { status: "completed" };
+      if (authorization.state === "uncertain") return { status: "uncertain" };
+      required(authorization.state === "identity-resolved", "Executor result requires resolved spawn identity");
+      if (event.isError) return { status: "error" };
+      required(exactResultDetails(event.details), "Executor result details must be exact");
+      const details = event.details;
+      required(details.version === "coding-dispatch-handle.v1", "Executor result version mismatch");
+      required(details.dispatchId === authorization.dispatchId, "Executor result dispatch mismatch");
+      required(details.taskId === authorization.contract.taskId, "Executor result task mismatch");
+      required(details.agent === authorization.contract.agent, "Executor result agent mismatch");
+      required(details.title === authorization.contract.title, "Executor result title mismatch");
+      required(details.contractHash === authorization.contractHash, "Executor result contract hash mismatch");
+      required(typeof details.runId === "string" && details.runId.trim(), "Executor result runId is required");
+      required(typeof details.asyncDir === "string" && details.asyncDir.trim(), "Executor result asyncDir is required");
+      return { status: "spawned", binding: { runId: details.runId, asyncDir: details.asyncDir } };
+    },
+    completeExecutorToolCall(toolCallId) {
+      const authorization = authorizedToolCallIds.get(toolCallId);
+      required(authorization, "Executor completion toolCallId is not authorized");
+      required(["identity-resolved", "completed"].includes(authorization.state), "Executor completion requires resolved identity");
+      authorization.state = "completed";
+      return { state: "completed" };
+    },
+    releaseExecutorToolCall(toolCallId, disposition) {
+      required(["not-started", "cleaned"].includes(disposition), "Executor release disposition is invalid");
+      const authorization = authorizedToolCallIds.get(toolCallId);
+      required(authorization, "Executor release toolCallId is not authorized");
+      required(["executing", "identity-resolved"].includes(authorization.state), "Executor release requires uncompleted dispatch");
+      authorized.delete(`${authorization.dispatchId}:${authorization.contractHash}`);
+      authorizedToolCallIds.delete(toolCallId);
+      return { state: "released", disposition };
+    },
+    fenceExecutorToolCall(toolCallId) {
+      const authorization = authorizedToolCallIds.get(toolCallId);
+      required(authorization, "Executor fence toolCallId is not authorized");
+      required(["identity-resolved", "uncertain"].includes(authorization.state), "Executor fence requires resolved identity");
+      authorization.state = "uncertain";
+      return { state: "uncertain" };
     },
   };
 }

@@ -601,6 +601,12 @@ export function createPlanRunnerDependencies({
       await derivedStatus(ctx);
       return { resolved: true, requestId: authorization.requestId, projectionVersion: currentProjection(ctx).version };
     },
+    async bindExecutorDispatch(input, { ctx }) {
+      const coordinator = await coordinatorFor(ctx);
+      const result = await coordinator.bindAuthorizedDispatch(input);
+      await derivedStatus(ctx);
+      return result;
+    },
     processAttentionReplies,
     startPlanControl({ binding, ctx }) {
       let processing = false;

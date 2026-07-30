@@ -89,16 +89,56 @@ export default async function planRunner(pi: ExtensionAPI) {
       externalReview: createExternalReviewAdapter(),
     });
 
+    async function resolveExecutorDispatchResult(event: any, { ctx }: { ctx: unknown }) {
+      const parsed = boundary.resolveExecutorToolResult(event);
+      if (parsed.status === "completed" || parsed.status === "uncertain") return parsed;
+      const request = boundary.executionRequestForToolCall(event.toolCallId);
+      const bind = async (binding: { runId: string; asyncDir: string }) => {
+        const runtimeBinding = await executionBackend!.bindDispatch({
+          dispatchId: request.dispatchId,
+          attemptId: request.attemptId,
+          ...binding,
+        });
+        await deps.bindExecutorDispatch({
+          attemptId: request.attemptId,
+          taskId: event.input.taskId,
+          dispatchId: request.dispatchId,
+          binding: runtimeBinding,
+        }, { ctx });
+        return boundary.completeExecutorToolCall(event.toolCallId);
+      };
+      if (parsed.status === "spawned") return bind(parsed.binding);
+
+      const lookup = await rpc.lookupSpawn?.({ spawnKey: request.dispatchId });
+      const state = lookup?.state;
+      if (state === "spawned") {
+        const binding = lookup?.binding;
+        if (!binding || typeof binding.runId !== "string" || !binding.runId.trim()
+          || typeof binding.asyncDir !== "string" || !binding.asyncDir.trim()) {
+          boundary.fenceExecutorToolCall(event.toolCallId);
+          throw executionDispatchError("EXECUTION_DISPATCH_INVALID", "Durable dispatch lookup binding is invalid");
+        }
+        return bind({ runId: binding.runId, asyncDir: binding.asyncDir });
+      }
+      if (state === "not-started" || state === "cleaned") {
+        await executionBackend!.abandonDispatch({ dispatchId: request.dispatchId, attemptId: request.attemptId });
+        return boundary.releaseExecutorToolCall(event.toolCallId, state);
+      }
+      boundary.fenceExecutorToolCall(event.toolCallId);
+      return { status: "uncertain" };
+    }
+
     createPlanCapsuleExtension(pi, {
       ...deps,
       authorizeExecutorDispatch(input: unknown, context: unknown) {
         return boundary.authorize(input, context);
       },
+      resolveExecutorDispatchResult,
       async assertRuntimeCapabilities() {
         await assertExecutionRuntime!();
       },
       disposeExecutionBackend() {
-        executionBackend.dispose();
+        executionBackend?.dispose();
       },
     });
   } catch (error) {

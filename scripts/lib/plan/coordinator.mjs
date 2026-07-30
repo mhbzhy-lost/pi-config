@@ -811,6 +811,7 @@ export function createPlanCoordinator({
     coordinator: Object.freeze({
       dispatchAuthorized,
       prepareAuthorizedDispatches,
+      bindAuthorizedDispatch: bindOrCleanupSpawnedAttempt,
       recover,
       settleBoundAttempt,
       setIntegrationQueue(queue) {
