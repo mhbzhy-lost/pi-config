@@ -5,6 +5,7 @@ import { applyEvent, createProjection } from "./plan-events.mjs";
 import { authorizedFrontier } from "./ir/frontier.mjs";
 import { selectExecutionView, selectSchedulingView } from "./ir/views.mjs";
 import { hashValidatedAttempt } from "./integration-queue.mjs";
+import { compileCodingDispatchIR } from "../subagent-dispatch/ir.ts";
 
 function sha256(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -467,6 +468,118 @@ export function createPlanCoordinator({
     return { state: "waiting-executors", dispatched, projectionVersion: projection.version };
   }
 
+  async function prepareAuthorizedDispatches() {
+    await refreshProjection();
+    if (ir.version !== "plan-ir.v3") throw new Error("not implemented in initial intent path: legacy Plan IR");
+    if (!projection.planId || ["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
+      throw new Error("Plan cannot dispatch executors");
+    }
+    if (typeof allocateWorkspace !== "function") throw new Error("Attempt workspace allocator is required");
+    if (integrationQueue) throw new Error("not implemented in initial intent path: integration drain");
+
+    const authorization = authorizedFrontier(selectSchedulingView(ir), projection);
+    if (!Array.isArray(authorization)) throw new Error("not implemented in initial intent path: authorization deadlock");
+    if (authorization.length !== 1) throw new Error("not implemented in initial intent path: frontier must contain exactly one task");
+    const node = authorization[0];
+    if (attemptsForTask(projection, node.id).length > 0) {
+      throw new Error("not implemented in initial intent path: existing attempt");
+    }
+
+    const execution = selectExecutionView(ir, node.id);
+    const { task, plan } = execution;
+    if (task.acceptance.strategy !== "commands") throw new Error("not implemented in initial intent path: non-commands acceptance");
+    const selectedCommands = ir.verification.commands.filter((command) => task.acceptance.commandIds.includes(command.id));
+    if (selectedCommands.length === 0) throw new Error("not implemented in initial intent path: selected verification command is unavailable");
+    if (selectedCommands.some((command) => command.cwd !== ".")) throw new Error("not implemented in initial intent path: verification cwd");
+    if (task.execution.workflow?.mode !== "inherit-repository") {
+      throw new Error("not implemented in initial intent path: workflow");
+    }
+
+    const attemptId = nextAttemptId(projection, node.id);
+    const baseCommit = projection.workspace.headCommit;
+    const output = outputForAttempt(attemptId);
+    const workspaceLease = await allocateWorkspace({
+      originRoot: projection.workspace.originRoot,
+      stateRoot,
+      planId: projection.planId,
+      taskId: node.id,
+      attemptId,
+      baseCommit,
+    });
+    await appendEvent("attempt.workspace-allocated", {
+      attemptId,
+      taskId: node.id,
+      baseCommit,
+      workspace: workspaceLease,
+    });
+
+    const source = {
+      version: "dispatch-ir.v1",
+      taskId: task.id,
+      title: task.title,
+      agent: task.execution.agent,
+      risk: task.execution.risk,
+      objective: `Complete approved plan task ${task.id}: ${task.title}.`,
+      workflow: { mode: "tdd" },
+      requirements: [task.body],
+      context: {
+        knownFacts: [
+          `Plan title: ${plan.title}`,
+          `Plan instructions: ${plan.instructions}`,
+          `Task resources: ${JSON.stringify(task.resources)}`,
+        ],
+        decisions: [JSON.stringify(plan.executionPolicy)],
+        relevantFiles: task.allowedPaths,
+      },
+      boundaries: { writePaths: task.allowedPaths, excludedWork: [], forbiddenActions: [] },
+      acceptance: { criteria: [JSON.stringify(task.acceptance)], commands: selectedCommands.map((command) => command.command) },
+      execution: { cwd: workspaceLease.path, timeoutMs: task.execution.timeoutMs },
+    };
+    const compiled = compileCodingDispatchIR(source, { cwd: projection.workspace.originRoot });
+    const { hash: contractHash, ...contract } = compiled;
+    const receipts = [];
+    const dispatchId = `${attemptId}.dispatch.1`;
+    const prompt = buildExecutionPrompt(execution, { attemptId, baseCommit, output, receipts });
+    const tool = {
+      agent: task.execution.agent,
+      task: prompt,
+      cwd: workspaceLease.path,
+      context: "fresh",
+      async: true,
+      clarify: false,
+      worktree: false,
+      output,
+      outputMode: "file-only",
+      acceptance: false,
+      artifacts: true,
+      timeoutMs: task.execution.timeoutMs,
+      contract,
+      dependencyReceipts: receipts,
+    };
+    await appendEvent("attempt.dispatch-requested", {
+      attemptId,
+      taskId: node.id,
+      dispatchId,
+      baseCommit,
+      workspace: workspaceLease,
+      tool,
+      toolHash: contractHash,
+      planIrHash: ir.hash,
+      taskHash: task.hashes.effective,
+      schedulingHash: task.hashes.scheduling,
+      dispatchContextHash: sha256({
+        planIrHash: ir.hash,
+        taskHash: task.hashes.effective,
+        schedulingHash: task.hashes.scheduling,
+        attemptId,
+        baseCommit,
+        output,
+        dependencyReceipts: receipts,
+      }),
+    });
+    return { state: "dispatch-required", dispatches: [{ attemptId, dispatchId, contract, contractHash }], projectionVersion: projection.version };
+  }
+
   function matchingFacts(attempt, facts) {
     return facts.filter((fact) => fact?.type === "execution.started"
       && fact.dispatchId === attempt.dispatchId
@@ -512,6 +625,7 @@ export function createPlanCoordinator({
   return {
     coordinator: Object.freeze({
       dispatchAuthorized,
+      prepareAuthorizedDispatches,
       recover,
       settleBoundAttempt,
       setIntegrationQueue(queue) {
