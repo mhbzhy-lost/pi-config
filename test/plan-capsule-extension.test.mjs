@@ -473,6 +473,31 @@ test("capsule submits one Executor tool result and retries an unresolved result"
   assert.equal(calls, 2);
 });
 
+test("capsule routes each authorized Executor success and error event with its raw event and current context", async (t) => {
+  for (const isError of [false, true]) await t.test(isError ? "error" : "success", async () => {
+    const calls = []; const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
+    const { handlers } = setup({ authorizeExecutorDispatch: async () => {}, resolveExecutorDispatchResult: async (...args) => calls.push(args) });
+    await handlers.get("session_start")({}, ctx);
+    const { input } = executorContract();
+    const event = { toolName: "subagent", toolCallId: `route-${isError}`, input, isError, details: { runId: "run-1", asyncDir: "/async/run-1" } };
+    assert.equal(await handlers.get("tool_call")(event, ctx), undefined);
+    await handlers.get("tool_result")(event, ctx);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], event);
+    assert.equal(calls[0][1].ctx, ctx);
+    assert.equal(calls[0][1].projection.attempts.get("attempt-1").dispatchId, "dispatch-1");
+  });
+});
+
+test("capsule fails closed for an authorized Executor result when result resolution is unavailable", async () => {
+  const ctx = context(activeEvents.map((data) => ({ customType: "pi-plan-event-v1", data })));
+  const { handlers } = setup({ authorizeExecutorDispatch: async () => {} });
+  await handlers.get("session_start")({}, ctx);
+  const { input } = executorContract(); const event = { toolName: "subagent", toolCallId: "missing-result-capability", input, isError: false };
+  assert.equal(await handlers.get("tool_call")(event, ctx), undefined);
+  await assert.rejects(handlers.get("tool_result")(event, ctx), /result.*unavailable|resolution.*unavailable/i);
+});
+
 test("capsule blocks legacy Supervisor pending and reply without invoking its authorizer", async () => {
   const authorized = [];
   const { handlers } = setup({ authorizeSupervisorReply: async (input) => authorized.push(input) });

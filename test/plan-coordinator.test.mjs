@@ -9,6 +9,11 @@ import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 
+function bindAuthorizedDispatch(coordinator, input) {
+  assert.equal(typeof coordinator.bindAuthorizedDispatch, "function", "Coordinator must expose bindAuthorizedDispatch");
+  return coordinator.bindAuthorizedDispatch(input);
+}
+
 test("requires a compiled Plan IR instead of compiling a parsed plan", () => {
   assert.throws(
     () => createPlanCoordinator({ plan: {}, entries: [], append() {} }),
@@ -18,11 +23,34 @@ test("requires a compiled Plan IR instead of compiling a parsed plan", () => {
 
 test("publicly binds an exact requested Executor dispatch once", async () => {
   const subject = harness({ approvedPlan: plan([task("task-1")]), entries: requestedEntries() });
-  assert.equal(typeof subject.coordinator.bindAuthorizedDispatch, "function", "Coordinator must expose bindAuthorizedDispatch");
   const binding = { runId: "run-public-bind", asyncDir: "/async/public-bind", sessionFile: "/sessions/public-bind.jsonl" };
-  await subject.coordinator.bindAuthorizedDispatch({ attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", dispatchId: "attempt-plan-1-task-1-1.dispatch.1", binding });
+  await bindAuthorizedDispatch(subject.coordinator, { attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", dispatchId: "attempt-plan-1-task-1-1.dispatch.1", binding });
   assert.deepEqual(subject.appended.map(({ type }) => type), ["attempt.bound"]);
   assert.deepEqual(subject.appended[0].data, { attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", dispatchId: "attempt-plan-1-task-1-1.dispatch.1", ...binding });
+  await bindAuthorizedDispatch(subject.coordinator, { attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", dispatchId: "attempt-plan-1-task-1-1.dispatch.1", binding });
+  assert.equal(subject.appended.length, 1);
+});
+
+test("public binding stops a spawned result after requested projection becomes terminal", async () => {
+  const stops = []; const entries = [...requestedEntries(), event("plan.cancelled", { reason: "cancelled" }, 4)];
+  const subject = harness({ entries, backend: { async stop(binding) { stops.push(binding); } } });
+  const binding = { runId: "run-terminal", asyncDir: "/async/terminal", sessionFile: "/sessions/terminal.jsonl" };
+  const result = await bindAuthorizedDispatch(subject.coordinator, { attemptId: "attempt-plan-1-task-1-1", taskId: "task-1", dispatchId: "attempt-plan-1-task-1-1.dispatch.1", binding });
+  assert.equal(result.state, "cancelled");
+  assert.deepEqual(stops, [{ runId: "run-terminal", asyncDir: "/async/terminal" }]);
+  assert.deepEqual(subject.appended, []);
+});
+
+test("public binding stops and records protocol violation for mismatched requested identity", async (t) => {
+  for (const [name, identity] of [["taskId", { taskId: "other-task", dispatchId: "attempt-plan-1-task-1-1.dispatch.1" }], ["dispatchId", { taskId: "task-1", dispatchId: "other-dispatch" }]]) await t.test(name, async () => {
+    const stops = []; const subject = harness({ entries: requestedEntries(), backend: { async stop(binding) { stops.push(binding); } } });
+    const binding = { runId: `run-${name}`, asyncDir: `/async/${name}`, sessionFile: null };
+    const result = await bindAuthorizedDispatch(subject.coordinator, { attemptId: "attempt-plan-1-task-1-1", ...identity, binding });
+    assert.equal(result.state, "blocked");
+    assert.deepEqual(stops, [{ runId: binding.runId, asyncDir: binding.asyncDir }]);
+    assert.equal(subject.appended.at(-1).type, "plan.blocked");
+    assert.equal(subject.appended.at(-1).data.reason, "protocol_violation");
+  });
 });
 
 const workspace = {

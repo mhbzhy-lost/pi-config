@@ -167,3 +167,82 @@ test("releases a cleaned Executor authorization so the same contract can be retr
   assert.deepEqual(boundary.releaseExecutorToolCall("cleaned-call", "cleaned"), { state: "released", disposition: "cleaned" });
   assert.equal(boundary.authorize(exact.contract, { projection, toolCallId: "retry-call" }).toolCallId, "retry-call");
 });
+
+function resolvedBoundary(toolCallId = "result-call") {
+  const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+  boundary.authorize(exact.contract, { projection, toolCallId });
+  boundary.resolveCodingSpawnIdentity({ toolCallId, contract: exact.contract, contractHash: exact.contractHash });
+  return { exact, boundary, toolCallId };
+}
+
+function boundaryMethod(boundary, name) {
+  const method = boundary[name];
+  assert.equal(typeof method, "function", `Boundary must expose ${name}`);
+  return method.bind(boundary);
+}
+
+function validResult({ exact, toolCallId }, overrides = {}) {
+  return {
+    toolName: "subagent", toolCallId, input: exact.contract, isError: false,
+    details: { version: "coding-dispatch-handle.v1", dispatchId: "dispatch-1", taskId: "task-1", agent: "executor", title: "Execute task", contractHash: exact.contractHash, runId: "run-1", asyncDir: "/async/run-1", ...overrides },
+  };
+}
+
+test("returns error without accepting a spawn binding from an authorized Executor result", () => {
+  const fixture = resolvedBoundary("error-result-call");
+  assert.deepEqual(boundaryMethod(fixture.boundary, "resolveExecutorToolResult")({ ...validResult(fixture), isError: true, details: { runId: "untrusted-run", asyncDir: "/untrusted" } }), { status: "error" });
+});
+
+test("rejects every mismatched result field without consuming its tool call", async (t) => {
+  for (const [name, mutate] of [
+    ["raw input", (event) => ({ ...event, input: { ...event.input, title: "forged" } })],
+    ["dispatchId", (event) => ({ ...event, details: { ...event.details, dispatchId: "other" } })],
+    ["taskId", (event) => ({ ...event, details: { ...event.details, taskId: "other" } })],
+    ["agent", (event) => ({ ...event, details: { ...event.details, agent: "reviewer" } })],
+    ["contractHash", (event) => ({ ...event, details: { ...event.details, contractHash: hash("other") } })],
+    ["blank runId", (event) => ({ ...event, details: { ...event.details, runId: " " } })],
+    ["blank asyncDir", (event) => ({ ...event, details: { ...event.details, asyncDir: "" } })],
+  ]) await t.test(name, () => {
+    const fixture = resolvedBoundary(`mismatch-${name}`);
+    const resolveResult = boundaryMethod(fixture.boundary, "resolveExecutorToolResult");
+    assert.throws(() => resolveResult(mutate(validResult(fixture))), /result|exact|dispatch|task|agent|hash|runId|asyncDir/i);
+    assert.deepEqual(resolveResult(validResult(fixture)), { status: "spawned", binding: { runId: "run-1", asyncDir: "/async/run-1" } });
+  });
+});
+
+test("completes a spawned result idempotently and never submits a second binding", () => {
+  const fixture = resolvedBoundary("complete-result-call");
+  const resolveResult = boundaryMethod(fixture.boundary, "resolveExecutorToolResult");
+  const complete = boundaryMethod(fixture.boundary, "completeExecutorToolCall");
+  resolveResult(validResult(fixture));
+  assert.deepEqual(complete(fixture.toolCallId), { state: "completed" });
+  assert.deepEqual(complete(fixture.toolCallId), { state: "completed" });
+  assert.deepEqual(resolveResult(validResult(fixture)), { status: "completed" });
+});
+
+test("releases fresh not-started and cleaned calls but rejects other dispositions", async (t) => {
+  for (const disposition of ["not-started", "cleaned"]) await t.test(disposition, () => {
+    const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+    boundary.authorize(exact.contract, { projection, toolCallId: `${disposition}-call` });
+    const release = boundaryMethod(boundary, "releaseExecutorToolCall");
+    assert.deepEqual(release(`${disposition}-call`, disposition), { state: "released", disposition });
+    assert.equal(boundary.authorize(exact.contract, { projection, toolCallId: `${disposition}-retry` }).toolCallId, `${disposition}-retry`);
+  });
+  const exact = contract(); const boundary = createPlanExecutorToolBoundary(); const projection = projectionFor(exact);
+  boundary.authorize(exact.contract, { projection, toolCallId: "invalid-release" });
+  const release = boundaryMethod(boundary, "releaseExecutorToolCall");
+  assert.throws(() => release("invalid-release", "other"), /disposition|release/i);
+  assert.throws(() => boundary.authorize(exact.contract, { projection, toolCallId: "invalid-release-retry" }), /already authorized|replay/i);
+});
+
+test("fences an uncertain call without re-exposing its spawned binding", () => {
+  const fixture = resolvedBoundary("uncertain-result-call");
+  const resolveResult = boundaryMethod(fixture.boundary, "resolveExecutorToolResult");
+  const fence = boundaryMethod(fixture.boundary, "fenceExecutorToolCall");
+  resolveResult(validResult(fixture));
+  assert.deepEqual(fence(fixture.toolCallId), { state: "uncertain" });
+  assert.throws(() => fixture.boundary.authorize(fixture.exact.contract, { projection: projectionFor(fixture.exact), toolCallId: "uncertain-retry" }), /uncertain|already authorized|replay/i);
+  const repeated = resolveResult(validResult(fixture));
+  assert.equal(repeated.status, "uncertain");
+  assert.equal(Object.hasOwn(repeated, "binding"), false);
+});
