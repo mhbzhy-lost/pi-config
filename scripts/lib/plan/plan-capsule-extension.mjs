@@ -7,6 +7,7 @@ const PLAN_ACTIVE_TOOLS = [
   "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
   "subagent", "plan_executor_supervisor", "read", "grep",
 ];
+const PRE_OPEN_ACTIVE_TOOLS = ["plan_open", "read", "grep"];
 
 function result(value, isError = false) {
   return {
@@ -145,6 +146,8 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     if (projection.planId) {
       opened = true;
       activateTools();
+    } else {
+      pi.setActiveTools([...PRE_OPEN_ACTIVE_TOOLS]);
     }
     return projection;
   }
@@ -333,7 +336,6 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     },
   });
   registerLifecycleTools();
-  pi.setActiveTools(["plan_open", "read", "grep"]);
 }
 
 createPlanCapsuleExtension.acceptanceVerify = function acceptanceVerify(status) {
