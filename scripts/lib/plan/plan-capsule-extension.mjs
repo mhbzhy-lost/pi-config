@@ -45,6 +45,7 @@ function assertExactOpenInput(input) {
 
 export function createPlanCapsuleExtension(pi, options = {}) {
   let opened = false;
+  let openedPlanId;
   let lifecycleRegistered = false;
   let runtimeCapabilitiesReady = false;
   let stopPlanControl;
@@ -145,6 +146,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     const projection = projectionFrom(ctx);
     if (projection.planId) {
       opened = true;
+      openedPlanId = projection.planId;
       activateTools();
     } else {
       pi.setActiveTools([...PRE_OPEN_ACTIVE_TOOLS]);
@@ -203,6 +205,15 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     }
   });
   pi.on("tool_result", async (event, ctx) => {
+    if (event?.toolName === "plan_open") {
+      if (event.isError !== true && opened && openedPlanId) {
+        pi.sendMessage(
+          { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: openedPlanId } },
+          { triggerTurn: true, deliverAs: "followUp" },
+        );
+      }
+      return;
+    }
     if (event?.toolName === "subagent") {
       const key = event.toolCallId;
       if (resolvedExecutorCalls.has(key)) return;
@@ -329,6 +340,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
         }
         opened = true;
         activateTools();
+        openedPlanId = binding.planId;
         return result(`Plan ${binding.planId} opened.`);
       } catch (error) {
         return result(error instanceof Error ? error.message : "Plan binding validation failed.", true);
