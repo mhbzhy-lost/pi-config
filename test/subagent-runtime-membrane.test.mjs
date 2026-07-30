@@ -572,7 +572,7 @@ test("reload and shutdown dispose only the current RPC client", async () => {
   assert.equal(second.disposed(), 1);
 });
 
-test("internal Supervisor target forwards exact params and context", async () => {
+test("internal Supervisor target forwards the public two-argument handle through the native five-argument closure", async () => {
   const pi = createPi();
   const params = { action: "reply", replyTo: "native-1", message: "Proceed." };
   const context = { cwd: "/repo", request: "exact" };
@@ -589,7 +589,10 @@ test("internal Supervisor target forwards exact params and context", async () =>
     : async () => undefined;
   const actual = await executeSupervisor(params, context);
   assert.strictEqual(actual, result, "runtime must expose its internal Supervisor target");
-  assert.deepEqual(received, [params, context]);
-  assert.strictEqual(received?.[0], params);
-  assert.strictEqual(received?.[1], context);
+  assert.equal(typeof received?.[0], "string");
+  assert.notEqual(received?.[0].length, 0);
+  assert.strictEqual(received?.[1], params);
+  assert.strictEqual(received?.[2], undefined);
+  assert.strictEqual(received?.[3], undefined);
+  assert.strictEqual(received?.[4], context);
 });
