@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { connect, Socket } from "node:net";
 
 import {
+  BROKER_FRAME_LIMIT_BYTES,
   brokerSocketPath,
   parseBrokerPush,
   parseBrokerResponse,
@@ -17,7 +18,6 @@ type ClientOptions = {
 };
 
 type Subscription = { dispose(): void; closed: Promise<void> };
-const MAX_BUFFER_BYTES = 64 * 1024;
 
 function clientError(message: string, code?: string) {
   const error = new Error(message);
@@ -88,7 +88,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
       socket.once("close", () => { if (!settled) finish(clientError("Root broker disconnected before response", "BROKER_DISCONNECTED")); });
       socket.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
-        if (Buffer.byteLength(buffer, "utf8") > MAX_BUFFER_BYTES) return finish(clientError("Root broker response is too large", "BROKER_RESPONSE_TOO_LARGE"));
+        if (Buffer.byteLength(buffer, "utf8") > BROKER_FRAME_LIMIT_BYTES) return finish(clientError("Root broker response is too large", "BROKER_RESPONSE_TOO_LARGE"));
         const newline = buffer.indexOf("\n");
         if (newline < 0) return;
         let response;
@@ -137,7 +137,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
       socket.once("close", () => fail(clientError("Root broker subscription disconnected", "BROKER_DISCONNECTED")));
       socket.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
-        if (Buffer.byteLength(buffer, "utf8") > MAX_BUFFER_BYTES) { socket.destroy(clientError("Root broker subscription is too large", "BROKER_RESPONSE_TOO_LARGE")); return; }
+        if (Buffer.byteLength(buffer, "utf8") > BROKER_FRAME_LIMIT_BYTES) { socket.destroy(clientError("Root broker subscription is too large", "BROKER_RESPONSE_TOO_LARGE")); return; }
         for (;;) {
           const newline = buffer.indexOf("\n");
           if (newline < 0) break;

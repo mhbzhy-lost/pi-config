@@ -8,12 +8,24 @@ const GRANT_SCHEMA_VERSION = "pi-root-subagent-broker-grant.v1";
 const RESPONSE_SCHEMA_VERSION = "pi-root-subagent-broker-response.v1";
 const SOCKET_PATH_LIMIT = 103;
 const ERROR_MESSAGE_LIMIT = 1024;
-const PUSH_PROOF_LIMIT = 64 * 1024;
+export const BROKER_FRAME_LIMIT_BYTES = 64 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const METHODS = Object.freeze(["ping", "spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "subscribe"] as const);
 const PUSH_TYPES = Object.freeze(["execution.started", "execution.completed", "supervisor.request", "root.closing"] as const);
 const GRANT_ROLES = Object.freeze(["plan-runner", "executor"] as const);
+const PROCESS_TERMINAL_STATES = Object.freeze(["pending", "observed", "unknown", "not-started"] as const);
+const PROCESS_TERMINAL_REASONS = Object.freeze([
+  "observer-unavailable",
+  "runner-candidate-missing",
+  "runner-instance-mismatch",
+  "writer-close-unverified",
+  "canonical-session-unavailable",
+  "canonical-session-lease-active",
+  "canonical-session-release-unverified",
+  "proof-write-failed",
+  "stale-repair",
+] as const);
 
 export const BROKER_METHODS = METHODS;
 
@@ -109,6 +121,77 @@ function callerToken(value) {
 function record(value, name) {
   if (!isPlainObject(value)) fail(`${name} must be an object`);
   return value;
+}
+
+function nonEmptyString(value, name) {
+  if (typeof value !== "string" || value.length === 0) fail(`${name} must be a non-empty string`);
+  return value;
+}
+
+function exactOptionalObject(value, name, required, optional = []) {
+  if (!isPlainObject(value)) fail(`${name} must be an object`);
+  const allowed = new Set([...required, ...optional]);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) fail(`${name} contains unknown field ${key}`);
+  }
+  for (const key of required) {
+    if (!Object.hasOwn(value, key)) fail(`${name} is missing required field ${key}`);
+  }
+  return value;
+}
+
+function processTerminal(value) {
+  const terminal = exactOptionalObject(value, "push.data.processTerminal", ["version", "runnerProcessInstanceId", "state"], ["childIndex", "resumeDisposition", "observedAt", "instances", "canonicalSession", "reason", "diagnostic"]);
+  if (terminal.version !== 1) fail("push.data.processTerminal.version must equal 1");
+  nonEmptyString(terminal.runnerProcessInstanceId, "push.data.processTerminal.runnerProcessInstanceId");
+  if (typeof terminal.state !== "string" || !PROCESS_TERMINAL_STATES.includes(terminal.state)) fail("push.data.processTerminal.state is unsupported");
+  if (terminal.childIndex !== undefined && (!Number.isSafeInteger(terminal.childIndex) || terminal.childIndex < 0)) fail("push.data.processTerminal.childIndex must be a non-negative safe integer");
+  if (terminal.resumeDisposition !== undefined && !["resumable", "non-resumable", "unavailable"].includes(terminal.resumeDisposition)) fail("push.data.processTerminal.resumeDisposition is unsupported");
+
+  if (terminal.state === "pending" || terminal.state === "not-started") {
+    exactOptionalObject(terminal, "push.data.processTerminal", ["version", "runnerProcessInstanceId", "state"], ["childIndex", "resumeDisposition"]);
+  } else if (terminal.state === "unknown") {
+    exactOptionalObject(terminal, "push.data.processTerminal", ["version", "runnerProcessInstanceId", "state", "reason"], ["childIndex", "resumeDisposition", "diagnostic"]);
+    if (typeof terminal.reason !== "string" || !PROCESS_TERMINAL_REASONS.includes(terminal.reason)) fail("push.data.processTerminal.reason is unsupported");
+    if (terminal.diagnostic !== undefined && typeof terminal.diagnostic !== "string") fail("push.data.processTerminal.diagnostic must be a string");
+  } else {
+    exactOptionalObject(terminal, "push.data.processTerminal", ["version", "runnerProcessInstanceId", "state", "observedAt", "instances"], ["childIndex", "resumeDisposition", "canonicalSession"]);
+    if (typeof terminal.observedAt !== "number" || !Number.isFinite(terminal.observedAt)) fail("push.data.processTerminal.observedAt must be finite");
+    if (!Array.isArray(terminal.instances)) fail("push.data.processTerminal.instances must be an array");
+    let matchingRunner = false;
+    for (const [index, instance] of terminal.instances.entries()) {
+      const instanceName = `push.data.processTerminal.instances[${index}]`;
+      if (!isPlainObject(instance) || (instance.kind !== "runner" && instance.kind !== "pi-writer")) fail(`${instanceName} is unsupported`);
+      const required = instance.kind === "runner" ? ["processInstanceId", "kind", "closeObservedAt", "exitCode", "signal"] : ["processInstanceId", "kind", "attempt", "closeObservedAt", "exitCode", "signal"];
+      exactOptionalObject(instance, instanceName, required);
+      nonEmptyString(instance.processInstanceId, `${instanceName}.processInstanceId`);
+      if (typeof instance.closeObservedAt !== "number" || !Number.isFinite(instance.closeObservedAt)) fail(`${instanceName}.closeObservedAt must be finite`);
+      if (instance.exitCode !== null && !Number.isInteger(instance.exitCode)) fail(`${instanceName}.exitCode must be an integer or null`);
+      if (instance.signal !== null && typeof instance.signal !== "string") fail(`${instanceName}.signal must be a string or null`);
+      if (instance.kind === "pi-writer" && (!Number.isSafeInteger(instance.attempt) || instance.attempt < 0)) fail(`${instanceName}.attempt must be a non-negative safe integer`);
+      if (instance.kind === "runner" && instance.processInstanceId === terminal.runnerProcessInstanceId) matchingRunner = true;
+    }
+    if (!matchingRunner) fail("push.data.processTerminal.instances must contain the matching runner instance");
+    if (terminal.canonicalSession !== undefined) {
+      const session = exactOptionalObject(terminal.canonicalSession, "push.data.processTerminal.canonicalSession", ["canonicalSessionId", "leaseDisposition", "freeAtObservation"], ["canonicalSessionLeaseReleased"]);
+      nonEmptyString(session.canonicalSessionId, "push.data.processTerminal.canonicalSession.canonicalSessionId");
+      if (session.leaseDisposition !== "released" && session.leaseDisposition !== "not-held") fail("push.data.processTerminal.canonicalSession.leaseDisposition is unsupported");
+      if (session.freeAtObservation !== true) fail("push.data.processTerminal.canonicalSession.freeAtObservation must equal true");
+      if (session.canonicalSessionLeaseReleased !== undefined && session.canonicalSessionLeaseReleased !== true) fail("push.data.processTerminal.canonicalSession.canonicalSessionLeaseReleased must equal true");
+    }
+  }
+  return terminal;
+}
+
+function assertPushFrameSize(push) {
+  try {
+    const frame = `${JSON.stringify(push)}\n`;
+    const size = Buffer.byteLength(frame, "utf8");
+    if (size > BROKER_FRAME_LIMIT_BYTES) fail(`push frame is too large: ${size} bytes exceeds ${BROKER_FRAME_LIMIT_BYTES}`);
+  } catch (error) {
+    if (error instanceof BrokerProtocolError) throw error;
+    fail("push frame must be JSON serializable");
+  }
 }
 
 function responseData(value) {
@@ -223,12 +306,8 @@ export function parseBrokerPush(value) {
       else if (typeof push.data[key] !== "string" || push.data[key].length === 0) fail(`push.data.${key} must be a non-empty string`);
     }
     if (Object.hasOwn(push.data, "processTerminal")) {
-      try {
-        if (Buffer.byteLength(JSON.stringify(push.data.processTerminal), "utf8") > PUSH_PROOF_LIMIT) fail("push.data.processTerminal exceeds size limit");
-      } catch (error) {
-        if (error instanceof BrokerProtocolError) throw error;
-        fail("push.data.processTerminal must be JSON serializable");
-      }
+      processTerminal(push.data.processTerminal);
+      if (push.data.processTerminal.state !== push.data.state) fail("push.data.processTerminal.state must match push.data.state");
     }
   }
   if (push.type === "supervisor.request") {
@@ -240,6 +319,7 @@ export function parseBrokerPush(value) {
       }
     }
   }
+  assertPushFrameSize(push);
   return push;
 }
 
