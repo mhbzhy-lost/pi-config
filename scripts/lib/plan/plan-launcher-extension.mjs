@@ -68,6 +68,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
   const activeHandles = new Map();
   const launchFences = new Map();
   const attentionPollers = new Map();
+  const attentionReplyFences = new Map();
   const schedule = options.schedule ?? setInterval;
   const cancelSchedule = options.cancelSchedule ?? clearInterval;
   const stopAttentionPoller = (planId) => {
@@ -76,6 +77,7 @@ export function createPlanLauncherExtension(pi, options = {}) {
     attentionPollers.delete(planId);
   };
   const forwardedAttention = new Set();
+  const forwardingAttention = new Map();
   const forwardAttention = async (handle, plan, { failClosed = false } = {}) => {
     const matches = (plan?.tasks ?? []).flatMap((task) => (task.attempts ?? []).filter((attempt) => attempt.status === "waiting-attention" && attempt.attention?.status === "pending" && typeof attempt.attention.requestId === "string").map((attempt) => ({ attention: attempt.attention })));
     for (const match of matches) {
@@ -89,17 +91,23 @@ export function createPlanLauncherExtension(pi, options = {}) {
       }
       const key = `${handle.planId}:${attention.requestId}:${attention.projectionVersion}`;
       if (forwardedAttention.has(key)) continue;
-      const runsRoot = path.resolve(stateRoot, "var", "plan-runs", handle.planId);
+      const pending = forwardingAttention.get(key);
+      if (pending) {
+        await pending;
+        continue;
+      }
+      const forwarding = (async () => {
+        const runsRoot = path.resolve(stateRoot, "var", "plan-runs", handle.planId);
       const absoluteBodyPath = path.resolve(runsRoot, bodyPath);
       const relative = path.relative(runsRoot, absoluteBodyPath);
       if (relative.startsWith("..") || path.isAbsolute(relative)) {
         if (failClosed) throw new Error("Plan Attention evidence is invalid");
-        continue;
+        return;
       }
       const body = await readFile(absoluteBodyPath);
       if (createHash("sha256").update(body).digest("hex") !== bodySha256) {
         if (failClosed) throw new Error("Plan Attention evidence is invalid");
-        continue;
+        return;
       }
       await pi.sendMessage?.({
         customType: "pi-plan-attention-v1",
@@ -112,6 +120,13 @@ export function createPlanLauncherExtension(pi, options = {}) {
         details: { planId: handle.planId, requestId: attention.requestId, expectedProjectionVersion: attention.projectionVersion, bodyPath, bodySha256 },
       }, { triggerTurn: true, deliverAs: "followUp" });
       forwardedAttention.add(key);
+      })();
+      forwardingAttention.set(key, forwarding);
+      try {
+        await forwarding;
+      } finally {
+        forwardingAttention.delete(key);
+      }
     }
   };
   const startAttentionPoller = (handle) => {
@@ -220,10 +235,20 @@ export function createPlanLauncherExtension(pi, options = {}) {
       const plan = JSON.parse(await readFile(path.join(stateRoot, "var", "plan-runs", handle.planId, "status.json"), "utf8"));
       const match = pendingAttention(plan, params);
       const command = { planId: params.planId, requestId: params.requestId, taskId: match.taskId, attemptId: match.attemptId, runId: match.runId, expectedProjectionVersion: params.expectedProjectionVersion, message: params.message, occurredAt: options.now?.() ?? new Date().toISOString() };
-      const prior = (await control.readAttentionReplies(params.planId)).find((candidate) => candidate.requestId === params.requestId);
-      if (prior) {
-        for (const field of ["planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message"]) if (prior[field] !== command[field]) throw new Error("A different durable Plan Attention reply is already queued");
-      } else await control.writeAttentionReply(command);
+      const fenceKey = `${params.planId}:${params.requestId}`;
+      const previous = attentionReplyFences.get(fenceKey) ?? Promise.resolve();
+      const pending = previous.catch(() => undefined).then(async () => {
+        const prior = (await control.readAttentionReplies(params.planId)).find((candidate) => candidate.requestId === params.requestId);
+        if (prior) {
+          for (const field of ["planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message"]) if (prior[field] !== command[field]) throw new Error("A different durable Plan Attention reply is already queued");
+        } else await control.writeAttentionReply(command);
+      });
+      attentionReplyFences.set(fenceKey, pending);
+      try {
+        await pending;
+      } finally {
+        if (attentionReplyFences.get(fenceKey) === pending) attentionReplyFences.delete(fenceKey);
+      }
       return toolResult({ status: "queued", planId: params.planId, requestId: params.requestId });
     } catch (error) { return toolResult(error instanceof Error ? error.message : String(error), true); }
   } });

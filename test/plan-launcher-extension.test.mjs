@@ -197,6 +197,25 @@ test("plan-status forwards pending Attention using the Host event contract once"
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("concurrent plan-status calls forward one Attention and retry after send failure", async () => {
+  const { root } = await fixture(); const calls = []; let sends = 0;
+  try {
+    const body = "Choose the deployment target."; const bodySha256 = createHash("sha256").update(body).digest("hex");
+    const dir = await writeProjection(root, { planId: "plan-one", lifecycle: "running", tasks: [{ attempts: [{ status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4, evidence: { bodyPath: "attention/request-1.md", bodySha256 } } }] }] });
+    await (await import("node:fs/promises")).mkdir(path.join(dir, "attention"), { recursive: true }); await writeFile(path.join(dir, "attention", "request-1.md"), body);
+    const { commands } = setup(options(root, calls, { findHandle: async () => handle(root), sendMessage: async () => { sends += 1; await new Promise((resolve) => setImmediate(resolve)); if (sends === 1) throw new Error("send failed"); } }));
+    await assert.rejects(commands.get("plan-status").handler("plan-one", {}), /send failed/);
+    await commands.get("plan-status").handler("plan-one", {});
+    assert.equal(sends, 2);
+    await Promise.all([commands.get("plan-status").handler("plan-one", {}), commands.get("plan-status").handler("plan-one", {})]);
+    assert.equal(sends, 2);
+    let concurrentSends = 0;
+    const concurrent = setup(options(root, calls, { findHandle: async () => handle(root), sendMessage: async () => { concurrentSends += 1; await new Promise((resolve) => setImmediate(resolve)); } }));
+    await Promise.all([concurrent.commands.get("plan-status").handler("plan-one", {}), concurrent.commands.get("plan-status").handler("plan-one", {})]);
+    assert.equal(concurrentSends, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("plan_attention_reply fences projection and is idempotent", async () => {
   const { root } = await fixture(); const calls = []; const writes = [];
   try {
@@ -209,6 +228,23 @@ test("plan_attention_reply fences projection and is idempotent", async () => {
     assert.equal(writes.length, 1);
     assert.equal((await tools.get("plan_attention_reply").execute("id", { ...reply, expectedProjectionVersion: 3 }, undefined, undefined, {})).isError, true);
     assert.equal((await tools.get("plan_attention_reply").execute("id", { ...reply, message: "Stop." }, undefined, undefined, {})).isError, true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("concurrent identical Attention replies write once and conflicting replies elect one decision", async () => {
+  const { root } = await fixture(); const calls = []; const writes = [];
+  try {
+    await writeProjection(root, { planId: "plan-one", tasks: [{ taskId: "task-1", attempts: [{ attemptId: "attempt-1", runId: "run-1", status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4 } }] }] });
+    const planControl = { readAttentionReplies: async () => writes, writeAttentionReply: async (reply) => { await new Promise((resolve) => setImmediate(resolve)); writes.push(reply); } };
+    const { tools } = setup(options(root, calls, { findHandle: async () => handle(root), planControl }));
+    const execute = (message) => tools.get("plan_attention_reply").execute("id", { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, message }, undefined, undefined, {});
+    const identical = await Promise.all([execute("Proceed."), execute("Proceed.")]);
+    assert.deepEqual(identical.map((result) => result.isError), [undefined, undefined]);
+    assert.equal(writes.length, 1);
+    writes.length = 0;
+    const conflicting = await Promise.all([execute("Proceed."), execute("Stop.")]);
+    assert.equal(conflicting.filter((result) => !result.isError).length, 1);
+    assert.equal(writes.length, 1);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -41,4 +41,20 @@ test("control rejects escaping identifiers and fails closed on invalid acknowled
   const pending = control.requestCancel({ planId: "plan-1", runId: "run-1" });
   await control.writeAck({ schemaVersion: "pi-plan-control.v1", requestId: "wrong", planId: "plan-1", runId: "run-1", type: "cancel", lifecycle: "cancelled", result: "accepted", occurredAt: "now" });
   await assert.rejects(pending, /timeout|acknowledgement/i);
+});
+
+test("concurrent Attention replies publish one immutable complete decision", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-control-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const control = createPlanControl({ stateRoot: root, now: () => "2026-07-15T00:00:00.000Z" });
+  const command = { planId: "plan-1", requestId: "request-1", taskId: "task-1", attemptId: "attempt-1", runId: "run-1", expectedProjectionVersion: 1, message: "Proceed.", occurredAt: "2026-07-15T00:00:00.000Z" };
+  const identical = await Promise.all([control.writeAttentionReply(command), control.writeAttentionReply(command)]);
+  assert.deepEqual(identical, [command, command]);
+  const replyPath = path.join(root, "var", "plan-runs", "plan-1", "control", "attention", "request-1.reply.json");
+  assert.deepEqual(JSON.parse(await readFile(replyPath, "utf8")), { schemaVersion: "pi-plan-attention-command.v1", ...command });
+  const conflicting = await Promise.allSettled([control.writeAttentionReply(command), control.writeAttentionReply({ ...command, message: "Stop." })]);
+  assert.equal(conflicting.filter((result) => result.status === "fulfilled").length, 1);
+  assert.deepEqual(JSON.parse(await readFile(replyPath, "utf8")), { schemaVersion: "pi-plan-attention-command.v1", ...command });
+  await writeFile(replyPath, "{malformed");
+  await assert.rejects(control.writeAttentionReply(command), /different|Invalid|Unexpected/i);
 });

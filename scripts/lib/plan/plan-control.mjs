@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const PLAN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -66,6 +66,32 @@ function attentionPath(paths, requestId, suffix) {
   return path.join(paths.attention, `${requestId}.${suffix}.json`);
 }
 
+function matchingAttentionReply(existing, expected) {
+  return ["planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message"].every((field) => existing[field] === expected[field]);
+}
+
+async function publishAttentionReply(file, value) {
+  await mkdir(path.dirname(file), { recursive: true });
+  const temporary = path.join(path.dirname(file), `.${path.basename(file)}-${process.pid}-${crypto.randomUUID()}.tmp`);
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  try {
+    await link(temporary, file);
+    return value;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    let existing;
+    try {
+      existing = parseAttentionReply(JSON.parse(await readFile(file, "utf8")));
+    } catch {
+      throw new Error("A different durable Plan Attention reply is already queued");
+    }
+    if (!matchingAttentionReply(existing, value)) throw new Error("A different durable Plan Attention reply is already queued");
+    return existing;
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -114,8 +140,7 @@ export function createPlanControl({ stateRoot, id = () => crypto.randomUUID(), n
     async writeAttentionReply(command) {
       const parsed = parseAttentionReply(command);
       const paths = controlPaths(stateRoot, parsed.planId);
-      await writeAtomic(attentionPath(paths, parsed.requestId, "reply"), parsed);
-      return publicAttentionReply(parsed);
+      return publicAttentionReply(await publishAttentionReply(attentionPath(paths, parsed.requestId, "reply"), parsed));
     },
     async readAttentionReplies(planId) {
       const paths = controlPaths(stateRoot, planId);
