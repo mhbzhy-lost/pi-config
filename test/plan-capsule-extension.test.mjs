@@ -767,6 +767,33 @@ test("agent_settled uses a valid custom follow-up payload for runnable work", as
   }]);
 });
 
+test("agent_settled durable runnable work registers a Root wake without local follow-up", async () => {
+  const calls = [];
+  const { handlers, messages } = setup({
+    canContinue: () => true,
+    requestCallerFollowUp: async (request) => calls.push(request),
+  });
+
+  await handlers.get("agent_settled")({ type: "agent_settled" }, context([{ customType: "pi-plan-event-v1", data: created }]));
+
+  assert.deepEqual(calls, [{ wakeId: "plan-opened", reason: "plan-opened" }]);
+  assert.deepEqual(messages, []);
+});
+
+test("agent_settled durable gate-required continuation registers a Root wake without local follow-up", async () => {
+  const calls = [];
+  const { handlers, messages } = setup({
+    canContinue: () => false,
+    getHeadCommit: async () => "advanced",
+    requestCallerFollowUp: async (request) => calls.push(request),
+  });
+
+  await handlers.get("agent_settled")({ type: "agent_settled" }, context([{ customType: "pi-plan-event-v1", data: created }]));
+
+  assert.deepEqual(calls, [{ wakeId: "plan-opened", reason: "plan-opened" }]);
+  assert.deepEqual(messages, []);
+});
+
 test("agent_settled fails closed when continuation capability is not injected", async () => {
   const { handlers, messages, entries } = setup();
   await handlers.get("agent_settled")({ type: "agent_settled" }, context([{ customType: "pi-plan-event-v1", data: created }]));
