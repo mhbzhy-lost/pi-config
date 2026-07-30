@@ -233,9 +233,12 @@ export function createPlanCapsuleExtension(pi, options = {}) {
       pi.sendMessage({ customType: "pi-plan-summary-v1", content: `Plan ${projection.planId} ${projection.lifecycle}.`, details: { planId: projection.planId, lifecycle: projection.lifecycle } });
       return;
     }
-    const hasInFlightAttempt = [...projection.attempts.values()]
+    const attempts = [...projection.attempts.values()];
+    const hasInFlightAttempt = attempts
       .some((attempt) => ["dispatch-requested", "active", "waiting-attention"].includes(attempt.status));
-    if (hasInFlightAttempt) return;
+    const hasCoordinatorWork = attempts
+      .some((attempt) => ["validated", "workspace-allocated"].includes(attempt.status));
+    if (hasInFlightAttempt && !hasCoordinatorWork) return;
     if (options.canContinue?.(projection) === true) {
       pi.sendMessage(
         { customType: "pi-plan-follow-up-v1", content: "Continue the plan coordinator.", details: { planId: projection.planId } },
