@@ -53,6 +53,13 @@ const LEGACY_TASK7_FILES = [
   "scripts/lib/subagent-agents.mjs",
   "pi/extensions/subagent.ts",
 ];
+const ROOT_BROKER_COMPONENTS = [
+  "scripts/lib/subagent-dispatch/root-broker-server.ts",
+  "scripts/lib/subagent-dispatch/root-broker-client.ts",
+  "scripts/lib/subagent-dispatch/root-broker-protocol.ts",
+  "scripts/lib/subagent-dispatch/root-broker-registry.ts",
+  "pi/child-extensions/root-session-owner.ts",
+];
 
 async function readIfExists(path) {
   try {
@@ -150,10 +157,12 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     issues.push("missing typed subagent runtime extension: pi/extensions/subagent-runtime.ts");
   }
 
-  try {
-    await access(join(repoRoot, "scripts", "lib", "plan", "parent-lifecycle.mjs"), constants.R_OK);
-  } catch {
-    issues.push("missing Parent-owned Plan lifecycle helper");
+  for (const relativeComponent of ROOT_BROKER_COMPONENTS) {
+    try {
+      await access(join(repoRoot, relativeComponent), constants.R_OK);
+    } catch {
+      issues.push(`missing Root subagent broker component: ${relativeComponent}`);
+    }
   }
 
   const piVersion = await (options.readPiVersion ?? readInstalledPiVersion)();
@@ -218,16 +227,6 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     } catch {}
   }
 
-  const hostSource = await readIfExists(join(repoRoot, "scripts", "lib", "plan", "plan-host-runtime.mjs"));
-  if (!hostSource?.includes("PI_SUBAGENT_CHILD") || !hostSource.includes("PI_SUBAGENT_FANOUT_CHILD")) {
-    issues.push("Standalone Plan Host does not reject child and fanout-child environments");
-  }
-  if (!hostSource?.includes("delete childEnv.PI_SUBAGENT_PARENT_SESSION")) {
-    issues.push("Standalone Plan Host does not rebuild its session identity");
-  }
-  if (/lib\/runtime|spawnExecutor/.test(hostSource ?? "")) {
-    issues.push("thin Plan Host retains an Executor or legacy runtime API");
-  }
   for (const relativeSource of ["coordinator.mjs", "plan-runner-dependencies.mjs", "pi-subagents-execution-backend.mjs"]) {
     const source = await readIfExists(join(repoRoot, "scripts", "lib", "plan", relativeSource));
     if (/spawnPiAgent|createMonitor|stopAgent|interruptAgent/.test(source ?? "")) {
@@ -313,6 +312,7 @@ if (isMain) {
     const issues = await inspectConfiguration(repoRoot);
     if (issues.length === 0) {
       console.log("[ok] Pi Skill allowlist extension is ready");
+      console.log("[ok] Root subagent broker: ready");
       for (const limitation of LIMITATIONS) console.warn(`[warning] ${limitation}`);
     }
     else {

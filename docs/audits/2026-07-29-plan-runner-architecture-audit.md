@@ -69,3 +69,10 @@ amendment 依次经过三项不可跳过的 checkpoint：
 - **推荐**：维持 `plan-host-runtime.mjs`，因为 v3 文档工作未实现 runtime 生命周期替换。
 - **不选原因**：提前宣称 flat runtime 会掩盖现有 Host、Gate 和恢复责任。
 - **选错代价**：终态回收或恢复时暴露，修复代价高。
+
+## Superseding Decision
+
+- **[运行时替代]**：Task9 已实现并取代 Host-retirement 决策；Root 是唯一生命周期 owner，其他 Root 不 attach。
+- **推荐**：使用 Root broker 管理同一 Root 内 Plan Runner 与 Executor 的派发、所有权和有序关闭。
+- **不选原因**：其他 Root 接管运行会破坏 session-local handle 与官方终态证明的归属。
+- **选错代价**：恢复或关闭时可能重复控制同一 Attempt，审计事实不再可靠。
