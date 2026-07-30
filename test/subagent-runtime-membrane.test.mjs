@@ -307,6 +307,24 @@ test("beforeDispose failure still disposes RPC and removes its cleanup entry", a
   assert.deepEqual(order, ["before", "dispose"]);
 });
 
+test("retain-on-beforeDispose-failure retries cleanup before disposing RPC", async () => {
+  const pi = createPi();
+  let attempts = 0;
+  const rpc = createRpc();
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    retainOnBeforeDisposeFailure: true,
+    async beforeDispose() { attempts += 1; if (attempts === 1) throw new Error("controlled close failure"); },
+  });
+  const shutdown = pi.handlers.get("session_shutdown")[0];
+  await assert.rejects(() => shutdown(), /controlled close failure/);
+  assert.equal(rpc.disposed(), 0);
+  await shutdown();
+  assert.equal(attempts, 2);
+  assert.equal(rpc.disposed(), 1);
+});
+
 test("project subagent schema exposes an object root to OpenAI-compatible providers", () => {
   const pi = createPi();
 

@@ -764,19 +764,148 @@ test("broker closes idle sockets, disposes upstream once, and validates caller g
   assert.deepEqual(order, ["upstream.dispose"]);
 });
 
-test("broker disposes upstream when grant cleanup fails", async (t) => {
+test("Root cleanup ownership retains grants and upstream disposal until grant cleanup can succeed", async (t) => {
   let disposed = 0;
   const grantDirectory = await mkdtemp(path.join(tmpdir(), "root-broker-grant-"));
-  t.after(() => removePath(grantDirectory, { recursive: true, force: true }));
+  const events = startedEventBus();
   const broker = new RootBrokerServer({
     rootSessionId,
+    events,
     upstream: { ...fakeUpstream(), dispose() { disposed += 1; } },
+  });
+  t.after(async () => {
+    await removePath(grantDirectory, { recursive: true, force: true });
+    const outcome = await closeOutcome(broker.closeRootSession(), 100);
+    assert.notEqual(outcome.state, "watchdog", "grant cleanup teardown must not hang");
+    if (outcome.state === "rejected") throw outcome.error;
   });
   await broker.start();
   broker.grantPaths.add(grantDirectory);
 
   await assert.rejects(() => broker.closeRootSession());
+  assert.equal(disposed, 0);
+  assert.equal(broker.server?.listening, true);
+  assert.equal(broker.grantPaths.has(grantDirectory), true);
+  assert.notEqual(broker.unsubscribeTerminal, undefined);
+  await removePath(grantDirectory, { recursive: true, force: true });
+  await broker.closeRootSession();
   assert.equal(disposed, 1);
+  assert.equal(broker.server, undefined);
+  assert.equal(broker.grantPaths.size, 0);
+});
+
+test("Root cleanup ownership retains teardown state after upstream disposal failure and retries transport once", async (t) => {
+  let disposeCalls = 0;
+  const grantDirectory = await mkdtemp(path.join(tmpdir(), "root-broker-dispose-"));
+  const events = startedEventBus();
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    events,
+    upstream: { ...fakeUpstream(), dispose() { disposeCalls += 1; if (disposeCalls === 1) throw new Error("controlled dispose failure"); } },
+  });
+  const writes = [];
+  const socket = { destroyed: false, write(value) { writes.push(value); return true; }, endCalls: 0, end() { this.endCalls += 1; this.destroyed = true; }, destroy() { this.destroyed = true; } };
+  await broker.start();
+  t.after(async () => {
+    await removePath(grantDirectory, { recursive: true, force: true });
+    const outcome = await closeOutcome(broker.closeRootSession(), 100);
+    assert.notEqual(outcome.state, "watchdog", "dispose cleanup teardown must not hang");
+    if (outcome.state === "rejected") throw outcome.error;
+  });
+  const caller = await broker.grantCaller({ callerRunId: "dispose-plan", planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
+  broker.subscriptions.set(caller.runId, new Set([socket]));
+  broker.sockets.add(socket);
+  broker.spawnLedger.set("plan\u0000dispose", { promise: undefined, state: "done" });
+  broker.ownedRuns.set("dispose-executor", { rootSessionId, runId: "dispose-executor", role: "executor", asyncDir: "/async/dispose", sessionId: rootSessionId, pid: 1, birthIdentity: null, identityState: "unavailable" });
+  broker.terminalProofs.set("dispose-executor", officialObservedProof("dispose-executor"));
+  broker.grantPaths.add(grantDirectory);
+
+  const server = broker.server;
+  await assert.rejects(() => broker.closeRootSession(), /controlled dispose failure/);
+  assert.equal(disposeCalls, 1);
+  assert.equal(broker.server, server);
+  assert.equal(broker.subscriptions.size, 1);
+  assert.equal(broker.spawnLedger.size, 1);
+  assert.equal(broker.ownedRuns.size, 1);
+  assert.equal(broker.grantPaths.has(grantDirectory), true);
+  assert.equal(broker.callers.has(caller.runId), true);
+  assert.equal(events.unsubscribed, undefined);
+  assert.equal(writes.filter((value) => value.includes("root.closing")).length, 1);
+  assert.equal(socket.endCalls, 1);
+  await broker.closeRootSession();
+  assert.equal(disposeCalls, 2);
+  assert.equal(writes.filter((value) => value.includes("root.closing")).length, 1);
+  assert.equal(socket.endCalls, 1);
+  assert.equal(broker.server, undefined);
+  assert.equal(events.unsubscribed, true);
+  for (const collection of [broker.subscriptions, broker.spawnLedger, broker.ownedRuns, broker.grantPaths, broker.callers]) assert.equal(collection.size, 0);
+});
+
+test("Root cleanup ownership keeps the real runtime broker bound until close retry succeeds", async () => {
+  const agentCore = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.js";
+  await stat(agentCore);
+  const { createJiti } = await import("../pi/npm/node_modules/jiti/lib/jiti.mjs");
+  const npmRoot = path.join(process.cwd(), "pi/npm/node_modules");
+  const jiti = createJiti(import.meta.url, { alias: {
+    "@earendil-works/pi-ai/compat": path.join(npmRoot, "@earendil-works/pi-ai/dist/compat.js"),
+    "@earendil-works/pi-tui": path.join(npmRoot, "@earendil-works/pi-tui/dist/index.js"),
+    "@earendil-works/pi-coding-agent": path.join(npmRoot, "@earendil-works/pi-coding-agent/dist/index.js"),
+    "@earendil-works/pi-ai": path.join(npmRoot, "@earendil-works/pi-ai/dist/index.js"),
+    "@earendil-works/pi-agent-core": agentCore,
+  } });
+  const { default: subagentRuntime } = await jiti.import(path.join(process.cwd(), "pi/extensions/subagent-runtime.ts"));
+  const registry = await jiti.import(path.join(process.cwd(), "scripts/lib/subagent-dispatch/root-broker-registry.ts"));
+  const handlers = new Map();
+  const pi = {
+    events: { on() { return () => {}; }, emit() {} },
+    on(type, handler) { const list = handlers.get(type) ?? []; list.push(handler); handlers.set(type, list); },
+    registerTool() {}, registerCommand() {}, registerShortcut() {}, registerProvider() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+    getAllTools() { return []; }, getActiveTools() { return []; }, setActiveTools() {}, sendMessage() {}, appendEntry() {},
+  };
+  const marker = [Object.hasOwn(process.env, "PI_ROOT_SUBAGENT_BROKER_ENABLED"), process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED];
+  const childMarker = [Object.hasOwn(process.env, "PI_SUBAGENT_CHILD"), process.env.PI_SUBAGENT_CHILD];
+  const fanoutMarker = [Object.hasOwn(process.env, "PI_SUBAGENT_FANOUT_CHILD"), process.env.PI_SUBAGENT_FANOUT_CHILD];
+  delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
+  delete process.env.PI_SUBAGENT_CHILD;
+  delete process.env.PI_SUBAGENT_FANOUT_CHILD;
+  let broker;
+  let realClose;
+  try {
+    subagentRuntime(pi);
+    const start = handlers.get("session_start")?.at(-1);
+    const shutdown = handlers.get("session_shutdown")?.at(-1);
+    assert.equal(typeof start, "function");
+    assert.equal(typeof shutdown, "function");
+    await start({}, { sessionManager: { getSessionId: () => "runtime-root-cleanup" } });
+    broker = registry.requireRootBroker(pi);
+    realClose = broker.closeRootSession.bind(broker);
+    let closeCalls = 0;
+    broker.closeRootSession = async () => { closeCalls += 1; if (closeCalls === 1) throw new Error("controlled runtime close failure"); return realClose(); };
+    const first = await closeOutcome(shutdown(), 200);
+    assert.equal(first.state, "rejected");
+    assert.match(first.error?.message ?? "", /controlled runtime close failure/);
+    assert.equal(registry.requireRootBroker(pi), broker);
+    assert.equal(broker.server?.listening, true);
+    const second = await closeOutcome(shutdown(), 200);
+    assert.equal(second.state, "resolved");
+    assert.equal(closeCalls, 2);
+    assert.throws(() => registry.requireRootBroker(pi), /unavailable/);
+    assert.equal(broker.server, undefined);
+  } finally {
+    if (broker) {
+      try {
+        const outcome = await closeOutcome(realClose(), 200);
+        assert.notEqual(outcome.state, "watchdog", "runtime broker cleanup must not hang");
+        if (outcome.state === "rejected") throw outcome.error;
+      } finally {
+        registry.unbindRootBroker(pi, broker);
+      }
+    }
+    await assert.rejects(stat(brokerSocketPath("runtime-root-cleanup")));
+    if (marker[0]) process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = marker[1]; else delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
+    if (childMarker[0]) process.env.PI_SUBAGENT_CHILD = childMarker[1]; else delete process.env.PI_SUBAGENT_CHILD;
+    if (fanoutMarker[0]) process.env.PI_SUBAGENT_FANOUT_CHILD = fanoutMarker[1]; else delete process.env.PI_SUBAGENT_FANOUT_CHILD;
+  }
 });
 
 test("broker normal close removes grants and releases every authorization collection", async (t) => {
