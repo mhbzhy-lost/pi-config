@@ -133,3 +133,43 @@ test("coalesces concurrent pending wakes for the same plan-runner revival", asyn
   assert.deepEqual(server.callerFollowUps.get(ownedRun.runId), []);
   assert.deepEqual(server.reviveResults.get(ownedRun.runId), result);
 });
+
+test("releases the revival single-flight after resume rejects", async () => {
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture({
+    resume: async () => { throw new Error("resume unavailable"); },
+  });
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.deepEqual(server.callerFollowUps.get(ownedRun.runId), [{ wakeId: "plan-opened-1", reason: "plan-opened" }]);
+  assert.equal(server.revivePromises.size, 0);
+});
+
+test("retries a pending wake after the previous revival rejects", async () => {
+  const result = { runId: "plan-runner-2", asyncDir: "/async/plan-runner-2" };
+  let attempts = 0;
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture({
+    resume: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("resume unavailable");
+      return result;
+    },
+  });
+  const retryRequest = parseBrokerRequest({
+    ...request,
+    requestId: "request-followup-2",
+  });
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+  await server.dispatch(retryRequest, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, [...expectedResume, ...expectedResume]);
+  assert.deepEqual(server.callerFollowUps.get(ownedRun.runId), []);
+  assert.deepEqual(server.reviveResults.get(ownedRun.runId), result);
+});
