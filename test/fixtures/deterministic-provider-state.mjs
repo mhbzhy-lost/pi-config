@@ -110,7 +110,7 @@ export function decideDeterministicTurn({ messages = [], toolNames = [], issuedD
     }
   }
 
-  if (attentionMode) {
+  if (attentionMode && deterministicExecutorCommand(userText)) {
     const contract = typedExecutorAttentionContract(userText, executorRunId);
     if (!contract) return { text: "PLAN_EXECUTOR_ATTENTION_INVALID" };
     const supervisorResult = toolResults.find((message) => message.toolName === "contact_supervisor");
