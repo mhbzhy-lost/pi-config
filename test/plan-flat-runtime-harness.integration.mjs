@@ -128,7 +128,11 @@ async function assertFutureGreen(handle, outcome, planPath, runtimeTmp) {
     planHash: plan.sha256,
     irVersion: ir.version,
     irHash: ir.hash,
-    taskHashes: Object.fromEntries(ir.nodes.map((node) => [node.id, node.hashes.effective])),
+    taskHashes: Object.fromEntries(ir.nodes.map((node) => [node.id, {
+      full: node.hashes.full,
+      effective: node.hashes.effective,
+      scheduling: node.hashes.scheduling,
+    }])),
   });
   const dispatches = events.filter((event) => event.type === "attempt.dispatch-requested");
   assert.equal(dispatches.length, 2);
