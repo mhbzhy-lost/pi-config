@@ -468,6 +468,36 @@ test("fails closed when a non-resumable active generation has no exact canonical
   assert.equal(server.logicalCallers.get("plan-runner-1")?.activeRunId, "plan-runner-2");
 });
 
+test("fails closed when a canonical predecessor was not officially observed before the active generation", async () => {
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture();
+  server.upstream.ping = async () => ({});
+  const canonicalSession = { canonicalSessionId: "canonical-plan-1", leaseDisposition: "released", freeAtObservation: true, canonicalSessionLeaseReleased: true };
+  server.acceptTerminalProof(ownedRun, { ...proof, observedAt: 200, resumeDisposition: "resumable", canonicalSession });
+  await server.dispatch(request, {});
+  await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2");
+
+  const wake = { wakeId: "attention-reply-late-predecessor", reason: "attention-reply" };
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", wake), { accepted: true, wakeId: wake.wakeId });
+  const activeRun = server.ownedRuns.get("plan-runner-2");
+  assert.ok(activeRun);
+  const activeProcessInstanceId = "plan-runner-2-instance";
+  server.acceptTerminalProof(activeRun, {
+    ...proof,
+    runId: activeRun.runId,
+    runnerProcessInstanceId: activeProcessInstanceId,
+    observedAt: 100,
+    resumeDisposition: "non-resumable",
+    canonicalSession,
+    instances: [{ processInstanceId: activeProcessInstanceId, kind: "runner", closeObservedAt: 100, exitCode: 0, signal: null }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [wake]);
+  assert.equal(server.logicalCallers.get("plan-runner-1")?.activeRunId, "plan-runner-2");
+});
+
 test("does not use a foreign canonical proof when its logical predecessor identity is incomplete", async () => {
   const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture();
   server.upstream.ping = async () => ({});
