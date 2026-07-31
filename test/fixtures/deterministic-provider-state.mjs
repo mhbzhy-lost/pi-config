@@ -30,23 +30,24 @@ export function deterministicExecutorAcceptanceReport(userText, command) {
   }, null, 2)}\n\`\`\``;
 }
 
-export function deterministicExecutorCommand(userText) {
-  const declaredWritePaths = (() => {
-    const section = userText.match(/^## Declared Write Scope\n([\s\S]*?)(?:\n\n|$)/m)?.[1];
-    if (!section) return [];
-    return section.split("\n").flatMap((line) => {
-      const scalar = line.match(/^\d+\. (.+)$/)?.[1];
-      if (!scalar) return [];
-      try {
-        const path = JSON.parse(scalar);
-        return typeof path === "string" ? [path] : [];
-      } catch {
-        return [];
-      }
-    });
-  })();
-  const allows = (path) => declaredWritePaths.includes(path)
+export function deterministicExecutorAllowsPath(userText, path) {
+  const section = userText.match(/^## Declared Write Scope\n([\s\S]*?)(?:\n\n|$)/m)?.[1];
+  const declaredWritePaths = section?.split("\n").flatMap((line) => {
+    const scalar = line.match(/^\d+\. (.+)$/)?.[1];
+    if (!scalar) return [];
+    try {
+      const value = JSON.parse(scalar);
+      return typeof value === "string" ? [value] : [];
+    } catch {
+      return [];
+    }
+  }) ?? [];
+  return declaredWritePaths.includes(path)
     || new RegExp(`^Allowed paths: ${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m").test(userText);
+}
+
+export function deterministicExecutorCommand(userText) {
+  const allows = (path) => deterministicExecutorAllowsPath(userText, path);
   if (allows("README.md")) {
     return "printf 'worker\\n' >> README.md && git add README.md && git commit -m 'test: 添加确定性 worker 标记'";
   }
@@ -71,7 +72,7 @@ export function decideDeterministicAmendmentTurn({ messages = [], toolNames = []
   const hasSuccessfulSupervisorDecision = messages.some((message) => message?.role === "toolResult"
     && message.toolName === "contact_supervisor" && !message.isError);
   const hasBashResult = messages.some((message) => message?.role === "toolResult" && message.toolName === "bash");
-  if (/^Allowed paths: decision\.txt$/m.test(userText) && hasSuccessfulSupervisorDecision && !hasBashResult && tools.has("bash")) {
+  if (deterministicExecutorAllowsPath(userText, "decision.txt") && hasSuccessfulSupervisorDecision && !hasBashResult && tools.has("bash")) {
     return { tool: { name: "bash", arguments: { command: "sleep 120; printf 'approved\\n' > decision.txt && git add decision.txt && git commit -m 'test: amendment 旧任务'" } } };
   }
   const replyIndex = messages.reduce((last, message, index) => message?.role === "toolResult" && message.toolName === "plan_executor_supervisor" && !message.isError && typeof message.details?.replyTo === "string" && message.details.replyTo ? index : last, -1);
