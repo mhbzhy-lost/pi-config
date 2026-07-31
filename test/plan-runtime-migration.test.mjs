@@ -43,6 +43,13 @@ test("amendment Harness uses flat Root crash and revival control", async () => {
   assert.match(source, /PI_PLAN_FLAT_AMENDMENT_CRASH/);
   assert.match(source, /logicalRunId/);
   assert.match(source, /executorRunId/);
+  assert.match(source, /async function waitFor[^\n]*ENOENT/);
+  assert.match(source, /attempt\.attemptId === dispatch\.data\.attemptId/);
+  assert.match(source, /rev-list[^\n]*--count/);
+  assert.match(source, /assertRuntimeClean/);
+  assert.match(source, /runnerProcessInstanceId/);
+  assert.match(source, /this\.child\.kill\("SIGKILL"\); await this\.exited/);
+  for (const field of ["description:", "thinking:", "temperature:"]) assert.match(source, new RegExp(field));
 });
 
 test("unused Parent lifecycle source and test are absent", async () => {
