@@ -288,6 +288,37 @@ test("revives unbound dispatches and active bindings from the durable execution 
   assert.equal(spawns, 0);
 });
 
+test("rejects a malformed later dispatch before recovering any durable execution state", async (t) => {
+  const repo = await fixture(parallelSource);
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  const validWorkspace = fakeAllocator({ planId: repo.planId, taskId: "task-1", attemptId: "attempt-1", baseCommit: repo.baseCommit });
+  const malformedWorkspace = fakeAllocator({ planId: repo.planId, taskId: "task-2", attemptId: "attempt-2", baseCommit: repo.baseCommit });
+  const durableEntries = [
+    created(binding),
+    { schemaVersion: "pi-plan-event.v1", eventId: "attempt-1-allocated", planId: repo.planId, occurredAt: "2026-07-30T00:01:01.000Z", type: "attempt.workspace-allocated", data: { attemptId: "attempt-1", taskId: "task-1", baseCommit: repo.baseCommit, workspace: validWorkspace } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "attempt-1-requested", planId: repo.planId, occurredAt: "2026-07-30T00:01:02.000Z", type: "attempt.dispatch-requested", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", baseCommit: repo.baseCommit, workspace: validWorkspace, tool: { agent: "executor", task: "Recover valid dispatch.", cwd: validWorkspace.path, output: "/results/attempt-1.json", timeoutMs: 900000, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: "4".repeat(64) } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "attempt-2-allocated", planId: repo.planId, occurredAt: "2026-07-30T00:01:03.000Z", type: "attempt.workspace-allocated", data: { attemptId: "attempt-2", taskId: "task-2", baseCommit: repo.baseCommit, workspace: malformedWorkspace } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "attempt-2-requested", planId: repo.planId, occurredAt: "2026-07-30T00:01:04.000Z", type: "attempt.dispatch-requested", data: { attemptId: "attempt-2", taskId: "task-2", dispatchId: "dispatch-2", baseCommit: repo.baseCommit, workspace: malformedWorkspace, tool: { agent: "executor", task: "Recover malformed dispatch.", cwd: malformedWorkspace.path, output: "/results/attempt-2.json", timeoutMs: 0, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: "5".repeat(64) } },
+  ];
+  const projection = durableEntries.reduce(applyEvent, createProjection());
+  assert.equal(projection.attempts.get("attempt-1").status, "dispatch-requested");
+  assert.equal(projection.attempts.get("attempt-2").status, "dispatch-requested");
+  const recoverDispatch = [];
+  let spawns = 0;
+  const deps = runnerDependencies(repo, {
+    executionBackend: {
+      async recoverDispatch(input) { recoverDispatch.push(input); },
+      async spawn() { spawns += 1; throw new Error("recovery must not spawn"); },
+    },
+  });
+  const ctx = context(repo.worktree, durableEntries.map((data) => ({ customType: "pi-plan-event-v1", data })));
+
+  await assert.rejects(() => deps.recoverExecutionState({ ctx }), (error) => error?.code === "INVALID_EXECUTION_REQUEST" && error.message.includes("timeoutMs"));
+  assert.deepEqual(recoverDispatch, []);
+  assert.equal(spawns, 0);
+});
+
 test("fails closed when a durable active binding lacks its session file", async (t) => {
   const repo = await fixture();
   t.after(() => rm(repo.origin, { recursive: true, force: true }));
