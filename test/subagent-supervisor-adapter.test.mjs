@@ -511,6 +511,30 @@ test("drains a Supervisor push that arrives during a successful in-flight pass",
   assert.deepEqual(acknowledgements, ["snapshot-a", "snapshot-b"]);
 });
 
+test("bounds concurrent lifecycle compensation when Supervisor record keeps failing", async () => {
+  let enterFirst; let releaseFirst;
+  const firstEntered = new Promise((resolve) => { enterFirst = resolve; });
+  const firstRelease = new Promise((resolve) => { releaseFirst = resolve; });
+  let attempts = 0;
+  const subject = lifecycleFixture({
+    async recordSupervisorRequest() {
+      attempts += 1;
+      if (attempts === 1) { enterFirst(); await firstRelease; }
+      throw new Error("persistent record failure");
+    },
+  });
+  await subject.installed.startLifecycleSubscription?.({ marker: "live" });
+  subject.rpc.onPush?.({ type: "supervisor.request", callerRunId: "run", data: { requestId: "bounded-retry", executorRunId: "executor-bounded", content: "Keep failing.", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 0 } });
+  await firstEntered;
+  const settled = subject.pi.emitLifecycle("agent_settled", { marker: "settled" });
+  const shutdown = subject.pi.emitLifecycle("session_shutdown", { marker: "shutdown" });
+  releaseFirst();
+
+  const outcomes = await Promise.allSettled([settled, shutdown]);
+  assert.deepEqual(outcomes.map(({ status }) => status), ["rejected", "rejected"]);
+  assert.equal(attempts, 2);
+});
+
 test("isolates failed Supervisor records by Executor while retaining each Executor FIFO", async () => {
   const attempts = [];
   const subject = lifecycleFixture({ async recordSupervisorRequest(message) { attempts.push(message.details.id); if (message.details.runId === "executor-a") throw new Error("A permanently fails"); } });
@@ -520,9 +544,9 @@ test("isolates failed Supervisor records by Executor while retaining each Execut
   assert.deepEqual(attempts, ["a-first", "b-first"]);
 });
 
-test("retains a failed Supervisor record for session-shutdown retry", async () => {
+test("retains a failed immediate Supervisor record for session-shutdown retry", async () => {
   const attempts = [];
-  const settledCtx = { marker: "settled" };
+  const liveCtx = { marker: "live" };
   const shutdownCtx = { marker: "shutdown" };
   const subject = lifecycleFixture({
     async recordSupervisorRequest(message, { ctx }) {
@@ -530,14 +554,14 @@ test("retains a failed Supervisor record for session-shutdown retry", async () =
       if (attempts.length === 1) throw new Error("durable attention write failed");
     },
   });
-  await subject.installed.startLifecycleSubscription?.(settledCtx);
+  await subject.installed.startLifecycleSubscription?.(liveCtx);
   subject.rpc.onPush?.({ type: "supervisor.request", callerRunId: "run", data: { requestId: "request-retry", executorRunId: "executor-3", content: "Retry this request.", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 3 } });
 
-  await assert.rejects(subject.pi.emitLifecycle("agent_settled", settledCtx), /durable attention write failed/);
+  await new Promise((resolve) => setImmediate(resolve));
   await subject.pi.emitLifecycle("session_shutdown", shutdownCtx);
 
   assert.deepEqual(attempts, [
-    { requestId: "request-retry", ctx: settledCtx },
+    { requestId: "request-retry", ctx: liveCtx },
     { requestId: "request-retry", ctx: shutdownCtx },
   ]);
 });
