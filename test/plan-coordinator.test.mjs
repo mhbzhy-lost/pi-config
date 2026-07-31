@@ -973,11 +973,18 @@ test("recovers an append-only succeeded Attempt through validation exactly once 
   assert.equal(queued[0].resultCommit, "persisted-result");
   assert.equal(queued[0].validationHash, appended.find(({ type }) => type === "attempt.validated").data.validationHash);
   await first.coordinator.recoverSucceededAttempts();
-  const fresh = harness({ approvedPlan: plan([task("task-1")]), entries, backend, options });
+  assert.equal(queued.length, 1);
+
+  const freshQueued = [];
+  const fresh = harness({
+    approvedPlan: plan([task("task-1")]), entries, backend,
+    options: { ...options, integrationQueue: { enqueue(attempt) { freshQueued.push(attempt); } } },
+  });
+  assert.equal(freshQueued.length, 0);
   await fresh.coordinator.recoverSucceededAttempts();
+  assert.equal(freshQueued.length, 0);
   assert.equal(validations.length, 1);
   assert.equal(appended.filter(({ type }) => type === "attempt.validated").length, 1);
-  assert.equal(queued.length, 1);
   assert.equal(backendCalls, 0);
 });
 
