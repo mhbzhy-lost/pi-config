@@ -2,6 +2,23 @@ import { requireRootBroker } from "../../../scripts/lib/subagent-dispatch/root-b
 
 const safeId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value);
 const result = (value: unknown, isError = false) => ({ content: [{ type: "text", text: JSON.stringify(value) }], ...(isError ? { isError: true } : {}) });
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function drainOnceAndAwaitProof(broker: any, run: any) {
+  try {
+    await broker.drainRun(run);
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "official terminal is non-observed (pending)") throw error;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const proof = broker.terminalProofs.get(run.runId);
+      if (proof) return proof;
+      await sleep(25);
+    }
+    throw new Error(`amendment crash timed out waiting for official proof: ${run.runId}`);
+  }
+  return broker.terminalProofs.get(run.runId);
+}
 
 export default function rootAmendmentControl(pi: any) {
   pi.registerTool({
@@ -20,10 +37,10 @@ export default function rootAmendmentControl(pi: any) {
           || broker.runOwners.get(params.executorRunId) !== params.logicalRunId
           || broker.callers.get(params.logicalRunId)?.ownedRunIds?.has(params.executorRunId) !== true
           || broker.resolveActiveCaller(params.logicalRunId) !== actualRunId) return result({ error: "amendment crash ownership changed" }, true);
-        await broker.drainRun(executor);
+        await drainOnceAndAwaitProof(broker, executor);
         const executorProof = broker.terminalProofs.get(params.executorRunId);
         if (!executorProof || broker.resolveActiveCaller(params.logicalRunId) !== actualRunId) return result({ error: "amendment crash active generation changed" }, true);
-        await broker.drainRun(runner);
+        await drainOnceAndAwaitProof(broker, runner);
         const runnerProof = broker.terminalProofs.get(actualRunId);
         if (!runnerProof) return result({ error: "amendment crash missing official proof" }, true);
         return result({ logicalRunId: params.logicalRunId, actualRunId, executorRunId: params.executorRunId, executorProof, runnerProof });

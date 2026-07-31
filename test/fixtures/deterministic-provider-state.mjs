@@ -186,6 +186,7 @@ export function decideDeterministicTurn({ messages = [], toolNames = [], issuedD
     const valid = marker && typeof marker === "object" && !Array.isArray(marker) && Object.keys(marker).length === 2
       && ["logicalRunId", "executorRunId"].every((key) => typeof marker[key] === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(marker[key]));
     if (!valid) return { text: "PLAN_ROOT_AMENDMENT_CRASH_INVALID" };
+    if (toolResults.some((message) => message.toolName === "plan_harness_crash_amendment")) return { text: "PLAN_ROOT_AMENDMENT_CRASH_RESULT" };
     if (toolNames.includes("plan_harness_crash_amendment")) return { tool: { name: "plan_harness_crash_amendment", arguments: marker } };
   }
   const attentionReplies = rootAttentionReplies(messages);
