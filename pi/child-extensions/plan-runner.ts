@@ -15,6 +15,17 @@ const REQUIRED_RPC_METHODS = ["ping", "spawn", "spawn.lookup", "status", "interr
 const GRANT_RETRY_MS = 25;
 const GRANT_TIMEOUT_MS = 5_000;
 
+export type PlanRunnerDependenciesFactoryInput = Parameters<typeof createPlanRunnerDependencies>[0] & {
+  pi: ExtensionAPI;
+  originRoot: string;
+  stateRoot: string;
+  executionBackend: ReturnType<typeof createPiSubagentsExecutionBackend>;
+  takeExecutionFacts: () => unknown[];
+  externalReview: ReturnType<typeof createExternalReviewAdapter>;
+};
+
+export type PlanRunnerDependenciesFactory = (input: PlanRunnerDependenciesFactoryInput) => ReturnType<typeof createPlanRunnerDependencies>;
+
 function runtimeRoots(data: unknown) {
   const runtime = (data as { planRuntime?: unknown })?.planRuntime;
   if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)
@@ -44,7 +55,10 @@ export async function bootstrapRuntimeRoots(rpc: { ping(): Promise<unknown> }, {
   }
 }
 
-export default async function planRunner(pi: ExtensionAPI) {
+export async function installPlanRunner(
+  pi: ExtensionAPI,
+  { createDependencies = createPlanRunnerDependencies as PlanRunnerDependenciesFactory } = {},
+) {
   const boundary = createPlanExecutorToolBoundary();
   let executionBackend: ReturnType<typeof createPiSubagentsExecutionBackend> | undefined;
   let assertExecutionRuntime: (() => Promise<void>) | undefined;
@@ -71,7 +85,6 @@ export default async function planRunner(pi: ExtensionAPI) {
   const rpc = rootOwned.rpc;
   try {
     const roots = await bootstrapRuntimeRoots(rpc);
-    await rootOwned.startLifecycleSubscription();
     executionBackend = createPiSubagentsExecutionBackend({
       rpc,
       events: pi.events,
@@ -81,7 +94,7 @@ export default async function planRunner(pi: ExtensionAPI) {
       ensurePlanRuntimeTools(pi, REQUIRED_RUNTIME_TOOLS);
       await executionBackend!.assertCapabilities({ rpcVersion: 1, methods: REQUIRED_RPC_METHODS });
     };
-    const deps = createPlanRunnerDependencies({
+    const deps = createDependencies({
       pi,
       ...roots,
       executionBackend,
@@ -141,6 +154,10 @@ export default async function planRunner(pi: ExtensionAPI) {
       async assertRuntimeCapabilities() {
         await assertExecutionRuntime!();
       },
+      async prepareExecutionLifecycle({ ctx }: { ctx: unknown }) {
+        await deps.recoverExecutionState({ ctx });
+        await rootOwned.startLifecycleSubscription();
+      },
       disposeExecutionBackend() {
         executionBackend?.dispose();
       },
@@ -149,4 +166,8 @@ export default async function planRunner(pi: ExtensionAPI) {
     rootOwned.dispose();
     throw error;
   }
+}
+
+export default function planRunner(pi: ExtensionAPI) {
+  return installPlanRunner(pi);
 }
