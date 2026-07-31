@@ -154,7 +154,6 @@ test("terminateDetachedRunsUnder reaps a same-group child created by the runner 
     process.on("SIGTERM", () => {
       const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
       writeFileSync(process.argv[1], String(child.pid));
-      setTimeout(() => process.exit(0), 10);
     });
     process.stdout.write("ready\\n");
     setInterval(() => {}, 1000);
@@ -200,6 +199,34 @@ test("terminateDetachedRun rechecks the group leader identity before SIGKILL", a
       },
     ),
     /identity|changed|reused/i,
+  );
+  assert.deepEqual(signals, [{ pgid: pid, signal: "SIGTERM" }]);
+});
+
+test("terminateDetachedRun refuses SIGKILL when the verified group leader disappeared", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "plan-e2e-cleanup-missing-leader-"));
+  const asyncDir = join(root, "async-subagent-runs", "missing-leader-run");
+  const pid = 434_343;
+  const startedAt = Date.now();
+  await mkdir(asyncDir, { recursive: true });
+  await writeFile(join(asyncDir, "status.json"), JSON.stringify({ runId: "missing-leader-run", state: "running", pid, startedAt }));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const initial = { pid, pgid: pid, startedAt, command: `${root}/async-cfg-missing-leader-run.json` };
+  let inspections = 0;
+  const signals = [];
+
+  await assert.rejects(
+    cleanup.terminateDetachedRun(
+      { runId: "missing-leader-run", asyncDir },
+      {
+        expectedCommandPath: root,
+        timeoutMs: 1,
+        inspectProcess: async () => inspections++ === 0 ? initial : undefined,
+        isGroupAlive: async () => true,
+        signalProcessGroup: (pgid, signal) => signals.push({ pgid, signal }),
+      },
+    ),
+    /leader.*unavailable|identity.*before SIGKILL/i,
   );
   assert.deepEqual(signals, [{ pgid: pid, signal: "SIGTERM" }]);
 });

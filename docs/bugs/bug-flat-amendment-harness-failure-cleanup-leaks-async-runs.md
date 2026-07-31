@@ -26,7 +26,7 @@
 
 ## 6. 修复与验证
 
-`test/support/plan-e2e-process-cleanup.mjs`只在以下身份同时成立时发信号：目录名匹配`status.runId`、`status.startedAt`匹配当前`ps`启动时间、当前命令行包含本次唯一`runtimeTmp`、PID仍是独立进程组leader。`ps`明确证明PID不存在时视为已经收敛；其他任一身份不可证明时fail closed，不得向PID发信号。信号发送给负PGID；TERM后按整个进程组等待，超时准备KILL时再次核对leader身份：已复用则拒绝，leader已退出但原PGID持续存在时才清理同组后代。
+`test/support/plan-e2e-process-cleanup.mjs`只在以下身份同时成立时发信号：目录名匹配`status.runId`、`status.startedAt`匹配当前`ps`启动时间、当前命令行包含本次唯一`runtimeTmp`、PID仍是独立进程组leader。`ps`明确证明PID不存在时视为已经收敛；其他任一身份不可证明时fail closed，不得向PID发信号。信号发送给负PGID；TERM后按整个进程组等待，超时准备KILL时必须再次证明同一leader仍存在且身份不变。leader缺失或已复用都形成cleanup错误，禁止KILL；这优先保证不会误杀复用PGID，残留组由失败证据与人工处置接管。
 
 fixture删除采用证据归档：先在fixture同级生成单文件tar，再递归删除目录；目录删除失败时完整tar保留并成为diagnostic路径，目录删除成功后以单文件unlink原子清理tar。cleanup error在删除前出现时不创建归档并直接保留原fixture。`AggregateError`按主体错误、cleanup错误顺序保留引用。
 
