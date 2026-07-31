@@ -589,3 +589,89 @@ test("top-level attention parent resolves the exact supervisor request and waits
     toolResult("subagent_wait", "complete"),
   ], tools), { text: "COMPAT_PARENT_DONE" });
 });
+
+test("fresh provider revival dispatches only the remaining unbound contract in a partial wave", async () => {
+  const contractA = { taskId: "task-revival-a", agent: "executor", title: "Revival contract A", prompt: "Execute A." };
+  const contractB = { taskId: "task-revival-b", agent: "executor", title: "Revival contract B", prompt: "Execute B." };
+  const dispatch = toolResult("plan_continue", JSON.stringify({
+    state: "dispatch-required",
+    dispatches: [
+      { attemptId: "attempt-revival-a", dispatchId: "dispatch-revival-a", contract: contractA },
+      { attemptId: "attempt-revival-b", dispatchId: "dispatch-revival-b", contract: contractB },
+    ],
+  }));
+  const status = toolResult("plan_status", JSON.stringify({
+    schemaVersion: "pi-plan-status.v1",
+    tasks: [
+      { taskId: "task-revival-a", attempts: [{ attemptId: "attempt-revival-a", dispatchId: "dispatch-revival-a", runId: "run-revival-a", status: "active" }] },
+      { taskId: "task-revival-b", attempts: [{ attemptId: "attempt-revival-b", dispatchId: "dispatch-revival-b", runId: null, status: "dispatch-requested" }] },
+    ],
+  }));
+  const done = await streamDone([
+    flatPlanPrompt(), toolResult("plan_open", "opened"), dispatch,
+    user("A lifecycle update arrived. Call plan_status."), status,
+  ], flatPlanTools.map((name) => ({ name })));
+  const toolCalls = done.message.content.filter((part) => part.type === "toolCall");
+
+  assert.equal(done.reason, "toolUse");
+  assert.equal(toolCalls.length, 1);
+  assert.equal(toolCalls[0].name, "subagent");
+  assert.deepEqual(toolCalls[0].arguments, contractB);
+});
+
+test("fresh provider revival waits when every exact dispatch binding is active", async () => {
+  const contractA = { taskId: "task-revival-a", agent: "executor", title: "Revival contract A", prompt: "Execute A." };
+  const contractB = { taskId: "task-revival-b", agent: "executor", title: "Revival contract B", prompt: "Execute B." };
+  const dispatch = toolResult("plan_continue", JSON.stringify({
+    state: "dispatch-required",
+    dispatches: [
+      { attemptId: "attempt-revival-a", dispatchId: "dispatch-revival-a", contract: contractA },
+      { attemptId: "attempt-revival-b", dispatchId: "dispatch-revival-b", contract: contractB },
+    ],
+  }));
+  const status = toolResult("plan_status", JSON.stringify({
+    schemaVersion: "pi-plan-status.v1",
+    tasks: [
+      { taskId: "task-revival-a", attempts: [{ attemptId: "attempt-revival-a", dispatchId: "dispatch-revival-a", runId: "run-revival-a", status: "active" }] },
+      { taskId: "task-revival-b", attempts: [{ attemptId: "attempt-revival-b", dispatchId: "dispatch-revival-b", runId: "run-revival-b", status: "active" }] },
+    ],
+  }));
+  const done = await streamDone([
+    flatPlanPrompt(), toolResult("plan_open", "opened"), dispatch,
+    user("A lifecycle update arrived. Call plan_status."), status,
+  ], flatPlanTools.map((name) => ({ name })));
+  const toolCalls = done.message.content.filter((part) => part.type === "toolCall");
+
+  assert.equal(done.reason, "stop");
+  assert.equal(toolCalls.length, 0);
+  assert.deepEqual(done.message.content, [{ type: "text", text: "PLAN_RUNNER_WAITING_LIFECYCLE" }]);
+});
+
+test("fresh provider revival integrates when every exact dispatch binding is validated", async () => {
+  const contractA = { taskId: "task-revival-a", agent: "executor", title: "Revival contract A", prompt: "Execute A." };
+  const contractB = { taskId: "task-revival-b", agent: "executor", title: "Revival contract B", prompt: "Execute B." };
+  const dispatch = toolResult("plan_continue", JSON.stringify({
+    state: "dispatch-required",
+    dispatches: [
+      { attemptId: "attempt-revival-a", dispatchId: "dispatch-revival-a", contract: contractA },
+      { attemptId: "attempt-revival-b", dispatchId: "dispatch-revival-b", contract: contractB },
+    ],
+  }));
+  const status = toolResult("plan_status", JSON.stringify({
+    schemaVersion: "pi-plan-status.v1",
+    tasks: [
+      { taskId: "task-revival-a", attempts: [{ attemptId: "attempt-revival-a", dispatchId: "dispatch-revival-a", runId: "run-revival-a", status: "validated" }] },
+      { taskId: "task-revival-b", attempts: [{ attemptId: "attempt-revival-b", dispatchId: "dispatch-revival-b", runId: "run-revival-b", status: "validated" }] },
+    ],
+  }));
+  const done = await streamDone([
+    flatPlanPrompt(), toolResult("plan_open", "opened"), dispatch,
+    user("A lifecycle update arrived. Call plan_status."), status,
+  ], flatPlanTools.map((name) => ({ name })));
+  const toolCalls = done.message.content.filter((part) => part.type === "toolCall");
+
+  assert.equal(done.reason, "toolUse");
+  assert.equal(toolCalls.length, 1);
+  assert.equal(toolCalls[0].name, "plan_continue");
+  assert.deepEqual(toolCalls[0].arguments, { reason: "integrate" });
+});
