@@ -1228,7 +1228,7 @@ test("broker normal close removes grants and releases every authorization collec
 
   await assert.rejects(stat(callerGrant));
   await assert.rejects(stat(executorGrant));
-  for (const collection of [broker.callers, broker.principals, broker.runOwners, broker.subscriptions, broker.sockets, broker.grantPaths, broker.executorGrants, broker.callerGrants, broker.pendingSupervisorIngress]) assert.equal(collection.size, 0);
+  for (const collection of [broker.callers, broker.principals, broker.runOwners, broker.subscriptions, broker.sockets, broker.grantPaths, broker.executorGrants, broker.callerGrants, broker.pendingSupervisorIngress, broker.pendingSupervisorRequestIds, broker.supervisorIngressRevokedRuns]) assert.equal(collection.size, 0);
   assert.equal(disposed, 1);
 });
 
@@ -2267,6 +2267,116 @@ test("Root close fences an in-flight Executor grant from owner promotion and Sup
   });
   assert.deepEqual({ pending: broker.pendingSupervisorIngress.size, principals: broker.principals.size, callers: broker.callers.size, owners: broker.runOwners.size }, { pending: 0, principals: 0, callers: 0, owners: 0 });
   await assert.rejects(stat(brokerSocketPath(rootSessionId)));
+});
+
+test("started grant failure revokes Supervisor ingress eligibility until a legal retry", async (t) => {
+  const events = startedEventBus();
+  let failExecutorGrant = true;
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: fakeUpstream(),
+    events,
+    captureProcessBirthIdentity: async () => "started-grant-failure-birth",
+    writeGrant: async (grant) => {
+      if (grant.role === "executor" && failExecutorGrant) throw new Error("controlled started Executor grant failure");
+      return await writeBrokerGrant(grant);
+    },
+  });
+  await broker.start();
+  t.after(() => closeOwnedRuns(broker, events));
+  events.emit("subagent:async-started", { id: "started-grant-failure-executor", pid: 9_901, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/started-grant-failure" });
+  await events.settled();
+  await waitForCondition(
+    () => broker.ownedRuns.has("started-grant-failure-executor") && !broker.principals.has("started-grant-failure-executor") && broker.executorGrants.size === 0,
+    "failed started Executor grant settlement",
+  );
+
+  const rejectedContext = { nativeChannel: "must-not-be-retained" };
+  const rejected = await broker.routeSupervisorRequest(supervisorIngress({ id: "started-grant-retry-request", runId: "started-grant-failure-executor", content: "rejected after failed grant" }), rejectedContext);
+  assert.deepEqual({
+    code: rejected?.code,
+    pending: broker.pendingSupervisorIngress.size,
+    reservations: broker.pendingSupervisorRequestIds.size,
+    retained: [...broker.pendingSupervisorIngress.values()].flat().some((entry) => entry.context === rejectedContext),
+  }, {
+    code: "supervisor_request_unknown_owner",
+    pending: 0,
+    reservations: 0,
+    retained: false,
+  });
+
+  failExecutorGrant = false;
+  await broker.ensureExecutorOwner("started-grant-failure-executor");
+  const retryContext = { nativeChannel: "accepted-after-retry" };
+  const retried = await broker.routeSupervisorRequest(supervisorIngress({ id: "started-grant-retry-request", runId: "started-grant-failure-executor", content: "accepted after retry" }), retryContext);
+  assert.deepEqual({
+    result: retried,
+    queued: broker.pendingSupervisorIngress.get("started-grant-failure-executor")?.length,
+    reserved: broker.pendingSupervisorRequestIds.has("started-grant-retry-request"),
+    context: broker.pendingSupervisorIngress.get("started-grant-failure-executor")?.[0]?.context,
+  }, {
+    result: undefined,
+    queued: 1,
+    reserved: true,
+    context: retryContext,
+  });
+});
+
+test("Root close emits no ordinary lifecycle push while accepting an official terminal", async (t) => {
+  const events = startedEventBus();
+  const stops = [];
+  let proofAccepted = false;
+  const runId = "close-lifecycle-executor";
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    events,
+    captureProcessBirthIdentity: async () => "close-lifecycle-birth",
+    upstream: {
+      ...fakeUpstream(),
+      async spawn() {
+        events.emit("subagent:async-started", { id: runId, pid: 9_902, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/close-lifecycle" });
+        return { details: { runId, asyncDir: "/async/close-lifecycle" } };
+      },
+      async stop(params) {
+        stops.push(params);
+        events.emit("subagent:process-terminal", officialObservedProof(runId));
+        proofAccepted = broker.terminalProofs.has(runId);
+        return { stopped: true };
+      },
+    },
+  });
+  await broker.start();
+  const owner = await broker.grantCaller({ callerRunId: "close-lifecycle-plan", planId: "close-lifecycle", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: "close-lifecycle-plan" });
+  const pushed = [];
+  const subscription = await client.subscribe((push) => pushed.push(push));
+  const closed = subscription.closed.catch((error) => error);
+  t.after(async () => {
+    subscription.dispose();
+    client.dispose();
+    await closed;
+    await broker.closeRootSession();
+  });
+  const spawned = await broker.dispatch(request({ callerRunId: "close-lifecycle-plan", callerToken: owner.callerToken, method: "spawn", requestId: "close-lifecycle-spawn", params: { agent: "executor", task: "close lifecycle", cwd: "/repo", spawnKey: "close-lifecycle" } }), {});
+  assert.equal(spawned.success, true);
+  await events.settled();
+  await waitForCondition(() => pushed.some((push) => push.type === "execution.started"), "pre-close execution.started push");
+  pushed.length = 0;
+
+  await broker.closeRootSession();
+  await closed;
+  await events.settled();
+  assert.deepEqual({
+    ordinary: pushed.filter((push) => push.type === "execution.started" || push.type === "execution.completed" || push.type === "supervisor.request"),
+    closing: pushed.filter((push) => push.type === "root.closing"),
+    stops,
+    proofAccepted,
+  }, {
+    ordinary: [],
+    closing: [{ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, callerRunId: "close-lifecycle-plan", type: "root.closing", data: {} }],
+    stops: [{ runId, dir: "/async/close-lifecycle" }],
+    proofAccepted: true,
+  });
 });
 
 test("Supervisor pending ingress bounds dedupe conflicts and Root close cleanup", async (t) => {
