@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
+import { renderCodingDispatchPrompt } from "../scripts/lib/subagent-dispatch/prompt.ts";
 
 const jiti = createJiti(import.meta.url, {
   moduleCache: false,
@@ -361,6 +363,79 @@ function toolResult(toolName, text = "ok", details) {
     ...(details === undefined ? {} : { details }),
   };
 }
+
+function typedExecutorPrompt(writePath) {
+  return user(renderCodingDispatchPrompt(compileCodingDispatchIR({
+    version: "dispatch-ir.v1",
+    taskId: `deterministic-${writePath.replace(/[^A-Za-z0-9]/g, "-")}`,
+    title: "Run deterministic executor command",
+    agent: "executor",
+    risk: "low",
+    objective: "Exercise the deterministic executor command mapping.",
+    workflow: { mode: "tdd" },
+    requirements: ["Load test-driven-development and git-commit-convention."],
+    context: { knownFacts: [], decisions: [], relevantFiles: ["test/deterministic-provider.test.mjs"] },
+    boundaries: { writePaths: [writePath], excludedWork: [], forbiddenActions: [] },
+    acceptance: { criteria: ["Run the fixed command."], commands: ["node --test test/deterministic-provider.test.mjs"] },
+    execution: { timeoutMs: 300000 },
+  }, { cwd: "/repo" })));
+}
+
+function assistantSubagentCall(id, contract) {
+  return {
+    role: "assistant",
+    content: [{ type: "toolCall", id, name: "subagent", arguments: contract }],
+    api: "fake",
+    provider: "fake",
+    model: "deterministic",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "toolUse",
+    timestamp: 0,
+  };
+}
+
+test("typed Executor prompts retain fixed command mapping without arbitrary scope", () => {
+  const readmePrompt = typedExecutorPrompt("README.md");
+  const workerPrompt = typedExecutorPrompt("worker.txt");
+  const arbitraryPrompt = typedExecutorPrompt("arbitrary.txt");
+
+  assert.equal(
+    state.deterministicExecutorCommand(readmePrompt.content[0].text),
+    "printf 'worker\\n' >> README.md && git add README.md && git commit -m 'test: 添加确定性 worker 标记'",
+  );
+  assert.equal(
+    state.deterministicExecutorCommand(workerPrompt.content[0].text),
+    "printf 'worker-2\\n' > worker.txt && git add worker.txt && git commit -m 'test: 添加第二个确定性 worker 标记'",
+  );
+  assert.equal(state.deterministicExecutorCommand(arbitraryPrompt.content[0].text), undefined);
+});
+
+test("private wake advances dispatch selection from assistant subagent calls", () => {
+  const contractA = { task: "task-63a", agent: "executor", runId: "executor-run-a", prompt: "Run contract A." };
+  const contractB = { task: "task-63b", agent: "executor", runId: "executor-run-b", prompt: "Run contract B." };
+  const dispatch = toolResult("plan_continue", JSON.stringify({
+    state: "dispatch-required", dispatches: [{ contract: contractA }, { contract: contractB }],
+  }));
+
+  assert.deepEqual(decide([
+    privateWakePrompt(), dispatch, assistantSubagentCall("deterministic-subagent-1", contractA),
+  ], flatPlanTools), { tool: { name: "subagent", arguments: contractB } });
+});
+
+test("provider stream allocates a new subagent toolCall id after an assistant call", async () => {
+  const contractA = { task: "task-63a", agent: "executor", runId: "executor-run-a", prompt: "Run contract A." };
+  const contractB = { task: "task-63b", agent: "executor", runId: "executor-run-b", prompt: "Run contract B." };
+  const done = await streamDone([
+    privateWakePrompt(),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractA }, { contract: contractB }] })),
+    assistantSubagentCall("deterministic-subagent-1", contractA),
+  ], flatPlanTools.map((name) => ({ name })));
+
+  const toolCalls = done.message.content.filter((part) => part.type === "toolCall");
+  assert.equal(toolCalls.length, 1);
+  assert.equal(toolCalls[0].name, "subagent");
+  assert.notEqual(toolCalls[0].id, "deterministic-subagent-1");
+});
 
 test("top-level completion parent spawns through the harness tool then uses official wait", () => {
   const prompt = user("PI_SUBAGENTS_COMPAT_PARENT_COMPLETE");
