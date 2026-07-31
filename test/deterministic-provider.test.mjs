@@ -242,7 +242,7 @@ test("flat amendment keeps the old decision Executor active until the Root fault
   process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = "# revision 2";
   try {
     const done = await streamDone([
-      user("Execute Task 1\nAllowed paths: decision.txt"),
+      typedExecutorPrompt("decision.txt"),
       toolResult("contact_supervisor", "Reply from supervisor: APPROVED"),
     ], [{ name: "contact_supervisor" }, { name: "bash" }]);
     assert.equal(done.reason, "toolUse");

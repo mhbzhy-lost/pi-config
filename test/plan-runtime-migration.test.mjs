@@ -59,6 +59,19 @@ test("amendment Harness uses flat Root crash and revival control", async () => {
   for (const field of ["description:", "thinking:", "temperature:"]) assert.match(source, new RegExp(field));
 });
 
+test("flat Harness preserves failure evidence and compensates detached runs", async () => {
+  const source = await readFile(path.join(root, "test/plan-flat-runtime-harness.integration.mjs"), "utf8");
+  for (const boundary of [
+    "terminateDetachedRunsUnder",
+    "processesReferencing",
+    "finalizeHarnessCleanup",
+    "removeFixtureWithEvidence",
+  ]) assert.match(source, new RegExp(boundary));
+  assert.match(source, /await terminateDetachedRunsUnder\(runtimeTmp\)/);
+  assert.match(source, /passed\s*=\s*true/);
+  assert.match(source, /brokerSocketPath\(rootSessionId\)/);
+});
+
 test("unused Parent lifecycle source and test are absent", async () => {
   for (const relative of ["scripts/lib/plan/parent-lifecycle.mjs", "test/parent-lifecycle.test.mjs"]) await missing(relative);
 });
