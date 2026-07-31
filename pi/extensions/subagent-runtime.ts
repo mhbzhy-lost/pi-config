@@ -9,7 +9,6 @@ import registerSubagentNotify from "../npm/node_modules/pi-subagents/src/runs/ba
 import { writePrivateAtomicJson } from "../npm/node_modules/pi-subagents/src/shared/atomic-json.ts";
 import { resolveCurrentSessionId } from "../npm/node_modules/pi-subagents/src/shared/session-identity.ts";
 import { ASYNC_DIR } from "../npm/node_modules/pi-subagents/src/shared/types.ts";
-import { PLAN_ACTIVE_TOOLS } from "../../scripts/lib/plan/plan-capsule-extension.mjs";
 import {
   formatCompactSubagentNotification,
   formatCompactSubagentToolResult,
@@ -64,7 +63,9 @@ export function createRootBrokerUpstream({ rpc, executeSupervisor, asyncDirRoot 
     if (!descriptor || descriptor.version !== 1 || descriptor.sourceRunId !== runId || descriptor.agent !== "plan-runner") {
       throw new Error("Async recovery descriptor identity is invalid");
     }
-    writePrivateAtomicJson(descriptorPath, { ...descriptor, tools: [...PLAN_ACTIVE_TOOLS] });
+    const recoveryDescriptor = { ...descriptor };
+    delete recoveryDescriptor.tools;
+    writePrivateAtomicJson(descriptorPath, recoveryDescriptor);
   }
 
   return Object.freeze({
