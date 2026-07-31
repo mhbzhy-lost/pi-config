@@ -16,6 +16,9 @@ export function deterministicExecutorCommand(userText) {
 
 export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) {
   const userText = messages.filter((message) => message?.role === "user").map(textParts).join("\n");
+  const latestUserMessage = [...messages].reverse().find((message) => message?.role === "user");
+  const latestUserText = textParts(latestUserMessage);
+  const latestPrivateWake = latestUserText.split("\n").includes("A durable Root broker wake is pending.");
   const toolInventory = toolNames.join(",");
 
   const toolResults = messages.filter((message) => message?.role === "toolResult");
@@ -115,7 +118,7 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
   }
 
   const bootstrap = userText.match(/Open the approved Plan revision by calling plan_open exactly once with (\{[^\n]+\})\./)?.[1];
-  if (bootstrap) {
+  if (bootstrap || latestPrivateWake) {
     const resultsFor = (name) => toolResults.filter((message) => message.toolName === name);
     const customDurableReply = [...messages].reverse().find((message) => message?.role === "custom"
       && message.customType === "pi-plan-attention-reply-v1");
@@ -135,7 +138,7 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
         },
       };
     }
-    if (resultsFor("plan_open").length === 0 && toolNames.includes("plan_open")) {
+    if (!latestPrivateWake && resultsFor("plan_open").length === 0 && toolNames.includes("plan_open")) {
       return { tool: { name: "plan_open", arguments: JSON.parse(bootstrap) } };
     }
     const latestPushIndex = messages.findLastIndex((message) => message?.role === "custom"
