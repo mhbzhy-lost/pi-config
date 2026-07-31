@@ -4,34 +4,38 @@ import test from "node:test";
 import { BROKER_METHODS, parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
-async function createRevivalFixture({ recordRevivalDiagnostic, resume, spawn } = {}) {
+async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDiagnostic, resume, spawn } = {}) {
   const callerToken = "a".repeat(64);
   const revivedCallerToken = "b".repeat(64);
   const executorToken = "c".repeat(64);
   const tokens = [callerToken, revivedCallerToken, executorToken];
   const grants = [];
   const resumeCalls = [];
+  const upstream = {
+    ...(preparePlanRunnerRecovery ? {
+      preparePlanRunnerRecovery: async (params) => await preparePlanRunnerRecovery(params),
+    } : {}),
+    resume: async (params) => {
+      resumeCalls.push(params);
+      if (resume) return await resume(params);
+      return {
+        text: "Revived",
+        details: {
+          mode: "single",
+          results: [],
+          asyncId: "plan-runner-2",
+          asyncDir: "/async/plan-runner-2",
+        },
+      };
+    },
+    spawn: async (params) => {
+      if (spawn) return await spawn(params);
+      return { runId: "executor-1", asyncDir: "/async/executor-1" };
+    },
+  };
   const server = new RootBrokerServer({
     rootSessionId: "root-session-1",
-    upstream: {
-      resume: async (params) => {
-        resumeCalls.push(params);
-        if (resume) return await resume(params);
-        return {
-          text: "Revived",
-          details: {
-            mode: "single",
-            results: [],
-            asyncId: "plan-runner-2",
-            asyncDir: "/async/plan-runner-2",
-          },
-        };
-      },
-      spawn: async (params) => {
-        if (spawn) return await spawn(params);
-        return { runId: "executor-1", asyncDir: "/async/executor-1" };
-      },
-    },
+    upstream,
     writeGrant: async (grant) => {
       grants.push(grant);
       return `/tmp/root-broker-revival-grant-${grant.runId}`;
@@ -196,6 +200,47 @@ test("revives when a pending plan-runner wake follows its observed terminal proo
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(resumeCalls, expectedResume);
+});
+
+test("prepares private plan-runner recovery before resuming a proved wake", async () => {
+  const calls = [];
+  const { ownedRun, proof, request, server } = await createRevivalFixture({
+    preparePlanRunnerRecovery: async (params) => calls.push({ method: "prepare", params }),
+    resume: async (params) => {
+      calls.push({ method: "resume", params });
+      return revivedResult;
+    },
+  });
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(calls, [
+    {
+      method: "prepare",
+      params: { role: "plan-runner", runId: "plan-runner-1", asyncDir: "/async/plan-runner-1" },
+    },
+    {
+      method: "resume",
+      params: { id: "plan-runner-1", message: "A durable Root broker wake is pending." },
+    },
+  ]);
+});
+
+test("keeps a wake pending when private plan-runner recovery preparation fails", async () => {
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture({
+    preparePlanRunnerRecovery: async () => { throw new Error("recovery denied"); },
+  });
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await server.dispatch(request, {});
+  await new Promise((resolve) => setImmediate(resolve));
+  await Promise.resolve();
+
+  assert.deepEqual(resumeCalls, []);
+  assert.deepEqual(server.callerFollowUps.get(ownedRun.runId), [{ wakeId: "plan-opened-1", reason: "plan-opened" }]);
+  assert.equal(server.revivePromises.size, 0);
 });
 
 test("coalesces concurrent pending wakes for the same plan-runner revival", async (t) => {
