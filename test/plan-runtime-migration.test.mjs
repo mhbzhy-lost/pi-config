@@ -49,6 +49,10 @@ test("amendment Harness uses flat Root crash and revival control", async () => {
   assert.match(source, /assertRuntimeClean/);
   assert.match(source, /runnerProcessInstanceId/);
   assert.match(source, /this\.child\.kill\("SIGKILL"\); await this\.exited/);
+  assert.doesNotMatch(source, /assert\.deepEqual\(superseded\[0\]\.data\.evidence/);
+  for (const field of ["kind", "dispatchId", "runId", "asyncDir", "artifactSha256"]) {
+    assert.match(source, new RegExp(`superseded\\[0\\]\\.data\\.evidence\\.${field}`));
+  }
   for (const field of ["description:", "thinking:", "temperature:"]) assert.match(source, new RegExp(field));
 });
 
