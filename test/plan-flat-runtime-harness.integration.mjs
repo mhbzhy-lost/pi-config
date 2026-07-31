@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, execFile as execFileCallback } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -52,7 +52,16 @@ class RootRpc {
   }
   consume(chunk) { this.buffer += chunk; for (;;) { const i = this.buffer.indexOf("\n"); if (i < 0) return; const line = this.buffer.slice(0, i); this.buffer = this.buffer.slice(i + 1); if (!line) continue; try { this.records.push(JSON.parse(line)); } catch { this.records.push({ type: "invalid-json", line }); } } }
   send(value) { this.child.stdin.write(`${JSON.stringify(value)}\n`); }
-  async waitFor(predicate, timeoutMs, label) { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { const found = this.records.find(predicate); if (found) return found; await new Promise((resolve) => setTimeout(resolve, 25)); } throw new Error(`${label} timed out; stderr=${this.stderr}\nrecords=${JSON.stringify(this.records.slice(-12))}`); }
+  async waitForExact(predicate, count, timeoutMs, label) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const found = this.records.filter(predicate);
+      if (found.length === count) return found;
+      if (found.length > count) throw new Error(`${label} produced ${found.length} records, expected ${count}`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`${label} timed out; stderr=${this.stderr}\nrecords=${JSON.stringify(this.records.slice(-12))}`);
+  }
   async close() {
     if (!this.child.stdin.destroyed) this.child.stdin.end();
     let timer;
@@ -147,27 +156,57 @@ async function assertFutureGreen(handle, outcome, planPath, runtimeTmp) {
     assert.ok(dispatch.data.tool.task.includes(`Acceptance: ${node.acceptance.strategy}`));
     assert.ok(dispatch.data.tool.task.includes(JSON.stringify(node.acceptance)));
   }
+  return { executorRuns, events };
 }
 
-test("flat Root runtime Harness reaches the validated Plan Runner happy path", { timeout: 90_000 }, async (t) => {
+test("flat Root runtime Harness reaches two validated Plan Runner happy paths", { timeout: 90_000 }, async (t) => {
   assert.ok(piBinary, "PI_REAL_BIN is required for the flat runtime Harness integration test");
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-flat-runtime-")); const origin = path.join(root, "origin"); const runtimeTmp = path.join(root, "tmp"); const sessions = path.join(root, "sessions");
   let rpc; let primaryError;
   try {
     await mkdir(path.join(origin, ".pi", "agents"), { recursive: true }); await mkdir(runtimeTmp); await mkdir(sessions); await git(origin, "init"); await git(origin, "config", "user.email", "harness@example.com"); await git(origin, "config", "user.name", "Flat Harness");
-    await writeFile(path.join(origin, "README.md"), "base\n"); await mkdir(path.join(origin, "docs")); await copyFile(sourcePlan, path.join(origin, "docs", "plan.md"));
+    await writeFile(path.join(origin, "README.md"), "base\n"); await mkdir(path.join(origin, "docs"));
+    const planPaths = [path.join(origin, "docs", "plan-one.md"), path.join(origin, "docs", "plan-two.md")];
+    await Promise.all(planPaths.map((planPath) => copyFile(sourcePlan, planPath)));
     await writeFile(path.join(origin, ".pi", "agents", "plan-runner.md"), `---\nname: plan-runner\ndescription: deterministic flat Harness Plan Runner\nmodel: fake/deterministic\nthinking: off\ntemperature: 0\ntools: plan_open,read,grep\nsubagentOnlyExtensions: ${provider},${runnerExtension}\n---\nOpen and execute only the approved Plan revision.\n`);
     await writeFile(path.join(origin, ".pi", "agents", "executor.md"), `---\nname: executor\ndescription: deterministic flat Harness executor\nmodel: fake/deterministic\nthinking: off\ntemperature: 0\ntools: bash,read,contact_supervisor\nsubagentOnlyExtensions: ${provider},${executorExtension},${rootOwner}\n---\nExecute only the approved task and commit the result.\n`);
     await writeFile(path.join(origin, "commit-message"), "test: 初始化 flat Harness\n"); await git(origin, "add", "."); await git(origin, "commit", "--file", "commit-message");
     const rootSessionId = `flat-${path.basename(root)}`;
     const rootEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("PI_SUBAGENT_") && name !== "PI_ROOT_SUBAGENT_BROKER_ENABLED"));
     const child = spawn(piBinary, ["--mode", "rpc", "--session-dir", sessions, "--session-id", rootSessionId, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve", "--offline", "-e", provider, "-e", rootRuntime, "-e", launcher, "--provider", "fake", "--model", "fake/deterministic"], { cwd: origin, env: { ...rootEnv, PI_CODING_AGENT_DIR: path.join(repoRoot, "pi"), TMPDIR: runtimeTmp, OPENAI_API_KEY: "not-used" }, stdio: ["pipe", "pipe", "pipe"] });
-    rpc = new RootRpc(child); const planPath = path.join(origin, "docs", "plan.md"); rpc.send({ id: "flat-root-harness", type: "prompt", message: `PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths: [planPath] })}` });
-    const event = await rpc.waitFor((record) => record.type === "tool_execution_end" && record.toolName === "plan_run", 25_000, "plan_run handle"); const handle = resultValue(event);
-    assert.deepEqual(Object.keys(handle).sort(), ["asyncDir", "baseCommit", "manifestSha256", "planHash", "planId", "planIrHash", "planRunnerRunId", "revision", "rootSessionId", "schemaVersion", "sourceBytesSha256", "worktree"]); assert.equal(handle.schemaVersion, "pi-plan-handle.v4"); assert.equal(handle.rootSessionId, rootSessionId);
-    const statusPath = path.join(origin, "var", "plan-runs", handle.planId, "status.json");
-    const outcome = await waitForPlanOrRunner(statusPath, handle.asyncDir);
-    await assertFutureGreen(handle, outcome, planPath, runtimeTmp);
+    rpc = new RootRpc(child); rpc.send({ id: "flat-root-harness", type: "prompt", message: `PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths })}` });
+    const events = await rpc.waitForExact((record) => record.type === "tool_execution_end" && record.toolName === "plan_run", 2, 25_000, "plan_run handles");
+    const handles = events.map(resultValue);
+    const handleKeys = ["asyncDir", "baseCommit", "manifestSha256", "planHash", "planId", "planIrHash", "planRunnerRunId", "revision", "rootSessionId", "schemaVersion", "sourceBytesSha256", "worktree"];
+    for (const handle of handles) {
+      assert.deepEqual(Object.keys(handle).sort(), handleKeys);
+      assert.equal(handle.schemaVersion, "pi-plan-handle.v4");
+      assert.equal(handle.rootSessionId, rootSessionId);
+    }
+    for (const key of ["planId", "worktree", "planRunnerRunId", "asyncDir"]) assert.equal(new Set(handles.map((handle) => handle[key])).size, 2, `Plan handles must have unique ${key}`);
+    const outcomes = await Promise.all(handles.map((handle) => waitForPlanOrRunner(path.join(origin, "var", "plan-runs", handle.planId, "status.json"), handle.asyncDir)));
+    const greens = await Promise.all(handles.map((handle, index) => assertFutureGreen(handle, outcomes[index], planPaths[index], runtimeTmp)));
+    const initialRuns = handles.flatMap((handle, index) => [{ runId: handle.planRunnerRunId, asyncDir: handle.asyncDir }, ...greens[index].executorRuns]);
+    assert.equal(initialRuns.length, 6);
+    for (const key of ["runId", "asyncDir"]) assert.equal(new Set(initialRuns.map((run) => run[key])).size, 6, `Initial runs must have unique ${key}`);
+
+    const asyncRoot = path.join(runtimeTmp, "async-subagent-runs");
+    const actualRuns = await Promise.all((await readdir(asyncRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map(async (entry) => ({ asyncDir: path.join(asyncRoot, entry.name), status: await readJson(path.join(asyncRoot, entry.name, "status.json")) })));
+    assert.ok(actualRuns.length >= 6);
+    const executors = actualRuns.filter(({ status }) => status?.steps?.[0]?.agent === "executor");
+    const runners = actualRuns.filter(({ status }) => status?.steps?.[0]?.agent === "plan-runner");
+    assert.equal(executors.length, 4);
+    assert.deepEqual(new Set(executors.map(({ status }) => status.runId)), new Set(greens.flatMap(({ executorRuns }) => executorRuns.map((run) => run.runId))));
+    assert.ok(handles.every((handle) => runners.some(({ status }) => status.runId === handle.planRunnerRunId)));
+    for (const { asyncDir, status } of actualRuns) {
+      assert.ok(status);
+      assert.equal(path.dirname(asyncDir), asyncRoot);
+      assert.equal(path.basename(asyncDir), status.runId);
+      assert.match(path.basename(status.sessionId), new RegExp(rootSessionId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      assert.notEqual(path.basename(status.sessionId), rootSessionId);
+      for (const field of ["parentRunId", "parentStepIndex", "depth", "path"]) assert.ok(!Object.hasOwn(status, field));
+    }
+    for (const { status } of runners) assert.equal(handles.filter((handle) => handle.worktree === status.cwd).length, 1, "Plan Runner cwd must belong to exactly one Plan worktree");
   } catch (error) {
     primaryError = error;
     throw error;
