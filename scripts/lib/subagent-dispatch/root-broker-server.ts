@@ -675,7 +675,15 @@ export class RootBrokerServer {
   lookupSpawn(request: any, caller: Caller) {
     const entry = this.spawnLedger.get(`${caller.planId}\u0000${request.params.spawnKey}`);
     if (!entry) return createBrokerSuccessResponse({ ...request, data: { state: "not-started" } });
-    if (entry.state === "spawned") return createBrokerSuccessResponse({ ...request, data: { state: "spawned", binding: entry.binding } });
+    if (entry.state === "spawned") {
+      const proof = this.terminalProofs.get(entry.binding?.runId);
+      const data: any = { state: "spawned", binding: entry.binding };
+      if (proof?.runId === entry.binding?.runId) {
+        const { runId: _runId, ...processTerminal } = proof;
+        data.processTerminal = processTerminal;
+      }
+      return createBrokerSuccessResponse({ ...request, data });
+    }
     return createBrokerSuccessResponse({ ...request, data: { state: entry.state } });
   }
 

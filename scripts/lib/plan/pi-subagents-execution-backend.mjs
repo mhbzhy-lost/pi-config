@@ -54,6 +54,50 @@ function nonempty(value) {
   return typeof value === "string" && value.length > 0;
 }
 
+function plainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function invalidRecoveredLookup(message) {
+  throw new ExecutionProtocolError("EXECUTION_BINDING_INVALID", message);
+}
+
+function parseRecoveredTerminal(value) {
+  if (!plainObject(value)) invalidRecoveredLookup("Recovered terminal proof must be a plain object");
+  const allowed = new Set(["version", "runnerProcessInstanceId", "state", "childIndex", "resumeDisposition", "observedAt", "instances", "canonicalSession", "reason", "diagnostic"]);
+  if (Object.keys(value).some((key) => !allowed.has(key)) || value.version !== 1 || !nonempty(value.runnerProcessInstanceId) || value.state !== "observed"
+    || typeof value.observedAt !== "number" || !Number.isFinite(value.observedAt) || !Array.isArray(value.instances)
+    || (value.childIndex !== undefined && (!Number.isSafeInteger(value.childIndex) || value.childIndex < 0))
+    || (value.resumeDisposition !== undefined && !["resumable", "non-resumable", "unavailable"].includes(value.resumeDisposition))
+    || value.reason !== undefined || value.diagnostic !== undefined) invalidRecoveredLookup("Recovered terminal proof is invalid");
+  let matchingRunner = false;
+  for (const instance of value.instances) {
+    if (!plainObject(instance) || !["runner", "pi-writer"].includes(instance.kind)
+      || !nonempty(instance.processInstanceId) || typeof instance.closeObservedAt !== "number" || !Number.isFinite(instance.closeObservedAt)
+      || (instance.exitCode !== null && !Number.isInteger(instance.exitCode)) || (instance.signal !== null && typeof instance.signal !== "string")) invalidRecoveredLookup("Recovered terminal proof is invalid");
+    const keys = instance.kind === "runner" ? ["processInstanceId", "kind", "closeObservedAt", "exitCode", "signal"] : ["processInstanceId", "kind", "attempt", "closeObservedAt", "exitCode", "signal"];
+    if (Object.keys(instance).length !== keys.length || keys.some((key) => !Object.hasOwn(instance, key))
+      || (instance.kind === "pi-writer" && (!Number.isSafeInteger(instance.attempt) || instance.attempt < 0))) invalidRecoveredLookup("Recovered terminal proof is invalid");
+    if (instance.kind === "runner" && instance.processInstanceId === value.runnerProcessInstanceId) matchingRunner = true;
+  }
+  if (!matchingRunner) invalidRecoveredLookup("Recovered terminal proof is invalid");
+  if (value.canonicalSession !== undefined) {
+    const session = value.canonicalSession;
+    const keys = ["canonicalSessionId", "leaseDisposition", "freeAtObservation", "canonicalSessionLeaseReleased"];
+    if (!plainObject(session) || Object.keys(session).some((key) => !keys.includes(key)) || !nonempty(session.canonicalSessionId)
+      || !["released", "not-held"].includes(session.leaseDisposition) || session.freeAtObservation !== true
+      || (session.canonicalSessionLeaseReleased !== undefined && session.canonicalSessionLeaseReleased !== true)) invalidRecoveredLookup("Recovered terminal proof is invalid");
+  }
+  return value;
+}
+
+function validateRecoveredLookup(reply, binding) {
+  if (!plainObject(reply) || Object.keys(reply).some((key) => !["state", "binding", "processTerminal"].includes(key))
+    || reply.state !== "spawned" || !plainObject(reply.binding) || !nonempty(reply.binding.runId) || !nonempty(reply.binding.asyncDir)
+    || reply.binding.runId !== binding.runId || reply.binding.asyncDir !== binding.asyncDir) invalidRecoveredLookup("Recovered spawn lookup does not match the durable binding");
+  return Object.hasOwn(reply, "processTerminal") ? parseRecoveredTerminal(reply.processTerminal) : null;
+}
+
 function replyBinding(reply) {
   const details = reply?.details ?? reply;
   const runId = details?.runId ?? details?.asyncId;
@@ -89,7 +133,7 @@ export function createPiSubagentsExecutionBackend({
     const bindingWait = deferred();
     // A deferred may be rejected during dispose without a caller waiting yet.
     bindingWait.promise.catch(() => {});
-    return { request, binding, bindingWait, cancelling: false, stopPromise: null, supersedePromise: null, terminalProof: null };
+    return { request, binding, bindingWait, cancelling: false, stopPromise: null, supersedePromise: null, terminalProof: null, completionPublished: false };
   }
 
   function bind(entry, binding) {
@@ -255,6 +299,7 @@ export function createPiSubagentsExecutionBackend({
       sessionFile: sessionId,
     });
     bind(entry, binding);
+    if (completed && entry.completionPublished) return;
     publish({
       type: completed ? "execution.completed" : "execution.started",
       dispatchId: entry.request.dispatchId,
@@ -265,6 +310,7 @@ export function createPiSubagentsExecutionBackend({
       state: completed ? (nonempty(event.state) ? event.state : "complete") : "running",
       observedAt: now(),
     });
+    if (completed) entry.completionPublished = true;
 
   }
 
@@ -383,10 +429,27 @@ export function createPiSubagentsExecutionBackend({
           && stableJson(existingDispatch.binding) === stableJson(recovered.binding)) return existingDispatch.binding;
         throw new ExecutionProtocolError("EXECUTION_BINDING_CONFLICT", "Recovered binding conflicts with an existing dispatch or run", recovered.request.dispatchId);
       }
+      let processTerminal = null;
+      if (typeof rpc.lookupSpawn === "function") {
+        processTerminal = validateRecoveredLookup(await rpc.lookupSpawn({ spawnKey: recovered.binding.dispatchId }), recovered.binding);
+      }
       const entry = createEntry(recovered.request, recovered.binding);
       entry.bindingWait.resolve(entry.binding);
       pending.set(recovered.request.dispatchId, entry);
       byRunId.set(recovered.binding.runId, entry.binding);
+      if (processTerminal) {
+        entry.completionPublished = true;
+        publish({
+          type: "execution.completed",
+          dispatchId: recovered.binding.dispatchId,
+          attemptId: recovered.binding.attemptId,
+          runId: recovered.binding.runId,
+          asyncDir: recovered.binding.asyncDir,
+          cwd: recovered.binding.cwd,
+          state: "observed",
+          observedAt: now(),
+        });
+      }
       return entry.binding;
     },
     async recoverDispatch(input) {
