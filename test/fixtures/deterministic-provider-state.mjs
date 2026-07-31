@@ -213,8 +213,26 @@ export function decideDeterministicTurn({ messages = [], toolNames = [], issuedD
       const assistantDispatchKeys = waveMessages.filter((message) => message?.role === "assistant").flatMap((message) => message.content ?? [])
         .filter((part) => part?.type === "toolCall" && part.name === "subagent")
         .map((part) => deterministicContractKey(part.arguments));
+      const authoritativeBoundKeys = new Set();
+      if (latestStatusIndex > latestContinueIndex) {
+        try {
+          const status = JSON.parse(textParts(messages[latestStatusIndex]));
+          if (status.schemaVersion === "pi-plan-status.v1" && Array.isArray(status.tasks)) {
+            for (const dispatch of dispatches) {
+              const matches = status.tasks.flatMap((task) => Array.isArray(task?.attempts)
+                ? task.attempts.filter((attempt) => task.taskId === dispatch.contract?.taskId
+                  && attempt?.attemptId === dispatch.attemptId
+                  && attempt?.dispatchId === dispatch.dispatchId)
+                : []);
+              if (matches.length === 1 && typeof matches[0].runId === "string" && matches[0].runId.trim()) {
+                authoritativeBoundKeys.add(deterministicContractKey(dispatch.contract));
+              }
+            }
+          }
+        } catch {}
+      }
       let standaloneResultCount = Math.max(0, waveMessages.filter((message) => message?.role === "toolResult" && message.toolName === "subagent").length - assistantDispatchKeys.length);
-      const attempted = new Set([...issuedDispatchContractKeys, ...assistantDispatchKeys]);
+      const attempted = new Set([...issuedDispatchContractKeys, ...assistantDispatchKeys, ...authoritativeBoundKeys]);
       for (const dispatch of dispatches) {
         if (standaloneResultCount === 0) break;
         const key = deterministicContractKey(dispatch.contract);
