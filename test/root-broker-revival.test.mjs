@@ -400,7 +400,7 @@ test("revives a non-resumable active generation from its newest exact canonical 
   });
   server.upstream.ping = async () => ({});
   const canonicalSession = { canonicalSessionId: "canonical-plan-1", leaseDisposition: "released", freeAtObservation: true, canonicalSessionLeaseReleased: true };
-  server.acceptTerminalProof(ownedRun, { ...proof, resumeDisposition: "resumable", canonicalSession });
+  server.acceptTerminalProof(ownedRun, { ...proof, observedAt: 100, resumeDisposition: "resumable", canonicalSession });
   await server.dispatch(request, {});
   await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2");
 
@@ -413,9 +413,10 @@ test("revives a non-resumable active generation from its newest exact canonical 
     ...proof,
     runId: generationTwo.runId,
     runnerProcessInstanceId: generationTwoProcess,
+    observedAt: 200,
     resumeDisposition: "resumable",
     canonicalSession,
-    instances: [{ processInstanceId: generationTwoProcess, kind: "runner", closeObservedAt: Date.now(), exitCode: 0, signal: null }],
+    instances: [{ processInstanceId: generationTwoProcess, kind: "runner", closeObservedAt: 200, exitCode: 0, signal: null }],
   });
   await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-3");
 
@@ -428,9 +429,10 @@ test("revives a non-resumable active generation from its newest exact canonical 
     ...proof,
     runId: generationThree.runId,
     runnerProcessInstanceId: generationThreeProcess,
+    observedAt: 300,
     resumeDisposition: "non-resumable",
     canonicalSession,
-    instances: [{ processInstanceId: generationThreeProcess, kind: "runner", closeObservedAt: Date.now(), exitCode: 0, signal: null }],
+    instances: [{ processInstanceId: generationThreeProcess, kind: "runner", closeObservedAt: 300, exitCode: 0, signal: null }],
   });
 
   await waitFor(() => resumeCalls.length === 3);
@@ -496,6 +498,46 @@ test("fails closed when a canonical predecessor was not officially observed befo
   assert.deepEqual(resumeCalls, expectedResume);
   assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [wake]);
   assert.equal(server.logicalCallers.get("plan-runner-1")?.activeRunId, "plan-runner-2");
+});
+
+test("re-evaluates a pending wake when a predecessor proof arrives during a failed revival", async () => {
+  let nextGeneration = 2;
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture({
+    resume: async () => ({
+      text: "Revived",
+      details: {
+        mode: "single",
+        results: [],
+        asyncId: `plan-runner-${nextGeneration++}`,
+        asyncDir: `/async/plan-runner-${nextGeneration - 1}`,
+      },
+    }),
+  });
+  server.upstream.ping = async () => ({});
+  server.acceptTerminalProof(ownedRun, { ...proof, observedAt: 100, resumeDisposition: "resumable" });
+  await server.dispatch(request, {});
+  await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2");
+
+  const wake = { wakeId: "attention-reply-predecessor-race", reason: "attention-reply" };
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", wake), { accepted: true, wakeId: wake.wakeId });
+  const canonicalSession = { canonicalSessionId: "canonical-plan-1", leaseDisposition: "released", freeAtObservation: true, canonicalSessionLeaseReleased: true };
+  const activeRun = server.ownedRuns.get("plan-runner-2");
+  assert.ok(activeRun);
+  const activeProcessInstanceId = "plan-runner-2-instance";
+  server.acceptTerminalProof(activeRun, {
+    ...proof,
+    runId: activeRun.runId,
+    runnerProcessInstanceId: activeProcessInstanceId,
+    observedAt: 300,
+    resumeDisposition: "non-resumable",
+    canonicalSession,
+    instances: [{ processInstanceId: activeProcessInstanceId, kind: "runner", closeObservedAt: 300, exitCode: 0, signal: null }],
+  });
+  server.acceptTerminalProof(ownedRun, { ...proof, observedAt: 100, resumeDisposition: "resumable", canonicalSession });
+
+  await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-3");
+  assert.deepEqual(resumeCalls.map(({ id }) => id), ["plan-runner-1", "plan-runner-1"]);
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), []);
 });
 
 test("does not use a foreign canonical proof when its logical predecessor identity is incomplete", async () => {
