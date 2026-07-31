@@ -2123,21 +2123,22 @@ test("Root close fences an in-flight Executor grant from owner promotion and Sup
     value,
     ownerAtSettlement: broker.runOwners.get("close-race-executor"),
     requestsAtSettlement: broker.supervisorRequests.size,
-    pushesAtSettlement: pushed.length,
+    supervisorPushesAtSettlement: pushed.filter((push) => push.type === "supervisor.request").length,
   }), (error) => ({ state: "rejected", error }));
   closing = broker.closeRootSession();
   const closeObserved = closing.then((value) => ({ state: "fulfilled", value }), (error) => ({ state: "rejected", error }));
   grantGate.release();
   const [spawnResult, closeResult] = await Promise.all([spawnObserved, closeObserved]);
-  assert.deepEqual({ spawn: spawnResult.state, close: closeResult.state, ownerAtSettlement: spawnResult.ownerAtSettlement, requestsAtSettlement: spawnResult.requestsAtSettlement, pushesAtSettlement: spawnResult.pushesAtSettlement, owner: broker.runOwners.get("close-race-executor"), requests: broker.supervisorRequests.size, pushes: pushed.length, stops }, {
+  assert.deepEqual({ spawn: spawnResult.state, close: closeResult.state, ownerAtSettlement: spawnResult.ownerAtSettlement, requestsAtSettlement: spawnResult.requestsAtSettlement, supervisorPushesAtSettlement: spawnResult.supervisorPushesAtSettlement, owner: broker.runOwners.get("close-race-executor"), requests: broker.supervisorRequests.size, supervisorPushes: pushed.filter((push) => push.type === "supervisor.request").length, rootClosingPushes: pushed.filter((push) => push.type === "root.closing"), stops }, {
     spawn: "fulfilled",
     close: "fulfilled",
     ownerAtSettlement: undefined,
     requestsAtSettlement: 0,
-    pushesAtSettlement: 0,
+    supervisorPushesAtSettlement: 0,
     owner: undefined,
     requests: 0,
-    pushes: 0,
+    supervisorPushes: 0,
+    rootClosingPushes: [{ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, callerRunId: "close-race-plan", type: "root.closing", data: {} }],
     stops: [{ runId: "close-race-executor", dir: "/async/close-race" }],
   });
   assert.deepEqual({ pending: broker.pendingSupervisorIngress.size, principals: broker.principals.size, callers: broker.callers.size, owners: broker.runOwners.size }, { pending: 0, principals: 0, callers: 0, owners: 0 });
