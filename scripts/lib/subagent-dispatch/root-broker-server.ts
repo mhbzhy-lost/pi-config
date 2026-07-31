@@ -256,9 +256,10 @@ export class RootBrokerServer {
     if (!logical || !actualRunId || !run || run.role !== "plan-runner" || !this.terminalProofs.has(actualRunId)) return;
     const caller = this.callers.get(logicalRunId);
     const followUps = this.callerFollowUps.get(logicalRunId);
-    if (!caller || caller.role !== "plan-runner" || !followUps?.length) return;
-    const wakeIds = followUps.map((followUp) => followUp.wakeId);
-    const wakeId = wakeIds[0];
+    const queue = this.callerPushQueues.get(logicalRunId);
+    if (!caller || caller.role !== "plan-runner" || (!followUps?.length && !queue?.length)) return;
+    const wakeIds = (followUps ?? []).map((followUp) => followUp.wakeId);
+    const wakeId = wakeIds[0] ?? "queued-push";
     this.recordDiagnostic("revival.started", logicalRunId, wakeId);
     const preparePlanRunnerRecovery = this.upstream.preparePlanRunnerRecovery;
     if (typeof preparePlanRunnerRecovery === "function") {
@@ -297,7 +298,8 @@ export class RootBrokerServer {
     const run = logical ? this.ownedRuns.get(logical.activeRunId) : undefined;
     const caller = this.callers.get(logicalRunId);
     const followUps = this.callerFollowUps.get(logicalRunId);
-    if (this.closed || !logical || !run || run.role !== "plan-runner" || !this.terminalProofs.has(logical.activeRunId) || !caller || caller.role !== "plan-runner" || !followUps?.length) {
+    const queue = this.callerPushQueues.get(logicalRunId);
+    if (this.closed || !logical || !run || run.role !== "plan-runner" || !this.terminalProofs.has(logical.activeRunId) || !caller || caller.role !== "plan-runner" || (!followUps?.length && !queue?.length)) {
       const reason = this.closed ? "broker-closed" : !logical ? "caller-missing" : !run ? "run-missing" : run.role !== "plan-runner" ? "caller-not-plan-runner" : !this.terminalProofs.has(logical.activeRunId) ? "proof-missing" : !caller || caller.role !== "plan-runner" ? "caller-missing" : "wake-missing";
       this.recordDiagnostic("revival.blocked", logicalRunId, undefined, { reason });
       return Promise.resolve();
@@ -811,6 +813,14 @@ export class RootBrokerServer {
     return parseBrokerPush({ ...push, callerRunId: actualCallerRunId });
   }
 
+  private queueCallerPush(logicalCallerRunId: string, queued: QueuedCallerPush) {
+    const queue = this.callerPushQueues.get(logicalCallerRunId);
+    if (!queue) return false;
+    queue.push(queued);
+    void this.reviveCallerAfterProof(logicalCallerRunId).catch(() => undefined);
+    return false;
+  }
+
   flushCallerPushQueue(logicalCallerRunId: string, actualCallerRunId: string, socket: Socket) {
     const queue = this.callerPushQueues.get(logicalCallerRunId);
     if (!queue) return false;
@@ -835,30 +845,25 @@ export class RootBrokerServer {
       ? [...(this.subscriptions.get(actualCallerRunId) ?? [])].filter((socket) => !socket.destroyed)
       : [];
     if (!queue || !actualCallerRunId || sockets.length === 0) {
-      if (!queue) return false;
-      queue.push({ push, onDelivered });
-      return false;
+      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered });
     }
     for (const socket of sockets) {
       if (queue.length === 0) break;
       this.flushCallerPushQueue(logicalCallerRunId, actualCallerRunId, socket);
     }
     if (queue.length > 0) {
-      queue.push({ push, onDelivered });
-      return false;
+      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered });
     }
     let outbound: BrokerPush;
     try { outbound = this.outboundPush(push, actualCallerRunId); } catch {
-      queue.push({ push, onDelivered });
-      return false;
+      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered });
     }
     let delivered = false;
     for (const socket of sockets) {
       try { socket.write(`${JSON.stringify(outbound)}\n`); delivered = true; } catch { /* isolate subscriber failures */ }
     }
     if (!delivered) {
-      queue.push({ push, onDelivered });
-      return false;
+      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered });
     }
     try { onDelivered?.(); } catch { /* delivery observers must not interrupt push routing */ }
     return true;
