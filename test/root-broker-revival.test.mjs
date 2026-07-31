@@ -146,6 +146,49 @@ function queuedLifecyclePush({ dispatchId, runId }) {
   });
 }
 
+async function createLiveLifecycleFixture({ recordRevivalDiagnostic, resume } = {}) {
+  let executorNumber = 0;
+  const fixture = await createRevivalFixture({
+    recordRevivalDiagnostic,
+    resume,
+    spawn: async () => {
+      executorNumber += 1;
+      return { runId: `executor-live-${executorNumber}`, asyncDir: `/async/executor-live-${executorNumber}` };
+    },
+  });
+  const { request, server } = fixture;
+  const writes = [];
+  const socket = {
+    destroyed: false,
+    write(frame) { writes.push(parseBrokerPush(JSON.parse(frame))); return true; },
+    once() {},
+  };
+  server.subscriptions.set("plan-runner-1", new Set([socket]));
+
+  async function forwardCompletion(spawnKey, state = "complete") {
+    const spawnResponse = await server.dispatch(parseBrokerRequest({
+      ...request,
+      requestId: `request-spawn-${spawnKey}`,
+      method: "spawn",
+      params: { agent: "executor", task: "run", spawnKey },
+    }), {});
+    assert.equal(spawnResponse.success, true);
+    const entry = server.spawnLedger.get(`plan-1\u0000${spawnKey}`);
+    assert.ok(entry?.binding, "spawn must create a bound spawnLedger entry");
+    server.lifecycle({
+      runId: entry.binding.runId,
+      agent: "executor",
+      asyncDir: entry.binding.asyncDir,
+      cwd: "/workspace",
+      sessionId: "root-session-1",
+      state,
+    }, "execution.completed", entry);
+    return entry;
+  }
+
+  return { ...fixture, forwardCompletion, socket, writes };
+}
+
 const supervisorMessage = {
   customType: "subagent_supervisor_request",
   content: "Need approval",
@@ -918,4 +961,68 @@ test("coalesces queued lifecycle pushes into one revival and flushes them FIFO a
     },
   ]);
   assert.deepEqual(server.callerPushQueues.get("plan-runner-1"), []);
+});
+
+test("live lifecycle completion creates post-proof revival debt after delivery", async () => {
+  const { ownedRun, proof, resumeCalls, server, forwardCompletion, writes } = await createLiveLifecycleFixture();
+
+  await forwardCompletion("live-post-proof-1");
+
+  assert.deepEqual(writes.map((push) => push.type), ["execution.completed"]);
+  assert.deepEqual(server.callerPushQueues.get("plan-runner-1"), [], "the live write must not depend on the payload FIFO");
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+});
+
+test("live lifecycle completions coalesce post-proof revival debt into one handoff", async (t) => {
+  let resolveResume;
+  const resumeDeferred = new Promise((resolve) => { resolveResume = resolve; });
+  t.after(() => resolveResume(revivedResult));
+  const { ownedRun, proof, resumeCalls, server, forwardCompletion } = await createLiveLifecycleFixture({
+    resume: () => resumeDeferred,
+  });
+
+  await forwardCompletion("live-coalesce-1");
+  await forwardCompletion("live-coalesce-2");
+  assert.deepEqual(server.callerPushQueues.get("plan-runner-1"), []);
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.equal(server.revivePromises.size, 1);
+  resolveResume(revivedResult);
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("live lifecycle revival debt is consumed after successful handoff without a new completion", async () => {
+  const { ownedRun, proof, resumeCalls, request, server, forwardCompletion } = await createLiveLifecycleFixture();
+
+  await forwardCompletion("live-consume-1");
+  server.acceptTerminalProof(ownedRun, proof);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(resumeCalls, expectedResume);
+
+  const revivedRun = { ...ownedRun, runId: "plan-runner-2", asyncDir: "/async/plan-runner-2", pid: 102, birthIdentity: "plan-runner-2-birth" };
+  server.ownedRuns.set(revivedRun.runId, revivedRun);
+  const socket = { destroyed: false, write() { return true; }, once() {} };
+  const subscription = parseBrokerRequest({
+    ...request,
+    requestId: "request-subscribe-live-consume-2",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    method: "subscribe",
+    params: {},
+  });
+  const acknowledgement = await server.dispatch(subscription, socket, { deferSubscription: true });
+  assert.equal(acknowledgement.success, true);
+  server.activateSubscription(subscription, socket);
+
+  server.acceptTerminalProof(revivedRun, { ...proof, runId: "plan-runner-2" });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
 });
