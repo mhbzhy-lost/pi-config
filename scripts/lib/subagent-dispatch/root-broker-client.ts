@@ -131,6 +131,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
       sockets.add(socket);
       const decoder = createBrokerFrameDecoder();
       let acknowledged = false;
+      let ready = false;
       let localDispose = false;
       let settleClosed!: () => void;
       let rejectClosed!: (error: Error) => void;
@@ -138,7 +139,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
       const cleanup = () => sockets.delete(socket);
       const fail = (error: Error) => {
         cleanup();
-        if (!acknowledged) {
+        if (!ready) {
           subscriptions.delete(handle);
           reject(error);
         }
@@ -166,11 +167,16 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
               const response = parseBrokerResponse(JSON.parse(line), value);
               if (!response.success) throw clientError(response.error.message, response.error.code);
               acknowledged = true;
-              resolve(handle);
             } else {
               const push = parseBrokerPush(JSON.parse(line));
               if (push.rootSessionId !== rootSessionId || push.callerRunId !== callerRunId) throw clientError("Broker push identity does not match", "BROKER_IDENTITY_MISMATCH");
-              onPush(push);
+              if (push.type === "subscription.ready") {
+                if (ready) throw clientError("Broker subscription received duplicate ready", "BROKER_SUBSCRIPTION_READY_DUPLICATE");
+                ready = true;
+                resolve(handle);
+              } else {
+                onPush(push);
+              }
             }
           } catch (error) { socket.destroy(error as Error); }
         }

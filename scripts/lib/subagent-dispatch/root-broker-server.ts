@@ -630,6 +630,11 @@ export class RootBrokerServer {
     }
     this.registerSubscription(request.callerRunId, socket);
     if (logicalCallerRunId) this.flushCallerPushQueue(logicalCallerRunId, request.callerRunId, socket);
+    if (this.closed || socket.destroyed || this.principals.get(request.callerRunId)?.callerToken !== request.callerToken) return;
+    if (logicalCallerRunId && (this.callerAliases.get(request.callerRunId) !== logicalCallerRunId || this.logicalCallers.get(logicalCallerRunId)?.activeRunId !== request.callerRunId || (this.callerPushQueues.get(logicalCallerRunId)?.length ?? 0) !== 0)) return;
+    try {
+      socket.write(`${JSON.stringify({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: request.callerRunId, type: "subscription.ready", data: {} })}\n`);
+    } catch { /* socket failure leaves the subscription unready */ }
   }
 
   async dispatch(request: any, socket: Socket, { deferSubscription = false }: { deferSubscription?: boolean } = {}) {

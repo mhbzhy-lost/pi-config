@@ -12,7 +12,7 @@ export const BROKER_FRAME_LIMIT_BYTES = 64 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const METHODS = Object.freeze(["ping", "spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "caller.followup", "subscribe"] as const);
-const PUSH_TYPES = Object.freeze(["execution.started", "execution.completed", "supervisor.request", "root.closing"] as const);
+const PUSH_TYPES = Object.freeze(["execution.started", "execution.completed", "supervisor.request", "root.closing", "subscription.ready"] as const);
 const GRANT_ROLES = Object.freeze(["plan-runner", "executor"] as const);
 const PROCESS_TERMINAL_STATES = Object.freeze(["pending", "observed", "unknown", "not-started"] as const);
 const PROCESS_TERMINAL_REASONS = Object.freeze([
@@ -331,6 +331,7 @@ export function parseBrokerPush(value) {
       }
     }
   }
+  if (push.type === "subscription.ready") exactObject(push.data, "push.data", []);
   assertPushFrameSize(push);
   return push;
 }
