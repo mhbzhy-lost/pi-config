@@ -26,6 +26,24 @@ test("Standalone Plan Host runtime and its test are absent", async () => {
   for (const relative of ["scripts/lib/plan/plan-host-runtime.mjs", "test/plan-host-runtime.test.mjs"]) await missing(relative);
 });
 
+test("retired Host parallel harness and RPC client pair are absent", async () => {
+  for (const relative of [
+    "test/plan-parallel-harness.integration.mjs",
+    "scripts/lib/subagents-rpc-client.mjs",
+    "test/subagents-rpc-client.test.mjs",
+  ]) await missing(relative);
+});
+
+test("amendment Harness uses flat Root crash and revival control", async () => {
+  const source = await readFile(path.join(root, "test/plan-amendment-harness.integration.mjs"), "utf8");
+  assert.doesNotMatch(source, /plan-host-runtime|createPlanHostRuntime|PI_PLAN_HARNESS_STANDALONE|hostRunId/);
+  assert.match(source, /pi\/extensions\/subagent-runtime\.ts/);
+  assert.match(source, /pi\/extensions\/plan-launcher\.ts/);
+  assert.match(source, /PI_PLAN_FLAT_AMENDMENT_CRASH/);
+  assert.match(source, /logicalRunId/);
+  assert.match(source, /executorRunId/);
+});
+
 test("unused Parent lifecycle source and test are absent", async () => {
   for (const relative of ["scripts/lib/plan/parent-lifecycle.mjs", "test/parent-lifecycle.test.mjs"]) await missing(relative);
 });

@@ -57,6 +57,23 @@ test("deterministic executors map only approved harness paths to fixed commands"
   assert.equal(state.deterministicExecutorCommand("Allowed paths: arbitrary.txt"), undefined);
 });
 
+test("deterministic amended Executors have fixed commands and valid acceptance reports", () => {
+  assert.equal(typeof state.deterministicExecutorCommand, "function");
+  assert.equal(typeof state.deterministicExecutorAcceptanceReport, "function");
+  const cases = [
+    ["amended.txt", "printf 'amended\\n' > amended.txt && git add amended.txt && git commit -m 'test: amendment 新任务'"],
+    ["repair.txt", "printf 'repair\\n' > repair.txt && git add repair.txt && git commit -m 'test: amendment 修复任务'"],
+  ];
+  for (const [writePath, command] of cases) {
+    const prompt = typedExecutorPrompt(writePath).content[0].text;
+    assert.equal(state.deterministicExecutorCommand(prompt), command);
+    const parsed = parseAcceptanceReport(state.deterministicExecutorAcceptanceReport(prompt, command));
+    assert.ok(parsed.report, parsed.error);
+    assert.deepEqual(parsed.report.changedFiles, [writePath]);
+    assert.deepEqual(parsed.report.commandsRun, [{ command, result: "passed", summary: "completed" }]);
+  }
+});
+
 test("deterministic Executor waits for a supervisor decision before writing its approved path", () => {
   const prompt = user("Execute Task 1\nAllowed paths: decision.txt");
   const tools = ["contact_supervisor", "bash"];
@@ -149,6 +166,50 @@ test("Root Main stops launching after a failed plan_run", () => {
     rootMainPrompt(),
     { ...planRunResult(rootMainPlanPaths[0]), isError: true },
   ], rootMainTools), { text: "PLAN_ROOT_LAUNCH_FAILED" });
+});
+
+test("Root Main sends only a strict flat amendment crash marker", () => {
+  const tools = [...rootMainTools, "plan_harness_crash_amendment"];
+  const crash = user(`PI_PLAN_FLAT_AMENDMENT_CRASH\n${JSON.stringify({ logicalRunId: "logical-65", executorRunId: "executor-65" })}`);
+  assert.deepEqual(decide([crash], tools), {
+    tool: {
+      name: "plan_harness_crash_amendment",
+      arguments: { logicalRunId: "logical-65", executorRunId: "executor-65" },
+    },
+  });
+  assert.deepEqual(decide([user("PI_PLAN_FLAT_AMENDMENT_CRASH\n{malformed")], tools), {
+    text: "PLAN_ROOT_AMENDMENT_CRASH_INVALID",
+  });
+});
+
+test("flat amendment provider uses typed replies, status refreshes, and broker lifecycle pushes", () => {
+  assert.equal(typeof state.decideDeterministicAmendmentTurn, "function");
+  const tools = ["plan_status", "plan_amend", "plan_continue", "plan_executor_supervisor"];
+  assert.equal(tools.includes("subagent_wait"), false);
+  const prompt = user("PI_PLAN_FLAT_AMENDMENT");
+  const reply = toolResult("plan_executor_supervisor", "replied", { replyTo: "request-65", to: "executor-65" });
+  const revision1 = toolResult("plan_status", JSON.stringify({ revision: { number: 1 }, projectionVersion: 65 }));
+  const revision2Active = toolResult("plan_status", JSON.stringify({ revision: { number: 2 }, lifecycle: "running", tasks: [{ status: "active" }] }));
+  const revision2PendingSuperseded = toolResult("plan_status", JSON.stringify({ revision: { number: 2 }, lifecycle: "running", tasks: [{ status: "pending", attempts: [{ status: "superseded" }] }] }));
+  const turn = (messages) => state.decideDeterministicAmendmentTurn({ messages, toolNames: tools, amendmentSource: "# revision 2" });
+
+  assert.deepEqual(turn([prompt, reply]), { tool: { name: "plan_status", arguments: {} } });
+  assert.deepEqual(turn([prompt, reply, revision1]), {
+    tool: { name: "plan_amend", arguments: { expectedProjectionVersion: 65, baseRevision: 1, requestId: "request-65", reason: "approved amendment", source: "# revision 2" } },
+  });
+  assert.deepEqual(turn([prompt, reply, revision1, toolResult("plan_amend", "amended"), revision2Active]), {
+    text: "PLAN_AMENDMENT_WAITING_LIFECYCLE",
+  });
+  const completionPush = { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "Executor completed.", details: { type: "execution.completed", runId: "executor-65" } };
+  assert.deepEqual(turn([prompt, reply, revision1, toolResult("plan_amend", "amended"), revision2Active, completionPush]), {
+    tool: { name: "plan_status", arguments: {} },
+  });
+  assert.deepEqual(turn([prompt, reply, revision1, toolResult("plan_amend", "amended"), revision2Active, privateWakePrompt()]), {
+    tool: { name: "plan_status", arguments: {} },
+  });
+  assert.deepEqual(turn([prompt, reply, revision1, toolResult("plan_amend", "amended"), revision2PendingSuperseded]), {
+    tool: { name: "plan_continue", arguments: { reason: "amendment-recovery" } },
+  });
 });
 
 test("flat Attention mode preserves Root Main launch turns", () => {
