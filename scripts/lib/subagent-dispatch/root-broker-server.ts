@@ -72,6 +72,7 @@ export class RootBrokerServer {
   callers = new Map<string, Caller>();
   logicalCallers = new Map<string, LogicalCaller>();
   callerAliases = new Map<string, string>();
+  callerGenerationByRunId = new Map<string, number>();
   callerFollowUps = new Map<string, FollowUpIntent[]>();
   callerWakes = new Map<string, FollowUpIntent>();
   callerPushQueues = new Map<string, QueuedCallerPush[]>();
@@ -275,7 +276,13 @@ export class RootBrokerServer {
     const waiters = this.terminalWaiters.get(run.runId);
     this.terminalWaiters.delete(run.runId);
     for (const resolve of waiters ?? []) resolve(value);
-    void this.reviveCallerAfterProof(this.callerAliases.get(run.runId) ?? run.runId).catch(() => undefined);
+    const activeRunId = logicalCallerRunId ? this.logicalCallers.get(logicalCallerRunId)?.activeRunId : undefined;
+    const inFlightRevival = logicalCallerRunId && activeRunId !== run.runId ? this.revivePromises.get(logicalCallerRunId) : undefined;
+    void this.reviveCallerAfterProof(logicalCallerRunId ?? run.runId).catch(() => undefined);
+    if (inFlightRevival && logicalCallerRunId) {
+      const rearm = () => { void this.reviveCallerAfterProof(logicalCallerRunId).catch(() => undefined); };
+      void inFlightRevival.then(rearm, rearm);
+    }
     return value;
   }
 
@@ -293,6 +300,7 @@ export class RootBrokerServer {
         if (this.closed || this.logicalCallers.get(logicalRunId)?.activeRunId !== logical.activeRunId || this.logicalCallers.get(logicalRunId)?.generation !== generation || this.principals.has(actualRunId) || this.callerAliases.has(actualRunId)) throw new Error("Root subagent broker revived caller grant changed while pending");
         this.principals.set(actualRunId, { role: "plan-runner", callerToken });
         this.callerAliases.set(actualRunId, logicalRunId);
+        this.callerGenerationByRunId.set(actualRunId, generation + 1);
         this.logicalCallers.set(logicalRunId, { activeRunId: actualRunId, generation: generation + 1 });
         const previousSubscriptions = this.subscriptions.get(previousActualRunId);
         this.subscriptions.delete(previousActualRunId);
@@ -310,6 +318,31 @@ export class RootBrokerServer {
       if (this.callerGrants.get(actualRunId) === pending) this.callerGrants.delete(actualRunId);
     }).catch(() => undefined);
     return await pending;
+  }
+
+  selectResumeSource(logicalRunId: string, actualRunId: string, run: OwnedRun): OwnedRun {
+    const activeProof = this.terminalProofs.get(actualRunId);
+    if (activeProof?.resumeDisposition !== "non-resumable") return run;
+    const canonicalSessionId = activeProof?.canonicalSession?.canonicalSessionId;
+    const activeObservedAt = activeProof?.observedAt;
+    const activeGeneration = this.callerGenerationByRunId.get(actualRunId);
+    if (typeof canonicalSessionId !== "string" || canonicalSessionId.length === 0 || typeof activeObservedAt !== "number" || !Number.isFinite(activeObservedAt)
+      || typeof activeGeneration !== "number" || !Number.isSafeInteger(activeGeneration) || activeGeneration < 1) {
+      throw new Error("Root subagent broker non-resumable caller lacks canonical generation identity");
+    }
+    let selected: { generation: number; run: OwnedRun } | undefined;
+    for (const [candidateRunId, generation] of this.callerGenerationByRunId) {
+      if (generation >= activeGeneration || generation <= (selected?.generation ?? -1)) continue;
+      if (this.callerAliases.get(candidateRunId) !== logicalRunId) continue;
+      const candidate = this.ownedRuns.get(candidateRunId);
+      const proof = this.terminalProofs.get(candidateRunId);
+      if (!candidate || candidate.role !== "plan-runner" || proof?.resumeDisposition !== "resumable"
+        || typeof proof?.observedAt !== "number" || !Number.isFinite(proof.observedAt) || proof.observedAt >= activeObservedAt
+        || proof?.canonicalSession?.canonicalSessionId !== canonicalSessionId) continue;
+      selected = { generation, run: candidate };
+    }
+    if (!selected) throw new Error("Root subagent broker non-resumable caller has no exact canonical predecessor");
+    return selected.run;
   }
 
   async performCallerRevive(logicalRunId: string) {
@@ -330,6 +363,13 @@ export class RootBrokerServer {
     const wakeId = handoff?.wakeId ?? callerWake?.wakeId ?? (queue?.length ? "queued-push" : "live-lifecycle");
     this.recordDiagnostic("revival.started", logicalRunId, wakeId);
     if (!handoff) {
+      let resumeSource: OwnedRun;
+      try {
+        resumeSource = this.selectResumeSource(logicalRunId, actualRunId, run);
+      } catch (error) {
+        this.recordDiagnostic("revival.failed", logicalRunId, wakeId, { reason: "resume-source-invalid", errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 512) });
+        throw error;
+      }
       const preparePlanRunnerRecovery = this.upstream.preparePlanRunnerRecovery;
       if (typeof preparePlanRunnerRecovery === "function") {
         try {
@@ -339,10 +379,10 @@ export class RootBrokerServer {
           throw error;
         }
       }
-      this.recordDiagnostic("resume.invoked", logicalRunId, wakeId);
+      this.recordDiagnostic("resume.invoked", logicalRunId, wakeId, resumeSource.runId === actualRunId ? {} : { resumeSourceRunId: resumeSource.runId });
       let result: any;
       try {
-        result = await this.upstream.resume({ id: actualRunId, message: "A durable Root broker wake is pending." });
+        result = await this.upstream.resume({ id: resumeSource.runId, message: "A durable Root broker wake is pending." });
       } catch (error) {
         this.recordDiagnostic("revival.failed", logicalRunId, wakeId, { reason: "resume-failed", errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 512) });
         throw error;
@@ -664,6 +704,7 @@ export class RootBrokerServer {
       this.callers.set(callerRunId, caller);
       this.logicalCallers.set(callerRunId, { activeRunId: callerRunId, generation: 0 });
       this.callerAliases.set(callerRunId, callerRunId);
+      this.callerGenerationByRunId.set(callerRunId, 0);
       this.callerFollowUps.set(callerRunId, []);
       this.callerPushQueues.set(callerRunId, []);
       this.principals.set(callerRunId, { role, callerToken });
@@ -674,6 +715,7 @@ export class RootBrokerServer {
           this.callers.delete(callerRunId);
           this.logicalCallers.delete(callerRunId);
           this.callerAliases.delete(callerRunId);
+          this.callerGenerationByRunId.delete(callerRunId);
           this.callerFollowUps.delete(callerRunId);
           this.callerPushQueues.delete(callerRunId);
           this.principals.delete(callerRunId);
@@ -684,6 +726,7 @@ export class RootBrokerServer {
         this.callers.delete(callerRunId);
         this.logicalCallers.delete(callerRunId);
         this.callerAliases.delete(callerRunId);
+        this.callerGenerationByRunId.delete(callerRunId);
         this.callerFollowUps.delete(callerRunId);
         this.callerPushQueues.delete(callerRunId);
         this.principals.delete(callerRunId);
@@ -1298,7 +1341,7 @@ export class RootBrokerServer {
       this.unsubscribeStarted?.(); this.unsubscribeStarted = undefined;
       this.unsubscribeComplete?.(); this.unsubscribeComplete = undefined;
       this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
-      this.callers.clear(); this.logicalCallers.clear(); this.callerAliases.clear(); this.callerFollowUps.clear(); this.callerWakes.clear(); this.callerPushQueues.clear(); this.liveLifecycleWakeCounts.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
+      this.callers.clear(); this.logicalCallers.clear(); this.callerAliases.clear(); this.callerGenerationByRunId.clear(); this.callerFollowUps.clear(); this.callerWakes.clear(); this.callerPushQueues.clear(); this.liveLifecycleWakeCounts.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
       this.grantPaths.clear(); this.executorGrants.clear(); this.callerGrants.clear(); this.spawnLedger.clear(); this.supervisorRequests.clear(); this.pendingSupervisorIngress.clear(); this.pendingSupervisorRequestIds.clear(); this.supervisorIngressRevokedRuns.clear();
       for (const timer of this.retryTimers.values()) clearTimeout(timer);
       this.ownedRuns.clear(); this.terminalProofs.clear(); this.reviveResults.clear(); this.revivePromises.clear(); this.pendingRevivedHandoffs.clear(); this.revivedOwnershipWaiters.clear(); this.retryTimers.clear(); this.retryAttempts.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
