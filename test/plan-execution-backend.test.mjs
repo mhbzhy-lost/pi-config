@@ -439,6 +439,73 @@ test("recoverBinding publishes one completed fact from an exact Root observed te
   backend.dispose();
 });
 
+test("recoverBinding rolls back an observed completion when its fact sink fails", async () => {
+  const events = createEvents();
+  const facts = [];
+  let lookups = 0;
+  let failEmit = true;
+  const sinkError = new Error("recovered completion sink failed");
+  const binding = {
+    dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl",
+  };
+  const processTerminal = {
+    version: 1,
+    runnerProcessInstanceId: "runner-recovered-rollback",
+    state: "observed",
+    observedAt: 1_700_000_000_005,
+    instances: [{ processInstanceId: "runner-recovered-rollback", kind: "runner", closeObservedAt: 1_700_000_000_005, exitCode: 0, signal: null }],
+  };
+  const expectedFact = {
+    type: "execution.completed",
+    dispatchId: "attempt-1.dispatch.1",
+    attemptId: "attempt-1",
+    runId: "run-1",
+    asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-1",
+    state: "observed",
+    observedAt: "recovered-rollback",
+  };
+  const backend = createPiSubagentsExecutionBackend({
+    events,
+    emitFact(fact) {
+      if (failEmit) throw sinkError;
+      facts.push(fact);
+    },
+    now: () => "recovered-rollback",
+    readArtifacts: async () => { throw new Error("recoverBinding must not read artifacts"); },
+    rpc: {
+      async ping() { return capabilities({ methods: ["ping", "spawn", "spawn.lookup", "status", "interrupt", "stop"] }); },
+      async lookupSpawn() {
+        lookups += 1;
+        return { state: "spawned", binding: { runId: "run-1", asyncDir: "/async/run-1" }, processTerminal };
+      },
+      async spawn() { throw new Error("recoverBinding must not spawn"); },
+      async status() { throw new Error("recoverBinding must not status"); },
+      async stop() { throw new Error("recoverBinding must not stop"); },
+      dispose() {},
+    },
+  });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+
+  try {
+    await assert.rejects(backend.recoverBinding(binding), (error) => error === sinkError);
+    failEmit = false;
+    assert.deepEqual(await backend.recoverBinding(binding), binding);
+    assert.equal(lookups, 2);
+    assert.deepEqual(facts, [expectedFact]);
+    assert.deepEqual(await backend.recoverBinding(binding), binding);
+    events.emit("subagent:async-complete", {
+      runId: "run-1", asyncDir: "/async/run-1", cwd: "/attempts/attempt-1",
+      sessionId: "/sessions/plan-session-1.jsonl", state: "observed",
+    });
+    assert.equal(lookups, 2);
+    assert.deepEqual(facts, [expectedFact]);
+  } finally {
+    backend.dispose();
+  }
+});
+
 test("recoverBinding shares an in-flight exact lookup and publishes one observed completion", async () => {
   const events = createEvents();
   const facts = [];
