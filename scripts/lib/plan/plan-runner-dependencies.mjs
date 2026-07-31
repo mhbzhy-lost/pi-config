@@ -351,16 +351,9 @@ export function createPlanRunnerDependencies({
     const resultsDir = path.join(stateRoot, "var", "plan-runs", current.planId, "results");
     await mkdir(resultsDir, { recursive: true });
     let commandRegistry;
-    const verificationForTask = async (taskId, { recovery = false } = {}) => {
+    const verificationForTask = async (taskId) => {
       commandRegistry ??= createTaskCommandRegistry({ cwd: current.workspace.worktree, ir, legacyPlan: plan });
-      const verification = resolveTaskVerification({ ir, legacyPlan: plan, taskId, registry: await commandRegistry });
-      if (!recovery || verification.length || ir.version === "plan-ir.v3" || Array.isArray(plan.taskVerification?.[taskId])) return verification;
-      return plan.verification.map((command, index) => ({
-        id: `${taskId}:verification-${index + 1}`,
-        command: typeof command === "string" ? command : command.command,
-        cwd: ctx.cwd,
-        timeoutMs: 900_000,
-      }));
+      return resolveTaskVerification({ ir, legacyPlan: plan, taskId, registry: await commandRegistry });
     };
     const coordinator = createPlanCoordinator({
       ir,

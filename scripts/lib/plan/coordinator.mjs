@@ -308,7 +308,7 @@ export function createPlanCoordinator({
     return { attemptId, outcome, resultCommit: resultCommit ?? null, validation, projectionVersion: projection.version };
   }
 
-  async function validateSucceededAttempt(attemptId, { recovery = false } = {}) {
+  async function validateSucceededAttempt(attemptId) {
     await refreshProjection();
     const attempt = projection.attempts.get(attemptId);
     if (!attempt || attempt.status !== "succeeded" || typeof validateAttemptResult !== "function") return null;
@@ -324,7 +324,7 @@ export function createPlanCoordinator({
     const validation = await validateAttemptResult({
       lease: attemptLease,
       allowedPaths: node.allowedPaths ?? node.files,
-      verification: await verificationForTask(node.id, { recovery }),
+      verification: await verificationForTask(node.id),
     });
     if (!validation?.accepted) {
       await block("attempt_validation_failed", { attemptId, code: validation?.code ?? "invalid_result" });
@@ -363,7 +363,7 @@ export function createPlanCoordinator({
       .filter(([, attempt]) => attempt.status === "succeeded")
       .map(([attemptId]) => attemptId);
     for (const attemptId of attempts) {
-      await validateSucceededAttempt(attemptId, { recovery: true });
+      await validateSucceededAttempt(attemptId);
       await refreshProjection();
       if (projection.lifecycle === "blocked") return { state: "blocked", dispatched: [], projectionVersion: projection.version };
     }
