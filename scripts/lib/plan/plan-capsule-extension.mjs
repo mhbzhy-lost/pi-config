@@ -271,7 +271,6 @@ export function createPlanCapsuleExtension(pi, options = {}) {
     if (hasInFlightAttempt && !hasCoordinatorWork) return;
     if (options.canContinue?.(projection) === true) {
       if (typeof options.requestCallerFollowUp === "function") {
-        await options.requestCallerFollowUp({ wakeId: "plan-opened", reason: "plan-opened" });
         return;
       }
       pi.sendMessage(
@@ -295,7 +294,6 @@ export function createPlanCapsuleExtension(pi, options = {}) {
           ? "Cannot determine worktree HEAD (git failed). Assuming work exists."
           : `Worktree HEAD advanced to ${currentHead} but plan lifecycle is still running.`;
         if (typeof options.requestCallerFollowUp === "function") {
-          await options.requestCallerFollowUp({ wakeId: "plan-opened", reason: "plan-opened" });
           return;
         }
         pi.sendMessage(
