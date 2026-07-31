@@ -190,7 +190,13 @@ test("flat Root runtime Harness reaches two validated Plan Runner happy paths", 
     assert.equal(initialRuns.length, 6);
     for (const key of ["runId", "asyncDir"]) assert.equal(new Set(initialRuns.map((run) => run[key])).size, 6, `Initial runs must have unique ${key}`);
 
-    const asyncRoot = path.join(runtimeTmp, "async-subagent-runs");
+    const resolvedRuntimeTmp = path.resolve(runtimeTmp);
+    const asyncRoots = new Set(handles.map((handle) => path.dirname(path.resolve(handle.asyncDir))));
+    assert.equal(asyncRoots.size, 1);
+    const [asyncRoot] = asyncRoots;
+    assert.equal(path.basename(asyncRoot), "async-subagent-runs");
+    assert.ok(asyncRoot.startsWith(`${resolvedRuntimeTmp}${path.sep}`));
+    assert.notEqual(asyncRoot, resolvedRuntimeTmp);
     const actualRuns = await Promise.all((await readdir(asyncRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map(async (entry) => ({ asyncDir: path.join(asyncRoot, entry.name), status: await readJson(path.join(asyncRoot, entry.name, "status.json")) })));
     assert.ok(actualRuns.length >= 6);
     const executors = actualRuns.filter(({ status }) => status?.steps?.[0]?.agent === "executor");
