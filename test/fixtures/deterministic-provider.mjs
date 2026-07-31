@@ -37,7 +37,13 @@ export default function (pi) {
         .map((part) => part.text)
         .join("\n") ?? "").join("\n");
       const bootstrap = userText.match(/exact bootstrap JSON:\s*\n(\{[^\n]+\})/)?.[1];
-      const compatTurn = decideDeterministicTurn({ messages, toolNames: [...availableTools], issuedDispatchContractKeys });
+      const compatTurn = decideDeterministicTurn({
+        messages,
+        toolNames: [...availableTools],
+        issuedDispatchContractKeys,
+        attentionMode: process.env.PI_PLAN_HARNESS_ATTENTION === "1",
+        executorRunId: process.env.PI_SUBAGENT_RUN_ID,
+      });
       const amendmentSource = process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
       const amendmentMode = process.env.PI_PLAN_HARNESS_AMENDMENT === "1";
       let amendmentOwnsTurn = false;

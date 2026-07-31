@@ -56,7 +56,43 @@ export function deterministicExecutorCommand(userText) {
   return undefined;
 }
 
-export function decideDeterministicTurn({ messages = [], toolNames = [], issuedDispatchContractKeys = new Set() } = {}) {
+function typedExecutorAttentionContract(userText, executorRunId) {
+  const taskIdSource = userText.match(/^- Task ID: (.+)$/m)?.[1];
+  let taskId;
+  try { taskId = JSON.parse(taskIdSource); } catch {}
+  const section = userText.match(/^## Declared Write Scope\n([\s\S]*?)(?:\n\n|$)/m)?.[1];
+  const writePaths = section?.split("\n").flatMap((line) => {
+    const source = line.match(/^\d+\. (.+)$/)?.[1];
+    try {
+      const path = JSON.parse(source);
+      return typeof path === "string" ? [path] : [];
+    } catch {
+      return [];
+    }
+  }) ?? [];
+  if (typeof taskId !== "string" || !taskId || typeof executorRunId !== "string" || !executorRunId
+    || writePaths.length !== 1 || !deterministicExecutorCommand(userText)) return undefined;
+  return { taskId, writePath: writePaths[0] };
+}
+
+function rootAttentionReplies(messages) {
+  const marker = "PI_PLAN_FLAT_ATTENTION_REPLIES";
+  const markerIndex = messages.findLastIndex((message) => message?.role === "user" && textParts(message).startsWith(`${marker}\n`));
+  if (markerIndex < 0) return undefined;
+  let replies;
+  try { replies = JSON.parse(textParts(messages[markerIndex]).slice(marker.length).trim()).replies; } catch {}
+  const exactReply = (reply) => reply && typeof reply === "object" && !Array.isArray(reply)
+    && Object.keys(reply).length === 4
+    && ["planId", "requestId", "expectedProjectionVersion", "message"].every((key) => Object.hasOwn(reply, key))
+    && typeof reply.planId === "string" && reply.planId
+    && typeof reply.requestId === "string" && reply.requestId
+    && Number.isSafeInteger(reply.expectedProjectionVersion)
+    && typeof reply.message === "string" && reply.message;
+  if (!Array.isArray(replies) || replies.length === 0 || !replies.every(exactReply)) return { text: "PLAN_ROOT_ATTENTION_REPLIES_INVALID" };
+  return { replies, results: messages.slice(markerIndex + 1).filter((message) => message?.role === "toolResult" && message.toolName === "plan_attention_reply") };
+}
+
+export function decideDeterministicTurn({ messages = [], toolNames = [], issuedDispatchContractKeys = new Set(), attentionMode = false, executorRunId } = {}) {
   const userText = messages.filter((message) => message?.role === "user").map(textParts).join("\n");
   const latestPrivateWakeIndex = messages.findLastIndex((message) => message?.role === "user"
     && textParts(message).split("\n").includes("A durable Root broker wake is pending."));
@@ -64,6 +100,41 @@ export function decideDeterministicTurn({ messages = [], toolNames = [], issuedD
   const toolInventory = toolNames.join(",");
 
   const toolResults = messages.filter((message) => message?.role === "toolResult");
+  const attentionReplies = rootAttentionReplies(messages);
+  if (attentionReplies) {
+    if (attentionReplies.text) return attentionReplies;
+    if (attentionReplies.results.some((message) => message.isError)) return { text: "PLAN_ROOT_ATTENTION_REPLY_FAILED" };
+    if (attentionReplies.results.length >= attentionReplies.replies.length) return { text: "PLAN_ROOT_ATTENTION_REPLIES_DONE" };
+    if (toolNames.includes("plan_attention_reply")) {
+      return { tool: { name: "plan_attention_reply", arguments: attentionReplies.replies[attentionReplies.results.length] } };
+    }
+  }
+
+  if (attentionMode) {
+    const contract = typedExecutorAttentionContract(userText, executorRunId);
+    if (!contract) return { text: "PLAN_EXECUTOR_ATTENTION_INVALID" };
+    const supervisorResult = toolResults.find((message) => message.toolName === "contact_supervisor");
+    if (!supervisorResult) {
+      if (toolNames.includes("contact_supervisor")) {
+        return {
+          tool: {
+            name: "contact_supervisor",
+            arguments: {
+              reason: "need_decision",
+              message: `PI_PLAN_FLAT_ATTENTION ${JSON.stringify({ schemaVersion: "pi-plan-flat-attention-marker.v1", executorRunId, ...contract })}`,
+            },
+          },
+        };
+      }
+      return { text: "PLAN_EXECUTOR_ATTENTION_SUPERVISOR_UNAVAILABLE" };
+    }
+    if (supervisorResult.isError) return { text: "PLAN_EXECUTOR_ATTENTION_REPLY_FAILED" };
+    if (!toolResults.some((message) => message.toolName === "bash") && toolNames.includes("bash")) {
+      return { tool: { name: "bash", arguments: { command: deterministicExecutorCommand(userText) } } };
+    }
+    return { text: "PLAN_EXECUTOR_DECISION_DONE" };
+  }
+
   const rootHarnessMarker = "PI_PLAN_FLAT_ROOT_HARNESS";
   const rootHarnessMarkerIndex = userText.indexOf(rootHarnessMarker);
   if (rootHarnessMarkerIndex >= 0) {
