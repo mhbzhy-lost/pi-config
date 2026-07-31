@@ -3,7 +3,7 @@ import { applyEvent, createProjection } from "./plan-events.mjs";
 const STRING = { type: "string", minLength: 1 };
 const EMPTY_OBJECT = { type: "object", properties: {}, additionalProperties: false };
 const OPEN_KEYS = ["allowPlanCommits", "baseCommit", "manifestSha256", "planId", "planIrHash", "revision", "worktree"];
-const PLAN_ACTIVE_TOOLS = [
+export const PLAN_ACTIVE_TOOLS = [
   "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
   "subagent", "plan_executor_supervisor", "read", "grep",
 ];
