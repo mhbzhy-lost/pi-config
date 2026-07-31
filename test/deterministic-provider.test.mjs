@@ -212,6 +212,29 @@ test("flat amendment provider uses typed replies, status refreshes, and broker l
   });
 });
 
+test("flat amendment waiting text suppresses common fallback tools", async () => {
+  const previousMode = process.env.PI_PLAN_HARNESS_AMENDMENT;
+  const previousSource = process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+  process.env.PI_PLAN_HARNESS_AMENDMENT = "1";
+  process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = "# revision 2";
+  try {
+    const done = await streamDone([
+      flatPlanPrompt(),
+      toolResult("plan_open", "opened"),
+      toolResult("plan_executor_supervisor", "replied", { replyTo: "request-65", to: "executor-old" }),
+      toolResult("plan_amend", "amended"),
+      toolResult("plan_status", JSON.stringify({ revision: { number: 2 }, lifecycle: "running", tasks: [{ taskId: "task-1", status: "active", attempts: [{ status: "active" }] }] })),
+    ], flatPlanTools.map((name) => ({ name })));
+    assert.equal(done.reason, "stop");
+    assert.deepEqual(done.message.content, [{ type: "text", text: "PLAN_AMENDMENT_WAITING_LIFECYCLE" }]);
+  } finally {
+    if (previousMode === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT = previousMode;
+    if (previousSource === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = previousSource;
+  }
+});
+
 test("flat amendment keeps the old decision Executor active until the Root fault", async () => {
   const previousMode = process.env.PI_PLAN_HARNESS_AMENDMENT;
   const previousSource = process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
