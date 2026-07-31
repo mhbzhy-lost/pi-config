@@ -893,7 +893,7 @@ test("persists Supervisor Attention and recovers a fenced durable Root reply aft
   assert.equal(appended.filter(({ type }) => type === "attempt.attention-resolved").length, 1);
 });
 
-test("idempotent Supervisor Attention replay does not append a second event but conflicting payload is rejected", async (t) => {
+test("idempotent Supervisor Attention replay survives a later progress overwrite and rejects conflicting payload", async (t) => {
   const repo = await fixture();
   t.after(() => rm(repo.origin, { recursive: true, force: true }));
   const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
@@ -904,12 +904,37 @@ test("idempotent Supervisor Attention replay does not append a second event but 
   await deps.continuePlan({}, { ctx });
   const message = { customType: "subagent_supervisor_request", content: "Choose the target", display: true, details: { id: "exact-replay", reason: "progress_update", expectsReply: false, runId: "run-1", agent: "executor", childIndex: 0 } };
   await deps.recordSupervisorRequest(message, { ctx });
+  await deps.recordSupervisorRequest({ ...message, content: "A later update", details: { ...message.details, id: "later-progress" } }, { ctx });
   const firstCount = appended.filter(({ type }) => type === "attempt.attention-requested").length;
   const replayCtx = context(repo.worktree, [created(binding), ...appended].map((data) => ({ customType: "pi-plan-event-v1", data })));
   const replay = runnerDependencies(repo, options);
   await replay.recordSupervisorRequest(message, { ctx: replayCtx });
   assert.equal(appended.filter(({ type }) => type === "attempt.attention-requested").length, firstCount);
   await assert.rejects(replay.recordSupervisorRequest({ ...message, content: "Choose another target" }, { ctx: replayCtx }), /conflict|already|Attention/i);
+});
+
+test("exact Supervisor Attention replay completes a partially committed escalation", async (t) => {
+  const repo = await fixture();
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  const appended = [];
+  let failEscalation = true;
+  const ctx = context(repo.worktree, [{ customType: "pi-plan-event-v1", data: created(binding) }]);
+  const options = {
+    pi: { async appendEntry(_type, data) { if (data.type === "attempt.attention-escalated" && failEscalation) { failEscalation = false; throw new Error("escalation append failed"); } appended.push(data); } },
+    executionBackend: backend(),
+    allocateAttemptWorkspace: async (input) => fakeAllocator(input),
+  };
+  const deps = runnerDependencies(repo, options);
+  await deps.continuePlan({}, { ctx });
+  const message = { customType: "subagent_supervisor_request", content: "Choose the target", display: true, details: { id: "partial-escalation", reason: "need_decision", expectsReply: true, runId: "run-1", agent: "executor", childIndex: 0 } };
+  await assert.rejects(deps.recordSupervisorRequest(message, { ctx }), /escalation append failed/);
+  assert.deepEqual(appended.filter(({ type }) => type.startsWith("attempt.attention-")).map(({ type }) => type), ["attempt.attention-requested"]);
+
+  const recoveryCtx = context(repo.worktree, [created(binding), ...appended].map((data) => ({ customType: "pi-plan-event-v1", data })));
+  await runnerDependencies(repo, options).recordSupervisorRequest(message, { ctx: recoveryCtx });
+
+  assert.deepEqual(appended.filter(({ type }) => type.startsWith("attempt.attention-")).map(({ type }) => type), ["attempt.attention-requested", "attempt.attention-escalated"]);
 });
 
 test("fresh recoverExecutionState announces a matching durable Attention reply once after binding recovery", async (t) => {

@@ -412,9 +412,9 @@ test("records subscription-backlog Supervisor requests before the ready barrier 
   assert.deepEqual(subject.messages, []);
 });
 
-test("records live Supervisor requests once at agent settlement with the current context", async () => {
+test("records live Supervisor requests immediately with the latest subscription context", async () => {
   const records = [];
-  const ctx = { cwd: "/plan-worktree", marker: "settled" };
+  const ctx = { cwd: "/plan-worktree", marker: "live" };
   const subject = lifecycleFixture({
     async recordSupervisorRequest(message, options) { records.push({ message, options }); },
   });
@@ -422,9 +422,7 @@ test("records live Supervisor requests once at agent settlement with the current
   await subject.installed.startLifecycleSubscription?.(ctx);
   subject.rpc.onPush?.(push);
   subject.rpc.onPush?.(push);
-
-  assert.deepEqual(records, []);
-  await subject.pi.emitLifecycle("agent_settled", ctx);
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(records.length, 1);
   assert.strictEqual(records[0].options.ctx, ctx);
@@ -486,6 +484,31 @@ test("session shutdown waits for a failed agent-settled drain then retries with 
   await assert.rejects(settled, /settled write failed/);
   await assert.doesNotReject(shutdown);
   assert.deepEqual(attempts, ["settled", "shutdown"]);
+});
+
+test("drains a Supervisor push that arrives during a successful in-flight pass", async () => {
+  let enterFirst; let releaseFirst;
+  const firstEntered = new Promise((resolve) => { enterFirst = resolve; });
+  const firstRelease = new Promise((resolve) => { releaseFirst = resolve; });
+  const records = []; const acknowledgements = [];
+  const subject = lifecycleFixture({
+    async recordSupervisorRequest(message) {
+      records.push(message.details.id);
+      if (message.details.id === "snapshot-a") { enterFirst(); await firstRelease; }
+    },
+    async supervisorAcknowledge(requestId) { acknowledgements.push(requestId); },
+  });
+  const ctx = { marker: "settled" };
+  await subject.installed.startLifecycleSubscription?.(ctx);
+  subject.rpc.onPush?.({ type: "supervisor.request", callerRunId: "run", data: { requestId: "snapshot-a", executorRunId: "executor-a", content: "First.", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 0 } });
+  const settled = subject.pi.emitLifecycle("agent_settled", ctx);
+  await firstEntered;
+  subject.rpc.onPush?.({ type: "supervisor.request", callerRunId: "run", data: { requestId: "snapshot-b", executorRunId: "executor-b", content: "Second.", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 1 } });
+  releaseFirst();
+  await settled;
+
+  assert.deepEqual(records, ["snapshot-a", "snapshot-b"]);
+  assert.deepEqual(acknowledgements, ["snapshot-a", "snapshot-b"]);
 });
 
 test("isolates failed Supervisor records by Executor while retaining each Executor FIFO", async () => {
