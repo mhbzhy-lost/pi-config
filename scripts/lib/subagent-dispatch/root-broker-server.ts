@@ -260,6 +260,15 @@ export class RootBrokerServer {
     const wakeIds = followUps.map((followUp) => followUp.wakeId);
     const wakeId = wakeIds[0];
     this.recordDiagnostic("revival.started", logicalRunId, wakeId);
+    const preparePlanRunnerRecovery = this.upstream.preparePlanRunnerRecovery;
+    if (typeof preparePlanRunnerRecovery === "function") {
+      try {
+        await preparePlanRunnerRecovery({ role: run.role, runId: actualRunId, asyncDir: run.asyncDir });
+      } catch (error) {
+        this.recordDiagnostic("revival.failed", logicalRunId, wakeId, { reason: "recovery-prepare-failed", errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 512) });
+        throw error;
+      }
+    }
     this.recordDiagnostic("resume.invoked", logicalRunId, wakeId);
     let result: any;
     try {
