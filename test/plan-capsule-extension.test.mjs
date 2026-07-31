@@ -767,7 +767,7 @@ test("agent_settled uses a valid custom follow-up payload for runnable work", as
   }]);
 });
 
-test("agent_settled durable runnable work registers a Root wake without local follow-up", async () => {
+test("agent_settled durable runnable work does not rearm the consumed plan-opened wake", async () => {
   const calls = [];
   const { handlers, messages } = setup({
     canContinue: () => true,
@@ -776,11 +776,11 @@ test("agent_settled durable runnable work registers a Root wake without local fo
 
   await handlers.get("agent_settled")({ type: "agent_settled" }, context([{ customType: "pi-plan-event-v1", data: created }]));
 
-  assert.deepEqual(calls, [{ wakeId: "plan-opened", reason: "plan-opened" }]);
+  assert.deepEqual(calls, []);
   assert.deepEqual(messages, []);
 });
 
-test("agent_settled durable gate-required continuation registers a Root wake without local follow-up", async () => {
+test("agent_settled durable gate-required continuation does not rearm the consumed plan-opened wake", async () => {
   const calls = [];
   const { handlers, messages } = setup({
     canContinue: () => false,
@@ -790,7 +790,7 @@ test("agent_settled durable gate-required continuation registers a Root wake wit
 
   await handlers.get("agent_settled")({ type: "agent_settled" }, context([{ customType: "pi-plan-event-v1", data: created }]));
 
-  assert.deepEqual(calls, [{ wakeId: "plan-opened", reason: "plan-opened" }]);
+  assert.deepEqual(calls, []);
   assert.deepEqual(messages, []);
 });
 
