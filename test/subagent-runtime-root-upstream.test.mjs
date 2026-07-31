@@ -17,6 +17,7 @@ const jiti = createJiti(import.meta.url, {
   },
 });
 const runtimeModule = await jiti.import("../pi/extensions/subagent-runtime.ts");
+const asyncResumeModule = await jiti.import("../pi/npm/node_modules/pi-subagents/src/runs/background/async-resume.ts");
 
 const PLAN_RUNNER_TOOLS = [
   "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
@@ -45,9 +46,14 @@ async function createRecoveryFixture(t, { agent = "plan-runner", sourceRunId, as
     tools: ["read"],
     extensions: ["sentinel-extension"],
     skills: ["test-driven-development", "writing-good-tests"],
-    artifactConfig: { enabled: true },
-    sentinel: "must-survive-recovery-tool-promotion",
-    sentinelNested: { retained: true },
+    artifactConfig: {
+      enabled: true,
+      includeInput: true,
+      includeOutput: true,
+      includeJsonl: true,
+      includeMetadata: true,
+      cleanupDays: 7,
+    },
   };
   await writeFile(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`, { mode: 0o600 });
   return { asyncDirRoot, runId, runDir, descriptorPath, descriptor };
@@ -120,6 +126,7 @@ test("Root broker upstream exposes the private plan-runner recovery preparation 
 
 test("Root broker upstream promotes a trusted plan-runner recovery descriptor to the exact Plan Runner tools", async (t) => {
   const fixture = await createRecoveryFixture(t);
+  assert.deepEqual(asyncResumeModule.readAsyncRecoveryDescriptor(fixture.runDir), fixture.descriptor);
   const upstream = createUpstream(fixture.asyncDirRoot);
   await (upstream.preparePlanRunnerRecovery?.({ role: "plan-runner", runId: fixture.runId, asyncDir: fixture.runDir }) ?? Promise.resolve());
 
