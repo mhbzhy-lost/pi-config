@@ -14,8 +14,13 @@ export default async function planHarnessRunner(pi: ExtensionAPI) {
       async writeCurrent(prepared: Parameters<typeof realRevisionStore.writeCurrent>[0]) {
         if (prepared?.revision === 2) {
           mkdirSync(barrier, { recursive: true });
-          writeFileSync(`${barrier}/entered`, "entered\n");
-          while (!existsSync(`${barrier}/release`)) await new Promise((resolve) => setTimeout(resolve, 20));
+          try {
+            mkdirSync(`${barrier}/claimed`);
+            writeFileSync(`${barrier}/entered`, `entered ${process.env.PI_SUBAGENT_RUN_ID ?? "unknown"}\n`);
+            while (!existsSync(`${barrier}/release`)) await new Promise((resolve) => setTimeout(resolve, 20));
+          } catch (error: any) {
+            if (error?.code !== "EEXIST") throw error;
+          }
         }
         return realRevisionStore.writeCurrent(prepared);
       },

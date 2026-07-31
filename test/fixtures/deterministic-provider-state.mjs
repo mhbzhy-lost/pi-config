@@ -16,7 +16,7 @@ export function deterministicContractKey(contract) {
 
 export function deterministicExecutorAcceptanceReport(userText, command) {
   if (command !== deterministicExecutorCommand(userText)) return undefined;
-  const path = command.match(/(?:README\.md|worker\.txt)/)?.[0];
+  const path = command.match(/(?:README\.md|worker\.txt|amended\.txt|repair\.txt)/)?.[0];
   if (!path) return undefined;
   return `\`\`\`acceptance-report\n${JSON.stringify({
     criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: `${path} command completed.` }],
@@ -53,6 +53,51 @@ export function deterministicExecutorCommand(userText) {
   if (allows("worker.txt")) {
     return "printf 'worker-2\\n' > worker.txt && git add worker.txt && git commit -m 'test: 添加第二个确定性 worker 标记'";
   }
+  if (allows("amended.txt")) return "printf 'amended\\n' > amended.txt && git add amended.txt && git commit -m 'test: amendment 新任务'";
+  if (allows("repair.txt")) return "printf 'repair\\n' > repair.txt && git add repair.txt && git commit -m 'test: amendment 修复任务'";
+  return undefined;
+}
+
+function messageText(message) { return typeof message?.content === "string" ? message.content : textParts(message); }
+function hasToolCall(messages, name) { return messages.some((message) => message?.role === "assistant" && message.content?.some((part) => part?.type === "toolCall" && part?.name === name)); }
+function latestStatus(messages) {
+  const result = messages.filter((message) => message?.role === "toolResult" && message.toolName === "plan_status" && !message.isError).at(-1);
+  try { return result ? { result, value: JSON.parse(messageText(result)), index: messages.lastIndexOf(result) } : undefined; } catch { return undefined; }
+}
+
+export function decideDeterministicAmendmentTurn({ messages = [], toolNames = [], amendmentSource } = {}) {
+  const tools = new Set(toolNames);
+  const userText = messages.filter((message) => message?.role === "user").map(textParts).join("\n");
+  const hasSuccessfulSupervisorDecision = messages.some((message) => message?.role === "toolResult"
+    && message.toolName === "contact_supervisor" && !message.isError);
+  const hasBashResult = messages.some((message) => message?.role === "toolResult" && message.toolName === "bash");
+  if (/^Allowed paths: decision\.txt$/m.test(userText) && hasSuccessfulSupervisorDecision && !hasBashResult && tools.has("bash")) {
+    return { tool: { name: "bash", arguments: { command: "sleep 120; printf 'approved\\n' > decision.txt && git add decision.txt && git commit -m 'test: amendment 旧任务'" } } };
+  }
+  const replyIndex = messages.reduce((last, message, index) => message?.role === "toolResult" && message.toolName === "plan_executor_supervisor" && !message.isError && typeof message.details?.replyTo === "string" && message.details.replyTo ? index : last, -1);
+  if (replyIndex < 0 || !amendmentSource) return undefined;
+  const amended = hasToolCall(messages, "plan_amend") || messages.some((message) => message?.role === "toolResult" && message.toolName === "plan_amend");
+  const status = latestStatus(messages);
+  if (!amended) {
+    if (!status || status.index < replyIndex) return tools.has("plan_status") ? { tool: { name: "plan_status", arguments: {} } } : undefined;
+    const version = status.value?.projectionVersion;
+    return Number.isSafeInteger(version) && tools.has("plan_amend") ? { tool: { name: "plan_amend", arguments: { expectedProjectionVersion: version, baseRevision: 1, requestId: messages[replyIndex].details.replyTo, reason: "approved amendment", source: amendmentSource } } } : undefined;
+  }
+  if (!status || status.value?.revision?.number !== 2) return tools.has("plan_status") ? { tool: { name: "plan_status", arguments: {} } } : undefined;
+  if (messages.findLastIndex((message) => message?.role === "toolResult" && ["plan_continue", "plan_verify"].includes(message.toolName)) > status.index) return undefined;
+  const wakeIndex = messages.findLastIndex((message) => (message?.role === "custom" && message.customType === "pi-root-subagent-lifecycle-v1") || (message?.role === "user" && textParts(message).split("\n").includes("A durable Root broker wake is pending.")));
+  if (wakeIndex > status.index) return tools.has("plan_status") ? { tool: { name: "plan_status", arguments: {} } } : undefined;
+  const tasks = Array.isArray(status.value.tasks) ? status.value.tasks : [];
+  const attempts = tasks.flatMap((task) => Array.isArray(task?.attempts) ? task.attempts : []);
+  const active = [...tasks, ...attempts].some((item) => ["active", "waiting", "waiting-attention", "dispatch", "dispatching"].includes(item?.status));
+  if (active) return { text: "PLAN_AMENDMENT_WAITING_LIFECYCLE" };
+  const pending = tasks.some((task) => task?.status === "pending");
+  const validated = attempts.some((attempt) => ["validated", "succeeded"].includes(attempt?.status));
+  const integrated = tasks.some((task) => ["accepted", "integrated"].includes(task?.status));
+  const superseded = attempts.some((attempt) => attempt?.status === "superseded");
+  if (pending && superseded && !validated && !integrated && tools.has("plan_continue")) return { tool: { name: "plan_continue", arguments: { reason: "amendment-recovery" } } };
+  if (pending && (validated || integrated) && tools.has("plan_continue")) return { tool: { name: "plan_continue", arguments: { reason: "integrate" } } };
+  if ((status.value.lifecycle === "verifying" || (tasks.length && tasks.every((task) => ["accepted", "integrated", "retired"].includes(task?.status)))) && tools.has("plan_verify")) return { tool: { name: "plan_verify", arguments: {} } };
   return undefined;
 }
 
@@ -132,6 +177,16 @@ export function decideDeterministicTurn({ messages = [], toolNames = [], issuedD
   const toolInventory = toolNames.join(",");
 
   const toolResults = messages.filter((message) => message?.role === "toolResult");
+  const crash = [...messages].reverse().find((message) => message?.role === "user" && textParts(message).startsWith("PI_PLAN_FLAT_AMENDMENT_CRASH\n"));
+  if (crash) {
+    const lines = textParts(crash).split("\n");
+    let marker;
+    try { marker = lines.length === 2 ? JSON.parse(lines[1]) : undefined; } catch {}
+    const valid = marker && typeof marker === "object" && !Array.isArray(marker) && Object.keys(marker).length === 2
+      && ["logicalRunId", "executorRunId"].every((key) => typeof marker[key] === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(marker[key]));
+    if (!valid) return { text: "PLAN_ROOT_AMENDMENT_CRASH_INVALID" };
+    if (toolNames.includes("plan_harness_crash_amendment")) return { tool: { name: "plan_harness_crash_amendment", arguments: marker } };
+  }
   const attentionReplies = rootAttentionReplies(messages);
   if (attentionReplies) {
     if (attentionReplies.text) return attentionReplies;
