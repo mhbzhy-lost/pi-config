@@ -351,9 +351,16 @@ export function createPlanRunnerDependencies({
     const resultsDir = path.join(stateRoot, "var", "plan-runs", current.planId, "results");
     await mkdir(resultsDir, { recursive: true });
     let commandRegistry;
-    const verificationForTask = async (taskId) => {
+    const verificationForTask = async (taskId, { recovery = false } = {}) => {
       commandRegistry ??= createTaskCommandRegistry({ cwd: current.workspace.worktree, ir, legacyPlan: plan });
-      return resolveTaskVerification({ ir, legacyPlan: plan, taskId, registry: await commandRegistry });
+      const verification = resolveTaskVerification({ ir, legacyPlan: plan, taskId, registry: await commandRegistry });
+      if (!recovery || verification.length || ir.version === "plan-ir.v3" || Array.isArray(plan.taskVerification?.[taskId])) return verification;
+      return plan.verification.map((command, index) => ({
+        id: `${taskId}:verification-${index + 1}`,
+        command: typeof command === "string" ? command : command.command,
+        cwd: ctx.cwd,
+        timeoutMs: 900_000,
+      }));
     };
     const coordinator = createPlanCoordinator({
       ir,
@@ -439,7 +446,11 @@ export function createPlanRunnerDependencies({
 
   async function consumeExecutionFacts(ctx) {
     const facts = takeExecutionFacts();
-    if (!Array.isArray(facts) || facts.length === 0) return null;
+    if (!Array.isArray(facts) || facts.length === 0) {
+      const current = currentProjection(ctx);
+      if (![...current.attempts.values()].some((attempt) => attempt.status === "succeeded")) return null;
+      return (await coordinatorFor(ctx)).recoverSucceededAttempts();
+    }
     const current = currentProjection(ctx);
     const unresolvedFacts = facts.filter((fact) => !resolvedSupersedeStopViolation(current, fact));
     const violation = unresolvedFacts.find((fact) => fact?.type === "execution.protocol-violation");
@@ -676,7 +687,13 @@ export function createPlanRunnerDependencies({
         throw new Error(`Projection version conflict: expected ${input.expectedProjectionVersion}, current ${current.version}`);
       }
       const coordinator = await coordinatorFor(ctx);
-      const result = current.revision && legacyDirectDispatch !== true
+      const recovered = await coordinator.recoverSucceededAttempts();
+      if (recovered.state === "blocked") {
+        await derivedStatus(ctx);
+        return recovered;
+      }
+      const refreshed = currentProjection(ctx);
+      const result = refreshed.revision && legacyDirectDispatch !== true
         ? await coordinator.prepareAuthorizedDispatches()
         : await coordinator.dispatchAuthorized();
       await derivedStatus(ctx);

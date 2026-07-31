@@ -304,48 +304,70 @@ export function createPlanCoordinator({
       if (typeof resultCommit !== "string" || !resultCommit) throw new Error("successful attempt HEAD is unavailable");
     }
     await appendEvent("attempt.settled", { attemptId, outcome, ...(resultCommit ? { resultCommit } : {}) });
-    let validation = null;
-    if (outcome === "succeeded" && typeof validateAttemptResult === "function") {
-      const node = ir.nodes.find((candidate) => candidate.id === attempt.taskId);
-      const attemptLease = {
-        ...attempt.workspace,
-        planId: projection.planId,
-        taskId: attempt.taskId,
-        attemptId,
-        baseCommit: attempt.baseCommit,
-      };
-      validation = await validateAttemptResult({
-        lease: attemptLease,
-        allowedPaths: node.allowedPaths ?? node.files,
-        verification: await verificationForTask(node.id),
-      });
-      if (!validation?.accepted) {
-        await block("attempt_validation_failed", { attemptId, code: validation?.code ?? "invalid_result" });
-      } else {
-        const validatedAttempt = {
-          planId: projection.planId,
-          taskId: attempt.taskId,
-          attemptId,
-          resultCommit: validation.resultCommit,
-          diffSha256: validation.diffSha256,
-          changedPaths: validation.changedPaths,
-          evidence: validation.evidence,
-          workspace: attemptLease,
-          deps: ir.version === "plan-ir.v3" ? node.dependencies.map(({ taskId }) => taskId) : [...node.deps],
-        };
-        validatedAttempt.validationHash = hashValidatedAttempt(validatedAttempt);
-        await appendEvent("attempt.validated", {
-          attemptId,
-          resultCommit: validation.resultCommit,
-          validationHash: validatedAttempt.validationHash,
-          diffSha256: validation.diffSha256,
-          changedPaths: validation.changedPaths,
-          evidence: validation.evidence,
-        });
-        integrationQueue?.enqueue(validatedAttempt);
-      }
-    }
+    const validation = outcome === "succeeded" ? await validateSucceededAttempt(attemptId) : null;
     return { attemptId, outcome, resultCommit: resultCommit ?? null, validation, projectionVersion: projection.version };
+  }
+
+  async function validateSucceededAttempt(attemptId, { recovery = false } = {}) {
+    await refreshProjection();
+    const attempt = projection.attempts.get(attemptId);
+    if (!attempt || attempt.status !== "succeeded" || typeof validateAttemptResult !== "function") return null;
+    const node = ir.nodes.find((candidate) => candidate.id === attempt.taskId);
+    if (!node) throw new Error(`unknown IR task: ${attempt.taskId}`);
+    const attemptLease = {
+      ...attempt.workspace,
+      planId: projection.planId,
+      taskId: attempt.taskId,
+      attemptId,
+      baseCommit: attempt.baseCommit,
+    };
+    const validation = await validateAttemptResult({
+      lease: attemptLease,
+      allowedPaths: node.allowedPaths ?? node.files,
+      verification: await verificationForTask(node.id, { recovery }),
+    });
+    if (!validation?.accepted) {
+      await block("attempt_validation_failed", { attemptId, code: validation?.code ?? "invalid_result" });
+      return validation;
+    }
+    const validatedAttempt = {
+      planId: projection.planId,
+      taskId: attempt.taskId,
+      attemptId,
+      resultCommit: validation.resultCommit,
+      diffSha256: validation.diffSha256,
+      changedPaths: validation.changedPaths,
+      evidence: validation.evidence,
+      workspace: attemptLease,
+      deps: ir.version === "plan-ir.v3" ? node.dependencies.map(({ taskId }) => taskId) : [...node.deps],
+    };
+    validatedAttempt.validationHash = hashValidatedAttempt(validatedAttempt);
+    await appendEvent("attempt.validated", {
+      attemptId,
+      resultCommit: validation.resultCommit,
+      validationHash: validatedAttempt.validationHash,
+      diffSha256: validation.diffSha256,
+      changedPaths: validation.changedPaths,
+      evidence: validation.evidence,
+    });
+    integrationQueue?.enqueue(validatedAttempt);
+    return validation;
+  }
+
+  async function recoverSucceededAttempts() {
+    await refreshProjection();
+    if (["blocked", "cancelled", "validated", "interrupted"].includes(projection.lifecycle)) {
+      return { state: projection.lifecycle, dispatched: [], projectionVersion: projection.version };
+    }
+    const attempts = [...projection.attempts.entries()]
+      .filter(([, attempt]) => attempt.status === "succeeded")
+      .map(([attemptId]) => attemptId);
+    for (const attemptId of attempts) {
+      await validateSucceededAttempt(attemptId, { recovery: true });
+      await refreshProjection();
+      if (projection.lifecycle === "blocked") return { state: "blocked", dispatched: [], projectionVersion: projection.version };
+    }
+    return { state: stateFor(projection), dispatched: [], projectionVersion: projection.version };
   }
 
   async function dispatchAuthorized() {
@@ -805,11 +827,7 @@ export function createPlanCoordinator({
       const outcome = terminalOutcome(runtimeState(artifacts));
       if (outcome) await settleBoundAttempt(outcome, attempt.attemptId);
     }
-    return {
-      state: stateFor(projection),
-      dispatched: [],
-      projectionVersion: projection.version,
-    };
+    return recoverSucceededAttempts();
   }
 
   return {
@@ -818,6 +836,7 @@ export function createPlanCoordinator({
       prepareAuthorizedDispatches,
       bindAuthorizedDispatch: (input) => bindOrCleanupSpawnedAttempt(input, { stopOnPersistenceError: false }),
       recover,
+      recoverSucceededAttempts,
       settleBoundAttempt,
       setIntegrationQueue(queue) {
         if (integrationQueue && integrationQueue !== queue) throw new Error("Integration queue is already configured");
