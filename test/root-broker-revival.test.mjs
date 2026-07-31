@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BROKER_METHODS, parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
+import { BROKER_METHODS, parseBrokerPush, parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
 async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDiagnostic, resume, spawn } = {}) {
@@ -127,6 +127,23 @@ const expectedResume = [{
   id: "plan-runner-1",
   message: "A durable Root broker wake is pending.",
 }];
+
+function queuedLifecyclePush({ dispatchId, runId }) {
+  return parseBrokerPush({
+    schemaVersion: "pi-root-subagent-broker-push.v1",
+    rootSessionId: "root-session-1",
+    callerRunId: "plan-runner-1",
+    type: "execution.completed",
+    data: {
+      dispatchId,
+      runId,
+      asyncDir: `/async/${runId}`,
+      cwd: "/workspace",
+      sessionId: "root-session-1",
+      state: "complete",
+    },
+  });
+}
 
 const supervisorMessage = {
   customType: "subagent_supervisor_request",
@@ -707,4 +724,81 @@ test("replies to a revived executor supervisor request from its active plan-runn
     params: { action: "reply", replyTo: "attention-1", message: "Proceed" },
     context: supervisorContext,
   }]);
+});
+
+test("revives a proved plan-runner for a queued lifecycle push without an explicit follow-up", async () => {
+  const { ownedRun, proof, resumeCalls, server } = await createRevivalFixture();
+  const push = queuedLifecyclePush({ dispatchId: "dispatch-proof-first-1", runId: "executor-proof-first-1" });
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(resumeCalls, []);
+
+  assert.equal(server.deliverOrQueuePush("plan-runner-1", push), false);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.deepEqual(server.callerPushQueues.get("plan-runner-1")?.map(({ push: queued }) => queued), [push]);
+});
+
+test("does not revive a queued lifecycle push until official terminal proof is accepted", async () => {
+  const { ownedRun, proof, resumeCalls, server } = await createRevivalFixture();
+  const push = queuedLifecyclePush({ dispatchId: "dispatch-queue-first-1", runId: "executor-queue-first-1" });
+
+  assert.equal(server.deliverOrQueuePush("plan-runner-1", push), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(resumeCalls, []);
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+});
+
+test("coalesces queued lifecycle pushes into one revival and flushes them FIFO after subscription activation", async (t) => {
+  let resolveResume;
+  const resumeDeferred = new Promise((resolve) => { resolveResume = resolve; });
+  t.after(() => resolveResume(revivedResult));
+  const { ownedRun, proof, resumeCalls, server } = await createRevivalFixture({
+    resume: () => resumeDeferred,
+  });
+  const firstPush = queuedLifecyclePush({ dispatchId: "dispatch-fifo-1", runId: "executor-fifo-1" });
+  const secondPush = queuedLifecyclePush({ dispatchId: "dispatch-fifo-2", runId: "executor-fifo-2" });
+
+  server.acceptTerminalProof(ownedRun, proof);
+  assert.equal(server.deliverOrQueuePush("plan-runner-1", firstPush), false);
+  assert.equal(server.deliverOrQueuePush("plan-runner-1", secondPush), false);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.equal(server.revivePromises.size, 1);
+
+  resolveResume(revivedResult);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(server.callerPushQueues.get("plan-runner-1")?.map(({ push }) => push), [firstPush, secondPush]);
+
+  const writes = [];
+  const socket = {
+    destroyed: false,
+    write(frame) { writes.push(frame); return true; },
+    once() {},
+  };
+  const subscription = parseBrokerRequest({
+    schemaVersion: "pi-root-subagent-broker-request.v1",
+    requestId: "request-subscribe-queued-revival-1",
+    rootSessionId: "root-session-1",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    method: "subscribe",
+    params: {},
+  });
+  const acknowledgement = await server.dispatch(subscription, socket, { deferSubscription: true });
+  assert.equal(acknowledgement.success, true);
+  server.activateSubscription(subscription, socket);
+
+  assert.deepEqual(writes.map((frame) => parseBrokerPush(JSON.parse(frame))), [
+    { ...firstPush, callerRunId: "plan-runner-2" },
+    { ...secondPush, callerRunId: "plan-runner-2" },
+  ]);
+  assert.deepEqual(server.callerPushQueues.get("plan-runner-1"), []);
 });
