@@ -10,7 +10,7 @@ import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
 import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
 import { brokerSocketPath, parseProcessTerminal } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
-import { finalizeHarnessCleanup, processesReferencing, terminateDetachedRunsUnder } from "./support/plan-e2e-process-cleanup.mjs";
+import { finalizeHarnessCleanup, processesReferencing, removeFixtureWithEvidence, terminateDetachedRunsUnder } from "./support/plan-e2e-process-cleanup.mjs";
 
 const execFile = promisify(execFileCallback);
 const root = path.resolve(import.meta.dirname, "..");
@@ -99,7 +99,7 @@ test("same Root flat amendment crash Harness revives the canonical Plan Runner",
       preserve: process.env.PLAN_HARNESS_PRESERVE === "1",
       primaryError,
       cleanupErrors,
-      removeFixture: () => rm(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),
+      removeFixture: () => removeFixtureWithEvidence(fixture, { removeFixture: () => rm(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) }),
       diagnostic: (message) => t.diagnostic(message),
     });
   }

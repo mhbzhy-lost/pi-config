@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, readdir, unlink } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -39,13 +39,25 @@ async function recordedProcess(pid) {
   };
 }
 
-async function waitForGroupExit(pgid, timeoutMs) {
+async function waitForGroupExit(pgid, timeoutMs, isGroupAlive = groupAlive) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!(await groupAlive(pgid))) return true;
+    if (!(await isGroupAlive(pgid))) return true;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  return !(await groupAlive(pgid));
+  return !(await isGroupAlive(pgid));
+}
+
+function matchesRunIdentity(process, status, handle, expectedCommandPath) {
+  const expectedStartedAt = new Date(status.startedAt).getTime();
+  return process &&
+    process.pid === status.pid &&
+    process.pgid === status.pid &&
+    Number.isFinite(process.startedAt) &&
+    Number.isFinite(expectedStartedAt) &&
+    Math.abs(process.startedAt - expectedStartedAt) <= START_TIME_TOLERANCE_MS &&
+    process.command.includes(expectedCommandPath) &&
+    process.command.includes(handle.runId);
 }
 
 export async function processesReferencing(...paths) {
@@ -57,7 +69,13 @@ export async function processesReferencing(...paths) {
   });
 }
 
-export async function terminateDetachedRun(handle, { expectedCommandPath, timeoutMs = 2_000 } = {}) {
+export async function terminateDetachedRun(handle, {
+  expectedCommandPath,
+  timeoutMs = 2_000,
+  inspectProcess = recordedProcess,
+  isGroupAlive = groupAlive,
+  signalProcessGroup = signalGroup,
+} = {}) {
   if (!handle?.runId || !handle?.asyncDir) return;
   let status;
   try {
@@ -70,25 +88,20 @@ export async function terminateDetachedRun(handle, { expectedCommandPath, timeou
     throw new Error("Detached Plan run identity is incomplete or does not match its handle");
   }
 
-  const process = await recordedProcess(status.pid);
+  const process = await inspectProcess(status.pid);
   if (!process) return;
-  const expectedStartedAt = new Date(status.startedAt).getTime();
-  if (
-    process.pid !== status.pid ||
-    process.pgid !== status.pid ||
-    !Number.isFinite(process.startedAt) ||
-    !Number.isFinite(expectedStartedAt) ||
-    Math.abs(process.startedAt - expectedStartedAt) > START_TIME_TOLERANCE_MS ||
-    !process.command.includes(expectedCommandPath) ||
-    !process.command.includes(handle.runId)
-  ) {
+  if (!matchesRunIdentity(process, status, handle, expectedCommandPath)) {
     throw new Error("Detached Plan run process identity does not match status or runtime");
   }
 
-  signalGroup(process.pgid, "SIGTERM");
-  if (await waitForGroupExit(process.pgid, timeoutMs)) return;
-  signalGroup(process.pgid, "SIGKILL");
-  if (!(await waitForGroupExit(process.pgid, timeoutMs))) {
+  signalProcessGroup(process.pgid, "SIGTERM");
+  if (await waitForGroupExit(process.pgid, timeoutMs, isGroupAlive)) return;
+  const leaderAfterTerm = await inspectProcess(status.pid);
+  if (leaderAfterTerm && !matchesRunIdentity(leaderAfterTerm, status, handle, expectedCommandPath)) {
+    throw new Error("Detached Plan run process identity changed before SIGKILL");
+  }
+  signalProcessGroup(process.pgid, "SIGKILL");
+  if (!(await waitForGroupExit(process.pgid, timeoutMs, isGroupAlive))) {
     throw new Error(`Detached Plan process group did not exit: ${process.pgid}`);
   }
 }
@@ -145,8 +158,26 @@ export async function finalizeHarnessCleanup({ fixture, passed, preserve, primar
       errors.push(error);
     }
   }
-  if (!passed || preserve || errors.length > 0) diagnostic?.(`preserved=${fixture}`);
+  if (!passed || preserve || errors.length > 0) {
+    diagnostic?.(`preserved=${errors.find((error) => error?.preservedFixture)?.preservedFixture ?? fixture}`);
+  }
   if (errors.length) {
     throw new AggregateError(primaryError ? [primaryError, ...errors] : errors, "Harness cleanup failed");
+  }
+}
+
+export async function removeFixtureWithEvidence(fixture, { removeFixture, archivePath = `${fixture}.cleanup-evidence.tar` } = {}) {
+  await run("tar", ["-cf", archivePath, "-C", dirname(fixture), basename(fixture)]);
+  try {
+    await removeFixture();
+  } catch (error) {
+    error.preservedFixture = archivePath;
+    throw error;
+  }
+  try {
+    await unlink(archivePath);
+  } catch (error) {
+    error.preservedFixture = archivePath;
+    throw error;
   }
 }
