@@ -58,9 +58,9 @@ export function deterministicExecutorCommand(userText) {
 
 export function decideDeterministicTurn({ messages = [], toolNames = [], issuedDispatchContractKeys = new Set() } = {}) {
   const userText = messages.filter((message) => message?.role === "user").map(textParts).join("\n");
-  const latestUserMessage = [...messages].reverse().find((message) => message?.role === "user");
-  const latestUserText = textParts(latestUserMessage);
-  const latestPrivateWake = latestUserText.split("\n").includes("A durable Root broker wake is pending.");
+  const latestPrivateWakeIndex = messages.findLastIndex((message) => message?.role === "user"
+    && textParts(message).split("\n").includes("A durable Root broker wake is pending."));
+  const latestPrivateWake = latestPrivateWakeIndex >= 0;
   const toolInventory = toolNames.join(",");
 
   const toolResults = messages.filter((message) => message?.role === "toolResult");
@@ -187,6 +187,9 @@ export function decideDeterministicTurn({ messages = [], toolNames = [], issuedD
       && ["pi-root-subagent-lifecycle-v1", "subagent_supervisor_request"].includes(message.customType))
       || (message?.role === "user" && textParts(message) === lifecycleUpdateMarker));
     const latestStatusIndex = messages.findLastIndex((message) => message?.role === "toolResult" && message.toolName === "plan_status");
+    if (latestPrivateWakeIndex > latestStatusIndex && latestStatusIndex >= 0 && toolNames.includes("plan_status")) {
+      return { tool: { name: "plan_status", arguments: {} } };
+    }
     if (latestPushIndex > latestStatusIndex && toolNames.includes("plan_status")) {
       return { tool: { name: "plan_status", arguments: {} } };
     }
