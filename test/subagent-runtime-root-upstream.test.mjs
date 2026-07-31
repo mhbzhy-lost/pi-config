@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
@@ -15,6 +17,49 @@ const jiti = createJiti(import.meta.url, {
   },
 });
 const runtimeModule = await jiti.import("../pi/extensions/subagent-runtime.ts");
+
+const PLAN_RUNNER_TOOLS = [
+  "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
+  "subagent", "plan_executor_supervisor", "read", "grep",
+];
+
+async function createRecoveryFixture(t, { agent = "plan-runner", sourceRunId, asyncDir } = {}) {
+  const root = await mkdtemp(join(tmpdir(), "root-upstream-recovery-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const asyncDirRoot = join(root, "async");
+  const runId = "plan-runner-recovery-123";
+  const runDir = asyncDir ?? join(asyncDirRoot, runId);
+  const descriptorPath = join(runDir, "recovery-descriptor.json");
+  await mkdir(runDir, { recursive: true });
+  const descriptor = {
+    version: 1,
+    sourceRunId: sourceRunId ?? runId,
+    agent,
+    cwd: join(root, "project"),
+    systemPromptMode: "append",
+    outputMode: "inline",
+    inheritProjectContext: true,
+    inheritSkills: true,
+    share: true,
+    maxSubagentDepth: 2,
+    tools: ["read"],
+    extensions: ["sentinel-extension"],
+    skills: ["test-driven-development", "writing-good-tests"],
+    artifactConfig: { enabled: true },
+    sentinel: "must-survive-recovery-tool-promotion",
+    sentinelNested: { retained: true },
+  };
+  await writeFile(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`, { mode: 0o600 });
+  return { asyncDirRoot, runId, runDir, descriptorPath, descriptor };
+}
+
+function createUpstream(asyncDirRoot) {
+  return runtimeModule.createRootBrokerUpstream({
+    rpc: Object.fromEntries(["ping", "spawn", "status", "resume", "steer", "interrupt", "stop", "dispose"].map((method) => [method, () => ({ method })])),
+    executeSupervisor: () => undefined,
+    asyncDirRoot,
+  });
+}
 
 test("Root broker upstream exposes only frozen RPC forwarding methods including private resume", () => {
   const { createRootBrokerUpstream } = runtimeModule;
@@ -65,4 +110,59 @@ test("Root broker upstream exposes only frozen RPC forwarding methods including 
   assert.strictEqual(supervisorCalls[0].params, supervisorParams);
   assert.strictEqual(supervisorCalls[0].context, supervisorContext);
   assert.strictEqual(supervisorResult, supervisorCalls[0].result);
+});
+
+test("Root broker upstream exposes the private plan-runner recovery preparation method", () => {
+  const upstream = createUpstream("/tmp/root-async");
+  assert.equal(Object.isFrozen(upstream), true);
+  assert.equal(typeof upstream.preparePlanRunnerRecovery, "function");
+});
+
+test("Root broker upstream promotes a trusted plan-runner recovery descriptor to the exact Plan Runner tools", async (t) => {
+  const fixture = await createRecoveryFixture(t);
+  const upstream = createUpstream(fixture.asyncDirRoot);
+  await (upstream.preparePlanRunnerRecovery?.({ role: "plan-runner", runId: fixture.runId, asyncDir: fixture.runDir }) ?? Promise.resolve());
+
+  const recovered = JSON.parse(await readFile(fixture.descriptorPath, "utf8"));
+  assert.deepEqual(recovered, { ...fixture.descriptor, tools: PLAN_RUNNER_TOOLS });
+  assert.equal((await stat(fixture.descriptorPath)).mode & 0o777, 0o600);
+});
+
+test("Root broker upstream rejects recovery descriptors outside its configured async root without changing bytes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "root-upstream-outside-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const fixture = await createRecoveryFixture(t, { asyncDir: join(root, "sibling", "plan-runner-recovery-123") });
+  const before = await readFile(fixture.descriptorPath);
+  const upstream = createUpstream(join(root, "async"));
+  await assert.rejects(upstream.preparePlanRunnerRecovery?.({ role: "plan-runner", runId: fixture.runId, asyncDir: fixture.runDir }) ?? Promise.resolve());
+  assert.deepEqual(await readFile(fixture.descriptorPath), before);
+});
+
+test("Root broker upstream rejects a symlinked recovery descriptor without changing its target bytes", async (t) => {
+  const fixture = await createRecoveryFixture(t);
+  const targetPath = join(fixture.runDir, "recovery-descriptor-target.json");
+  const before = await readFile(fixture.descriptorPath);
+  await writeFile(targetPath, before, { mode: 0o600 });
+  await rm(fixture.descriptorPath);
+  await symlink(targetPath, fixture.descriptorPath);
+  const upstream = createUpstream(fixture.asyncDirRoot);
+  await assert.rejects(upstream.preparePlanRunnerRecovery?.({ role: "plan-runner", runId: fixture.runId, asyncDir: fixture.runDir }) ?? Promise.resolve());
+  assert.equal((await lstat(fixture.descriptorPath)).isSymbolicLink(), true);
+  assert.deepEqual(await readFile(targetPath), before);
+});
+
+test("Root broker upstream rejects a recovery descriptor with a mismatched source run id without changing bytes", async (t) => {
+  const fixture = await createRecoveryFixture(t, { sourceRunId: "other-run" });
+  const before = await readFile(fixture.descriptorPath);
+  const upstream = createUpstream(fixture.asyncDirRoot);
+  await assert.rejects(upstream.preparePlanRunnerRecovery?.({ role: "plan-runner", runId: fixture.runId, asyncDir: fixture.runDir }) ?? Promise.resolve());
+  assert.deepEqual(await readFile(fixture.descriptorPath), before);
+});
+
+test("Root broker upstream rejects a recovery descriptor for a non-plan-runner agent without changing bytes", async (t) => {
+  const fixture = await createRecoveryFixture(t, { agent: "executor" });
+  const before = await readFile(fixture.descriptorPath);
+  const upstream = createUpstream(fixture.asyncDirRoot);
+  await assert.rejects(upstream.preparePlanRunnerRecovery?.({ role: "plan-runner", runId: fixture.runId, asyncDir: fixture.runDir }) ?? Promise.resolve());
+  assert.deepEqual(await readFile(fixture.descriptorPath), before);
 });
