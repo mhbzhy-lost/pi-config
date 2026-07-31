@@ -71,6 +71,7 @@ export class RootBrokerServer {
   logicalCallers = new Map<string, LogicalCaller>();
   callerAliases = new Map<string, string>();
   callerFollowUps = new Map<string, FollowUpIntent[]>();
+  callerWakes = new Map<string, FollowUpIntent>();
   callerPushQueues = new Map<string, QueuedCallerPush[]>();
   principals = new Map<string, Principal>();
   runOwners = new Map<string, string>();
@@ -220,6 +221,7 @@ export class RootBrokerServer {
     try { parseProcessTerminal(terminal); } catch (error) { throw new Error(`invalid official terminal: ${error instanceof Error ? error.message : String(error)}`); }
     if (terminal.state !== "observed") throw new Error(`official terminal is non-observed (${String(terminal.state)})`);
     this.terminalProofs.set(run.runId, value);
+    this.callerWakes.delete(run.runId);
     this.recordDiagnostic("proof.accepted", this.callerAliases.get(run.runId) ?? run.runId);
     const logicalCallerRunId = this.callerAliases.get(run.runId);
     if (run.role === "plan-runner" && logicalCallerRunId) {
@@ -271,8 +273,8 @@ export class RootBrokerServer {
     const followUps = this.callerFollowUps.get(logicalRunId);
     const queue = this.callerPushQueues.get(logicalRunId);
     if (!caller || caller.role !== "plan-runner" || (!followUps?.length && !queue?.length)) return;
-    const wakeIds = (followUps ?? []).map((followUp) => followUp.wakeId);
-    const wakeId = wakeIds[0] ?? "queued-push";
+    const callerWake = followUps?.[0];
+    const wakeId = callerWake?.wakeId ?? "queued-push";
     this.recordDiagnostic("revival.started", logicalRunId, wakeId);
     const preparePlanRunnerRecovery = this.upstream.preparePlanRunnerRecovery;
     if (typeof preparePlanRunnerRecovery === "function") {
@@ -299,8 +301,11 @@ export class RootBrokerServer {
     await this.grantRevivedCaller(logicalRunId, revivedRunId);
     this.recordDiagnostic("grant.issued", logicalRunId, wakeId, { revivedRunId });
     this.reviveResults.set(logicalRunId, result);
-    const currentFollowUps = this.callerFollowUps.get(logicalRunId);
-    if (currentFollowUps) this.callerFollowUps.set(logicalRunId, currentFollowUps.filter((followUp) => !wakeIds.includes(followUp.wakeId)));
+    if (callerWake) {
+      this.callerWakes.set(revivedRunId, callerWake);
+      const currentFollowUps = this.callerFollowUps.get(logicalRunId);
+      if (currentFollowUps?.[0]?.wakeId === callerWake.wakeId) currentFollowUps.shift();
+    }
     this.recordDiagnostic("revival.succeeded", logicalRunId, wakeId, { revivedRunId });
   }
 
@@ -600,7 +605,8 @@ export class RootBrokerServer {
   enqueueCallerFollowUp(logicalCallerRunId: string, intent: FollowUpIntent) {
     const followUps = this.callerFollowUps.get(logicalCallerRunId);
     if (!followUps) throw new Error("Root subagent broker caller is not granted");
-    if (!followUps.some((followUp) => followUp.wakeId === intent.wakeId)) followUps.push(intent);
+    const activeWake = this.callerWakes.get(this.logicalCallers.get(logicalCallerRunId)?.activeRunId ?? "");
+    if (!followUps.some((followUp) => followUp.wakeId === intent.wakeId) && activeWake?.wakeId !== intent.wakeId) followUps.push(intent);
     this.recordDiagnostic("followup.accepted", logicalCallerRunId, intent.wakeId);
     void this.reviveCallerAfterProof(logicalCallerRunId).catch(() => undefined);
     return { accepted: true, wakeId: intent.wakeId };
@@ -706,7 +712,9 @@ export class RootBrokerServer {
       }
       if (request.method === "ping") {
         const data = await this.upstream.ping();
-        return createBrokerSuccessResponse({ ...request, data: { ...data, methods: [...new Set([...(Array.isArray(data?.methods) ? data.methods : []), "spawn.lookup"])], session: { ...(data?.session ?? {}), cwd: caller.cwd }, planRuntime: { originRoot: caller.originRoot, stateRoot: caller.stateRoot } } });
+        const { callerWake: _upstreamCallerWake, ...upstreamData } = data && typeof data === "object" ? data : {};
+        const callerWake = principal.role === "plan-runner" ? this.callerWakes.get(request.callerRunId) : undefined;
+        return createBrokerSuccessResponse({ ...request, data: { ...upstreamData, methods: [...new Set([...(Array.isArray(data?.methods) ? data.methods : []), "spawn.lookup"])], session: { ...(data?.session ?? {}), cwd: caller.cwd }, planRuntime: { originRoot: caller.originRoot, stateRoot: caller.stateRoot }, ...(callerWake ? { callerWake } : {}) } });
       }
       if (request.method === "spawn") return await this.spawn(request, caller, logicalCallerRunId);
       if (request.method === "caller.followup") return this.registerCallerFollowUp(request, logicalCallerRunId);
@@ -1189,7 +1197,7 @@ export class RootBrokerServer {
       this.unsubscribeStarted?.(); this.unsubscribeStarted = undefined;
       this.unsubscribeComplete?.(); this.unsubscribeComplete = undefined;
       this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
-      this.callers.clear(); this.logicalCallers.clear(); this.callerAliases.clear(); this.callerFollowUps.clear(); this.callerPushQueues.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
+      this.callers.clear(); this.logicalCallers.clear(); this.callerAliases.clear(); this.callerFollowUps.clear(); this.callerWakes.clear(); this.callerPushQueues.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
       this.grantPaths.clear(); this.executorGrants.clear(); this.callerGrants.clear(); this.spawnLedger.clear(); this.supervisorRequests.clear(); this.pendingSupervisorIngress.clear(); this.pendingSupervisorRequestIds.clear(); this.supervisorIngressRevokedRuns.clear();
       this.ownedRuns.clear(); this.terminalProofs.clear(); this.reviveResults.clear(); this.revivePromises.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
       this.transportSockets.clear(); this.closingSockets.clear(); this.endedSockets.clear(); this.cleanedGrantPaths.clear(); this.server = undefined;

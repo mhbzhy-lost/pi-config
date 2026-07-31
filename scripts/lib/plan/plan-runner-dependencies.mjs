@@ -307,7 +307,43 @@ export function createPlanRunnerDependencies({
     return () => executionBackend.recoverBinding(binding);
   }
 
-  async function recoverExecutionState({ ctx } = {}) {
+  function attentionWakeRequestId(wakeId) {
+    if (typeof wakeId !== "string") throw new Error("Attention wake ID is invalid.");
+    const match = /^attention-reply-([A-Za-z0-9][A-Za-z0-9._-]*)$/.exec(wakeId);
+    if (!match) throw new Error("Attention wake ID is invalid.");
+    return match[1];
+  }
+
+  function attentionMessage(command) {
+    return {
+      customType: "pi-plan-attention-reply-v1",
+      content: command.message,
+      details: {
+        planId: command.planId,
+        taskId: command.taskId,
+        attemptId: command.attemptId,
+        runId: command.runId,
+        requestId: command.requestId,
+        expectedProjectionVersion: command.expectedProjectionVersion,
+      },
+    };
+  }
+
+  async function attentionDeliveryMessage({ control, current, ctx, command }) {
+    if (matchingAttentionResolution(ctx, command)) {
+      await control.writeAttentionAck({ ...command, result: "delivered", deliveredAt: now() });
+      announcedAttentionReplies.delete(command.requestId);
+      return;
+    }
+    const attempt = current.attempts.get(command.attemptId);
+    if (command.planId !== current.planId || !attempt || attempt.status !== "waiting-attention"
+      || attempt.attention?.requestId !== command.requestId || attempt.runId !== command.runId
+      || command.expectedProjectionVersion !== attempt.attention.projectionVersion) return;
+    return attentionMessage(command);
+  }
+
+  async function recoverExecutionState({ ctx, wakeId } = {}) {
+    const requestId = wakeId === undefined ? undefined : attentionWakeRequestId(wakeId);
     const projection = currentProjection(ctx);
     const operations = [...projection.attempts]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -317,7 +353,17 @@ export function createPlanRunnerDependencies({
     const current = currentProjection(ctx);
     if (!current.planId) return;
     const { stateRoot } = await rootsFor(ctx, current.planId);
-    await processAttentionReplies({ binding: { planId: current.planId, stateRoot }, ctx });
+    if (requestId === undefined) {
+      await processAttentionReplies({ binding: { planId: current.planId, stateRoot }, ctx });
+      return;
+    }
+    const control = controlFor({ stateRoot });
+    const command = (await control.readAttentionReplies(current.planId)).find((candidate) => candidate.requestId === requestId);
+    if (!command) return;
+    const message = await attentionDeliveryMessage({ control, current, ctx, command });
+    if (!message) return;
+    announcedAttentionReplies.add(command.requestId);
+    return message;
   }
 
   async function approvedPlan(current) {
@@ -492,30 +538,11 @@ export function createPlanRunnerDependencies({
     const commands = await control.readAttentionReplies(binding.planId);
     const ready = [];
     for (const command of commands) {
-      if (matchingAttentionResolution(ctx, command)) {
-        await control.writeAttentionAck({ ...command, result: "delivered", deliveredAt: now() });
-        announcedAttentionReplies.delete(command.requestId);
-        continue;
-      }
-      const attempt = current.attempts.get(command.attemptId);
-      if (command.planId !== binding.planId || !attempt || attempt.status !== "waiting-attention"
-        || attempt.attention?.requestId !== command.requestId
-        || attempt.runId !== command.runId) continue;
-      if (command.expectedProjectionVersion !== attempt.attention.projectionVersion) continue;
+      const message = await attentionDeliveryMessage({ control, current, ctx, command });
+      if (!message) continue;
       if (announcedAttentionReplies.has(command.requestId)) continue;
       await pi?.sendMessage?.(
-        {
-          customType: "pi-plan-attention-reply-v1",
-          content: command.message,
-          details: {
-            planId: command.planId,
-            taskId: command.taskId,
-            attemptId: command.attemptId,
-            runId: command.runId,
-            requestId: command.requestId,
-            expectedProjectionVersion: command.expectedProjectionVersion,
-          },
-        },
+        message,
         { triggerTurn: true, deliverAs: "followUp" },
       );
       announcedAttentionReplies.add(command.requestId);

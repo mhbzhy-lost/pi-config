@@ -27,7 +27,8 @@ export type PlanRunnerDependenciesFactoryInput = Parameters<typeof createPlanRun
 export type PlanRunnerDependenciesFactory = (input: PlanRunnerDependenciesFactoryInput) => ReturnType<typeof createPlanRunnerDependencies>;
 
 function runtimeRoots(data: unknown) {
-  const runtime = (data as { planRuntime?: unknown })?.planRuntime;
+  const response = data as { planRuntime?: unknown; callerWake?: unknown };
+  const runtime = response?.planRuntime;
   if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)
     || Object.keys(runtime).length !== 2 || !Object.hasOwn(runtime, "originRoot") || !Object.hasOwn(runtime, "stateRoot")) {
     throw new Error("Root broker plan runtime is invalid");
@@ -37,7 +38,21 @@ function runtimeRoots(data: unknown) {
     || typeof stateRoot !== "string" || !stateRoot || !path.isAbsolute(stateRoot)) {
     throw new Error("Root broker plan runtime is invalid");
   }
-  return { originRoot, stateRoot };
+  if (!Object.hasOwn(response, "callerWake")) return { originRoot, stateRoot };
+  const callerWake = response.callerWake;
+  if (!callerWake || typeof callerWake !== "object" || Array.isArray(callerWake)
+    || Object.keys(callerWake).length !== 2 || !Object.hasOwn(callerWake, "wakeId") || !Object.hasOwn(callerWake, "reason")) {
+    throw new Error("Root broker caller wake is invalid");
+  }
+  const { wakeId, reason } = callerWake as Record<string, unknown>;
+  if (typeof wakeId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(wakeId)
+    || !["plan-opened", "attention-reply"].includes(reason as string)) {
+    throw new Error("Root broker caller wake is invalid");
+  }
+  if (reason === "attention-reply" && !/^attention-reply-[A-Za-z0-9][A-Za-z0-9._-]*$/.test(wakeId)) {
+    throw new Error("Root broker caller wake is invalid");
+  }
+  return { originRoot, stateRoot, callerWake: { wakeId, reason } };
 }
 
 export async function bootstrapRuntimeRoots(rpc: { ping(): Promise<unknown> }, { sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)), clock = () => Date.now(), timeoutMs = GRANT_TIMEOUT_MS, retryMs = GRANT_RETRY_MS } = {}) {
@@ -161,8 +176,12 @@ export async function installPlanRunner(
         await assertExecutionRuntime!();
       },
       async prepareExecutionLifecycle({ ctx }: { ctx: unknown }) {
-        await deps.recoverExecutionState({ ctx });
+        const recovered = await deps.recoverExecutionState({
+          ctx,
+          wakeId: "callerWake" in roots && roots.callerWake.reason === "attention-reply" ? roots.callerWake.wakeId : undefined,
+        });
         await rootOwned.startLifecycleSubscription(ctx);
+        return recovered;
       },
       disposeExecutionBackend() {
         executionBackend?.dispose();
