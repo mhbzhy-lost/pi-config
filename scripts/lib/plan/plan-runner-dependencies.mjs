@@ -306,15 +306,7 @@ export function createPlanRunnerDependencies({
   }
 
   async function recoverExecutionState({ ctx } = {}) {
-    let projection;
-    try {
-      projection = currentProjection(ctx);
-    } catch (error) {
-      if (error instanceof Error && error.message === "invalid sessionFile") {
-        throw new Error("Persisted execution binding recovery data is incomplete.");
-      }
-      throw error;
-    }
+    const projection = currentProjection(ctx);
     const operations = [...projection.attempts]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([attemptId, attempt]) => executionRecoveryOperation(attemptId, attempt))

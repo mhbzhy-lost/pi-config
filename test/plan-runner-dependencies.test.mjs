@@ -297,7 +297,7 @@ test("fails closed when a durable active binding lacks its session file", async 
     created(binding),
     { schemaVersion: "pi-plan-event.v1", eventId: "allocated", planId: repo.planId, occurredAt: "2026-07-30T00:01:01.000Z", type: "attempt.workspace-allocated", data: { attemptId: "attempt-1", taskId: "task-1", baseCommit: repo.baseCommit, workspace } },
     { schemaVersion: "pi-plan-event.v1", eventId: "requested", planId: repo.planId, occurredAt: "2026-07-30T00:01:02.000Z", type: "attempt.dispatch-requested", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", baseCommit: repo.baseCommit, workspace, tool: { agent: "executor", task: "Recover active binding.", cwd: workspace.path, output: "/results/attempt-1.json", timeoutMs: 900000, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: "3".repeat(64) } },
-    { schemaVersion: "pi-plan-event.v1", eventId: "bound", planId: repo.planId, occurredAt: "2026-07-30T00:01:03.000Z", type: "attempt.bound", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", runId: "run-1", asyncDir: "/async/run-1" } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "bound", planId: repo.planId, occurredAt: "2026-07-30T00:01:03.000Z", type: "attempt.bound", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", runId: "run-1", asyncDir: "/async/run-1", sessionFile: null } },
   ];
   const calls = [];
   const deps = runnerDependencies(repo, {
