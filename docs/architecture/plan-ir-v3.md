@@ -103,4 +103,4 @@ accepted/integrated Task 的 `full` hash 不能改变或删除；pending Task �
 | `pi-plan.v2` | 继续读取并编译为 `plan-ir.v2`，保留旧 hash/事件语义。 |
 | `pi-plan.v3` | 编译为完整 `plan-ir.v3`，进入 revision store，并允许受控 amendment。 |
 
-新 launch 可具有 revision/event identity；但 legacy session 不会被重新解释为 v3 合同。legacy `plan.created` 仍可 replay；v3 `plan.created/plan.amended` 必须携带 revision identity。当前运行时仍是 `scripts/lib/plan/plan-host-runtime.mjs`；Host 退役和 flat runtime 不属于本合同已经完成的范围。
+新 launch 可具有 revision/event identity；但 legacy session 不会被重新解释为 v3 合同。legacy `plan.created` 仍可 replay；v3 `plan.created/plan.amended` 必须携带 revision identity。当前运行时由同一 Root 下的 Plan Runner generations 与 Executors 组成，Root broker 是唯一 lifecycle/RPC owner；Standalone Host、re-root、fanout-child 和跨 Root attach 均已退役。event-to-pointer amendment recovery 只在原 Root 的 canonical Plan Runner session内进行。

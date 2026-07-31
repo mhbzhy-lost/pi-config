@@ -76,3 +76,12 @@ amendment 依次经过三项不可跳过的 checkpoint：
 - **推荐**：使用 Root broker 管理同一 Root 内 Plan Runner 与 Executor 的派发、所有权和有序关闭。
 - **不选原因**：其他 Root 接管运行会破坏 session-local handle 与官方终态证明的归属。
 - **选错代价**：恢复或关闭时可能重复控制同一 Attempt，审计事实不再可靠。
+
+## Final Runtime Status
+
+上文“仍存风险”和“运行时迁移”保留 2026-07-29 审计时点的历史事实；`Superseding Decision` 及本节描述当前状态。生产路径不再包含 `plan-host-runtime.mjs` 或 shared `subagents-rpc-client.mjs`，parallel Host Harness 已由双 Plan flat Root Harness supersede。
+
+- **[Harness 收敛]**：并行主路径与 amendment 崩溃恢复均只验证 Root-owned flat runtime。
+- **推荐**：双 Plan Harness覆盖常规并行/Attention/关闭，独立 amendment Harness只覆盖 event-to-pointer crash，因为领域矩阵已由单元测试验证。
+- **不选原因**：保留旧 Host Harness会制造第二套生命周期权威；把全部断言塞入一个真实场景会放大时序噪声。
+- **选错代价**：runtime升级或崩溃恢复时暴露，修复代价中。
