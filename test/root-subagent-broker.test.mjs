@@ -2020,6 +2020,130 @@ test("Supervisor owner binding replays interleaved ingress only to each deferred
   assert.deepEqual([...broker.supervisorRequests.values()].filter(({ ownerRunId }) => ownerRunId === "owner-race-plan-b").map(({ requestId, executorRunId }) => ({ requestId, executorRunId })), [{ requestId: "owner-race-B1", executorRunId: "owner-race-executor-b" }]);
 });
 
+test("rejects a second Plan owner for one Executor runId without disturbing the first owner", async (t) => {
+  const stops = [];
+  const controls = [];
+  const upstream = {
+    ...fakeUpstream(),
+    async spawn() { return { details: { runId: "owner-contention-executor", asyncDir: "/async/owner-contention" } }; },
+    async stop(params) { stops.push(params); return { stopped: true }; },
+    async status(params) { controls.push(params); return { state: "running" }; },
+  };
+  const broker = new RootBrokerServer({ rootSessionId, upstream });
+  await broker.start();
+  t.after(() => broker.closeRootSession());
+  const grantA = await broker.grantCaller({ callerRunId: "owner-contention-plan-a", planId: "owner-contention-a", cwd: "/repo-a", originRoot: "/repo-a", stateRoot: "/state-a", role: "plan-runner" });
+  const grantB = await broker.grantCaller({ callerRunId: "owner-contention-plan-b", planId: "owner-contention-b", cwd: "/repo-b", originRoot: "/repo-b", stateRoot: "/state-b", role: "plan-runner" });
+
+  const first = await broker.dispatch(request({ callerRunId: "owner-contention-plan-a", callerToken: grantA.callerToken, method: "spawn", requestId: "owner-contention-spawn-a", params: { agent: "executor", task: "first owner", spawnKey: "owner-contention-a" } }), {});
+  assert.equal(first.success, true);
+  const firstContext = { nativeChannel: "owner-contention-a" };
+  await broker.routeSupervisorRequest(supervisorIngress({ id: "owner-contention-request", runId: "owner-contention-executor", content: "only Plan A may reply" }), firstContext);
+
+  const second = await broker.dispatch(request({ callerRunId: "owner-contention-plan-b", callerToken: grantB.callerToken, method: "spawn", requestId: "owner-contention-spawn-b", params: { agent: "executor", task: "second owner", spawnKey: "owner-contention-b" } }), {});
+  const bControl = await broker.dispatch(request({ callerRunId: "owner-contention-plan-b", callerToken: grantB.callerToken, method: "status", requestId: "owner-contention-control-b", params: { runId: "owner-contention-executor" } }), {});
+  const bReply = await broker.dispatch(request({ callerRunId: "owner-contention-plan-b", callerToken: grantB.callerToken, method: "supervisor.reply", requestId: "owner-contention-reply-b", params: { replyTo: "owner-contention-request", message: "must be denied" } }), {});
+
+  assert.deepEqual({
+    secondSuccess: second.success,
+    secondCode: second.error?.code,
+    runOwner: broker.runOwners.get("owner-contention-executor"),
+    aOwns: broker.callers.get("owner-contention-plan-a")?.ownedRunIds.has("owner-contention-executor"),
+    bOwns: broker.callers.get("owner-contention-plan-b")?.ownedRunIds.has("owner-contention-executor"),
+    requestOwner: broker.supervisorRequests.get("owner-contention-request")?.ownerRunId,
+    requestContext: broker.supervisorRequests.get("owner-contention-request")?.context,
+    controlCode: bControl.error?.code,
+    replyCode: bReply.error?.code,
+    controls,
+    stops,
+  }, {
+    secondSuccess: false,
+    secondCode: "spawn_owner_conflict",
+    runOwner: "owner-contention-plan-a",
+    aOwns: true,
+    bOwns: false,
+    requestOwner: "owner-contention-plan-a",
+    requestContext: firstContext,
+    controlCode: "run_not_owned",
+    replyCode: "supervisor_not_owned",
+    controls: [],
+    stops: [],
+  });
+});
+
+test("prevalidates the full Supervisor promotion batch before mutating or delivering", async (t) => {
+  const grantGate = deferred();
+  const stops = [];
+  const callerRunId = "p".repeat(160);
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: {
+      ...fakeUpstream(),
+      async spawn() { return { details: { runId: "promotion-atomic-executor", asyncDir: "/async/promotion-atomic" } }; },
+      async stop(params) { stops.push(params); return { stopped: true }; },
+    },
+    writeGrant: async (grant) => {
+      if (grant.role === "executor") await grantGate.promise;
+      return await writeBrokerGrant(grant);
+    },
+  });
+  await broker.start();
+  let spawnAttempt;
+  let client;
+  let subscription;
+  let closed;
+  t.after(async () => {
+    grantGate.release();
+    await Promise.allSettled([spawnAttempt]);
+    subscription?.dispose();
+    client?.dispose();
+    await closed;
+    await broker.closeRootSession();
+  });
+  const owner = await broker.grantCaller({ callerRunId, planId: "promotion-atomic", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  client = createRootBrokerClient({ rootSessionId, callerRunId });
+  const pushed = [];
+  subscription = await client.subscribe((push) => pushed.push(push));
+  closed = subscription.closed.catch((error) => error);
+  spawnAttempt = broker.dispatch(request({ callerRunId, callerToken: owner.callerToken, method: "spawn", requestId: "promotion-atomic-spawn", params: { agent: "executor", task: "promotion atomicity", spawnKey: "promotion-atomic" } }), {});
+  await waitForCondition(() => broker.principals.has("promotion-atomic-executor"), "Executor principal before promotion validation");
+  const firstContext = { nativeChannel: "promotion-small" };
+  const secondContext = { nativeChannel: "promotion-large" };
+  const firstIngress = await broker.routeSupervisorRequest(supervisorIngress({ id: "promotion-small", runId: "promotion-atomic-executor", content: "small request" }), firstContext);
+  const secondIngress = await broker.routeSupervisorRequest(supervisorIngress({ id: "promotion-large", runId: "promotion-atomic-executor", content: "x".repeat(65_222) }), secondContext);
+  assert.deepEqual({ firstIngress, secondIngress, queued: broker.pendingSupervisorIngress.get("promotion-atomic-executor")?.length }, { firstIngress: undefined, secondIngress: undefined, queued: 2 });
+
+  grantGate.release();
+  const spawned = await spawnAttempt;
+  await waitForCondition(
+    () => broker.supervisorRequests.size === 0 || pushed.some((push) => push.type === "supervisor.request"),
+    "promotion failure delivery state",
+  );
+  const retainedContexts = [
+    ...[...broker.pendingSupervisorIngress.values()].flat(),
+    ...broker.supervisorRequests.values(),
+  ].filter((entry) => entry.context === firstContext || entry.context === secondContext);
+  assert.deepEqual({
+    spawnSuccess: spawned.success,
+    spawnCode: spawned.error?.code,
+    supervisorPushes: pushed.filter((push) => push.type === "supervisor.request").length,
+    pendingExecutors: broker.pendingSupervisorIngress.size,
+    reservations: broker.pendingSupervisorRequestIds.size,
+    requests: broker.supervisorRequests.size,
+    retainedContexts: retainedContexts.length,
+    stops,
+  }, {
+    spawnSuccess: false,
+    spawnCode: "spawn_cleanup",
+    supervisorPushes: 0,
+    pendingExecutors: 0,
+    reservations: 0,
+    requests: 0,
+    retainedContexts: 0,
+    stops: [{ runId: "promotion-atomic-executor", dir: "/async/promotion-atomic" }],
+  });
+});
+
 test("Supervisor grant failure releases pending ingress and permits requestId reuse by a later Executor", async (t) => {
   const grantGate = deferred();
   const stops = [];
