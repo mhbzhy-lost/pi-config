@@ -71,7 +71,7 @@ function attentionMarker(body, requestId) {
   assert.equal(marker.schemaVersion, "pi-plan-flat-attention-marker.v1");
   return marker;
 }
-function rootSessionFile(sessions, sessionId) { return path.join(sessions, `${path.basename(sessionId)}.jsonl`); }
+function rootSessionFile(sessions, sessionId) { return path.join(sessions, path.basename(sessionId)); }
 
 class RootRpc {
   constructor(child) {
