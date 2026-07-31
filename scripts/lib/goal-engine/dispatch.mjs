@@ -19,6 +19,11 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
 
   const relevantFiles = buildRelevantFiles(projection, taskId);
 
+  const workflowMode = task.workflow || "tdd";
+  const workflow = workflowMode === "docs-only"
+    ? { mode: workflowMode, reason: "Documentation-only task produces a review or report artifact." }
+    : { mode: workflowMode };
+
   const input = {
     version: "dispatch-ir.v1",
     taskId: `${projection.goalId}.${taskId}`,
@@ -26,7 +31,7 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
     agent: "executor",
     risk: "normal",
     objective: task.description,
-    workflow: { mode: task.workflow || "tdd" },
+    workflow,
     requirements: [
       task.description,
       ...task.acceptance.criteria,

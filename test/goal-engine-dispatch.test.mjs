@@ -123,6 +123,16 @@ test("compileTaskContract produces valid dispatch-ir.v1", () => {
   assert.ok(contract.hash);
 });
 
+test("compileTaskContract adds a reason for docs-only workflow", () => {
+  const p = buildProjection();
+  p.tasks.get("t1").workflow = "docs-only";
+
+  const contract = compileTaskContract(p, "t1", "/workspace/project");
+
+  assert.equal(contract.workflow.mode, "docs-only");
+  assert.match(contract.workflow.reason, /documentation|review|report/i);
+});
+
 test("compileTaskContract includes goal context as knownFacts", () => {
   const p = buildProjection();
   const contract = compileTaskContract(p, "t1", "/workspace/project");

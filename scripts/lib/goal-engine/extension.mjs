@@ -189,12 +189,22 @@ export function createGoalEngineExtension(pi) {
         baseCommit,
       });
 
-      const contract = compileTaskContract(projection, params.task_id, lease.path, {
-        timeoutMs: params.timeout_ms || 30 * 60 * 1000,
-      });
+      let contract;
+      try {
+        contract = compileTaskContract(projection, params.task_id, lease.path, {
+          timeoutMs: params.timeout_ms || 30 * 60 * 1000,
+        });
 
-      const event = makeEvent("task.dispatched", { taskId: params.task_id, contractHash: contract.hash }, goalId);
-      appendEvent(root, event, projection.version);
+        const event = makeEvent("task.dispatched", { taskId: params.task_id, contractHash: contract.hash }, goalId);
+        appendEvent(root, event, projection.version);
+      } catch (err) {
+        try {
+          releaseExecutorWorkspace(lease, { disposition: "failed-cleanup" });
+        } catch (cleanupErr) {
+          throw new Error(`${err.message}; workspace cleanup also failed: ${cleanupErr.message}`, { cause: err });
+        }
+        throw err;
+      }
 
       activeLeases.set(params.task_id, lease);
 

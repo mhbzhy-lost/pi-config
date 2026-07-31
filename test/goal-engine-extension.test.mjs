@@ -121,6 +121,51 @@ test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", asy
   assert.equal(result.contract.execution.cwd, result.workspace.path);
 });
 
+test("goal_dispatch supports docs-only tasks with a workflow reason", async () => {
+  const cwd = tmpCwd();
+  initGitRepo(cwd);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  const init = pi.tools.find((t) => t.name === "goal_init");
+  await init.handler({
+    objective: "Independent documentation review goal",
+    tasks: [{ id: "review", description: "Review implementation and write the acceptance report", deps: [], writePaths: ["reports/review.md"], acceptance: { criteria: ["Report has verdict"], commands: ["test -f reports/review.md"] }, workflow: "docs-only" }],
+  });
+
+  const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
+  const result = JSON.parse(await dispatch.handler({ task_id: "review" }));
+
+  assert.equal(result.contract.workflow.mode, "docs-only");
+  assert.match(result.contract.workflow.reason, /documentation|review|report/i);
+});
+
+test("goal_dispatch cleans the workspace when contract compilation fails", async () => {
+  const cwd = tmpCwd();
+  const git = initGitRepo(cwd);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  const init = pi.tools.find((t) => t.name === "goal_init");
+  await init.handler({
+    objective: "Dispatch cleanup test goal",
+    tasks: [{ id: "t1", description: "Compile an invalid path-boundary contract", deps: [], writePaths: ["../../etc/passwd"], acceptance: { criteria: ["Compilation fails"], commands: ["true"] }, workflow: "tdd" }],
+  });
+
+  const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
+  await assert.rejects(() => dispatch.handler({ task_id: "t1" }), /repo-relative/);
+
+  const worktreesRoot = join(cwd, ".state/goal-engine/worktrees");
+  assert.equal(existsSync(join(worktreesRoot, "dispatch-cleanup-test-goal-t1-1")), false);
+  assert.equal(existsSync(join(worktreesRoot, ".dispatch-cleanup-test-goal-t1-1.lease.json")), false);
+  assert.equal(git("branch", "--list", "ge/dispatch-cleanup-test-goal/t1/1"), "");
+
+  const status = pi.tools.find((t) => t.name === "goal_status");
+  const projection = JSON.parse(await status.handler({}));
+  assert.equal(projection.tasks.t1.status, "pending");
+  assert.equal(projection.tasks.t1.attempts, 0);
+});
+
 test("goal_integrate recovers a persisted workspace lease after extension restart", async () => {
   const cwd = tmpCwd();
   const git = initGitRepo(cwd);
