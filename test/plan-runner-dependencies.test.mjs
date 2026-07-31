@@ -893,6 +893,25 @@ test("persists Supervisor Attention and recovers a fenced durable Root reply aft
   assert.equal(appended.filter(({ type }) => type === "attempt.attention-resolved").length, 1);
 });
 
+test("idempotent Supervisor Attention replay does not append a second event but conflicting payload is rejected", async (t) => {
+  const repo = await fixture();
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  const appended = [];
+  const ctx = context(repo.worktree, [{ customType: "pi-plan-event-v1", data: created(binding) }]);
+  const options = { pi: { appendEntry(_type, data) { appended.push(data); } }, executionBackend: backend(), allocateAttemptWorkspace: async (input) => fakeAllocator(input) };
+  const deps = runnerDependencies(repo, options);
+  await deps.continuePlan({}, { ctx });
+  const message = { customType: "subagent_supervisor_request", content: "Choose the target", display: true, details: { id: "exact-replay", reason: "progress_update", expectsReply: false, runId: "run-1", agent: "executor", childIndex: 0 } };
+  await deps.recordSupervisorRequest(message, { ctx });
+  const firstCount = appended.filter(({ type }) => type === "attempt.attention-requested").length;
+  const replayCtx = context(repo.worktree, [created(binding), ...appended].map((data) => ({ customType: "pi-plan-event-v1", data })));
+  const replay = runnerDependencies(repo, options);
+  await replay.recordSupervisorRequest(message, { ctx: replayCtx });
+  assert.equal(appended.filter(({ type }) => type === "attempt.attention-requested").length, firstCount);
+  await assert.rejects(replay.recordSupervisorRequest({ ...message, content: "Choose another target" }, { ctx: replayCtx }), /conflict|already|Attention/i);
+});
+
 test("fresh recoverExecutionState announces a matching durable Attention reply once after binding recovery", async (t) => {
   const repo = await fixture();
   t.after(() => rm(repo.origin, { recursive: true, force: true }));

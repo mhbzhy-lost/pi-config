@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { BROKER_FRAME_LIMIT_BYTES, BROKER_METHODS, brokerGrantPath, brokerSocketPath, parseBrokerPush, readBrokerGrant, writeBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
+import { BROKER_FRAME_LIMIT_BYTES, BROKER_METHODS, brokerGrantPath, brokerSocketPath, parseBrokerPush, parseBrokerRequest, readBrokerGrant, writeBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { createBrokerFrameDecoder, createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
 import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
@@ -2458,6 +2458,52 @@ test("Supervisor pending exposes only requests owned by its caller", async (t) =
   const pendingB = await broker.dispatch(request({ callerRunId: "pending-b", callerToken: b.callerToken, method: "supervisor.pending", params: {} }), {});
   assert.deepEqual(pendingA.data?.pending?.map((entry) => entry.requestId), ["pending-A"]);
   assert.deepEqual(pendingB.data?.pending?.map((entry) => entry.requestId), ["pending-B"]);
+});
+
+test("Supervisor ack is a client protocol method and fails closed for unknown or foreign requests", async (t) => {
+  assert.ok(BROKER_METHODS.includes("supervisor.ack"));
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: "ack-a" });
+  assert.equal(typeof client.supervisorAcknowledge, "function");
+  client.dispose();
+  assert.throws(() => parseBrokerRequest(request({ callerRunId: "ack-a", callerToken: "a".repeat(64), method: "supervisor.ack", params: { requestId: "ack-owned", extra: true } })), /unsupported|unexpected|exact/i);
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() }); await broker.start(); t.after(() => broker.closeRootSession());
+  const a = await broker.grantCaller({ callerRunId: "ack-a", planId: "ack-a", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const b = await broker.grantCaller({ callerRunId: "ack-b", planId: "ack-b", cwd: "/other", originRoot: "/other", stateRoot: "/state-b", role: "plan-runner" });
+  broker.ownedRuns.set("ack-a", { rootSessionId, runId: "ack-a", role: "plan-runner", asyncDir: "/async/ack-a", sessionId: rootSessionId, pid: 101, birthIdentity: "ack-a-birth", identityState: "verified" });
+  broker.runOwners.set("ack-executor", "ack-a");
+  await broker.routeSupervisorRequest(supervisorIngress({ id: "ack-owned", runId: "ack-executor" }));
+
+  const foreign = await broker.dispatch(request({ callerRunId: "ack-b", callerToken: b.callerToken, method: "supervisor.ack", params: { requestId: "ack-owned" } }), {});
+  const unknown = await broker.dispatch(request({ callerRunId: "ack-a", callerToken: a.callerToken, method: "supervisor.ack", params: { requestId: "unknown" } }), {});
+  const acknowledged = await broker.dispatch(request({ callerRunId: "ack-a", callerToken: a.callerToken, method: "supervisor.ack", params: { requestId: "ack-owned" } }), {});
+  const pending = await broker.dispatch(request({ callerRunId: "ack-a", callerToken: a.callerToken, method: "supervisor.pending", params: {} }), {});
+  broker.acceptTerminalProof(broker.ownedRuns.get("ack-a"), officialObservedProof("ack-a"));
+  assert.deepEqual({
+    foreign: foreign.error?.code,
+    unknown: unknown.error?.code,
+    acknowledged: acknowledged.data,
+    retained: broker.supervisorRequests.has("ack-owned"),
+    pending: pending.data?.pending?.map((entry) => entry.requestId),
+    replayQueued: broker.callerPushQueues.get("ack-a")?.some(({ push }) => push.type === "supervisor.request" && push.data.requestId === "ack-owned") ?? false,
+  }, {
+    foreign: "supervisor_not_owned", unknown: "supervisor_request_unknown", acknowledged: { acknowledged: true }, retained: true, pending: ["ack-owned"], replayQueued: false,
+  });
+});
+
+test("unacknowledged Supervisor request is replayed to the caller queue after official terminal proof", async (t) => {
+  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() }); await broker.start();
+  await broker.grantCaller({ callerRunId: "unacked-plan", planId: "unacked", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: "unacked-plan" }); const pushed = [];
+  const subscription = await client.subscribe((push) => pushed.push(push)); const closed = subscription.closed.catch(() => undefined);
+  t.after(async () => { subscription.dispose(); client.dispose(); await closed; await broker.closeRootSession(); });
+  broker.runOwners.set("unacked-executor", "unacked-plan");
+  await broker.routeSupervisorRequest(supervisorIngress({ id: "unacked-request", runId: "unacked-executor" }));
+  await waitForCondition(() => pushed.some((push) => push.data.requestId === "unacked-request"), "initial unacknowledged delivery");
+  subscription.dispose();
+  broker.ownedRuns.set("unacked-plan", { rootSessionId, runId: "unacked-plan", role: "plan-runner", asyncDir: "/async/unacked-plan", sessionId: rootSessionId, pid: 102, birthIdentity: "unacked-plan-birth", identityState: "verified" });
+  broker.acceptTerminalProof(broker.ownedRuns.get("unacked-plan"), officialObservedProof("unacked-plan"));
+
+  assert.ok(broker.callerPushQueues.get("unacked-plan")?.some(({ push }) => push.type === "supervisor.request" && push.data.requestId === "unacked-request"));
 });
 
 test("Supervisor reply fences ownership, strips Plan routing, and consumes requests exactly once", async (t) => {
