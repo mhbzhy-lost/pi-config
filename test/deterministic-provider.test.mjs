@@ -493,8 +493,13 @@ test("provider instance returns a typed Executor acceptance report after success
   assert.equal(bash.message.content[0].name, "bash");
   const final = await streamProviderDone(provider, [
     prompt,
-    bash.message,
-    toolResult("bash", "completed", { command: fixedCommand, exitCode: 0 }),
+    {
+      role: "toolResult",
+      toolName: "bash",
+      isError: false,
+      details: null,
+      content: [{ type: "text", text: "completed" }],
+    },
   ], tools);
   const parsed = parseAcceptanceReport(final.message.content[0].text);
 
