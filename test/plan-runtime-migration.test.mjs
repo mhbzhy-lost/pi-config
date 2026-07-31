@@ -74,6 +74,8 @@ test("flat Harness preserves failure evidence and compensates detached runs", as
   assert.match(source, /const rootStartupBarrierBudgetMs = 5_000/);
   assert.match(source, /const runtimeArtifactPublicationBudgetMs = 500/);
   assert.match(source, /quietMs:\s*rootRevivalRetryMaxMs \+ rootStartupBarrierBudgetMs \+ runtimeArtifactPublicationBudgetMs/);
+  assert.match(source, /const quiescentRuns = await waitForHarnessRunQuiescence/);
+  assert.match(source, /assert\.deepEqual\(postCloseRunIdentities, quiescentRunIdentities/);
   assert.match(source, /await terminateDetachedRunsUnder\(runtimeTmp\)/);
   assert.match(source, /passed\s*=\s*true/);
   assert.match(source, /brokerSocketPath\(rootSessionId\)/);

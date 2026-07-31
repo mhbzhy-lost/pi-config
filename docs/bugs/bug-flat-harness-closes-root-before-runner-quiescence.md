@@ -26,4 +26,4 @@ Plan刚完成Gate时仍有终代Runner turn，或旧generation official proof同
 
 ## 6. 修复与验证
 
-新增tests-only quiescence driver：持续枚举runtime下actual runs，要求调用方已知的6个initial run始终存在，见过的run集合只能增加；每个run均须有匹配runId且通过完整协议解析的official observed terminal。run集合或terminal指纹变化会重置quiet window；quiet window显式取`1秒revival retry上限 + 5秒Root startup barrier预算 + 0.5秒落盘余量`，所有run持续收敛6.5秒才允许关闭Root。timeout必须区分缺proof与集合持续变化未静默，并输出最后run集合、缺失列表和最后变化时间。双Plan Harness只在该barrier后关闭Root，关闭后仍重新枚举并逐项验证sidecar、PID `ESRCH`、`close.started/close.completed`和broker socket删除。不得用status文本、进程死亡或固定短sleep替代official proof。
+新增tests-only quiescence driver：持续枚举runtime下actual runs，要求调用方已知的6个initial run始终存在，见过的run集合只能增加；每个run均须有匹配runId且通过完整协议解析的official observed terminal。run集合或terminal指纹变化会重置quiet window；quiet window显式取`1秒revival retry上限 + 5秒Root startup barrier预算 + 0.5秒落盘余量`，所有run持续收敛6.5秒才允许关闭Root。timeout必须区分缺proof与集合持续变化未静默，并输出最后run集合、缺失列表和最后变化时间。双Plan Harness保存barrier返回的完整`runId -> asyncDir`集合，只在该barrier后关闭Root；关闭后重新枚举的集合必须与保存值精确相等，再逐项验证sidecar、PID `ESRCH`、`close.started/close.completed`和broker socket删除。不得用status文本、进程死亡或固定短sleep替代official proof。
