@@ -993,7 +993,16 @@ test("recovery injects only the durable Attention reply identified by its genera
 
   assert.deepEqual(injected, {
     customType: "pi-plan-attention-reply-v1",
-    content: "Use beta",
+    content: `PI_PLAN_ATTENTION_REPLY ${JSON.stringify({
+      schemaVersion: "pi-plan-attention-reply-message.v1",
+      planId: repo.planId,
+      taskId: "task-2",
+      attemptId: "attempt-2",
+      runId: "run-2",
+      requestId: "request-2",
+      expectedProjectionVersion: 9,
+      message: "Use beta",
+    })}`,
     details: { planId: repo.planId, taskId: "task-2", attemptId: "attempt-2", runId: "run-2", requestId: "request-2", expectedProjectionVersion: 9 },
   });
 });

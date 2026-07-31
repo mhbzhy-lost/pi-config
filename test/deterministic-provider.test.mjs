@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { convertToLlm } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/messages.js";
 import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 import { renderCodingDispatchPrompt } from "../scripts/lib/subagent-dispatch/prompt.ts";
 
@@ -440,6 +441,36 @@ test("flat Plan Runner fences durable Attention replies through plan_executor_su
   assert.deepEqual(decide(messages, flatPlanTools), expected);
   assert.deepEqual(decide([...messages, toolResult("plan_executor_supervisor", "replied", { replyTo: "request-1" })], flatPlanTools), {
     tool: { name: "plan_continue", arguments: { reason: "harness" } },
+  });
+});
+
+test("flat Plan Runner reads the durable Attention reply envelope after Pi LLM conversion", () => {
+  const envelope = {
+    schemaVersion: "pi-plan-attention-reply-message.v1",
+    planId: "plan-1",
+    taskId: "task-1",
+    attemptId: "attempt-1",
+    runId: "executor-run-1",
+    requestId: "request-1",
+    expectedProjectionVersion: 7,
+    message: "APPROVED",
+  };
+  const internalReply = {
+    role: "custom",
+    customType: "pi-plan-attention-reply-v1",
+    content: `PI_PLAN_ATTENTION_REPLY ${JSON.stringify(envelope)}`,
+    details: { requestId: envelope.requestId, runId: envelope.runId },
+  };
+  const messages = convertToLlm([privateWakePrompt(), internalReply]);
+
+  assert.equal(messages[1].role, "user");
+  assert.equal(Object.hasOwn(messages[1], "customType"), false);
+  assert.equal(Object.hasOwn(messages[1], "details"), false);
+  assert.deepEqual(decide(messages, flatPlanTools), {
+    tool: {
+      name: "plan_executor_supervisor",
+      arguments: { action: "reply", replyTo: "request-1", to: "executor-run-1", message: "APPROVED" },
+    },
   });
 });
 
