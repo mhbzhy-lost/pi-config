@@ -178,23 +178,25 @@ test("provider stream polls plan_status when a lifecycle follow-up arrives", asy
 });
 
 test("provider stream polls stale active status after a private wake", async () => {
-  const contractA = { task: "task-63bl-a", agent: "executor", runId: "executor-run-63bl-a", prompt: "Complete task A." };
-  const contractB = { task: "task-63bl-b", agent: "executor", runId: "executor-run-63bl-b", prompt: "Complete task B." };
+  const contractA = { taskId: "task-63bl-a", agent: "executor", title: "Complete task A", prompt: "Complete task A." };
+  const contractB = { taskId: "task-63bl-b", agent: "executor", title: "Complete task B", prompt: "Complete task B." };
+  const handleA = { version: "coding-dispatch-handle.v1", dispatchId: "dispatch-63bl-a", taskId: contractA.taskId, agent: contractA.agent, title: contractA.title, contractHash: "a".repeat(64), runId: "executor-run-63bl-a", asyncDir: "/tmp/executor-run-63bl-a" };
+  const handleB = { version: "coding-dispatch-handle.v1", dispatchId: "dispatch-63bl-b", taskId: contractB.taskId, agent: contractB.agent, title: contractB.title, contractHash: "b".repeat(64), runId: "executor-run-63bl-b", asyncDir: "/tmp/executor-run-63bl-b" };
   const staleActiveStatus = toolResult("plan_status", JSON.stringify({
     schemaVersion: "pi-plan-status.v1",
     tasks: [
-      { task: "task-63bl-a", attempts: [{ runId: contractA.runId, status: "active" }] },
-      { task: "task-63bl-b", attempts: [{ runId: contractB.runId, status: "active" }] },
+      { taskId: contractA.taskId, attempts: [{ attemptId: "attempt-63bl-a", dispatchId: handleA.dispatchId, runId: handleA.runId, status: "active" }] },
+      { taskId: contractB.taskId, attempts: [{ attemptId: "attempt-63bl-b", dispatchId: handleB.dispatchId, runId: handleB.runId, status: "active" }] },
     ],
   }));
   const done = await streamDone([
     flatPlanPrompt(),
     toolResult("plan_open", "opened"),
-    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractA }, { contract: contractB }] })),
-    assistantSubagentCall("deterministic-subagent-63bl-a", contractA),
-    toolResult("subagent", "completed task A"),
-    assistantSubagentCall("deterministic-subagent-63bl-b", contractB),
-    toolResult("subagent", "completed task B"),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ attemptId: "attempt-63bl-a", dispatchId: handleA.dispatchId, contract: contractA }, { attemptId: "attempt-63bl-b", dispatchId: handleB.dispatchId, contract: contractB }] })),
+    assistantSubagentCall(handleA.dispatchId, contractA),
+    toolResult("subagent", "completed task A", handleA),
+    assistantSubagentCall(handleB.dispatchId, contractB),
+    toolResult("subagent", "completed task B", handleB),
     staleActiveStatus,
     privateWakePrompt(),
   ], flatPlanTools.map((name) => ({ name })));
@@ -206,23 +208,25 @@ test("provider stream polls stale active status after a private wake", async () 
 });
 
 test("provider stream does not re-poll after a private wake has newer active status", async () => {
-  const contractA = { task: "task-63bl-a", agent: "executor", runId: "executor-run-63bl-a", prompt: "Complete task A." };
-  const contractB = { task: "task-63bl-b", agent: "executor", runId: "executor-run-63bl-b", prompt: "Complete task B." };
+  const contractA = { taskId: "task-63bl-a", agent: "executor", title: "Complete task A", prompt: "Complete task A." };
+  const contractB = { taskId: "task-63bl-b", agent: "executor", title: "Complete task B", prompt: "Complete task B." };
+  const handleA = { version: "coding-dispatch-handle.v1", dispatchId: "dispatch-63bl-a", taskId: contractA.taskId, agent: contractA.agent, title: contractA.title, contractHash: "a".repeat(64), runId: "executor-run-63bl-a", asyncDir: "/tmp/executor-run-63bl-a" };
+  const handleB = { version: "coding-dispatch-handle.v1", dispatchId: "dispatch-63bl-b", taskId: contractB.taskId, agent: contractB.agent, title: contractB.title, contractHash: "b".repeat(64), runId: "executor-run-63bl-b", asyncDir: "/tmp/executor-run-63bl-b" };
   const activeStatus = () => toolResult("plan_status", JSON.stringify({
     schemaVersion: "pi-plan-status.v1",
     tasks: [
-      { task: "task-63bl-a", attempts: [{ runId: contractA.runId, status: "active" }] },
-      { task: "task-63bl-b", attempts: [{ runId: contractB.runId, status: "active" }] },
+      { taskId: contractA.taskId, attempts: [{ attemptId: "attempt-63bl-a", dispatchId: handleA.dispatchId, runId: handleA.runId, status: "active" }] },
+      { taskId: contractB.taskId, attempts: [{ attemptId: "attempt-63bl-b", dispatchId: handleB.dispatchId, runId: handleB.runId, status: "active" }] },
     ],
   }));
   const done = await streamDone([
     flatPlanPrompt(),
     toolResult("plan_open", "opened"),
-    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractA }, { contract: contractB }] })),
-    assistantSubagentCall("deterministic-subagent-63bl-a", contractA),
-    toolResult("subagent", "completed task A"),
-    assistantSubagentCall("deterministic-subagent-63bl-b", contractB),
-    toolResult("subagent", "completed task B"),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ attemptId: "attempt-63bl-a", dispatchId: handleA.dispatchId, contract: contractA }, { attemptId: "attempt-63bl-b", dispatchId: handleB.dispatchId, contract: contractB }] })),
+    assistantSubagentCall(handleA.dispatchId, contractA),
+    toolResult("subagent", "completed task A", handleA),
+    assistantSubagentCall(handleB.dispatchId, contractB),
+    toolResult("subagent", "completed task B", handleB),
     activeStatus(),
     privateWakePrompt(),
     activeStatus(),
