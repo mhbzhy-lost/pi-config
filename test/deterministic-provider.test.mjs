@@ -177,6 +177,63 @@ test("provider stream polls plan_status when a lifecycle follow-up arrives", asy
   assert.deepEqual(done.message.content.map((part) => part.name), ["plan_status"]);
 });
 
+test("provider stream polls stale active status after a private wake", async () => {
+  const contractA = { task: "task-63bl-a", agent: "executor", runId: "executor-run-63bl-a", prompt: "Complete task A." };
+  const contractB = { task: "task-63bl-b", agent: "executor", runId: "executor-run-63bl-b", prompt: "Complete task B." };
+  const staleActiveStatus = toolResult("plan_status", JSON.stringify({
+    schemaVersion: "pi-plan-status.v1",
+    tasks: [
+      { task: "task-63bl-a", attempts: [{ runId: contractA.runId, status: "active" }] },
+      { task: "task-63bl-b", attempts: [{ runId: contractB.runId, status: "active" }] },
+    ],
+  }));
+  const done = await streamDone([
+    flatPlanPrompt(),
+    toolResult("plan_open", "opened"),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractA }, { contract: contractB }] })),
+    assistantSubagentCall("deterministic-subagent-63bl-a", contractA),
+    toolResult("subagent", "completed task A"),
+    assistantSubagentCall("deterministic-subagent-63bl-b", contractB),
+    toolResult("subagent", "completed task B"),
+    staleActiveStatus,
+    privateWakePrompt(),
+  ], flatPlanTools.map((name) => ({ name })));
+
+  const toolCalls = done.message.content.filter((part) => part.type === "toolCall");
+  assert.equal(done.reason, "toolUse");
+  assert.equal(toolCalls.length, 1);
+  assert.equal(toolCalls[0].name, "plan_status");
+});
+
+test("provider stream does not re-poll after a private wake has newer active status", async () => {
+  const contractA = { task: "task-63bl-a", agent: "executor", runId: "executor-run-63bl-a", prompt: "Complete task A." };
+  const contractB = { task: "task-63bl-b", agent: "executor", runId: "executor-run-63bl-b", prompt: "Complete task B." };
+  const activeStatus = () => toolResult("plan_status", JSON.stringify({
+    schemaVersion: "pi-plan-status.v1",
+    tasks: [
+      { task: "task-63bl-a", attempts: [{ runId: contractA.runId, status: "active" }] },
+      { task: "task-63bl-b", attempts: [{ runId: contractB.runId, status: "active" }] },
+    ],
+  }));
+  const done = await streamDone([
+    flatPlanPrompt(),
+    toolResult("plan_open", "opened"),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractA }, { contract: contractB }] })),
+    assistantSubagentCall("deterministic-subagent-63bl-a", contractA),
+    toolResult("subagent", "completed task A"),
+    assistantSubagentCall("deterministic-subagent-63bl-b", contractB),
+    toolResult("subagent", "completed task B"),
+    activeStatus(),
+    privateWakePrompt(),
+    activeStatus(),
+  ], flatPlanTools.map((name) => ({ name })));
+
+  assert.equal(done.reason, "stop");
+  assert.equal(done.message.stopReason, "stop");
+  assert.deepEqual(done.message.content, [{ type: "text", text: "PLAN_RUNNER_WAITING_LIFECYCLE" }]);
+  assert.equal(done.message.content.some((part) => part.type === "toolCall"), false);
+});
+
 test("provider stream preserves executor bash fallback when state is undefined", async () => {
   const done = await streamDone([user("Allowed paths: README.md")], [{ name: "bash" }]);
 
