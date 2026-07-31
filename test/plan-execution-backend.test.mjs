@@ -439,6 +439,109 @@ test("recoverBinding publishes one completed fact from an exact Root observed te
   backend.dispose();
 });
 
+test("recoverBinding shares an in-flight exact lookup and publishes one observed completion", async () => {
+  const events = createEvents();
+  const facts = [];
+  let lookups = 0;
+  let releaseLookup;
+  const lookupGate = new Promise((resolve) => { releaseLookup = resolve; });
+  const binding = {
+    dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl",
+  };
+  const backend = createPiSubagentsExecutionBackend({
+    events,
+    emitFact: (fact) => facts.push(fact),
+    now: () => "recovered-concurrently",
+    readArtifacts: async () => { throw new Error("recoverBinding must not read artifacts"); },
+    rpc: {
+      async ping() { return capabilities({ methods: ["ping", "spawn", "spawn.lookup", "status", "interrupt", "stop"] }); },
+      async lookupSpawn() {
+        lookups += 1;
+        await lookupGate;
+        return {
+          state: "spawned",
+          binding: { runId: "run-1", asyncDir: "/async/run-1" },
+          processTerminal: {
+            version: 1, runnerProcessInstanceId: "runner-recovered-concurrently", state: "observed", observedAt: 1_700_000_000_004,
+            instances: [{ processInstanceId: "runner-recovered-concurrently", kind: "runner", closeObservedAt: 1_700_000_000_004, exitCode: 0, signal: null }],
+          },
+        };
+      },
+      async spawn() { throw new Error("recoverBinding must not spawn"); },
+      async status() { throw new Error("recoverBinding must not status"); },
+      async stop() { throw new Error("recoverBinding must not stop"); },
+      dispose() {},
+    },
+  });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  const first = backend.recoverBinding(binding);
+  const second = backend.recoverBinding(binding);
+
+  try {
+    assert.equal(lookups, 1);
+    releaseLookup();
+    const [firstBinding, secondBinding] = await Promise.all([first, second]);
+    assert.strictEqual(firstBinding, secondBinding);
+    assert.deepEqual(firstBinding, binding);
+    assert.deepEqual(secondBinding, binding);
+    assert.deepEqual(facts, [{
+      type: "execution.completed", dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1",
+      runId: "run-1", asyncDir: "/async/run-1", cwd: "/attempts/attempt-1",
+      state: "observed", observedAt: "recovered-concurrently",
+    }]);
+  } finally {
+    releaseLookup();
+    await Promise.allSettled([first, second]);
+    backend.dispose();
+  }
+});
+
+test("recoverBinding fences a conflicting binding while its lookup is in flight", async () => {
+  const events = createEvents();
+  const facts = [];
+  let lookups = 0;
+  let releaseLookup;
+  const lookupGate = new Promise((resolve) => { releaseLookup = resolve; });
+  const binding = {
+    dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1",
+    cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl",
+  };
+  const backend = createPiSubagentsExecutionBackend({
+    events,
+    emitFact: (fact) => facts.push(fact),
+    now: () => "recovered-conflict",
+    readArtifacts: async () => { throw new Error("recoverBinding must not read artifacts"); },
+    rpc: {
+      async ping() { return capabilities({ methods: ["ping", "spawn", "spawn.lookup", "status", "interrupt", "stop"] }); },
+      async lookupSpawn() {
+        lookups += 1;
+        await lookupGate;
+        return { state: "spawned", binding: { runId: "run-1", asyncDir: "/async/run-1" } };
+      },
+      async spawn() { throw new Error("recoverBinding must not spawn"); },
+      async status() { throw new Error("recoverBinding must not status"); },
+      async stop() { throw new Error("recoverBinding must not stop"); },
+      dispose() {},
+    },
+  });
+  await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+  const first = backend.recoverBinding(binding);
+  const conflicting = backend.recoverBinding({ ...binding, runId: "run-2", asyncDir: "/async/run-2" });
+
+  try {
+    assert.equal(lookups, 1);
+    await assert.rejects(conflicting, (error) => error.code === "EXECUTION_BINDING_CONFLICT");
+    releaseLookup();
+    assert.deepEqual(await first, binding);
+    assert.deepEqual(facts, []);
+  } finally {
+    releaseLookup();
+    await Promise.allSettled([first, conflicting]);
+    backend.dispose();
+  }
+});
+
 test("recoverBinding distinguishes an absent Root terminal proof from invalid proofs", async (t) => {
   const binding = {
     dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1",
