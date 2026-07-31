@@ -10,6 +10,7 @@ const jiti = createJiti(import.meta.url, {
     "@earendil-works/pi-ai": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js",
   },
 });
+const { parseAcceptanceReport } = await jiti.import("../pi/npm/node_modules/pi-subagents/src/runs/shared/acceptance.ts");
 
 let state = {};
 try {
@@ -35,6 +36,10 @@ async function deterministicProvider() {
 
 async function streamDone(messages, tools) {
   const provider = await deterministicProvider();
+  return streamProviderDone(provider, messages, tools);
+}
+
+async function streamProviderDone(provider, messages, tools) {
   let done;
   const model = { ...provider.models[0], api: provider.api, provider: "fake" };
   for await (const event of provider.streamSimple(model, { messages, tools })) {
@@ -435,6 +440,73 @@ test("provider stream allocates a new subagent toolCall id after an assistant ca
   assert.equal(toolCalls.length, 1);
   assert.equal(toolCalls[0].name, "subagent");
   assert.notEqual(toolCalls[0].id, "deterministic-subagent-1");
+});
+
+test("provider instance dispatch progress survives projected history without its prior subagent call", async () => {
+  const provider = await deterministicProvider();
+  const contractA = { task: "task-63a", agent: "executor", runId: "executor-run-a", prompt: "Run contract A." };
+  const contractB = { task: "task-63b", agent: "executor", runId: "executor-run-b", prompt: "Run contract B." };
+  const projectedContext = [
+    privateWakePrompt(),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract: contractA }, { contract: contractB }] })),
+  ];
+  const tools = flatPlanTools.map((name) => ({ name }));
+
+  const first = await streamProviderDone(provider, projectedContext, tools);
+  const second = await streamProviderDone(provider, projectedContext, tools);
+
+  assert.deepEqual(first.message.content[0].arguments, contractA);
+  assert.deepEqual(second.message.content[0].arguments, contractB);
+});
+
+test("provider instance gives repeated projected typed Executor bash calls monotonic IDs", async () => {
+  const provider = await deterministicProvider();
+  const prompt = typedExecutorPrompt("README.md");
+  const tools = [{ name: "bash" }];
+
+  const first = await streamProviderDone(provider, [prompt], tools);
+  const second = await streamProviderDone(provider, [prompt], tools);
+  const firstCall = first.message.content[0];
+  const secondCall = second.message.content[0];
+
+  assert.equal(firstCall.name, "bash");
+  assert.equal(secondCall.name, "bash");
+  assert.match(firstCall.id, /^deterministic-bash-\d+$/);
+  assert.match(secondCall.id, /^deterministic-bash-\d+$/);
+  assert.notEqual(secondCall.id, firstCall.id);
+});
+
+test("provider instance returns a typed Executor acceptance report after successful bash", async () => {
+  const provider = await deterministicProvider();
+  const fixedCommand = "printf 'worker\\n' >> README.md && git add README.md && git commit -m 'test: 添加确定性 worker 标记'";
+  const basePrompt = typedExecutorPrompt("README.md");
+  const prompt = {
+    ...basePrompt,
+    content: [{
+      type: "text",
+      text: `${basePrompt.content[0].text}\n\n## Acceptance Contract\nAcceptance level: verified\n\nCriteria:\n- criterion-1: Complete the fixed README.md command.\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files`,
+    }],
+  };
+  const tools = [{ name: "bash" }];
+
+  const bash = await streamProviderDone(provider, [prompt], tools);
+  assert.equal(bash.message.content[0].name, "bash");
+  const final = await streamProviderDone(provider, [
+    prompt,
+    bash.message,
+    toolResult("bash", "completed", { command: fixedCommand, exitCode: 0 }),
+  ], tools);
+  const parsed = parseAcceptanceReport(final.message.content[0].text);
+
+  assert.ok(parsed.report, parsed.error);
+  assert.deepEqual(parsed.report.criteriaSatisfied, [{ id: "criterion-1", status: "satisfied", evidence: "README.md command completed." }]);
+  assert.deepEqual(parsed.report.changedFiles, ["README.md"]);
+  assert.deepEqual(parsed.report.testsAddedOrUpdated, []);
+  assert.deepEqual(parsed.report.commandsRun, [{ command: fixedCommand, result: "passed", summary: "completed" }]);
+  assert.ok(parsed.report.validationOutput?.length);
+  assert.deepEqual(parsed.report.residualRisks, []);
+  assert.equal(parsed.report.noStagedFiles, true);
+  assert.ok(parsed.report.diffSummary);
 });
 
 test("top-level completion parent spawns through the harness tool then uses official wait", () => {
