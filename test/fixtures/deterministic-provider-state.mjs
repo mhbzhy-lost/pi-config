@@ -4,6 +4,8 @@ function textParts(message) {
     : "";
 }
 
+const lifecycleUpdateMarker = "A lifecycle update arrived. Call plan_status.";
+
 export function deterministicContractKey(contract) {
   if (Array.isArray(contract)) return `[${contract.map(deterministicContractKey).join(",")}]`;
   if (contract && typeof contract === "object") {
@@ -181,8 +183,9 @@ export function decideDeterministicTurn({ messages = [], toolNames = [], issuedD
     if (!latestPrivateWake && resultsFor("plan_open").length === 0 && toolNames.includes("plan_open")) {
       return { tool: { name: "plan_open", arguments: JSON.parse(bootstrap) } };
     }
-    const latestPushIndex = messages.findLastIndex((message) => message?.role === "custom"
-      && ["pi-root-subagent-lifecycle-v1", "subagent_supervisor_request"].includes(message.customType));
+    const latestPushIndex = messages.findLastIndex((message) => (message?.role === "custom"
+      && ["pi-root-subagent-lifecycle-v1", "subagent_supervisor_request"].includes(message.customType))
+      || (message?.role === "user" && textParts(message) === lifecycleUpdateMarker));
     const latestStatusIndex = messages.findLastIndex((message) => message?.role === "toolResult" && message.toolName === "plan_status");
     if (latestPushIndex > latestStatusIndex && toolNames.includes("plan_status")) {
       return { tool: { name: "plan_status", arguments: {} } };
