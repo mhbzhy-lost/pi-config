@@ -212,6 +212,58 @@ test("flat amendment provider uses typed replies, status refreshes, and broker l
   });
 });
 
+test("flat amendment keeps the old decision Executor active until the Root fault", async () => {
+  const previousMode = process.env.PI_PLAN_HARNESS_AMENDMENT;
+  const previousSource = process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+  process.env.PI_PLAN_HARNESS_AMENDMENT = "1";
+  process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = "# revision 2";
+  try {
+    const done = await streamDone([
+      user("Execute Task 1\nAllowed paths: decision.txt"),
+      toolResult("contact_supervisor", "Reply from supervisor: APPROVED"),
+    ], [{ name: "contact_supervisor" }, { name: "bash" }]);
+    assert.equal(done.reason, "toolUse");
+    const call = done.message.content.find((part) => part.type === "toolCall");
+    assert.equal(call?.name, "bash");
+    assert.match(call?.arguments?.command ?? "", /^sleep 120; /);
+    assert.match(call?.arguments?.command ?? "", /decision\.txt/);
+  } finally {
+    if (previousMode === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT = previousMode;
+    if (previousSource === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = previousSource;
+  }
+});
+
+test("flat amendment yields dispatch-required turns to the common subagent selector", async () => {
+  const previousMode = process.env.PI_PLAN_HARNESS_AMENDMENT;
+  const previousSource = process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+  process.env.PI_PLAN_HARNESS_AMENDMENT = "1";
+  process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = "# revision 2";
+  try {
+    const contract = { agent: "executor", task: "amended task", runId: "executor-amended" };
+    const done = await streamDone([
+      flatPlanPrompt(),
+      toolResult("plan_open", "opened"),
+      toolResult("plan_executor_supervisor", "replied", { replyTo: "request-65", to: "executor-old" }),
+      toolResult("plan_status", JSON.stringify({ revision: { number: 1 }, projectionVersion: 65 })),
+      toolResult("plan_amend", "amended"),
+      toolResult("plan_status", JSON.stringify({ revision: { number: 2 }, lifecycle: "running", tasks: [{ taskId: "task-1", status: "pending", attempts: [{ status: "superseded" }] }] })),
+      toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ attemptId: "attempt-amended", dispatchId: "dispatch-amended", contract }] })),
+    ], flatPlanTools.map((name) => ({ name })));
+    assert.equal(done.reason, "toolUse");
+    const calls = done.message.content.filter((part) => part.type === "toolCall");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].name, "subagent");
+    assert.deepEqual(calls[0].arguments, contract);
+  } finally {
+    if (previousMode === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT = previousMode;
+    if (previousSource === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = previousSource;
+  }
+});
+
 test("flat Attention mode preserves Root Main launch turns", () => {
   assert.deepEqual(decide([rootMainPrompt()], rootMainTools, { attentionMode: true }), {
     tool: { name: "plan_run", arguments: { planPath: rootMainPlanPaths[0] } },
