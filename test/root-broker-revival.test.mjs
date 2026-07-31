@@ -9,7 +9,7 @@ async function createRevivalFixture({ preparePlanRunnerRecovery, publishRevivedS
   const callerToken = "a".repeat(64);
   const revivedCallerToken = "b".repeat(64);
   const executorToken = "c".repeat(64);
-  const tokens = [callerToken, revivedCallerToken, executorToken];
+  const tokens = [callerToken, revivedCallerToken, executorToken, "d".repeat(64), "e".repeat(64)];
   const grants = [];
   const resumeCalls = [];
   let server;
@@ -381,6 +381,133 @@ test("assigns distinct queued Attention wakes to consecutive revived generations
   }), {});
   assert.deepEqual(generationThreePing.data.callerWake, secondWake);
   assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), []);
+});
+
+test("revives a non-resumable active generation from its newest exact canonical predecessor", async () => {
+  let nextGeneration = 2;
+  const prepared = [];
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture({
+    preparePlanRunnerRecovery: async (params) => prepared.push(params),
+    resume: async () => ({
+      text: "Revived",
+      details: {
+        mode: "single",
+        results: [],
+        asyncId: `plan-runner-${nextGeneration++}`,
+        asyncDir: `/async/plan-runner-${nextGeneration - 1}`,
+      },
+    }),
+  });
+  server.upstream.ping = async () => ({});
+  const canonicalSession = { canonicalSessionId: "canonical-plan-1", leaseDisposition: "released", freeAtObservation: true, canonicalSessionLeaseReleased: true };
+  server.acceptTerminalProof(ownedRun, { ...proof, resumeDisposition: "resumable", canonicalSession });
+  await server.dispatch(request, {});
+  await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2");
+
+  const secondWake = { wakeId: "attention-reply-after-first-generation", reason: "attention-reply" };
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", secondWake), { accepted: true, wakeId: secondWake.wakeId });
+  const generationTwo = server.ownedRuns.get("plan-runner-2");
+  assert.ok(generationTwo);
+  const generationTwoProcess = "plan-runner-2-instance";
+  server.acceptTerminalProof(generationTwo, {
+    ...proof,
+    runId: generationTwo.runId,
+    runnerProcessInstanceId: generationTwoProcess,
+    resumeDisposition: "resumable",
+    canonicalSession,
+    instances: [{ processInstanceId: generationTwoProcess, kind: "runner", closeObservedAt: Date.now(), exitCode: 0, signal: null }],
+  });
+  await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-3");
+
+  const thirdWake = { wakeId: "attention-reply-after-stopped-generation", reason: "attention-reply" };
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", thirdWake), { accepted: true, wakeId: thirdWake.wakeId });
+  const generationThree = server.ownedRuns.get("plan-runner-3");
+  assert.ok(generationThree);
+  const generationThreeProcess = "plan-runner-3-instance";
+  server.acceptTerminalProof(generationThree, {
+    ...proof,
+    runId: generationThree.runId,
+    runnerProcessInstanceId: generationThreeProcess,
+    resumeDisposition: "non-resumable",
+    canonicalSession,
+    instances: [{ processInstanceId: generationThreeProcess, kind: "runner", closeObservedAt: Date.now(), exitCode: 0, signal: null }],
+  });
+
+  await waitFor(() => resumeCalls.length === 3);
+  assert.deepEqual(resumeCalls.map(({ id }) => id), ["plan-runner-1", "plan-runner-2", "plan-runner-2"]);
+  await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-4");
+  assert.deepEqual(prepared.map(({ runId }) => runId), ["plan-runner-1", "plan-runner-2", "plan-runner-3"]);
+});
+
+test("fails closed when a non-resumable active generation has no exact canonical predecessor", async () => {
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture();
+  server.upstream.ping = async () => ({});
+  const predecessorSession = { canonicalSessionId: "canonical-plan-1", leaseDisposition: "released", freeAtObservation: true, canonicalSessionLeaseReleased: true };
+  server.acceptTerminalProof(ownedRun, { ...proof, resumeDisposition: "resumable", canonicalSession: predecessorSession });
+  await server.dispatch(request, {});
+  await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2");
+
+  const secondWake = { wakeId: "attention-reply-wrong-session", reason: "attention-reply" };
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", secondWake), { accepted: true, wakeId: secondWake.wakeId });
+  const activeRun = server.ownedRuns.get("plan-runner-2");
+  assert.ok(activeRun);
+  const activeProcessInstanceId = "plan-runner-2-instance";
+  server.acceptTerminalProof(activeRun, {
+    ...proof,
+    runId: activeRun.runId,
+    runnerProcessInstanceId: activeProcessInstanceId,
+    resumeDisposition: "non-resumable",
+    canonicalSession: { ...predecessorSession, canonicalSessionId: "canonical-plan-2" },
+    instances: [{ processInstanceId: activeProcessInstanceId, kind: "runner", closeObservedAt: Date.now(), exitCode: 0, signal: null }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [secondWake]);
+  assert.equal(server.logicalCallers.get("plan-runner-1")?.activeRunId, "plan-runner-2");
+});
+
+test("does not use a foreign canonical proof when its logical predecessor identity is incomplete", async () => {
+  const { ownedRun, proof, request, resumeCalls, server } = await createRevivalFixture();
+  server.upstream.ping = async () => ({});
+  server.acceptTerminalProof(ownedRun, { ...proof, resumeDisposition: "resumable" });
+  await server.dispatch(request, {});
+  await waitFor(() => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2");
+
+  const canonicalSession = { canonicalSessionId: "canonical-plan-1", leaseDisposition: "released", freeAtObservation: true, canonicalSessionLeaseReleased: true };
+  const foreignRun = { ...ownedRun, runId: "foreign-plan-runner", asyncDir: "/async/foreign-plan-runner", pid: 404 };
+  const foreignProcessInstanceId = "foreign-plan-runner-instance";
+  server.ownedRuns.set(foreignRun.runId, foreignRun);
+  server.callerAliases.set(foreignRun.runId, "foreign-logical-caller");
+  server.acceptTerminalProof(foreignRun, {
+    ...proof,
+    runId: foreignRun.runId,
+    runnerProcessInstanceId: foreignProcessInstanceId,
+    resumeDisposition: "resumable",
+    canonicalSession,
+    instances: [{ processInstanceId: foreignProcessInstanceId, kind: "runner", closeObservedAt: Date.now(), exitCode: 0, signal: null }],
+  });
+
+  const wake = { wakeId: "attention-reply-foreign-canonical", reason: "attention-reply" };
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", wake), { accepted: true, wakeId: wake.wakeId });
+  const activeRun = server.ownedRuns.get("plan-runner-2");
+  assert.ok(activeRun);
+  const activeProcessInstanceId = "plan-runner-2-instance";
+  server.acceptTerminalProof(activeRun, {
+    ...proof,
+    runId: activeRun.runId,
+    runnerProcessInstanceId: activeProcessInstanceId,
+    resumeDisposition: "non-resumable",
+    canonicalSession,
+    instances: [{ processInstanceId: activeProcessInstanceId, kind: "runner", closeObservedAt: Date.now(), exitCode: 0, signal: null }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [wake]);
+  assert.equal(server.logicalCallers.get("plan-runner-1")?.activeRunId, "plan-runner-2");
 });
 
 test("wire caller.followup remains limited to the one-shot plan-opened wake", async () => {
