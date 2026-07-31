@@ -4,6 +4,30 @@ function textParts(message) {
     : "";
 }
 
+export function deterministicContractKey(contract) {
+  if (Array.isArray(contract)) return `[${contract.map(deterministicContractKey).join(",")}]`;
+  if (contract && typeof contract === "object") {
+    return `{${Object.keys(contract).sort().map((key) => `${JSON.stringify(key)}:${deterministicContractKey(contract[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(contract);
+}
+
+export function deterministicExecutorAcceptanceReport(userText, command) {
+  if (command !== deterministicExecutorCommand(userText)) return undefined;
+  const path = command.match(/(?:README\.md|worker\.txt)/)?.[0];
+  if (!path) return undefined;
+  return `\`\`\`acceptance-report\n${JSON.stringify({
+    criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: `${path} command completed.` }],
+    changedFiles: [path],
+    testsAddedOrUpdated: [],
+    commandsRun: [{ command, result: "passed", summary: "completed" }],
+    validationOutput: [`${path} command completed.`],
+    residualRisks: [],
+    noStagedFiles: true,
+    diffSummary: `Applied deterministic ${path} command.`,
+  }, null, 2)}\n\`\`\``;
+}
+
 export function deterministicExecutorCommand(userText) {
   const declaredWritePaths = (() => {
     const section = userText.match(/^## Declared Write Scope\n([\s\S]*?)(?:\n\n|$)/m)?.[1];
@@ -30,7 +54,7 @@ export function deterministicExecutorCommand(userText) {
   return undefined;
 }
 
-export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) {
+export function decideDeterministicTurn({ messages = [], toolNames = [], issuedDispatchContractKeys = new Set() } = {}) {
   const userText = messages.filter((message) => message?.role === "user").map(textParts).join("\n");
   const latestUserMessage = [...messages].reverse().find((message) => message?.role === "user");
   const latestUserText = textParts(latestUserMessage);
@@ -182,14 +206,23 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
       return { tool: { name: "plan_verify", arguments: {} } };
     }
     if (continueState === "dispatch-required") {
-      const toolResultDispatches = messages.filter((message, index) => index > latestContinueIndex
-        && message?.role === "toolResult" && message.toolName === "subagent").length;
-      const assistantDispatches = messages.filter((message, index) => index > latestContinueIndex
-        && message?.role === "assistant").flatMap((message) => message.content ?? [])
-        .filter((part) => part?.type === "toolCall" && part.name === "subagent").length;
-      const dispatched = Math.max(toolResultDispatches, assistantDispatches);
-      if (dispatched < dispatches.length && toolNames.includes("subagent")) {
-        return { tool: { name: "subagent", arguments: dispatches[dispatched].contract } };
+      const waveMessages = messages.slice(latestContinueIndex + 1);
+      const assistantDispatchKeys = waveMessages.filter((message) => message?.role === "assistant").flatMap((message) => message.content ?? [])
+        .filter((part) => part?.type === "toolCall" && part.name === "subagent")
+        .map((part) => deterministicContractKey(part.arguments));
+      let standaloneResultCount = Math.max(0, waveMessages.filter((message) => message?.role === "toolResult" && message.toolName === "subagent").length - assistantDispatchKeys.length);
+      const attempted = new Set([...issuedDispatchContractKeys, ...assistantDispatchKeys]);
+      for (const dispatch of dispatches) {
+        if (standaloneResultCount === 0) break;
+        const key = deterministicContractKey(dispatch.contract);
+        if (!attempted.has(key)) {
+          attempted.add(key);
+          standaloneResultCount--;
+        }
+      }
+      const nextDispatch = dispatches.find((dispatch) => !attempted.has(deterministicContractKey(dispatch.contract)));
+      if (nextDispatch && toolNames.includes("subagent")) {
+        return { tool: { name: "subagent", arguments: nextDispatch.contract } };
       }
       if (latestStatusIndex <= latestContinueIndex) return { text: "PLAN_RUNNER_WAITING_LIFECYCLE" };
     }

@@ -1,7 +1,14 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { decideDeterministicTurn, deterministicExecutorCommand } from "./deterministic-provider-state.mjs";
+import {
+  decideDeterministicTurn,
+  deterministicContractKey,
+  deterministicExecutorAcceptanceReport,
+  deterministicExecutorCommand,
+} from "./deterministic-provider-state.mjs";
 
 export default function (pi) {
+  const issuedDispatchContractKeys = new Set();
+  let nextToolCallOrdinal = 1;
   pi.registerProvider("fake", {
     baseUrl: "http://127.0.0.1:9",
     api: "fake",
@@ -29,7 +36,7 @@ export default function (pi) {
         .map((part) => part.text)
         .join("\n") ?? "").join("\n");
       const bootstrap = userText.match(/exact bootstrap JSON:\s*\n(\{[^\n]+\})/)?.[1];
-      const compatTurn = decideDeterministicTurn({ messages, toolNames: [...availableTools] });
+      const compatTurn = decideDeterministicTurn({ messages, toolNames: [...availableTools], issuedDispatchContractKeys });
       const amendmentSource = process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
       const amendmentMode = process.env.PI_PLAN_HARNESS_AMENDMENT === "1";
       let amendmentOwnsTurn = false;
@@ -174,18 +181,28 @@ export default function (pi) {
         }
         return undefined;
       })() : compatTurn.tool);
-      const responseText = amendmentOwnsTurn && !next ? "amendment revision2 waiting" : compatTurn?.text ?? "deterministic";
+      const successfulExecutorResult = toolResults.some((message) => message?.toolName === "bash"
+        && message?.isError !== true
+        && (message?.details?.exitCode === undefined || message.details.exitCode === 0)
+        && message?.details?.command === deterministicExecutorCommand(userText));
+      const responseText = successfulExecutorResult
+        ? deterministicExecutorAcceptanceReport(userText, deterministicExecutorCommand(userText))
+        : amendmentOwnsTurn && !next ? "amendment revision2 waiting" : compatTurn?.text ?? "deterministic";
       const assistantToolCalls = messages.filter((message) => message?.role === "assistant")
         .flatMap((message) => message.content ?? [])
         .filter((part) => part?.type === "toolCall");
       const seenToolCallIds = new Set(assistantToolCalls
         .filter((part) => typeof part.id === "string")
         .map((part) => part.id));
-      let toolCallOrdinal = assistantToolCalls.length + 1;
+      let toolCallOrdinal = nextToolCallOrdinal;
       let toolCallId = `deterministic-${next?.name}-${toolCallOrdinal}`;
       while (seenToolCallIds.has(toolCallId)) {
         toolCallOrdinal += 1;
         toolCallId = `deterministic-${next?.name}-${toolCallOrdinal}`;
+      }
+      if (next) {
+        nextToolCallOrdinal = toolCallOrdinal + 1;
+        if (next.name === "subagent") issuedDispatchContractKeys.add(deterministicContractKey(next.arguments));
       }
       const usage = {
         input: 0,
