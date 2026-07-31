@@ -8,6 +8,7 @@ import {
 
 export default function (pi) {
   const issuedDispatchContractKeys = new Set();
+  const issuedExecutorBashCommands = new Set();
   let nextToolCallOrdinal = 1;
   pi.registerProvider("fake", {
     baseUrl: "http://127.0.0.1:9",
@@ -181,12 +182,14 @@ export default function (pi) {
         }
         return undefined;
       })() : compatTurn.tool);
-      const successfulExecutorResult = toolResults.some((message) => message?.toolName === "bash"
-        && message?.isError !== true
-        && (message?.details?.exitCode === undefined || message.details.exitCode === 0)
-        && message?.details?.command === deterministicExecutorCommand(userText));
+      const executorCommand = deterministicExecutorCommand(userText);
+      const successfulExecutorResult = executorCommand !== undefined
+        && issuedExecutorBashCommands.has(executorCommand)
+        && toolResults.some((message) => message?.toolName === "bash"
+          && message?.isError !== true
+          && (message?.details?.exitCode === undefined || message.details.exitCode === 0));
       const responseText = successfulExecutorResult
-        ? deterministicExecutorAcceptanceReport(userText, deterministicExecutorCommand(userText))
+        ? deterministicExecutorAcceptanceReport(userText, executorCommand)
         : amendmentOwnsTurn && !next ? "amendment revision2 waiting" : compatTurn?.text ?? "deterministic";
       const assistantToolCalls = messages.filter((message) => message?.role === "assistant")
         .flatMap((message) => message.content ?? [])
@@ -203,6 +206,9 @@ export default function (pi) {
       if (next) {
         nextToolCallOrdinal = toolCallOrdinal + 1;
         if (next.name === "subagent") issuedDispatchContractKeys.add(deterministicContractKey(next.arguments));
+        if (next.name === "bash" && next.arguments?.command === executorCommand) {
+          issuedExecutorBashCommands.add(executorCommand);
+        }
       }
       const usage = {
         input: 0,
