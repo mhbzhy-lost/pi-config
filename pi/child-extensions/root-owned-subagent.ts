@@ -28,7 +28,7 @@ export function installRootOwnedSubagent(pi: any, { rootSessionId = process.env.
       const requestId = data?.requestId;
       if (supervisorRequestIds.has(requestId)) return;
       supervisorRequestIds.add(requestId);
-      pi.sendMessage({ customType: "subagent_supervisor_request", content: data.content, display: true, details: { id: data.requestId, reason: data.reason, expectsReply: data.expectsReply, runId: data.executorRunId, agent: data.agent, childIndex: data.childIndex } }, { triggerTurn: true });
+      pi.sendMessage({ customType: "subagent_supervisor_request", content: data.content, display: true, details: { id: data.requestId, reason: data.reason, expectsReply: data.expectsReply, runId: data.executorRunId, agent: data.agent, childIndex: data.childIndex } }, { triggerTurn: true, deliverAs: "followUp" });
       return;
     }
     if (!push || (push.type !== "execution.started" && push.type !== "execution.completed")) return;
