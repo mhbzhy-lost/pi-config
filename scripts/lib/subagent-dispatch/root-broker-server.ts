@@ -24,7 +24,9 @@ type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: stri
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type LogicalCaller = { activeRunId: string; generation: number };
 type FollowUpIntent = { wakeId: string; reason: "plan-opened" | "attention-reply" };
-type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number; recordRevivalDiagnostic?: (customType: "pi-root-broker-revival-v1", data: Record<string, unknown>) => unknown; lifecycleSessionId?: string };
+type PendingRevivedHandoff = { sourceActualRunId: string; result: any; revivedRunId: string; revivedAsyncDir: string; ownership: Promise<void>; callerWake?: FollowUpIntent; wakeId: string; liveLifecycleWakeCount: number };
+type RevivedOwnershipWaiter = { asyncDir: string; promise: Promise<void>; resolve: () => void };
+type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number; recordRevivalDiagnostic?: (customType: "pi-root-broker-revival-v1", data: Record<string, unknown>) => unknown; lifecycleSessionId?: string; revivalRetryBaseMs?: number; revivalRetryMaxMs?: number };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; queued?: Set<string>; delivered: Set<string> };
 type QueuedCallerPush = { push: BrokerPush; onDelivered?: () => void; supervisorRequestId?: string };
 type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed"; announced: boolean; announcementQueued: boolean };
@@ -73,6 +75,7 @@ export class RootBrokerServer {
   callerFollowUps = new Map<string, FollowUpIntent[]>();
   callerWakes = new Map<string, FollowUpIntent>();
   callerPushQueues = new Map<string, QueuedCallerPush[]>();
+  liveLifecycleWakeCounts = new Map<string, number>();
   principals = new Map<string, Principal>();
   runOwners = new Map<string, string>();
   subscriptions = new Map<string, Set<Socket>>();
@@ -89,6 +92,10 @@ export class RootBrokerServer {
   terminalProofs = new Map<string, any>();
   reviveResults = new Map<string, any>();
   revivePromises = new Map<string, Promise<any>>();
+  pendingRevivedHandoffs = new Map<string, PendingRevivedHandoff>();
+  revivedOwnershipWaiters = new Map<string, RevivedOwnershipWaiter>();
+  retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  retryAttempts = new Map<string, number>();
   forcePendingRuns = new Set<string>();
   terminalWaiters = new Map<string, Set<(proof: any) => void>>();
   startedObservations = new Map<string, Promise<void>>();
@@ -113,11 +120,15 @@ export class RootBrokerServer {
   artifactPollIntervalMs: number;
   recordRevivalDiagnostic: Dependencies["recordRevivalDiagnostic"];
   supervisorIngressLimit: number;
+  revivalRetryBaseMs: number;
+  revivalRetryMaxMs: number;
 
-  constructor({ rootSessionId, lifecycleSessionId = rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, killProcess = process.kill, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50, recordRevivalDiagnostic, supervisorIngressLimit = 64 }: { rootSessionId: string; upstream: Upstream; supervisorIngressLimit?: number } & Dependencies) {
+  constructor({ rootSessionId, lifecycleSessionId = rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, killProcess = process.kill, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50, recordRevivalDiagnostic, supervisorIngressLimit = 64, revivalRetryBaseMs = 50, revivalRetryMaxMs = 1_000 }: { rootSessionId: string; upstream: Upstream; supervisorIngressLimit?: number } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
     if (!Number.isSafeInteger(supervisorIngressLimit) || supervisorIngressLimit <= 0) throw new Error("Root subagent broker supervisor ingress limit must be a positive safe integer");
+    if (!Number.isSafeInteger(revivalRetryBaseMs) || revivalRetryBaseMs <= 0) throw new Error("Root subagent broker revival retry base must be a positive safe integer");
+    if (!Number.isSafeInteger(revivalRetryMaxMs) || revivalRetryMaxMs < revivalRetryBaseMs) throw new Error("Root subagent broker revival retry max must be a positive safe integer no less than the base");
     this.rootSessionId = rootSessionId;
     this.lifecycleSessionId = lifecycleSessionId;
     this.upstream = upstream;
@@ -131,6 +142,8 @@ export class RootBrokerServer {
     this.artifactPollIntervalMs = artifactPollIntervalMs;
     this.recordRevivalDiagnostic = recordRevivalDiagnostic;
     this.supervisorIngressLimit = supervisorIngressLimit;
+    this.revivalRetryBaseMs = revivalRetryBaseMs;
+    this.revivalRetryMaxMs = revivalRetryMaxMs;
   }
 
   recordDiagnostic(phase: string, logicalCallerRunId?: string, wakeId?: string, extra: Record<string, unknown> = {}) {
@@ -183,6 +196,34 @@ export class RootBrokerServer {
     return { runId, role: event.agent === "spark" ? "executor" : event.agent, asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid };
   }
 
+  hasRevivedOwnership(runId: string, asyncDir: string) {
+    const run = this.ownedRuns.get(runId);
+    return run?.rootSessionId === this.rootSessionId
+      && run.runId === runId
+      && run.role === "plan-runner"
+      && run.sessionId === this.lifecycleSessionId
+      && run.asyncDir === asyncDir
+      && run.identityState !== "conflict";
+  }
+
+  waitForRevivedOwnership(runId: string, asyncDir: string): Promise<void> {
+    if (this.hasRevivedOwnership(runId, asyncDir)) return Promise.resolve();
+    const existing = this.revivedOwnershipWaiters.get(runId);
+    if (existing) return existing.asyncDir === asyncDir ? existing.promise : new Promise<void>(() => undefined);
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    this.revivedOwnershipWaiters.set(runId, { asyncDir, promise, resolve });
+    return promise;
+  }
+
+  resolveRevivedOwnership(runId: string, asyncDir: string) {
+    if (!this.hasRevivedOwnership(runId, asyncDir)) return;
+    const waiter = this.revivedOwnershipWaiters.get(runId);
+    if (!waiter || waiter.asyncDir !== asyncDir) return;
+    this.revivedOwnershipWaiters.delete(runId);
+    waiter.resolve();
+  }
+
   observeStarted(event: any): Promise<void> {
     const facts = this.startedFacts(event);
     if (!facts) return Promise.resolve();
@@ -191,10 +232,12 @@ export class RootBrokerServer {
       if (existing.role !== facts.role || existing.sessionId !== facts.sessionId || existing.pid !== facts.pid || existing.asyncDir !== facts.asyncDir) {
         this.ownedRuns.set(facts.runId, { ...existing, identityState: "conflict" });
       }
+      this.resolveRevivedOwnership(facts.runId, facts.asyncDir);
       return this.startedObservations.get(facts.runId) ?? Promise.resolve();
     }
     const initial: OwnedRun = { rootSessionId: this.rootSessionId, ...facts, birthIdentity: null, identityState: "unavailable" };
     this.ownedRuns.set(facts.runId, initial);
+    this.resolveRevivedOwnership(facts.runId, facts.asyncDir);
     const observation = (async () => {
       let birthIdentity: string | null = null;
       let identityState: OwnedRun["identityState"] = "verified";
@@ -278,40 +321,82 @@ export class RootBrokerServer {
     const caller = this.callers.get(logicalRunId);
     const followUps = this.callerFollowUps.get(logicalRunId);
     const queue = this.callerPushQueues.get(logicalRunId);
-    if (!caller || caller.role !== "plan-runner" || (!followUps?.length && !queue?.length)) return;
-    const callerWake = followUps?.[0];
-    const wakeId = callerWake?.wakeId ?? "queued-push";
+    let handoff = this.pendingRevivedHandoffs.get(logicalRunId);
+    if (handoff && handoff.sourceActualRunId !== actualRunId) throw new Error("Root subagent broker pending revived handoff source changed");
+    const liveLifecycleWakeCount = handoff?.liveLifecycleWakeCount ?? (this.liveLifecycleWakeCounts.get(actualRunId) ?? 0);
+    const hasLiveLifecycleWake = (this.liveLifecycleWakeCounts.get(actualRunId) ?? 0) > 0;
+    if (!caller || caller.role !== "plan-runner" || (!followUps?.length && !queue?.length && !hasLiveLifecycleWake)) return;
+    const callerWake = handoff?.callerWake ?? followUps?.[0];
+    const wakeId = handoff?.wakeId ?? callerWake?.wakeId ?? (queue?.length ? "queued-push" : "live-lifecycle");
     this.recordDiagnostic("revival.started", logicalRunId, wakeId);
-    const preparePlanRunnerRecovery = this.upstream.preparePlanRunnerRecovery;
-    if (typeof preparePlanRunnerRecovery === "function") {
+    if (!handoff) {
+      const preparePlanRunnerRecovery = this.upstream.preparePlanRunnerRecovery;
+      if (typeof preparePlanRunnerRecovery === "function") {
+        try {
+          await preparePlanRunnerRecovery({ role: run.role, runId: actualRunId, asyncDir: run.asyncDir });
+        } catch (error) {
+          this.recordDiagnostic("revival.failed", logicalRunId, wakeId, { reason: "recovery-prepare-failed", errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 512) });
+          throw error;
+        }
+      }
+      this.recordDiagnostic("resume.invoked", logicalRunId, wakeId);
+      let result: any;
       try {
-        await preparePlanRunnerRecovery({ role: run.role, runId: actualRunId, asyncDir: run.asyncDir });
+        result = await this.upstream.resume({ id: actualRunId, message: "A durable Root broker wake is pending." });
       } catch (error) {
-        this.recordDiagnostic("revival.failed", logicalRunId, wakeId, { reason: "recovery-prepare-failed", errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 512) });
+        this.recordDiagnostic("revival.failed", logicalRunId, wakeId, { reason: "resume-failed", errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 512) });
         throw error;
       }
+      if (!result || typeof result !== "object" || Array.isArray(result) || result instanceof Error || !result.details || typeof result.details !== "object" || Array.isArray(result.details)) throw new Error("Root subagent broker resume result is invalid");
+      const revivedRunId = result.details.asyncId;
+      const revivedAsyncDir = result.details.asyncDir;
+      if (typeof revivedRunId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(revivedRunId) || revivedRunId === "." || revivedRunId === ".." || typeof revivedAsyncDir !== "string" || revivedAsyncDir.length === 0 || !path.isAbsolute(revivedAsyncDir) || revivedRunId === actualRunId || this.principals.has(revivedRunId) || this.callerAliases.has(revivedRunId)) throw new Error("Root subagent broker resume result is invalid");
+      this.recordDiagnostic("resume.succeeded", logicalRunId, wakeId, { revivedRunId });
+      const ownership = this.waitForRevivedOwnership(revivedRunId, revivedAsyncDir);
+      handoff = { sourceActualRunId: actualRunId, result, revivedRunId, revivedAsyncDir, ownership, callerWake, wakeId, liveLifecycleWakeCount };
+      this.pendingRevivedHandoffs.set(logicalRunId, handoff);
     }
-    this.recordDiagnostic("resume.invoked", logicalRunId, wakeId);
-    let result: any;
-    try {
-      result = await this.upstream.resume({ id: actualRunId, message: "A durable Root broker wake is pending." });
-    } catch (error) {
-      this.recordDiagnostic("revival.failed", logicalRunId, wakeId, { reason: "resume-failed", errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 512) });
-      throw error;
+    await handoff.ownership;
+    await this.grantRevivedCaller(logicalRunId, handoff.revivedRunId, handoff.callerWake);
+    if (this.pendingRevivedHandoffs.get(logicalRunId) === handoff) this.pendingRevivedHandoffs.delete(logicalRunId);
+    const retryTimer = this.retryTimers.get(logicalRunId);
+    if (retryTimer) clearTimeout(retryTimer);
+    this.retryTimers.delete(logicalRunId);
+    this.retryAttempts.delete(logicalRunId);
+    const remainingLiveLifecycleWakeCount = (this.liveLifecycleWakeCounts.get(actualRunId) ?? 0) - handoff.liveLifecycleWakeCount;
+    this.liveLifecycleWakeCounts.delete(actualRunId);
+    if (remainingLiveLifecycleWakeCount > 0) {
+      this.liveLifecycleWakeCounts.set(handoff.revivedRunId, (this.liveLifecycleWakeCounts.get(handoff.revivedRunId) ?? 0) + remainingLiveLifecycleWakeCount);
+      setImmediate(() => { void this.reviveCallerAfterProof(logicalRunId).catch(() => undefined); });
     }
-    if (!result || typeof result !== "object" || Array.isArray(result) || result instanceof Error || !result.details || typeof result.details !== "object" || Array.isArray(result.details)) throw new Error("Root subagent broker resume result is invalid");
-    const revivedRunId = result.details.asyncId;
-    const revivedAsyncDir = result.details.asyncDir;
-    if (typeof revivedRunId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(revivedRunId) || revivedRunId === "." || revivedRunId === ".." || typeof revivedAsyncDir !== "string" || revivedAsyncDir.length === 0 || !path.isAbsolute(revivedAsyncDir) || revivedRunId === actualRunId || this.principals.has(revivedRunId) || this.callerAliases.has(revivedRunId)) throw new Error("Root subagent broker resume result is invalid");
-    this.recordDiagnostic("resume.succeeded", logicalRunId, wakeId, { revivedRunId });
-    await this.grantRevivedCaller(logicalRunId, revivedRunId, callerWake);
-    this.recordDiagnostic("grant.issued", logicalRunId, wakeId, { revivedRunId });
-    this.reviveResults.set(logicalRunId, result);
+    this.recordDiagnostic("grant.issued", logicalRunId, wakeId, { revivedRunId: handoff.revivedRunId });
+    this.reviveResults.set(logicalRunId, handoff.result);
     if (callerWake) {
       const currentFollowUps = this.callerFollowUps.get(logicalRunId);
       if (currentFollowUps?.[0]?.wakeId === callerWake.wakeId) currentFollowUps.shift();
     }
-    this.recordDiagnostic("revival.succeeded", logicalRunId, wakeId, { revivedRunId });
+    this.recordDiagnostic("revival.succeeded", logicalRunId, wakeId, { revivedRunId: handoff.revivedRunId });
+  }
+
+  scheduleLiveLifecycleRetry(logicalRunId: string) {
+    if (this.retryTimers.has(logicalRunId)) return;
+    const logical = this.logicalCallers.get(logicalRunId);
+    if (this.closed || !logical || !this.terminalProofs.has(logical.activeRunId) || (this.liveLifecycleWakeCounts.get(logical.activeRunId) ?? 0) <= 0) return;
+    const attempt = (this.retryAttempts.get(logicalRunId) ?? 0) + 1;
+    this.retryAttempts.set(logicalRunId, attempt);
+    const multiplier = 2 ** Math.min(attempt - 1, 52);
+    const delay = this.revivalRetryBaseMs > Math.floor(this.revivalRetryMaxMs / multiplier) ? this.revivalRetryMaxMs : this.revivalRetryBaseMs * multiplier;
+    const timer = setTimeout(() => {
+      if (this.retryTimers.get(logicalRunId) !== timer) return;
+      this.retryTimers.delete(logicalRunId);
+      const current = this.logicalCallers.get(logicalRunId);
+      if (this.closed || !current || !this.terminalProofs.has(current.activeRunId) || (this.liveLifecycleWakeCounts.get(current.activeRunId) ?? 0) <= 0) {
+        if (!current || (current && (this.liveLifecycleWakeCounts.get(current.activeRunId) ?? 0) <= 0)) this.retryAttempts.delete(logicalRunId);
+        return;
+      }
+      void this.reviveCallerAfterProof(logicalRunId).catch(() => undefined);
+    }, delay);
+    this.retryTimers.set(logicalRunId, timer);
   }
 
   reviveCallerAfterProof(logicalRunId: string) {
@@ -322,17 +407,19 @@ export class RootBrokerServer {
     const caller = this.callers.get(logicalRunId);
     const followUps = this.callerFollowUps.get(logicalRunId);
     const queue = this.callerPushQueues.get(logicalRunId);
-    if (this.closed || !logical || !run || run.role !== "plan-runner" || !this.terminalProofs.has(logical.activeRunId) || !caller || caller.role !== "plan-runner" || (!followUps?.length && !queue?.length)) {
+    const hasLiveLifecycleWake = logical ? (this.liveLifecycleWakeCounts.get(logical.activeRunId) ?? 0) > 0 : false;
+    if (this.closed || !logical || !run || run.role !== "plan-runner" || !this.terminalProofs.has(logical.activeRunId) || !caller || caller.role !== "plan-runner" || (!followUps?.length && !queue?.length && !hasLiveLifecycleWake)) {
       const reason = this.closed ? "broker-closed" : !logical ? "caller-missing" : !run ? "run-missing" : run.role !== "plan-runner" ? "caller-not-plan-runner" : !this.terminalProofs.has(logical.activeRunId) ? "proof-missing" : !caller || caller.role !== "plan-runner" ? "caller-missing" : "wake-missing";
       this.recordDiagnostic("revival.blocked", logicalRunId, undefined, { reason });
       return Promise.resolve();
     }
     const operation = this.performCallerRevive(logicalRunId);
     this.revivePromises.set(logicalRunId, operation);
-    const cleanup = () => {
+    const cleanup = (failed = false) => {
       if (this.revivePromises.get(logicalRunId) === operation) this.revivePromises.delete(logicalRunId);
+      if (failed) this.scheduleLiveLifecycleRetry(logicalRunId);
     };
-    void operation.then(cleanup, cleanup);
+    void operation.then(() => cleanup(), () => cleanup(true));
     return operation;
   }
 
@@ -894,10 +981,19 @@ export class RootBrokerServer {
       const dedupe = `${type}\u0000${JSON.stringify(data)}`;
       entry.queued ??= new Set();
       if (entry.delivered.has(dedupe) || entry.queued.has(dedupe)) return;
-      if (!this.deliverOrQueuePush(entry.callerRunId, push, () => {
+      const delivered = this.deliverOrQueuePush(entry.callerRunId, push, () => {
         entry.queued?.delete(dedupe);
         entry.delivered.add(dedupe);
-      })) entry.queued.add(dedupe);
+      });
+      if (!delivered) entry.queued.add(dedupe);
+      else if (type === "execution.completed") {
+        const actualCallerRunId = this.logicalCallers.get(entry.callerRunId)?.activeRunId;
+        const caller = this.callers.get(entry.callerRunId);
+        if (actualCallerRunId && caller?.role === "plan-runner") {
+          this.liveLifecycleWakeCounts.set(actualCallerRunId, (this.liveLifecycleWakeCounts.get(actualCallerRunId) ?? 0) + 1);
+          void this.reviveCallerAfterProof(entry.callerRunId).catch(() => undefined);
+        }
+      }
     } catch { /* malformed upstream lifecycle facts are not forwarded */ }
   }
 
@@ -1121,7 +1217,7 @@ export class RootBrokerServer {
       const startupDeadline = new Promise<never>((_, reject) => {
         startupTimeout = setTimeout(() => reject(new AggregateError([], "Root subagent broker startup barrier deadline exceeded")), this.terminalTimeoutMs);
       });
-      const collectStartupBarrier = () => [...this.startedObservations.values(), ...this.executorGrants.values(), ...this.callerGrants.values(), ...this.revivePromises.values(), ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise))];
+      const collectStartupBarrier = () => [...this.startedObservations.values(), ...this.executorGrants.values(), ...this.callerGrants.values(), ...this.revivePromises.values(), ...[...this.pendingRevivedHandoffs.values()].flatMap((handoff) => this.revivedOwnershipWaiters.get(handoff.revivedRunId)?.promise === handoff.ownership ? [handoff.ownership] : []), ...[...this.spawnLedger.values()].map((entry) => entry.promise).filter((promise): promise is Promise<any> => Boolean(promise))];
       let observedStartupWork = false;
       try {
         for (;;) {
@@ -1202,9 +1298,10 @@ export class RootBrokerServer {
       this.unsubscribeStarted?.(); this.unsubscribeStarted = undefined;
       this.unsubscribeComplete?.(); this.unsubscribeComplete = undefined;
       this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
-      this.callers.clear(); this.logicalCallers.clear(); this.callerAliases.clear(); this.callerFollowUps.clear(); this.callerWakes.clear(); this.callerPushQueues.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
+      this.callers.clear(); this.logicalCallers.clear(); this.callerAliases.clear(); this.callerFollowUps.clear(); this.callerWakes.clear(); this.callerPushQueues.clear(); this.liveLifecycleWakeCounts.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
       this.grantPaths.clear(); this.executorGrants.clear(); this.callerGrants.clear(); this.spawnLedger.clear(); this.supervisorRequests.clear(); this.pendingSupervisorIngress.clear(); this.pendingSupervisorRequestIds.clear(); this.supervisorIngressRevokedRuns.clear();
-      this.ownedRuns.clear(); this.terminalProofs.clear(); this.reviveResults.clear(); this.revivePromises.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
+      for (const timer of this.retryTimers.values()) clearTimeout(timer);
+      this.ownedRuns.clear(); this.terminalProofs.clear(); this.reviveResults.clear(); this.revivePromises.clear(); this.pendingRevivedHandoffs.clear(); this.revivedOwnershipWaiters.clear(); this.retryTimers.clear(); this.retryAttempts.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
       this.transportSockets.clear(); this.closingSockets.clear(); this.endedSockets.clear(); this.cleanedGrantPaths.clear(); this.server = undefined;
       this.teardown.released = true;
       this.recordDiagnostic("close.completed");
