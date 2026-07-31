@@ -933,6 +933,78 @@ test("validates a completed Attempt, enqueues it, and drains integration before 
   assert.deepEqual(calls, ["enqueue", "drain"]);
 });
 
+test("recovers an append-only succeeded Attempt through validation exactly once without backend polling", async () => {
+  const attemptId = "attempt-plan-1-task-1-1";
+  const entries = [...requestedEntries(), event("attempt.bound", {
+    attemptId, taskId: "task-1", dispatchId: `${attemptId}.dispatch.1`, runId: "run-1", asyncDir: "/async/run-1", sessionFile: null,
+  }, 3), event("attempt.settled", { attemptId, outcome: "succeeded", resultCommit: "persisted-result" }, 4)];
+  const appended = [];
+  const writer = createPlanEventWriter({
+    readEntries: async () => entries,
+    append: async (entry) => { entries.push(entry); appended.push(entry); },
+    id: (() => { let sequence = 0; return () => `recovery-${++sequence}`; })(),
+    now: () => "2026-07-15T00:00:05.000Z",
+  });
+  const validations = [];
+  const queued = [];
+  let backendCalls = 0;
+  const options = {
+    writer, readEntries: async () => entries, readProjection: () => replay(entries),
+    integrationQueue: { enqueue(attempt) { queued.push(attempt); } },
+    validateAttemptResult: async (input) => {
+      validations.push(input);
+      return { accepted: true, resultCommit: "persisted-result", diffSha256: "recovered-diff", changedPaths: ["src/a.mjs"], evidence: [{ kind: "command", commandId: "test", exitCode: 0 }] };
+    },
+  };
+  const backend = {
+    async status() { backendCalls++; throw new Error("succeeded recovery must not poll backend"); },
+    async spawn() { backendCalls++; throw new Error("succeeded recovery must not spawn"); },
+  };
+  const first = harness({ approvedPlan: plan([task("task-1")]), entries, backend, options });
+
+  assert.equal(typeof first.coordinator.recoverSucceededAttempts, "function", "Coordinator must expose recoverSucceededAttempts for durable succeeded checkpoints");
+  await first.coordinator.recoverSucceededAttempts();
+  assert.deepEqual(validations[0], {
+    lease: { ...entries[1].data.workspace, planId: "plan-1", taskId: "task-1", attemptId, baseCommit: "base" },
+    allowedPaths: ["src/task-1/**"], verification: [],
+  });
+  assert.equal(appended.filter(({ type }) => type === "attempt.validated").length, 1);
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].resultCommit, "persisted-result");
+  assert.equal(queued[0].validationHash, appended.find(({ type }) => type === "attempt.validated").data.validationHash);
+  await first.coordinator.recoverSucceededAttempts();
+  const fresh = harness({ approvedPlan: plan([task("task-1")]), entries, backend, options });
+  await fresh.coordinator.recoverSucceededAttempts();
+  assert.equal(validations.length, 1);
+  assert.equal(appended.filter(({ type }) => type === "attempt.validated").length, 1);
+  assert.equal(queued.length, 1);
+  assert.equal(backendCalls, 0);
+});
+
+test("fails closed when succeeded Attempt recovery validation is rejected", async () => {
+  const attemptId = "attempt-plan-1-task-1-1";
+  const entries = [...requestedEntries(), event("attempt.bound", {
+    attemptId, taskId: "task-1", dispatchId: `${attemptId}.dispatch.1`, runId: "run-1", asyncDir: "/async/run-1", sessionFile: null,
+  }, 3), event("attempt.settled", { attemptId, outcome: "succeeded", resultCommit: "persisted-result" }, 4)];
+  const appended = [];
+  const subject = harness({
+    approvedPlan: plan([task("task-1")]), entries,
+    options: {
+      writer: createPlanEventWriter({ readEntries: async () => entries, append: async (entry) => { entries.push(entry); appended.push(entry); } }),
+      readEntries: async () => entries, readProjection: () => replay(entries),
+      integrationQueue: { enqueue() { throw new Error("rejected validation must not enqueue"); } },
+      validateAttemptResult: async () => ({ accepted: false, code: "RESULT_REJECTED" }),
+    },
+  });
+
+  assert.equal(typeof subject.coordinator.recoverSucceededAttempts, "function", "Coordinator must expose recoverSucceededAttempts for rejected durable checkpoints");
+  const recovered = await subject.coordinator.recoverSucceededAttempts();
+  assert.equal(recovered.state, "blocked");
+  assert.deepEqual(appended.map(({ type }) => type), ["plan.blocked"]);
+  assert.equal(appended[0].data.reason, "attempt_validation_failed");
+  assert.equal(entries.some(({ type }) => type === "attempt.validated"), false);
+});
+
 test("failed attempts receive a new workspace and sequence on retry", async () => {
   const { coordinator } = harness({ approvedPlan: plan([task("task-1")]) });
   const first = await coordinator.dispatchAuthorized();

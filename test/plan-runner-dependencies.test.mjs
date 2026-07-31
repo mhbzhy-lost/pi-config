@@ -678,6 +678,68 @@ test("plan_status consumes official completion facts and settles from authoritat
   await assert.rejects(access(run.cwd));
 });
 
+test("status recovers a durable succeeded Attempt after its terminal fact was consumed before validation", async (t) => {
+  const repo = await fixture();
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  const branch = [{ customType: "pi-plan-event-v1", data: created(binding) }];
+  const appended = [];
+  const facts = [];
+  const first = runnerDependencies(repo, {
+    legacyDirectDispatch: true,
+    pi: { appendEntry(_type, data) { appended.push(data); branch.push({ customType: "pi-plan-event-v1", data }); } },
+    executionBackend: backend({ statuses: new Map([["run-1", { status: { kind: "stable", value: { state: "complete" } } }]]) }),
+    takeExecutionFacts: () => facts.splice(0),
+    validateAttemptResult: async () => { throw new Error("injected validation interruption"); },
+  });
+  const ctx = context(repo.worktree, branch);
+  const dispatched = await first.continuePlan({}, { ctx });
+  const run = dispatched.dispatched[0];
+  await mkdir(path.join(run.cwd, "src"), { recursive: true });
+  await writeFile(path.join(run.cwd, "src", "a.mjs"), "export default 1;\n");
+  await git(run.cwd, "add", "src/a.mjs");
+  await git(run.cwd, "commit", "-m", "durable result");
+  const resultCommit = await git(run.cwd, "rev-parse", "HEAD");
+  facts.push({ type: "execution.completed", dispatchId: run.dispatchId, attemptId: run.attemptId, runId: run.runId, asyncDir: run.asyncDir, cwd: run.cwd, state: "complete" });
+
+  await assert.rejects(first.status({ ctx }), /injected validation interruption/);
+  assert.deepEqual(appended.slice(-1).map(({ type }) => type), ["attempt.settled"]);
+  assert.equal(appended.at(-1).data.resultCommit, resultCommit);
+  assert.deepEqual(facts, []);
+
+  let statusCalls = 0;
+  let spawnCalls = 0;
+  let validations = 0;
+  const freshAppended = [];
+  const fresh = runnerDependencies(repo, {
+    legacyDirectDispatch: true,
+    pi: { appendEntry(_type, data) { freshAppended.push(data); branch.push({ customType: "pi-plan-event-v1", data }); } },
+    executionBackend: {
+      async status() { statusCalls++; throw new Error("recovery must not poll backend"); },
+      async spawn() { spawnCalls++; throw new Error("recovery must not spawn"); },
+    },
+    takeExecutionFacts: () => [],
+    validateAttemptResult: async ({ lease, verification }) => {
+      validations++;
+      assert.equal(lease.attemptId, run.attemptId);
+      assert.equal(lease.path, run.cwd);
+      assert.deepEqual(verification, [{ id: "task-1:verification-1", command: "true", cwd: repo.worktree, timeoutMs: 900000 }]);
+      return { accepted: true, resultCommit, diffSha256: "recovered-diff", changedPaths: ["src/a.mjs"], evidence: [] };
+    },
+  });
+  const freshCtx = context(repo.worktree, branch);
+
+  const recovered = await fresh.status({ ctx: freshCtx });
+  assert.equal(recovered.tasks[0].attempts[0].status, "validated");
+  assert.deepEqual(freshAppended.map(({ type }) => type), ["attempt.validated"]);
+  const integrated = await fresh.continuePlan({}, { ctx: freshCtx });
+  assert.equal(integrated.state, "ready-to-verify");
+  assert.equal(validations, 1);
+  assert.equal(statusCalls, 0);
+  assert.equal(spawnCalls, 0);
+  assert.equal(freshAppended.filter(({ type }) => type === "attempt.validated").length, 1);
+});
+
 test("plan_status projects a structured Executor block without requiring a result commit", async (t) => {
   const repo = await fixture();
   t.after(() => rm(repo.origin, { recursive: true, force: true }));
