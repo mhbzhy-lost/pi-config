@@ -28,6 +28,7 @@ type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => 
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; queued?: Set<string>; delivered: Set<string> };
 type QueuedCallerPush = { push: BrokerPush; onDelivered?: () => void };
 type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
+type PendingSupervisorIngress = { requestId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean };
 type OwnedRun = { rootSessionId: string; runId: string; role: "plan-runner" | "executor"; asyncDir: string; sessionId: string; pid: number; birthIdentity: string | null; identityState: "verified" | "unavailable" | "conflict" };
 type StartedFacts = Pick<OwnedRun, "runId" | "role" | "asyncDir" | "sessionId" | "pid">;
 
@@ -80,6 +81,9 @@ export class RootBrokerServer {
   callerGrants = new Map<string, Promise<{ callerToken: string }>>();
   spawnLedger = new Map<string, SpawnLedgerEntry>();
   supervisorRequests = new Map<string, SupervisorRequest>();
+  pendingSupervisorIngress = new Map<string, PendingSupervisorIngress[]>();
+  pendingSupervisorRequestIds = new Map<string, PendingSupervisorIngress>();
+  supervisorIngressRevokedRuns = new Set<string>();
   ownedRuns = new Map<string, OwnedRun>();
   terminalProofs = new Map<string, any>();
   reviveResults = new Map<string, any>();
@@ -107,10 +111,12 @@ export class RootBrokerServer {
   readFile: typeof nodeReadFile;
   artifactPollIntervalMs: number;
   recordRevivalDiagnostic: Dependencies["recordRevivalDiagnostic"];
+  supervisorIngressLimit: number;
 
-  constructor({ rootSessionId, lifecycleSessionId = rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, killProcess = process.kill, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50, recordRevivalDiagnostic }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
+  constructor({ rootSessionId, lifecycleSessionId = rootSessionId, upstream, writeGrant = writeBrokerGrant, randomToken = () => randomBytes(32).toString("hex"), captureProcessBirthIdentity: captureBirthIdentity = captureProcessBirthIdentity, killProcess = process.kill, events, terminalTimeoutMs = 5_000, readFile = nodeReadFile, artifactPollIntervalMs = 50, recordRevivalDiagnostic, supervisorIngressLimit = 64 }: { rootSessionId: string; upstream: Upstream; supervisorIngressLimit?: number } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
+    if (!Number.isSafeInteger(supervisorIngressLimit) || supervisorIngressLimit <= 0) throw new Error("Root subagent broker supervisor ingress limit must be a positive safe integer");
     this.rootSessionId = rootSessionId;
     this.lifecycleSessionId = lifecycleSessionId;
     this.upstream = upstream;
@@ -123,6 +129,7 @@ export class RootBrokerServer {
     this.readFile = readFile;
     this.artifactPollIntervalMs = artifactPollIntervalMs;
     this.recordRevivalDiagnostic = recordRevivalDiagnostic;
+    this.supervisorIngressLimit = supervisorIngressLimit;
   }
 
   recordDiagnostic(phase: string, logicalCallerRunId?: string, wakeId?: string, extra: Record<string, unknown> = {}) {
@@ -511,16 +518,26 @@ export class RootBrokerServer {
       const principal = this.principals.get(runId);
       if (principal) {
         if (principal.role !== "executor") throw new Error("Root subagent broker principal is already granted");
+        this.supervisorIngressRevokedRuns.delete(runId);
         return { callerToken: principal.callerToken };
       }
       const callerToken = this.randomToken();
       this.principals.set(runId, { role: "executor", callerToken });
+      this.supervisorIngressRevokedRuns.delete(runId);
       try {
         const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId, callerToken, role: "executor" });
         this.grantPaths.add(grantPath);
+        if (this.closed) {
+          this.principals.delete(runId);
+          this.supervisorIngressRevokedRuns.add(runId);
+          this.releasePendingSupervisorIngress(runId);
+          throw new Error("Root subagent broker is closing");
+        }
         return { callerToken };
       } catch (error) {
         this.principals.delete(runId);
+        this.supervisorIngressRevokedRuns.add(runId);
+        this.releasePendingSupervisorIngress(runId);
         throw error;
       }
     })();
@@ -773,11 +790,30 @@ export class RootBrokerServer {
       if (entry) entry.state = "uncertain";
       return failure(request, "spawn_invalid", "Upstream spawn reply is missing runId or asyncDir");
     }
+    if (this.runOwners.has(runId)) {
+      if (entry) entry.state = "uncertain";
+      return failure(request, "spawn_owner_conflict", "Executor run is already owned by another caller");
+    }
+    const closeOwnsStartedExecutor = () => this.closed && this.ownedRuns.get(runId)?.role === "executor";
+    if (closeOwnsStartedExecutor()) return createBrokerSuccessResponse({ ...request, data: reply });
     try {
       await this.ensureExecutorOwner(runId);
+      if (this.runOwners.has(runId)) {
+        if (entry) entry.state = "uncertain";
+        return failure(request, "spawn_owner_conflict", "Executor run is already owned by another caller");
+      }
+      if (this.closed) {
+        if (closeOwnsStartedExecutor()) return createBrokerSuccessResponse({ ...request, data: reply });
+        throw new Error("Root subagent broker is closing");
+      }
       caller.ownedRunIds.add(runId);
       this.runOwners.set(runId, logicalCallerRunId);
+      this.promoteSupervisorIngress(runId, logicalCallerRunId, caller);
     } catch (error) {
+      this.runOwners.delete(runId);
+      caller.ownedRunIds.delete(runId);
+      this.supervisorIngressRevokedRuns.add(runId);
+      this.releasePendingSupervisorIngress(runId);
       const grantMessage = error instanceof Error ? error.message : String(error);
       try {
         await this.upstream.stop({ runId, dir: asyncDir });
@@ -808,6 +844,7 @@ export class RootBrokerServer {
   }
 
   lifecycle(event: any, type: "execution.started" | "execution.completed", known?: SpawnLedgerEntry) {
+    if (this.closed) return;
     const runId = event?.runId ?? event?.id;
     let entry = known;
     if (!entry && typeof runId === "string") entry = [...this.spawnLedger.values()].find((candidate) => candidate.binding?.runId === runId);
@@ -938,21 +975,65 @@ export class RootBrokerServer {
     if (this.closed || message?.customType !== "subagent_supervisor_request") return;
     const details = message.details;
     const { parent: _parent, depth: _depth, path: _path, ...upstreamDetails } = details ?? {};
-    const executorRunId = upstreamDetails.runId;
-    const ownerRunId = typeof executorRunId === "string" ? this.runOwners.get(executorRunId) : undefined;
+    const upstreamExecutorRunId = upstreamDetails.runId;
+    const ownerRunId = typeof upstreamExecutorRunId === "string" ? this.runOwners.get(upstreamExecutorRunId) : undefined;
     let push;
     try {
       push = createSupervisorRequestPush({ rootSessionId: this.rootSessionId, callerRunId: ownerRunId ?? "owner", upstreamDetails: { ...upstreamDetails, content: message.content } });
     } catch { return { code: "supervisor_request_invalid" }; }
-    const existing = this.supervisorRequests.get(push.data.requestId as string);
+    const requestId = push.data.requestId as string;
+    const executorRunId = push.data.executorRunId as string;
+    const identity = (entry: { executorRunId: string; data: Record<string, unknown> }) => stableJson({ executorRunId: entry.executorRunId, data: entry.data });
+    const existing = this.supervisorRequests.get(requestId);
     if (existing) {
-      if (stableJson({ ownerRunId: existing.ownerRunId, data: existing.data }) !== stableJson({ ownerRunId, data: push.data })) return { code: "supervisor_request_conflict" };
+      if (identity(existing) !== identity({ executorRunId, data: push.data })) return { code: "supervisor_request_conflict" };
       return;
     }
-    if (!ownerRunId || !this.callers.has(ownerRunId)) return;
-    const entry: SupervisorRequest = { requestId: push.data.requestId as string, ownerRunId, executorRunId: push.data.executorRunId as string, data: push.data, context, expectsReply: push.data.expectsReply === true, state: "pending" };
-    this.supervisorRequests.set(entry.requestId, entry);
-    this.deliverOrQueuePush(ownerRunId, push);
+    const reserved = this.pendingSupervisorRequestIds.get(requestId);
+    if (reserved) {
+      if (identity(reserved) !== identity({ executorRunId, data: push.data })) return { code: "supervisor_request_conflict" };
+      return;
+    }
+    if (ownerRunId && this.callers.has(ownerRunId)) {
+      const entry: SupervisorRequest = { requestId, ownerRunId, executorRunId, data: push.data, context, expectsReply: push.data.expectsReply === true, state: "pending" };
+      this.supervisorRequests.set(entry.requestId, entry);
+      this.deliverOrQueuePush(ownerRunId, push);
+      return;
+    }
+    const known = !this.supervisorIngressRevokedRuns.has(executorRunId)
+      && (this.principals.get(executorRunId)?.role === "executor" || this.ownedRuns.get(executorRunId)?.role === "executor");
+    if (!known) return { code: "supervisor_request_unknown_owner" };
+    if (this.pendingSupervisorRequestIds.size >= this.supervisorIngressLimit) return { code: "supervisor_ingress_queue_full" };
+    const pending: PendingSupervisorIngress = { requestId, executorRunId, data: push.data, context, expectsReply: push.data.expectsReply === true };
+    const queue = this.pendingSupervisorIngress.get(executorRunId) ?? [];
+    queue.push(pending);
+    this.pendingSupervisorIngress.set(executorRunId, queue);
+    this.pendingSupervisorRequestIds.set(requestId, pending);
+  }
+
+  releasePendingSupervisorIngress(executorRunId: string) {
+    const pending = this.pendingSupervisorIngress.get(executorRunId);
+    this.pendingSupervisorIngress.delete(executorRunId);
+    for (const entry of pending ?? []) this.pendingSupervisorRequestIds.delete(entry.requestId);
+  }
+
+  promoteSupervisorIngress(executorRunId: string, ownerRunId: string, caller: Caller) {
+    const pending = this.pendingSupervisorIngress.get(executorRunId);
+    if (!pending?.length) return;
+    if (this.closed || this.runOwners.get(executorRunId) !== ownerRunId || !caller.ownedRunIds.has(executorRunId) || this.principals.get(executorRunId)?.role !== "executor" || !this.callers.has(ownerRunId)) return;
+    const promoted: Array<{ entry: SupervisorRequest; push: BrokerPush }> = [];
+    for (const queued of pending) {
+      if (this.pendingSupervisorRequestIds.get(queued.requestId) !== queued || this.supervisorRequests.has(queued.requestId)) throw new Error("Supervisor ingress reservation is invalid");
+      const entry: SupervisorRequest = { ...queued, ownerRunId, state: "pending" };
+      const push = parseBrokerPush({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: ownerRunId, type: "supervisor.request", data: entry.data });
+      promoted.push({ entry, push });
+    }
+    this.pendingSupervisorIngress.delete(executorRunId);
+    for (const { entry } of promoted) {
+      this.pendingSupervisorRequestIds.delete(entry.requestId);
+      this.supervisorRequests.set(entry.requestId, entry);
+    }
+    for (const { push } of promoted) this.deliverOrQueuePush(ownerRunId, push);
   }
 
   pendingSupervisor(request: any, _caller: Caller, logicalCallerRunId: string) {
@@ -982,6 +1063,9 @@ export class RootBrokerServer {
     if (this.closePromise) return this.closePromise;
     if (this.teardown.released) return;
     this.closed = true;
+    this.pendingSupervisorIngress.clear();
+    this.pendingSupervisorRequestIds.clear();
+    this.supervisorIngressRevokedRuns.clear();
     this.recordDiagnostic("close.started");
     const closing = (async () => {
       let startupTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -1070,7 +1154,7 @@ export class RootBrokerServer {
       this.unsubscribeComplete?.(); this.unsubscribeComplete = undefined;
       this.unsubscribeTerminal?.(); this.unsubscribeTerminal = undefined;
       this.callers.clear(); this.logicalCallers.clear(); this.callerAliases.clear(); this.callerFollowUps.clear(); this.callerPushQueues.clear(); this.principals.clear(); this.runOwners.clear(); this.subscriptions.clear(); this.sockets.clear();
-      this.grantPaths.clear(); this.executorGrants.clear(); this.callerGrants.clear(); this.spawnLedger.clear(); this.supervisorRequests.clear();
+      this.grantPaths.clear(); this.executorGrants.clear(); this.callerGrants.clear(); this.spawnLedger.clear(); this.supervisorRequests.clear(); this.pendingSupervisorIngress.clear(); this.pendingSupervisorRequestIds.clear(); this.supervisorIngressRevokedRuns.clear();
       this.ownedRuns.clear(); this.terminalProofs.clear(); this.reviveResults.clear(); this.revivePromises.clear(); this.forcePendingRuns.clear(); this.terminalWaiters.clear(); this.startedObservations.clear();
       this.transportSockets.clear(); this.closingSockets.clear(); this.endedSockets.clear(); this.cleanedGrantPaths.clear(); this.server = undefined;
       this.teardown.released = true;
