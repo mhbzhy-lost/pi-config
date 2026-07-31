@@ -7,7 +7,8 @@
 1. `waitForAttentionStatuses()`直接flatten public attempts，随后却读取不存在的`attempt.taskId`；
 2. 主测试读取Root session时引用只存在于`assertFutureGreen()`局部作用域的`asyncStatuses`；
 3. Executor persisted session的模型消息位于JSONL entry的`message`字段，代码却把entry本身当作`role/content`消息；
-4. RPC `tool_execution_end`的tool error位于`record.result.isError`，代码只检查`record.isError`。
+4. RPC `tool_execution_end`的tool error位于`record.result.isError`，代码只检查`record.isError`；
+5. actual run的`status.sessionId`已是完整`.jsonl`文件名，helper又追加`.jsonl`，最终读取不存在的`.jsonl.jsonl`。
 
 ## 2. 真实证据与反证
 
@@ -27,7 +28,8 @@ A2改造把三个不同边界的数据结构混为一层：Plan public projectio
 2. Root session identity从主作用域已验证的`actualRuns[*].status.sessionId`取得；
 3. Executor取证先把`type=message` entries映射为`entry.message`，再检查contact/result/bash顺序；
 4. tool error检查`record.result?.isError`，并继续用`resultValue()`解析成功值；
-5. 补强requested/escalated/resolved的request/attempt/run/hash字段，避免仅按事件数量误判不串Plan。
+5. Root session路径直接使用`path.basename(status.sessionId)`，不得再次追加扩展名；
+6. 补强requested/escalated/resolved的request/attempt/run/hash字段，避免仅按事件数量误判不串Plan。
 
 不得运行真实Harness来“试错”；修正后只做syntax/provider/static review，冻结新HEAD后才运行一次。
 
@@ -37,7 +39,7 @@ A2改造把三个不同边界的数据结构混为一层：Plan public projectio
 
 - `node --check test/plan-flat-runtime-harness.integration.mjs`；
 - `node --test test/deterministic-provider.test.mjs`；
-- 静态确认主作用域无`asyncStatuses`自由引用、waiting flatten保留taskId、session entry显式unwrap、RPC检查`result.isError`。
+- 静态确认主作用域无`asyncStatuses`自由引用、waiting flatten保留taskId、session entry显式unwrap、session filename不重复扩展名、RPC检查`result.isError`。
 
 随后冻结HEAD/index/porcelain/Harness/provider哈希并只运行一次真实A2 Harness。
 
