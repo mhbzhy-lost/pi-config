@@ -229,10 +229,10 @@ async function assertFutureGreen(handle, outcome, planPath, runtimeTmp, attentio
 
 test("flat Root runtime Harness reaches two validated Plan Runner happy paths", { timeout: 140_000 }, async (t) => {
   assert.ok(piBinary, "PI_REAL_BIN is required for the flat runtime Harness integration test");
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-flat-runtime-")); const origin = path.join(root, "origin"); const runtimeTmp = path.join(root, "tmp"); const sessions = path.join(root, "sessions");
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-flat-runtime-")); const origin = path.join(root, "origin"); const runtimeTmp = path.join(root, "tmp"); const sessions = path.join(root, "sessions"); const agentDir = path.join(root, "agent-dir");
   let rpc; let primaryError;
   try {
-    await mkdir(path.join(origin, ".pi", "agents"), { recursive: true }); await mkdir(runtimeTmp); await mkdir(sessions); await git(origin, "init"); await git(origin, "config", "user.email", "harness@example.com"); await git(origin, "config", "user.name", "Flat Harness");
+    await mkdir(path.join(origin, ".pi", "agents"), { recursive: true }); await mkdir(runtimeTmp); await mkdir(sessions); await mkdir(agentDir); await git(origin, "init"); await git(origin, "config", "user.email", "harness@example.com"); await git(origin, "config", "user.name", "Flat Harness");
     await writeFile(path.join(origin, "README.md"), "base\n"); await mkdir(path.join(origin, "docs"));
     const planPaths = [path.join(origin, "docs", "plan-one.md"), path.join(origin, "docs", "plan-two.md")];
     await Promise.all(planPaths.map((planPath) => copyFile(sourcePlan, planPath)));
@@ -241,7 +241,7 @@ test("flat Root runtime Harness reaches two validated Plan Runner happy paths", 
     await writeFile(path.join(origin, "commit-message"), "test: 初始化 flat Harness\n"); await git(origin, "add", "."); await git(origin, "commit", "--file", "commit-message");
     const rootSessionId = `flat-${path.basename(root)}`;
     const rootEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("PI_SUBAGENT_") && name !== "PI_ROOT_SUBAGENT_BROKER_ENABLED"));
-    const child = spawn(piBinary, ["--mode", "rpc", "--session-dir", sessions, "--session-id", rootSessionId, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve", "--offline", "-e", provider, "-e", rootRuntime, "-e", launcher, "--provider", "fake", "--model", "fake/deterministic"], { cwd: origin, env: { ...rootEnv, PI_CODING_AGENT_DIR: path.join(repoRoot, "pi"), PI_PLAN_HARNESS_ATTENTION: "1", TMPDIR: runtimeTmp, OPENAI_API_KEY: "not-used" }, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(piBinary, ["--mode", "rpc", "--session-dir", sessions, "--session-id", rootSessionId, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve", "--offline", "-e", provider, "-e", rootRuntime, "-e", launcher, "--provider", "fake", "--model", "fake/deterministic"], { cwd: origin, env: { ...rootEnv, PI_CODING_AGENT_DIR: agentDir, PI_PLAN_HARNESS_ATTENTION: "1", TMPDIR: runtimeTmp, OPENAI_API_KEY: "not-used" }, stdio: ["pipe", "pipe", "pipe"] });
     rpc = new RootRpc(child); rpc.send({ id: "flat-root-harness", type: "prompt", message: `PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths })}` });
     const events = await rpc.waitForExact((record) => record.type === "tool_execution_end" && record.toolName === "plan_run", 2, 25_000, "plan_run handles");
     const handles = events.map(resultValue);
