@@ -10,6 +10,7 @@ import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
 import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
 import { brokerSocketPath, parseProcessTerminal } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
+import { processesReferencing, terminateDetachedRunsUnder } from "./support/plan-e2e-process-cleanup.mjs";
 
 const execFile = promisify(execFileCallback);
 const root = path.resolve(import.meta.dirname, "..");
@@ -86,5 +87,17 @@ test("same Root flat amendment crash Harness revives the canonical Plan Runner",
     const asyncRoot = path.dirname(handle.asyncDir); const runs = await Promise.all((await readdir(asyncRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map(async (entry) => ({ dir: path.join(asyncRoot, entry.name), status: await readJson(path.join(asyncRoot, entry.name, "status.json")) }))); const runners = runs.filter((run) => run.status.steps?.[0]?.agent === "plan-runner"); const executors = runs.filter((run) => run.status.steps?.[0]?.agent === "executor"); assert.ok(runners.length >= 2); assert.ok(executors.length >= 3);
     for (const run of runs) { for (const field of ["parentRunId", "parentStepIndex", "depth", "path"]) assert.ok(!Object.hasOwn(run.status, field)); if (run.status.steps?.[0]?.agent === "plan-runner") assert.equal(run.status.steps[0].sessionFile, canonicalSession); assertTerminal(await readJson(path.join(run.dir, "process-terminal.json")), run.status.runId, ![old.runId, crash.actualRunId].includes(run.status.runId)); try { process.kill(run.status.pid, 0); assert.fail(`PID remains live: ${run.status.pid}`); } catch (error) { assert.equal(error.code, "ESRCH"); } }
     const rootEntries = await readEntries(path.join(sessions, path.basename(runs[0].status.sessionId))); const diagnostics = rootEntries.filter((entry) => entry.customType === "pi-root-broker-revival-v1").map((entry) => entry.data); assert.ok(diagnostics.some((entry) => entry.phase === "grant.issued" && entry.logicalCallerRunId === handle.planRunnerRunId && entry.activeRunId !== handle.planRunnerRunId)); assert.equal(diagnostics.filter((entry) => entry.phase === "close.started").length, 1); assert.equal(diagnostics.filter((entry) => entry.phase === "close.completed").length, 1); await assert.rejects(lstat(brokerSocketPath(rootSessionId)), { code: "ENOENT" }); passed = true;
-  } catch (error) { primaryError = error; throw error; } finally { let closeError; try { await rpc?.close(); } catch (error) { closeError = error; } if (passed && process.env.PLAN_HARNESS_PRESERVE !== "1") await rm(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); else t.diagnostic(`preserved=${fixture}`); if (closeError) { if (primaryError) t.diagnostic(`Root close failed: ${closeError.message}`); else throw closeError; } }
+  } catch (error) { primaryError = error; throw error; } finally {
+    const cleanupErrors = [];
+    try { await rpc?.close(); } catch (error) { cleanupErrors.push(error); }
+    try { await terminateDetachedRunsUnder(runtimeTmp); } catch (error) { cleanupErrors.push(error); }
+    try { assert.deepEqual(await processesReferencing(fixture, runtimeTmp), [], "processes remain after Harness cleanup"); } catch (error) { cleanupErrors.push(error); }
+    try { await rm(brokerSocketPath(rootSessionId), { force: true }); } catch (error) { cleanupErrors.push(error); }
+    if (passed && process.env.PLAN_HARNESS_PRESERVE !== "1") await rm(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); else t.diagnostic(`preserved=${fixture}`);
+    if (cleanupErrors.length) {
+      const cleanupError = new AggregateError(cleanupErrors, "Harness cleanup failed");
+      if (primaryError) t.diagnostic(cleanupError.message);
+      else throw cleanupError;
+    }
+  }
 });

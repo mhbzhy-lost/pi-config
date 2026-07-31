@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -81,4 +81,47 @@ export async function terminateDetachedRun(handle, { timeoutMs = 2_000 } = {}) {
   if (!(await waitForExit(pids, timeoutMs))) {
     throw new Error(`Detached Plan process tree did not exit: ${pids.filter(alive).join(",")}`);
   }
+}
+
+export async function terminateDetachedRunsUnder(root, { timeoutMs = 2_000 } = {}) {
+  const handles = [];
+  const visit = async (directory) => {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      const child = join(directory, entry.name);
+      if (entry.name === "async-subagent-runs") {
+        let runs;
+        try {
+          runs = await readdir(child, { withFileTypes: true });
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          continue;
+        }
+        for (const run of runs) {
+          if (!run.isDirectory() || run.isSymbolicLink()) continue;
+          handles.push({ runId: run.name, asyncDir: join(child, run.name) });
+        }
+      } else {
+        await visit(child);
+      }
+    }
+  };
+
+  await visit(root);
+  const errors = [];
+  for (const handle of handles) {
+    try {
+      await terminateDetachedRun(handle, { timeoutMs });
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length) throw new AggregateError(errors, "Failed to terminate detached Plan runs");
 }
