@@ -106,6 +106,7 @@ export function createPiSubagentsExecutionBackend({
   }
   const pending = new Map();
   const byRunId = new Map();
+  const recoveringBindings = new Map();
   let sessionId = null;
   let rpcSessionId = null;
   let capabilitiesVerified = false;
@@ -210,6 +211,16 @@ export function createPiSubagentsExecutionBackend({
       timeoutMs: binding.timeoutMs ?? 1,
     });
     return { request, binding: Object.freeze({ ...binding }) };
+  }
+
+  function existingRecoveredBinding(recovered) {
+    const existingDispatch = pending.get(recovered.request.dispatchId);
+    const existingRun = byRunId.get(recovered.binding.runId);
+    if (!existingDispatch && !existingRun) return null;
+    if (existingDispatch?.binding && existingDispatch.binding.runId === recovered.binding.runId
+      && existingRun === existingDispatch.binding
+      && stableJson(existingDispatch.binding) === stableJson(recovered.binding)) return existingDispatch.binding;
+    throw new ExecutionProtocolError("EXECUTION_BINDING_CONFLICT", "Recovered binding conflicts with an existing dispatch or run", recovered.request.dispatchId);
   }
 
   function publish(fact) {
@@ -403,36 +414,53 @@ export function createPiSubagentsExecutionBackend({
     async recoverBinding(binding) {
       ensureReady();
       const recovered = recoveredEntry(binding, true);
-      const existingDispatch = pending.get(recovered.request.dispatchId);
-      const existingRun = byRunId.get(recovered.binding.runId);
-      if (existingDispatch || existingRun) {
-        if (existingDispatch?.binding && existingDispatch.binding.runId === recovered.binding.runId
-          && existingRun === existingDispatch.binding
-          && stableJson(existingDispatch.binding) === stableJson(recovered.binding)) return existingDispatch.binding;
+      const existing = existingRecoveredBinding(recovered);
+      if (existing) return existing;
+      const inFlight = recoveringBindings.get(recovered.request.dispatchId);
+      if (inFlight) {
+        if (stableJson(inFlight.binding) === stableJson(recovered.binding)) return inFlight.promise;
         throw new ExecutionProtocolError("EXECUTION_BINDING_CONFLICT", "Recovered binding conflicts with an existing dispatch or run", recovered.request.dispatchId);
       }
-      let processTerminal = null;
-      if (typeof rpc.lookupSpawn === "function") {
-        processTerminal = validateRecoveredLookup(await rpc.lookupSpawn({ spawnKey: recovered.binding.dispatchId }), recovered.binding);
-      }
-      const entry = createEntry(recovered.request, recovered.binding);
-      entry.bindingWait.resolve(entry.binding);
-      pending.set(recovered.request.dispatchId, entry);
-      byRunId.set(recovered.binding.runId, entry.binding);
-      if (processTerminal) {
-        entry.completionPublished = true;
-        publish({
-          type: "execution.completed",
-          dispatchId: recovered.binding.dispatchId,
-          attemptId: recovered.binding.attemptId,
-          runId: recovered.binding.runId,
-          asyncDir: recovered.binding.asyncDir,
-          cwd: recovered.binding.cwd,
-          state: "observed",
-          observedAt: now(),
-        });
-      }
-      return entry.binding;
+      const completion = deferred();
+      const operation = { binding: recovered.binding, promise: completion.promise };
+      recoveringBindings.set(recovered.request.dispatchId, operation);
+      void (async () => {
+        try {
+          let processTerminal = null;
+          if (typeof rpc.lookupSpawn === "function") {
+            processTerminal = validateRecoveredLookup(await rpc.lookupSpawn({ spawnKey: recovered.binding.dispatchId }), recovered.binding);
+          }
+          ensureReady();
+          const concurrent = existingRecoveredBinding(recovered);
+          if (concurrent) {
+            completion.resolve(concurrent);
+            return;
+          }
+          const entry = createEntry(recovered.request, recovered.binding);
+          entry.bindingWait.resolve(entry.binding);
+          pending.set(recovered.request.dispatchId, entry);
+          byRunId.set(recovered.binding.runId, entry.binding);
+          if (processTerminal) {
+            entry.completionPublished = true;
+            publish({
+              type: "execution.completed",
+              dispatchId: recovered.binding.dispatchId,
+              attemptId: recovered.binding.attemptId,
+              runId: recovered.binding.runId,
+              asyncDir: recovered.binding.asyncDir,
+              cwd: recovered.binding.cwd,
+              state: "observed",
+              observedAt: now(),
+            });
+          }
+          completion.resolve(entry.binding);
+        } catch (error) {
+          completion.reject(error);
+        } finally {
+          if (recoveringBindings.get(recovered.request.dispatchId) === operation) recoveringBindings.delete(recovered.request.dispatchId);
+        }
+      })();
+      return completion.promise;
     },
     async recoverDispatch(input) {
       ensureReady();
