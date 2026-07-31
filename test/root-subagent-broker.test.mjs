@@ -2465,7 +2465,7 @@ test("Supervisor ack is a client protocol method and fails closed for unknown or
   const client = createRootBrokerClient({ rootSessionId, callerRunId: "ack-a" });
   assert.equal(typeof client.supervisorAcknowledge, "function");
   client.dispose();
-  assert.throws(() => parseBrokerRequest(request({ callerRunId: "ack-a", callerToken: "a".repeat(64), method: "supervisor.ack", params: { requestId: "ack-owned", extra: true } })), /unsupported|unexpected|exact/i);
+  assert.throws(() => parseBrokerRequest(request({ callerRunId: "ack-a", callerToken: "a".repeat(64), method: "supervisor.ack", params: { requestId: "ack-owned", extra: true } })), /unsupported|unexpected|unknown field|exact/i);
   const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream() }); await broker.start(); t.after(() => broker.closeRootSession());
   const a = await broker.grantCaller({ callerRunId: "ack-a", planId: "ack-a", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
   const b = await broker.grantCaller({ callerRunId: "ack-b", planId: "ack-b", cwd: "/other", originRoot: "/other", stateRoot: "/state-b", role: "plan-runner" });
