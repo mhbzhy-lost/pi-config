@@ -1228,7 +1228,7 @@ test("broker normal close removes grants and releases every authorization collec
 
   await assert.rejects(stat(callerGrant));
   await assert.rejects(stat(executorGrant));
-  for (const collection of [broker.callers, broker.principals, broker.runOwners, broker.subscriptions, broker.sockets, broker.grantPaths, broker.executorGrants, broker.callerGrants]) assert.equal(collection.size, 0);
+  for (const collection of [broker.callers, broker.principals, broker.runOwners, broker.subscriptions, broker.sockets, broker.grantPaths, broker.executorGrants, broker.callerGrants, broker.pendingSupervisorIngress]) assert.equal(collection.size, 0);
   assert.equal(disposed, 1);
 });
 
@@ -1978,74 +1978,63 @@ test("routes Supervisor requests only to the Executor owner in stable owner orde
 test("Supervisor owner binding replays interleaved ingress only to each deferred spawn caller in Executor FIFO order", async (t) => {
   const releases = new Map([["owner-race-executor-a", deferred()], ["owner-race-executor-b", deferred()]]);
   const entered = new Set();
-  let broker;
-  const upstream = {
-    ...fakeUpstream(),
-    async spawn({ task }) {
-      const runId = task === "A" ? "owner-race-executor-a" : "owner-race-executor-b";
-      await broker.ensureExecutorOwner(runId);
-      return { details: { runId, asyncDir: `/async/${runId}` } };
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: { ...fakeUpstream(), async spawn({ task }) { const runId = task === "A" ? "owner-race-executor-a" : "owner-race-executor-b"; return { details: { runId, asyncDir: `/async/${runId}` } }; } },
+    writeGrant: async (grant) => {
+      if (grant.role !== "executor") return await writeBrokerGrant(grant);
+      entered.add(grant.runId);
+      await releases.get(grant.runId).promise;
+      return await writeBrokerGrant(grant);
     },
-  };
-  broker = new RootBrokerServer({ rootSessionId, upstream });
-  broker.ensureExecutorOwner = async (runId) => {
-    broker.principals.set(runId, { role: "executor", callerToken: `${runId}-token` });
-    entered.add(runId);
-    await releases.get(runId).promise;
-    return { callerToken: `${runId}-token` };
-  };
+  });
   await broker.start();
   const aGrant = await broker.grantCaller({ callerRunId: "owner-race-plan-a", planId: "owner-race-a", cwd: "/repo-a", originRoot: "/repo-a", stateRoot: "/state-a", role: "plan-runner" });
   const bGrant = await broker.grantCaller({ callerRunId: "owner-race-plan-b", planId: "owner-race-b", cwd: "/repo-b", originRoot: "/repo-b", stateRoot: "/state-b", role: "plan-runner" });
-  const a = createRootBrokerClient({ rootSessionId, callerRunId: "owner-race-plan-a" });
-  const b = createRootBrokerClient({ rootSessionId, callerRunId: "owner-race-plan-b" });
+  const a = createRootBrokerClient({ rootSessionId, callerRunId: "owner-race-plan-a" }); const b = createRootBrokerClient({ rootSessionId, callerRunId: "owner-race-plan-b" });
   const pushedA = []; const pushedB = [];
-  const subscriptionA = await a.subscribe((push) => pushedA.push(push));
-  const subscriptionB = await b.subscribe((push) => pushedB.push(push));
-  const closedA = subscriptionA.closed.catch((error) => error);
-  const closedB = subscriptionB.closed.catch((error) => error);
+  const subscriptionA = await a.subscribe((push) => pushedA.push(push)); const subscriptionB = await b.subscribe((push) => pushedB.push(push));
+  const closedA = subscriptionA.closed.catch((error) => error); const closedB = subscriptionB.closed.catch((error) => error);
   const spawnA = broker.dispatch(request({ callerRunId: "owner-race-plan-a", callerToken: aGrant.callerToken, method: "spawn", params: { agent: "executor", task: "A", spawnKey: "owner-race-a" } }), {});
   const spawnB = broker.dispatch(request({ callerRunId: "owner-race-plan-b", callerToken: bGrant.callerToken, method: "spawn", params: { agent: "executor", task: "B", spawnKey: "owner-race-b" } }), {});
-  t.after(async () => {
-    releases.get("owner-race-executor-a").release(); releases.get("owner-race-executor-b").release();
-    await Promise.all([spawnA, spawnB]);
-    subscriptionA.dispose(); subscriptionB.dispose(); a.dispose(); b.dispose();
-    await Promise.all([closedA, closedB]);
-    await broker.closeRootSession();
-  });
-
+  t.after(async () => { releases.get("owner-race-executor-a").release(); releases.get("owner-race-executor-b").release(); await Promise.all([spawnA, spawnB]); subscriptionA.dispose(); subscriptionB.dispose(); a.dispose(); b.dispose(); await Promise.all([closedA, closedB]); await broker.closeRootSession(); });
   await waitForCondition(() => entered.size === 2, "both Executor grants before owner binding");
   const contextA1 = { nativeChannel: "A1" };
   await broker.routeSupervisorRequest(supervisorIngress({ id: "owner-race-A1", runId: "owner-race-executor-a", content: "A first" }), contextA1);
   await broker.routeSupervisorRequest(supervisorIngress({ id: "owner-race-B1", runId: "owner-race-executor-b", content: "B first" }), { nativeChannel: "B1" });
   await broker.routeSupervisorRequest(supervisorIngress({ id: "owner-race-A2", runId: "owner-race-executor-a", content: "A second" }), { nativeChannel: "A2" });
-  releases.get("owner-race-executor-a").release();
-  await waitForCondition(() => pushedA.length === 2, "replayed A ingress");
+  releases.get("owner-race-executor-a").release(); await waitForCondition(() => pushedA.length === 2, "replayed A ingress");
   assert.deepEqual(pushedA, [
     { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, callerRunId: "owner-race-plan-a", type: "supervisor.request", data: { requestId: "owner-race-A1", executorRunId: "owner-race-executor-a", content: "A first", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 0 } },
     { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, callerRunId: "owner-race-plan-a", type: "supervisor.request", data: { requestId: "owner-race-A2", executorRunId: "owner-race-executor-a", content: "A second", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 0 } },
   ]);
-  assert.equal(broker.supervisorRequests.get("owner-race-A1")?.context, contextA1);
   assert.equal(pushedB.length, 0);
-  releases.get("owner-race-executor-b").release();
-  await waitForCondition(() => pushedB.length === 1, "replayed B ingress");
+  assert.equal(broker.supervisorRequests.get("owner-race-A1")?.context, contextA1);
+  await broker.routeSupervisorRequest(supervisorIngress({ id: "owner-race-A1", runId: "owner-race-executor-a", content: "A first" }), { nativeChannel: "changed" });
+  assert.equal(pushedA.length, 2); assert.equal(broker.supervisorRequests.get("owner-race-A1")?.context, contextA1);
+  releases.get("owner-race-executor-b").release(); await waitForCondition(() => pushedB.length === 1, "replayed B ingress");
   assert.deepEqual(pushedB, [
     { schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, callerRunId: "owner-race-plan-b", type: "supervisor.request", data: { requestId: "owner-race-B1", executorRunId: "owner-race-executor-b", content: "B first", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 0 } },
   ]);
-  assert.deepEqual([...broker.supervisorRequests.values()].map(({ requestId, ownerRunId, executorRunId }) => ({ requestId, ownerRunId, executorRunId })), [
-    { requestId: "owner-race-A1", ownerRunId: "owner-race-plan-a", executorRunId: "owner-race-executor-a" },
-    { requestId: "owner-race-B1", ownerRunId: "owner-race-plan-b", executorRunId: "owner-race-executor-b" },
-    { requestId: "owner-race-A2", ownerRunId: "owner-race-plan-a", executorRunId: "owner-race-executor-a" },
-  ]);
+  assert.deepEqual([...broker.supervisorRequests.values()].filter(({ ownerRunId }) => ownerRunId === "owner-race-plan-a").map(({ requestId, executorRunId }) => ({ requestId, executorRunId })), [{ requestId: "owner-race-A1", executorRunId: "owner-race-executor-a" }, { requestId: "owner-race-A2", executorRunId: "owner-race-executor-a" }]);
+  assert.deepEqual([...broker.supervisorRequests.values()].filter(({ ownerRunId }) => ownerRunId === "owner-race-plan-b").map(({ requestId, executorRunId }) => ({ requestId, executorRunId })), [{ requestId: "owner-race-B1", executorRunId: "owner-race-executor-b" }]);
 });
 
 test("Supervisor pending ingress bounds dedupe conflicts and Root close cleanup", async (t) => {
-  const broker = new RootBrokerServer({ rootSessionId, upstream: fakeUpstream(), supervisorIngressLimit: 2 });
+  const gates = new Map([["pending-bound-a", deferred()], ["pending-bound-b", deferred()], ["pending-bound-c", deferred()]]);
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: fakeUpstream(),
+    supervisorIngressLimit: 2,
+    writeGrant: async (grant) => {
+      if (grant.role === "executor") await gates.get(grant.runId).promise;
+      return await writeBrokerGrant(grant);
+    },
+  });
   await broker.start();
-  t.after(() => broker.closeRootSession());
-  broker.principals.set("pending-bound-a", { role: "executor", callerToken: "pending-bound-a-token" });
-  broker.principals.set("pending-bound-b", { role: "executor", callerToken: "pending-bound-b-token" });
-  broker.principals.set("pending-bound-c", { role: "executor", callerToken: "pending-bound-c-token" });
+  t.after(async () => { for (const gate of gates.values()) gate.release(); await broker.closeRootSession(); });
+  const grants = ["pending-bound-a", "pending-bound-b", "pending-bound-c"].map((runId) => broker.ensureExecutorOwner(runId));
+  await waitForCondition(() => broker.principals.size === 3, "three known unbound Executors");
   await broker.routeSupervisorRequest(supervisorIngress({ id: "pending-bound-1", runId: "pending-bound-a", content: "first" }));
   await broker.routeSupervisorRequest(supervisorIngress({ id: "pending-bound-1", runId: "pending-bound-a", content: "first" }));
   const conflict = await broker.routeSupervisorRequest(supervisorIngress({ id: "pending-bound-1", runId: "pending-bound-a", content: "changed" }));
@@ -2054,10 +2043,10 @@ test("Supervisor pending ingress bounds dedupe conflicts and Root close cleanup"
   assert.deepEqual({ pending: broker.pendingSupervisorIngress.size, requestIds: [...broker.pendingSupervisorIngress.keys()], conflict: conflict?.code, full: full?.code }, {
     pending: 2, requestIds: ["pending-bound-a", "pending-bound-b"], conflict: "supervisor_request_conflict", full: "supervisor_ingress_queue_full",
   });
+  for (const gate of gates.values()) gate.release();
+  await Promise.all(grants);
   await broker.closeRootSession();
-  assert.deepEqual({ pending: broker.pendingSupervisorIngress.size, supervisorRequests: broker.supervisorRequests.size, callers: broker.callers.size, principals: broker.principals.size, runOwners: broker.runOwners.size }, {
-    pending: 0, supervisorRequests: 0, callers: 0, principals: 0, runOwners: 0,
-  });
+  assert.deepEqual({ pending: broker.pendingSupervisorIngress.size, supervisorRequests: broker.supervisorRequests.size, callers: broker.callers.size, principals: broker.principals.size, runOwners: broker.runOwners.size }, { pending: 0, supervisorRequests: 0, callers: 0, principals: 0, runOwners: 0 });
 });
 
 test("Supervisor unknown owner fails closed without poisoning a later bound requestId", async (t) => {
