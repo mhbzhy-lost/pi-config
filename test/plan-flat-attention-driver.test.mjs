@@ -54,3 +54,23 @@ test("Attention driver replies incrementally before all capacity-blocked request
   assert.deepEqual(result.pending.map((entries) => entries.length), [2, 2]);
   assert.equal(replied.has("p0-task-2"), true, "capacity-blocked request was eventually observed and replied");
 });
+
+test("Attention driver rejects one requestId reused by another Attempt in the same Plan", async () => {
+  const { driveHarnessAttention } = await import("./support/flat-plan-attention-driver.mjs");
+  const conflicting = {
+    tasks: [
+      { taskId: "task-1", attempts: [attempt("task-1", "waiting-attention", "reused-request")] },
+      { taskId: "task-2", attempts: [attempt("task-2", "waiting-attention", "reused-request")] },
+    ],
+  };
+
+  await assert.rejects(driveHarnessAttention({
+    handles: [{ planId: "plan-0" }],
+    expectedPerPlan: 2,
+    timeoutMs: 20,
+    pollIntervalMs: 0,
+    readStatuses: async () => [conflicting],
+    readRunners: async () => [{ state: "complete" }],
+    onPending: async () => {},
+  }), /request identity conflict/i);
+});
