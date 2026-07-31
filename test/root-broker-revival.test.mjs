@@ -238,6 +238,62 @@ test("wakeCaller accepts one durable Attention reply wake only after official pr
   await new Promise((resolve) => setImmediate(resolve));
 });
 
+test("assigns distinct queued Attention wakes to consecutive revived generations", async () => {
+  let nextGeneration = 2;
+  const { ownedRun, proof, resumeCalls, server } = await createRevivalFixture({
+    resume: async () => ({
+      text: "Revived",
+      details: {
+        mode: "single",
+        results: [],
+        asyncId: `plan-runner-${nextGeneration++}`,
+        asyncDir: `/async/plan-runner-${nextGeneration - 1}`,
+      },
+    }),
+  });
+  server.upstream.ping = async () => ({});
+  const firstWake = { wakeId: "attention-reply-attention-1", reason: "attention-reply" };
+  const secondWake = { wakeId: "attention-reply-attention-2", reason: "attention-reply" };
+
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", firstWake), { accepted: true, wakeId: firstWake.wakeId });
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", secondWake), { accepted: true, wakeId: secondWake.wakeId });
+  assert.deepEqual(resumeCalls, []);
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [secondWake]);
+  const generationTwoPing = await server.dispatch(parseBrokerRequest({
+    schemaVersion: "pi-root-subagent-broker-request.v1",
+    requestId: "request-ping-generation-2",
+    rootSessionId: "root-session-1",
+    callerRunId: "plan-runner-2",
+    callerToken: "b".repeat(64),
+    method: "ping",
+    params: {},
+  }), {});
+  assert.deepEqual(generationTwoPing.data.callerWake, firstWake);
+
+  const generationTwoRun = { ...ownedRun, runId: "plan-runner-2", asyncDir: "/async/plan-runner-2", pid: 102, birthIdentity: "plan-runner-2-birth" };
+  server.ownedRuns.set(generationTwoRun.runId, generationTwoRun);
+  server.acceptTerminalProof(generationTwoRun, { ...proof, runId: "plan-runner-2" });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, [...expectedResume, { id: "plan-runner-2", message: "A durable Root broker wake is pending." }]);
+  const generationThreePing = await server.dispatch(parseBrokerRequest({
+    schemaVersion: "pi-root-subagent-broker-request.v1",
+    requestId: "request-ping-generation-3",
+    rootSessionId: "root-session-1",
+    callerRunId: "plan-runner-3",
+    callerToken: "c".repeat(64),
+    method: "ping",
+    params: {},
+  }), {});
+  assert.deepEqual(generationThreePing.data.callerWake, secondWake);
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), []);
+});
+
 test("wire caller.followup remains limited to the one-shot plan-opened wake", async () => {
   const { request } = await createRevivalFixture();
   assert.throws(() => parseBrokerRequest({

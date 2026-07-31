@@ -961,6 +961,43 @@ test("fresh recoverExecutionState announces a matching durable Attention reply o
   assert.equal(calls.find(([name]) => name === "send")[1].customType, "pi-plan-attention-reply-v1");
 });
 
+test("recovery injects only the durable Attention reply identified by its generation wake", async (t) => {
+  const repo = await fixture(parallelSource);
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  const workspaces = ["task-1", "task-2"].map((taskId, index) => fakeAllocator({ planId: repo.planId, taskId, attemptId: `attempt-${index + 1}`, baseCommit: repo.baseCommit }));
+  const durableEntries = [created(binding)];
+  for (const [index, taskId] of ["task-1", "task-2"].entries()) {
+    const attemptId = `attempt-${index + 1}`;
+    const runId = `run-${index + 1}`;
+    const requestId = `request-${index + 1}`;
+    const workspace = workspaces[index];
+    const offset = index * 4;
+    durableEntries.push(
+      { schemaVersion: "pi-plan-event.v1", eventId: `${attemptId}-allocated`, planId: repo.planId, occurredAt: `2026-07-30T00:02:0${offset + 1}.000Z`, type: "attempt.workspace-allocated", data: { attemptId, taskId, baseCommit: repo.baseCommit, workspace } },
+      { schemaVersion: "pi-plan-event.v1", eventId: `${attemptId}-requested`, planId: repo.planId, occurredAt: `2026-07-30T00:02:0${offset + 2}.000Z`, type: "attempt.dispatch-requested", data: { attemptId, taskId, dispatchId: `dispatch-${index + 1}`, baseCommit: repo.baseCommit, workspace, tool: { agent: "executor", task: `Recover ${taskId}.`, cwd: workspace.path, output: `/results/${attemptId}.json`, timeoutMs: 900000, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: `${index + 1}`.repeat(64) } },
+      { schemaVersion: "pi-plan-event.v1", eventId: `${attemptId}-bound`, planId: repo.planId, occurredAt: `2026-07-30T00:02:0${offset + 3}.000Z`, type: "attempt.bound", data: { attemptId, taskId, dispatchId: `dispatch-${index + 1}`, runId, asyncDir: `/async/${runId}`, sessionFile: `/sessions/${runId}.jsonl` } },
+      { schemaVersion: "pi-plan-event.v1", eventId: `${attemptId}-attention`, planId: repo.planId, occurredAt: `2026-07-30T00:02:0${offset + 4}.000Z`, type: "attempt.attention-requested", data: { requestId, taskId, attemptId, runId, kind: "need_decision", message: `Choose ${taskId}`, projectionVersion: offset + 5, createdAt: `2026-07-30T00:02:0${offset + 4}.000Z`, evidence: { bodyPath: `attention/${requestId}.md`, bodySha256: `${index + 3}`.repeat(64) } } },
+    );
+  }
+  const ctx = context(repo.worktree, durableEntries.map((data) => ({ customType: "pi-plan-event-v1", data })));
+  const control = createPlanControl({ stateRoot: repo.origin });
+  await control.writeAttentionReply({ planId: repo.planId, requestId: "request-1", taskId: "task-1", attemptId: "attempt-1", runId: "run-1", expectedProjectionVersion: 5, message: "Use alpha", occurredAt: "2026-07-30T00:03:01.000Z" });
+  await control.writeAttentionReply({ planId: repo.planId, requestId: "request-2", taskId: "task-2", attemptId: "attempt-2", runId: "run-2", expectedProjectionVersion: 9, message: "Use beta", occurredAt: "2026-07-30T00:03:02.000Z" });
+  const deps = runnerDependencies(repo, {
+    pi: { sendMessage() { throw new Error("recovery must not start a nested turn"); } },
+    executionBackend: { async recoverBinding() {} },
+  });
+
+  const injected = await deps.recoverExecutionState({ ctx, wakeId: "attention-reply-request-2" });
+
+  assert.deepEqual(injected, {
+    customType: "pi-plan-attention-reply-v1",
+    content: "Use beta",
+    details: { planId: repo.planId, taskId: "task-2", attemptId: "attempt-2", runId: "run-2", requestId: "request-2", expectedProjectionVersion: 9 },
+  });
+});
+
 test("does not acknowledge a durable reply when matching resolution evidence has another message hash", async (t) => {
   const repo = await fixture();
   t.after(() => rm(repo.origin, { recursive: true, force: true }));

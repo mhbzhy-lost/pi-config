@@ -96,7 +96,10 @@ function setup(options = {}) {
       if (extensionLoading) throw new Error("Extension runtime not initialized. Action methods cannot be called during extension loading.");
       activeTools = next;
     },
-    sendMessage(message, sendOptions) { messages.push({ message, options: sendOptions }); },
+    sendMessage(message, sendOptions) {
+      if (typeof options.sendMessage === "function") return options.sendMessage(message, sendOptions);
+      messages.push({ message, options: sendOptions });
+    },
   };
   createPlanCapsuleExtension(pi, {
     appendPlanEvent: async (_ctx, type, data) => {
@@ -203,6 +206,23 @@ test("before_agent_start checks capabilities before recovering an opened Plan", 
   await handlers.get("before_agent_start")({}, ctx);
 
   assert.deepEqual(calls, ["capabilities", "prepare", "recovery"]);
+});
+
+test("before_agent_start returns the recovered Attention command as the current-turn message", async () => {
+  const recovered = {
+    customType: "pi-plan-attention-reply-v1",
+    content: "Use the approved target",
+    details: { planId: "release-11", taskId: "task-1", attemptId: "attempt-1", runId: "run-1", requestId: "request-1", expectedProjectionVersion: 5 },
+  };
+  const { handlers } = setup({
+    sendMessage() { throw new Error("preflight must not start a nested turn"); },
+    prepareExecutionLifecycle: async () => recovered,
+  });
+  const ctx = context([{ customType: "pi-plan-event-v1", data: created }]);
+
+  const result = await handlers.get("before_agent_start")({ wakeId: "attention-reply-request-1" }, ctx);
+
+  assert.deepEqual(result, { message: recovered });
 });
 
 test("before_agent_start prepares an empty durable projection without supersede recovery", async () => {
