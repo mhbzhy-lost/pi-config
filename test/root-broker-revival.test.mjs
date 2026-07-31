@@ -1134,9 +1134,21 @@ test("live lifecycle retries transient resume failure without a second completio
 
 test("live lifecycle retries transient revived caller grant failure without a second completion or proof", async () => {
   let failedGrant = false;
-  const { ownedRun, proof, resumeCalls, server, forwardCompletion, writes } = await createLiveLifecycleFixture({
+  let resumeNumber = 0;
+  const { grants, ownedRun, proof, resumeCalls, server, forwardCompletion, writes } = await createLiveLifecycleFixture({
     revivalRetryBaseMs: 1,
     revivalRetryMaxMs: 1,
+    resume: async () => {
+      resumeNumber += 1;
+      return {
+        ...revivedResult,
+        details: {
+          ...revivedResult.details,
+          asyncId: `plan-runner-${resumeNumber + 1}`,
+          asyncDir: `/async/plan-runner-${resumeNumber + 1}`,
+        },
+      };
+    },
     writeGrant: async (grant) => {
       if (grant.runId === "plan-runner-2" && !failedGrant) {
         failedGrant = true;
@@ -1151,13 +1163,19 @@ test("live lifecycle retries transient revived caller grant failure without a se
   server.acceptTerminalProof(ownedRun, proof);
 
   await waitFor(
-    () => resumeCalls.length === 2,
+    () => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2",
     100,
-    `expected two resume attempts after the one live completion and proof; received ${resumeCalls.length}`,
+    `expected the revived Plan Runner actual to remain plan-runner-2; received ${server.logicalCallers.get("plan-runner-1")?.activeRunId}`,
   );
 
-  assert.deepEqual(resumeCalls, [...expectedResume, ...expectedResume]);
+  assert.deepEqual(resumeCalls, expectedResume);
   assert.equal(failedGrant, true);
   assert.deepEqual(server.logicalCallers.get("plan-runner-1"), { activeRunId: "plan-runner-2", generation: 1 });
   assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), []);
+  assert.deepEqual(
+    grants
+      .filter(({ role, runId }) => role === "plan-runner" && runId !== "plan-runner-1")
+      .map(({ runId }) => runId),
+    ["plan-runner-2", "plan-runner-2"],
+  );
 });
