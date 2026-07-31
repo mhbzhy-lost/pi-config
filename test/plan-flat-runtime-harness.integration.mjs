@@ -77,10 +77,27 @@ async function assertFutureGreen(handle, outcome, planPath, runtimeTmp) {
   const { plan: status, runner: runnerAsyncStatus } = outcome;
   assert.equal(status.lifecycle, "validated"); assert.equal(status.tasks.length, 2);
   assert.ok(status.tasks.every((task) => task.status === "accepted" && task.attempts?.[0]?.status === "integrated"));
+  const runnerSessionFile = runnerAsyncStatus.steps?.[0]?.sessionFile;
+  assert.ok(runnerSessionFile);
+  const events = await readPlanEvents(runnerSessionFile);
+  const attempts = status.tasks.flatMap((task) => task.attempts);
+  assert.equal(attempts.length, 2);
+  const bounds = events.filter((event) => event.type === "attempt.bound");
+  assert.equal(bounds.length, 2);
+  const executorRuns = attempts.map((attempt) => {
+    const matches = bounds.filter((bound) => bound.data.attemptId === attempt.attemptId);
+    assert.equal(matches.length, 1, `Plan Runner session must bind ${attempt.attemptId} exactly once`);
+    const bound = matches[0];
+    assert.equal(bound.data.dispatchId, attempt.dispatchId);
+    assert.equal(bound.data.runId, attempt.runId);
+    assert.equal(typeof bound.data.asyncDir, "string");
+    assert.ok(bound.data.asyncDir.trim());
+    return { runId: attempt.runId, asyncDir: bound.data.asyncDir };
+  });
   assert.equal(await readFile(path.join(handle.worktree, "README.md"), "utf8"), "base\nworker\n");
   assert.equal(await readFile(path.join(handle.worktree, "worker.txt"), "utf8"), "worker-2\n");
   assert.equal(await git(handle.worktree, "rev-list", "--count", `${handle.baseCommit}..HEAD`), "2"); await assertRuntimeClean(handle.worktree);
-  const runs = [{ runId: handle.planRunnerRunId, asyncDir: handle.asyncDir }, ...status.tasks.flatMap((task) => task.attempts)];
+  const runs = [{ runId: handle.planRunnerRunId, asyncDir: handle.asyncDir }, ...executorRuns];
   assert.equal(runs.length, 3);
   assert.ok(runs.every((run) => run?.runId && run?.asyncDir));
   assert.equal(new Set(runs.map((run) => run.runId)).size, 3);
@@ -97,14 +114,11 @@ async function assertFutureGreen(handle, outcome, planPath, runtimeTmp) {
   assert.equal(new Set(sessionIds).size, 1);
   assert.match(path.basename(sessionIds[0]), new RegExp(handle.rootSessionId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.notEqual(path.basename(sessionIds[0]), handle.rootSessionId);
-  const runnerSessionFile = runnerAsyncStatus.steps?.[0]?.sessionFile;
-  assert.ok(runnerSessionFile);
   assert.doesNotMatch(JSON.stringify({ handle, status, asyncStatuses }), /Standalone Host|hostHandle|hostRunId/);
 
   const plan = parsePlanDocument(await readFile(planPath, "utf8"), planPath);
   const ir = compilePlanToIR(plan);
   assert.equal(plan.schemaVersion, "pi-plan.v3");
-  const events = await readPlanEvents(runnerSessionFile);
   const created = events.find((event) => event.type === "plan.created");
   assert.ok(created, "Plan Runner session must contain plan.created");
   assert.deepEqual(created.data.revision, {
