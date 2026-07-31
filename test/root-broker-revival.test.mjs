@@ -4,7 +4,7 @@ import test from "node:test";
 import { BROKER_METHODS, parseBrokerPush, parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
-async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDiagnostic, resume, spawn, writeGrant } = {}) {
+async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDiagnostic, resume, revivalRetryBaseMs, revivalRetryMaxMs, spawn, writeGrant } = {}) {
   const callerToken = "a".repeat(64);
   const revivedCallerToken = "b".repeat(64);
   const executorToken = "c".repeat(64);
@@ -43,6 +43,8 @@ async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDi
     },
     randomToken: () => tokens.shift(),
     recordRevivalDiagnostic,
+    revivalRetryBaseMs,
+    revivalRetryMaxMs,
   });
   await server.grantCaller({
     callerRunId: "plan-runner-1",
@@ -146,11 +148,14 @@ function queuedLifecyclePush({ dispatchId, runId }) {
   });
 }
 
-async function createLiveLifecycleFixture({ recordRevivalDiagnostic, resume } = {}) {
+async function createLiveLifecycleFixture({ recordRevivalDiagnostic, resume, revivalRetryBaseMs, revivalRetryMaxMs, writeGrant } = {}) {
   let executorNumber = 0;
   const fixture = await createRevivalFixture({
     recordRevivalDiagnostic,
     resume,
+    revivalRetryBaseMs,
+    revivalRetryMaxMs,
+    writeGrant,
     spawn: async () => {
       executorNumber += 1;
       return { runId: `executor-live-${executorNumber}`, asyncDir: `/async/executor-live-${executorNumber}` };
@@ -187,6 +192,14 @@ async function createLiveLifecycleFixture({ recordRevivalDiagnostic, resume } = 
   }
 
   return { ...fixture, forwardCompletion, socket, writes };
+}
+
+async function waitFor(condition, timeoutMs = 100, failureMessage = `condition was not met within ${timeoutMs}ms`) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(failureMessage);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
 }
 
 const supervisorMessage = {
@@ -1090,4 +1103,61 @@ test("live lifecycle completion received during resume transfers debt to the rev
     ...expectedResume,
     { id: "plan-runner-2", message: "A durable Root broker wake is pending." },
   ]);
+});
+
+test("live lifecycle retries transient resume failure without a second completion or proof", async () => {
+  let attempts = 0;
+  const { ownedRun, proof, resumeCalls, server, forwardCompletion, writes } = await createLiveLifecycleFixture({
+    revivalRetryBaseMs: 1,
+    revivalRetryMaxMs: 1,
+    resume: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("resume unavailable");
+      return revivedResult;
+    },
+  });
+
+  await forwardCompletion("live-retry-resume-1");
+  assert.deepEqual(writes.map((push) => push.type), ["execution.completed"]);
+  server.acceptTerminalProof(ownedRun, proof);
+
+  await waitFor(
+    () => resumeCalls.length === 2,
+    100,
+    `expected two resume attempts after the one live completion and proof; received ${resumeCalls.length}`,
+  );
+
+  assert.deepEqual(resumeCalls, [...expectedResume, ...expectedResume]);
+  assert.deepEqual(server.logicalCallers.get("plan-runner-1"), { activeRunId: "plan-runner-2", generation: 1 });
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), []);
+});
+
+test("live lifecycle retries transient revived caller grant failure without a second completion or proof", async () => {
+  let failedGrant = false;
+  const { ownedRun, proof, resumeCalls, server, forwardCompletion, writes } = await createLiveLifecycleFixture({
+    revivalRetryBaseMs: 1,
+    revivalRetryMaxMs: 1,
+    writeGrant: async (grant) => {
+      if (grant.runId === "plan-runner-2" && !failedGrant) {
+        failedGrant = true;
+        throw new Error("revived grant unavailable");
+      }
+      return `/tmp/root-broker-revival-grant-${grant.runId}`;
+    },
+  });
+
+  await forwardCompletion("live-retry-grant-1");
+  assert.deepEqual(writes.map((push) => push.type), ["execution.completed"]);
+  server.acceptTerminalProof(ownedRun, proof);
+
+  await waitFor(
+    () => resumeCalls.length === 2,
+    100,
+    `expected two resume attempts after the one live completion and proof; received ${resumeCalls.length}`,
+  );
+
+  assert.deepEqual(resumeCalls, [...expectedResume, ...expectedResume]);
+  assert.equal(failedGrant, true);
+  assert.deepEqual(server.logicalCallers.get("plan-runner-1"), { activeRunId: "plan-runner-2", generation: 1 });
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), []);
 });
