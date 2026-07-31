@@ -474,6 +474,38 @@ test("flat Plan Runner reads the durable Attention reply envelope after Pi LLM c
   });
 });
 
+test("flat Plan Runner does not fall back to an older Attention envelope", () => {
+  const oldEnvelope = {
+    schemaVersion: "pi-plan-attention-reply-message.v1",
+    planId: "plan-1",
+    taskId: "task-old",
+    attemptId: "attempt-old",
+    runId: "executor-run-old",
+    requestId: "request-old",
+    expectedProjectionVersion: 5,
+    message: "OLD DECISION",
+  };
+  const messages = convertToLlm([
+    {
+      role: "custom",
+      customType: "pi-plan-attention-reply-v1",
+      content: `PI_PLAN_ATTENTION_REPLY ${JSON.stringify(oldEnvelope)}`,
+      details: { requestId: oldEnvelope.requestId, runId: oldEnvelope.runId },
+    },
+    privateWakePrompt(),
+    {
+      role: "custom",
+      customType: "pi-plan-attention-reply-v1",
+      content: "PI_PLAN_ATTENTION_REPLY {malformed",
+      details: { requestId: "request-current", runId: "executor-run-current" },
+    },
+  ]);
+
+  assert.deepEqual(decide(messages, flatPlanTools), {
+    tool: { name: "plan_continue", arguments: { reason: "harness" } },
+  });
+});
+
 test("flat Plan Runner integrates validated work", () => {
   const status = toolResult("plan_status", '{"tasks":[{"status":"pending","attempts":[{"status":"validated"}]}]}');
   assert.deepEqual(decide([flatPlanPrompt(), toolResult("plan_open", "opened"), toolResult("plan_continue", "started"), status], flatPlanTools), {

@@ -92,6 +92,38 @@ function rootAttentionReplies(messages) {
   return { replies, results: messages.slice(markerIndex + 1).filter((message) => message?.role === "toolResult" && message.toolName === "plan_attention_reply") };
 }
 
+function attentionReplyEnvelope(messages, latestPrivateWakeIndex) {
+  const prefix = "PI_PLAN_ATTENTION_REPLY ";
+  const keys = ["schemaVersion", "planId", "taskId", "attemptId", "runId", "requestId", "expectedProjectionVersion", "message"];
+  const candidates = latestPrivateWakeIndex >= 0
+    ? messages.slice(latestPrivateWakeIndex + 1).filter((message) => message?.role === "user"
+      || (message?.role === "custom" && message.customType === "pi-plan-attention-reply-v1"))
+    : messages;
+  for (const candidate of [...candidates].reverse()) {
+    const content = typeof candidate?.content === "string" ? candidate.content : textParts(candidate);
+    if (!content.startsWith(prefix)) continue;
+    let envelope;
+    try { envelope = JSON.parse(content.slice(prefix.length)); } catch { return undefined; }
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
+      || Object.keys(envelope).length !== keys.length || !keys.every((key) => Object.hasOwn(envelope, key))
+      || envelope.schemaVersion !== "pi-plan-attention-reply-message.v1"
+      || !["planId", "taskId", "attemptId", "runId", "requestId", "message"].every((key) => typeof envelope[key] === "string" && envelope[key])
+      || !Number.isSafeInteger(envelope.expectedProjectionVersion)) return undefined;
+    return envelope;
+  }
+  if (latestPrivateWakeIndex >= 0) return undefined;
+  const legacy = [...candidates].reverse().find((message) => message?.role === "custom"
+    && message.customType === "pi-plan-attention-reply-v1"
+    && !String(message.content ?? "").startsWith(prefix));
+  const requestId = legacy?.details?.requestId;
+  const runId = legacy?.details?.runId;
+  const message = typeof legacy?.content === "string" ? legacy.content : textParts(legacy);
+  if (typeof requestId === "string" && requestId && typeof runId === "string" && runId && message.trim()) {
+    return { requestId, runId, message };
+  }
+  return undefined;
+}
+
 export function decideDeterministicTurn({ messages = [], toolNames = [], issuedDispatchContractKeys = new Set(), attentionMode = false, executorRunId } = {}) {
   const userText = messages.filter((message) => message?.role === "user").map(textParts).join("\n");
   const latestPrivateWakeIndex = messages.findLastIndex((message) => message?.role === "user"
@@ -233,12 +265,10 @@ export function decideDeterministicTurn({ messages = [], toolNames = [], issuedD
   const bootstrap = userText.match(/Open the approved Plan revision by calling plan_open exactly once with (\{[^\n]+\})\./)?.[1];
   if (bootstrap || latestPrivateWake) {
     const resultsFor = (name) => toolResults.filter((message) => message.toolName === name);
-    const customDurableReply = [...messages].reverse().find((message) => message?.role === "custom"
-      && message.customType === "pi-plan-attention-reply-v1");
-    const durableRequestId = customDurableReply?.details?.requestId;
-    const durableRunId = customDurableReply?.details?.runId;
-    const durableMessage = typeof customDurableReply?.content === "string"
-      ? customDurableReply.content : textParts(customDurableReply);
+    const durableReply = attentionReplyEnvelope(messages, latestPrivateWakeIndex);
+    const durableRequestId = durableReply?.requestId;
+    const durableRunId = durableReply?.runId;
+    const durableMessage = durableReply?.message;
     const delivered = typeof durableRequestId === "string" && durableRequestId
       ? resultsFor("plan_executor_supervisor").some((message) => message.details?.replyTo === durableRequestId)
       : false;

@@ -315,9 +315,19 @@ export function createPlanRunnerDependencies({
   }
 
   function attentionMessage(command) {
+    const envelope = {
+      schemaVersion: "pi-plan-attention-reply-message.v1",
+      planId: command.planId,
+      taskId: command.taskId,
+      attemptId: command.attemptId,
+      runId: command.runId,
+      requestId: command.requestId,
+      expectedProjectionVersion: command.expectedProjectionVersion,
+      message: command.message,
+    };
     return {
       customType: "pi-plan-attention-reply-v1",
-      content: command.message,
+      content: `PI_PLAN_ATTENTION_REPLY ${JSON.stringify(envelope)}`,
       details: {
         planId: command.planId,
         taskId: command.taskId,
