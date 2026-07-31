@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +9,7 @@ import test from "node:test";
 
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
+import { brokerSocketPath, parseProcessTerminal } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 
 const execFile = promisify(execFileCallback);
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -42,6 +43,26 @@ async function readPlanEvents(sessionFile) {
   return lines.map((line) => JSON.parse(line))
     .filter((entry) => entry?.customType === "pi-plan-event-v1" && entry?.data)
     .map((entry) => entry.data);
+}
+function sessionMessages(entries) { return entries.filter((entry) => entry?.type === "message" && entry.message && typeof entry.message === "object").map((entry) => entry.message); }
+function toolCalls(messages, name) { return messages.flatMap((message, messageIndex) => message?.role === "assistant" ? (message.content ?? []).flatMap((part) => part?.type === "toolCall" && part.name === name ? [{ message, messageIndex, part }] : []) : []); }
+function toolResults(messages, name, toolCallId) { return messages.flatMap((message, messageIndex) => message?.role === "toolResult" && message.toolName === name && message.toolCallId === toolCallId ? [{ message, messageIndex }] : []); }
+function finiteTime(value, label) { const timestamp = typeof value === "number" ? value : Date.parse(value); assert.ok(Number.isFinite(timestamp), `${label} must be finite`); return timestamp; }
+function logicalCallerAt(grants, logicalCallerRunId, initialRunId, occurredAt, label) {
+  const timestamp = finiteTime(occurredAt, label);
+  const candidates = grants.filter((grant) => grant.logicalCallerRunId === logicalCallerRunId && grant.observedAt <= timestamp);
+  return candidates.at(-1)?.activeRunId ?? initialRunId;
+}
+function assertOfficialTerminal(sidecar, runId) {
+  assert.ok(sidecar && typeof sidecar === "object" && !Array.isArray(sidecar), `official terminal for ${runId}`);
+  assert.equal(sidecar.runId, runId, `official terminal runId for ${runId}`);
+  const { runId: _runId, ...terminal } = sidecar;
+  parseProcessTerminal(terminal);
+  assert.equal(terminal.state, "observed", `official terminal state for ${runId}`);
+  const runner = terminal.instances.find((instance) => instance.kind === "runner" && instance.processInstanceId === terminal.runnerProcessInstanceId);
+  assert.ok(runner, `official terminal must contain matching Runner for ${runId}`);
+  assert.equal(runner.exitCode, 0, `Runner exit code for ${runId}`);
+  assert.equal(runner.signal, null, `Runner signal for ${runId}`);
 }
 function exactObject(value, keys, label) {
   assert.ok(value && typeof value === "object" && !Array.isArray(value), `${label} must be an object`);
@@ -100,8 +121,10 @@ class RootRpc {
       const exit = await Promise.race([this.exited, timeout]);
       if (!exit) {
         this.child.kill("SIGKILL");
-        await this.exited;
+        const forced = await this.exited;
+        throw new Error(`Root RPC graceful close timed out and forced exit ${JSON.stringify(forced)}`);
       }
+      if (exit.code !== 0 || exit.signal !== null) throw new Error(`Root RPC graceful close failed ${JSON.stringify(exit)}`);
     } finally { clearTimeout(timer); }
   }
 }
@@ -271,6 +294,9 @@ test("flat Root runtime Harness reaches two validated Plan Runner happy paths", 
     assert.equal(initialRuns.length, 6);
     for (const key of ["runId", "asyncDir"]) assert.equal(new Set(initialRuns.map((run) => run[key])).size, 6, `Initial runs must have unique ${key}`);
 
+    await rpc.close();
+    rpc = undefined;
+
     const resolvedRuntimeTmp = path.resolve(runtimeTmp);
     const asyncRoots = new Set(handles.map((handle) => path.dirname(path.resolve(handle.asyncDir))));
     assert.equal(asyncRoots.size, 1);
@@ -293,33 +319,69 @@ test("flat Root runtime Harness reaches two validated Plan Runner happy paths", 
       assert.match(path.basename(status.sessionId), new RegExp(rootSessionId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
       assert.notEqual(path.basename(status.sessionId), rootSessionId);
       for (const field of ["parentRunId", "parentStepIndex", "depth", "path"]) assert.ok(!Object.hasOwn(status, field));
+      assertOfficialTerminal(await readJson(path.join(asyncDir, "process-terminal.json")), status.runId);
+      assert.ok(Number.isSafeInteger(status.pid) && status.pid > 0, `Run ${status.runId} status PID`);
+      try { process.kill(status.pid, 0); assert.fail(`Run ${status.runId} PID ${status.pid} remains alive after graceful close`); } catch (error) { assert.equal(error?.code, "ESRCH", `Run ${status.runId} PID check`); }
     }
     for (const { status } of runners) assert.equal(handles.filter((handle) => handle.worktree === status.cwd).length, 1, "Plan Runner cwd must belong to exactly one Plan worktree");
+    const runnerSessions = new Map();
+    for (const handle of handles) {
+      const sessionFiles = new Set(runners.filter(({ status }) => status.cwd === handle.worktree).map(({ status }) => status.steps?.[0]?.sessionFile));
+      assert.equal(sessionFiles.size, 1, `Plan ${handle.planId} Runner generations must share one canonical session`);
+      const [sessionFile] = sessionFiles;
+      assert.ok(typeof sessionFile === "string" && sessionFile, `Plan ${handle.planId} canonical Runner session`);
+      runnerSessions.set(handle.worktree, sessionMessages(await readSession(sessionFile)));
+    }
     const rootSession = rootSessionFile(sessions, actualRuns[0].status.sessionId);
     const rootEntries = await readSession(rootSession);
-    const grants = rootEntries.filter((entry) => entry?.customType === "pi-root-broker-revival-v1" && entry?.data?.phase === "grant.issued").map((entry) => entry.data).sort((left, right) => left.observedAt - right.observedAt);
-    for (let index = 1; index < grants.length; index++) assert.ok(grants[index].observedAt >= grants[index - 1].observedAt, "Root grant diagnostics must be time-monotonic");
+    const diagnostics = rootEntries.filter((entry) => entry?.customType === "pi-root-broker-revival-v1" && entry?.data).map((entry) => entry.data);
+    const grants = diagnostics.filter((entry) => entry.phase === "grant.issued").sort((left, right) => left.observedAt - right.observedAt || left.generation - right.generation);
+    for (const grant of grants) {
+      finiteTime(grant.observedAt, "Root grant observedAt");
+      assert.ok(Number.isSafeInteger(grant.generation) && grant.generation >= 1, "Root grant generation must be a positive safe integer");
+      assert.ok(typeof grant.logicalCallerRunId === "string" && grant.logicalCallerRunId, "Root grant logical caller");
+      assert.ok(typeof grant.activeRunId === "string" && grant.activeRunId, "Root grant active caller");
+    }
+    for (let index = 1; index < grants.length; index++) assert.ok(grants[index].observedAt > grants[index - 1].observedAt || (grants[index].observedAt === grants[index - 1].observedAt && grants[index].generation >= grants[index - 1].generation), "Root grants must be monotonic by observedAt/generation");
+    const closeStarted = diagnostics.filter((entry) => entry.phase === "close.started");
+    const closeCompleted = diagnostics.filter((entry) => entry.phase === "close.completed");
+    assert.equal(closeStarted.length, 1); assert.equal(closeCompleted.length, 1);
+    assert.ok(rootEntries.findIndex((entry) => entry?.data === closeStarted[0]) < rootEntries.findIndex((entry) => entry?.data === closeCompleted[0]), "Root close.started must precede close.completed");
+    await assert.rejects(lstat(brokerSocketPath(rootSessionId)), { code: "ENOENT" });
+
     for (const entry of pending) {
       const reply = exactObject(await readJson(path.join(origin, "var", "plan-runs", entry.planId, "control", "attention", `${entry.requestId}.reply.json`)), ["schemaVersion", "planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message", "occurredAt"], "durable attention reply");
       const ack = exactObject(await readJson(path.join(origin, "var", "plan-runs", entry.planId, "control", "attention", `${entry.requestId}.ack.json`)), ["schemaVersion", "planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message", "occurredAt", "result", "deliveredAt"], "durable attention acknowledgement");
       for (const field of ["planId", "requestId", "taskId", "attemptId", "expectedProjectionVersion", "message"]) { assert.equal(reply[field], entry[field]); assert.equal(ack[field], entry[field]); }
       assert.equal(reply.runId, entry.executorRunId); assert.equal(ack.runId, entry.executorRunId);
-      assert.equal(reply.schemaVersion, "pi-plan-attention-command.v1"); assert.equal(ack.schemaVersion, "pi-plan-attention-command.v1"); assert.equal(ack.result, "delivered"); assert.equal(typeof ack.deliveredAt, "string");
-      const grant = grants.filter((candidate) => candidate.logicalCallerRunId === handles[entry.planIndex].planRunnerRunId && candidate.observedAt <= Date.parse(entry.requested.occurredAt)).at(-1);
-      const actualCallerRunId = grant?.activeRunId ?? handles[entry.planIndex].planRunnerRunId;
-      const actual = actualRuns.filter(({ status }) => status?.runId === actualCallerRunId);
-      assert.equal(actual.length, 1, `Attention ${entry.requestId} actual caller must be one persisted Runner`);
-      assert.equal(actual[0].status.steps?.[0]?.agent, "plan-runner"); assert.equal(actual[0].status.cwd, handles[entry.planIndex].worktree);
-      entry.logicalCallerRunId = handles[entry.planIndex].planRunnerRunId; entry.actualCallerRunId = actualCallerRunId;
+      assert.equal(reply.schemaVersion, "pi-plan-attention-command.v1"); assert.equal(ack.schemaVersion, "pi-plan-attention-command.v1"); assert.equal(ack.result, "delivered");
+      const logicalCallerRunId = handles[entry.planIndex].planRunnerRunId;
+      const requestActualCallerRunId = logicalCallerAt(grants, logicalCallerRunId, logicalCallerRunId, entry.requested.occurredAt, `Attention ${entry.requestId} requestedAt`);
+      const actualCallerRunId = logicalCallerAt(grants, logicalCallerRunId, logicalCallerRunId, ack.deliveredAt, `Attention ${entry.requestId} deliveredAt`);
+      for (const [label, runId] of [["request", requestActualCallerRunId], ["reply", actualCallerRunId]]) {
+        const actual = actualRuns.filter(({ status }) => status?.runId === runId);
+        assert.equal(actual.length, 1, `Attention ${entry.requestId} ${label} caller must be one persisted Runner`);
+        assert.equal(actual[0].status.steps?.[0]?.agent, "plan-runner"); assert.equal(actual[0].status.cwd, handles[entry.planIndex].worktree);
+        if (runId !== logicalCallerRunId) assert.ok(grants.some((grant) => grant.logicalCallerRunId === logicalCallerRunId && grant.activeRunId === runId), `Revived ${label} caller must have a matching grant`);
+      }
+      entry.logicalCallerRunId = logicalCallerRunId; entry.requestActualCallerRunId = requestActualCallerRunId; entry.actualCallerRunId = actualCallerRunId;
+      const followups = diagnostics.filter((diagnostic) => diagnostic.phase === "followup.accepted" && diagnostic.logicalCallerRunId === logicalCallerRunId && diagnostic.wakeId === `attention-reply-${entry.requestId}`);
+      assert.equal(followups.length, 1, `Attention ${entry.requestId} must have one Root followup`);
+      const runnerMessages = runnerSessions.get(handles[entry.planIndex].worktree);
+      const supervisor = toolCalls(runnerMessages, "plan_executor_supervisor").filter(({ part }) => part.arguments?.replyTo === entry.requestId);
+      assert.equal(supervisor.length, 1, `Attention ${entry.requestId} must have one Supervisor reply call`);
+      assert.deepEqual(supervisor[0].part.arguments, { action: "reply", replyTo: entry.requestId, to: entry.executorRunId, message: entry.message });
+      const supervisorResults = toolResults(runnerMessages, "plan_executor_supervisor", supervisor[0].part.id);
+      assert.equal(supervisorResults.length, 1); assert.ok(supervisorResults[0].messageIndex > supervisor[0].messageIndex); assert.notEqual(supervisorResults[0].message.isError, true);
       const executor = actualRuns.filter(({ status }) => status?.runId === entry.executorRunId);
-      assert.equal(executor.length, 1); const transcript = await readSession(executor[0].status.steps?.[0]?.sessionFile);
-      const messages = transcript.filter((entry) => entry?.type === "message" && entry.message && typeof entry.message === "object").map((entry) => entry.message);
-      const contact = messages.filter((message) => message?.role === "assistant" && message?.content?.some((part) => part?.type === "toolCall" && part.name === "contact_supervisor"));
-      assert.equal(contact.length, 1); const contactIndex = messages.indexOf(contact[0]); const contactCall = contact[0].content.find((part) => part?.type === "toolCall" && part.name === "contact_supervisor");
-      assert.equal(contactCall.arguments.reason, "need_decision"); assert.equal(contactCall.arguments.message, `PI_PLAN_FLAT_ATTENTION ${JSON.stringify(entry.marker)}`);
-      const contactResultIndex = messages.findIndex((message, index) => index > contactIndex && message?.role === "toolResult" && message.toolName === "contact_supervisor");
-      const bashIndex = messages.findIndex((message) => message?.role === "assistant" && message?.content?.some((part) => part?.type === "toolCall" && part.name === "bash"));
-      assert.ok(contactResultIndex > contactIndex && bashIndex > contactResultIndex, `Executor ${entry.executorRunId} must receive approval before bash`);
+      assert.equal(executor.length, 1); const messages = sessionMessages(await readSession(executor[0].status.steps?.[0]?.sessionFile));
+      const contact = toolCalls(messages, "contact_supervisor"); const bash = toolCalls(messages, "bash");
+      assert.equal(contact.length, 1); assert.equal(bash.length, 1);
+      assert.deepEqual(contact[0].part.arguments, { reason: "need_decision", message: `PI_PLAN_FLAT_ATTENTION ${JSON.stringify(entry.marker)}` });
+      const contactResults = toolResults(messages, "contact_supervisor", contact[0].part.id);
+      assert.equal(contactResults.length, 1); assert.notEqual(contactResults[0].message.isError, true);
+      assert.ok(contactResults[0].messageIndex > contact[0].messageIndex && bash[0].messageIndex > contactResults[0].messageIndex, `Executor ${entry.executorRunId} must receive approval before bash`);
+      assert.equal(bash[0].part.arguments?.command, entry.marker.writePath === "README.md" ? "printf 'worker\\n' >> README.md && git add README.md && git commit -m 'test: 添加确定性 worker 标记'" : "printf 'worker-2\\n' > worker.txt && git add worker.txt && git commit -m 'test: 添加第二个确定性 worker 标记'");
     }
   } catch (error) {
     primaryError = error;
