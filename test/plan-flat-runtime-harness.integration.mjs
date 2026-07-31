@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -42,6 +43,35 @@ async function readPlanEvents(sessionFile) {
     .filter((entry) => entry?.customType === "pi-plan-event-v1" && entry?.data)
     .map((entry) => entry.data);
 }
+function exactObject(value, keys, label) {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value), `${label} must be an object`);
+  assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `${label} fields`);
+  return value;
+}
+function textContent(message) { return Array.isArray(message?.content) ? message.content.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("\n") : typeof message?.content === "string" ? message.content : ""; }
+async function readSession(sessionFile) { return (await readFile(sessionFile, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line)); }
+async function waitForAttentionStatuses(handles, origin) {
+  const deadline = Date.now() + 45_000; let statuses = [];
+  while (Date.now() < deadline) {
+    statuses = await Promise.all(handles.map((handle) => readJson(path.join(origin, "var", "plan-runs", handle.planId, "status.json"))));
+    const waiting = statuses.map((status) => status?.tasks?.flatMap((task) => task.attempts ?? []).filter((attempt) => attempt.status === "waiting-attention") ?? []);
+    if (waiting.every((attempts) => attempts.length === 2)) return { statuses, waiting };
+    if (waiting.some((attempts) => attempts.length > 2)) throw new Error(`Attention polling observed too many pending Attempts: ${JSON.stringify(statuses)}`);
+    const runners = await Promise.all(handles.map((handle) => runnerDiagnostic(handle.asyncDir)));
+    if (runners.some(({ status }) => ["failed", "stopped"].includes(status?.state))) throw new Error(`Plan Runner stopped before Attention: ${JSON.stringify({ statuses, runners })}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const runners = await Promise.all(handles.map((handle) => runnerDiagnostic(handle.asyncDir)));
+  throw new Error(`Attention polling timed out: ${JSON.stringify({ statuses, runners })}`);
+}
+function attentionMarker(body, requestId) {
+  const prefix = "PI_PLAN_FLAT_ATTENTION ";
+  assert.ok(body.startsWith(prefix), `Attention ${requestId} marker prefix`);
+  const marker = exactObject(JSON.parse(body.slice(prefix.length)), ["schemaVersion", "executorRunId", "taskId", "writePath"], `Attention ${requestId} marker`);
+  assert.equal(marker.schemaVersion, "pi-plan-flat-attention-marker.v1");
+  return marker;
+}
+function rootSessionFile(sessions, sessionId) { return path.join(sessions, `${path.basename(sessionId)}.jsonl`); }
 
 class RootRpc {
   constructor(child) {
@@ -82,13 +112,18 @@ async function waitForPlanOrRunner(statusPath, asyncDir) {
   throw new Error(`flat Harness timed out: ${JSON.stringify({ plan, runner })}`);
 }
 
-async function assertFutureGreen(handle, outcome, planPath, runtimeTmp) {
+async function assertFutureGreen(handle, outcome, planPath, runtimeTmp, attention = []) {
   const { plan: status, runner: runnerAsyncStatus } = outcome;
   assert.equal(status.lifecycle, "validated"); assert.equal(status.tasks.length, 2);
   assert.ok(status.tasks.every((task) => task.status === "accepted" && task.attempts?.[0]?.status === "integrated"));
   const runnerSessionFile = runnerAsyncStatus.steps?.[0]?.sessionFile;
   assert.ok(runnerSessionFile);
   const events = await readPlanEvents(runnerSessionFile);
+  for (const pending of attention) {
+    for (const type of ["attempt.attention-requested", "attempt.attention-escalated", "attempt.attention-resolved"]) {
+      assert.equal(events.filter((event) => event.type === type && event.data?.requestId === pending.requestId).length, 1, `${pending.requestId} must have one ${type}`);
+    }
+  }
   const attempts = status.tasks.flatMap((task) => task.attempts);
   assert.equal(attempts.length, 2);
   const bounds = events.filter((event) => event.type === "attempt.bound");
@@ -156,10 +191,10 @@ async function assertFutureGreen(handle, outcome, planPath, runtimeTmp) {
     assert.ok(dispatch.data.tool.task.includes(`Acceptance: ${node.acceptance.strategy}`));
     assert.ok(dispatch.data.tool.task.includes(JSON.stringify(node.acceptance)));
   }
-  return { executorRuns, events };
+  return { executorRuns, events, runnerSessionFile };
 }
 
-test("flat Root runtime Harness reaches two validated Plan Runner happy paths", { timeout: 90_000 }, async (t) => {
+test("flat Root runtime Harness reaches two validated Plan Runner happy paths", { timeout: 140_000 }, async (t) => {
   assert.ok(piBinary, "PI_REAL_BIN is required for the flat runtime Harness integration test");
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-plan-flat-runtime-")); const origin = path.join(root, "origin"); const runtimeTmp = path.join(root, "tmp"); const sessions = path.join(root, "sessions");
   let rpc; let primaryError;
@@ -173,7 +208,7 @@ test("flat Root runtime Harness reaches two validated Plan Runner happy paths", 
     await writeFile(path.join(origin, "commit-message"), "test: 初始化 flat Harness\n"); await git(origin, "add", "."); await git(origin, "commit", "--file", "commit-message");
     const rootSessionId = `flat-${path.basename(root)}`;
     const rootEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("PI_SUBAGENT_") && name !== "PI_ROOT_SUBAGENT_BROKER_ENABLED"));
-    const child = spawn(piBinary, ["--mode", "rpc", "--session-dir", sessions, "--session-id", rootSessionId, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve", "--offline", "-e", provider, "-e", rootRuntime, "-e", launcher, "--provider", "fake", "--model", "fake/deterministic"], { cwd: origin, env: { ...rootEnv, PI_CODING_AGENT_DIR: path.join(repoRoot, "pi"), TMPDIR: runtimeTmp, OPENAI_API_KEY: "not-used" }, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(piBinary, ["--mode", "rpc", "--session-dir", sessions, "--session-id", rootSessionId, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve", "--offline", "-e", provider, "-e", rootRuntime, "-e", launcher, "--provider", "fake", "--model", "fake/deterministic"], { cwd: origin, env: { ...rootEnv, PI_CODING_AGENT_DIR: path.join(repoRoot, "pi"), PI_PLAN_HARNESS_ATTENTION: "1", TMPDIR: runtimeTmp, OPENAI_API_KEY: "not-used" }, stdio: ["pipe", "pipe", "pipe"] });
     rpc = new RootRpc(child); rpc.send({ id: "flat-root-harness", type: "prompt", message: `PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths })}` });
     const events = await rpc.waitForExact((record) => record.type === "tool_execution_end" && record.toolName === "plan_run", 2, 25_000, "plan_run handles");
     const handles = events.map(resultValue);
@@ -184,8 +219,43 @@ test("flat Root runtime Harness reaches two validated Plan Runner happy paths", 
       assert.equal(handle.rootSessionId, rootSessionId);
     }
     for (const key of ["planId", "worktree", "planRunnerRunId", "asyncDir"]) assert.equal(new Set(handles.map((handle) => handle[key])).size, 2, `Plan handles must have unique ${key}`);
+    const pendingStatus = await waitForAttentionStatuses(handles, origin);
+    const pending = [];
+    for (const [planIndex, handle] of handles.entries()) {
+      const runner = await runnerDiagnostic(handle.asyncDir);
+      const runnerSessionFile = runner.status?.steps?.[0]?.sessionFile;
+      assert.ok(runnerSessionFile, "Attention Plan Runner must persist a session file");
+      const planEvents = await readPlanEvents(runnerSessionFile);
+      for (const attempt of pendingStatus.waiting[planIndex]) {
+        const requested = planEvents.filter((event) => event.type === "attempt.attention-requested" && event.data?.requestId === attempt.attention?.requestId);
+        assert.equal(requested.length, 1, "waiting Attention must have one requested event");
+        const event = requested[0]; const evidence = event.data.evidence;
+        assert.equal(event.data.taskId, attempt.taskId); assert.equal(event.data.attemptId, attempt.attemptId); assert.equal(event.data.runId, attempt.runId);
+        assert.equal(evidence?.bodyPath, `attention/${event.data.requestId}.md`);
+        const body = await readFile(path.join(origin, "var", "plan-runs", handle.planId, evidence.bodyPath), "utf8");
+        assert.equal(createHash("sha256").update(body).digest("hex"), evidence.bodySha256);
+        const marker = attentionMarker(body, event.data.requestId);
+        assert.equal(marker.executorRunId, attempt.runId); assert.equal(marker.taskId, attempt.taskId);
+        assert.equal(marker.writePath, attempt.taskId === "task-1" ? "README.md" : "worker.txt");
+        pending.push({ planIndex, planId: handle.planId, taskId: attempt.taskId, attemptId: attempt.attemptId, runId: attempt.runId, requestId: event.data.requestId, expectedProjectionVersion: attempt.attention.projectionVersion, message: `APPROVED ${event.data.requestId}`, marker, requested: event });
+      }
+    }
+    assert.equal(pending.length, 4); assert.equal(new Set(pending.map((entry) => entry.requestId)).size, 4); assert.equal(new Set(pending.map((entry) => entry.runId)).size, 4);
+    const byPlanTask = (planIndex, taskId) => {
+      const match = pending.filter((entry) => entry.planIndex === planIndex && entry.taskId === taskId);
+      assert.equal(match.length, 1, `one pending Attention for plan ${planIndex} ${taskId}`); return match[0];
+    };
+    const ordered = [byPlanTask(1, "task-2"), byPlanTask(0, "task-2"), byPlanTask(1, "task-1"), byPlanTask(0, "task-1")];
+    const beforeReplies = rpc.records.length;
+    rpc.send({ id: "flat-root-attention-replies", type: "prompt", message: `PI_PLAN_FLAT_ATTENTION_REPLIES\n${JSON.stringify({ replies: ordered.map(({ planId, requestId, expectedProjectionVersion, message }) => ({ planId, requestId, expectedProjectionVersion, message })) })}` });
+    const replyResults = await rpc.waitForExact((record) => record.type === "tool_execution_end" && record.toolName === "plan_attention_reply", 4, 45_000, "plan_attention_reply results");
+    assert.equal(replyResults.filter((record) => rpc.records.indexOf(record) >= beforeReplies).length, 4);
+    for (const [index, record] of replyResults.entries()) {
+      const value = resultValue(record); assert.ok(!record.isError, JSON.stringify(record));
+      assert.equal(value.planId, ordered[index].planId); assert.equal(value.requestId, ordered[index].requestId);
+    }
     const outcomes = await Promise.all(handles.map((handle) => waitForPlanOrRunner(path.join(origin, "var", "plan-runs", handle.planId, "status.json"), handle.asyncDir)));
-    const greens = await Promise.all(handles.map((handle, index) => assertFutureGreen(handle, outcomes[index], planPaths[index], runtimeTmp)));
+    const greens = await Promise.all(handles.map((handle, index) => assertFutureGreen(handle, outcomes[index], planPaths[index], runtimeTmp, pending.filter((entry) => entry.planIndex === index))));
     const initialRuns = handles.flatMap((handle, index) => [{ runId: handle.planRunnerRunId, asyncDir: handle.asyncDir }, ...greens[index].executorRuns]);
     assert.equal(initialRuns.length, 6);
     for (const key of ["runId", "asyncDir"]) assert.equal(new Set(initialRuns.map((run) => run[key])).size, 6, `Initial runs must have unique ${key}`);
@@ -213,6 +283,30 @@ test("flat Root runtime Harness reaches two validated Plan Runner happy paths", 
       for (const field of ["parentRunId", "parentStepIndex", "depth", "path"]) assert.ok(!Object.hasOwn(status, field));
     }
     for (const { status } of runners) assert.equal(handles.filter((handle) => handle.worktree === status.cwd).length, 1, "Plan Runner cwd must belong to exactly one Plan worktree");
+    const rootSession = rootSessionFile(sessions, asyncStatuses[0].sessionId);
+    const rootEntries = await readSession(rootSession);
+    const grants = rootEntries.filter((entry) => entry?.customType === "pi-root-broker-revival-v1" && entry?.data?.phase === "grant.issued").map((entry) => entry.data).sort((left, right) => left.observedAt - right.observedAt);
+    for (let index = 1; index < grants.length; index++) assert.ok(grants[index].observedAt >= grants[index - 1].observedAt, "Root grant diagnostics must be time-monotonic");
+    for (const entry of pending) {
+      const reply = exactObject(await readJson(path.join(origin, "var", "plan-runs", entry.planId, "control", "attention", `${entry.requestId}.reply.json`)), ["schemaVersion", "planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message", "occurredAt"], "durable attention reply");
+      const ack = exactObject(await readJson(path.join(origin, "var", "plan-runs", entry.planId, "control", "attention", `${entry.requestId}.ack.json`)), ["schemaVersion", "planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message", "occurredAt", "result", "deliveredAt"], "durable attention acknowledgement");
+      for (const field of ["planId", "requestId", "taskId", "attemptId", "runId", "expectedProjectionVersion", "message"]) { assert.equal(reply[field], entry[field]); assert.equal(ack[field], entry[field]); }
+      assert.equal(reply.schemaVersion, "pi-plan-attention-command.v1"); assert.equal(ack.schemaVersion, "pi-plan-attention-command.v1"); assert.equal(ack.result, "delivered"); assert.equal(typeof ack.deliveredAt, "string");
+      const grant = grants.filter((candidate) => candidate.logicalCallerRunId === handles[entry.planIndex].planRunnerRunId && candidate.observedAt <= Date.parse(entry.requested.occurredAt)).at(-1);
+      const actualCallerRunId = grant?.activeRunId ?? handles[entry.planIndex].planRunnerRunId;
+      const actual = actualRuns.filter(({ status }) => status?.runId === actualCallerRunId);
+      assert.equal(actual.length, 1, `Attention ${entry.requestId} actual caller must be one persisted Runner`);
+      assert.equal(actual[0].status.steps?.[0]?.agent, "plan-runner"); assert.equal(actual[0].status.cwd, handles[entry.planIndex].worktree);
+      entry.logicalCallerRunId = handles[entry.planIndex].planRunnerRunId; entry.actualCallerRunId = actualCallerRunId;
+      const executor = actualRuns.filter(({ status }) => status?.runId === entry.runId);
+      assert.equal(executor.length, 1); const transcript = await readSession(executor[0].status.steps?.[0]?.sessionFile);
+      const contact = transcript.filter((message) => message?.role === "assistant" && message?.content?.some((part) => part?.type === "toolCall" && part.name === "contact_supervisor"));
+      assert.equal(contact.length, 1); const contactIndex = transcript.indexOf(contact[0]); const contactCall = contact[0].content.find((part) => part?.type === "toolCall" && part.name === "contact_supervisor");
+      assert.equal(contactCall.arguments.reason, "need_decision"); assert.equal(contactCall.arguments.message, `PI_PLAN_FLAT_ATTENTION ${JSON.stringify(entry.marker)}`);
+      const contactResultIndex = transcript.findIndex((message, index) => index > contactIndex && message?.role === "toolResult" && message.toolName === "contact_supervisor");
+      const bashIndex = transcript.findIndex((message) => message?.role === "assistant" && message?.content?.some((part) => part?.type === "toolCall" && part.name === "bash"));
+      assert.ok(contactResultIndex > contactIndex && bashIndex > contactResultIndex, `Executor ${entry.runId} must receive approval before bash`);
+    }
   } catch (error) {
     primaryError = error;
     throw error;
