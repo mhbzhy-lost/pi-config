@@ -25,4 +25,4 @@ Executor `execution.completed` 在 Plan Runner generation 仍有活跃 subscript
 
 ## 6. 修复与验证
 
-仅对 live-delivered `execution.completed` 在现有 caller push queue 保留一个副本。当前 generation 仍可立即处理；若它先退出，official proof 后 Root 用 queued push 唤醒下一代并 FIFO flush。started push、Supervisor request、Attention wake、grant schema 和 proof authority不变。RED 必须证明 live socket 已收到 completion，但 proof 后仍需 resume；GREEN 还需证明多条 completion coalesce、close 清理和 queued path 不重复扩张。
+仅对 live-delivered `execution.completed` 记录无 payload 的 actual-generation wake debt。当前 generation 仍可立即处理；无论 completion 与 Plan Runner proof 谁先到，Root 都必须在两者齐备后启动下一代。revival 开始时只消费 debt 快照；resume/grant 失败保留全部 debt，in-flight 新增 debt 在 successful handoff 后转移到 revived actual generation，避免一次布尔删除吞掉并发完成。started push、caller push FIFO、Supervisor request、Attention wake、grant schema 和 proof authority不变。RED 必须证明 live socket 已收到 completion 且 FIFO为空，但 proof 后仍需 resume；还必须覆盖 proof-first、同代合并、换代消费与 in-flight 新 debt 转移。

@@ -1013,7 +1013,7 @@ test("live lifecycle revival debt is consumed after successful handoff without a
     ...request,
     requestId: "request-subscribe-live-consume-2",
     callerRunId: "plan-runner-2",
-    callerToken: "b".repeat(64),
+    callerToken: "c".repeat(64),
     method: "subscribe",
     params: {},
   });
@@ -1025,4 +1025,69 @@ test("live lifecycle revival debt is consumed after successful handoff without a
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(resumeCalls, expectedResume);
+});
+
+test("live lifecycle completion creates revival debt after Plan Runner proof", async () => {
+  const { ownedRun, proof, resumeCalls, server, forwardCompletion, writes } = await createLiveLifecycleFixture();
+
+  server.acceptTerminalProof(ownedRun, proof);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(resumeCalls, []);
+
+  await forwardCompletion("live-proof-first-1");
+  assert.deepEqual(writes.map((push) => push.type), ["execution.completed"]);
+  assert.deepEqual(server.callerPushQueues.get("plan-runner-1"), []);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, expectedResume);
+});
+
+test("live lifecycle completion received during resume transfers debt to the revived Plan Runner", async () => {
+  let resolveFirstResume;
+  const firstResume = new Promise((resolve) => { resolveFirstResume = resolve; });
+  let resumeNumber = 0;
+  const { ownedRun, proof, resumeCalls, server, forwardCompletion } = await createLiveLifecycleFixture({
+    resume: async () => {
+      resumeNumber += 1;
+      if (resumeNumber === 1) return await firstResume;
+      return {
+        ...revivedResult,
+        details: { ...revivedResult.details, asyncId: "plan-runner-3", asyncDir: "/async/plan-runner-3" },
+      };
+    },
+  });
+
+  await forwardCompletion("live-in-flight-1");
+  server.acceptTerminalProof(ownedRun, proof);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(resumeCalls, expectedResume, "the first resume must remain in flight");
+
+  await forwardCompletion("live-in-flight-2");
+  resolveFirstResume(revivedResult);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(resumeCalls, expectedResume, "stale old debt must not start a second resume before plan-runner-2 proof");
+
+  const revivedRun = {
+    ...ownedRun,
+    runId: "plan-runner-2",
+    asyncDir: "/async/plan-runner-2",
+    pid: 102,
+    birthIdentity: "plan-runner-2-birth",
+  };
+  server.ownedRuns.set(revivedRun.runId, revivedRun);
+  server.acceptTerminalProof(revivedRun, {
+    ...proof,
+    runId: "plan-runner-2",
+    runnerProcessInstanceId: "plan-runner-2-instance",
+    instances: [{
+      ...proof.instances[0],
+      processInstanceId: "plan-runner-2-instance",
+    }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(resumeCalls, [
+    ...expectedResume,
+    { id: "plan-runner-2", message: "A durable Root broker wake is pending." },
+  ]);
 });
