@@ -274,6 +274,8 @@ test("assigns distinct queued Attention wakes to consecutive revived generations
     params: {},
   }), {});
   assert.deepEqual(generationTwoPing.data.callerWake, firstWake);
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", firstWake), { accepted: true, wakeId: firstWake.wakeId });
+  assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [secondWake], "an exact retry of the generation-bound wake must not enqueue another generation");
 
   const generationTwoRun = { ...ownedRun, runId: "plan-runner-2", asyncDir: "/async/plan-runner-2", pid: 102, birthIdentity: "plan-runner-2-birth" };
   server.ownedRuns.set(generationTwoRun.runId, generationTwoRun);

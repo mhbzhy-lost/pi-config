@@ -25,8 +25,8 @@ generation 可以消费多个调度债务，却没有能力证明自己处理了
 
 ## 4. 正确修复
 
-每个 revival generation 只认领 caller FIFO 中一个 distinct follow-up；exact duplicate 仍在入队时去重。
-Broker 在 grant 提交时把该 generation 的 wake identity 绑定到 actual run，并通过已认证的 private
+每个 revival generation 只认领 caller FIFO 中一个 distinct follow-up；exact duplicate 在 pending 或当前 generation-bound
+状态都必须去重。Broker 在 grant 提交时把该 generation 的 wake identity 绑定到 actual run，并通过已认证的 private
 bootstrap 数据提供给 Plan Runner。固定 private wake 文本保持不变，child wire
 `caller.followup` 仍只接受 `plan-opened`。
 
