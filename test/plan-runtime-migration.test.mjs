@@ -66,7 +66,9 @@ test("flat Harness preserves failure evidence and compensates detached runs", as
     "processesReferencing",
     "finalizeHarnessCleanup",
     "removeFixtureWithEvidence",
+    "waitForHarnessRunQuiescence",
   ]) assert.match(source, new RegExp(boundary));
+  assert.match(source, /await waitForHarnessRunQuiescence\([\s\S]*?\);\s*await rpc\.close\(\)/);
   assert.match(source, /await terminateDetachedRunsUnder\(runtimeTmp\)/);
   assert.match(source, /passed\s*=\s*true/);
   assert.match(source, /brokerSocketPath\(rootSessionId\)/);

@@ -235,6 +235,27 @@ test("flat amendment waiting text suppresses common fallback tools", async () =>
   }
 });
 
+test("flat amendment requests the blocking Supervisor decision from a typed Executor prompt", async () => {
+  const previousMode = process.env.PI_PLAN_HARNESS_AMENDMENT;
+  const previousSource = process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+  process.env.PI_PLAN_HARNESS_AMENDMENT = "1";
+  process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = "# revision 2";
+  try {
+    const done = await streamDone([
+      typedExecutorPrompt("decision.txt"),
+    ], [{ name: "contact_supervisor" }, { name: "bash" }]);
+    assert.equal(done.reason, "toolUse");
+    const call = done.message.content.find((part) => part.type === "toolCall");
+    assert.equal(call?.name, "contact_supervisor");
+    assert.deepEqual(call?.arguments, { reason: "need_decision", message: "Approve the deterministic Plan Harness change" });
+  } finally {
+    if (previousMode === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT = previousMode;
+    if (previousSource === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = previousSource;
+  }
+});
+
 test("flat amendment keeps the old decision Executor active until the Root fault", async () => {
   const previousMode = process.env.PI_PLAN_HARNESS_AMENDMENT;
   const previousSource = process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;

@@ -12,13 +12,13 @@
 
 - Plan Runner提交typed `dispatch-ir.v1`并启动Executor。
 - Executor收到的真实用户prompt含`## Declared Write Scope`和`1. "decision.txt"`。
-- `deterministicExecutorCommand()`能解析该typed scope。
-- `decideDeterministicAmendmentTurn()`却只用`/^Allowed paths: decision\.txt$/m`识别旧文本。
-- amendment selector返回`undefined`，common selector也没有amendment decision分支，最终输出`deterministic`。
+- `decideDeterministicAmendmentTurn()`的Supervisor回复后分支已复用typed scope，但首轮没有结果时返回`undefined`。
+- common selector的首轮`contact_supervisor`分支仍只匹配`Allowed paths: decision.txt`。
+- 真实首轮因此未调用Supervisor工具，最终输出`deterministic`。
 
 ## 4. 根因
 
-amendment专用selector与通用command parser各自维护写路径识别；前者保留旧Plan prose格式，没有复用已支持typed dispatch prompt的判定结果。现有测试只构造`Allowed paths: decision.txt`，没有使用真实`Coding Dispatch Contract v1`形状。
+amendment专用selector的回复后路径与common selector的首轮路径分别维护写路径识别；只修前者仍会在真实首轮失败。现有post-reply测试覆盖长bash，却没有断言同一typed prompt在无结果时先发`contact_supervisor`。
 
 ## 5. 触发条件
 
@@ -26,4 +26,4 @@ amendment专用selector与通用command parser各自维护写路径识别；前�
 
 ## 6. 修复与验证
 
-先增加provider RED：使用含`Declared Write Scope`的真实最小typed prompt和成功`contact_supervisor`结果，必须选择保持old Executor活跃的`sleep 120; ... decision.txt` bash命令。最小实现复用`deterministicExecutorCommand(userText)`和解析后的decision写路径，不恢复旧任意文本猜测。focused provider suite和下一冻结HEAD真实Harness验证GREEN。
+增加两段provider RED：同一`Declared Write Scope` typed prompt在无结果时必须先选择`contact_supervisor`；有成功Supervisor结果后必须选择保持old Executor活跃的`sleep 120; ... decision.txt` bash命令。最小实现让common selector的decision分支复用`deterministicExecutorAllowsPath()`，保留legacy兼容且不恢复任意文本猜测。focused provider suite和下一冻结HEAD真实Harness验证GREEN。
