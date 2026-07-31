@@ -170,7 +170,7 @@ test("provider stream polls plan_status when a lifecycle follow-up arrives", asy
   }));
   const done = await streamDone([
     flatPlanPrompt(), toolResult("plan_open", "opened"), dispatch, toolResult("subagent", "started"),
-    { role: "custom", customType: "pi-root-subagent-lifecycle-v1", content: "started", details: {} },
+    user("A lifecycle update arrived. Call plan_status."),
   ], flatPlanTools.map((name) => ({ name })));
 
   assert.equal(done.reason, "toolUse");
