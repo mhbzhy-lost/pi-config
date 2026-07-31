@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
 
@@ -18,11 +18,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const runtimeModule = await jiti.import("../pi/extensions/subagent-runtime.ts");
 const asyncResumeModule = await jiti.import("../pi/npm/node_modules/pi-subagents/src/runs/background/async-resume.ts");
-
-const PLAN_RUNNER_TOOLS = [
-  "plan_open", "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
-  "subagent", "plan_executor_supervisor", "read", "grep",
-];
+const piArgsModule = await jiti.import("../pi/npm/node_modules/pi-subagents/src/runs/shared/pi-args.ts");
 
 async function createRecoveryFixture(t, { agent = "plan-runner", sourceRunId, asyncDir } = {}) {
   const root = await mkdtemp(join(tmpdir(), "root-upstream-recovery-"));
@@ -118,15 +114,39 @@ test("Root broker upstream exposes only frozen RPC forwarding methods including 
   assert.strictEqual(supervisorResult, supervisorCalls[0].result);
 });
 
-test("Root broker upstream promotes a trusted plan-runner recovery descriptor to the exact Plan Runner tools", async (t) => {
+test("Root broker upstream recovery deletes tools from a trusted plan-runner descriptor", async (t) => {
   const fixture = await createRecoveryFixture(t);
   assert.deepEqual(asyncResumeModule.readAsyncRecoveryDescriptor(fixture.runDir), fixture.descriptor);
   const upstream = createUpstream(fixture.asyncDirRoot);
   await (upstream.preparePlanRunnerRecovery?.({ role: "plan-runner", runId: fixture.runId, asyncDir: fixture.runDir }) ?? Promise.resolve());
 
   const recovered = JSON.parse(await readFile(fixture.descriptorPath, "utf8"));
-  assert.deepEqual(recovered, { ...fixture.descriptor, tools: PLAN_RUNNER_TOOLS });
+  assert.equal(Object.hasOwn(recovered, "tools"), false);
+  assert.deepEqual(recovered, Object.fromEntries(Object.entries(fixture.descriptor).filter(([key]) => key !== "tools")));
+  assert.deepEqual(asyncResumeModule.readAsyncRecoveryDescriptor(fixture.runDir), recovered);
   assert.equal((await stat(fixture.descriptorPath)).mode & 0o777, 0o600);
+});
+
+test("Root broker upstream recovery descriptor omission does not authorize fanout", async (t) => {
+  const fixture = await createRecoveryFixture(t);
+  assert.deepEqual(asyncResumeModule.readAsyncRecoveryDescriptor(fixture.runDir), fixture.descriptor);
+  const upstream = createUpstream(fixture.asyncDirRoot);
+  await (upstream.preparePlanRunnerRecovery?.({ role: "plan-runner", runId: fixture.runId, asyncDir: fixture.runDir }) ?? Promise.resolve());
+
+  const recovered = JSON.parse(await readFile(fixture.descriptorPath, "utf8"));
+  assert.deepEqual(asyncResumeModule.readAsyncRecoveryDescriptor(fixture.runDir), recovered);
+  const toolPlan = piArgsModule.resolvePiLaunchToolPlan({
+    tools: recovered.tools,
+    extensions: recovered.extensions,
+    subagentOnlyExtensions: recovered.subagentOnlyExtensions,
+    mcpDirectTools: recovered.mcpDirectTools,
+    cwd: recovered.cwd,
+  });
+
+  assert.equal(toolPlan.fanoutAuthorized, false);
+  assert.equal(toolPlan.explicitToolAllowlist, false);
+  assert.equal(toolPlan.runtimeExtensions.some((extension) => basename(extension) === "fanout-child.ts"), false);
+  assert.equal(toolPlan.extensionArgs.some((extension) => basename(extension) === "fanout-child.ts"), false);
 });
 
 test("Root broker upstream rejects recovery descriptors outside its configured async root without changing bytes", async (t) => {
