@@ -251,6 +251,68 @@ function backend({ statuses = new Map(), stops = [], spawns = [] } = {}) {
   };
 }
 
+test("revives unbound dispatches and active bindings from the durable execution projection", async (t) => {
+  const repo = await fixture(parallelSource);
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  const unboundWorkspace = fakeAllocator({ planId: repo.planId, taskId: "task-1", attemptId: "attempt-1", baseCommit: repo.baseCommit });
+  const activeWorkspace = fakeAllocator({ planId: repo.planId, taskId: "task-2", attemptId: "attempt-2", baseCommit: repo.baseCommit });
+  const durableEntries = [
+    created(binding),
+    { schemaVersion: "pi-plan-event.v1", eventId: "attempt-1-allocated", planId: repo.planId, occurredAt: "2026-07-30T00:00:01.000Z", type: "attempt.workspace-allocated", data: { attemptId: "attempt-1", taskId: "task-1", baseCommit: repo.baseCommit, workspace: unboundWorkspace } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "attempt-1-requested", planId: repo.planId, occurredAt: "2026-07-30T00:00:02.000Z", type: "attempt.dispatch-requested", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", baseCommit: repo.baseCommit, workspace: unboundWorkspace, tool: { agent: "executor", task: "Recover unbound dispatch.", cwd: unboundWorkspace.path, output: "/results/attempt-1.json", timeoutMs: 900000, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: "1".repeat(64) } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "attempt-2-allocated", planId: repo.planId, occurredAt: "2026-07-30T00:00:03.000Z", type: "attempt.workspace-allocated", data: { attemptId: "attempt-2", taskId: "task-2", baseCommit: repo.baseCommit, workspace: activeWorkspace } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "attempt-2-requested", planId: repo.planId, occurredAt: "2026-07-30T00:00:04.000Z", type: "attempt.dispatch-requested", data: { attemptId: "attempt-2", taskId: "task-2", dispatchId: "dispatch-2", baseCommit: repo.baseCommit, workspace: activeWorkspace, tool: { agent: "executor", task: "Recover active binding.", cwd: activeWorkspace.path, output: "/results/attempt-2.json", timeoutMs: 900000, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: "2".repeat(64) } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "attempt-2-bound", planId: repo.planId, occurredAt: "2026-07-30T00:00:05.000Z", type: "attempt.bound", data: { attemptId: "attempt-2", taskId: "task-2", dispatchId: "dispatch-2", runId: "run-2", asyncDir: "/async/run-2", sessionFile: "/sessions/plan-runner.jsonl" } },
+  ];
+  const projection = durableEntries.reduce(applyEvent, createProjection());
+  assert.equal(projection.attempts.get("attempt-1").status, "dispatch-requested");
+  assert.equal(projection.attempts.get("attempt-2").status, "active");
+  const recoverDispatch = [];
+  const recoverBinding = [];
+  let spawns = 0;
+  const deps = runnerDependencies(repo, {
+    executionBackend: {
+      async recoverDispatch(input) { recoverDispatch.push(input); },
+      async recoverBinding(input) { recoverBinding.push(input); },
+      async spawn() { spawns += 1; throw new Error("recovery must not spawn"); },
+    },
+  });
+  const ctx = context(repo.worktree, durableEntries.map((data) => ({ customType: "pi-plan-event-v1", data })));
+
+  await deps.recoverExecutionState({ ctx });
+
+  assert.deepEqual(recoverDispatch, [{ dispatchId: "dispatch-1", attemptId: "attempt-1", agent: "executor", task: "Recover unbound dispatch.", cwd: unboundWorkspace.path, output: "/results/attempt-1.json", timeoutMs: 900000 }]);
+  assert.deepEqual(recoverBinding, [{ dispatchId: "dispatch-2", attemptId: "attempt-2", runId: "run-2", asyncDir: "/async/run-2", cwd: activeWorkspace.path, output: "/results/attempt-2.json", sessionId: "/sessions/plan-runner.jsonl", sessionFile: "/sessions/plan-runner.jsonl" }]);
+  assert.equal(recoverBinding[0].sessionId, recoverBinding[0].sessionFile);
+  assert.equal(spawns, 0);
+});
+
+test("fails closed when a durable active binding lacks its session file", async (t) => {
+  const repo = await fixture();
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  const workspace = fakeAllocator({ planId: repo.planId, taskId: "task-1", attemptId: "attempt-1", baseCommit: repo.baseCommit });
+  const durableEntries = [
+    created(binding),
+    { schemaVersion: "pi-plan-event.v1", eventId: "allocated", planId: repo.planId, occurredAt: "2026-07-30T00:01:01.000Z", type: "attempt.workspace-allocated", data: { attemptId: "attempt-1", taskId: "task-1", baseCommit: repo.baseCommit, workspace } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "requested", planId: repo.planId, occurredAt: "2026-07-30T00:01:02.000Z", type: "attempt.dispatch-requested", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", baseCommit: repo.baseCommit, workspace, tool: { agent: "executor", task: "Recover active binding.", cwd: workspace.path, output: "/results/attempt-1.json", timeoutMs: 900000, context: "fresh", async: true, clarify: false, worktree: false }, toolHash: "3".repeat(64) } },
+    { schemaVersion: "pi-plan-event.v1", eventId: "bound", planId: repo.planId, occurredAt: "2026-07-30T00:01:03.000Z", type: "attempt.bound", data: { attemptId: "attempt-1", taskId: "task-1", dispatchId: "dispatch-1", runId: "run-1", asyncDir: "/async/run-1" } },
+  ];
+  const calls = [];
+  const deps = runnerDependencies(repo, {
+    executionBackend: {
+      async recoverDispatch(input) { calls.push({ method: "recoverDispatch", input }); },
+      async recoverBinding(input) { calls.push({ method: "recoverBinding", input }); },
+      async spawn() { calls.push({ method: "spawn" }); throw new Error("recovery must not spawn"); },
+    },
+  });
+  const ctx = context(repo.worktree, durableEntries.map((data) => ({ customType: "pi-plan-event-v1", data })));
+
+  await assert.rejects(() => deps.recoverExecutionState({ ctx }), /Persisted execution binding recovery data is incomplete/);
+  assert.deepEqual(calls, []);
+});
+
 test("binds a submodule Plan to launcher-owned roots and keeps all runtime state in the submodule", async (t) => {
   const repo = await submoduleFixture();
   t.after(() => rm(repo.root, { recursive: true, force: true }));

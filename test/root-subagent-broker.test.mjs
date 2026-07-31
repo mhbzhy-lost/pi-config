@@ -142,10 +142,11 @@ test("default plan runner bootstraps from a delayed real broker grant without PI
   await new Promise((resolve) => setTimeout(resolve, 30));
   await broker.grantCaller({ callerRunId: runId, planId: "plan", cwd: "/repo", originRoot: "/origin", stateRoot: "/state", role: "plan-runner" });
   await factory;
-  assert.equal(broker.subscriptions.get(runId)?.size, 1);
+  assert.equal(broker.subscriptions.get(runId)?.size ?? 0, 0);
   const dispatch = v3DispatchBranch();
   const ctx = { cwd: "/repo", sessionManager: { getBranch: () => dispatch.branch.map((data) => ({ customType: "pi-plan-event-v1", data })) } };
   await handlers.get("before_agent_start").at(-1)({}, { cwd: "/repo", sessionManager: { getBranch: () => [] } });
+  assert.equal(broker.subscriptions.get(runId)?.size, 1);
   for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx);
   const capsuleToolCall = handlers.get("tool_call").at(-1);
   assert.equal(await capsuleToolCall({ toolName: "subagent", toolCallId: "dispatch-tool-call-1", input: dispatch.contract }, ctx), undefined);

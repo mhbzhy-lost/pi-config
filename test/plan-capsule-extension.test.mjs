@@ -191,6 +191,7 @@ test("before_agent_start checks capabilities before recovering an opened Plan", 
   const calls = [];
   const { handlers } = setup({
     assertRuntimeCapabilities: async () => calls.push("capabilities"),
+    prepareExecutionLifecycle: async () => calls.push("prepare"),
     recoverSupersededAttempts: async () => calls.push("recovery"),
   });
   const ctx = context([{
@@ -201,7 +202,20 @@ test("before_agent_start checks capabilities before recovering an opened Plan", 
   await handlers.get("session_start")({}, ctx);
   await handlers.get("before_agent_start")({}, ctx);
 
-  assert.deepEqual(calls, ["capabilities", "recovery"]);
+  assert.deepEqual(calls, ["capabilities", "prepare", "recovery"]);
+});
+
+test("before_agent_start prepares an empty durable projection without supersede recovery", async () => {
+  const calls = [];
+  const { handlers } = setup({
+    assertRuntimeCapabilities: async () => calls.push("capabilities"),
+    prepareExecutionLifecycle: async () => calls.push("prepare"),
+    recoverSupersededAttempts: async () => { calls.push("recovery"); throw new Error("empty projection must not recover superseded attempts"); },
+  });
+
+  await handlers.get("before_agent_start")({}, context());
+
+  assert.deepEqual(calls, ["capabilities", "prepare"]);
 });
 
 test("before_agent_start reactivates tools from a revived durable Plan", async () => {
