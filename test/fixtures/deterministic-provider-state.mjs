@@ -242,7 +242,7 @@ export function decideDeterministicTurn({ messages = [], toolNames = [], issuedD
     }
   }
 
-  if (/^Allowed paths: decision\.txt$/m.test(userText)) {
+  if (deterministicExecutorAllowsPath(userText, "decision.txt")) {
     const supervisorReplied = toolResults.some((message) => message.toolName === "contact_supervisor");
     const committed = toolResults.some((message) => message.toolName === "bash");
     if (!supervisorReplied && toolNames.includes("contact_supervisor")) {
