@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { access, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
 import {
@@ -131,10 +132,18 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
   for (const name of markers) delete process.env[name];
   const runtimeMarkers = new Map(markers.map((name) => [name, process.env[name]]));
 
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-subagents-compat-"));
   let result;
   try {
-    const agentDir = join(repoRoot, "pi");
-    const loader = new DefaultResourceLoader({ cwd: repoRoot, agentDir });
+    const loader = new DefaultResourceLoader({
+      cwd: repoRoot,
+      agentDir,
+      additionalExtensionPaths: [join(repoRoot, "pi/extensions/subagent-runtime.ts")],
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
     await loader.reload();
     result = await createAgentSession({
       cwd: repoRoot,
@@ -207,9 +216,13 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
         }
       }
     } finally {
-      for (const [name, value] of previousMarkers) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
+      try {
+        await rm(agentDir, { recursive: true, force: true });
+      } finally {
+        for (const [name, value] of previousMarkers) {
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        }
       }
     }
   }
