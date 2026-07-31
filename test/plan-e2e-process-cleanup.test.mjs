@@ -55,7 +55,7 @@ test("terminateDetachedRun reaps the recorded runner and its child before fixtur
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     process.stdout.write(String(child.pid) + "\\n");
     setInterval(() => {}, 1000);
-  `, root], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  `, root, "run-1"], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
   t.after(async () => {
     if (groupAlive(runner.pid)) killGroup(runner.pid);
     await rm(root, { recursive: true, force: true });
@@ -85,7 +85,7 @@ test("terminateDetachedRunsUnder reaps every persisted async run below an isolat
       const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
       process.stdout.write(String(child.pid) + "\\n");
       setInterval(() => {}, 1000);
-    `, root], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+    `, root, runId], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
     const childPid = Number(await new Promise((resolve, reject) => {
       runner.stdout.once("data", (chunk) => resolve(String(chunk).trim()));
       runner.once("error", reject);
@@ -138,7 +138,7 @@ test("terminateDetachedRunsUnder reaps a same-group child created by the runner 
     });
     process.stdout.write("ready\\n");
     setInterval(() => {}, 1000);
-  `, childPidFile, root], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  `, childPidFile, root, "term-race"], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
   t.after(async () => {
     if (groupAlive(runner.pid)) killGroup(runner.pid);
     await rm(root, { recursive: true, force: true });
