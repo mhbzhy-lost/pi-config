@@ -5,10 +5,26 @@ function textParts(message) {
 }
 
 export function deterministicExecutorCommand(userText) {
-  if (/^Allowed paths: README\.md$/m.test(userText)) {
+  const declaredWritePaths = (() => {
+    const section = userText.match(/^## Declared Write Scope\n([\s\S]*?)(?:\n\n|$)/m)?.[1];
+    if (!section) return [];
+    return section.split("\n").flatMap((line) => {
+      const scalar = line.match(/^\d+\. (.+)$/)?.[1];
+      if (!scalar) return [];
+      try {
+        const path = JSON.parse(scalar);
+        return typeof path === "string" ? [path] : [];
+      } catch {
+        return [];
+      }
+    });
+  })();
+  const allows = (path) => declaredWritePaths.includes(path)
+    || new RegExp(`^Allowed paths: ${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m").test(userText);
+  if (allows("README.md")) {
     return "printf 'worker\\n' >> README.md && git add README.md && git commit -m 'test: 添加确定性 worker 标记'";
   }
-  if (/^Allowed paths: worker\.txt$/m.test(userText)) {
+  if (allows("worker.txt")) {
     return "printf 'worker-2\\n' > worker.txt && git add worker.txt && git commit -m 'test: 添加第二个确定性 worker 标记'";
   }
   return undefined;
@@ -166,8 +182,12 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
       return { tool: { name: "plan_verify", arguments: {} } };
     }
     if (continueState === "dispatch-required") {
-      const dispatched = messages.filter((message, index) => index > latestContinueIndex
+      const toolResultDispatches = messages.filter((message, index) => index > latestContinueIndex
         && message?.role === "toolResult" && message.toolName === "subagent").length;
+      const assistantDispatches = messages.filter((message, index) => index > latestContinueIndex
+        && message?.role === "assistant").flatMap((message) => message.content ?? [])
+        .filter((part) => part?.type === "toolCall" && part.name === "subagent").length;
+      const dispatched = Math.max(toolResultDispatches, assistantDispatches);
       if (dispatched < dispatches.length && toolNames.includes("subagent")) {
         return { tool: { name: "subagent", arguments: dispatches[dispatched].contract } };
       }

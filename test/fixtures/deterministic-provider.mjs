@@ -175,6 +175,18 @@ export default function (pi) {
         return undefined;
       })() : compatTurn.tool);
       const responseText = amendmentOwnsTurn && !next ? "amendment revision2 waiting" : compatTurn?.text ?? "deterministic";
+      const assistantToolCalls = messages.filter((message) => message?.role === "assistant")
+        .flatMap((message) => message.content ?? [])
+        .filter((part) => part?.type === "toolCall");
+      const seenToolCallIds = new Set(assistantToolCalls
+        .filter((part) => typeof part.id === "string")
+        .map((part) => part.id));
+      let toolCallOrdinal = assistantToolCalls.length + 1;
+      let toolCallId = `deterministic-${next?.name}-${toolCallOrdinal}`;
+      while (seenToolCallIds.has(toolCallId)) {
+        toolCallOrdinal += 1;
+        toolCallId = `deterministic-${next?.name}-${toolCallOrdinal}`;
+      }
       const usage = {
         input: 0,
         output: 0,
@@ -185,7 +197,7 @@ export default function (pi) {
       };
       const message = {
         role: "assistant",
-        content: next ? [{ type: "toolCall", id: `deterministic-${next.name}-${toolResults.length}`, name: next.name, arguments: next.arguments }] : [{ type: "text", text: responseText }],
+        content: next ? [{ type: "toolCall", id: toolCallId, name: next.name, arguments: next.arguments }] : [{ type: "text", text: responseText }],
         api: model.api,
         provider: model.provider,
         model: model.id,
