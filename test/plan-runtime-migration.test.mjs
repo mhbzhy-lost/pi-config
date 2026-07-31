@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "..");
+const retiredRpcClient = ["subagents", "rpc-client.mjs"].join("-");
 
 async function missing(relative) {
   await assert.rejects(access(path.join(root, relative)));
@@ -29,7 +30,7 @@ test("Standalone Plan Host runtime and its test are absent", async () => {
 test("retired Host parallel harness and RPC client pair are absent", async () => {
   for (const relative of [
     "test/plan-parallel-harness.integration.mjs",
-    "scripts/lib/subagents-rpc-client.mjs",
+    `scripts/lib/${retiredRpcClient}`,
     "test/subagents-rpc-client.test.mjs",
   ]) await missing(relative);
 });

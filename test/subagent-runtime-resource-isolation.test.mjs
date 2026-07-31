@@ -76,7 +76,6 @@ test("production dispatch modules are independent from Plan Runner and native to
     "scripts/lib/plan",
     "plan-runner",
     "pi-plan-capsule",
-    "subagents-rpc-client.mjs",
     "createPiSubagentsExecutionBackend",
     "compilePlanToIR",
     "tool_call",

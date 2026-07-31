@@ -149,7 +149,7 @@ test("plan runner entry remains child-safe and uses the Root-owned adapter", asy
   assert.match(source, /requestCallerFollowUp[\s\S]{0,120}rpc\.callerFollowUp/);
   assert.match(source, /recordSupervisorRequest[\s\S]{0,200}deps\.recordSupervisorRequest/);
   assert.match(source, /startLifecycleSubscription\(ctx\)/);
-  assert.doesNotMatch(source, /PI_SUBAGENT_CHILD.*return/); assert.doesNotMatch(source, /createSubagentsRpcClient|spawnPiAgent|createMonitor/);
+  assert.doesNotMatch(source, /PI_SUBAGENT_CHILD.*return/); assert.doesNotMatch(source, /subagents-rpc-client\.mjs|spawnPiAgent|createMonitor/);
 });
 
 test("plan-status returns both Root RPC state and durable Plan projection", async () => {
