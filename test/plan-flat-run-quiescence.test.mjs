@@ -33,3 +33,14 @@ test("run quiescence times out while any actual run lacks official proof", async
     readOfficialTerminal: async () => undefined,
   }), /run-pending.*official terminal/i);
 });
+
+test("run quiescence rejects a malformed observed-looking terminal", async () => {
+  const { waitForHarnessRunQuiescence } = await import("./support/flat-plan-run-quiescence.mjs");
+  await assert.rejects(waitForHarnessRunQuiescence({
+    timeoutMs: 10,
+    quietMs: 2,
+    pollIntervalMs: 1,
+    listRuns: async () => [{ runId: "run-malformed", asyncDir: "/tmp/run-malformed" }],
+    readOfficialTerminal: async () => ({ runId: "run-malformed", state: "observed" }),
+  }), /run-malformed.*official terminal/i);
+});
