@@ -236,25 +236,31 @@ export class RootBrokerServer {
     return value;
   }
 
-  async grantRevivedCaller(logicalRunId: string, actualRunId: string) {
+  async grantRevivedCaller(logicalRunId: string, actualRunId: string, callerWake?: FollowUpIntent) {
     const logical = this.logicalCallers.get(logicalRunId);
     if (this.closed || !logical || logical.activeRunId === actualRunId || this.principals.has(actualRunId) || this.callerAliases.has(actualRunId)) throw new Error("Root subagent broker revived caller is invalid");
     const previousActualRunId = logical.activeRunId;
     const generation = logical.generation;
     const callerToken = this.randomToken();
     const pending = (async () => {
-      const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId: actualRunId, callerToken, role: "plan-runner" });
-      this.grantPaths.add(grantPath);
-      if (this.closed || this.logicalCallers.get(logicalRunId)?.activeRunId !== logical.activeRunId || this.logicalCallers.get(logicalRunId)?.generation !== generation || this.principals.has(actualRunId) || this.callerAliases.has(actualRunId)) throw new Error("Root subagent broker revived caller grant changed while pending");
-      this.principals.set(actualRunId, { role: "plan-runner", callerToken });
-      this.callerAliases.set(actualRunId, logicalRunId);
-      this.logicalCallers.set(logicalRunId, { activeRunId: actualRunId, generation: generation + 1 });
-      const previousSubscriptions = this.subscriptions.get(previousActualRunId);
-      this.subscriptions.delete(previousActualRunId);
-      for (const socket of previousSubscriptions ?? []) {
-        try { if (!socket.destroyed) socket.destroy(); } catch { /* isolate subscriber failures */ }
+      if (callerWake) this.callerWakes.set(actualRunId, callerWake);
+      try {
+        const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId: actualRunId, callerToken, role: "plan-runner" });
+        this.grantPaths.add(grantPath);
+        if (this.closed || this.logicalCallers.get(logicalRunId)?.activeRunId !== logical.activeRunId || this.logicalCallers.get(logicalRunId)?.generation !== generation || this.principals.has(actualRunId) || this.callerAliases.has(actualRunId)) throw new Error("Root subagent broker revived caller grant changed while pending");
+        this.principals.set(actualRunId, { role: "plan-runner", callerToken });
+        this.callerAliases.set(actualRunId, logicalRunId);
+        this.logicalCallers.set(logicalRunId, { activeRunId: actualRunId, generation: generation + 1 });
+        const previousSubscriptions = this.subscriptions.get(previousActualRunId);
+        this.subscriptions.delete(previousActualRunId);
+        for (const socket of previousSubscriptions ?? []) {
+          try { if (!socket.destroyed) socket.destroy(); } catch { /* isolate subscriber failures */ }
+        }
+        return { callerToken };
+      } catch (error) {
+        if (callerWake && this.callerWakes.get(actualRunId) === callerWake) this.callerWakes.delete(actualRunId);
+        throw error;
       }
-      return { callerToken };
     })();
     this.callerGrants.set(actualRunId, pending);
     void pending.finally(() => {
@@ -298,11 +304,10 @@ export class RootBrokerServer {
     const revivedAsyncDir = result.details.asyncDir;
     if (typeof revivedRunId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(revivedRunId) || revivedRunId === "." || revivedRunId === ".." || typeof revivedAsyncDir !== "string" || revivedAsyncDir.length === 0 || !path.isAbsolute(revivedAsyncDir) || revivedRunId === actualRunId || this.principals.has(revivedRunId) || this.callerAliases.has(revivedRunId)) throw new Error("Root subagent broker resume result is invalid");
     this.recordDiagnostic("resume.succeeded", logicalRunId, wakeId, { revivedRunId });
-    await this.grantRevivedCaller(logicalRunId, revivedRunId);
+    await this.grantRevivedCaller(logicalRunId, revivedRunId, callerWake);
     this.recordDiagnostic("grant.issued", logicalRunId, wakeId, { revivedRunId });
     this.reviveResults.set(logicalRunId, result);
     if (callerWake) {
-      this.callerWakes.set(revivedRunId, callerWake);
       const currentFollowUps = this.callerFollowUps.get(logicalRunId);
       if (currentFollowUps?.[0]?.wakeId === callerWake.wakeId) currentFollowUps.shift();
     }
