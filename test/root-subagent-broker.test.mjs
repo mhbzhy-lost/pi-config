@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { connect } from "node:net";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm as removePath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -219,6 +219,62 @@ test("broker forwards flat spawn, projects caller cwd, rejects foreign control, 
   const closing = once(subscription.socket, "data");
   await broker.closeRootSession();
   assert.match((await closing)[0].toString(), /root\.closing/);
+});
+
+test("real client resolves subscription only after queued pushes and the ready barrier", async (t) => {
+  const sessionId = `subscription-ready-${randomUUID()}`;
+  const callerRunId = "subscription-ready-owner";
+  const broker = new RootBrokerServer({ rootSessionId: sessionId, upstream: fakeUpstream() });
+  await broker.start();
+  await broker.grantCaller({ callerRunId, planId: "subscription-ready-plan", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  const queued = {
+    schemaVersion: "pi-root-subagent-broker-push.v1",
+    rootSessionId: sessionId,
+    callerRunId,
+    type: "execution.started",
+    data: { dispatchId: "subscription-ready-dispatch", runId: "subscription-ready-executor", asyncDir: "/async/subscription-ready", cwd: "/repo", sessionId, state: "running" },
+  };
+  assert.equal(broker.deliverOrQueuePush(callerRunId, queued), false);
+
+  const activateSubscription = broker.activateSubscription.bind(broker);
+  let releaseActivation;
+  const activationReleased = new Promise((resolve) => { releaseActivation = resolve; });
+  let activationRequest;
+  let activationSocket;
+  let reachedActivation;
+  const activationReached = new Promise((resolve) => { reachedActivation = resolve; });
+  broker.activateSubscription = (request, socket) => {
+    activationRequest = request;
+    activationSocket = socket;
+    reachedActivation();
+    void activationReleased.then(() => activateSubscription(request, socket));
+  };
+
+  const client = createRootBrokerClient({ rootSessionId: sessionId, callerRunId });
+  const received = [];
+  const events = [];
+  let subscriptionSettled = false;
+  const subscribing = client.subscribe((push) => { received.push(push); events.push("push"); });
+  subscribing.then(() => { subscriptionSettled = true; events.push("complete"); });
+  t.after(async () => {
+    releaseActivation();
+    const subscription = await subscribing.catch(() => undefined);
+    subscription?.dispose();
+    client.dispose();
+    await broker.closeRootSession();
+  });
+
+  await activationReached;
+  await client.ping();
+  assert.equal(subscriptionSettled, false, "ACK has reached the activation gate without completing the client subscription");
+  assert.equal(activationRequest.callerRunId, callerRunId);
+  assert.equal(activationSocket.destroyed, false);
+
+  releaseActivation();
+  const subscription = await subscribing;
+  assert.deepEqual(received, [queued]);
+  assert.deepEqual(events, ["push", "complete"]);
+  subscription.dispose();
 });
 
 test("broker fails closed for root, caller, and token mismatches", async (t) => {

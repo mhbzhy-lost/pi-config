@@ -151,6 +151,19 @@ test("fixes supervisor push and reply identities to upstream request identity", 
   expectInvalid(() => createSupervisorRequestPush({ rootSessionId, callerRunId, upstreamDetails: { id: "upstream-request-1", runId: "executor/run" } }), /runId/);
 });
 
+test("accepts only an exact empty subscription ready push", () => {
+  const ready = {
+    schemaVersion: "pi-root-subagent-broker-push.v1",
+    rootSessionId,
+    callerRunId,
+    type: "subscription.ready",
+    data: {},
+  };
+
+  assert.deepEqual(parseBrokerPush(ready), ready);
+  expectInvalid(() => parseBrokerPush({ ...ready, data: { subscribed: true } }), /unknown|additional|data/i);
+});
+
 test("reload identity uses the safe session ID instead of the session file path", () => {
   const sessionManager = {
     getSessionFile: () => "/tmp/pi/sessions/2026-07-30_root-session-1.jsonl",

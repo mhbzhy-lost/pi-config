@@ -799,6 +799,13 @@ test("coalesces queued lifecycle pushes into one revival and flushes them FIFO a
   assert.deepEqual(writes.map((frame) => parseBrokerPush(JSON.parse(frame))), [
     { ...firstPush, callerRunId: "plan-runner-2" },
     { ...secondPush, callerRunId: "plan-runner-2" },
+    {
+      schemaVersion: "pi-root-subagent-broker-push.v1",
+      rootSessionId: "root-session-1",
+      callerRunId: "plan-runner-2",
+      type: "subscription.ready",
+      data: {},
+    },
   ]);
   assert.deepEqual(server.callerPushQueues.get("plan-runner-1"), []);
 });

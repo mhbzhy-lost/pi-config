@@ -144,6 +144,13 @@ test("respond flushes queued logical pushes to the active actual caller after it
       type: "supervisor.request",
       data: supervisorData,
     },
+    {
+      schemaVersion: "pi-root-subagent-broker-push.v1",
+      rootSessionId: "root-session-1",
+      callerRunId: actualCallerRunId,
+      type: "subscription.ready",
+      data: {},
+    },
   ]);
   assert.equal(server.callerPushQueues.get(logicalCallerRunId).length, 0);
   assert.deepEqual(delivered, ["lifecycle", "supervisor"]);
@@ -151,7 +158,7 @@ test("respond flushes queued logical pushes to the active actual caller after it
   assert.equal(server.subscriptions.get(logicalCallerRunId)?.has(socket) ?? false, false);
 });
 
-test("respond activates a subscription only after its success ACK write callback", async () => {
+test("respond activates an empty subscription only after its success ACK write callback and sends ready", async () => {
   const { server, socket } = await createSubscriptionFixture();
 
   assert.deepEqual(socket.writes.map(({ frame }) => frame), [{
@@ -166,6 +173,23 @@ test("respond activates a subscription only after its success ACK write callback
 
   socket.writes[0].callback();
 
+  assert.deepEqual(socket.writes.map(({ frame }) => frame), [
+    {
+      schemaVersion: "pi-root-subagent-broker-response.v1",
+      requestId: "subscribe-1",
+      rootSessionId: "root-session-1",
+      callerRunId: "plan-runner-1",
+      success: true,
+      data: { subscribed: true },
+    },
+    {
+      schemaVersion: "pi-root-subagent-broker-push.v1",
+      rootSessionId: "root-session-1",
+      callerRunId: "plan-runner-1",
+      type: "subscription.ready",
+      data: {},
+    },
+  ]);
   assert.equal(server.subscriptions.get("plan-runner-1")?.has(socket) ?? false, true);
 });
 
