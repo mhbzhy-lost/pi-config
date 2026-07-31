@@ -4,44 +4,48 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
+const START_TIME_TOLERANCE_MS = 5_000;
 
-function alive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error.code === "ESRCH") return false;
-    throw error;
-  }
+async function groupAlive(pgid) {
+  const { stdout } = await run("ps", ["-axo", "pgid="]);
+  return stdout.split("\n").some((line) => Number(line.trim()) === pgid);
 }
 
-function signal(pid, name) {
+function signalGroup(pgid, name) {
   try {
-    process.kill(pid, name);
+    process.kill(-pgid, name);
   } catch (error) {
     if (error.code !== "ESRCH") throw error;
   }
 }
 
-async function processTree(rootPid) {
-  const { stdout } = await run("ps", ["-axo", "pid=,ppid="]);
-  const children = new Map();
-  for (const line of stdout.split("\n")) {
-    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
-    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
-    const entries = children.get(ppid) ?? [];
-    entries.push(pid);
-    children.set(ppid, entries);
+async function recordedProcess(pid) {
+  let stdout;
+  try {
+    ({ stdout } = await run("ps", ["-ww", "-p", String(pid), "-o", "pid=,pgid=,lstart=,command="], {
+      env: { ...process.env, LC_ALL: "C" },
+    }));
+  } catch (error) {
+    if (error?.code === 1 && String(error?.stdout ?? "").trim() === "") return undefined;
+    throw error;
   }
-  const descendants = [];
-  const visit = (pid) => {
-    for (const child of children.get(pid) ?? []) {
-      visit(child);
-      descendants.push(child);
-    }
+  const match = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.{24})\s+(.*)$/);
+  if (!match) return undefined;
+  return {
+    pid: Number(match[1]),
+    pgid: Number(match[2]),
+    startedAt: Date.parse(match[3]),
+    command: match[4],
   };
-  visit(rootPid);
-  return descendants;
+}
+
+async function waitForGroupExit(pgid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await groupAlive(pgid))) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return !(await groupAlive(pgid));
 }
 
 export async function processesReferencing(...paths) {
@@ -53,16 +57,7 @@ export async function processesReferencing(...paths) {
   });
 }
 
-async function waitForExit(pids, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (pids.every((pid) => !alive(pid))) return true;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  return pids.every((pid) => !alive(pid));
-}
-
-export async function terminateDetachedRun(handle, { timeoutMs = 2_000 } = {}) {
+export async function terminateDetachedRun(handle, { expectedCommandPath, timeoutMs = 2_000 } = {}) {
   if (!handle?.runId || !handle?.asyncDir) return;
   let status;
   try {
@@ -71,15 +66,30 @@ export async function terminateDetachedRun(handle, { timeoutMs = 2_000 } = {}) {
     if (error.code === "ENOENT") return;
     throw error;
   }
-  if (status.runId !== handle.runId || !Number.isInteger(status.pid) || status.pid <= 1) {
-    throw new Error("Detached Plan run status does not match its handle");
+  if (status.runId !== handle.runId || !Number.isInteger(status.pid) || status.pid <= 1 || !expectedCommandPath || !status.startedAt) {
+    throw new Error("Detached Plan run identity is incomplete or does not match its handle");
   }
-  const pids = [...await processTree(status.pid), status.pid];
-  for (const pid of pids) signal(pid, "SIGTERM");
-  if (await waitForExit(pids, timeoutMs)) return;
-  for (const pid of pids) signal(pid, "SIGKILL");
-  if (!(await waitForExit(pids, timeoutMs))) {
-    throw new Error(`Detached Plan process tree did not exit: ${pids.filter(alive).join(",")}`);
+
+  const process = await recordedProcess(status.pid);
+  if (!process) return;
+  const expectedStartedAt = new Date(status.startedAt).getTime();
+  if (
+    process.pid !== status.pid ||
+    process.pgid !== status.pid ||
+    !Number.isFinite(process.startedAt) ||
+    !Number.isFinite(expectedStartedAt) ||
+    Math.abs(process.startedAt - expectedStartedAt) > START_TIME_TOLERANCE_MS ||
+    !process.command.includes(expectedCommandPath) ||
+    !process.command.includes(handle.runId)
+  ) {
+    throw new Error("Detached Plan run process identity does not match status or runtime");
+  }
+
+  signalGroup(process.pgid, "SIGTERM");
+  if (await waitForGroupExit(process.pgid, timeoutMs)) return;
+  signalGroup(process.pgid, "SIGKILL");
+  if (!(await waitForGroupExit(process.pgid, timeoutMs))) {
+    throw new Error(`Detached Plan process group did not exit: ${process.pgid}`);
   }
 }
 
@@ -118,10 +128,25 @@ export async function terminateDetachedRunsUnder(root, { timeoutMs = 2_000 } = {
   const errors = [];
   for (const handle of handles) {
     try {
-      await terminateDetachedRun(handle, { timeoutMs });
+      await terminateDetachedRun(handle, { expectedCommandPath: root, timeoutMs });
     } catch (error) {
       errors.push(error);
     }
   }
-  if (errors.length) throw new AggregateError(errors, "Failed to terminate detached Plan runs");
+  if (errors.length) throw new AggregateError(errors, "Detached Plan run identity cleanup failed");
+}
+
+export async function finalizeHarnessCleanup({ fixture, passed, preserve, primaryError, cleanupErrors = [], removeFixture, diagnostic }) {
+  const errors = [...cleanupErrors];
+  if (passed && !preserve && errors.length === 0) {
+    try {
+      await removeFixture();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (!passed || preserve || errors.length > 0) diagnostic?.(`preserved=${fixture}`);
+  if (errors.length) {
+    throw new AggregateError(primaryError ? [primaryError, ...errors] : errors, "Harness cleanup failed");
+  }
 }

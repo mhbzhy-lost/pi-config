@@ -10,7 +10,7 @@ import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
 import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
 import { brokerSocketPath, parseProcessTerminal } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
-import { processesReferencing, terminateDetachedRunsUnder } from "./support/plan-e2e-process-cleanup.mjs";
+import { finalizeHarnessCleanup, processesReferencing, terminateDetachedRunsUnder } from "./support/plan-e2e-process-cleanup.mjs";
 
 const execFile = promisify(execFileCallback);
 const root = path.resolve(import.meta.dirname, "..");
@@ -93,11 +93,14 @@ test("same Root flat amendment crash Harness revives the canonical Plan Runner",
     try { await terminateDetachedRunsUnder(runtimeTmp); } catch (error) { cleanupErrors.push(error); }
     try { assert.deepEqual(await processesReferencing(fixture, runtimeTmp), [], "processes remain after Harness cleanup"); } catch (error) { cleanupErrors.push(error); }
     try { await rm(brokerSocketPath(rootSessionId), { force: true }); } catch (error) { cleanupErrors.push(error); }
-    if (passed && process.env.PLAN_HARNESS_PRESERVE !== "1") await rm(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); else t.diagnostic(`preserved=${fixture}`);
-    if (cleanupErrors.length) {
-      const cleanupError = new AggregateError(cleanupErrors, "Harness cleanup failed");
-      if (primaryError) t.diagnostic(cleanupError.message);
-      else throw cleanupError;
-    }
+    await finalizeHarnessCleanup({
+      fixture,
+      passed,
+      preserve: process.env.PLAN_HARNESS_PRESERVE === "1",
+      primaryError,
+      cleanupErrors,
+      removeFixture: () => rm(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),
+      diagnostic: (message) => t.diagnostic(message),
+    });
   }
 });
