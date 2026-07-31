@@ -26,4 +26,4 @@ Harness无法进入四个Attention roundtrip、integration、Gate和graceful shu
 
 ## 6. 修复与验证
 
-新增纯测试support driver及可信RED：模拟前三个请求已pending、第四个只有在任一回复后才出现；driver必须逐个调用`onPending`并最终收集每Plan两个唯一request。driver只对完全相同的`plan/task/attempt/run/requestId`轮询重读去重；同一requestId对应不同Attempt、task、run或Plan必须立即fail closed。Harness callback继续逐项验证Plan event、body hash、typed marker和owner identity，再用单请求Root prompt立即执行`plan_attention_reply`并核对结果。禁止提高并发容量或放松四请求oracle。下一冻结HEAD真实Harness是最终GREEN。
+新增纯测试support driver及可信RED：模拟前三个请求已pending、第四个只有在任一回复后才出现；driver必须逐个调用`onPending`并最终收集每Plan两个唯一request。driver只对完全相同的`plan/task/attempt/run/requestId/projectionVersion`轮询重读去重；同一requestId对应不同Attempt、task、run、Plan或projection version必须立即fail closed。Harness callback继续逐项验证Plan event、body hash、typed marker和owner identity，再用单请求Root prompt立即执行`plan_attention_reply`并核对结果。禁止提高并发容量或放松四请求oracle。下一冻结HEAD真实Harness是最终GREEN。

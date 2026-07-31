@@ -74,3 +74,23 @@ test("Attention driver rejects one requestId reused by another Attempt in the sa
     onPending: async () => {},
   }), /request identity conflict/i);
 });
+
+test("Attention driver rejects a reused requestId with a different projection version", async () => {
+  const { driveHarnessAttention } = await import("./support/flat-plan-attention-driver.mjs");
+  let reads = 0;
+
+  await assert.rejects(driveHarnessAttention({
+    handles: [{ planId: "plan-0" }],
+    expectedPerPlan: 2,
+    timeoutMs: 20,
+    pollIntervalMs: 0,
+    readStatuses: async () => {
+      reads += 1;
+      const waiting = attempt("task-1", "waiting-attention", "reused-request");
+      waiting.attention.projectionVersion = reads === 1 ? 1 : 2;
+      return [{ tasks: [{ taskId: "task-1", attempts: [waiting] }] }];
+    },
+    readRunners: async () => [{ state: "complete" }],
+    onPending: async () => {},
+  }), /request identity conflict/i);
+});
