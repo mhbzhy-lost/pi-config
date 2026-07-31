@@ -182,6 +182,14 @@ test("Root Main sends only a strict flat amendment crash marker", () => {
   });
 });
 
+test("Root Main does not replay a flat amendment crash after its tool result", () => {
+  const tools = [...rootMainTools, "plan_harness_crash_amendment"];
+  const crash = user(`PI_PLAN_FLAT_AMENDMENT_CRASH\n${JSON.stringify({ logicalRunId: "logical-65", executorRunId: "executor-65" })}`);
+  assert.deepEqual(decide([crash, toolResult("plan_harness_crash_amendment", JSON.stringify({ error: "official terminal is non-observed (pending)" }))], tools), {
+    text: "PLAN_ROOT_AMENDMENT_CRASH_RESULT",
+  });
+});
+
 test("flat amendment provider uses typed replies, status refreshes, and broker lifecycle pushes", () => {
   assert.equal(typeof state.decideDeterministicAmendmentTurn, "function");
   const tools = ["plan_status", "plan_amend", "plan_continue", "plan_executor_supervisor"];

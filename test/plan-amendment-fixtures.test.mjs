@@ -35,6 +35,31 @@ test("root amendment fixture drains the exact Executor before its active Plan Ru
   } finally { unbindRootBroker(pi, broker); }
 });
 
+test("root amendment fixture waits for official proof after one pending drain", async () => {
+  const calls = [];
+  const broker = {
+    callers: new Map([["logical-1", { ownedRunIds: new Set(["executor-1"]) }]]),
+    runOwners: new Map([["executor-1", "logical-1"]]),
+    ownedRuns: new Map([["executor-1", { runId: "executor-1", role: "executor" }], ["runner-active", { runId: "runner-active", role: "plan-runner" }]]),
+    terminalProofs: new Map(),
+    resolveActiveCaller() { return "runner-active"; },
+    async drainRun(run) {
+      calls.push(run.runId);
+      setTimeout(() => this.terminalProofs.set(run.runId, { runId: run.runId, state: "observed" }), 0);
+      throw new Error("official terminal is non-observed (pending)");
+    },
+  };
+  const { pi, tool } = install(broker);
+  try {
+    const response = await tool.execute("x", { logicalRunId: "logical-1", executorRunId: "executor-1" });
+    assert.equal(response.isError, undefined);
+    assert.deepEqual(calls, ["executor-1", "runner-active"], "each owned run must be stopped once");
+    const proof = JSON.parse(response.content[0].text);
+    assert.equal(proof.executorProof.runId, "executor-1");
+    assert.equal(proof.runnerProof.runId, "runner-active");
+  } finally { unbindRootBroker(pi, broker); }
+});
+
 test("root amendment fixture fails closed when owner or active generation changes", async () => {
   const broker = {
     callers: new Map([["logical-1", { ownedRunIds: new Set() }]]),
