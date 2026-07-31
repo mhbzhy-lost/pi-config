@@ -97,7 +97,10 @@ export async function terminateDetachedRun(handle, {
   signalProcessGroup(process.pgid, "SIGTERM");
   if (await waitForGroupExit(process.pgid, timeoutMs, isGroupAlive)) return;
   const leaderAfterTerm = await inspectProcess(status.pid);
-  if (leaderAfterTerm && !matchesRunIdentity(leaderAfterTerm, status, handle, expectedCommandPath)) {
+  if (!leaderAfterTerm) {
+    throw new Error("Detached Plan run leader is unavailable before SIGKILL");
+  }
+  if (!matchesRunIdentity(leaderAfterTerm, status, handle, expectedCommandPath)) {
     throw new Error("Detached Plan run process identity changed before SIGKILL");
   }
   signalProcessGroup(process.pgid, "SIGKILL");
