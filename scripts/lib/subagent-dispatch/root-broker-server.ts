@@ -26,8 +26,8 @@ type LogicalCaller = { activeRunId: string; generation: number };
 type FollowUpIntent = { wakeId: string; reason: "plan-opened" | "attention-reply" };
 type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number; recordRevivalDiagnostic?: (customType: "pi-root-broker-revival-v1", data: Record<string, unknown>) => unknown; lifecycleSessionId?: string };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; queued?: Set<string>; delivered: Set<string> };
-type QueuedCallerPush = { push: BrokerPush; onDelivered?: () => void };
-type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed" };
+type QueuedCallerPush = { push: BrokerPush; onDelivered?: () => void; supervisorRequestId?: string };
+type SupervisorRequest = { requestId: string; ownerRunId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean; state: "pending" | "replying" | "consumed"; announced: boolean; announcementQueued: boolean };
 type PendingSupervisorIngress = { requestId: string; executorRunId: string; data: Record<string, unknown>; context: any; expectsReply: boolean };
 type OwnedRun = { rootSessionId: string; runId: string; role: "plan-runner" | "executor"; asyncDir: string; sessionId: string; pid: number; birthIdentity: string | null; identityState: "verified" | "unavailable" | "conflict" };
 type StartedFacts = Pick<OwnedRun, "runId" | "role" | "asyncDir" | "sessionId" | "pid">;
@@ -221,6 +221,12 @@ export class RootBrokerServer {
     if (terminal.state !== "observed") throw new Error(`official terminal is non-observed (${String(terminal.state)})`);
     this.terminalProofs.set(run.runId, value);
     this.recordDiagnostic("proof.accepted", this.callerAliases.get(run.runId) ?? run.runId);
+    const logicalCallerRunId = this.callerAliases.get(run.runId);
+    if (run.role === "plan-runner" && logicalCallerRunId) {
+      for (const request of this.supervisorRequests.values()) {
+        if (request.ownerRunId === logicalCallerRunId && request.state === "pending" && !request.announced) this.queueUnacknowledgedSupervisorRequest(request);
+      }
+    }
     const waiters = this.terminalWaiters.get(run.runId);
     this.terminalWaiters.delete(run.runId);
     for (const resolve of waiters ?? []) resolve(value);
@@ -706,6 +712,7 @@ export class RootBrokerServer {
       if (request.method === "caller.followup") return this.registerCallerFollowUp(request, logicalCallerRunId);
       if (request.method === "spawn.lookup") return this.lookupSpawn(request, caller);
       if (request.method === "supervisor.pending") return this.pendingSupervisor(request, caller, logicalCallerRunId);
+      if (request.method === "supervisor.ack") return this.acknowledgeSupervisor(request, logicalCallerRunId);
       if (request.method === "supervisor.reply") return await this.replySupervisor(request, caller, logicalCallerRunId);
       if (["status", "steer", "interrupt", "stop"].includes(request.method)) return await this.control(request, caller, logicalCallerRunId);
       return failure(request, "unsupported", `Broker method ${request.method} is unsupported`);
@@ -910,35 +917,49 @@ export class RootBrokerServer {
     return flushed;
   }
 
-  deliverOrQueuePush(logicalCallerRunId: string, push: BrokerPush, onDelivered?: () => void) {
+  deliverOrQueuePush(logicalCallerRunId: string, push: BrokerPush, onDelivered?: () => void, supervisorRequestId?: string) {
     const queue = this.callerPushQueues.get(logicalCallerRunId);
     const actualCallerRunId = this.logicalCallers.get(logicalCallerRunId)?.activeRunId;
     const sockets = actualCallerRunId
       ? [...(this.subscriptions.get(actualCallerRunId) ?? [])].filter((socket) => !socket.destroyed)
       : [];
     if (!queue || !actualCallerRunId || sockets.length === 0) {
-      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered });
+      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered, supervisorRequestId });
     }
     for (const socket of sockets) {
       if (queue.length === 0) break;
       this.flushCallerPushQueue(logicalCallerRunId, actualCallerRunId, socket);
     }
     if (queue.length > 0) {
-      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered });
+      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered, supervisorRequestId });
     }
     let outbound: BrokerPush;
     try { outbound = this.outboundPush(push, actualCallerRunId); } catch {
-      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered });
+      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered, supervisorRequestId });
     }
     let delivered = false;
     for (const socket of sockets) {
       try { socket.write(`${JSON.stringify(outbound)}\n`); delivered = true; } catch { /* isolate subscriber failures */ }
     }
     if (!delivered) {
-      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered });
+      return this.queueCallerPush(logicalCallerRunId, { push, onDelivered, supervisorRequestId });
     }
     try { onDelivered?.(); } catch { /* delivery observers must not interrupt push routing */ }
     return true;
+  }
+
+  deliverSupervisorRequest(entry: SupervisorRequest, push: BrokerPush) {
+    entry.announcementQueued = !this.deliverOrQueuePush(entry.ownerRunId, push, () => { entry.announcementQueued = false; }, entry.requestId);
+  }
+
+  queueUnacknowledgedSupervisorRequest(entry: SupervisorRequest) {
+    if (entry.announced || entry.announcementQueued || entry.state !== "pending") return;
+    let push: BrokerPush;
+    try {
+      push = parseBrokerPush({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: entry.ownerRunId, type: "supervisor.request", data: entry.data });
+    } catch { return; }
+    entry.announcementQueued = true;
+    this.queueCallerPush(entry.ownerRunId, { push, supervisorRequestId: entry.requestId, onDelivered: () => { entry.announcementQueued = false; } });
   }
 
   resolveActiveCaller(logicalRunId: string) {
@@ -995,9 +1016,9 @@ export class RootBrokerServer {
       return;
     }
     if (ownerRunId && this.callers.has(ownerRunId)) {
-      const entry: SupervisorRequest = { requestId, ownerRunId, executorRunId, data: push.data, context, expectsReply: push.data.expectsReply === true, state: "pending" };
+      const entry: SupervisorRequest = { requestId, ownerRunId, executorRunId, data: push.data, context, expectsReply: push.data.expectsReply === true, state: "pending", announced: false, announcementQueued: false };
       this.supervisorRequests.set(entry.requestId, entry);
-      this.deliverOrQueuePush(ownerRunId, push);
+      this.deliverSupervisorRequest(entry, push);
       return;
     }
     const known = !this.supervisorIngressRevokedRuns.has(executorRunId)
@@ -1024,7 +1045,7 @@ export class RootBrokerServer {
     const promoted: Array<{ entry: SupervisorRequest; push: BrokerPush }> = [];
     for (const queued of pending) {
       if (this.pendingSupervisorRequestIds.get(queued.requestId) !== queued || this.supervisorRequests.has(queued.requestId)) throw new Error("Supervisor ingress reservation is invalid");
-      const entry: SupervisorRequest = { ...queued, ownerRunId, state: "pending" };
+      const entry: SupervisorRequest = { ...queued, ownerRunId, state: "pending", announced: false, announcementQueued: false };
       const push = parseBrokerPush({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: ownerRunId, type: "supervisor.request", data: entry.data });
       promoted.push({ entry, push });
     }
@@ -1033,7 +1054,22 @@ export class RootBrokerServer {
       this.pendingSupervisorRequestIds.delete(entry.requestId);
       this.supervisorRequests.set(entry.requestId, entry);
     }
-    for (const { push } of promoted) this.deliverOrQueuePush(ownerRunId, push);
+    for (const { entry, push } of promoted) this.deliverSupervisorRequest(entry, push);
+  }
+
+  acknowledgeSupervisor(request: any, logicalCallerRunId: string) {
+    const entry = this.supervisorRequests.get(request.params.requestId);
+    if (!entry) return failure(request, "supervisor_request_unknown", "Supervisor request is unknown");
+    if (entry.ownerRunId !== logicalCallerRunId) return failure(request, "supervisor_not_owned", "Supervisor request is not owned by caller");
+    entry.announced = true;
+    entry.announcementQueued = false;
+    const queue = this.callerPushQueues.get(logicalCallerRunId);
+    if (queue) {
+      for (let index = queue.length - 1; index >= 0; index -= 1) {
+        if (queue[index].supervisorRequestId === entry.requestId) queue.splice(index, 1);
+      }
+    }
+    return createBrokerSuccessResponse({ ...request, data: { acknowledged: true } });
   }
 
   pendingSupervisor(request: any, _caller: Caller, logicalCallerRunId: string) {

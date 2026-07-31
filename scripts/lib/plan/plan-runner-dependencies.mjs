@@ -546,13 +546,47 @@ export function createPlanRunnerDependencies({
       }
       const body = supervisorMessageText(message);
       if (!body.trim() || Buffer.byteLength(body, "utf8") > 64 * 1024) throw new Error("Invalid native Supervisor request body");
+      const kind = ATTENTION_KINDS.has(details.reason) ? details.reason : "need_decision";
+      const messageHash = createHash("sha256").update(body).digest("hex");
       let current = currentProjection(ctx);
+      const replay = [...current.attempts.entries()].map(([attemptId, attempt]) => ({
+        attemptId,
+        attempt,
+        attention: attempt.attention?.requestId === requestId ? attempt.attention : attempt.lastProgress?.requestId === requestId ? attempt.lastProgress : undefined,
+      })).find((candidate) => candidate.attention);
+      const replayEvents = combinedEvents(ctx);
+      const requestedEvent = replayEvents.find((entry) => entry.type === "attempt.attention-requested" && entry.data?.requestId === requestId);
+      if (replay) {
+        if (replay.attempt.runId !== details.runId || replay.attention.kind !== kind || replay.attention.messageSha256 !== messageHash) {
+          throw new Error("Native Supervisor Attention replay conflicts with the durable request");
+        }
+        if (kind !== "progress_update" && replay.attempt.status === "waiting-attention" && replay.attention.status === "pending" && replay.attention.escalated !== true) {
+          await appendEvent(ctx, "attempt.attention-escalated", {
+            attemptId: replay.attemptId,
+            requestId,
+            runId: replay.attempt.runId,
+            expectedProjectionVersion: current.version,
+            evidence: replay.attention.evidence,
+          }, current.version);
+          current = currentProjection(ctx);
+        }
+        await derivedStatus(ctx);
+        return { requestId, attemptId: replay.attemptId, runId: replay.attempt.runId, projectionVersion: current.version, evidence: replay.attention.evidence };
+      }
+      if (requestedEvent) {
+        const requested = requestedEvent.data;
+        if (requested.runId !== details.runId || requested.kind !== kind || createHash("sha256").update(requested.message).digest("hex") !== messageHash) {
+          throw new Error("Native Supervisor Attention replay conflicts with the durable request");
+        }
+        await derivedStatus(ctx);
+        return { requestId, attemptId: requested.attemptId, runId: requested.runId, projectionVersion: current.version, evidence: requested.evidence };
+      }
+      if (current.attentionRequestIds.has(requestId)) throw new Error("Native Supervisor Attention replay conflicts with the durable request");
       const match = [...current.attempts.entries()].find(([, attempt]) => attempt.status === "active" && attempt.runId === details.runId);
       if (!match) throw new Error("Native Supervisor request does not match an active Attempt");
       const [attemptId, attempt] = match;
       const { stateRoot } = await rootsFor(ctx, current.planId);
       const evidence = await writeAttentionBody({ stateRoot, planId: current.planId, requestId, message: body });
-      const kind = ATTENTION_KINDS.has(details.reason) ? details.reason : "need_decision";
       await appendEvent(ctx, "attempt.attention-requested", {
         requestId,
         taskId: attempt.taskId,

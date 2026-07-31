@@ -62,8 +62,13 @@ export async function installPlanRunner(
   const boundary = createPlanExecutorToolBoundary();
   let executionBackend: ReturnType<typeof createPiSubagentsExecutionBackend> | undefined;
   let assertExecutionRuntime: (() => Promise<void>) | undefined;
+  let recordSupervisorRequest: ((message: unknown, options: { ctx: unknown }) => Promise<unknown>) | undefined;
   const executionDispatchError = (code: string, message: string) => Object.assign(new Error(message), { code });
   const rootOwned = installRootOwnedSubagent(pi, {
+    async recordSupervisorRequest(message: unknown, options: { ctx: unknown }) {
+      if (!recordSupervisorRequest) throw new Error("Plan Supervisor recorder is not initialized");
+      await recordSupervisorRequest(message, options);
+    },
     async resolveCodingSpawnIdentity(input: unknown) {
       if (!executionBackend || !assertExecutionRuntime) throw executionDispatchError("EXECUTION_DISPATCH_INVALID", "Execution backend is not initialized");
       await assertExecutionRuntime();
@@ -101,6 +106,7 @@ export async function installPlanRunner(
       takeExecutionFacts: () => executionFacts.splice(0),
       externalReview: createExternalReviewAdapter(),
     });
+    recordSupervisorRequest = (message, options) => deps.recordSupervisorRequest(message, options);
 
     async function resolveExecutorDispatchResult(event: any, { ctx }: { ctx: unknown }) {
       const parsed = boundary.resolveExecutorToolResult(event);
@@ -156,7 +162,7 @@ export async function installPlanRunner(
       },
       async prepareExecutionLifecycle({ ctx }: { ctx: unknown }) {
         await deps.recoverExecutionState({ ctx });
-        await rootOwned.startLifecycleSubscription();
+        await rootOwned.startLifecycleSubscription(ctx);
       },
       disposeExecutionBackend() {
         executionBackend?.dispose();

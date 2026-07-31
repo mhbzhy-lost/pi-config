@@ -671,7 +671,7 @@ test("resolves statusCaller through a revived plan-runner alias", async () => {
     return { state: "status-result" };
   };
 
-  assert.deepEqual(BROKER_METHODS, ["ping", "spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.reply", "caller.followup", "subscribe"]);
+  assert.deepEqual(BROKER_METHODS, ["ping", "spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.ack", "supervisor.reply", "caller.followup", "subscribe"]);
   assert.deepEqual(await server.statusCaller("plan-runner-1"), { state: "status-result" });
   assert.deepEqual(calls, [{ runId: "plan-runner-2" }]);
 });
