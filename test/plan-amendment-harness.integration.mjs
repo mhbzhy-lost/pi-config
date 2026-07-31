@@ -1,152 +1,90 @@
 import assert from "node:assert/strict";
-import { execFile as execFileCallback } from "node:child_process";
-import { access, copyFile, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { spawn, execFile as execFileCallback } from "node:child_process";
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createPlanHostRuntime } from "../scripts/lib/plan/plan-host-runtime.mjs";
-import { createPlanLauncherExtension } from "../scripts/lib/plan/plan-launcher-extension.mjs";
 import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
 import { createPlanRevisionStore } from "../scripts/lib/plan/plan-revision-store.mjs";
+import { brokerSocketPath, parseProcessTerminal } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 
 const execFile = promisify(execFileCallback);
 const root = path.resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;
 const provider = path.join(root, "test/fixtures/deterministic-provider.mjs");
-const extension = path.join(root, "test/fixtures/plan-harness/plan-runner-extension.ts");
-const fixture = path.join(root, "test/fixtures/plan-harness/plans/amendment-success.md");
+const runnerExtension = path.join(root, "test/fixtures/plan-harness/plan-runner-extension.ts");
+const executorExtension = path.join(root, "test/fixtures/plan-harness/executor-extension.ts");
+const rootControl = path.join(root, "test/fixtures/plan-harness/root-amendment-control-extension.ts");
+const sourcePlan = path.join(root, "test/fixtures/plan-harness/plans/amendment-success.md");
+const rootRuntime = path.join(root, "pi/extensions/subagent-runtime.ts");
+const launcher = path.join(root, "pi/extensions/plan-launcher.ts");
+const rootOwner = path.join(root, "pi/child-extensions/root-session-owner.ts");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function git(cwd, ...args) { return (await execFile("git", args, { cwd })).stdout.trim(); }
-async function assertRuntimeClean(cwd, allowedPrefixes) {
-  assert.equal(await git(cwd, "status", "--porcelain", "--untracked-files=no"), "");
-  const untracked = (await git(cwd, "ls-files", "--others", "--exclude-standard", "-z")).split("\0").filter(Boolean);
-  const unexpected = untracked.filter((file) => !allowedPrefixes.some((prefix) => file.startsWith(prefix)));
-  assert.equal(unexpected.length, 0, `unexpected untracked files: ${unexpected.join(", ")}`);
+async function gitRaw(cwd, ...args) { return (await execFile("git", args, { cwd })).stdout; }
+async function assertRuntimeClean(cwd, allowedPrefixes = [".pi-subagents/", "attempts/"]) {
+  const entries = (await gitRaw(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")).split("\0").filter(Boolean)
+    .map((entry) => ({ status: entry.slice(0, 2), file: entry.slice(3) }));
+  const tracked = entries.filter((entry) => entry.status !== "??");
+  assert.equal(tracked.length, 0, `tracked runtime changes: ${tracked.map((entry) => entry.file).join(", ")}`);
+  const unexpected = entries.filter((entry) => entry.status === "??" && !allowedPrefixes.some((prefix) => entry.file.startsWith(prefix)));
+  assert.equal(unexpected.length, 0, `unexpected runtime files: ${unexpected.map((entry) => entry.file).join(", ")}`);
 }
-async function sessionEntries(sessionFile) {
-  return (await readFile(sessionFile, "utf8")).split("\n").filter(Boolean).map(JSON.parse);
-}
-async function events(sessionFile) {
-  return (await sessionEntries(sessionFile))
-    .filter((entry) => entry.customType === "pi-plan-event-v1").map((entry) => entry.data);
-}
-function assistantToolCalls(entries) {
-  return entries.flatMap((entry, entryIndex) => entry.message?.role === "assistant"
-    ? (entry.message.content ?? []).flatMap((part) => part?.type === "toolCall"
-      ? [{ entryIndex, name: part.name, arguments: part.arguments }]
-      : [])
-    : []);
-}
-async function waitFor(read, predicate, timeout = 120000) {
-  const until = Date.now() + timeout;
-  let value;
-  while (Date.now() < until) {
-    try { value = await read(); if (predicate(value)) return value; } catch (error) { if (error?.code !== "ENOENT") throw error; }
-    await sleep(50);
-  }
-  throw new Error(`timed out: ${JSON.stringify(value)}`);
-}
-function revision2(parentPlanHash) {
-  return `# Amendment crash recovery\n\n**Goal:** Recover the superseded Executor, record the clarified amended artifact, and perform the dependent repair without recreating the rejected decision.\n\n**Recovery instructions:** Task 2 must wait for Task 1's integrated receipt and repair the amended result as an independently accepted commit.\n\n## Execution Contract\n\n\`\`\`json\n{\n  "schemaVersion": "pi-plan.v3",\n  "revision": 2,\n  "parentPlanHash": "${parentPlanHash}",\n  "verification": [\n    {"id":"plan:amended","command":"test -f amended.txt","cwd":".","timeoutMs":120000},\n    {"id":"plan:repair","command":"test -f repair.txt && ! test -e decision.txt","cwd":".","timeoutMs":120000}\n  ],\n  "requiredGates": ["deterministic", "plan-audit", "external-review", "final-completeness"],\n  "resourceCapacities": {},\n  "executionDefaults": {"agent":"executor","risk":"normal","workflow":{"mode":"inherit-repository"},"timeoutMs":120000},\n  "taskExecution": {"task-1": {}, "task-2": {}},\n  "taskAcceptance": {\n    "task-1": {"strategy":"commands","commandIds":["plan:amended"]},\n    "task-2": {"strategy":"commands","commandIds":["plan:repair"]}\n  }\n}\n\`\`\`\n\n### Task 1: Record the clarified amended decision\n\n**Files:**\n- Create: \`amended.txt\`\n\nCreate amended.txt containing exactly \`amended\`, commit only that approved file, and leave unrelated files untouched.\n\n### Task 2: Repair the amended result\n\n**Deps:** Task 1\n\n**Files:**\n- Create: \`repair.txt\`\n\nAfter Task 1 is integrated, repair the amended result by creating repair.txt containing exactly \`repair\`, commit only that approved repair file, and leave decision.txt absent.\n`;
+async function readJson(file) { return JSON.parse(await readFile(file, "utf8")); }
+async function readEntries(file) { return (await readFile(file, "utf8")).split("\n").filter(Boolean).map(JSON.parse); }
+async function readEvents(file) { return (await readEntries(file)).filter((entry) => entry.customType === "pi-plan-event-v1").map((entry) => entry.data); }
+async function waitFor(read, predicate, label, timeout = 90_000) { const deadline = Date.now() + timeout; let value; while (Date.now() < deadline) { try { value = await read(); if (predicate(value)) return value; } catch (error) { if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error; } await sleep(40); } throw new Error(`${label}: ${JSON.stringify(value)}`); }
+function exact(value, keys, label) { assert.ok(value && typeof value === "object" && !Array.isArray(value), label); assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `${label} fields`); return value; }
+function resultValue(record) { const text = record?.result?.content?.filter?.((part) => part.type === "text").map((part) => part.text).join("\n") ?? record?.result?.text; try { return JSON.parse(text); } catch { return record?.result?.details ?? record?.result; } }
+function assertTerminal(value, runId, successful) { assert.equal(value?.runId, runId); const { runId: ignored, ...terminal } = value; parseProcessTerminal(terminal); assert.equal(terminal.state, "observed"); if (successful) { const runner = terminal.instances.find((entry) => entry.kind === "runner" && entry.processInstanceId === terminal.runnerProcessInstanceId); assert.ok(runner, `matching runner for ${runId}`); assert.equal(runner.exitCode, 0); assert.equal(runner.signal, null); } }
+
+class RootRpc {
+  constructor(child) { this.child = child; this.records = []; this.stderr = ""; this.buffer = ""; this.exited = new Promise((resolve, reject) => { child.once("error", reject); child.once("close", (code, signal) => resolve({ code, signal })); }); child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8"); child.stdout.on("data", (chunk) => this.consume(chunk)); child.stderr.on("data", (chunk) => { this.stderr += chunk; }); }
+  consume(chunk) { this.buffer += chunk; for (;;) { const index = this.buffer.indexOf("\n"); if (index < 0) return; const line = this.buffer.slice(0, index); this.buffer = this.buffer.slice(index + 1); if (line) this.records.push(JSON.parse(line)); } }
+  send(value) { this.child.stdin.write(`${JSON.stringify(value)}\n`); }
+  async one(predicate, label, timeout = 90_000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { const found = this.records.filter(predicate); if (found.length === 1) return found[0]; if (found.length > 1) throw new Error(`${label}: duplicate result`); await sleep(25); } throw new Error(`${label}: ${this.stderr}`); }
+  async close() { this.child.stdin.end(); const exit = await Promise.race([this.exited, sleep(8_000).then(() => undefined)]); if (!exit) { this.child.kill("SIGKILL"); await this.exited; throw new Error("Root close timed out after forced exit"); } if (exit.code !== 0 || exit.signal !== null) throw new Error(`Root close failed: ${JSON.stringify(exit)}`); }
 }
 
-test("amendment crash restart Harness uses durable events for exact-once recovery", { timeout: 480000 }, async (t) => {
-  assert.ok(piBinary, "PI_REAL_BIN is required");
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-plan-amendment-harness-"));
-  const source = path.join(tmp, "source"); const superproject = path.join(tmp, "super"); const origin = path.join(superproject, "plugins/fixture");
-  const planId = "amendment-crash"; const hostRunId = "amendment-durable-host"; const barrier = path.join(tmp, "barrier");
-  let first; let second; let host; let passed = false;
+function revision2(parentPlanHash) {
+  return `# Amendment recovery\n\n**Goal:** Record the clarified amended artifact and its repair.\n\n## Execution Contract\n\n\`\`\`json\n{"schemaVersion":"pi-plan.v3","revision":2,"parentPlanHash":"${parentPlanHash}","verification":[{"id":"plan:amended","command":"test -f amended.txt","cwd":".","timeoutMs":120000},{"id":"plan:repair","command":"test -f repair.txt && ! test -e decision.txt","cwd":".","timeoutMs":120000}],"requiredGates":["deterministic","plan-audit","external-review","final-completeness"],"resourceCapacities":{},"executionDefaults":{"agent":"executor","risk":"normal","workflow":{"mode":"inherit-repository"},"timeoutMs":120000},"taskExecution":{"task-1":{},"task-2":{}},"taskAcceptance":{"task-1":{"strategy":"commands","commandIds":["plan:amended"]},"task-2":{"strategy":"commands","commandIds":["plan:repair"]}}}\n\`\`\`\n\n### Task 1: Record amendment\n\n**Files:**\n- Create: \`amended.txt\`\n\nCreate amended.txt containing exactly \`amended\` and commit it.\n\n### Task 2: Repair amendment\n\n**Deps:** Task 1\n\n**Files:**\n- Create: \`repair.txt\`\n\nCreate repair.txt containing exactly \`repair\` and commit it.\n`;
+}
+
+test("same Root flat amendment crash Harness revives the canonical Plan Runner", { timeout: 140_000 }, async (t) => {
+  assert.ok(piBinary, "PI_REAL_BIN is required for this integration Harness");
+  const fixture = await mkdtemp(path.join(os.tmpdir(), "pi-plan-flat-amendment-"));
+  const origin = path.join(fixture, "origin"); const runtimeTmp = path.join(fixture, "tmp"); const sessions = path.join(fixture, "sessions"); const agentDir = path.join(fixture, "agent-dir"); const barrier = path.join(fixture, "barrier"); const rootSessionId = `amendment-${path.basename(fixture)}`;
+  let rpc; let primaryError; let passed = false;
   try {
-    await mkdir(path.join(source, "docs"), { recursive: true }); await mkdir(path.join(source, ".pi/agents"), { recursive: true }); await mkdir(superproject, { recursive: true });
-    await git(source, "init"); await git(source, "config", "user.email", "harness@example.com"); await git(source, "config", "user.name", "Harness");
-    await writeFile(path.join(source, "README.md"), "base\n"); await copyFile(fixture, path.join(source, "docs/plan.md"));
-    await writeFile(path.join(source, ".pi/agents/executor.md"), `---\nname: executor\ndescription: deterministic amendment executor\nmodel: fake/deterministic\nthinking: off\ntemperature: 0\ntools: bash,read,contact_supervisor\nsubagentOnlyExtensions: ${provider}\n---\nExecute only the approved task and commit the result.\n`);
-    await git(source, "add", "."); await git(source, "commit", "-m", "harness base");
-    await git(superproject, "init"); await git(superproject, "config", "user.email", "harness@example.com"); await git(superproject, "config", "user.name", "Harness"); await git(superproject, "-c", "protocol.file.allow=always", "submodule", "add", source, "plugins/fixture"); await git(superproject, "commit", "-am", "submodule");
-    const baseCommit = await git(origin, "rev-parse", "HEAD");
-    const r1 = await readFile(path.join(origin, "docs/plan.md")); const r2 = revision2(parsePlanDocument(r1.toString(), "plan.md").sha256);
-    const revision2Ir = compilePlanToIR(parsePlanDocument(r2, "amendment-revision-2.md"));
-    const tools = new Map(); const handlers = new Map(); const attention = [];
-    const makeHost = (withBarrier) => createPlanHostRuntime({ model: "fake/deterministic", noExtensions: true, extraExtensions: [provider, path.join(root, "pi/npm/node_modules/pi-subagents")], promptMarker: "PI_PLAN_HARNESS_STANDALONE", id: () => hostRunId, env: { ...process.env, PI_PLAN_HARNESS_AMENDMENT: "1", PI_PLAN_HARNESS_AMENDMENT_SOURCE: r2, ...(withBarrier ? { PI_PLAN_HARNESS_SUPERSEDE_BARRIER: barrier } : {}) }, emitAttention: async (entry) => attention.push(entry) });
-    host = makeHost(true);
-    const pi = { registerTool: (tool) => tools.set(tool.name, tool), registerCommand() {}, on: (name, handler) => handlers.set(name, handler), appendEntry() {}, sendMessage() {} };
-    createPlanLauncherExtension(pi, { originRoot: origin, stateRoot: origin, hostRuntime: host, planRunnerEntry: extension, attentionPollIntervalMs: 20, id: () => planId });
-    const launch = await tools.get("plan_run").execute("launch", { planPath: path.join(origin, "docs/plan.md") }, undefined, undefined, {});
-    assert.equal(launch.isError, undefined, launch.content[0].text); first = JSON.parse(launch.content[0].text);
-    const statusPath = path.join(origin, "var/plan-runs", planId, "status.json");
-    const pending = await waitFor(async () => JSON.parse(await readFile(statusPath, "utf8")), (status) => status.tasks?.[0]?.attempts?.[0]?.attention?.status === "pending");
-    const old = pending.tasks[0].attempts[0];
-    await waitFor(async () => attention.length, (count) => count === 1);
-    const reply = await tools.get("plan_attention_reply").execute("reply", { planId, requestId: old.attention.requestId, expectedProjectionVersion: old.attention.projectionVersion, message: "APPROVED" }, undefined, undefined, {});
-    assert.equal(reply.isError, undefined, reply.content[0].text);
-    await waitFor(async () => access(path.join(barrier, "entered")).then(() => true), Boolean);
-    const before = await events(first.sessionFile); const amended = before.filter((event) => event.type === "plan.amended");
-    assert.equal(amended.length, 1); assert.equal(before.filter((event) => event.type === "attempt.superseded").length, 0); assert.equal(before.filter((event) => event.type === "attempt.workspace-released").length, 0);
-    const oldDispatch = before.find((event) => event.type === "attempt.dispatch-requested");
-    assert.ok(oldDispatch); assert.equal(oldDispatch.data.tool.task.includes("decision.txt"), true);
-    const revisionStore = createPlanRevisionStore({ stateRoot: origin }); const stored1 = await revisionStore.readRevision(planId, 1); const currentAtBarrier = await revisionStore.readCurrent(planId);
-    assert.ok(stored1 && currentAtBarrier); assert.equal(currentAtBarrier.revision, 1); assert.equal(currentAtBarrier.manifestSha256, stored1.manifestSha256); assert.equal(currentAtBarrier.manifest.irHash, stored1.manifest.irHash);
-    await host.stop(first); await unlink(path.join(origin, "var/plan-runs", planId, "current.json"));
-    host = makeHost(false);
-    second = await host.spawnPlanRunner({ planId, revision: 2, manifestSha256: amended[0].data.manifestSha256, sourceBytesSha256: amended[0].data.sourceBytesSha256, planHash: amended[0].data.planHash, planIrHash: amended[0].data.irHash, baseCommit, originRoot: origin, stateRoot: origin, cwd: first.worktree, extension, runDir: first.runDir, statusPath: first.statusPath });
-    for (const field of ["hostRunId", "sessionFile", "runDir", "worktree", "statusPath"]) assert.equal(second[field], first[field], `restart must preserve ${field}`);
-    const final = await waitFor(async () => JSON.parse(await readFile(statusPath, "utf8")), (status) => status.lifecycle === "validated", 240000);
-    const after = await events(second.sessionFile); assert.equal(new Set(after.map((event) => event.eventId)).size, after.length); assert.equal(after.filter((event) => event.type === "plan.amended").length, 1); assert.equal(after.filter((event) => event.type === "attempt.superseded").length, 1); assert.equal(after.filter((event) => event.type === "attempt.workspace-released").length, 3);
-    const entries = await sessionEntries(second.sessionFile);
-    const calls = assistantToolCalls(entries);
-    const amendmentCalls = calls.filter((call) => call.name === "plan_amend"); const continueCalls = calls.filter((call) => call.name === "plan_continue"); const verifyCalls = calls.filter((call) => call.name === "plan_verify");
-    assert.equal(amendmentCalls.length, 1); assert.deepEqual(continueCalls.map((call) => call.arguments.reason), ["harness", "amendment-recovery", "integrate", "integrate"]); assert.equal(verifyCalls.length, 1);
-    const recoveryIndex = calls.findIndex((call) => call.name === "plan_continue" && call.arguments.reason === "amendment-recovery");
-    assert.ok(recoveryIndex >= 0, "missing amendment-recovery plan_continue");
-    const revision2Controls = calls.slice(recoveryIndex).filter((call) => ["plan_continue", "subagent_wait", "plan_status", "plan_verify"].includes(call.name));
-    const revision2Statuses = revision2Controls.filter((call) => call.name === "plan_status"); const revision2Verifies = revision2Controls.filter((call) => call.name === "plan_verify");
-    for (let index = 0; index < revision2Controls.length; index += 1) {
-      const current = revision2Controls[index]; const next = revision2Controls[index + 1];
-      if (["plan_continue", "subagent_wait"].includes(current.name)) {
-        assert.ok(next, `expected fresh plan_status after ${current.name} at entry ${current.entryIndex}; next missing at entry end`);
-        assert.equal(next.name, "plan_status", `expected fresh plan_status after ${current.name} at entry ${current.entryIndex}; next ${next.name} at entry ${next.entryIndex}`);
-      }
-    }
-    assert.ok(revision2Statuses.length >= 4, "revision 2 must read plan_status at least four times"); assert.equal(revision2Verifies.length, 1);
-    const lastContinue = revision2Controls.reduce((last, call, index) => call.name === "plan_continue" ? index : last, -1); const verifyControlIndex = revision2Controls.findIndex((call) => call.name === "plan_verify");
-    assert.ok(lastContinue < verifyControlIndex, `plan_verify at entry ${revision2Controls[verifyControlIndex].entryIndex} must follow all plan_continue calls`);
-    const dispatches = after.filter((event) => event.type === "attempt.dispatch-requested"); const oldAttemptId = oldDispatch.data.attemptId;
-    assert.equal(dispatches.filter((event) => event.data.attemptId === oldAttemptId).length, 1);
-    const task1Dispatch = dispatches.find((event) => event.data.attemptId !== oldAttemptId && event.data.taskId === "task-1"); const task2Dispatch = dispatches.find((event) => event.data.taskId === "task-2"); assert.ok(task1Dispatch && task2Dispatch);
-    const oldBound = after.find((event) => event.type === "attempt.bound" && event.data.attemptId === oldAttemptId); assert.ok(oldBound);
-    const superseded = after.find((event) => event.type === "attempt.superseded" && event.data.attemptId === oldAttemptId); assert.ok(superseded);
-    assert.equal(superseded.data.evidence.kind, "terminal"); assert.equal(superseded.data.evidence.dispatchId, oldDispatch.data.dispatchId); assert.equal(superseded.data.evidence.runId, oldBound.data.runId); assert.equal(superseded.data.evidence.asyncDir, oldBound.data.asyncDir);
-    const releases = after.filter((event) => event.type === "attempt.workspace-released");
-    assert.equal(releases.filter((event) => event.data.attemptId === oldAttemptId && event.data.disposition === "superseded-preserve").length, 1);
-    assert.equal(releases.filter((event) => event.data.attemptId === task1Dispatch.data.attemptId && event.data.disposition === "integrated-cleanup").length, 1);
-    assert.equal(releases.filter((event) => event.data.attemptId === task2Dispatch.data.attemptId && event.data.disposition === "integrated-cleanup").length, 1);
-    for (const dispatch of dispatches) assert.equal(releases.filter((event) => event.data.attemptId === dispatch.data.attemptId).length, 1, `workspace release count for ${dispatch.data.attemptId}`);
-    const continuedIndex = entries.findIndex((entry) => entry.customType === "pi-plan-event-v1" && entry.data.type === "attempt.dispatch-requested" && entry.data.data.attemptId === task1Dispatch.data.attemptId);
-    const verifyIndex = entries.findIndex((entry) => entry.message?.role === "assistant" && entry.message.content?.some((part) => part?.type === "toolCall" && part?.name === "plan_verify"));
-    assert.ok(continuedIndex >= 0 && verifyIndex >= 0); assert.ok(continuedIndex < verifyIndex);
-    const amendedIndex = after.findIndex((event) => event.type === "plan.amended"); const supersededIndex = after.findIndex((event) => event === superseded); const releasedIndex = after.findIndex((event) => event.data.attemptId === oldAttemptId && event.type === "attempt.workspace-released");
-    assert.ok(amendedIndex < supersededIndex && supersededIndex < releasedIndex); assert.ok(after.findIndex((event) => event === task1Dispatch) > releasedIndex);
-    const task1 = revision2Ir.nodes.find((entry) => entry.id === "task-1"); const task2 = revision2Ir.nodes.find((entry) => entry.id === "task-2"); assert.ok(task1 && task2);
-    assert.equal(task1Dispatch.data.planIrHash, revision2Ir.hash); assert.equal(task1Dispatch.data.taskHash, task1.hashes.effective); assert.equal(task1Dispatch.data.schedulingHash, task1.hashes.scheduling);
-    assert.equal(task2Dispatch.data.planIrHash, revision2Ir.hash); assert.equal(task2Dispatch.data.taskHash, task2.hashes.effective); assert.equal(task2Dispatch.data.schedulingHash, task2.hashes.scheduling);
-    assert.notEqual(oldDispatch.data.taskHash, task1Dispatch.data.taskHash); assert.equal(dispatches.filter((event) => event.data.taskHash === oldDispatch.data.taskHash).length, 1);
-    const revision2Plan = parsePlanDocument(r2, "amendment-revision-2.md");
-    for (const [dispatch, task] of [[task1Dispatch, task1], [task2Dispatch, task2]]) {
-      const prompt = dispatch.data.tool.task;
-      assert.equal(prompt.includes(`Plan instructions:\n${revision2Plan.instructions}`), true);
-      assert.equal(prompt.includes(`Task: ${task.id} ${task.title}`), true); assert.equal(prompt.includes(`Task body:\n${task.body}`), true);
-      assert.equal(prompt.includes(`Execution: ${JSON.stringify(task.execution)}`), true); assert.equal(prompt.includes(`Acceptance: commands\n${JSON.stringify(task.acceptance)}`), true);
-      assert.equal(prompt.includes(`Result contract: ${revision2Ir.executionPolicy.resultContract}`), true); assert.equal(prompt.includes(`Allowed paths: ${task.allowedPaths.join(", ")}`), true);
-    }
-    const stored2 = await revisionStore.readRevision(planId, 2); const current = await revisionStore.readCurrent(planId);
-    assert.ok(stored1 && stored2 && current); assert.deepEqual(stored1.sourceBytes, r1); assert.deepEqual(stored2.sourceBytes, Buffer.from(r2)); assert.deepEqual((await revisionStore.readRevision(planId, 1)).sourceBytes, r1); assert.equal(current.revision, 2); assert.equal(current.manifestSha256, stored2.manifestSha256);
-    const oldFinal = final.tasks[0].attempts.find((attempt) => attempt.attemptId === oldAttemptId); const task1Final = final.tasks.find((task) => task.taskId === "task-1").attempts.find((attempt) => attempt.attemptId === task1Dispatch.data.attemptId); const task2Final = final.tasks.find((task) => task.taskId === "task-2").attempts.find((attempt) => attempt.attemptId === task2Dispatch.data.attemptId);
-    assert.equal(oldFinal.status, "superseded"); assert.equal(oldFinal.workspaceReleased, true); assert.equal(oldFinal.workspaceDisposition, "superseded-preserve"); await access(oldFinal.workspace.path); await assertRuntimeClean(oldFinal.workspace.path, [".pi-subagents/"]); assert.ok(["integrated", "accepted"].includes(task1Final.status)); assert.ok(["integrated", "accepted"].includes(task2Final.status));
-    assert.equal(final.revision.number, 2); assert.equal(final.validatedHead, final.headCommit); assert.equal(await readFile(path.join(first.worktree, "amended.txt"), "utf8"), "amended\n"); assert.equal(await readFile(path.join(first.worktree, "repair.txt"), "utf8"), "repair\n"); await assert.rejects(access(path.join(first.worktree, "decision.txt"))); await assertRuntimeClean(first.worktree, [".pi-subagents/", "attempts/"]); assert.equal(await git(first.worktree, "rev-list", "--count", `${baseCommit}..HEAD`), "2");
-    passed = true; t.diagnostic(`plan=${planId} amended=${amended[0].eventId} lifecycle=${final.lifecycle}`);
-  } finally { try { await handlers?.get?.("session_shutdown")?.(); } catch {} try { if (host && (second ?? first)) await host.stop(second ?? first); } catch {} if (passed && process.env.PLAN_HARNESS_PRESERVE !== "1") await rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); else t.diagnostic(`preserved=${tmp}`); }
+    await mkdir(path.join(origin, ".pi", "agents"), { recursive: true }); await Promise.all([mkdir(runtimeTmp), mkdir(sessions), mkdir(agentDir)]);
+    await git(origin, "init"); await git(origin, "config", "user.email", "harness@example.com"); await git(origin, "config", "user.name", "Harness");
+    await writeFile(path.join(origin, "README.md"), "base\n"); await mkdir(path.join(origin, "docs")); await writeFile(path.join(origin, "docs", "plan.md"), await readFile(sourcePlan));
+    await writeFile(path.join(origin, ".pi", "agents", "plan-runner.md"), `---\nname: plan-runner\ndescription: deterministic amendment plan runner\nmodel: fake/deterministic\nthinking: off\ntemperature: 0\ntools: plan_open,read,grep\nsubagentOnlyExtensions: ${provider},${runnerExtension}\n---\nOpen and execute only the approved Plan revision.\n`);
+    await writeFile(path.join(origin, ".pi", "agents", "executor.md"), `---\nname: executor\ndescription: deterministic amendment executor\nmodel: fake/deterministic\nthinking: off\ntemperature: 0\ntools: bash,read,contact_supervisor\nsubagentOnlyExtensions: ${provider},${executorExtension},${rootOwner}\n---\nExecute only the approved task and commit the result.\n`);
+    await git(origin, "add", "."); await git(origin, "commit", "-m", "harness base"); const baseCommit = await git(origin, "rev-parse", "HEAD");
+    const source1 = await readFile(path.join(origin, "docs", "plan.md"), "utf8"); const source2 = revision2(parsePlanDocument(source1, "plan.md").sha256); const ir2 = compilePlanToIR(parsePlanDocument(source2, "revision-2.md"));
+    const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("PI_SUBAGENT_") && name !== "PI_ROOT_SUBAGENT_BROKER_ENABLED"));
+    rpc = new RootRpc(spawn(piBinary, ["--mode", "rpc", "--session-dir", sessions, "--session-id", rootSessionId, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve", "--offline", "-e", provider, "-e", rootRuntime, "-e", launcher, "-e", rootControl, "--provider", "fake", "--model", "fake/deterministic"], { cwd: origin, env: { ...environment, OPENAI_API_KEY: "not-used", PI_CODING_AGENT_DIR: agentDir, TMPDIR: runtimeTmp, PI_PLAN_HARNESS_AMENDMENT: "1", PI_PLAN_HARNESS_AMENDMENT_SOURCE: source2, PI_PLAN_HARNESS_SUPERSEDE_BARRIER: barrier }, stdio: ["pipe", "pipe", "pipe"] }));
+    rpc.send({ id: "launch", type: "prompt", message: `PI_PLAN_FLAT_ROOT_HARNESS\n${JSON.stringify({ planPaths: [path.join(origin, "docs", "plan.md")] })}` });
+    const handle = resultValue(await rpc.one((record) => record.type === "tool_execution_end" && record.toolName === "plan_run", "plan handle")); exact(handle, ["asyncDir", "baseCommit", "manifestSha256", "planHash", "planId", "planIrHash", "planRunnerRunId", "revision", "rootSessionId", "schemaVersion", "sourceBytesSha256", "worktree"], "handle"); assert.equal(handle.schemaVersion, "pi-plan-handle.v4"); assert.equal(handle.rootSessionId, rootSessionId); assert.equal(handle.baseCommit, baseCommit);
+    const statusPath = path.join(origin, "var", "plan-runs", handle.planId, "status.json"); const pending = await waitFor(() => readJson(statusPath), (status) => status?.tasks?.[0]?.attempts?.filter((attempt) => attempt.status === "waiting-attention").length === 1, "waiting attention"); const old = pending.tasks[0].attempts[0];
+    rpc.send({ id: "reply", type: "prompt", message: `PI_PLAN_FLAT_ATTENTION_REPLIES\n${JSON.stringify({ replies: [{ planId: handle.planId, requestId: old.attention.requestId, expectedProjectionVersion: old.attention.projectionVersion, message: "APPROVED" }] })}` }); await rpc.one((record) => record.type === "tool_execution_end" && record.toolName === "plan_attention_reply", "durable reply");
+    await waitFor(() => access(path.join(barrier, "entered")).then(() => true), Boolean, "supersede barrier");
+    const runnerStatus = await readJson(path.join(handle.asyncDir, "status.json")); const canonicalSession = runnerStatus.steps[0].sessionFile; const before = await readEvents(canonicalSession); const amended = before.filter((event) => event.type === "plan.amended"); assert.equal(amended.length, 1); assert.equal(before.filter((event) => event.type === "attempt.superseded").length, 0); assert.equal(before.filter((event) => event.type === "attempt.workspace-released").length, 0); const oldDispatch = before.find((event) => event.type === "attempt.dispatch-requested"); const oldBound = before.find((event) => event.type === "attempt.bound"); assert.ok(oldDispatch && oldBound); assert.match(oldDispatch.data.tool.task, /decision\.txt/);
+    const store = createPlanRevisionStore({ stateRoot: origin }); const stored1 = await store.readRevision(handle.planId, 1); const pointer1 = await store.readCurrent(handle.planId); assert.equal(pointer1.revision, 1); assert.equal(pointer1.manifestSha256, stored1.manifestSha256); await assert.rejects(access(path.join(handle.worktree, "decision.txt")));
+    rpc.send({ id: "crash", type: "prompt", message: `PI_PLAN_FLAT_AMENDMENT_CRASH\n${JSON.stringify({ logicalRunId: handle.planRunnerRunId, executorRunId: old.runId })}` });
+    const crash = resultValue(await rpc.one((record) => record.type === "tool_execution_end" && record.toolName === "plan_harness_crash_amendment", "crash proof")); exact(crash, ["actualRunId", "executorProof", "executorRunId", "logicalRunId", "runnerProof"], "crash proof"); assert.equal(crash.logicalRunId, handle.planRunnerRunId); assert.equal(crash.executorRunId, old.runId); assertTerminal(crash.executorProof, old.runId, false); assertTerminal(crash.runnerProof, crash.actualRunId, false);
+    const final = await waitFor(() => readJson(statusPath), (status) => status?.lifecycle === "validated", "validated"); const after = await readEvents(canonicalSession); assert.equal(new Set(after.map((event) => event.eventId)).size, after.length); assert.equal(after.filter((event) => event.type === "plan.amended").length, 1); assert.equal(after.filter((event) => event.type === "attempt.dispatch-requested" && event.data.taskHash === oldDispatch.data.taskHash).length, 1);
+    const superseded = after.filter((event) => event.type === "attempt.superseded" && event.data.attemptId === old.attemptId); assert.equal(superseded.length, 1); assert.equal(superseded[0].data.evidence.kind, "terminal"); assert.equal(superseded[0].data.evidence.dispatchId, oldDispatch.data.dispatchId); assert.equal(superseded[0].data.evidence.runId, oldBound.data.runId); assert.equal(superseded[0].data.evidence.asyncDir, oldBound.data.asyncDir); assert.match(superseded[0].data.evidence.artifactSha256, /^[0-9a-f]{64}$/); assert.equal(after.filter((event) => event.type === "attempt.workspace-released" && event.data.attemptId === old.attemptId && event.data.disposition === "superseded-preserve").length, 1);
+    const dispatches = after.filter((event) => event.type === "attempt.dispatch-requested"); const revision2Dispatches = new Map(); for (const node of ir2.nodes) { const matching = dispatches.filter((event) => event.data.taskId === node.id && event.data.planIrHash === ir2.hash && event.data.taskHash === node.hashes.effective && event.data.schedulingHash === node.hashes.scheduling); assert.equal(matching.length, 1, `${node.id} exact dispatch`); revision2Dispatches.set(node.id, matching[0]); }
+    assert.equal(final.gates.filter((gate) => gate.status === "passed").length, 4); for (const [taskId, dispatch] of revision2Dispatches) { const task = final.tasks.find((entry) => entry.taskId === taskId); const attempt = task?.attempts.find((attempt) => attempt.attemptId === dispatch.data.attemptId); assert.ok(attempt, `final Attempt for ${taskId}`); assert.ok(["integrated", "accepted"].includes(attempt.status), `final Attempt status for ${taskId}`); } const oldFinal = final.tasks.find((task) => task.taskId === "task-1").attempts.find((attempt) => attempt.attemptId === old.attemptId); assert.equal(oldFinal.status, "superseded"); await assertRuntimeClean(oldFinal.workspace.path); const stored2 = await store.readRevision(handle.planId, 2); const pointer2 = await store.readCurrent(handle.planId); assert.deepEqual(stored1.sourceBytes, Buffer.from(source1)); assert.deepEqual(stored2.sourceBytes, Buffer.from(source2)); assert.equal(pointer2.revision, 2); assert.equal(await readFile(path.join(handle.worktree, "amended.txt"), "utf8"), "amended\n"); assert.equal(await readFile(path.join(handle.worktree, "repair.txt"), "utf8"), "repair\n"); await assert.rejects(access(path.join(handle.worktree, "decision.txt"))); await assertRuntimeClean(handle.worktree); assert.equal(await git(handle.worktree, "rev-list", "--count", `${baseCommit}..HEAD`), "2");
+    await rpc.close(); rpc = undefined;
+    const asyncRoot = path.dirname(handle.asyncDir); const runs = await Promise.all((await readdir(asyncRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map(async (entry) => ({ dir: path.join(asyncRoot, entry.name), status: await readJson(path.join(asyncRoot, entry.name, "status.json")) }))); const runners = runs.filter((run) => run.status.steps?.[0]?.agent === "plan-runner"); const executors = runs.filter((run) => run.status.steps?.[0]?.agent === "executor"); assert.ok(runners.length >= 2); assert.ok(executors.length >= 3);
+    for (const run of runs) { for (const field of ["parentRunId", "parentStepIndex", "depth", "path"]) assert.ok(!Object.hasOwn(run.status, field)); if (run.status.steps?.[0]?.agent === "plan-runner") assert.equal(run.status.steps[0].sessionFile, canonicalSession); assertTerminal(await readJson(path.join(run.dir, "process-terminal.json")), run.status.runId, ![old.runId, crash.actualRunId].includes(run.status.runId)); try { process.kill(run.status.pid, 0); assert.fail(`PID remains live: ${run.status.pid}`); } catch (error) { assert.equal(error.code, "ESRCH"); } }
+    const rootEntries = await readEntries(path.join(sessions, path.basename(runs[0].status.sessionId))); const diagnostics = rootEntries.filter((entry) => entry.customType === "pi-root-broker-revival-v1").map((entry) => entry.data); assert.ok(diagnostics.some((entry) => entry.phase === "grant.issued" && entry.logicalCallerRunId === handle.planRunnerRunId && entry.activeRunId !== handle.planRunnerRunId)); assert.equal(diagnostics.filter((entry) => entry.phase === "close.started").length, 1); assert.equal(diagnostics.filter((entry) => entry.phase === "close.completed").length, 1); await assert.rejects(lstat(brokerSocketPath(rootSessionId)), { code: "ENOENT" }); passed = true;
+  } catch (error) { primaryError = error; throw error; } finally { let closeError; try { await rpc?.close(); } catch (error) { closeError = error; } if (passed && process.env.PLAN_HARNESS_PRESERVE !== "1") await rm(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); else t.diagnostic(`preserved=${fixture}`); if (closeError) { if (primaryError) t.diagnostic(`Root close failed: ${closeError.message}`); else throw closeError; } }
 });
