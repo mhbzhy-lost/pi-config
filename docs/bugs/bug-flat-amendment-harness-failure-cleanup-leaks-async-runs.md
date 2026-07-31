@@ -18,7 +18,7 @@
 
 ## 4. 根因
 
-迁移Harness复用了只负责Root RPC进程的close helper，却把它误当成完整fixture cleanup。flat runtime的进程是Root-owned siblings，不是Root进程树；杀Root不能证明children退出。既有`terminateDetachedRun`只接受单个已知handle，Harness失败早期又可能尚未保存全部run身份。
+迁移Harness复用了只负责Root RPC进程的close helper，却把它误当成完整fixture cleanup。flat runtime的进程是Root-owned siblings，不是Root进程树；杀Root不能证明children退出。第一版补偿实现又只核对`status.runId + status.pid`，没有证明PID仍属于原runner；它在发TERM前只快照一次进程树，也会漏掉runner在TERM handler内新建的同组后代。
 
 ## 5. 触发条件
 
@@ -26,4 +26,6 @@
 
 ## 6. 修复与验证
 
-先扩展`test/support/plan-e2e-process-cleanup.mjs`：在受控`runtimeTmp`下递归寻找`async-subagent-runs/<runId>/status.json`，核对目录名/runId/PID，对每个run调用已有process-tree TERM/KILL与有界退出验证，并聚合错误。单元RED必须创建嵌套async root和多个真实子进程，证明一调用全部回收。amendment Harness finally在Root close之后无条件执行该补偿清理、确认fixture路径无残留进程并移除broker socket；失败仍保留文件证据，但不能保留运行进程。真实Harness只在新冻结HEAD运行一次。
+`test/support/plan-e2e-process-cleanup.mjs`只在以下身份同时成立时发信号：目录名匹配`status.runId`、`status.startedAt`匹配当前`ps`启动时间、当前命令行包含本次唯一`runtimeTmp`、PID仍是独立进程组leader。信号发送给负PGID；TERM后按整个进程组等待，超时再KILL同组，因此无路径命令行的子进程和TERM竞态新后代也必须收敛。任一身份不可证明时fail closed，不得向PID发信号。
+
+RED必须覆盖三个独立行为：stale status指向无关活进程时不得误杀；runner在TERM handler内新建后代时最终整个进程组退出；主体成功但cleanup失败时不得删除fixture，且聚合错误包含主体/cleanup细节。amendment Harness仅在主体成功、所有cleanup成功且未要求preserve时删除fixture；fixture删除失败也进入聚合。最后确认broker socket移除并且唯一runtime路径无残留runner。真实Harness只在新冻结HEAD运行一次。
