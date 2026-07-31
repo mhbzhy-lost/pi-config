@@ -67,8 +67,8 @@ function createPi() {
       current.push(handler);
       handlers.set(name, current);
     },
-    async emitLifecycle(name) {
-      for (const handler of handlers.get(name) ?? []) await handler({ type: name }, {});
+    async emitLifecycle(name, ctx = {}) {
+      for (const handler of handlers.get(name) ?? []) await handler({ type: name }, ctx);
     },
   };
 }
@@ -280,7 +280,7 @@ test("fails closed before binding, on duplicate binding, and after dispose", asy
   await assert.rejects(adapter.execute("tool-1", { action: "status" }), /SUPERVISOR_TARGET_UNAVAILABLE/);
 });
 
-function lifecycleFixture({ subscribeError, lifecycleDedupeLimit } = {}) {
+function lifecycleFixture({ subscribeError, lifecycleDedupeLimit, initialPush, recordSupervisorRequest } = {}) {
   const emitted = []; const messages = []; let subscribeCalls = 0; let closedCatchCalls = 0; let subscriptionDisposals = 0; let rpcDisposals = 0;
   const listeners = new Map();
   const pi = createPi();
@@ -292,11 +292,11 @@ function lifecycleFixture({ subscribeError, lifecycleDedupeLimit } = {}) {
   const closed = { catch(handler) { closedCatchCalls += 1; handler(new Error("closed")); return Promise.resolve(); } };
   const rpc = {
     dispose() { rpcDisposals += 1; },
-    async subscribe(onPush) { subscribeCalls += 1; if (subscribeError) throw subscribeError; this.onPush = onPush; return { dispose() { subscriptionDisposals += 1; }, closed }; },
+    async subscribe(onPush) { subscribeCalls += 1; if (subscribeError) throw subscribeError; this.onPush = onPush; if (initialPush) onPush(initialPush); return { dispose() { subscriptionDisposals += 1; }, closed }; },
     supervisorPending() {}, supervisorReply() {},
   };
-  const installed = installRootOwnedSubagent(pi, { rootSessionId: "root", callerRunId: "run", createClient: () => rpc, lifecycleDedupeLimit });
-  return { emitted, messages, rpc, installed, closed: () => closedCatchCalls, subscribeCalls: () => subscribeCalls, subscriptionDisposals: () => subscriptionDisposals, rpcDisposals: () => rpcDisposals };
+  const installed = installRootOwnedSubagent(pi, { rootSessionId: "root", callerRunId: "run", createClient: () => rpc, lifecycleDedupeLimit, recordSupervisorRequest });
+  return { emitted, messages, pi, rpc, installed, closed: () => closedCatchCalls, subscribeCalls: () => subscribeCalls, subscriptionDisposals: () => subscriptionDisposals, rpcDisposals: () => rpcDisposals };
 }
 
 function started(dispatchId = "D1") { return { type: "execution.started", callerRunId: "run", data: { dispatchId, runId: "R1", state: "running" } }; }
@@ -392,4 +392,64 @@ test("does not let lifecycle churn evict Supervisor request dedupe", async () =>
     lifecycleEmitted: subject.emitted.length,
     lifecycleFollowUps: subject.messages.filter(({ message }) => message.customType === "pi-root-subagent-lifecycle-v1").length,
   }, { supervisor: 1, lifecycleEmitted: 2, lifecycleFollowUps: 2 });
+});
+
+test("records subscription-backlog Supervisor requests before the ready barrier returns", async () => {
+  const records = [];
+  const ctx = { cwd: "/plan-worktree", marker: "backlog" };
+  const push = { type: "supervisor.request", callerRunId: "run", data: { requestId: "request-backlog", executorRunId: "executor-1", content: "Approve the backlog change.", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 1 } };
+  const subject = lifecycleFixture({
+    initialPush: push,
+    async recordSupervisorRequest(message, options) { records.push({ message, options }); },
+  });
+
+  await subject.installed.startLifecycleSubscription?.(ctx);
+
+  assert.deepEqual(records, [{
+    message: { customType: "subagent_supervisor_request", content: "Approve the backlog change.", display: true, details: { id: "request-backlog", reason: "need_decision", expectsReply: true, runId: "executor-1", agent: "executor", childIndex: 1 } },
+    options: { ctx },
+  }]);
+  assert.deepEqual(subject.messages, []);
+});
+
+test("records live Supervisor requests once at agent settlement with the current context", async () => {
+  const records = [];
+  const ctx = { cwd: "/plan-worktree", marker: "settled" };
+  const subject = lifecycleFixture({
+    async recordSupervisorRequest(message, options) { records.push({ message, options }); },
+  });
+  const push = { type: "supervisor.request", callerRunId: "run", data: { requestId: "request-live", executorRunId: "executor-2", content: "Approve the live change.", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 2 } };
+  await subject.installed.startLifecycleSubscription?.(ctx);
+  subject.rpc.onPush?.(push);
+  subject.rpc.onPush?.(push);
+
+  assert.deepEqual(records, []);
+  await subject.pi.emitLifecycle("agent_settled", ctx);
+
+  assert.equal(records.length, 1);
+  assert.strictEqual(records[0].options.ctx, ctx);
+  assert.equal(records[0].message.details.id, "request-live");
+  assert.deepEqual(subject.messages, []);
+});
+
+test("retains a failed Supervisor record for session-shutdown retry", async () => {
+  const attempts = [];
+  const settledCtx = { marker: "settled" };
+  const shutdownCtx = { marker: "shutdown" };
+  const subject = lifecycleFixture({
+    async recordSupervisorRequest(message, { ctx }) {
+      attempts.push({ requestId: message.details.id, ctx });
+      if (attempts.length === 1) throw new Error("durable attention write failed");
+    },
+  });
+  await subject.installed.startLifecycleSubscription?.(settledCtx);
+  subject.rpc.onPush?.({ type: "supervisor.request", callerRunId: "run", data: { requestId: "request-retry", executorRunId: "executor-3", content: "Retry this request.", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 3 } });
+
+  await assert.rejects(subject.pi.emitLifecycle("agent_settled", settledCtx), /durable attention write failed/);
+  await subject.pi.emitLifecycle("session_shutdown", shutdownCtx);
+
+  assert.deepEqual(attempts, [
+    { requestId: "request-retry", ctx: settledCtx },
+    { requestId: "request-retry", ctx: shutdownCtx },
+  ]);
 });
