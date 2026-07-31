@@ -2020,6 +2020,130 @@ test("Supervisor owner binding replays interleaved ingress only to each deferred
   assert.deepEqual([...broker.supervisorRequests.values()].filter(({ ownerRunId }) => ownerRunId === "owner-race-plan-b").map(({ requestId, executorRunId }) => ({ requestId, executorRunId })), [{ requestId: "owner-race-B1", executorRunId: "owner-race-executor-b" }]);
 });
 
+test("Supervisor grant failure releases pending ingress and permits requestId reuse by a later Executor", async (t) => {
+  const grantGate = deferred();
+  const stops = [];
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: {
+      ...fakeUpstream(),
+      async spawn({ task }) {
+        return task === "first" ? { details: { runId: "grant-failure-executor", asyncDir: "/async/grant-failure" } } : { details: { runId: "grant-reuse-executor", asyncDir: "/async/grant-reuse" } };
+      },
+      async stop(params) { stops.push(params); return { stopped: true }; },
+    },
+    writeGrant: async (grant) => {
+      if (grant.role !== "executor") return await writeBrokerGrant(grant);
+      if (grant.runId === "grant-failure-executor") {
+        await grantGate.promise;
+        throw new Error("controlled Executor grant failure");
+      }
+      return await writeBrokerGrant(grant);
+    },
+  });
+  await broker.start();
+  let firstSpawn;
+  let client;
+  let subscription;
+  let closed;
+  t.after(async () => {
+    grantGate.release();
+    await Promise.allSettled([firstSpawn]);
+    subscription?.dispose(); client?.dispose();
+    await closed;
+    await broker.closeRootSession().catch(() => undefined);
+  });
+  const owner = await broker.grantCaller({ callerRunId: "grant-failure-plan", planId: "grant-failure", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  client = createRootBrokerClient({ rootSessionId, callerRunId: "grant-failure-plan" });
+  const pushed = [];
+  subscription = await client.subscribe((push) => pushed.push(push));
+  closed = subscription.closed.catch((error) => error);
+  firstSpawn = broker.dispatch(request({ callerRunId: "grant-failure-plan", callerToken: owner.callerToken, method: "spawn", params: { agent: "executor", task: "first", spawnKey: "grant-failure-first" } }), {});
+  await waitForCondition(() => broker.principals.has("grant-failure-executor"), "Executor principal before grant failure");
+  const failedContext = { nativeChannel: "grant-failure" };
+  await broker.routeSupervisorRequest(supervisorIngress({ id: "grant-failure-request", runId: "grant-failure-executor", content: "release after failure" }), failedContext);
+  assert.equal(broker.pendingSupervisorIngress.get("grant-failure-executor")?.[0]?.context, failedContext);
+  grantGate.release();
+  const failed = await firstSpawn;
+  assert.deepEqual({ success: failed.success, code: failed.error?.code, stops, pending: broker.pendingSupervisorIngress.size, request: broker.supervisorRequests.get("grant-failure-request") }, {
+    success: false,
+    code: "spawn_cleanup",
+    stops: [{ runId: "grant-failure-executor", dir: "/async/grant-failure" }],
+    pending: 0,
+    request: undefined,
+  });
+  const reused = await broker.dispatch(request({ callerRunId: "grant-failure-plan", callerToken: owner.callerToken, method: "spawn", params: { agent: "executor", task: "second", spawnKey: "grant-failure-reuse" } }), {});
+  assert.equal(reused.success, true);
+  const reuseContext = { nativeChannel: "grant-reuse" };
+  await broker.routeSupervisorRequest(supervisorIngress({ id: "grant-failure-request", runId: "grant-reuse-executor", content: "new request" }), reuseContext);
+  await waitForCondition(() => pushed.length === 1, "one requestId-reuse push");
+  assert.deepEqual(pushed, [{ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId, callerRunId: "grant-failure-plan", type: "supervisor.request", data: { requestId: "grant-failure-request", executorRunId: "grant-reuse-executor", content: "new request", reason: "need_decision", expectsReply: true, agent: "executor", childIndex: 0 } }]);
+  assert.equal(broker.supervisorRequests.get("grant-failure-request")?.context, reuseContext);
+});
+
+test("Root close fences an in-flight Executor grant from owner promotion and Supervisor delivery", async (t) => {
+  const grantGate = deferred();
+  const stops = [];
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: {
+      ...fakeUpstream(),
+      async spawn() { return { details: { runId: "close-race-executor", asyncDir: "/async/close-race" } }; },
+      async stop(params) { stops.push(params); return { stopped: true }; },
+    },
+    writeGrant: async (grant) => {
+      if (grant.role === "executor") await grantGate.promise;
+      return await writeBrokerGrant(grant);
+    },
+  });
+  await broker.start();
+  let spawnAttempt;
+  let closing;
+  let client;
+  let subscription;
+  let closed;
+  t.after(async () => {
+    grantGate.release();
+    await Promise.allSettled([spawnAttempt, closing]);
+    subscription?.dispose(); client?.dispose();
+    await closed;
+    await broker.closeRootSession().catch(() => undefined);
+  });
+  const owner = await broker.grantCaller({ callerRunId: "close-race-plan", planId: "close-race", cwd: "/repo", originRoot: "/repo", stateRoot: "/state", role: "plan-runner" });
+  client = createRootBrokerClient({ rootSessionId, callerRunId: "close-race-plan" });
+  const pushed = [];
+  subscription = await client.subscribe((push) => pushed.push(push));
+  closed = subscription.closed.catch((error) => error);
+  spawnAttempt = broker.dispatch(request({ callerRunId: "close-race-plan", callerToken: owner.callerToken, method: "spawn", params: { agent: "executor", task: "close", spawnKey: "close-race" } }), {});
+  await waitForCondition(() => broker.principals.has("close-race-executor"), "Executor principal before close");
+  await broker.routeSupervisorRequest(supervisorIngress({ id: "close-race-request", runId: "close-race-executor", content: "must not promote" }), { nativeChannel: "close-race" });
+  assert.equal(broker.pendingSupervisorIngress.get("close-race-executor")?.length, 1);
+  const spawnObserved = spawnAttempt.then((value) => ({
+    state: "fulfilled",
+    value,
+    ownerAtSettlement: broker.runOwners.get("close-race-executor"),
+    requestsAtSettlement: broker.supervisorRequests.size,
+    pushesAtSettlement: pushed.length,
+  }), (error) => ({ state: "rejected", error }));
+  closing = broker.closeRootSession();
+  const closeObserved = closing.then((value) => ({ state: "fulfilled", value }), (error) => ({ state: "rejected", error }));
+  grantGate.release();
+  const [spawnResult, closeResult] = await Promise.all([spawnObserved, closeObserved]);
+  assert.deepEqual({ spawn: spawnResult.state, close: closeResult.state, ownerAtSettlement: spawnResult.ownerAtSettlement, requestsAtSettlement: spawnResult.requestsAtSettlement, pushesAtSettlement: spawnResult.pushesAtSettlement, owner: broker.runOwners.get("close-race-executor"), requests: broker.supervisorRequests.size, pushes: pushed.length, stops }, {
+    spawn: "fulfilled",
+    close: "fulfilled",
+    ownerAtSettlement: undefined,
+    requestsAtSettlement: 0,
+    pushesAtSettlement: 0,
+    owner: undefined,
+    requests: 0,
+    pushes: 0,
+    stops: [{ runId: "close-race-executor", dir: "/async/close-race" }],
+  });
+  assert.deepEqual({ pending: broker.pendingSupervisorIngress.size, principals: broker.principals.size, callers: broker.callers.size, owners: broker.runOwners.size }, { pending: 0, principals: 0, callers: 0, owners: 0 });
+  await assert.rejects(stat(brokerSocketPath(rootSessionId)));
+});
+
 test("Supervisor pending ingress bounds dedupe conflicts and Root close cleanup", async (t) => {
   const gates = new Map([["pending-bound-a", deferred()], ["pending-bound-b", deferred()], ["pending-bound-c", deferred()]]);
   const broker = new RootBrokerServer({
