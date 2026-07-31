@@ -11,6 +11,7 @@ import { parsePlanDocument } from "../scripts/lib/plan/plan-document.mjs";
 import { compilePlanToIR } from "../scripts/lib/plan/ir/index.mjs";
 import { brokerSocketPath, parseProcessTerminal } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { driveHarnessAttention } from "./support/flat-plan-attention-driver.mjs";
+import { waitForHarnessRunQuiescence } from "./support/flat-plan-run-quiescence.mjs";
 import { finalizeHarnessCleanup, processesReferencing, removeFixtureWithEvidence, terminateDetachedRunsUnder } from "./support/plan-e2e-process-cleanup.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -23,6 +24,9 @@ const sourcePlan = path.join(repoRoot, "test/fixtures/plan-harness/plans/paralle
 const rootRuntime = path.join(repoRoot, "pi/extensions/subagent-runtime.ts");
 const launcher = path.join(repoRoot, "pi/extensions/plan-launcher.ts");
 const rootOwner = path.join(repoRoot, "pi/child-extensions/root-session-owner.ts");
+const rootRevivalRetryMaxMs = 1_000;
+const rootStartupBarrierBudgetMs = 5_000;
+const runtimeArtifactPublicationBudgetMs = 500;
 
 async function git(cwd, ...args) { return (await execFile("git", args, { cwd })).stdout.trim(); }
 async function gitRaw(cwd, ...args) { return (await execFile("git", args, { cwd })).stdout; }
@@ -280,9 +284,6 @@ test("flat Root runtime Harness reaches two validated Plan Runner happy paths", 
     assert.equal(initialRuns.length, 6);
     for (const key of ["runId", "asyncDir"]) assert.equal(new Set(initialRuns.map((run) => run[key])).size, 6, `Initial runs must have unique ${key}`);
 
-    await rpc.close();
-    rpc = undefined;
-
     const resolvedRuntimeTmp = path.resolve(runtimeTmp);
     const asyncRoots = new Set(handles.map((handle) => path.dirname(path.resolve(handle.asyncDir))));
     assert.equal(asyncRoots.size, 1);
@@ -290,7 +291,21 @@ test("flat Root runtime Harness reaches two validated Plan Runner happy paths", 
     assert.equal(path.basename(asyncRoot), "async-subagent-runs");
     assert.ok(asyncRoot.startsWith(`${resolvedRuntimeTmp}${path.sep}`));
     assert.notEqual(asyncRoot, resolvedRuntimeTmp);
+    const quiescentRuns = await waitForHarnessRunQuiescence({
+      timeoutMs: 30_000,
+      quietMs: rootRevivalRetryMaxMs + rootStartupBarrierBudgetMs + runtimeArtifactPublicationBudgetMs,
+      pollIntervalMs: 50,
+      requiredRuns: initialRuns,
+      listRuns: async () => (await readdir(asyncRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => ({ runId: entry.name, asyncDir: path.join(asyncRoot, entry.name) })),
+      readOfficialTerminal: ({ asyncDir }) => readJson(path.join(asyncDir, "process-terminal.json")),
+    });
+    await rpc.close();
+    rpc = undefined;
+
     const actualRuns = await Promise.all((await readdir(asyncRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map(async (entry) => ({ asyncDir: path.join(asyncRoot, entry.name), status: await readJson(path.join(asyncRoot, entry.name, "status.json")) })));
+    const quiescentRunIdentities = Object.fromEntries(quiescentRuns.map(({ runId, asyncDir }) => [runId, asyncDir]));
+    const postCloseRunIdentities = Object.fromEntries(actualRuns.map(({ asyncDir }) => [path.basename(asyncDir), asyncDir]).sort(([left], [right]) => left.localeCompare(right)));
+    assert.deepEqual(postCloseRunIdentities, quiescentRunIdentities, "Root close must preserve the complete quiescent actual run set");
     assert.ok(actualRuns.length >= 6);
     const executors = actualRuns.filter(({ status }) => status?.steps?.[0]?.agent === "executor");
     const runners = actualRuns.filter(({ status }) => status?.steps?.[0]?.agent === "plan-runner");

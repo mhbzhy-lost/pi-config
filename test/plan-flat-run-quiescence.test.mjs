@@ -10,6 +10,7 @@ test("run quiescence waits for a late generation and its official terminal proof
     timeoutMs: 100,
     quietMs: 5,
     pollIntervalMs: 1,
+    requiredRuns: [{ runId: "run-a", asyncDir: "/tmp/run-a" }],
     listRuns: async () => {
       polls += 1;
       return polls === 1
@@ -29,6 +30,7 @@ test("run quiescence times out while any actual run lacks official proof", async
     timeoutMs: 10,
     quietMs: 2,
     pollIntervalMs: 1,
+    requiredRuns: [{ runId: "run-pending", asyncDir: "/tmp/run-pending" }],
     listRuns: async () => [{ runId: "run-pending", asyncDir: "/tmp/run-pending" }],
     readOfficialTerminal: async () => undefined,
   }), /run-pending.*official terminal/i);
@@ -40,6 +42,7 @@ test("run quiescence rejects a malformed observed-looking terminal", async () =>
     timeoutMs: 10,
     quietMs: 2,
     pollIntervalMs: 1,
+    requiredRuns: [{ runId: "run-malformed", asyncDir: "/tmp/run-malformed" }],
     listRuns: async () => [{ runId: "run-malformed", asyncDir: "/tmp/run-malformed" }],
     readOfficialTerminal: async () => ({ runId: "run-malformed", state: "observed" }),
   }), /run-malformed.*official terminal/i);
