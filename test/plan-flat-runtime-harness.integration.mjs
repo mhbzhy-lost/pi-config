@@ -21,6 +21,14 @@ const launcher = path.join(repoRoot, "pi/extensions/plan-launcher.ts");
 const rootOwner = path.join(repoRoot, "pi/child-extensions/root-session-owner.ts");
 
 async function git(cwd, ...args) { return (await execFile("git", args, { cwd })).stdout.trim(); }
+async function gitRaw(cwd, ...args) { return (await execFile("git", args, { cwd })).stdout; }
+async function assertRuntimeClean(cwd) {
+  const status = await gitRaw(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all");
+  const dirty = status.split("\0").filter(Boolean).map((entry) => ({ status: entry.slice(0, 2), path: entry.slice(3) }))
+    .filter((entry) => entry.status !== "??" || !entry.path.startsWith(".pi-subagents/"));
+  assert.deepEqual(dirty, []);
+  assert.equal(await gitRaw(cwd, "ls-files", "-z", "--", ".pi-subagents"), "");
+}
 async function readJson(file) { try { return JSON.parse(await readFile(file, "utf8")); } catch (error) { if (error?.code === "ENOENT" || error instanceof SyntaxError) return undefined; throw error; } }
 async function runnerDiagnostic(asyncDir) {
   const status = await readJson(path.join(asyncDir, "status.json"));
@@ -71,7 +79,7 @@ async function assertFutureGreen(handle, outcome, planPath, runtimeTmp) {
   assert.ok(status.tasks.every((task) => task.status === "accepted" && task.attempts?.[0]?.status === "integrated"));
   assert.equal(await readFile(path.join(handle.worktree, "README.md"), "utf8"), "base\nworker\n");
   assert.equal(await readFile(path.join(handle.worktree, "worker.txt"), "utf8"), "worker-2\n");
-  assert.equal(await git(handle.worktree, "rev-list", "--count", `${handle.baseCommit}..HEAD`), "2"); assert.equal(await git(handle.worktree, "status", "--porcelain"), "");
+  assert.equal(await git(handle.worktree, "rev-list", "--count", `${handle.baseCommit}..HEAD`), "2"); await assertRuntimeClean(handle.worktree);
   const runs = [{ runId: handle.planRunnerRunId, asyncDir: handle.asyncDir }, ...status.tasks.flatMap((task) => task.attempts)];
   assert.equal(runs.length, 3);
   assert.ok(runs.every((run) => run?.runId && run?.asyncDir));
