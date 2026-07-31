@@ -88,7 +88,7 @@ test("Root broker upstream exposes only frozen RPC forwarding methods including 
 
   const upstream = createRootBrokerUpstream({ rpc, executeSupervisor });
   assert.deepEqual(Object.keys(upstream).sort(), [
-    "dispose", "executeSupervisor", "interrupt", "ping", "resume", "spawn", "status", "steer", "stop",
+    "dispose", "executeSupervisor", "interrupt", "ping", "preparePlanRunnerRecovery", "resume", "spawn", "status", "steer", "stop",
   ]);
   assert.equal(Object.isFrozen(upstream), true);
 
@@ -116,12 +116,6 @@ test("Root broker upstream exposes only frozen RPC forwarding methods including 
   assert.strictEqual(supervisorCalls[0].params, supervisorParams);
   assert.strictEqual(supervisorCalls[0].context, supervisorContext);
   assert.strictEqual(supervisorResult, supervisorCalls[0].result);
-});
-
-test("Root broker upstream exposes the private plan-runner recovery preparation method", () => {
-  const upstream = createUpstream("/tmp/root-async");
-  assert.equal(Object.isFrozen(upstream), true);
-  assert.equal(typeof upstream.preparePlanRunnerRecovery, "function");
 });
 
 test("Root broker upstream promotes a trusted plan-runner recovery descriptor to the exact Plan Runner tools", async (t) => {
