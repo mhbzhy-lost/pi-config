@@ -78,6 +78,33 @@ test("inspectExecutorWorkspace reports diff after executor commits", () => {
   assert.equal(inspection.clean, true);
 });
 
+test("inspectExecutorWorkspace ignores untracked subagent runtime artifacts", () => {
+  const origin = initRepo();
+  const stateRoot = tmpStateRoot();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "g", taskId: "t1", attempt: 1, originRoot: origin, stateRoot, baseCommit });
+
+  mkdirSync(join(lease.path, ".pi-subagents/artifacts"), { recursive: true });
+  writeFileSync(join(lease.path, ".pi-subagents/artifacts/run.json"), "{}\n");
+
+  const inspection = inspectExecutorWorkspace(lease);
+  assert.deepEqual(inspection.untrackedFiles, []);
+  assert.equal(inspection.clean, true);
+});
+
+test("inspectExecutorWorkspace keeps ordinary untracked files dirty", () => {
+  const origin = initRepo();
+  const stateRoot = tmpStateRoot();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "g", taskId: "t1", attempt: 1, originRoot: origin, stateRoot, baseCommit });
+
+  writeFileSync(join(lease.path, "untracked.txt"), "user output\n");
+
+  const inspection = inspectExecutorWorkspace(lease);
+  assert.deepEqual(inspection.untrackedFiles, ["untracked.txt"]);
+  assert.equal(inspection.clean, false);
+});
+
 test("integrateExecutorWorkspace cherry-picks executor commit into origin", () => {
   const origin = initRepo();
   const stateRoot = tmpStateRoot();

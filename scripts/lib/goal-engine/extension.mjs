@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { validateDAG, runnableFrontier, goalProgress } from "./graph.mjs";
 import { appendEvent, loadProjection, listGoals } from "./store.mjs";
 import { compileTaskContract } from "./dispatch.mjs";
-import { allocateExecutorWorkspace, inspectExecutorWorkspace, integrateExecutorWorkspace, releaseExecutorWorkspace } from "./workspace.mjs";
+import { allocateExecutorWorkspace, loadExecutorWorkspaceLease, inspectExecutorWorkspace, integrateExecutorWorkspace, releaseExecutorWorkspace } from "./workspace.mjs";
 
 const STATE_ROOT_REL = ".state/goal-engine";
 const GOAL_ID_RE = /[^a-zA-Z0-9._-]+/g;
@@ -375,8 +375,17 @@ export function createGoalEngineExtension(pi) {
       const goalId = resolveGoal(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
 
-      const lease = activeLeases.get(params.task_id);
-      if (!lease) throw new Error(`No active workspace lease for task: ${params.task_id}. Was it dispatched?`);
+      const projection = loadProjection(root, goalId);
+      const task = projection.tasks.get(params.task_id);
+      if (!task) throw new Error(`unknown task: ${params.task_id}`);
+
+      const lease = activeLeases.get(params.task_id) ?? loadExecutorWorkspaceLease({
+        goalId,
+        taskId: params.task_id,
+        attempt: task.attempts,
+        stateRoot: root,
+      });
+      activeLeases.set(params.task_id, lease);
 
       if (params.action === "preserve") {
         releaseExecutorWorkspace(lease, { disposition: "preserved" });

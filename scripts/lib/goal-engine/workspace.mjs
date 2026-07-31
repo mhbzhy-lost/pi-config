@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -63,6 +63,45 @@ export function allocateExecutorWorkspace({ goalId, taskId, attempt, originRoot,
   return { ...lease, leasePath };
 }
 
+export function loadExecutorWorkspaceLease({ goalId, taskId, attempt, stateRoot }) {
+  safeId(goalId, "goalId");
+  safeId(taskId, "taskId");
+  if (!Number.isInteger(attempt) || attempt < 1) throw new Error("attempt must be a positive integer");
+  if (typeof stateRoot !== "string") throw new Error("stateRoot is required");
+
+  const { workspacePath, leasePath } = workspacePaths(stateRoot, goalId, taskId, attempt);
+  if (!existsSync(leasePath)) {
+    throw new Error(`Executor workspace lease not found: ${goalId}/${taskId}/${attempt}`);
+  }
+
+  let lease;
+  try {
+    lease = JSON.parse(readFileSync(leasePath, "utf8"));
+  } catch {
+    throw new Error(`Executor workspace lease is invalid: ${goalId}/${taskId}/${attempt}`);
+  }
+
+  const expected = {
+    goalId,
+    taskId,
+    attempt,
+    stateRoot: path.resolve(stateRoot),
+    path: workspacePath,
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    if (lease?.[field] !== value) {
+      throw new Error(`Executor workspace lease ${field} does not match`);
+    }
+  }
+  for (const field of ["originRoot", "baseCommit", "branch", "ownerToken", "createdAt"]) {
+    if (typeof lease[field] !== "string" || !lease[field]) {
+      throw new Error(`Executor workspace lease ${field} is invalid`);
+    }
+  }
+
+  return { ...lease, leasePath };
+}
+
 export function inspectExecutorWorkspace(lease) {
   if (!existsSync(lease.path)) throw new Error("Executor workspace is missing");
 
@@ -70,7 +109,9 @@ export function inspectExecutorWorkspace(lease) {
   const statusOutput = git(lease.path, "status", "--porcelain=v1", "-uno");
   const dirtyFiles = statusOutput ? statusOutput.split("\n").map((line) => line.slice(3)) : [];
   const untrackedOutput = git(lease.path, "ls-files", "--others", "--exclude-standard");
-  const untrackedFiles = untrackedOutput ? untrackedOutput.split("\n").filter(Boolean) : [];
+  const untrackedFiles = untrackedOutput
+    ? untrackedOutput.split("\n").filter((file) => file && !file.startsWith(".pi-subagents/"))
+    : [];
 
   let diff = "";
   if (headCommit !== lease.baseCommit) {

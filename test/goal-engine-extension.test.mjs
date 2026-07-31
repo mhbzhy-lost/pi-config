@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
@@ -119,6 +119,45 @@ test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", asy
   assert.ok(result.workspace.branch.startsWith("ge/"));
   assert.notEqual(result.contract.execution.cwd, cwd);
   assert.equal(result.contract.execution.cwd, result.workspace.path);
+});
+
+test("goal_integrate recovers a persisted workspace lease after extension restart", async () => {
+  const cwd = tmpCwd();
+  const git = initGitRepo(cwd);
+
+  const firstPi = createMockPi(cwd);
+  createGoalEngineExtension(firstPi);
+  const init = firstPi.tools.find((t) => t.name === "goal_init");
+  await init.handler({
+    objective: "Restart integration test goal",
+    tasks: [{ id: "t1", description: "Create a persisted executor artifact", deps: [], writePaths: ["src/result.ts"], acceptance: { criteria: ["result exists"], commands: ["test -f src/result.ts"] }, workflow: "tdd" }],
+  });
+
+  const dispatch = firstPi.tools.find((t) => t.name === "goal_dispatch");
+  const dispatched = JSON.parse(await dispatch.handler({ task_id: "t1" }));
+  mkdirSync(join(dispatched.workspace.path, "src"), { recursive: true });
+  writeFileSync(join(dispatched.workspace.path, "src/result.ts"), "export const result = true;\n");
+  execFileSync("git", ["add", "."], { cwd: dispatched.workspace.path });
+  execFileSync("git", ["commit", "-m", "feat: add persisted result"], { cwd: dispatched.workspace.path });
+
+  const settle = firstPi.tools.find((t) => t.name === "goal_settle");
+  await settle.handler({
+    task_id: "t1",
+    outcome: "succeeded",
+    evidence: { type: "diff", ref: "git diff HEAD~1 -- src/result.ts" },
+    evidence_source: "self_produced",
+    next_action: "Recover the persisted lease and integrate the executor result",
+  });
+
+  const restartedPi = createMockPi(cwd);
+  createGoalEngineExtension(restartedPi);
+  const integrate = restartedPi.tools.find((t) => t.name === "goal_integrate");
+  const result = JSON.parse(await integrate.handler({ task_id: "t1", action: "integrate" }));
+
+  assert.equal(result.action, "integrated");
+  assert.equal(result.released, true);
+  assert.ok(existsSync(join(cwd, "src/result.ts")));
+  assert.equal(git("branch", "--list", dispatched.workspace.branch), "");
 });
 
 test("goal_settle + goal_accept full cycle", async () => {
