@@ -250,6 +250,9 @@ export function createPlanLauncherExtension(pi, options = {}) {
       } finally {
         if (attentionReplyFences.get(fenceKey) === pending) attentionReplyFences.delete(fenceKey);
       }
+      const broker = rootIdentity();
+      if (typeof broker.wakeCaller !== "function") throw new Error("Root Attention wake capability is unavailable");
+      await broker.wakeCaller(handle.planRunnerRunId, { wakeId: `attention-reply-${params.requestId}`, reason: "attention-reply" });
       return toolResult({ status: "queued", planId: params.planId, requestId: params.requestId });
     } catch (error) { return toolResult(error instanceof Error ? error.message : String(error), true); }
   } });

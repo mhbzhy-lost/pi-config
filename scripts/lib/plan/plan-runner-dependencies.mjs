@@ -314,6 +314,10 @@ export function createPlanRunnerDependencies({
       .map(([attemptId, attempt]) => executionRecoveryOperation(attemptId, attempt))
       .filter(Boolean);
     for (const recover of operations) await recover();
+    const current = currentProjection(ctx);
+    if (!current.planId) return;
+    const { stateRoot } = await rootsFor(ctx, current.planId);
+    await processAttentionReplies({ binding: { planId: current.planId, stateRoot }, ctx });
   }
 
   async function approvedPlan(current) {

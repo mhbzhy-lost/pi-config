@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createPlanLauncherExtension } from "../scripts/lib/plan/plan-launcher-extension.mjs";
+import { createPlanControl } from "../scripts/lib/plan/plan-control.mjs";
 
 const planSource = "# Approved plan\n\n### Task 1: Ship it\n";
 const hashes = { manifestSha256: "a".repeat(64), sourceBytesSha256: "b".repeat(64), planHash: "c".repeat(64), irHash: "d".repeat(64) };
@@ -67,7 +68,7 @@ function broker(calls, overrides = {}) {
     async spawn(input) { calls.push(["spawn", input]); return overrides.spawnReply ?? { details: { runId: "plan-runner-run-1", asyncDir: "/async/plan-runner-run-1" } }; },
     async status(input) { calls.push(["status", input]); return { state: "running" }; },
     async interrupt(input) { calls.push(["interrupt", input]); }, async stop(input) { calls.push(["stop", input]); },
-  }, async grantCaller(input) { calls.push(["grant", input]); if (overrides.grantError) throw overrides.grantError; }, async statusCaller(logicalId) { calls.push(["statusCaller", logicalId]); return { state: "running" }; }, async interruptCaller(logicalId) { calls.push(["interruptCaller", logicalId]); }, async stopCaller(logicalId) { calls.push(["stopCaller", logicalId]); }, ...overrides };
+  }, async grantCaller(input) { calls.push(["grant", input]); if (overrides.grantError) throw overrides.grantError; }, async wakeCaller(logicalId, intent) { calls.push(["wakeCaller", logicalId, intent]); }, async statusCaller(logicalId) { calls.push(["statusCaller", logicalId]); return { state: "running" }; }, async interruptCaller(logicalId) { calls.push(["interruptCaller", logicalId]); }, async stopCaller(logicalId) { calls.push(["stopCaller", logicalId]); }, ...overrides };
 }
 
 function options(root, calls, extra = {}) {

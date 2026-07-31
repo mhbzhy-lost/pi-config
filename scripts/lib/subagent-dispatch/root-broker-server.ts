@@ -23,7 +23,7 @@ type Upstream = Record<string, (...args: any[]) => Promise<any>> & { dispose?: (
 type Caller = { planId: string; cwd: string; originRoot: string; stateRoot: string; role: "plan-runner"; callerToken: string; ownedRunIds: Set<string> };
 type Principal = { role: "plan-runner" | "executor"; callerToken: string };
 type LogicalCaller = { activeRunId: string; generation: number };
-type FollowUpIntent = { wakeId: string; reason: "plan-opened" };
+type FollowUpIntent = { wakeId: string; reason: "plan-opened" | "attention-reply" };
 type Dependencies = { writeGrant?: typeof writeBrokerGrant; randomToken?: () => string; captureProcessBirthIdentity?: typeof captureProcessBirthIdentity; killProcess?: (pid: number, signal: "SIGKILL") => void; events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void }; terminalTimeoutMs?: number; readFile?: typeof nodeReadFile; artifactPollIntervalMs?: number; recordRevivalDiagnostic?: (customType: "pi-root-broker-revival-v1", data: Record<string, unknown>) => unknown; lifecycleSessionId?: string };
 type SpawnLedgerEntry = { hash: string; state: "not-started" | "spawning" | "spawned" | "cleaned" | "uncertain"; spawnKey?: string; callerRunId?: string; params?: Record<string, unknown>; promise?: Promise<any>; reply?: any; binding?: any; started?: any; pending: any[]; queued?: Set<string>; delivered: Set<string> };
 type QueuedCallerPush = { push: BrokerPush; onDelivered?: () => void };
@@ -574,6 +574,29 @@ export class RootBrokerServer {
     try { return await pending; } finally { if (this.callerGrants.get(callerRunId) === pending) this.callerGrants.delete(callerRunId); }
   }
 
+  enqueueCallerFollowUp(logicalCallerRunId: string, intent: FollowUpIntent) {
+    const followUps = this.callerFollowUps.get(logicalCallerRunId);
+    if (!followUps) throw new Error("Root subagent broker caller is not granted");
+    if (!followUps.some((followUp) => followUp.wakeId === intent.wakeId)) followUps.push(intent);
+    this.recordDiagnostic("followup.accepted", logicalCallerRunId, intent.wakeId);
+    void this.reviveCallerAfterProof(logicalCallerRunId).catch(() => undefined);
+    return { accepted: true, wakeId: intent.wakeId };
+  }
+
+  async wakeCaller(logicalCallerRunId: string, intent: unknown) {
+    if (this.closed) throw new Error("Root subagent broker is closing");
+    const logical = this.logicalCallers.get(logicalCallerRunId);
+    const caller = this.callers.get(logicalCallerRunId);
+    if (!logical || !caller || caller.role !== "plan-runner" || typeof logicalCallerRunId !== "string" || logicalCallerRunId.length === 0) throw new Error("Root subagent broker caller is not granted");
+    if (!intent || typeof intent !== "object" || Array.isArray(intent)
+      || JSON.stringify(Object.keys(intent).sort()) !== JSON.stringify(["reason", "wakeId"])) throw new Error("Root subagent broker wake is invalid");
+    const { wakeId, reason } = intent as Record<string, unknown>;
+    const requestId = typeof wakeId === "string" ? wakeId.slice("attention-reply-".length) : "";
+    if (reason !== "attention-reply" || typeof wakeId !== "string" || wakeId !== `attention-reply-${requestId}`
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(requestId) || requestId === "." || requestId === "..") throw new Error("Root subagent broker wake is invalid");
+    return this.enqueueCallerFollowUp(logicalCallerRunId, { wakeId, reason });
+  }
+
   handleSocket(socket: Socket) {
     this.sockets.add(socket);
     socket.once("close", () => this.sockets.delete(socket));
@@ -688,13 +711,12 @@ export class RootBrokerServer {
   }
 
   registerCallerFollowUp(request: any, logicalCallerRunId: string) {
-    const followUps = this.callerFollowUps.get(logicalCallerRunId);
-    if (!followUps) return failure(request, "caller_unauthorized", "Caller is not granted");
     const intent: FollowUpIntent = { ...request.params };
-    if (!followUps.some((followUp) => followUp.wakeId === intent.wakeId)) followUps.push(intent);
-    this.recordDiagnostic("followup.accepted", logicalCallerRunId, intent.wakeId);
-    void this.reviveCallerAfterProof(logicalCallerRunId).catch(() => undefined);
-    return createBrokerSuccessResponse({ ...request, data: { accepted: true, wakeId: intent.wakeId } });
+    try {
+      return createBrokerSuccessResponse({ ...request, data: this.enqueueCallerFollowUp(logicalCallerRunId, intent) });
+    } catch {
+      return failure(request, "caller_unauthorized", "Caller is not granted");
+    }
   }
 
   async spawn(request: any, caller: Caller, logicalCallerRunId: string) {
