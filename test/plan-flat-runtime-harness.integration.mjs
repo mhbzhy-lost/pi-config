@@ -87,8 +87,9 @@ async function waitForAttentionStatuses(handles, origin) {
 }
 function attentionMarker(body, requestId) {
   const prefix = "PI_PLAN_FLAT_ATTENTION ";
-  assert.ok(body.startsWith(prefix), `Attention ${requestId} marker prefix`);
-  const marker = exactObject(JSON.parse(body.slice(prefix.length)), ["schemaVersion", "executorRunId", "taskId", "writePath"], `Attention ${requestId} marker`);
+  const markerLines = body.split(/\r?\n/).filter((line) => line.startsWith(prefix));
+  assert.equal(markerLines.length, 1, `Attention ${requestId} exact marker line`);
+  const marker = exactObject(JSON.parse(markerLines[0].slice(prefix.length)), ["schemaVersion", "executorRunId", "taskId", "writePath"], `Attention ${requestId} marker`);
   assert.equal(marker.schemaVersion, "pi-plan-flat-attention-marker.v1");
   return marker;
 }
