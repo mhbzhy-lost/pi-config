@@ -80,6 +80,10 @@ function flatPlanPrompt() {
   return user(`Open the approved Plan revision by calling plan_open exactly once with ${JSON.stringify(flatBootstrap)}.`);
 }
 
+function privateWakePrompt() {
+  return user("async resume wrapper\nA durable Root broker wake is pending.");
+}
+
 const rootMainTools = ["plan_run", "plan_attention_reply"];
 const rootMainPlanPaths = ["/tmp/root-main-first.plan.md", "/tmp/root-main-second.plan.md"];
 function rootMainPrompt() {
@@ -177,6 +181,29 @@ test("flat Plan Runner parses the production bootstrap and opens the exact revis
   assert.deepEqual(decide([flatPlanPrompt()], flatPlanTools), {
     tool: { name: "plan_open", arguments: flatBootstrap },
   });
+});
+
+test("private wake continues an already opened Plan without plan_open", () => {
+  assert.deepEqual(decide([privateWakePrompt()], flatPlanTools), {
+    tool: { name: "plan_continue", arguments: { reason: "harness" } },
+  });
+});
+
+test("private wake provider forwards a dispatch-required contract exactly", async () => {
+  const contract = {
+    task: "task-63v", agent: "executor", runId: "executor-run-63v", prompt: "Implement only the approved task.",
+  };
+  const done = await streamDone([
+    privateWakePrompt(),
+    toolResult("plan_continue", JSON.stringify({ state: "dispatch-required", dispatches: [{ contract }] })),
+  ], flatPlanTools.map((name) => ({ name })));
+
+  assert.equal(done.reason, "toolUse");
+  assert.equal(done.message.stopReason, "toolUse");
+  const toolCalls = done.message.content.filter((part) => part.type === "toolCall");
+  assert.equal(toolCalls.length, 1);
+  assert.equal(toolCalls[0].name, "subagent");
+  assert.deepEqual(toolCalls[0].arguments, contract);
 });
 
 test("flat Plan Runner forwards each dispatch-required contract unchanged to subagent", () => {
