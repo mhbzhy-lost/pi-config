@@ -425,6 +425,7 @@ export function createPiSubagentsExecutionBackend({
       const operation = { binding: recovered.binding, promise: completion.promise };
       recoveringBindings.set(recovered.request.dispatchId, operation);
       void (async () => {
+        let committedEntry = null;
         try {
           let processTerminal = null;
           if (typeof rpc.lookupSpawn === "function") {
@@ -438,10 +439,11 @@ export function createPiSubagentsExecutionBackend({
           }
           const entry = createEntry(recovered.request, recovered.binding);
           entry.bindingWait.resolve(entry.binding);
+          // Retain ownership before the first ledger write so a partial commit can be fenced out.
+          committedEntry = entry;
           pending.set(recovered.request.dispatchId, entry);
           byRunId.set(recovered.binding.runId, entry.binding);
           if (processTerminal) {
-            entry.completionPublished = true;
             publish({
               type: "execution.completed",
               dispatchId: recovered.binding.dispatchId,
@@ -452,9 +454,14 @@ export function createPiSubagentsExecutionBackend({
               state: "observed",
               observedAt: now(),
             });
+            entry.completionPublished = true;
           }
           completion.resolve(entry.binding);
         } catch (error) {
+          if (committedEntry) {
+            if (pending.get(recovered.request.dispatchId) === committedEntry) pending.delete(recovered.request.dispatchId);
+            if (byRunId.get(recovered.binding.runId) === committedEntry.binding) byRunId.delete(recovered.binding.runId);
+          }
           completion.reject(error);
         } finally {
           if (recoveringBindings.get(recovered.request.dispatchId) === operation) recoveringBindings.delete(recovered.request.dispatchId);
