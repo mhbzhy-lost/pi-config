@@ -219,6 +219,34 @@ test("revives when a pending plan-runner wake follows its observed terminal proo
   assert.deepEqual(resumeCalls, expectedResume);
 });
 
+test("wakeCaller accepts one durable Attention reply wake only after official proof and coalesces revival", async () => {
+  let resolveResume;
+  const resumeDeferred = new Promise((resolve) => { resolveResume = resolve; });
+  const { ownedRun, proof, resumeCalls, server } = await createRevivalFixture({ resume: () => resumeDeferred });
+  const intent = { wakeId: "attention-reply-request-1", reason: "attention-reply" };
+
+  assert.equal(typeof server.wakeCaller, "function", "RootBrokerServer must expose the Root-only Attention wake API");
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", intent), { accepted: true, wakeId: intent.wakeId });
+  assert.deepEqual(await server.wakeCaller("plan-runner-1", intent), { accepted: true, wakeId: intent.wakeId });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(resumeCalls, []);
+  server.acceptTerminalProof(ownedRun, proof);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(resumeCalls, expectedResume);
+  assert.equal(server.revivePromises.size, 1);
+  resolveResume(revivedResult);
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("wire caller.followup remains limited to the one-shot plan-opened wake", async () => {
+  const { request } = await createRevivalFixture();
+  assert.throws(() => parseBrokerRequest({
+    ...request,
+    requestId: "request-followup-attention-wire",
+    params: { wakeId: "attention-reply-request-1", reason: "attention-reply" },
+  }), /params.reason is unsupported/);
+});
+
 test("prepares private plan-runner recovery before resuming a proved wake", async () => {
   const calls = [];
   const { ownedRun, proof, request, server } = await createRevivalFixture({

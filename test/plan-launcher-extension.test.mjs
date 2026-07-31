@@ -298,6 +298,28 @@ test("plan_attention_reply fences projection and is idempotent", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("plan_attention_reply durably writes before waking the Root runner and retries a failed wake", async () => {
+  const { root } = await fixture(); const calls = []; let wakeAttempts = 0;
+  try {
+    await writeProjection(root, { planId: "plan-one", tasks: [{ taskId: "task-1", attempts: [{ attemptId: "attempt-1", runId: "run-1", status: "waiting-attention", attention: { status: "pending", requestId: "request-1", projectionVersion: 4 } }] }] });
+    const rootBroker = broker(calls, { async wakeCaller(logicalRunId, intent) {
+      wakeAttempts += 1;
+      const durable = await createPlanControl({ stateRoot: root }).readAttentionReplies("plan-one");
+      calls.push(["wakeCaller", logicalRunId, intent, durable]);
+      if (wakeAttempts === 1) throw new Error("wake unavailable");
+    } });
+    const { tools } = setup(options(root, calls, { rootBroker, findHandle: async () => handle(root) }));
+    const reply = { planId: "plan-one", requestId: "request-1", expectedProjectionVersion: 4, message: "Proceed." };
+    const expectedCommand = { planId: "plan-one", requestId: "request-1", taskId: "task-1", attemptId: "attempt-1", runId: "run-1", expectedProjectionVersion: 4, message: "Proceed." };
+    const failed = await tools.get("plan_attention_reply").execute("id", reply, undefined, undefined, {});
+    assert.equal(failed.isError, true);
+    assert.deepEqual(calls.at(-1).slice(0, 3), ["wakeCaller", "run-1", { wakeId: "attention-reply-request-1", reason: "attention-reply" }]);
+    assert.deepEqual(calls.at(-1)[3].map(({ occurredAt: _occurredAt, ...command }) => command), [expectedCommand]);
+    assert.equal((await tools.get("plan_attention_reply").execute("id", reply, undefined, undefined, {})).isError, undefined);
+    assert.equal(wakeAttempts, 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("concurrent identical Attention replies write once and conflicting replies elect one decision", async () => {
   const { root } = await fixture(); const calls = []; const writes = [];
   try {

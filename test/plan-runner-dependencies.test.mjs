@@ -893,6 +893,30 @@ test("persists Supervisor Attention and recovers a fenced durable Root reply aft
   assert.equal(appended.filter(({ type }) => type === "attempt.attention-resolved").length, 1);
 });
 
+test("fresh recoverExecutionState announces a matching durable Attention reply once after binding recovery", async (t) => {
+  const repo = await fixture();
+  t.after(() => rm(repo.origin, { recursive: true, force: true }));
+  const binding = await runnerDependencies(repo).validateBinding(await bindingInput(repo), { ctx: context(repo.worktree) });
+  const appended = [];
+  const initial = runnerDependencies(repo, { pi: { appendEntry(_type, data) { appended.push(data); } }, executionBackend: backend(), allocateAttemptWorkspace: async (input) => fakeAllocator(input) });
+  const createdEvent = created(binding);
+  const ctx = context(repo.worktree, [{ customType: "pi-plan-event-v1", data: createdEvent }]);
+  await initial.continuePlan({}, { ctx });
+  const attention = await initial.recordSupervisorRequest({ customType: "subagent_supervisor_request", content: "Choose target", display: true, details: { id: "request-1", reason: "need_decision", expectsReply: true, runId: "run-1", agent: "executor", childIndex: 0 } }, { ctx });
+  await createPlanControl({ stateRoot: repo.origin }).writeAttentionReply({ planId: repo.planId, requestId: "request-1", taskId: "task-1", attemptId: attention.attemptId, runId: "run-1", expectedProjectionVersion: attention.projectionVersion, message: "Use target A", occurredAt: "2026-07-26T00:00:01.000Z" });
+  const calls = [];
+  const fresh = runnerDependencies(repo, { pi: { sendMessage(message) { calls.push(["send", message]); } }, executionBackend: { async recoverBinding(input) { calls.push(["recoverBinding", input]); } } });
+  const freshCtx = context(repo.worktree, [createdEvent, ...appended].map((data) => ({ customType: "pi-plan-event-v1", data: data.type === "attempt.bound" ? { ...data, data: { ...data.data, sessionFile: "/sessions/plan-runner.jsonl" } } : data })));
+
+  await fresh.recoverExecutionState({ ctx: freshCtx });
+  await fresh.recoverExecutionState({ ctx: freshCtx });
+
+  assert.equal(calls.filter(([name]) => name === "recoverBinding").length, 2);
+  assert.equal(calls.filter(([name]) => name === "send").length, 1);
+  assert.equal(calls.findIndex(([name]) => name === "recoverBinding") < calls.findIndex(([name]) => name === "send"), true);
+  assert.equal(calls.find(([name]) => name === "send")[1].customType, "pi-plan-attention-reply-v1");
+});
+
 test("does not acknowledge a durable reply when matching resolution evidence has another message hash", async (t) => {
   const repo = await fixture();
   t.after(() => rm(repo.origin, { recursive: true, force: true }));
