@@ -150,6 +150,21 @@ test("Root Main stops launching after a failed plan_run", () => {
   ], rootMainTools), { text: "PLAN_ROOT_LAUNCH_FAILED" });
 });
 
+test("flat Attention mode preserves Root Main launch turns", () => {
+  assert.deepEqual(decide([rootMainPrompt()], rootMainTools, { attentionMode: true }), {
+    tool: { name: "plan_run", arguments: { planPath: rootMainPlanPaths[0] } },
+  });
+});
+
+test("flat Attention mode preserves Plan Runner bootstrap turns", () => {
+  assert.deepEqual(decide([flatPlanPrompt()], flatPlanTools, {
+    attentionMode: true,
+    executorRunId: "plan-runner-generation-1",
+  }), {
+    tool: { name: "plan_open", arguments: flatBootstrap },
+  });
+});
+
 test("flat Attention mode requires supervisor approval before typed Executor writes", () => {
   const tools = ["contact_supervisor", "bash"];
   for (const writePath of ["README.md", "worker.txt"]) {
