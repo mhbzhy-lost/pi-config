@@ -264,6 +264,30 @@ test("flat amendment yields dispatch-required turns to the common subagent selec
   }
 });
 
+test("flat amendment yields a completed verify result to the common terminal selector", async () => {
+  const previousMode = process.env.PI_PLAN_HARNESS_AMENDMENT;
+  const previousSource = process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+  process.env.PI_PLAN_HARNESS_AMENDMENT = "1";
+  process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = "# revision 2";
+  try {
+    const done = await streamDone([
+      flatPlanPrompt(),
+      toolResult("plan_open", "opened"),
+      toolResult("plan_executor_supervisor", "replied", { replyTo: "request-65", to: "executor-old" }),
+      toolResult("plan_amend", "amended"),
+      toolResult("plan_status", JSON.stringify({ revision: { number: 2 }, lifecycle: "verifying", tasks: [{ taskId: "task-1", status: "accepted", attempts: [{ status: "integrated" }] }, { taskId: "task-2", status: "accepted", attempts: [{ status: "integrated" }] }] })),
+      toolResult("plan_verify", JSON.stringify({ lifecycle: "validated" })),
+    ], flatPlanTools.map((name) => ({ name })));
+    assert.equal(done.reason, "stop");
+    assert.deepEqual(done.message.content, [{ type: "text", text: "PLAN_RUNNER_DONE" }]);
+  } finally {
+    if (previousMode === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT = previousMode;
+    if (previousSource === undefined) delete process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE;
+    else process.env.PI_PLAN_HARNESS_AMENDMENT_SOURCE = previousSource;
+  }
+});
+
 test("flat Attention mode preserves Root Main launch turns", () => {
   assert.deepEqual(decide([rootMainPrompt()], rootMainTools, { attentionMode: true }), {
     tool: { name: "plan_run", arguments: { planPath: rootMainPlanPaths[0] } },
