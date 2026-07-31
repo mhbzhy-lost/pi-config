@@ -26,6 +26,6 @@
 
 ## 6. 修复与验证
 
-`test/support/plan-e2e-process-cleanup.mjs`只在以下身份同时成立时发信号：目录名匹配`status.runId`、`status.startedAt`匹配当前`ps`启动时间、当前命令行包含本次唯一`runtimeTmp`、PID仍是独立进程组leader。信号发送给负PGID；TERM后按整个进程组等待，超时再KILL同组，因此无路径命令行的子进程和TERM竞态新后代也必须收敛。任一身份不可证明时fail closed，不得向PID发信号。
+`test/support/plan-e2e-process-cleanup.mjs`只在以下身份同时成立时发信号：目录名匹配`status.runId`、`status.startedAt`匹配当前`ps`启动时间、当前命令行包含本次唯一`runtimeTmp`、PID仍是独立进程组leader。`ps`明确证明PID不存在时视为已经收敛；其他任一身份不可证明时fail closed，不得向PID发信号。信号发送给负PGID；TERM后按整个进程组等待，超时再KILL同组，因此无路径命令行的子进程和TERM竞态新后代也必须收敛。
 
 RED必须覆盖三个独立行为：stale status指向无关活进程时不得误杀；runner在TERM handler内新建后代时最终整个进程组退出；主体成功但cleanup失败时不得删除fixture，且聚合错误包含主体/cleanup细节。amendment Harness仅在主体成功、所有cleanup成功且未要求preserve时删除fixture；fixture删除失败也进入聚合。最后确认broker socket移除并且唯一runtime路径无残留runner。真实Harness只在新冻结HEAD运行一次。

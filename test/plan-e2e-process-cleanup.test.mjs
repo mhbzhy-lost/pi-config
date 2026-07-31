@@ -108,6 +108,23 @@ test("terminateDetachedRunsUnder reaps every persisted async run below an isolat
   assert.ok(processes.every((pid) => !alive(pid)));
 });
 
+test("terminateDetachedRunsUnder treats an exited recorded PID as already clean", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "plan-e2e-cleanup-exited-"));
+  const asyncDir = join(root, "pi-subagents-uid-501", "async-subagent-runs", "exited-run");
+  await mkdir(asyncDir, { recursive: true });
+  const finished = spawn(process.execPath, ["-e", "process.exit(0)", root, "exited-run"], { detached: true, stdio: "ignore" });
+  const startedAt = Date.now();
+  const pid = finished.pid;
+  await new Promise((resolve, reject) => {
+    finished.once("close", resolve);
+    finished.once("error", reject);
+  });
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(asyncDir, "status.json"), JSON.stringify({ runId: "exited-run", state: "complete", pid, startedAt }));
+
+  await cleanup.terminateDetachedRunsUnder(root, { timeoutMs: 100 });
+});
+
 test("terminateDetachedRunsUnder refuses a stale status PID owned by an unrelated process", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "plan-e2e-cleanup-stale-"));
   const asyncDir = join(root, "pi-subagents-uid-501", "async-subagent-runs", "stale-run");
