@@ -29,4 +29,4 @@ ACK成功只设置announcement状态并移除该request的queued replay，必须
 
 ## 验证
 
-RED必须分别证明：foreign/unknown ACK fail closed；owner ACK幂等且保留pending reply；ACK后official proof不重放；未ACK时同一official proof把exact request排队。协议测试另断言ACK params只允许exact `requestId`。
+RED必须分别证明：foreign/unknown ACK fail closed；owner ACK幂等且保留pending reply；ACK后official proof不重放；未ACK时同一official proof把exact request排队。协议测试另断言ACK params只允许exact `requestId`，并接受protocol parser既有的`contains unknown field`诊断措辞。
