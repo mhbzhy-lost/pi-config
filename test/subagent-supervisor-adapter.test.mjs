@@ -365,7 +365,7 @@ test("mirrors Supervisor request pushes as an exact Plan Attention without lifec
   assert.deepEqual(subject.emitted, []);
   assert.deepEqual(subject.messages, [{
     message: { customType: "subagent_supervisor_request", content: "Approve the change.", display: true, details: { id: "request-1", reason: "need_decision", expectsReply: true, runId: "executor-1", agent: "executor", childIndex: 2 } },
-    options: { triggerTurn: true },
+    options: { triggerTurn: true, deliverAs: "followUp" },
   }]);
 });
 
