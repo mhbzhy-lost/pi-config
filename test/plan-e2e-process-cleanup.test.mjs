@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import * as cleanup from "./support/plan-e2e-process-cleanup.mjs";
+
+const execFile = promisify(execFileCallback);
 
 const { terminateDetachedRun } = cleanup;
 
@@ -170,6 +173,100 @@ test("terminateDetachedRunsUnder reaps a same-group child created by the runner 
   const childPid = Number(await readFile(childPidFile, "utf8"));
   await waitForExit(childPid);
   assert.equal(groupAlive(runner.pid), false);
+});
+
+test("terminateDetachedRun rechecks the group leader identity before SIGKILL", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "plan-e2e-cleanup-recapture-"));
+  const asyncDir = join(root, "async-subagent-runs", "recapture-run");
+  const pid = 424_242;
+  const startedAt = Date.now();
+  await mkdir(asyncDir, { recursive: true });
+  await writeFile(join(asyncDir, "status.json"), JSON.stringify({ runId: "recapture-run", state: "running", pid, startedAt }));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const initial = { pid, pgid: pid, startedAt, command: `${root}/async-cfg-recapture-run.json` };
+  const reused = { ...initial, startedAt: startedAt + 60_000, command: "/usr/bin/unrelated" };
+  let inspections = 0;
+  const signals = [];
+
+  await assert.rejects(
+    cleanup.terminateDetachedRun(
+      { runId: "recapture-run", asyncDir },
+      {
+        expectedCommandPath: root,
+        timeoutMs: 1,
+        inspectProcess: async () => inspections++ === 0 ? initial : reused,
+        isGroupAlive: async () => true,
+        signalProcessGroup: (pgid, signal) => signals.push({ pgid, signal }),
+      },
+    ),
+    /identity|changed|reused/i,
+  );
+  assert.deepEqual(signals, [{ pgid: pid, signal: "SIGTERM" }]);
+});
+
+test("removeFixtureWithEvidence retains a complete archive after partial recursive deletion", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "plan-e2e-cleanup-evidence-"));
+  const fixture = join(root, "fixture");
+  const evidenceFile = join(fixture, "evidence.txt");
+  await mkdir(fixture);
+  await writeFile(evidenceFile, "durable evidence\n");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const removeWithEvidence = cleanup.removeFixtureWithEvidence ?? (async () => assert.fail("removeFixtureWithEvidence is required"));
+  let failure;
+
+  try {
+    await removeWithEvidence(fixture, {
+      removeFixture: async () => {
+        await rm(evidenceFile, { force: true });
+        throw new Error("recursive removal failed after partial deletion");
+      },
+    });
+    assert.fail("removeFixtureWithEvidence must reject a partial deletion");
+  } catch (error) {
+    failure = error;
+  }
+  assert.match(failure.message, /recursive removal failed/);
+  assert.equal(typeof failure.preservedFixture, "string");
+  const { stdout } = await execFile("tar", ["-xOf", failure.preservedFixture, "fixture/evidence.txt"]);
+  assert.equal(stdout, "durable evidence\n");
+});
+
+test("finalizeHarnessCleanup reports the preserved archive when fixture removal fails", async () => {
+  const preservedFixture = "/tmp/fixture-evidence.cleanup-evidence.tar";
+  const removalFailure = Object.assign(new Error("fixture removal failed"), { preservedFixture });
+  const diagnostics = [];
+
+  await assert.rejects(
+    cleanup.finalizeHarnessCleanup({
+      fixture: "/tmp/fixture-evidence",
+      passed: true,
+      preserve: false,
+      primaryError: undefined,
+      cleanupErrors: [],
+      removeFixture: async () => { throw removalFailure; },
+      diagnostic: (message) => diagnostics.push(message),
+    }),
+    (error) => error instanceof AggregateError && error.errors[0] === removalFailure,
+  );
+  assert.deepEqual(diagnostics, [`preserved=${preservedFixture}`]);
+});
+
+test("finalizeHarnessCleanup preserves primary and cleanup errors in order", async () => {
+  const primaryError = new Error("body failed");
+  const cleanupError = new Error("cleanup failed");
+
+  await assert.rejects(
+    cleanup.finalizeHarnessCleanup({
+      fixture: "/tmp/fixture-evidence",
+      passed: false,
+      preserve: false,
+      primaryError,
+      cleanupErrors: [cleanupError],
+      removeFixture: async () => assert.fail("failed Harness must not remove fixture"),
+      diagnostic: () => {},
+    }),
+    (error) => error instanceof AggregateError && error.errors[0] === primaryError && error.errors[1] === cleanupError,
+  );
 });
 
 test("finalizeHarnessCleanup preserves a successful fixture when cleanup failed", async () => {

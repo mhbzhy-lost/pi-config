@@ -26,6 +26,8 @@
 
 ## 6. 修复与验证
 
-`test/support/plan-e2e-process-cleanup.mjs`只在以下身份同时成立时发信号：目录名匹配`status.runId`、`status.startedAt`匹配当前`ps`启动时间、当前命令行包含本次唯一`runtimeTmp`、PID仍是独立进程组leader。`ps`明确证明PID不存在时视为已经收敛；其他任一身份不可证明时fail closed，不得向PID发信号。信号发送给负PGID；TERM后按整个进程组等待，超时再KILL同组，因此无路径命令行的子进程和TERM竞态新后代也必须收敛。
+`test/support/plan-e2e-process-cleanup.mjs`只在以下身份同时成立时发信号：目录名匹配`status.runId`、`status.startedAt`匹配当前`ps`启动时间、当前命令行包含本次唯一`runtimeTmp`、PID仍是独立进程组leader。`ps`明确证明PID不存在时视为已经收敛；其他任一身份不可证明时fail closed，不得向PID发信号。信号发送给负PGID；TERM后按整个进程组等待，超时准备KILL时再次核对leader身份：已复用则拒绝，leader已退出但原PGID持续存在时才清理同组后代。
 
-RED必须覆盖三个独立行为：stale status指向无关活进程时不得误杀；runner在TERM handler内新建后代时最终整个进程组退出；主体成功但cleanup失败时不得删除fixture，且聚合错误包含主体/cleanup细节。amendment Harness仅在主体成功、所有cleanup成功且未要求preserve时删除fixture；fixture删除失败也进入聚合。最后确认broker socket移除并且唯一runtime路径无残留runner。真实Harness只在新冻结HEAD运行一次。
+fixture删除采用证据归档：先在fixture同级生成单文件tar，再递归删除目录；目录删除失败时完整tar保留并成为diagnostic路径，目录删除成功后以单文件unlink原子清理tar。cleanup error在删除前出现时不创建归档并直接保留原fixture。`AggregateError`按主体错误、cleanup错误顺序保留引用。
+
+RED必须覆盖五个独立行为：stale status指向无关活进程时不得误杀；runner在TERM handler内新建后代时最终整个进程组退出；TERM后leader身份变化时不得发KILL；主体成功但cleanup失败时不得删除fixture；递归删除部分失败时证据tar仍可完整读取。amendment Harness仅在主体成功、所有cleanup成功且未要求preserve时删除fixture。最后确认broker socket移除并且唯一runtime路径无残留runner。真实Harness只在新冻结HEAD运行一次。
