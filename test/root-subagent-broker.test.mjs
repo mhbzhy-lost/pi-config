@@ -1748,6 +1748,35 @@ test("broker reconstructs process-terminal lifecycle identity from its spawn led
   assert.deepEqual(subject.bSocket.lines, []);
 });
 
+test("durable spawn lookup returns only its matching official observed terminal proof", async (t) => {
+  const subject = await lifecycleBroker(t, () => {});
+  const spawned = await subject.broker.dispatch(request({ callerRunId: "caller-a", callerToken: subject.a.callerToken, method: "spawn", params: { agent: "executor", task: "run", spawnKey: "dispatch-terminal-lookup" } }), {});
+  assert.equal(spawned.success, true);
+  subject.events.emit("subagent:async-started", { runId: "lifecycle-run", pid: 804, agent: "executor", asyncDir: "/async/lifecycle", cwd: "/repo", sessionId: rootSessionId });
+  await subject.events.settled();
+
+  const beforeProof = await subject.broker.dispatch(request({ callerRunId: "caller-a", callerToken: subject.a.callerToken, method: "spawn.lookup", params: { spawnKey: "dispatch-terminal-lookup" } }), {});
+  assert.deepEqual(beforeProof.data, { state: "spawned", binding: { runId: "lifecycle-run", asyncDir: "/async/lifecycle" } });
+  assert.equal(Object.hasOwn(beforeProof.data, "processTerminal"), false);
+
+  const processTerminal = {
+    version: 1,
+    runnerProcessInstanceId: "runner-process-lookup",
+    state: "observed",
+    observedAt: 1_700_000_000_001,
+    instances: [{ processInstanceId: "runner-process-lookup", kind: "runner", closeObservedAt: 1_700_000_000_001, exitCode: 0, signal: null }],
+  };
+  subject.events.emit("subagent:process-terminal", { runId: "lifecycle-run", ...processTerminal });
+  await subject.events.settled();
+
+  const found = await subject.broker.dispatch(request({ callerRunId: "caller-a", callerToken: subject.a.callerToken, method: "spawn.lookup", params: { spawnKey: "dispatch-terminal-lookup" } }), {});
+  assert.deepEqual(found.data, {
+    state: "spawned",
+    binding: { runId: "lifecycle-run", asyncDir: "/async/lifecycle" },
+    processTerminal,
+  });
+});
+
 test("a cleaned retry does not reuse old started evidence for a new process terminal", async (t) => {
   const subject = await cleanedLifecycleBroker(t);
   subject.events.emit("subagent:process-terminal", {
