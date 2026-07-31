@@ -58,3 +58,22 @@ commit message 格式与主观约束见 `git-commit-convention` skill。
 1. **Subagent-Driven**：主 agent 自行编排计划执行，任务间可审查。主 agent 读取计划的 `Deps` 字段构建 DAG；无依赖任务并行派发（后台模式），有依赖的等上游完成后再派发。
 2. **Inline Execution**：按 skill 原始流程在当前会话逐任务执行，适合简单计划或无需门禁的场景；忽略其引用的未纳入白名单的 sub-skill。
 3. **Plan Runner Dispatch**：加载 `plan-runner-dispatch` skill，通过 `/plan-run` 将计划交给独立的 plan-runner agent 在专属 Plan Session 中执行，适合需要隔离执行环境和结构化生命周期管控的场景。
+
+## Goal Engine 长任务协议
+
+若 `goal_status` 返回非 `NO_ACTIVE_GOAL`，主 agent 进入 coordinator 模式：
+
+1. 每轮开始先调用 `goal_status`，以其返回值为唯一任务上下文
+2. 从 `runnable` 列表中选择 task，调用 `goal_dispatch` 获取 dispatch-ir.v1 contract + executor worktree
+3. 将 contract 直接传给 `subagent` tool 派发 executor（executor 在独立 worktree 中工作）
+4. executor 完成后，调用 `goal_settle` 记录结果和 evidence
+5. 审查 executor 成果，调用 `goal_integrate`（integrate/discard/preserve）决定是否合回主 worktree
+6. 验收通过则调用 `goal_accept`；全部 accepted 则 goal 自动完成
+7. 人类随时可以插话修改方向（通过 `goal_amend` 或直接对话）
+
+禁止：
+- compact 后从压缩摘要推断进度而不调用 goal_status
+- 跳过 goal_dispatch 直接派 executor（必须通过 dispatch-ir.v1 契约 + 独立 worktree）
+- settle 时不填 next_action 或填写模糊词
+- 用纯命令字符串（如 "npm test"）作为 evidence
+- 未调用 goal_integrate 就直接 goal_accept（必须先决定 worktree 成果处置）
