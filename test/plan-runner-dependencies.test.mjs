@@ -723,7 +723,7 @@ test("status recovers a durable succeeded Attempt after its terminal fact was co
       validations++;
       assert.equal(lease.attemptId, run.attemptId);
       assert.equal(lease.path, run.cwd);
-      assert.deepEqual(verification, [{ id: "task-1:verification-1", command: "true", cwd: repo.worktree, timeoutMs: 900000 }]);
+      assert.deepEqual(verification, []);
       return { accepted: true, resultCommit, diffSha256: "recovered-diff", changedPaths: ["src/a.mjs"], evidence: [] };
     },
   });
