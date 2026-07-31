@@ -2271,7 +2271,11 @@ test("Root close fences an in-flight Executor grant from owner promotion and Sup
 
 test("started grant failure revokes Supervisor ingress eligibility until a legal retry", async (t) => {
   const events = startedEventBus();
+  const retryGrantGate = deferred();
   let failExecutorGrant = true;
+  let deferRetryGrant = false;
+  let retryGrantEntered = false;
+  let retryGrant;
   const broker = new RootBrokerServer({
     rootSessionId,
     upstream: fakeUpstream(),
@@ -2279,11 +2283,19 @@ test("started grant failure revokes Supervisor ingress eligibility until a legal
     captureProcessBirthIdentity: async () => "started-grant-failure-birth",
     writeGrant: async (grant) => {
       if (grant.role === "executor" && failExecutorGrant) throw new Error("controlled started Executor grant failure");
+      if (grant.role === "executor" && deferRetryGrant) {
+        retryGrantEntered = true;
+        await retryGrantGate.promise;
+      }
       return await writeBrokerGrant(grant);
     },
   });
   await broker.start();
-  t.after(() => closeOwnedRuns(broker, events));
+  t.after(async () => {
+    retryGrantGate.release();
+    await Promise.allSettled([retryGrant]);
+    await closeOwnedRuns(broker, events);
+  });
   events.emit("subagent:async-started", { id: "started-grant-failure-executor", pid: 9_901, sessionId: rootSessionId, agent: "executor", cwd: "/repo", asyncDir: "/async/started-grant-failure" });
   await events.settled();
   await waitForCondition(
@@ -2306,9 +2318,14 @@ test("started grant failure revokes Supervisor ingress eligibility until a legal
   });
 
   failExecutorGrant = false;
-  await broker.ensureExecutorOwner("started-grant-failure-executor");
-  const retryContext = { nativeChannel: "accepted-after-retry" };
-  const retried = await broker.routeSupervisorRequest(supervisorIngress({ id: "started-grant-retry-request", runId: "started-grant-failure-executor", content: "accepted after retry" }), retryContext);
+  deferRetryGrant = true;
+  retryGrant = broker.ensureExecutorOwner("started-grant-failure-executor");
+  await waitForCondition(
+    () => retryGrantEntered && broker.principals.get("started-grant-failure-executor")?.role === "executor",
+    "retry Executor grant before settlement",
+  );
+  const retryContext = { nativeChannel: "accepted-during-retry" };
+  const retried = await broker.routeSupervisorRequest(supervisorIngress({ id: "started-grant-retry-request", runId: "started-grant-failure-executor", content: "accepted during retry" }), retryContext);
   assert.deepEqual({
     result: retried,
     queued: broker.pendingSupervisorIngress.get("started-grant-failure-executor")?.length,
@@ -2320,6 +2337,8 @@ test("started grant failure revokes Supervisor ingress eligibility until a legal
     reserved: true,
     context: retryContext,
   });
+  retryGrantGate.release();
+  await retryGrant;
 });
 
 test("Root close emits no ordinary lifecycle push while accepting an official terminal", async (t) => {
