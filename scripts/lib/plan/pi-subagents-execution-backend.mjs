@@ -7,6 +7,7 @@ import {
   normalizeExecutionTarget,
 } from "./execution-backend.mjs";
 import { readRuntimeArtifacts } from "./runtime-artifacts.mjs";
+import { parseProcessTerminal } from "../subagent-dispatch/root-broker-protocol.ts";
 
 const STARTED_EVENT = "subagent:async-started";
 const COMPLETED_EVENT = "subagent:async-complete";
@@ -63,32 +64,13 @@ function invalidRecoveredLookup(message) {
 }
 
 function parseRecoveredTerminal(value) {
-  if (!plainObject(value)) invalidRecoveredLookup("Recovered terminal proof must be a plain object");
-  const allowed = new Set(["version", "runnerProcessInstanceId", "state", "childIndex", "resumeDisposition", "observedAt", "instances", "canonicalSession", "reason", "diagnostic"]);
-  if (Object.keys(value).some((key) => !allowed.has(key)) || value.version !== 1 || !nonempty(value.runnerProcessInstanceId) || value.state !== "observed"
-    || typeof value.observedAt !== "number" || !Number.isFinite(value.observedAt) || !Array.isArray(value.instances)
-    || (value.childIndex !== undefined && (!Number.isSafeInteger(value.childIndex) || value.childIndex < 0))
-    || (value.resumeDisposition !== undefined && !["resumable", "non-resumable", "unavailable"].includes(value.resumeDisposition))
-    || value.reason !== undefined || value.diagnostic !== undefined) invalidRecoveredLookup("Recovered terminal proof is invalid");
-  let matchingRunner = false;
-  for (const instance of value.instances) {
-    if (!plainObject(instance) || !["runner", "pi-writer"].includes(instance.kind)
-      || !nonempty(instance.processInstanceId) || typeof instance.closeObservedAt !== "number" || !Number.isFinite(instance.closeObservedAt)
-      || (instance.exitCode !== null && !Number.isInteger(instance.exitCode)) || (instance.signal !== null && typeof instance.signal !== "string")) invalidRecoveredLookup("Recovered terminal proof is invalid");
-    const keys = instance.kind === "runner" ? ["processInstanceId", "kind", "closeObservedAt", "exitCode", "signal"] : ["processInstanceId", "kind", "attempt", "closeObservedAt", "exitCode", "signal"];
-    if (Object.keys(instance).length !== keys.length || keys.some((key) => !Object.hasOwn(instance, key))
-      || (instance.kind === "pi-writer" && (!Number.isSafeInteger(instance.attempt) || instance.attempt < 0))) invalidRecoveredLookup("Recovered terminal proof is invalid");
-    if (instance.kind === "runner" && instance.processInstanceId === value.runnerProcessInstanceId) matchingRunner = true;
+  try {
+    const terminal = parseProcessTerminal(value);
+    if (terminal.state !== "observed") invalidRecoveredLookup("Recovered terminal proof is invalid");
+    return terminal;
+  } catch {
+    invalidRecoveredLookup("Recovered terminal proof is invalid");
   }
-  if (!matchingRunner) invalidRecoveredLookup("Recovered terminal proof is invalid");
-  if (value.canonicalSession !== undefined) {
-    const session = value.canonicalSession;
-    const keys = ["canonicalSessionId", "leaseDisposition", "freeAtObservation", "canonicalSessionLeaseReleased"];
-    if (!plainObject(session) || Object.keys(session).some((key) => !keys.includes(key)) || !nonempty(session.canonicalSessionId)
-      || !["released", "not-held"].includes(session.leaseDisposition) || session.freeAtObservation !== true
-      || (session.canonicalSessionLeaseReleased !== undefined && session.canonicalSessionLeaseReleased !== true)) invalidRecoveredLookup("Recovered terminal proof is invalid");
-  }
-  return value;
 }
 
 function validateRecoveredLookup(reply, binding) {
