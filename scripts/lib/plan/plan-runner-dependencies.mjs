@@ -290,6 +290,38 @@ export function createPlanRunnerDependencies({
     }
     if (errors.length) throw new AggregateError(errors, "Superseded Attempt recovery failed");
   }
+
+  function executionRecoveryOperation(attemptId, attempt) {
+    if (attempt.status === "dispatch-requested") {
+      if (typeof executionBackend?.recoverDispatch !== "function") throw new Error("Execution dispatch recovery capability is unavailable.");
+      const request = { dispatchId: attempt.dispatchId, attemptId, agent: attempt.tool?.agent, task: attempt.tool?.task, cwd: attempt.tool?.cwd, output: attempt.tool?.output, timeoutMs: attempt.tool?.timeoutMs };
+      if (Object.values(request).some((value) => value === undefined || value === null)) throw new Error("Persisted execution dispatch recovery data is incomplete.");
+      return () => executionBackend.recoverDispatch(request);
+    }
+    if (!["active", "waiting-attention"].includes(attempt.status)) return null;
+    if (typeof executionBackend?.recoverBinding !== "function") throw new Error("Execution binding recovery capability is unavailable.");
+    const binding = { dispatchId: attempt.dispatchId, attemptId, runId: attempt.runId, asyncDir: attempt.asyncDir, cwd: attempt.tool?.cwd, output: attempt.tool?.output, sessionId: attempt.sessionFile, sessionFile: attempt.sessionFile };
+    if (Object.values(binding).some((value) => typeof value !== "string" || value.length === 0)) throw new Error("Persisted execution binding recovery data is incomplete.");
+    return () => executionBackend.recoverBinding(binding);
+  }
+
+  async function recoverExecutionState({ ctx } = {}) {
+    let projection;
+    try {
+      projection = currentProjection(ctx);
+    } catch (error) {
+      if (error instanceof Error && error.message === "invalid sessionFile") {
+        throw new Error("Persisted execution binding recovery data is incomplete.");
+      }
+      throw error;
+    }
+    const operations = [...projection.attempts]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([attemptId, attempt]) => executionRecoveryOperation(attemptId, attempt))
+      .filter(Boolean);
+    for (const recover of operations) await recover();
+  }
+
   async function approvedPlan(current) {
     if (current.revision) {
       const revision = await revisionStore.readRevision(current.planId, current.revision.number);
@@ -494,6 +526,7 @@ export function createPlanRunnerDependencies({
     appendPlanEvent: appendEvent,
     readCurrentRevision,
     amendPlan: (input, { ctx }) => createPlanAmendmentService({ revisionStore, eventWriter: writer, currentProjection: () => currentProjection(ctx), supersedeAttempt: (input) => supersedeAttempt(input, { ctx }) }).amend(input),
+    recoverExecutionState,
     recoverSupersededAttempts,
     writeCurrentRevision: (revision) => revisionStore.writeCurrent(revision),
     async validateBinding(input, { ctx }) {

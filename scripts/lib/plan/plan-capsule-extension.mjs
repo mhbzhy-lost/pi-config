@@ -159,6 +159,7 @@ export function createPlanCapsuleExtension(pi, options = {}) {
   pi.on("before_agent_start", async (_event, ctx) => {
     const projection = await restore(ctx);
     await assertRuntimeCapabilities();
+    if (typeof options.prepareExecutionLifecycle === "function") await options.prepareExecutionLifecycle({ projection, ctx });
     if (projection.planId && typeof options.recoverSupersededAttempts === "function") await options.recoverSupersededAttempts({ ctx });
   });
   pi.on("session_shutdown", async () => {
