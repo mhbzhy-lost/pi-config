@@ -95,12 +95,7 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
   assert.equal(runner.extensions, undefined);
   assert.equal(reviewer.extensions, undefined);
   assert.equal(runner.subagentOnlyExtensions, ".pi-subagents/plan-runner-entry.mjs");
-  const runnerTools = new Set(runner.tools.split(","));
-  for (const tool of ["subagent", "subagent_wait", "subagent_supervisor", "plan_executor_supervisor"]) {
-    assert.equal(runnerTools.has(tool), false);
-  }
-  assert.equal(runnerTools.has("plan_read_revision"), true);
-  assert.equal(runnerTools.has("plan_amend"), true);
+  assert.deepEqual(runner.tools.split(","), ["plan_open", "read", "grep"]);
   assert.equal(reviewer.tools.includes("subagent"), false);
   assert.equal(reviewer.tools.includes("write"), false);
   await access(join(repoRoot, "pi", "child-extensions", "plan-capsule.ts"));
