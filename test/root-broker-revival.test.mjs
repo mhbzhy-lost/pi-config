@@ -4,7 +4,7 @@ import test from "node:test";
 import { BROKER_METHODS, parseBrokerPush, parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
-async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDiagnostic, resume, spawn } = {}) {
+async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDiagnostic, resume, spawn, writeGrant } = {}) {
   const callerToken = "a".repeat(64);
   const revivedCallerToken = "b".repeat(64);
   const executorToken = "c".repeat(64);
@@ -38,6 +38,7 @@ async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDi
     upstream,
     writeGrant: async (grant) => {
       grants.push(grant);
+      if (writeGrant) return await writeGrant(grant);
       return `/tmp/root-broker-revival-grant-${grant.runId}`;
     },
     randomToken: () => tokens.shift(),
@@ -553,6 +554,29 @@ test("grants the revived actual plan-runner while retaining its stable logical a
   assert.equal(server.callerAliases.get("plan-runner-2"), "plan-runner-1");
   assert.deepEqual(server.principals.get("plan-runner-2"), { role: "plan-runner", callerToken: "b".repeat(64) });
   assert.deepEqual([...server.callers.keys()], ["plan-runner-1"]);
+});
+
+test("publishes a revived caller wake atomically with its grant and rolls it back on failure", async () => {
+  const callerWake = { wakeId: "attention-reply-grant-1", reason: "attention-reply" };
+  let observedWake;
+  let server;
+  ({ server } = await createRevivalFixture({
+    writeGrant: async (grant) => {
+      if (grant.runId === "plan-runner-2") {
+        observedWake = server.callerWakes.get(grant.runId);
+        throw new Error("revived grant unavailable");
+      }
+      return `/tmp/root-broker-revival-grant-${grant.runId}`;
+    },
+  }));
+
+  await assert.rejects(
+    server.grantRevivedCaller("plan-runner-1", "plan-runner-2", callerWake),
+    /revived grant unavailable/,
+  );
+
+  assert.equal(observedWake, callerWake);
+  assert.equal(server.callerWakes.has("plan-runner-2"), false);
 });
 
 test("closes and removes the old actual subscription when its alias activates", async () => {
