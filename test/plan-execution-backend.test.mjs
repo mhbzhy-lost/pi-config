@@ -439,7 +439,7 @@ test("recoverBinding publishes one completed fact from an exact Root observed te
   backend.dispose();
 });
 
-test("recoverBinding never trusts an invalid or absent Root terminal proof", async (t) => {
+test("recoverBinding distinguishes an absent Root terminal proof from invalid proofs", async (t) => {
   const binding = {
     dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1", runId: "run-1", asyncDir: "/async/run-1",
     cwd: "/attempts/attempt-1", output: "/results/attempt-1.json", sessionId: "/sessions/plan-session-1.jsonl", sessionFile: "/sessions/plan-session-1.jsonl",
@@ -451,13 +451,47 @@ test("recoverBinding never trusts an invalid or absent Root terminal proof", asy
     observedAt: 1_700_000_000_003,
     instances: [{ processInstanceId: "runner-recovered-negative", kind: "runner", closeObservedAt: 1_700_000_000_003, exitCode: 0, signal: null }],
   };
+  await t.test("no proof recovers the durable binding and later publishes lifecycle completion", async () => {
+    const events = createEvents();
+    const facts = [];
+    const calls = [];
+    const backend = createPiSubagentsExecutionBackend({
+      events,
+      emitFact: (fact) => facts.push(fact),
+      now: () => "recovered-without-proof",
+      readArtifacts: async () => { throw new Error("recoverBinding must not poll artifacts"); },
+      rpc: {
+        async ping() { return capabilities({ methods: ["ping", "spawn", "spawn.lookup", "status", "interrupt", "stop"] }); },
+        async lookupSpawn(params) { calls.push(["spawn.lookup", params]); return { state: "spawned", binding: { runId: "run-1", asyncDir: "/async/run-1" } }; },
+        async spawn() { throw new Error("recoverBinding must not spawn"); },
+        async status() { throw new Error("recoverBinding must not status"); },
+        async stop() { throw new Error("recoverBinding must not stop"); },
+        dispose() {},
+      },
+    });
+    await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
+    assert.deepEqual(await backend.recoverBinding(binding), binding);
+    assert.deepEqual(facts, []);
+    assert.deepEqual(calls, [["spawn.lookup", { spawnKey: "attempt-1.dispatch.1" }]]);
+    events.emit("subagent:async-complete", {
+      runId: "run-1", asyncDir: "/async/run-1", cwd: "/attempts/attempt-1",
+      sessionId: "/sessions/plan-session-1.jsonl", state: "complete",
+    });
+    assert.deepEqual(facts, [{
+      type: "execution.completed", dispatchId: "attempt-1.dispatch.1", attemptId: "attempt-1",
+      runId: "run-1", asyncDir: "/async/run-1", cwd: "/attempts/attempt-1",
+      state: "complete", observedAt: "recovered-without-proof",
+    }]);
+    backend.dispose();
+  });
+
   const cases = [
     ["unknown proof field", { state: "spawned", binding: { runId: "run-1", asyncDir: "/async/run-1" }, processTerminal: { ...observedProof, extra: true } }],
     ["lookup binding identity mismatch", { state: "spawned", binding: { runId: "other-run", asyncDir: "/async/run-1" }, processTerminal: observedProof }],
     ["non-observed proof", { state: "spawned", binding: { runId: "run-1", asyncDir: "/async/run-1" }, processTerminal: { version: 1, runnerProcessInstanceId: "runner-pending", state: "pending" } }],
-    ["no observed proof", { state: "spawned", binding: { runId: "run-1", asyncDir: "/async/run-1" } }],
   ];
-  for (const [name, lookupReply] of cases) await t.test(name, async () => {
+  for (const [name, initialLookupReply] of cases) await t.test(name, async () => {
+    let lookupReply = initialLookupReply;
     const events = createEvents();
     const facts = [];
     const calls = [];
@@ -468,13 +502,23 @@ test("recoverBinding never trusts an invalid or absent Root terminal proof", asy
       rpc: {
         async ping() { return capabilities({ methods: ["ping", "spawn", "spawn.lookup", "status", "interrupt", "stop"] }); },
         async lookupSpawn(params) { calls.push(["spawn.lookup", params]); return lookupReply; },
-        async spawn() { calls.push(["spawn"]); }, async status() { calls.push(["status"]); }, async stop() { calls.push(["stop"]); }, dispose() {},
+        async spawn() { throw new Error("recoverBinding must not spawn"); }, async status() { throw new Error("recoverBinding must not status"); }, async stop() { throw new Error("recoverBinding must not stop"); }, dispose() {},
       },
     });
     await backend.assertCapabilities({ rpcVersion: 1, methods: ["ping", "spawn", "status", "interrupt", "stop"] });
-    await backend.recoverBinding(binding).catch(() => undefined);
+    await assert.rejects(backend.recoverBinding(binding), (error) => error.code === "EXECUTION_BINDING_INVALID");
     assert.deepEqual(facts, []);
-    assert.deepEqual(calls, [["spawn.lookup", { spawnKey: "attempt-1.dispatch.1" }]]);
+    if (name === "unknown proof field") {
+      lookupReply = { state: "spawned", binding: { runId: "run-1", asyncDir: "/async/run-1" } };
+      assert.deepEqual(await backend.recoverBinding(binding), binding);
+      assert.deepEqual(facts, []);
+      assert.deepEqual(calls, [
+        ["spawn.lookup", { spawnKey: "attempt-1.dispatch.1" }],
+        ["spawn.lookup", { spawnKey: "attempt-1.dispatch.1" }],
+      ]);
+    } else {
+      assert.deepEqual(calls, [["spawn.lookup", { spawnKey: "attempt-1.dispatch.1" }]]);
+    }
     backend.dispose();
   });
 });
