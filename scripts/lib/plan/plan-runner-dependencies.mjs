@@ -16,6 +16,7 @@ import { createTaskCommandRegistry, resolveTaskVerification, runPlanGates } from
 import { createPlanControl } from "./plan-control.mjs";
 import { createPlanRevisionStore } from "./plan-revision-store.mjs";
 import { assertCurrentRevisionIdentity, createPlanAmendmentService } from "./plan-amendment.mjs";
+import { normalizeExecutionSpawn } from "./execution-backend.mjs";
 
 const execFile = promisify(execFileCallback);
 const TERMINAL = new Set(["validated", "blocked", "cancelled", "interrupted"]);
@@ -296,7 +297,8 @@ export function createPlanRunnerDependencies({
       if (typeof executionBackend?.recoverDispatch !== "function") throw new Error("Execution dispatch recovery capability is unavailable.");
       const request = { dispatchId: attempt.dispatchId, attemptId, agent: attempt.tool?.agent, task: attempt.tool?.task, cwd: attempt.tool?.cwd, output: attempt.tool?.output, timeoutMs: attempt.tool?.timeoutMs };
       if (Object.values(request).some((value) => value === undefined || value === null)) throw new Error("Persisted execution dispatch recovery data is incomplete.");
-      return () => executionBackend.recoverDispatch(request);
+      const normalizedRequest = normalizeExecutionSpawn(request);
+      return () => executionBackend.recoverDispatch(normalizedRequest);
     }
     if (!["active", "waiting-attention"].includes(attempt.status)) return null;
     if (typeof executionBackend?.recoverBinding !== "function") throw new Error("Execution binding recovery capability is unavailable.");
