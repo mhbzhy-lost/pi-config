@@ -1,24 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import path from "node:path";
 
 import { BROKER_METHODS, parseBrokerPush, parseBrokerRequest } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
-async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDiagnostic, resume, revivalRetryBaseMs, revivalRetryMaxMs, spawn, writeGrant } = {}) {
+async function createRevivalFixture({ preparePlanRunnerRecovery, publishRevivedStarted = true, recordRevivalDiagnostic, resume, revivalRetryBaseMs, revivalRetryMaxMs, spawn, terminalTimeoutMs, writeGrant } = {}) {
   const callerToken = "a".repeat(64);
   const revivedCallerToken = "b".repeat(64);
   const executorToken = "c".repeat(64);
   const tokens = [callerToken, revivedCallerToken, executorToken];
   const grants = [];
   const resumeCalls = [];
+  let server;
+  let revivedPid = 201;
   const upstream = {
     ...(preparePlanRunnerRecovery ? {
       preparePlanRunnerRecovery: async (params) => await preparePlanRunnerRecovery(params),
     } : {}),
     resume: async (params) => {
       resumeCalls.push(params);
-      if (resume) return await resume(params);
-      return {
+      const result = resume ? await resume(params) : {
         text: "Revived",
         details: {
           mode: "single",
@@ -27,13 +29,30 @@ async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDi
           asyncDir: "/async/plan-runner-2",
         },
       };
+      const revivedRunId = result?.details?.asyncId;
+      const revivedAsyncDir = result?.details?.asyncDir;
+      if (publishRevivedStarted
+        && typeof revivedRunId === "string" && revivedRunId.length > 0
+        && typeof revivedAsyncDir === "string" && path.isAbsolute(revivedAsyncDir)) {
+        void (async () => {
+          await new Promise((resolve) => setImmediate(resolve));
+          await server.observeStarted({
+            runId: revivedRunId,
+            agent: "plan-runner",
+            asyncDir: revivedAsyncDir,
+            sessionId: "root-session-1",
+            pid: revivedPid++,
+          });
+        })();
+      }
+      return result;
     },
     spawn: async (params) => {
       if (spawn) return await spawn(params);
       return { runId: "executor-1", asyncDir: "/async/executor-1" };
     },
   };
-  const server = new RootBrokerServer({
+  server = new RootBrokerServer({
     rootSessionId: "root-session-1",
     upstream,
     writeGrant: async (grant) => {
@@ -45,6 +64,7 @@ async function createRevivalFixture({ preparePlanRunnerRecovery, recordRevivalDi
     recordRevivalDiagnostic,
     revivalRetryBaseMs,
     revivalRetryMaxMs,
+    terminalTimeoutMs,
   });
   await server.grantCaller({
     callerRunId: "plan-runner-1",
@@ -148,13 +168,15 @@ function queuedLifecyclePush({ dispatchId, runId }) {
   });
 }
 
-async function createLiveLifecycleFixture({ recordRevivalDiagnostic, resume, revivalRetryBaseMs, revivalRetryMaxMs, writeGrant } = {}) {
+async function createLiveLifecycleFixture({ publishRevivedStarted, recordRevivalDiagnostic, resume, revivalRetryBaseMs, revivalRetryMaxMs, terminalTimeoutMs, writeGrant } = {}) {
   let executorNumber = 0;
   const fixture = await createRevivalFixture({
+    publishRevivedStarted,
     recordRevivalDiagnostic,
     resume,
     revivalRetryBaseMs,
     revivalRetryMaxMs,
+    terminalTimeoutMs,
     writeGrant,
     spawn: async () => {
       executorNumber += 1;
@@ -1178,4 +1200,48 @@ test("live lifecycle retries transient revived caller grant failure without a se
       .map(({ runId }) => runId),
     ["plan-runner-2", "plan-runner-2"],
   );
+});
+
+test("Root close retains a revived Plan Runner until started ownership", async () => {
+  const { ownedRun, proof, resumeCalls, server, forwardCompletion } = await createLiveLifecycleFixture({
+    publishRevivedStarted: false,
+    terminalTimeoutMs: 20,
+  });
+
+  await forwardCompletion("live-close-before-revived-start-1");
+  server.acceptTerminalProof(ownedRun, proof);
+  await waitFor(() => resumeCalls.length === 1, 100, "expected one revival resume after the live completion and source proof");
+
+  await assert.rejects(
+    server.closeRootSession(),
+    /startup barrier deadline exceeded/i,
+  );
+  assert.equal(server.teardown.released, false);
+
+  await server.observeStarted({
+    runId: "plan-runner-2",
+    agent: "plan-runner",
+    asyncDir: "/async/plan-runner-2",
+    sessionId: "root-session-1",
+    pid: 202,
+  });
+  const revivedRun = server.ownedRuns.get("plan-runner-2");
+  assert.ok(revivedRun, "delayed started observation must establish revived ownership");
+  server.acceptTerminalProof(revivedRun, {
+    runId: "plan-runner-2",
+    version: 1,
+    runnerProcessInstanceId: "plan-runner-2-instance",
+    state: "observed",
+    observedAt: Date.now(),
+    instances: [{
+      processInstanceId: "plan-runner-2-instance",
+      kind: "runner",
+      closeObservedAt: Date.now(),
+      exitCode: 0,
+      signal: null,
+    }],
+  });
+
+  await server.closeRootSession();
+  assert.equal(server.teardown.released, true);
 });
