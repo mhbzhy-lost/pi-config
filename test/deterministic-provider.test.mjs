@@ -17,9 +17,9 @@ try {
   state = await import("./fixtures/deterministic-provider-state.mjs");
 } catch {}
 
-function decide(messages, toolNames = []) {
+function decide(messages, toolNames = [], options = {}) {
   assert.equal(typeof state.decideDeterministicTurn, "function");
-  return state.decideDeterministicTurn({ messages, toolNames });
+  return state.decideDeterministicTurn({ messages, toolNames, ...options });
 }
 
 function user(text) {
@@ -148,6 +148,72 @@ test("Root Main stops launching after a failed plan_run", () => {
     rootMainPrompt(),
     { ...planRunResult(rootMainPlanPaths[0]), isError: true },
   ], rootMainTools), { text: "PLAN_ROOT_LAUNCH_FAILED" });
+});
+
+test("flat Attention mode requires supervisor approval before typed Executor writes", () => {
+  const tools = ["contact_supervisor", "bash"];
+  for (const writePath of ["README.md", "worker.txt"]) {
+    const prompt = typedExecutorPrompt(writePath);
+    const executorRunId = `executor-run-flat-attention-${writePath.replace(/[^A-Za-z0-9]/g, "-")}`;
+    const taskId = `deterministic-${writePath.replace(/[^A-Za-z0-9]/g, "-")}`;
+    const options = { attentionMode: true, executorRunId };
+    const command = state.deterministicExecutorCommand(prompt.content[0].text);
+    const marker = `PI_PLAN_FLAT_ATTENTION ${JSON.stringify({
+      schemaVersion: "pi-plan-flat-attention-marker.v1",
+      executorRunId,
+      taskId,
+      writePath,
+    })}`;
+
+    assert.deepEqual(decide([prompt], tools, options), {
+      tool: { name: "contact_supervisor", arguments: { reason: "need_decision", message: marker } },
+    });
+    assert.deepEqual(decide([
+      prompt,
+      toolResult("contact_supervisor", "APPROVED"),
+    ], tools, options), {
+      tool: { name: "bash", arguments: { command } },
+    });
+    assert.deepEqual(decide([
+      prompt,
+      toolResult("contact_supervisor", "APPROVED"),
+      toolResult("bash", "committed"),
+    ], tools, options), { text: "PLAN_EXECUTOR_DECISION_DONE" });
+  }
+});
+
+test("Root Main submits explicit interleaved Attention decisions", () => {
+  const requestList = [
+    { planId: "plan-a", requestId: "request-a-1", expectedProjectionVersion: 11, message: "Approve A1" },
+    { planId: "plan-a", requestId: "request-a-2", expectedProjectionVersion: 12, message: "Approve A2" },
+    { planId: "plan-b", requestId: "request-b-1", expectedProjectionVersion: 21, message: "Approve B1" },
+    { planId: "plan-b", requestId: "request-b-2", expectedProjectionVersion: 22, message: "Approve B2" },
+  ];
+  const replies = [requestList[3], requestList[1], requestList[2], requestList[0]]
+    .map(({ planId, requestId, expectedProjectionVersion, message }) => ({
+      planId, requestId, expectedProjectionVersion, message,
+    }));
+  const staleDecision = user(`PI_PLAN_FLAT_ATTENTION_REPLIES\n${JSON.stringify({ replies: [requestList[0]] })}`);
+  const decision = user(`PI_PLAN_FLAT_ATTENTION_REPLIES\n${JSON.stringify({ replies })}`);
+  const messages = [
+    rootMainPrompt(),
+    planRunResult(rootMainPlanPaths[0]),
+    planRunResult(rootMainPlanPaths[1]),
+    staleDecision,
+    toolResult("plan_attention_reply", "replied", requestList[0]),
+    decision,
+  ];
+
+  for (const reply of replies) {
+    assert.deepEqual(decide(messages, rootMainTools), {
+      tool: { name: "plan_attention_reply", arguments: reply },
+    });
+    messages.push(toolResult("plan_attention_reply", "replied", reply));
+  }
+  assert.deepEqual(decide(messages, rootMainTools), { text: "PLAN_ROOT_ATTENTION_REPLIES_DONE" });
+
+  const failed = [...messages.slice(0, -1), { ...messages.at(-1), isError: true }];
+  assert.deepEqual(decide(failed, rootMainTools), { text: "PLAN_ROOT_ATTENTION_REPLY_FAILED" });
 });
 
 test("provider stream waits for lifecycle instead of falling through to plan_verify", async () => {
