@@ -339,7 +339,11 @@ test("assigns distinct queued Attention wakes to consecutive revived generations
   assert.deepEqual(resumeCalls, []);
 
   server.acceptTerminalProof(ownedRun, proof);
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitFor(
+    () => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2",
+    100,
+    `expected revived active run plan-runner-2; received ${server.logicalCallers.get("plan-runner-1")?.activeRunId}`,
+  );
 
   assert.deepEqual(resumeCalls, expectedResume);
   assert.deepEqual(server.callerFollowUps.get("plan-runner-1"), [secondWake]);
@@ -359,7 +363,11 @@ test("assigns distinct queued Attention wakes to consecutive revived generations
   const generationTwoRun = { ...ownedRun, runId: "plan-runner-2", asyncDir: "/async/plan-runner-2", pid: 102, birthIdentity: "plan-runner-2-birth" };
   server.ownedRuns.set(generationTwoRun.runId, generationTwoRun);
   server.acceptTerminalProof(generationTwoRun, { ...proof, runId: "plan-runner-2" });
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitFor(
+    () => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-3",
+    100,
+    `expected revived active run plan-runner-3; received ${server.logicalCallers.get("plan-runner-1")?.activeRunId}`,
+  );
 
   assert.deepEqual(resumeCalls, [...expectedResume, { id: "plan-runner-2", message: "A durable Root broker wake is pending." }]);
   const generationThreePing = await server.dispatch(parseBrokerRequest({
@@ -454,7 +462,11 @@ test("coalesces concurrent pending wakes for the same plan-runner revival", asyn
   assert.equal(server.revivePromises.size, 1);
 
   resolveResume(result);
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitFor(
+    () => server.revivePromises.size === 0,
+    100,
+    `expected revival single-flight to clear; received ${server.revivePromises.size} active revival(s)`,
+  );
 
   assert.equal(server.revivePromises.size, 0);
   assert.deepEqual(server.callerFollowUps.get(ownedRun.runId), []);
@@ -962,7 +974,11 @@ test("coalesces queued lifecycle pushes into one revival and flushes them FIFO a
   assert.equal(server.revivePromises.size, 1);
 
   resolveResume(revivedResult);
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitFor(
+    () => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2",
+    100,
+    `expected revived active run plan-runner-2; received ${server.logicalCallers.get("plan-runner-1")?.activeRunId}`,
+  );
   assert.deepEqual(server.callerPushQueues.get("plan-runner-1")?.map(({ push }) => push), [firstPush, secondPush]);
 
   const writes = [];
@@ -1099,17 +1115,15 @@ test("live lifecycle completion received during resume transfers debt to the rev
 
   await forwardCompletion("live-in-flight-2");
   resolveFirstResume(revivedResult);
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitFor(
+    () => server.logicalCallers.get("plan-runner-1")?.activeRunId === "plan-runner-2",
+    100,
+    `expected revived active run plan-runner-2; received ${server.logicalCallers.get("plan-runner-1")?.activeRunId}`,
+  );
   assert.deepEqual(resumeCalls, expectedResume, "stale old debt must not start a second resume before plan-runner-2 proof");
 
-  const revivedRun = {
-    ...ownedRun,
-    runId: "plan-runner-2",
-    asyncDir: "/async/plan-runner-2",
-    pid: 102,
-    birthIdentity: "plan-runner-2-birth",
-  };
-  server.ownedRuns.set(revivedRun.runId, revivedRun);
+  const revivedRun = server.ownedRuns.get("plan-runner-2");
+  assert.ok(revivedRun, "expected fixture to observe revived plan-runner-2 ownership");
   server.acceptTerminalProof(revivedRun, {
     ...proof,
     runId: "plan-runner-2",
@@ -1119,7 +1133,11 @@ test("live lifecycle completion received during resume transfers debt to the rev
       processInstanceId: "plan-runner-2-instance",
     }],
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await waitFor(
+    () => resumeCalls.length === 2,
+    100,
+    `expected two resume calls after plan-runner-2 proof; received ${resumeCalls.length}`,
+  );
 
   assert.deepEqual(resumeCalls, [
     ...expectedResume,
