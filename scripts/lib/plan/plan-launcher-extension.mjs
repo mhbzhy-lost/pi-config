@@ -5,6 +5,7 @@ import { createPlanRevisionStore } from "./plan-revision-store.mjs";
 import { createPlanWorkspace, rollbackPlanWorkspace } from "./workspace.mjs";
 import { createPlanControl } from "./plan-control.mjs";
 import { requireRootBroker } from "../subagent-dispatch/root-broker-registry.ts";
+import { materializeChildRuntimeEntry, removeChildRuntimeEntry } from "../subagent-dispatch/child-runtime-entry.ts";
 
 const HANDLE_TYPE = "pi-plan-launch-handle-v4";
 const HANDLE_PREFIX = "PI_PLAN_HANDLE=";
@@ -197,10 +198,11 @@ export function createPlanLauncherExtension(pi, options = {}) {
     }
     if (existing) throw new Error(`Plan already exists: ${planId}`);
     const broker = rootIdentity(); const baseCommit = options.readBaseCommit ? await options.readBaseCommit(originRoot) : await concreteBase(originRoot);
-    let lease; let binding;
+    let lease; let binding; let entryReceipt;
     try {
       lease = await (options.createWorkspace ?? createPlanWorkspace)({ originRoot, stateRoot, planId, baseCommit });
       const worktree = lease.workspacePath;
+      entryReceipt = await (options.materializePlanRunnerEntry ?? materializeChildRuntimeEntry)({ cwd: worktree, fileName: "plan-runner-entry.mjs", targetUrl: new URL("../../../pi/child-extensions/plan-runner.ts", import.meta.url) });
       const reply = await broker.upstream.spawn({ agent: "plan-runner", title: `Plan ${planId}`, task: bootstrapRevisionIdentity(prepared, { planId, baseCommit, worktree }), cwd: worktree, context: "fresh", async: true, clarify: false, artifacts: true, output: false, acceptance: { level: "none", reason: "Plan Runner generations persist progress through durable Plan events and Root lifecycle." }, timeoutMs: options.planRunnerTimeoutMs ?? DEFAULT_TIMEOUT_MS });
       binding = requireAsyncBinding(reply);
       await broker.grantCaller({ callerRunId: binding.runId, planId, cwd: worktree, originRoot, stateRoot, role: "plan-runner" });
@@ -213,6 +215,13 @@ export function createPlanLauncherExtension(pi, options = {}) {
           await stopIfBound(partial, broker);
         } catch (stopError) {
           throw new AggregateError([error, stopError], "Plan launch failed and cleanup failed", { cause: error });
+        }
+      }
+      if (entryReceipt) {
+        try {
+          await (options.removePlanRunnerEntry ?? removeChildRuntimeEntry)(entryReceipt);
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "Plan launch failed and cleanup failed", { cause: error });
         }
       }
       if (lease) {

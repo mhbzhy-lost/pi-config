@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -72,8 +72,54 @@ function broker(calls, overrides = {}) {
 }
 
 function options(root, calls, extra = {}) {
-  return { originRoot: root, stateRoot: root, rootBroker: broker(calls, extra), id: () => "plan-one", readBaseCommit: async () => "e".repeat(40), createWorkspace: async ({ planId }) => ({ planId, workspacePath: path.join(root, "var", "plan-worktrees", planId), baseCommit: "e".repeat(40) }), rollbackWorkspace: async () => calls.push(["rollback"]), revisionStore: { async prepareRevision() { return { revision: 1, manifestSha256: hashes.manifestSha256, manifest: { sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, irHash: hashes.irHash } }; } }, ...extra };
+  return { originRoot: root, stateRoot: root, rootBroker: broker(calls, extra), id: () => "plan-one", readBaseCommit: async () => "e".repeat(40), createWorkspace: async ({ planId }) => ({ planId, workspacePath: path.join(root, "var", "plan-worktrees", planId), baseCommit: "e".repeat(40) }), rollbackWorkspace: async () => calls.push(["rollback"]), materializePlanRunnerEntry: async () => ({ created: true }), removePlanRunnerEntry: async () => {}, revisionStore: { async prepareRevision() { return { revision: 1, manifestSha256: hashes.manifestSha256, manifest: { sourceBytesSha256: hashes.sourceBytesSha256, planHash: hashes.planHash, irHash: hashes.irHash } }; } }, ...extra };
 }
+
+test("materializes a trusted Plan Runner entry before spawn", async () => {
+  const { root, planPath } = await fixture(); const calls = [];
+  try {
+    const realBroker = broker(calls);
+    realBroker.upstream.spawn = async (input) => {
+      calls.push(["spawn", input]);
+      const entry = path.join(input.cwd, ".pi-subagents", "plan-runner-entry.mjs");
+      const target = new URL("../pi/child-extensions/plan-runner.ts", import.meta.url).href;
+      assert.equal((await lstat(entry)).isFile(), true);
+      assert.equal((await stat(path.dirname(entry))).mode & 0o777, 0o700);
+      assert.equal((await stat(entry)).mode & 0o777, 0o600);
+      assert.equal(await readFile(entry, "utf8"), `export { default } from ${JSON.stringify(target)};\n`);
+      return { details: { runId: "plan-runner-run-1", asyncDir: "/async/plan-runner-run-1" } };
+    };
+    const { commands } = setup(options(root, calls, {
+      rootBroker: realBroker,
+      createWorkspace: async ({ planId }) => { const workspacePath = path.join(root, "var", "plan-worktrees", planId); await mkdir(workspacePath, { recursive: true }); return { planId, workspacePath, baseCommit: "e".repeat(40) }; },
+      materializePlanRunnerEntry: undefined,
+      removePlanRunnerEntry: undefined,
+    }));
+    await commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+    assert.deepEqual(calls.map(([name]) => name), ["spawn", "grant"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("entry conflict does not spawn, preserves foreign bytes, and rolls back", async () => {
+  const { root, planPath } = await fixture(); const calls = []; const workspacePath = path.join(root, "var", "plan-worktrees", "plan-one");
+  try {
+    await mkdir(path.join(workspacePath, ".pi-subagents"), { recursive: true });
+    const entry = path.join(workspacePath, ".pi-subagents", "plan-runner-entry.mjs"); await writeFile(entry, "foreign\n", { mode: 0o600 });
+    const { commands } = setup(options(root, calls, { createWorkspace: async () => ({ planId: "plan-one", workspacePath, baseCommit: "e".repeat(40) }), materializePlanRunnerEntry: undefined, removePlanRunnerEntry: undefined }));
+    await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /conflict/);
+    assert.equal(await readFile(entry, "utf8"), "foreign\n"); assert.deepEqual(calls.map(([name]) => name), ["rollback"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("changed entry cleanup preserves workspace and reports both errors", async () => {
+  const { root, planPath } = await fixture(); const calls = []; const workspacePath = path.join(root, "var", "plan-worktrees", "plan-one");
+  try {
+    const realBroker = broker(calls); realBroker.upstream.spawn = async (input) => { calls.push(["spawn"]); await writeFile(path.join(input.cwd, ".pi-subagents", "plan-runner-entry.mjs"), "foreign\n"); throw new Error("spawn denied"); };
+    const { commands } = setup(options(root, calls, { rootBroker: realBroker, createWorkspace: async () => { await mkdir(workspacePath, { recursive: true }); return { planId: "plan-one", workspacePath, baseCommit: "e".repeat(40) }; }, materializePlanRunnerEntry: undefined, removePlanRunnerEntry: undefined }));
+    await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), (error) => error instanceof AggregateError && error.cause?.message === "spawn denied" && error.errors.map((item) => item.message).some((message) => /ownership changed/.test(message)));
+    assert.equal(await readFile(path.join(workspacePath, ".pi-subagents", "plan-runner-entry.mjs"), "utf8"), "foreign\n"); assert.deepEqual(calls.map(([name]) => name), ["spawn"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("plan-run launches a session-local Root Plan Runner and never persists a handle", async () => {
   const { root, planPath } = await fixture(); const calls = [];
@@ -111,12 +157,12 @@ test("Root B rejects management of Root A's Plan Runner without Root RPC", async
 
 test("incomplete spawn binding stops any bound run and rolls back", async () => {
   const { root, planPath } = await fixture(); const calls = [];
-  try { const { commands } = setup(options(root, calls, { spawnReply: { details: { runId: "run-1" } } })); await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /missing runId or asyncDir/); assert.deepEqual(calls.map(([name]) => name), ["spawn", "stop", "rollback"]); assert.deepEqual(calls[1][1], { runId: "run-1" }); } finally { await rm(root, { recursive: true, force: true }); }
+  try { const { commands } = setup(options(root, calls, { spawnReply: { details: { runId: "run-1" } }, materializePlanRunnerEntry: async () => { calls.push(["materialize"]); return { created: true }; }, removePlanRunnerEntry: async () => calls.push(["remove-entry"]) })); await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /missing runId or asyncDir/); assert.deepEqual(calls.map(([name]) => name), ["materialize", "spawn", "stop", "remove-entry", "rollback"]); assert.deepEqual(calls[2][1], { runId: "run-1" }); } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("grant failure stops the spawned runner and rolls back", async () => {
   const { root, planPath } = await fixture(); const calls = [];
-  try { const { commands } = setup(options(root, calls, { grantError: new Error("grant denied") })); await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /grant denied/); assert.deepEqual(calls.map(([name]) => name), ["spawn", "grant", "stop", "rollback"]); } finally { await rm(root, { recursive: true, force: true }); }
+  try { const { commands } = setup(options(root, calls, { grantError: new Error("grant denied"), materializePlanRunnerEntry: async () => { calls.push(["materialize"]); return { created: true }; }, removePlanRunnerEntry: async () => calls.push(["remove-entry"]) })); await assert.rejects(commands.get("plan-run").handler(planPath, { mode: "tui", hasUI: true, ui: { confirm: async () => true } }), /grant denied/); assert.deepEqual(calls.map(([name]) => name), ["materialize", "spawn", "grant", "stop", "remove-entry", "rollback"]); } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("plan-status uses the Broker logical status caller", async () => {
