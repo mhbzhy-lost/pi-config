@@ -203,6 +203,237 @@ test("goal.amended adds and removes tasks", () => {
   assert.deepEqual(p.tasks.get("t3").deps, ["t1"]);
 });
 
+test("v2 dispatch requires downstream dependencies accepted", () => {
+  const goalId = "dispatch-runnable-goal";
+  let p = applyEvent(
+    createProjection(),
+    v2Event(
+      "goal.created",
+      {
+        objective: "DAG gate test",
+        scope: [],
+        nonGoals: [],
+        dod: [],
+        tasks: ["t1", "t2"],
+        taskDefs: {
+          t1: { description: "task one", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
+          t2: { description: "task two", deps: ["t1"], writePaths: ["b.ts"], acceptance: { criteria: ["y"], commands: ["true"] }, workflow: "tdd" },
+        },
+      },
+      goalId,
+    ),
+  );
+
+  assert.throws(
+    () =>
+      applyEvent(
+        p,
+        v2Event(
+          "task.dispatched",
+          {
+            taskId: "t2",
+            contractHash: "dispatch-t2",
+            workspace: { attempt: 1, path: "/tmp/work-t2", branch: "task/t2", baseCommit: "abc" },
+          },
+          goalId,
+        ),
+      ),
+    /dependencies not accepted|not accepted|not runnable/i,
+  );
+});
+
+test("rejected dispatch keeps task and workspace state unchanged", () => {
+  const goalId = "dispatch-immutable-goal";
+  let p = applyEvent(
+    createProjection(),
+    v2Event(
+      "goal.created",
+      {
+        objective: "Immutable dispatch check",
+        scope: [],
+        nonGoals: [],
+        dod: [],
+        tasks: ["t1", "t2"],
+        taskDefs: {
+          t1: { description: "task one", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
+          t2: { description: "task two", deps: ["t1"], writePaths: ["b.ts"], acceptance: { criteria: ["y"], commands: ["true"] }, workflow: "tdd" },
+        },
+      },
+      goalId,
+    ),
+  );
+
+  const expectedVersion = p.version;
+  const expectedTasks = new Map(
+    [...p.tasks].map(([taskId, task]) => [
+      taskId,
+      {
+        status: task.status,
+        attempts: task.attempts,
+        deps: [...task.deps],
+        workspace: task.workspace ? { ...task.workspace } : null,
+      },
+    ]),
+  );
+
+  assert.throws(
+    () =>
+      applyEvent(
+        p,
+        v2Event(
+          "task.dispatched",
+          {
+            taskId: "t2",
+            contractHash: "dispatch-t2",
+            workspace: { attempt: 1, path: "/tmp/work-t2", branch: "task/t2", baseCommit: "abc" },
+          },
+          goalId,
+        ),
+      ),
+    /dependencies not accepted|not accepted|not runnable/i,
+  );
+
+  assert.equal(p.version, expectedVersion);
+  for (const [taskId, expected] of expectedTasks) {
+    const task = p.tasks.get(taskId);
+    assert.equal(task.status, expected.status);
+    assert.equal(task.attempts, expected.attempts);
+    assert.deepEqual(task.deps, expected.deps);
+    assert.deepEqual(task.workspace, expected.workspace);
+  }
+});
+
+test("amendment updateTasks with dependency cycle is rejected and projection unchanged", () => {
+  const goalId = "amend-cycle-goal";
+  let p = applyEvent(
+    createProjection(),
+    makeEvent(
+      "goal.created",
+      {
+        objective: "Amendment cycle test",
+        scope: [],
+        nonGoals: [],
+        dod: [],
+        tasks: ["t1", "t2"],
+        taskDefs: {
+          t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
+          t2: { description: "b", deps: [], writePaths: ["b.ts"], acceptance: { criteria: ["y"], commands: ["true"] }, workflow: "tdd" },
+        },
+      },
+      goalId,
+    ),
+  );
+
+  const expectedVersion = p.version;
+  const expectedTasks = new Map(
+    [...p.tasks].map(([taskId, task]) => [
+      taskId,
+      {
+        status: task.status,
+        attempts: task.attempts,
+        deps: [...task.deps],
+        workspace: task.workspace ? { ...task.workspace } : null,
+      },
+    ]),
+  );
+
+  assert.throws(
+    () =>
+      applyEvent(
+        p,
+        makeEvent(
+          "goal.amended",
+          {
+            reason: "Create an explicit dependency loop between t1 and t2 to validate cycle guard",
+            updateTasks: {
+              t1: { deps: ["t2"] },
+              t2: { deps: ["t1"] },
+            },
+          },
+          goalId,
+        ),
+      ),
+    /cycle/i,
+  );
+
+  assert.equal(p.version, expectedVersion);
+  for (const [taskId, expected] of expectedTasks) {
+    const task = p.tasks.get(taskId);
+    assert.equal(task.status, expected.status);
+    assert.equal(task.attempts, expected.attempts);
+    assert.deepEqual(task.deps, expected.deps);
+    assert.deepEqual(task.workspace, expected.workspace);
+  }
+});
+
+test("amendment unknown dependency is rejected and projection unchanged", () => {
+  const goalId = "amend-unknown-goal";
+  let p = applyEvent(
+    createProjection(),
+    makeEvent(
+      "goal.created",
+      {
+        objective: "Amendment unknown dependency test",
+        scope: [],
+        nonGoals: [],
+        dod: [],
+        tasks: ["t1", "t2"],
+        taskDefs: {
+          t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
+          t2: { description: "b", deps: [], writePaths: ["b.ts"], acceptance: { criteria: ["y"], commands: ["true"] }, workflow: "tdd" },
+        },
+      },
+      goalId,
+    ),
+  );
+
+  const expectedVersion = p.version;
+  const expectedTasks = new Map(
+    [...p.tasks].map(([taskId, task]) => [
+      taskId,
+      {
+        status: task.status,
+        attempts: task.attempts,
+        deps: [...task.deps],
+        workspace: task.workspace ? { ...task.workspace } : null,
+      },
+    ]),
+  );
+
+  assert.throws(
+    () =>
+      applyEvent(
+        p,
+        makeEvent(
+          "goal.amended",
+          {
+            reason: "Add task t3 depending on a missing task to guard unknown deps",
+            addTasks: {
+              t3: {
+                description: "new task",
+                deps: ["t-missing"],
+                writePaths: ["c.ts"],
+                acceptance: { criteria: ["z"], commands: ["true"] },
+                workflow: "tdd",
+              },
+            },
+          },
+          goalId,
+        ),
+      ),
+    /unknown dep/i,
+  );
+
+  assert.equal(p.version, expectedVersion);
+  for (const [taskId, expected] of expectedTasks) {
+    const task = p.tasks.get(taskId);
+    assert.equal(task.status, expected.status);
+    assert.equal(task.attempts, expected.attempts);
+    assert.deepEqual(task.deps, expected.deps);
+    assert.deepEqual(task.workspace, expected.workspace);
+  }
+});
+
 // --- Store tests ---
 
 function tmpRoot() {

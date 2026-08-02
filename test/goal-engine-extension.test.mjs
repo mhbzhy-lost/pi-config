@@ -135,6 +135,17 @@ function createGoalEngineWithAppendInjection(pi, options = {}) {
   return createGoalEngineExtension(pi, options);
 }
 
+function assertTaskMachineAction(task, expected) {
+  assert.deepEqual(task.allowedActions, expected.allowedActions);
+  const required = task.requiredNextAction;
+  assert.ok(required && typeof required === "object", "requiredNextAction must be an object");
+  assert.equal(required.tool, expected.requiredTool);
+  assert.deepEqual(required.params, expected.requiredParams);
+  assert.equal(typeof required.reason, "string");
+  assert.ok(required.reason.trim().length > 0, "requiredNextAction.reason must be a non-empty string");
+  assert.deepEqual(task.blockingReason, expected.blockingReason);
+}
+
 test("registers seven goal engine tools", () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);
@@ -200,6 +211,75 @@ test("goal_status returns full recovery context", async () => {
   assert.deepEqual(result.tasks.t1.writePaths, ["a.ts"]);
 });
 
+test("goal_status exposes machine action state across lifecycle (machine action)", async () => {
+  const cwd = tmpCwd();
+  initGitRepo(cwd);
+
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  const init = pi.tools.find((t) => t.name === "goal_init");
+  await invoke(pi, "goal_init", {
+    objective: "Machine action state goal",
+    tasks: [{ id: "t1", description: "Flow task for machine action assertions", deps: [], writePaths: ["src/machine.ts"], acceptance: { criteria: ["flow"], commands: ["true"] }, workflow: "tdd" }],
+  });
+
+  let snapshot = JSON.parse(await invoke(pi, "goal_status", {}));
+  assertTaskMachineAction(snapshot.tasks.t1, {
+    allowedActions: ["goal_dispatch"],
+    requiredTool: "goal_dispatch",
+    requiredParams: {},
+    blockingReason: null,
+  });
+
+  const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  assert.equal(dispatched.status, "dispatched");
+
+  snapshot = JSON.parse(await invoke(pi, "goal_status", {}));
+  assert.equal(snapshot.tasks.t1.status, "dispatched");
+  assert.equal(snapshot.tasks.t1.workspace.phase, "active");
+  assertTaskMachineAction(snapshot.tasks.t1, {
+    allowedActions: ["goal_settle"],
+    requiredTool: "goal_settle",
+    requiredParams: {},
+    blockingReason: null,
+  });
+
+  commitWorkspaceChange(dispatched.workspace, "src/machine.ts", "export const machine = true;\n", "feat: machine action state");
+  const settle = pi.tools.find((t) => t.name === "goal_settle");
+  await invoke(pi, "goal_settle", {
+    task_id: "t1",
+    outcome: "succeeded",
+    evidence: { type: "diff", ref: "git diff HEAD~1 -- src/machine.ts" },
+    evidence_source: "self_produced",
+    next_action: "Integrate t1, verify the resulting disposition, and prepare task acceptance.",
+  });
+
+  snapshot = JSON.parse(await invoke(pi, "goal_status", {}));
+  assert.equal(snapshot.tasks.t1.status, "succeeded");
+  assert.equal(snapshot.tasks.t1.workspace.phase, "active");
+  assertTaskMachineAction(snapshot.tasks.t1, {
+    allowedActions: ["goal_integrate"],
+    requiredTool: "goal_integrate",
+    requiredParams: { action: "integrate" },
+    blockingReason: null,
+  });
+
+  const integrated = JSON.parse(await invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }));
+  assert.equal(integrated.action, "integrated");
+
+  snapshot = JSON.parse(await invoke(pi, "goal_status", {}));
+  assert.equal(snapshot.tasks.t1.workspace.phase, "disposed");
+  assert.equal(snapshot.tasks.t1.workspace.disposition, "integrated");
+  assert.equal(snapshot.tasks.t1.workspace.released, true);
+  assertTaskMachineAction(snapshot.tasks.t1, {
+    allowedActions: ["goal_accept"],
+    requiredTool: "goal_accept",
+    requiredParams: {},
+    blockingReason: null,
+  });
+});
 test("goal_status returns NO_ACTIVE_GOAL when none", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
@@ -804,7 +884,7 @@ test("dependent pending task cannot be dispatched when dependency is not accepte
   );
 });
 
-test("event failure: applied append retry should skip duplicate Git integration and only complete disposal", async () => {
+test("action recovery: applied append retry should skip duplicate Git integration and only complete disposal", async () => {
   const cwd = tmpCwd();
   const objective = "Event failure applied append goal";
   const goalId = objectiveToGoalId(objective);
@@ -855,8 +935,21 @@ test("event failure: applied append retry should skip duplicate Git integration 
   assert.equal(taskAfterFailure.workspace.disposition, undefined);
   assert.equal(taskAfterFailure.workspace.released, undefined);
 
+  const statusFromFailureA = JSON.parse(await invoke(initPi, "goal_status", {}));
+  assertTaskMachineAction(statusFromFailureA.tasks.t1, {
+    allowedActions: ["goal_integrate"],
+    requiredTool: "goal_integrate",
+    requiredParams: { action: "integrate", strategy: "cherry-pick" },
+    blockingReason: null,
+  });
+
   const retryPi = createMockPi(cwd);
   createGoalEngineExtension(retryPi);
+  const statusFromFailureB = JSON.parse(await invoke(retryPi, "goal_status", {}));
+  assert.deepEqual(statusFromFailureA.tasks.t1.allowedActions, statusFromFailureB.tasks.t1.allowedActions);
+  assert.deepEqual(statusFromFailureA.tasks.t1.requiredNextAction, statusFromFailureB.tasks.t1.requiredNextAction);
+  assert.deepEqual(statusFromFailureA.tasks.t1.blockingReason, statusFromFailureB.tasks.t1.blockingReason);
+
   const retryIntegrate = JSON.parse(await invoke(retryPi, "goal_integrate", { task_id: "t1", action: "integrate" }));
   assert.equal(retryIntegrate.action, "integrated");
   assert.equal(retryIntegrate.released, true);
@@ -879,7 +972,7 @@ test("event failure: applied append retry should skip duplicate Git integration 
   assert.equal(projectionAfterRetry.tasks.get("t1").workspace.phase, "disposed");
 });
 
-test("event failure: disposed append can be repaired from projection snapshot without lease", async () => {
+test("action recovery: disposed append can be repaired from projection snapshot without lease", async () => {
   const cwd = tmpCwd();
   const objective = "Event failure disposed append goal";
   const goalId = objectiveToGoalId(objective);
@@ -929,8 +1022,21 @@ test("event failure: disposed append can be repaired from projection snapshot wi
   assert.equal(taskAfterFailure.workspace.disposition, "integrated");
   assert.equal(taskAfterFailure.workspace.released, undefined);
 
+  const statusFromFailureA = JSON.parse(await invoke(initPi, "goal_status", {}));
+  assertTaskMachineAction(statusFromFailureA.tasks.t1, {
+    allowedActions: ["goal_integrate"],
+    requiredTool: "goal_integrate",
+    requiredParams: { action: "integrate", strategy: "cherry-pick" },
+    blockingReason: null,
+  });
+
   const retryPi = createMockPi(cwd);
   createGoalEngineExtension(retryPi);
+  const statusFromFailureB = JSON.parse(await invoke(retryPi, "goal_status", {}));
+  assert.deepEqual(statusFromFailureA.tasks.t1.allowedActions, statusFromFailureB.tasks.t1.allowedActions);
+  assert.deepEqual(statusFromFailureA.tasks.t1.requiredNextAction, statusFromFailureB.tasks.t1.requiredNextAction);
+  assert.deepEqual(statusFromFailureA.tasks.t1.blockingReason, statusFromFailureB.tasks.t1.blockingReason);
+
   const result = JSON.parse(await invoke(retryPi, "goal_integrate", { task_id: "t1", action: "integrate" }));
   assert.equal(result.action, "integrated");
   assert.equal(result.released, true);

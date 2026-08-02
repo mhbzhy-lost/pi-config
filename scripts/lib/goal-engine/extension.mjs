@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
-import { validateDAG, runnableFrontier, goalProgress } from "./graph.mjs";
+import { validateDAG, runnableFrontier, goalProgress, taskActionState } from "./graph.mjs";
 import { appendEvent, loadProjection, listGoals } from "./store.mjs";
 import { compileTaskContract } from "./dispatch.mjs";
 import {
@@ -153,13 +153,23 @@ function statusResponse(projection) {
     runnable,
     nextAction: projection.nextAction,
     checkpointCount: projection.checkpointCount,
-    tasks: Object.fromEntries([...projection.tasks].map(([id, t]) => [id, {
-      description: t.description, status: t.status, deps: t.deps,
-      writePaths: t.writePaths, acceptance: t.acceptance,
-      evidence_count: t.evidence.length, attempts: t.attempts,
-      contractHash: t.contractHash,
-      workspace: t.workspace ? { ...t.workspace } : null,
-    }])),
+    tasks: Object.fromEntries([...projection.tasks].map(([id, t]) => {
+      const actionState = taskActionState(projection, id);
+      return [id, {
+        description: t.description,
+        status: t.status,
+        deps: t.deps,
+        writePaths: t.writePaths,
+        acceptance: t.acceptance,
+        evidence_count: t.evidence.length,
+        attempts: t.attempts,
+        contractHash: t.contractHash,
+        workspace: t.workspace ? { ...t.workspace } : null,
+        allowedActions: actionState.allowedActions,
+        requiredNextAction: actionState.requiredNextAction,
+        blockingReason: actionState.blockingReason,
+      }];
+    })),
   }, null, 2);
 }
 
@@ -331,6 +341,10 @@ export function createGoalEngineExtension(pi, options = {}) {
       const task = projection.tasks.get(params.task_id);
       if (!task) throw new Error(`unknown task: ${params.task_id}`);
 
+      if (task.workspace && !(task.workspace.phase === "disposed" && task.workspace.disposition === "discarded" && task.workspace.released === true)) {
+        throw new Error("existing workspace must be disposed, discarded, and released before redispatch");
+      }
+
       const frontier = runnableFrontier(projection);
       if (!frontier.includes(params.task_id)) {
         if (task.status !== "pending") {
@@ -338,10 +352,6 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         const unmetDeps = task.deps.filter((dep) => projection.tasks.get(dep)?.status !== "accepted");
         throw new Error(`task is not runnable: dependency not accepted (${unmetDeps.join(", ")})`);
-      }
-
-      if (task.workspace && !(task.workspace.phase === "disposed" && task.workspace.disposition === "discarded" && task.workspace.released === true)) {
-        throw new Error("existing workspace must be disposed, discarded, and released before redispatch");
       }
 
       const attempt = task.attempts + 1;

@@ -1,3 +1,5 @@
+import { validateDAG } from "./graph.mjs";
+
 const SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2"]);
 const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
 const TERMINAL_LIFECYCLES = new Set(["completed", "blocked", "cancelled"]);
@@ -137,6 +139,7 @@ function taskDispatched(p, data, schemaVersion) {
   const { taskId, contractHash, workspace } = data;
   const task = requireTask(p, taskId);
   if (task.status !== "pending") throw new Error(`task is not pending: ${taskId} (${task.status})`);
+  assertDepsAccepted(p, task);
   if (!contractHash || typeof contractHash !== "string") throw new Error("contractHash is required for dispatch");
   if (schemaVersion === "goal-engine.event.v2") {
     assertWorkspaceRedispatchable(task);
@@ -257,6 +260,19 @@ function requireWorkspace(task, attempt) {
   return task.workspace;
 }
 
+function assertDepsAccepted(p, task) {
+  const blockedDeps = [];
+  for (const dep of task.deps) {
+    const depTask = p.tasks.get(dep);
+    if (!depTask || depTask.status !== "accepted") {
+      blockedDeps.push(dep);
+    }
+  }
+  if (blockedDeps.length > 0) {
+    throw new Error(`task dependencies are not accepted: ${blockedDeps.join(", ")}`);
+  }
+}
+
 function goalAmended(p, data) {
   requireActive(p);
   const { addTasks, removeTasks, updateTasks, reason } = data;
@@ -300,6 +316,8 @@ function goalAmended(p, data) {
       if (updates.acceptance) task.acceptance = updates.acceptance;
     }
   }
+
+  validateDAG(p.tasks);
 }
 
 function goalBlocked(p, data) {
