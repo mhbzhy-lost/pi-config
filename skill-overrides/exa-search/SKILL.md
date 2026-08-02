@@ -7,6 +7,16 @@ description: Use when needing to search the web for current information, news, f
 
 Search the web and fetch webpage content using Exa's semantic search API.
 
+## Prerequisite
+
+Python 3.9 or newer is required. Set a personal Exa API key in the process environment:
+
+```bash
+export EXA_API_KEY="<your-exa-api-key>"
+```
+
+The script intentionally has no built-in or anonymous fallback. Never commit the key to this repository. `skill-overrides/exa-search/.env` is ignored for local secret management, but the script does not parse it; load it into bash/zsh first with `set -a; source skill-overrides/exa-search/.env; set +a`.
+
 ## When to Use
 
 - User asks about current events, recent news, or time-sensitive information
@@ -64,6 +74,7 @@ python3 ~/pi-config/skill-overrides/exa-search/exa.py fetch "https://docs.exampl
 ## Error Handling
 
 If the script fails:
+- Confirm `EXA_API_KEY` is exported in the process environment
 - Check internet connection
 - Verify Python3 is available
-- Exa MCP is free but has rate limits - retry after a moment if needed
+- If Exa reports a rate limit, inspect the quota for the configured personal key
