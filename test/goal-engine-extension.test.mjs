@@ -10,7 +10,7 @@ function createMockPi(cwd) {
   const tools = [];
   const hooks = { tool_result: [] };
   return {
-    tools, hooks, cwd,
+    tools, hooks, executeContext: { cwd },
     registerTool(def) { tools.push(def); },
     on(event, handler) { if (hooks[event]) hooks[event].push(handler); },
   };
@@ -28,7 +28,7 @@ async function invoke(pi, name, params = {}) {
     params,
     new AbortController().signal,
     undefined,
-    { cwd: pi.cwd },
+    pi.executeContext,
   );
   assert.deepEqual(result.content.map((part) => part.type), ["text"]);
   assert.ok(result.details && Object.hasOwn(result.details, "value"), `${name} must return details.value`);
@@ -61,6 +61,16 @@ test("registers seven goal engine tools", () => {
     assert.equal(typeof definition.execute, "function", `${definition.name} must expose execute`);
     assert.equal(Object.hasOwn(definition, "handler"), false, `${definition.name} must not expose handler`);
   }
+});
+
+test("tool execution rejects a missing cwd context", async () => {
+  const pi = createMockPi(tmpCwd());
+  createGoalEngineExtension(pi);
+  const init = pi.tools.find((tool) => tool.name === "goal_init");
+  await assert.rejects(
+    init.execute("missing-context", { objective: "Missing context", tasks: [] }, new AbortController().signal, undefined, undefined),
+    /ExtensionContext\.cwd/,
+  );
 });
 
 test("goal_init creates goal and returns runnable frontier", async () => {
@@ -298,6 +308,7 @@ test("tool_result hook appends reminder when checkpoint overdue", async () => {
   });
 
   const hook = pi.hooks.tool_result[0];
+  assert.equal(hook({ toolName: "bash", content: [{ type: "text", text: "ok" }], isError: false }), undefined);
   let lastResult;
   for (let i = 0; i < 6; i++) {
     lastResult = hook({ toolName: "bash", input: { command: "ls" }, content: [{ type: "text", text: "ok" }], isError: false }, { cwd });

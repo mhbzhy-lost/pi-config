@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { validateDAG, runnableFrontier, goalProgress } from "./graph.mjs";
 import { appendEvent, loadProjection, listGoals } from "./store.mjs";
 import { compileTaskContract } from "./dispatch.mjs";
@@ -22,14 +22,25 @@ function registerGoalTool(pi, definition) {
   if (typeof handler !== "function") throw new Error(`Goal tool ${definition.name} is missing its domain handler`);
   pi.registerTool({
     ...publicDefinition,
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      return toolResult(await handler(params));
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return toolResult(await handler(params, ctx));
     },
   });
 }
 
 function stateRoot(cwd) {
   return join(cwd, STATE_ROOT_REL);
+}
+
+export function executionScope(ctx) {
+  if (!ctx?.cwd || typeof ctx.cwd !== "string" || !isAbsolute(ctx.cwd)) {
+    throw new Error("Goal Engine requires a non-empty absolute ExtensionContext.cwd");
+  }
+  return { cwd: ctx.cwd, root: stateRoot(ctx.cwd) };
+}
+
+function leaseKey(cwd, goalId, taskId) {
+  return `${cwd}\0${goalId}\0${taskId}`;
 }
 
 function slugify(raw) {
@@ -81,8 +92,6 @@ function statusResponse(projection) {
 }
 
 export function createGoalEngineExtension(pi) {
-  const cwd = pi.cwd || process.cwd();
-  const root = stateRoot(cwd);
   let turnsSinceSettle = 0;
   const activeLeases = new Map();
 
@@ -122,7 +131,8 @@ export function createGoalEngineExtension(pi) {
       },
       required: ["objective", "tasks"],
     },
-    async handler(params) {
+    async handler(params, ctx) {
+      const { cwd, root } = executionScope(ctx);
       const goalId = slugify(params.objective);
       const taskDefs = {};
       const taskIds = [];
@@ -166,7 +176,8 @@ export function createGoalEngineExtension(pi) {
       properties: { goal_id: { type: "string" } },
       required: [],
     },
-    async handler(params) {
+    async handler(params, ctx) {
+      const { cwd, root } = executionScope(ctx);
       try {
         const goalId = resolveGoal(params.goal_id, root);
         if (!goalId) return "NO_ACTIVE_GOAL";
@@ -191,7 +202,8 @@ export function createGoalEngineExtension(pi) {
       },
       required: ["task_id"],
     },
-    async handler(params) {
+    async handler(params, ctx) {
+      const { cwd, root } = executionScope(ctx);
       const goalId = resolveGoal(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
       const projection = loadProjection(root, goalId);
@@ -225,7 +237,7 @@ export function createGoalEngineExtension(pi) {
         throw err;
       }
 
-      activeLeases.set(params.task_id, lease);
+      activeLeases.set(leaseKey(cwd, goalId, params.task_id), lease);
 
       return JSON.stringify({
         status: "dispatched",
@@ -260,7 +272,8 @@ export function createGoalEngineExtension(pi) {
       },
       required: ["task_id", "outcome", "next_action"],
     },
-    async handler(params) {
+    async handler(params, ctx) {
+      const { cwd, root } = executionScope(ctx);
       const goalId = resolveGoal(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjection(root, goalId);
@@ -300,7 +313,8 @@ export function createGoalEngineExtension(pi) {
       },
       required: ["task_id"],
     },
-    async handler(params) {
+    async handler(params, ctx) {
+      const { cwd, root } = executionScope(ctx);
       const goalId = resolveGoal(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjection(root, goalId);
@@ -364,7 +378,8 @@ export function createGoalEngineExtension(pi) {
       },
       required: ["reason"],
     },
-    async handler(params) {
+    async handler(params, ctx) {
+      const { cwd, root } = executionScope(ctx);
       const goalId = resolveGoal(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
       const projection = loadProjection(root, goalId);
@@ -400,7 +415,8 @@ export function createGoalEngineExtension(pi) {
       },
       required: ["task_id", "action"],
     },
-    async handler(params) {
+    async handler(params, ctx) {
+      const { cwd, root } = executionScope(ctx);
       const goalId = resolveGoal(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
 
@@ -408,36 +424,36 @@ export function createGoalEngineExtension(pi) {
       const task = projection.tasks.get(params.task_id);
       if (!task) throw new Error(`unknown task: ${params.task_id}`);
 
-      const lease = activeLeases.get(params.task_id) ?? loadExecutorWorkspaceLease({
+      const lease = activeLeases.get(leaseKey(cwd, goalId, params.task_id)) ?? loadExecutorWorkspaceLease({
         goalId,
         taskId: params.task_id,
         attempt: task.attempts,
         stateRoot: root,
       });
-      activeLeases.set(params.task_id, lease);
+      activeLeases.set(leaseKey(cwd, goalId, params.task_id), lease);
 
       if (params.action === "preserve") {
         releaseExecutorWorkspace(lease, { disposition: "preserved" });
-        activeLeases.delete(params.task_id);
+        activeLeases.delete(leaseKey(cwd, goalId, params.task_id));
         return JSON.stringify({ action: "preserved", path: lease.path, branch: lease.branch });
       }
 
       if (params.action === "discard") {
         releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup" });
-        activeLeases.delete(params.task_id);
+        activeLeases.delete(leaseKey(cwd, goalId, params.task_id));
         return JSON.stringify({ action: "discarded", released: true });
       }
 
       const inspection = inspectExecutorWorkspace(lease);
       if (!inspection.hasCommits) {
         releaseExecutorWorkspace(lease, { disposition: "integrated-cleanup" });
-        activeLeases.delete(params.task_id);
+        activeLeases.delete(leaseKey(cwd, goalId, params.task_id));
         return JSON.stringify({ action: "integrated", note: "no commits to integrate", released: true });
       }
 
       const result = integrateExecutorWorkspace(lease, { strategy: params.strategy || "cherry-pick" });
       releaseExecutorWorkspace(lease, { disposition: "integrated-cleanup" });
-      activeLeases.delete(params.task_id);
+      activeLeases.delete(leaseKey(cwd, goalId, params.task_id));
 
       return JSON.stringify({
         action: "integrated",
@@ -449,7 +465,9 @@ export function createGoalEngineExtension(pi) {
   });
 
   // --- tool_result hook: checkpoint reminder ---
-  pi.on("tool_result", (event) => {
+  pi.on("tool_result", (event, ctx) => {
+    let root;
+    try { ({ root } = executionScope(ctx)); } catch { return undefined; }
     if (event.isError) return undefined;
     if (["goal_settle", "goal_status", "goal_init", "goal_dispatch", "goal_accept", "goal_amend", "goal_integrate"].includes(event.toolName)) return undefined;
 
