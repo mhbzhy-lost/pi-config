@@ -1,5 +1,6 @@
 {
   "schema_version": "goal_contract.v1.1",
+  "practice_profile_sha256": "9898570db4bac8bf8f59f696209b3a52a89493d7b09a1ac45dcdc4debb19748d",
   "slug": "plan-ir-v3-complete-capsule-contract",
   "status": "active",
   "phase": "implementation",

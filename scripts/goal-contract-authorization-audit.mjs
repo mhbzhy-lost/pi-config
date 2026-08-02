@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { auditAmendmentAuthorizations } from "./lib/goal-contract/authorization-audit.mjs";
+import { auditGoalContractIntegrity } from "./lib/goal-contract/authorization-audit.mjs";
 
 const goalRoot = process.argv[2];
 if (!goalRoot) {
@@ -9,12 +9,12 @@ if (!goalRoot) {
 }
 
 try {
-  const errors = auditAmendmentAuthorizations(goalRoot);
+  const errors = auditGoalContractIntegrity(goalRoot);
   if (errors.length > 0) {
     for (const error of errors) console.error(`ERROR: ${error}`);
     process.exit(1);
   }
-  console.log(`Goal Contract authorization artifacts valid: ${goalRoot}`);
+  console.log(`Goal Contract integrity valid: ${goalRoot}`);
 } catch (error) {
   console.error(`ERROR: ${error.message}`);
   process.exit(2);

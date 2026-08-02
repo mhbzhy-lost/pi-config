@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { auditAmendmentAuthorizations } from "../scripts/lib/goal-contract/authorization-audit.mjs";
+import {
+  auditAmendmentAuthorizations,
+  auditPracticeProfileSync,
+  canonicalJsonSha256,
+} from "../scripts/lib/goal-contract/authorization-audit.mjs";
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "goal-auth-audit-"));
@@ -76,5 +80,61 @@ test("artifact path must remain inside goal directory", () => {
     writeFileSync(amendmentPath, `${JSON.stringify(amendment)}\n`);
 
     assert.match(auditAmendmentAuthorizations(root).join("\n"), /goal-relative/);
+  });
+});
+
+function practiceProfileFixture() {
+  const root = mkdtempSync(path.join(tmpdir(), "goal-profile-audit-"));
+  const practiceProfile = {
+    schema_version: "goal_contract.practice_profile.v1",
+    evidence_lanes: [{ id: "source", purpose: "Source evidence" }],
+    drift_detectors: [{ id: "single-writer", action: "fail" }],
+  };
+  const digest = canonicalJsonSha256(practiceProfile);
+  writeFileSync(
+    path.join(root, "state.json"),
+    `${JSON.stringify({ practice_profile: practiceProfile, practice_profile_sha256: digest })}\n`,
+  );
+  writeFileSync(
+    path.join(root, "goal-contract.md"),
+    `# Goal Contract\n\nPractice-Profile-SHA256: ${digest}\n`,
+  );
+  return { root, practiceProfile, digest };
+}
+
+function withPracticeProfileFixture(fn) {
+  const value = practiceProfileFixture();
+  try {
+    fn(value);
+  } finally {
+    rmSync(value.root, { recursive: true, force: true });
+  }
+}
+
+test("matching practice profile identities pass", () => {
+  withPracticeProfileFixture(({ root }) => {
+    assert.deepEqual(auditPracticeProfileSync(root), []);
+  });
+});
+
+test("practice profile content drift fails declared hash", () => {
+  withPracticeProfileFixture(({ root }) => {
+    const statePath = path.join(root, "state.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    state.practice_profile.drift_detectors[0].action = "silently-continue";
+    writeFileSync(statePath, `${JSON.stringify(state)}\n`);
+
+    assert.match(auditPracticeProfileSync(root).join("\n"), /state hash mismatch/);
+  });
+});
+
+test("markdown practice profile marker must match canonical profile", () => {
+  withPracticeProfileFixture(({ root }) => {
+    writeFileSync(
+      path.join(root, "goal-contract.md"),
+      `# Goal Contract\n\nPractice-Profile-SHA256: ${"0".repeat(64)}\n`,
+    );
+
+    assert.match(auditPracticeProfileSync(root).join("\n"), /contract marker mismatch/);
   });
 });

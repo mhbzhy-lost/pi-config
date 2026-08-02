@@ -1,5 +1,7 @@
 # Goal Contract: plan-ir-v3-complete-capsule-contract
 
+Practice-Profile-SHA256: 9898570db4bac8bf8f59f696209b3a52a89493d7b09a1ac45dcdc4debb19748d
+
 ## Objective
 按顺序完成两份已批准计划：先交付 pi-plan.v3、plan-ir.v3、worktree 外 revision store、单写者事件协议、Plan amendment 与全链路消费者迁移；再删除独立 Standalone Host，以 Root session 内扁平 `pi-subagents` RPC runtime 承载 Plan Runner 和 Executor，并通过全部门禁。
 

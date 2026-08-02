@@ -46,6 +46,8 @@ Goal Contract 的 `amendments.jsonl` 允许在 `evidence` 中写入 `user-messag
 
 现有 `plan-ir-v3-complete-capsule-contract` 无法恢复已经丢失的原始消息和 Todo 快照。本次增加 `authorization-evidence.json`，保存从 amendment 记录可确认的摘要和字段范围；每条 amendment 记录 artifact 路径与 SHA-256，并明确标记 `legacy_unverifiable`。
 
+时间语义显式分离：amendment 顶层 `ts` 保留原应用时间，artifact 使用 `original_amendments_applied_at` 和 `reconstructed_at`，descriptor 使用 `reconstructedAt`。事后重建时间不得被解释为原始授权在 amendment 应用前已经存在。
+
 该 artifact 只改善恢复上下文和篡改检测，不把历史摘要提升为可验证用户授权，也不替代上述 validator/audit 的后续 fail-closed 实现。
 
 ## 本次机械门禁
