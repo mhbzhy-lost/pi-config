@@ -22,6 +22,7 @@ export function createProjection() {
     nextAction: null,
     createdAt: null,
     updatedAt: null,
+    eventSchemaVersion: null,
   };
 }
 
@@ -33,12 +34,16 @@ export function applyEvent(projection, event) {
   }
 
   validateGoalIdentity(projection, event);
+  if (projection.eventSchemaVersion === "goal-engine.event.v2" && event.schemaVersion === "goal-engine.event.v1") {
+    throw new Error("schema downgrade from goal-engine.event.v2 is not allowed");
+  }
 
   if (TERMINAL_LIFECYCLES.has(projection.lifecycle)) {
     throw new Error(`goal is terminal: ${projection.lifecycle}`);
   }
 
   const next = copyProjection(projection);
+  if (event.schemaVersion === "goal-engine.event.v2") next.eventSchemaVersion = event.schemaVersion;
   switch (event.type) {
     case "goal.created": goalCreated(next, event); break;
     case "task.dispatched": taskDispatched(next, event.data, event.schemaVersion); break;
@@ -94,6 +99,7 @@ function goalCreated(p, event) {
   if (!taskDefs || typeof taskDefs !== "object") throw new Error("taskDefs is required");
 
   p.goalId = event.goalId;
+  p.eventSchemaVersion = event.schemaVersion;
   p.lifecycle = "active";
   p.objective = objective;
   p.scope = scope || [];
@@ -188,6 +194,11 @@ function workspaceDispositionStarted(p, data, schemaVersion) {
   const workspace = requireWorkspace(task, attempt);
   if (workspace.phase !== "active") throw new Error("workspace disposition already started or terminal phase");
   if (!DISPOSITION_ACTIONS.has(requestedAction)) throw new Error("invalid requested action");
+  if (requestedAction === "integrate") {
+    if (task.status !== "succeeded") throw new Error("integrate disposition requires succeeded task");
+  } else if (!((task.status === "pending" && task.lastSettledOutcome === "failed") || task.status === "succeeded" || task.status === "blocked")) {
+    throw new Error("discard and preserve dispositions require settled task");
+  }
   for (const [name, value] of Object.entries({ strategy, executorHead, originHeadBefore })) if (!value || typeof value !== "string") throw new Error(`${name} is required`);
   Object.assign(workspace, { requestedAction, strategy, executorHead, originHeadBefore, phase: "disposing" });
 }
@@ -199,7 +210,9 @@ function workspaceDispositionApplied(p, data, schemaVersion) {
   if (workspace.phase !== "disposing") throw new Error("workspace must be disposing");
   if (action !== workspace.requestedAction) throw new Error("workspace action mismatch");
   for (const [name, value] of Object.entries({ strategy, executorHead, originHead })) if (!value || typeof value !== "string") throw new Error(`${name} is required`);
-  Object.assign(workspace, { strategy, executorHead, originHead, phase: "applied" });
+  if (strategy !== workspace.strategy) throw new Error("workspace strategy mismatch");
+  if (executorHead !== workspace.executorHead) throw new Error("workspace executorHead mismatch");
+  Object.assign(workspace, { originHead, phase: "applied" });
   workspace.disposition = ({ integrate: "integrated", discard: "discarded", preserve: "preserved" })[action];
 }
 

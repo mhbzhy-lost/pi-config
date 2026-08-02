@@ -68,6 +68,7 @@ function serializeProjection(p) {
     nextAction: p.nextAction,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
+    eventSchemaVersion: p.eventSchemaVersion,
   };
 }
 
