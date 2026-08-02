@@ -15,12 +15,18 @@ export function auditGoal(goalId, stateRoot) {
   const { hasExternalEvidence, allSelfProduced, evidenceCount } = analyzeEvidence(projection);
   const checkpointGap = hasLongCheckpointGap(events);
   const neverBlockedSuspicious = isNeverBlockedSuspicious(events, projection);
+  const projectionSignals = detectProjectionSignals(projection);
 
   const signals = [];
   if (failedAttempts >= 3) signals.push("HIGH_RETRY_RATE");
   if (allSelfProduced) signals.push("ALL_SELF_PRODUCED_EVIDENCE");
   if (checkpointGap) signals.push("LONG_CHECKPOINT_GAP");
   if (neverBlockedSuspicious) signals.push("NEVER_BLOCKED_SUSPICIOUS");
+
+  // keep deterministic ordering: existing signals first, then projection-based safety signals
+  if (projectionSignals.legacyUnverifiedAcceptance) signals.push("LEGACY_UNVERIFIED_ACCEPTANCE");
+  if (projectionSignals.incompleteWorkspaceDisposition) signals.push("INCOMPLETE_WORKSPACE_DISPOSITION");
+  if (projectionSignals.unreleasedIntegratedWorkspace) signals.push("UNRELEASED_INTEGRATED_WORKSPACE");
 
   const verdict = signals.length >= 2 ? "DEGRADED" : signals.length === 1 ? "AT_RISK" : "HEALTHY";
 
@@ -75,6 +81,37 @@ function analyzeEvidence(projection) {
     hasExternalEvidence: evidenceCount > 0 && selfProducedCount < evidenceCount,
     allSelfProduced: evidenceCount > 0 && selfProducedCount === evidenceCount,
     evidenceCount,
+  };
+}
+
+function detectProjectionSignals(projection) {
+  let legacyUnverifiedAcceptance = false;
+  let incompleteWorkspaceDisposition = false;
+  let unreleasedIntegratedWorkspace = false;
+
+  for (const [, task] of projection.tasks) {
+    if (!legacyUnverifiedAcceptance && task.acceptanceVerification === "legacy_unverified") {
+      legacyUnverifiedAcceptance = true;
+    }
+
+    const workspace = task.workspace;
+    if (!workspace) continue;
+
+    if (!incompleteWorkspaceDisposition && (workspace.phase === "disposing" || workspace.phase === "applied")) {
+      incompleteWorkspaceDisposition = true;
+    }
+
+    if (!unreleasedIntegratedWorkspace && workspace.disposition === "integrated" && workspace.released !== true) {
+      unreleasedIntegratedWorkspace = true;
+    }
+
+    if (legacyUnverifiedAcceptance && incompleteWorkspaceDisposition && unreleasedIntegratedWorkspace) break;
+  }
+
+  return {
+    legacyUnverifiedAcceptance,
+    incompleteWorkspaceDisposition,
+    unreleasedIntegratedWorkspace,
   };
 }
 

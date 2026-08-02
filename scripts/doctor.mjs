@@ -7,6 +7,7 @@ import { constants } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { loadDesiredSkills, parseSkillList } from "./lib/skill-whitelist.mjs";
+import { createGoalEngineExtension } from "./lib/goal-engine/extension.mjs";
 import { auditGoalContractIntegrity } from "./lib/goal-contract/authorization-audit.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -51,6 +52,16 @@ const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/index.mjs",
 ];
 const REQUIRED_RPC_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];
+const GOAL_ENGINE_TOOL_NAMES = [
+  "goal_init",
+  "goal_status",
+  "goal_dispatch",
+  "goal_settle",
+  "goal_accept",
+  "goal_amend",
+  "goal_integrate",
+];
+const GOAL_ENGINE_TOOL_SET = new Set(GOAL_ENGINE_TOOL_NAMES);
 const LEGACY_TASK7_FILES = [
   "scripts/lib/subagent-jobs.mjs",
   "scripts/lib/subagent-extension.mjs",
@@ -339,6 +350,67 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     }
   } catch {
     issues.push(`missing Pi package: typebox@${TYPEBOX_VERSION}`);
+  }
+
+  const goalEngineFactory = options.goalEngineFactory ?? createGoalEngineExtension;
+  const goalEngineToolDefinitions = [];
+  const goalEnginePi = {
+    registerTool(definition) {
+      goalEngineToolDefinitions.push(definition);
+    },
+    on() {},
+  };
+
+  let goalEngineFactoryFailed = false;
+  try {
+    await Promise.resolve(goalEngineFactory(goalEnginePi));
+  } catch {
+    issues.push("invalid Goal Engine tool ABI: factory");
+    goalEngineFactoryFailed = true;
+  }
+
+  if (!goalEngineFactoryFailed) {
+    const invalidTools = new Set();
+    const seenTools = new Set();
+    const registeredTools = new Set();
+
+    for (const definition of goalEngineToolDefinitions) {
+      const name = typeof definition?.name === "string" ? definition.name : String(definition?.name);
+      if (seenTools.has(name)) {
+        invalidTools.add(name);
+      } else {
+        seenTools.add(name);
+      }
+
+      if (typeof definition !== "object" || definition === null || typeof definition?.name !== "string") {
+        invalidTools.add(name);
+        continue;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(definition, "handler")) {
+        invalidTools.add(name);
+      }
+      if (typeof definition.execute !== "function") {
+        invalidTools.add(name);
+      }
+      registeredTools.add(name);
+    }
+
+    for (const required of GOAL_ENGINE_TOOL_NAMES) {
+      if (!registeredTools.has(required)) {
+        invalidTools.add(required);
+      }
+    }
+
+    for (const name of registeredTools) {
+      if (!GOAL_ENGINE_TOOL_SET.has(name)) {
+        invalidTools.add(name);
+      }
+    }
+
+    for (const name of invalidTools) {
+      issues.push(`invalid Goal Engine tool ABI: ${name}`);
+    }
   }
 
   return issues;

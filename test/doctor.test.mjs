@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -9,6 +9,105 @@ import { inspectConfiguration, inspectGoalContractIntegrity } from "../scripts/d
 import { canonicalJsonSha256 } from "../scripts/lib/goal-contract/authorization-audit.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+const GOAL_ENGINE_TOOL_NAMES = ["goal_init", "goal_status", "goal_dispatch", "goal_settle", "goal_accept", "goal_amend", "goal_integrate"];
+
+async function inspectConfigurationWithValidatedVersions(root, options = {}) {
+  const stateExisted = await goalEngineStateExists(root);
+  const issues = await inspectConfiguration(root, {
+    readPiVersion: async () => "0.82.1",
+    readBasicMemoryVersion: async () => "0.22.1",
+    ...options,
+  });
+  assert.equal(await goalEngineStateExists(root), stateExisted);
+  return issues;
+}
+
+async function goalEngineStateExists(root) {
+  try {
+    await stat(join(root, ".state", "goal-engine"));
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function createGoalEngineToolDefinition(name, options = {}) {
+  const definition = {
+    name,
+    description: `${name} tool ABI fixture`,
+    parameters: { type: "object", properties: {} },
+  };
+  if (options.exposeHandler) {
+    definition.handler = async () => ({ status: "ok" });
+  }
+  if (options.includeExecute !== false) {
+    definition.execute = () => {
+      if (typeof options.onExecute === "function") {
+        options.onExecute();
+      }
+      throw new Error("Goal Engine definition execute should not be invoked during ABI validation");
+    };
+  }
+  return definition;
+}
+
+function createGoalEngineFactoryFixture({
+  missingExecute,
+  exposeHandlerFor,
+  omitTools = [],
+  extraTools = [],
+  onFactory,
+} = {}) {
+  const omitted = new Set(omitTools);
+  let callCount = 0;
+  let executeCallCount = 0;
+  const definitions = [];
+
+  const registerDefinitions = (pi) => {
+    for (const definition of definitions) {
+      pi.registerTool(definition);
+    }
+    pi.on("tool_result", () => undefined);
+  };
+
+  const trackExecute = () => {
+    executeCallCount += 1;
+  };
+
+  for (const name of GOAL_ENGINE_TOOL_NAMES) {
+    if (omitted.has(name)) continue;
+    definitions.push(createGoalEngineToolDefinition(name, {
+      includeExecute: name !== missingExecute,
+      exposeHandler: name === exposeHandlerFor,
+      onExecute: trackExecute,
+    }));
+  }
+
+  for (const name of extraTools) {
+    definitions.push(createGoalEngineToolDefinition(name, {
+      includeExecute: true,
+      onExecute: trackExecute,
+    }));
+  }
+
+  return {
+    get called() {
+      return callCount;
+    },
+    get executeCalls() {
+      return executeCallCount;
+    },
+    factory(pi) {
+      callCount += 1;
+      if (typeof onFactory === "function") {
+        return onFactory(pi, registerDefinitions);
+      }
+      return registerDefinitions(pi);
+    },
+  };
+}
 
 const isolatedSubagentPackage = {
   source: "npm:pi-subagents@0.37.2",
@@ -311,6 +410,124 @@ test("no issue when basic-memory version matches", async () => {
     readBasicMemoryVersion: async () => "0.22.1",
   });
   assert.ok(!issues.some((i) => i.includes("basic-memory")));
+});
+
+test("Goal Engine tool ABI default factory does not report ABI issues", async () => {
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot);
+  assert.equal(
+    issues.some((issue) => issue.includes("invalid Goal Engine tool ABI:")),
+    false,
+  );
+});
+
+test("Goal Engine tool ABI validator rejects missing execute", async () => {
+  const fixture = createGoalEngineFactoryFixture({
+    missingExecute: "goal_dispatch",
+  });
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot, {
+    goalEngineFactory: fixture.factory,
+  });
+  assert.equal(fixture.called, 1);
+  assert.equal(fixture.executeCalls, 0);
+  assert.ok(issues.includes("invalid Goal Engine tool ABI: goal_dispatch"));
+});
+
+test("Goal Engine tool ABI validator rejects exposed handler", async () => {
+  const fixture = createGoalEngineFactoryFixture({
+    exposeHandlerFor: "goal_accept",
+  });
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot, {
+    goalEngineFactory: fixture.factory,
+  });
+  assert.equal(fixture.called, 1);
+  assert.equal(fixture.executeCalls, 0);
+  assert.ok(issues.includes("invalid Goal Engine tool ABI: goal_accept"));
+});
+
+test("Goal Engine tool ABI validator requires exact tool set (missing)", async () => {
+  const fixture = createGoalEngineFactoryFixture({
+    omitTools: ["goal_status"],
+  });
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot, {
+    goalEngineFactory: fixture.factory,
+  });
+  assert.equal(fixture.called, 1);
+  assert.equal(fixture.executeCalls, 0);
+  assert.ok(issues.includes("invalid Goal Engine tool ABI: goal_status"));
+});
+
+test("Goal Engine tool ABI validator requires exact tool set (extra)", async () => {
+  const fixture = createGoalEngineFactoryFixture({
+    extraTools: ["goal_surprise"],
+  });
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot, {
+    goalEngineFactory: fixture.factory,
+  });
+  assert.equal(fixture.called, 1);
+  assert.equal(fixture.executeCalls, 0);
+  assert.ok(issues.includes("invalid Goal Engine tool ABI: goal_surprise"));
+});
+
+test("Goal Engine tool ABI validator rejects duplicated tools", async () => {
+  const fixture = createGoalEngineFactoryFixture({
+    extraTools: ["goal_accept"],
+  });
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot, {
+    goalEngineFactory: fixture.factory,
+  });
+  assert.equal(fixture.called, 1);
+  assert.equal(fixture.executeCalls, 0);
+  assert.equal(
+    issues.filter((issue) => issue === "invalid Goal Engine tool ABI: goal_accept").length,
+    1,
+  );
+});
+
+test("Goal Engine tool ABI validator reports factory failures (sync)", async () => {
+  const fixture = createGoalEngineFactoryFixture({
+    onFactory: () => {
+      throw new Error("sync factory failure");
+    },
+  });
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot, {
+    goalEngineFactory: fixture.factory,
+  });
+  assert.equal(fixture.called, 1);
+  assert.equal(fixture.executeCalls, 0);
+  assert.ok(issues.includes("invalid Goal Engine tool ABI: factory"));
+});
+
+test("Goal Engine tool ABI validator reports factory failures (async)", async () => {
+  const fixture = createGoalEngineFactoryFixture({
+    onFactory: async () => {
+      await Promise.resolve();
+      throw new Error("async factory failure");
+    },
+  });
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot, {
+    goalEngineFactory: fixture.factory,
+  });
+  assert.equal(fixture.called, 1);
+  assert.equal(fixture.executeCalls, 0);
+  assert.ok(issues.includes("invalid Goal Engine tool ABI: factory"));
+});
+
+test("Goal Engine tool ABI validator awaits async factory registration", async () => {
+  let factoryResumed = false;
+  const fixture = createGoalEngineFactoryFixture({
+    onFactory: async (pi, registerDefinitions) => {
+      await Promise.resolve();
+      registerDefinitions(pi);
+      factoryResumed = true;
+    },
+  });
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot, {
+    goalEngineFactory: fixture.factory,
+  });
+  assert.equal(fixture.called, 1);
+  assert.equal(fixture.executeCalls, 0);
+  assert.equal(factoryResumed, true);
+  assert.equal(issues.some((issue) => issue.includes("invalid Goal Engine tool ABI:")), false);
 });
 
 test("doctor validates Goal Contract integrity for registered goals", async () => {
