@@ -281,12 +281,23 @@ export function isExecutorWorkspaceIntegrated(lease, { strategy, executorHead } 
   throw new Error(`Unknown integration strategy: ${selectedStrategy}`);
 }
 
-export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick" } = {}) {
+export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick", executorHead } = {}) {
   if (!existsSync(lease.path)) throw new Error("Executor workspace is missing");
 
   const origin = lease.originRoot;
   const inspection = inspectExecutorWorkspace(lease);
-  if (!inspection.hasCommits) throw new Error("No commits to integrate");
+
+  const selectedExecutorHead = executorHead
+    ? git(lease.path, "rev-parse", `${executorHead}^{commit}`)
+    : inspection.headCommit;
+
+  if (executorHead && selectedExecutorHead !== inspection.headCommit) {
+    throw new Error(
+      `executor HEAD mismatch (expected ${selectedExecutorHead}, got ${inspection.headCommit})`,
+    );
+  }
+
+  if (!inspection.hasCommits || selectedExecutorHead === lease.baseCommit) throw new Error("No commits to integrate");
   if (!inspection.clean) throw new Error("Workspace must be clean before integration (no uncommitted changes)");
 
   const originHeadBefore = git(origin, "rev-parse", "HEAD");
@@ -294,7 +305,7 @@ export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick" } =
 
   if (strategy === "cherry-pick") {
     try {
-      git(origin, "cherry-pick", `${lease.baseCommit}..${inspection.headCommit}`);
+      git(origin, "cherry-pick", `${lease.baseCommit}..${selectedExecutorHead}`);
     } catch (error) {
       let abortError;
       try {
@@ -313,7 +324,7 @@ export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick" } =
     }
   } else if (strategy === "merge") {
     try {
-      git(origin, "merge", "--no-ff", lease.branch, "-m", `ge: integrate ${lease.goalId}/${lease.taskId}`);
+      git(origin, "merge", "--no-ff", selectedExecutorHead, "-m", `ge: integrate ${lease.goalId}/${lease.taskId}`);
     } catch (error) {
       let abortError;
       try {
@@ -337,7 +348,7 @@ export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick" } =
   const newHead = git(origin, "rev-parse", "HEAD");
   return {
     integrated: true,
-    executorHead: inspection.headCommit,
+    executorHead: selectedExecutorHead,
     originHeadBefore,
     newHead,
     strategy,
@@ -368,6 +379,8 @@ export function releaseExecutorWorkspace(lease, { disposition } = {}) {
       if (!inspection.clean) throw new Error("Workspace must be clean before integrated-cleanup");
     }
     git(origin, "worktree", "remove", "--force", lease.path);
+  } else {
+    git(origin, "worktree", "prune", "--expire", "now");
   }
 
   const branchExists = git(origin, "branch", "--list", lease.branch);

@@ -1,13 +1,91 @@
 import { execFileSync } from "node:child_process";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { validateDAG, runnableFrontier, goalProgress } from "./graph.mjs";
 import { appendEvent, loadProjection, listGoals } from "./store.mjs";
 import { compileTaskContract } from "./dispatch.mjs";
-import { allocateExecutorWorkspace, loadExecutorWorkspaceLease, inspectExecutorWorkspace, integrateExecutorWorkspace, releaseExecutorWorkspace } from "./workspace.mjs";
+import {
+  allocateExecutorWorkspace,
+  loadExecutorWorkspaceLease,
+  inspectExecutorWorkspace,
+  inspectExecutorWorkspaceResources,
+  assertWorkspaceChangesWithinPaths,
+  isExecutorWorkspaceIntegrated,
+  integrateExecutorWorkspace,
+  releaseExecutorWorkspace,
+} from "./workspace.mjs";
 
 const STATE_ROOT_REL = ".state/goal-engine";
 const GOAL_ID_RE = /[^a-zA-Z0-9._-]+/g;
 const CHECKPOINT_REMINDER_THRESHOLD = 5;
+const DEFAULT_EVENT_VERSION = "goal-engine.event.v2";
+const DEFAULT_DISPOSITION_STRATEGY = "cherry-pick";
+
+function gitHead(cwd) {
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+}
+
+function workspacePaths(stateRoot, goalId, taskId, attempt) {
+  const normalizedRoot = resolve(stateRoot);
+  const worktreesRoot = join(normalizedRoot, "worktrees");
+  return {
+    workspacePath: resolve(worktreesRoot, `${goalId}-${taskId}-${attempt}`),
+    leasePath: resolve(worktreesRoot, `.${goalId}-${taskId}-${attempt}.lease.json`),
+  };
+}
+
+function workspaceLeaseIdentityFromProjection(taskWorkspace, goalId, taskId, cwd, root) {
+  if (!taskWorkspace) {
+    throw new Error("workspace is required");
+  }
+
+  const attempt = taskWorkspace.attempt;
+  if (!Number.isInteger(attempt) || attempt < 1) {
+    throw new Error(`invalid workspace attempt for task ${taskId}`);
+  }
+
+  const snapshotPath = taskWorkspace.path;
+  const branch = taskWorkspace.branch;
+  const baseCommit = taskWorkspace.baseCommit;
+  if (typeof snapshotPath !== "string" || !snapshotPath) {
+    throw new Error(`workspace snapshot missing path for task ${taskId}`);
+  }
+  if (typeof branch !== "string" || !branch) {
+    throw new Error(`workspace snapshot missing branch for task ${taskId}`);
+  }
+  if (typeof baseCommit !== "string" || !baseCommit) {
+    throw new Error(`workspace snapshot missing baseCommit for task ${taskId}`);
+  }
+
+  const { workspacePath, leasePath } = workspacePaths(root, goalId, taskId, attempt);
+  const expected = {
+    goalId,
+    taskId,
+    attempt,
+    path: workspacePath,
+    branch: `ge/${goalId}/${taskId}/${attempt}`,
+    baseCommit,
+    originRoot: resolve(cwd),
+    stateRoot: resolve(root),
+    leasePath,
+  };
+
+  if (snapshotPath !== expected.path) {
+    throw new Error(`workspace snapshot mismatch for task ${taskId}`);
+  }
+  if (branch !== expected.branch) {
+    throw new Error(`workspace snapshot branch mismatch for task ${taskId}`);
+  }
+
+  return expected;
+}
+
+function assertLeaseIdentity(lease, expected, label) {
+  for (const [field, value] of Object.entries(expected)) {
+    if (lease?.[field] !== value) {
+      throw new Error(`${label} workspace lease ${field} mismatch for task ${expected.taskId}`);
+    }
+  }
+}
 
 function toolResult(value) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -49,9 +127,9 @@ function slugify(raw) {
   return slug;
 }
 
-function makeEvent(type, data, goalId) {
+function makeEvent(type, data, goalId, schemaVersion = DEFAULT_EVENT_VERSION) {
   return {
-    schemaVersion: "goal-engine.event.v1",
+    schemaVersion,
     eventId: crypto.randomUUID(),
     goalId,
     type,
@@ -60,13 +138,6 @@ function makeEvent(type, data, goalId) {
   };
 }
 
-function resolveGoal(goalId, root) {
-  if (goalId) return goalId;
-  const active = listGoals(root);
-  if (active.length === 0) return null;
-  if (active.length > 1) throw new Error(`Multiple active goals: ${active.join(", ")}. Specify goal_id.`);
-  return active[0];
-}
 
 function statusResponse(projection) {
   const progress = goalProgress(projection);
@@ -87,13 +158,63 @@ function statusResponse(projection) {
       writePaths: t.writePaths, acceptance: t.acceptance,
       evidence_count: t.evidence.length, attempts: t.attempts,
       contractHash: t.contractHash,
+      workspace: t.workspace ? { ...t.workspace } : null,
     }])),
   }, null, 2);
 }
 
-export function createGoalEngineExtension(pi) {
-  let turnsSinceSettle = 0;
+export function createGoalEngineExtension(pi, options = {}) {
+  const store = options.store || {};
+  const appendEventFn = options.appendEvent || store.appendEvent || appendEvent;
+  const loadProjectionFn = store.loadProjection || loadProjection;
+  const listGoalsFn = store.listGoals || listGoals;
   const activeLeases = new Map();
+  let turnsSinceSettle = 0;
+
+  const resolveGoalId = (goalId, root) => {
+    if (goalId) return goalId;
+    const active = listGoalsFn(root);
+    if (active.length === 0) return null;
+    if (active.length > 1) throw new Error(`Multiple active goals: ${active.join(", ")}. Specify goal_id.`);
+    return active[0];
+  };
+
+  const resolveWorkspaceLease = (task, goalId, taskId, cwd, root) => {
+    const expected = workspaceLeaseIdentityFromProjection(task.workspace, goalId, taskId, cwd, root);
+    let lease;
+
+    try {
+      lease = loadExecutorWorkspaceLease({ goalId, taskId, attempt: expected.attempt, stateRoot: expected.stateRoot });
+    } catch (error) {
+      if (!String(error.message).includes("Executor workspace lease not found")) {
+        throw error;
+      }
+    }
+
+    if (lease) {
+      assertLeaseIdentity(lease, expected, "persisted");
+    } else {
+      lease = {
+        ...expected,
+        ownerToken: "restored",
+        createdAt: new Date().toISOString(),
+      };
+    }
+
+    return lease;
+  };
+
+  const resolveLease = (task, goalId, taskId, cwd, root) => {
+    const key = leaseKey(cwd, goalId, taskId);
+    const expected = workspaceLeaseIdentityFromProjection(task.workspace, goalId, taskId, cwd, root);
+    const cached = activeLeases.get(key);
+    if (cached) {
+      assertLeaseIdentity(cached, expected, "cached");
+    }
+    const lease = resolveWorkspaceLease(task, goalId, taskId, cwd, root);
+    activeLeases.set(key, lease);
+    return lease;
+  };
 
   registerGoalTool(pi, {
     name: "goal_init",
@@ -156,9 +277,9 @@ export function createGoalEngineExtension(pi) {
         tasks: taskIds,
         taskDefs,
       }, goalId);
-      appendEvent(root, event, 0);
+      appendEventFn(root, event, 0);
 
-      const projection = loadProjection(root, goalId);
+      const projection = loadProjectionFn(root, goalId);
       return JSON.stringify({
         goalId,
         lifecycle: "active",
@@ -179,9 +300,9 @@ export function createGoalEngineExtension(pi) {
     async handler(params, ctx) {
       const { cwd, root } = executionScope(ctx);
       try {
-        const goalId = resolveGoal(params.goal_id, root);
+        const goalId = resolveGoalId(params.goal_id, root);
         if (!goalId) return "NO_ACTIVE_GOAL";
-        const projection = loadProjection(root, goalId);
+        const projection = loadProjectionFn(root, goalId);
         if (!projection) return "NO_ACTIVE_GOAL";
         return statusResponse(projection);
       } catch (err) {
@@ -204,17 +325,31 @@ export function createGoalEngineExtension(pi) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScope(ctx);
-      const goalId = resolveGoal(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
-      const projection = loadProjection(root, goalId);
+      const projection = loadProjectionFn(root, goalId);
       const task = projection.tasks.get(params.task_id);
       if (!task) throw new Error(`unknown task: ${params.task_id}`);
 
-      const baseCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+      const frontier = runnableFrontier(projection);
+      if (!frontier.includes(params.task_id)) {
+        if (task.status !== "pending") {
+          throw new Error(`task is not runnable (not pending): ${task.status}`);
+        }
+        const unmetDeps = task.deps.filter((dep) => projection.tasks.get(dep)?.status !== "accepted");
+        throw new Error(`task is not runnable: dependency not accepted (${unmetDeps.join(", ")})`);
+      }
+
+      if (task.workspace && !(task.workspace.phase === "disposed" && task.workspace.disposition === "discarded" && task.workspace.released === true)) {
+        throw new Error("existing workspace must be disposed, discarded, and released before redispatch");
+      }
+
+      const attempt = task.attempts + 1;
+      const baseCommit = gitHead(cwd);
       const lease = allocateExecutorWorkspace({
         goalId,
         taskId: params.task_id,
-        attempt: task.attempts + 1,
+        attempt,
         originRoot: cwd,
         stateRoot: root,
         baseCommit,
@@ -226,8 +361,17 @@ export function createGoalEngineExtension(pi) {
           timeoutMs: params.timeout_ms || 30 * 60 * 1000,
         });
 
-        const event = makeEvent("task.dispatched", { taskId: params.task_id, contractHash: contract.hash }, goalId);
-        appendEvent(root, event, projection.version);
+        const event = makeEvent("task.dispatched", {
+          taskId: params.task_id,
+          contractHash: contract.hash,
+          workspace: {
+            attempt,
+            path: lease.path,
+            branch: lease.branch,
+            baseCommit,
+          },
+        }, goalId);
+        appendEventFn(root, event, projection.version);
       } catch (err) {
         try {
           releaseExecutorWorkspace(lease, { disposition: "failed-cleanup" });
@@ -243,9 +387,10 @@ export function createGoalEngineExtension(pi) {
         status: "dispatched",
         task_id: params.task_id,
         contract,
-        workspace: { path: lease.path, branch: lease.branch, baseCommit: lease.baseCommit },
+        workspace: { attempt, path: lease.path, branch: lease.branch, baseCommit: lease.baseCommit },
       });
     },
+
   });
 
   registerGoalTool(pi, {
@@ -274,9 +419,9 @@ export function createGoalEngineExtension(pi) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScope(ctx);
-      const goalId = resolveGoal(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
-      let projection = loadProjection(root, goalId);
+      let projection = loadProjectionFn(root, goalId);
 
       const settleEvent = makeEvent("task.settled", {
         taskId: params.task_id,
@@ -286,10 +431,10 @@ export function createGoalEngineExtension(pi) {
         nextAction: params.next_action,
         reason: params.reason || null,
       }, goalId);
-      projection = appendEvent(root, settleEvent, projection.version);
+      projection = appendEventFn(root, settleEvent, projection.version);
 
       const cpEvent = makeEvent("goal.checkpoint", { nextAction: params.next_action }, goalId);
-      projection = appendEvent(root, cpEvent, projection.version);
+      projection = appendEventFn(root, cpEvent, projection.version);
 
       turnsSinceSettle = 0;
 
@@ -315,12 +460,16 @@ export function createGoalEngineExtension(pi) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScope(ctx);
-      const goalId = resolveGoal(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
-      let projection = loadProjection(root, goalId);
+      let projection = loadProjectionFn(root, goalId);
 
-      const acceptEvent = makeEvent("task.accepted", { taskId: params.task_id }, goalId);
-      projection = appendEvent(root, acceptEvent, projection.version);
+      const task = projection.tasks.get(params.task_id);
+      if (!task) throw new Error(`unknown task: ${params.task_id}`);
+      const workspaceAttempt = task.workspace?.attempt;
+
+      const acceptEvent = makeEvent("task.accepted", { taskId: params.task_id, workspaceAttempt }, goalId);
+      projection = appendEventFn(root, acceptEvent, projection.version);
 
       const progress = goalProgress(projection);
       const allAccepted = progress.accepted === progress.total;
@@ -332,7 +481,7 @@ export function createGoalEngineExtension(pi) {
         completionVerdict = hasExternal ? "COMPLETE" : "DONE_WITHOUT_EXTERNAL_VERIFICATION";
 
         const completeEvent = makeEvent("goal.completed", { verdict: completionVerdict }, goalId);
-        projection = appendEvent(root, completeEvent, projection.version);
+        projection = appendEventFn(root, completeEvent, projection.version);
       }
 
       return JSON.stringify({
@@ -380,9 +529,9 @@ export function createGoalEngineExtension(pi) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScope(ctx);
-      const goalId = resolveGoal(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
-      const projection = loadProjection(root, goalId);
+      const projection = loadProjectionFn(root, goalId);
 
       const addTasks = {};
       if (params.add_tasks) {
@@ -397,7 +546,7 @@ export function createGoalEngineExtension(pi) {
         removeTasks: params.remove_tasks || undefined,
         updateTasks: params.update_tasks || undefined,
       }, goalId);
-      const updated = appendEvent(root, event, projection.version);
+      const updated = appendEventFn(root, event, projection.version);
       return statusResponse(updated);
     },
   });
@@ -417,51 +566,203 @@ export function createGoalEngineExtension(pi) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScope(ctx);
-      const goalId = resolveGoal(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
 
-      const projection = loadProjection(root, goalId);
-      const task = projection.tasks.get(params.task_id);
-      if (!task) throw new Error(`unknown task: ${params.task_id}`);
+      let projection = loadProjectionFn(root, goalId);
+      const taskId = params.task_id;
+      const task = projection.tasks.get(taskId);
+      if (!task) throw new Error(`unknown task: ${taskId}`);
 
-      const lease = activeLeases.get(leaseKey(cwd, goalId, params.task_id)) ?? loadExecutorWorkspaceLease({
-        goalId,
-        taskId: params.task_id,
-        attempt: task.attempts,
-        stateRoot: root,
-      });
-      activeLeases.set(leaseKey(cwd, goalId, params.task_id), lease);
-
-      if (params.action === "preserve") {
-        releaseExecutorWorkspace(lease, { disposition: "preserved" });
-        activeLeases.delete(leaseKey(cwd, goalId, params.task_id));
-        return JSON.stringify({ action: "preserved", path: lease.path, branch: lease.branch });
+      const action = params.action;
+      const key = leaseKey(cwd, goalId, taskId);
+      const taskWorkspace = task.workspace;
+      if (!taskWorkspace || !taskWorkspace.phase) {
+        throw new Error("workspace is not initialized for disposition");
       }
 
-      if (params.action === "discard") {
-        releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup" });
-        activeLeases.delete(leaseKey(cwd, goalId, params.task_id));
-        return JSON.stringify({ action: "discarded", released: true });
+      const formatDispositionResponse = (dispositionWorkspace) => {
+        if (action === "integrate") {
+          return {
+            action: "integrated",
+            released: dispositionWorkspace.released,
+            strategy: dispositionWorkspace.strategy || params.strategy || DEFAULT_DISPOSITION_STRATEGY,
+            newHead: dispositionWorkspace.originHead || gitHead(cwd),
+          };
+        }
+        if (action === "discard") {
+          return {
+            action: "discarded",
+            released: dispositionWorkspace.released,
+          };
+        }
+
+        return {
+          action: "preserved",
+          released: dispositionWorkspace.released,
+          path: dispositionWorkspace.path,
+          branch: dispositionWorkspace.branch,
+        };
+      };
+
+      if (taskWorkspace.phase === "disposed") {
+        const expectedDisposition = { integrate: "integrated", discard: "discarded", preserve: "preserved" };
+        if (taskWorkspace.disposition !== expectedDisposition[action]) {
+          throw new Error(`workspace action mismatch (expected ${taskWorkspace.disposition}, got ${action})`);
+        }
+
+        const strategy = params.strategy || taskWorkspace.strategy || DEFAULT_DISPOSITION_STRATEGY;
+        if (params.strategy !== undefined && taskWorkspace.strategy !== undefined && strategy !== taskWorkspace.strategy) {
+          throw new Error(`workspace strategy mismatch (expected ${taskWorkspace.strategy}, got ${strategy})`);
+        }
+
+        const terminalLease = resolveLease(task, goalId, taskId, cwd, root);
+        const resources = inspectExecutorWorkspaceResources(terminalLease);
+
+        if (action === "preserve") {
+          if (!(resources.workspaceExists && resources.branchExists && resources.leaseExists)) {
+            throw new Error("preserve disposition requires workspace, branch, and lease to remain available");
+          }
+        } else if (resources.workspaceExists || resources.branchExists || resources.leaseExists) {
+          throw new Error("workspace is already disposed and cannot change disposition");
+        }
+
+        activeLeases.delete(key);
+        return JSON.stringify(formatDispositionResponse(taskWorkspace));
       }
 
-      const inspection = inspectExecutorWorkspace(lease);
-      if (!inspection.hasCommits) {
-        releaseExecutorWorkspace(lease, { disposition: "integrated-cleanup" });
-        activeLeases.delete(leaseKey(cwd, goalId, params.task_id));
-        return JSON.stringify({ action: "integrated", note: "no commits to integrate", released: true });
+      const lease = resolveLease(task, goalId, taskId, cwd, root);
+
+      const ensureApplied = () => {
+        const currentTask = projection.tasks.get(taskId);
+        const currentWorkspace = currentTask.workspace;
+
+        if (action === "preserve") {
+          const resources = inspectExecutorWorkspaceResources(lease);
+          if (!(resources.workspaceExists && resources.branchExists && resources.leaseExists)) {
+            throw new Error("preserve disposition requires workspace, branch, and lease to remain available");
+          }
+          const disposedEvent = makeEvent("task.workspace_disposed", {
+            taskId,
+            attempt: currentWorkspace.attempt,
+            action: currentWorkspace.requestedAction,
+            released: false,
+          }, goalId);
+          projection = appendEventFn(root, disposedEvent, projection.version);
+          return false;
+        }
+
+        const resourcesBefore = inspectExecutorWorkspaceResources(lease);
+        if (resourcesBefore.workspaceExists || resourcesBefore.branchExists || resourcesBefore.leaseExists) {
+          releaseExecutorWorkspace(
+            lease,
+            {
+              disposition: currentWorkspace.requestedAction === "integrate" ? "integrated-cleanup" : "discarded-cleanup",
+            },
+          );
+        }
+
+        const resourcesAfter = inspectExecutorWorkspaceResources(lease);
+        if (resourcesAfter.workspaceExists || resourcesAfter.branchExists || resourcesAfter.leaseExists) {
+          throw new Error("failed to release workspace resources before disposal");
+        }
+
+        const disposedEvent = makeEvent("task.workspace_disposed", {
+          taskId,
+          attempt: currentWorkspace.attempt,
+          action: currentWorkspace.requestedAction,
+          released: true,
+        }, goalId);
+        projection = appendEventFn(root, disposedEvent, projection.version);
+        return true;
+      };
+
+      if (taskWorkspace.phase === "active") {
+        let inspection;
+        if (action === "integrate") {
+          inspection = inspectExecutorWorkspace(lease);
+          if (!inspection.hasCommits) {
+            throw new Error("No commits to integrate");
+          }
+          if (!inspection.clean) {
+            throw new Error("Workspace must be clean before integration");
+          }
+          assertWorkspaceChangesWithinPaths(inspection, task.writePaths);
+        }
+
+        const strategy = params.strategy || DEFAULT_DISPOSITION_STRATEGY;
+        const executorHead = action === "integrate"
+          ? inspection.headCommit
+          : gitHead(lease.path);
+
+        const startedEvent = makeEvent("task.workspace_disposition_started", {
+          taskId,
+          attempt: taskWorkspace.attempt,
+          requestedAction: action,
+          strategy,
+          executorHead,
+          originHeadBefore: gitHead(cwd),
+        }, goalId);
+        projection = appendEventFn(root, startedEvent, projection.version);
+
+        const nextTask = projection.tasks.get(taskId);
+        if (action === "integrate" && !isExecutorWorkspaceIntegrated(lease, { strategy, executorHead: nextTask.workspace.executorHead })) {
+          integrateExecutorWorkspace(lease, { strategy, executorHead: nextTask.workspace.executorHead });
+        }
+
+        const appliedEvent = makeEvent("task.workspace_disposition_applied", {
+          taskId,
+          attempt: nextTask.workspace.attempt,
+          action,
+          strategy,
+          executorHead: nextTask.workspace.executorHead,
+          originHead: gitHead(cwd),
+        }, goalId);
+        projection = appendEventFn(root, appliedEvent, projection.version);
+      } else if (taskWorkspace.phase === "disposing") {
+        if (taskWorkspace.requestedAction !== action) {
+          throw new Error(`workspace action mismatch (expected ${taskWorkspace.requestedAction}, got ${action})`);
+        }
+
+        const strategy = params.strategy || taskWorkspace.strategy || DEFAULT_DISPOSITION_STRATEGY;
+        if (strategy !== taskWorkspace.strategy) {
+          throw new Error(`workspace strategy mismatch (expected ${taskWorkspace.strategy}, got ${strategy})`);
+        }
+
+        if (action === "integrate" && !isExecutorWorkspaceIntegrated(lease, { strategy, executorHead: taskWorkspace.executorHead })) {
+          integrateExecutorWorkspace(lease, { strategy, executorHead: taskWorkspace.executorHead });
+        }
+
+        const appliedEvent = makeEvent("task.workspace_disposition_applied", {
+          taskId,
+          attempt: taskWorkspace.attempt,
+          action,
+          strategy,
+          executorHead: taskWorkspace.executorHead,
+          originHead: gitHead(cwd),
+        }, goalId);
+        projection = appendEventFn(root, appliedEvent, projection.version);
+      } else if (taskWorkspace.phase === "applied") {
+        if (taskWorkspace.requestedAction !== action) {
+          throw new Error(`workspace action mismatch (expected ${taskWorkspace.requestedAction}, got ${action})`);
+        }
+
+        const strategy = params.strategy || taskWorkspace.strategy || DEFAULT_DISPOSITION_STRATEGY;
+        if (params.strategy !== undefined && taskWorkspace.strategy !== undefined && strategy !== taskWorkspace.strategy) {
+          throw new Error(`workspace strategy mismatch (expected ${taskWorkspace.strategy}, got ${strategy})`);
+        }
+      } else {
+        throw new Error("workspace must be in active, disposing, or applied phase");
       }
 
-      const result = integrateExecutorWorkspace(lease, { strategy: params.strategy || "cherry-pick" });
-      releaseExecutorWorkspace(lease, { disposition: "integrated-cleanup" });
-      activeLeases.delete(leaseKey(cwd, goalId, params.task_id));
+      const released = ensureApplied();
+      activeLeases.delete(key);
 
-      return JSON.stringify({
-        action: "integrated",
-        strategy: result.strategy,
-        newHead: result.newHead,
-        released: true,
-      });
+      const finalWorkspace = projection.tasks.get(taskId).workspace;
+      finalWorkspace.released = released;
+      return JSON.stringify(formatDispositionResponse(finalWorkspace));
     },
+
   });
 
   // --- tool_result hook: checkpoint reminder ---
@@ -472,14 +773,14 @@ export function createGoalEngineExtension(pi) {
     if (["goal_settle", "goal_status", "goal_init", "goal_dispatch", "goal_accept", "goal_amend", "goal_integrate"].includes(event.toolName)) return undefined;
 
     let activeGoals;
-    try { activeGoals = listGoals(root); } catch { return undefined; }
+    try { activeGoals = listGoalsFn(root); } catch { return undefined; }
     if (activeGoals.length === 0) return undefined;
 
     turnsSinceSettle++;
     if (turnsSinceSettle < CHECKPOINT_REMINDER_THRESHOLD) return undefined;
 
     let projection;
-    try { projection = loadProjection(root, activeGoals[0]); } catch { return undefined; }
+    try { projection = loadProjectionFn(root, activeGoals[0]); } catch { return undefined; }
     if (!projection || projection.lifecycle !== "active") return undefined;
 
     const reminder = `\n\n⚠️ [goal-engine] 活跃 goal "${projection.goalId}" 已 ${turnsSinceSettle} 轮未 settle。当前 runnable: [${runnableFrontier(projection).join(", ")}]。请推进任务或调用 goal_settle 更新状态。`;

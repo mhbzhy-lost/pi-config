@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
@@ -190,6 +190,35 @@ test("integrateExecutorWorkspace cherry-picks executor commit into origin", () =
   assert.ok(existsSync(join(origin, "feature.ts")));
 });
 
+test("integrateExecutorWorkspace with expected executor head must reject head mismatch before origin side effects", () => {
+  const origin = initRepo();
+  const stateRoot = tmpStateRoot();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+
+  const lease = allocateExecutorWorkspace({ goalId: "g", taskId: "t1", attempt: 2, originRoot: origin, stateRoot, baseCommit });
+
+  writeFileSync(join(lease.path, "expected-head-first.ts"), "export const first = true;\n");
+  git(lease.path, "add", ".");
+  git(lease.path, "commit", "-m", "feat: first commit");
+  const firstHead = git(lease.path, "rev-parse", "HEAD");
+
+  writeFileSync(join(lease.path, "expected-head-second.ts"), "export const second = true;\n");
+  git(lease.path, "add", ".");
+  git(lease.path, "commit", "-m", "feat: second commit");
+
+  const originHeadBefore = git(origin, "rev-parse", "HEAD");
+  const originStatusBefore = git(origin, "status", "--porcelain");
+
+  assert.throws(
+    () => integrateExecutorWorkspace(lease, { strategy: "cherry-pick", executorHead: firstHead }),
+    /executor.*HEAD|HEAD.*expected|HEAD.*changed/i,
+  );
+  assert.equal(git(origin, "rev-parse", "HEAD"), originHeadBefore);
+  assert.equal(git(origin, "status", "--porcelain"), originStatusBefore);
+  assert.equal(existsSync(join(origin, "expected-head-first.ts")), false);
+  assert.equal(existsSync(join(origin, "expected-head-second.ts")), false);
+});
+
 test("releaseExecutorWorkspace removes worktree and branch", () => {
   const origin = initRepo();
   const stateRoot = tmpStateRoot();
@@ -201,6 +230,37 @@ test("releaseExecutorWorkspace removes worktree and branch", () => {
   releaseExecutorWorkspace(lease, { disposition: "integrated-cleanup" });
   assert.equal(existsSync(lease.path), false);
   assert.equal(git(origin, "branch", "--list", branch), "");
+});
+
+test("releaseExecutorWorkspace(discarded-cleanup) partial cleanup should restore workspace, branch, and lease", () => {
+  const origin = initRepo();
+  const stateRoot = tmpStateRoot();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+
+  const lease = allocateExecutorWorkspace({ goalId: "g", taskId: "t2", attempt: 1, originRoot: origin, stateRoot, baseCommit });
+
+  rmSync(lease.path, { recursive: true, force: true });
+  assert.equal(existsSync(lease.path), false);
+  assert.ok(git(origin, "branch", "--list", lease.branch).includes(lease.branch));
+  assert.equal(existsSync(lease.leasePath), true);
+
+  assert.equal(
+    typeof workspace.inspectExecutorWorkspaceResources,
+    "function",
+    "inspectExecutorWorkspaceResources must be exported",
+  );
+  assert.deepEqual(workspace.inspectExecutorWorkspaceResources(lease), {
+    workspaceExists: false,
+    branchExists: true,
+    leaseExists: true,
+  });
+
+  releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup" });
+  assert.deepEqual(workspace.inspectExecutorWorkspaceResources(lease), {
+    workspaceExists: false,
+    branchExists: false,
+    leaseExists: false,
+  });
 });
 
 test("isExecutorWorkspaceIntegrated detects cherry-pick patch equivalence", () => {
