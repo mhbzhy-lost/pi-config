@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -77,9 +77,49 @@ test("removal preserves changed entries and foreign namespace content", async (t
   assert.equal(await readFile(foreign, "utf8"), "keep\n");
 });
 
-test("cleans temporary files when publication fails", async (t) => {
+test("rejects pre-existing conflicting entry without creating temporary files", async (t) => {
   const { cwd, targetUrl } = await fixture(); t.after(() => rm(cwd, { recursive: true, force: true }));
   const dir = path.join(cwd, ".pi-subagents"); await mkdir(dir, { mode: 0o700 }); await writeFile(path.join(dir, "race.mjs"), "foreign\n");
   await rejects({ cwd, fileName: "race.mjs", targetUrl }, /existing|conflict/i);
   assert.deepEqual((await readdir(dir)).sort(), ["race.mjs"]);
+});
+
+test("accepts a URL object and records its canonical href", async (t) => {
+  const { cwd, target } = await fixture(); t.after(() => rm(cwd, { recursive: true, force: true }));
+  const receipt = await materializeChildRuntimeEntry({ cwd, fileName: "url.mjs", targetUrl: pathToFileURL(target) });
+  assert.equal(receipt.targetUrl, pathToFileURL(await (await import("node:fs/promises")).realpath(target)).href);
+});
+
+test("concurrent identical requests converge without temporary files", async (t) => {
+  const { cwd, targetUrl } = await fixture(); t.after(() => rm(cwd, { recursive: true, force: true }));
+  const results = await Promise.allSettled(Array.from({ length: 8 }, () => materializeChildRuntimeEntry({ cwd, fileName: "shared.mjs", targetUrl })));
+  assert.ok(results.every((result) => result.status === "fulfilled"));
+  const receipts = results.map((result) => result.value);
+  assert.equal(receipts.filter((receipt) => receipt.created).length, 1);
+  assert.deepEqual((await readdir(receipts[0].directoryPath)).sort(), ["shared.mjs"]);
+});
+
+test("concurrent conflicting requests fail closed and leave no temporary files", async (t) => {
+  const { cwd, targetUrl } = await fixture(); t.after(() => rm(cwd, { recursive: true, force: true }));
+  const other = path.join(cwd, "other.mjs"); await writeFile(other, "export default 7;\n");
+  const results = await Promise.allSettled([
+    materializeChildRuntimeEntry({ cwd, fileName: "contested.mjs", targetUrl }),
+    materializeChildRuntimeEntry({ cwd, fileName: "contested.mjs", targetUrl: pathToFileURL(other).href }),
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+  const winner = results.find((result) => result.status === "fulfilled").value;
+  assert.equal(await readFile(winner.entryPath, "utf8"), source(winner.targetUrl));
+  const dir = path.join(cwd, ".pi-subagents"); assert.deepEqual((await readdir(dir)).sort(), ["contested.mjs"]);
+});
+
+test("removal rejects forged and stale receipts without deleting replacement", async (t) => {
+  const { cwd, targetUrl } = await fixture(); t.after(() => rm(cwd, { recursive: true, force: true }));
+  const receipt = await materializeChildRuntimeEntry({ cwd, fileName: "owned.mjs", targetUrl });
+  const forged = Object.freeze({ ...receipt });
+  await assert.rejects(() => removeChildRuntimeEntry(forged), /invalid|ownership|receipt/i);
+  assert.equal((await lstat(receipt.entryPath)).isFile(), true);
+  await unlink(receipt.entryPath); await writeFile(receipt.entryPath, source(targetUrl), { mode: 0o600 });
+  await assert.rejects(() => removeChildRuntimeEntry(receipt), /ownership|receipt/i);
+  assert.equal(await readFile(receipt.entryPath, "utf8"), source(targetUrl));
 });
