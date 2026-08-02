@@ -1,0 +1,197 @@
+{
+  "schema_version": "goal_contract.v1.1",
+  "slug": "plan-ir-v3-complete-capsule-contract",
+  "status": "active",
+  "phase": "implementation",
+  "current_slice": "flat-runtime-task-8",
+  "last_verified_at": "2026-07-30T13:43:11Z",
+  "next_action": "进入 Task 8B2：先清理 bounded-wait 测试 watchdog timer，再建立 official sidecar/status proof polling 与 verified force-kill 的独立 RED。",
+  "blocked_reason": null,
+  "contract_path": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract/goal-contract.md",
+  "feature_list_path": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract/feature-list.json",
+  "evidence_path": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract/evidence.jsonl",
+  "recovery_path": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract/recovery.md",
+  "amendments_path": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract/amendments.jsonl",
+  "practice_profile": {
+    "schema_version": "goal_contract.practice_profile.v1",
+    "source_projects": [
+      "pi-config"
+    ],
+    "evidence_lanes": [
+      {
+        "id": "source",
+        "purpose": "Code, diff, design, and repository artifact evidence."
+      },
+      {
+        "id": "build",
+        "purpose": "Compile, lint, typecheck, package, and generated-config evidence."
+      },
+      {
+        "id": "runtime",
+        "purpose": "Runtime logs, device/simulator state, session events, screenshots, and generated artifacts."
+      },
+      {
+        "id": "delivery",
+        "purpose": "Preview, publish, release, final manifest, and downstream handoff evidence."
+      },
+      {
+        "id": "eval",
+        "purpose": "Evaluator, benchmark, task suite, score, policy decision, and behavior report evidence."
+      },
+      {
+        "id": "environment",
+        "purpose": "Auth, credentials, toolchain, cloud device, sandbox, and external-service blocker evidence."
+      },
+      {
+        "id": "review",
+        "purpose": "Code review, security review, cross-review, user correction, and residual-risk evidence."
+      }
+    ],
+    "authority_ladder": [
+      {
+        "id": "source_trace",
+        "rank": 1,
+        "lane": "eval",
+        "allowed_claims": [
+          "full benchmark outcome",
+          "full conversion latency"
+        ],
+        "notes": "Producer-owned phase boundary, PipelineRun, source trace, or equivalent source-of-truth manifest."
+      },
+      {
+        "id": "usage_report",
+        "rank": 2,
+        "lane": "eval",
+        "allowed_claims": [
+          "token usage",
+          "cost",
+          "provider/runtime usage"
+        ],
+        "notes": "Provider or runtime usage report. Heuristic estimates must not be marked collected."
+      },
+      {
+        "id": "source_artifact",
+        "rank": 3,
+        "lane": "source",
+        "allowed_claims": [
+          "artifact shape",
+          "schema compatibility",
+          "producer output existence"
+        ],
+        "notes": "Generated files, manifests, reports, schemas, or source artifacts."
+      },
+      {
+        "id": "runner_trace",
+        "rank": 4,
+        "lane": "environment",
+        "allowed_claims": [
+          "diagnostic wall-clock",
+          "subprocess health",
+          "wrapper failure"
+        ],
+        "notes": "Runner/subprocess traces are diagnostic only unless the contract explicitly promotes them through an amendment."
+      },
+      {
+        "id": "heuristic_estimate",
+        "rank": 5,
+        "lane": "review",
+        "allowed_claims": [
+          "speculative estimate"
+        ],
+        "notes": "May explain uncertainty; must not satisfy collected metrics or full benchmark claims."
+      }
+    ],
+    "drift_detectors": [
+      {
+        "id": "single-compiler",
+        "invalid_when": "Main Agent、Plan Runner 或 tool 参数直接构造 IR JSON。",
+        "action": "停止实现并回到 Harness compiler 边界。"
+      },
+      {
+        "id": "single-domain-ir",
+        "invalid_when": "新增第二套带版本、hash 或持久化身份的 Task IR。",
+        "action": "标记 scope drift，改为无身份 selector view。"
+      },
+      {
+        "id": "revision-authority",
+        "invalid_when": "覆盖 revision 文件，或由 current.json 而非事件决定 committed revision。",
+        "action": "修复为不可变 artifact 和 event commit。"
+      },
+      {
+        "id": "event-cas",
+        "invalid_when": "任一 Plan event 绕过单 Event Writer 或 expected projection version。",
+        "action": "阻止 slice 完成并补齐 writer 接线和并发测试。"
+      },
+      {
+        "id": "historical-task-contract",
+        "invalid_when": "amendment 修改或删除 accepted/integrated Task 的局部 full 合同。",
+        "action": "拒绝 amendment 并使用新增 repair Task。"
+      },
+      {
+        "id": "unrelated-settings",
+        "invalid_when": "本目标 diff 或提交包含 pi/settings.json 的既有用户变化。",
+        "action": "保持用户改动原状并从本目标提交中排除。"
+      }
+    ],
+    "slice_ordering_gate": [
+      {
+        "id": "document-before-ir",
+        "requires": [
+          "pi-plan.v3 canonical contract"
+        ],
+        "before": [
+          "plan-ir.v3 compiler",
+          "selectors"
+        ],
+        "reason": "IR 不能编译尚未冻结的文档语义。"
+      },
+      {
+        "id": "identity-before-amendment",
+        "requires": [
+          "revision store",
+          "Event Writer",
+          "revision events"
+        ],
+        "before": [
+          "plan_amend"
+        ],
+        "reason": "更新协议必须建立在不可变 artifact 和事件 CAS 之上。"
+      },
+      {
+        "id": "amendment-before-consumers",
+        "requires": [
+          "committed revision",
+          "supersede recovery"
+        ],
+        "before": [
+          "Coordinator migration",
+          "Queue migration",
+          "Gate migration"
+        ],
+        "reason": "消费者必须只读取当前 event-committed revision。"
+      },
+      {
+        "id": "focused-before-full",
+        "requires": [
+          "Task 1-8 focused RED/GREEN evidence"
+        ],
+        "before": [
+          "Harness verification",
+          "full test suite",
+          "external review"
+        ],
+        "reason": "最终证据不能替代每个行为 slice 的 TDD 证据。"
+      }
+    ],
+    "blocker_taxonomy": [
+      "environment_auth",
+      "toolchain",
+      "device_runtime",
+      "external_service",
+      "missing_evidence",
+      "scope_conflict",
+      "review_rejected"
+    ],
+    "completion_rule": "Do not mark a goal complete by collapsing source, build, runtime, delivery, eval, environment, and review lanes into one verdict."
+  }
+}

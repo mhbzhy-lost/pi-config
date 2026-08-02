@@ -1,0 +1,36 @@
+{
+  "schema_version": "goal_contract.legacy_authorization_capture.v1",
+  "captured_at": "2026-08-02T11:50:03+08:00",
+  "status": "legacy_unverifiable",
+  "notice": "These summaries were reconstructed from committed amendment records. They preserve recoverable context but do not replace the unavailable original user messages or Todo snapshots.",
+  "sources": [
+    {
+      "source_id": "user-message:2026-07-29-unattended-both-plans",
+      "kind": "user_message_summary",
+      "captured_summary": "用户要求把两份已批准计划纳入同一无人值守执行目标，并持续推进到全部任务和最终门禁完成。",
+      "authorized_fields": ["Objective", "Scope", "Definition of Done"],
+      "authority": "legacy_unverifiable"
+    },
+    {
+      "source_id": "user-message:runtime-flat-domain-nested",
+      "kind": "user_message_summary",
+      "captured_summary": "用户冻结运行时扁平、领域拓扑嵌套和 Root session 单一生命周期 owner 的架构方向。",
+      "authorized_fields": ["Non-Goals"],
+      "authority": "legacy_unverifiable"
+    },
+    {
+      "source_id": "todo:17-21,26-35",
+      "kind": "todo_snapshot_summary",
+      "captured_summary": "Todo 范围覆盖 IR v3 收口任务及 flat runtime 后续实现与最终验证任务。",
+      "authorized_fields": ["Definition of Done"],
+      "authority": "legacy_unverifiable"
+    },
+    {
+      "source_id": "todo:26-35",
+      "kind": "todo_snapshot_summary",
+      "captured_summary": "Todo 范围覆盖薄 Host 退役、扁平 runtime 和最终验收任务。",
+      "authorized_fields": ["Scope"],
+      "authority": "legacy_unverifiable"
+    }
+  ]
+}

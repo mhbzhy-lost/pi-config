@@ -1,0 +1,300 @@
+[
+  {
+    "id": "task-1",
+    "description": "增加 pi-plan.v3 完整文档合同",
+    "status": "complete",
+    "priority": 1,
+    "verification": "node --test test/plan-document.test.mjs",
+    "evidence": [
+      "commit 427c82618a54c9350fc0d8bfe9014b8b2a30c81f",
+      "node --test test/plan-document.test.mjs: 13/13 pass",
+      "node --test test/plan-ir.test.mjs: 18/18 pass"
+    ],
+    "evidence_lane": "source",
+    "stage": "document-contract",
+    "blocker": null
+  },
+  {
+    "id": "task-2",
+    "description": "编译唯一完整 plan-ir.v3",
+    "status": "complete",
+    "priority": 2,
+    "verification": "node --test test/plan-ir.test.mjs test/plan-ir-schema.test.mjs",
+    "evidence": [
+      "commit 8e237de883f92c0b241f8725e4467cae23582d4a",
+      "node --test test/plan-document.test.mjs test/plan-ir.test.mjs test/plan-ir-schema.test.mjs: 33/33 pass"
+    ],
+    "evidence_lane": "source",
+    "stage": "ir-contract",
+    "blocker": null
+  },
+  {
+    "id": "task-3",
+    "description": "在 worktree 外冻结初始 Plan revision",
+    "status": "complete",
+    "priority": 3,
+    "verification": "node --test test/plan-revision-store.test.mjs test/plan-launcher-extension.test.mjs test/plan-host-runtime.test.mjs",
+    "evidence": [
+      "commits d4fe827eb0afcde91d5262834116fea4adb6da36, 5e4d40ea1a4e7304e5cb3d6ab5bf25459835b686, 2cf27291eafa596f6e48a6e933f3b82b4ed62fd2, c20c743540326c6e1096cdd8163a51b5bc1bb648, 920eb7575793cdde61a90b0edd76f59d953782ab",
+      "node --test test/plan-revision-store.test.mjs test/plan-launcher-extension.test.mjs test/plan-host-runtime.test.mjs: 38/38 pass; five consecutive rounds passed",
+      "node --test test/plan-document.test.mjs test/plan-ir.test.mjs test/plan-ir-schema.test.mjs test/plan-revision-store.test.mjs: 40/40 pass",
+      "git diff --check d4fe827..920eb757: pass"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "revision-store",
+    "blocker": null
+  },
+  {
+    "id": "task-4",
+    "description": "建立单写者 Plan Event Writer",
+    "status": "complete",
+    "priority": 4,
+    "verification": "node --test test/plan-event-writer.test.mjs test/plan-runner-dependencies.test.mjs",
+    "evidence": [
+      "commits 53103ad42983b1a720e7dcc0581a8f4bf785c140, 2cc8c9a169f0659b9e1b046069db415e0d7dfe83, 57dfe8848f7e78c98fce807756c5eb419e01e3b0",
+      "node --test test/plan-event-writer.test.mjs test/plan-events.test.mjs test/plan-coordinator.test.mjs test/plan-capsule-extension.test.mjs test/plan-runner-dependencies.test.mjs: 74/74 pass",
+      "local plan-reviewer found a late attempt.bound cancellation race; commit 57dfe884 fixed bind-or-cleanup and added deterministic RED/GREEN coverage",
+      "production grep leaves one low-level pi-plan-event append owned by plan-runner-dependencies writer callback",
+      "git diff --check 920eb757..57dfe884: pass"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "event-writer",
+    "blocker": null
+  },
+  {
+    "id": "task-5",
+    "description": "用事件绑定 Plan revision 身份",
+    "status": "complete",
+    "priority": 5,
+    "verification": "node --test test/plan-events.test.mjs test/plan-projection.test.mjs test/plan-capsule-extension.test.mjs test/plan-runner-dependencies.test.mjs",
+    "evidence": [
+      "commit 73e4032a717f61288482f9e11aac59d2e1e74d7d",
+      "67 focused tests passed",
+      "141 extended regression tests passed",
+      "pointer append/writeCurrent ordering and dispatch mismatch matrix passed"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "revision-events",
+    "blocker": null
+  },
+  {
+    "id": "task-6",
+    "description": "实现 Supervisor 驱动的 plan_amend",
+    "status": "complete",
+    "priority": 6,
+    "verification": "node --test test/plan-amendment.test.mjs test/plan-capsule-extension.test.mjs test/plan-projection.test.mjs",
+    "evidence": [
+      "commits 744b675c, bc22f5b3, e2fc5759, ed767034, 5146cb51, 27300b93, 64378a6c, b623cf7d, 1d20de0, fefc1a95, e687cc24, 13d1d4f7, 2d4586ee, 6e8e0d4b, 896e850c, 1f1f5ed9, 8d104935, 2d1db806, cb23ca36",
+      "test/plan-amendment-recovery.test.mjs: 14/14 pass with real v3 revision store and event replay",
+      "focused amendment/runtime/recovery regression: 157/157 pass",
+      "clear-env Host/migration regression: 23/23 pass",
+      "git diff --check: pass"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "amendment",
+    "blocker": null
+  },
+  {
+    "id": "task-7",
+    "description": "让 Coordinator 完整消费当前 revision IR",
+    "status": "complete",
+    "priority": 7,
+    "verification": "node --test test/plan-coordinator.test.mjs test/plan-attempt-validator.test.mjs",
+    "evidence": [
+      "commits db43db4b, 929a99b, 0c5a2c91, c3189717, 3ac1da41, bea798d, 042741eb",
+      "Coordinator/current revision focused regression: 83/83 pass",
+      "amendment recovery and Capsule cumulative regression: 84/84 pass",
+      "clear-env Host/migration regression: 23/23 pass",
+      "public revision1 -> plan.amended revision2 replay dispatched only changed task with revision2 prompt and hashes",
+      "git diff --check and static no-compiler check: pass"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "coordinator",
+    "blocker": null
+  },
+  {
+    "id": "task-8",
+    "description": "统一 Queue 与 v3 Gate 的 IR 消费",
+    "status": "complete",
+    "priority": 8,
+    "verification": "node --test test/plan-integration-queue.test.mjs test/plan-gates.test.mjs test/plan-coordinator.test.mjs",
+    "evidence": [
+      "commits 7af14539, b2c11c50, 4b08cced",
+      "Gate/validator/Queue/runner/Coordinator focused regression: 71/71 pass",
+      "amendment recovery and Capsule cumulative regression: 84/84 pass",
+      "clear-env Host/migration regression: 23/23 pass",
+      "forward-dependency public runner and real Git Queue used current v3 IR topology order",
+      "git diff --check: pass"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "queue-gates",
+    "blocker": null
+  },
+  {
+    "id": "task-9",
+    "description": "迁移真实 Harness 并完成回归门禁",
+    "status": "complete",
+    "priority": 9,
+    "verification": "执行计划 Execution Contract 的全部 8 条验证命令",
+    "evidence": [
+      "commits 6a20884, c32241d, 3dbda95, f9c9705, 28f28ec, 77ccef0, 3eaf441",
+      "IR/revision 40/40, events/amendment 80/80, Coordinator/resources 33/33, Gate/validator/Queue/runner 48/49 with the single timeout isolated GREEN, Launcher/Host/Capsule 60/61 with the single timing failure isolated GREEN",
+      "clear-env full suite with controlled concurrency: 724/724 pass",
+      "real amendment crash/restart Harness reached validated; real parallel/Attention Harness passed two delegated rounds and one independent parent round 3/3",
+      "npm run doctor and git diff --check passed; two independent plan-reviewer rounds completed, round-two fresh-status finding fixed"
+    ],
+    "evidence_lane": "eval",
+    "stage": "full-verification",
+    "blocker": null
+  },
+  {
+    "id": "flat-runtime-task-1",
+    "description": "冻结 Root Broker 协议",
+    "status": "complete",
+    "priority": 10,
+    "verification": "node --test test/root-subagent-broker-protocol.test.mjs",
+    "evidence": [
+      "commits 07c0307, 2099b4a, 5947f6c, 7cd81a8, 17ed7d0",
+      "protocol RED: module/response API missing; GREEN: dedicated 7/7 and related 18/18 pass",
+      "parent review fixed mutable method authorization and the missing response identity contract through bug documents plus TDD"
+    ],
+    "evidence_lane": "source",
+    "stage": "root-broker-protocol",
+    "blocker": null
+  },
+  {
+    "id": "flat-runtime-task-2",
+    "description": "建立 Root Session Broker",
+    "status": "complete",
+    "priority": 11,
+    "verification": "node --test test/root-subagent-broker.test.mjs test/subagent-runtime-membrane.test.mjs",
+    "evidence": [
+      "commits 0d5a0d5, b19bf96, 99bd75c, 1b7964c, 49fb4fa, 4071495",
+      "focused Root broker/runtime tests 28/28 and related protocol/dispatch regression 35/35 pass",
+      "real Pi compatibility test 19/19 pass",
+      "parent review reproduced idle-socket blocking, duplicate-bind ownership loss, and unusable Executor owner grants; all failure paths fixed with deterministic TDD"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "root-broker",
+    "blocker": null
+  },
+  {
+    "id": "flat-runtime-task-3",
+    "description": "增加 Child-Safe Typed Adapter 与 Root ownership guard",
+    "status": "complete",
+    "priority": 12,
+    "verification": "node --test test/root-subagent-broker.test.mjs test/pi-subagents-compat.test.mjs",
+    "evidence": [
+      "commits c734444, 430d080, bb8b743, 4318391, 77be802, b9dad5f, 0107345, a84d988, 98456f1, 7d754de",
+      "child/compat/supervisor focused 46/46 and extended Task3 regression 71/71 pass",
+      "clear-env real ExtensionRunner compatibility 20/20 pass; Doctor/migration 19/19 pass; npm run doctor pass",
+      "real installed upstream argv/env probe proves fanoutAuthorized=false, no fanout-child and no parent route; broker-only custom supervisor and Root marker restoration have direct tests"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "child-adapter",
+    "blocker": null
+  },
+  {
+    "id": "flat-runtime-task-4",
+    "description": "通过 Root RPC 启动 Plan Runner",
+    "status": "complete",
+    "priority": 13,
+    "verification": "node --test test/plan-launcher-extension.test.mjs test/plan-capsule-extension.test.mjs",
+    "evidence": [
+      "commits f58dbb3, 0fdbb7a, decd2b4, 605c9e7, 7b243e6, 576f61e, 066db8a, 6700641, c10b678, 9ddcba8",
+      "Task 4 focused Launcher/Capsule and Root broker regressions passed; independent review findings for launcher contract, lifecycle race, forwarding failure, broker grant cleanup, and Attention single-flight were fixed through TDD",
+      "flat launcher uses Root RPC and session-local handle without standalone attach or runtime parent metadata"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "plan-runner-launch",
+    "blocker": null
+  },
+  {
+    "id": "flat-runtime-task-5",
+    "description": "建立一次性 Executor Tool Authorization",
+    "status": "complete",
+    "priority": 14,
+    "verification": "node --test test/plan-executor-tool-boundary.test.mjs test/plan-coordinator.test.mjs test/plan-capsule-extension.test.mjs",
+    "evidence": [
+      "commits a09182e, 213c772, 1431727, d0a763e, fd78beb, cf0fb8a, c986a55",
+      "durable Executor intent, exact raw contract/hash/current revision/workspace identity, one-shot toolCallId authorization, Attention ACK recovery, and project tool wiring passed cumulative 148/148",
+      "prepareAuthorizedDispatches persists intent only; project subagent remains the sole model-callable dispatch surface"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "executor-tool-authorization",
+    "blocker": null
+  },
+  {
+    "id": "flat-runtime-task-6",
+    "description": "绑定 Tool Result 并转发 Runtime Lifecycle",
+    "status": "complete",
+    "priority": 15,
+    "verification": "node --test test/root-subagent-broker.test.mjs test/plan-executor-tool-boundary.test.mjs test/pi-subagents-execution-backend.test.mjs",
+    "evidence": [
+      "commits deb7461, b2f41a3, 919865b, d16f617, e59c50a, 57c7185, 6630b0d, ee24ebe, 8c3bb15, 56ce317, 5967055, f8d3e54, f8bbcd1, a3ab5aa, e1f870b",
+      "Task 6 exact cumulative matrix 278/278, cross-layer Boundary/Backend/Capsule/Dependencies 107/107, Root broker 69/69, and typed/Boundary/Capsule 91/91 passed",
+      "doctor, syntax, cumulative diff, staging, and orphan-process checks passed",
+      "two independent review rounds completed; stopped-run replay and concurrent terminal cleanup findings were fixed with separate RED/GREEN evidence"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "runtime-facts",
+    "blocker": null
+  },
+  {
+    "id": "flat-runtime-task-7",
+    "description": "路由 Supervisor 与 Attention",
+    "status": "complete",
+    "priority": 16,
+    "verification": "node --test test/root-subagent-broker.test.mjs test/plan-capsule-extension.test.mjs test/plan-runner-dependencies.test.mjs",
+    "evidence": [
+      "commits 8e7ccb7, f45d73a, 3842337 and tests-only RED chain through 971b1ff",
+      "Task 7 focused behavior 10/10, Root Broker 75/75, runtime/adapter/typed 54/54, Capsule/Dependencies 3/3, protocol/client 7/7 passed",
+      "Task 6+7 cumulative key matrix passed 306/306; npm run doctor, diff, staging, and orphan checks passed",
+      "two independent review rounds completed; lifecycle churn dedupe and mailbox route-failure ordering findings were fixed with separate RED/GREEN evidence",
+      ".pi-subagents/artifacts/outputs/b1b6b431-cbae-48e2-a3b2-36082a79a7a2/reports/task7-supervisor-owner-routing-review.md",
+      ".pi-subagents/artifacts/outputs/d893bb0a-fe55-49d1-b363-3a18fd0c7ae6/reports/task7-supervisor-owner-routing-rereview.md"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "supervisor-routing",
+    "blocker": null
+  },
+  {
+    "id": "flat-runtime-task-8",
+    "description": "让所有 Plan Runs 跟随 Root Session 终止",
+    "status": "active",
+    "priority": 17,
+    "verification": "node --test test/root-subagent-broker.test.mjs test/plan-launcher-extension.test.mjs",
+    "evidence": [
+      "commits f1f2ce1, 76eec61, b80c28a, 1cee8bb, d64e5d3, f5dd0a9",
+      "process birth helper 7/7; started ownership 7/7; lifecycle 5/5; parent Root Broker 90/90 after ordered-drain and bounded-wait remediation",
+      "Pi 0.83.0 / pi-subagents 0.37.2 source recheck preserves started/process-terminal contracts",
+      "Task 8B1 parent gates: bounded waits 3/3, ordered drain 5/5, Root Broker 90/90, protocol 8/8, birth helper 7/7; immediate stop-failure waiter finishes without the old 250ms timer",
+      "independent review 09556c85-fdac-43bc-a655-eeeeb375c7f7 reported no Critical and four Important findings; stop/startup deadline blockers are fixed, late-start fence and dispose retry debt remain assigned to Task 8C"
+    ],
+    "evidence_lane": "runtime",
+    "stage": "root-lifecycle",
+    "blocker": null
+  },
+  {
+    "id": "flat-runtime-task-9",
+    "description": "删除 Standalone Host 与旧恢复面",
+    "status": "pending",
+    "priority": 18,
+    "verification": "node --test test/doctor.test.mjs test/plan-launcher-extension.test.mjs",
+    "evidence": [],
+    "evidence_lane": "source",
+    "stage": "host-removal",
+    "blocker": "flat-runtime-task-8"
+  },
+  {
+    "id": "flat-runtime-task-10",
+    "description": "完成真实 flat runtime Harness 与累计回归",
+    "status": "pending",
+    "priority": 19,
+    "verification": "执行薄 Host 退役计划最终验收矩阵",
+    "evidence": [],
+    "evidence_lane": "eval",
+    "stage": "flat-runtime-verification",
+    "blocker": "flat-runtime-task-9"
+  }
+]
