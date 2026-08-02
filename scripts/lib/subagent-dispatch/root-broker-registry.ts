@@ -48,6 +48,11 @@ export function unbindRootBroker(pi: object, broker?: RootBrokerServer): void {
   if (!broker || brokers.get(key) === broker) brokers.delete(key);
 }
 
+export async function closeAndUnbindRootBroker(pi: object, broker = requireRootBroker(pi)): Promise<void> {
+  await broker.closeRootSession();
+  unbindRootBroker(pi, broker);
+}
+
 export async function startAndBindRootBroker(pi: object, broker: RootBrokerServer): Promise<void> {
   try {
     bindRootBroker(pi, broker);

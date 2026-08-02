@@ -8,6 +8,7 @@ import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
 
 const CLEANUP_KEY = "__typedSubagentRuntimeCleanup";
+const SHUTDOWN_DEBT_KEY = "__typedSubagentRuntimeShutdownDebt";
 const CODING_AGENTS = new Set(["executor", "spark"]);
 const CONTROL_ACTIONS = new Set(["status", "steer", "interrupt", "stop"]);
 
@@ -312,6 +313,37 @@ async function executeControl(input, rpc) {
   return rpcResult(await rpc[action](params));
 }
 
+function shutdownDebtManager(cleanupStore) {
+  const current = cleanupStore[SHUTDOWN_DEBT_KEY];
+  if (current?.lanes instanceof WeakMap) return current;
+  const manager = { lanes: new WeakMap(), debts: current?.debts instanceof Array ? current.debts : (current ? [current] : []) };
+  cleanupStore[SHUTDOWN_DEBT_KEY] = manager;
+  return manager;
+}
+
+function shutdownDebtLane(manager, pi) {
+  // ExtensionAPI objects change on reload; its event bus is the stable runtime lineage.
+  const identity = pi.events && (typeof pi.events === "object" || typeof pi.events === "function") ? pi.events : pi;
+  let lane = manager.lanes.get(identity);
+  if (!lane) {
+    lane = { debts: [] };
+    manager.lanes.set(identity, lane);
+  }
+  manager.debts = lane.debts;
+  return lane;
+}
+
+function releaseCompletedDebts(lane) {
+  while (lane.debts[0]?.completed) lane.debts.shift();
+}
+
+async function repayDebts(lane, before) {
+  for (const debt of [...lane.debts]) {
+    if (debt === before) break;
+    if (!debt.completed) await debt.run(debt.event, debt.ctx, true);
+  }
+}
+
 function cleanupRegistry(cleanupStore) {
   const current = cleanupStore[CLEANUP_KEY];
   if (current instanceof WeakMap) return current;
@@ -394,23 +426,49 @@ export function createTypedSubagentExtension(
     resolveCodingSpawnIdentity,
     beforeDispose = async () => {},
     retainOnBeforeDisposeFailure = false,
+    afterBeforeDispose = async () => {},
+    beforeSessionStart = async () => {},
     onSupervisorRequest,
   } = {},
 ) {
+  // Durable debt retention supersedes this legacy opt-in; retain it for callers on the old API.
+  void retainOnBeforeDisposeFailure;
   const registry = cleanupRegistry(cleanupStore);
+  const debtManager = shutdownDebtManager(cleanupStore);
+  const debtLane = shutdownDebtLane(debtManager, pi);
   const previous = registry.get(pi);
-  if (previous && typeof previous.dispose === "function") previous.dispose();
+  if (previous?.debt && !previous.debt.completed) {
+    Promise.resolve(previous.debt.run(previous.debt.event, previous.debt.ctx, true)).catch(() => {
+      // The replacement generation's ready gate retains and retries this debt.
+    });
+  }
 
   const token = Symbol("typed-subagent-runtime");
+  const resources = [
+    { dispose: () => supervisorAdapter?.dispose?.(), done: !supervisorAdapter?.dispose },
+    ...extraDisposables.map((disposable) => ({ dispose: () => disposable?.dispose?.(), done: !disposable?.dispose })),
+    { dispose: () => rpc.dispose?.(), done: !rpc.dispose },
+  ];
   let disposed = false;
-  const dispose = () => {
+  let disposeFlight;
+  const dispose = async () => {
     if (disposed) return;
-    disposed = true;
-    supervisorAdapter?.dispose();
-    for (const disposable of extraDisposables) disposable?.dispose?.();
-    rpc.dispose?.();
+    if (disposeFlight) return disposeFlight;
+    disposeFlight = (async () => {
+      const errors = [];
+      for (const resource of resources) {
+        if (resource.done) continue;
+        try { await resource.dispose(); resource.done = true; } catch (error) { errors.push(error); }
+      }
+      if (errors.length) throw new AggregateError(errors, "typed subagent runtime disposal failed");
+      disposed = true;
+    })();
+    try {
+      return await disposeFlight;
+    } finally {
+      if (!disposed) disposeFlight = undefined;
+    }
   };
-  registry.set(pi, { token, dispose });
 
   const tool = {
     name: "subagent",
@@ -431,46 +489,96 @@ export function createTypedSubagentExtension(
       }
     },
   };
-  pi.registerTool(tool);
-
-  if (typeof onSupervisorRequest === "function") {
-    pi.on("message_end", async (event, ctx) => {
-      if (disposed || registry.get(pi)?.token !== token) return;
-      const message = event?.message;
-      if (message?.customType === "subagent_supervisor_request") await onSupervisorRequest(message, ctx);
-    });
-  }
-
   const supervisorTool = supervisorAdapter ? createSupervisorTool(supervisorAdapter) : undefined;
-  if (supervisorTool) {
-    pi.registerTool(supervisorTool);
-    pi.on("session_start", async () => {
-      if (supervisorAdapter.isBound()) return;
-      deactivateSupervisorTool(pi);
-      const error = new Error("SUPERVISOR_TARGET_UNAVAILABLE");
-      error.code = "SUPERVISOR_TARGET_UNAVAILABLE";
-      throw error;
-    });
-  }
+  let shutdownDebt;
+  let ready;
+  try {
+    pi.registerTool(tool);
 
-  pi.on("session_shutdown", async () => {
-    if (registry.get(pi)?.token !== token) return;
-    if (retainOnBeforeDisposeFailure) {
-      await beforeDispose();
-      dispose();
-      registry.delete(pi);
-      return;
+    if (typeof onSupervisorRequest === "function") {
+      pi.on("message_end", async (event, ctx) => {
+        if (disposed || registry.get(pi)?.token !== token) return;
+        const message = event?.message;
+        if (message?.customType === "subagent_supervisor_request") await onSupervisorRequest(message, ctx);
+      });
     }
-    try {
-      await beforeDispose();
-    } finally {
-      dispose();
-      registry.delete(pi);
+
+    if (supervisorTool) pi.registerTool(supervisorTool);
+
+    shutdownDebt = { attempted: false, completed: false, inFlight: undefined, run: undefined, event: undefined, ctx: undefined };
+    shutdownDebt.run = async (event, ctx, force = false) => {
+      if (shutdownDebt.completed || (!force && registry.get(pi)?.token !== token)) return;
+      if (!shutdownDebt.attempted) {
+        shutdownDebt.event = event;
+        shutdownDebt.ctx = ctx;
+      }
+      shutdownDebt.attempted = true;
+      if (shutdownDebt.inFlight) return shutdownDebt.inFlight;
+      shutdownDebt.inFlight = (async () => {
+        await repayDebts(debtLane, shutdownDebt);
+        await beforeDispose(shutdownDebt.event, shutdownDebt.ctx);
+        await afterBeforeDispose(shutdownDebt.event, shutdownDebt.ctx);
+        await dispose();
+        if (registry.get(pi)?.token === token) registry.delete(pi);
+        shutdownDebt.completed = true;
+        releaseCompletedDebts(debtLane);
+      })();
+      try {
+        return await shutdownDebt.inFlight;
+      } finally {
+        if (!shutdownDebt.completed) shutdownDebt.inFlight = undefined;
+      }
+    };
+    debtLane.debts.push(shutdownDebt);
+    registry.set(pi, { token, dispose, debt: shutdownDebt, lane: debtLane });
+    let startFlight;
+    let started = false;
+    ready = async (event, ctx) => {
+      if (started) return;
+      if (startFlight) return startFlight;
+      startFlight = (async () => {
+        if (shutdownDebt.attempted && !shutdownDebt.completed) {
+          await shutdownDebt.run(event, ctx, true);
+          return;
+        }
+        await repayDebts(debtLane, shutdownDebt);
+        await beforeSessionStart(event, ctx);
+        started = true;
+      })();
+      try {
+        return await startFlight;
+      } finally {
+        if (!started) startFlight = undefined;
+      }
+    };
+    pi.on("session_start", async (event, ctx) => {
+      if (registry.get(pi)?.token !== token) return;
+      await ready(event, ctx);
+    });
+    pi.on("session_shutdown", shutdownDebt.run);
+    if (supervisorTool) {
+      pi.on("session_start", async (event, ctx) => {
+        if (registry.get(pi)?.token !== token) return;
+        await ready(event, ctx);
+        if (registry.get(pi)?.token !== token || supervisorAdapter.isBound()) return;
+        deactivateSupervisorTool(pi);
+        const error = new Error("SUPERVISOR_TARGET_UNAVAILABLE");
+        error.code = "SUPERVISOR_TARGET_UNAVAILABLE";
+        throw error;
+      });
     }
-  });
+  } catch (error) {
+    if (shutdownDebt) {
+      const debtIndex = debtLane.debts.indexOf(shutdownDebt);
+      if (debtIndex >= 0) debtLane.debts.splice(debtIndex, 1);
+    }
+    if (registry.get(pi)?.token === token) registry.delete(pi);
+    void Promise.resolve(dispose()).catch(() => undefined);
+    throw error;
+  }
 
   const executeSupervisor = async (params, ctx) => supervisorAdapter.execute(randomUUID(), params, undefined, undefined, ctx);
-  return Object.freeze({ tool, supervisorTool, executeSupervisor, dispose });
+  return Object.freeze({ tool, supervisorTool, executeSupervisor, dispose, ready });
 }
 
 export function installHeadlessTypedSubagentRuntime(pi, {
@@ -478,6 +586,7 @@ export function installHeadlessTypedSubagentRuntime(pi, {
   completionNotifierFactory,
   resolveSessionId,
   beforeRuntimeDispose,
+  beforeUpstreamSessionStart = async () => {},
   ...options
 } = {}) {
   if (typeof bootstrap !== "function") {
@@ -486,38 +595,158 @@ export function installHeadlessTypedSubagentRuntime(pi, {
   const supervisorAdapter = createSupervisorAdapter();
   const titleRegistry = options.titleRegistry ?? getTitleRegistry(options.cleanupStore ?? globalThis);
   titleRegistry.resetCompleted?.();
+  const upstreamShutdownHandlers = [];
+  const upstreamSessionStartHandlers = [];
+  const deferredEventSubscriptions = [];
+  const cleanupStore = options.cleanupStore ?? globalThis;
+  const debtManager = shutdownDebtManager(cleanupStore);
+  const debtLane = shutdownDebtLane(debtManager, pi);
+  const globalStore = globalThis;
+  const globalCleanupKeys = ["__piSubagentRuntimeCleanup", "__piSubagentEventUnsubscribes"];
+  const globalOwnership = globalCleanupKeys.map((key) => ({ key, present: Object.hasOwn(globalStore, key), value: globalStore[key] }));
+  const hiddenOwnership = debtLane.debts.some((debt) => !debt.completed);
+  if (hiddenOwnership) {
+    // Upstream performs best-effort global cleanup synchronously during bootstrap.
+    // Hide the old generation until its ordered shutdown debt has been repaid.
+    for (const { key } of globalOwnership) delete globalStore[key];
+  }
+  let generationOwnership;
+  const rollbackOwnership = new Map();
+  const snapshotOwnership = (key) => ({ present: Object.hasOwn(globalStore, key), value: globalStore[key] });
+  const matchesOwnership = (key, ownership) => ownership
+    && Object.hasOwn(globalStore, key) === ownership.present
+    && (!ownership.present || globalStore[key] === ownership.value);
+  const cleanupGenerationOwnership = () => {
+    if (!generationOwnership) return;
+    for (const { key } of globalOwnership) {
+      const owned = generationOwnership.get(key);
+      if (!matchesOwnership(key, owned)) continue;
+      try {
+        if (key === "__piSubagentRuntimeCleanup" && typeof owned.value === "function") owned.value();
+        if (key === "__piSubagentEventUnsubscribes" && Array.isArray(owned.value)) {
+          for (const unsubscribe of owned.value) if (typeof unsubscribe === "function") unsubscribe();
+        }
+      } catch {
+        // Preserve the installation error while continuing best-effort rollback.
+      }
+      const released = snapshotOwnership(key);
+      if (!released.present || matchesOwnership(key, owned)) rollbackOwnership.set(key, released);
+    }
+  };
+  const restoreOwnership = () => {
+    if (!hiddenOwnership) return;
+    for (const { key, present, value } of globalOwnership) {
+      const expected = rollbackOwnership.get(key) ?? generationOwnership?.get(key);
+      if (generationOwnership && !matchesOwnership(key, expected)) continue;
+      if (present) globalStore[key] = value;
+      else delete globalStore[key];
+    }
+  };
+  const captureEventSubscription = (type, handler) => {
+    if (typeof handler !== "function") throw new TypeError("upstream event handler must be a function");
+    const entry = { type, handler, active: false, cancelled: false, unsubscribe: undefined };
+    deferredEventSubscriptions.push(entry);
+    return () => {
+      if (entry.cancelled) return;
+      entry.cancelled = true;
+      entry.unsubscribe?.();
+      entry.unsubscribe = undefined;
+    };
+  };
+  const activateEventSubscriptions = () => {
+    for (const entry of deferredEventSubscriptions) {
+      if (entry.cancelled || entry.active) continue;
+      entry.unsubscribe = pi.events.on(entry.type, entry.handler);
+      entry.active = true;
+    }
+  };
+  try {
   bootstrap(createHeadlessSubagentApi(pi, {
     supervisorAdapter,
     titleRegistry,
     suppressCompletionNotifications: typeof completionNotifierFactory === "function",
+    captureSessionStart(handler) {
+      if (typeof handler !== "function") throw new TypeError("upstream session_start handler must be a function");
+      upstreamSessionStartHandlers.push(handler);
+      return () => {
+        const index = upstreamSessionStartHandlers.indexOf(handler);
+        if (index >= 0) upstreamSessionStartHandlers.splice(index, 1);
+      };
+    },
+    captureSessionShutdown(handler) {
+      if (typeof handler !== "function") throw new TypeError("upstream session_shutdown handler must be a function");
+      upstreamShutdownHandlers.push({ handler, completed: false });
+      return () => {
+        const index = upstreamShutdownHandlers.findIndex((entry) => entry.handler === handler);
+        if (index >= 0) upstreamShutdownHandlers.splice(index, 1);
+      };
+    },
+    captureEventSubscription,
   }));
+  } catch (error) {
+    generationOwnership = new Map(globalCleanupKeys.map((key) => [key, snapshotOwnership(key)]));
+    cleanupGenerationOwnership();
+    restoreOwnership();
+    throw error;
+  }
+  generationOwnership = new Map(globalCleanupKeys.map((key) => [key, snapshotOwnership(key)]));
 
   let completionNotifier;
-  if (typeof completionNotifierFactory === "function") {
-    if (typeof resolveSessionId !== "function") {
-      throw new TypeError("title-aware completion notification requires a session identity resolver");
+  let notificationState;
+  try {
+    if (typeof completionNotifierFactory === "function") {
+      if (typeof resolveSessionId !== "function") {
+        throw new TypeError("title-aware completion notification requires a session identity resolver");
+      }
+      notificationState = { currentSessionId: null };
+      completionNotifier = completionNotifierFactory(
+        createHeadlessSubagentApi(pi, { titleRegistry, captureEventSubscription }),
+        notificationState,
+      );
+      if (!completionNotifier || typeof completionNotifier.dispose !== "function") {
+        throw new TypeError("completion notifier factory must return a disposable notifier");
+      }
+      pi.on("session_start", (_event, ctx) => {
+        notificationState.currentSessionId = resolveSessionId(ctx.sessionManager);
+      });
     }
-    const notificationState = { currentSessionId: null };
-    completionNotifier = completionNotifierFactory(
-      createHeadlessSubagentApi(pi, { titleRegistry }),
-      notificationState,
-    );
-    if (!completionNotifier || typeof completionNotifier.dispose !== "function") {
-      throw new TypeError("completion notifier factory must return a disposable notifier");
-    }
-    pi.on("session_start", (_event, ctx) => {
-      notificationState.currentSessionId = resolveSessionId(ctx.sessionManager);
-    });
-    pi.on("session_shutdown", () => {
-      notificationState.currentSessionId = null;
-    });
-  }
 
-  return createTypedSubagentExtension(pi, {
+    return createTypedSubagentExtension(pi, {
     ...options,
     supervisorAdapter,
     titleRegistry,
-    extraDisposables: completionNotifier ? [completionNotifier] : [],
+    extraDisposables: [
+      ...(completionNotifier ? [completionNotifier, { dispose() { notificationState.currentSessionId = null; } }] : []),
+      { dispose() { for (const entry of deferredEventSubscriptions) { entry.cancelled = true; entry.unsubscribe?.(); entry.unsubscribe = undefined; } } },
+    ],
     beforeDispose: beforeRuntimeDispose,
-  });
+    async beforeSessionStart(event, ctx) {
+      await beforeUpstreamSessionStart(event, ctx);
+      for (const handler of upstreamSessionStartHandlers) await handler(event, ctx);
+      activateEventSubscriptions();
+    },
+    async afterBeforeDispose(event, ctx) {
+      for (const entry of upstreamShutdownHandlers) {
+        if (!Object.hasOwn(entry, "event")) {
+          entry.event = event;
+          entry.ctx = ctx;
+        }
+      }
+      for (const entry of upstreamShutdownHandlers) {
+        if (entry.completed) continue;
+        await entry.handler(entry.event, entry.ctx);
+        entry.completed = true;
+      }
+    },
+    });
+  } catch (error) {
+    completionNotifier?.dispose?.();
+    for (const entry of deferredEventSubscriptions) {
+      entry.cancelled = true;
+      entry.unsubscribe?.();
+    }
+    cleanupGenerationOwnership();
+    restoreOwnership();
+    throw error;
+  }
 }

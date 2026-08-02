@@ -292,19 +292,139 @@ test("beforeDispose completes before RPC disposal in the single shutdown handler
   assert.deepEqual(order, ["before", "dispose"]);
 });
 
-test("beforeDispose failure still disposes RPC and removes its cleanup entry", async () => {
+test("beforeDispose failure retains RPC and cleanup entry for shutdown retry", async () => {
   const pi = createPi();
   const order = [];
+  let failClose = true;
   const rpc = createRpc({ dispose() { order.push("dispose"); } });
   createTypedSubagentExtension(pi, {
     rpc,
     cleanupStore: {},
-    async beforeDispose() { order.push("before"); throw new Error("close failed"); },
+    async beforeDispose() {
+      order.push("before");
+      if (failClose) throw new Error("close failed");
+    },
   });
   const shutdown = pi.handlers.get("session_shutdown")[0];
   await assert.rejects(() => shutdown(), /close failed/);
+  assert.deepEqual(order, ["before"]);
+  failClose = false;
   await shutdown();
-  assert.deepEqual(order, ["before", "dispose"]);
+  await shutdown();
+  assert.deepEqual(order, ["before", "before", "dispose"]);
+});
+
+test("headless bootstrap defers upstream shutdown cleanup until ordered drain succeeds and preserves retry ownership", async () => {
+  const pi = createPi();
+  const order = [];
+  let failDrain = true;
+  const rpc = createRpc({ dispose() { order.push("project-rpc-dispose"); } });
+
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) {
+      api.on("session_shutdown", (event, context) => {
+        order.push(`upstream:${event.reason}:${context.id}`);
+      });
+    },
+    rpc,
+    cleanupStore: {},
+    async beforeRuntimeDispose() {
+      order.push("ordered-drain");
+      if (failDrain) throw new Error("drain failed");
+    },
+  });
+
+  const shutdown = async (event, context) => {
+    for (const handler of pi.handlers.get("session_shutdown") ?? []) await handler(event, context);
+  };
+  await assert.rejects(() => shutdown({ reason: "exit" }, { id: "original-context" }), /drain failed/);
+  assert.deepEqual(order, ["ordered-drain"], "failed drain must retain upstream and project cleanup ownership");
+
+  failDrain = false;
+  await shutdown({ reason: "exit" }, { id: "original-context" });
+  await shutdown({ reason: "exit" }, { id: "original-context" });
+  assert.deepEqual(order, [
+    "ordered-drain",
+    "ordered-drain",
+    "upstream:exit:original-context",
+    "project-rpc-dispose",
+  ]);
+});
+
+test("shutdown is single-flight and retries the complete flow after failure", async () => {
+  const pi = createPi();
+  const order = [];
+  let fail = true;
+  createTypedSubagentExtension(pi, {
+    cleanupStore: {},
+    rpc: createRpc({ dispose() { order.push("dispose"); } }),
+    async beforeDispose() {
+      order.push("drain");
+      if (fail) throw new Error("drain failed");
+    },
+    async afterBeforeDispose() { order.push("upstream"); },
+  });
+  const shutdown = pi.handlers.get("session_shutdown")[0];
+  await assert.rejects(() => Promise.all([shutdown(), shutdown()]), /drain failed/);
+  assert.deepEqual(order, ["drain"]);
+  fail = false;
+  await Promise.all([shutdown(), shutdown()]);
+  await shutdown();
+  assert.deepEqual(order, ["drain", "drain", "upstream", "dispose"]);
+});
+
+test("upstream shutdown debt retries only handlers that failed", async () => {
+  const pi = createPi();
+  const calls = [];
+  let failSecond = true;
+  installHeadlessTypedSubagentRuntime(pi, {
+    cleanupStore: {}, rpc: createRpc(),
+    bootstrap(api) {
+      api.on("session_shutdown", () => { calls.push("first"); });
+      api.on("session_shutdown", (event) => {
+        calls.push(`second:${event.reason}`);
+        if (failSecond) throw new Error("second failed");
+      });
+      api.on("session_shutdown", (event) => { calls.push(`third:${event.reason}`); });
+    },
+  });
+  const shutdown = pi.handlers.get("session_shutdown")[0];
+  await assert.rejects(() => shutdown({ reason: "exit" }, {}), /second failed/);
+  failSecond = false;
+  await shutdown({ reason: "changed" }, { changed: true });
+  assert.deepEqual(calls, ["first", "second:exit", "second:exit", "third:exit"]);
+});
+
+test("reload repays old generation shutdown debt before activating new upstream handlers", async () => {
+  const pi = createPi();
+  const cleanupStore = {};
+  const order = [];
+  let failDrain = true;
+  installHeadlessTypedSubagentRuntime(pi, {
+    cleanupStore, rpc: createRpc({ dispose() { order.push("old-project"); } }),
+    bootstrap(api) {
+      api.registerTool({ name: "subagent_supervisor", execute() {} });
+      api.on("session_start", () => { order.push("old-generation"); });
+      api.on("session_shutdown", () => { order.push("old-upstream"); });
+    },
+    async beforeRuntimeDispose() {
+      order.push("old-drain");
+      if (failDrain) throw new Error("drain failed");
+    },
+  });
+  const oldShutdown = pi.handlers.get("session_shutdown")[0];
+  await assert.rejects(() => oldShutdown({ reason: "reload" }, {}), /drain failed/);
+  installHeadlessTypedSubagentRuntime(pi, {
+    cleanupStore, rpc: createRpc(),
+    bootstrap(api) {
+      api.registerTool({ name: "subagent_supervisor", execute() {} });
+      api.on("session_start", () => { order.push("new-generation"); });
+    },
+    async beforeUpstreamSessionStart() { order.push("new-project"); },
+  });
+  failDrain = false;
+  for (const handler of pi.handlers.get("session_start") ?? []) await handler({ reason: "reload" }, {});
+  assert.deepEqual(order, ["old-drain", "old-drain", "old-upstream", "old-project", "new-project", "new-generation"]);
 });
 
 test("retain-on-beforeDispose-failure retries cleanup before disposing RPC", async () => {
@@ -581,9 +701,10 @@ test("reload and shutdown dispose only the current RPC client", async () => {
 
   createTypedSubagentExtension(pi, { rpc: first, cleanupStore });
   const firstShutdown = pi.handlers.get("session_shutdown")[0];
-  createTypedSubagentExtension(pi, { rpc: second, cleanupStore });
+  const current = createTypedSubagentExtension(pi, { rpc: second, cleanupStore });
   const secondShutdown = pi.handlers.get("session_shutdown")[1];
 
+  await current.ready();
   assert.equal(first.disposed(), 1);
   await firstShutdown();
   assert.equal(second.disposed(), 0);
@@ -775,4 +896,118 @@ test("keeps in-flight Supervisor routing isolated from mailbox deactivation", as
   await mailbox.activate();
 
   assert.deepEqual(calls, [1, 3]);
+});
+
+test("installation rollback cleans the failed generation and restores hidden upstream ownership", async () => {
+  const pi = createPi(); const cleanupStore = {}; const oldRuntime = { old: "runtime" }; const oldEvents = { old: "events" };
+  let generatedRuntimeCleanups = 0; let generatedEventCleanups = 0;
+  globalThis.__piSubagentRuntimeCleanup = oldRuntime;
+  globalThis.__piSubagentEventUnsubscribes = oldEvents;
+  try {
+    installHeadlessTypedSubagentRuntime(pi, { cleanupStore, rpc: createRpc(), bootstrap() {}, async beforeRuntimeDispose() { throw new Error("old debt"); } });
+    await assert.rejects(() => pi.handlers.get("session_shutdown")[0](), /old debt/);
+    assert.throws(() => installHeadlessTypedSubagentRuntime(pi, {
+      cleanupStore,
+      rpc: createRpc(),
+      bootstrap() {
+        globalThis.__piSubagentRuntimeCleanup = () => { generatedRuntimeCleanups += 1; };
+        globalThis.__piSubagentEventUnsubscribes = [() => { generatedEventCleanups += 1; }];
+      },
+      completionNotifierFactory() { throw new Error("notifier failure"); },
+      resolveSessionId() { return "session"; },
+    }), /notifier failure/);
+    assert.equal(generatedRuntimeCleanups, 1);
+    assert.equal(generatedEventCleanups, 1);
+    assert.equal(globalThis.__piSubagentRuntimeCleanup, oldRuntime);
+    assert.equal(globalThis.__piSubagentEventUnsubscribes, oldEvents);
+  } finally {
+    delete globalThis.__piSubagentRuntimeCleanup;
+    delete globalThis.__piSubagentEventUnsubscribes;
+  }
+});
+
+test("installation rollback preserves a newer owner written by another cleanup callback", async () => {
+  const pi = createPi(); const cleanupStore = {}; const oldRuntime = { old: "runtime" }; const oldEvents = { old: "events" };
+  const newerRuntime = { newer: "runtime" };
+  globalThis.__piSubagentRuntimeCleanup = oldRuntime;
+  globalThis.__piSubagentEventUnsubscribes = oldEvents;
+  try {
+    installHeadlessTypedSubagentRuntime(pi, { cleanupStore, rpc: createRpc(), bootstrap() {}, async beforeRuntimeDispose() { throw new Error("old debt"); } });
+    await assert.rejects(() => pi.handlers.get("session_shutdown")[0](), /old debt/);
+    assert.throws(() => installHeadlessTypedSubagentRuntime(pi, {
+      cleanupStore,
+      rpc: createRpc(),
+      bootstrap() {
+        globalThis.__piSubagentRuntimeCleanup = () => {};
+        globalThis.__piSubagentEventUnsubscribes = [() => { globalThis.__piSubagentRuntimeCleanup = newerRuntime; }];
+      },
+      completionNotifierFactory() { throw new Error("notifier failure"); },
+      resolveSessionId() { return "session"; },
+    }), /notifier failure/);
+    assert.equal(globalThis.__piSubagentRuntimeCleanup, newerRuntime);
+    assert.equal(globalThis.__piSubagentEventUnsubscribes, oldEvents);
+  } finally {
+    delete globalThis.__piSubagentRuntimeCleanup;
+    delete globalThis.__piSubagentEventUnsubscribes;
+  }
+});
+
+test("installation rollback preserves a newer owner written by its own cleanup callback", async () => {
+  const pi = createPi(); const cleanupStore = {}; const oldRuntime = { old: "runtime" }; const newerRuntime = { newer: "runtime" };
+  globalThis.__piSubagentRuntimeCleanup = oldRuntime;
+  delete globalThis.__piSubagentEventUnsubscribes;
+  try {
+    installHeadlessTypedSubagentRuntime(pi, { cleanupStore, rpc: createRpc(), bootstrap() {}, async beforeRuntimeDispose() { throw new Error("old debt"); } });
+    await assert.rejects(() => pi.handlers.get("session_shutdown")[0](), /old debt/);
+    assert.throws(() => installHeadlessTypedSubagentRuntime(pi, {
+      cleanupStore,
+      rpc: createRpc(),
+      bootstrap() { globalThis.__piSubagentRuntimeCleanup = () => { globalThis.__piSubagentRuntimeCleanup = newerRuntime; }; },
+      completionNotifierFactory() { throw new Error("notifier failure"); },
+      resolveSessionId() { return "session"; },
+    }), /notifier failure/);
+    assert.equal(globalThis.__piSubagentRuntimeCleanup, newerRuntime);
+  } finally {
+    delete globalThis.__piSubagentRuntimeCleanup;
+    delete globalThis.__piSubagentEventUnsubscribes;
+  }
+});
+
+test("dispose retries only failed resources while continuing after an earlier failure", async () => {
+  const pi = createPi(); const calls = []; let failSupervisor = true;
+  createTypedSubagentExtension(pi, {
+    cleanupStore: {},
+    extraDisposables: [
+      { dispose() { calls.push("supervisor"); if (failSupervisor) throw new Error("supervisor failed"); } },
+      { dispose() { calls.push("extra"); } },
+    ],
+    rpc: createRpc({ dispose() { calls.push("rpc"); } }),
+  });
+  const shutdown = pi.handlers.get("session_shutdown")[0];
+  await assert.rejects(() => shutdown(), AggregateError);
+  assert.deepEqual(calls, ["supervisor", "extra", "rpc"]);
+  failSupervisor = false;
+  await shutdown();
+  assert.deepEqual(calls, ["supervisor", "extra", "rpc", "supervisor"]);
+});
+
+test("lifecycle registration failure rolls back runtime debt, registry ownership, and RPC", async () => {
+  const pi = createPi();
+  const cleanupStore = {};
+  const rpc = createRpc();
+  const originalOn = pi.on;
+  pi.on = (name, handler) => {
+    if (name === "session_shutdown") throw new Error("shutdown registration failed");
+    return originalOn.call(pi, name, handler);
+  };
+
+  assert.throws(
+    () => createTypedSubagentExtension(pi, { cleanupStore, rpc }),
+    /shutdown registration failed/,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(rpc.disposed(), 1);
+  assert.equal(cleanupStore.__typedSubagentRuntimeCleanup.has(pi), false);
+  assert.equal(cleanupStore.__typedSubagentRuntimeShutdownDebt.debts.length, 0);
 });

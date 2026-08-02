@@ -1172,7 +1172,7 @@ test("Root cleanup ownership keeps the real runtime broker bound until close ret
     const shutdown = handlers.get("session_shutdown")?.at(-1);
     assert.equal(typeof start, "function");
     assert.equal(typeof shutdown, "function");
-    await start({}, { sessionManager: { getSessionId: () => "runtime-root-cleanup", getSessionFile: () => "/sessions/runtime-root-cleanup.jsonl" } });
+    await start({}, { cwd: process.cwd(), sessionManager: { getEntries: () => [], getSessionId: () => "runtime-root-cleanup", getSessionFile: () => "/sessions/runtime-root-cleanup.jsonl" } });
     broker = registry.requireRootBroker(pi);
     realClose = broker.closeRootSession.bind(broker);
     let closeCalls = 0;

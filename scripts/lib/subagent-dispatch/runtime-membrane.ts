@@ -74,6 +74,9 @@ export function createHeadlessSubagentApi(pi, {
   supervisorAdapter,
   titleRegistry,
   suppressCompletionNotifications = false,
+  captureSessionShutdown,
+  captureSessionStart,
+  captureEventSubscription,
 } = {}) {
   if (!pi || typeof pi !== "object") {
     throw new TypeError("headless subagent runtime requires an ExtensionAPI object");
@@ -85,6 +88,9 @@ export function createHeadlessSubagentApi(pi, {
       if (property === "emit") {
         return (type, payload) => target.emit(type, decorateLifecycle(type, payload, titleRegistry));
       }
+      if (property === "on" && typeof captureEventSubscription === "function") {
+        return (type, handler) => captureEventSubscription(type, handler);
+      }
       const value = Reflect.get(target, property, receiver);
       return typeof value === "function" ? value.bind(target) : value;
     },
@@ -94,6 +100,13 @@ export function createHeadlessSubagentApi(pi, {
   return new Proxy(pi, {
     get(target, property, receiver) {
       if (property === "events") return events;
+      if (property === "on" && (typeof captureSessionShutdown === "function" || typeof captureSessionStart === "function")) {
+        return (type, handler) => {
+          if (type === "session_shutdown" && typeof captureSessionShutdown === "function") return captureSessionShutdown(handler);
+          if (type === "session_start" && typeof captureSessionStart === "function") return captureSessionStart(handler);
+          return target.on(type, handler);
+        };
+      }
       if (property === "sendMessage") {
         return (message, options) => {
           if (suppressCompletionNotifications && message?.customType === "subagent-notify") return undefined;

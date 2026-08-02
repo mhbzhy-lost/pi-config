@@ -16,7 +16,7 @@ import {
 import { createSupervisorRequestMailbox, installHeadlessTypedSubagentRuntime } from "../../scripts/lib/subagent-dispatch/extension.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../../scripts/lib/subagent-dispatch/rpc-client.ts";
 import { resolveRootSessionId } from "../../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
-import { requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { closeAndUnbindRootBroker, requireRootBroker, startAndBindRootBroker } from "../../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../../scripts/lib/subagent-dispatch/root-broker-server.ts";
 
 const MAX_RECOVERY_DESCRIPTOR_BYTES = 1024 * 1024;
@@ -96,6 +96,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     return new Text(theme.fg(result?.isError ? "error" : "dim", text), 0, 0);
   };
   let brokerStarted = false;
+  let brokerReady = false;
   let previousBrokerMarker: string | undefined;
   const rpc = createRenewableTypedSubagentRpcClient(() => createTypedSubagentRpcClient(pi.events));
   const mailbox = createSupervisorRequestMailbox((message, context) => (
@@ -108,49 +109,51 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       return registerSubagentNotify(api, state, { batchConfig: completionBatch });
     },
     resolveSessionId: resolveCurrentSessionId,
+    async beforeUpstreamSessionStart(_event, ctx) {
+      if (brokerReady) return;
+      if (brokerStarted) throw new Error("Root subagent broker startup is incomplete");
+      rpc.renew();
+      const rootSessionId = resolveRootSessionId(ctx.sessionManager);
+      const lifecycleSessionId = resolveCurrentSessionId(ctx.sessionManager);
+      const upstream = createRootBrokerUpstream({
+        rpc,
+        executeSupervisor: (params: any, context: any) => runtime.executeSupervisor(params, context),
+      });
+      const broker = new RootBrokerServer({ rootSessionId, lifecycleSessionId, upstream, events: pi.events, recordRevivalDiagnostic: (customType, data) => pi.appendEntry(customType, data) });
+      previousBrokerMarker = process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
+      try {
+        await startAndBindRootBroker(pi, broker);
+        process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = "1";
+        brokerStarted = true;
+        await mailbox.activate();
+        brokerReady = true;
+      } catch (error) {
+        mailbox.deactivate();
+        if (brokerStarted) {
+          await closeAndUnbindRootBroker(pi, broker);
+          brokerStarted = false;
+        }
+        if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
+        else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
+        previousBrokerMarker = undefined;
+        throw error;
+      }
+    },
     async beforeRuntimeDispose() {
       mailbox.deactivate();
       if (!brokerStarted) return;
       const broker = requireRootBroker(pi);
-      await broker.closeRootSession();
-      unbindRootBroker(pi, broker);
+      await closeAndUnbindRootBroker(pi, broker);
       if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
       else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
       previousBrokerMarker = undefined;
       brokerStarted = false;
+      brokerReady = false;
     },
     renderSubagentResult,
     rpc,
     retainOnBeforeDisposeFailure: true,
     onSupervisorRequest: mailbox.handle,
-  });
-  pi.on("session_start", async (_event, ctx) => {
-    rpc.renew();
-    if (brokerStarted) throw new Error("Root subagent broker is already started");
-    const rootSessionId = resolveRootSessionId(ctx.sessionManager);
-    const upstream = createRootBrokerUpstream({
-      rpc,
-      executeSupervisor: (params: any, context: any) => runtime.executeSupervisor(params, context),
-    });
-    const broker = new RootBrokerServer({ rootSessionId, lifecycleSessionId: resolveCurrentSessionId(ctx.sessionManager), upstream, events: pi.events, recordRevivalDiagnostic: (customType, data) => pi.appendEntry(customType, data) });
-    previousBrokerMarker = process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
-    try {
-      await startAndBindRootBroker(pi, broker);
-      process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = "1";
-      brokerStarted = true;
-      await mailbox.activate();
-    } catch (error) {
-      mailbox.deactivate();
-      if (brokerStarted) {
-        await broker.closeRootSession();
-        unbindRootBroker(pi, broker);
-        brokerStarted = false;
-      }
-      if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
-      else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
-      previousBrokerMarker = undefined;
-      throw error;
-    }
   });
   // Upstream registers the same custom type during bootstrap; the project renderer must win last-write ownership.
   pi.registerMessageRenderer("subagent-notify", (message, { outputPad }, theme) => {

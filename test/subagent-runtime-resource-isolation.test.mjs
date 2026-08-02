@@ -62,6 +62,15 @@ test("loads upstream only behind the project-owned headless runtime entry", asyn
   assert.doesNotMatch(entry, /registerTool\s*\(/);
 });
 
+test("production runtime lifecycle identity and retry cleanup contract", async () => {
+  const entry = await text("pi/extensions/subagent-runtime.ts");
+
+  assert.match(entry, /const lifecycleSessionId = resolveCurrentSessionId\(ctx\.sessionManager\);/);
+  assert.match(entry, /new RootBrokerServer\(\{ rootSessionId, lifecycleSessionId, upstream, events: pi\.events, recordRevivalDiagnostic:/);
+  assert.match(entry, /closeAndUnbindRootBroker\(pi, broker\)/);
+  assert.doesNotMatch(entry, /closeRootSession\(\);\s*\}\s*finally\s*\{\s*unbindRootBroker/);
+});
+
 test("production dispatch modules are independent from Plan Runner and native tool definitions", async () => {
   const sources = await Promise.all([
     "scripts/lib/subagent-dispatch/ir.ts",
