@@ -14,6 +14,62 @@ function safeId(value, field) {
   return value;
 }
 
+function isRepoRelativePosixPath(value, field) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Invalid ${field}: path must be a non-empty string`);
+  }
+  if (value.includes("\u0000")) {
+    throw new Error(`Invalid ${field}: path contains NUL byte`);
+  }
+  if (value.includes("\\")) {
+    throw new Error(`Invalid ${field}: path must be repo-relative and POSIX`);
+  }
+  if (value.startsWith("/") || /^[A-Za-z]:\//.test(value)) {
+    throw new Error(`Invalid ${field}: path must be repo-relative and POSIX`);
+  }
+  if (value.includes("*") || value.includes("?") || value.includes("[") || value.includes("]") || value.includes("{") || value.includes("}")) {
+    throw new Error(`Invalid ${field}: unsupported glob pattern`);
+  }
+
+  const segments = value.split("/");
+  if (!segments.every((segment) => segment.length > 0)) {
+    throw new Error(`Invalid ${field}: path contains empty segment`);
+  }
+  if (segments.includes("." ) || segments.includes("..")) {
+    throw new Error(`Invalid ${field}: path contains invalid segment`);
+  }
+  return value;
+}
+
+function describeWritePath(writePath) {
+  if (writePath.endsWith("/**")) {
+    const dir = writePath.slice(0, -3);
+    if (!dir) {
+      throw new Error(`Invalid writePath: path must include a directory before "/**"`);
+    }
+    if (dir.includes("*") || dir.includes("?") || dir.includes("[") || dir.includes("]") || dir.includes("{") || dir.includes("}")) {
+      throw new Error(`Invalid writePath pattern: unsupported glob`);
+    }
+    isRepoRelativePosixPath(dir, "writePath");
+    return { type: "dir", prefix: `${dir}/`, raw: writePath };
+  }
+
+  isRepoRelativePosixPath(writePath, "writePath");
+  return { type: "file", path: writePath, raw: writePath };
+}
+
+function matchesWritePath(writePath, changedFile) {
+  if (writePath.type === "file") {
+    return changedFile === writePath.path;
+  }
+
+  if (writePath.type === "dir") {
+    return changedFile.startsWith(writePath.prefix);
+  }
+
+  return false;
+}
+
 function workspacePaths(stateRoot, goalId, taskId, attempt) {
   const worktreesRoot = path.resolve(stateRoot, "worktrees");
   const name = `${goalId}-${taskId}-${attempt}`;
@@ -113,6 +169,11 @@ export function inspectExecutorWorkspace(lease) {
     ? untrackedOutput.split("\n").filter((file) => file && !file.startsWith(".pi-subagents/"))
     : [];
 
+  const changedOutput = headCommit === lease.baseCommit
+    ? ""
+    : git(lease.path, "diff", "--name-only", `${lease.baseCommit}..${headCommit}`);
+  const changedFiles = changedOutput ? changedOutput.split("\n").filter(Boolean) : [];
+
   let diff = "";
   if (headCommit !== lease.baseCommit) {
     diff = git(lease.path, "diff", `${lease.baseCommit}..${headCommit}`);
@@ -121,6 +182,7 @@ export function inspectExecutorWorkspace(lease) {
   return {
     headCommit,
     baseCommit: lease.baseCommit,
+    changedFiles,
     dirtyFiles,
     untrackedFiles,
     diff,
@@ -129,29 +191,165 @@ export function inspectExecutorWorkspace(lease) {
   };
 }
 
+export function assertWorkspaceChangesWithinPaths(inspection, writePaths) {
+  if (!inspection || !Array.isArray(inspection.changedFiles)) {
+    throw new Error("Invalid inspection result: changedFiles is required");
+  }
+
+  if (!Array.isArray(writePaths) || writePaths.length === 0) {
+    throw new Error("Invalid writePaths: at least one write path is required");
+  }
+
+  const validatedWritePaths = writePaths.map((writePath) => {
+    if (typeof writePath !== "string" || writePath.length === 0) {
+      throw new Error("Invalid writePaths: each write path must be a non-empty string");
+    }
+    if (writePath.includes("..")) {
+      const parts = writePath.split("/");
+      if (parts.includes("..")) {
+        throw new Error(`Invalid writePath: ${writePath}`);
+      }
+    }
+    if (writePath.includes("/")) {
+      const leadingOrTrailingSlash = writePath.startsWith("/") || writePath.endsWith("/");
+      if (leadingOrTrailingSlash) {
+        throw new Error(`Invalid writePath: ${writePath}`);
+      }
+    }
+
+    return describeWritePath(writePath);
+  });
+
+  const validPaths = inspection.changedFiles.map((changedFile) => {
+    isRepoRelativePosixPath(changedFile, "changed file");
+    return changedFile;
+  });
+
+  const invalid = [];
+  for (const changedFile of validPaths) {
+    const matches = validatedWritePaths.some((writePath) => matchesWritePath(writePath, changedFile));
+    if (!matches) {
+      invalid.push(changedFile);
+    }
+  }
+
+  if (invalid.length > 0) {
+    const sortedInvalid = [...new Set(invalid)].sort();
+    const sortedWritePaths = [...new Set(writePaths)].sort();
+    throw new Error(
+      `writePaths mismatch: changed files outside writePaths: ${sortedInvalid.join(", ")}; writePaths: ${sortedWritePaths.join(", ")}`,
+    );
+  }
+}
+
+export function isExecutorWorkspaceIntegrated(lease, { strategy, executorHead } = {}) {
+  const selectedStrategy = strategy || "cherry-pick";
+  const checkedHead = executorHead ?? git(lease.path, "rev-parse", "HEAD");
+
+  if (!lease.baseCommit) {
+    throw new Error("Invalid lease: missing baseCommit");
+  }
+
+  if (selectedStrategy === "merge") {
+    try {
+      git(lease.originRoot, "merge-base", "--is-ancestor", checkedHead, "HEAD");
+      return true;
+    } catch (error) {
+      if (error?.status === 1) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  if (selectedStrategy === "cherry-pick") {
+    const range = git(lease.originRoot, "rev-list", "--max-count=1", `${lease.baseCommit}..${checkedHead}`);
+    if (!range.trim()) return false;
+
+    const output = git(lease.originRoot, "cherry", "HEAD", checkedHead, lease.baseCommit);
+    const lines = output ? output.split("\n").filter((line) => line.length > 0) : [];
+
+    if (lines.length === 0) {
+      const firstParentCommits = git(lease.originRoot, "rev-list", "--first-parent", "HEAD", `^${lease.baseCommit}`);
+      const firstParentList = firstParentCommits ? firstParentCommits.split("\n").filter((line) => line.length > 0) : [];
+      return firstParentList.includes(checkedHead);
+    }
+
+    return lines.every((line) => line.startsWith("-"));
+  }
+
+  throw new Error(`Unknown integration strategy: ${selectedStrategy}`);
+}
+
 export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick" } = {}) {
   if (!existsSync(lease.path)) throw new Error("Executor workspace is missing");
 
+  const origin = lease.originRoot;
   const inspection = inspectExecutorWorkspace(lease);
   if (!inspection.hasCommits) throw new Error("No commits to integrate");
   if (!inspection.clean) throw new Error("Workspace must be clean before integration (no uncommitted changes)");
 
-  const origin = lease.originRoot;
+  const originHeadBefore = git(origin, "rev-parse", "HEAD");
+  const originStatusBefore = git(origin, "status", "--porcelain");
 
   if (strategy === "cherry-pick") {
-    const logOutput = git(lease.path, "rev-list", "--reverse", `${lease.baseCommit}..${inspection.headCommit}`);
-    const commits = logOutput.split("\n").filter(Boolean);
-    for (const commit of commits) {
-      git(origin, "cherry-pick", commit);
+    try {
+      git(origin, "cherry-pick", `${lease.baseCommit}..${inspection.headCommit}`);
+    } catch (error) {
+      let abortError;
+      try {
+        git(origin, "cherry-pick", "--abort");
+      } catch (abortErr) {
+        abortError = abortErr;
+      }
+
+      const originHeadAfter = git(origin, "rev-parse", "HEAD");
+      const originStatusAfter = git(origin, "status", "--porcelain");
+      if (originHeadAfter !== originHeadBefore || originStatusAfter !== originStatusBefore) {
+        throw abortError || error;
+      }
+      if (abortError) throw error;
+      throw error;
     }
   } else if (strategy === "merge") {
-    git(origin, "merge", "--no-ff", lease.branch, "-m", `ge: integrate ${lease.goalId}/${lease.taskId}`);
+    try {
+      git(origin, "merge", "--no-ff", lease.branch, "-m", `ge: integrate ${lease.goalId}/${lease.taskId}`);
+    } catch (error) {
+      let abortError;
+      try {
+        git(origin, "merge", "--abort");
+      } catch (abortErr) {
+        abortError = abortErr;
+      }
+
+      const originHeadAfter = git(origin, "rev-parse", "HEAD");
+      const originStatusAfter = git(origin, "status", "--porcelain");
+      if (originHeadAfter !== originHeadBefore || originStatusAfter !== originStatusBefore) {
+        throw abortError || error;
+      }
+      if (abortError) throw error;
+      throw error;
+    }
   } else {
     throw new Error(`Unknown integration strategy: ${strategy}`);
   }
 
   const newHead = git(origin, "rev-parse", "HEAD");
-  return { integrated: true, newHead, strategy };
+  return {
+    integrated: true,
+    executorHead: inspection.headCommit,
+    originHeadBefore,
+    newHead,
+    strategy,
+  };
+}
+
+export function inspectExecutorWorkspaceResources(lease) {
+  const workspaceExists = existsSync(lease.path);
+  const leaseExists = lease.leasePath ? existsSync(lease.leasePath) : false;
+  const branchExists = !!git(lease.originRoot, "branch", "--list", lease.branch);
+
+  return { workspaceExists, branchExists, leaseExists };
 }
 
 export function releaseExecutorWorkspace(lease, { disposition } = {}) {
