@@ -286,6 +286,10 @@ function v2Event(type, data, goalId = "v2-goal", occurredAt = "2026-01-02T03:04:
   return { schemaVersion: "goal-engine.event.v2", eventId: crypto.randomUUID(), goalId, type, occurredAt, data };
 }
 
+function fixedV2Event(type, data, goalId, occurredAt, eventId) {
+  return { schemaVersion: "goal-engine.event.v2", eventId, goalId, type, occurredAt, data };
+}
+
 function v2Created(goalId = "v2-goal") {
   return v2Event("goal.created", { objective: "Workspace disposition test", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } } }, goalId);
 }
@@ -363,21 +367,249 @@ test("disposition applied retains attempt phase and action gates", () => {
   assert.throws(() => applyEvent(p, v2Event("task.workspace_disposition_applied", { ...start.data, action: "integrate", originHead: "origin-after" })), /disposing/);
 });
 
-test("v2 terminal disposition store round-trip preserves schema and acceptance", () => {
-  const goalId = "round-trip-goal";
-  let p = applyEvent(createProjection(), v2Created(goalId));
-  p = v2Dispatched(p, goalId); p = v2Settled(p, "succeeded", goalId);
-  const start = started("integrate", goalId); p = applyEvent(p, start);
+test("redispatch attempt2 is rejected after failed settle when active workspace is still attempt1", () => {
+  const goalId = "failed-active-redispatch-goal";
+  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "failed", goalId);
+  const failedWorkspace = p.tasks.get("t1").workspace;
+  assert.equal(failedWorkspace.phase, "active");
+
+  assert.throws(
+    () =>
+      applyEvent(
+        p,
+        v2Event(
+          "task.dispatched",
+          {
+            taskId: "t1",
+            contractHash: "h2",
+            workspace: { attempt: failedWorkspace.attempt + 1, path: "/tmp/work-retry", branch: "task/t1/retry", baseCommit: "retry" },
+          },
+          goalId,
+        ),
+      ),
+    /attempt|workspace|phase|attempt mismatch|active|disposed/,
+  );
+});
+
+test("preserved terminal workspace blocks redispatch", () => {
+  const goalId = "preserve-vs-discard-redispatch-goal";
+  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "failed", goalId);
+
+  const preserveStart = started("preserve", goalId);
+  p = applyEvent(p, preserveStart);
+  p = applyEvent(p, v2Event("task.workspace_disposition_applied", { ...preserveStart.data, action: "preserve", originHead: "origin-after" }, goalId));
+  p = applyEvent(p, v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "preserve", released: false }, goalId));
+
+  assert.equal(p.tasks.get("t1").workspace.phase, "disposed");
+  assert.equal(p.tasks.get("t1").workspace.disposition, "preserved");
+  assert.throws(
+    () =>
+      applyEvent(
+        p,
+        v2Event("task.dispatched", {
+          taskId: "t1",
+          contractHash: "h2",
+          workspace: { attempt: 2, path: "/tmp/work-preserve", branch: "task/t1/preserve", baseCommit: "retry-preserve" },
+        }, goalId),
+      ),
+    /attempt|workspace|phase|disposed|succeeded/,
+  );
+});
+
+test("discarded released workspace allows redispatch retry", () => {
+  const goalId = "discard-retry-redispatch-goal";
+  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "failed", goalId);
+  const start = started("discard", goalId);
+  p = applyEvent(p, start);
+  p = applyEvent(p, v2Event("task.workspace_disposition_applied", { ...start.data, action: "discard", originHead: "origin-after" }, goalId));
+  p = applyEvent(p, v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "discard", released: true }, goalId));
+
+  p = applyEvent(
+    p,
+    v2Event("task.dispatched", {
+      taskId: "t1",
+      contractHash: "h2",
+      workspace: { attempt: 2, path: "/tmp/work-discard", branch: "task/t1/discard", baseCommit: "retry-discard" },
+    }, goalId),
+  );
+  const task = p.tasks.get("t1");
+  assert.equal(task.attempts, 2);
+  assert.equal(task.workspace.phase, "active");
+  assert.equal(task.workspace.attempt, 2);
+});
+
+test("v2 without integrated or released succeeded rejects accept", () => {
+  const goalId = "without-integrated-accept-goal";
+  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "succeeded", goalId);
+
+  const start = started("preserve", goalId);
+  p = applyEvent(p, start);
+  p = applyEvent(p, v2Event("task.workspace_disposition_applied", { ...start.data, action: "preserve", originHead: "origin-after" }, goalId));
+  p = applyEvent(p, v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "preserve", released: false }, goalId));
+
+  assert.throws(() => applyEvent(p, v2Event("task.accepted", { taskId: "t1", workspaceAttempt: 1 }, goalId)), /workspace must be disposed, integrated, and released before acceptance/);
+});
+
+test("terminal dispose event is rejected when terminal state already emitted", () => {
+  const goalId = "terminal-dispose-repeat-goal";
+  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "succeeded", goalId);
+  const start = started("integrate", goalId);
+  p = applyEvent(p, start);
   p = applyEvent(p, v2Event("task.workspace_disposition_applied", { ...start.data, action: "integrate", originHead: "origin-after" }, goalId));
   p = applyEvent(p, v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "integrate", released: true }, goalId));
-  p = applyEvent(p, v2Event("task.accepted", { taskId: "t1", workspaceAttempt: 1 }, goalId));
-  const events = []; let q = createProjection();
-  for (const event of [v2Created(goalId), v2Event("task.dispatched", { taskId: "t1", contractHash: "h1", workspace: { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc" } }, goalId), v2Event("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria" }, goalId), start, v2Event("task.workspace_disposition_applied", { ...start.data, action: "integrate", originHead: "origin-after" }, goalId), v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "integrate", released: true }, goalId), v2Event("task.accepted", { taskId: "t1", workspaceAttempt: 1 }, goalId)]) events.push(event);
-  const root = tmpRoot(); events.forEach((event, index) => appendEvent(root, event, index));
-  const serialized = JSON.parse(readFileSync(join(root, `goals/${goalId}/projection.json`), "utf8"));
-  const task = serialized.tasks.t1;
-  assert.equal(serialized.eventSchemaVersion, "goal-engine.event.v2");
-  assert.deepEqual({ phase: task.workspace.phase, disposition: task.workspace.disposition, released: task.workspace.released, acceptanceVerification: task.acceptanceVerification }, { phase: "disposed", disposition: "integrated", released: true, acceptanceVerification: "integrated" });
-  assert.equal(loadProjection(root, goalId).version, events.length);
-  assert.equal(p.version, events.length);
+
+  assert.throws(
+    () =>
+      applyEvent(
+        p,
+        v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "integrate", released: true }, goalId),
+      ),
+    /workspace must be applied/,
+  );
+});
+
+test("v2 terminal disposition store round-trip preserves schema and acceptance", () => {
+  const goalId = "round-trip-goal";
+  const events = [
+    fixedV2Event(
+      "goal.created",
+      {
+        objective: "Workspace disposition test",
+        scope: [],
+        nonGoals: [],
+        dod: [],
+        tasks: ["t1"],
+        taskDefs: {
+          t1: {
+            description: "work",
+            deps: [],
+            writePaths: ["a.ts"],
+            acceptance: { criteria: ["x"], commands: ["true"] },
+            workflow: "tdd",
+          },
+        },
+      },
+      goalId,
+      "2026-01-02T03:04:05.000Z",
+      "round-trip-goal-created",
+    ),
+    fixedV2Event(
+      "task.dispatched",
+      {
+        taskId: "t1",
+        contractHash: "h1",
+        workspace: { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc" },
+      },
+      goalId,
+      "2026-01-02T03:04:06.000Z",
+      "round-trip-task-dispatched",
+    ),
+    fixedV2Event(
+      "task.settled",
+      {
+        taskId: "t1",
+        outcome: "succeeded",
+        evidence: { type: "file", path: "a.ts" },
+        nextAction: "Verify the complete implementation meets the required acceptance criteria",
+      },
+      goalId,
+      "2026-01-02T03:04:07.000Z",
+      "round-trip-task-settled",
+    ),
+    fixedV2Event(
+      "task.workspace_disposition_started",
+      {
+        taskId: "t1",
+        attempt: 1,
+        requestedAction: "integrate",
+        strategy: "merge",
+        executorHead: "executor-head",
+        originHeadBefore: "origin-before",
+      },
+      goalId,
+      "2026-01-02T03:04:08.000Z",
+      "round-trip-workspace-started",
+    ),
+    fixedV2Event(
+      "task.workspace_disposition_applied",
+      {
+        taskId: "t1",
+        attempt: 1,
+        action: "integrate",
+        strategy: "merge",
+        executorHead: "executor-head",
+        originHead: "origin-after",
+      },
+      goalId,
+      "2026-01-02T03:04:09.000Z",
+      "round-trip-workspace-applied",
+    ),
+    fixedV2Event(
+      "task.workspace_disposed",
+      {
+        taskId: "t1",
+        attempt: 1,
+        action: "integrate",
+        released: true,
+      },
+      goalId,
+      "2026-01-02T03:04:10.000Z",
+      "round-trip-workspace-disposed",
+    ),
+    fixedV2Event(
+      "task.accepted",
+      {
+        taskId: "t1",
+        workspaceAttempt: 1,
+      },
+      goalId,
+      "2026-01-02T03:04:11.000Z",
+      "round-trip-task-accepted",
+    ),
+  ];
+
+  const expectedEvents = JSON.parse(JSON.stringify(events));
+  let replayed = createProjection();
+  let replayedTwice = createProjection();
+
+  for (const event of events) {
+    replayed = applyEvent(replayed, event);
+  }
+
+  for (const event of events) {
+    replayedTwice = applyEvent(replayedTwice, event);
+  }
+
+  assert.deepEqual(replayed, replayedTwice);
+  assert.deepEqual(expectedEvents, events);
+  const root = tmpRoot();
+  events.forEach((event, index) => appendEvent(root, event, index));
+  const storedEvents = readFileSync(join(root, `goals/${goalId}/events.jsonl`), "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+
+  assert.deepEqual(storedEvents, expectedEvents);
+
+  const loaded = loadProjection(root, goalId);
+  const loadedTask = loaded.tasks.get("t1");
+  assert.equal(loaded.eventSchemaVersion, "goal-engine.event.v2");
+  assert.deepEqual(
+    {
+      phase: loadedTask.workspace.phase,
+      disposition: loadedTask.workspace.disposition,
+      released: loadedTask.workspace.released,
+      acceptanceVerification: loadedTask.acceptanceVerification,
+    },
+    {
+      phase: "disposed",
+      disposition: "integrated",
+      released: true,
+      acceptanceVerification: "integrated",
+    },
+  );
+  assert.equal(loadedTask.evidence[0].ts, events[2].occurredAt);
+  assert.equal(loaded.version, events.length);
+  assert.equal(replayed.version, events.length);
 });
