@@ -75,6 +75,14 @@ score, or review note proves only its own lane.
 | environment | Auth, credentials, toolchain, cloud device, sandbox, and external-service blocker evidence. |
 | review | Code review, security review, cross-review, user correction, and residual-risk evidence. |
 
+Batch-imported evidence records must set:
+
+- `batch_import: true`
+- one-based `batch_sequence`
+- total `batch_size`
+
+`batch_sequence` records deterministic import/replay order inside one batch. It does not claim distinct original completion timestamps when those timestamps were unavailable.
+
 Blocker taxonomy:
 - environment_auth
 - toolchain

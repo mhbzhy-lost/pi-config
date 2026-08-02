@@ -138,6 +138,18 @@ test("matching practice profile identities pass", () => {
   });
 });
 
+test("legacy practice profile without identity declarations remains readable", () => {
+  withPracticeProfileFixture(({ root, practiceProfile }) => {
+    writeFileSync(
+      path.join(root, "state.json"),
+      `${JSON.stringify({ practice_profile: practiceProfile })}\n`,
+    );
+    writeFileSync(path.join(root, "goal-contract.md"), "# Legacy Goal Contract\n");
+
+    assert.deepEqual(auditPracticeProfileSync(root), []);
+  });
+});
+
 test("practice profile content drift fails declared hash", () => {
   withPracticeProfileFixture(({ root }) => {
     const statePath = path.join(root, "state.json");

@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { inspectConfiguration } from "../scripts/doctor.mjs";
+import { inspectConfiguration, inspectGoalContractIntegrity } from "../scripts/doctor.mjs";
+import { canonicalJsonSha256 } from "../scripts/lib/goal-contract/authorization-audit.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -307,6 +308,55 @@ test("no issue when basic-memory version matches", async () => {
     readBasicMemoryVersion: async () => "0.22.1",
   });
   assert.ok(!issues.some((i) => i.includes("basic-memory")));
+});
+
+test("doctor validates Goal Contract integrity for registered goals", async () => {
+  const root = await mkdtemp(join(tmpdir(), "doctor-goal-contract-"));
+  try {
+    const goalRoot = join(root, ".state", "goal-contract", "goals", "g1");
+    await mkdir(goalRoot, { recursive: true });
+    await writeFile(
+      join(root, ".state", "goal-contract", "registry.json"),
+      JSON.stringify({
+        schema_version: "goal_contract.registry.v1",
+        state_root: ".state/goal-contract",
+        active_goal_ids: ["g1"],
+        goals: { g1: { contract_dir: ".state/goal-contract/goals/g1" } },
+      }),
+    );
+    const practiceProfile = { schema_version: "goal_contract.practice_profile.v1" };
+    const digest = canonicalJsonSha256(practiceProfile);
+    await writeFile(
+      join(goalRoot, "state.json"),
+      JSON.stringify({ practice_profile: practiceProfile, practice_profile_sha256: digest }),
+    );
+    await writeFile(
+      join(goalRoot, "goal-contract.md"),
+      `# Goal\n\nPractice-Profile-SHA256: ${digest}\n`,
+    );
+    await writeFile(join(goalRoot, "authorization-evidence.json"), "{}\n");
+    await writeFile(
+      join(goalRoot, "amendments.jsonl"),
+      `${JSON.stringify({
+        status: "applied",
+        risk: "high",
+        authorization: {
+          artifact: "authorization-evidence.json",
+          artifactSha256: "0".repeat(64),
+        },
+      })}\n`,
+    );
+
+    const issues = await inspectGoalContractIntegrity(root);
+
+    assert.ok(issues.some((issue) => issue.includes("artifact hash mismatch")), issues);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor accepts current registered Goal Contract integrity", async () => {
+  assert.deepEqual(await inspectGoalContractIntegrity(repoRoot), []);
 });
 
 test("doctor CLI reports Root broker readiness without retired Host terminology", async () => {

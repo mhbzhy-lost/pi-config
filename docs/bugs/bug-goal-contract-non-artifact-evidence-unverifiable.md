@@ -62,4 +62,4 @@ Goal Contract 的 `amendments.jsonl` 允许在 `evidence` 中写入 `user-messag
 - `artifactSha256` 必须是小写 64 位 SHA-256，并与提交内容完全匹配。
 - authorization artifact 声明的 linked artifacts 同样必须保持 goal-relative、存在且 SHA-256 匹配。
 
-Node test 覆盖匹配、内容漂移、文件缺失、路径逃逸和高风险 descriptor 缺失五种情况；恢复协议也记录了每次 continuation 前必须运行的 audit 命令。对 legacy 权威等级的专门 audit 信号仍属于后续工作。
+Node test 覆盖匹配、内容漂移、文件缺失、路径逃逸、高风险 descriptor 缺失和 linked artifact 漂移；恢复协议记录每次 continuation 前必须运行的 audit 命令，`npm run doctor` 也会对 registry 中所有 Goal 自动执行同一检查。对 legacy 权威等级的专门 audit 信号仍属于后续工作。

@@ -42,4 +42,6 @@ Markdown 章节仍用于人审；digest 不尝试从 Markdown 反向解析结构
 
 `state.json.practice_profile_sha256` 和 `goal-contract.md` 的 `practice-profile-sha256` marker 绑定同一个 canonical profile identity。`scripts/goal-contract-authorization-audit.mjs` 在每次恢复前重新计算递归 key 排序后的 canonical SHA-256，并同时校验两处声明。
 
-Node test 覆盖完整匹配、profile 内容漂移和 Markdown marker 漂移；任一不一致都会令恢复 audit 非零退出。
+`scripts/doctor.mjs` 会读取 `.state/goal-contract/registry.json`，对每个注册 Goal 自动执行同一 integrity audit；未声明 profile identity 的 legacy Goal 保持可读，但只要 state 或 Markdown 任一侧 opt in，另一侧缺失或漂移就 fail closed。
+
+Node test 覆盖完整匹配、legacy opt-in 兼容、profile 内容漂移和 Markdown marker 漂移；任一不一致都会令恢复 audit 或 doctor 非零退出。

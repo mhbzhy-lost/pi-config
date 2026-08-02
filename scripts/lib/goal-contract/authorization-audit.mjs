@@ -166,21 +166,23 @@ export function auditPracticeProfileSync(goalRoot) {
   } catch (error) {
     return [`state.json is not valid JSON: ${error.message}`];
   }
+  const contract = readFileSync(contractPath, "utf8");
+  const marker = contract.match(PRACTICE_PROFILE_MARKER_RE)?.[1];
+  const declaredHash = state.practice_profile_sha256;
+  if (declaredHash == null && marker == null) return [];
+
   const practiceProfile = state?.practice_profile;
   if (!practiceProfile || typeof practiceProfile !== "object" || Array.isArray(practiceProfile)) {
     return ["state.json.practice_profile must be an object"];
   }
 
   const actualHash = canonicalJsonSha256(practiceProfile);
-  const declaredHash = state.practice_profile_sha256;
   if (typeof declaredHash !== "string" || !SHA256_RE.test(declaredHash)) {
     errors.push("state.json.practice_profile_sha256 must be lowercase SHA-256");
   } else if (declaredHash !== actualHash) {
     errors.push("state.json practice profile state hash mismatch");
   }
 
-  const contract = readFileSync(contractPath, "utf8");
-  const marker = contract.match(PRACTICE_PROFILE_MARKER_RE)?.[1];
   if (!marker) {
     errors.push("goal-contract.md practice profile marker is missing or invalid");
   } else if (marker !== actualHash) {
