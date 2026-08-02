@@ -1,4 +1,5 @@
-const SCHEMA_VERSION = "goal-engine.event.v1";
+const SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2"]);
+const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
 const TERMINAL_LIFECYCLES = new Set(["completed", "blocked", "cancelled"]);
 const VALID_EVIDENCE_TYPES = new Set(["diff", "file", "test_output", "screenshot", "log", "external_review"]);
 const VAGUE_PATTERNS = /\b(continue|proceed|next step|next|TBD|todo|keep going|carry on)\b/i;
@@ -40,9 +41,12 @@ export function applyEvent(projection, event) {
   const next = copyProjection(projection);
   switch (event.type) {
     case "goal.created": goalCreated(next, event); break;
-    case "task.dispatched": taskDispatched(next, event.data); break;
-    case "task.settled": taskSettled(next, event.data); break;
-    case "task.accepted": taskAccepted(next, event.data); break;
+    case "task.dispatched": taskDispatched(next, event.data, event.schemaVersion); break;
+    case "task.settled": taskSettled(next, event.data, event.occurredAt); break;
+    case "task.accepted": taskAccepted(next, event.data, event.schemaVersion); break;
+    case "task.workspace_disposition_started": workspaceDispositionStarted(next, event.data, event.schemaVersion); break;
+    case "task.workspace_disposition_applied": workspaceDispositionApplied(next, event.data, event.schemaVersion); break;
+    case "task.workspace_disposed": workspaceDisposed(next, event.data, event.schemaVersion); break;
     case "goal.amended": goalAmended(next, event.data); break;
     case "goal.blocked": goalBlocked(next, event.data); break;
     case "goal.completed": goalCompleted(next, event.data); break;
@@ -56,7 +60,7 @@ export function applyEvent(projection, event) {
 }
 
 function validateEnvelope(event) {
-  if (!event || event.schemaVersion !== SCHEMA_VERSION) throw new Error("invalid schemaVersion");
+  if (!event || !SCHEMA_VERSIONS.has(event.schemaVersion)) throw new Error("invalid schemaVersion");
   for (const field of ["eventId", "goalId", "occurredAt", "type"]) {
     if (typeof event[field] !== "string" || !event[field].trim()) throw new Error(`invalid ${field}`);
   }
@@ -78,7 +82,7 @@ function copyProjection(p) {
     scope: [...p.scope],
     nonGoals: [...p.nonGoals],
     dod: [...p.dod],
-    tasks: new Map([...p.tasks].map(([k, v]) => [k, { ...v, evidence: [...v.evidence], deps: [...v.deps], writePaths: [...(v.writePaths || [])], acceptance: v.acceptance ? { ...v.acceptance, criteria: [...v.acceptance.criteria], commands: [...v.acceptance.commands] } : null }])),
+    tasks: new Map([...p.tasks].map(([k, v]) => [k, { ...v, workspace: v.workspace ? { ...v.workspace } : null, evidence: [...v.evidence], deps: [...v.deps], writePaths: [...(v.writePaths || [])], acceptance: v.acceptance ? { ...v.acceptance, criteria: [...v.acceptance.criteria], commands: [...v.acceptance.commands] } : null }])),
     eventIds: new Set(p.eventIds),
   };
 }
@@ -116,22 +120,28 @@ function goalCreated(p, event) {
       attempts: 0,
       lastSettledOutcome: null,
       contractHash: null,
+      workspace: null,
+      acceptanceVerification: null,
     });
   }
 }
 
-function taskDispatched(p, data) {
+function taskDispatched(p, data, schemaVersion) {
   requireActive(p);
-  const { taskId, contractHash } = data;
+  const { taskId, contractHash, workspace } = data;
   const task = requireTask(p, taskId);
   if (task.status !== "pending") throw new Error(`task is not pending: ${taskId} (${task.status})`);
   if (!contractHash || typeof contractHash !== "string") throw new Error("contractHash is required for dispatch");
+  if (schemaVersion === "goal-engine.event.v2") {
+    validateWorkspace(workspace, task.attempts + 1);
+    task.workspace = { ...workspace, phase: "active" };
+  }
   task.status = "dispatched";
   task.attempts++;
   task.contractHash = contractHash;
 }
 
-function taskSettled(p, data) {
+function taskSettled(p, data, occurredAt) {
   requireActive(p);
   const { taskId, outcome, evidence, evidenceSource, nextAction } = data;
   const task = requireTask(p, taskId);
@@ -144,7 +154,7 @@ function taskSettled(p, data) {
   task.lastSettledOutcome = outcome;
   if (outcome === "succeeded") {
     task.status = "succeeded";
-    task.evidence.push({ ...evidence, source: evidenceSource || "self_produced", ts: new Date().toISOString() });
+    task.evidence.push({ ...evidence, source: evidenceSource || "self_produced", ts: occurredAt });
   } else if (outcome === "failed") {
     task.status = "pending";
   } else {
@@ -153,12 +163,74 @@ function taskSettled(p, data) {
   }
 }
 
-function taskAccepted(p, data) {
+function taskAccepted(p, data, schemaVersion) {
   requireActive(p);
-  const { taskId } = data;
+  const { taskId, workspaceAttempt } = data;
   const task = requireTask(p, taskId);
   if (task.status !== "succeeded") throw new Error(`task is not succeeded: ${taskId} (${task.status})`);
+  if (schemaVersion === "goal-engine.event.v2") {
+    const workspace = task.workspace;
+    if (!workspace || workspace.phase !== "disposed" || workspace.disposition !== "integrated" || workspace.released !== true) {
+      throw new Error("workspace must be disposed, integrated, and released before acceptance");
+    }
+    if (workspaceAttempt !== workspace.attempt) throw new Error("workspace attempt mismatch");
+    task.acceptanceVerification = "integrated";
+  } else {
+    task.acceptanceVerification = "legacy_unverified";
+  }
   task.status = "accepted";
+}
+
+function workspaceDispositionStarted(p, data, schemaVersion) {
+  requireV2(schemaVersion);
+  const { taskId, attempt, requestedAction, strategy, executorHead, originHeadBefore } = data;
+  const task = requireTask(p, taskId);
+  const workspace = requireWorkspace(task, attempt);
+  if (workspace.phase !== "active") throw new Error("workspace disposition already started or terminal phase");
+  if (!DISPOSITION_ACTIONS.has(requestedAction)) throw new Error("invalid requested action");
+  for (const [name, value] of Object.entries({ strategy, executorHead, originHeadBefore })) if (!value || typeof value !== "string") throw new Error(`${name} is required`);
+  Object.assign(workspace, { requestedAction, strategy, executorHead, originHeadBefore, phase: "disposing" });
+}
+
+function workspaceDispositionApplied(p, data, schemaVersion) {
+  requireV2(schemaVersion);
+  const { taskId, attempt, action, strategy, executorHead, originHead } = data;
+  const workspace = requireWorkspace(requireTask(p, taskId), attempt);
+  if (workspace.phase !== "disposing") throw new Error("workspace must be disposing");
+  if (action !== workspace.requestedAction) throw new Error("workspace action mismatch");
+  for (const [name, value] of Object.entries({ strategy, executorHead, originHead })) if (!value || typeof value !== "string") throw new Error(`${name} is required`);
+  Object.assign(workspace, { strategy, executorHead, originHead, phase: "applied" });
+  workspace.disposition = ({ integrate: "integrated", discard: "discarded", preserve: "preserved" })[action];
+}
+
+function workspaceDisposed(p, data, schemaVersion) {
+  requireV2(schemaVersion);
+  const { taskId, attempt, action, released } = data;
+  const task = requireTask(p, taskId);
+  const workspace = requireWorkspace(task, attempt);
+  if (workspace.phase !== "applied") throw new Error("workspace must be applied");
+  if (action !== workspace.requestedAction) throw new Error("workspace action mismatch");
+  const requiresRelease = action !== "preserve";
+  if (released !== requiresRelease) throw new Error(`workspace ${action} requires released=${requiresRelease}`);
+  workspace.released = released;
+  workspace.phase = "disposed";
+  if (workspace.disposition === "discarded" && task.status === "succeeded") task.status = "pending";
+}
+
+function requireV2(schemaVersion) {
+  if (schemaVersion !== "goal-engine.event.v2") throw new Error("workspace disposition events require goal-engine.event.v2");
+}
+
+function validateWorkspace(workspace, expectedAttempt) {
+  if (!workspace || typeof workspace !== "object") throw new Error("workspace is required for v2 dispatch");
+  if (workspace.attempt !== expectedAttempt) throw new Error("workspace attempt mismatch");
+  for (const field of ["path", "branch", "baseCommit"]) if (!workspace[field] || typeof workspace[field] !== "string") throw new Error(`workspace ${field} is required`);
+}
+
+function requireWorkspace(task, attempt) {
+  if (!task.workspace) throw new Error("workspace is required");
+  if (task.workspace.attempt !== attempt) throw new Error("workspace attempt mismatch");
+  return task.workspace;
 }
 
 function goalAmended(p, data) {
@@ -190,6 +262,8 @@ function goalAmended(p, data) {
         attempts: 0,
         lastSettledOutcome: null,
         contractHash: null,
+        workspace: null,
+        acceptanceVerification: null,
       });
     }
   }

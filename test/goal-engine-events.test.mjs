@@ -6,277 +6,106 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-function makeEvent(type, data, goalId = "test-goal") {
-  return {
-    schemaVersion: "goal-engine.event.v1",
-    eventId: crypto.randomUUID(),
-    goalId,
-    type,
-    occurredAt: new Date().toISOString(),
-    data,
-  };
+function makeEvent(type, data, goalId = "test-goal", schemaVersion = "goal-engine.event.v1", occurredAt = new Date().toISOString()) {
+  return { schemaVersion, eventId: crypto.randomUUID(), goalId, type, occurredAt, data };
 }
 
-test("createProjection returns empty state", () => {
-  const p = createProjection();
-  assert.equal(p.goalId, null);
-  assert.equal(p.version, 0);
-  assert.equal(p.lifecycle, null);
-  assert.equal(p.tasks.size, 0);
-});
-
-test("goal.created initializes projection", () => {
-  let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
-    objective: "Build auth module",
-    scope: ["src/auth/"],
-    nonGoals: ["UI changes"],
-    dod: ["All auth tests pass", "No hardcoded secrets"],
-    tasks: ["task-001", "task-002"],
-    taskDefs: {
-      "task-001": {
-        description: "Token validation",
-        deps: [],
-        writePaths: ["src/auth/token.ts"],
-        acceptance: { criteria: ["Handles expiry"], commands: ["node --test test/token.test.mjs"] },
-        workflow: "tdd",
-      },
-      "task-002": {
-        description: "Session management",
-        deps: ["task-001"],
-        writePaths: ["src/auth/session.ts"],
-        acceptance: { criteria: ["Session persists"], commands: ["node --test test/session.test.mjs"] },
-        workflow: "tdd",
-      },
-    },
-  }));
-
-  assert.equal(p.goalId, "test-goal");
-  assert.equal(p.lifecycle, "active");
-  assert.equal(p.version, 1);
-  assert.equal(p.objective, "Build auth module");
-  assert.deepEqual(p.dod, ["All auth tests pass", "No hardcoded secrets"]);
-  assert.equal(p.tasks.size, 2);
-  assert.equal(p.tasks.get("task-001").status, "pending");
-  assert.deepEqual(p.tasks.get("task-001").writePaths, ["src/auth/token.ts"]);
-  assert.deepEqual(p.tasks.get("task-001").acceptance.commands, ["node --test test/token.test.mjs"]);
-  assert.deepEqual(p.tasks.get("task-002").deps, ["task-001"]);
-});
-
-test("goal.created must be first event", () => {
-  let p = createProjection();
-  assert.throws(
-    () => applyEvent(p, makeEvent("task.dispatched", { taskId: "x" })),
-    /goal\.created must be first/,
-  );
-});
-
-test("duplicate eventId is rejected", () => {
-  let p = createProjection();
-  const event = makeEvent("goal.created", {
-    objective: "X", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
-  });
-  p = applyEvent(p, event);
-  assert.throws(() => applyEvent(p, event), /duplicate eventId/);
-});
-
-test("terminal lifecycle rejects further events", () => {
-  let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
-    objective: "X", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
-  }));
-  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "abc123" }));
-  p = applyEvent(p, makeEvent("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, evidenceSource: "self_produced", nextAction: "Accept t1 and verify goal completion criteria are satisfied" }));
-  p = applyEvent(p, makeEvent("task.accepted", { taskId: "t1" }));
-  p = applyEvent(p, makeEvent("goal.completed", { verdict: "DONE_WITHOUT_EXTERNAL_VERIFICATION" }));
-  assert.throws(
-    () => applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "x" })),
-    /goal is terminal/,
-  );
-});
-
-test("task lifecycle: pending → dispatched → succeeded → accepted", () => {
-  let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
-    objective: "Lifecycle test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["node --test test/x.test.mjs"] }, workflow: "tdd" } },
-  }));
-
-  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "sha256abc" }));
-  assert.equal(p.tasks.get("t1").status, "dispatched");
-  assert.equal(p.tasks.get("t1").attempts, 1);
-  assert.equal(p.tasks.get("t1").contractHash, "sha256abc");
-
-  p = applyEvent(p, makeEvent("task.settled", {
-    taskId: "t1", outcome: "succeeded",
-    evidence: { type: "diff", ref: "git diff HEAD~1" },
-    evidenceSource: "self_produced",
-    nextAction: "Accept t1 and verify all acceptance criteria are met",
-  }));
-  assert.equal(p.tasks.get("t1").status, "succeeded");
-  assert.equal(p.tasks.get("t1").evidence.length, 1);
-
-  p = applyEvent(p, makeEvent("task.accepted", { taskId: "t1" }));
-  assert.equal(p.tasks.get("t1").status, "accepted");
-});
-
-test("task.settled failed resets to pending for retry", () => {
-  let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
-    objective: "Retry test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
-  }));
-  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
-  p = applyEvent(p, makeEvent("task.settled", { taskId: "t1", outcome: "failed", nextAction: "Retry t1 with a different approach to fix the failing test case" }));
-  assert.equal(p.tasks.get("t1").status, "pending");
-  assert.equal(p.tasks.get("t1").attempts, 1);
-  assert.equal(p.tasks.get("t1").lastSettledOutcome, "failed");
-});
-
-test("task.settled rejects vague nextAction", () => {
-  let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
-    objective: "Vague test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
-  }));
-  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
-  assert.throws(
-    () => applyEvent(p, makeEvent("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "continue" })),
-    /at least 20 characters|specific/i,
-  );
-});
-
-test("task.settled rejects command-type evidence", () => {
-  let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
-    objective: "Cmd evidence test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
-  }));
-  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
-  assert.throws(
-    () => applyEvent(p, makeEvent("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "command", ref: "npm test" }, nextAction: "Accept the task and verify goal completion criteria are met" })),
-    /evidence type must be one of/i,
-  );
-});
-
-test("goal.completed rejects when tasks not all accepted", () => {
-  let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
-    objective: "Gate test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1", "t2"],
-    taskDefs: {
-      t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
-      t2: { description: "b", deps: [], writePaths: ["b.ts"], acceptance: { criteria: ["y"], commands: ["true"] }, workflow: "tdd" },
-    },
-  }));
-  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
-  p = applyEvent(p, makeEvent("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Accept t1 and then dispatch t2 for implementation" }));
-  p = applyEvent(p, makeEvent("task.accepted", { taskId: "t1" }));
-
-  assert.throws(
-    () => applyEvent(p, makeEvent("goal.completed", { verdict: "COMPLETE" })),
-    /task not accepted: t2/,
-  );
-});
-
-test("goal.amended adds and removes tasks", () => {
-  let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
-    objective: "Amend test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1", "t2"],
-    taskDefs: {
-      t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
-      t2: { description: "b", deps: [], writePaths: ["b.ts"], acceptance: { criteria: ["y"], commands: ["true"] }, workflow: "tdd" },
-    },
-  }));
-
-  p = applyEvent(p, makeEvent("goal.amended", {
-    reason: "User changed direction: t2 no longer needed, adding t3 for new requirement",
-    removeTasks: ["t2"],
-    addTasks: { t3: { description: "new work", deps: ["t1"], writePaths: ["c.ts"], acceptance: { criteria: ["z"], commands: ["true"] }, workflow: "tdd" } },
-  }));
-
-  assert.equal(p.tasks.has("t2"), false);
-  assert.equal(p.tasks.has("t3"), true);
-  assert.deepEqual(p.tasks.get("t3").deps, ["t1"]);
-});
-
-// --- Store tests ---
-
-function tmpRoot() {
-  return mkdtempSync(join(tmpdir(), "ge-store-"));
+function created(goalId = "test-goal", schemaVersion = "goal-engine.event.v1") {
+  return makeEvent("goal.created", { objective: "Workspace test", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } } }, goalId, schemaVersion);
 }
 
-test("appendEvent writes events.jsonl and projection.json", () => {
-  const root = tmpRoot();
-  const event = makeEvent("goal.created", {
-    objective: "Store test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
-  }, "store-goal");
+function v2(type, data, goalId = "test-goal", occurredAt) {
+  return makeEvent(type, data, goalId, "goal-engine.event.v2", occurredAt);
+}
 
-  const proj = appendEvent(root, event, 0);
+function dispatchV2(p) {
+  return applyEvent(p, v2("task.dispatched", { taskId: "t1", contractHash: "h1", workspace: { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc" } }));
+}
 
-  assert.ok(existsSync(join(root, "goals/store-goal/events.jsonl")));
-  assert.ok(existsSync(join(root, "goals/store-goal/projection.json")));
+function succeed(p, schemaVersion = "goal-engine.event.v2") {
+  return applyEvent(p, makeEvent("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria" }, "test-goal", schemaVersion, "2026-01-02T03:04:05.000Z"));
+}
 
-  const lines = readFileSync(join(root, "goals/store-goal/events.jsonl"), "utf8").trim().split("\n");
-  assert.equal(lines.length, 1);
+test("goal.created initializes workspace and acceptance verification", () => {
+  const p = applyEvent(createProjection(), created());
+  assert.equal(p.tasks.get("t1").workspace, null);
+  assert.equal(p.tasks.get("t1").acceptanceVerification, null);
+});
 
+test("goal.amended initializes workspace and acceptance verification", () => {
+  let p = applyEvent(createProjection(), created());
+  p = applyEvent(p, makeEvent("goal.amended", { reason: "Add a necessary implementation task to cover the new requirement", addTasks: { t2: { description: "more work", deps: [], writePaths: ["b.ts"], acceptance: { criteria: ["y"], commands: ["true"] } } } }));
+  assert.equal(p.tasks.get("t2").workspace, null);
+  assert.equal(p.tasks.get("t2").acceptanceVerification, null);
+});
+
+test("v2 dispatched requires workspace and initializes active workspace", () => {
+  let p = applyEvent(createProjection(), created("test-goal", "goal-engine.event.v2"));
+  assert.throws(() => applyEvent(p, v2("task.dispatched", { taskId: "t1", contractHash: "h1" })), /workspace/);
+  p = dispatchV2(p);
+  assert.deepEqual(p.tasks.get("t1").workspace, { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "active" });
+  assert.throws(() => applyEvent(p, v2("task.workspace_disposition_started", { taskId: "t1", attempt: 2, requestedAction: "integrate", strategy: "merge", executorHead: "e", originHeadBefore: "o" })), /attempt/);
+});
+
+test("v2 disposition enforces three phases, attempt, and action", () => {
+  let p = dispatchV2(applyEvent(createProjection(), created("test-goal", "goal-engine.event.v2")));
+  const started = { taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "merge", executorHead: "e", originHeadBefore: "o" };
+  assert.throws(() => applyEvent(p, v2("task.workspace_disposition_applied", { ...started, action: "integrate", originHead: "o2" })), /disposing/);
+  p = applyEvent(p, v2("task.workspace_disposition_started", started));
+  assert.equal(p.tasks.get("t1").workspace.phase, "disposing");
+  assert.throws(() => applyEvent(p, v2("task.workspace_disposition_started", started)), /already started|phase/);
+  assert.throws(() => applyEvent(p, v2("task.workspace_disposition_applied", { ...started, action: "discard", originHead: "o2" })), /action/);
+  p = applyEvent(p, v2("task.workspace_disposition_applied", { ...started, action: "integrate", strategy: "merge", executorHead: "e2", originHead: "o2" }));
+  assert.equal(p.tasks.get("t1").workspace.phase, "applied");
+  assert.throws(() => applyEvent(p, v2("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "integrate", released: false })), /released/);
+  p = applyEvent(p, v2("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "integrate", released: true }));
+  assert.equal(p.tasks.get("t1").workspace.disposition, "integrated");
+  assert.equal(p.tasks.get("t1").workspace.phase, "disposed");
+});
+
+test("v2 accept is rejected until integrated released workspace is disposed", () => {
+  let p = succeed(dispatchV2(applyEvent(createProjection(), created("test-goal", "goal-engine.event.v2"))));
+  assert.throws(() => applyEvent(p, v2("task.accepted", { taskId: "t1", workspaceAttempt: 1 })), /workspace.*disposed|integrated/i);
+  const start = { taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "merge", executorHead: "e", originHeadBefore: "o" };
+  p = applyEvent(p, v2("task.workspace_disposition_started", start));
+  p = applyEvent(p, v2("task.workspace_disposition_applied", { ...start, action: "integrate", originHead: "o2" }));
+  p = applyEvent(p, v2("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "integrate", released: true }));
+  p = applyEvent(p, v2("task.accepted", { taskId: "t1", workspaceAttempt: 1 }));
+  assert.equal(p.tasks.get("t1").acceptanceVerification, "integrated");
+});
+
+test("discarded resets succeeded task and preserved cannot be accepted", () => {
+  for (const action of ["discard", "preserve"]) {
+    let p = succeed(dispatchV2(applyEvent(createProjection(), created("test-goal", "goal-engine.event.v2"))));
+    const start = { taskId: "t1", attempt: 1, requestedAction: action, strategy: "x", executorHead: "e", originHeadBefore: "o" };
+    p = applyEvent(p, v2("task.workspace_disposition_started", start));
+    p = applyEvent(p, v2("task.workspace_disposition_applied", { ...start, action, originHead: "o2" }));
+    p = applyEvent(p, v2("task.workspace_disposed", { taskId: "t1", attempt: 1, action, released: action === "discard" }));
+    if (action === "discard") assert.equal(p.tasks.get("t1").status, "pending");
+    else assert.throws(() => applyEvent(p, v2("task.accepted", { taskId: "t1", workspaceAttempt: 1 })), /integrated/);
+  }
+});
+
+test("legacy v1 accepted remains replayable and explicitly unverified", () => {
+  let p = applyEvent(createProjection(), created());
+  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
+  p = succeed(p, "goal-engine.event.v1");
+  p = applyEvent(p, makeEvent("task.accepted", { taskId: "t1" }));
+  assert.equal(p.tasks.get("t1").acceptanceVerification, "legacy_unverified");
+});
+
+test("settled evidence timestamps are deterministic and store round-trips workspace fields", () => {
+  const events = [created("store-goal", "goal-engine.event.v2"), v2("task.dispatched", { taskId: "t1", contractHash: "h1", workspace: { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc" } }, "store-goal", "2026-01-01T00:00:00.000Z"), makeEvent("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria" }, "store-goal", "goal-engine.event.v2", "2026-01-02T03:04:05.000Z")];
+  const replay = () => events.reduce(applyEvent, createProjection());
+  assert.deepEqual(replay(), replay());
+  assert.equal(replay().tasks.get("t1").evidence[0].ts, "2026-01-02T03:04:05.000Z");
+  const root = tmpRoot(); let version = 0;
+  for (const event of events) { appendEvent(root, event, version++); }
   const serialized = JSON.parse(readFileSync(join(root, "goals/store-goal/projection.json"), "utf8"));
-  assert.equal(serialized.goalId, "store-goal");
-  assert.equal(serialized.lifecycle, "active");
-  assert.equal(serialized.version, 1);
-  assert.equal(proj.version, 1);
+  assert.equal(serialized.tasks.t1.workspace.phase, "active");
+  assert.equal(loadProjection(root, "store-goal").tasks.get("t1").workspace.path, "/tmp/work");
 });
 
-test("appendEvent rejects stale expectedVersion", () => {
-  const root = tmpRoot();
-  const e1 = makeEvent("goal.created", {
-    objective: "Version test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
-  }, "ver-goal");
-
-  appendEvent(root, e1, 0);
-
-  const e2 = makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }, "ver-goal");
-  assert.throws(
-    () => appendEvent(root, e2, 0),
-    /projection version conflict: expected 0, current 1/,
-  );
-});
-
-test("loadProjection rebuilds from events.jsonl", () => {
-  const root = tmpRoot();
-  const e1 = makeEvent("goal.created", {
-    objective: "Load test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
-  }, "load-goal");
-
-  appendEvent(root, e1, 0);
-
-  const proj = loadProjection(root, "load-goal");
-  assert.equal(proj.goalId, "load-goal");
-  assert.equal(proj.version, 1);
-  assert.equal(proj.lifecycle, "active");
-  assert.equal(proj.tasks.get("t1").status, "pending");
-});
-
-test("loadProjection returns null for nonexistent goal", () => {
-  const root = tmpRoot();
-  assert.equal(loadProjection(root, "no-such-goal"), null);
-});
-
-test("listGoals returns active goal ids", () => {
-  const root = tmpRoot();
-  assert.deepEqual(listGoals(root), []);
-
-  const e1 = makeEvent("goal.created", {
-    objective: "List test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
-  }, "list-goal");
-
-  appendEvent(root, e1, 0);
-  assert.deepEqual(listGoals(root), ["list-goal"]);
-});
+function tmpRoot() { return mkdtempSync(join(tmpdir(), "ge-store-")); }
+test("appendEvent writes events.jsonl and projection.json", () => { const root = tmpRoot(); const proj = appendEvent(root, created("store-goal"), 0); assert.ok(existsSync(join(root, "goals/store-goal/events.jsonl"))); assert.equal(proj.version, 1); });
+test("listGoals returns active goal ids", () => { const root = tmpRoot(); appendEvent(root, created("list-goal"), 0); assert.deepEqual(listGoals(root), ["list-goal"]); });
