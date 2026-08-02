@@ -9,6 +9,25 @@ const STATE_ROOT_REL = ".state/goal-engine";
 const GOAL_ID_RE = /[^a-zA-Z0-9._-]+/g;
 const CHECKPOINT_REMINDER_THRESHOLD = 5;
 
+function toolResult(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return {
+    content: [{ type: "text", text }],
+    details: { value },
+  };
+}
+
+function registerGoalTool(pi, definition) {
+  const { handler, ...publicDefinition } = definition;
+  if (typeof handler !== "function") throw new Error(`Goal tool ${definition.name} is missing its domain handler`);
+  pi.registerTool({
+    ...publicDefinition,
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      return toolResult(await handler(params));
+    },
+  });
+}
+
 function stateRoot(cwd) {
   return join(cwd, STATE_ROOT_REL);
 }
@@ -67,7 +86,7 @@ export function createGoalEngineExtension(pi) {
   let turnsSinceSettle = 0;
   const activeLeases = new Map();
 
-  pi.registerTool({
+  registerGoalTool(pi, {
     name: "goal_init",
     description: "创建长任务 goal。将目标结构化为 task DAG（含 writePaths、acceptance、workflow），持久化到 .state/goal-engine/。用于 24h+ 跨多次 compaction 的任务。主 agent 作为 coordinator 驱动执行。",
     parameters: {
@@ -139,7 +158,7 @@ export function createGoalEngineExtension(pi) {
     },
   });
 
-  pi.registerTool({
+  registerGoalTool(pi, {
     name: "goal_status",
     description: "获取当前活跃 goal 的完整恢复上下文。compact 后必须首先调用。返回：objective、task 状态、可执行前沿、next_action、进度、每个 task 的 writePaths 和 acceptance。",
     parameters: {
@@ -160,7 +179,7 @@ export function createGoalEngineExtension(pi) {
     },
   });
 
-  pi.registerTool({
+  registerGoalTool(pi, {
     name: "goal_dispatch",
     description: "为 task 分配独立 git worktree，编译 dispatch-ir.v1 契约（execution.cwd 指向 worktree），标记为 dispatched。返回的 contract 直接传给 subagent tool 派发 executor。",
     parameters: {
@@ -217,7 +236,7 @@ export function createGoalEngineExtension(pi) {
     },
   });
 
-  pi.registerTool({
+  registerGoalTool(pi, {
     name: "goal_settle",
     description: "记录 executor 执行结果。succeeded 必须附带 evidence（artifact 引用，非命令字符串）。failed 将 task 重置为 pending（可重试）。同时记录 checkpoint。",
     parameters: {
@@ -270,7 +289,7 @@ export function createGoalEngineExtension(pi) {
     },
   });
 
-  pi.registerTool({
+  registerGoalTool(pi, {
     name: "goal_accept",
     description: "验收一个 succeeded 的 task。如果所有 task 都 accepted，自动触发 goal 完成并返回 completion_verdict。",
     parameters: {
@@ -312,7 +331,7 @@ export function createGoalEngineExtension(pi) {
     },
   });
 
-  pi.registerTool({
+  registerGoalTool(pi, {
     name: "goal_amend",
     description: "修改 goal 的 task DAG（增删改 task）。需要 reason（≥10字符）。不能删除已 accepted 的 task。用于人类介入调整方向。新增 task 必须含 writePaths 和 acceptance。",
     parameters: {
@@ -368,7 +387,7 @@ export function createGoalEngineExtension(pi) {
     },
   });
 
-  pi.registerTool({
+  registerGoalTool(pi, {
     name: "goal_integrate",
     description: "将 executor worktree 的成果合回主 worktree（cherry-pick 或 merge），或丢弃。在 goal_accept 之前调用。合回后自动释放 worktree。",
     parameters: {

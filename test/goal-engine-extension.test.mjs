@@ -20,6 +20,20 @@ function tmpCwd() {
   return mkdtempSync(join(tmpdir(), "ge-ext-"));
 }
 
+async function invoke(pi, name, params = {}) {
+  const definition = pi.tools.find((tool) => tool.name === name);
+  assert.ok(definition, `missing tool: ${name}`);
+  const result = await definition.execute(
+    `test-${name}`,
+    params,
+    new AbortController().signal,
+    undefined,
+    { cwd: pi.cwd },
+  );
+  assert.deepEqual(result.content.map((part) => part.type), ["text"]);
+  return result.content[0].text;
+}
+
 function initGitRepo(cwd) {
   const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
   git("init");
@@ -36,6 +50,10 @@ test("registers seven goal engine tools", () => {
   createGoalEngineExtension(pi);
   const names = pi.tools.map((t) => t.name).sort();
   assert.deepEqual(names, ["goal_accept", "goal_amend", "goal_dispatch", "goal_init", "goal_integrate", "goal_settle", "goal_status"]);
+  for (const definition of pi.tools) {
+    assert.equal(typeof definition.execute, "function", `${definition.name} must expose execute`);
+    assert.equal(Object.hasOwn(definition, "handler"), false, `${definition.name} must not expose handler`);
+  }
 });
 
 test("goal_init creates goal and returns runnable frontier", async () => {
@@ -44,7 +62,7 @@ test("goal_init creates goal and returns runnable frontier", async () => {
   createGoalEngineExtension(pi);
 
   const init = pi.tools.find((t) => t.name === "goal_init");
-  const result = JSON.parse(await init.handler({
+  const result = JSON.parse(await invoke(pi, "goal_init", {
     objective: "Build the authentication module with token validation",
     dod: ["All auth tests pass"],
     tasks: [
@@ -65,13 +83,13 @@ test("goal_status returns full recovery context", async () => {
   createGoalEngineExtension(pi);
 
   const init = pi.tools.find((t) => t.name === "goal_init");
-  await init.handler({
+  await invoke(pi, "goal_init", {
     objective: "Status recovery test goal",
     tasks: [{ id: "t1", description: "First task work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
   });
 
   const status = pi.tools.find((t) => t.name === "goal_status");
-  const result = JSON.parse(await status.handler({}));
+  const result = JSON.parse(await invoke(pi, "goal_status", {}));
   assert.equal(result.goalId, "status-recovery-test-goal");
   assert.equal(result.lifecycle, "active");
   assert.ok(result.objective);
@@ -88,7 +106,7 @@ test("goal_status returns NO_ACTIVE_GOAL when none", async () => {
   createGoalEngineExtension(pi);
 
   const status = pi.tools.find((t) => t.name === "goal_status");
-  assert.equal(await status.handler({}), "NO_ACTIVE_GOAL");
+  assert.equal(await invoke(pi, "goal_status", {}), "NO_ACTIVE_GOAL");
 });
 
 test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", async () => {
@@ -99,13 +117,13 @@ test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", asy
   createGoalEngineExtension(pi);
 
   const init = pi.tools.find((t) => t.name === "goal_init");
-  await init.handler({
+  await invoke(pi, "goal_init", {
     objective: "Dispatch IR test goal",
     tasks: [{ id: "t1", description: "Implement the widget parser module", deps: [], writePaths: ["src/parser.ts"], acceptance: { criteria: ["Parses valid input"], commands: ["node --test test/parser.test.mjs"] }, workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
-  const result = JSON.parse(await dispatch.handler({ task_id: "t1" }));
+  const result = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
 
   assert.equal(result.status, "dispatched");
   assert.ok(result.contract);
@@ -128,13 +146,13 @@ test("goal_dispatch supports docs-only tasks with a workflow reason", async () =
   createGoalEngineExtension(pi);
 
   const init = pi.tools.find((t) => t.name === "goal_init");
-  await init.handler({
+  await invoke(pi, "goal_init", {
     objective: "Independent documentation review goal",
     tasks: [{ id: "review", description: "Review implementation and write the acceptance report", deps: [], writePaths: ["reports/review.md"], acceptance: { criteria: ["Report has verdict"], commands: ["test -f reports/review.md"] }, workflow: "docs-only" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
-  const result = JSON.parse(await dispatch.handler({ task_id: "review" }));
+  const result = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "review" }));
 
   assert.equal(result.contract.workflow.mode, "docs-only");
   assert.match(result.contract.workflow.reason, /documentation|review|report/i);
@@ -147,13 +165,13 @@ test("goal_dispatch cleans the workspace when contract compilation fails", async
   createGoalEngineExtension(pi);
 
   const init = pi.tools.find((t) => t.name === "goal_init");
-  await init.handler({
+  await invoke(pi, "goal_init", {
     objective: "Dispatch cleanup test goal",
     tasks: [{ id: "t1", description: "Compile an invalid path-boundary contract", deps: [], writePaths: ["../../etc/passwd"], acceptance: { criteria: ["Compilation fails"], commands: ["true"] }, workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
-  await assert.rejects(() => dispatch.handler({ task_id: "t1" }), /repo-relative/);
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), /repo-relative/);
 
   const worktreesRoot = join(cwd, ".state/goal-engine/worktrees");
   assert.equal(existsSync(join(worktreesRoot, "dispatch-cleanup-test-goal-t1-1")), false);
@@ -161,7 +179,7 @@ test("goal_dispatch cleans the workspace when contract compilation fails", async
   assert.equal(git("branch", "--list", "ge/dispatch-cleanup-test-goal/t1/1"), "");
 
   const status = pi.tools.find((t) => t.name === "goal_status");
-  const projection = JSON.parse(await status.handler({}));
+  const projection = JSON.parse(await invoke(pi, "goal_status", {}));
   assert.equal(projection.tasks.t1.status, "pending");
   assert.equal(projection.tasks.t1.attempts, 0);
 });
@@ -173,20 +191,20 @@ test("goal_integrate recovers a persisted workspace lease after extension restar
   const firstPi = createMockPi(cwd);
   createGoalEngineExtension(firstPi);
   const init = firstPi.tools.find((t) => t.name === "goal_init");
-  await init.handler({
+  await invoke(firstPi, "goal_init", {
     objective: "Restart integration test goal",
     tasks: [{ id: "t1", description: "Create a persisted executor artifact", deps: [], writePaths: ["src/result.ts"], acceptance: { criteria: ["result exists"], commands: ["test -f src/result.ts"] }, workflow: "tdd" }],
   });
 
   const dispatch = firstPi.tools.find((t) => t.name === "goal_dispatch");
-  const dispatched = JSON.parse(await dispatch.handler({ task_id: "t1" }));
+  const dispatched = JSON.parse(await invoke(firstPi, "goal_dispatch", { task_id: "t1" }));
   mkdirSync(join(dispatched.workspace.path, "src"), { recursive: true });
   writeFileSync(join(dispatched.workspace.path, "src/result.ts"), "export const result = true;\n");
   execFileSync("git", ["add", "."], { cwd: dispatched.workspace.path });
   execFileSync("git", ["commit", "-m", "feat: add persisted result"], { cwd: dispatched.workspace.path });
 
   const settle = firstPi.tools.find((t) => t.name === "goal_settle");
-  await settle.handler({
+  await invoke(firstPi, "goal_settle", {
     task_id: "t1",
     outcome: "succeeded",
     evidence: { type: "diff", ref: "git diff HEAD~1 -- src/result.ts" },
@@ -197,7 +215,7 @@ test("goal_integrate recovers a persisted workspace lease after extension restar
   const restartedPi = createMockPi(cwd);
   createGoalEngineExtension(restartedPi);
   const integrate = restartedPi.tools.find((t) => t.name === "goal_integrate");
-  const result = JSON.parse(await integrate.handler({ task_id: "t1", action: "integrate" }));
+  const result = JSON.parse(await invoke(restartedPi, "goal_integrate", { task_id: "t1", action: "integrate" }));
 
   assert.equal(result.action, "integrated");
   assert.equal(result.released, true);
@@ -213,16 +231,16 @@ test("goal_settle + goal_accept full cycle", async () => {
   createGoalEngineExtension(pi);
 
   const init = pi.tools.find((t) => t.name === "goal_init");
-  await init.handler({
+  await invoke(pi, "goal_init", {
     objective: "Full cycle test goal",
     tasks: [{ id: "t1", description: "The only task in this goal", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
-  await dispatch.handler({ task_id: "t1" });
+  await invoke(pi, "goal_dispatch", { task_id: "t1" });
 
   const settle = pi.tools.find((t) => t.name === "goal_settle");
-  const settleResult = JSON.parse(await settle.handler({
+  const settleResult = JSON.parse(await invoke(pi, "goal_settle", {
     task_id: "t1",
     outcome: "succeeded",
     evidence: { type: "diff", ref: "git diff HEAD~1 -- src/x.ts" },
@@ -232,7 +250,7 @@ test("goal_settle + goal_accept full cycle", async () => {
   assert.equal(settleResult.status, "succeeded");
 
   const accept = pi.tools.find((t) => t.name === "goal_accept");
-  const acceptResult = JSON.parse(await accept.handler({ task_id: "t1" }));
+  const acceptResult = JSON.parse(await invoke(pi, "goal_accept", { task_id: "t1" }));
   assert.equal(acceptResult.status, "accepted");
   assert.equal(acceptResult.goal_complete, true);
   assert.equal(acceptResult.completion_verdict, "DONE_WITHOUT_EXTERNAL_VERIFICATION");
@@ -246,17 +264,17 @@ test("goal_settle rejects vague next_action", async () => {
   createGoalEngineExtension(pi);
 
   const init = pi.tools.find((t) => t.name === "goal_init");
-  await init.handler({
+  await invoke(pi, "goal_init", {
     objective: "Vague action test goal",
     tasks: [{ id: "t1", description: "work item", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
-  await dispatch.handler({ task_id: "t1" });
+  await invoke(pi, "goal_dispatch", { task_id: "t1" });
 
   const settle = pi.tools.find((t) => t.name === "goal_settle");
   await assert.rejects(
-    () => settle.handler({ task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, next_action: "continue" }),
+    () => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, next_action: "continue" }),
     /at least 20 characters|specific/i,
   );
 });
@@ -267,7 +285,7 @@ test("tool_result hook appends reminder when checkpoint overdue", async () => {
   createGoalEngineExtension(pi);
 
   const init = pi.tools.find((t) => t.name === "goal_init");
-  await init.handler({
+  await invoke(pi, "goal_init", {
     objective: "Hook test goal for reminder",
     tasks: [{ id: "t1", description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
   });
