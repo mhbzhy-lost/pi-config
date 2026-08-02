@@ -13,11 +13,12 @@ const piModule = await import(pathToFileURL(join(piRoot, "dist/index.js")).href)
 const { createAgentSession, DefaultResourceLoader, SessionManager } = piModule;
 
 test("real Pi host executes goal_status through ToolDefinition.execute", async () => {
+  const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-project-"));
   const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-host-"));
   let result;
   try {
     const loader = new DefaultResourceLoader({
-      cwd: repoRoot,
+      cwd: projectCwd,
       agentDir,
       additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")],
       noSkills: true,
@@ -27,10 +28,10 @@ test("real Pi host executes goal_status through ToolDefinition.execute", async (
     });
     await loader.reload();
     result = await createAgentSession({
-      cwd: repoRoot,
+      cwd: projectCwd,
       agentDir,
       resourceLoader: loader,
-      sessionManager: SessionManager.inMemory(repoRoot),
+      sessionManager: SessionManager.inMemory(projectCwd),
     });
     const errors = [];
     await result.session.bindExtensions({
@@ -47,12 +48,22 @@ test("real Pi host executes goal_status through ToolDefinition.execute", async (
       undefined,
     );
     assert.equal(output.content[0].text, "NO_ACTIVE_GOAL");
+    assert.deepEqual(output.details, { value: "NO_ACTIVE_GOAL" });
+    assert.equal(output.details.value, "NO_ACTIVE_GOAL");
     assert.deepEqual(errors, []);
   } finally {
-    if (result) {
-      await result.session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });
-      result.session.dispose();
+    try {
+      if (result?.session) {
+        try {
+          await result.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+        } finally {
+          result.session.dispose();
+          result = undefined;
+        }
+      }
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+      await rm(projectCwd, { recursive: true, force: true });
     }
-    await rm(agentDir, { recursive: true, force: true });
   }
 });

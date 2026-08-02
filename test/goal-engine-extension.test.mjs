@@ -31,7 +31,14 @@ async function invoke(pi, name, params = {}) {
     { cwd: pi.cwd },
   );
   assert.deepEqual(result.content.map((part) => part.type), ["text"]);
-  return result.content[0].text;
+  assert.ok(result.details && Object.hasOwn(result.details, "value"), `${name} must return details.value`);
+  const text = result.content[0].text;
+  if (typeof result.details.value === "string") {
+    assert.equal(result.details.value, text);
+  } else {
+    assert.deepEqual(result.details.value, JSON.parse(text));
+  }
+  return text;
 }
 
 function initGitRepo(cwd) {
