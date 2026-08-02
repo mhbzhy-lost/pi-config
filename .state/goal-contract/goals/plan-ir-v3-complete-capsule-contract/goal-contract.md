@@ -146,6 +146,14 @@ context compression, resume only after reading:
 5. `feature-list.json`
 6. last 20 lines of `evidence.jsonl`
 
+If `evidence.jsonl` contains fewer than 20 lines, read every available line. An empty file is missing recovery evidence and must stop continuation as `needs_recovery`.
+
+Before continuing, verify amendment authorization artifacts:
+
+```bash
+node scripts/goal-contract-authorization-audit.mjs .state/goal-contract/goals/plan-ir-v3-complete-capsule-contract
+```
+
 If these files are missing, conflict with the summary, or show multiple active
 goals without an explicit `goal_id`, stop as `needs_recovery` or
 `needs_amendment`. Do not continue from the compressed summary alone.
@@ -176,6 +184,8 @@ On every resume or compaction continuation, read in order:
 4. `goal-contract.md`
 5. `feature-list.json`
 6. last 20 lines of `evidence.jsonl`
+
+If `evidence.jsonl` contains fewer than 20 lines, read every available line. An empty file is missing recovery evidence and must stop continuation as `needs_recovery`.
 
 If multiple active goals exist in the registry, require an explicit `goal_id`.
 

@@ -9,6 +9,14 @@ Read these files before acting:
 5. `feature-list.json`
 6. last 20 lines of `evidence.jsonl`
 
+If `evidence.jsonl` contains fewer than 20 lines, read every available line. An empty file is missing recovery evidence and must stop continuation as `needs_recovery`.
+
+Before continuing, verify amendment authorization artifacts:
+
+```bash
+node scripts/goal-contract-authorization-audit.mjs .state/goal-contract/goals/plan-ir-v3-complete-capsule-contract
+```
+
 ## Current State
 - Status: active
 - Phase: implementation
