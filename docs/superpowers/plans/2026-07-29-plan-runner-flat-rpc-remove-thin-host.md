@@ -544,7 +544,7 @@ upstreamEvents.emit("subagent:async-complete", {
 assert.deepEqual(childPushes.at(-1).type, "execution.completed");
 ```
 
-RED 必须彼此独立覆盖：相同 spawnKey 并发/重试只 spawn 一次；响应丢失后 lookup 恢复同一 binding；真正 pre-spawn 失败可重试；started 早于 upstream reply 时不丢失；started/complete/process-terminal 只推给 owner；同 cwd 多 dispatch 依靠 dispatchId 精确映射；成功 tool result 绑定；重复同 binding 幂等；Plan 在 tool result 前 cancelled 时 stop 且不写 `attempt.bound`；不同 binding/CAS/持久化失败执行 cleanup；重建 boundary 后从 durable dispatch intent + lookup 恢复而不 spawn。
+RED 必须彼此独立覆盖：相同 spawnKey 并发/重试只 spawn 一次；响应丢失后 lookup 恢复同一 binding；真正 pre-spawn 失败可重试；started 早于 upstream reply 时不丢失；started/complete/process-terminal 只推给 owner；同 cwd 多 dispatch 依靠 dispatchId 精确映射；成功 tool result 绑定；重复同 binding 幂等；Plan 在 tool result 前 cancelled 时 stop 且不写 `attempt.bound`；terminal、不同 binding 或 CAS 后观察到 terminal 时执行 cleanup；项目 tool result 遇普通非冲突持久化错误时保留 authoritative binding 并允许 exact retry，legacy direct dispatch 仍 cleanup；重建 boundary 后从 durable dispatch intent + lookup 恢复而不 spawn。
 
 - [ ] **Step 3: 运行测试确认 RED**
 
@@ -564,7 +564,7 @@ Broker 在调用 upstream 前登记 spawnKey 和 paramsHash；同 key 同参数�
 
 Capsule 在 `tool_call` 授权时以 `event.toolCallId` 执行 `prepared -> executing`，并在现有 `pi.on("tool_result", ...)` handler 中对 `event.toolName === "subagent"` 调用 `boundary.onToolResult({toolCallId:event.toolCallId,isError:event.isError,details:event.details})`；必须复用同一个 handler，与 Supervisor reply 分支按 toolName 分流，避免注册顺序造成双消费。错误 result 按状态机区分“已知未 spawn”与“spawn 不确定”，session shutdown 对所有 `executing/spawned` entry 执行 reconcile/cleanup，禁止留下可 replay 的 token。
 
-成功 result 校验 runId/asyncDir 和 one-shot authorization 后执行 `spawned -> bound`。正常路径由 tool result 提交 `attempt.bound`；lifecycle started 只生成带 dispatchId 的 official fact，供 tool result 丢失后的 lookup/recovery 使用。两条路径必须复用 Coordinator 的同一 bind-or-cleanup 原语：CAS conflict 时重放最新 projection；同一 binding 幂等成功；terminal 或不同 binding 通过 broker stop 本次 run并进入 `cleaned`；非冲突 persistence error 先 stop 再传播，stop 也失败时抛 `AggregateError`。
+成功 result 校验 runId/asyncDir 和 one-shot authorization 后执行 `spawned -> bound`。正常路径由 tool result 提交 `attempt.bound`；lifecycle started 只生成带 dispatchId 的 official fact，供 tool result 丢失后的 lookup/recovery 使用。两条路径必须复用 Coordinator 的同一 bind-or-cleanup 原语：CAS conflict 时重放最新 projection；同一 binding 幂等成功；terminal 或不同 binding 通过 broker stop 本次 run并进入 `cleaned`。项目 tool result 的普通非冲突 persistence error 原样传播但保留 authoritative run 和 binding，Capsule 不消费 result，后续相同 result 或重启 lookup 可重试；legacy direct dispatch 没有可重放 result，仍在普通 persistence error 后 stop，stop 也失败时抛 `AggregateError`。
 
 Plan Runner 在 `before_agent_start` 与 graceful shutdown 对 durable `dispatch-requested` 执行 lookup：`spawned` 使用同一 bind-or-cleanup；`not-started` 才允许释放本 session authorization并重新派发；`spawning/uncertain` 保持 fail closed fence；不得依赖 shutdown handler 覆盖 SIGKILL。
 
