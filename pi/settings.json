@@ -1,7 +1,7 @@
 {
   "lastChangelogVersion": "0.83.0",
   "theme": "light",
-  "defaultProvider": "codex-pool",
+  "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-sol",
   "hideThinkingBlock": true,
   "packages": [
@@ -47,9 +47,9 @@
     }
   },
   "enabledModels": [
-    "codex-pool/gpt-5.6-sol",
-    "anthropic-idealab/claude-opus-4-6",
-    "openai-idealab/Peach-07-17-DogFooding"
+    "openai-codex/gpt-5.6-sol",
+    "openai-codex/gpt-5.6-terra",
+    "openai-codex/gpt-5.3-codex-spark"
   ],
   "defaultThinkingLevel": "low"
 }

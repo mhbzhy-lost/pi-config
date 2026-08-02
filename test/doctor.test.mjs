@@ -100,10 +100,10 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     await writeFile(join(root, "pi", "child-extensions", "root-session-owner.ts"), "");
     await writeFile(join(root, ".gitignore"), "/var/\n");
     for (const [name, model, tools] of [
-      ["executor", "codex-pool/gpt-5.6-terra", "read"],
-      ["spark", "codex-pool/gpt-5.3-codex-spark", "read"],
-      ["plan-runner", "codex-pool/gpt-5.6-sol", "plan_open,plan_status,plan_continue,plan_verify,plan_block,plan_read_revision,plan_amend,read"],
-      ["plan-reviewer", "codex-pool/gpt-5.6-sol", "read"],
+      ["executor", "openai-codex/gpt-5.6-terra", "read"],
+      ["spark", "openai-codex/gpt-5.3-codex-spark", "read"],
+      ["plan-runner", "openai-codex/gpt-5.6-sol", "plan_open,read,grep"],
+      ["plan-reviewer", "openai-codex/gpt-5.6-sol", "read"],
     ]) {
       const childExtension = name === "plan-runner" ? "subagentOnlyExtensions: .pi-subagents/plan-runner-entry.mjs\n" : "";
       await writeFile(join(root, "pi", "agents", `${name}.md`), `---\nmodel: ${model}\n${childExtension}tools: ${tools}\n---\n`);
@@ -120,10 +120,13 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     assert.deepEqual(await inspectConfiguration(root, { readPiVersion: async () => "0.82.1", readBasicMemoryVersion: async () => "0.22.1" }), []);
 
     const runnerPath = join(root, "pi", "agents", "plan-runner.md");
-    for (const tool of ["subagent", "subagent_wait", "subagent_supervisor", "plan_executor_supervisor"]) {
+    for (const tool of [
+      "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
+      "subagent", "subagent_wait", "subagent_supervisor", "plan_executor_supervisor",
+    ]) {
       await writeFile(
         runnerPath,
-        `---\nmodel: codex-pool/gpt-5.6-sol\nsubagentOnlyExtensions: .pi-subagents/plan-runner-entry.mjs\ntools: plan_open,plan_status,plan_continue,plan_verify,plan_block,plan_read_revision,plan_amend,read,${tool}\n---\n`,
+        `---\nmodel: openai-codex/gpt-5.6-sol\nsubagentOnlyExtensions: .pi-subagents/plan-runner-entry.mjs\ntools: plan_open,read,grep,${tool}\n---\n`,
       );
       const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1", readBasicMemoryVersion: async () => "0.22.1" });
       assert.ok(issues.includes(`forbidden plan-runner control tool: ${tool}`));

@@ -1,7 +1,7 @@
 ---
 name: executor
 description: Deterministic coding subagent for precise multi-file implementation
-model: codex-pool/gpt-5.6-terra
+model: openai-codex/gpt-5.6-terra
 thinking: low
 temperature: 0
 tools: read,write,edit,bash,grep,find,ls,contact_supervisor

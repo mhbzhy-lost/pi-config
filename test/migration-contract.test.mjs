@@ -61,8 +61,8 @@ test("migration keeps ordinary agent profiles independent from subagent tools", 
     ),
   );
 
-  assert.equal(executor.model, "codex-pool/gpt-5.6-terra");
-  assert.equal(spark.model, "codex-pool/gpt-5.3-codex-spark");
+  assert.equal(executor.model, "openai-codex/gpt-5.6-terra");
+  assert.equal(spark.model, "openai-codex/gpt-5.3-codex-spark");
   assert.equal(executor.tools.includes("subagent"), false);
   assert.equal(spark.tools.includes("subagent"), false);
   assert.equal(executor.extensions, undefined);
@@ -86,8 +86,8 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
     ),
   );
 
-  assert.equal(runner.model, "codex-pool/gpt-5.6-sol");
-  assert.equal(reviewer.model, "codex-pool/gpt-5.6-sol");
+  assert.equal(runner.model, "openai-codex/gpt-5.6-sol");
+  assert.equal(reviewer.model, "openai-codex/gpt-5.6-sol");
   assert.equal(runner.share, "false");
   assert.equal(reviewer.share, "false");
   assert.equal(runner.fallback, "false");
@@ -100,6 +100,17 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
   assert.equal(reviewer.tools.includes("write"), false);
   await access(join(repoRoot, "pi", "child-extensions", "plan-capsule.ts"));
   await assert.rejects(access(join(repoRoot, "pi", "extensions", "subagent.ts")));
+});
+
+test("configuration cycles only authenticated OpenAI Codex models", async () => {
+  const settings = JSON.parse(await readFile(join(repoRoot, "pi", "settings.json"), "utf8"));
+
+  assert.equal(settings.defaultProvider, "openai-codex");
+  assert.deepEqual(settings.enabledModels, [
+    "openai-codex/gpt-5.6-sol",
+    "openai-codex/gpt-5.6-terra",
+    "openai-codex/gpt-5.3-codex-spark",
+  ]);
 });
 
 test("migration ignores all Plan runtime state", async () => {
