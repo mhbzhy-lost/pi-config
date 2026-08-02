@@ -139,6 +139,7 @@ function taskDispatched(p, data, schemaVersion) {
   if (task.status !== "pending") throw new Error(`task is not pending: ${taskId} (${task.status})`);
   if (!contractHash || typeof contractHash !== "string") throw new Error("contractHash is required for dispatch");
   if (schemaVersion === "goal-engine.event.v2") {
+    assertWorkspaceRedispatchable(task);
     validateWorkspace(workspace, task.attempts + 1);
     task.workspace = { ...workspace, phase: "active" };
   }
@@ -238,6 +239,16 @@ function validateWorkspace(workspace, expectedAttempt) {
   if (!workspace || typeof workspace !== "object") throw new Error("workspace is required for v2 dispatch");
   if (workspace.attempt !== expectedAttempt) throw new Error("workspace attempt mismatch");
   for (const field of ["path", "branch", "baseCommit"]) if (!workspace[field] || typeof workspace[field] !== "string") throw new Error(`workspace ${field} is required`);
+}
+
+function assertWorkspaceRedispatchable(task) {
+  if (!task.workspace) return;
+  const { phase, disposition, released } = task.workspace;
+  const isReleasable = phase === "disposed" && disposition === "discarded" && released === true;
+  if (isReleasable) return;
+  throw new Error(
+    `workspace redispatch error: existing workspace must be disposed, discarded, and released before redispatch (phase=${phase}, disposition=${disposition}, released=${released})`,
+  );
 }
 
 function requireWorkspace(task, attempt) {
