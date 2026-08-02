@@ -51,5 +51,5 @@
     "anthropic-idealab/claude-opus-4-6",
     "openai-idealab/Peach-07-17-DogFooding"
   ],
-  "defaultThinkingLevel": "xhigh"
+  "defaultThinkingLevel": "low"
 }
