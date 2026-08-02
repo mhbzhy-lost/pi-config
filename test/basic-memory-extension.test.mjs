@@ -16,11 +16,28 @@ function createMockPi() {
   };
 }
 
+function executeTool(tool, params) {
+  return tool.execute("memory-test-call", params);
+}
+
 test("registers exactly five memory tools", () => {
   const pi = createMockPi();
   createBasicMemoryExtension(pi);
   const names = pi.tools.map((t) => t.name).sort();
   assert.deepEqual(names, ["memory_context", "memory_read", "memory_recent", "memory_search", "memory_write"]);
+});
+
+test("registered memory tools satisfy the current Pi execute contract", async () => {
+  const pi = createMockPi();
+  createBasicMemoryExtension(pi);
+  const search = pi.tools.find((tool) => tool.name === "memory_search");
+
+  assert.equal(typeof search.execute, "function");
+  const result = await search.execute("memory-call-1", { query: "test" });
+  assert.deepEqual(result, {
+    content: [{ type: "text", text: "OK" }],
+    details: {},
+  });
 });
 
 test("all tool descriptions mention no secrets", () => {
@@ -36,7 +53,7 @@ test("tool commands start with basic-memory tool and include --local", async () 
   createBasicMemoryExtension(pi);
 
   const search = pi.tools.find((t) => t.name === "memory_search");
-  await search.handler({ query: "test" });
+  await executeTool(search, { query: "test" });
   assert.equal(pi.execCalls[0].command, "basic-memory");
   assert.ok(pi.execCalls[0].args.includes("--local"));
   assert.ok(pi.execCalls[0].args.includes("search-notes"));
@@ -47,7 +64,7 @@ test("memory_write includes title, folder, content args", async () => {
   createBasicMemoryExtension(pi);
 
   const write = pi.tools.find((t) => t.name === "memory_write");
-  await write.handler({ title: "Test", folder: "decisions", content: "Some content" });
+  await executeTool(write, { title: "Test", folder: "decisions", content: "Some content" });
   const args = pi.execCalls[0].args;
   assert.ok(args.includes("--title"));
   assert.ok(args.includes("Test"));
@@ -65,7 +82,7 @@ test("memory_write rejects likely secrets", async () => {
   const write = pi.tools.find((t) => t.name === "memory_write");
 
   await assert.rejects(
-    () => write.handler({ title: "creds", folder: "secrets", content: "api_key=sk-abcdefghijklmnop" }),
+    () => executeTool(write, { title: "creds", folder: "secrets", content: "api_key=sk-abcdefghijklmnop" }),
     /secret|凭据/i,
   );
   assert.equal(pi.execCalls.length, 0);
@@ -92,7 +109,7 @@ test("memory_search passes project param when provided", async () => {
   const pi = createMockPi();
   createBasicMemoryExtension(pi);
   const search = pi.tools.find((t) => t.name === "memory_search");
-  await search.handler({ query: "test", project: "my-proj" });
+  await executeTool(search, { query: "test", project: "my-proj" });
   const args = pi.execCalls[0].args;
   assert.ok(args.includes("--project"));
   assert.ok(args.includes("my-proj"));
@@ -102,7 +119,7 @@ test("memory_recent requires no required params", async () => {
   const pi = createMockPi();
   createBasicMemoryExtension(pi);
   const recent = pi.tools.find((t) => t.name === "memory_recent");
-  await recent.handler({});
+  await executeTool(recent, {});
   assert.equal(pi.execCalls[0].command, "basic-memory");
   assert.ok(pi.execCalls[0].args.includes("recent-activity"));
 });
@@ -116,7 +133,8 @@ test("truncates output exceeding 50KB", async () => {
   };
   createBasicMemoryExtension(pi);
   const search = tools.find((t) => t.name === "memory_search");
-  const result = await search.handler({ query: "test" });
-  assert.ok(result.length < bigOutput.length);
-  assert.match(result, /\[truncated/i);
+  const result = await executeTool(search, { query: "test" });
+  const output = result.content[0].text;
+  assert.ok(output.length < bigOutput.length);
+  assert.match(output, /\[truncated/i);
 });

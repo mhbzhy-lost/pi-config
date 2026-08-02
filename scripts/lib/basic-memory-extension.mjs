@@ -65,16 +65,19 @@ export function createBasicMemoryExtension(pi) {
     const commandBuilder = COMMANDS[def.name];
     pi.registerTool({
       ...def,
-      async handler(params) {
+      async execute(_toolCallId, params, signal) {
         if (def.name === "memory_write" && containsLikelySecret(params.content)) {
           throw new Error("禁止将凭据或秘密 (secret) 写入持久存储");
         }
         const args = commandBuilder(params);
-        const result = await pi.exec("basic-memory", args, { timeout: 30000 });
+        const result = await pi.exec("basic-memory", args, { timeout: 30000, signal });
         if (result.code !== 0) {
           throw new Error(result.stderr || `basic-memory exited with code ${result.code}`);
         }
-        return truncate(result.stdout);
+        return {
+          content: [{ type: "text", text: truncate(result.stdout) }],
+          details: {},
+        };
       },
     });
   }
