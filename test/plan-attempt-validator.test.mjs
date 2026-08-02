@@ -21,7 +21,7 @@ async function git(cwd, ...args) {
 
 async function repository() {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-attempt-validator-"));
-  await git(root, "init");
+  await git(root, "init", "--initial-branch=main");
   await git(root, "config", "user.email", "test@example.com");
   await git(root, "config", "user.name", "Test User");
   await writeFile(path.join(root, "README.md"), "base\n");
@@ -112,7 +112,7 @@ test("rejects no commit, a non-descendant HEAD, and multi-commit or merge result
   await withRepository(async ({ root, lease, baseCommit }) => {
     await git(root, "checkout", "-b", "side", baseCommit);
     await commitFile(root, "src/side.txt");
-    await git(root, "checkout", "master");
+    await git(root, "checkout", "main");
     await commitFile(root, "src/main.txt");
     await git(root, "merge", "--no-ff", "side", "-m", "merge result");
     assert.equal((await validateAttemptResult({ lease, allowedPaths: ["src/**"], verification: [] })).code, "INVALID_COMMIT_COUNT");

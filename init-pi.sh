@@ -93,6 +93,7 @@ printf '[ok] registered Pi shell integration in %s\n' "$ZSHRC_PATH"
 uv tool install --force "basic-memory==$BASIC_MEMORY_VERSION"
 
 (
+  unset PI_SUBAGENT_CHILD PI_SUBAGENT_FANOUT_CHILD PI_SUBAGENT_PARENT_SESSION PI_ROOT_SUBAGENT_BROKER_ENABLED
   cd -- "$SCRIPT_DIR"
   npm test
   npm run doctor

@@ -1,16 +1,23 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
-
+import { fileURLToPath } from "node:url";
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const npmRoot = spawnSync("npm", ["root", "-g"], { encoding: "utf8" });
+assert.equal(npmRoot.status, 0, npmRoot.stderr);
+const piPackageRoot = join(npmRoot.stdout.trim(), "@earendil-works", "pi-coding-agent");
+const { createJiti } = await import(join(piPackageRoot, "node_modules", "jiti", "lib", "jiti.mjs"));
+const typeboxRoot = join(repoRoot, "pi", "npm", "node_modules", "typebox", "build");
 const jiti = createJiti(import.meta.url, {
   moduleCache: false,
   alias: {
-    "@earendil-works/pi-ai": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js",
-    "@earendil-works/pi-coding-agent": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
-    "@earendil-works/pi-tui": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js",
-    "typebox/value": "/Users/leshi.zhy/pi-config/pi/npm/node_modules/typebox/build/value/index.mjs",
-    typebox: "/Users/leshi.zhy/pi-config/pi/npm/node_modules/typebox/build/index.mjs",
+    "@earendil-works/pi-ai": join(piPackageRoot, "node_modules", "@earendil-works", "pi-ai", "dist", "index.js"),
+    "@earendil-works/pi-coding-agent": join(piPackageRoot, "dist", "index.js"),
+    "@earendil-works/pi-tui": join(piPackageRoot, "node_modules", "@earendil-works", "pi-tui", "dist", "index.js"),
+    "typebox/value": join(typeboxRoot, "value", "index.mjs"),
+    typebox: join(typeboxRoot, "index.mjs"),
   },
 });
 const todoRendererModule = await jiti.import("../pi/extensions/todo-compact-renderer.ts").catch(() => undefined);
@@ -32,6 +39,11 @@ function registerTodoDefinition() {
   assert.ok(definition, "todo compact renderer should register the upstream tool");
   return definition;
 }
+
+test("todo test resolves global Pi packages without machine-specific paths", async () => {
+  const source = await readFile(new URL(import.meta.url), "utf8");
+  assert.doesNotMatch(source, new RegExp([["/opt", "/homebrew"].join(""), `/${"Users"}/`].join("|")));
+});
 
 test("todo compact rendering lives in a tracked reload-safe extension", async () => {
   const source = await readFile(

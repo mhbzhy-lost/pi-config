@@ -32,13 +32,13 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     for (const command of ["git", "uv"]) {
       const commandPath = join(fakeBin, command);
-      await writeFile(commandPath, `#!/usr/bin/env bash\nprintf '%s\\n' '${command} '"$*" >> "$COMMAND_LOG"\n`);
+      await writeFile(commandPath, `#!/usr/bin/env bash\nprintf '${command} %s markers=%s,%s,%s,%s\\n' "$*" "\${PI_SUBAGENT_CHILD:-}" "\${PI_SUBAGENT_FANOUT_CHILD:-}" "\${PI_SUBAGENT_PARENT_SESSION:-}" "\${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}" >> "$COMMAND_LOG"\n`);
       await chmod(commandPath, 0o755);
     }
     const fakeNpm = join(fakeBin, "npm");
     await writeFile(
       fakeNpm,
-      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"--prefix\" && \"$3\" == \"run\" && \"$4\" == \"setup:plan-runtime\" ]]; then mkdir -p \"$2/pi/npm/node_modules/typebox\"; printf '{\\\"version\\\":\\\"1.1.38\\\"}' > \"$2/pi/npm/node_modules/typebox/package.json\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"--prefix\" && \"$3\" == \"run\" && \"$4\" == \"setup:plan-runtime\" ]]; then mkdir -p \"$2/pi/npm/node_modules/typebox\"; printf '{\\\"version\\\":\\\"1.1.38\\\"}' > \"$2/pi/npm/node_modules/typebox/package.json\"; fi\n",
     );
     await chmod(fakeNpm, 0o755);
     await writeFile(
@@ -64,6 +64,10 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
       PATH: `${fakeBin}:${process.env.PATH}`,
       COMMAND_LOG: commandLog,
       PI_REAL_BIN: fakePi,
+      PI_SUBAGENT_CHILD: "1",
+      PI_SUBAGENT_FANOUT_CHILD: "1",
+      PI_SUBAGENT_PARENT_SESSION: "parent-session",
+      PI_ROOT_SUBAGENT_BROKER_ENABLED: "1",
     };
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const result = spawnSync("bash", [join(fixtureRepo, "init-pi.sh")], {
@@ -90,17 +94,18 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     assert.equal((await stat(join(fixtureRepo, "pi", "auth.json"))).mode & 0o777, 0o600);
 
     const commands = await readFile(commandLog, "utf8");
-    assert.match(commands, /git -C .* submodule update --init --recursive/);
+    assert.match(commands, /git -C .* submodule update --init --recursive markers=1,1,parent-session,1/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.83\.0/);
     assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:pi-subagents@0\.37\.2/);
     assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:@juicesharp\/rpiv-todo@2\.2\.0/);
-    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:plan-runtime/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:plan-runtime markers=1,1,parent-session,1/);
     const typeboxPackage = JSON.parse(await readFile(join(fixtureRepo, "pi", "npm", "node_modules", "typebox", "package.json"), "utf8"));
     assert.equal(typeboxPackage.version, "1.1.38");
-    assert.match(commands, /npm registry= test/);
-    assert.match(commands, /npm registry= run doctor/);
-    assert.match(commands, /npm registry= run test:integration/);
-    assert.match(commands, /uv tool install --force basic-memory==0\.22\.1/);
+    assert.match(commands, /npm registry= test markers=,,,/);
+    assert.match(commands, /npm registry= run doctor markers=,,,/);
+    assert.match(commands, /npm registry= run test:integration markers=,,,/);
+    assert.match(commands, /uv run --no-project --with httpx --with python-dotenv --with pyyaml python -m unittest discover -s skill-overrides\/external-llm-review\/tests markers=,,,/);
+    assert.match(commands, /uv tool install --force basic-memory==0\.22\.1 markers=1,1,parent-session,1/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
