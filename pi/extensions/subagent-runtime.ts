@@ -18,6 +18,7 @@ import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } f
 import { resolveRootSessionId } from "../../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { closeAndUnbindRootBroker, requireRootBroker, startAndBindRootBroker } from "../../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../../scripts/lib/subagent-dispatch/root-broker-server.ts";
+import { materializeChildRuntimeEntry } from "../../scripts/lib/subagent-dispatch/child-runtime-entry.ts";
 
 const MAX_RECOVERY_DESCRIPTOR_BYTES = 1024 * 1024;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
@@ -152,6 +153,14 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     },
     renderSubagentResult,
     rpc,
+    async prepareCodingSpawn(ir: { agent: string; execution: { cwd?: string } }) {
+      if (ir.agent !== "executor") return;
+      await materializeChildRuntimeEntry({
+        cwd: ir.execution.cwd!,
+        fileName: "root-session-owner-entry.mjs",
+        targetUrl: new URL("../child-extensions/root-session-owner.ts", import.meta.url),
+      });
+    },
     retainOnBeforeDisposeFailure: true,
     onSupervisorRequest: mailbox.handle,
   });

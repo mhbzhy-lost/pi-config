@@ -232,7 +232,7 @@ test("root-owned subagent passes its coding spawn identity resolver to the regis
   };
   const compiled = compileCodingDispatchIR(contract, { cwd: "/repo" });
   installRootOwnedSubagent(pi, {
-    rootSessionId: "root", callerRunId: "run", createClient: () => rpc,
+    rootSessionId: "root", callerRunId: "run", createClient: () => rpc, prepareCodingSpawn: async () => {},
     resolveCodingSpawnIdentity(value) { resolverCalls.push(value); return { requestId: "durable-dispatch", spawnKey: "durable-dispatch" }; },
   });
   const tool = pi.tools.find((candidate) => candidate.name === "subagent");
@@ -244,6 +244,45 @@ test("root-owned subagent passes its coding spawn identity resolver to the regis
   assert.equal(result.details.dispatchId, "durable-dispatch");
   assert.equal(result.details.runId, "rpc-run");
   assert.equal(result.details.asyncDir, "/tmp/rpc-run");
+});
+
+test("root-owned subagent forwards injected coding prepare to its registered tool", async () => {
+  const pi = createPi(); const prepared = [];
+  const rpc = {
+    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session", sessionFile: "/tmp/root-session", cwd: "/repo" } }; },
+    async spawn() { return { details: { runId: "rpc-run", asyncDir: "/tmp/rpc-run" } }; },
+    supervisorPending() {}, supervisorReply() {}, dispose() {},
+  };
+  installRootOwnedSubagent(pi, { rootSessionId: "root", callerRunId: "run", createClient: () => rpc, async prepareCodingSpawn(ir) { prepared.push(ir); } });
+  const tool = pi.tools.find((candidate) => candidate.name === "subagent");
+  const input = { version: "dispatch-ir.v1", taskId: "prepared-task", title: "Prepare entry", agent: "executor", risk: "normal", objective: "Prepare owner entry.", workflow: { mode: "tdd" }, requirements: ["Prepare."], context: { knownFacts: [], decisions: [], relevantFiles: [] }, boundaries: { writePaths: ["test/subagent-supervisor-adapter.test.mjs"], excludedWork: [], forbiddenActions: [] }, acceptance: { criteria: ["prepared"], commands: ["node --test"] }, execution: { cwd: "/repo", timeoutMs: 1000 } };
+  await tool.execute("prepared-call", input, undefined, undefined, { cwd: "/repo" });
+  assert.equal(prepared.length, 1); assert.equal(prepared[0].taskId, "prepared-task");
+});
+
+test("root-owned default preparer materializes a private canonical owner wrapper", async () => {
+  const { access, mkdtemp, readFile, rm, stat } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const root = await mkdtemp(join(tmpdir(), "root-owned-entry-"));
+  const pi = createPi();
+  const rpc = {
+    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session", sessionFile: "/tmp/root-session", cwd: root } }; },
+    async spawn() { return { details: { runId: "rpc-run", asyncDir: "/tmp/rpc-run" } }; },
+    supervisorPending() {}, supervisorReply() {}, dispose() {},
+  };
+  try {
+    installRootOwnedSubagent(pi, { rootSessionId: "root", callerRunId: "run", createClient: () => rpc });
+    const tool = pi.tools.find((candidate) => candidate.name === "subagent");
+    const input = { version: "dispatch-ir.v1", taskId: "materialized-task", title: "Materialize entry", agent: "executor", risk: "normal", objective: "Materialize owner entry.", workflow: { mode: "tdd" }, requirements: ["Materialize."], context: { knownFacts: [], decisions: [], relevantFiles: [] }, boundaries: { writePaths: ["test/subagent-supervisor-adapter.test.mjs"], excludedWork: [], forbiddenActions: [] }, acceptance: { criteria: ["materialized"], commands: ["node --test"] }, execution: { cwd: root, timeoutMs: 1000 } };
+    const entry = join(root, ".pi-subagents", "root-session-owner-entry.mjs");
+    await tool.execute("spark-call", { ...input, taskId: "spark-task", agent: "spark" }, undefined, undefined, { cwd: root });
+    await assert.rejects(access(entry));
+    await tool.execute("materialized-call", input, undefined, undefined, { cwd: root });
+    const source = await readFile(entry, "utf8"); const target = new URL("../pi/child-extensions/root-session-owner.ts", import.meta.url).href;
+    assert.equal(source, `export { default } from ${JSON.stringify(target)};\n`);
+    assert.equal((await stat(join(root, ".pi-subagents"))).mode & 0o777, 0o700);
+    assert.equal((await stat(entry)).mode & 0o777, 0o600);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("delegates every execution argument and the resolved result unchanged", async () => {

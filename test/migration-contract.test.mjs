@@ -67,8 +67,8 @@ test("migration keeps ordinary agent profiles independent from subagent tools", 
   assert.equal(spark.tools.includes("subagent"), false);
   assert.equal(executor.extensions, undefined);
   assert.equal(spark.extensions, undefined);
-  assert.equal(executor.subagentOnlyExtensions, "pi/child-extensions/root-session-owner.ts");
-  await access(join(repoRoot, executor.subagentOnlyExtensions));
+  assert.equal(executor.subagentOnlyExtensions, ".pi-subagents/root-session-owner-entry.mjs");
+  await access(join(repoRoot, "pi", "child-extensions", "root-session-owner.ts"));
 });
 
 test("migration keeps the Plan profiles and child extension isolated", async () => {

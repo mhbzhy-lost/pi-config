@@ -254,11 +254,12 @@ function codingSpawnParams(ir, prompt) {
   };
 }
 
-async function executeCoding(toolCallId, input, ctx, rpc, createId, titleRegistry, resolveCodingSpawnIdentity) {
+async function executeCoding(toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity) {
   const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
   const prompt = renderCodingDispatchPrompt(ir);
   titleRegistry.prepare({ agent: ir.agent, task: prompt, title: ir.title });
   assertSpawnCapabilities(await rpc.ping(), ctx.cwd);
+  await prepareCodingSpawn(ir);
   const hasSpawnIdentityResolver = typeof resolveCodingSpawnIdentity === "function";
   const identity = hasSpawnIdentityResolver
     ? await resolveCodingSpawnIdentity({ toolCallId, contract: input, contractHash: ir.hash })
@@ -423,6 +424,7 @@ export function createTypedSubagentExtension(
     titleRegistry = getTitleRegistry(cleanupStore),
     extraDisposables = [],
     renderSubagentResult,
+    prepareCodingSpawn = async () => {},
     resolveCodingSpawnIdentity,
     beforeDispose = async () => {},
     retainOnBeforeDisposeFailure = false,
@@ -480,7 +482,7 @@ export function createTypedSubagentExtension(
       try {
         if (!isRecord(input)) return failure("INVALID_DISPATCH", "subagent input must be an object");
         if (Object.hasOwn(input, "action")) return await executeControl(input, rpc);
-        if (Object.hasOwn(input, "version")) return await executeCoding(toolCallId, input, ctx, rpc, createId, titleRegistry, resolveCodingSpawnIdentity);
+        if (Object.hasOwn(input, "version")) return await executeCoding(toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity);
         return await executeGeneric(input, ctx, rpc, titleRegistry);
       } catch (error) {
         const code = error?.code

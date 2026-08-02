@@ -63,10 +63,36 @@ test("coding spawn forwards resolver metadata raw as RPC options and excludes sp
   assert.equal(Object.hasOwn(calls[0]?.params ?? {}, "spawnKey"), false);
 });
 
-test("generic and control dispatches never resolve coding spawn identity", async () => {
-  const { pi, rpc, tools } = setup(); let resolved = 0;
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity() { resolved += 1; return { requestId: "x", spawnKey: "x" }; } });
+test("coding prepare runs after ping and before spawn", async () => {
+  const { pi, rpc, tools } = setup(); const order = [];
+  rpc.ping = async () => { order.push("ping"); return { version: 1, methods: ["spawn"], session: { sessionId: "s", sessionFile: "/tmp/s", cwd: "/repo" } }; };
+  rpc.spawn = async () => { order.push("spawn"); return { details: { runId: "run-1", asyncDir: "/tmp/run-1" } }; };
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { order.push("prepare"); } });
+  await tools[0].execute("prepare-call", contract, undefined, undefined, { cwd: "/repo" });
+  assert.deepEqual(order, ["ping", "prepare", "spawn"]);
+});
+
+test("coding prepare runs before durable identity resolution", async () => {
+  const { pi, rpc, tools } = setup(); const order = [];
+  rpc.ping = async () => { order.push("ping"); return { version: 1, methods: ["spawn"], session: { sessionId: "s", sessionFile: "/tmp/s", cwd: "/repo" } }; };
+  rpc.spawn = async () => { order.push("spawn"); return { details: { runId: "run-1", asyncDir: "/tmp/run-1" } }; };
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { order.push("prepare"); }, resolveCodingSpawnIdentity() { order.push("resolveIdentity"); return { requestId: "x", spawnKey: "x" }; } });
+  await tools[0].execute("prepare-resolver-call", contract, undefined, undefined, { cwd: "/repo" });
+  assert.deepEqual(order, ["ping", "prepare", "resolveIdentity", "spawn"]);
+});
+
+test("coding prepare failure prevents identity resolution and spawn", async () => {
+  const { pi, rpc, calls, tools } = setup(); let resolved = 0;
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { throw new Error("owner wrapper failed"); }, resolveCodingSpawnIdentity() { resolved += 1; return { requestId: "x", spawnKey: "x" }; } });
+  const result = await tools[0].execute("prepare-fail", contract, undefined, undefined, { cwd: "/repo" });
+  assert.equal(result.isError, true); assert.match(result.content[0].text, /owner wrapper failed/);
+  assert.equal(calls.length, 0); assert.equal(resolved, 0);
+});
+
+test("generic and control dispatches never prepare or resolve coding spawn identity", async () => {
+  const { pi, rpc, tools } = setup(); let resolved = 0; let prepared = 0;
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { prepared += 1; }, resolveCodingSpawnIdentity() { resolved += 1; return { requestId: "x", spawnKey: "x" }; } });
   await tools[0].execute("generic-call", { agent: "reviewer", title: "Review", task: "Inspect." }, undefined, undefined, { cwd: "/repo" });
   await tools[0].execute("control-call", { action: "status", id: "run-1" }, undefined, undefined, { cwd: "/repo" });
-  assert.equal(resolved, 0);
+  assert.equal(resolved, 0); assert.equal(prepared, 0);
 });
