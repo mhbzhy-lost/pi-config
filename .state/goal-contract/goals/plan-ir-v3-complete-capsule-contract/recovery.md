@@ -27,8 +27,8 @@ node scripts/goal-contract-authorization-audit.mjs .state/goal-contract/goals/pl
 
 ## Unattended Execution
 - Active plans: `docs/superpowers/plans/2026-07-29-plan-ir-v3-complete-capsule-contract.md`, `docs/superpowers/plans/2026-07-29-plan-runner-flat-rpc-remove-thin-host.md`
-- Todo DAG: IR `#17-#21` complete; flat runtime `#26-#32` complete, `#33` active, then `#34-#35`.
-- Attached issue: Todo `#53` tracks the new Pi conversation startup failure `rootSessionId must be a safe non-path identity`; root cause is proven as `getSessionFile()` being used instead of `getSessionId()`. It must be fixed before final verification but does not interrupt Task 8.
+- Todo recovery snapshot: `todo-recovery-snapshot.json` (SHA-256 `b2660a256c090731ac6dc0c5451aebac91a3bbca501d793c8c5e80a5ac473f87`). Stable aliases: `ir-v3-plan-closeout` complete; `flat-runtime-foundation` complete; `flat-runtime-root-lifecycle` active; `flat-runtime-finalization` pending.
+- Attached issue: stable alias `root-session-identity-startup` tracks the new Pi conversation startup failure `rootSessionId must be a safe non-path identity`; root cause is proven as `getSessionFile()` being used instead of `getSessionId()`. It must be fixed before final verification but does not interrupt Task 8.
 - Ordering gate: Task 8 depends on completed Tasks 4, 6, and 7; Task 9 waits for Task 8.
 - Stop only after every listed todo, attached startup issue, and both final verification matrices pass.
 

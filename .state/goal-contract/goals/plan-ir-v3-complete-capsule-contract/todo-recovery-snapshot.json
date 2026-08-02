@@ -1,0 +1,45 @@
+{
+  "schema_version": "goal_contract.legacy_todo_recovery_snapshot.v1",
+  "reconstructed_at": "2026-08-02T12:10:00+08:00",
+  "status": "legacy_unverifiable",
+  "notice": "This artifact replaces unstable Todo display-number references with stable semantic aliases reconstructed from committed recovery and feature state.",
+  "task_groups": [
+    {
+      "stable_id": "ir-v3-plan-closeout",
+      "legacy_display_ids": [17, 18, 19, 20, 21],
+      "status": "complete",
+      "summary": "Plan IR v3 document, compiler, revision, event, amendment, consumer migration and final verification tasks.",
+      "related_feature_ids": ["task-1", "task-2", "task-3", "task-4", "task-5", "task-6", "task-7", "task-8", "task-9"]
+    },
+    {
+      "stable_id": "flat-runtime-foundation",
+      "legacy_display_ids": [26, 27, 28, 29, 30, 31, 32],
+      "status": "complete",
+      "summary": "Flat runtime protocol, broker, child adapter, launch, authorization, runtime facts and supervisor routing tasks.",
+      "related_feature_ids": ["flat-runtime-task-1", "flat-runtime-task-2", "flat-runtime-task-3", "flat-runtime-task-4", "flat-runtime-task-5", "flat-runtime-task-6", "flat-runtime-task-7"]
+    },
+    {
+      "stable_id": "flat-runtime-root-lifecycle",
+      "legacy_display_ids": [33],
+      "status": "active",
+      "summary": "Root session lifecycle, ordered drain and official terminal proof work.",
+      "related_feature_ids": ["flat-runtime-task-8"]
+    },
+    {
+      "stable_id": "flat-runtime-finalization",
+      "legacy_display_ids": [34, 35],
+      "status": "pending",
+      "summary": "Standalone Host removal and final real flat runtime verification.",
+      "related_feature_ids": ["flat-runtime-task-9", "flat-runtime-task-10"]
+    }
+  ],
+  "attached_issues": [
+    {
+      "stable_id": "root-session-identity-startup",
+      "legacy_display_ids": [53],
+      "status": "diagnosed",
+      "summary": "Persisted-session Root Broker startup used a path-like session file identity instead of the safe session UUID.",
+      "related_evidence_slices": ["attached-root-session-identity"]
+    }
+  ]
+}

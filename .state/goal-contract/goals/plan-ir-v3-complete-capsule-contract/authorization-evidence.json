@@ -43,5 +43,13 @@
       ],
       "authority": "legacy_unverifiable"
     }
+  ],
+  "immutability_policy": "This aggregate legacy artifact is immutable after commit. Corrections or new amendments must create a new per-amendment artifact and must not edit this file in place.",
+  "linkedArtifacts": [
+    {
+      "artifact": "todo-recovery-snapshot.json",
+      "sha256": "b2660a256c090731ac6dc0c5451aebac91a3bbca501d793c8c5e80a5ac473f87",
+      "purpose": "Stable semantic aliases for legacy Todo display IDs"
+    }
   ]
 }

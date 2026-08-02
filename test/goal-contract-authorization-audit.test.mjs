@@ -13,8 +13,21 @@ import {
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "goal-auth-audit-"));
+  const linkedArtifactPath = path.join(root, "todo-recovery-snapshot.json");
+  writeFileSync(linkedArtifactPath, '{"status":"legacy_unverifiable"}\n');
+  const linkedArtifactSha256 = createHash("sha256")
+    .update(readFileSync(linkedArtifactPath))
+    .digest("hex");
   const artifactPath = path.join(root, "authorization-evidence.json");
-  writeFileSync(artifactPath, '{"status":"legacy_unverifiable"}\n');
+  writeFileSync(
+    artifactPath,
+    `${JSON.stringify({
+      status: "legacy_unverifiable",
+      linkedArtifacts: [
+        { artifact: "todo-recovery-snapshot.json", sha256: linkedArtifactSha256 },
+      ],
+    })}\n`,
+  );
   const artifactSha256 = createHash("sha256").update(readFileSync(artifactPath)).digest("hex");
   const amendment = {
     status: "applied",
@@ -27,7 +40,7 @@ function fixture() {
     },
   };
   writeFileSync(path.join(root, "amendments.jsonl"), `${JSON.stringify(amendment)}\n`);
-  return { root, artifactPath };
+  return { root, artifactPath, linkedArtifactPath };
 }
 
 function withFixture(fn) {
@@ -61,6 +74,14 @@ test("artifact content drift fails hash validation", () => {
     writeFileSync(artifactPath, '{"status":"changed"}\n');
 
     assert.match(auditAmendmentAuthorizations(root).join("\n"), /hash mismatch/);
+  });
+});
+
+test("linked authorization artifact content drift fails hash validation", () => {
+  withFixture(({ root, linkedArtifactPath }) => {
+    writeFileSync(linkedArtifactPath, '{"status":"changed"}\n');
+
+    assert.match(auditAmendmentAuthorizations(root).join("\n"), /linked artifact hash mismatch/);
   });
 });
 

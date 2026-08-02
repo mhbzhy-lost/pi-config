@@ -11,7 +11,7 @@ Status: active
 - [Evidence-Backed] Task 7 focused behavior passed `10/10`; Root Broker `75/75`; runtime/adapter/typed `54/54`; Capsule/Dependencies `3/3`; protocol/client `7/7`.
 - [Evidence-Backed] Task 6+7 cumulative key matrix passed `306/306`; `npm run doctor`, diff, staging, socket, and orphan checks passed.
 - [Evidence-Backed] Task 7 completed two independent review rounds. Both Important findings were reproduced and fixed with separate bug documents, RED tests, and production GREEN commits; Round 2 found no new Critical/Important.
-- [Evidence-Backed] Todo `#53` root cause is proven: Root Broker startup used upstream `resolveCurrentSessionId()`, which selects absolute `getSessionFile()` for persisted sessions instead of safe `getSessionId()`.
+- [Evidence-Backed] Attached issue `root-session-identity-startup` root cause is proven: Root Broker startup used upstream `resolveCurrentSessionId()`, which selects absolute `getSessionFile()` for persisted sessions instead of safe `getSessionId()`. Stable identity and legacy display-ID mapping are captured in `todo-recovery-snapshot.json`.
 - [Evidence-Backed] Task 8A process birth helper and started ownership ledger passed helper `7/7`, lifecycle `5/5`, and Root Broker `82/82` before ordered drain。
 - [Evidence-Backed] Task 8B1 commits `1cee8bb`、`d64e5d3`、`f5dd0a9` establish ordered Executor -> Plan Runner drain, official-event terminal authority, cleanup debt retry, bounded pending stop, and bounded startup barriers.
 - [Evidence-Backed] Parent gates pass: bounded waits `3/3`, ordered drain `5/5`, complete Root Broker `90/90`, protocol `8/8`, process birth helper `7/7`; stop-failure waiter no longer leaves the old 250ms timer.
@@ -25,7 +25,7 @@ Status: active
 
 ### What This State Cannot Tell Us
 - It does not prove Task 8 graceful Root stop-all, Task 9 Host removal, or Task 10 real flat runtime Harness.
-- It does not yet prove the production remediation of Todo `#53`; only the root cause is proven.
+- It does not yet prove the production remediation of attached issue `root-session-identity-startup`; only the root cause is proven.
 - Full clear-env repository regression and real migrated Harness remain final-stage evidence.
 
 ### Next Action

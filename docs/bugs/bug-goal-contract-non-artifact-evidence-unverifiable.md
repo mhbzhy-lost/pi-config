@@ -48,6 +48,8 @@ Goal Contract 的 `amendments.jsonl` 允许在 `evidence` 中写入 `user-messag
 
 时间语义显式分离：amendment 顶层 `ts` 保留原应用时间，artifact 使用 `original_amendments_applied_at` 和 `reconstructed_at`，descriptor 使用 `reconstructedAt`。事后重建时间不得被解释为原始授权在 amendment 应用前已经存在。
 
+历史聚合 artifact 提交后视为不可变；修正或新增 amendment 必须创建新的 per-amendment artifact，禁止就地修改导致四条历史 descriptor 同时失效。旧 Todo 显示编号通过带 SHA-256 的 `todo-recovery-snapshot.json` 映射到稳定语义 alias，该 linked artifact 由同一 integrity audit 递归校验。
+
 该 artifact 只改善恢复上下文和篡改检测，不把历史摘要提升为可验证用户授权，也不替代上述 validator/audit 的后续 fail-closed 实现。
 
 ## 本次机械门禁
@@ -58,5 +60,6 @@ Goal Contract 的 `amendments.jsonl` 允许在 `evidence` 中写入 `user-messag
 - artifact 必须是 goal 目录内的相对路径，拒绝绝对路径、`..` 和 symlink 逃逸。
 - artifact 必须存在且为普通文件。
 - `artifactSha256` 必须是小写 64 位 SHA-256，并与提交内容完全匹配。
+- authorization artifact 声明的 linked artifacts 同样必须保持 goal-relative、存在且 SHA-256 匹配。
 
 Node test 覆盖匹配、内容漂移、文件缺失、路径逃逸和高风险 descriptor 缺失五种情况；恢复协议也记录了每次 continuation 前必须运行的 audit 命令。对 legacy 权威等级的专门 audit 信号仍属于后续工作。

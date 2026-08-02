@@ -52,6 +52,7 @@ export function auditAmendmentAuthorizations(goalRoot) {
   }
 
   const rootReal = realpathSync(root);
+  const auditedAuthorizationArtifacts = new Set();
   for (const [index, record] of records.entries()) {
     if (!record || typeof record !== "object" || Array.isArray(record)) continue;
     const authorization = record.authorization;
@@ -95,6 +96,55 @@ export function auditAmendmentAuthorizations(goalRoot) {
     const actualHash = createHash("sha256").update(readFileSync(artifactReal)).digest("hex");
     if (actualHash !== expectedHash) {
       errors.push(`amendments.jsonl[${index}].authorization artifact hash mismatch: ${artifact}`);
+      continue;
+    }
+
+    if (auditedAuthorizationArtifacts.has(artifactReal)) continue;
+    auditedAuthorizationArtifacts.add(artifactReal);
+
+    let authorizationArtifact;
+    try {
+      authorizationArtifact = JSON.parse(readFileSync(artifactReal, "utf8"));
+    } catch (error) {
+      errors.push(`authorization artifact is not valid JSON: ${artifact}: ${error.message}`);
+      continue;
+    }
+    const linkedArtifacts = authorizationArtifact.linkedArtifacts;
+    if (linkedArtifacts == null) continue;
+    if (!Array.isArray(linkedArtifacts)) {
+      errors.push(`authorization artifact linkedArtifacts must be an array: ${artifact}`);
+      continue;
+    }
+
+    for (const [linkedIndex, linked] of linkedArtifacts.entries()) {
+      const linkedPathValue = linked?.artifact;
+      const linkedExpectedHash = linked?.sha256;
+      if (!isGoalRelative(linkedPathValue)) {
+        errors.push(`authorization linkedArtifacts[${linkedIndex}].artifact must be goal-relative`);
+        continue;
+      }
+      const linkedPath = path.resolve(root, linkedPathValue);
+      if (!existsSync(linkedPath)) {
+        errors.push(`authorization linked artifact does not exist: ${linkedPathValue}`);
+        continue;
+      }
+      const linkedReal = realpathSync(linkedPath);
+      if (linkedReal !== rootReal && !linkedReal.startsWith(`${rootReal}${path.sep}`)) {
+        errors.push(`authorization linkedArtifacts[${linkedIndex}].artifact must be goal-relative`);
+        continue;
+      }
+      if (!lstatSync(linkedReal).isFile()) {
+        errors.push(`authorization linked artifact is not a file: ${linkedPathValue}`);
+        continue;
+      }
+      if (typeof linkedExpectedHash !== "string" || !SHA256_RE.test(linkedExpectedHash)) {
+        errors.push(`authorization linkedArtifacts[${linkedIndex}].sha256 must be lowercase SHA-256`);
+        continue;
+      }
+      const linkedActualHash = createHash("sha256").update(readFileSync(linkedReal)).digest("hex");
+      if (linkedActualHash !== linkedExpectedHash) {
+        errors.push(`authorization linked artifact hash mismatch: ${linkedPathValue}`);
+      }
     }
   }
 
