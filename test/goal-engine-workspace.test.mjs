@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
 import { allocateExecutorWorkspace, inspectExecutorWorkspace, integrateExecutorWorkspace, releaseExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
@@ -997,4 +997,109 @@ test("orphan inventory invalid arguments throw validation errors but runtime fai
   const fixture = orphanArgs("invalid");
   for (const args of [{ ...fixture, goalId: "../unsafe" }, { ...fixture, taskId: "bad/name" }, { ...fixture, attempt: 0 }, { ...fixture, originRoot: undefined }, { ...fixture, stateRoot: undefined }]) assert.throws(() => orphanInventoryApi()(args), /invalid|required|attempt/i);
   assertOrphanUnverified(orphanInventoryApi()({ ...fixture, originRoot: join(fixture.originRoot, "not-a-repo") }));
+});
+
+test("orphan inventory review regression treats an ELOOP exact-attempt probe as unverified", () => {
+  const fixture = orphanArgs("review-eloop");
+  rmSync(join(fixture.stateRoot, "worktrees"), { recursive: true, force: true });
+  symlinkSync("worktrees", join(fixture.stateRoot, "worktrees"));
+  git(fixture.originRoot, "update-ref", "-d", `refs/heads/${fixture.lease.branch}`);
+
+  assertOrphanUnverified(orphanInventoryApi()(fixture));
+});
+
+test("orphan inventory review regression rejects an unknown persisted lease field", () => {
+  const fixture = orphanArgs("review-unknown");
+  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, unexpected: true }));
+
+  assertOrphanUnverified(orphanInventoryApi()(fixture));
+});
+
+test("orphan inventory review regression rejects persisted leasePath", () => {
+  const fixture = orphanArgs("review-lease-path");
+  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, leasePath: fixture.lease.leasePath }));
+
+  assertOrphanUnverified(orphanInventoryApi()(fixture));
+});
+
+test("orphan inventory review regression rejects a JSON array persisted lease", () => {
+  const fixture = orphanArgs("review-array");
+  writeFileSync(fixture.lease.leasePath, "[]");
+
+  assertOrphanUnverified(orphanInventoryApi()(fixture));
+});
+
+test("orphan inventory review regression rejects a JSON null persisted lease", () => {
+  const fixture = orphanArgs("review-null");
+  writeFileSync(fixture.lease.leasePath, "null");
+
+  assertOrphanUnverified(orphanInventoryApi()(fixture));
+});
+
+test("orphan inventory review regression rejects a relative persisted path", () => {
+  const fixture = orphanArgs("review-relative-path");
+  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, path: relative(process.cwd(), fixture.lease.path) }));
+
+  assertOrphanUnverified(orphanInventoryApi()(fixture));
+});
+
+test("orphan inventory review regression rejects a relative persisted originRoot", () => {
+  const fixture = orphanArgs("review-relative-origin");
+  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, originRoot: relative(process.cwd(), fixture.originRoot) }));
+
+  assertOrphanUnverified(orphanInventoryApi()(fixture));
+});
+
+test("orphan inventory review regression rejects a relative persisted stateRoot", () => {
+  const fixture = orphanArgs("review-relative-state");
+  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, stateRoot: relative(process.cwd(), fixture.stateRoot) }));
+
+  assertOrphanUnverified(orphanInventoryApi()(fixture));
+});
+
+test("orphan inventory review regression rechecks a persisted path alias after inspection", () => {
+  const fixture = orphanArgs("review-alias-drift");
+  const other = orphanArgs("review-alias-other");
+  const alias = `${fixture.lease.path}-alias`;
+  symlinkSync(fixture.lease.path, alias);
+  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, path: alias }));
+  let hookCalls = 0;
+
+  const result = orphanInventoryApi()(fixture, {
+    inspectExecutorWorkspaceFn(lease) {
+      const inspection = inspectExecutorWorkspace(lease);
+      hookCalls += 1;
+      if (hookCalls === 1) {
+        const replacement = `${alias}-replacement`;
+        symlinkSync(other.lease.path, replacement);
+        renameSync(replacement, alias);
+      }
+      return inspection;
+    },
+  });
+
+  assert.ok(hookCalls > 0, "injected inspector must be called");
+  assertOrphanUnverified(result);
+});
+
+test("orphan inventory review regression rechecks HEAD after inspection", () => {
+  const fixture = orphanArgs("review-head-drift");
+  let hookCalls = 0;
+  let competingCommits = 0;
+
+  const result = orphanInventoryApi()(fixture, {
+    inspectExecutorWorkspaceFn(lease) {
+      const inspection = inspectExecutorWorkspace(lease);
+      hookCalls += 1;
+      if (competingCommits === 0) {
+        git(lease.path, "commit", "--allow-empty", "-m", "test: competing orphan inspection commit");
+        competingCommits += 1;
+      }
+      return inspection;
+    },
+  });
+
+  assert.ok(hookCalls > 0, "injected inspector must be called");
+  assert.equal(competingCommits, 1, "the competing commit must be created exactly once");
+  assertOrphanUnverified(result);
 });
