@@ -21,5 +21,5 @@
 
 ## 修复与验证策略
 - 编译失败继续执行 failed-cleanup。
-- append 抛错后经 `loadProjection` 重建：完整身份匹配为 committed，注册 lease 并返回；只有版本、pending task、attempts 与 workspace 均精确未变化时才为 not_committed 并清理；其他情况以 `AMBIGUOUS_DISPATCH_COMMIT` 保留现场。
-- 覆盖 durable-then-throw、写入前失败、恢复失败/身份冲突以及重启后 status/integrate 的回归测试。
+- append 抛错后经 `loadProjection` 重建：恢复投影的 `goalId` 必须是非空字符串且精确等于当前 goal；`loadProjectionFn` 返回错误 goal identity，或 durable dispatch 的 contract/workspace identity 冲突，均必须归类为 `AMBIGUOUS_DISPATCH_COMMIT` 并保留现场。完整身份匹配才为 committed 并注册 lease；只有版本、pending task、attempts 与 workspace 均精确未变化时才为 not_committed 并清理。
+- 覆盖 durable-then-throw、写入前失败、恢复失败、错误 goal identity、durable contract/workspace identity 冲突以及重启后 status/integrate 的回归测试。

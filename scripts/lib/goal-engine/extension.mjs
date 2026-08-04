@@ -104,7 +104,8 @@ function classifyDispatchAppendFailure(loadProjectionFn, root, goalId, taskId, p
   } catch {
     return "ambiguous";
   }
-  const task = recovered?.tasks?.get(taskId);
+  if (typeof recovered?.goalId !== "string" || recovered.goalId !== goalId) return "ambiguous";
+  const task = recovered.tasks?.get(taskId);
   const workspace = task?.workspace;
   const committed = task?.status === "dispatched"
     && task.attempts === attempt
