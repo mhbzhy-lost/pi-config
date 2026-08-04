@@ -94,7 +94,9 @@ test("real Pi host rejects historical unsafe dispatch through ToolDefinition.exe
     const dispatch = result.session.getToolDefinition("goal_dispatch");
     await assert.rejects(
       () => dispatch.execute("historical-dispatch-host", { task_id: "t1" }, new AbortController().signal, undefined, { cwd: projectCwd }),
-      (error) => error.code === "INVALID_TASK_CONTRACT" && /stateChanged=false.*goal_amend/.test(error.message),
+      (error) => error.code === "INVALID_TASK_CONTRACT"
+        && /stateChanged=false.*goal_status/.test(error.message)
+        && JSON.stringify(error.requiredNextAction) === JSON.stringify({ tool: "goal_status", params: { goal_id: goalId } }),
     );
     assert.equal(existsSync(join(root, "worktrees", `${goalId}-t1-1`)), false);
     assert.equal(existsSync(join(root, "worktrees", `.${goalId}-t1-1.lease.json`)), false);

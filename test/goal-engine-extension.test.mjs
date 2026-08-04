@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
@@ -160,6 +160,13 @@ function createGoalEngineWithAppendInjection(pi, options = {}) {
   return createGoalEngineExtension(pi, options);
 }
 
+function assertDispatchRequiredNextAction(error, expected) {
+  assert.deepEqual(error.requiredNextAction, expected);
+  const match = error.message.match(/requiredNextAction=(\{.*\})$/);
+  assert.ok(match, "dispatch preflight error must include requiredNextAction JSON");
+  assert.deepEqual(JSON.parse(match[1]), expected);
+}
+
 function assertTaskMachineAction(task, expected) {
   assert.deepEqual(task.allowedActions, expected.allowedActions);
   const required = task.requiredNextAction;
@@ -203,7 +210,12 @@ test("historical unsafe dispatch is rejected before workspace allocation while s
   assert.equal(JSON.parse(await invoke(pi, "goal_status", {})).tasks.t1.status, "pending");
   await assert.rejects(
     () => invoke(pi, "goal_dispatch", { task_id: "t1" }),
-    (error) => error.code === "INVALID_TASK_CONTRACT" && /observed=.*remediation=.*goal_amend.*stateChanged=false/.test(error.message),
+    (error) => {
+      assert.equal(error.code, "INVALID_TASK_CONTRACT");
+      assert.match(error.message, /observed=.*remediation=.*goal_amend.*stateChanged=false/);
+      assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
+      return true;
+    },
   );
   assert.equal(readGoalEvents(cwd, goalId).length, 1);
   assert.deepEqual(workspaceState(cwd, goalId, "t1"), {
@@ -228,13 +240,42 @@ test("historical tracked state dispatch is rejected before workspace allocation"
 
   await assert.rejects(
     () => invoke(pi, "goal_dispatch", { task_id: "t1" }),
-    (error) => error.code === "STATE_TRACKED" && /observed=.*remediation=.*goal_dispatch.*stateChanged=false/.test(error.message),
+    (error) => {
+      assert.equal(error.code, "STATE_TRACKED");
+      assert.match(error.message, /observed=.*remediation=.*goal_dispatch.*stateChanged=false/);
+      assertDispatchRequiredNextAction(error, { tool: "goal_dispatch", params: { goal_id: goalId, task_id: "t1" } });
+      return true;
+    },
   );
   assert.equal(readGoalEvents(cwd, goalId).length, 1);
   assert.deepEqual(workspaceState(cwd, goalId, "t1"), {
     workspacePath: join(cwd, ".state/goal-engine/worktrees", `${goalId}-t1-1`), leasePath: join(cwd, ".state/goal-engine/worktrees", `.${goalId}-t1-1.lease.json`), branch: `ge/${goalId}/t1/1`,
     workspaceExists: false, leaseExists: false, branchExists: false,
   });
+});
+
+test("historical dispatch errors offer complete retry and status actions", async () => {
+  for (const scenario of [
+    { code: "STATE_NOT_IGNORED", setup(cwd) { writeFileSync(join(cwd, ".gitignore"), ""); git(cwd, "add", ".gitignore"); git(cwd, "commit", "-m", "test: stop ignoring state"); } },
+    { code: "GIT_INFRASTRUCTURE_ERROR", setup(cwd) { renameSync(join(cwd, ".git"), join(cwd, ".git-hidden")); } },
+  ]) {
+    const cwd = tmpCwd();
+    const goalId = `historical-${scenario.code.toLowerCase()}`;
+    const root = join(cwd, ".state/goal-engine");
+    const event = { schemaVersion: "goal-engine.event.v2", eventId: `historical-${scenario.code}`, goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Historical preflight", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy safe task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } };
+    mkdirSync(join(root, "goals", goalId), { recursive: true });
+    writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${JSON.stringify(event)}\n`);
+    writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: event.data.objective, updatedAt: event.occurredAt } } }));
+    scenario.setup(cwd);
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi);
+    await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), (error) => {
+      assert.equal(error.code, scenario.code);
+      assert.match(error.message, /observed=.*remediation=.*stateChanged=false/);
+      assertDispatchRequiredNextAction(error, { tool: "goal_dispatch", params: { goal_id: goalId, task_id: "t1" } });
+      return true;
+    });
+  }
 });
 
 test("historical safe ignored state dispatch remains available", async () => {
