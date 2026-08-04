@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -289,67 +289,100 @@ export function inspectExecutorWorkspace(lease) {
   };
 }
 
-export function inspectOrphanedExecutorWorkspace({ goalId, taskId, attempt, originRoot, stateRoot }) {
+const PERSISTED_LEASE_FIELDS = ["goalId", "taskId", "attempt", "originRoot", "stateRoot", "baseCommit", "originRef", "path", "branch", "ownerToken", "createdAt"];
+
+function probePath(file) {
+  try {
+    lstatSync(file);
+    statSync(file);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function inspectionSnapshot(inspection) {
+  return JSON.stringify({
+    headCommit: inspection.headCommit, baseCommit: inspection.baseCommit, descendant: inspection.descendant,
+    aheadCommits: inspection.aheadCommits, aheadCount: inspection.aheadCount, treeChanged: inspection.treeChanged,
+    changedFiles: inspection.changedFiles, dirtyFiles: inspection.dirtyFiles, untrackedFiles: inspection.untrackedFiles,
+    clean: inspection.clean, hasCommits: inspection.hasCommits, diff: inspection.diff,
+  });
+}
+
+export function inspectOrphanedExecutorWorkspace({ goalId, taskId, attempt, originRoot, stateRoot }, { inspectExecutorWorkspaceFn = inspectExecutorWorkspace } = {}) {
   safeId(goalId, "goalId");
   safeId(taskId, "taskId");
   if (!Number.isInteger(attempt) || attempt < 1) throw new Error("attempt must be a positive integer");
   if (typeof originRoot !== "string" || !path.isAbsolute(originRoot)) throw new Error("Invalid originRoot");
   if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) throw new Error("Invalid stateRoot");
+  if (typeof inspectExecutorWorkspaceFn !== "function") throw new Error("Invalid inspectExecutorWorkspaceFn");
 
   const expected = workspacePaths(stateRoot, goalId, taskId, attempt);
   const branch = `ge/${goalId}/${taskId}/${attempt}`;
   let resources = { workspaceExists: false, branchExists: false, leaseExists: false };
   try {
-    // These are deliberately the only paths and ref derived for this query.
-    resources.workspaceExists = existsSync(expected.workspacePath);
-    resources.leaseExists = existsSync(expected.leasePath);
+    resources.workspaceExists = probePath(expected.workspacePath);
+    resources.leaseExists = probePath(expected.leasePath);
     resources.branchExists = refExists(originRoot, `refs/heads/${branch}`);
-    if (!resources.workspaceExists && !resources.branchExists && !resources.leaseExists) {
-      return { kind: "none", resources };
-    }
+    if (!resources.workspaceExists && !resources.branchExists && !resources.leaseExists) return { kind: "none", resources };
     if (!resources.workspaceExists || !resources.branchExists || !resources.leaseExists) {
       return { kind: "unverified", resources, observed: "partial executor workspace resources" };
     }
 
-    let lease;
-    try {
-      lease = JSON.parse(readFileSync(expected.leasePath, "utf8"));
-    } catch {
-      return { kind: "unverified", resources, error: "Executor workspace lease is invalid" };
-    }
-    const required = ["baseCommit", "originRef", "ownerToken", "createdAt"];
-    if (!lease || lease.goalId !== goalId || lease.taskId !== taskId || lease.attempt !== attempt
-      || lease.branch !== branch || required.some((field) => typeof lease[field] !== "string" || !lease[field])
-      || ["path", "originRoot", "stateRoot"].some((field) => typeof lease[field] !== "string" || !lease[field])) {
-      return { kind: "unverified", resources, observed: "invalid persisted lease envelope" };
-    }
+    const canonicalSnapshot = () => {
+      const leaseText = readFileSync(expected.leasePath, "utf8");
+      const lease = JSON.parse(leaseText);
+      if (!lease || typeof lease !== "object" || Array.isArray(lease)
+        || Object.getPrototypeOf(lease) !== Object.prototype
+        || JSON.stringify(Object.keys(lease).sort()) !== JSON.stringify([...PERSISTED_LEASE_FIELDS].sort())
+        || lease.goalId !== goalId || lease.taskId !== taskId || lease.attempt !== attempt || lease.branch !== branch
+        || ["originRoot", "stateRoot", "baseCommit", "originRef", "path", "ownerToken", "createdAt"].some((field) => typeof lease[field] !== "string" || !lease[field])
+        || ["originRoot", "stateRoot", "path"].some((field) => !path.isAbsolute(lease[field]))) {
+        throw new Error("invalid persisted lease envelope");
+      }
+      const queryOrigin = realpathSync(originRoot);
+      const queryState = realpathSync(stateRoot);
+      const queryPath = realpathSync(expected.workspacePath);
+      const persistedOrigin = realpathSync(lease.originRoot);
+      const persistedState = realpathSync(lease.stateRoot);
+      const persistedPath = realpathSync(lease.path);
+      const persistedExpectedPath = realpathSync(workspacePaths(lease.stateRoot, goalId, taskId, attempt).workspacePath);
+      if (queryOrigin !== persistedOrigin || queryState !== persistedState || persistedPath !== queryPath || persistedPath !== persistedExpectedPath) {
+        throw new Error("persisted lease identity mismatch");
+      }
+      const currentOriginRef = git(persistedOrigin, "symbolic-ref", "--quiet", "HEAD");
+      if (currentOriginRef !== lease.originRef) throw new Error("origin ref mismatch");
+      const workspaceHead = git(persistedPath, "rev-parse", "HEAD");
+      return {
+        leaseText, lease, persistedOrigin, persistedState, persistedPath, currentOriginRef, workspaceHead,
+        pinnedLease: { ...lease, originRoot: persistedOrigin, stateRoot: persistedState, path: persistedPath },
+      };
+    };
 
-    const queryOrigin = realpathSync(originRoot);
-    const queryState = realpathSync(stateRoot);
-    const persistedOrigin = realpathSync(lease.originRoot);
-    const persistedState = realpathSync(lease.stateRoot);
-    const persistedPath = realpathSync(lease.path);
-    const queryPath = realpathSync(expected.workspacePath);
-    const persistedExpectedPath = realpathSync(workspacePaths(lease.stateRoot, goalId, taskId, attempt).workspacePath);
-    if (queryOrigin !== persistedOrigin || queryState !== persistedState
-      || persistedPath !== queryPath || persistedPath !== persistedExpectedPath) {
-      return { kind: "unverified", resources, observed: "persisted lease identity mismatch" };
+    const first = canonicalSnapshot();
+    const firstInspection = inspectExecutorWorkspaceFn(first.pinnedLease);
+    const second = canonicalSnapshot();
+    if (first.leaseText !== second.leaseText || first.persistedOrigin !== second.persistedOrigin
+      || first.persistedState !== second.persistedState || first.persistedPath !== second.persistedPath
+      || first.currentOriginRef !== second.currentOriginRef || first.workspaceHead !== second.workspaceHead) {
+      return { kind: "unverified", resources, observed: "executor workspace identity changed during inspection" };
     }
-    if (git(originRoot, "symbolic-ref", "--quiet", "HEAD") !== lease.originRef) {
-      return { kind: "unverified", resources, observed: "origin ref mismatch" };
+    const secondInspection = inspectExecutorWorkspaceFn(second.pinnedLease);
+    const third = canonicalSnapshot();
+    if (second.leaseText !== third.leaseText || second.persistedOrigin !== third.persistedOrigin
+      || second.persistedState !== third.persistedState || second.persistedPath !== third.persistedPath
+      || second.currentOriginRef !== third.currentOriginRef || second.workspaceHead !== third.workspaceHead
+      || inspectionSnapshot(firstInspection) !== inspectionSnapshot(secondInspection)) {
+      return { kind: "unverified", resources, observed: "executor workspace inspection changed during verification" };
     }
-
-    // Keep the persisted lexical lease intact; canonical paths above are identity-only.
-    const inspection = inspectExecutorWorkspace(lease);
-    if (!inspection.descendant) {
-      return { kind: "unverified", resources, observed: "executor HEAD is not a descendant of base" };
-    }
+    if (!secondInspection.descendant) return { kind: "unverified", resources, observed: "executor HEAD is not a descendant of base" };
+    const persistedLease = Object.fromEntries(PERSISTED_LEASE_FIELDS.map((field) => [field, second.lease[field]]));
     return {
-      kind: "verified",
-      resources,
-      lease: { ...lease, leasePath: workspacePaths(lease.stateRoot, goalId, taskId, attempt).leasePath },
-      inspection,
-      executorHead: inspection.headCommit,
+      kind: "verified", resources,
+      lease: { ...persistedLease, leasePath: workspacePaths(persistedLease.stateRoot, goalId, taskId, attempt).leasePath },
+      inspection: secondInspection, executorHead: secondInspection.headCommit,
     };
   } catch (error) {
     return { kind: "unverified", resources, error: error instanceof Error ? error.message : String(error) };
