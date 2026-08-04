@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
-import { validateDAG, runnableFrontier, goalProgress, taskActionState } from "./graph.mjs";
+import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
 import { appendEvent, loadProjection, listGoals } from "./store.mjs";
 import { compileTaskContract, assertPendingTaskContractsCompile } from "./dispatch.mjs";
 import { applyEvent, createProjection } from "./events.mjs";
@@ -11,6 +11,7 @@ import {
   allocateExecutorWorkspace,
   loadExecutorWorkspaceLease,
   inspectExecutorWorkspace,
+  inspectOrphanedExecutorWorkspace,
   inspectExecutorWorkspaceResources,
   assertWorkspaceChangesWithinPaths,
   isExecutorWorkspaceIntegrated,
@@ -281,9 +282,19 @@ function ambiguousAcceptCommitError(goalId, taskId, cause) {
   });
 }
 
-function statusResponse(projection) {
+function statusResponse(projection, cwd, root) {
   const progress = goalProgress(projection);
-  const runnable = runnableFrontier(projection);
+  const orphanInventories = new Map();
+  for (const [taskId] of projection.tasks) {
+    const attempt = nextDispatchAttempt(projection, taskId);
+    if (attempt !== null) {
+      orphanInventories.set(taskId, inspectOrphanedExecutorWorkspace({
+        goalId: projection.goalId, taskId, attempt, originRoot: cwd, stateRoot: root,
+      }));
+    }
+  }
+  const blockedTaskIds = new Set([...orphanInventories].filter(([, inventory]) => inventory.kind !== "none").map(([taskId]) => taskId));
+  const runnable = runnableFrontier(projection, { blockedTaskIds });
   return JSON.stringify({
     goalId: projection.goalId,
     lifecycle: projection.lifecycle,
@@ -296,7 +307,10 @@ function statusResponse(projection) {
     nextAction: projection.nextAction,
     checkpointCount: projection.checkpointCount,
     tasks: Object.fromEntries([...projection.tasks].map(([id, t]) => {
-      const actionState = taskActionState(projection, id);
+      const inventory = orphanInventories.get(id);
+      const actionState = inventory && inventory.kind !== "none"
+        ? orphanWorkspaceActionState(id, inventory)
+        : taskActionState(projection, id);
       return [id, {
         description: t.description,
         status: t.status,
@@ -485,7 +499,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (!goalId) return "NO_ACTIVE_GOAL";
         const projection = loadProjectionFn(root, goalId);
         if (!projection) return "NO_ACTIVE_GOAL";
-        return statusResponse(projection);
+        return statusResponse(projection, cwd, root);
       } catch (err) {
         return `ERROR: ${err.message}`;
       }
@@ -512,17 +526,16 @@ export function createGoalEngineExtension(pi, options = {}) {
       const task = projection.tasks.get(params.task_id);
       if (!task) throw new Error(`unknown task: ${params.task_id}`);
 
-      if (task.workspace && !(task.workspace.phase === "disposed" && task.workspace.disposition === "discarded" && task.workspace.released === true)) {
-        throw new Error("existing workspace must be disposed, discarded, and released before redispatch");
+      if (task.status !== "pending") {
+        throw new Error(`task is not runnable (not pending): ${task.status}`);
       }
-
-      const frontier = runnableFrontier(projection);
-      if (!frontier.includes(params.task_id)) {
-        if (task.status !== "pending") {
-          throw new Error(`task is not runnable (not pending): ${task.status}`);
-        }
-        const unmetDeps = task.deps.filter((dep) => projection.tasks.get(dep)?.status !== "accepted");
+      const unmetDeps = task.deps.filter((dep) => projection.tasks.get(dep)?.status !== "accepted");
+      if (unmetDeps.length > 0) {
         throw new Error(`task is not runnable: dependency not accepted (${unmetDeps.join(", ")})`);
+      }
+      const candidateAttempt = nextDispatchAttempt(projection, params.task_id);
+      if (candidateAttempt === null) {
+        throw new Error("existing workspace must be disposed, discarded, and released before redispatch");
       }
 
       assertRepositoryPreflight(cwd, {
@@ -536,7 +549,25 @@ export function createGoalEngineExtension(pi, options = {}) {
         throw preflightError("INVALID_TASK_CONTRACT", error.message, remediation, { tool: "goal_status", params: { goal_id: goalId } });
       }
 
-      const attempt = task.attempts + 1;
+      const attempt = candidateAttempt;
+      const orphanInventory = inspectOrphanedExecutorWorkspace({
+        goalId, taskId: params.task_id, attempt, originRoot: cwd, stateRoot: root,
+      });
+      if (orphanInventory.kind !== "none") {
+        const actionState = orphanWorkspaceActionState(params.task_id, orphanInventory);
+        const code = actionState.blockingReason.code;
+        const observed = `taskId=${params.task_id}; attempt=${attempt}; resources=${JSON.stringify(orphanInventory.resources)}${orphanInventory.observed !== undefined ? `; observed=${JSON.stringify(orphanInventory.observed)}` : ""}${orphanInventory.error !== undefined ? `; error=${JSON.stringify(orphanInventory.error)}` : ""}`;
+        const remediation = code === "ORPHANED_EXECUTOR_WORKSPACE"
+          ? "review the orphaned executor workspace and explicitly choose discard or preserve via goal_integrate"
+          : "inspect the authoritative recovery state with goal_status before any workspace action";
+        const requiredNextAction = code === "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED"
+          ? { tool: "goal_status", params: { goal_id: goalId } }
+          : null;
+        const error = initError(code, observed, remediation);
+        error.requiredNextAction = requiredNextAction;
+        error.blockingReason = actionState.blockingReason;
+        throw error;
+      }
       const baseCommit = gitHead(cwd);
       const lease = allocateExecutorWorkspace({
         goalId,
@@ -861,7 +892,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         throw initError("INVALID_GOAL_CONTRACT", error.message, "correct derived task, goal metadata, or requirements limits, then retry goal_amend");
       }
       const updated = appendEventFn(root, event, projection.version);
-      return statusResponse(updated);
+      return statusResponse(updated, cwd, root);
     },
   });
 

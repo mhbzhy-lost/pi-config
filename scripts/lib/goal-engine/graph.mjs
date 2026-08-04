@@ -17,11 +17,20 @@ export function validateDAG(tasks) {
   for (const taskId of tasks.keys()) visit(taskId);
 }
 
-export function runnableFrontier(projection) {
+export function nextDispatchAttempt(projection, taskId) {
+  const task = projection?.tasks?.get(taskId);
+  if (projection?.lifecycle !== "active" || task?.status !== "pending") return null;
+  const workspace = task.workspace;
+  return !workspace || (workspace.phase === "disposed" && workspace.disposition === "discarded" && workspace.released === true)
+    ? task.attempts + 1
+    : null;
+}
+
+export function runnableFrontier(projection, { blockedTaskIds = new Set() } = {}) {
   if (projection.lifecycle !== "active") return [];
   const frontier = [];
   for (const [taskId, task] of projection.tasks) {
-    if (task.status !== "pending") continue;
+    if (blockedTaskIds.has(taskId) || task.status !== "pending") continue;
     const workspaceRedispatchable = !task.workspace
       || (task.workspace.phase === "disposed" && task.workspace.disposition === "discarded" && task.workspace.released === true);
     if (!workspaceRedispatchable) continue;
@@ -63,6 +72,30 @@ function dependencyBlockingReason(task, projection) {
   const blockedDeps = task.deps.filter((depId) => projection.tasks.get(depId)?.status !== "accepted");
   if (blockedDeps.length === 0) return null;
   return `task dependencies are not accepted: ${blockedDeps.join(", ")}`;
+}
+
+export function orphanWorkspaceActionState(taskId, inventory) {
+  if (inventory?.kind === "verified") {
+    return {
+      allowedActions: ["goal_integrate"],
+      requiredNextAction: null,
+      blockingReason: {
+        code: "ORPHANED_EXECUTOR_WORKSPACE",
+        requiresHumanDecision: true,
+        choices: [
+          { tool: "goal_integrate", params: { task_id: taskId, action: "discard" } },
+          { tool: "goal_integrate", params: { task_id: taskId, action: "preserve" } },
+        ],
+      },
+    };
+  }
+  const blockingReason = {
+    code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+    resources: inventory?.resources || { workspaceExists: null, branchExists: null, leaseExists: null },
+  };
+  if (inventory?.observed !== undefined) blockingReason.observed = inventory.observed;
+  if (inventory?.error !== undefined) blockingReason.error = inventory.error;
+  return { allowedActions: [], requiredNextAction: null, blockingReason };
 }
 
 export function taskActionState(projection, taskId) {
