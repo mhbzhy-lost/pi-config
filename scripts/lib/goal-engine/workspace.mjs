@@ -331,6 +331,50 @@ function hasRebaseState(cwd) {
   return existsSync(path.join(absoluteGitDir, "rebase-merge")) || existsSync(path.join(absoluteGitDir, "rebase-apply"));
 }
 
+function hasSequencerState(cwd) {
+  const gitDir = git(cwd, "rev-parse", "--git-dir");
+  return existsSync(path.join(path.resolve(cwd, gitDir), "sequencer"));
+}
+
+function originIsRestored(origin, { originRef, originHeadBefore }) {
+  try {
+    return git(origin, "symbolic-ref", "--quiet", "HEAD") === originRef
+      && git(origin, "rev-parse", "HEAD") === originHeadBefore
+      && userVisibleStatus(origin).length === 0
+      && !["CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD"].some((ref) => refExists(origin, ref))
+      && !hasRebaseState(origin)
+      && !hasSequencerState(origin);
+  } catch {
+    return false;
+  }
+}
+
+function restoreGoalSequencer(origin, { strategy, originRef, originHeadBefore }) {
+  let currentRef;
+  try { currentRef = git(origin, "symbolic-ref", "--quiet", "HEAD"); } catch {
+    throw new Error("Goal sequencer recovery identity mismatch; manual recovery required");
+  }
+  if (currentRef !== originRef) {
+    throw new Error("Goal sequencer recovery identity mismatch; manual recovery required");
+  }
+  try {
+    git(origin, strategy, "--abort");
+  } catch {
+    throw new Error("Goal sequencer abort failed; manual recovery required");
+  }
+  if (originIsRestored(origin, { originRef, originHeadBefore })) return;
+
+  // Git may report abort success while refusing to rewind a commit made before
+  // its process died. Ownership and the attached ref were checked by the caller.
+  if (git(origin, "symbolic-ref", "--quiet", "HEAD") !== originRef || userVisibleStatus(origin).length > 0) {
+    throw new Error("Goal sequencer abort did not safely restore origin; manual recovery required");
+  }
+  git(origin, "reset", "--hard", originHeadBefore);
+  if (!originIsRestored(origin, { originRef, originHeadBefore })) {
+    throw new Error("Goal sequencer compensation did not restore origin; manual recovery required");
+  }
+}
+
 function userVisibleStatus(origin) {
   const status = git(origin, "status", "--porcelain=v1");
   return status.split("\n").filter((line) => line && line.slice(3) !== ".state/" && !line.slice(3).startsWith(".state/goal-engine/"));
@@ -384,10 +428,7 @@ function recoverGoalSequencer(origin, { strategy, lease, executorHead, originRef
   if (!goalOwnsSequencer(origin, strategy, lease, executorHead)) {
     throw new Error("Git sequencer is not provably owned by this Goal; preserving Git operation");
   }
-  git(origin, strategy, "--abort");
-  if (git(origin, "symbolic-ref", "--quiet", "HEAD") !== originRef || git(origin, "rev-parse", "HEAD") !== originHeadBefore || userVisibleStatus(origin).length > 0) {
-    throw new Error("Goal sequencer abort did not restore origin identity; manual recovery required");
-  }
+  restoreGoalSequencer(origin, { strategy, originRef, originHeadBefore });
   return true;
 }
 
@@ -431,7 +472,11 @@ export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick", ex
   } catch (error) {
     // Abort only a sequencer demonstrably created by this invocation.
     if (goalOwnsSequencer(origin, strategy, lease, selectedExecutorHead)) {
-      try { git(origin, strategy, "--abort"); } catch { /* preserve the original failure */ }
+      try {
+        restoreGoalSequencer(origin, { strategy, originRef, originHeadBefore: expectedOriginHead });
+      } catch (recoveryError) {
+        throw new Error(`Integration failed and origin requires manual recovery: ${recoveryError.message}`);
+      }
     }
     throw error;
   }

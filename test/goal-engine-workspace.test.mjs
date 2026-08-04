@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
@@ -577,6 +577,34 @@ test("isExecutorWorkspaceIntegrated(cherry-pick) stays false after merge integra
   const executorHead = git(lease.path, "rev-parse", "HEAD");
   integrateExecutorWorkspace(lease, { strategy: "merge" });
   assert.equal(workspace.isExecutorWorkspaceIntegrated(lease, { strategy: "cherry-pick", executorHead }), false);
+});
+
+test("integrateExecutorWorkspace atomically rewinds a partial cherry-pick when a post-commit hook kills Git", () => {
+  const origin = initRepo();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "partial-hook", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  writeFileSync(join(lease.path, "first.txt"), "first commit\n");
+  git(lease.path, "add", "first.txt");
+  git(lease.path, "commit", "-m", "feat: first executor commit");
+  writeFileSync(join(lease.path, "second.txt"), "second commit\n");
+  git(lease.path, "add", "second.txt");
+  git(lease.path, "commit", "-m", "feat: second executor commit");
+
+  const hook = join(origin, ".git", "hooks", "post-commit");
+  writeFileSync(hook, "#!/bin/sh\nrm -f \"$0\"\nkill -TERM \"$PPID\"\n");
+  chmodSync(hook, 0o755);
+
+  assert.throws(() => integrateExecutorWorkspace(lease, { strategy: "cherry-pick" }), /./);
+  assert.equal(git(origin, "symbolic-ref", "--quiet", "HEAD"), lease.originRef);
+  assert.equal(git(origin, "rev-parse", "HEAD"), baseCommit);
+  assert.equal(git(origin, "status", "--porcelain=v1"), "");
+  assert.equal(existsSync(join(origin, "first.txt")), false);
+  for (const marker of ["CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD"]) {
+    assert.throws(() => git(origin, "rev-parse", "-q", "--verify", marker));
+  }
+  assert.equal(existsSync(join(origin, ".git", "rebase-merge")), false);
+  assert.equal(existsSync(join(origin, ".git", "rebase-apply")), false);
+  assert.equal(existsSync(join(origin, ".git", "sequencer")), false);
 });
 
 test("integrateExecutorWorkspace throws atomically when second cherry-pick conflicts", () => {
