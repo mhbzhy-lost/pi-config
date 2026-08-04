@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { appendEvent, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
+import { appendEvent, loadProjection, listGoals, acquireWriterLock, releaseWriterLock } from "../scripts/lib/goal-engine/store.mjs";
 
 function event(type, data, goalId = "concurrent-goal") {
   return { schemaVersion: "goal-engine.event.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
@@ -23,9 +23,9 @@ function checkpoint(workerId, goalId = "concurrent-goal") {
   return event("goal.checkpoint", { nextAction: `Worker ${workerId} must wait for the serialized event store writer` }, goalId);
 }
 
-async function worker(stateRoot, workerId) {
+async function worker(stateRoot, workerId, goalId = "concurrent-goal") {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [import.meta.filename, "worker", stateRoot, workerId], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [import.meta.filename, "worker", stateRoot, workerId, goalId], { stdio: ["ignore", "pipe", "pipe"] });
     let output = ""; let error = "";
     child.stdout.on("data", (chunk) => { output += chunk; });
     child.stderr.on("data", (chunk) => { error += chunk; });
@@ -36,7 +36,7 @@ async function worker(stateRoot, workerId) {
 
 if (process.argv[2] === "worker") {
   try {
-    appendEvent(process.argv[3], checkpoint(process.argv[4]), 1);
+    appendEvent(process.argv[3], checkpoint(process.argv[4], process.argv[5]), 1);
     process.stdout.write(JSON.stringify({ ok: true }));
   } catch (error) {
     process.stdout.write(JSON.stringify({ ok: false, code: error.code, message: error.message }));
@@ -57,6 +57,49 @@ if (process.argv[2] === "worker") {
     assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
     assert.deepEqual(readdirSync(join(stateRoot, "goals/concurrent-goal")).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
     assert.equal(existsSync(join(stateRoot, ".writer.lock")), false);
+  });
+
+  test("concurrent stale recovery never leaks filesystem conflicts and leaves one writer per round", async () => {
+    for (let round = 0; round < 20; round += 1) {
+      const stateRoot = root();
+      createGoal(stateRoot);
+      const lock = join(stateRoot, ".writer.lock");
+      mkdirSync(lock, { recursive: true });
+      writeFileSync(join(lock, "owner.json"), "malformed stale owner");
+
+      const results = await Promise.all([...Array(12)].map((_, workerId) => worker(stateRoot, `${round}-${workerId}`)));
+      const detail = results.map((result, workerId) => ({ workerId, code: result.code, message: result.message }));
+      assert.equal(results.filter((result) => result.ok).length, 1, JSON.stringify(detail));
+      assert.deepEqual(results.filter((result) => !result.ok).map((result) => result.code), Array(11).fill("PROJECTION_CONFLICT"), JSON.stringify(detail));
+      assert.equal(results.some((result) => ["ENOTEMPTY", "EEXIST"].includes(result.code)), false, JSON.stringify(detail));
+      assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 2, JSON.stringify(detail));
+      assert.deepEqual(listGoals(stateRoot), ["concurrent-goal"]);
+      assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:\.tmp|candidate|quarantine|recovery)/.test(name)), []);
+      assert.equal(existsSync(lock), false);
+    }
+  });
+
+  test("stale writer receipt cannot release a replacement writer lock", () => {
+    const stateRoot = root();
+    const staleReceipt = acquireWriterLock(stateRoot);
+    releaseWriterLock(stateRoot, staleReceipt.token);
+    const replacementReceipt = acquireWriterLock(stateRoot);
+
+    releaseWriterLock(stateRoot, staleReceipt.token);
+    assert.equal(JSON.parse(readFileSync(join(stateRoot, ".writer.lock/owner.json"), "utf8")).token, replacementReceipt.token);
+    releaseWriterLock(stateRoot, replacementReceipt.token);
+    assert.equal(existsSync(join(stateRoot, ".writer.lock")), false);
+  });
+
+  test("concurrent different goals retain every registry entry", async () => {
+    const stateRoot = root();
+    const goalIds = [...Array(8)].map((_, index) => `concurrent-goal-${index}`);
+    for (const goalId of goalIds) createGoal(stateRoot, goalId);
+
+    const results = await Promise.all(goalIds.map((goalId, index) => worker(stateRoot, String(index), goalId)));
+    assert.deepEqual(results, Array(8).fill({ ok: true }));
+    assert.deepEqual(listGoals(stateRoot).sort(), goalIds);
+    for (const goalId of goalIds) assert.equal(loadProjection(stateRoot, goalId).version, 2);
   });
 
   test("missing writer lock owner is quarantined so append recovers without residual directories", () => {
@@ -93,6 +136,17 @@ if (process.argv[2] === "worker") {
     assert.equal(appendEvent(stateRoot, checkpoint("stale"), 1).version, 2);
     assert.equal(existsSync(lock), false);
     assert.deepEqual(readdirSync(stateRoot).filter((name) => name.includes("quarantine")), []);
+  });
+
+  test("recovery guard timeout fails closed without entering the writer action", () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    writeFileSync(join(stateRoot, ".writer.recovery.guard"), JSON.stringify({ pid: process.pid, token: "unproven-guard-owner" }));
+
+    assert.throws(() => appendEvent(stateRoot, checkpoint("guard-timeout"), 1), (error) => error.code === "GOAL_ENGINE_STORE_LOCK_TIMEOUT");
+    assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 1);
+    assert.equal(existsSync(join(stateRoot, ".writer.lock")), false);
+    assert.equal(JSON.parse(readFileSync(join(stateRoot, ".writer.recovery.guard"), "utf8")).token, "unproven-guard-owner");
   });
 
   test("live writer lock times out without deleting another owner lock", () => {

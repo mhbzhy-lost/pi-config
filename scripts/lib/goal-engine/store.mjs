@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, existsSync, chmodSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, existsSync, chmodSync, rmSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { applyEvent, createProjection } from "./events.mjs";
@@ -47,33 +47,34 @@ export function listGoals(stateRoot) {
   return registry.active_goal_ids || [];
 }
 
-function acquireWriterLock(stateRoot) {
+export function acquireWriterLock(stateRoot) {
   mkdirSync(stateRoot, { recursive: true });
   const lockPath = join(stateRoot, ".writer.lock");
   const token = randomUUID();
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
+    const guard = acquireRecoveryGuard(stateRoot, deadline);
     const candidate = `${lockPath}.candidate-${process.pid}-${randomUUID()}`;
     try {
-      mkdirSync(candidate, { mode: 0o700 });
-      chmodSync(candidate, 0o700);
-      const ownerPath = join(candidate, "owner.json");
-      writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }) + "\n", { mode: 0o600 });
-      chmodSync(ownerPath, 0o600);
-      renameSync(candidate, lockPath);
-      return { token };
-    } catch (error) {
-      if (existsSync(candidate)) rmSync(candidate, { recursive: true, force: true });
-      if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
-      const owner = readLockOwner(lockPath);
-      if (!owner || !pidIsAlive(owner.pid)) {
-        quarantineStaleLock(lockPath);
-      } else if (Date.now() >= deadline) {
-        throw lockTimeout();
-      } else {
-        sleep(LOCK_WAIT_MS);
+      try {
+        mkdirSync(candidate, { mode: 0o700 });
+        chmodSync(candidate, 0o700);
+        const ownerPath = join(candidate, "owner.json");
+        writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }) + "\n", { mode: 0o600 });
+        chmodSync(ownerPath, 0o600);
+        renameSync(candidate, lockPath);
+        return { token };
+      } catch (error) {
+        if (existsSync(candidate)) rmSync(candidate, { recursive: true, force: true });
+        if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+        const owner = readLockOwner(lockPath);
+        if (!owner || !pidIsAlive(owner.pid)) quarantineStaleLock(lockPath);
       }
+    } finally {
+      releaseRecoveryGuard(stateRoot, guard.token);
     }
+    if (Date.now() >= deadline) throw lockTimeout();
+    sleep(LOCK_WAIT_MS);
   }
 }
 
@@ -98,10 +99,40 @@ function quarantineStaleLock(lockPath) {
   }
 }
 
-function releaseWriterLock(stateRoot, token) {
-  const lockPath = join(stateRoot, ".writer.lock");
-  const owner = readLockOwner(lockPath);
-  if (owner?.token === token) rmSync(lockPath, { recursive: true, force: true });
+function acquireRecoveryGuard(stateRoot, deadline) {
+  const guardPath = join(stateRoot, ".writer.recovery.guard");
+  const token = randomUUID();
+  while (true) {
+    try {
+      writeFileSync(guardPath, JSON.stringify({ pid: process.pid, token }) + "\n", { flag: "wx", mode: 0o600 });
+      return { token };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) throw lockTimeout();
+      sleep(LOCK_WAIT_MS);
+    }
+  }
+}
+
+function releaseRecoveryGuard(stateRoot, token) {
+  const guardPath = join(stateRoot, ".writer.recovery.guard");
+  try {
+    const owner = JSON.parse(readFileSync(guardPath, "utf8"));
+    if (owner?.token === token) unlinkSync(guardPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
+export function releaseWriterLock(stateRoot, token) {
+  const guard = acquireRecoveryGuard(stateRoot, Date.now() + LOCK_TIMEOUT_MS);
+  try {
+    const lockPath = join(stateRoot, ".writer.lock");
+    const owner = readLockOwner(lockPath);
+    if (owner?.token === token) rmSync(lockPath, { recursive: true, force: true });
+  } finally {
+    releaseRecoveryGuard(stateRoot, guard.token);
+  }
 }
 
 function sleep(milliseconds) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds); }
