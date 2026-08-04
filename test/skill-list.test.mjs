@@ -127,6 +127,19 @@ test("resolveSkillSource prefers a local override over vendor", async () => {
   }
 });
 
+test("resolveSkillSource accepts plain and quoted single-line descriptions", async () => {
+  for (const description of ["plain fixture", '"double quoted fixture"', "'single quoted fixture'"]) {
+    const root = await createFixture();
+    try {
+      const directory = await addSkill(root, "local", "writing-plans");
+      await writeFile(join(directory, "SKILL.md"), `---\nname: writing-plans\ndescription: ${description}\n---\n`);
+      assert.equal(await resolveSkillSource(root, "writing-plans"), await realpath(directory));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("resolveSkillSource fails closed for malformed allowlisted Skill frontmatter", async () => {
   const cases = [
     ["missing frontmatter", "# no frontmatter\n", "missing frontmatter"],
