@@ -2709,13 +2709,36 @@ test("orphan inventory drift compares two real snapshots after the configured ba
       blockingReason: {
         code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
         resources: { workspaceExists: true, branchExists: true, leaseExists: true },
-        observed: "executor workspace identity changed between recovery inventories",
+        observed: "executor workspace identity changed during inspection",
       },
     });
     assert.equal(Object.hasOwn(error.blockingReason, "choices"), false);
     return true;
   });
   assert.equal(calls, 2); assert.ok(afterCommit); assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), afterCommit);
+  assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_orphan_recovered").length, 0);
+});
+
+test("orphan recovery rejects drift between two verified inventories", async () => {
+  const fixture = await dispatchedRollbackFixture("between inventory drift"); let calls = 0; let afterCommit;
+  const pi = createMockPi(fixture.cwd); createGoalEngineExtension(pi, { betweenOrphanInventoriesBarrier(lease) { if (++calls === 1) { commitWorkspaceChange(lease, "race.txt", "race\\n", "test: orphan inventory race"); afterCommit = fullRejectionSnapshot(fixture.cwd, fixture.goalId); } return { kind: "forged" }; } });
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }), (error) => {
+    assertOrphanRecoveryContract(error, {
+      code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+      observed: { taskId: "t1", candidate: { attempt: 1 }, resources: { workspaceExists: true, branchExists: true, leaseExists: true } },
+      remediation: "inspect the authoritative recovery state with goal_status before any workspace action",
+      stateChanged: false,
+      requiredNextAction: { tool: "goal_status", params: { goal_id: fixture.goalId } },
+      blockingReason: {
+        code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+        resources: { workspaceExists: true, branchExists: true, leaseExists: true },
+        observed: "executor workspace identity changed between recovery inventories",
+      },
+    });
+    assert.equal(Object.hasOwn(error.blockingReason, "choices"), false);
+    return true;
+  });
+  assert.equal(calls, 1); assert.ok(afterCommit); assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), afterCommit);
   assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_orphan_recovered").length, 0);
 });
 
