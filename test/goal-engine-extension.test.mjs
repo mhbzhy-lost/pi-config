@@ -156,6 +156,15 @@ function commitWorkspaceChange(lease, filePath, content, message) {
   execFileSync("git", ["commit", "-m", message], { cwd: lease.path });
 }
 
+function persistedStateBytes(cwd, goalId) {
+  const root = join(cwd, ".state/goal-engine");
+  return [
+    readFileSync(goalEventsPath(cwd, goalId), "utf8"),
+    readFileSync(join(root, "goals", goalId, "projection.json"), "utf8"),
+    readFileSync(join(root, "registry.json"), "utf8"),
+  ];
+}
+
 function createGoalEngineWithAppendInjection(pi, options = {}) {
   return createGoalEngineExtension(pi, options);
 }
@@ -928,7 +937,7 @@ test("goal_integrate requires a settled task and keeps active workspace for pre-
   assert.equal(existsSync(join(cwd, "src/pre.ts")), false);
 });
 
-test("goal_integrate rejects succeeded no-op workspace and still allows discard", async () => {
+test("goal_settle rejects succeeded no-op workspace and failed settle still allows discard", async () => {
   const cwd = tmpCwd();
   const objective = "No-commit integrate test goal";
   const goalId = objectiveToGoalId(objective);
@@ -946,20 +955,21 @@ test("goal_integrate rejects succeeded no-op workspace and still allows discard"
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
   await invoke(pi, "goal_dispatch", { task_id: "t1" });
 
-  const settle = pi.tools.find((t) => t.name === "goal_settle");
-  await invoke(pi, "goal_settle", {
-    task_id: "t1",
-    outcome: "succeeded",
-    evidence: { type: "diff", ref: "git diff HEAD --no-index" },
-    evidence_source: "self_produced",
-    next_action: "No-op commit should still integrate cannot be accepted and must be discarded first",
-  });
-
+  const before = persistedStateBytes(cwd, goalId);
   await assert.rejects(
-    () => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }),
-    /no commits|nothing to commit|cherry-pick|merge/i,
+    () => invoke(pi, "goal_settle", {
+      task_id: "t1", outcome: "succeeded",
+      evidence: { type: "diff", ref: "git diff HEAD --no-index" }, evidence_source: "self_produced",
+      next_action: "No-op commit should still integrate cannot be accepted and must be discarded first",
+    }),
+    (error) => error.code === "EXECUTOR_COMMIT_REQUIRED" && /observed=.*remediation=.*stateChanged=false.*requiredNextAction/.test(error.message),
   );
+  assert.deepEqual(persistedStateBytes(cwd, goalId), before);
 
+  await invoke(pi, "goal_settle", {
+    task_id: "t1", outcome: "failed",
+    next_action: "Discard the no-op executor workspace and retry with a warranted implementation.",
+  });
   const preDiscardState = workspaceState(cwd, goalId, "t1");
   assert.equal(preDiscardState.workspaceExists, true);
   assert.equal(preDiscardState.leaseExists, true);
@@ -975,7 +985,40 @@ test("goal_integrate rejects succeeded no-op workspace and still allows discard"
   assert.equal(existsSync(join(cwd, "src/noop.ts")), false);
 });
 
-test("goal_integrate rejects changedFiles outside writePaths and keeps workspace for retry", async () => {
+test("goal_settle rejects dirty executor workspace without state changes", async () => {
+  const cwd = tmpCwd();
+  const objective = "Dirty settle gate test goal";
+  const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: { criteria: ["allowed"], commands: ["true"] }, workflow: "tdd" }] });
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  commitWorkspaceChange(dispatched.workspace, "src/allowed.ts", "export const allowed = true;\n", "feat: allowed");
+  writeFileSync(join(dispatched.workspace.path, "src", "staged.ts"), "staged\n");
+  git(dispatched.workspace.path, "add", "src/staged.ts");
+  const before = persistedStateBytes(cwd, goalId);
+  await assert.rejects(
+    () => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/allowed.ts" }, next_action: "Clean the executor workspace before retrying the successful settlement." }),
+    (error) => error.code === "EXECUTOR_WORKSPACE_DIRTY" && /stateChanged=false.*requiredNextAction/.test(error.message),
+  );
+  assert.deepEqual(persistedStateBytes(cwd, goalId), before);
+});
+
+test("goal_settle permits clean authorized commits with runtime-only artifacts", async () => {
+  const cwd = tmpCwd();
+  const objective = "Clean settle gate test goal";
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: { criteria: ["allowed"], commands: ["true"] }, workflow: "tdd" }] });
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  commitWorkspaceChange(dispatched.workspace, "src/allowed.ts", "export const allowed = true;\n", "feat: allowed");
+  mkdirSync(join(dispatched.workspace.path, ".pi-subagents"), { recursive: true });
+  writeFileSync(join(dispatched.workspace.path, ".pi-subagents", "runtime.log"), "runtime\n");
+  const settled = JSON.parse(await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/allowed.ts" }, next_action: "Integrate the clean authorized executor commit after confirming its evidence." }));
+  assert.equal(settled.status, "succeeded");
+});
+
+test("goal_settle rejects changedFiles outside writePaths and keeps workspace for retry", async () => {
   const cwd = tmpCwd();
   const objective = "Write-path gate test goal";
   const goalId = objectiveToGoalId(objective);
@@ -994,19 +1037,16 @@ test("goal_integrate rejects changedFiles outside writePaths and keeps workspace
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   commitWorkspaceChange(dispatched.workspace, "outside/rogue.txt", "rogue\n", "feat: rogue change");
 
-  const settle = pi.tools.find((t) => t.name === "goal_settle");
-  await invoke(pi, "goal_settle", {
-    task_id: "t1",
-    outcome: "succeeded",
-    evidence: { type: "diff", ref: "git diff HEAD~1 -- outside/rogue.txt" },
-    evidence_source: "self_produced",
-    next_action: "Integrate t1 and verify changedFiles are inside declared writePaths",
-  });
-
+  const before = persistedStateBytes(cwd, goalId);
   await assert.rejects(
-    () => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }),
-    /writePaths|outside|mismatch|forbidden/i,
+    () => invoke(pi, "goal_settle", {
+      task_id: "t1", outcome: "succeeded",
+      evidence: { type: "diff", ref: "git diff HEAD~1 -- outside/rogue.txt" }, evidence_source: "self_produced",
+      next_action: "Integrate t1 and verify changedFiles are inside declared writePaths",
+    }),
+    (error) => error.code === "EXECUTOR_WRITE_PATH_VIOLATION" && /stateChanged=false.*requiredNextAction/.test(error.message),
   );
+  assert.deepEqual(persistedStateBytes(cwd, goalId), before);
 
   const state = workspaceState(cwd, goalId, "t1");
   assert.equal(state.workspaceExists, true);
@@ -1014,7 +1054,7 @@ test("goal_integrate rejects changedFiles outside writePaths and keeps workspace
   assert.equal(state.branchExists, true);
 });
 
-test("goal_integrate rejects rename from forbidden source while preserving retry resources", async () => {
+test("goal_settle rejects rename from forbidden source while preserving retry resources", async () => {
   const cwd = tmpCwd();
   const objective = "Rename source write-path gate goal";
   const goalId = objectiveToGoalId(objective);
@@ -1035,13 +1075,14 @@ test("goal_integrate rejects rename from forbidden source while preserving retry
   mkdirSync(join(dispatched.workspace.path, "allowed"), { recursive: true });
   git(dispatched.workspace.path, "mv", "forbidden/secret.txt", "allowed/secret.txt");
   git(dispatched.workspace.path, "commit", "-m", "test: move protected source");
-  await invoke(pi, "goal_settle", {
-    task_id: "t1", outcome: "succeeded",
-    evidence: { type: "diff", ref: "git diff HEAD~1" }, evidence_source: "self_produced",
-    next_action: "Attempt integration and verify the forbidden rename source is rejected.",
-  });
-
-  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }), /writePaths|forbidden|mismatch/i);
+  await assert.rejects(
+    () => invoke(pi, "goal_settle", {
+      task_id: "t1", outcome: "succeeded",
+      evidence: { type: "diff", ref: "git diff HEAD~1" }, evidence_source: "self_produced",
+      next_action: "Attempt integration and verify the forbidden rename source is rejected.",
+    }),
+    (error) => error.code === "EXECUTOR_WRITE_PATH_VIOLATION",
+  );
   assert.equal(git(cwd, "rev-parse", "HEAD"), originHeadBefore);
   const state = workspaceState(cwd, goalId, "t1");
   assert.equal(state.workspaceExists, true);

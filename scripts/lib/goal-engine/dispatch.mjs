@@ -49,6 +49,7 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
     workflow,
     requirements: [
       task.description,
+      "Before reporting completed, create at least one clean commit containing only approved writePaths; if no commit is warranted, return NEEDS_CONTEXT instead of completed.",
       ...task.acceptance.criteria,
       ...projection.dod.map((d) => `Goal DoD: ${d}`),
     ],

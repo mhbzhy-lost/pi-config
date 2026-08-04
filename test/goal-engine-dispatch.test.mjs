@@ -158,7 +158,7 @@ function buildProjection() {
   return p;
 }
 
-test("compileTaskContract produces valid dispatch-ir.v1", () => {
+test("compileTaskContract includes mandatory clean commit requirement", () => {
   const p = buildProjection();
   const contract = compileTaskContract(p, "t1", "/workspace/project");
 
@@ -168,6 +168,9 @@ test("compileTaskContract produces valid dispatch-ir.v1", () => {
   assert.equal(contract.risk, "normal");
   assert.match(contract.objective, /token validation/i);
   assert.ok(contract.requirements.length >= 2);
+  assert.ok(contract.requirements.includes(
+    "Before reporting completed, create at least one clean commit containing only approved writePaths; if no commit is warranted, return NEEDS_CONTEXT instead of completed.",
+  ));
   assert.deepEqual(contract.boundaries.writePaths, ["src/auth/token.ts", "test/auth/token.test.mjs"]);
   assert.deepEqual(contract.acceptance.commands, ["node --test test/auth/token.test.mjs"]);
   assert.equal(contract.workflow.mode, "tdd");
@@ -235,7 +238,7 @@ test("pending contract oracle catches derived composite ids and requirement comb
   p.goalId = "g".repeat(160);
   assert.throws(() => assertPendingTaskContractsCompile(p, "/workspace/project"), /taskId.*160/);
   p.goalId = "dispatch-test";
-  p.tasks.get("t1").acceptance.criteria = Array.from({ length: 32 }, (_, i) => `criterion ${i}`);
+  p.tasks.get("t1").acceptance.criteria = Array.from({ length: 31 }, (_, i) => `criterion ${i}`);
   assert.throws(() => assertPendingTaskContractsCompile(p, "/workspace/project"), /requirements.*32/);
 });
 

@@ -615,6 +615,32 @@ export function createGoalEngineExtension(pi, options = {}) {
         nextAction: params.next_action,
         reason: params.reason || null,
       }, goalId);
+      // Validate the event first so reducer errors retain priority over Git preflight.
+      const candidate = applyEvent(projection, settleEvent);
+      if (params.outcome === "succeeded") {
+        const task = projection.tasks.get(params.task_id);
+        const retry = { tool: "goal_status", params: { goal_id: goalId } };
+        const remediation = "return to the same Executor worktree, create an authorized commit and make it clean, then retry goal_settle";
+        let lease;
+        let inspection;
+        try {
+          lease = resolveLease(task, goalId, params.task_id, cwd, root);
+          inspection = inspectExecutorWorkspace(lease);
+        } catch (error) {
+          throw preflightError("EXECUTOR_COMMIT_REQUIRED", error.message, remediation, retry);
+        }
+        if (!inspection.hasCommits) {
+          throw preflightError("EXECUTOR_COMMIT_REQUIRED", `workspace=${lease.path}; hasCommits=false`, remediation, retry);
+        }
+        if (!inspection.clean) {
+          throw preflightError("EXECUTOR_WORKSPACE_DIRTY", `workspace=${lease.path}; dirtyFiles=${inspection.dirtyFiles.join(",")}; untrackedFiles=${inspection.untrackedFiles.join(",")}`, remediation, retry);
+        }
+        try {
+          assertWorkspaceChangesWithinPaths(inspection, task.writePaths);
+        } catch (error) {
+          throw preflightError("EXECUTOR_WRITE_PATH_VIOLATION", `workspace=${lease.path}; changedFiles=${inspection.changedFiles.join(",")}; ${error.message}`, remediation, retry);
+        }
+      }
       projection = appendEventFn(root, settleEvent, projection.version);
 
       const cpEvent = makeEvent("goal.checkpoint", { nextAction: params.next_action }, goalId);
