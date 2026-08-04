@@ -48,10 +48,10 @@ function assertInitPreflight(cwd, root) {
   gitOutput(cwd, ["rev-parse", "--verify", "HEAD"], "INVALID_GIT_HEAD", "HEAD is unborn or invalid", "create a commit on an attached branch before goal_init");
   const ref = gitOutput(cwd, ["symbolic-ref", "--quiet", "HEAD"], "DETACHED_GIT_HEAD", "HEAD is detached", "checkout an attached branch before goal_init", [1]);
   if (!ref) throw initError("DETACHED_GIT_HEAD", "HEAD is detached", "checkout an attached branch before goal_init");
-  const ignored = gitOutput(cwd, ["check-ignore", "-q", ".state/goal-engine/"], "GIT_INFRASTRUCTURE_ERROR", "could not inspect .state/goal-engine ignore rule", "repair Git ignore configuration", [1]);
-  if (ignored === null) throw initError("STATE_NOT_IGNORED", ".state/goal-engine/ is not ignored", "add .state/goal-engine/ to .gitignore manually before goal_init");
   const tracked = gitOutput(cwd, ["ls-files", "--", STATE_ROOT_REL], "GIT_INFRASTRUCTURE_ERROR", "could not inspect tracked state entries", "repair Git index and retry goal_init");
   if (tracked) throw initError("STATE_TRACKED", `tracked entries: ${tracked}`, "remove .state/goal-engine from the Git index before goal_init");
+  const ignored = gitOutput(cwd, ["check-ignore", "-q", ".state/goal-engine/"], "GIT_INFRASTRUCTURE_ERROR", "could not inspect .state/goal-engine ignore rule", "repair Git ignore configuration", [1]);
+  if (ignored === null) throw initError("STATE_NOT_IGNORED", ".state/goal-engine/ is not ignored", "add .state/goal-engine/ to .gitignore manually before goal_init");
 }
 
 function gitHead(cwd) {
