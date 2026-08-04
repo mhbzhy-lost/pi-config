@@ -52,11 +52,14 @@ test("resources_discover rejects a malformed local list", async () => {
   }
 });
 
-test("resolveSkillSource and Pi loader agree on scalar fixtures, including Pi-valid ISO dates", async () => {
+test("resolveSkillSource and Pi loader agree on scalar fixtures and inline comments", async () => {
   const fixtures = [
     ["true", false], ["false", false], ["123", false], ["~", false],
-    [".nan", false], [".inf", false], ["null", false],
+    [".nan", false], [".inf", false], ["null", false], ["true # comment", false],
+    ["false # comment", false], ["null # comment", false], ["true: false", false],
     ['"true"', true], ["'123'", true], ["2026-08-05", true], ['"2026-08-05"', true], ["描述 fixture", true],
+    ['"true" # comment', true], ["plain fixture # comment", true], ["yes # comment", true],
+    ["'single '' quote'", true], ['"double \\" quote"', true], ['"line\\nfeed"', true],
   ];
   const { loadSkillsFromDir } = await import(piHostModuleUrl);
 

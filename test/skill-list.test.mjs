@@ -140,6 +140,30 @@ test("resolveSkillSource accepts plain and quoted single-line descriptions", asy
   }
 });
 
+test("resolveSkillSource supports only safe quoted scalar escapes", async () => {
+  for (const description of ["'single '' quote'", '"double \\" quote"', '"line\\nfeed"']) {
+    const root = await createFixture();
+    try {
+      const directory = await addSkill(root, "local", "writing-plans");
+      await writeFile(join(directory, "SKILL.md"), `---\nname: writing-plans\ndescription: ${description}\n---\n`);
+      assert.equal(await resolveSkillSource(root, "writing-plans"), await realpath(directory), description);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  for (const description of ["'single ' quote'", '"hex \\x41"', '"unterminated']) {
+    const root = await createFixture();
+    try {
+      const directory = await addSkill(root, "local", "writing-plans");
+      await writeFile(join(directory, "SKILL.md"), `---\nname: writing-plans\ndescription: ${description}\n---\n`);
+      await assert.rejects(resolveSkillSource(root, "writing-plans"), /unsupported string scalar/, description);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("resolveSkillSource fails closed for malformed allowlisted Skill frontmatter", async () => {
   const cases = [
     ["missing frontmatter", "# no frontmatter\n", "missing frontmatter"],
