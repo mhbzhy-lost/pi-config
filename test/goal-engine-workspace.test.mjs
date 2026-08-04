@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
@@ -849,14 +849,6 @@ function assertOrphanUnverified(result) {
   assert.ok(result.observed || result.error, "unverified inventory must retain observed evidence or an error");
 }
 
-function canonicalPath(value) {
-  try {
-    return typeof value === "string" ? realpathSync(value) : value;
-  } catch {
-    return value;
-  }
-}
-
 function assertOrphanVerified(result, lease) {
   assert.equal(result.kind, "verified");
   assert.equal(result.lease.goalId, lease.goalId);
@@ -866,10 +858,11 @@ function assertOrphanVerified(result, lease) {
   assert.equal(result.lease.originRef, lease.originRef);
   assert.equal(result.lease.branch, lease.branch);
   assert.equal(result.lease.ownerToken, lease.ownerToken);
-  assert.equal(canonicalPath(result.lease.path), canonicalPath(lease.path));
-  assert.equal(canonicalPath(result.lease.originRoot), canonicalPath(lease.originRoot));
-  assert.equal(canonicalPath(result.lease.stateRoot), canonicalPath(lease.stateRoot));
-  assert.equal(canonicalPath(result.lease.leasePath), canonicalPath(lease.leasePath));
+  assert.equal(result.lease.createdAt, lease.createdAt);
+  assert.equal(result.lease.path, lease.path);
+  assert.equal(result.lease.originRoot, lease.originRoot);
+  assert.equal(result.lease.stateRoot, lease.stateRoot);
+  assert.equal(result.lease.leasePath, lease.leasePath);
   assert.equal(result.inspection.hasCommits, true);
   assert.equal(result.executorHead, git(lease.path, "rev-parse", "HEAD"));
 }
