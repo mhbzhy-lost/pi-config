@@ -270,6 +270,9 @@ export function inspectExecutorWorkspace(lease) {
     : "";
   const changedFiles = changedOutput ? parseChangedPaths(changedOutput) : [];
   const diff = changed ? git(workspacePath, "diff", `${lease.baseCommit}..${headCommit}`) : "";
+  if (git(workspacePath, "rev-parse", "HEAD") !== headCommit) {
+    throw new Error("Executor workspace HEAD changed during inspection");
+  }
 
   return {
     headCommit,
