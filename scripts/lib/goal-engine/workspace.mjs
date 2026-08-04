@@ -193,7 +193,7 @@ export function inspectExecutorWorkspace(lease) {
 
   const changedOutput = headCommit === lease.baseCommit
     ? ""
-    : gitRaw(lease.path, "diff", "--name-status", "-z", "--find-renames", "--find-copies-harder", `${lease.baseCommit}..${headCommit}`);
+    : gitRaw(lease.path, "diff", "-l0", "--name-status", "-z", "--find-renames", "--find-copies-harder", `${lease.baseCommit}..${headCommit}`);
   const changedFiles = changedOutput ? parseChangedPaths(changedOutput) : [];
 
   let diff = "";

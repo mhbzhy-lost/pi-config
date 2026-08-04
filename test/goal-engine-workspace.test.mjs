@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -192,6 +192,67 @@ test("writePaths requires both sides of rename and copy to be owned", () => {
   assert.deepEqual(copyInspection.changedFiles, ["allowed/copy.txt", "forbidden/source.txt"]);
   assert.throws(() => workspace.assertWorkspaceChangesWithinPaths(copyInspection, ["allowed/**"]), /forbidden\/source\.txt/);
   assert.doesNotThrow(() => workspace.assertWorkspaceChangesWithinPaths(copyInspection, ["allowed/**", "forbidden/**"]));
+});
+
+test("renameLimit cannot hide a forbidden copy source from the writePaths gate", () => {
+  const origin = initRepo();
+  const stateRoot = tmpStateRoot();
+  const protectedContent = "protected copy source\n".repeat(100);
+  const firstDecoyContent = "first unrelated candidate\n".repeat(100);
+  const secondDecoyContent = "second unrelated candidate\n".repeat(100);
+  mkdirSync(join(origin, "forbidden"), { recursive: true });
+  writeFileSync(join(origin, "forbidden/source.txt"), protectedContent);
+  writeFileSync(join(origin, "forbidden/decoy-one.txt"), firstDecoyContent);
+  writeFileSync(join(origin, "forbidden/decoy-two.txt"), secondDecoyContent);
+  git(origin, "add", ".");
+  git(origin, "commit", "-m", "test: add copy detection candidates");
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "rename-limit", taskId: "t1", attempt: 1, originRoot: origin, stateRoot, baseCommit });
+
+  git(lease.path, "config", "diff.renameLimit", "1");
+  mkdirSync(join(lease.path, "allowed"), { recursive: true });
+  writeFileSync(join(lease.path, "allowed/copy.txt"), `${protectedContent}destination change\n`);
+  writeFileSync(join(lease.path, "allowed/decoy-one.txt"), `${firstDecoyContent}destination change\n`);
+  writeFileSync(join(lease.path, "allowed/decoy-two.txt"), `${secondDecoyContent}destination change\n`);
+  git(lease.path, "add", ".");
+  git(lease.path, "commit", "-m", "test: copy protected source");
+  const headCommit = git(lease.path, "rev-parse", "HEAD");
+
+  const vulnerableDiff = spawnSync(
+    "git",
+    ["diff", "--name-status", "-z", "--find-renames", "--find-copies-harder", `${baseCommit}..${headCommit}`],
+    { cwd: lease.path, encoding: "utf8" },
+  );
+  assert.equal(vulnerableDiff.status, 0);
+  assert.match(vulnerableDiff.stderr, /renameLimit variable|too many files|exhaustive.*rename/i, "fixture must trigger Git renameLimit degradation");
+  assert.deepEqual(vulnerableDiff.stdout.split("\0").filter(Boolean), [
+    "A", "allowed/copy.txt",
+    "A", "allowed/decoy-one.txt",
+    "A", "allowed/decoy-two.txt",
+  ]);
+
+  const degradedInspection = {
+    changedFiles: vulnerableDiff.stdout.split("\0").filter((token) => token && !/^[A-Z]\d*$/.test(token)),
+  };
+  assert.doesNotThrow(
+    () => workspace.assertWorkspaceChangesWithinPaths(degradedInspection, ["allowed/**"]),
+    "without an explicit limit override, the degraded diff incorrectly lets target-only access pass",
+  );
+
+  const inspection = inspectExecutorWorkspace(lease);
+  assert.deepEqual(inspection.changedFiles, [
+    "allowed/copy.txt",
+    "allowed/decoy-one.txt",
+    "allowed/decoy-two.txt",
+    "forbidden/decoy-one.txt",
+    "forbidden/decoy-two.txt",
+    "forbidden/source.txt",
+  ]);
+  assert.throws(
+    () => workspace.assertWorkspaceChangesWithinPaths(inspection, ["allowed/**"]),
+    /forbidden\/source\.txt/,
+    "the formerly passing target-only gate must fail closed",
+  );
 });
 
 test("assertWorkspaceChangesWithinPaths rejects NUL-byte paths", () => {
