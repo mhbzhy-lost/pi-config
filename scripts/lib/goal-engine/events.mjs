@@ -1,4 +1,5 @@
 import { validateDAG } from "./graph.mjs";
+import { validateTaskDefinitions } from "./task-definition.mjs";
 
 const SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2"]);
 const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
@@ -97,6 +98,7 @@ function copyProjection(p) {
 
 function goalCreated(p, event) {
   const { objective, scope, nonGoals, dod, tasks, taskDefs } = event.data;
+  if (event.schemaVersion === "goal-engine.event.v2") validateTaskDefinitions(tasks, taskDefs);
   if (!objective || typeof objective !== "string") throw new Error("objective is required");
   if (!Array.isArray(tasks) || tasks.length === 0) throw new Error("tasks must be non-empty");
   if (!taskDefs || typeof taskDefs !== "object") throw new Error("taskDefs is required");
@@ -334,7 +336,11 @@ function goalAmended(p, data, schemaVersion) {
     if (updates.writePaths) task.writePaths = updates.writePaths;
     if (updates.acceptance) task.acceptance = updates.acceptance;
   }
-  validateDAG(candidate);
+  if (schemaVersion === "goal-engine.event.v2") {
+    validateTaskDefinitions([...candidate.keys()], Object.fromEntries(candidate));
+  } else {
+    validateDAG(candidate);
+  }
   p.tasks = candidate;
 }
 

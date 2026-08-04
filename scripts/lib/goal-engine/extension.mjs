@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
+import { realpathSync } from "node:fs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState } from "./graph.mjs";
 import { appendEvent, loadProjection, listGoals } from "./store.mjs";
 import { compileTaskContract } from "./dispatch.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
+import { validateTaskDefinitions } from "./task-definition.mjs";
 import {
   allocateExecutorWorkspace,
   loadExecutorWorkspaceLease,
@@ -20,6 +22,31 @@ const GOAL_ID_RE = /[^a-zA-Z0-9._-]+/g;
 const CHECKPOINT_REMINDER_THRESHOLD = 5;
 const DEFAULT_EVENT_VERSION = "goal-engine.event.v2";
 const DEFAULT_DISPOSITION_STRATEGY = "cherry-pick";
+
+function initError(code, observed, remediation) {
+  return Object.assign(new Error(`${code}: observed=${observed}; remediation=${remediation}; stateChanged=false`), { code });
+}
+
+function gitOutput(cwd, args, code, observed, remediation, allowedStatuses = []) {
+  try { return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(); }
+  catch (error) {
+    if (allowedStatuses.includes(error.status)) return null;
+    throw initError(code, observed, remediation);
+  }
+}
+
+function assertInitPreflight(cwd, root) {
+  const physicalCwd = realpathSync(cwd);
+  const topLevel = gitOutput(cwd, ["rev-parse", "--show-toplevel"], "GIT_INFRASTRUCTURE_ERROR", "Git worktree top-level could not be read", "repair Git and retry goal_init");
+  if (realpathSync(topLevel) !== physicalCwd) throw initError("UNSAFE_GIT_CWD", `cwd=${physicalCwd}, topLevel=${topLevel}`, "run goal_init from the repository top-level");
+  gitOutput(cwd, ["rev-parse", "--verify", "HEAD"], "INVALID_GIT_HEAD", "HEAD is unborn or invalid", "create a commit on an attached branch before goal_init");
+  const ref = gitOutput(cwd, ["symbolic-ref", "--quiet", "HEAD"], "DETACHED_GIT_HEAD", "HEAD is detached", "checkout an attached branch before goal_init", [1]);
+  if (!ref) throw initError("DETACHED_GIT_HEAD", "HEAD is detached", "checkout an attached branch before goal_init");
+  const ignored = gitOutput(cwd, ["check-ignore", "-q", ".state/goal-engine/"], "GIT_INFRASTRUCTURE_ERROR", "could not inspect .state/goal-engine ignore rule", "repair Git ignore configuration", [1]);
+  if (ignored === null) throw initError("STATE_NOT_IGNORED", ".state/goal-engine/ is not ignored", "add .state/goal-engine/ to .gitignore manually before goal_init");
+  const tracked = gitOutput(cwd, ["ls-files", "--", STATE_ROOT_REL], "GIT_INFRASTRUCTURE_ERROR", "could not inspect tracked state entries", "repair Git index and retry goal_init");
+  if (tracked) throw initError("STATE_TRACKED", `tracked entries: ${tracked}`, "remove .state/goal-engine from the Git index before goal_init");
+}
 
 function gitHead(cwd) {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
@@ -318,6 +345,16 @@ export function createGoalEngineExtension(pi, options = {}) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScope(ctx);
+      assertInitPreflight(cwd, root);
+      const activeGoals = listGoalsFn(root);
+      if (activeGoals.length > 0) {
+        const goalId = activeGoals[0];
+        throw Object.assign(initError("ACTIVE_GOAL_EXISTS", `active goal=${goalId}`, "call goal_status before creating another goal"), {
+          code: "ACTIVE_GOAL_EXISTS",
+          requiredNextAction: { tool: "goal_status", params: { goal_id: goalId } },
+          message: `${initError("ACTIVE_GOAL_EXISTS", `active goal=${goalId}`, "call goal_status before creating another goal").message}; ${JSON.stringify({ requiredNextAction: { tool: "goal_status", params: { goal_id: goalId } } })}`,
+        });
+      }
       const goalId = slugify(params.objective);
       const taskDefs = {};
       const taskIds = [];
@@ -331,7 +368,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           workflow: t.workflow || "tdd",
         };
       }
-      validateDAG(new Map(Object.entries(taskDefs).map(([k, v]) => [k, { deps: v.deps }])));
+      validateTaskDefinitions(taskIds, taskDefs);
 
       const event = makeEvent("goal.created", {
         objective: params.objective,
