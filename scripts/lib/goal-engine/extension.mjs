@@ -50,6 +50,15 @@ function preflightError(code, observed, remediation, requiredNextAction) {
   return error;
 }
 
+function workspaceMutationError(error, requiredNextAction) {
+  const observed = String(error?.message || error);
+  const code = /persisted lease not found/i.test(observed) ? "EXECUTOR_LEASE_NOT_FOUND"
+    : /Executor workspace is missing/i.test(observed) ? "EXECUTOR_WORKSPACE_MISSING"
+      : /workspace identity|lease .*mismatch|live branch mismatch/i.test(observed) ? "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH"
+        : "GIT_INFRASTRUCTURE_ERROR";
+  return preflightError(code, observed, "stop modifying the workspace and use the typed goal_status recovery action", requiredNextAction);
+}
+
 function assertRepositoryPreflight(cwd, { operation, requiredNextAction }) {
   const retry = `repair Git and retry ${operation}`;
   const realpathRemediation = requiredNextAction ? retry : "repair filesystem access and retry goal_init";
@@ -629,11 +638,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           lease = resolveLease(task, goalId, params.task_id, cwd, root);
           inspection = inspectExecutorWorkspace(lease);
         } catch (error) {
-          const observed = error.message;
-          const code = /persisted lease not found/.test(observed) ? "EXECUTOR_LEASE_NOT_FOUND"
-            : /workspace identity|lease .*mismatch/.test(observed) ? "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH"
-              : "GIT_INFRASTRUCTURE_ERROR";
-          throw preflightError(code, observed, "stop modifying the workspace and wait for typed recovery guidance", retry);
+          throw workspaceMutationError(error, retry);
         }
         if (!inspection.descendant) {
           throw preflightError("EXECUTOR_COMMIT_RANGE_INVALID", `workspace=${lease.path}; descendant=false`, remediation, retry);
@@ -900,10 +905,19 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (taskWorkspace.legacyOriginRef || !taskWorkspace.originRef) {
         throw new Error("legacy/manual recovery required: workspace disposition has no originRef");
       }
-      const lease = resolveLease(task, goalId, taskId, cwd, root, { allowSynthetic: taskWorkspace.phase !== "active" });
-      // An active disposition has no durable recovery event yet: prove the exact
-      // lease and executor identity before reading origin HEAD or starting cleanup.
-      const activeInspection = taskWorkspace.phase === "active" ? inspectExecutorWorkspace(lease) : null;
+      let lease;
+      let activeInspection;
+      // Active mutations must classify lease/inspection failures before any origin
+      // HEAD read, event append, or cleanup side effect.
+      try {
+        lease = resolveLease(task, goalId, taskId, cwd, root, { allowSynthetic: taskWorkspace.phase !== "active" });
+        activeInspection = taskWorkspace.phase === "active" ? inspectExecutorWorkspace(lease) : null;
+      } catch (error) {
+        if (taskWorkspace.phase === "active") {
+          throw workspaceMutationError(error, { tool: "goal_status", params: { goal_id: goalId } });
+        }
+        throw error;
+      }
       // This guard deliberately precedes every recovery probe, event append, HEAD
       // read, and cleanup action. Patch equivalence on another ref is not consent.
       if (currentOriginRef(cwd) !== taskWorkspace.originRef) {
