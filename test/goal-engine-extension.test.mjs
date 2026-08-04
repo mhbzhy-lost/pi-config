@@ -1565,7 +1565,7 @@ test("failed settle keeps active workspace and blocks redispatch until discard",
   assert.equal(state.branchExists, true);
 });
 
-test("preserve keeps workspace and rejects accept/dispatch/discard afterwards", async () => {
+test("preserve keeps workspace and rejects discard after a tampered lease", async () => {
   const cwd = tmpCwd();
   const objective = "Preserve gate test goal";
   const goalId = objectiveToGoalId(objective);
@@ -2787,7 +2787,10 @@ test("preserved release discard cleans orphan and succeeded fixtures before one 
     assert.deepEqual(result, { action: "discarded", released: true }); assert.equal(observedCleanup, true);
     assertReleasedPreservation(fixture, before.workspace.executorHead);
     const status = JSON.parse(await invoke(pi, "goal_status", {}));
-    assert.deepEqual(status.runnable, ["t1"]); assert.equal(status.tasks.t1.requiredTool, "goal_dispatch");
+    assert.deepEqual(status.runnable, ["t1"]);
+    assertTaskMachineAction(status.tasks.t1, {
+      allowedActions: ["goal_dispatch"], requiredTool: "goal_dispatch", requiredParams: { task_id: "t1" }, blockingReason: null,
+    });
     assert.deepEqual(JSON.parse(await invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" })), { action: "discarded", released: true });
     assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released").length, 1);
     assert.equal(JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace.attempt, 2);
@@ -2795,16 +2798,33 @@ test("preserved release discard cleans orphan and succeeded fixtures before one 
 });
 
 test("preserved release append failures recover only after cleanup is provably complete", async () => {
-  for (const factory of [createFailingAppendEvent, createDurableThenThrowAppendEvent]) {
+  for (const { name, factory, durable } of [
+    { name: "before durable", factory: createFailingAppendEvent, durable: false },
+    { name: "durable then throw", factory: createDurableThenThrowAppendEvent, durable: true },
+  ]) {
     const fixture = await disposedPreservedFixture("orphan"); const injected = factory("task.workspace_preservation_released");
     const beforeBytes = persistedStateBytes(fixture.cwd, fixture.goalId); const pi = createMockPi(fixture.cwd);
     createGoalEngineWithAppendInjection(pi, { appendEvent: injected.appendEvent });
-    await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }));
-    assert.deepEqual([workspaceState(fixture.cwd, fixture.goalId, "t1").workspaceExists, workspaceState(fixture.cwd, fixture.goalId, "t1").leaseExists, workspaceState(fixture.cwd, fixture.goalId, "t1").branchExists], [false, false, false]);
-    if (factory === createFailingAppendEvent) assert.deepEqual(persistedStateBytes(fixture.cwd, fixture.goalId), beforeBytes);
+    await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }), name);
+    const resources = workspaceState(fixture.cwd, fixture.goalId, "t1");
+    assert.deepEqual([resources.workspaceExists, resources.leaseExists, resources.branchExists], [false, false, false]);
+    const releasesBeforeRetry = readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released");
+    const projectionBeforeRetry = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
+    assert.equal(releasesBeforeRetry.length, durable ? 1 : 0);
+    if (durable) {
+      assert.equal(projectionBeforeRetry.workspace.preservedResourcesReleased, true);
+    } else {
+      assert.notEqual(projectionBeforeRetry.workspace.preservedResourcesReleased, true);
+      assert.deepEqual(persistedStateBytes(fixture.cwd, fixture.goalId), beforeBytes);
+    }
+    const preservedWorkspaceBeforeRetry = { ...projectionBeforeRetry.workspace };
     const retry = createMockPi(fixture.cwd); createGoalEngineExtension(retry);
     assert.deepEqual(JSON.parse(await invoke(retry, "goal_integrate", { task_id: "t1", action: "discard" })), { action: "discarded", released: true });
     assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released").length, 1);
+    const projectionAfterRetry = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
+    assert.equal(projectionAfterRetry.workspace.disposition, "preserved");
+    assert.equal(projectionAfterRetry.workspace.executorHead, preservedWorkspaceBeforeRetry.executorHead);
+    if (durable) assert.deepEqual(projectionAfterRetry.workspace, preservedWorkspaceBeforeRetry);
   }
 });
 
@@ -2826,17 +2846,19 @@ test("preserved release identity gates reject before cleanup or release fact", a
 });
 
 test("preserved release rejects a deterministic second-inspection HEAD race without cleanup", async () => {
-  const fixture = await disposedPreservedFixture("succeeded"); let calls = 0; let racedSnapshot;
+  const fixture = await disposedPreservedFixture("succeeded"); let calls = 0; let racedSnapshot; const inspectedHeads = [];
   const pi = createMockPi(fixture.cwd);
   createGoalEngineExtension(pi, { inspectExecutorWorkspace(lease) {
+    calls += 1;
+    if (calls === 2) { commitWorkspaceChange(lease, "race.ts", "race\n", "test: preserved inspection race"); racedSnapshot = fullRejectionSnapshot(fixture.cwd, fixture.goalId); }
     const inspected = inspectExecutorWorkspace(lease);
-    if (++calls === 2) { commitWorkspaceChange(lease, "race.ts", "race\n", "test: preserved inspection race"); racedSnapshot = fullRejectionSnapshot(fixture.cwd, fixture.goalId); }
+    inspectedHeads.push(inspected.headCommit);
     return inspected;
   } });
   await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }), (error) => {
     assert.equal(error.code, "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH"); assert.deepEqual(error.requiredNextAction, { tool: "goal_status", params: { goal_id: fixture.goalId } }); return true;
   });
-  assert.equal(calls, 2); assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), racedSnapshot);
+  assert.equal(calls, 2); assert.notEqual(inspectedHeads[0], inspectedHeads[1]); assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), racedSnapshot);
   assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released").length, 0);
 });
 
