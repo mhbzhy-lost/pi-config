@@ -843,6 +843,23 @@ function orphanArgs(goalId = "orphan", taskId = "t1", attempt = 1) {
   return { goalId, taskId, attempt, originRoot, stateRoot, lease };
 }
 
+function persistedLease(lease, overrides = {}) {
+  return {
+    goalId: lease.goalId,
+    taskId: lease.taskId,
+    attempt: lease.attempt,
+    originRoot: lease.originRoot,
+    stateRoot: lease.stateRoot,
+    baseCommit: lease.baseCommit,
+    originRef: lease.originRef,
+    path: lease.path,
+    branch: lease.branch,
+    ownerToken: lease.ownerToken,
+    createdAt: lease.createdAt,
+    ...overrides,
+  };
+}
+
 function assertOrphanUnverified(result) {
   assert.equal(result.kind, "unverified");
   assert.deepEqual(Object.keys(result.resources).sort(), ["branchExists", "leaseExists", "workspaceExists"]);
@@ -901,7 +918,10 @@ test("orphan inventory persisted lease envelope rejects malformed and canonical 
       : field === "path" ? other.lease.path
       : field === "originRoot" ? other.originRoot
       : other.stateRoot;
-    writeFileSync(fixture.lease.leasePath, field === "malformed JSON" ? "{" : JSON.stringify({ ...fixture.lease, [field]: value }));
+    const serializedLease = field === "malformed JSON"
+      ? "{"
+      : JSON.stringify(persistedLease(fixture.lease, { [field]: value }));
+    writeFileSync(fixture.lease.leasePath, serializedLease);
     assertOrphanUnverified(orphanInventoryApi()(fixture));
   }
 });
@@ -917,7 +937,8 @@ test("orphan inventory commit-range identity distinguishes invalid and usable hi
     "clean non-empty descendant",
   ]) {
     const fixture = orphanArgs(`range-${scenario.replace(/ /g, "-")}`);
-    const lease = { ...fixture.lease };
+    const lease = persistedLease(fixture.lease);
+    const persisted = { ...lease, leasePath: fixture.lease.leasePath };
     if (scenario === "missing base") lease.baseCommit = "0000000000000000000000000000000000000000";
     if (scenario === "unrelated base") {
       const unrelatedBaseTree = git(fixture.originRoot, "rev-parse", "HEAD^{tree}");
@@ -932,12 +953,12 @@ test("orphan inventory commit-range identity distinguishes invalid and usable hi
       git(lease.path, "add", ".");
       git(lease.path, "commit", "-m", "test: child");
     }
-    writeFileSync(lease.leasePath, JSON.stringify(lease));
+    writeFileSync(fixture.lease.leasePath, JSON.stringify(lease));
     const result = orphanInventoryApi()(fixture);
     if (scenario === "missing base" || scenario === "unrelated base") {
       assertOrphanUnverified(result);
     } else {
-      assertOrphanVerified(result, lease);
+      assertOrphanVerified(result, persisted);
       if (scenario === "dirty no-commit") {
         assert.equal(result.inspection.hasCommits, false);
         assert.equal(result.inspection.clean, false);
@@ -977,10 +998,10 @@ test("orphan inventory canonical roots and paths accept aliases but reject other
   assertOrphanVerified(orphanInventoryApi()({ ...fixture, originRoot: originAlias, stateRoot: stateAlias }), fixture.lease);
   for (const field of ["path", "originRoot", "stateRoot"]) {
     const other = orphanArgs(`canonical-other-${field}`);
-    const lease = { ...fixture.lease, [field]: field === "path" ? other.lease.path : other[field] };
+    const lease = persistedLease(fixture.lease, { [field]: field === "path" ? other.lease.path : other[field] });
     writeFileSync(fixture.lease.leasePath, JSON.stringify(lease));
     assertOrphanUnverified(orphanInventoryApi()(fixture));
-    writeFileSync(fixture.lease.leasePath, JSON.stringify(fixture.lease));
+    writeFileSync(fixture.lease.leasePath, JSON.stringify(persistedLease(fixture.lease)));
   }
 });
 
@@ -1010,14 +1031,14 @@ test("orphan inventory review regression treats an ELOOP exact-attempt probe as 
 
 test("orphan inventory review regression rejects an unknown persisted lease field", () => {
   const fixture = orphanArgs("review-unknown");
-  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, unexpected: true }));
+  writeFileSync(fixture.lease.leasePath, JSON.stringify(persistedLease(fixture.lease, { unexpected: true })));
 
   assertOrphanUnverified(orphanInventoryApi()(fixture));
 });
 
 test("orphan inventory review regression rejects persisted leasePath", () => {
   const fixture = orphanArgs("review-lease-path");
-  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, leasePath: fixture.lease.leasePath }));
+  writeFileSync(fixture.lease.leasePath, JSON.stringify(persistedLease(fixture.lease, { leasePath: fixture.lease.leasePath })));
 
   assertOrphanUnverified(orphanInventoryApi()(fixture));
 });
@@ -1038,21 +1059,21 @@ test("orphan inventory review regression rejects a JSON null persisted lease", (
 
 test("orphan inventory review regression rejects a relative persisted path", () => {
   const fixture = orphanArgs("review-relative-path");
-  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, path: relative(process.cwd(), fixture.lease.path) }));
+  writeFileSync(fixture.lease.leasePath, JSON.stringify(persistedLease(fixture.lease, { path: relative(process.cwd(), fixture.lease.path) })));
 
   assertOrphanUnverified(orphanInventoryApi()(fixture));
 });
 
 test("orphan inventory review regression rejects a relative persisted originRoot", () => {
   const fixture = orphanArgs("review-relative-origin");
-  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, originRoot: relative(process.cwd(), fixture.originRoot) }));
+  writeFileSync(fixture.lease.leasePath, JSON.stringify(persistedLease(fixture.lease, { originRoot: relative(process.cwd(), fixture.originRoot) })));
 
   assertOrphanUnverified(orphanInventoryApi()(fixture));
 });
 
 test("orphan inventory review regression rejects a relative persisted stateRoot", () => {
   const fixture = orphanArgs("review-relative-state");
-  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, stateRoot: relative(process.cwd(), fixture.stateRoot) }));
+  writeFileSync(fixture.lease.leasePath, JSON.stringify(persistedLease(fixture.lease, { stateRoot: relative(process.cwd(), fixture.stateRoot) })));
 
   assertOrphanUnverified(orphanInventoryApi()(fixture));
 });
@@ -1062,7 +1083,7 @@ test("orphan inventory review regression rechecks a persisted path alias after i
   const other = orphanArgs("review-alias-other");
   const alias = `${fixture.lease.path}-alias`;
   symlinkSync(fixture.lease.path, alias);
-  writeFileSync(fixture.lease.leasePath, JSON.stringify({ ...fixture.lease, path: alias }));
+  writeFileSync(fixture.lease.leasePath, JSON.stringify(persistedLease(fixture.lease, { path: alias })));
   let hookCalls = 0;
 
   const result = orphanInventoryApi()(fixture, {
