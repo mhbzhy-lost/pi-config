@@ -197,6 +197,27 @@ function assertDispatchRequiredNextAction(error, expected) {
   assert.deepEqual(JSON.parse(match[1]), expected);
 }
 
+function assertOrphanRecoveryContract(error, expected) {
+  assert.equal(error.code, expected.code);
+  assert.deepEqual(error.observed, expected.observed);
+  assert.equal(error.remediation, expected.remediation);
+  assert.equal(error.stateChanged, false);
+  assert.deepEqual(error.requiredNextAction, expected.requiredNextAction);
+  assert.deepEqual(error.blockingReason, expected.blockingReason);
+  assert.match(error.message, /observed=.*remediation=.*stateChanged=false/);
+  const match = error.message.match(/recoveryContract=(\{.*\})$/);
+  assert.ok(match, "orphan dispatch error must end with recoveryContract JSON");
+  assert.deepEqual(JSON.parse(match[1]), {
+    code: error.code,
+    observed: error.observed,
+    remediation: error.remediation,
+    stateChanged: error.stateChanged,
+    requiredNextAction: error.requiredNextAction,
+    blockingReason: error.blockingReason,
+  });
+  assert.deepEqual(JSON.parse(match[1]), expected);
+}
+
 function assertTaskMachineAction(task, expected) {
   assert.deepEqual(task.allowedActions, expected.allowedActions);
   const required = task.requiredNextAction;
@@ -2432,10 +2453,18 @@ test("event rollback verified orphan status and dispatch are side-effect free", 
   });
   assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
   await assert.rejects(() => invoke(fixture.pi, "goal_dispatch", { task_id: "t1" }), (error) => {
-    assert.equal(error.code, "ORPHANED_EXECUTOR_WORKSPACE");
-    assert.match(error.message, /observed=.*remediation=.*stateChanged=false/);
-    assert.equal(error.requiredNextAction, null);
-    assert.deepEqual(error.blockingReason, status.tasks.t1.blockingReason);
+    assertOrphanRecoveryContract(error, {
+      code: "ORPHANED_EXECUTOR_WORKSPACE",
+      observed: {
+        taskId: "t1",
+        candidate: { attempt: 1 },
+        resources: { workspaceExists: true, branchExists: true, leaseExists: true },
+      },
+      remediation: "review the orphaned executor workspace and explicitly choose discard or preserve via goal_integrate",
+      stateChanged: false,
+      requiredNextAction: null,
+      blockingReason: status.tasks.t1.blockingReason,
+    });
     return true;
   });
   assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
@@ -2454,7 +2483,27 @@ test("event rollback unverified orphan has no destructive recovery choices", asy
   assert.equal(Object.hasOwn(status.tasks.t1.blockingReason, "choices"), false);
   assert.deepEqual(status.tasks.t1.blockingReason.resources, { workspaceExists: true, branchExists: true, leaseExists: false });
   assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
-  await assert.rejects(() => invoke(fixture.pi, "goal_dispatch", { task_id: "t1" }), (error) => error.code === "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED" && (error.requiredNextAction === null || error.requiredNextAction?.tool === "goal_status"));
+  await assert.rejects(() => invoke(fixture.pi, "goal_dispatch", { task_id: "t1" }), (error) => {
+    const blockingReason = {
+      code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+      resources: { workspaceExists: true, branchExists: true, leaseExists: false },
+      observed: "partial executor workspace resources",
+    };
+    assert.equal(Object.hasOwn(error.blockingReason, "choices"), false);
+    assertOrphanRecoveryContract(error, {
+      code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+      observed: {
+        taskId: "t1",
+        candidate: { attempt: 1 },
+        resources: { workspaceExists: true, branchExists: true, leaseExists: false },
+      },
+      remediation: "inspect the authoritative recovery state with goal_status before any workspace action",
+      stateChanged: false,
+      requiredNextAction: { tool: "goal_status", params: { goal_id: fixture.goalId } },
+      blockingReason,
+    });
+    return true;
+  });
   assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
 });
 
