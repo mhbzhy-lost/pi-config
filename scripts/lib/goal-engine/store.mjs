@@ -1,10 +1,11 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, linkSync, existsSync, chmodSync, rmSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { applyEvent, createProjection } from "./events.mjs";
 
 const REGISTRY_SCHEMA_VERSION = "goal-engine.registry.v1";
-const LOCK_TIMEOUT_MS = 500;
+const LOCK_TIMEOUT_MS = 1500;
 const LOCK_WAIT_MS = 10;
 
 export function appendEvent(stateRoot, event, expectedVersion) {
@@ -52,6 +53,7 @@ export function acquireWriterLock(stateRoot) {
   mkdirSync(stateRoot, { recursive: true });
   const lockPath = join(stateRoot, ".writer.lock");
   const token = randomUUID();
+  const birthIdentity = currentProcessBirthIdentity();
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
     const guard = acquireRecoveryGuard(stateRoot, deadline);
@@ -61,7 +63,7 @@ export function acquireWriterLock(stateRoot) {
         mkdirSync(candidate, { mode: 0o700 });
         chmodSync(candidate, 0o700);
         const ownerPath = join(candidate, "owner.json");
-        writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }) + "\n", { mode: 0o600 });
+        writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString(), birthIdentity }) + "\n", { mode: 0o600 });
         chmodSync(ownerPath, 0o600);
         renameSync(candidate, lockPath);
         return { token };
@@ -69,7 +71,7 @@ export function acquireWriterLock(stateRoot) {
         if (existsSync(candidate)) rmSync(candidate, { recursive: true, force: true });
         if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
         const owner = readLockOwner(lockPath);
-        if (!owner || !pidIsAlive(owner.pid)) quarantineStaleLock(lockPath);
+        if (ownerState(owner) === "dead") quarantineStaleLock(lockPath);
       }
     } finally {
       releaseRecoveryGuard(stateRoot, guard.token);
@@ -82,12 +84,31 @@ export function acquireWriterLock(stateRoot) {
 function readLockOwner(lockPath) {
   try {
     const owner = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8"));
-    return Number.isInteger(owner.pid) && typeof owner.token === "string" ? owner : null;
+    return validOwner(owner) ? owner : null;
   } catch { return null; }
 }
 
-function pidIsAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
+function validOwner(owner) {
+  return Number.isInteger(owner?.pid) && owner.pid > 0 && typeof owner.token === "string" && owner.token.length > 0 && typeof owner.createdAt === "string" && !Number.isNaN(Date.parse(owner.createdAt)) && typeof owner.birthIdentity === "string" && owner.birthIdentity.length > 0;
+}
+
+function currentProcessBirthIdentity() {
+  try { return processBirthIdentity(process.pid); }
+  catch { throw identityUnavailable(); }
+}
+
+function processBirthIdentity(pid) {
+  const identity = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  if (!identity) throw new Error("process birth identity unavailable");
+  return identity;
+}
+
+function ownerState(owner) {
+  if (!owner) return "unknown";
+  try { process.kill(owner.pid, 0); }
+  catch (error) { return error.code === "ESRCH" ? "dead" : "unknown"; }
+  try { return processBirthIdentity(owner.pid) === owner.birthIdentity ? "live" : "dead"; }
+  catch { return "unknown"; }
 }
 
 function quarantineStaleLock(lockPath) {
@@ -104,9 +125,10 @@ export function acquireRecoveryGuard(stateRoot, deadline) {
   mkdirSync(stateRoot, { recursive: true });
   const guardPath = join(stateRoot, ".writer.recovery.guard");
   const token = randomUUID();
+  const birthIdentity = currentProcessBirthIdentity();
   const candidate = `${guardPath}.candidate-${process.pid}-${randomUUID()}`;
   try {
-    writeFileSync(candidate, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }) + "\n", { flag: "wx", mode: 0o600 });
+    writeFileSync(candidate, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString(), birthIdentity }) + "\n", { flag: "wx", mode: 0o600 });
     while (true) {
       try {
         linkSync(candidate, guardPath);
@@ -114,7 +136,7 @@ export function acquireRecoveryGuard(stateRoot, deadline) {
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
         const owner = readRecoveryGuardOwner(guardPath);
-        if (!owner || recoveryGuardOwnerState(owner) === "dead") quarantineStaleGuard(guardPath);
+        if (ownerState(owner) === "dead") quarantineStaleGuard(guardPath);
         if (Date.now() >= deadline) throw lockTimeout();
         sleep(LOCK_WAIT_MS);
       }
@@ -127,16 +149,8 @@ export function acquireRecoveryGuard(stateRoot, deadline) {
 function readRecoveryGuardOwner(guardPath) {
   try {
     const owner = JSON.parse(readFileSync(guardPath, "utf8"));
-    return Number.isInteger(owner.pid) && owner.pid > 0 && typeof owner.token === "string" && owner.token.length > 0 && typeof owner.createdAt === "string" && !Number.isNaN(Date.parse(owner.createdAt)) ? owner : null;
+    return validOwner(owner) ? owner : null;
   } catch { return null; }
-}
-
-function recoveryGuardOwnerState(owner) {
-  try { process.kill(owner.pid, 0); return "live"; }
-  catch (error) {
-    if (error.code === "ESRCH") return "dead";
-    return "unknown";
-  }
 }
 
 function quarantineStaleGuard(guardPath) {
@@ -172,6 +186,7 @@ export function releaseWriterLock(stateRoot, token) {
 
 function sleep(milliseconds) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds); }
 function lockTimeout() { return Object.assign(new Error("goal engine store writer lock timed out"), { code: "GOAL_ENGINE_STORE_LOCK_TIMEOUT" }); }
+function identityUnavailable() { return Object.assign(new Error("goal engine store process birth identity unavailable"), { code: "GOAL_ENGINE_STORE_LOCK_IDENTITY_UNAVAILABLE" }); }
 function writerLockLost() { return Object.assign(new Error("goal engine store writer lock was lost"), { code: "GOAL_ENGINE_STORE_LOCK_LOST" }); }
 function projectionConflict(expected, current) { return Object.assign(new Error(`projection version conflict: expected ${expected}, current ${current}`), { code: "PROJECTION_CONFLICT" }); }
 
