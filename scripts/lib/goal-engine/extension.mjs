@@ -638,6 +638,9 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
 
         const terminalLease = resolveLease(task, goalId, taskId, cwd, root);
+        if (currentOriginRef(cwd) !== taskWorkspace.originRef) {
+          throw new Error(`Origin ref mismatch (expected ${taskWorkspace.originRef})`);
+        }
         const resources = inspectExecutorWorkspaceResources(terminalLease);
 
         if (action === "preserve") {
@@ -645,7 +648,9 @@ export function createGoalEngineExtension(pi, options = {}) {
             throw new Error("preserve disposition requires workspace, branch, and lease to remain available");
           }
         } else if (resources.workspaceExists || resources.branchExists || resources.leaseExists) {
-          throw new Error("workspace is already disposed and cannot change disposition");
+          releaseExecutorWorkspace(terminalLease, {
+            disposition: action === "integrate" ? "integrated-cleanup" : "discarded-cleanup",
+          });
         }
 
         activeLeases.delete(key);
@@ -656,6 +661,11 @@ export function createGoalEngineExtension(pi, options = {}) {
         throw new Error("legacy/manual recovery required: workspace disposition has no originRef");
       }
       const lease = resolveLease(task, goalId, taskId, cwd, root);
+      // This guard deliberately precedes every recovery probe, event append, HEAD
+      // read, and cleanup action. Patch equivalence on another ref is not consent.
+      if (currentOriginRef(cwd) !== taskWorkspace.originRef) {
+        throw new Error(`Origin ref mismatch (expected ${taskWorkspace.originRef})`);
+      }
 
       const ensureApplied = () => {
         const currentTask = projection.tasks.get(taskId);
@@ -676,6 +686,16 @@ export function createGoalEngineExtension(pi, options = {}) {
           return false;
         }
 
+        // Persisting can fail. Do it before cleanup so a failed append never turns
+        // an originRef-rejected retry into an irreversible resource release.
+        const disposedEvent = makeEvent("task.workspace_disposed", {
+          taskId,
+          attempt: currentWorkspace.attempt,
+          action: currentWorkspace.requestedAction,
+          released: true,
+        }, goalId);
+        projection = appendEventFn(root, disposedEvent, projection.version);
+
         const resourcesBefore = inspectExecutorWorkspaceResources(lease);
         if (resourcesBefore.workspaceExists || resourcesBefore.branchExists || resourcesBefore.leaseExists) {
           releaseExecutorWorkspace(
@@ -688,16 +708,8 @@ export function createGoalEngineExtension(pi, options = {}) {
 
         const resourcesAfter = inspectExecutorWorkspaceResources(lease);
         if (resourcesAfter.workspaceExists || resourcesAfter.branchExists || resourcesAfter.leaseExists) {
-          throw new Error("failed to release workspace resources before disposal");
+          throw new Error("failed to release workspace resources after disposal");
         }
-
-        const disposedEvent = makeEvent("task.workspace_disposed", {
-          taskId,
-          attempt: currentWorkspace.attempt,
-          action: currentWorkspace.requestedAction,
-          released: true,
-        }, goalId);
-        projection = appendEventFn(root, disposedEvent, projection.version);
         return true;
       };
 

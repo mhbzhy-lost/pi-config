@@ -979,8 +979,17 @@ test("action recovery: applied append retry should skip duplicate Git integratio
     blockingReason: null,
   });
 
+  const otherStatusBeforeRetry = git(cwd, "status", "--porcelain=v1");
+  git(cwd, "branch", "other");
+  git(cwd, "switch", "other");
+  const otherBeforeRetry = git(cwd, "rev-parse", "HEAD");
   const retryPi = createMockPi(cwd);
   createGoalEngineExtension(retryPi);
+  await assert.rejects(() => invoke(retryPi, "goal_integrate", { task_id: "t1", action: "integrate" }), /origin ref mismatch/i);
+  assert.equal(git(cwd, "rev-parse", "HEAD"), otherBeforeRetry);
+  assert.equal(git(cwd, "status", "--porcelain=v1"), otherStatusBeforeRetry);
+  assert.deepEqual(workspaceState(cwd, goalId, "t1"), stateBeforeRetry);
+  git(cwd, "switch", "main");
   const statusFromFailureB = JSON.parse(await invoke(retryPi, "goal_status", {}));
   assert.deepEqual(statusFromFailureA.tasks.t1.allowedActions, statusFromFailureB.tasks.t1.allowedActions);
   assert.deepEqual(statusFromFailureA.tasks.t1.requiredNextAction, statusFromFailureB.tasks.t1.requiredNextAction);
@@ -1048,9 +1057,9 @@ test("action recovery: disposed append can be repaired from projection snapshot 
   assert.notEqual(originHeadAfterFailure, originHeadBeforeIntegration);
 
   const stateAfterFailure = workspaceState(cwd, goalId, "t1");
-  assert.equal(stateAfterFailure.workspaceExists, false);
-  assert.equal(stateAfterFailure.leaseExists, false);
-  assert.equal(stateAfterFailure.branchExists, false);
+  assert.equal(stateAfterFailure.workspaceExists, true);
+  assert.equal(stateAfterFailure.leaseExists, true);
+  assert.equal(stateAfterFailure.branchExists, true);
 
   const projectionAfterFailure = loadProjection(join(cwd, ".state/goal-engine"), goalId);
   const taskAfterFailure = projectionAfterFailure.tasks.get("t1");
@@ -1072,6 +1081,16 @@ test("action recovery: disposed append can be repaired from projection snapshot 
   assert.deepEqual(statusFromFailureA.tasks.t1.allowedActions, statusFromFailureB.tasks.t1.allowedActions);
   assert.deepEqual(statusFromFailureA.tasks.t1.requiredNextAction, statusFromFailureB.tasks.t1.requiredNextAction);
   assert.deepEqual(statusFromFailureA.tasks.t1.blockingReason, statusFromFailureB.tasks.t1.blockingReason);
+
+  const otherStatusBeforeRetry = git(cwd, "status", "--porcelain=v1");
+  git(cwd, "branch", "other");
+  git(cwd, "switch", "other");
+  const otherBeforeRetry = git(cwd, "rev-parse", "HEAD");
+  await assert.rejects(() => invoke(retryPi, "goal_integrate", { task_id: "t1", action: "integrate" }), /origin ref mismatch/i);
+  assert.equal(git(cwd, "rev-parse", "HEAD"), otherBeforeRetry);
+  assert.equal(git(cwd, "status", "--porcelain=v1"), otherStatusBeforeRetry);
+  assert.deepEqual(workspaceState(cwd, goalId, "t1"), stateAfterFailure);
+  git(cwd, "switch", "main");
 
   const result = JSON.parse(await invoke(retryPi, "goal_integrate", { task_id: "t1", action: "integrate" }));
   assert.equal(result.action, "integrated");
@@ -1184,9 +1203,9 @@ test("event failure: disposed append durable-then-throw keeps disposed and rejec
   assert.equal(taskAfterFailure.workspace.released, true);
 
   const stateAfterFailure = workspaceState(cwd, goalId, "t1");
-  assert.equal(stateAfterFailure.workspaceExists, false);
-  assert.equal(stateAfterFailure.leaseExists, false);
-  assert.equal(stateAfterFailure.branchExists, false);
+  assert.equal(stateAfterFailure.workspaceExists, true);
+  assert.equal(stateAfterFailure.leaseExists, true);
+  assert.equal(stateAfterFailure.branchExists, true);
 
   const eventsAfterFailure = readGoalEvents(cwd, goalId).filter((event) => ["task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"].includes(event.type));
   assert.equal(eventsAfterFailure.filter((event) => event.type === "task.workspace_disposition_started").length, 1);

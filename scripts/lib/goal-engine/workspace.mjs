@@ -312,7 +312,15 @@ export function isExecutorWorkspaceIntegrated(lease, { strategy, executorHead } 
 }
 
 function refExists(cwd, ref) {
-  try { git(cwd, "rev-parse", "-q", "--verify", ref); return true; } catch { return false; }
+  try {
+    git(cwd, "rev-parse", "-q", "--verify", ref);
+    return true;
+  } catch (error) {
+    // rev-parse uses status 1 for an absent ref. Infrastructure failures must not
+    // be mistaken for absence, because that would bypass the fail-closed gate.
+    if (error?.status === 1) return false;
+    throw error;
+  }
 }
 
 function hasRebaseState(cwd) {
@@ -341,7 +349,32 @@ function goalOwnsSequencer(origin, strategy, lease, executorHead) {
   if (!refExists(origin, marker)) return false;
   const marked = git(origin, "rev-parse", marker);
   if (strategy === "merge") return marked === executorHead;
-  try { git(lease.path, "merge-base", "--is-ancestor", marked, executorHead); return true; } catch { return false; }
+  try {
+    git(lease.path, "merge-base", "--is-ancestor", marked, executorHead);
+    return true;
+  } catch (error) {
+    if (error?.status === 1) return false;
+    throw error;
+  }
+}
+
+function recoverGoalSequencer(origin, { strategy, lease, executorHead, originRef, originHeadBefore }) {
+  const marker = strategy === "cherry-pick" ? "CHERRY_PICK_HEAD" : "MERGE_HEAD";
+  const otherMarkers = strategy === "cherry-pick" ? ["MERGE_HEAD", "REVERT_HEAD"] : ["CHERRY_PICK_HEAD", "REVERT_HEAD"];
+  if (!refExists(origin, marker)) return false;
+  const currentRef = git(origin, "symbolic-ref", "--quiet", "HEAD");
+  if (currentRef !== originRef || git(origin, "rev-parse", "HEAD") !== originHeadBefore) {
+    throw new Error("Goal sequencer recovery identity mismatch; preserving Git operation");
+  }
+  if (otherMarkers.some((ref) => refExists(origin, ref)) || hasRebaseState(origin)) return false;
+  if (!goalOwnsSequencer(origin, strategy, lease, executorHead)) {
+    throw new Error("Git sequencer is not provably owned by this Goal; preserving Git operation");
+  }
+  git(origin, strategy, "--abort");
+  if (git(origin, "symbolic-ref", "--quiet", "HEAD") !== originRef || git(origin, "rev-parse", "HEAD") !== originHeadBefore || git(origin, "status", "--porcelain=v1") !== "") {
+    throw new Error("Goal sequencer abort did not restore origin identity; manual recovery required");
+  }
+  return true;
 }
 
 export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick", executorHead, originRef = lease.originRef, originHeadBefore } = {}) {
@@ -364,7 +397,11 @@ export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick", ex
   if (!inspection.clean) throw new Error("Workspace must be clean before integration (no uncommitted changes)");
 
   if (typeof originRef !== "string" || !originRef) throw new Error("Invalid lease: missing originRef");
+  if (!["cherry-pick", "merge"].includes(strategy)) throw new Error(`Unknown integration strategy: ${strategy}`);
   const expectedOriginHead = originHeadBefore || git(origin, "rev-parse", "HEAD");
+  // A crash may leave only this Goal's conflict sequencer. Recover it only after
+  // checking every persisted identity; user and ambiguous sequencers stay intact.
+  recoverGoalSequencer(origin, { strategy, lease, executorHead: selectedExecutorHead, originRef, originHeadBefore: expectedOriginHead });
   assertOriginPreflight(origin, { originRef, originHeadBefore: expectedOriginHead });
 
   const run = strategy === "cherry-pick"
