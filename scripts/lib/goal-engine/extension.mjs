@@ -54,6 +54,13 @@ function settlementIdentityError(code, observed, requiredNextAction) {
   return preflightError(code, observed, "return to the executor workspace, verify the settled attempt and commit identity, then retry goal_integrate", requiredNextAction);
 }
 
+function inspectionSnapshotsMatch(first, second) {
+  return first.headCommit === second.headCommit
+    && first.clean === second.clean
+    && JSON.stringify(first.dirtyFiles) === JSON.stringify(second.dirtyFiles)
+    && JSON.stringify(first.untrackedFiles) === JSON.stringify(second.untrackedFiles);
+}
+
 function workspaceMutationError(error, requiredNextAction) {
   const observed = String(error?.message || error);
   const code = /persisted lease not found/i.test(observed) ? "EXECUTOR_LEASE_NOT_FOUND"
@@ -310,6 +317,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   const appendEventFn = options.appendEvent || store.appendEvent || appendEvent;
   const loadProjectionFn = store.loadProjection || loadProjection;
   const listGoalsFn = store.listGoals || listGoals;
+  const inspectExecutorWorkspaceFn = options.inspectExecutorWorkspace || inspectExecutorWorkspace;
   const activeLeases = new Map();
   let turnsSinceSettle = 0;
 
@@ -655,7 +663,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         let inspection;
         try {
           lease = resolveLease(task, goalId, params.task_id, cwd, root);
-          inspection = inspectExecutorWorkspace(lease);
+          inspection = inspectExecutorWorkspaceFn(lease);
         } catch (error) {
           throw workspaceMutationError(error, retry);
         }
@@ -676,8 +684,17 @@ export function createGoalEngineExtension(pi, options = {}) {
         } catch (error) {
           throw preflightError("EXECUTOR_WRITE_PATH_VIOLATION", `workspace=${lease.path}; changedFiles=${inspection.changedFiles.join(",")}; ${error.message}`, remediation, retry);
         }
+        let confirmedInspection;
+        try {
+          confirmedInspection = inspectExecutorWorkspaceFn(lease);
+        } catch (error) {
+          throw workspaceMutationError(error, retry);
+        }
+        if (!inspectionSnapshotsMatch(inspection, confirmedInspection)) {
+          throw settlementIdentityError("EXECUTOR_SETTLEMENT_HEAD_MISMATCH", `workspace=${lease.path}; firstHead=${inspection.headCommit}; observedHead=${confirmedInspection.headCommit}; firstClean=${inspection.clean}; observedClean=${confirmedInspection.clean}`, retry);
+        }
         settlementData.attempt = lease.attempt;
-        settlementData.executorHead = inspection.headCommit;
+        settlementData.executorHead = confirmedInspection.headCommit;
       }
       const settleEvent = makeEvent("task.settled", settlementData, goalId);
       projection = appendEventFn(root, settleEvent, projection.version);
@@ -933,7 +950,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       // HEAD read, event append, or cleanup side effect.
       try {
         lease = resolveLease(task, goalId, taskId, cwd, root, { allowSynthetic: taskWorkspace.phase !== "active" });
-        activeInspection = taskWorkspace.phase === "active" ? inspectExecutorWorkspace(lease) : null;
+        activeInspection = taskWorkspace.phase === "active" ? inspectExecutorWorkspaceFn(lease) : null;
       } catch (error) {
         if (taskWorkspace.phase === "active") {
           throw workspaceMutationError(error, { tool: "goal_status", params: { goal_id: goalId } });
@@ -951,6 +968,22 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (settlement.attempt !== taskWorkspace.attempt || settlement.attempt !== lease.attempt || settlement.executorHead !== activeInspection.headCommit) {
           throw settlementIdentityError("EXECUTOR_SETTLEMENT_HEAD_MISMATCH", `workspace=${lease.path}; settlementAttempt=${settlement.attempt}; leaseAttempt=${lease.attempt}; settlementHead=${settlement.executorHead}; observedHead=${activeInspection.headCommit}`, retry);
         }
+      }
+      if (taskWorkspace.phase === "active") {
+        const retry = { tool: "goal_status", params: { goal_id: goalId } };
+        let confirmedInspection;
+        try {
+          confirmedInspection = inspectExecutorWorkspaceFn(lease);
+        } catch (error) {
+          throw workspaceMutationError(error, retry);
+        }
+        if (!inspectionSnapshotsMatch(activeInspection, confirmedInspection)) {
+          if (task.status === "succeeded") {
+            throw settlementIdentityError("EXECUTOR_SETTLEMENT_HEAD_MISMATCH", `workspace=${lease.path}; firstHead=${activeInspection.headCommit}; observedHead=${confirmedInspection.headCommit}; firstClean=${activeInspection.clean}; observedClean=${confirmedInspection.clean}`, retry);
+          }
+          throw workspaceMutationError(new Error(`workspace identity changed during inspection: firstHead=${activeInspection.headCommit}; observedHead=${confirmedInspection.headCommit}`), retry);
+        }
+        activeInspection = confirmedInspection;
       }
       if (currentOriginRef(cwd) !== taskWorkspace.originRef) {
         throw new Error(`Origin ref mismatch (expected ${taskWorkspace.originRef})`);
