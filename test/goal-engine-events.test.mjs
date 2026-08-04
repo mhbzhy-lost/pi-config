@@ -1048,7 +1048,7 @@ function v2Dispatched(p, goalId = "v2-goal") {
 }
 
 function v2Settled(p, outcome = "succeeded", goalId = "v2-goal") {
-  return applyEvent(p, v2Event("task.settled", { taskId: "t1", outcome, evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria" }, goalId));
+  return applyEvent(p, v2Event("task.settled", { taskId: "t1", outcome, evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria", ...(outcome === "succeeded" ? { attempt: 1, executorHead: "executor-head" } : {}) }, goalId));
 }
 
 function started(action, goalId = "v2-goal") {
@@ -1065,6 +1065,16 @@ test("settlement identity strictly binds succeeded v2 attempt and HEAD", () => {
   assert.throws(() => applyEvent(settled, started("integrate")), /settlement|executorHead/i);
   const matching = started("integrate"); matching.data.executorHead = "head-1";
   assert.doesNotThrow(() => applyEvent(settled, matching));
+});
+
+test("redispatch clears stale settlement identity", () => {
+  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  const task = p.tasks.get("t1");
+  // A discarded settled task is the reducer's redispatchable recovery state.
+  Object.assign(task.workspace, { phase: "disposed", disposition: "discarded", released: true });
+  task.status = "pending";
+  p = applyEvent(p, v2Event("task.dispatched", { taskId: "t1", contractHash: "h2", workspace: { attempt: 2, path: "/tmp/work-2", branch: "task/t1/2", baseCommit: "def" } }));
+  assert.equal(p.tasks.get("t1").settlement, null);
 });
 
 test("schema downgrade rejects v1 accepted after a v2 event", () => {
