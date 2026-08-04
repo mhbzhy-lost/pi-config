@@ -164,13 +164,13 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    for (const skill of ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "exa-search", "playwright", "browser-auth-session", "goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7"]) {
+    for (const skill of ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "using-goal-engine", "exa-search", "playwright", "browser-auth-session", "goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7"]) {
       await mkdir(join(root, "skill-overrides", skill), { recursive: true });
       await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), "# test\n");
     }
     await writeFile(
       join(root, "skill-overrides", "skills.list"),
-      "external-llm-review\ngit-commit-convention\ntest-driven-development\nwriting-skills\nwriting-plans\nplan-runner-dispatch\nsubagent-dispatch\nexa-search\nplaywright\nbrowser-auth-session\n",
+      "external-llm-review\ngit-commit-convention\ntest-driven-development\nwriting-skills\nwriting-plans\nplan-runner-dispatch\nsubagent-dispatch\nusing-goal-engine\nexa-search\nplaywright\nbrowser-auth-session\n",
     );
     await writeFile(
       join(root, "skill-overrides", "skills.local.list"),
@@ -238,7 +238,7 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
 test("inspectConfiguration accepts additional valid local skills", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
-    const globalSkills = ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "exa-search", "playwright", "browser-auth-session"];
+    const globalSkills = ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "using-goal-engine", "exa-search", "playwright", "browser-auth-session"];
     const localSkills = ["goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7", "crash-analyzer-usage"];
     await mkdir(join(root, "skill-overrides"), { recursive: true });
     for (const skill of [...globalSkills, ...localSkills]) {
