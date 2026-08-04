@@ -580,8 +580,10 @@ export function createGoalEngineExtension(pi, options = {}) {
 
       const verdictFor = (current) => completionVerdictFor(current);
       if (projection.lifecycle === "completed") {
-        const verdict = verdictFor(projection);
-        if (task.status !== "accepted" || projection.completionVerdict !== verdict) {
+        // The persisted terminal verdict is historical authority: evidence classification
+        // may evolve after this projection was completed.
+        const verdict = projection.completionVerdict;
+        if (task.status !== "accepted" || !["COMPLETE", "DONE_WITHOUT_EXTERNAL_VERIFICATION"].includes(verdict)) {
           throw ambiguousAcceptCommitError(goalId, params.task_id);
         }
         return respond(projection, verdict);

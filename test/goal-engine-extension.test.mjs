@@ -1457,6 +1457,94 @@ test("goal_amend rejects an active workspace remove without releasing resources"
   });
 });
 
+async function prepareSucceededTask(pi, taskId = "t1") {
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: taskId }));
+  commitWorkspaceChange(dispatched.workspace, `src/${taskId}.ts`, `export const ${taskId} = true;\n`, `feat: ${taskId}`);
+  await invoke(pi, "goal_settle", {
+    task_id: taskId, outcome: "succeeded", evidence: { type: "file", path: `src/${taskId}.ts` },
+    evidence_source: "self_produced", next_action: `Integrate ${taskId} before recording final acceptance for recovery testing`,
+  });
+  await invoke(pi, "goal_integrate", { task_id: taskId, action: "integrate" });
+}
+
+test("goal_accept retries final accepted after goal.completed pre-durable failure exactly once", async () => {
+  const cwd = tmpCwd(); const objective = "Final accepted retry"; const goalId = objectiveToGoalId(objective);
+  initGitRepo(cwd);
+  const injected = createFailingAppendEvent("goal.completed");
+  const pi = createMockPi(cwd); createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "final task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await prepareSucceededTask(pi);
+  await assert.rejects(() => invoke(pi, "goal_accept", { task_id: "t1" }), /injected appendEvent failure/);
+  let projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  assert.equal(projection.lifecycle, "active"); assert.equal(projection.tasks.get("t1").status, "accepted");
+  const recoveringPi = createMockPi(cwd); createGoalEngineExtension(recoveringPi);
+  const recovered = JSON.parse(await invoke(recoveringPi, "goal_accept", { goal_id: goalId, task_id: "t1" }));
+  assert.equal(recovered.goal_complete, true);
+  assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "goal.completed").length, 1);
+  const before = readGoalEvents(cwd, goalId).length;
+  await invoke(recoveringPi, "goal_accept", { goal_id: goalId, task_id: "t1" });
+  assert.equal(readGoalEvents(cwd, goalId).length, before);
+});
+
+test("goal_accept task.accepted durable-then-throw recovers and completes exactly once", async () => {
+  const cwd = tmpCwd(); const objective = "Accepted durable retry"; const goalId = objectiveToGoalId(objective);
+  initGitRepo(cwd); const injected = createDurableThenThrowAppendEvent("task.accepted");
+  const pi = createMockPi(cwd); createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "durable task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await prepareSucceededTask(pi);
+  assert.equal(JSON.parse(await invoke(pi, "goal_accept", { task_id: "t1" })).goal_complete, true);
+  const events = readGoalEvents(cwd, goalId);
+  assert.equal(events.filter((event) => event.type === "task.accepted").length, 1);
+  assert.equal(events.filter((event) => event.type === "goal.completed").length, 1);
+});
+
+test("goal_accept goal.completed durable-then-throw returns completion retry exactly once", async () => {
+  const cwd = tmpCwd(); const objective = "Completion durable retry"; const goalId = objectiveToGoalId(objective);
+  initGitRepo(cwd); const injected = createDurableThenThrowAppendEvent("goal.completed");
+  const pi = createMockPi(cwd); createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "durable completion", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await prepareSucceededTask(pi);
+  assert.equal(JSON.parse(await invoke(pi, "goal_accept", { task_id: "t1" })).goal_complete, true);
+  const before = readGoalEvents(cwd, goalId).length;
+  await invoke(pi, "goal_accept", { goal_id: goalId, task_id: "t1" });
+  assert.equal(readGoalEvents(cwd, goalId).length, before);
+  assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "goal.completed").length, 1);
+});
+
+test("goal_accept non-final accepted durable retry does not append and remains incomplete", async () => {
+  const cwd = tmpCwd(); const objective = "Non final accepted retry"; const goalId = objectiveToGoalId(objective);
+  initGitRepo(cwd); const injected = createDurableThenThrowAppendEvent("task.accepted");
+  const pi = createMockPi(cwd); createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
+  await invoke(pi, "goal_init", { objective, tasks: [
+    { id: "t1", description: "first durable task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
+    { id: "t2", description: "remaining task", deps: [], writePaths: ["src/t2.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
+  ] });
+  await prepareSucceededTask(pi, "t1");
+  const result = JSON.parse(await invoke(pi, "goal_accept", { task_id: "t1" }));
+  assert.equal(result.status, "accepted"); assert.equal(result.goal_complete, false);
+  const before = readGoalEvents(cwd, goalId).length;
+  await invoke(pi, "goal_accept", { task_id: "t1" });
+  assert.equal(readGoalEvents(cwd, goalId).length, before);
+  assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.accepted").length, 1);
+});
+
+test("goal_accept completed historical verdict is durable authority without append", async () => {
+  const cwd = tmpCwd(); const objective = "Historical verdict retry"; const goalId = objectiveToGoalId(objective);
+  initGitRepo(cwd); const pi = createMockPi(cwd); createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "historical evidence", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await prepareSucceededTask(pi); await invoke(pi, "goal_accept", { task_id: "t1" });
+  const before = readGoalEvents(cwd, goalId).length;
+  const retryPi = createMockPi(cwd);
+  createGoalEngineExtension(retryPi, { store: { loadProjection(root, id) {
+    const projection = loadProjection(root, id);
+    projection.tasks.get("t1").evidence.push({ source: "external" });
+    return projection;
+  } } });
+  const result = JSON.parse(await invoke(retryPi, "goal_accept", { goal_id: goalId, task_id: "t1" }));
+  assert.equal(result.completion_verdict, "DONE_WITHOUT_EXTERNAL_VERIFICATION");
+  assert.equal(readGoalEvents(cwd, goalId).length, before);
+});
+
 test("goal_amend rejects accepted acceptance rewrite without appending an event", async () => {
   const cwd = tmpCwd();
   const objective = "Amend accepted proof protection goal";

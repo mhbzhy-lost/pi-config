@@ -329,6 +329,21 @@ test("pending task only advertises dispatch for a redispatchable workspace", () 
   assert.deepEqual(graph.runnableFrontier(redispatchable), ["task"]);
 });
 
+test("all accepted gives only the first Map task the final goal_accept action", () => {
+  const projection = projectionState({
+    first: taskState({ status: "accepted" }),
+    second: taskState({ status: "accepted" }),
+  });
+  assertActionCase(graph.taskActionState(projection, "first"), {
+    allowedActions: ["goal_accept"],
+    requiredNextAction: { tool: "goal_accept", params: { task_id: "first" } },
+    blockingReason: null,
+  });
+  assertActionCase(graph.taskActionState(projection, "second"), {
+    allowedActions: [], requiredNextAction: null, blockingReason: null,
+  });
+});
+
 test("terminal goal lifecycle makes every task non-runnable", () => {
   const cases = ["completed", "blocked", "cancelled"];
 
@@ -338,6 +353,7 @@ test("terminal goal lifecycle makes every task non-runnable", () => {
       acceptedTask: taskState({ status: "accepted", workspace: { phase: "disposed", disposition: "integrated", released: true, attempt: 1 } }),
     }, { lifecycle });
 
+    assert.deepEqual(graph.runnableFrontier(projection), [], `lifecycle=${lifecycle} runnable frontier`);
     for (const taskId of projection.tasks.keys()) {
       const action = graph.taskActionState(projection, taskId);
       assertActionCase(action, {
