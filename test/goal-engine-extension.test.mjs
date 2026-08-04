@@ -2240,6 +2240,8 @@ test("inspection race: goal_settle rejects HEAD drift after the first real inspe
   await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover through the typed goal status action after the executor head changed." }), (error) => {
     assert.equal(error.code, "EXECUTOR_SETTLEMENT_HEAD_MISMATCH");
     assert.match(error.message, /observed=.*remediation=.*stateChanged=false.*requiredNextAction/);
+    assert.match(error.message, /return to the same Executor worktree, verify the same Executor worktree HEAD and cleanliness, then retry goal_settle/);
+    assert.doesNotMatch(error.message, /retry goal_integrate/);
     assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
     return true;
   });
