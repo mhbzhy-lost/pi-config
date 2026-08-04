@@ -985,6 +985,33 @@ test("goal_settle rejects succeeded no-op workspace and failed settle still allo
   assert.equal(existsSync(join(cwd, "src/noop.ts")), false);
 });
 
+test("goal_settle classifies ancestor, empty, and missing persisted lease before appending", async () => {
+  const cases = [
+    { name: "ancestor", prepare(workspace) { git(workspace.path, "reset", "--hard", workspace.baseCommit); }, code: "EXECUTOR_COMMIT_RANGE_INVALID" },
+    { name: "empty", prepare(workspace) { git(workspace.path, "commit", "--allow-empty", "-m", "test: empty"); }, code: "EXECUTOR_COMMIT_RANGE_EMPTY" },
+    { name: "missing lease", prepare(workspace, state) { renameSync(state.leasePath, `${state.leasePath}.removed`); }, code: "EXECUTOR_LEASE_NOT_FOUND" },
+  ];
+  for (const scenario of cases) {
+    const cwd = tmpCwd();
+    const objective = `Strict ${scenario.name} settle gate`;
+    const goalId = objectiveToGoalId(objective);
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi);
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write authorized source", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+    commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: x");
+    scenario.prepare(workspace, workspaceState(cwd, goalId, "t1"));
+    const resources = workspaceState(cwd, goalId, "t1");
+    const before = persistedStateBytes(cwd, goalId);
+    await assert.rejects(
+      () => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Inspect the executor workspace and recover through the typed status action." }),
+      (error) => error.code === scenario.code && /observed=.*remediation=.*stateChanged=false.*requiredNextAction/.test(error.message),
+    );
+    assert.deepEqual(persistedStateBytes(cwd, goalId), before);
+    assert.deepEqual(workspaceState(cwd, goalId, "t1"), resources);
+  }
+});
+
 test("goal_settle rejects dirty executor workspace without state changes", async () => {
   const cwd = tmpCwd();
   const objective = "Dirty settle gate test goal";
