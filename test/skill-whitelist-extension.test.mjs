@@ -56,14 +56,14 @@ test("resolveSkillSource and Pi loader agree on scalar fixtures and inline comme
   const fixtures = [
     ["true", false], ["false", false], ["123", false], ["~", false],
     [".nan", false], [".inf", false], ["null", false], ["true # comment", false],
-    ["false # comment", false], ["null # comment", false], ["true: false", false],
+    ["false # comment", false], ["null # comment", false], ['"" # comment', false, "empty description"], ["'' # comment", false, "empty description"], ["true: false", false],
     ['"true"', true], ["'123'", true], ["2026-08-05", true], ['"2026-08-05"', true], ["描述 fixture", true],
     ['"true" # comment', true], ["plain fixture # comment", true], ["yes # comment", true],
     ["'single '' quote'", true], ['"double \\" quote"', true], ['"line\\nfeed"', true],
   ];
   const { loadSkillsFromDir } = await import(piHostModuleUrl);
 
-  for (const [description, valid] of fixtures) {
+  for (const [description, valid, error = "unsupported string scalar"] of fixtures) {
     const root = await mkdtemp(join(tmpdir(), "skill-scalar-"));
     try {
       const skillPath = join(root, "skill-overrides", "writing-plans");
@@ -73,7 +73,7 @@ test("resolveSkillSource and Pi loader agree on scalar fixtures and inline comme
       if (valid) {
         assert.equal(await resolveSkillSource(root, "writing-plans"), await realpath(skillPath), description);
       } else {
-        await assert.rejects(resolveSkillSource(root, "writing-plans"), /unsupported string scalar/, description);
+        await assert.rejects(resolveSkillSource(root, "writing-plans"), new RegExp(error), description);
       }
 
       const result = await loadSkillsFromDir({ dir: skillPath, source: "allowlist" });
