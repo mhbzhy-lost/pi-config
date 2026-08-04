@@ -1575,41 +1575,264 @@ test("strict disposition settlement identity matrix permits only matching succee
   }
 });
 
-function orphanRecoveryFixture(goalId = "orphan-recovery-goal") {
-  let projection = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "failed", goalId);
-  const task = projection.tasks.get("t1"); task.status = "pending"; task.settlement = null;
-  Object.assign(task.workspace, { phase: "disposed", disposition: "discarded", released: true });
-  return projection;
+function eventSnapshot(projection) {
+  return structuredClone({
+    version: projection.version,
+    lifecycle: projection.lifecycle,
+    eventIds: [...projection.eventIds],
+    tasks: [...projection.tasks],
+  });
 }
-function orphanRecoveredEvent(data = {}, goalId = "orphan-recovery-goal", schemaVersion = "goal-engine.event.v2") {
-  return { schemaVersion, eventId: crypto.randomUUID(), goalId, type: "task.workspace_orphan_recovered", occurredAt: "2026-02-03T04:05:06.000Z", data: { taskId: "t1", attempt: 2, workspace: { attempt: 2, path: "/tmp/recovered", branch: "ge/t1/2", baseCommit: "base-2", originRef: "refs/heads/main" }, executorHead: "recovered-head", reason: "verified orphan workspace was recovered before resource cleanup", ...data } };
-}
-function preservedReleaseFixture(goalId = "preservation-release-goal", status = "succeeded") {
-  const p = applyEvent(createProjection(), v2Created(goalId));
-  Object.assign(p.tasks.get("t1"), { status, attempts: 1, settlement: { attempt: 1, executorHead: "preserved-head" }, workspace: { attempt: 1, path: "/tmp/preserved", branch: "ge/t1/1", baseCommit: "base-1", originRef: "refs/heads/main", phase: "disposed", disposition: "preserved", released: false, executorHead: "preserved-head" } }); return p;
-}
-function preservationReleasedEvent(data = {}, goalId = "preservation-release-goal", schemaVersion = "goal-engine.event.v2") { return { schemaVersion, eventId: crypto.randomUUID(), goalId, type: "task.workspace_preservation_released", occurredAt: "2026-02-03T04:05:07.000Z", data: { taskId: "t1", attempt: 1, executorHead: "preserved-head", released: true, ...data } }; }
 
-test("orphan recovery strict v2 reducer accepts exact next-attempt identity", () => {
-  const task = applyEvent(orphanRecoveryFixture(), orphanRecoveredEvent()).tasks.get("t1");
-  assert.equal(task.status, "pending"); assert.equal(task.attempts, 2); assert.equal(task.lastSettledOutcome, "failed"); assert.equal(task.settlement, null);
-  assert.deepEqual(task.workspace, { attempt: 2, path: "/tmp/recovered", branch: "ge/t1/2", baseCommit: "base-2", originRef: "refs/heads/main", executorHead: "recovered-head", phase: "active", recovery: "orphaned" });
+function orphanRecoveredEvent(data = {}, goalId = "orphan-recovery-goal", schemaVersion = "goal-engine.event.v2") {
+  return {
+    schemaVersion,
+    eventId: crypto.randomUUID(),
+    goalId,
+    type: "task.workspace_orphan_recovered",
+    occurredAt: "2026-02-03T04:05:06.000Z",
+    data: {
+      taskId: "t1",
+      attempt: 1,
+      workspace: {
+        attempt: 1,
+        path: "/tmp/recovered",
+        branch: "ge/t1/1",
+        baseCommit: "base-1",
+        originRef: "refs/heads/main",
+      },
+      executorHead: "recovered-head",
+      reason: "Verified orphan workspace recovery before resource cleanup.",
+      ...data,
+    },
+  };
+}
+
+function orphanRecoveryBaseline(goalId = "orphan-recovery-goal") {
+  return applyEvent(createProjection(), v2Created(goalId));
+}
+
+function discardAttemptOne(goalId = "orphan-attempt-two-goal") {
+  let projection = v2Dispatched(orphanRecoveryBaseline(goalId), goalId);
+  projection = v2Settled(projection, "failed", goalId);
+  const discard = started("discard", goalId);
+  projection = applyEvent(projection, discard);
+  projection = applyEvent(projection, v2Event(
+    "task.workspace_disposition_applied",
+    { ...discard.data, action: "discard", originHead: "origin-after" },
+    goalId,
+  ));
+  return applyEvent(projection, v2Event(
+    "task.workspace_disposed",
+    { taskId: "t1", attempt: 1, action: "discard", released: true },
+    goalId,
+  ));
+}
+
+function preservationReleasedEvent(data = {}, goalId = "preservation-release-goal", schemaVersion = "goal-engine.event.v2") {
+  return {
+    schemaVersion,
+    eventId: crypto.randomUUID(),
+    goalId,
+    type: "task.workspace_preservation_released",
+    occurredAt: "2026-02-03T04:05:07.000Z",
+    data: {
+      taskId: "t1",
+      attempt: 1,
+      executorHead: "preserved-head",
+      released: true,
+      ...data,
+    },
+  };
+}
+
+function preserveWorkspace(projection, goalId, executorHead) {
+  const task = projection.tasks.get("t1");
+  const disposition = v2Event("task.workspace_disposition_started", {
+    taskId: "t1",
+    attempt: task.workspace.attempt,
+    requestedAction: "preserve",
+    strategy: "merge",
+    executorHead,
+    originHeadBefore: "origin-before",
+  }, goalId);
+  projection = applyEvent(projection, disposition);
+  projection = applyEvent(projection, v2Event("task.workspace_disposition_applied", {
+    ...disposition.data,
+    action: "preserve",
+    originHead: "origin-after",
+  }, goalId));
+  return applyEvent(projection, v2Event("task.workspace_disposed", {
+    taskId: "t1",
+    attempt: task.workspace.attempt,
+    action: "preserve",
+    released: false,
+  }, goalId));
+}
+
+function preservedReleaseFixture(goalId = "preservation-release-goal", kind = "succeeded") {
+  if (kind === "recovered-pending") {
+    const recovered = applyEvent(orphanRecoveryBaseline(goalId), orphanRecoveredEvent({}, goalId));
+    return preserveWorkspace(recovered, goalId, "recovered-head");
+  }
+  let projection = v2Dispatched(orphanRecoveryBaseline(goalId), goalId);
+  projection = v2Settled(projection, "succeeded", goalId);
+  return preserveWorkspace(projection, goalId, "executor-head");
+}
+
+test("orphan recovery restores the Task4 attempt-one rollback baseline", () => {
+  const baseline = orphanRecoveryBaseline();
+  assert.deepEqual(baseline.tasks.get("t1").workspace, null);
+  assert.equal(baseline.tasks.get("t1").status, "pending");
+  assert.equal(baseline.tasks.get("t1").attempts, 0);
+
+  const recovered = applyEvent(baseline, orphanRecoveredEvent());
+  const task = recovered.tasks.get("t1");
+  assert.equal(task.status, "pending");
+  assert.equal(task.attempts, 1);
+  assert.deepEqual(task.workspace, {
+    attempt: 1,
+    path: "/tmp/recovered",
+    branch: "ge/t1/1",
+    baseCommit: "base-1",
+    originRef: "refs/heads/main",
+    executorHead: "recovered-head",
+    phase: "active",
+    recovery: "orphaned",
+  });
 });
-test("orphan recovery rejects invalid matrix atomically", () => {
-  const cases = [["v1", () => orphanRecoveredEvent({}, undefined, "goal-engine.event.v1")], ["wrong attempt", () => orphanRecoveredEvent({ attempt: 3 })], ["workspace attempt", () => orphanRecoveredEvent({ workspace: { ...orphanRecoveredEvent().data.workspace, attempt: 3 } })], ...["path", "branch", "baseCommit", "originRef"].map((field) => [`missing ${field}`, () => { const e = orphanRecoveredEvent(); delete e.data.workspace[field]; return e; }]), ["executorHead", () => orphanRecoveredEvent({ executorHead: "" })], ["reason", () => orphanRecoveredEvent({ reason: "" })], ["nonpending", () => { const p = orphanRecoveryFixture(); p.tasks.get("t1").status = "dispatched"; return [p, orphanRecoveredEvent()]; }], ["active", () => { const p = orphanRecoveryFixture(); p.tasks.get("t1").workspace = { attempt: 1, path: "/tmp/active", branch: "ge/t1/1", baseCommit: "base", phase: "active" }; return [p, orphanRecoveredEvent()]; }], ["duplicate", () => { const p = orphanRecoveryFixture(); p.tasks.get("t1").workspace.recovery = "orphaned"; return [p, orphanRecoveredEvent()]; }], ["terminal", () => { const p = orphanRecoveryFixture(); p.lifecycle = "completed"; return [p, orphanRecoveredEvent()]; }]];
-  for (const [label, make] of cases) { const value = make(); const [p, e] = Array.isArray(value) ? value : [orphanRecoveryFixture(), value]; const before = structuredClone({ lifecycle: p.lifecycle, tasks: [...p.tasks] }); assert.throws(() => applyEvent(p, e), /v2|attempt|workspace|path|branch|baseCommit|originRef|executorHead|reason|pending|active|recovery|lifecycle|terminal/i, label); assert.deepEqual(structuredClone({ lifecycle: p.lifecycle, tasks: [...p.tasks] }), before, label); }
+
+test("orphan recovery accepts attempt two after a real failed-discard chain", () => {
+  const projection = discardAttemptOne();
+  assert.equal(projection.tasks.get("t1").attempts, 1);
+  assert.equal(projection.tasks.get("t1").workspace.released, true);
+
+  const recovered = applyEvent(projection, orphanRecoveredEvent({
+    attempt: 2,
+    workspace: {
+      attempt: 2,
+      path: "/tmp/recovered-two",
+      branch: "ge/t1/2",
+      baseCommit: "base-2",
+      originRef: "refs/heads/main",
+    },
+  }, projection.goalId));
+  assert.equal(recovered.tasks.get("t1").attempts, 2);
+  assert.equal(recovered.tasks.get("t1").workspace.attempt, 2);
 });
-test("orphan recovery roundtrip and recovered HEAD gates disposition", () => {
-  const p = applyEvent(orphanRecoveryFixture(), orphanRecoveredEvent()); const wrong = started("discard"); wrong.data.attempt = 2; wrong.data.executorHead = "other-head"; assert.throws(() => applyEvent(p, wrong), /executorHead|settlement|attempt/i); const matching = started("discard"); matching.data.attempt = 2; matching.data.executorHead = "recovered-head"; assert.doesNotThrow(() => applyEvent(p, matching));
-  const root = tmpRoot(); const goalId = "orphan-store"; const events = [v2Created(goalId), v2Event("task.dispatched", { taskId: "t1", contractHash: "h1", workspace: { attempt: 1, path: "/tmp/one", branch: "ge/t1/1", baseCommit: "base-1" } }, goalId), v2Event("task.settled", { taskId: "t1", outcome: "failed", evidence: { type: "file", path: "a.ts" }, nextAction: "discard orphan", }, goalId)]; const discard = started("discard", goalId); events.push(discard, v2Event("task.workspace_disposition_applied", { ...discard.data, action: "discard", originHead: "origin-after" }, goalId), v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "discard", released: true }, goalId), orphanRecoveredEvent({}, goalId)); let stored; events.forEach((event, index) => { stored = appendEvent(root, event, index); }); assert.deepEqual(loadProjection(root, goalId).tasks.get("t1"), stored.tasks.get("t1"));
+
+test("orphan recovery rejects invalid states and exact-shape data atomically", () => {
+  const cases = [
+    ["v1", () => [orphanRecoveryBaseline(), orphanRecoveredEvent({}, undefined, "goal-engine.event.v1")]],
+    ["wrong attempt", () => [orphanRecoveryBaseline(), orphanRecoveredEvent({ attempt: 2 })]],
+    ["unknown data field", () => [orphanRecoveryBaseline(), orphanRecoveredEvent({ unexpected: true })]],
+    ["unknown workspace field", () => [orphanRecoveryBaseline(), orphanRecoveredEvent({ workspace: { ...orphanRecoveredEvent().data.workspace, unexpected: true } })]],
+    ...["path", "branch", "baseCommit", "originRef"].map((field) => [
+      `missing workspace ${field}`,
+      () => {
+        const event = orphanRecoveredEvent();
+        delete event.data.workspace[field];
+        return [orphanRecoveryBaseline(), event];
+      },
+    ]),
+    ["nonpending dispatched", () => {
+      const projection = orphanRecoveryBaseline();
+      return [v2Dispatched(projection, projection.goalId), orphanRecoveredEvent({}, projection.goalId)];
+    }],
+    ["active workspace", () => {
+      const projection = orphanRecoveryBaseline();
+      return [v2Dispatched(projection, projection.goalId), orphanRecoveredEvent({}, projection.goalId)];
+    }],
+    ["terminal goal", () => {
+      const projection = orphanRecoveryBaseline();
+      return [applyEvent(projection, v2Event("goal.blocked", {
+        reason: "Stop recovery after a verified terminal operational incident.",
+      }, projection.goalId)), orphanRecoveredEvent({}, projection.goalId)];
+    }],
+  ];
+
+  for (const [label, makeCase] of cases) {
+    const [projection, event] = makeCase();
+    const before = eventSnapshot(projection);
+    assert.throws(() => applyEvent(projection, event), /unsupported|v2|attempt|workspace|pending|terminal|unknown|field/i, label);
+    assert.deepEqual(eventSnapshot(projection), before, label);
+  }
 });
-test("preservation release strict v2 preserves history and makes pending", () => {
-  for (const status of ["succeeded", "pending"]) { const task = applyEvent(preservedReleaseFixture(`release-${status}`, status), preservationReleasedEvent({}, `release-${status}`)).tasks.get("t1"); assert.equal(task.status, "pending"); assert.equal(task.settlement, null); assert.equal(task.workspace.disposition, "preserved"); assert.equal(task.workspace.released, false); assert.equal(task.preservedResourcesReleased, true); }
+
+test("orphan recovery duplicate follows a real first recovery", () => {
+  const recovered = applyEvent(orphanRecoveryBaseline(), orphanRecoveredEvent());
+  const duplicate = orphanRecoveredEvent({}, recovered.goalId);
+  const before = eventSnapshot(recovered);
+  assert.throws(() => applyEvent(recovered, duplicate), /duplicate|recovery|workspace|active/i);
+  assert.deepEqual(eventSnapshot(recovered), before);
 });
-test("preservation release rejects invalid matrix atomically", () => {
-  const cases = [["v1", () => [preservedReleaseFixture(), preservationReleasedEvent({}, undefined, "goal-engine.event.v1")]], ["not preserved", () => { const p = preservedReleaseFixture(); p.tasks.get("t1").workspace.disposition = "discarded"; return [p, preservationReleasedEvent()]; }], ["not disposed", () => { const p = preservedReleaseFixture(); p.tasks.get("t1").workspace.phase = "active"; return [p, preservationReleasedEvent()]; }], ["attempt", () => [preservedReleaseFixture(), preservationReleasedEvent({ attempt: 2 })]], ["head", () => [preservedReleaseFixture(), preservationReleasedEvent({ executorHead: "other" })]], ["released", () => [preservedReleaseFixture(), preservationReleasedEvent({ released: false })]], ["duplicate", () => { const p = preservedReleaseFixture(); p.tasks.get("t1").preservedResourcesReleased = true; return [p, preservationReleasedEvent()]; }]];
-  for (const [label, make] of cases) { const [p, e] = make(); const before = structuredClone([...p.tasks]); assert.throws(() => applyEvent(p, e), /v2|preserv|disposed|attempt|executorHead|released/i, label); assert.deepEqual(structuredClone([...p.tasks]), before, label); }
+
+test("orphan recovery store round-trip uses only legal history before recovery", () => {
+  const root = tmpRoot();
+  const projection = discardAttemptOne("orphan-store");
+  const history = [
+    v2Created("orphan-store"),
+    v2Event("task.dispatched", { taskId: "t1", contractHash: "h1", workspace: { attempt: 1, path: "/tmp/work", branch: "ge/t1/1", baseCommit: "base-1" } }, "orphan-store"),
+    v2Event("task.settled", { taskId: "t1", outcome: "failed", evidence: { type: "file", path: "a.ts" }, nextAction: "Discard the failed workspace before attempting any recovery action." }, "orphan-store"),
+  ];
+  const discard = started("discard", "orphan-store");
+  history.push(discard, v2Event("task.workspace_disposition_applied", { ...discard.data, action: "discard", originHead: "origin-after" }, "orphan-store"), v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "discard", released: true }, "orphan-store"), orphanRecoveredEvent({ attempt: 2, workspace: { attempt: 2, path: "/tmp/recovered-two", branch: "ge/t1/2", baseCommit: "base-2", originRef: "refs/heads/main" } }, "orphan-store"));
+  history.forEach((event, index) => appendEvent(root, event, index));
+  assert.deepEqual(loadProjection(root, "orphan-store").tasks.get("t1"), projection.tasks.get("t1"));
 });
-test("released preservation permits amend and redispatch while unreleased remains blocked", () => {
-  const amend = (p) => applyEvent(p, v2Event("goal.amended", { reason: "Safe cleanup permits a pending contract amendment", updateTasks: { t1: { description: "amended" } } }, p.goalId)); assert.throws(() => amend(preservedReleaseFixture()), /workspace|pending|amend/i); const released = applyEvent(preservedReleaseFixture(), preservationReleasedEvent()); assert.equal(amend(released).tasks.get("t1").description, "amended"); assert.equal(applyEvent(released, v2Event("task.dispatched", { taskId: "t1", contractHash: "h2", workspace: { attempt: 2, path: "/tmp/retry", branch: "ge/t1/2", baseCommit: "base-2" } })).tasks.get("t1").attempts, 2);
+
+function assertReleasedPreservation(task) {
+  assert.equal(task.status, "pending");
+  assert.equal(task.settlement, null);
+  assert.equal(task.workspace.disposition, "preserved");
+  assert.equal(task.workspace.released, false);
+  assert.equal(task.workspace.preservedResourcesReleased, true);
+  assert.equal(Object.hasOwn(task, "preservedResourcesReleased"), false);
+}
+
+test("preservation release follows the normal succeeded preserve chain", () => {
+  const task = applyEvent(
+    preservedReleaseFixture("release-succeeded", "succeeded"),
+    preservationReleasedEvent({}, "release-succeeded"),
+  ).tasks.get("t1");
+  assertReleasedPreservation(task);
+});
+
+test("preservation release follows the recovered pending preserve chain", () => {
+  const task = applyEvent(
+    preservedReleaseFixture("release-recovered", "recovered-pending"),
+    preservationReleasedEvent({}, "release-recovered"),
+  ).tasks.get("t1");
+  assertReleasedPreservation(task);
+});
+
+test("preservation release rejects invalid exact-shape data atomically", () => {
+  const cases = [
+    ["v1", () => preservationReleasedEvent({}, undefined, "goal-engine.event.v1")],
+    ["unknown field", () => preservationReleasedEvent({ unexpected: true })],
+    ["wrong attempt", () => preservationReleasedEvent({ attempt: 2 })],
+    ["wrong head", () => preservationReleasedEvent({ executorHead: "other-head" })],
+    ["wrong released", () => preservationReleasedEvent({ released: false })],
+  ];
+  for (const [label, makeEvent] of cases) {
+    const projection = preservedReleaseFixture();
+    const before = eventSnapshot(projection);
+    assert.throws(() => applyEvent(projection, makeEvent()), /unsupported|v2|preserv|attempt|executorHead|released|unknown/i, label);
+    assert.deepEqual(eventSnapshot(projection), before, label);
+  }
+});
+
+test("preservation release rejects wrong workspace phase, disposition, duplicate, and v1", () => {
+  const cases = [
+    ["wrong phase", (projection) => { projection.tasks.get("t1").workspace.phase = "active"; }],
+    ["wrong disposition", (projection) => { projection.tasks.get("t1").workspace.disposition = "discarded"; }],
+    ["duplicate", (projection) => { projection.tasks.get("t1").workspace.preservedResourcesReleased = true; }],
+  ];
+  for (const [label, tamper] of cases) {
+    const projection = preservedReleaseFixture();
+    tamper(projection);
+    const before = eventSnapshot(projection);
+    assert.throws(() => applyEvent(projection, preservationReleasedEvent()), /unsupported|preserv|disposed|released/i, label);
+    assert.deepEqual(eventSnapshot(projection), before, label);
+  }
 });

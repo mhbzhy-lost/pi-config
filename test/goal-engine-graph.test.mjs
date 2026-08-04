@@ -409,10 +409,53 @@ test("orphan graph overlay advertises verified recovery and non-destructive unve
   assert.deepEqual(unverified.blockingReason.resources, { workspaceExists: true, branchExists: true, leaseExists: false });
 });
 
+test("unreleased preserved workspace requires goal_integrate discard in graph", () => {
+  const projection = projectionState({
+    task: taskState({
+      attempts: 1,
+      workspace: {
+        phase: "disposed",
+        disposition: "preserved",
+        released: false,
+        attempt: 1,
+      },
+    }),
+  });
 
-test("released preserved workspace is redispatchable in graph", () => {
-  const projection = projectionState({ task: taskState({ attempts: 1, workspace: { phase: "disposed", disposition: "preserved", released: false, preservedResourcesReleased: true, attempt: 1 } }) });
+  assert.equal(graph.nextDispatchAttempt(projection, "task"), null);
+  assert.deepEqual(graph.runnableFrontier(projection), []);
+  assertActionCase(graph.taskActionState(projection, "task"), {
+    allowedActions: ["goal_integrate"],
+    requiredNextAction: {
+      tool: "goal_integrate",
+      params: { task_id: "task", action: "discard" },
+    },
+    blockingReason: null,
+  });
+});
+
+test("released preserved workspace exposes the next dispatch attempt in graph", () => {
+  const projection = projectionState({
+    task: taskState({
+      attempts: 1,
+      workspace: {
+        phase: "disposed",
+        disposition: "preserved",
+        released: false,
+        preservedResourcesReleased: true,
+        attempt: 1,
+      },
+    }),
+  });
+
   assert.equal(graph.nextDispatchAttempt(projection, "task"), 2);
   assert.deepEqual(graph.runnableFrontier(projection), ["task"]);
-  assertActionCase(graph.taskActionState(projection, "task"), { allowedActions: ["goal_dispatch"], requiredNextAction: { tool: "goal_dispatch", params: { task_id: "task" } }, blockingReason: null });
+  assertActionCase(graph.taskActionState(projection, "task"), {
+    allowedActions: ["goal_dispatch"],
+    requiredNextAction: {
+      tool: "goal_dispatch",
+      params: { task_id: "task" },
+    },
+    blockingReason: null,
+  });
 });
