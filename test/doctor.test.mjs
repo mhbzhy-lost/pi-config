@@ -300,6 +300,27 @@ test("inspectConfiguration reports missing pi-subagents package", async () => {
   }
 });
 
+test("inspectConfiguration reports a malformed local list and continues", async () => {
+  const root = await mkdtemp(join(tmpdir(), "doctor-"));
+  try {
+    await mkdir(join(root, "skill-overrides"), { recursive: true });
+    await writeFile(join(root, "skill-overrides", "skills.list"), "writing-plans\n");
+    await writeFile(join(root, "skill-overrides", "skills.local.list"), "Bad_Name\n");
+    await mkdir(join(root, "pi", "extensions"), { recursive: true });
+    await mkdir(join(root, "scripts"), { recursive: true });
+    await writeFile(join(root, "pi", "settings.json"), "{}");
+    await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
+    await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
+
+    const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
+    assert.ok(issues.includes("invalid skill name: Bad_Name"));
+    assert.ok(issues.includes("unexpected Skill whitelist"));
+    assert.ok(issues.includes("missing Pi package: pi-subagents@0.37.2"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("inspectConfiguration reports malformed allowlisted Skill frontmatter and continues", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {

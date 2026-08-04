@@ -44,6 +44,42 @@ test("parseSkillList rejects names outside the Agent Skills naming subset", () =
   }
 });
 
+test("loadDesiredSkills ignores a missing optional local list", async () => {
+  const root = await createFixture();
+  try {
+    await addSkill(root, "vendor", "writing-plans");
+    const globalList = join(root, "skill-overrides", "skills.list");
+    await writeFile(globalList, "writing-plans\n");
+
+    const result = await loadDesiredSkills(root, globalList, join(root, "skill-overrides", "skills.local.list"));
+
+    assert.deepEqual([...result.keys()], ["writing-plans"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loadDesiredSkills fails closed for invalid, duplicate, or unreadable local lists", async () => {
+  for (const [label, setup, expected] of [
+    ["invalid name", async (path) => writeFile(path, "Bad_Name\n"), /invalid skill name: Bad_Name/],
+    ["duplicate", async (path) => writeFile(path, "local-tool\nlocal-tool\n"), /duplicate skill: local-tool/],
+    ["directory", async (path) => import("node:fs/promises").then(({ mkdir }) => mkdir(path)), /EISDIR/],
+  ]) {
+    const root = await createFixture();
+    try {
+      await addSkill(root, "vendor", "writing-plans");
+      const globalList = join(root, "skill-overrides", "skills.list");
+      const localList = join(root, "skill-overrides", "skills.local.list");
+      await writeFile(globalList, "writing-plans\n");
+      await setup(localList);
+
+      await assert.rejects(loadDesiredSkills(root, globalList, localList), expected, label);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("loadDesiredSkills appends local Skills after the global list", async () => {
   const root = await createFixture();
   try {
@@ -99,6 +135,9 @@ test("resolveSkillSource fails closed for malformed allowlisted Skill frontmatte
     ["empty description", "---\nname: writing-plans\ndescription:   \n---\n", "empty description"],
     ["duplicate name", "---\nname: writing-plans\nname: writing-plans\ndescription: fixture\n---\n", "duplicate name"],
     ["duplicate description", "---\nname: writing-plans\ndescription: fixture\ndescription: again\n---\n", "duplicate description"],
+    ["null description", "---\nname: writing-plans\ndescription: null\n---\n", "unsupported string scalar"],
+    ["array description", "---\nname: writing-plans\ndescription: []\n---\n", "unsupported string scalar"],
+    ["object description", "---\nname: writing-plans\ndescription: {}\n---\n", "unsupported string scalar"],
   ];
   for (const [label, content, reason] of cases) {
     const root = await createFixture();

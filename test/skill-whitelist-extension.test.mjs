@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { piHostModuleUrl } from "./helpers/pi-host.mjs";
 import test from "node:test";
@@ -26,6 +28,27 @@ test("extension contributes exactly the allowlisted skill directories", async ()
   assert.deepEqual(result.skillPaths.slice(0, expected.length), expected);
   for (const extra of result.skillPaths.slice(expected.length)) {
     assert.match(extra, /\.pi\/skills\//);
+  }
+});
+
+test("resources_discover rejects a malformed local list", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skill-extension-"));
+  try {
+    await mkdir(join(root, "scripts", "lib"), { recursive: true });
+    for (const name of ["skill-whitelist.mjs", "skill-whitelist-extension.mjs"]) {
+      await writeFile(join(root, "scripts", "lib", name), await readFile(new URL(`../scripts/lib/${name}`, import.meta.url), "utf8"));
+    }
+    await mkdir(join(root, "skill-overrides", "writing-plans"), { recursive: true });
+    await writeFile(join(root, "skill-overrides", "skills.list"), "writing-plans\n");
+    await writeFile(join(root, "skill-overrides", "skills.local.list"), "Bad_Name\n");
+    await writeFile(join(root, "skill-overrides", "writing-plans", "SKILL.md"), "---\nname: writing-plans\ndescription: fixture\n---\n");
+
+    const { default: createFixtureExtension } = await import(`${pathToFileURL(join(root, "scripts", "lib", "skill-whitelist-extension.mjs")).href}?fixture=${Date.now()}`);
+    const handlers = new Map();
+    createFixtureExtension({ on(name, handler) { handlers.set(name, handler); } });
+    await assert.rejects(handlers.get("resources_discover")({ cwd: root }, {}), /invalid skill name: Bad_Name/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
