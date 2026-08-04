@@ -1124,3 +1124,41 @@ test("orphan inventory review regression rechecks HEAD after inspection", () => 
   assert.equal(competingCommits, 1, "the competing commit must be created exactly once");
   assertOrphanUnverified(result);
 });
+
+test("orphan inventory review regression dangling workspace symlink on exact workspace path", () => {
+  const fixture = orphanArgs("review-dangling-workspace");
+  const danglingTarget = join(fixture.stateRoot, "worktrees", "dangling-workspace-target");
+
+  rmSync(fixture.lease.path, { recursive: true, force: true });
+  rmSync(danglingTarget, { recursive: true, force: true });
+  symlinkSync(danglingTarget, fixture.lease.path);
+  rmSync(fixture.lease.leasePath, { force: true });
+  git(fixture.originRoot, "update-ref", "-d", `refs/heads/${fixture.lease.branch}`);
+
+  const result = orphanInventoryApi()(fixture);
+  assert.equal(result.kind, "unverified");
+  assert.deepEqual(result.resources, {
+    workspaceExists: true,
+    branchExists: false,
+    leaseExists: false,
+  });
+});
+
+test("orphan inventory review regression dangling lease symlink on exact lease path", () => {
+  const fixture = orphanArgs("review-dangling-lease");
+  const danglingTarget = join(fixture.stateRoot, "worktrees", "dangling-lease-target");
+
+  rmSync(fixture.lease.path, { recursive: true, force: true });
+  rmSync(fixture.lease.leasePath, { force: true });
+  rmSync(danglingTarget, { recursive: true, force: true });
+  symlinkSync(danglingTarget, fixture.lease.leasePath);
+  git(fixture.originRoot, "update-ref", "-d", `refs/heads/${fixture.lease.branch}`);
+
+  const result = orphanInventoryApi()(fixture);
+  assert.equal(result.kind, "unverified");
+  assert.deepEqual(result.resources, {
+    workspaceExists: false,
+    branchExists: false,
+    leaseExists: true,
+  });
+});
