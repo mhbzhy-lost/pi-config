@@ -22,7 +22,9 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
   const workflowMode = task.workflow || "tdd";
   const workflow = workflowMode === "docs-only"
     ? { mode: workflowMode, reason: "Documentation-only task produces a review or report artifact." }
-    : { mode: workflowMode };
+    : workflowMode === "existing-tests"
+      ? { mode: workflowMode, reason: "Task uses the Goal contract's existing acceptance test suite without inventing new tests." }
+      : { mode: workflowMode };
 
   const input = {
     version: "dispatch-ir.v1",
