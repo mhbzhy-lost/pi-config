@@ -66,3 +66,33 @@ Skill 完成后，使用同类 fresh-context 场景复测，Agent 必须：
 - compact/reload/新协调轮次先调用 `goal_status`，服从 machine action。
 - 成功路径严格执行 settle → integrate → accept；失败/blocked 路径先 discard active workspace，再 redispatch 或 amend。
 - 不直接编辑 events/projection，不用重新 init 代替 amendment。
+
+## GREEN：加载 Skill 后复测
+
+评估时间：2026-08-04。三个 fresh-context 场景均先加载 Git 管理的 `using-goal-engine` Skill。
+
+### 初始化边界
+
+Agent 拒绝在非 Git 项目、绝对 `cd` 和错误 workflow 下直接 `goal_init`；明确区分当前项目 workspace 与未来 Executor worktree，并把无测试的 `existing-tests` 改为 `tdd`、把包含脚本逻辑的 `docs-only` 拆分或改为 `tdd`。未探测虚构路径。
+
+### 失败恢复
+
+Agent 保留 active Goal 和事件历史，拒绝删除状态后 re-init；先 `goal_status`，修正 `.state/goal-engine/` 跟踪时保留磁盘内容，再按 machine action 选择 dispatch 或 amend。未虚构参数或工具。
+
+### 生命周期闭环
+
+首次复测因场景没有暴露 ToolDefinition，Agent 搜索内部源码后超时，不能计为通过。Skill 随后新增 typed-only 边界：schema 只能来自当前 Pi Host，不得经源码或 CLI 重建；Host 能力缺失时停止。
+
+重试时 Agent 未搜索源码或运行测试，正确给出：
+
+```text
+成功：goal_status → goal_settle → goal_integrate(integrate) → acceptance → goal_accept
+失败：goal_status → goal_settle → goal_integrate(discard) → goal_status → goal_dispatch/goal_amend
+reload：goal_status
+```
+
+它明确拒绝从 dispatched 直接 accept，且没有虚构 `expectedVersion`、`attempt_id` 或额外 workspace 工具。
+
+## 评估结论
+
+Skill 压力场景由 RED 转为 GREEN。Skill 能显著降低 Agent 的 ABI 幻觉和状态跳步，但仍是指导层；机械可证明的不变量必须继续由 typed tool handler、事件状态机及存储/Git 层强制执行。
