@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadProjection } from "./store.mjs";
+import { classifyGoalEvidence } from "./evidence.mjs";
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
@@ -12,7 +13,7 @@ export function auditGoal(goalId, stateRoot) {
   const events = readEvents(eventsPath);
 
   const failedAttempts = countFailedSettles(events);
-  const { hasExternalEvidence, allSelfProduced, evidenceCount } = analyzeEvidence(projection);
+  const { hasExternalReview, hasPreExisting, allSelfProduced } = classifyGoalEvidence(projection);
   const checkpointGap = hasLongCheckpointGap(events);
   const neverBlockedSuspicious = isNeverBlockedSuspicious(events, projection);
   const projectionSignals = detectProjectionSignals(projection);
@@ -20,6 +21,7 @@ export function auditGoal(goalId, stateRoot) {
   const signals = [];
   if (failedAttempts >= 3) signals.push("HIGH_RETRY_RATE");
   if (allSelfProduced) signals.push("ALL_SELF_PRODUCED_EVIDENCE");
+  if (hasPreExisting && !hasExternalReview) signals.push("PRE_EXISTING_EVIDENCE_WITHOUT_EXTERNAL_REVIEW");
   if (checkpointGap) signals.push("LONG_CHECKPOINT_GAP");
   if (neverBlockedSuspicious) signals.push("NEVER_BLOCKED_SUSPICIOUS");
 
@@ -43,7 +45,7 @@ export function auditGoal(goalId, stateRoot) {
     checkpoint_count: projection.checkpointCount,
     progress: { total: totalTasks, accepted: acceptedTasks },
     failed_attempts: failedAttempts,
-    has_external_evidence: hasExternalEvidence,
+    has_external_evidence: hasExternalReview,
     signals,
     verdict,
   };
@@ -64,24 +66,6 @@ function countFailedSettles(events) {
     if (e.type === "task.settled" && e.data.outcome === "failed") count++;
   }
   return count;
-}
-
-function analyzeEvidence(projection) {
-  let evidenceCount = 0;
-  let selfProducedCount = 0;
-
-  for (const [, task] of projection.tasks) {
-    for (const ev of task.evidence) {
-      evidenceCount++;
-      if (ev.source === "self_produced") selfProducedCount++;
-    }
-  }
-
-  return {
-    hasExternalEvidence: evidenceCount > 0 && selfProducedCount < evidenceCount,
-    allSelfProduced: evidenceCount > 0 && selfProducedCount === evidenceCount,
-    evidenceCount,
-  };
 }
 
 function detectProjectionSignals(projection) {

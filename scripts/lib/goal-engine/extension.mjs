@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState } from "./graph.mjs";
 import { appendEvent, loadProjection, listGoals } from "./store.mjs";
 import { compileTaskContract } from "./dispatch.mjs";
+import { completionVerdictFor } from "./evidence.mjs";
 import {
   allocateExecutorWorkspace,
   loadExecutorWorkspaceLease,
@@ -184,13 +185,6 @@ function makeEvent(type, data, goalId, schemaVersion = DEFAULT_EVENT_VERSION) {
   };
 }
 
-
-function completionVerdictFor(projection) {
-  const allEvidence = [...projection.tasks.values()].flatMap((task) => task.evidence);
-  return allEvidence.some((evidence) => evidence.source !== "self_produced")
-    ? "COMPLETE"
-    : "DONE_WITHOUT_EXTERNAL_VERIFICATION";
-}
 
 function ambiguousAcceptCommitError(goalId, taskId, cause) {
   return Object.assign(new Error(`ambiguous accept commit for goal ${goalId}, task ${taskId}`), {
@@ -578,7 +572,6 @@ export function createGoalEngineExtension(pi, options = {}) {
         throw ambiguousAcceptCommitError(goalId, params.task_id, cause);
       };
 
-      const verdictFor = (current) => completionVerdictFor(current);
       if (projection.lifecycle === "completed") {
         // The persisted terminal verdict is historical authority: evidence classification
         // may evolve after this projection was completed.
@@ -603,7 +596,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
       const progress = goalProgress(projection);
       if (progress.accepted !== progress.total) return respond(projection);
-      const verdict = verdictFor(projection);
+      const verdict = completionVerdictFor(projection);
       try {
         projection = appendEventFn(root, makeEvent("goal.completed", { verdict }, goalId), projection.version);
       } catch (cause) {

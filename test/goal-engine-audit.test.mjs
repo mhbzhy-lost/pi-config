@@ -56,8 +56,8 @@ test("auditGoal reports healthy for well-maintained goal (v2 integrated+released
   appendEvent(root, makeV2Event("task.settled", {
     taskId: "t1",
     outcome: "succeeded",
-    evidence: { type: "file", path: "src/x.ts" },
-    evidenceSource: "pre_existing",
+    evidence: { type: "external_review", ref: "independent-review-healthy" },
+    evidenceSource: "external",
     nextAction: "Accept t1 and verify all acceptance criteria are satisfied",
   }, goalId), v++);
 
@@ -205,7 +205,7 @@ test("auditGoal detects all self-produced evidence (v2 integrated+released)", ()
   assert.equal(report.verdict, "AT_RISK");
 });
 
-test("auditGoal reports legacy unverified acceptance for v1 history", () => {
+test("auditGoal flags pre_existing evidence without external review in v1 history", () => {
   const root = tmpRoot();
   const goalId = "legacy-acceptance-goal";
   let v = 0;
@@ -237,7 +237,9 @@ test("auditGoal reports legacy unverified acceptance for v1 history", () => {
   assert.ok(report.signals.includes("LEGACY_UNVERIFIED_ACCEPTANCE"));
   assert.notEqual(report.verdict, "HEALTHY");
   assert.equal(report.total_events, 5);
-  assert.equal(report.has_external_evidence, true);
+  assert.equal(report.has_external_evidence, false);
+  assert.ok(report.signals.includes("PRE_EXISTING_EVIDENCE_WITHOUT_EXTERNAL_REVIEW"));
+  assert.equal(report.verdict, "DEGRADED");
 });
 
 test("auditGoal detects incomplete workspace disposition while disposing", () => {

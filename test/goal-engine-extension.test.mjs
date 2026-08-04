@@ -6,6 +6,25 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
+import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
+
+test("external evidence classification matrix only promotes external_review from external", () => {
+  const projectionFor = (evidence) => ({ tasks: new Map([["t1", { evidence }]]) });
+  for (const evidence of [
+    [{ source: "self_produced", type: "file" }],
+    [{ source: "pre_existing", type: "file" }],
+    [{ source: "self_produced", type: "file" }, { source: "pre_existing", type: "file" }],
+    [{ source: "self_produced", type: "external_review" }],
+    [{ source: "pre_existing", type: "external_review" }],
+    [{ source: "external", type: "file" }],
+  ]) {
+    assert.equal(completionVerdictFor(projectionFor(evidence)), "DONE_WITHOUT_EXTERNAL_VERIFICATION");
+    assert.equal(classifyGoalEvidence(projectionFor(evidence)).hasExternalReview, false);
+  }
+  const externalReview = projectionFor([{ source: "external", type: "external_review" }]);
+  assert.equal(completionVerdictFor(externalReview), "COMPLETE");
+  assert.equal(classifyGoalEvidence(externalReview).hasExternalReview, true);
+});
 
 function createMockPi(cwd) {
   const tools = [];

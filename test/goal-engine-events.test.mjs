@@ -148,6 +148,36 @@ test("task.settled rejects vague nextAction", () => {
   );
 });
 
+test("task.settled rejects illegal evidence sources and external non-review atomically", () => {
+  const dispatched = () => {
+    let projection = createProjection();
+    projection = applyEvent(projection, makeEvent("goal.created", {
+      objective: "Evidence source validation", scope: [], nonGoals: [], dod: [],
+      tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
+    }));
+    return applyEvent(projection, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
+  };
+  const settle = (evidenceSource, evidence = { type: "file", path: "a.ts" }) => makeEvent("task.settled", {
+    taskId: "t1", outcome: "succeeded", evidence, evidenceSource,
+    nextAction: "Accept the task and verify all acceptance criteria are met",
+  });
+  for (const [source, evidence, pattern] of [
+    ["unknown", undefined, /invalid evidence source/i],
+    ["external", { type: "file", path: "a.ts" }, /external evidence source requires external_review/i],
+  ]) {
+    const projection = dispatched();
+    const version = projection.version;
+    assert.throws(() => applyEvent(projection, settle(source, evidence)), pattern);
+    assert.equal(projection.version, version);
+    assert.equal(projection.tasks.get("t1").status, "dispatched");
+    assert.equal(projection.tasks.get("t1").evidence.length, 0);
+  }
+  const external = applyEvent(dispatched(), settle("external", { type: "external_review", ref: "review-42" }));
+  assert.equal(external.tasks.get("t1").evidence[0].source, "external");
+  const legacy = applyEvent(dispatched(), settle(undefined));
+  assert.equal(legacy.tasks.get("t1").evidence[0].source, "self_produced");
+});
+
 test("task.settled rejects command-type evidence", () => {
   let p = createProjection();
   p = applyEvent(p, makeEvent("goal.created", {

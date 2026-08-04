@@ -4,6 +4,7 @@ const SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2"]
 const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
 const TERMINAL_LIFECYCLES = new Set(["completed", "blocked", "cancelled"]);
 const VALID_EVIDENCE_TYPES = new Set(["diff", "file", "test_output", "screenshot", "log", "external_review"]);
+const VALID_EVIDENCE_SOURCES = new Set(["self_produced", "pre_existing", "external"]);
 const VAGUE_PATTERNS = /\b(continue|proceed|next step|next|TBD|todo|keep going|carry on)\b/i;
 const MIN_NEXT_ACTION_LEN = 20;
 
@@ -161,6 +162,7 @@ function taskSettled(p, data, occurredAt) {
   if (task.status !== "dispatched") throw new Error(`task is not dispatched: ${taskId} (${task.status})`);
   if (!["succeeded", "failed", "blocked"].includes(outcome)) throw new Error(`invalid outcome: ${outcome}`);
 
+  validateEvidenceSource(evidenceSource, evidence);
   validateNextAction(nextAction);
   if (outcome === "succeeded") validateEvidence(evidence);
 
@@ -391,6 +393,14 @@ export function validateNextAction(nextAction) {
   }
   if (VAGUE_PATTERNS.test(nextAction)) {
     throw new Error("next_action must be specific — vague words (continue/proceed/next step/TBD) are rejected");
+  }
+}
+
+function validateEvidenceSource(source, evidence) {
+  if (source === undefined) return;
+  if (!VALID_EVIDENCE_SOURCES.has(source)) throw new Error(`invalid evidence source: ${source}`);
+  if (source === "external" && evidence?.type !== "external_review") {
+    throw new Error("external evidence source requires external_review evidence type");
   }
 }
 
