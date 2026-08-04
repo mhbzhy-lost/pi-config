@@ -892,8 +892,15 @@ test("orphan inventory persisted lease envelope rejects malformed and canonical 
   orphanInventoryApi();
   for (const field of ["malformed JSON", "goalId", "taskId", "attempt", "stateRoot", "path", "originRoot", "branch"]) {
     const fixture = orphanArgs(`envelope-${field.replace(/ /g, "-")}`);
-    const other = orphanArgs(`envelope-other-${field.replace(/ /g, "-")}`);
-    const value = field === "attempt" ? 2 : field === "branch" ? other.lease.branch : field === "goalId" ? other.goalId : field === "taskId" ? other.taskId : field === "path" ? other.lease.path : field === "originRoot" ? other.originRoot : other.stateRoot;
+    const otherTaskId = field === "taskId" ? "other-task" : fixture.taskId;
+    const other = orphanArgs(`envelope-other-${field.replace(/ /g, "-")}`, otherTaskId);
+    const value = field === "attempt" ? 2
+      : field === "branch" ? other.lease.branch
+      : field === "goalId" ? other.goalId
+      : field === "taskId" ? other.taskId
+      : field === "path" ? other.lease.path
+      : field === "originRoot" ? other.originRoot
+      : other.stateRoot;
     writeFileSync(fixture.lease.leasePath, field === "malformed JSON" ? "{" : JSON.stringify({ ...fixture.lease, [field]: value }));
     assertOrphanUnverified(orphanInventoryApi()(fixture));
   }
