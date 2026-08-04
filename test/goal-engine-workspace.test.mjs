@@ -26,6 +26,120 @@ function tmpStateRoot() {
   return mkdtempSync(join(tmpdir(), "ge-ws-state-"));
 }
 
+test("inspectExecutorWorkspace rejects an ancestor HEAD on the live branch", () => {
+  const origin = initRepo();
+  writeFileSync(join(origin, "base.txt"), "base\n");
+  git(origin, "add", ".");
+  git(origin, "commit", "-m", "test: base");
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "ancestor", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  git(lease.path, "reset", "--hard", "HEAD^");
+
+  const inspection = inspectExecutorWorkspace(lease);
+  assert.equal(inspection.descendant, false);
+  assert.equal(inspection.hasCommits, false);
+  assert.deepEqual(inspection.aheadCommits, []);
+});
+
+test("inspectExecutorWorkspace reports unrelated live branch HEAD as non-descendant", () => {
+  const origin = initRepo();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "unrelated", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  git(lease.path, "checkout", "--orphan", "unrelated-root");
+  git(lease.path, "rm", "-rf", ".");
+  writeFileSync(join(lease.path, "unrelated.txt"), "unrelated\n");
+  git(lease.path, "add", ".");
+  git(lease.path, "commit", "-m", "test: unrelated root");
+  const unrelatedHead = git(lease.path, "rev-parse", "HEAD");
+  git(lease.path, "branch", "-f", lease.branch, unrelatedHead);
+  git(lease.path, "switch", lease.branch);
+
+  const inspection = inspectExecutorWorkspace(lease);
+  assert.equal(inspection.descendant, false);
+  assert.equal(inspection.hasCommits, false);
+  assert.equal(inspection.aheadCount, 0);
+});
+
+test("inspectExecutorWorkspace rejects empty-only descendant commits as usable", () => {
+  const origin = initRepo();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "empty", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  git(lease.path, "commit", "--allow-empty", "-m", "test: empty");
+
+  const inspection = inspectExecutorWorkspace(lease);
+  assert.equal(inspection.descendant, true);
+  assert.equal(inspection.aheadCount, 1);
+  assert.equal(inspection.treeChanged, false);
+  assert.equal(inspection.hasCommits, false);
+});
+
+test("inspectExecutorWorkspace rejects a wrong live branch", () => {
+  const origin = initRepo();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "live-branch", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  git(lease.path, "switch", "-c", "wrong-live-branch");
+
+  assert.throws(() => inspectExecutorWorkspace(lease), /branch|identity/i);
+});
+
+test("inspectExecutorWorkspace rejects a canonical common dir identity mismatch", () => {
+  const origin = initRepo();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "common-dir", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  const otherOrigin = initRepo();
+
+  assert.throws(() => inspectExecutorWorkspace({ ...lease, originRoot: otherOrigin }), /common|identity|origin/i);
+});
+
+test("inspectExecutorWorkspace treats runtime to outside staged rename as dirty", () => {
+  const origin = initRepo();
+  mkdirSync(join(origin, ".pi-subagents"), { recursive: true });
+  writeFileSync(join(origin, ".pi-subagents", "tracked.txt"), "runtime\n");
+  git(origin, "add", ".");
+  git(origin, "commit", "-m", "test: runtime tracked");
+  const lease = allocateExecutorWorkspace({ goalId: "runtime-out", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit: git(origin, "rev-parse", "HEAD") });
+  mkdirSync(join(lease.path, "outside"));
+  git(lease.path, "mv", ".pi-subagents/tracked.txt", "outside/rogue.txt");
+
+  const inspection = inspectExecutorWorkspace(lease);
+  assert.equal(inspection.clean, false);
+  assert.deepEqual(inspection.dirtyFiles.sort(), [".pi-subagents/tracked.txt", "outside/rogue.txt"]);
+});
+
+test("inspectExecutorWorkspace treats outside to runtime staged rename as dirty", () => {
+  const origin = initRepo();
+  mkdirSync(join(origin, "outside"), { recursive: true });
+  writeFileSync(join(origin, "outside", "tracked.txt"), "outside\n");
+  git(origin, "add", ".");
+  git(origin, "commit", "-m", "test: outside tracked");
+  const lease = allocateExecutorWorkspace({ goalId: "outside-runtime", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit: git(origin, "rev-parse", "HEAD") });
+  mkdirSync(join(lease.path, ".pi-subagents"));
+  git(lease.path, "mv", "outside/tracked.txt", ".pi-subagents/rogue.txt");
+
+  const inspection = inspectExecutorWorkspace(lease);
+  assert.equal(inspection.clean, false);
+  assert.deepEqual(inspection.dirtyFiles.sort(), [".pi-subagents/rogue.txt", "outside/tracked.txt"]);
+});
+
+test("inspectExecutorWorkspace exempts runtime-only staged changes but keeps ordinary staged and unstaged files dirty", () => {
+  const origin = initRepo();
+  mkdirSync(join(origin, ".pi-subagents"), { recursive: true });
+  writeFileSync(join(origin, ".pi-subagents", "tracked.txt"), "runtime\n");
+  git(origin, "add", ".");
+  git(origin, "commit", "-m", "test: runtime tracked");
+  const lease = allocateExecutorWorkspace({ goalId: "status", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit: git(origin, "rev-parse", "HEAD") });
+  writeFileSync(join(lease.path, ".pi-subagents", "tracked.txt"), "runtime changed\n");
+  git(lease.path, "add", ".pi-subagents/tracked.txt");
+  assert.equal(inspectExecutorWorkspace(lease).clean, true);
+  writeFileSync(join(lease.path, "staged.txt"), "staged\n");
+  git(lease.path, "add", "staged.txt");
+  writeFileSync(join(lease.path, "unstaged.txt"), "unstaged\n");
+  const inspection = inspectExecutorWorkspace(lease);
+  assert.equal(inspection.clean, false);
+  assert.ok(inspection.dirtyFiles.includes("staged.txt"));
+  assert.ok(inspection.untrackedFiles.includes("unstaged.txt"));
+});
+
 test("allocateExecutorWorkspace creates worktree on new branch", () => {
   const origin = initRepo();
   const stateRoot = tmpStateRoot();
