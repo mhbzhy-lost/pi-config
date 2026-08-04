@@ -189,6 +189,70 @@ test("goal_status returns active task from historical v2 JSONL", async () => {
   assert.deepEqual(status.runnable, ["t1"]);
 });
 
+test("historical unsafe dispatch is rejected before workspace allocation while status remains readable", async () => {
+  const cwd = tmpCwd();
+  const goalId = "historical-unsafe-dispatch";
+  const root = join(cwd, ".state/goal-engine");
+  const event = { schemaVersion: "goal-engine.event.v2", eventId: "historical-unsafe-create", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Historical unsafe dispatch", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: [`cd ${cwd} && true`] }, workflow: "tdd" } } } };
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${JSON.stringify(event)}\n`);
+  writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: event.data.objective, updatedAt: event.occurredAt } } }));
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  assert.equal(JSON.parse(await invoke(pi, "goal_status", {})).tasks.t1.status, "pending");
+  await assert.rejects(
+    () => invoke(pi, "goal_dispatch", { task_id: "t1" }),
+    (error) => error.code === "INVALID_TASK_CONTRACT" && /observed=.*remediation=.*goal_amend.*stateChanged=false/.test(error.message),
+  );
+  assert.equal(readGoalEvents(cwd, goalId).length, 1);
+  assert.deepEqual(workspaceState(cwd, goalId, "t1"), {
+    workspacePath: join(cwd, ".state/goal-engine/worktrees", `${goalId}-t1-1`), leasePath: join(cwd, ".state/goal-engine/worktrees", `.${goalId}-t1-1.lease.json`), branch: `ge/${goalId}/t1/1`,
+    workspaceExists: false, leaseExists: false, branchExists: false,
+  });
+});
+
+test("historical tracked state dispatch is rejected before workspace allocation", async () => {
+  const cwd = tmpCwd();
+  const goalId = "historical-tracked-state-dispatch";
+  const root = join(cwd, ".state/goal-engine");
+  const event = { schemaVersion: "goal-engine.event.v2", eventId: "historical-tracked-create", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Historical tracked state dispatch", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy safe task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } };
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${JSON.stringify(event)}\n`);
+  writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: event.data.objective, updatedAt: event.occurredAt } } }));
+  writeFileSync(join(root, "tracked.json"), "{}\n");
+  git(cwd, "add", "-f", ".state/goal-engine/tracked.json");
+  git(cwd, "commit", "-m", "test: track legacy goal state");
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  await assert.rejects(
+    () => invoke(pi, "goal_dispatch", { task_id: "t1" }),
+    (error) => error.code === "STATE_TRACKED" && /observed=.*remediation=.*goal_dispatch.*stateChanged=false/.test(error.message),
+  );
+  assert.equal(readGoalEvents(cwd, goalId).length, 1);
+  assert.deepEqual(workspaceState(cwd, goalId, "t1"), {
+    workspacePath: join(cwd, ".state/goal-engine/worktrees", `${goalId}-t1-1`), leasePath: join(cwd, ".state/goal-engine/worktrees", `.${goalId}-t1-1.lease.json`), branch: `ge/${goalId}/t1/1`,
+    workspaceExists: false, leaseExists: false, branchExists: false,
+  });
+});
+
+test("historical safe ignored state dispatch remains available", async () => {
+  const cwd = tmpCwd();
+  const goalId = "historical-safe-dispatch";
+  const root = join(cwd, ".state/goal-engine");
+  const event = { schemaVersion: "goal-engine.event.v2", eventId: "historical-safe-create", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Historical safe dispatch", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy safe task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } };
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${JSON.stringify(event)}\n`);
+  writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: event.data.objective, updatedAt: event.occurredAt } } }));
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  assert.equal(dispatched.status, "dispatched");
+  assert.equal(dispatched.workspace.attempt, 1);
+});
+
 test("registers seven goal engine tools", () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);

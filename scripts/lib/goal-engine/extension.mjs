@@ -41,17 +41,34 @@ function realpathForPreflight(path, observed) {
   catch { throw initError("GIT_INFRASTRUCTURE_ERROR", observed, "repair filesystem access and retry goal_init"); }
 }
 
-function assertInitPreflight(cwd, root) {
+function preflightError(code, observed, remediation, operation) {
+  const error = initError(code, observed, remediation);
+  error.requiredNextAction = { tool: operation, params: {} };
+  error.message = `${error.message}; requiredNextAction=${JSON.stringify(error.requiredNextAction)}`;
+  return error;
+}
+
+function assertRepositoryPreflight(cwd, { operation }) {
+  const retry = `repair Git and retry ${operation}`;
   const physicalCwd = realpathForPreflight(cwd, `cwd realpath could not be read: ${cwd}`);
-  const topLevel = gitOutput(cwd, ["rev-parse", "--show-toplevel"], "GIT_INFRASTRUCTURE_ERROR", "Git worktree top-level could not be read", "repair Git and retry goal_init");
-  if (realpathForPreflight(topLevel, `Git top-level realpath could not be read: ${topLevel}`) !== physicalCwd) throw initError("UNSAFE_GIT_CWD", `cwd=${physicalCwd}, topLevel=${topLevel}`, "run goal_init from the repository top-level");
-  gitOutput(cwd, ["rev-parse", "--verify", "HEAD"], "INVALID_GIT_HEAD", "HEAD is unborn or invalid", "create a commit on an attached branch before goal_init");
-  const ref = gitOutput(cwd, ["symbolic-ref", "--quiet", "HEAD"], "DETACHED_GIT_HEAD", "HEAD is detached", "checkout an attached branch before goal_init", [1]);
-  if (!ref) throw initError("DETACHED_GIT_HEAD", "HEAD is detached", "checkout an attached branch before goal_init");
-  const tracked = gitOutput(cwd, ["ls-files", "--", STATE_ROOT_REL], "GIT_INFRASTRUCTURE_ERROR", "could not inspect tracked state entries", "repair Git index and retry goal_init");
-  if (tracked) throw initError("STATE_TRACKED", `tracked entries: ${tracked}`, "remove .state/goal-engine from the Git index before goal_init");
+  const topLevel = gitOutput(cwd, ["rev-parse", "--show-toplevel"], "GIT_INFRASTRUCTURE_ERROR", "Git worktree top-level could not be read", retry);
+  if (realpathForPreflight(topLevel, `Git top-level realpath could not be read: ${topLevel}`) !== physicalCwd) throw preflightError("UNSAFE_GIT_CWD", `cwd=${physicalCwd}, topLevel=${topLevel}`, `run ${operation} from the repository top-level`, operation);
+  gitOutput(cwd, ["rev-parse", "--verify", "HEAD"], "INVALID_GIT_HEAD", "HEAD is unborn or invalid", `create a commit on an attached branch before ${operation}`);
+  const ref = gitOutput(cwd, ["symbolic-ref", "--quiet", "HEAD"], "DETACHED_GIT_HEAD", "HEAD is detached", `checkout an attached branch before ${operation}`, [1]);
+  if (!ref) throw preflightError("DETACHED_GIT_HEAD", "HEAD is detached", `checkout an attached branch before ${operation}`, operation);
+  const tracked = gitOutput(cwd, ["ls-files", "--", STATE_ROOT_REL], "GIT_INFRASTRUCTURE_ERROR", "could not inspect tracked state entries", retry);
+  if (tracked) throw preflightError("STATE_TRACKED", `tracked entries: ${tracked}`, `remove .state/goal-engine from the Git index before retrying ${operation}`, operation);
   const ignored = gitOutput(cwd, ["check-ignore", "-q", ".state/goal-engine/"], "GIT_INFRASTRUCTURE_ERROR", "could not inspect .state/goal-engine ignore rule", "repair Git ignore configuration", [1]);
-  if (ignored === null) throw initError("STATE_NOT_IGNORED", ".state/goal-engine/ is not ignored", "add .state/goal-engine/ to .gitignore manually before goal_init");
+  if (ignored === null) throw preflightError("STATE_NOT_IGNORED", ".state/goal-engine/ is not ignored", `add .state/goal-engine/ to .gitignore before retrying ${operation}`, operation);
+}
+
+function assertInitPreflight(cwd, root) {
+  assertRepositoryPreflight(cwd, { operation: "goal_init" });
+}
+
+function validateProjectionForDispatch(projection, cwd) {
+  validateTaskDefinitions([...projection.tasks.keys()], taskDefsFromProjection(projection), { cwd, realpathCwd: realpathSync(cwd) });
+  assertPendingTaskContractsCompile(projection, cwd);
 }
 
 function gitHead(cwd) {
@@ -475,6 +492,17 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         const unmetDeps = task.deps.filter((dep) => projection.tasks.get(dep)?.status !== "accepted");
         throw new Error(`task is not runnable: dependency not accepted (${unmetDeps.join(", ")})`);
+      }
+
+      assertRepositoryPreflight(cwd, { operation: "goal_dispatch" });
+      try {
+        validateProjectionForDispatch(projection, cwd);
+      } catch (error) {
+        const remediation = "correct the complete pending task candidate with goal_amend, then retry goal_dispatch";
+        const rejected = preflightError("INVALID_TASK_CONTRACT", error.message, remediation, "goal_amend");
+        rejected.requiredNextAction = { tool: "goal_amend", params: { goal_id: goalId } };
+        rejected.message = `${initError("INVALID_TASK_CONTRACT", error.message, remediation).message}; requiredNextAction=${JSON.stringify(rejected.requiredNextAction)}`;
+        throw rejected;
       }
 
       const attempt = task.attempts + 1;
