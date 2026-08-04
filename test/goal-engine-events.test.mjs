@@ -17,6 +17,25 @@ function makeEvent(type, data, goalId = "test-goal") {
   };
 }
 
+test("v2 create and amend reject pending tasks that cannot compile dispatch IR atomically", () => {
+  const created = {
+    objective: "Valid objective",
+    scope: [], nonGoals: [], dod: [], tasks: ["t1"],
+    taskDefs: { t1: { description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } },
+  };
+  assert.throws(() => applyEvent(createProjection(), { ...makeEvent("goal.created", created, "g".repeat(160)), schemaVersion: "goal-engine.event.v2" }), /taskId.*160/);
+  assert.equal(createProjection().tasks.size, 0);
+
+  let p = applyEvent(createProjection(), { ...makeEvent("goal.created", created), schemaVersion: "goal-engine.event.v2" });
+  const before = p;
+  assert.throws(() => applyEvent(p, { ...makeEvent("goal.amended", {
+    reason: "Add a task whose derived requirements exceed the dispatch limit",
+    updateTasks: { t1: { acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `criterion ${i}`), commands: ["true"] } } },
+  }), schemaVersion: "goal-engine.event.v2" }), /requirements.*32/);
+  assert.equal(p, before);
+  assert.equal(p.tasks.get("t1").acceptance.criteria.length, 1);
+});
+
 test("createProjection returns empty state", () => {
   const p = createProjection();
   assert.equal(p.goalId, null);

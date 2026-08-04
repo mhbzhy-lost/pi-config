@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { compileCodingDispatchIR, renderDispatchPrompt } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
-import { compileTaskContract } from "../scripts/lib/goal-engine/dispatch.mjs";
+import { compileTaskContract, assertPendingTaskContractsCompile } from "../scripts/lib/goal-engine/dispatch.mjs";
 import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
 import { validateRepoRelativePath, validateTaskDefinitions } from "../scripts/lib/goal-engine/task-definition.mjs";
 
@@ -228,4 +228,28 @@ test("compileTaskContract rejects non-pending task", () => {
     () => compileTaskContract(p, "t1", "/workspace"),
     /not pending/,
   );
+});
+
+test("pending contract oracle catches derived composite ids and requirement combinations", () => {
+  const p = buildProjection();
+  p.goalId = "g".repeat(160);
+  assert.throws(() => assertPendingTaskContractsCompile(p, "/workspace/project"), /taskId.*160/);
+  p.goalId = "dispatch-test";
+  p.tasks.get("t1").acceptance.criteria = Array.from({ length: 32 }, (_, i) => `criterion ${i}`);
+  assert.throws(() => assertPendingTaskContractsCompile(p, "/workspace/project"), /requirements.*32/);
+});
+
+test("completed optional context is stable, bounded, and skips oversized facts", () => {
+  const p = buildProjection();
+  const completed = p.tasks.get("t1");
+  completed.status = "accepted";
+  completed.evidence = Array.from({ length: 40 }, (_, i) => ({ type: "log", ref: `evidence-${i}` }));
+  completed.evidence.unshift({ type: "log", ref: "x".repeat(4097) });
+  completed.writePaths = ["src/ok.ts", ...Array.from({ length: 40 }, (_, i) => `src/${i}.ts`)];
+  const first = compileTaskContract(p, "t2", "/workspace/project");
+  const second = compileTaskContract(p, "t2", "/workspace/project");
+  assert.ok(first.context.knownFacts.length <= 32);
+  assert.ok(first.context.relevantFiles.length <= 32);
+  assert.ok(first.context.knownFacts.every((fact) => Buffer.byteLength(fact, "utf8") <= 4096));
+  assert.deepEqual(first.context, second.context);
 });

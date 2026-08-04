@@ -283,6 +283,16 @@ test("goal_init rejects bounded task contracts and wrapper escapes before state"
   }
 });
 
+test("goal_init preflights derived dispatch contracts before appending", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  const task = { id: "t1", description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `criterion ${i}`), commands: ["true"] }, workflow: "tdd" };
+  await assert.rejects(() => invoke(pi, "goal_init", { objective: "Derived contract failure", tasks: [task] }), (error) => error.code === "INVALID_GOAL_CONTRACT" && /observed=.*requirements.*remediation=.*stateChanged=false/i.test(error.message));
+  assert.equal(existsSync(join(cwd, ".state/goal-engine")), false);
+  await assert.rejects(() => invoke(pi, "goal_init", { objective: "!!!", tasks: [{ ...task, acceptance: { criteria: ["works"], commands: ["true"] } }] }), (error) => error.code === "INVALID_GOAL_CONTRACT" && /observed=.*objective.*remediation=.*stateChanged=false/i.test(error.message));
+});
+
 test("goal_init active-goal error embeds actionable goal_status next action", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
