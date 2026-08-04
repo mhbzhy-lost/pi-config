@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, renameSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, renameSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
@@ -163,6 +163,14 @@ function persistedStateBytes(cwd, goalId) {
     readFileSync(join(root, "goals", goalId, "projection.json"), "utf8"),
     readFileSync(join(root, "registry.json"), "utf8"),
   ];
+}
+
+function rejectionSnapshot(cwd, goalId) {
+  return {
+    state: persistedStateBytes(cwd, goalId),
+    refs: git(cwd, "for-each-ref", "--format=%(refname):%(objectname)", "refs/heads"),
+    worktrees: git(cwd, "worktree", "list", "--porcelain"),
+  };
 }
 
 function createGoalEngineWithAppendInjection(pi, options = {}) {
@@ -1009,6 +1017,50 @@ test("goal_settle classifies ancestor, empty, and missing persisted lease before
     );
     assert.deepEqual(persistedStateBytes(cwd, goalId), before);
     assert.deepEqual(workspaceState(cwd, goalId, "t1"), resources);
+  }
+});
+
+test("goal_settle classifies unrelated, wrong live branch, tampered lease, and physical workspace failures without side effects", async () => {
+  const cases = [
+    { name: "unrelated", code: "EXECUTOR_COMMIT_RANGE_INVALID", prepare(workspace) { git(workspace.path, "checkout", "--orphan", "impostor"); writeFileSync(join(workspace.path, "rogue.txt"), "x\n"); git(workspace.path, "add", "rogue.txt"); git(workspace.path, "commit", "-m", "test: unrelated"); const head = git(workspace.path, "rev-parse", "HEAD"); git(workspace.path, "branch", "-f", workspace.branch, head); git(workspace.path, "checkout", workspace.branch); } },
+    { name: "wrong live branch", code: "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH", prepare(workspace) { git(workspace.path, "checkout", "-b", "impostor-live-branch"); } },
+    { name: "tampered lease", code: "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH", prepare(workspace, state) { const lease = JSON.parse(readFileSync(state.leasePath, "utf8")); lease.branch = "ge/tampered/branch/1"; writeFileSync(state.leasePath, `${JSON.stringify(lease)}\n`); } },
+    { name: "physical workspace", code: "EXECUTOR_WORKSPACE_MISSING", prepare(workspace) { rmSync(workspace.path, { recursive: true, force: true }); } },
+  ];
+  for (const scenario of cases) {
+    const cwd = tmpCwd();
+    const objective = `Settle ${scenario.name} error contract`;
+    const goalId = objectiveToGoalId(objective);
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi);
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write source", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+    commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: x");
+    scenario.prepare(workspace, workspaceState(cwd, goalId, "t1"));
+    const before = rejectionSnapshot(cwd, goalId);
+    await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover only through the typed goal status action before retrying." }), (error) => error.code === scenario.code && /observed=.*remediation=.*stateChanged=false.*requiredNextAction/.test(error.message));
+    assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+  }
+});
+
+test("active discard and preserve classify live branch and missing lease without side effects", async () => {
+  const cases = [
+    { name: "live branch", code: "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH", prepare(workspace) { git(workspace.path, "checkout", "-b", "impostor-disposition-branch"); } },
+    { name: "lease", code: "EXECUTOR_LEASE_NOT_FOUND", prepare(workspace, state) { renameSync(state.leasePath, `${state.leasePath}.removed`); } },
+  ];
+  for (const action of ["discard", "preserve"]) for (const scenario of cases) {
+    const cwd = tmpCwd();
+    const objective = `${action} ${scenario.name} mutation contract`;
+    const goalId = objectiveToGoalId(objective);
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi);
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Disposition", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+    await invoke(pi, "goal_settle", { task_id: "t1", outcome: "failed", next_action: "Dispose the executor workspace using the selected typed disposition action." });
+    scenario.prepare(workspace, workspaceState(cwd, goalId, "t1"));
+    const before = rejectionSnapshot(cwd, goalId);
+    await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action }), (error) => error.code === scenario.code && /observed=.*remediation=.*stateChanged=false.*requiredNextAction/.test(error.message));
+    assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
   }
 });
 
