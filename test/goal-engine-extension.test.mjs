@@ -256,6 +256,42 @@ test("goal_init rejects unsafe Git preflight before creating state", async () =>
   }
 });
 
+test("goal_init rejects a nonexistent absolute cwd before creating state", async () => {
+  const cwd = join(tmpdir(), `ge-missing-${crypto.randomUUID()}`);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await assert.rejects(
+    () => invoke(pi, "goal_init", { objective: "Missing cwd", tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] }),
+    (error) => error.code === "GIT_INFRASTRUCTURE_ERROR"
+      && /GIT_INFRASTRUCTURE_ERROR: observed=cwd realpath could not be read: .*; remediation=repair filesystem access and retry goal_init; stateChanged=false/.test(error.message),
+  );
+  assert.equal(existsSync(join(cwd, ".state/goal-engine")), false);
+});
+
+test("goal_init metadata-derived dispatch gates reject atomically", async () => {
+  const base = { id: "t1", description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" };
+  const cases = [
+    ["objective fact", { objective: "o".repeat(4097), tasks: [base] }],
+    ["scope joined fact", { objective: "scope gate", scope: ["s".repeat(4090)], tasks: [base] }],
+    ["non-goals", { objective: "non-goals gate", non_goals: Array.from({ length: 33 }, (_, i) => `non-goal ${i}`), tasks: [base] }],
+    ["DoD requirements", { objective: "dod gate", dod: ["goal proof"], tasks: [{ ...base, acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `criterion ${i}`), commands: ["true"] } }] }],
+    ["composite id", { objective: "g".repeat(80), tasks: [{ ...base, id: "t".repeat(80) }] }],
+  ];
+  for (const [name, params] of cases) {
+    const cwd = tmpCwd();
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi);
+    await assert.rejects(
+      () => invoke(pi, "goal_init", params),
+      (error) => error.code === "INVALID_GOAL_CONTRACT" && /observed=.*remediation=.*stateChanged=false/i.test(error.message),
+      name,
+    );
+    assert.equal(existsSync(join(cwd, ".state/goal-engine/registry.json")), false, `${name} must not register a goal`);
+    assert.equal(existsSync(join(cwd, ".state/goal-engine/worktrees")), false, `${name} must not allocate worktrees`);
+    assert.deepEqual(readGoalEvents(cwd, objectiveToGoalId(params.objective)), [], `${name} must not append events`);
+  }
+});
+
 test("goal_init wraps invalid task contracts before any persistent side effect", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);

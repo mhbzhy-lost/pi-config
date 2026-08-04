@@ -4,6 +4,8 @@ import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.
 import { appendEvent, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
 import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 
 function makeEvent(type, data, goalId = "test-goal") {
@@ -39,6 +41,56 @@ test("v2 create and amend reject pending tasks that cannot compile dispatch IR a
   }), schemaVersion: "goal-engine.event.v2" }), /requirements.*32/);
   assert.equal(p, before);
   assert.equal(p.tasks.get("t1").acceptance.criteria.length, 1);
+});
+
+test("v2 metadata-derived create and amendment gates leave projections atomic", () => {
+  const task = { description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" };
+  const createCases = [
+    ["objective", { objective: "o".repeat(4097), scope: [], nonGoals: [], dod: [] }],
+    ["scope", { objective: "scope", scope: ["s".repeat(4090)], nonGoals: [], dod: [] }],
+    ["nonGoals", { objective: "non-goals", scope: [], nonGoals: Array.from({ length: 33 }, (_, i) => `n${i}`), dod: [] }],
+    ["dod", { objective: "dod", scope: [], nonGoals: [], dod: ["proof"], taskDefs: { t1: { ...task, acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `c${i}`), commands: ["true"] } } } }],
+    ["composite", { objective: "composite", scope: [], nonGoals: [], dod: [], goalId: "g".repeat(160) }],
+  ];
+  for (const [name, data] of createCases) {
+    const projection = createProjection();
+    const event = { ...makeEvent("goal.created", { ...data, tasks: ["t1"], taskDefs: data.taskDefs || { t1: task } }, data.goalId || "metadata-goal"), schemaVersion: "goal-engine.event.v2" };
+    assert.throws(() => applyEvent(projection, event), /objective|knownFacts|decisions|requirements|taskId|4096|32|160/i, name);
+    assert.equal(projection.version, 0, `${name} must not mutate the original projection`);
+    assert.equal(projection.tasks.size, 0);
+  }
+  let projection = applyEvent(createProjection(), { ...makeEvent("goal.created", { objective: "amend", scope: [], nonGoals: [], dod: ["proof"], tasks: ["t1"], taskDefs: { t1: task } }), schemaVersion: "goal-engine.event.v2" });
+  const before = structuredClone({ version: projection.version, tasks: [...projection.tasks] });
+  assert.throws(() => applyEvent(projection, { ...makeEvent("goal.amended", { reason: "Derived requirements must remain bounded during amendment", updateTasks: { t1: { acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `criterion ${i}`), commands: ["true"] } } } }), schemaVersion: "goal-engine.event.v2" }), /requirements.*32/i);
+  assert.deepEqual(structuredClone({ version: projection.version, tasks: [...projection.tasks] }), before);
+});
+
+test("legacy v1 create replays oversized historical shapes unchanged", () => {
+  const goalId = "g".repeat(160);
+  const taskId = "t".repeat(160);
+  const taskDefs = Object.fromEntries(Array.from({ length: 33 }, (_, i) => {
+    const id = i === 0 ? taskId : `legacy-${i}`;
+    return [id, { description: i === 0 ? "d".repeat(4097) : "legacy task", deps: [], writePaths: [i === 0 ? "../unsafe-path" : `src/${i}.ts`], acceptance: { criteria: [], commands: [] }, workflow: "legacy-workflow" }];
+  }));
+  const tasks = Object.keys(taskDefs);
+  const projection = applyEvent(createProjection(), makeEvent("goal.created", { objective: "legacy", scope: [], nonGoals: [], dod: [], tasks, taskDefs }, goalId));
+  assert.equal(projection.version, 1);
+  assert.equal(projection.eventSchemaVersion, "goal-engine.event.v1");
+  assert.equal(projection.tasks.size, 33);
+  assert.deepEqual(projection.tasks.get(taskId), { description: "d".repeat(4097), deps: [], writePaths: ["../unsafe-path"], acceptance: { criteria: [], commands: [] }, workflow: "legacy-workflow", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, acceptanceVerification: null });
+});
+
+test("v2 create and amend replay identically across child-process cwd values", () => {
+  const events = [
+    { schemaVersion: "goal-engine.event.v2", eventId: "create", goalId: "cwd-replay", occurredAt: "2025-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "cwd replay", scope: ["src"], nonGoals: ["docs"], dod: ["proof"], tasks: ["t1"], taskDefs: { t1: { description: "first", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" } } } },
+    { schemaVersion: "goal-engine.event.v2", eventId: "amend", goalId: "cwd-replay", occurredAt: "2025-01-01T00:00:01.000Z", type: "goal.amended", data: { reason: "Add an independently replayable pending task", addTasks: { t2: { description: "second", deps: ["t1"], writePaths: ["src/b.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" } } } },
+  ];
+  const moduleUrl = pathToFileURL(new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).pathname).href;
+  const program = `const {createProjection,applyEvent}=await import(process.argv[1]); let p=createProjection(); for (const e of JSON.parse(process.argv[2])) p=applyEvent(p,e); console.log(JSON.stringify({goalId:p.goalId,version:p.version,objective:p.objective,scope:p.scope,nonGoals:p.nonGoals,dod:p.dod,tasks:[...p.tasks]}));`;
+  const first = mkdtempSync(join(tmpdir(), "ge-replay-a-"));
+  const second = mkdtempSync(join(tmpdir(), "ge-replay-b-"));
+  const replay = (cwd) => JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", program, moduleUrl, JSON.stringify(events)], { cwd, encoding: "utf8", env: { ...process.env, GOAL_ENGINE_REPLAY_CWD: cwd } }));
+  assert.deepEqual(replay(first), replay(second));
 });
 
 test("createProjection returns empty state", () => {
