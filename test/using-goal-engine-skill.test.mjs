@@ -60,6 +60,15 @@ test("initializes from the current project and classifies workflows by their act
   assert.match(body, /(混合|mixed)[\s\S]{0,100}(拆分|split)/i);
 });
 
+test("requires executor acceptance before settle and status-gated lifecycle transitions", async () => {
+  const { body } = await loadSkill();
+  assert.match(body, /成功路径[\s\S]{0,900}status[\s\S]{0,120}dispatch[\s\S]{0,220}Executor[\s\S]{0,220}(acceptance commands|验收命令)[\s\S]{0,180}(worktree|工作树)[\s\S]{0,180}settle[\s\S]{0,120}status[\s\S]{0,120}integrate[\s\S]{0,120}status[\s\S]{0,240}(当前项目|current project)[\s\S]{0,180}(最终回归|final regression)[\s\S]{0,180}accept/i);
+  assert.match(body, /(wrapper|包装层)[\s\S]{0,160}(failed|timeout)[\s\S]{0,200}(artifact|session|worktree|工作树)[\s\S]{0,180}goal_status[\s\S]{0,160}(requiredNextAction|machine action|机器动作)/i);
+  assert.match(body, /(ambiguous|歧义)[\s\S]{0,120}(停止|stop)/i);
+  assert.match(body, /失败路径[\s\S]{0,900}status[\s\S]{0,120}settle[\s\S]{0,120}status[\s\S]{0,120}integrate[\s\S]{0,120}discard[\s\S]{0,120}status[\s\S]{0,180}(dispatch|amend)/i);
+  assert.match(body, /(每个|every)[\s\S]{0,100}(durable mutation|持久化变更)[\s\S]{0,140}goal_status/i);
+});
+
 test("keeps Goal Engine mutation at the Host typed-tool boundary", async () => {
   const { body } = await loadSkill();
   assert.match(body, /(只|only)[\s\S]{0,100}(Pi Host|Host)[\s\S]{0,160}(七个|seven)[\s\S]{0,100}(typed tools|类型工具)/i);
