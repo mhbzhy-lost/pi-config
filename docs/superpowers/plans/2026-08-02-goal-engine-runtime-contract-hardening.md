@@ -58,7 +58,8 @@
 - Create: `test/goal-engine-runtime.integration.mjs`
 
 **Interfaces:**
-- Produces: `registerGoalTool(pi, definition)`，只向 Pi 注册 `execute(toolCallId, params, signal, onUpdate, ctx)`。
+- Produces: `registerGoalTool(pi, definition)`，只向 Pi 注册 `execute(toolCallId, params, signal, onUpdate, ctx)`，并把真实 `ctx` 传给领域 handler。
+- Produces: `executionScope(ctx)`，只从非空绝对 `ctx.cwd` 推导 `{ cwd, root }`，禁止回退到 `pi.cwd` 或 `process.cwd()`。
 - Produces: `toolResult(value)`，返回 `{ content: [{ type: "text", text }], details: { value } }`。
 - Preserves: 七个工具的参数 schema、工具名称、领域 handler 抛错语义和文本/JSON 内容。
 
@@ -194,14 +195,16 @@ function registerGoalTool(pi, definition) {
   if (typeof handler !== "function") throw new Error(`Goal tool ${definition.name} is missing its domain handler`);
   pi.registerTool({
     ...publicDefinition,
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      return toolResult(await handler(params));
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      return toolResult(await handler(params, ctx));
     },
   });
 }
 ```
 
-仅将七处 `pi.registerTool({ ... })` 改成 `registerGoalTool(pi, { ... })`；保留内部 `handler(params)` 作为未注册的领域函数，避免在本 task 夹带生命周期行为修改。
+仅将七处 `pi.registerTool({ ... })` 改成 `registerGoalTool(pi, { ... })`；内部领域函数改为 `handler(params, ctx)`，每次调用通过 `executionScope(ctx)` 获取当前项目 cwd/root。Extension factory 和 `tool_result` hook 均不得读取 `pi.cwd` 或 `process.cwd()`。
+
+评审补充 RED：真实 Host 测试必须创建不同的 `processCwd` 与 `projectCwd`，隔离调用 `goal_init` 后只允许 `projectCwd/.state/goal-engine/registry.json` 存在；`processCwd` 和当前仓库不得产生 Goal 状态。该 RED 修复记录见 `docs/bugs/bug-goal-engine-extension-uses-process-cwd.md`。
 
 - [ ] **Step 6: 将 Extension 测试调用迁移到 execute**
 

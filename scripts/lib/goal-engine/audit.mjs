@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadProjection } from "./store.mjs";
+import { classifyGoalEvidence } from "./evidence.mjs";
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
@@ -12,15 +13,22 @@ export function auditGoal(goalId, stateRoot) {
   const events = readEvents(eventsPath);
 
   const failedAttempts = countFailedSettles(events);
-  const { hasExternalEvidence, allSelfProduced, evidenceCount } = analyzeEvidence(projection);
+  const { hasExternalReview, hasPreExisting, allSelfProduced } = classifyGoalEvidence(projection);
   const checkpointGap = hasLongCheckpointGap(events);
   const neverBlockedSuspicious = isNeverBlockedSuspicious(events, projection);
+  const projectionSignals = detectProjectionSignals(projection);
 
   const signals = [];
   if (failedAttempts >= 3) signals.push("HIGH_RETRY_RATE");
   if (allSelfProduced) signals.push("ALL_SELF_PRODUCED_EVIDENCE");
+  if (hasPreExisting && !hasExternalReview) signals.push("PRE_EXISTING_EVIDENCE_WITHOUT_EXTERNAL_REVIEW");
   if (checkpointGap) signals.push("LONG_CHECKPOINT_GAP");
   if (neverBlockedSuspicious) signals.push("NEVER_BLOCKED_SUSPICIOUS");
+
+  // keep deterministic ordering: existing signals first, then projection-based safety signals
+  if (projectionSignals.legacyUnverifiedAcceptance) signals.push("LEGACY_UNVERIFIED_ACCEPTANCE");
+  if (projectionSignals.incompleteWorkspaceDisposition) signals.push("INCOMPLETE_WORKSPACE_DISPOSITION");
+  if (projectionSignals.unreleasedIntegratedWorkspace) signals.push("UNRELEASED_INTEGRATED_WORKSPACE");
 
   const verdict = signals.length >= 2 ? "DEGRADED" : signals.length === 1 ? "AT_RISK" : "HEALTHY";
 
@@ -37,7 +45,7 @@ export function auditGoal(goalId, stateRoot) {
     checkpoint_count: projection.checkpointCount,
     progress: { total: totalTasks, accepted: acceptedTasks },
     failed_attempts: failedAttempts,
-    has_external_evidence: hasExternalEvidence,
+    has_external_evidence: hasExternalReview,
     signals,
     verdict,
   };
@@ -60,21 +68,34 @@ function countFailedSettles(events) {
   return count;
 }
 
-function analyzeEvidence(projection) {
-  let evidenceCount = 0;
-  let selfProducedCount = 0;
+function detectProjectionSignals(projection) {
+  let legacyUnverifiedAcceptance = false;
+  let incompleteWorkspaceDisposition = false;
+  let unreleasedIntegratedWorkspace = false;
 
   for (const [, task] of projection.tasks) {
-    for (const ev of task.evidence) {
-      evidenceCount++;
-      if (ev.source === "self_produced") selfProducedCount++;
+    if (!legacyUnverifiedAcceptance && task.acceptanceVerification === "legacy_unverified") {
+      legacyUnverifiedAcceptance = true;
     }
+
+    const workspace = task.workspace;
+    if (!workspace) continue;
+
+    if (!incompleteWorkspaceDisposition && (workspace.phase === "disposing" || workspace.phase === "applied")) {
+      incompleteWorkspaceDisposition = true;
+    }
+
+    if (!unreleasedIntegratedWorkspace && workspace.disposition === "integrated" && workspace.released !== true) {
+      unreleasedIntegratedWorkspace = true;
+    }
+
+    if (legacyUnverifiedAcceptance && incompleteWorkspaceDisposition && unreleasedIntegratedWorkspace) break;
   }
 
   return {
-    hasExternalEvidence: evidenceCount > 0 && selfProducedCount < evidenceCount,
-    allSelfProduced: evidenceCount > 0 && selfProducedCount === evidenceCount,
-    evidenceCount,
+    legacyUnverifiedAcceptance,
+    incompleteWorkspaceDisposition,
+    unreleasedIntegratedWorkspace,
   };
 }
 
