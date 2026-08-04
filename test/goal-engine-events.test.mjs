@@ -800,16 +800,16 @@ test("amend allows never-dispatched and discarded released pending tasks", () =>
   let neverDispatched = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
   neverDispatched = amend(neverDispatched, { updateTasks: { t1: { description: "changed" } } });
   assert.equal(neverDispatched.tasks.get("t1").description, "changed");
-  let neverDispatchedRemoval = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
-  neverDispatchedRemoval = amend(neverDispatchedRemoval, { removeTasks: ["t1"] });
-  assert.equal(neverDispatchedRemoval.tasks.has("t1"), false);
+  const neverDispatchedRemoval = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  assert.throws(() => amend(neverDispatchedRemoval, { removeTasks: ["t1"] }), /non-empty|tasks/i);
+  assert.equal(neverDispatchedRemoval.tasks.has("t1"), true);
 
   let released = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
   released.tasks.get("t1").workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "disposed", disposition: "discarded", released: true };
   released = amend(released, { updateTasks: { t1: { description: "changed again" } } });
   assert.equal(released.tasks.get("t1").description, "changed again");
-  released = amend(released, { removeTasks: ["t1"] });
-  assert.equal(released.tasks.has("t1"), false);
+  assert.throws(() => amend(released, { removeTasks: ["t1"] }), /non-empty|tasks/i);
+  assert.equal(released.tasks.has("t1"), true);
 });
 
 function v2Event(type, data, goalId = "v2-goal", occurredAt = "2026-01-02T03:04:05.000Z") {
@@ -1203,4 +1203,37 @@ test("v2 terminal disposition store round-trip preserves schema and acceptance",
   assert.equal(loadedTask.evidence[0].ts, events[2].occurredAt);
   assert.equal(loaded.version, events.length);
   assert.equal(replayed.version, events.length);
+});
+
+test("v2 creation rejects malformed task contracts atomically while v1 replay remains isolated", () => {
+  const valid = { objective: "Validate new task contracts", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } };
+  const invalids = [
+    { tasks: [], taskDefs: {} }, { tasks: ["t1", "t1"] },
+    { taskDefs: { t1: { ...valid.taskDefs.t1, deps: ["missing"] } } },
+    { taskDefs: { t1: { ...valid.taskDefs.t1, deps: ["t1"] } } },
+    { taskDefs: { t1: { ...valid.taskDefs.t1, writePaths: ["../escape"] } } },
+    { taskDefs: { t1: { ...valid.taskDefs.t1, acceptance: { criteria: [], commands: ["true"] } } } },
+    { taskDefs: { t1: { ...valid.taskDefs.t1, acceptance: { criteria: ["works"], commands: ["cd /tmp && true"] } } } },
+    { taskDefs: { t1: { ...valid.taskDefs.t1, workflow: "unsupported" } } },
+  ];
+  for (const patch of invalids) {
+    const before = createProjection();
+    assert.throws(() => applyEvent(before, v2Event("goal.created", { ...valid, ...patch }, "contract-gate")), /task|taskDefs|deps|dep|cycle|path|acceptance|workflow|command/i);
+    assert.equal(before.version, 0); assert.equal(before.tasks.size, 0);
+  }
+  const legacy = applyEvent(createProjection(), makeEvent("goal.created", { ...valid, tasks: ["t1", "t1"] }, "legacy-contract-replay"));
+  assert.equal(legacy.tasks.size, 1);
+});
+
+test("v2 amendment cannot bypass task contract validation or empty the DAG", () => {
+  const projection = applyEvent(createProjection(), v2Created("amend-contract-gate"));
+  const before = structuredClone({ version: projection.version, tasks: [...projection.tasks] });
+  for (const data of [
+    { reason: "Reject unsafe updated path through new amendment validator", updateTasks: { t1: { writePaths: ["/tmp/x"] } } },
+    { reason: "Reject empty DAG through new amendment validator contract", removeTasks: ["t1"] },
+    { reason: "Reject invalid added workflow through new amendment validator", addTasks: { t2: { description: "task", deps: [], writePaths: ["x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "bad" } } },
+  ]) {
+    assert.throws(() => applyEvent(projection, v2Event("goal.amended", data, "amend-contract-gate")), /path|task|workflow|empty/i);
+    assert.deepEqual(structuredClone({ version: projection.version, tasks: [...projection.tasks] }), before);
+  }
 });

@@ -37,7 +37,12 @@ function createMockPi(cwd) {
 }
 
 function tmpCwd() {
-  return mkdtempSync(join(tmpdir(), "ge-ext-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ge-ext-"));
+  initGitRepo(cwd);
+  writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n");
+  git(cwd, "add", ".gitignore");
+  git(cwd, "commit", "-m", "test: ignore goal state");
+  return cwd;
 }
 
 function objectiveToGoalId(objective) {
@@ -71,6 +76,7 @@ async function invoke(pi, name, params = {}) {
 
 function initGitRepo(cwd) {
   const run = (...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  if (existsSync(join(cwd, ".git"))) return run;
   run("init");
   run("config", "user.email", "t@t.com");
   run("config", "user.name", "T");
@@ -222,6 +228,39 @@ test("goal_init creates goal and returns runnable frontier", async () => {
   assert.equal(result.lifecycle, "active");
   assert.deepEqual(result.runnable, ["t1"]);
   assert.equal(result.total_tasks, 2);
+});
+
+test("goal_init rejects unsafe Git preflight before creating state", async () => {
+  const cases = [
+    { name: "non Git cwd", setup: () => mkdtempSync(join(tmpdir(), "ge-unsafe-")) },
+    { name: "unborn HEAD", setup: () => { const cwd = mkdtempSync(join(tmpdir(), "ge-unborn-")); git(cwd, "init"); return cwd; } },
+    { name: "state directory not ignored", setup: () => { const cwd = mkdtempSync(join(tmpdir(), "ge-unignored-")); initGitRepo(cwd); return cwd; } },
+    { name: "repository subdirectory", setup: () => { const cwd = tmpCwd(); mkdirSync(join(cwd, "child")); return join(cwd, "child"); } },
+  ];
+  for (const fixture of cases) {
+    const cwd = fixture.setup();
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi);
+    await assert.rejects(
+      () => invoke(pi, "goal_init", { objective: `Unsafe ${fixture.name}`, tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] }),
+      /GIT_INFRASTRUCTURE_ERROR|UNSAFE_GIT_CWD|INVALID_GIT_HEAD|DETACHED_GIT_HEAD|STATE_NOT_IGNORED|STATE_TRACKED/,
+      fixture.name,
+    );
+    assert.equal(existsSync(join(cwd, ".state/goal-engine")), false, `${fixture.name} must leave no state`);
+  }
+});
+
+test("goal_init active-goal error embeds actionable goal_status next action", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  const params = { objective: "Only active goal", tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] };
+  await invoke(pi, "goal_init", params);
+  await assert.rejects(() => invoke(pi, "goal_init", { ...params, objective: "Another goal" }), (error) =>
+    error.code === "ACTIVE_GOAL_EXISTS"
+      && /observed=.*remediation=.*stateChanged=false/i.test(error.message)
+      && /"requiredNextAction":\{"tool":"goal_status","params":\{"goal_id":"only-active-goal"\}\}/.test(error.message),
+  );
 });
 
 test("goal_status returns full recovery context", async () => {
@@ -402,23 +441,17 @@ test("goal_dispatch cleans the workspace when contract compilation fails", async
   createGoalEngineExtension(pi);
 
   const init = pi.tools.find((t) => t.name === "goal_init");
-  await invoke(pi, "goal_init", {
+  await assert.rejects(() => invoke(pi, "goal_init", {
     objective: "Dispatch cleanup test goal",
     tasks: [{ id: "t1", description: "Compile an invalid path-boundary contract", deps: [], writePaths: ["../../etc/passwd"], acceptance: { criteria: ["Compilation fails"], commands: ["true"] }, workflow: "tdd" }],
-  });
-
-  const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
-  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), /repo-relative/);
+  }), /repo-relative/);
 
   const worktreesRoot = join(cwd, ".state/goal-engine/worktrees");
   assert.equal(existsSync(join(worktreesRoot, "dispatch-cleanup-test-goal-t1-1")), false);
   assert.equal(existsSync(join(worktreesRoot, ".dispatch-cleanup-test-goal-t1-1.lease.json")), false);
   assert.equal(git("branch", "--list", "ge/dispatch-cleanup-test-goal/t1/1"), "");
 
-  const status = pi.tools.find((t) => t.name === "goal_status");
-  const projection = JSON.parse(await invoke(pi, "goal_status", {}));
-  assert.equal(projection.tasks.t1.status, "pending");
-  assert.equal(projection.tasks.t1.attempts, 0);
+  assert.equal(await invoke(pi, "goal_status", {}), "NO_ACTIVE_GOAL");
 });
 
 test("goal_dispatch durable-then-throw acknowledges committed dispatch and survives restart", async () => {

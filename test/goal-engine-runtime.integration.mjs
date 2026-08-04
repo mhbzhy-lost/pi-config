@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -20,6 +20,13 @@ test("real Pi host uses execution context cwd instead of process cwd", async () 
   const originalCwd = process.cwd();
   let result;
   try {
+    execFileSync("git", ["init"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.name", "Goal Engine Test"], { cwd: projectCwd });
+    writeFileSync(join(projectCwd, "README.md"), "fixture\n");
+    writeFileSync(join(projectCwd, ".gitignore"), ".state/goal-engine/\n");
+    execFileSync("git", ["add", "."], { cwd: projectCwd });
+    execFileSync("git", ["commit", "-m", "test: initialize safe fixture"], { cwd: projectCwd });
     process.chdir(processCwd);
     const loader = new DefaultResourceLoader({
       cwd: projectCwd, agentDir,
