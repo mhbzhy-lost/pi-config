@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { normalizeRepoRelativePosixPath } from "./repo-path.mjs";
+import { MAX_CONTRACT_ARRAY_ITEMS, MAX_CONTRACT_STRING_BYTES } from "./contract-limits.mjs";
 
 const CONTRACT_VERSION = "dispatch-ir.v1";
-const MAX_ARRAY_ITEMS = 32;
-const MAX_STRING_BYTES = 4 * 1024;
 const TASK_ID_PATTERN = /^[A-Za-z0-9._-]{1,160}$/;
 const AGENTS = new Set(["executor", "spark"]);
 const RISKS = new Set(["low", "normal", "high"]);
@@ -35,7 +34,7 @@ function validateObject(value, location, allowedKeys, requiredKeys = allowedKeys
   return value;
 }
 
-function normalizeString(value, location, { maxBytes = MAX_STRING_BYTES } = {}) {
+function normalizeString(value, location, { maxBytes = MAX_CONTRACT_STRING_BYTES } = {}) {
   if (typeof value !== "string") fail(`${location} must be a string`);
   const normalized = value.trim();
   if (!normalized) fail(`${location} must not be empty`);
@@ -45,7 +44,7 @@ function normalizeString(value, location, { maxBytes = MAX_STRING_BYTES } = {}) 
 
 function normalizeStringArray(value, location, { minItems = 0, item = normalizeString } = {}) {
   if (!Array.isArray(value)) fail(`${location} must be an array`);
-  if (value.length > MAX_ARRAY_ITEMS) fail(`${location} must contain at most ${MAX_ARRAY_ITEMS} items`);
+  if (value.length > MAX_CONTRACT_ARRAY_ITEMS) fail(`${location} must contain at most ${MAX_CONTRACT_ARRAY_ITEMS} items`);
   const normalized = [];
   const seen = new Set();
   for (let i = 0; i < value.length; i++) {

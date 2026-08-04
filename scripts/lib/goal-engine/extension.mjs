@@ -369,7 +369,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         };
       }
       try {
-        validateTaskDefinitions(taskIds, taskDefs, { cwd });
+        validateTaskDefinitions(taskIds, taskDefs, { cwd, realpathCwd: realpathSync(cwd) });
       } catch (error) {
         throw initError("INVALID_TASK_CONTRACT", error.message, "correct task commands and writePaths, then retry goal_init");
       }
