@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { piHostModuleUrl } from "./helpers/pi-host.mjs";
@@ -52,11 +52,11 @@ test("resources_discover rejects a malformed local list", async () => {
   }
 });
 
-test("resolveSkillSource and Pi loader agree on description scalar fixtures", async () => {
+test("resolveSkillSource and Pi loader agree on scalar fixtures, including Pi-valid ISO dates", async () => {
   const fixtures = [
     ["true", false], ["false", false], ["123", false], ["~", false],
-    [".nan", false], [".inf", false], ["2026-08-05", false], ["null", false],
-    ['"true"', true], ["'123'", true], ['"2026-08-05"', true], ["描述 fixture", true],
+    [".nan", false], [".inf", false], ["null", false],
+    ['"true"', true], ["'123'", true], ["2026-08-05", true], ['"2026-08-05"', true], ["描述 fixture", true],
   ];
   const { loadSkillsFromDir } = await import(piHostModuleUrl);
 
@@ -68,7 +68,7 @@ test("resolveSkillSource and Pi loader agree on description scalar fixtures", as
       await writeFile(join(skillPath, "SKILL.md"), `---\nname: writing-plans\ndescription: ${description}\n---\n`);
 
       if (valid) {
-        assert.equal(await resolveSkillSource(root, "writing-plans"), skillPath, description);
+        assert.equal(await resolveSkillSource(root, "writing-plans"), await realpath(skillPath), description);
       } else {
         await assert.rejects(resolveSkillSource(root, "writing-plans"), /unsupported string scalar/, description);
       }

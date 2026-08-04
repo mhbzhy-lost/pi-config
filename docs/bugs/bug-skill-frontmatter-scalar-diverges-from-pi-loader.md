@@ -19,8 +19,8 @@ allowlisted `SKILL.md` 的 `description: true`、`123`、`~`、`.nan` 等 YAML �
 
 ## 修复方向
 
-采用明确的单行字符串 scalar 子集：允许非空 quoted scalar 及以 Unicode letter 开头的 plain description；拒绝 null、boolean、number、日期、非有限数和 block scalar。以真实 Pi loader 的差分测试作为 oracle，Doctor 捕获错误并继续检查。
+采用明确的单行字符串 scalar 子集：允许非空 quoted scalar、以 Unicode letter 开头的 plain description，以及经真实 Pi loader 实测可加载的 ISO 日期 plain scalar；拒绝 null、boolean、number、非有限数和 block scalar。以真实 Pi loader 的差分测试作为 oracle，Doctor 捕获错误并继续检查。
 
 ## 防复发
 
-为非法与 quoted 合法 scalar 建立 Pi differential matrix，并验证 Doctor 对 boolean/number description 输出具体 frontmatter issue 后仍继续其他检查。
+为非法与 quoted 合法 scalar 建立 Pi differential matrix，并锁定 `2026-08-05` 被当前 Pi loader 作为 string 接受的实测行为；验证 Doctor 对 boolean/number description 输出具体 frontmatter issue 后仍继续其他检查。

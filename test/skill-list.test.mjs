@@ -128,7 +128,7 @@ test("resolveSkillSource prefers a local override over vendor", async () => {
 });
 
 test("resolveSkillSource accepts plain and quoted single-line descriptions", async () => {
-  for (const description of ["plain fixture", '"double quoted fixture"', "'single quoted fixture'"]) {
+  for (const description of ["plain fixture", '"double quoted fixture"', "'single quoted fixture'", "2026-08-05"]) {
     const root = await createFixture();
     try {
       const directory = await addSkill(root, "local", "writing-plans");
@@ -155,7 +155,6 @@ test("resolveSkillSource fails closed for malformed allowlisted Skill frontmatte
     ["null alias description", "---\nname: writing-plans\ndescription: ~\n---\n", "unsupported string scalar"],
     ["non-finite number description", "---\nname: writing-plans\ndescription: .nan\n---\n", "unsupported string scalar"],
     ["infinite number description", "---\nname: writing-plans\ndescription: .inf\n---\n", "unsupported string scalar"],
-    ["date description", "---\nname: writing-plans\ndescription: 2026-08-05\n---\n", "unsupported string scalar"],
     ["block description", "---\nname: writing-plans\ndescription: |\n  fixture\n---\n", "unsupported string scalar"],
     ["array description", "---\nname: writing-plans\ndescription: []\n---\n", "unsupported string scalar"],
     ["object description", "---\nname: writing-plans\ndescription: {}\n---\n", "unsupported string scalar"],

@@ -28,6 +28,16 @@ function frontmatterError(name, reason) {
   return new Error(`invalid frontmatter for allowlisted skill: ${name}: ${reason}`);
 }
 
+function isSupportedDescriptionScalar(value) {
+  const description = value.trim();
+  if (/^"[^"\\\r\n]+"$/u.test(description) || /^'[^'\r\n]+'$/u.test(description)) return true;
+  if (/^(?:~|null|true|false)$/iu.test(description)) return false;
+  if (/^\d{4}-\d{2}-\d{2}$/u.test(description)) return true;
+  if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/iu.test(description)) return false;
+  if (/^[+-]?\.(?:nan|inf)$/iu.test(description)) return false;
+  return /^\p{L}/u.test(description);
+}
+
 function validateSkillFrontmatter(name, content) {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u);
   if (!match) throw frontmatterError(name, "missing frontmatter");
@@ -40,6 +50,10 @@ function validateSkillFrontmatter(name, content) {
     const [, key, value] = field;
     if (key !== "name" && key !== "description") continue;
     if (fields.has(key)) throw frontmatterError(name, `duplicate ${key}`);
+    const description = value.trim();
+    if (key === "description" && description && description !== '""' && description !== "''" && !isSupportedDescriptionScalar(value)) {
+      throw frontmatterError(name, "unsupported string scalar");
+    }
     fields.set(key, value);
   }
 
@@ -49,9 +63,6 @@ function validateSkillFrontmatter(name, content) {
   const description = fields.get("description").trim();
   if (!description || description === '""' || description === "''") {
     throw frontmatterError(name, "empty description");
-  }
-  if (description === "null" || description === "[]" || description === "{}") {
-    throw frontmatterError(name, "unsupported string scalar");
   }
 }
 
