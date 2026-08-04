@@ -2,7 +2,7 @@
 
 ## 目标
 
-Harness 用于确定性执行已批准 Plan，同时把 Plan 领域权威、Root-owned subagent运行事实和Git副作用分开。当前支持Pi `0.82.0`/`0.82.1`/`0.83.0`，精确锁定`pi-subagents@0.37.2`与`typebox@1.1.38`；交互Todo wrapper锁定`@juicesharp/rpiv-todo@2.2.0`。
+Harness 用于确定性执行已批准 Plan，同时把 Plan 领域权威、Root-owned subagent运行事实和Git副作用分开。当前支持Pi `0.82.0`/`0.82.1`/`0.83.0`，精确锁定`pi-subagents@0.37.2`与`typebox@1.1.38`。
 
 领域拓扑是`Main -> Plan Runner -> Executor`；runtime拓扑是`Root -> [Plan Runner generations, Executors]`。领域父子关系描述审批与合同责任，不表示进程嵌套。
 

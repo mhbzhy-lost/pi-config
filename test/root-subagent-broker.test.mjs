@@ -15,6 +15,7 @@ import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts"
 import { bootstrapRuntimeRoots, default as planRunner } from "../pi/child-extensions/plan-runner.ts";
 import { installRootSessionOwner, installRootSessionOwnerLifecycle } from "../pi/child-extensions/root-session-owner.ts";
 import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { piHostAliases } from "./helpers/pi-host.mjs";
 
 const rootSessionId = "root-broker-test-1";
 
@@ -1138,17 +1139,9 @@ test("Root cleanup review records a throwing socket end before retry", async (t)
 });
 
 test("Root cleanup ownership keeps the real runtime broker bound until close retry succeeds", async () => {
-  const agentCore = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.js";
-  await stat(agentCore);
+  await stat(piHostAliases["@earendil-works/pi-agent-core"]);
   const { createJiti } = await import("../pi/npm/node_modules/jiti/lib/jiti.mjs");
-  const npmRoot = path.join(process.cwd(), "pi/npm/node_modules");
-  const jiti = createJiti(import.meta.url, { alias: {
-    "@earendil-works/pi-ai/compat": path.join(npmRoot, "@earendil-works/pi-ai/dist/compat.js"),
-    "@earendil-works/pi-tui": path.join(npmRoot, "@earendil-works/pi-tui/dist/index.js"),
-    "@earendil-works/pi-coding-agent": path.join(npmRoot, "@earendil-works/pi-coding-agent/dist/index.js"),
-    "@earendil-works/pi-ai": path.join(npmRoot, "@earendil-works/pi-ai/dist/index.js"),
-    "@earendil-works/pi-agent-core": agentCore,
-  } });
+  const jiti = createJiti(import.meta.url, { alias: piHostAliases });
   const { default: subagentRuntime } = await jiti.import(path.join(process.cwd(), "pi/extensions/subagent-runtime.ts"));
   const registry = await jiti.import(path.join(process.cwd(), "scripts/lib/subagent-dispatch/root-broker-registry.ts"));
   const handlers = new Map();

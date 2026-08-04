@@ -97,7 +97,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     assert.match(commands, /git -C .* submodule update --init --recursive markers=1,1,parent-session,1/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.83\.0/);
     assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:pi-subagents@0\.37\.2/);
-    assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:@juicesharp\/rpiv-todo@2\.2\.0/);
+    assert.doesNotMatch(commands, /rpiv-todo/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:plan-runtime markers=1,1,parent-session,1/);
     const typeboxPackage = JSON.parse(await readFile(join(fixtureRepo, "pi", "npm", "node_modules", "typebox", "package.json"), "utf8"));
     assert.equal(typeboxPackage.version, "1.1.38");

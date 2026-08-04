@@ -29,7 +29,7 @@ pi --version
 
 - 初始化 Git submodule。
 - 安装并固定 Pi `0.83.0`。
-- 在 `pi/npm` 顶层精确安装 `pi-subagents@0.37.2`、`@juicesharp/rpiv-todo@2.2.0` 与 `typebox@1.1.38`。
+- 在 `pi/npm` 顶层精确安装 `pi-subagents@0.37.2` 与 `typebox@1.1.38`。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
 

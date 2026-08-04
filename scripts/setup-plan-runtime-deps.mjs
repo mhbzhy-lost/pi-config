@@ -11,7 +11,7 @@ export function buildPlanRuntimeInstallCommand(piNpmDir) {
     command: "npm",
     args: [
       "install", "--prefix", piNpmDir, "--save-exact",
-      "pi-subagents@0.37.2", "@juicesharp/rpiv-todo@2.2.0", "typebox@1.1.38",
+      "pi-subagents@0.37.2", "typebox@1.1.38",
     ],
   };
 }
@@ -21,6 +21,7 @@ export async function installPlanRuntimeDependencies({
   env = process.env,
   run = execFile,
 } = {}) {
+  await run("npm", ["uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo"], { env });
   const { command, args } = buildPlanRuntimeInstallCommand(piNpmDir);
   await run(command, args, { env });
   return { piNpmDir };

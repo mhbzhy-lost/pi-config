@@ -3,14 +3,15 @@ import { join } from "node:path";
 import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
-import {
+import * as compat from "../scripts/probes/pi-subagents-compat.mjs";
+import { piHostAliases, piHostJitiUrl, piHostModuleUrl } from "./helpers/pi-host.mjs";
+
+const { createJiti } = await import(piHostJitiUrl);
+const {
   createAgentSession,
   DefaultResourceLoader,
   SessionManager,
-} from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
-import * as compat from "../scripts/probes/pi-subagents-compat.mjs";
-
+} = await import(piHostModuleUrl);
 const { createSubagentsRpcClient, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } = compat;
 const repoRoot = process.cwd();
 const compatibleReport = {
@@ -119,7 +120,7 @@ test("requires upstream fleet transcript, artifact-root, and every public Pi nat
 });
 
 test("checks browser transcript compatibility against the installed pi-subagents package", async () => {
-  const jiti = createJiti(import.meta.url, { moduleCache: false });
+  const jiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
   await compat.assertBrowserTranscriptCompatibility({
     packageRoot: join(process.cwd(), "pi/npm/node_modules/pi-subagents"),
     jiti,
@@ -345,12 +346,12 @@ test("builds the exact top-level runtime dependency install command", async () =
     command: "npm",
     args: [
       "install", "--prefix", "/tmp/pi/npm", "--save-exact",
-      "pi-subagents@0.37.2", "@juicesharp/rpiv-todo@2.2.0", "typebox@1.1.38",
+      "pi-subagents@0.37.2", "typebox@1.1.38",
     ],
   });
 });
 
-test("installs the exact runtime dependencies through the injected process runner", async () => {
+test("uninstalls retired Todo before installing exact runtime dependencies", async () => {
   const setup = await import("../scripts/setup-plan-runtime-deps.mjs");
   assert.equal(typeof setup.installPlanRuntimeDependencies, "function");
   const calls = [];
@@ -360,11 +361,18 @@ test("installs the exact runtime dependencies through the injected process runne
     run: async (...args) => calls.push(args),
   });
 
-  assert.deepEqual(calls, [[
-    "npm",
-    ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "pi-subagents@0.37.2", "@juicesharp/rpiv-todo@2.2.0", "typebox@1.1.38"],
-    { env: { PATH: "/test/bin" } },
-  ]]);
+  assert.deepEqual(calls, [
+    [
+      "npm",
+      ["uninstall", "--prefix", "/tmp/pi/npm", "@juicesharp/rpiv-todo"],
+      { env: { PATH: "/test/bin" } },
+    ],
+    [
+      "npm",
+      ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "pi-subagents@0.37.2", "typebox@1.1.38"],
+      { env: { PATH: "/test/bin" } },
+    ],
+  ]);
   assert.deepEqual(result, { piNpmDir: "/tmp/pi/npm" });
 });
 

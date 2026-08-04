@@ -3,19 +3,10 @@ import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "n
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
-import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
 
-const npmRoot = join(process.cwd(), "pi/npm/node_modules");
-const jiti = createJiti(import.meta.url, {
-  moduleCache: false,
-  alias: {
-    "@earendil-works/pi-ai/compat": `${npmRoot}/@earendil-works/pi-ai/dist/compat.js`,
-    "@earendil-works/pi-tui": `${npmRoot}/@earendil-works/pi-tui/dist/index.js`,
-    "@earendil-works/pi-coding-agent": `${npmRoot}/@earendil-works/pi-coding-agent/dist/index.js`,
-    "@earendil-works/pi-ai": `${npmRoot}/@earendil-works/pi-ai/dist/index.js`,
-    "@earendil-works/pi-agent-core": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.js",
-  },
-});
+const { createJiti } = await import(piHostJitiUrl);
+const jiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
 const runtimeModule = await jiti.import("../pi/extensions/subagent-runtime.ts");
 const asyncResumeModule = await jiti.import("../pi/npm/node_modules/pi-subagents/src/runs/background/async-resume.ts");
 const piArgsModule = await jiti.import("../pi/npm/node_modules/pi-subagents/src/runs/shared/pi-args.ts");

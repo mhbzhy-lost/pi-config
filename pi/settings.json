@@ -12,11 +12,7 @@
       "prompts": [],
       "themes": []
     },
-    "../../.r2c/integrations/pi-adapter",
-    {
-      "source": "npm:@juicesharp/rpiv-todo@2.2.0",
-      "extensions": []
-    }
+    "../../.r2c/integrations/pi-adapter"
   ],
   "subagents": {
     "agentOverrides": {

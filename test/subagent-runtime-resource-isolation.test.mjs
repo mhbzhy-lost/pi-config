@@ -44,12 +44,22 @@ test("keeps delegate as the only enabled pi-subagents builtin agent", async () =
   assert.equal(overrides.delegate, undefined);
 });
 
-test("retains exact dependency ownership in Pi package management", async () => {
+test("does not configure the Todo package", async () => {
+  const settings = JSON.parse(await text("pi/settings.json"));
+  const hasTodoPackage = settings.packages.some((candidate) => {
+    const source = typeof candidate === "string" ? candidate : candidate?.source;
+    return /^npm:@juicesharp\/rpiv-todo(?:@|$)/.test(source ?? "");
+  });
+
+  assert.equal(hasTodoPackage, false);
+});
+
+test("retains exact subagent dependency ownership in Pi package management", async () => {
   const runtimePackage = JSON.parse(await text("pi/npm/package.json"));
   const init = await text("init-pi.sh");
 
   assert.equal(runtimePackage.dependencies["pi-subagents"], "0.37.2");
-  assert.equal(runtimePackage.dependencies["@juicesharp/rpiv-todo"], "2.2.0");
+  assert.equal(runtimePackage.dependencies["@juicesharp/rpiv-todo"], undefined);
   assert.match(init, /PI_CODING_AGENT_DIR="\$SCRIPT_DIR\/pi" "\$pi_binary" install "npm:pi-subagents@\$PI_SUBAGENTS_VERSION"/);
   assert.doesNotMatch(init, /npm install[^\n]*pi-subagents/);
 });
