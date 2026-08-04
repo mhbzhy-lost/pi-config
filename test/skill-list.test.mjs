@@ -91,6 +91,38 @@ test("resolveSkillSource prefers a local override over vendor", async () => {
   }
 });
 
+test("resolveSkillSource fails closed for malformed allowlisted Skill frontmatter", async () => {
+  const cases = [
+    ["missing frontmatter", "# no frontmatter\n", "missing frontmatter"],
+    ["mismatched name", "---\nname: another-skill\ndescription: fixture\n---\n", "name does not match allowlisted skill"],
+    ["missing description", "---\nname: writing-plans\n---\n", "missing description"],
+    ["empty description", "---\nname: writing-plans\ndescription:   \n---\n", "empty description"],
+    ["duplicate name", "---\nname: writing-plans\nname: writing-plans\ndescription: fixture\n---\n", "duplicate name"],
+    ["duplicate description", "---\nname: writing-plans\ndescription: fixture\ndescription: again\n---\n", "duplicate description"],
+  ];
+  for (const [label, content, reason] of cases) {
+    const root = await createFixture();
+    try {
+      const directory = await addSkill(root, "local", "writing-plans");
+      await writeFile(join(directory, "SKILL.md"), content);
+      await assert.rejects(
+        resolveSkillSource(root, "writing-plans"),
+        new RegExp(`invalid frontmatter for allowlisted skill: writing-plans: ${reason}`),
+        label,
+      );
+      const listPath = join(root, "skill-overrides", "skills.list");
+      await writeFile(listPath, "writing-plans\n");
+      await assert.rejects(
+        loadDesiredSkills(root, listPath),
+        new RegExp(`invalid frontmatter for allowlisted skill: writing-plans: ${reason}`),
+        label,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("resolveSkillSource falls back to vendor and fails closed when absent", async () => {
   const root = await createFixture();
   try {

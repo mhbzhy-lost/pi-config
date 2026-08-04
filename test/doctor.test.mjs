@@ -166,7 +166,7 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     await mkdir(join(root, "skill-overrides"), { recursive: true });
     for (const skill of ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "using-goal-engine", "exa-search", "playwright", "browser-auth-session", "goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7"]) {
       await mkdir(join(root, "skill-overrides", skill), { recursive: true });
-      await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), "# test\n");
+      await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), `---\nname: ${skill}\ndescription: fixture\n---\n`);
     }
     await writeFile(
       join(root, "skill-overrides", "skills.list"),
@@ -243,7 +243,7 @@ test("inspectConfiguration accepts additional valid local skills", async () => {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
     for (const skill of [...globalSkills, ...localSkills]) {
       await mkdir(join(root, "skill-overrides", skill), { recursive: true });
-      await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), "# test\n");
+      await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), `---\nname: ${skill}\ndescription: fixture\n---\n`);
     }
     await writeFile(join(root, "skill-overrides", "skills.list"), `${globalSkills.join("\n")}\n`);
     await writeFile(join(root, "skill-overrides", "skills.local.list"), `${localSkills.join("\n")}\n`);
@@ -294,6 +294,27 @@ test("inspectConfiguration reports missing pi-subagents package", async () => {
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "unknown" });
+    assert.ok(issues.includes("missing Pi package: pi-subagents@0.37.2"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("inspectConfiguration reports malformed allowlisted Skill frontmatter and continues", async () => {
+  const root = await mkdtemp(join(tmpdir(), "doctor-"));
+  try {
+    await mkdir(join(root, "skill-overrides", "writing-plans"), { recursive: true });
+    await writeFile(join(root, "skill-overrides", "skills.list"), "writing-plans\n");
+    await writeFile(join(root, "skill-overrides", "writing-plans", "SKILL.md"), "# malformed\n");
+    await mkdir(join(root, "pi", "extensions"), { recursive: true });
+    await mkdir(join(root, "scripts"), { recursive: true });
+    await writeFile(join(root, "pi", "settings.json"), "{}");
+    await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
+    await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
+
+    const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
+    assert.ok(issues.includes("invalid frontmatter for allowlisted skill: writing-plans: missing frontmatter"));
+    assert.ok(issues.includes("unexpected Skill whitelist"));
     assert.ok(issues.includes("missing Pi package: pi-subagents@0.37.2"));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -359,7 +380,7 @@ test("inspectConfiguration reports the final plan execution contract gaps", asyn
     await mkdir(join(root, "skill-overrides"), { recursive: true });
     await writeFile(join(root, "skill-overrides", "skills.list"), "external-llm-review\n");
     await mkdir(join(root, "skill-overrides", "external-llm-review"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "external-llm-review", "SKILL.md"), "# test\n");
+    await writeFile(join(root, "skill-overrides", "external-llm-review", "SKILL.md"), "---\nname: external-llm-review\ndescription: fixture\n---\n");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "pi", "agents"), { recursive: true });
     await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension"), { recursive: true });
