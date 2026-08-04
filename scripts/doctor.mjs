@@ -170,7 +170,12 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   issues.push(...await inspectGoalContractIntegrity(repoRoot));
   const listPath = join(repoRoot, "skill-overrides", "skills.list");
   const localListPath = join(repoRoot, "skill-overrides", "skills.local.list");
-  const desired = await loadDesiredSkills(repoRoot, listPath, localListPath);
+  let desired = new Map();
+  try {
+    desired = await loadDesiredSkills(repoRoot, listPath, localListPath);
+  } catch (error) {
+    issues.push(error.message);
+  }
   const globalSkills = parseSkillList(await readFile(listPath, "utf8"));
 
   if (JSON.stringify(globalSkills) !== JSON.stringify(EXPECTED_GLOBAL_SKILLS)) {

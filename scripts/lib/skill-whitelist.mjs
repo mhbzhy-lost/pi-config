@@ -24,6 +24,34 @@ export function parseSkillList(content) {
   return names;
 }
 
+function frontmatterError(name, reason) {
+  return new Error(`invalid frontmatter for allowlisted skill: ${name}: ${reason}`);
+}
+
+function validateSkillFrontmatter(name, content) {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u);
+  if (!match) throw frontmatterError(name, "missing frontmatter");
+
+  const fields = new Map();
+  for (const line of match[1].split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    const field = line.match(/^([A-Za-z][A-Za-z0-9_-]*):(?:\s(.*)|\s*)$/u);
+    if (!field) throw frontmatterError(name, "unsupported frontmatter field");
+    const [, key, value] = field;
+    if (key !== "name" && key !== "description") continue;
+    if (fields.has(key)) throw frontmatterError(name, `duplicate ${key}`);
+    fields.set(key, value);
+  }
+
+  if (!fields.has("name")) throw frontmatterError(name, "missing name");
+  if (fields.get("name") !== name) throw frontmatterError(name, "name does not match allowlisted skill");
+  if (!fields.has("description")) throw frontmatterError(name, "missing description");
+  const description = fields.get("description").trim();
+  if (!description || description === '""' || description === "''") {
+    throw frontmatterError(name, "empty description");
+  }
+}
+
 async function hasReadableSkill(directory) {
   try {
     await access(join(directory, "SKILL.md"), constants.R_OK);
@@ -47,6 +75,7 @@ export async function resolveSkillSource(repoRoot, name) {
     if (realCandidate !== resolve(realRoot, name)) {
       throw new Error(`skill source escapes allowed root: ${name}`);
     }
+    validateSkillFrontmatter(name, await readFile(join(realCandidate, "SKILL.md"), "utf8"));
     return realCandidate;
   }
 
