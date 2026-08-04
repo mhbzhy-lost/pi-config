@@ -1,5 +1,6 @@
 import { validateDAG } from "./graph.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
+import { assertPendingTaskContractsCompile } from "./dispatch.mjs";
 
 const SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2"]);
 const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
@@ -135,6 +136,7 @@ function goalCreated(p, event) {
       acceptanceVerification: null,
     });
   }
+  if (event.schemaVersion === "goal-engine.event.v2") assertPendingTaskContractsCompile(p, process.cwd());
 }
 
 function taskDispatched(p, data, schemaVersion) {
@@ -340,6 +342,10 @@ function goalAmended(p, data, schemaVersion) {
     validateTaskDefinitions([...candidate.keys()], Object.fromEntries(candidate));
   } else {
     validateDAG(candidate);
+  }
+  if (schemaVersion === "goal-engine.event.v2") {
+    const candidateProjection = { ...p, tasks: candidate };
+    assertPendingTaskContractsCompile(candidateProjection, process.cwd());
   }
   p.tasks = candidate;
 }

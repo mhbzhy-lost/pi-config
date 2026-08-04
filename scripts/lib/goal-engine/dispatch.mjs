@@ -2,6 +2,12 @@ import { compileCodingDispatchIR } from "./dispatch-ir.mjs";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
+export function assertPendingTaskContractsCompile(projection, cwd) {
+  for (const [taskId, task] of projection.tasks) {
+    if (task.status === "pending") compileTaskContract(projection, taskId, cwd);
+  }
+}
+
 export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const task = projection.tasks.get(taskId);
   if (!task) throw new Error(`unknown task: ${taskId}`);
@@ -55,26 +61,37 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
   return compileCodingDispatchIR(input, { cwd });
 }
 
+function boundedOptional(items, limit = 32) {
+  const result = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (result.length === limit) break;
+    if (typeof item !== "string" || Buffer.byteLength(item, "utf8") > 4096 || seen.has(item)) continue;
+    seen.add(item);
+    result.push(item);
+  }
+  return result;
+}
+
 function buildCompletedContext(projection, currentTaskId) {
   const facts = [];
   for (const [taskId, task] of projection.tasks) {
-    if (taskId === currentTaskId) continue;
-    if (task.status === "accepted") {
-      facts.push(`Completed task ${taskId}: ${task.description}`);
-      for (const ev of task.evidence) {
-        if (ev.ref) facts.push(`Evidence for ${taskId}: ${ev.type} @ ${ev.ref}`);
-        if (ev.path) facts.push(`Evidence for ${taskId}: ${ev.type} @ ${ev.path}`);
-      }
+    if (taskId === currentTaskId || task.status !== "accepted") continue;
+    facts.push(`Completed task ${taskId}: ${task.description}`);
+    for (const ev of task.evidence) {
+      if (ev.ref) facts.push(`Evidence for ${taskId}: ${ev.type} @ ${ev.ref}`);
+      if (ev.path) facts.push(`Evidence for ${taskId}: ${ev.type} @ ${ev.path}`);
     }
   }
-  return facts;
+  // Goal and Scope occupy two required knownFacts slots; optional history may not crowd them out.
+  return boundedOptional(facts, 30);
 }
 
 function buildRelevantFiles(projection, currentTaskId) {
   const files = [];
   for (const [taskId, task] of projection.tasks) {
-    if (taskId === currentTaskId) continue;
-    if (task.status === "accepted") files.push(...task.writePaths);
+    if (taskId === currentTaskId || task.status !== "accepted") continue;
+    files.push(...task.writePaths);
   }
-  return [...new Set(files)];
+  return boundedOptional(files);
 }

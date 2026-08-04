@@ -3,7 +3,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState } from "./graph.mjs";
 import { appendEvent, loadProjection, listGoals } from "./store.mjs";
-import { compileTaskContract } from "./dispatch.mjs";
+import { compileTaskContract, assertPendingTaskContractsCompile } from "./dispatch.mjs";
+import { applyEvent, createProjection } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import {
@@ -196,6 +197,7 @@ function leaseKey(cwd, goalId, taskId) {
 }
 
 function slugify(raw) {
+  if (typeof raw !== "string") throw new Error("objective must be a non-empty string");
   const slug = raw.toLowerCase().replace(GOAL_ID_RE, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 80);
   if (!slug) throw new Error("objective must produce a non-empty goal id");
   return slug;
@@ -355,7 +357,12 @@ export function createGoalEngineExtension(pi, options = {}) {
           message: `${initError("ACTIVE_GOAL_EXISTS", `active goal=${goalId}`, "call goal_status before creating another goal").message}; ${JSON.stringify({ requiredNextAction: { tool: "goal_status", params: { goal_id: goalId } } })}`,
         });
       }
-      const goalId = slugify(params.objective);
+      let goalId;
+      try {
+        goalId = slugify(params.objective);
+      } catch (error) {
+        throw initError("INVALID_GOAL_CONTRACT", error.message, "provide a non-empty objective that produces a goal id, then retry goal_init");
+      }
       const taskDefs = {};
       const taskIds = [];
       for (const t of params.tasks) {
@@ -382,6 +389,12 @@ export function createGoalEngineExtension(pi, options = {}) {
         tasks: taskIds,
         taskDefs,
       }, goalId);
+      try {
+        const candidate = applyEvent(createProjection(), event);
+        assertPendingTaskContractsCompile(candidate, cwd);
+      } catch (error) {
+        throw initError("INVALID_GOAL_CONTRACT", error.message, "correct derived task, goal metadata, or requirements limits, then retry goal_init");
+      }
       appendEventFn(root, event, 0);
 
       const projection = loadProjectionFn(root, goalId);
@@ -704,6 +717,12 @@ export function createGoalEngineExtension(pi, options = {}) {
         removeTasks: params.remove_tasks || undefined,
         updateTasks: params.update_tasks || undefined,
       }, goalId);
+      try {
+        const candidate = applyEvent(projection, event);
+        assertPendingTaskContractsCompile(candidate, cwd);
+      } catch (error) {
+        throw initError("INVALID_GOAL_CONTRACT", error.message, "correct derived task, goal metadata, or requirements limits, then retry goal_amend");
+      }
       const updated = appendEventFn(root, event, projection.version);
       return statusResponse(updated);
     },
