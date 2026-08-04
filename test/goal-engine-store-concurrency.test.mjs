@@ -54,8 +54,34 @@ if (process.argv[2] === "worker") {
     assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 2);
     assert.deepEqual(listGoals(stateRoot), ["concurrent-goal"]);
     assert.doesNotThrow(() => JSON.parse(readFileSync(join(stateRoot, "registry.json"), "utf8")));
-    assert.deepEqual(readdirSync(join(stateRoot, "goals/concurrent-goal")).filter((name) => name.includes(".tmp")), []);
+    assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
+    assert.deepEqual(readdirSync(join(stateRoot, "goals/concurrent-goal")).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
     assert.equal(existsSync(join(stateRoot, ".writer.lock")), false);
+  });
+
+  test("missing writer lock owner is quarantined so append recovers without residual directories", () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    const lock = join(stateRoot, ".writer.lock");
+    mkdirSync(lock, { recursive: true });
+
+    assert.equal(appendEvent(stateRoot, checkpoint("missing-owner"), 1).version, 2);
+    assert.equal(existsSync(lock), false);
+    assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
+    assert.deepEqual(readdirSync(join(stateRoot, "goals/concurrent-goal")).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
+  });
+
+  test("malformed writer lock owner is quarantined so append recovers without residual directories", () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    const lock = join(stateRoot, ".writer.lock");
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, "owner.json"), "not json");
+
+    assert.equal(appendEvent(stateRoot, checkpoint("malformed-owner"), 1).version, 2);
+    assert.equal(existsSync(lock), false);
+    assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
+    assert.deepEqual(readdirSync(join(stateRoot, "goals/concurrent-goal")).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
   });
 
   test("stale writer lock is quarantined before acquisition", () => {
@@ -77,5 +103,6 @@ if (process.argv[2] === "worker") {
     writeFileSync(join(lock, "owner.json"), JSON.stringify({ pid: process.pid, token: "live-owner", createdAt: new Date().toISOString() }));
     assert.throws(() => appendEvent(stateRoot, checkpoint("timeout"), 1), (error) => error.code === "GOAL_ENGINE_STORE_LOCK_TIMEOUT");
     assert.equal(JSON.parse(readFileSync(join(lock, "owner.json"), "utf8")).token, "live-owner");
+    assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
   });
 }

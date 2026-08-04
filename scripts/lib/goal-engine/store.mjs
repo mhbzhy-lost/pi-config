@@ -53,17 +53,26 @@ function acquireWriterLock(stateRoot) {
   const token = randomUUID();
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
+    const candidate = `${lockPath}.candidate-${process.pid}-${randomUUID()}`;
     try {
-      mkdirSync(lockPath, { mode: 0o700 });
-      chmodSync(lockPath, 0o700);
-      writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }) + "\n", { mode: 0o600 });
+      mkdirSync(candidate, { mode: 0o700 });
+      chmodSync(candidate, 0o700);
+      const ownerPath = join(candidate, "owner.json");
+      writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }) + "\n", { mode: 0o600 });
+      chmodSync(ownerPath, 0o600);
+      renameSync(candidate, lockPath);
       return { token };
     } catch (error) {
-      if (error.code !== "EEXIST") throw error;
+      if (existsSync(candidate)) rmSync(candidate, { recursive: true, force: true });
+      if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
       const owner = readLockOwner(lockPath);
-      if (owner && !pidIsAlive(owner.pid)) quarantineStaleLock(lockPath);
-      else if (Date.now() >= deadline) throw lockTimeout();
-      else sleep(LOCK_WAIT_MS);
+      if (!owner || !pidIsAlive(owner.pid)) {
+        quarantineStaleLock(lockPath);
+      } else if (Date.now() >= deadline) {
+        throw lockTimeout();
+      } else {
+        sleep(LOCK_WAIT_MS);
+      }
     }
   }
 }
