@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
 import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
+import { inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 
 test("external evidence classification matrix only promotes external_review from external", () => {
   const projectionFor = (evidence) => ({ tasks: new Map([["t1", { evidence }]]) });
@@ -2212,6 +2213,74 @@ test("post-settle wrong live branch rejects identity mismatch before started eve
   });
   assert.deepEqual(fullRejectionSnapshot(cwd, goalId), before);
   assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.workspace_disposition_started").length, 0);
+});
+
+test("inspection race: goal_settle rejects HEAD drift after the first real inspection without side effects", async () => {
+  const cwd = tmpCwd();
+  const objective = "Settlement inspection TOCTOU race";
+  const goalId = objectiveToGoalId(objective);
+  let rejectionSnapshot;
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi, {
+    inspectExecutorWorkspace(lease) {
+      const inspectedA = inspectExecutorWorkspace(lease);
+      commitWorkspaceChange(lease, "src/race-b.ts", "export const raceB = true;\n", "test: competing clean commit B");
+      rejectionSnapshot = fullRejectionSnapshot(cwd, goalId);
+      return inspectedA;
+    },
+  });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+  commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: clean commit A");
+
+  await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover through the typed goal status action after the executor head changed." }), (error) => {
+    assert.equal(error.code, "EXECUTOR_SETTLEMENT_HEAD_MISMATCH");
+    assert.match(error.message, /observed=.*remediation=.*stateChanged=false.*requiredNextAction/);
+    assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
+    return true;
+  });
+  assert.ok(rejectionSnapshot, "the injected inspector must commit B after inspecting A");
+  assert.deepEqual(fullRejectionSnapshot(cwd, goalId), rejectionSnapshot);
+});
+
+test("inspection race: succeeded dispositions reject HEAD drift before started event or side effects", async () => {
+  for (const action of ["integrate", "discard", "preserve"]) {
+    const cwd = tmpCwd();
+    const objective = `Disposition inspection TOCTOU ${action}`;
+    const goalId = objectiveToGoalId(objective);
+    let armed = false;
+    let rejectionSnapshot;
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi, {
+      inspectExecutorWorkspace(lease) {
+        const inspectedA = inspectExecutorWorkspace(lease);
+        if (armed) {
+          commitWorkspaceChange(lease, "src/race-b.ts", `export const ${action}RaceB = true;\n`, "test: competing clean commit B");
+          rejectionSnapshot = fullRejectionSnapshot(cwd, goalId);
+        }
+        return inspectedA;
+      },
+    });
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+    commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: clean commit A");
+    await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use a typed disposition after inspecting the settled executor commit." });
+    armed = true;
+
+    await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action }), (error) => {
+      assert.equal(error.code, "EXECUTOR_SETTLEMENT_HEAD_MISMATCH");
+      assert.match(error.message, /observed=.*remediation=.*stateChanged=false.*requiredNextAction/);
+      assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
+      return true;
+    });
+    assert.ok(rejectionSnapshot, `${action} must inspect A before competing commit B`);
+    assert.deepEqual(fullRejectionSnapshot(cwd, goalId), rejectionSnapshot);
+    assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.workspace_disposition_started").length, 0);
+    const state = workspaceState(cwd, goalId, "t1");
+    assert.equal(state.workspaceExists, true);
+    assert.equal(state.leaseExists, true);
+    assert.equal(state.branchExists, true);
+  }
 });
 
 test("semantic priority keeps task-state and reducer errors ahead of workspace-missing recovery", async () => {
