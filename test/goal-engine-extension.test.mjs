@@ -166,16 +166,22 @@ function persistedStateBytes(cwd, goalId) {
   ];
 }
 
-function rejectionSnapshot(cwd, goalId, taskId = "t1", attempt = 1) {
+function rejectionSnapshot(cwd, goalId) {
+  return {
+    state: persistedStateBytes(cwd, goalId),
+    refs: git(cwd, "for-each-ref", "--format=%(refname):%(objectname)", "refs/heads"),
+    worktrees: git(cwd, "worktree", "list", "--porcelain"),
+  };
+}
+
+function fullRejectionSnapshot(cwd, goalId, taskId = "t1", attempt = 1) {
   const workspace = workspaceState(cwd, goalId, taskId, attempt);
   const bytes = (path) => existsSync(path) ? readFileSync(path) : null;
   const workspaceGit = (args) => workspace.workspaceExists ? git(workspace.workspacePath, ...args) : null;
   return {
-    state: persistedStateBytes(cwd, goalId),
+    ...rejectionSnapshot(cwd, goalId),
     origin: { head: git(cwd, "rev-parse", "HEAD"), ref: git(cwd, "symbolic-ref", "--short", "HEAD"), status: git(cwd, "status", "--porcelain=v1") },
     workspace: { ...workspace, head: workspaceGit(["rev-parse", "HEAD"]), ref: workspaceGit(["symbolic-ref", "--short", "HEAD"]), status: workspaceGit(["status", "--porcelain=v1"]), leaseBytes: bytes(workspace.leasePath) },
-    refs: git(cwd, "for-each-ref", "--format=%(refname):%(objectname)", "refs/heads"),
-    worktrees: git(cwd, "worktree", "list", "--porcelain"),
   };
 }
 
@@ -2133,14 +2139,14 @@ test("settlement identity missing after a real dispatch reaches the integrate ga
   commitWorkspaceChange(workspace, "src/x.ts", "export const real = true;\n", "feat: authorized executor proof");
   const rawSettled = { schemaVersion: "goal-engine.event.v2", eventId: "unbound-settled", goalId, occurredAt: "2024-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, nextAction: "Review the historical evidence before selecting a recovery action" } };
   writeFileSync(goalEventsPath(cwd, goalId), `${readFileSync(goalEventsPath(cwd, goalId), "utf8")}${JSON.stringify(rawSettled)}\n`);
-  const before = rejectionSnapshot(cwd, goalId);
+  const before = fullRejectionSnapshot(cwd, goalId);
   await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }), (error) => {
     assert.equal(error.code, "EXECUTOR_SETTLEMENT_IDENTITY_MISSING");
     assert.match(error.message, /observed=.*remediation=.*stateChanged=false.*requiredNextAction/);
     assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
     return true;
   });
-  assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+  assert.deepEqual(fullRejectionSnapshot(cwd, goalId), before);
 });
 
 test("post-settle HEAD drift rejects every succeeded disposition before started event or Git side effect", async () => {
@@ -2154,14 +2160,14 @@ test("post-settle HEAD drift rejects every succeeded disposition before started 
     commitWorkspaceChange(workspace, "src/x.ts", "export const x = 1;\n", "feat: settled");
     await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use a typed disposition after inspecting the settled executor commit." });
     commitWorkspaceChange(workspace, "rogue.txt", "post-settle unauthorized commit\n", "test: post-settle rogue drift");
-    const before = rejectionSnapshot(cwd, goalId);
+    const before = fullRejectionSnapshot(cwd, goalId);
     await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action }), (error) => {
       assert.equal(error.code, "EXECUTOR_SETTLEMENT_HEAD_MISMATCH");
       assert.match(error.message, /observed=.*remediation=.*stateChanged=false.*requiredNextAction/);
       assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
       return true;
     });
-    assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+    assert.deepEqual(fullRejectionSnapshot(cwd, goalId), before);
     assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.workspace_disposition_started").length, 0);
   }
 });
@@ -2176,14 +2182,14 @@ test("post-settle allow-empty HEAD drift rejects integrate before started event"
   commitWorkspaceChange(workspace, "src/x.ts", "export const emptyDrift = true;\n", "feat: settle before empty drift");
   await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use a typed disposition after inspecting the settled executor commit." });
   git(workspace.path, "commit", "--allow-empty", "-m", "test: empty executor drift");
-  const before = rejectionSnapshot(cwd, goalId);
+  const before = fullRejectionSnapshot(cwd, goalId);
   await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }), (error) => {
     assert.equal(error.code, "EXECUTOR_SETTLEMENT_HEAD_MISMATCH");
     assert.match(error.message, /observed=.*remediation=.*stateChanged=false.*requiredNextAction/);
     assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
     return true;
   });
-  assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+  assert.deepEqual(fullRejectionSnapshot(cwd, goalId), before);
   assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.workspace_disposition_started").length, 0);
 });
 
@@ -2197,14 +2203,14 @@ test("post-settle wrong live branch rejects identity mismatch before started eve
   commitWorkspaceChange(workspace, "src/x.ts", "export const branch = true;\n", "feat: branch identity");
   await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use the typed disposition after inspecting the settled executor commit." });
   git(workspace.path, "checkout", "-b", `wrong/${goalId}`);
-  const before = rejectionSnapshot(cwd, goalId);
+  const before = fullRejectionSnapshot(cwd, goalId);
   await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }), (error) => {
     assert.equal(error.code, "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH");
     assert.match(error.message, /observed=.*remediation=.*stateChanged=false.*requiredNextAction/);
     assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
     return true;
   });
-  assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+  assert.deepEqual(fullRejectionSnapshot(cwd, goalId), before);
   assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.workspace_disposition_started").length, 0);
 });
 

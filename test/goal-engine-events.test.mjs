@@ -197,7 +197,7 @@ test("legacy v1 create replays oversized historical shapes unchanged", () => {
   assert.equal(projection.version, 1);
   assert.equal(projection.eventSchemaVersion, "goal-engine.event.v1");
   assert.equal(projection.tasks.size, 33);
-  assert.deepEqual(projection.tasks.get(taskId), { description: "d".repeat(4097), deps: [], writePaths: ["../unsafe-path"], acceptance: { criteria: [], commands: [] }, workflow: "legacy-workflow", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, acceptanceVerification: null });
+  assert.deepEqual(projection.tasks.get(taskId), { description: "d".repeat(4097), deps: [], writePaths: ["../unsafe-path"], acceptance: { criteria: [], commands: [] }, workflow: "legacy-workflow", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, acceptanceVerification: null, settlement: null });
 });
 
 test("v2 create and amend replay identically across child-process cwd values", () => {
@@ -1139,7 +1139,7 @@ test("historical v1 accepted amendment JSONL replays while v2 accepted amendment
   const v2Events = [
     { ...created("goal-engine.event.v2", "v2-created", "2025-01-02T00:00:00.000Z"), goalId: v2GoalId },
     v2("v2-dispatched", "2025-01-02T00:00:01.000Z", "task.dispatched", { taskId: "t1", contractHash: "v2-contract", workspace: { attempt: 1, path: "/tmp/fixed-v2", branch: "ge/fixed/t1/1", baseCommit: "base" } }),
-    v2("v2-settled", "2025-01-02T00:00:02.000Z", "task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/t1.ts" }, nextAction: "Review the fixed v2 task evidence before accepting the replay result" }),
+    v2("v2-settled", "2025-01-02T00:00:02.000Z", "task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/t1.ts" }, nextAction: "Review the fixed v2 task evidence before accepting the replay result", attempt: 1, executorHead: "executor" }),
     v2("v2-disposition-started", "2025-01-02T00:00:03.000Z", "task.workspace_disposition_started", { taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "merge", executorHead: "executor", originHeadBefore: "origin" }),
     v2("v2-disposition-applied", "2025-01-02T00:00:04.000Z", "task.workspace_disposition_applied", { taskId: "t1", attempt: 1, action: "integrate", strategy: "merge", executorHead: "executor", originHead: "origin-after" }),
     v2("v2-disposed", "2025-01-02T00:00:05.000Z", "task.workspace_disposed", { taskId: "t1", attempt: 1, action: "integrate", released: true }),
@@ -1343,6 +1343,8 @@ test("v2 terminal disposition store round-trip preserves schema and acceptance",
         outcome: "succeeded",
         evidence: { type: "file", path: "a.ts" },
         nextAction: "Verify the complete implementation meets the required acceptance criteria",
+        attempt: 1,
+        executorHead: "executor-head",
       },
       goalId,
       "2026-01-02T03:04:07.000Z",
