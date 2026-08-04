@@ -114,6 +114,13 @@ export function allocateExecutorWorkspace({ goalId, taskId, attempt, originRoot,
     throw new Error(`Executor workspace already exists: ${goalId}/${taskId}/${attempt}`);
   }
 
+  // A human-readable branch name is not stable enough: persist the full ref.
+  let originRef;
+  try {
+    originRef = git(originRoot, "symbolic-ref", "--quiet", "HEAD");
+  } catch {
+    throw new Error("Origin ref must be an attached symbolic ref (detached HEAD is not supported)");
+  }
   git(originRoot, "rev-parse", "--verify", `${baseCommit}^{commit}`);
   const existingBranch = git(originRoot, "branch", "--list", branch);
   if (existingBranch) throw new Error(`Branch already exists: ${branch}`);
@@ -128,6 +135,7 @@ export function allocateExecutorWorkspace({ goalId, taskId, attempt, originRoot,
     originRoot: path.resolve(originRoot),
     stateRoot: path.resolve(stateRoot),
     baseCommit,
+    originRef,
     path: workspacePath,
     branch,
     ownerToken: randomUUID(),
@@ -171,7 +179,7 @@ export function loadExecutorWorkspaceLease({ goalId, taskId, attempt, stateRoot 
       throw new Error(`Executor workspace lease ${field} does not match`);
     }
   }
-  for (const field of ["originRoot", "baseCommit", "branch", "ownerToken", "createdAt"]) {
+  for (const field of ["originRoot", "baseCommit", "originRef", "branch", "ownerToken", "createdAt"]) {
     if (typeof lease[field] !== "string" || !lease[field]) {
       throw new Error(`Executor workspace lease ${field} is invalid`);
     }
@@ -303,7 +311,40 @@ export function isExecutorWorkspaceIntegrated(lease, { strategy, executorHead } 
   throw new Error(`Unknown integration strategy: ${selectedStrategy}`);
 }
 
-export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick", executorHead } = {}) {
+function refExists(cwd, ref) {
+  try { git(cwd, "rev-parse", "-q", "--verify", ref); return true; } catch { return false; }
+}
+
+function hasRebaseState(cwd) {
+  const gitDir = git(cwd, "rev-parse", "--git-dir");
+  const absoluteGitDir = path.resolve(cwd, gitDir);
+  return existsSync(path.join(absoluteGitDir, "rebase-merge")) || existsSync(path.join(absoluteGitDir, "rebase-apply"));
+}
+
+function assertOriginPreflight(origin, { originRef, originHeadBefore }) {
+  let currentRef;
+  try { currentRef = git(origin, "symbolic-ref", "--quiet", "HEAD"); } catch { throw new Error("Origin ref preflight failed: detached HEAD"); }
+  if (currentRef !== originRef) throw new Error(`Origin ref mismatch (expected ${originRef}, got ${currentRef})`);
+  const currentHead = git(origin, "rev-parse", "HEAD");
+  if (originHeadBefore && currentHead !== originHeadBefore) throw new Error("Origin HEAD mismatch before integration");
+  const status = git(origin, "status", "--porcelain=v1");
+  const userChanges = status.split("\n").filter((line) => line && line.slice(3) !== ".state/" && !line.slice(3).startsWith(".state/goal-engine/"));
+  if (userChanges.length > 0) throw new Error("Origin must be clean before integration");
+  if (["CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD"].some((ref) => refExists(origin, ref)) || hasRebaseState(origin)) {
+    throw new Error("Origin Git sequencer is active; refusing to modify user operation");
+  }
+  return currentHead;
+}
+
+function goalOwnsSequencer(origin, strategy, lease, executorHead) {
+  const marker = strategy === "cherry-pick" ? "CHERRY_PICK_HEAD" : "MERGE_HEAD";
+  if (!refExists(origin, marker)) return false;
+  const marked = git(origin, "rev-parse", marker);
+  if (strategy === "merge") return marked === executorHead;
+  try { git(lease.path, "merge-base", "--is-ancestor", marked, executorHead); return true; } catch { return false; }
+}
+
+export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick", executorHead, originRef = lease.originRef, originHeadBefore } = {}) {
   if (!existsSync(lease.path)) throw new Error("Executor workspace is missing");
 
   const origin = lease.originRoot;
@@ -322,56 +363,33 @@ export function integrateExecutorWorkspace(lease, { strategy = "cherry-pick", ex
   if (!inspection.hasCommits || selectedExecutorHead === lease.baseCommit) throw new Error("No commits to integrate");
   if (!inspection.clean) throw new Error("Workspace must be clean before integration (no uncommitted changes)");
 
-  const originHeadBefore = git(origin, "rev-parse", "HEAD");
-  const originStatusBefore = git(origin, "status", "--porcelain");
+  if (typeof originRef !== "string" || !originRef) throw new Error("Invalid lease: missing originRef");
+  const expectedOriginHead = originHeadBefore || git(origin, "rev-parse", "HEAD");
+  assertOriginPreflight(origin, { originRef, originHeadBefore: expectedOriginHead });
 
-  if (strategy === "cherry-pick") {
-    try {
-      git(origin, "cherry-pick", `${lease.baseCommit}..${selectedExecutorHead}`);
-    } catch (error) {
-      let abortError;
-      try {
-        git(origin, "cherry-pick", "--abort");
-      } catch (abortErr) {
-        abortError = abortErr;
-      }
-
-      const originHeadAfter = git(origin, "rev-parse", "HEAD");
-      const originStatusAfter = git(origin, "status", "--porcelain");
-      if (originHeadAfter !== originHeadBefore || originStatusAfter !== originStatusBefore) {
-        throw abortError || error;
-      }
-      if (abortError) throw error;
-      throw error;
-    }
-  } else if (strategy === "merge") {
-    try {
-      git(origin, "merge", "--no-ff", selectedExecutorHead, "-m", `ge: integrate ${lease.goalId}/${lease.taskId}`);
-    } catch (error) {
-      let abortError;
-      try {
-        git(origin, "merge", "--abort");
-      } catch (abortErr) {
-        abortError = abortErr;
-      }
-
-      const originHeadAfter = git(origin, "rev-parse", "HEAD");
-      const originStatusAfter = git(origin, "status", "--porcelain");
-      if (originHeadAfter !== originHeadBefore || originStatusAfter !== originStatusBefore) {
-        throw abortError || error;
-      }
-      if (abortError) throw error;
-      throw error;
-    }
-  } else {
+  const run = strategy === "cherry-pick"
+    ? () => git(origin, "cherry-pick", `${lease.baseCommit}..${selectedExecutorHead}`)
+    : strategy === "merge"
+      ? () => git(origin, "merge", "--no-ff", selectedExecutorHead, "-m", `ge: integrate ${lease.goalId}/${lease.taskId}`)
+      : null;
+  if (!run) {
     throw new Error(`Unknown integration strategy: ${strategy}`);
+  }
+  try {
+    run();
+  } catch (error) {
+    // Abort only a sequencer demonstrably created by this invocation.
+    if (goalOwnsSequencer(origin, strategy, lease, selectedExecutorHead)) {
+      try { git(origin, strategy, "--abort"); } catch { /* preserve the original failure */ }
+    }
+    throw error;
   }
 
   const newHead = git(origin, "rev-parse", "HEAD");
   return {
     integrated: true,
     executorHead: selectedExecutorHead,
-    originHeadBefore,
+    originHeadBefore: expectedOriginHead,
     newHead,
     strategy,
   };

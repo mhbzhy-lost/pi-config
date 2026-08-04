@@ -638,6 +638,7 @@ test("goal_integrate rejects rogue commit appended after started event (rogue)",
       strategy: "cherry-pick",
       executorHead: expectedExecutorHead,
       originHeadBefore,
+      originRef: git(cwd, "symbolic-ref", "--quiet", "HEAD"),
     },
   }, projection.version);
 

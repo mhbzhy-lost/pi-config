@@ -24,6 +24,11 @@ function gitHead(cwd) {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
 }
 
+function currentOriginRef(cwd) {
+  try { return execFileSync("git", ["symbolic-ref", "--quiet", "HEAD"], { cwd, encoding: "utf8" }).trim(); }
+  catch { throw new Error("Origin ref must be an attached symbolic ref (detached HEAD is not supported)"); }
+}
+
 function workspacePaths(stateRoot, goalId, taskId, attempt) {
   const normalizedRoot = resolve(stateRoot);
   const worktreesRoot = join(normalizedRoot, "worktrees");
@@ -46,6 +51,7 @@ function workspaceLeaseIdentityFromProjection(taskWorkspace, goalId, taskId, cwd
   const snapshotPath = taskWorkspace.path;
   const branch = taskWorkspace.branch;
   const baseCommit = taskWorkspace.baseCommit;
+  const originRef = taskWorkspace.originRef;
   if (typeof snapshotPath !== "string" || !snapshotPath) {
     throw new Error(`workspace snapshot missing path for task ${taskId}`);
   }
@@ -54,6 +60,9 @@ function workspaceLeaseIdentityFromProjection(taskWorkspace, goalId, taskId, cwd
   }
   if (typeof baseCommit !== "string" || !baseCommit) {
     throw new Error(`workspace snapshot missing baseCommit for task ${taskId}`);
+  }
+  if (typeof originRef !== "string" || !originRef) {
+    throw new Error(`workspace snapshot missing originRef for task ${taskId}`);
   }
 
   const { workspacePath, leasePath } = workspacePaths(root, goalId, taskId, attempt);
@@ -64,6 +73,7 @@ function workspaceLeaseIdentityFromProjection(taskWorkspace, goalId, taskId, cwd
     path: workspacePath,
     branch: `ge/${goalId}/${taskId}/${attempt}`,
     baseCommit,
+    originRef,
     originRoot: resolve(cwd),
     stateRoot: resolve(root),
     leasePath,
@@ -379,6 +389,7 @@ export function createGoalEngineExtension(pi, options = {}) {
             path: lease.path,
             branch: lease.branch,
             baseCommit,
+            originRef: lease.originRef,
           },
         }, goalId);
         appendEventFn(root, event, projection.version);
@@ -397,7 +408,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         status: "dispatched",
         task_id: params.task_id,
         contract,
-        workspace: { attempt, path: lease.path, branch: lease.branch, baseCommit: lease.baseCommit },
+        workspace: { attempt, path: lease.path, branch: lease.branch, baseCommit: lease.baseCommit, originRef: lease.originRef },
       });
     },
 
@@ -641,6 +652,9 @@ export function createGoalEngineExtension(pi, options = {}) {
         return JSON.stringify(formatDispositionResponse(taskWorkspace));
       }
 
+      if (taskWorkspace.legacyOriginRef || !taskWorkspace.originRef) {
+        throw new Error("legacy/manual recovery required: workspace disposition has no originRef");
+      }
       const lease = resolveLease(task, goalId, taskId, cwd, root);
 
       const ensureApplied = () => {
@@ -688,6 +702,9 @@ export function createGoalEngineExtension(pi, options = {}) {
       };
 
       if (taskWorkspace.phase === "active") {
+        if (currentOriginRef(cwd) !== lease.originRef) {
+          throw new Error(`Origin ref mismatch (expected ${lease.originRef})`);
+        }
         let inspection;
         if (action === "integrate") {
           inspection = inspectExecutorWorkspace(lease);
@@ -712,12 +729,13 @@ export function createGoalEngineExtension(pi, options = {}) {
           strategy,
           executorHead,
           originHeadBefore: gitHead(cwd),
+          originRef: lease.originRef,
         }, goalId);
         projection = appendEventFn(root, startedEvent, projection.version);
 
         const nextTask = projection.tasks.get(taskId);
         if (action === "integrate" && !isExecutorWorkspaceIntegrated(lease, { strategy, executorHead: nextTask.workspace.executorHead })) {
-          integrateExecutorWorkspace(lease, { strategy, executorHead: nextTask.workspace.executorHead });
+          integrateExecutorWorkspace(lease, { strategy, executorHead: nextTask.workspace.executorHead, originRef: nextTask.workspace.originRef, originHeadBefore: nextTask.workspace.originHeadBefore });
         }
 
         const appliedEvent = makeEvent("task.workspace_disposition_applied", {
@@ -740,7 +758,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
 
         if (action === "integrate" && !isExecutorWorkspaceIntegrated(lease, { strategy, executorHead: taskWorkspace.executorHead })) {
-          integrateExecutorWorkspace(lease, { strategy, executorHead: taskWorkspace.executorHead });
+          integrateExecutorWorkspace(lease, { strategy, executorHead: taskWorkspace.executorHead, originRef: taskWorkspace.originRef, originHeadBefore: taskWorkspace.originHeadBefore });
         }
 
         const appliedEvent = makeEvent("task.workspace_disposition_applied", {

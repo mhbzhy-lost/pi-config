@@ -193,7 +193,7 @@ function taskAccepted(p, data, schemaVersion) {
 
 function workspaceDispositionStarted(p, data, schemaVersion) {
   requireV2(schemaVersion);
-  const { taskId, attempt, requestedAction, strategy, executorHead, originHeadBefore } = data;
+  const { taskId, attempt, requestedAction, strategy, executorHead, originHeadBefore, originRef } = data;
   const task = requireTask(p, taskId);
   const workspace = requireWorkspace(task, attempt);
   if (workspace.phase !== "active") throw new Error("workspace disposition already started or terminal phase");
@@ -204,7 +204,8 @@ function workspaceDispositionStarted(p, data, schemaVersion) {
     throw new Error("discard and preserve dispositions require settled task");
   }
   for (const [name, value] of Object.entries({ strategy, executorHead, originHeadBefore })) if (!value || typeof value !== "string") throw new Error(`${name} is required`);
-  Object.assign(workspace, { requestedAction, strategy, executorHead, originHeadBefore, phase: "disposing" });
+  if (originRef !== undefined && (typeof originRef !== "string" || !originRef)) throw new Error("originRef must be a non-empty string");
+  Object.assign(workspace, { requestedAction, strategy, executorHead, originHeadBefore, ...(originRef ? { originRef, legacyOriginRef: false } : { legacyOriginRef: true }), phase: "disposing" });
 }
 
 function workspaceDispositionApplied(p, data, schemaVersion) {

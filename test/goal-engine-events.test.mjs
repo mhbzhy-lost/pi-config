@@ -551,6 +551,21 @@ test("legacy v1 history remains replayable and explicitly unverified", () => {
   assert.equal(p.tasks.get("t1").acceptanceVerification, "legacy_unverified");
 });
 
+test("legacy v2 started without originRef replays with explicit legacy marker", () => {
+  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  p = applyEvent(p, started("integrate"));
+  assert.equal(p.tasks.get("t1").workspace.legacyOriginRef, true);
+  assert.equal(p.tasks.get("t1").workspace.originRef, undefined);
+});
+
+test("v2 started persists a valid originRef", () => {
+  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  const event = started("integrate"); event.data.originRef = "refs/heads/main";
+  p = applyEvent(p, event);
+  assert.equal(p.tasks.get("t1").workspace.originRef, "refs/heads/main");
+  assert.equal(p.tasks.get("t1").workspace.legacyOriginRef, false);
+});
+
 test("disposition requires settled status and compatible outcome", () => {
   let p = v2Dispatched(applyEvent(createProjection(), v2Created()));
   for (const action of ["integrate", "discard", "preserve"]) assert.throws(() => applyEvent(p, started(action)), /settled|status|succeeded/);

@@ -264,6 +264,61 @@ test("assertWorkspaceChangesWithinPaths rejects NUL-byte paths", () => {
   );
 });
 
+test("integration rejects a different checked-out origin ref before side effects", () => {
+  const origin = initRepo();
+  git(origin, "branch", "other");
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "branch-fence", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  writeFileSync(join(lease.path, "feature.ts"), "export const value = 1;\n");
+  git(lease.path, "add", ".");
+  git(lease.path, "commit", "-m", "test: executor result");
+  const mainBefore = git(origin, "rev-parse", "main");
+  const otherBefore = git(origin, "rev-parse", "other");
+  git(origin, "switch", "other");
+
+  assert.throws(() => integrateExecutorWorkspace(lease, { strategy: "cherry-pick" }), /origin ref|branch|target/i);
+  assert.equal(git(origin, "rev-parse", "main"), mainBefore);
+  assert.equal(git(origin, "rev-parse", "other"), otherBefore);
+  assert.equal(git(origin, "status", "--porcelain=v1"), "");
+});
+
+test("allocateExecutorWorkspace rejects detached origin", () => {
+  const origin = initRepo();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  git(origin, "checkout", "--detach");
+  assert.throws(() => allocateExecutorWorkspace({ goalId: "detached", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit }), /symbolic|detached|origin ref/i);
+});
+
+test("integration preserves user cherry-pick sequencer before side effects", () => {
+  const origin = initRepo();
+  writeFileSync(join(origin, "conflict.txt"), "base\n"); git(origin, "add", "."); git(origin, "commit", "-m", "test: base conflict");
+  git(origin, "branch", "topic"); writeFileSync(join(origin, "conflict.txt"), "main\n"); git(origin, "commit", "-am", "test: main conflict");
+  git(origin, "switch", "topic"); writeFileSync(join(origin, "conflict.txt"), "topic\n"); git(origin, "commit", "-am", "test: topic conflict");
+  git(origin, "switch", "main"); assert.throws(() => git(origin, "cherry-pick", "topic"));
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  git(origin, "cherry-pick", "--abort");
+  const lease = allocateExecutorWorkspace({ goalId: "user-cherry", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  writeFileSync(join(lease.path, "feature.ts"), "x\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "test: result");
+  assert.throws(() => git(origin, "cherry-pick", "topic"));
+  const before = { head: git(origin, "rev-parse", "HEAD"), ref: git(origin, "symbolic-ref", "--quiet", "HEAD"), status: git(origin, "status", "--porcelain=v1"), marker: git(origin, "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD") };
+  assert.throws(() => integrateExecutorWorkspace(lease, { strategy: "cherry-pick" }), /sequencer|clean|cherry/i);
+  assert.deepEqual({ head: git(origin, "rev-parse", "HEAD"), ref: git(origin, "symbolic-ref", "--quiet", "HEAD"), status: git(origin, "status", "--porcelain=v1"), marker: git(origin, "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD") }, before);
+});
+
+test("integration preserves user merge sequencer before side effects", () => {
+  const origin = initRepo();
+  writeFileSync(join(origin, "conflict.txt"), "base\n"); git(origin, "add", "."); git(origin, "commit", "-m", "test: base conflict");
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "user-merge", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  writeFileSync(join(lease.path, "feature.ts"), "x\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "test: result");
+  git(origin, "branch", "topic"); writeFileSync(join(origin, "conflict.txt"), "main\n"); git(origin, "commit", "-am", "test: main conflict");
+  git(origin, "switch", "topic"); writeFileSync(join(origin, "conflict.txt"), "topic\n"); git(origin, "commit", "-am", "test: topic conflict"); git(origin, "switch", "main");
+  assert.throws(() => git(origin, "merge", "topic"));
+  const before = { head: git(origin, "rev-parse", "HEAD"), ref: git(origin, "symbolic-ref", "--quiet", "HEAD"), status: git(origin, "status", "--porcelain=v1"), marker: git(origin, "rev-parse", "-q", "--verify", "MERGE_HEAD") };
+  assert.throws(() => integrateExecutorWorkspace(lease, { strategy: "merge" }), /sequencer|clean|merge/i);
+  assert.deepEqual({ head: git(origin, "rev-parse", "HEAD"), ref: git(origin, "symbolic-ref", "--quiet", "HEAD"), status: git(origin, "status", "--porcelain=v1"), marker: git(origin, "rev-parse", "-q", "--verify", "MERGE_HEAD") }, before);
+});
+
 test("integrateExecutorWorkspace cherry-picks executor commit into origin", () => {
   const origin = initRepo();
   const stateRoot = tmpStateRoot();
