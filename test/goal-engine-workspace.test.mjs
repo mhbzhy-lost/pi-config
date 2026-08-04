@@ -863,7 +863,7 @@ function assertOrphanVerified(result, lease) {
   assert.equal(result.lease.originRoot, lease.originRoot);
   assert.equal(result.lease.stateRoot, lease.stateRoot);
   assert.equal(result.lease.leasePath, lease.leasePath);
-  assert.equal(result.inspection.hasCommits, true);
+  assert.equal(result.inspection.descendant, true);
   assert.equal(result.executorHead, git(lease.path, "rev-parse", "HEAD"));
 }
 
@@ -901,7 +901,14 @@ test("orphan inventory persisted lease envelope rejects malformed and canonical 
 
 test("orphan inventory commit-range identity distinguishes invalid and usable histories", () => {
   orphanInventoryApi();
-  for (const scenario of ["missing base", "unrelated base", "no ahead", "empty descendant", "clean non-empty descendant"]) {
+  for (const scenario of [
+    "missing base",
+    "unrelated base",
+    "no ahead",
+    "empty descendant",
+    "dirty no-commit",
+    "clean non-empty descendant",
+  ]) {
     const fixture = orphanArgs(`range-${scenario.replace(/ /g, "-")}`);
     const lease = { ...fixture.lease };
     if (scenario === "missing base") lease.baseCommit = "0000000000000000000000000000000000000000";
@@ -910,11 +917,33 @@ test("orphan inventory commit-range identity distinguishes invalid and usable hi
       lease.baseCommit = git(fixture.originRoot, "commit-tree", unrelatedBaseTree, "-m", "test: unrelated base");
     }
     if (scenario === "empty descendant") git(lease.path, "commit", "--allow-empty", "-m", "test: empty");
-    if (scenario === "clean non-empty descendant") { writeFileSync(join(lease.path, "child.txt"), "child\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "test: child"); }
+    if (scenario === "dirty no-commit") {
+      writeFileSync(join(lease.path, "dirty.txt"), "dirty\n");
+    }
+    if (scenario === "clean non-empty descendant") {
+      writeFileSync(join(lease.path, "child.txt"), "child\n");
+      git(lease.path, "add", ".");
+      git(lease.path, "commit", "-m", "test: child");
+    }
     writeFileSync(lease.leasePath, JSON.stringify(lease));
     const result = orphanInventoryApi()(fixture);
-    if (scenario === "clean non-empty descendant") assertOrphanVerified(result, lease);
-    else assertOrphanUnverified(result);
+    if (scenario === "missing base" || scenario === "unrelated base") {
+      assertOrphanUnverified(result);
+    } else {
+      assertOrphanVerified(result, lease);
+      if (scenario === "dirty no-commit") {
+        assert.equal(result.inspection.hasCommits, false);
+        assert.equal(result.inspection.clean, false);
+      }
+      if (scenario === "no ahead" || scenario === "empty descendant") {
+        assert.equal(result.inspection.hasCommits, false);
+        assert.equal(result.inspection.clean, true);
+      }
+      if (scenario === "clean non-empty descendant") {
+        assert.equal(result.inspection.hasCommits, true);
+        assert.equal(result.inspection.clean, true);
+      }
+    }
   }
 });
 
