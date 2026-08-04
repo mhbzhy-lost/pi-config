@@ -339,6 +339,7 @@ function goalAmended(p, data, schemaVersion, replay) {
     if (updates.deps) task.deps = updates.deps;
     if (updates.writePaths) task.writePaths = updates.writePaths;
     if (updates.acceptance) task.acceptance = updates.acceptance;
+    if (updates.workflow !== undefined) task.workflow = updates.workflow;
   }
   if (schemaVersion === "goal-engine.event.v2" && !replay) {
     validateTaskDefinitions([...candidate.keys()], Object.fromEntries(candidate));

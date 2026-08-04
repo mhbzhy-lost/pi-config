@@ -1861,6 +1861,26 @@ test("goal_amend rejects lexical symlink and canonical realpath origin commands 
   assert.equal(readGoalEvents(cwd, goalId).length, before);
 });
 
+test("goal_amend applies workflow only to safe pending tasks", async () => {
+  const cwd = tmpCwd();
+  const objective = "Amend pending task workflow";
+  const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "workflow task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" }] });
+
+  const amended = JSON.parse(await invoke(pi, "goal_amend", { reason: "Change the pending task to a test-first implementation workflow", update_tasks: { t1: { workflow: "tdd" } } }));
+  assert.equal(amended.tasks.t1.workflow, "tdd");
+
+  await invoke(pi, "goal_dispatch", { task_id: "t1" });
+  const beforeEvents = readGoalEvents(cwd, goalId).length;
+  await assert.rejects(
+    () => invoke(pi, "goal_amend", { reason: "Do not alter workflow while an active workspace remains allocated", update_tasks: { t1: { workflow: "docs-only" } } }),
+    (error) => error.code === "INVALID_GOAL_CONTRACT" && /stateChanged=false/.test(error.message),
+  );
+  assert.equal(readGoalEvents(cwd, goalId).length, beforeEvents);
+});
+
 test("goal_amend rejects accepted acceptance rewrite without appending an event", async () => {
   const cwd = tmpCwd();
   const objective = "Amend accepted proof protection goal";

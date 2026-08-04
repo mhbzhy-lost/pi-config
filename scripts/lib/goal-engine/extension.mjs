@@ -279,6 +279,7 @@ function statusResponse(projection) {
         deps: t.deps,
         writePaths: t.writePaths,
         acceptance: t.acceptance,
+        workflow: t.workflow,
         evidence_count: t.evidence.length,
         attempts: t.attempts,
         contractHash: t.contractHash,
@@ -738,7 +739,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           type: "object",
           additionalProperties: {
             type: "object",
-            properties: { description: { type: "string" }, deps: { type: "array", items: { type: "string" } }, writePaths: { type: "array", items: { type: "string" } }, acceptance: { type: "object" } },
+            properties: { description: { type: "string" }, deps: { type: "array", items: { type: "string" } }, writePaths: { type: "array", items: { type: "string" } }, acceptance: { type: "object" }, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } },
           },
         },
       },

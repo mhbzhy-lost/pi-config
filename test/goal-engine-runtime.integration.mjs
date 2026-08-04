@@ -105,6 +105,37 @@ test("real Pi host rejects historical unsafe dispatch through ToolDefinition.exe
   }
 });
 
+test("real Pi host validates and applies workflow amendments", async () => {
+  const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-amend-host-"));
+  const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-host-"));
+  let result;
+  try {
+    execFileSync("git", ["init"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.name", "Goal Engine Test"], { cwd: projectCwd });
+    writeFileSync(join(projectCwd, "README.md"), "fixture\n");
+    writeFileSync(join(projectCwd, ".gitignore"), ".state/goal-engine/\n");
+    execFileSync("git", ["add", "."], { cwd: projectCwd });
+    execFileSync("git", ["commit", "-m", "test: initialize safe fixture"], { cwd: projectCwd });
+    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    await loader.reload();
+    result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: SessionManager.inMemory(projectCwd) });
+    await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
+    const signal = new AbortController().signal;
+    const init = result.session.getToolDefinition("goal_init");
+    const amend = result.session.getToolDefinition("goal_amend");
+    await init.execute("workflow-host-init", { objective: "Host workflow amendment", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "existing-tests" }] }, signal, undefined, { cwd: projectCwd });
+    const legal = await amend.execute("workflow-host-legal", { reason: "Change this pending task to the test-first workflow", update_tasks: { t1: { workflow: "tdd" } } }, signal, undefined, { cwd: projectCwd });
+    assert.equal(JSON.parse(legal.details.value).tasks.t1.workflow, "tdd");
+    await assert.rejects(
+      () => amend.execute("workflow-host-illegal", { reason: "Reject invalid workflow at the host schema boundary", update_tasks: { t1: { workflow: "unsafe" } } }, signal, undefined, { cwd: projectCwd }),
+      /workflow|enum|invalid/i,
+    );
+  } finally {
+    try { result?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
+  }
+});
+
 test("real Pi host executes goal_status through ToolDefinition.execute", async () => {
   const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-project-"));
   const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-host-"));

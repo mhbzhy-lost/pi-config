@@ -892,6 +892,7 @@ test("amend rejects accepted and unreleased workspace tasks atomically", () => {
     { deps: [] },
     { writePaths: ["other.ts"] },
     { acceptance: { criteria: ["changed"], commands: ["false"] } },
+    { workflow: "docs-only" },
   ]) {
     const before = snapshot(accepted);
     assert.throws(() => amend(accepted, { updateTasks: { t1: updates } }), /pending|accepted|amend/i);
@@ -905,7 +906,7 @@ test("amend rejects accepted and unreleased workspace tasks atomically", () => {
     task.status = status;
     if (status === "pending") task.lastSettledOutcome = "failed";
     task.workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "active" };
-    for (const data of [{ removeTasks: ["t1"] }, { updateTasks: { t1: { description: "changed" } } }]) {
+    for (const data of [{ removeTasks: ["t1"] }, { updateTasks: { t1: { workflow: "docs-only" } } }]) {
       const before = snapshot(projection);
       assert.throws(() => amend(projection, data), /pending|workspace|amend/i);
       assert.deepEqual(snapshot(projection), before);
@@ -956,24 +957,23 @@ test("v2 pending replacement succeeds while accepted and unreleased replacements
   }
 });
 
-test("amend allows never-dispatched and discarded released pending tasks", () => {
+test("workflow amendments apply to never-dispatched and discarded released pending tasks", () => {
   const amend = (projection, data) => applyEvent(projection, v2Event("goal.amended", {
-    reason: "Allow pending tasks after workspace resources are fully released",
+    reason: "Allow pending task workflow changes after workspace release",
     ...data,
   }, "amend-allowed-goal"));
   let neverDispatched = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
-  neverDispatched = amend(neverDispatched, { updateTasks: { t1: { description: "changed" } } });
-  assert.equal(neverDispatched.tasks.get("t1").description, "changed");
-  const neverDispatchedRemoval = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
-  assert.throws(() => amend(neverDispatchedRemoval, { removeTasks: ["t1"] }), /non-empty|tasks/i);
-  assert.equal(neverDispatchedRemoval.tasks.has("t1"), true);
+  neverDispatched = amend(neverDispatched, { updateTasks: { t1: { workflow: "existing-tests" } } });
+  assert.equal(neverDispatched.tasks.get("t1").workflow, "existing-tests");
 
   let released = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
   released.tasks.get("t1").workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "disposed", disposition: "discarded", released: true };
-  released = amend(released, { updateTasks: { t1: { description: "changed again" } } });
-  assert.equal(released.tasks.get("t1").description, "changed again");
-  assert.throws(() => amend(released, { removeTasks: ["t1"] }), /non-empty|tasks/i);
-  assert.equal(released.tasks.has("t1"), true);
+  released = amend(released, { updateTasks: { t1: { workflow: "docs-only" } } });
+  assert.equal(released.tasks.get("t1").workflow, "docs-only");
+
+  const invalid = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  assert.throws(() => amend(invalid, { updateTasks: { t1: { workflow: "unsafe" } } }), /workflow/i);
+  assert.equal(invalid.tasks.get("t1").workflow, "tdd");
 });
 
 function v2Event(type, data, goalId = "v2-goal", occurredAt = "2026-01-02T03:04:05.000Z") {
