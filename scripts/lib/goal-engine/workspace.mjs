@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -188,38 +188,101 @@ export function loadExecutorWorkspaceLease({ goalId, taskId, attempt, stateRoot 
   return { ...lease, leasePath };
 }
 
-export function inspectExecutorWorkspace(lease) {
-  if (!existsSync(lease.path)) throw new Error("Executor workspace is missing");
+function isRuntimePath(file) {
+  return file.startsWith(".pi-subagents/");
+}
 
-  const headCommit = git(lease.path, "rev-parse", "HEAD");
-  const statusOutput = git(lease.path, "status", "--porcelain=v1");
-  const dirtyFiles = statusOutput
-    ? statusOutput.split("\n").map((line) => line.slice(3)).filter((file) => file && !file.startsWith(".pi-subagents/"))
-    : [];
-  const untrackedOutput = git(lease.path, "ls-files", "--others", "--exclude-standard");
-  const untrackedFiles = untrackedOutput
-    ? untrackedOutput.split("\n").filter((file) => file && !file.startsWith(".pi-subagents/"))
-    : [];
-
-  const changedOutput = headCommit === lease.baseCommit
-    ? ""
-    : gitRaw(lease.path, "diff", "-l0", "--name-status", "-z", "--find-renames", "--find-copies-harder", `${lease.baseCommit}..${headCommit}`);
-  const changedFiles = changedOutput ? parseChangedPaths(changedOutput) : [];
-
-  let diff = "";
-  if (headCommit !== lease.baseCommit) {
-    diff = git(lease.path, "diff", `${lease.baseCommit}..${headCommit}`);
+function parsePorcelainStatus(output) {
+  const tokens = output.split("\0");
+  if (tokens.at(-1) === "") tokens.pop();
+  const dirtyFiles = [];
+  const untrackedFiles = [];
+  for (let index = 0; index < tokens.length;) {
+    const record = tokens[index++];
+    if (!record || record.length < 4) throw new Error("Invalid git porcelain status output");
+    const status = record.slice(0, 2);
+    const paths = [record.slice(3)];
+    if (/[RC]/.test(status)) {
+      if (index >= tokens.length) throw new Error("Invalid git porcelain rename/copy status output");
+      paths.push(tokens[index++]);
+    }
+    if (paths.some((file) => !file)) throw new Error("Invalid git porcelain status path");
+    if (paths.every(isRuntimePath)) continue;
+    if (status === "??") untrackedFiles.push(...paths);
+    else dirtyFiles.push(...paths);
   }
+  return { dirtyFiles: [...new Set(dirtyFiles)].sort(), untrackedFiles: [...new Set(untrackedFiles)].sort() };
+}
+
+function assertExecutorWorkspaceIdentity(lease) {
+  if (!existsSync(lease.path)) throw new Error("Executor workspace is missing");
+  const workspacePath = realpathSync(lease.path);
+  const originPath = realpathSync(lease.originRoot);
+  const workspaceTopLevel = realpathSync(git(workspacePath, "rev-parse", "--show-toplevel"));
+  const originTopLevel = realpathSync(git(originPath, "rev-parse", "--show-toplevel"));
+  if (workspaceTopLevel !== workspacePath || originTopLevel !== originPath) {
+    throw new Error("Executor workspace identity top-level mismatch");
+  }
+  const workspaceCommonDir = realpathSync(path.resolve(workspacePath, git(workspacePath, "rev-parse", "--git-common-dir")));
+  const originCommonDir = realpathSync(path.resolve(originPath, git(originPath, "rev-parse", "--git-common-dir")));
+  if (workspaceCommonDir !== originCommonDir) throw new Error("Executor workspace identity common dir mismatch");
+  const liveRef = git(workspacePath, "symbolic-ref", "--quiet", "HEAD");
+  const expectedRef = `refs/heads/${lease.branch}`;
+  if (liveRef !== expectedRef) throw new Error("Executor workspace identity live branch mismatch");
+  return workspacePath;
+}
+
+function isAncestor(cwd, ancestor, descendant) {
+  try {
+    git(cwd, "merge-base", "--is-ancestor", ancestor, descendant);
+    return true;
+  } catch (error) {
+    if (error?.status === 1) return false;
+    throw error;
+  }
+}
+
+function treeChanged(cwd, baseCommit, headCommit) {
+  try {
+    git(cwd, "diff", "--quiet", baseCommit, headCommit);
+    return false;
+  } catch (error) {
+    if (error?.status === 1) return true;
+    throw error;
+  }
+}
+
+export function inspectExecutorWorkspace(lease) {
+  const workspacePath = assertExecutorWorkspaceIdentity(lease);
+  const headCommit = git(workspacePath, "rev-parse", "HEAD");
+  if (git(workspacePath, "rev-parse", lease.branch) !== headCommit) {
+    throw new Error("Executor workspace identity branch HEAD mismatch");
+  }
+  const descendant = isAncestor(workspacePath, lease.baseCommit, headCommit);
+  const aheadCommits = descendant ? git(workspacePath, "rev-list", `${lease.baseCommit}..${headCommit}`).split("\n").filter(Boolean) : [];
+  const changed = descendant && aheadCommits.length > 0 && treeChanged(workspacePath, lease.baseCommit, headCommit);
+  const status = parsePorcelainStatus(gitRaw(workspacePath, "status", "--porcelain=v1", "-z"));
+  const endHead = git(workspacePath, "rev-parse", "HEAD");
+  if (endHead !== headCommit) throw new Error("Executor workspace HEAD changed during inspection");
+
+  const changedOutput = changed
+    ? gitRaw(workspacePath, "diff", "-l0", "--name-status", "-z", "--find-renames", "--find-copies-harder", `${lease.baseCommit}..${headCommit}`)
+    : "";
+  const changedFiles = changedOutput ? parseChangedPaths(changedOutput) : [];
+  const diff = changed ? git(workspacePath, "diff", `${lease.baseCommit}..${headCommit}`) : "";
 
   return {
     headCommit,
     baseCommit: lease.baseCommit,
+    descendant,
+    aheadCommits,
+    aheadCount: aheadCommits.length,
+    treeChanged: changed,
     changedFiles,
-    dirtyFiles,
-    untrackedFiles,
+    ...status,
     diff,
-    clean: dirtyFiles.length === 0 && untrackedFiles.length === 0,
-    hasCommits: headCommit !== lease.baseCommit,
+    clean: status.dirtyFiles.length === 0 && status.untrackedFiles.length === 0,
+    hasCommits: descendant && aheadCommits.length > 0 && changed,
   };
 }
 
