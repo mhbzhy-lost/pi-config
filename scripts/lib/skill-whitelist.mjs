@@ -48,8 +48,7 @@ function lexSingleLineScalar(value) {
   return value.trim();
 }
 
-function isSupportedDescriptionScalar(value) {
-  const description = lexSingleLineScalar(value);
+function isSupportedDescriptionScalar(description) {
   if (/^'(?:[^'\r\n]|'')*'$/u.test(description)) return true;
   if (/^"(?:[^"\\\r\n]|\\["\\/bfnrt])*"$/u.test(description)) return true;
   if (/^(?:~|null|true|false)$/iu.test(description)) return false;
@@ -72,17 +71,17 @@ function validateSkillFrontmatter(name, content) {
     const [, key, value] = field;
     if (key !== "name" && key !== "description") continue;
     if (fields.has(key)) throw frontmatterError(name, `duplicate ${key}`);
-    const description = value.trim();
-    if (key === "description" && description && description !== '""' && description !== "''" && !isSupportedDescriptionScalar(value)) {
+    const canonicalValue = key === "description" ? lexSingleLineScalar(value) : value;
+    if (key === "description" && canonicalValue && !isSupportedDescriptionScalar(canonicalValue)) {
       throw frontmatterError(name, "unsupported string scalar");
     }
-    fields.set(key, value);
+    fields.set(key, canonicalValue);
   }
 
   if (!fields.has("name")) throw frontmatterError(name, "missing name");
   if (fields.get("name") !== name) throw frontmatterError(name, "name does not match allowlisted skill");
   if (!fields.has("description")) throw frontmatterError(name, "missing description");
-  const description = fields.get("description").trim();
+  const description = fields.get("description");
   if (!description || description === '""' || description === "''") {
     throw frontmatterError(name, "empty description");
   }
