@@ -2742,6 +2742,104 @@ test("orphan recovery rejects drift between two verified inventories", async () 
   assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_orphan_recovered").length, 0);
 });
 
+async function disposedPreservedFixture(kind) {
+  if (kind === "orphan") {
+    const fixture = await dispatchedRollbackFixture("preserved release fixture");
+    await invoke(fixture.pi, "goal_integrate", { task_id: "t1", action: "preserve" });
+    return fixture;
+  }
+  const cwd = tmpCwd(); const objective = "Succeeded preserved release fixture"; const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd); createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "preserved", deps: [], writePaths: ["src/release.ts"], acceptance: { criteria: ["release"], commands: ["true"] }, workflow: "tdd" }] });
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  commitWorkspaceChange(dispatched.workspace, "src/release.ts", "export const released = true;\n", "test: preserved release");
+  await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "diff", ref: "git diff HEAD~1 -- src/release.ts" }, evidence_source: "self_produced", next_action: "Preserve the clean executor workspace pending explicit release." });
+  await invoke(pi, "goal_integrate", { task_id: "t1", action: "preserve" });
+  return { cwd, goalId, pi, workspace: dispatched.workspace };
+}
+
+function assertReleasedPreservation(fixture, executorHead) {
+  const resources = workspaceState(fixture.cwd, fixture.goalId, "t1");
+  assert.deepEqual([resources.workspaceExists, resources.leaseExists, resources.branchExists], [false, false, false]);
+  const releases = readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released");
+  assert.equal(releases.length, 1);
+  assert.deepEqual(releases[0].data, { taskId: "t1", attempt: 1, executorHead, released: true });
+  const task = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
+  assert.equal(task.workspace.disposition, "preserved"); assert.equal(task.workspace.released, false);
+  assert.equal(task.workspace.preservedResourcesReleased, true); assert.equal(task.status, "pending");
+  assert.equal(task.settlement, null); assert.equal(task.lastSettledOutcome, "failed");
+}
+
+test("preserved release discard cleans orphan and succeeded fixtures before one durable release fact", async () => {
+  for (const kind of ["orphan", "succeeded"]) {
+    const fixture = await disposedPreservedFixture(kind);
+    const before = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
+    let observedCleanup = false;
+    const pi = createMockPi(fixture.cwd);
+    createGoalEngineWithAppendInjection(pi, { appendEvent(root, event, version) {
+      if (event.type === "task.workspace_preservation_released") {
+        const state = workspaceState(fixture.cwd, fixture.goalId, "t1");
+        assert.deepEqual([state.workspaceExists, state.leaseExists, state.branchExists], [false, false, false]); observedCleanup = true;
+      }
+      return appendEventStore(root, event, version);
+    } });
+    const result = JSON.parse(await invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }));
+    assert.deepEqual(result, { action: "discarded", released: true }); assert.equal(observedCleanup, true);
+    assertReleasedPreservation(fixture, before.workspace.executorHead);
+    const status = JSON.parse(await invoke(pi, "goal_status", {}));
+    assert.deepEqual(status.runnable, ["t1"]); assert.equal(status.tasks.t1.requiredTool, "goal_dispatch");
+    assert.deepEqual(JSON.parse(await invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" })), { action: "discarded", released: true });
+    assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released").length, 1);
+    assert.equal(JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace.attempt, 2);
+  }
+});
+
+test("preserved release append failures recover only after cleanup is provably complete", async () => {
+  for (const factory of [createFailingAppendEvent, createDurableThenThrowAppendEvent]) {
+    const fixture = await disposedPreservedFixture("orphan"); const injected = factory("task.workspace_preservation_released");
+    const beforeBytes = persistedStateBytes(fixture.cwd, fixture.goalId); const pi = createMockPi(fixture.cwd);
+    createGoalEngineWithAppendInjection(pi, { appendEvent: injected.appendEvent });
+    await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }));
+    assert.deepEqual([workspaceState(fixture.cwd, fixture.goalId, "t1").workspaceExists, workspaceState(fixture.cwd, fixture.goalId, "t1").leaseExists, workspaceState(fixture.cwd, fixture.goalId, "t1").branchExists], [false, false, false]);
+    if (factory === createFailingAppendEvent) assert.deepEqual(persistedStateBytes(fixture.cwd, fixture.goalId), beforeBytes);
+    const retry = createMockPi(fixture.cwd); createGoalEngineExtension(retry);
+    assert.deepEqual(JSON.parse(await invoke(retry, "goal_integrate", { task_id: "t1", action: "discard" })), { action: "discarded", released: true });
+    assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released").length, 1);
+  }
+});
+
+test("preserved release identity gates reject before cleanup or release fact", async () => {
+  const cases = [
+    ["tampered lease", "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH", (f) => { const p = workspaceState(f.cwd, f.goalId, "t1").leasePath; const lease = JSON.parse(readFileSync(p)); lease.branch = "tampered"; writeFileSync(p, JSON.stringify(lease)); }],
+    ["missing lease", "EXECUTOR_LEASE_NOT_FOUND", (f) => rmSync(workspaceState(f.cwd, f.goalId, "t1").leasePath)],
+    ["wrong origin", "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH", (f) => git(f.cwd, "checkout", "-b", "preserved-other-origin")],
+    ["head drift", "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH", (f) => commitWorkspaceChange(f.workspace, "drift.ts", "drift\n", "test: preserved drift")],
+  ];
+  for (const [label, code, mutate] of cases) {
+    const fixture = await disposedPreservedFixture("succeeded"); mutate(fixture); const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
+    await assert.rejects(() => invoke(fixture.pi, "goal_integrate", { task_id: "t1", action: "discard" }), (error) => {
+      assert.equal(error.code, code); assert.deepEqual(error.requiredNextAction, { tool: "goal_status", params: { goal_id: fixture.goalId } }); return true;
+    });
+    assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before, label);
+    assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released").length, 0);
+  }
+});
+
+test("preserved release rejects a deterministic second-inspection HEAD race without cleanup", async () => {
+  const fixture = await disposedPreservedFixture("succeeded"); let calls = 0; let racedSnapshot;
+  const pi = createMockPi(fixture.cwd);
+  createGoalEngineExtension(pi, { inspectExecutorWorkspace(lease) {
+    const inspected = inspectExecutorWorkspace(lease);
+    if (++calls === 2) { commitWorkspaceChange(lease, "race.ts", "race\n", "test: preserved inspection race"); racedSnapshot = fullRejectionSnapshot(fixture.cwd, fixture.goalId); }
+    return inspected;
+  } });
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }), (error) => {
+    assert.equal(error.code, "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH"); assert.deepEqual(error.requiredNextAction, { tool: "goal_status", params: { goal_id: fixture.goalId } }); return true;
+  });
+  assert.equal(calls, 2); assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), racedSnapshot);
+  assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released").length, 0);
+});
+
 test("invalid historical contract takes priority over an exact orphan on dispatch", async () => {
   const cwd = tmpCwd(); const goalId = "unsafe-contract-orphan-priority"; const root = join(cwd, ".state/goal-engine");
   const created = { schemaVersion: "goal-engine.event.v2", eventId: "unsafe-priority-create", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Unsafe contract orphan priority", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: [`cd ${cwd} && true`] }, workflow: "tdd" } } } };
