@@ -349,6 +349,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   const listGoalsFn = store.listGoals || listGoals;
   const inspectExecutorWorkspaceFn = options.inspectExecutorWorkspace || inspectExecutorWorkspace;
   const inspectOrphanedExecutorWorkspaceBarrier = options.inspectOrphanedExecutorWorkspaceBarrier;
+  const betweenOrphanInventoriesBarrier = options.betweenOrphanInventoriesBarrier;
   const activeLeases = new Map();
   let turnsSinceSettle = 0;
 
@@ -967,13 +968,31 @@ export function createGoalEngineExtension(pi, options = {}) {
               "ORPHANED_WORKSPACE_NOT_SETTLED",
               { taskId, candidate: { attempt: candidateAttempt }, resources: firstInventory.resources },
               "inspect the authoritative recovery state with goal_status before any workspace action",
-              { tool: "goal_status", params: { goal_id: goalId } },
-              actionState.blockingReason,
+              null,
+              {
+                code: "ORPHANED_WORKSPACE_NOT_SETTLED",
+                requiresHumanDecision: true,
+                choices: actionState.blockingReason.choices,
+              },
             );
           }
+          betweenOrphanInventoriesBarrier?.(firstInventory.lease);
           const secondInventory = inspectOrphan();
-          if (secondInventory.kind !== "verified" || !isDeepStrictEqual(firstInventory, secondInventory)) {
+          if (secondInventory.kind !== "verified" && secondInventory.observed === "executor workspace identity changed during inspection") {
             unverified(secondInventory);
+          }
+          if (secondInventory.kind !== "verified" || !isDeepStrictEqual(firstInventory, secondInventory)) {
+            throw orphanRecoveryError(
+              "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+              { taskId, candidate: { attempt: candidateAttempt }, resources: secondInventory.resources },
+              "inspect the authoritative recovery state with goal_status before any workspace action",
+              { tool: "goal_status", params: { goal_id: goalId } },
+              {
+                code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+                resources: secondInventory.resources,
+                observed: "executor workspace identity changed between recovery inventories",
+              },
+            );
           }
           const recoveryEvent = makeEvent("task.workspace_orphan_recovered", {
             taskId,
