@@ -24,6 +24,7 @@ const EXPECTED_GLOBAL_SKILLS = [
   "writing-plans",
   "plan-runner-dispatch",
   "subagent-dispatch",
+  "using-goal-engine",
   "exa-search",
   "playwright",
   "browser-auth-session",
