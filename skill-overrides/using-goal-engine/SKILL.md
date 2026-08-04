@@ -1,36 +1,50 @@
 ---
 name: using-goal-engine
-description: Use when coordinating a multi-task Goal Engine objective, recovering its persisted state, or dispatching executor worktrees.
+description: Use when starting, resuming, amending, recovering, dispatching, or disposing worktrees for a multi-task Goal Engine objective.
 ---
 
 # 使用 Goal Engine
 
-以 typed schema 和 `goal_status` 的 machine action 为权威；绝不按记忆发明工具或参数。
+以 Pi Host 当前 ToolDefinition 提供的 typed schema 和 `goal_status` machine action 为权威；绝不按记忆发明工具或参数。
 
 ## 精简参考
 
-| 工具 | 仅在 machine action 指示时 |
+| 工具 | 使用条件 |
 |---|---|
-| `goal_init` | 建立新的多任务 DAG |
-| `goal_status` | 每轮、reload、compaction 或恢复后的第一步 |
+| `goal_init` | no active goal + 初始化检查通过 |
+| `goal_status` | 每轮、reload、compaction、recovery 的第一步 |
 | `goal_dispatch` | runnable task 无未释放 workspace |
 | `goal_settle` | executor 终止且有真实 artifact/evidence |
 | `goal_integrate` | settle 后处置 workspace：`integrate`、`discard` 或 `preserve` |
 | `goal_accept` | succeeded、验收通过且已 integrate/released |
 | `goal_amend` | 人类改范围，或 blocked/preserved 需要改计划 |
 
-只使用以上七个工具。调用前读取其 typed schema；不得臆造参数。包装层的 failed/timeout 文字不能替代 artifact、session 和 worktree 的实证。
-
 ## 初始化检查表
 
 在 `goal_init` 前逐项确认：
 
-- [ ] Executor worktree 有有效 Git HEAD。
-- [ ] `.state/goal-engine/` 不受跟踪（应被忽略）。
+- [ ] 当前项目 Git repository/workspace 有有效 HEAD；能据此创建未来 Executor worktree（不是要求尚未创建的 Executor worktree 有 HEAD）。
+- [ ] `.state/goal-engine/` 被忽略且不受跟踪（不受 Git 跟踪）。
 - [ ] 每个 `writePaths` 都相对 Executor worktree；acceptance `commands` 也相对 Executor worktree，不硬编码 origin 的 `cd`。
-- [ ] 为每项选择 `tdd`、`existing-tests` 或 `docs-only` workflow，并给出依赖、验收标准和命令。
+- [ ] 为每项按下列规则选择 workflow，并给出依赖、验收标准和命令。
 
-已有 active goal 时不重新初始化来绕过修改；应先 `goal_status`，必要时 `goal_amend`。
+已有 active goal 时不重新初始化来绕过修改；先 `goal_status`，必要时 `goal_amend`。
+
+## Workflow 分类
+
+- `tdd`：逻辑变更默认 tdd，并先 RED。
+- `existing-tests`：仅当真实 existing tests 已覆盖预期行为。
+- `docs-only`：仅纯文档/报告；不得改 scripts、configuration 或 runtime。
+- mixed work 必须 split 拆分为分别符合条件的任务。
+
+## Typed-only 边界
+
+Agent 只调用 Pi Host 暴露的七个 typed tools；调用前从当前 ToolDefinition 读取类型 schema。不得臆造参数；包装层的 failed/timeout 文字不能替代 artifact、session 和 worktree 的实证。
+
+- shell/CLI 禁止调用 Goal Engine mutation；普通 Git precheck 不受此禁止影响。
+- internal core scripts 禁止直接运行。
+- 搜索源码不得用于补造 schema 或 ABI。
+- 缺 schema/工具时停止并请求恢复 Pi Host 能力。
 
 ## 状态驱动闭环
 
