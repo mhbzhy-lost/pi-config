@@ -23,13 +23,16 @@ export function appendEvent(stateRoot, event, expectedVersion) {
   let registryTmp = null;
 
   try {
+    assertWriterLockOwned(stateRoot, lock.token);
     const current = rebuildProjection(eventsPath);
     if (current.version !== expectedVersion) throw projectionConflict(expectedVersion, current.version);
     const next = applyEvent(current, event);
-    const registry = prepareRegistryUpdate(stateRoot, event, next);
+    const registry = prepareRegistryUpdate(stateRoot, event, next, lock.token);
 
     mkdirSync(goalDir, { recursive: true });
+    assertWriterLockOwned(stateRoot, lock.token);
     appendFileSync(eventsPath, JSON.stringify(event) + "\n", { mode: 0o600 });
+    assertWriterLockOwned(stateRoot, lock.token);
     writeFileSync(projectionTmp, JSON.stringify(serializeProjection(next), null, 2) + "\n", { mode: 0o600 });
     renameSync(projectionTmp, projectionPath);
     registryTmp = publishRegistry(stateRoot, registry, identity, lock.token);
@@ -243,10 +246,11 @@ function serializeProjection(p) {
 }
 
 export function updateRegistry(stateRoot, event, projection, identity, writerToken) {
-  return publishRegistry(stateRoot, prepareRegistryUpdate(stateRoot, event, projection), identity, writerToken);
+  return publishRegistry(stateRoot, prepareRegistryUpdate(stateRoot, event, projection, writerToken), identity, writerToken);
 }
 
-function prepareRegistryUpdate(stateRoot, event, projection) {
+function prepareRegistryUpdate(stateRoot, event, projection, writerToken) {
+  assertWriterLockOwned(stateRoot, writerToken);
   const registryPath = join(stateRoot, "registry.json");
   const registry = existsSync(registryPath) ? JSON.parse(readFileSync(registryPath, "utf8")) : { schema_version: REGISTRY_SCHEMA_VERSION, active_goal_ids: [], goals: {} };
   validateRegistry(registry);
@@ -262,14 +266,24 @@ function prepareRegistryUpdate(stateRoot, event, projection) {
 }
 
 function validateRegistry(registry) {
-  if (!registry || typeof registry !== "object" || Array.isArray(registry) || registry.schema_version !== REGISTRY_SCHEMA_VERSION || !Array.isArray(registry.active_goal_ids) || !registry.active_goal_ids.every((goalId) => typeof goalId === "string") || !registry.goals || typeof registry.goals !== "object" || Array.isArray(registry.goals)) {
-    throw new TypeError("invalid goal engine registry");
+  if (!registry || typeof registry !== "object" || Array.isArray(registry) || registry.schema_version !== REGISTRY_SCHEMA_VERSION || !Array.isArray(registry.active_goal_ids) || !registry.goals || typeof registry.goals !== "object" || Array.isArray(registry.goals)) throw new TypeError("invalid goal engine registry");
+  const activeIds = new Set();
+  for (const goalId of registry.active_goal_ids) {
+    if (typeof goalId !== "string" || !goalId || activeIds.has(goalId)) throw new TypeError("invalid goal engine registry");
+    activeIds.add(goalId);
+  }
+  for (const [goalId, entry] of Object.entries(registry.goals)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || !["active", "blocked", "completed", "cancelled"].includes(entry.lifecycle) || typeof entry.objective !== "string" || typeof entry.updatedAt !== "string" || Number.isNaN(Date.parse(entry.updatedAt)) || (entry.lifecycle === "active") !== activeIds.has(goalId)) throw new TypeError("invalid goal engine registry");
   }
 }
 
-function publishRegistry(stateRoot, registry, identity, writerToken) {
+export function assertWriterLockOwned(stateRoot, token) {
   const owner = readLockOwner(join(stateRoot, ".writer.lock"));
-  if (!writerToken || owner?.token !== writerToken) throw writerLockLost();
+  if (!token || !validOwner(owner) || owner.token !== token) throw writerLockLost();
+}
+
+function publishRegistry(stateRoot, registry, identity, writerToken) {
+  assertWriterLockOwned(stateRoot, writerToken);
   const registryPath = join(stateRoot, "registry.json");
   mkdirSync(dirname(registryPath), { recursive: true });
   const tmpPath = `${registryPath}.${identity}.tmp`;

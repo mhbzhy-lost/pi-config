@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, statSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent, loadProjection, listGoals, acquireWriterLock, releaseWriterLock, acquireRecoveryGuard, releaseRecoveryGuard, updateRegistry } from "../scripts/lib/goal-engine/store.mjs";
@@ -146,6 +146,61 @@ if (process.argv[2] === "guard-owner") {
     assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 2);
     assert.equal(JSON.parse(readFileSync(projectionPath, "utf8")).version, 2);
     assert.deepEqual(listGoals(stateRoot), ["concurrent-goal"]);
+  });
+
+  test("registry goal entry shape corruption fails before every write and retries at the same version", () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    const goalDir = join(stateRoot, "goals/concurrent-goal");
+    const eventsPath = join(goalDir, "events.jsonl");
+    const projectionPath = join(goalDir, "projection.json");
+    const registryPath = join(stateRoot, "registry.json");
+    const valid = readFileSync(registryPath, "utf8");
+    const cases = [
+      (registry) => { registry.goals["concurrent-goal"] = []; },
+      (registry) => { registry.active_goal_ids = ["concurrent-goal", "concurrent-goal"]; },
+      (registry) => { registry.goals["concurrent-goal"].updatedAt = "not-a-time"; },
+      (registry) => { registry.active_goal_ids = []; },
+    ];
+    for (const corrupt of cases) {
+      const registry = JSON.parse(valid); corrupt(registry); writeFileSync(registryPath, JSON.stringify(registry));
+      const before = [readFileSync(eventsPath, "utf8"), readFileSync(projectionPath, "utf8"), readFileSync(registryPath, "utf8")];
+      assert.throws(() => appendEvent(stateRoot, checkpoint("bad-entry"), 1), TypeError);
+      assert.deepEqual([readFileSync(eventsPath, "utf8"), readFileSync(projectionPath, "utf8"), readFileSync(registryPath, "utf8")], before);
+      assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:writer|guard|tmp|candidate|quarantine)/.test(name)), []);
+    }
+    writeFileSync(registryPath, valid);
+    assert.equal(appendEvent(stateRoot, checkpoint("repaired-entry"), 1).version, 2);
+    assert.equal(readFileSync(eventsPath, "utf8").trim().split("\n").length, 2);
+  });
+
+  test("mutation oracle kills every release-before-stage mutant", () => {
+    const storePath = new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url);
+    const eventsUrl = new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).href;
+    const source = readFileSync(storePath, "utf8");
+    const mutations = [
+      ["registry prepare", "    const registry = prepareRegistryUpdate(stateRoot, event, next, lock.token);", "    releaseWriterLock(stateRoot, lock.token);\n    const registry = prepareRegistryUpdate(stateRoot, event, next, lock.token);"],
+      ["JSONL append", "    appendFileSync(eventsPath, JSON.stringify(event) + \"\\n\", { mode: 0o600 });", "    releaseWriterLock(stateRoot, lock.token);\n    appendFileSync(eventsPath, JSON.stringify(event) + \"\\n\", { mode: 0o600 });"],
+      ["projection publish", "    writeFileSync(projectionTmp, JSON.stringify(serializeProjection(next), null, 2) + \"\\n\", { mode: 0o600 });", "    releaseWriterLock(stateRoot, lock.token);\n    writeFileSync(projectionTmp, JSON.stringify(serializeProjection(next), null, 2) + \"\\n\", { mode: 0o600 });"],
+      ["registry publish", "    registryTmp = publishRegistry(stateRoot, registry, identity, lock.token);", "    releaseWriterLock(stateRoot, lock.token);\n    registryTmp = publishRegistry(stateRoot, registry, identity, lock.token);"],
+    ];
+    for (const [name, needle, replacement] of mutations) {
+      assert.equal(source.split(needle).length - 1, 1, `${name} replacement must be exact once`);
+      const stateRoot = root(); createGoal(stateRoot);
+      const mutantPath = join(stateRoot, `store-${name.replaceAll(" ", "-")}.mjs`);
+      writeFileSync(mutantPath, source.replace('from "./events.mjs"', `from ${JSON.stringify(eventsUrl)}`).replace(needle, replacement));
+      const goalDir = join(stateRoot, "goals/concurrent-goal");
+      const before = [readFileSync(join(goalDir, "events.jsonl"), "utf8"), readFileSync(join(goalDir, "projection.json"), "utf8"), readFileSync(join(stateRoot, "registry.json"), "utf8")];
+      const program = `import { appendEvent } from ${JSON.stringify(new URL(`file://${mutantPath}`).href)}; const event = ${JSON.stringify(checkpoint(`mutant-${name}`))}; try { appendEvent(${JSON.stringify(stateRoot)}, event, 1); console.log('success'); } catch (error) { console.log(error.code); }`;
+      const output = execFileSync(process.execPath, ["--input-type=module", "--eval", program], { encoding: "utf8" }).trim();
+      assert.equal(output, "GOAL_ENGINE_STORE_LOCK_LOST", name);
+      const after = [readFileSync(join(goalDir, "events.jsonl"), "utf8"), readFileSync(join(goalDir, "projection.json"), "utf8"), readFileSync(join(stateRoot, "registry.json"), "utf8")];
+      // A mutant is killed when it cannot report a successful, consistent append:
+      // prepare is stopped before writes; later stages expose their partial write.
+      if (name === "registry prepare") assert.deepEqual(after, before, name);
+      else assert.notDeepEqual(after, before, name);
+      rmSync(mutantPath, { force: true });
+    }
   });
 
   test("stale writer receipt cannot release a replacement writer lock", () => {
