@@ -2,7 +2,7 @@
   "version": 1,
   "generatedFor": "using-goal-engine-review-lifecycle",
   "sessionPrefix": "/Users/mhbzhy/pi-config/var/sessions/2026-08-02T15-31-03-478Z_019fc319-9cb6-7cdd-942f-3e788c739192/",
-  "notes": "Session SHA-256 authenticates the full, exact source session at the declared immutable path. Output copies contain only the five approved read-only evaluation outputs. Missing sources are explicitly marked; no output was reconstructed.",
+  "notes": "Session SHA-256 authenticates the full source session at the declared historical path. Committed sanitized non-thinking excerpts retain source line and session IDs for the two runs that produced no final output; excerpts demonstrate observable behavior only and do not reconstruct a final output.",
   "pressureRuns": [
     {
       "id": "6aac98d8",
@@ -15,7 +15,12 @@
       "result": "failed: attempted to inspect the fictional workspace; no output source was produced",
       "completeUsableOutput": {
         "missing": true,
-        "reason": "No approved output source exists; verify the task/toolResult in the session named above."
+        "reason": "No final output source exists. The committed session excerpt independently preserves observable task/tool behavior before final output."
+      },
+      "committedSessionExcerpt": {
+        "artifact": "red-baseline-init-session-excerpt.jsonl",
+        "sha256": "f594377cb863310e4e7f8349cea969ebcd89fc525205f2c70d25205aa2ede744",
+        "scope": "user task, ls toolCall, and Path not found toolResult; observable behavior before any final output, not a reconstructed final output"
       }
     },
     {
@@ -85,7 +90,12 @@
       "result": "failed: loaded Skill but searched source and timed out; superseded by typed-only refinement retry",
       "completeUsableOutput": {
         "missing": true,
-        "reason": "No approved output source exists; verify the task/toolResult in the session named above."
+        "reason": "No final output source exists. The committed session excerpt independently preserves observable behavior before final output."
+      },
+      "committedSessionExcerpt": {
+        "artifact": "green-lifecycle-initial-session-excerpt.jsonl",
+        "sha256": "54232db462087646ee41cef18f7ac84cb804237dd2a7e843a86dc2943da92573",
+        "scope": "user task, Skill read, and all subsequent non-thinking toolCall/toolResult through timeout; observable behavior before any final output, not a reconstructed final output"
       }
     },
     {

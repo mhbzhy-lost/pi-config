@@ -89,7 +89,7 @@ Agent 保留 active Goal 和事件历史，拒绝删除状态后 re-init；先 `
 
 最小证据包位于 [`artifacts/using-goal-engine-skill/`](artifacts/using-goal-engine-skill/)：[`manifest.json`](artifacts/using-goal-engine-skill/manifest.json) 逐项记录七个 exact prompt、run/session ID、Skill 加载状态、结果、完整 session 的绝对可复核路径及 SHA-256。五份允许读取的完整输出副本和本次静态 RED/GREEN 输出也在该目录，各自 SHA-256 记入 manifest。
 
-`6aac98d8`（RED 初始化）和 `85a5f4d8`（初始 GREEN 生命周期）没有允许的输出源；manifest 明确标为 missing，并保留 session task/toolResult 的路径和 SHA-256，未重构或捏造输出。证据包只包含指定 session 和指定输出，不包含凭据或无关 transcript。
+`6aac98d8`（RED 初始化）和 `85a5f4d8`（初始 GREEN 生命周期）没有 final output。为使核心可观察主张可在 checkout 独立验证，证据包提交了脱敏的非 thinking JSONL 摘录：前者保留用户 task、`ls` toolCall 与 `Path not found` toolResult；后者保留用户 task、Skill read 及其后直到 timeout 的全部非 thinking toolCall/toolResult。每条均保留 source line/session ID，SHA-256 记录在 manifest。它们只证明无 final output 前的可观察行为，不重构或捏造 final output；完整原 session 的绝对路径仅作历史溯源，不再是验证核心主张的必要条件。
 
 ## 评估结论
 
