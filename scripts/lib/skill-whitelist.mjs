@@ -50,6 +50,9 @@ function validateSkillFrontmatter(name, content) {
   if (!description || description === '""' || description === "''") {
     throw frontmatterError(name, "empty description");
   }
+  if (description === "null" || description === "[]" || description === "{}") {
+    throw frontmatterError(name, "unsupported string scalar");
+  }
 }
 
 async function hasReadableSkill(directory) {
@@ -90,7 +93,9 @@ export async function loadDesiredSkills(repoRoot, listPath, localListPath) {
       for (const name of localNames) {
         if (!names.includes(name)) names.push(name);
       }
-    } catch {}
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
   }
   const desired = new Map();
   for (const name of names) {
