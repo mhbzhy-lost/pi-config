@@ -241,11 +241,35 @@ test("goal_settle classifies Git infrastructure workspace inspection without sid
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Break Git metadata", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
   const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
-  renameSync(join(workspace.path, ".git"), join(workspace.path, ".git-unreadable"));
+  const gitFile = join(workspace.path, ".git");
+  assert.match(readFileSync(gitFile, "utf8"), /^gitdir: /);
+  writeFileSync(gitFile, "gitdir: /nonexistent/goal-engine-broken-gitdir\n");
   const before = rejectionSnapshot(cwd, goalId);
   await assert.rejects(
     () => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Repair the executor Git metadata and recover through typed goal status before retrying." }),
-    (error) => error.code === "GIT_INFRASTRUCTURE_ERROR" && /observed=.*remediation=.*stateChanged=false.*requiredNextAction/.test(error.message),
+    (error) => error.code === "GIT_INFRASTRUCTURE_ERROR" && /observed=.*git rev-parse[\s\S]*not a git repository[\s\S]*remediation=.*stateChanged=false.*requiredNextAction/.test(error.message),
+  );
+  assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+});
+
+test("goal_settle classifies top-level identity mismatch without side effects", async () => {
+  const cwd = tmpCwd();
+  const objective = "Top-level identity mismatch settle fixture";
+  const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Fall back to parent repository", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+  renameSync(join(workspace.path, ".git"), join(workspace.path, ".git-moved"));
+  const before = rejectionSnapshot(cwd, goalId);
+  await assert.rejects(
+    () => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover the executor workspace through typed goal status before retrying." }),
+    (error) => {
+      assert.equal(error.code, "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH");
+      assert.match(error.message, /observed=.*Executor workspace identity top-level mismatch.*remediation=.*stateChanged=false.*requiredNextAction/);
+      assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
+      return true;
+    },
   );
   assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
 });
