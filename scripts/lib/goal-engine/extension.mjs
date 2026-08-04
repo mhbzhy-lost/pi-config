@@ -29,6 +29,17 @@ function initError(code, observed, remediation) {
   return Object.assign(new Error(`${code}: observed=${observed}; remediation=${remediation}; stateChanged=false`), { code });
 }
 
+function orphanRecoveryError(code, observed, remediation, requiredNextAction, blockingReason) {
+  const stateChanged = false;
+  const error = Object.assign(initError(code, observed, remediation), {
+    code, observed, remediation, stateChanged, requiredNextAction, blockingReason,
+  });
+  error.message = `${error.message}; recoveryContract=${JSON.stringify({
+    code, observed, remediation, stateChanged, requiredNextAction, blockingReason,
+  })}`;
+  return error;
+}
+
 function gitOutput(cwd, args, code, observed, remediation, allowedStatuses = [], requiredNextAction) {
   try { return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(); }
   catch (error) {
@@ -556,17 +567,18 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (orphanInventory.kind !== "none") {
         const actionState = orphanWorkspaceActionState(params.task_id, orphanInventory);
         const code = actionState.blockingReason.code;
-        const observed = `taskId=${params.task_id}; attempt=${attempt}; resources=${JSON.stringify(orphanInventory.resources)}${orphanInventory.observed !== undefined ? `; observed=${JSON.stringify(orphanInventory.observed)}` : ""}${orphanInventory.error !== undefined ? `; error=${JSON.stringify(orphanInventory.error)}` : ""}`;
+        const observed = {
+          taskId: params.task_id,
+          candidate: { attempt },
+          resources: orphanInventory.resources,
+        };
         const remediation = code === "ORPHANED_EXECUTOR_WORKSPACE"
           ? "review the orphaned executor workspace and explicitly choose discard or preserve via goal_integrate"
           : "inspect the authoritative recovery state with goal_status before any workspace action";
         const requiredNextAction = code === "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED"
           ? { tool: "goal_status", params: { goal_id: goalId } }
           : null;
-        const error = initError(code, observed, remediation);
-        error.requiredNextAction = requiredNextAction;
-        error.blockingReason = actionState.blockingReason;
-        throw error;
+        throw orphanRecoveryError(code, observed, remediation, requiredNextAction, actionState.blockingReason);
       }
       const baseCommit = gitHead(cwd);
       const lease = allocateExecutorWorkspace({
