@@ -2555,19 +2555,21 @@ test("status removes only an orphaned task from a multi-task runnable frontier",
 test("orphan recover discard records recovery before the three disposition phases", async () => {
   const fixture = await dispatchedRollbackFixture("recover discard");
   const originHeadBefore = git(fixture.cwd, "rev-parse", "HEAD");
+  const executorHeadBefore = git(fixture.workspace.path, "rev-parse", "HEAD");
   const result = JSON.parse(await invoke(fixture.pi, "goal_integrate", { task_id: "t1", action: "discard" }));
   assert.deepEqual(result, { action: "discarded", released: true });
   const events = readGoalEvents(fixture.cwd, fixture.goalId);
-  const [recoveryEvent, startedEvent] = events.slice(-4);
+  const [recoveryEvent, startedEvent, appliedEvent] = events.slice(-4);
   assert.deepEqual(events.slice(-4).map((event) => event.type), ["task.workspace_orphan_recovered", "task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"]);
   const recovery = recoveryEvent.data;
+  assert.deepEqual(appliedEvent.data, { taskId: "t1", attempt: 1, action: "discard", strategy: "cherry-pick", executorHead: recovery.executorHead, originHead: originHeadBefore });
   assert.deepEqual(startedEvent.data, { taskId: "t1", attempt: 1, requestedAction: "discard", strategy: "cherry-pick", executorHead: recovery.executorHead, originHeadBefore, originRef: recovery.workspace.originRef });
-  assert.deepEqual({ taskId: recovery.taskId, attempt: recovery.attempt, workspace: recovery.workspace, executorHead: recovery.executorHead }, { taskId: "t1", attempt: 1, workspace: fixture.workspace, executorHead: git(fixture.workspace.path, "rev-parse", "HEAD") });
+  assert.deepEqual({ taskId: recovery.taskId, attempt: recovery.attempt, workspace: recovery.workspace, executorHead: recovery.executorHead }, { taskId: "t1", attempt: 1, workspace: fixture.workspace, executorHead: executorHeadBefore });
   assert.equal(typeof recovery.reason, "string"); assert.ok(recovery.reason.length > 0);
   assert.deepEqual(workspaceState(fixture.cwd, fixture.goalId, "t1"), { workspacePath: workspaceState(fixture.cwd, fixture.goalId, "t1").workspacePath, leasePath: workspaceState(fixture.cwd, fixture.goalId, "t1").leasePath, branch: workspaceState(fixture.cwd, fixture.goalId, "t1").branch, workspaceExists: false, leaseExists: false, branchExists: false });
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
   assert.equal(projection.status, "pending"); assert.equal(projection.attempts, 1);
-  assert.deepEqual(projection.workspace, { ...recovery.workspace, executorHead: recovery.executorHead, phase: "disposed", recovery: "orphaned", requestedAction: startedEvent.data.requestedAction, strategy: startedEvent.data.strategy, originHeadBefore: startedEvent.data.originHeadBefore, originRef: startedEvent.data.originRef, disposition: "discarded", released: true });
+  assert.deepEqual(projection.workspace, { ...recovery.workspace, executorHead: recovery.executorHead, phase: "disposed", recovery: "orphaned", requestedAction: startedEvent.data.requestedAction, strategy: startedEvent.data.strategy, originHeadBefore: startedEvent.data.originHeadBefore, originRef: startedEvent.data.originRef, legacyOriginRef: false, originHead: appliedEvent.data.originHead, disposition: "discarded", released: true });
   const status = JSON.parse(await invoke(fixture.pi, "goal_status", {}));
   assert.deepEqual(status.runnable, ["t1"]);
   assert.equal(JSON.parse(await invoke(fixture.pi, "goal_dispatch", { task_id: "t1" })).workspace.attempt, 2);
@@ -2577,8 +2579,9 @@ test("orphan recover preserve blocks redispatch with an exact discard action", a
   const fixture = await dispatchedRollbackFixture("recover preserve");
   const originHeadBefore = git(fixture.cwd, "rev-parse", "HEAD");
   assert.deepEqual(JSON.parse(await invoke(fixture.pi, "goal_integrate", { task_id: "t1", action: "preserve" })), { action: "preserved", released: false, path: fixture.workspace.path, branch: fixture.workspace.branch });
-  const [recoveryEvent, startedEvent] = readGoalEvents(fixture.cwd, fixture.goalId).slice(-4);
+  const [recoveryEvent, startedEvent, appliedEvent] = readGoalEvents(fixture.cwd, fixture.goalId).slice(-4);
   assert.deepEqual(readGoalEvents(fixture.cwd, fixture.goalId).slice(-4).map((event) => event.type), ["task.workspace_orphan_recovered", "task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"]);
+  assert.deepEqual(appliedEvent.data, { taskId: "t1", attempt: 1, action: "preserve", strategy: "cherry-pick", executorHead: recoveryEvent.data.executorHead, originHead: originHeadBefore });
   assert.deepEqual(startedEvent.data, { taskId: "t1", attempt: 1, requestedAction: "preserve", strategy: "cherry-pick", executorHead: recoveryEvent.data.executorHead, originHeadBefore, originRef: recoveryEvent.data.workspace.originRef });
   const resources = workspaceState(fixture.cwd, fixture.goalId, "t1");
   assert.equal(resources.workspaceExists, true);
@@ -2586,7 +2589,7 @@ test("orphan recover preserve blocks redispatch with an exact discard action", a
   assert.equal(resources.branchExists, true);
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
   const recovery = recoveryEvent.data;
-  assert.deepEqual(projection.workspace, { ...recovery.workspace, executorHead: recovery.executorHead, phase: "disposed", recovery: "orphaned", requestedAction: startedEvent.data.requestedAction, strategy: startedEvent.data.strategy, originHeadBefore: startedEvent.data.originHeadBefore, originRef: startedEvent.data.originRef, disposition: "preserved", released: false });
+  assert.deepEqual(projection.workspace, { ...recovery.workspace, executorHead: recovery.executorHead, phase: "disposed", recovery: "orphaned", requestedAction: startedEvent.data.requestedAction, strategy: startedEvent.data.strategy, originHeadBefore: startedEvent.data.originHeadBefore, originRef: startedEvent.data.originRef, legacyOriginRef: false, originHead: appliedEvent.data.originHead, disposition: "preserved", released: false });
   const status = JSON.parse(await invoke(fixture.pi, "goal_status", {}));
   assert.deepEqual(status.runnable, []);
   assertTaskMachineAction(status.tasks.t1, { allowedActions: ["goal_integrate"], requiredTool: "goal_integrate", requiredParams: { task_id: "t1", action: "discard" }, blockingReason: status.tasks.t1.blockingReason });
