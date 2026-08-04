@@ -281,44 +281,47 @@ function goalAmended(p, data) {
     throw new Error("amendment reason must be at least 10 characters");
   }
 
-  if (removeTasks) {
-    for (const taskId of removeTasks) {
-      const task = requireTask(p, taskId);
-      if (task.status === "accepted") throw new Error(`cannot remove accepted task: ${taskId}`);
-      p.tasks.delete(taskId);
-    }
-  }
-  if (addTasks) {
-    for (const [taskId, def] of Object.entries(addTasks)) {
-      if (p.tasks.has(taskId)) throw new Error(`task already exists: ${taskId}`);
-      if (!def.writePaths || !def.acceptance) throw new Error(`added task ${taskId} must have writePaths and acceptance`);
-      p.tasks.set(taskId, {
-        description: def.description,
-        deps: def.deps || [],
-        writePaths: def.writePaths,
-        acceptance: def.acceptance,
-        workflow: def.workflow || "tdd",
-        status: "pending",
-        evidence: [],
-        attempts: 0,
-        lastSettledOutcome: null,
-        contractHash: null,
-        workspace: null,
-        acceptanceVerification: null,
-      });
-    }
-  }
-  if (updateTasks) {
-    for (const [taskId, updates] of Object.entries(updateTasks)) {
-      const task = requireTask(p, taskId);
-      if (updates.description) task.description = updates.description;
-      if (updates.deps) task.deps = updates.deps;
-      if (updates.writePaths) task.writePaths = updates.writePaths;
-      if (updates.acceptance) task.acceptance = updates.acceptance;
-    }
-  }
+  // Validate every existing target before constructing the candidate so a rejected
+  // amendment cannot partially alter the cloned projection.
+  for (const taskId of removeTasks || []) assertTaskAmendable(requireTask(p, taskId), taskId, "remove");
+  for (const taskId of Object.keys(updateTasks || {})) assertTaskAmendable(requireTask(p, taskId), taskId, "update");
 
-  validateDAG(p.tasks);
+  const candidate = new Map([...p.tasks].map(([taskId, task]) => [taskId, {
+    ...task,
+    deps: [...task.deps],
+    writePaths: [...task.writePaths],
+    acceptance: { ...task.acceptance, criteria: [...task.acceptance.criteria], commands: [...task.acceptance.commands] },
+  }]));
+  for (const taskId of removeTasks || []) candidate.delete(taskId);
+  for (const [taskId, def] of Object.entries(addTasks || {})) {
+    if (candidate.has(taskId)) throw new Error(`task already exists: ${taskId}`);
+    if (!def.writePaths || !def.acceptance) throw new Error(`added task ${taskId} must have writePaths and acceptance`);
+    candidate.set(taskId, {
+      description: def.description, deps: def.deps || [], writePaths: def.writePaths, acceptance: def.acceptance,
+      workflow: def.workflow || "tdd", status: "pending", evidence: [], attempts: 0,
+      lastSettledOutcome: null, contractHash: null, workspace: null, acceptanceVerification: null,
+    });
+  }
+  for (const [taskId, updates] of Object.entries(updateTasks || {})) {
+    const task = candidate.get(taskId);
+    if (!task) throw new Error(`cannot update task scheduled for removal: ${taskId}`);
+    if (updates.description) task.description = updates.description;
+    if (updates.deps) task.deps = updates.deps;
+    if (updates.writePaths) task.writePaths = updates.writePaths;
+    if (updates.acceptance) task.acceptance = updates.acceptance;
+  }
+  validateDAG(candidate);
+  p.tasks = candidate;
+}
+
+function workspaceReleasedForRetry(task) {
+  const workspace = task.workspace;
+  return !workspace || (workspace.phase === "disposed" && workspace.disposition === "discarded" && workspace.released === true);
+}
+
+function assertTaskAmendable(task, taskId, operation) {
+  if (task.status !== "pending") throw new Error(`cannot ${operation} non-pending task: ${taskId} (${task.status})`);
+  if (!workspaceReleasedForRetry(task)) throw new Error(`cannot ${operation} task with unreleased workspace: ${taskId}`);
 }
 
 function goalBlocked(p, data) {

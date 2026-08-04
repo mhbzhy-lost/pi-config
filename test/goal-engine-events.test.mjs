@@ -513,6 +513,73 @@ test("listGoals returns active goal ids", () => {
 });
 
 // v2 disposition invariant regressions (incremental to the restored v1 suite).
+test("amend rejects accepted and unreleased workspace tasks atomically", () => {
+  const base = applyEvent(createProjection(), v2Created("amend-gate-goal"));
+  const amend = (projection, data) => applyEvent(projection, v2Event("goal.amended", {
+    reason: "Prevent rewriting executed task proof and workspace identity",
+    ...data,
+  }, "amend-gate-goal"));
+  const snapshot = (projection) => structuredClone({
+    version: projection.version,
+    tasks: [...projection.tasks],
+  });
+
+  const accepted = structuredClone(base);
+  accepted.tasks.get("t1").status = "accepted";
+  for (const updates of [
+    { description: "changed" },
+    { deps: [] },
+    { writePaths: ["other.ts"] },
+    { acceptance: { criteria: ["changed"], commands: ["false"] } },
+  ]) {
+    const before = snapshot(accepted);
+    assert.throws(() => amend(accepted, { updateTasks: { t1: updates } }), /pending|accepted|amend/i);
+    assert.deepEqual(snapshot(accepted), before);
+  }
+  assert.throws(() => amend(accepted, { removeTasks: ["t1"] }), /pending|accepted|amend/i);
+
+  for (const status of ["dispatched", "succeeded", "blocked", "pending"]) {
+    const projection = structuredClone(base);
+    const task = projection.tasks.get("t1");
+    task.status = status;
+    if (status === "pending") task.lastSettledOutcome = "failed";
+    task.workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "active" };
+    for (const data of [{ removeTasks: ["t1"] }, { updateTasks: { t1: { description: "changed" } } }]) {
+      const before = snapshot(projection);
+      assert.throws(() => amend(projection, data), /pending|workspace|amend/i);
+      assert.deepEqual(snapshot(projection), before);
+    }
+  }
+
+  for (const disposition of ["preserved", "integrated"]) {
+    const projection = structuredClone(base);
+    const task = projection.tasks.get("t1");
+    task.workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "disposed", disposition, released: disposition === "integrated" };
+    assert.throws(() => amend(projection, { removeTasks: ["t1"] }), /workspace|pending|amend/i);
+    assert.throws(() => amend(projection, { updateTasks: { t1: { description: "changed" } } }), /workspace|pending|amend/i);
+  }
+});
+
+test("amend allows never-dispatched and discarded released pending tasks", () => {
+  const amend = (projection, data) => applyEvent(projection, v2Event("goal.amended", {
+    reason: "Allow pending tasks after workspace resources are fully released",
+    ...data,
+  }, "amend-allowed-goal"));
+  let neverDispatched = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  neverDispatched = amend(neverDispatched, { updateTasks: { t1: { description: "changed" } } });
+  assert.equal(neverDispatched.tasks.get("t1").description, "changed");
+  let neverDispatchedRemoval = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  neverDispatchedRemoval = amend(neverDispatchedRemoval, { removeTasks: ["t1"] });
+  assert.equal(neverDispatchedRemoval.tasks.has("t1"), false);
+
+  let released = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  released.tasks.get("t1").workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "disposed", disposition: "discarded", released: true };
+  released = amend(released, { updateTasks: { t1: { description: "changed again" } } });
+  assert.equal(released.tasks.get("t1").description, "changed again");
+  released = amend(released, { removeTasks: ["t1"] });
+  assert.equal(released.tasks.has("t1"), false);
+});
+
 function v2Event(type, data, goalId = "v2-goal", occurredAt = "2026-01-02T03:04:05.000Z") {
   return { schemaVersion: "goal-engine.event.v2", eventId: crypto.randomUUID(), goalId, type, occurredAt, data };
 }

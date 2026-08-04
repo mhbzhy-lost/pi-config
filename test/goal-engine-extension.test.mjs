@@ -1275,3 +1275,42 @@ test("tool_result hook appends reminder when checkpoint overdue", async () => {
   assert.match(text, /goal-engine/);
   assert.match(text, /未 settle/);
 });
+
+
+test("goal_amend rejects an active workspace remove without releasing resources", async () => {
+  const cwd = tmpCwd();
+  const objective = "Amend active workspace protection goal";
+  const goalId = objectiveToGoalId(objective);
+  initGitRepo(cwd);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Protected active task", deps: [], writePaths: ["src/protected.ts"], acceptance: { criteria: ["protected"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_dispatch", { task_id: "t1" });
+  const beforeEvents = readGoalEvents(cwd, goalId).length;
+  await assert.rejects(() => invoke(pi, "goal_amend", { reason: "Do not delete a task that still owns active workspace resources", remove_tasks: ["t1"] }), /pending|workspace|remove/i);
+  assert.equal(readGoalEvents(cwd, goalId).length, beforeEvents);
+  assert.deepEqual(workspaceState(cwd, goalId, "t1"), {
+    ...workspaceState(cwd, goalId, "t1"), workspaceExists: true, leaseExists: true, branchExists: true,
+  });
+});
+
+test("goal_amend rejects accepted acceptance rewrite without appending an event", async () => {
+  const cwd = tmpCwd();
+  const objective = "Amend accepted proof protection goal";
+  const goalId = objectiveToGoalId(objective);
+  initGitRepo(cwd);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [
+    { id: "t1", description: "Accepted protected task", deps: [], writePaths: ["src/accepted.ts"], acceptance: { criteria: ["accepted"], commands: ["true"] }, workflow: "tdd" },
+    { id: "t2", description: "Keep goal active after t1 acceptance", deps: ["t1"], writePaths: ["src/pending.ts"], acceptance: { criteria: ["pending"], commands: ["true"] }, workflow: "tdd" },
+  ] });
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  commitWorkspaceChange(dispatched.workspace, "src/accepted.ts", "export const accepted = true;\n", "feat: accepted proof");
+  await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/accepted.ts" }, evidence_source: "self_produced", next_action: "Integrate this accepted proof task before recording its final acceptance" });
+  await invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" });
+  await invoke(pi, "goal_accept", { task_id: "t1" });
+  const beforeEvents = readGoalEvents(cwd, goalId).length;
+  await assert.rejects(() => invoke(pi, "goal_amend", { reason: "Do not rewrite acceptance proof after the task has been accepted", update_tasks: { t1: { acceptance: { criteria: ["rewritten"], commands: ["false"] } } } }), /pending|accepted|update/i);
+  assert.equal(readGoalEvents(cwd, goalId).length, beforeEvents);
+});

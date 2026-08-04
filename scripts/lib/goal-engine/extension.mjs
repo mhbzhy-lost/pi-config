@@ -517,7 +517,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   registerGoalTool(pi, {
     name: "goal_amend",
-    description: "修改 goal 的 task DAG（增删改 task）。需要 reason（≥10字符）。不能删除已 accepted 的 task。用于人类介入调整方向。新增 task 必须含 writePaths 和 acceptance。",
+    description: "修改 goal 的 task DAG（增删改 task）。需要 reason（≥10字符）。仅可修改没有 workspace 或已 discarded 且 released 的 pending task。用于人类介入调整方向。新增 task 必须含 writePaths 和 acceptance。",
     parameters: {
       type: "object",
       properties: {
