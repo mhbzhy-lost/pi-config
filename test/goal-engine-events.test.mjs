@@ -633,6 +633,52 @@ test("v2 started persists a valid originRef", () => {
   assert.equal(p.tasks.get("t1").workspace.legacyOriginRef, false);
 });
 
+test("historical v1 accepted amendment JSONL replays while v2 accepted amendment is rejected", () => {
+  const goalId = "fixed-amendment-history";
+  const event = (schemaVersion, eventId, occurredAt, type, data) => ({ schemaVersion, eventId, goalId, occurredAt, type, data });
+  const created = (schemaVersion, eventId, occurredAt) => event(schemaVersion, eventId, occurredAt, "goal.created", {
+    objective: "Replay frozen historical amendment", scope: [], nonGoals: [], dod: [], tasks: ["t1", "t2"],
+    taskDefs: {
+      t1: { description: "historical accepted work", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["original proof"], commands: ["node --test test/t1.test.mjs"] }, workflow: "tdd" },
+      t2: { description: "remaining work", deps: [], writePaths: ["src/t2.ts"], acceptance: { criteria: ["t2 proof"], commands: ["node --test test/t2.test.mjs"] }, workflow: "tdd" },
+    },
+  });
+  const v1Events = [
+    created("goal-engine.event.v1", "v1-created", "2025-01-01T00:00:00.000Z"),
+    event("goal-engine.event.v1", "v1-dispatched", "2025-01-01T00:00:01.000Z", "task.dispatched", { taskId: "t1", contractHash: "v1-contract" }),
+    event("goal-engine.event.v1", "v1-settled", "2025-01-01T00:00:02.000Z", "task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/t1.ts" }, nextAction: "Review the fixed historical task evidence before accepting the replay result" }),
+    event("goal-engine.event.v1", "v1-accepted", "2025-01-01T00:00:03.000Z", "task.accepted", { taskId: "t1" }),
+    event("goal-engine.event.v1", "v1-amended", "2025-01-01T00:00:04.000Z", "goal.amended", { reason: "Preserve historical rewritten acceptance proof during v1 log replay", updateTasks: { t1: { acceptance: { criteria: ["historically rewritten proof"], commands: ["node --test test/historical.test.mjs"] } } } }),
+  ];
+  const root = tmpRoot();
+  v1Events.forEach((item, index) => appendEvent(root, item, index));
+  const replayed = loadProjection(root, goalId);
+  assert.equal(replayed.version, 5);
+  assert.equal(replayed.tasks.get("t1").status, "accepted");
+  assert.equal(replayed.tasks.get("t1").acceptanceVerification, "legacy_unverified");
+  assert.deepEqual(replayed.tasks.get("t1").acceptance, { criteria: ["historically rewritten proof"], commands: ["node --test test/historical.test.mjs"] });
+  assert.throws(() => applyEvent(replayed, event("goal-engine.event.v1", "v1-remove-accepted", "2025-01-01T00:00:05.000Z", "goal.amended", { reason: "Keep the legacy accepted remove rejection during historical replay", removeTasks: ["t1"] })), /accepted|remove/i);
+  const removedLegacyPending = applyEvent(replayed, event("goal-engine.event.v1", "v1-remove-pending", "2025-01-01T00:00:06.000Z", "goal.amended", { reason: "Replay the historical removal of a nonaccepted legacy task", removeTasks: ["t2"] }));
+  assert.equal(removedLegacyPending.tasks.has("t2"), false);
+
+  const v2GoalId = "fixed-v2-amendment-history";
+  const v2 = (eventId, occurredAt, type, data) => ({ schemaVersion: "goal-engine.event.v2", eventId, goalId: v2GoalId, occurredAt, type, data });
+  const v2Events = [
+    { ...created("goal-engine.event.v2", "v2-created", "2025-01-02T00:00:00.000Z"), goalId: v2GoalId },
+    v2("v2-dispatched", "2025-01-02T00:00:01.000Z", "task.dispatched", { taskId: "t1", contractHash: "v2-contract", workspace: { attempt: 1, path: "/tmp/fixed-v2", branch: "ge/fixed/t1/1", baseCommit: "base" } }),
+    v2("v2-settled", "2025-01-02T00:00:02.000Z", "task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/t1.ts" }, nextAction: "Review the fixed v2 task evidence before accepting the replay result" }),
+    v2("v2-disposition-started", "2025-01-02T00:00:03.000Z", "task.workspace_disposition_started", { taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "merge", executorHead: "executor", originHeadBefore: "origin" }),
+    v2("v2-disposition-applied", "2025-01-02T00:00:04.000Z", "task.workspace_disposition_applied", { taskId: "t1", attempt: 1, action: "integrate", strategy: "merge", executorHead: "executor", originHead: "origin-after" }),
+    v2("v2-disposed", "2025-01-02T00:00:05.000Z", "task.workspace_disposed", { taskId: "t1", attempt: 1, action: "integrate", released: true }),
+    v2("v2-accepted", "2025-01-02T00:00:06.000Z", "task.accepted", { taskId: "t1", workspaceAttempt: 1 }),
+  ];
+  let v2Projection = createProjection();
+  for (const item of v2Events) v2Projection = applyEvent(v2Projection, item);
+  const before = structuredClone({ version: v2Projection.version, tasks: [...v2Projection.tasks] });
+  assert.throws(() => applyEvent(v2Projection, v2("v2-amended", "2025-01-02T00:00:07.000Z", "goal.amended", { reason: "Reject rewriting accepted v2 task proof after the contract freeze", updateTasks: { t1: { acceptance: { criteria: ["rewritten"], commands: ["false"] } } } })), /pending|accepted|amend/i);
+  assert.deepEqual(structuredClone({ version: v2Projection.version, tasks: [...v2Projection.tasks] }), before);
+});
+
 test("disposition requires settled status and compatible outcome", () => {
   let p = v2Dispatched(applyEvent(createProjection(), v2Created()));
   for (const action of ["integrate", "discard", "preserve"]) assert.throws(() => applyEvent(p, started(action)), /settled|status|succeeded/);

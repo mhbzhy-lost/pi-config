@@ -54,7 +54,7 @@ export function applyEvent(projection, event) {
     case "task.workspace_disposition_started": workspaceDispositionStarted(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposition_applied": workspaceDispositionApplied(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposed": workspaceDisposed(next, event.data, event.schemaVersion); break;
-    case "goal.amended": goalAmended(next, event.data); break;
+    case "goal.amended": goalAmended(next, event.data, event.schemaVersion); break;
     case "goal.blocked": goalBlocked(next, event.data); break;
     case "goal.completed": goalCompleted(next, event.data); break;
     case "goal.checkpoint": goalCheckpoint(next, event.data); break;
@@ -274,17 +274,17 @@ function assertDepsAccepted(p, task) {
   }
 }
 
-function goalAmended(p, data) {
+function goalAmended(p, data, schemaVersion) {
   requireActive(p);
   const { addTasks, removeTasks, updateTasks, reason } = data;
   if (!reason || typeof reason !== "string" || reason.trim().length < 10) {
     throw new Error("amendment reason must be at least 10 characters");
   }
 
-  // Validate every existing target before constructing the candidate so a rejected
-  // amendment cannot partially alter the cloned projection.
-  for (const taskId of removeTasks || []) assertTaskAmendable(requireTask(p, taskId), taskId, "remove");
-  for (const taskId of Object.keys(updateTasks || {})) assertTaskAmendable(requireTask(p, taskId), taskId, "update");
+  // v1 only replays its historical amendment semantics. New v2 amendments retain
+  // the pending-and-released workspace gate established by the contract freeze.
+  for (const taskId of removeTasks || []) assertTaskRemovable(requireTask(p, taskId), taskId, schemaVersion);
+  for (const taskId of Object.keys(updateTasks || {})) assertTaskUpdatable(requireTask(p, taskId), taskId, schemaVersion);
 
   const candidate = new Map([...p.tasks].map(([taskId, task]) => [taskId, {
     ...task,
@@ -319,9 +319,19 @@ function workspaceReleasedForRetry(task) {
   return !workspace || (workspace.phase === "disposed" && workspace.disposition === "discarded" && workspace.released === true);
 }
 
-function assertTaskAmendable(task, taskId, operation) {
-  if (task.status !== "pending") throw new Error(`cannot ${operation} non-pending task: ${taskId} (${task.status})`);
-  if (!workspaceReleasedForRetry(task)) throw new Error(`cannot ${operation} task with unreleased workspace: ${taskId}`);
+function assertTaskUpdatable(task, taskId, schemaVersion) {
+  if (schemaVersion === "goal-engine.event.v1") return;
+  if (task.status !== "pending") throw new Error(`cannot update non-pending task: ${taskId} (${task.status})`);
+  if (!workspaceReleasedForRetry(task)) throw new Error(`cannot update task with unreleased workspace: ${taskId}`);
+}
+
+function assertTaskRemovable(task, taskId, schemaVersion) {
+  if (schemaVersion === "goal-engine.event.v1") {
+    if (task.status === "accepted") throw new Error(`cannot remove accepted task: ${taskId}`);
+    return;
+  }
+  if (task.status !== "pending") throw new Error(`cannot remove non-pending task: ${taskId} (${task.status})`);
+  if (!workspaceReleasedForRetry(task)) throw new Error(`cannot remove task with unreleased workspace: ${taskId}`);
 }
 
 function goalBlocked(p, data) {
