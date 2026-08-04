@@ -54,7 +54,7 @@ function workspaceMutationError(error, requiredNextAction) {
   const observed = String(error?.message || error);
   const code = /persisted lease not found/i.test(observed) ? "EXECUTOR_LEASE_NOT_FOUND"
     : /Executor workspace is missing|workspace is required/i.test(observed) ? "EXECUTOR_WORKSPACE_MISSING"
-      : /lease .*mismatch|live branch mismatch|branch HEAD mismatch/i.test(observed) ? "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH"
+      : /workspace identity|lease .*mismatch|live branch mismatch/i.test(observed) ? "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH"
         : "GIT_INFRASTRUCTURE_ERROR";
   return preflightError(code, observed, "stop modifying the workspace and use the typed goal_status recovery action", requiredNextAction);
 }
