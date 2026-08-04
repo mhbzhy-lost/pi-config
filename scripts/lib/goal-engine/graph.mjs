@@ -18,6 +18,7 @@ export function validateDAG(tasks) {
 }
 
 export function runnableFrontier(projection) {
+  if (projection.lifecycle !== "active") return [];
   const frontier = [];
   for (const [taskId, task] of projection.tasks) {
     if (task.status !== "pending") continue;
@@ -50,10 +51,10 @@ function noAction(blockingReason = null) {
   };
 }
 
-function actionState(tool, params, reason, blockingReason = null) {
+function actionState(tool, taskId, params, reason, blockingReason = null) {
   return {
     allowedActions: [...new Set([tool])],
-    requiredNextAction: { tool, params, reason },
+    requiredNextAction: { tool, params: { task_id: taskId, ...params }, reason },
     blockingReason,
   };
 }
@@ -69,42 +70,48 @@ export function taskActionState(projection, taskId) {
   if (!task) throw new Error(`unknown task: ${taskId}`);
 
   if (projection.lifecycle !== "active") return noAction();
-  if (task.status === "accepted") return noAction();
+  if (task.status === "accepted") {
+    const allAccepted = [...projection.tasks.values()].every((candidate) => candidate.status === "accepted");
+    const firstTaskId = projection.tasks.keys().next().value;
+    return allAccepted && taskId === firstTaskId
+      ? actionState("goal_accept", taskId, {}, "All tasks are accepted; finalize the goal")
+      : noAction();
+  }
 
   const workspace = task.workspace;
   if (workspace?.phase === "disposing" || workspace?.phase === "applied") {
     const requestedAction = workspace.requestedAction;
     const strategy = workspace.strategy;
     if (typeof requestedAction === "string" && requestedAction.length > 0 && typeof strategy === "string" && strategy.length > 0) {
-      return actionState("goal_integrate", { action: requestedAction, strategy }, "Workspace disposition is pending; continue integration step");
+      return actionState("goal_integrate", taskId, { action: requestedAction, strategy }, "Workspace disposition is pending; continue integration step");
     }
     return noAction("workspace disposition is missing required action or strategy");
   }
 
   if (workspace?.phase === "disposed" && workspace.disposition === "preserved") {
-    return actionState("goal_amend", {}, "Workspace was preserved and requires manual resolution");
+    return actionState("goal_amend", taskId, {}, "Workspace was preserved and requires manual resolution");
   }
 
   switch (task.status) {
     case "dispatched":
-      return actionState("goal_settle", {}, "Task has been dispatched and requires settlement");
+      return actionState("goal_settle", taskId, {}, "Task has been dispatched and requires settlement");
 
     case "succeeded":
       if (!workspace) {
-        return actionState("goal_amend", {}, "Legacy succeeded task has no trusted workspace information");
+        return actionState("goal_amend", taskId, {}, "Legacy succeeded task has no trusted workspace information");
       }
       if (workspace.phase === "active") {
-        return actionState("goal_integrate", { action: "integrate" }, "Succeeded task workspace is still active");
+        return actionState("goal_integrate", taskId, { action: "integrate" }, "Succeeded task workspace is still active");
       }
       if (workspace.phase === "disposed" && workspace.disposition === "integrated" && workspace.released === true) {
-        return actionState("goal_accept", {}, "Workspace integrated and released, task can be accepted");
+        return actionState("goal_accept", taskId, {}, "Workspace integrated and released, task can be accepted");
       }
       return noAction();
 
     case "pending": {
       if (workspace?.phase === "active") {
         if (task.lastSettledOutcome === "failed" || task.lastSettledOutcome === "blocked") {
-          return actionState("goal_integrate", { action: "discard" }, "Settlement failed/blocked; discard active workspace before retrying");
+          return actionState("goal_integrate", taskId, { action: "discard" }, "Settlement failed/blocked; discard active workspace before retrying");
         }
         return noAction();
       }
@@ -117,14 +124,14 @@ export function taskActionState(projection, taskId) {
 
       const blockingReason = dependencyBlockingReason(task, projection);
       if (blockingReason) return noAction(blockingReason);
-      return actionState("goal_dispatch", {}, "All dependencies are accepted and task is ready to dispatch");
+      return actionState("goal_dispatch", taskId, {}, "All dependencies are accepted and task is ready to dispatch");
     }
 
     case "blocked":
       if (workspace?.phase === "active") {
-        return actionState("goal_integrate", { action: "discard" }, "Blocked task has active workspace; discard to continue safely");
+        return actionState("goal_integrate", taskId, { action: "discard" }, "Blocked task has active workspace; discard to continue safely");
       }
-      return actionState("goal_amend", {}, "Blocked task requires an explicit goal amendment");
+      return actionState("goal_amend", taskId, {}, "Blocked task requires an explicit goal amendment");
 
     default:
       return noAction();

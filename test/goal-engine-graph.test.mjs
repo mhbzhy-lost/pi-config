@@ -147,7 +147,7 @@ test("taskActionState returns action matrix for matrix states", () => {
       }),
       expected: {
         allowedActions: ["goal_dispatch"],
-        requiredNextAction: { tool: "goal_dispatch", params: {} },
+        requiredNextAction: { tool: "goal_dispatch", params: { task_id: "task" } },
         blockingReason: null,
       },
     },
@@ -158,7 +158,7 @@ test("taskActionState returns action matrix for matrix states", () => {
       }),
       expected: {
         allowedActions: ["goal_settle"],
-        requiredNextAction: { tool: "goal_settle", params: {} },
+        requiredNextAction: { tool: "goal_settle", params: { task_id: "task" } },
         blockingReason: null,
       },
     },
@@ -169,7 +169,7 @@ test("taskActionState returns action matrix for matrix states", () => {
       }),
       expected: {
         allowedActions: ["goal_integrate"],
-        requiredNextAction: { tool: "goal_integrate", params: { action: "integrate" } },
+        requiredNextAction: { tool: "goal_integrate", params: { task_id: "task", action: "integrate" } },
         blockingReason: null,
       },
     },
@@ -180,7 +180,7 @@ test("taskActionState returns action matrix for matrix states", () => {
       }),
       expected: {
         allowedActions: ["goal_integrate"],
-        requiredNextAction: { tool: "goal_integrate", params: { action: "discard", strategy: "merge" } },
+        requiredNextAction: { tool: "goal_integrate", params: { task_id: "task", action: "discard", strategy: "merge" } },
         blockingReason: null,
       },
     },
@@ -191,7 +191,7 @@ test("taskActionState returns action matrix for matrix states", () => {
       }),
       expected: {
         allowedActions: ["goal_integrate"],
-        requiredNextAction: { tool: "goal_integrate", params: { action: "discard", strategy: "merge" } },
+        requiredNextAction: { tool: "goal_integrate", params: { task_id: "task", action: "discard", strategy: "merge" } },
         blockingReason: null,
       },
     },
@@ -202,7 +202,7 @@ test("taskActionState returns action matrix for matrix states", () => {
       }),
       expected: {
         allowedActions: ["goal_accept"],
-        requiredNextAction: { tool: "goal_accept", params: {} },
+        requiredNextAction: { tool: "goal_accept", params: { task_id: "task" } },
         blockingReason: null,
       },
     },
@@ -212,8 +212,8 @@ test("taskActionState returns action matrix for matrix states", () => {
         task: taskState({ status: "accepted", workspace: { phase: "disposed", disposition: "integrated", released: true, attempt: 1 } }),
       }),
       expected: {
-        allowedActions: [],
-        requiredNextAction: null,
+        allowedActions: ["goal_accept"],
+        requiredNextAction: { tool: "goal_accept", params: { task_id: "task" } },
         blockingReason: null,
       },
     },
@@ -224,7 +224,7 @@ test("taskActionState returns action matrix for matrix states", () => {
       }),
       expected: {
         allowedActions: ["goal_amend"],
-        requiredNextAction: { tool: "goal_amend", params: {} },
+        requiredNextAction: { tool: "goal_amend", params: { task_id: "task" } },
         blockingReason: null,
       },
     },
@@ -265,7 +265,7 @@ test("failed settle pending + active workspace only allows goal_integrate discar
   const action = graph.taskActionState(projection, "task");
   assertActionCase(action, {
     allowedActions: ["goal_integrate"],
-    requiredNextAction: { tool: "goal_integrate", params: { action: "discard" } },
+    requiredNextAction: { tool: "goal_integrate", params: { task_id: "task", action: "discard" } },
     blockingReason: null,
   });
   assert.deepEqual(graph.runnableFrontier(projection), []);
@@ -281,7 +281,7 @@ test("blocked task requires workspace cleanup before amendment", () => {
   });
   assertActionCase(graph.taskActionState(active, "task"), {
     allowedActions: ["goal_integrate"],
-    requiredNextAction: { tool: "goal_integrate", params: { action: "discard" } },
+    requiredNextAction: { tool: "goal_integrate", params: { task_id: "task", action: "discard" } },
     blockingReason: null,
   });
 
@@ -294,7 +294,7 @@ test("blocked task requires workspace cleanup before amendment", () => {
   });
   assertActionCase(graph.taskActionState(cleaned, "task"), {
     allowedActions: ["goal_amend"],
-    requiredNextAction: { tool: "goal_amend", params: {} },
+    requiredNextAction: { tool: "goal_amend", params: { task_id: "task" } },
     blockingReason: null,
   });
 });
@@ -323,7 +323,7 @@ test("pending task only advertises dispatch for a redispatchable workspace", () 
   });
   assertActionCase(graph.taskActionState(redispatchable, "task"), {
     allowedActions: ["goal_dispatch"],
-    requiredNextAction: { tool: "goal_dispatch", params: {} },
+    requiredNextAction: { tool: "goal_dispatch", params: { task_id: "task" } },
     blockingReason: null,
   });
   assert.deepEqual(graph.runnableFrontier(redispatchable), ["task"]);

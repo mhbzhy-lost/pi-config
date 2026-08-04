@@ -185,6 +185,20 @@ function makeEvent(type, data, goalId, schemaVersion = DEFAULT_EVENT_VERSION) {
 }
 
 
+function completionVerdictFor(projection) {
+  const allEvidence = [...projection.tasks.values()].flatMap((task) => task.evidence);
+  return allEvidence.some((evidence) => evidence.source !== "self_produced")
+    ? "COMPLETE"
+    : "DONE_WITHOUT_EXTERNAL_VERIFICATION";
+}
+
+function ambiguousAcceptCommitError(goalId, taskId, cause) {
+  return Object.assign(new Error(`ambiguous accept commit for goal ${goalId}, task ${taskId}`), {
+    code: "AMBIGUOUS_ACCEPT_COMMIT",
+    cause,
+  });
+}
+
 function statusResponse(projection) {
   const progress = goalProgress(projection);
   const runnable = runnableFrontier(projection);
@@ -534,38 +548,71 @@ export function createGoalEngineExtension(pi, options = {}) {
       required: ["task_id"],
     },
     async handler(params, ctx) {
-      const { cwd, root } = executionScope(ctx);
-      const goalId = resolveGoalId(params.goal_id, root);
-      if (!goalId) throw new Error("No active goal");
+      const { root } = executionScope(ctx);
+      // Terminal goals are deliberately addressable only by explicit identity.
+      if (!params.goal_id) {
+        const activeGoalId = resolveGoalId(null, root);
+        if (!activeGoalId) throw new Error("No active goal");
+        params = { ...params, goal_id: activeGoalId };
+      }
+      const goalId = params.goal_id;
       let projection = loadProjectionFn(root, goalId);
-
-      const task = projection.tasks.get(params.task_id);
+      if (projection?.goalId !== goalId) throw ambiguousAcceptCommitError(goalId, params.task_id);
+      let task = projection.tasks.get(params.task_id);
       if (!task) throw new Error(`unknown task: ${params.task_id}`);
-      const workspaceAttempt = task.workspace?.attempt;
 
-      const acceptEvent = makeEvent("task.accepted", { taskId: params.task_id, workspaceAttempt }, goalId);
-      projection = appendEventFn(root, acceptEvent, projection.version);
+      const respond = (current, verdict = null) => JSON.stringify({
+        status: "accepted", task_id: params.task_id,
+        goal_complete: current.lifecycle === "completed" || goalProgress(current).accepted === goalProgress(current).total,
+        ...(verdict ? { completion_verdict: verdict } : {}), progress: goalProgress(current),
+      });
+      const reloadAfterFailure = (cause, committed) => {
+        let recovered;
+        try { recovered = loadProjectionFn(root, goalId); }
+        catch { throw ambiguousAcceptCommitError(goalId, params.task_id, cause); }
+        if (recovered?.goalId !== goalId || !recovered.tasks?.has(params.task_id)) {
+          throw ambiguousAcceptCommitError(goalId, params.task_id, cause);
+        }
+        if (committed(recovered)) return recovered;
+        if (recovered.version === projection.version) throw cause;
+        throw ambiguousAcceptCommitError(goalId, params.task_id, cause);
+      };
 
-      const progress = goalProgress(projection);
-      const allAccepted = progress.accepted === progress.total;
+      const verdictFor = (current) => completionVerdictFor(current);
+      if (projection.lifecycle === "completed") {
+        const verdict = verdictFor(projection);
+        if (task.status !== "accepted" || projection.completionVerdict !== verdict) {
+          throw ambiguousAcceptCommitError(goalId, params.task_id);
+        }
+        return respond(projection, verdict);
+      }
+      if (projection.lifecycle !== "active") throw new Error(`goal is not active: ${projection.lifecycle}`);
 
-      let completionVerdict = null;
-      if (allAccepted) {
-        const allEvidence = [...projection.tasks.values()].flatMap((t) => t.evidence);
-        const hasExternal = allEvidence.some((e) => e.source !== "self_produced");
-        completionVerdict = hasExternal ? "COMPLETE" : "DONE_WITHOUT_EXTERNAL_VERIFICATION";
-
-        const completeEvent = makeEvent("goal.completed", { verdict: completionVerdict }, goalId);
-        projection = appendEventFn(root, completeEvent, projection.version);
+      if (task.status === "succeeded") {
+        const acceptEvent = makeEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId);
+        try { projection = appendEventFn(root, acceptEvent, projection.version); }
+        catch (cause) {
+          projection = reloadAfterFailure(cause, (recovered) => recovered.tasks.get(params.task_id)?.status === "accepted");
+        }
+        task = projection.tasks.get(params.task_id);
+      } else if (task.status !== "accepted") {
+        throw new Error(`task is not succeeded or accepted: ${params.task_id} (${task.status})`);
       }
 
-      return JSON.stringify({
-        status: "accepted",
-        task_id: params.task_id,
-        goal_complete: allAccepted,
-        ...(completionVerdict ? { completion_verdict: completionVerdict } : {}),
-        progress: goalProgress(projection),
-      });
+      const progress = goalProgress(projection);
+      if (progress.accepted !== progress.total) return respond(projection);
+      const verdict = verdictFor(projection);
+      try {
+        projection = appendEventFn(root, makeEvent("goal.completed", { verdict }, goalId), projection.version);
+      } catch (cause) {
+        projection = reloadAfterFailure(cause, (recovered) => recovered.lifecycle === "completed"
+          && recovered.tasks.get(params.task_id)?.status === "accepted"
+          && recovered.completionVerdict === verdict);
+      }
+      if (projection.lifecycle !== "completed" || projection.completionVerdict !== verdict) {
+        throw ambiguousAcceptCommitError(goalId, params.task_id);
+      }
+      return respond(projection, verdict);
     },
   });
 

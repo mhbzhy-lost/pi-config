@@ -228,7 +228,7 @@ test("goal_status exposes machine action state across lifecycle (machine action)
   assertTaskMachineAction(snapshot.tasks.t1, {
     allowedActions: ["goal_dispatch"],
     requiredTool: "goal_dispatch",
-    requiredParams: {},
+    requiredParams: { task_id: "t1" },
     blockingReason: null,
   });
 
@@ -242,7 +242,7 @@ test("goal_status exposes machine action state across lifecycle (machine action)
   assertTaskMachineAction(snapshot.tasks.t1, {
     allowedActions: ["goal_settle"],
     requiredTool: "goal_settle",
-    requiredParams: {},
+    requiredParams: { task_id: "t1" },
     blockingReason: null,
   });
 
@@ -262,7 +262,7 @@ test("goal_status exposes machine action state across lifecycle (machine action)
   assertTaskMachineAction(snapshot.tasks.t1, {
     allowedActions: ["goal_integrate"],
     requiredTool: "goal_integrate",
-    requiredParams: { action: "integrate" },
+    requiredParams: { task_id: "t1", action: "integrate" },
     blockingReason: null,
   });
 
@@ -276,7 +276,7 @@ test("goal_status exposes machine action state across lifecycle (machine action)
   assertTaskMachineAction(snapshot.tasks.t1, {
     allowedActions: ["goal_accept"],
     requiredTool: "goal_accept",
-    requiredParams: {},
+    requiredParams: { task_id: "t1" },
     blockingReason: null,
   });
 });
@@ -1138,7 +1138,7 @@ test("action recovery: applied append retry should skip duplicate Git integratio
   assertTaskMachineAction(statusFromFailureA.tasks.t1, {
     allowedActions: ["goal_integrate"],
     requiredTool: "goal_integrate",
-    requiredParams: { action: "integrate", strategy: "cherry-pick" },
+    requiredParams: { task_id: "t1", action: "integrate", strategy: "cherry-pick" },
     blockingReason: null,
   });
 
@@ -1234,7 +1234,7 @@ test("action recovery: disposed append can be repaired from projection snapshot 
   assertTaskMachineAction(statusFromFailureA.tasks.t1, {
     allowedActions: ["goal_integrate"],
     requiredTool: "goal_integrate",
-    requiredParams: { action: "integrate", strategy: "cherry-pick" },
+    requiredParams: { task_id: "t1", action: "integrate", strategy: "cherry-pick" },
     blockingReason: null,
   });
 
