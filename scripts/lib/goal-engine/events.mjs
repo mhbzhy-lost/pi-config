@@ -138,6 +138,7 @@ function goalCreated(p, event, replay) {
     });
   }
   if (event.schemaVersion === "goal-engine.event.v2" && !replay) assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
+  if (event.schemaVersion === "goal-engine.event.v2" && replay) validateDAG(p.tasks);
 }
 
 function taskDispatched(p, data, schemaVersion) {
