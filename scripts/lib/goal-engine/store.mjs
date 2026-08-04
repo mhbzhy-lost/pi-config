@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, existsSync, chmodSync, rmSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, linkSync, existsSync, chmodSync, rmSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { applyEvent, createProjection } from "./events.mjs";
@@ -25,7 +25,7 @@ export function appendEvent(stateRoot, event, expectedVersion) {
     appendFileSync(eventsPath, JSON.stringify(event) + "\n", { mode: 0o600 });
     writeFileSync(projectionTmp, JSON.stringify(serializeProjection(next), null, 2) + "\n", { mode: 0o600 });
     renameSync(projectionTmp, projectionPath);
-    registryTmp = updateRegistry(stateRoot, event, next, identity);
+    registryTmp = updateRegistry(stateRoot, event, next, identity, lock.token);
     return next;
   } finally {
     if (existsSync(projectionTmp)) rmSync(projectionTmp, { force: true });
@@ -99,25 +99,59 @@ function quarantineStaleLock(lockPath) {
   }
 }
 
-function acquireRecoveryGuard(stateRoot, deadline) {
+export function acquireRecoveryGuard(stateRoot, deadline) {
+  mkdirSync(stateRoot, { recursive: true });
   const guardPath = join(stateRoot, ".writer.recovery.guard");
   const token = randomUUID();
-  while (true) {
-    try {
-      writeFileSync(guardPath, JSON.stringify({ pid: process.pid, token }) + "\n", { flag: "wx", mode: 0o600 });
-      return { token };
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      if (Date.now() >= deadline) throw lockTimeout();
-      sleep(LOCK_WAIT_MS);
+  const candidate = `${guardPath}.candidate-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(candidate, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }) + "\n", { flag: "wx", mode: 0o600 });
+    while (true) {
+      try {
+        linkSync(candidate, guardPath);
+        return { token };
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        const owner = readRecoveryGuardOwner(guardPath);
+        if (!owner || recoveryGuardOwnerState(owner) === "dead") quarantineStaleGuard(guardPath);
+        if (Date.now() >= deadline) throw lockTimeout();
+        sleep(LOCK_WAIT_MS);
+      }
     }
+  } finally {
+    if (existsSync(candidate)) rmSync(candidate, { force: true });
   }
 }
 
-function releaseRecoveryGuard(stateRoot, token) {
-  const guardPath = join(stateRoot, ".writer.recovery.guard");
+function readRecoveryGuardOwner(guardPath) {
   try {
     const owner = JSON.parse(readFileSync(guardPath, "utf8"));
+    return Number.isInteger(owner.pid) && owner.pid > 0 && typeof owner.token === "string" && owner.token.length > 0 && typeof owner.createdAt === "string" && !Number.isNaN(Date.parse(owner.createdAt)) ? owner : null;
+  } catch { return null; }
+}
+
+function recoveryGuardOwnerState(owner) {
+  try { process.kill(owner.pid, 0); return "live"; }
+  catch (error) {
+    if (error.code === "ESRCH") return "dead";
+    return "unknown";
+  }
+}
+
+function quarantineStaleGuard(guardPath) {
+  const quarantine = `${guardPath}.quarantine-${process.pid}-${randomUUID()}`;
+  try {
+    renameSync(guardPath, quarantine);
+    rmSync(quarantine, { force: true });
+  } catch (error) {
+    if (error.code !== "ENOENT" && error.code !== "EEXIST") throw error;
+  }
+}
+
+export function releaseRecoveryGuard(stateRoot, token) {
+  const guardPath = join(stateRoot, ".writer.recovery.guard");
+  try {
+    const owner = readRecoveryGuardOwner(guardPath);
     if (owner?.token === token) unlinkSync(guardPath);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
@@ -137,6 +171,7 @@ export function releaseWriterLock(stateRoot, token) {
 
 function sleep(milliseconds) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds); }
 function lockTimeout() { return Object.assign(new Error("goal engine store writer lock timed out"), { code: "GOAL_ENGINE_STORE_LOCK_TIMEOUT" }); }
+function writerLockLost() { return Object.assign(new Error("goal engine store writer lock was lost"), { code: "GOAL_ENGINE_STORE_LOCK_LOST" }); }
 function projectionConflict(expected, current) { return Object.assign(new Error(`projection version conflict: expected ${expected}, current ${current}`), { code: "PROJECTION_CONFLICT" }); }
 
 function rebuildProjection(eventsPath) {
@@ -151,7 +186,9 @@ function serializeProjection(p) {
   return { goalId: p.goalId, version: p.version, lifecycle: p.lifecycle, objective: p.objective, scope: p.scope, nonGoals: p.nonGoals, dod: p.dod, tasks: Object.fromEntries(p.tasks), checkpointCount: p.checkpointCount, completionVerdict: p.completionVerdict, blockedReason: p.blockedReason, nextAction: p.nextAction, createdAt: p.createdAt, updatedAt: p.updatedAt, eventSchemaVersion: p.eventSchemaVersion };
 }
 
-function updateRegistry(stateRoot, event, projection, identity) {
+export function updateRegistry(stateRoot, event, projection, identity, writerToken) {
+  const owner = readLockOwner(join(stateRoot, ".writer.lock"));
+  if (!writerToken || owner?.token !== writerToken) throw writerLockLost();
   const registryPath = join(stateRoot, "registry.json");
   const registry = existsSync(registryPath) ? JSON.parse(readFileSync(registryPath, "utf8")) : { schema_version: REGISTRY_SCHEMA_VERSION, active_goal_ids: [], goals: {} };
   const goalId = event.goalId;

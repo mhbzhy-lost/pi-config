@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { appendEvent, loadProjection, listGoals, acquireWriterLock, releaseWriterLock } from "../scripts/lib/goal-engine/store.mjs";
+import { appendEvent, loadProjection, listGoals, acquireWriterLock, releaseWriterLock, acquireRecoveryGuard, releaseRecoveryGuard, updateRegistry } from "../scripts/lib/goal-engine/store.mjs";
 
 function event(type, data, goalId = "concurrent-goal") {
   return { schemaVersion: "goal-engine.event.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
@@ -34,7 +34,21 @@ async function worker(stateRoot, workerId, goalId = "concurrent-goal") {
   });
 }
 
-if (process.argv[2] === "worker") {
+async function crashAfterAcquiringRecoveryGuard(stateRoot) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [import.meta.filename, "guard-owner", stateRoot], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = ""; let error = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { error += chunk; });
+    child.on("error", reject);
+    child.on("exit", (code) => code === 0 && output === "acquired" ? resolve() : reject(new Error(error || output)));
+  });
+}
+
+if (process.argv[2] === "guard-owner") {
+  acquireRecoveryGuard(process.argv[3], Date.now() + 500);
+  process.stdout.write("acquired");
+} else if (process.argv[2] === "worker") {
   try {
     appendEvent(process.argv[3], checkpoint(process.argv[4], process.argv[5]), 1);
     process.stdout.write(JSON.stringify({ ok: true }));
@@ -138,15 +152,49 @@ if (process.argv[2] === "worker") {
     assert.deepEqual(readdirSync(stateRoot).filter((name) => name.includes("quarantine")), []);
   });
 
+  test("crashed recovery guard owner is recovered before append and leaves no guard artifacts", async () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    await crashAfterAcquiringRecoveryGuard(stateRoot);
+
+    assert.equal(appendEvent(stateRoot, checkpoint("recovered-guard"), 1).version, 2);
+    assert.equal(existsSync(join(stateRoot, ".writer.recovery.guard")), false);
+    assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:\.tmp|candidate|quarantine|recovery)/.test(name)), []);
+  });
+
+  test("stale recovery guard receipt cannot release a replacement guard", () => {
+    const stateRoot = root();
+    const staleReceipt = acquireRecoveryGuard(stateRoot, Date.now() + 500);
+    releaseRecoveryGuard(stateRoot, staleReceipt.token);
+    const replacementReceipt = acquireRecoveryGuard(stateRoot, Date.now() + 500);
+
+    releaseRecoveryGuard(stateRoot, staleReceipt.token);
+    assert.equal(JSON.parse(readFileSync(join(stateRoot, ".writer.recovery.guard"), "utf8")).token, replacementReceipt.token);
+    releaseRecoveryGuard(stateRoot, replacementReceipt.token);
+    assert.equal(existsSync(join(stateRoot, ".writer.recovery.guard")), false);
+  });
+
   test("recovery guard timeout fails closed without entering the writer action", () => {
     const stateRoot = root();
     createGoal(stateRoot);
-    writeFileSync(join(stateRoot, ".writer.recovery.guard"), JSON.stringify({ pid: process.pid, token: "unproven-guard-owner" }));
+    writeFileSync(join(stateRoot, ".writer.recovery.guard"), JSON.stringify({ pid: process.pid, token: "unproven-guard-owner", createdAt: new Date().toISOString() }));
 
     assert.throws(() => appendEvent(stateRoot, checkpoint("guard-timeout"), 1), (error) => error.code === "GOAL_ENGINE_STORE_LOCK_TIMEOUT");
     assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 1);
     assert.equal(existsSync(join(stateRoot, ".writer.lock")), false);
     assert.equal(JSON.parse(readFileSync(join(stateRoot, ".writer.recovery.guard"), "utf8")).token, "unproven-guard-owner");
+  });
+
+  test("registry write rejects a receipt after its writer lock has been released", () => {
+    const stateRoot = root();
+    const receipt = acquireWriterLock(stateRoot);
+    releaseWriterLock(stateRoot, receipt.token);
+
+    assert.throws(
+      () => updateRegistry(stateRoot, event("goal.created", { objective: "must remain locked" }, "boundary-goal"), { lifecycle: "active", objective: "must remain locked", updatedAt: new Date().toISOString() }, "boundary" , receipt.token),
+      (error) => error.code === "GOAL_ENGINE_STORE_LOCK_LOST",
+    );
+    assert.equal(existsSync(join(stateRoot, "registry.json")), false);
   });
 
   test("live writer lock times out without deleting another owner lock", () => {
