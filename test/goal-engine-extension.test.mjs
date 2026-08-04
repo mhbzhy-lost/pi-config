@@ -364,6 +364,102 @@ test("goal_dispatch cleans the workspace when contract compilation fails", async
   assert.equal(projection.tasks.t1.attempts, 0);
 });
 
+test("goal_dispatch durable-then-throw acknowledges committed dispatch and survives restart", async () => {
+  const cwd = tmpCwd();
+  const git = initGitRepo(cwd);
+  const objective = "Dispatch durable acknowledgement restart";
+  const goalId = objectiveToGoalId(objective);
+  const injected = createDurableThenThrowAppendEvent("task.dispatched");
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [{ id: "t1", description: "durable dispatch", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+  });
+
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  const task = projection.tasks.get("t1");
+  assert.equal(dispatched.status, "dispatched");
+  assert.equal(task.status, "dispatched");
+  assert.equal(task.attempts, 1);
+  assert.equal(task.contractHash, dispatched.contract.hash);
+  assert.deepEqual(task.workspace, { ...dispatched.workspace, phase: "active" });
+  assert.deepEqual(workspaceState(cwd, goalId, "t1"), {
+    workspacePath: dispatched.workspace.path, leasePath: join(cwd, ".state/goal-engine/worktrees", `.${goalId}-t1-1.lease.json`), branch: dispatched.workspace.branch,
+    workspaceExists: true, leaseExists: true, branchExists: true,
+  });
+  assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.dispatched").length, 1);
+
+  const dispatchedStatus = JSON.parse(await invoke(pi, "goal_status", {}));
+  assert.equal(dispatchedStatus.tasks.t1.status, "dispatched");
+  commitWorkspaceChange(dispatched.workspace, "src/x.ts", "export const x = true;\n", "feat: durable dispatch");
+  await invoke(pi, "goal_settle", {
+    task_id: "t1", outcome: "succeeded", evidence: { type: "diff", ref: "git diff HEAD~1 -- src/x.ts" },
+    evidence_source: "self_produced", next_action: "Recover the durable lease and integrate it",
+  });
+  const restartedPi = createMockPi(cwd);
+  createGoalEngineExtension(restartedPi);
+  const status = JSON.parse(await invoke(restartedPi, "goal_status", {}));
+  assert.equal(status.tasks.t1.status, "succeeded");
+  assert.equal(status.tasks.t1.contractHash, dispatched.contract.hash);
+  const integrated = JSON.parse(await invoke(restartedPi, "goal_integrate", { task_id: "t1", action: "integrate" }));
+  assert.equal(integrated.action, "integrated");
+  assert.ok(existsSync(join(cwd, "src/x.ts")));
+});
+
+test("goal_dispatch before-durable append failure cleans resources and rethrows", async () => {
+  const cwd = tmpCwd();
+  const git = initGitRepo(cwd);
+  const objective = "Dispatch before durable failure";
+  const goalId = objectiveToGoalId(objective);
+  const injected = createFailingAppendEvent("task.dispatched");
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [{ id: "t1", description: "before durable", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+  });
+  const before = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), /injected appendEvent failure/);
+  const after = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  assert.equal(after.version, before.version);
+  assert.equal(after.tasks.get("t1").status, "pending");
+  assert.equal(after.tasks.get("t1").attempts, 0);
+  assert.deepEqual(workspaceState(cwd, goalId, "t1"), {
+    workspacePath: join(cwd, ".state/goal-engine/worktrees", `${goalId}-t1-1`), leasePath: join(cwd, ".state/goal-engine/worktrees", `.${goalId}-t1-1.lease.json`), branch: `ge/${goalId}/t1/1`,
+    workspaceExists: false, leaseExists: false, branchExists: false,
+  });
+});
+
+test("ambiguous dispatch recovery failure preserves resources and reports stable code", async () => {
+  const cwd = tmpCwd();
+  const git = initGitRepo(cwd);
+  const objective = "Ambiguous dispatch recovery";
+  const goalId = objectiveToGoalId(objective);
+  const injected = createFailingAppendEvent("task.dispatched");
+  let failRecovery = false;
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi, {
+    appendEvent(root, event, version) {
+      try { return injected.appendEvent(root, event, version); } catch (error) { failRecovery = true; throw error; }
+    },
+    store: { loadProjection(root, id) { if (failRecovery) throw new Error("injected recovery failure"); return loadProjection(root, id); } },
+  });
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [{ id: "t1", description: "ambiguous", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+  });
+  await assert.rejects(
+    () => invoke(pi, "goal_dispatch", { task_id: "t1" }),
+    (error) => error.code === "AMBIGUOUS_DISPATCH_COMMIT" && /goal .*task t1.*attempt 1/i.test(error.message),
+  );
+  const state = workspaceState(cwd, goalId, "t1");
+  assert.equal(state.workspaceExists, true);
+  assert.equal(state.leaseExists, true);
+  assert.equal(state.branchExists, true);
+});
+
 test("goal_integrate recovers a persisted workspace lease after extension restart", async () => {
   const cwd = tmpCwd();
   const git = initGitRepo(cwd);

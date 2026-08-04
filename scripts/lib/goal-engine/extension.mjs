@@ -97,6 +97,41 @@ function assertLeaseIdentity(lease, expected, label) {
   }
 }
 
+function classifyDispatchAppendFailure(loadProjectionFn, root, goalId, taskId, projectionBefore, attempt, contract, lease) {
+  let recovered;
+  try {
+    recovered = loadProjectionFn(root, goalId);
+  } catch {
+    return "ambiguous";
+  }
+  const task = recovered?.tasks?.get(taskId);
+  const workspace = task?.workspace;
+  const committed = task?.status === "dispatched"
+    && task.attempts === attempt
+    && task.contractHash === contract.hash
+    && workspace?.phase === "active"
+    && workspace.attempt === attempt
+    && workspace.path === lease.path
+    && workspace.branch === lease.branch
+    && workspace.baseCommit === lease.baseCommit
+    && workspace.originRef === lease.originRef;
+  if (committed) return "committed";
+
+  const beforeTask = projectionBefore.tasks.get(taskId);
+  const notCommitted = recovered?.version === projectionBefore.version
+    && task?.status === "pending"
+    && task.attempts === beforeTask.attempts
+    && workspace?.attempt !== attempt;
+  return notCommitted ? "not_committed" : "ambiguous";
+}
+
+function ambiguousDispatchCommitError(goalId, taskId, attempt, cause) {
+  return Object.assign(
+    new Error(`ambiguous dispatch commit for goal ${goalId}, task ${taskId}, attempt ${attempt}`),
+    { code: "AMBIGUOUS_DISPATCH_COMMIT", cause },
+  );
+}
+
 function toolResult(value) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   return {
@@ -380,19 +415,6 @@ export function createGoalEngineExtension(pi, options = {}) {
         contract = compileTaskContract(projection, params.task_id, lease.path, {
           timeoutMs: params.timeout_ms || 30 * 60 * 1000,
         });
-
-        const event = makeEvent("task.dispatched", {
-          taskId: params.task_id,
-          contractHash: contract.hash,
-          workspace: {
-            attempt,
-            path: lease.path,
-            branch: lease.branch,
-            baseCommit,
-            originRef: lease.originRef,
-          },
-        }, goalId);
-        appendEventFn(root, event, projection.version);
       } catch (err) {
         try {
           releaseExecutorWorkspace(lease, { disposition: "failed-cleanup" });
@@ -400,6 +422,37 @@ export function createGoalEngineExtension(pi, options = {}) {
           throw new Error(`${err.message}; workspace cleanup also failed: ${cleanupErr.message}`, { cause: err });
         }
         throw err;
+      }
+
+      const event = makeEvent("task.dispatched", {
+        taskId: params.task_id,
+        contractHash: contract.hash,
+        workspace: {
+          attempt,
+          path: lease.path,
+          branch: lease.branch,
+          baseCommit,
+          originRef: lease.originRef,
+        },
+      }, goalId);
+      try {
+        appendEventFn(root, event, projection.version);
+      } catch (err) {
+        const outcome = classifyDispatchAppendFailure(
+          loadProjectionFn, root, goalId, params.task_id, projection, attempt, contract, lease,
+        );
+        if (outcome === "committed") {
+          activeLeases.set(leaseKey(cwd, goalId, params.task_id), lease);
+        } else if (outcome === "not_committed") {
+          try {
+            releaseExecutorWorkspace(lease, { disposition: "failed-cleanup" });
+          } catch (cleanupErr) {
+            throw new Error(`${err.message}; workspace cleanup also failed: ${cleanupErr.message}`, { cause: err });
+          }
+          throw err;
+        } else {
+          throw ambiguousDispatchCommitError(goalId, params.task_id, attempt, err);
+        }
       }
 
       activeLeases.set(leaseKey(cwd, goalId, params.task_id), lease);
