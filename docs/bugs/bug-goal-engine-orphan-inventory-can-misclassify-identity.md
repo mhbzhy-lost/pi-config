@@ -23,7 +23,7 @@
 
 ## 修复方案
 1. 资源探测将 `existsSync` 替换为显式 `lstatSync`/`statSync` 语义的分类探针：只对 `ENOENT` 视为缺失；对 `ELOOP`、`EACCES`、`ENOTDIR`、`EIO` 等返回 `unverified`（保留已知证据），禁止归并为 none。
-2. `lease` 入参必须为 plain object 且字段集合精确白名单（`goalId/taskId/attempt/originRoot/stateRoot/path/branch/baseCommit/originRef/ownerToken/createdAt/leasePath` 按约定字段集，不额外接受未知键）；未知键和类型异常直接 `unverified`。
+2. `lease` 入参必须为 plain object 且字段集合精确白名单（`goalId/taskId/attempt/originRoot/stateRoot/path/branch/baseCommit/originRef/ownerToken/createdAt`）；除该集合外任何字段（包括 `leasePath`）一律视为异常并直接 `unverified`。
 3. `path/originRoot/stateRoot` 以 absolute lexical 持久字段为前置条件；relative 值直接拒绝，避免依赖 `process.cwd` 的 ambient 解析；读取时仅用于显示，不作为身份真值。
 4. 引入 canonical pinned inspection：先将 persisted 字段规范化为 canonical absolute snapshot，再以该 snapshot 调用 inspection，并在返回前做二次复验（`path/originRoot` 与 `branch/HEAD` 复核），确保 canonical 检查与 Git inspection 使用同一 pinned identity。
 5. 只承诺 fail-closed 的双阶段校验与可重复验证，不宣称跨进程数学单事务。
