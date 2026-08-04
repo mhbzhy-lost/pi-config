@@ -139,7 +139,10 @@ function taskDispatched(p, data, schemaVersion) {
   const { taskId, contractHash, workspace } = data;
   const task = requireTask(p, taskId);
   if (task.status !== "pending") throw new Error(`task is not pending: ${taskId} (${task.status})`);
-  assertDepsAccepted(p, task);
+  // v1 is replay-only compatibility for historical logs that dispatched a
+  // downstream task before its dependency was accepted. All newer schemas
+  // retain the DAG acceptance gate.
+  if (schemaVersion !== "goal-engine.event.v1") assertDepsAccepted(p, task);
   if (!contractHash || typeof contractHash !== "string") throw new Error("contractHash is required for dispatch");
   if (schemaVersion === "goal-engine.event.v2") {
     assertWorkspaceRedispatchable(task);

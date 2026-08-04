@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
 import { appendEvent, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -592,6 +592,73 @@ test("loadProjection rebuilds from events.jsonl", () => {
   assert.equal(proj.version, 1);
   assert.equal(proj.lifecycle, "active");
   assert.equal(proj.tasks.get("t1").status, "pending");
+});
+
+test("historical v1 dispatch JSONL replays downstream before dependency acceptance", () => {
+  const root = tmpRoot();
+  const goalId = "historical-v1-dispatch";
+  const event = (eventId, occurredAt, type, data) => ({ schemaVersion: "goal-engine.event.v1", eventId, goalId, occurredAt, type, data });
+  const events = [
+    event("v1-created", "2025-03-01T00:00:00.000Z", "goal.created", {
+      objective: "Replay legacy downstream dispatch", scope: [], nonGoals: [], dod: [], tasks: ["t1", "t2"],
+      taskDefs: {
+        t1: { description: "upstream", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["t1 works"], commands: ["true"] }, workflow: "tdd" },
+        t2: { description: "downstream", deps: ["t1"], writePaths: ["src/t2.ts"], acceptance: { criteria: ["t2 works"], commands: ["true"] }, workflow: "tdd" },
+      },
+    }),
+    event("v1-t2-dispatched", "2025-03-01T00:00:01.000Z", "task.dispatched", { taskId: "t2", contractHash: "legacy-t2" }),
+    event("v1-t2-failed", "2025-03-01T00:00:02.000Z", "task.settled", { taskId: "t2", outcome: "failed", nextAction: "Retry downstream work after reviewing the historical failure details" }),
+    event("v1-t1-dispatched", "2025-03-01T00:00:03.000Z", "task.dispatched", { taskId: "t1", contractHash: "legacy-t1" }),
+  ];
+  const goalDir = join(root, "goals", goalId);
+  mkdirSync(goalDir, { recursive: true });
+  writeFileSync(join(goalDir, "events.jsonl"), `${events.map(JSON.stringify).join("\n")}\n`);
+
+  const replayed = loadProjection(root, goalId);
+  assert.equal(replayed.version, 4);
+  assert.equal(replayed.eventSchemaVersion, "goal-engine.event.v1");
+  assert.equal(replayed.tasks.get("t2").attempts, 1);
+  assert.equal(replayed.tasks.get("t2").status, "pending");
+  assert.equal(replayed.tasks.get("t1").attempts, 1);
+  assert.equal(replayed.tasks.get("t1").status, "dispatched");
+});
+
+test("v2 dispatch dependency gate rejects downstream before acceptance atomically", () => {
+  const goalId = "v2-dispatch-dependency";
+  const created = fixedV2Event("goal.created", {
+    objective: "Reject premature downstream dispatch", scope: [], nonGoals: [], dod: [], tasks: ["t1", "t2"],
+    taskDefs: {
+      t1: { description: "upstream", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["t1 works"], commands: ["true"] }, workflow: "tdd" },
+      t2: { description: "downstream", deps: ["t1"], writePaths: ["src/t2.ts"], acceptance: { criteria: ["t2 works"], commands: ["true"] }, workflow: "tdd" },
+    },
+  }, goalId, "2025-03-02T00:00:00.000Z", "v2-created");
+  const projection = applyEvent(createProjection(), created);
+  const before = structuredClone({ version: projection.version, eventSchemaVersion: projection.eventSchemaVersion, tasks: [...projection.tasks] });
+  assert.throws(() => applyEvent(projection, fixedV2Event("task.dispatched", {
+    taskId: "t2", contractHash: "v2-t2", workspace: { attempt: 1, path: "/tmp/t2", branch: "ge/t2/1", baseCommit: "base" },
+  }, goalId, "2025-03-02T00:00:01.000Z", "v2-t2-dispatched")), /dependencies are not accepted: t1/);
+  assert.deepEqual(structuredClone({ version: projection.version, eventSchemaVersion: projection.eventSchemaVersion, tasks: [...projection.tasks] }), before);
+});
+
+test("dispatch downgrade rejects v1 after v2 history and v2 retains dependency gate after v1 history", () => {
+  const goalId = "mixed-dispatch-history";
+  const created = {
+    schemaVersion: "goal-engine.event.v1", eventId: "mixed-v1-created", goalId, occurredAt: "2025-03-03T00:00:00.000Z", type: "goal.created",
+    data: { objective: "Keep upgraded dependency gate", scope: [], nonGoals: [], dod: [], tasks: ["t1", "t2"], taskDefs: {
+      t1: { description: "upstream", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["t1 works"], commands: ["true"] }, workflow: "tdd" },
+      t2: { description: "downstream", deps: ["t1"], writePaths: ["src/t2.ts"], acceptance: { criteria: ["t2 works"], commands: ["true"] }, workflow: "tdd" },
+    } },
+  };
+  let projection = applyEvent(createProjection(), created);
+  assert.throws(() => applyEvent(projection, fixedV2Event("task.dispatched", {
+    taskId: "t2", contractHash: "upgraded-t2", workspace: { attempt: 1, path: "/tmp/t2", branch: "ge/t2/1", baseCommit: "base" },
+  }, goalId, "2025-03-03T00:00:01.000Z", "mixed-v2-t2")), /dependencies are not accepted: t1/);
+  projection = applyEvent(projection, fixedV2Event("goal.checkpoint", {
+    nextAction: "Keep the v2 upgrade marker while preserving all dependency protections",
+  }, goalId, "2025-03-03T00:00:02.000Z", "mixed-v2-checkpoint"));
+  assert.throws(() => applyEvent(projection, {
+    schemaVersion: "goal-engine.event.v1", eventId: "mixed-v1-dispatch", goalId, occurredAt: "2025-03-03T00:00:03.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "downgrade" },
+  }), /schema downgrade/);
 });
 
 test("loadProjection returns null for nonexistent goal", () => {
