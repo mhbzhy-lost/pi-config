@@ -1,6 +1,6 @@
 import { validateDAG } from "./graph.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
-import { assertPendingTaskContractsCompile } from "./dispatch.mjs";
+import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.mjs";
 
 const SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2"]);
 const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
@@ -136,7 +136,7 @@ function goalCreated(p, event) {
       acceptanceVerification: null,
     });
   }
-  if (event.schemaVersion === "goal-engine.event.v2") assertPendingTaskContractsCompile(p, process.cwd());
+  if (event.schemaVersion === "goal-engine.event.v2") assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
 }
 
 function taskDispatched(p, data, schemaVersion) {
@@ -345,7 +345,7 @@ function goalAmended(p, data, schemaVersion) {
   }
   if (schemaVersion === "goal-engine.event.v2") {
     const candidateProjection = { ...p, tasks: candidate };
-    assertPendingTaskContractsCompile(candidateProjection, process.cwd());
+    assertPendingTaskContractsCompile(candidateProjection, DISPATCH_VALIDATION_SENTINEL);
   }
   p.tasks = candidate;
 }

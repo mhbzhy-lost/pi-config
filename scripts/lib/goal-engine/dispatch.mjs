@@ -1,6 +1,10 @@
 import { compileCodingDispatchIR } from "./dispatch-ir.mjs";
+import { MAX_CONTRACT_ARRAY_ITEMS, MAX_CONTRACT_STRING_BYTES } from "./contract-limits.mjs";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+// Reducers need a stable absolute value only to validate derived IR; command origin
+// policy belongs to the ExtensionContext boundary, not event replay.
+export const DISPATCH_VALIDATION_SENTINEL = "/goal-engine-dispatch-validation";
 
 export function assertPendingTaskContractsCompile(projection, cwd) {
   for (const [taskId, task] of projection.tasks) {
@@ -13,17 +17,20 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
   if (!task) throw new Error(`unknown task: ${taskId}`);
   if (task.status !== "pending") throw new Error(`task is not pending: ${taskId} (${task.status})`);
 
+  const completed = buildCompletedContext(projection, taskId);
+  const relevant = buildRelevantFiles(projection, taskId);
   const knownFacts = [
     `Goal: ${projection.objective}`,
     `Scope: ${projection.scope.join(", ") || "unrestricted"}`,
-    ...buildCompletedContext(projection, taskId),
+    ...completed.items,
+    ...(completed.omitted || relevant.omitted ? [`Context omitted: facts=${completed.omitted}; files=${relevant.omitted}`] : []),
   ];
 
   const decisions = [
     ...projection.nonGoals.map((ng) => `Non-goal: ${ng}`),
   ];
 
-  const relevantFiles = buildRelevantFiles(projection, taskId);
+  const relevantFiles = relevant.items;
 
   const workflowMode = task.workflow || "tdd";
   const workflow = workflowMode === "docs-only"
@@ -61,16 +68,19 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
   return compileCodingDispatchIR(input, { cwd });
 }
 
-function boundedOptional(items, limit = 32) {
+function boundedOptional(items, limit = MAX_CONTRACT_ARRAY_ITEMS) {
   const result = [];
   const seen = new Set();
+  let omitted = 0;
   for (const item of items) {
-    if (result.length === limit) break;
-    if (typeof item !== "string" || Buffer.byteLength(item, "utf8") > 4096 || seen.has(item)) continue;
+    if (typeof item !== "string" || Buffer.byteLength(item, "utf8") > MAX_CONTRACT_STRING_BYTES || seen.has(item) || result.length >= limit) {
+      omitted++;
+      continue;
+    }
     seen.add(item);
     result.push(item);
   }
-  return result;
+  return { items: result, omitted };
 }
 
 function buildCompletedContext(projection, currentTaskId) {
@@ -83,8 +93,8 @@ function buildCompletedContext(projection, currentTaskId) {
       if (ev.path) facts.push(`Evidence for ${taskId}: ${ev.type} @ ${ev.path}`);
     }
   }
-  // Goal and Scope occupy two required knownFacts slots; optional history may not crowd them out.
-  return boundedOptional(facts, 30);
+  // Goal and Scope are mandatory; reserve one slot for an omission summary.
+  return boundedOptional(facts, MAX_CONTRACT_ARRAY_ITEMS - 3);
 }
 
 function buildRelevantFiles(projection, currentTaskId) {

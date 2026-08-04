@@ -36,10 +36,15 @@ function gitOutput(cwd, args, code, observed, remediation, allowedStatuses = [])
   }
 }
 
+function realpathForPreflight(path, observed) {
+  try { return realpathSync(path); }
+  catch { throw initError("GIT_INFRASTRUCTURE_ERROR", observed, "repair filesystem access and retry goal_init"); }
+}
+
 function assertInitPreflight(cwd, root) {
-  const physicalCwd = realpathSync(cwd);
+  const physicalCwd = realpathForPreflight(cwd, `cwd realpath could not be read: ${cwd}`);
   const topLevel = gitOutput(cwd, ["rev-parse", "--show-toplevel"], "GIT_INFRASTRUCTURE_ERROR", "Git worktree top-level could not be read", "repair Git and retry goal_init");
-  if (realpathSync(topLevel) !== physicalCwd) throw initError("UNSAFE_GIT_CWD", `cwd=${physicalCwd}, topLevel=${topLevel}`, "run goal_init from the repository top-level");
+  if (realpathForPreflight(topLevel, `Git top-level realpath could not be read: ${topLevel}`) !== physicalCwd) throw initError("UNSAFE_GIT_CWD", `cwd=${physicalCwd}, topLevel=${topLevel}`, "run goal_init from the repository top-level");
   gitOutput(cwd, ["rev-parse", "--verify", "HEAD"], "INVALID_GIT_HEAD", "HEAD is unborn or invalid", "create a commit on an attached branch before goal_init");
   const ref = gitOutput(cwd, ["symbolic-ref", "--quiet", "HEAD"], "DETACHED_GIT_HEAD", "HEAD is detached", "checkout an attached branch before goal_init", [1]);
   if (!ref) throw initError("DETACHED_GIT_HEAD", "HEAD is detached", "checkout an attached branch before goal_init");
@@ -183,6 +188,16 @@ function registerGoalTool(pi, definition) {
 
 function stateRoot(cwd) {
   return join(cwd, STATE_ROOT_REL);
+}
+
+function taskDefsFromProjection(projection) {
+  return Object.fromEntries([...projection.tasks].map(([taskId, task]) => [taskId, {
+    description: task.description,
+    deps: task.deps,
+    writePaths: task.writePaths,
+    acceptance: task.acceptance,
+    workflow: task.workflow,
+  }]));
 }
 
 export function executionScope(ctx) {
@@ -719,6 +734,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       }, goalId);
       try {
         const candidate = applyEvent(projection, event);
+        validateTaskDefinitions([...candidate.tasks.keys()], taskDefsFromProjection(candidate), { cwd, realpathCwd: realpathSync(cwd) });
         assertPendingTaskContractsCompile(candidate, cwd);
       } catch (error) {
         throw initError("INVALID_GOAL_CONTRACT", error.message, "correct derived task, goal metadata, or requirements limits, then retry goal_amend");
