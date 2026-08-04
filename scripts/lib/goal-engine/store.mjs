@@ -250,7 +250,7 @@ function rebuildProjection(eventsPath) {
   let projection = createProjection();
   if (!existsSync(eventsPath)) return projection;
   const lines = readFileSync(eventsPath, "utf8").trim().split("\n").filter(Boolean);
-  for (const line of lines) projection = applyEvent(projection, JSON.parse(line));
+  for (const line of lines) projection = applyEvent(projection, JSON.parse(line), { replay: true });
   return projection;
 }
 

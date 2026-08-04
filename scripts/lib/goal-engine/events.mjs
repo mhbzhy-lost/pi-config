@@ -31,7 +31,8 @@ export function createProjection() {
   };
 }
 
-export function applyEvent(projection, event) {
+// replay is only for already-persisted JSONL; new mutation candidates use strict defaults.
+export function applyEvent(projection, event, { replay = false } = {}) {
   validateEnvelope(event);
 
   if (projection.eventIds.has(event.eventId)) {
@@ -50,14 +51,14 @@ export function applyEvent(projection, event) {
   const next = copyProjection(projection);
   if (event.schemaVersion === "goal-engine.event.v2") next.eventSchemaVersion = event.schemaVersion;
   switch (event.type) {
-    case "goal.created": goalCreated(next, event); break;
+    case "goal.created": goalCreated(next, event, replay); break;
     case "task.dispatched": taskDispatched(next, event.data, event.schemaVersion); break;
     case "task.settled": taskSettled(next, event.data, event.occurredAt); break;
     case "task.accepted": taskAccepted(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposition_started": workspaceDispositionStarted(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposition_applied": workspaceDispositionApplied(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposed": workspaceDisposed(next, event.data, event.schemaVersion); break;
-    case "goal.amended": goalAmended(next, event.data, event.schemaVersion); break;
+    case "goal.amended": goalAmended(next, event.data, event.schemaVersion, replay); break;
     case "goal.blocked": goalBlocked(next, event.data); break;
     case "goal.completed": goalCompleted(next, event.data); break;
     case "goal.checkpoint": goalCheckpoint(next, event.data); break;
@@ -97,9 +98,9 @@ function copyProjection(p) {
   };
 }
 
-function goalCreated(p, event) {
+function goalCreated(p, event, replay) {
   const { objective, scope, nonGoals, dod, tasks, taskDefs } = event.data;
-  if (event.schemaVersion === "goal-engine.event.v2") validateTaskDefinitions(tasks, taskDefs);
+  if (event.schemaVersion === "goal-engine.event.v2" && !replay) validateTaskDefinitions(tasks, taskDefs);
   if (!objective || typeof objective !== "string") throw new Error("objective is required");
   if (!Array.isArray(tasks) || tasks.length === 0) throw new Error("tasks must be non-empty");
   if (!taskDefs || typeof taskDefs !== "object") throw new Error("taskDefs is required");
@@ -136,7 +137,7 @@ function goalCreated(p, event) {
       acceptanceVerification: null,
     });
   }
-  if (event.schemaVersion === "goal-engine.event.v2") assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
+  if (event.schemaVersion === "goal-engine.event.v2" && !replay) assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
 }
 
 function taskDispatched(p, data, schemaVersion) {
@@ -283,7 +284,7 @@ function assertDepsAccepted(p, task) {
   }
 }
 
-function goalAmended(p, data, schemaVersion) {
+function goalAmended(p, data, schemaVersion, replay) {
   requireActive(p);
   const { addTasks, removeTasks, updateTasks, reason } = data;
   if (!reason || typeof reason !== "string" || reason.trim().length < 10) {
@@ -338,12 +339,12 @@ function goalAmended(p, data, schemaVersion) {
     if (updates.writePaths) task.writePaths = updates.writePaths;
     if (updates.acceptance) task.acceptance = updates.acceptance;
   }
-  if (schemaVersion === "goal-engine.event.v2") {
+  if (schemaVersion === "goal-engine.event.v2" && !replay) {
     validateTaskDefinitions([...candidate.keys()], Object.fromEntries(candidate));
   } else {
     validateDAG(candidate);
   }
-  if (schemaVersion === "goal-engine.event.v2") {
+  if (schemaVersion === "goal-engine.event.v2" && !replay) {
     const candidateProjection = { ...p, tasks: candidate };
     assertPendingTaskContractsCompile(candidateProjection, DISPATCH_VALIDATION_SENTINEL);
   }
