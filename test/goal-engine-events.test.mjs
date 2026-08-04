@@ -203,6 +203,34 @@ test("goal.amended adds and removes tasks", () => {
   assert.deepEqual(p.tasks.get("t3").deps, ["t1"]);
 });
 
+test("historical v1 and v2 amendments update a task added by the same event", () => {
+  const goalId = "fixed-add-update-replay";
+  const created = {
+    schemaVersion: "goal-engine.event.v1", eventId: "fixed-created", goalId,
+    occurredAt: "2025-02-03T04:05:06.000Z", type: "goal.created",
+    data: {
+      objective: "Replay a same-event task amendment", scope: [], nonGoals: [], dod: [], tasks: ["t1"],
+      taskDefs: { t1: { description: "existing work", deps: [], writePaths: ["t1.ts"], acceptance: { criteria: ["t1"], commands: ["true"] }, workflow: "tdd" } },
+    },
+  };
+  const amendmentData = {
+    reason: "Replay historical add and update within one amendment event",
+    addTasks: { t2: { description: "initial new work", deps: ["t1"], writePaths: ["t2.ts"], acceptance: { criteria: ["initial"], commands: ["true"] }, workflow: "tdd" } },
+    updateTasks: { t2: { description: "updated new work", writePaths: ["updated-t2.ts"], acceptance: { criteria: ["updated"], commands: ["node --test test/t2.test.mjs"] } } },
+  };
+  const root = tmpRoot();
+  appendEvent(root, created, 0);
+  appendEvent(root, { schemaVersion: "goal-engine.event.v1", eventId: "fixed-amended", goalId, occurredAt: "2025-02-03T04:05:07.000Z", type: "goal.amended", data: amendmentData }, 1);
+  const replayed = loadProjection(root, goalId);
+  assert.equal(replayed.version, 2);
+  assert.equal(replayed.tasks.get("t2").description, "updated new work");
+  assert.deepEqual(replayed.tasks.get("t2").writePaths, ["updated-t2.ts"]);
+
+  let v2 = applyEvent(createProjection(), { ...created, schemaVersion: "goal-engine.event.v2", eventId: "fixed-v2-created", goalId: "fixed-v2-add-update" });
+  v2 = applyEvent(v2, { schemaVersion: "goal-engine.event.v2", eventId: "fixed-v2-amended", goalId: "fixed-v2-add-update", occurredAt: "2025-02-03T04:05:07.000Z", type: "goal.amended", data: amendmentData });
+  assert.equal(v2.tasks.get("t2").description, "updated new work");
+});
+
 test("v2 dispatch requires downstream dependencies accepted", () => {
   const goalId = "dispatch-runnable-goal";
   let p = applyEvent(

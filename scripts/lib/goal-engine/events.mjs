@@ -283,8 +283,20 @@ function goalAmended(p, data, schemaVersion) {
 
   // v1 only replays its historical amendment semantics. New v2 amendments retain
   // the pending-and-released workspace gate established by the contract freeze.
-  for (const taskId of removeTasks || []) assertTaskRemovable(requireTask(p, taskId), taskId, schemaVersion);
-  for (const taskId of Object.keys(updateTasks || {})) assertTaskUpdatable(requireTask(p, taskId), taskId, schemaVersion);
+  const removedTaskIds = new Set(removeTasks || []);
+  for (const taskId of removedTaskIds) assertTaskRemovable(requireTask(p, taskId), taskId, schemaVersion);
+  for (const taskId of Object.keys(addTasks || {})) {
+    if (p.tasks.has(taskId)) throw new Error(`task already exists: ${taskId}`);
+  }
+  for (const taskId of Object.keys(updateTasks || {})) {
+    if (removedTaskIds.has(taskId)) throw new Error(`cannot update task scheduled for removal: ${taskId}`);
+    const existingTask = p.tasks.get(taskId);
+    if (existingTask) {
+      assertTaskUpdatable(existingTask, taskId, schemaVersion);
+    } else if (!Object.hasOwn(addTasks || {}, taskId)) {
+      requireTask(p, taskId);
+    }
+  }
 
   const candidate = new Map([...p.tasks].map(([taskId, task]) => [taskId, {
     ...task,
@@ -294,7 +306,6 @@ function goalAmended(p, data, schemaVersion) {
   }]));
   for (const taskId of removeTasks || []) candidate.delete(taskId);
   for (const [taskId, def] of Object.entries(addTasks || {})) {
-    if (candidate.has(taskId)) throw new Error(`task already exists: ${taskId}`);
     if (!def.writePaths || !def.acceptance) throw new Error(`added task ${taskId} must have writePaths and acceptance`);
     candidate.set(taskId, {
       description: def.description, deps: def.deps || [], writePaths: def.writePaths, acceptance: def.acceptance,
