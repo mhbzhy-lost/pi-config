@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -294,7 +294,6 @@ const PERSISTED_LEASE_FIELDS = ["goalId", "taskId", "attempt", "originRoot", "st
 function probePath(file) {
   try {
     lstatSync(file);
-    statSync(file);
     return true;
   } catch (error) {
     if (error?.code === "ENOENT") return false;
