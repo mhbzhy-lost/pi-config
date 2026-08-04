@@ -61,6 +61,57 @@ test("historical v2 JSONL replays task-contract-gated create and amend while new
   assert.deepEqual({ events: readFileSync(join(appendRoot, "goals", goalId, "events.jsonl"), "utf8"), projection: readFileSync(join(appendRoot, "goals", goalId, "projection.json"), "utf8"), registry: readFileSync(join(appendRoot, "registry.json"), "utf8") }, before);
 });
 
+test("historical v2 create replay rejects cyclic and unknown dependencies while retaining absolute-cd compatibility", () => {
+  const root = mkdtempSync(join(tmpdir(), "ge-legacy-v2-dag-"));
+  const makeCreated = (goalId, taskDefs) => ({
+    schemaVersion: "goal-engine.event.v2", eventId: `${goalId}-create`, goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created",
+    data: { objective: "Validate persisted historical task graph", scope: [], nonGoals: [], dod: [], tasks: Object.keys(taskDefs), taskDefs },
+  });
+  const task = (deps) => ({ description: "legacy task", deps, writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["cd /tmp && true"] }, workflow: "tdd" });
+  for (const [goalId, taskDefs, error] of [
+    ["legacy-v2-cycle", { a: task(["b"]), b: task(["a"]) }, /dependency cycle at a|dependency cycle at b/],
+    ["legacy-v2-unknown", { a: task(["missing"]) }, /unknown dep: a depends on missing/],
+  ]) {
+    const eventsPath = join(root, "goals", goalId, "events.jsonl");
+    mkdirSync(join(root, "goals", goalId), { recursive: true });
+    writeFileSync(eventsPath, `${JSON.stringify(makeCreated(goalId, taskDefs))}\n`);
+    assert.throws(() => loadProjection(root, goalId), error);
+  }
+
+  const compatibleGoalId = "legacy-v2-absolute-cd";
+  const compatible = makeCreated(compatibleGoalId, { a: task([]) });
+  mkdirSync(join(root, "goals", compatibleGoalId), { recursive: true });
+  writeFileSync(join(root, "goals", compatibleGoalId, "events.jsonl"), `${JSON.stringify(compatible)}\n`);
+  assert.deepEqual(loadProjection(root, compatibleGoalId).tasks.get("a").acceptance.commands, ["cd /tmp && true"]);
+});
+
+test("unsafe historical v2 create recovers atomically through a safe amendment", () => {
+  const root = mkdtempSync(join(tmpdir(), "ge-legacy-v2-recover-"));
+  const goalId = "legacy-v2-recovery";
+  const created = { schemaVersion: "goal-engine.event.v2", eventId: "legacy-unsafe-create", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Recover a persisted unsafe historical command", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["cd /tmp && true"] }, workflow: "tdd" } } } };
+  const eventsPath = join(root, "goals", goalId, "events.jsonl");
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(eventsPath, `${JSON.stringify(created)}\n`);
+  const historical = loadProjection(root, goalId);
+  assert.equal(historical.version, 1);
+
+  const amended = { schemaVersion: "goal-engine.event.v2", eventId: "safe-amendment", goalId, occurredAt: "2024-01-01T00:00:01.000Z", type: "goal.amended", data: { reason: "Replace unsafe historical command with safe relative command", updateTasks: { t1: { acceptance: { criteria: ["works"], commands: ["npm test"] } } } } };
+  const projection = appendEvent(root, amended, historical.version);
+  const events = readFileSync(eventsPath, "utf8").trim().split("\n").map(JSON.parse);
+  const persisted = JSON.parse(readFileSync(join(root, "goals", goalId, "projection.json"), "utf8"));
+  const registry = JSON.parse(readFileSync(join(root, "registry.json"), "utf8"));
+  assert.equal(events.length, 2);
+  assert.equal(events[1].eventId, "safe-amendment");
+  assert.equal(projection.version, 2);
+  assert.deepEqual(projection.tasks.get("t1").acceptance.commands, ["npm test"]);
+  assert.equal(persisted.version, 2);
+  assert.deepEqual(persisted.tasks.t1.acceptance.commands, ["npm test"]);
+  assert.equal(registry.goals[goalId].lifecycle, "active");
+  assert.deepEqual(registry.active_goal_ids, [goalId]);
+  assert.equal(registry.goals[goalId].objective, projection.objective);
+  assert.equal(registry.goals[goalId].updatedAt, projection.updatedAt);
+});
+
 test("v2 create and amend reject pending tasks that cannot compile dispatch IR atomically", () => {
   const created = {
     objective: "Valid objective",
