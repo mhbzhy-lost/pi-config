@@ -698,7 +698,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           throw workspaceMutationError(error, retry);
         }
         if (!inspectionSnapshotsMatch(inspection, confirmedInspection)) {
-          throw settlementIdentityError("EXECUTOR_SETTLEMENT_HEAD_MISMATCH", `workspace=${lease.path}; firstHead=${inspection.headCommit}; observedHead=${confirmedInspection.headCommit}; firstClean=${inspection.clean}; observedClean=${confirmedInspection.clean}`, retry);
+          throw settlementIdentityError("EXECUTOR_SETTLEMENT_HEAD_MISMATCH", `workspace=${lease.path}; firstHead=${inspection.headCommit}; observedHead=${confirmedInspection.headCommit}; firstClean=${inspection.clean}; observedClean=${confirmedInspection.clean}`, retry, "return to the same Executor worktree, verify the same Executor worktree HEAD and cleanliness, then retry goal_settle");
         }
         settlementData.attempt = lease.attempt;
         settlementData.executorHead = confirmedInspection.headCommit;
