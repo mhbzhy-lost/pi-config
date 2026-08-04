@@ -280,10 +280,10 @@ test("goal_settle classifies top-level identity mismatch without side effects", 
   assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
 });
 
-test("goal_settle permits failed and blocked dirty no-commit workspaces", async () => {
-  for (const outcome of ["failed", "blocked"]) {
+test("goal_settle failed and blocked dirty no-commit recovery characterizes discard and preserve", async () => {
+  for (const [outcome, action] of [["failed", "discard"], ["blocked", "preserve"]]) {
     const cwd = tmpCwd();
-    const objective = `${outcome} dirty settle fixture`;
+    const objective = `${outcome} dirty no-commit recovery fixture`;
     const goalId = objectiveToGoalId(objective);
     const pi = createMockPi(cwd);
     createGoalEngineExtension(pi);
@@ -291,9 +291,10 @@ test("goal_settle permits failed and blocked dirty no-commit workspaces", async 
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     writeFileSync(join(workspace.path, "ordinary-dirty.txt"), "dirty\n");
     await invoke(pi, "goal_settle", { task_id: "t1", outcome, reason: outcome === "blocked" ? "Waiting for an external dependency before the executor can continue." : undefined, next_action: "Keep the dirty executor workspace available for the selected typed disposition action." });
-    const status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
-    assert.equal(status.tasks.t1.status, outcome === "failed" ? "pending" : "blocked");
-    assert.equal(existsSync(join(workspace.path, "ordinary-dirty.txt")), true);
+    await invoke(pi, "goal_integrate", { task_id: "t1", action });
+    assert.equal(existsSync(workspace.path), action === "preserve");
+    assert.equal(git(cwd, "branch", "--list", workspace.branch) !== "", action === "preserve");
+    if (action === "preserve") assert.equal(existsSync(join(workspace.path, "ordinary-dirty.txt")), true);
   }
 });
 
@@ -2122,22 +2123,20 @@ test("goal_amend rejects accepted acceptance rewrite without appending an event"
   assert.equal(readGoalEvents(cwd, goalId).length, beforeEvents);
 });
 
-test("historical settled active v2 without settlement binding returns actionable identity-missing status with zero side effects", async () => {
+test("settlement identity missing after a real dispatch reaches the integrate gate with zero side effects", async () => {
   const cwd = tmpCwd();
-  const goalId = "historical-unbound-succeeded";
-  const root = join(cwd, ".state/goal-engine");
-  const events = [
-    { schemaVersion: "goal-engine.event.v2", eventId: "unbound-created", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Historical unbound succeeded", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } },
-    { schemaVersion: "goal-engine.event.v2", eventId: "unbound-dispatched", goalId, occurredAt: "2024-01-01T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "legacy", workspace: { attempt: 1, path: "/tmp/historical", branch: "ge/historical/t1/1", baseCommit: "base" } } },
-    { schemaVersion: "goal-engine.event.v2", eventId: "unbound-settled", goalId, occurredAt: "2024-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, nextAction: "Review the historical evidence before selecting a recovery action" } },
-  ];
-  mkdirSync(join(root, "goals", goalId), { recursive: true });
-  writeFileSync(goalEventsPath(cwd, goalId), `${events.map(JSON.stringify).join("\n")}\n`);
-  writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: events[0].data.objective, updatedAt: events[2].occurredAt } } }));
+  const objective = "Historical unbound succeeded with real executor identity";
+  const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd); createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "real executor", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
+  const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+  commitWorkspaceChange(workspace, "src/x.ts", "export const real = true;\n", "feat: authorized executor proof");
+  const rawSettled = { schemaVersion: "goal-engine.event.v2", eventId: "unbound-settled", goalId, occurredAt: "2024-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, nextAction: "Review the historical evidence before selecting a recovery action" } };
+  writeFileSync(goalEventsPath(cwd, goalId), `${readFileSync(goalEventsPath(cwd, goalId), "utf8")}${JSON.stringify(rawSettled)}\n`);
   const before = rejectionSnapshot(cwd, goalId);
   await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }), (error) => {
     assert.equal(error.code, "EXECUTOR_SETTLEMENT_IDENTITY_MISSING");
+    assert.match(error.message, /observed=.*remediation=.*stateChanged=false.*requiredNextAction/);
     assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
     return true;
   });
@@ -2154,12 +2153,33 @@ test("post-settle HEAD drift rejects every succeeded disposition before started 
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     commitWorkspaceChange(workspace, "src/x.ts", "export const x = 1;\n", "feat: settled");
     await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use a typed disposition after inspecting the settled executor commit." });
-    git(workspace.path, "commit", "--allow-empty", "-m", "test: post-settle drift");
+    commitWorkspaceChange(workspace, "src/x.ts", "export const x = 2;\n", "test: post-settle rogue drift");
     const before = rejectionSnapshot(cwd, goalId);
     await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action }), (error) => error.code === "EXECUTOR_SETTLEMENT_HEAD_MISMATCH" && /stateChanged=false/.test(error.message));
     assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
     assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.workspace_disposition_started").length, 0);
   }
+});
+
+test("post-settle wrong live branch rejects identity mismatch before started event", async () => {
+  const cwd = tmpCwd();
+  const objective = "Post-settle wrong live branch";
+  const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd); createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "branch identity", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+  commitWorkspaceChange(workspace, "src/x.ts", "export const branch = true;\n", "feat: branch identity");
+  await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use the typed disposition after inspecting the settled executor commit." });
+  git(workspace.path, "checkout", "-b", `wrong/${goalId}`);
+  const before = rejectionSnapshot(cwd, goalId);
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }), (error) => {
+    assert.equal(error.code, "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH");
+    assert.match(error.message, /observed=.*remediation=.*stateChanged=false.*requiredNextAction/);
+    assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
+    return true;
+  });
+  assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+  assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.workspace_disposition_started").length, 0);
 });
 
 test("semantic priority keeps task-state and reducer errors ahead of workspace-missing recovery", async () => {
@@ -2177,8 +2197,16 @@ test("semantic priority keeps task-state and reducer errors ahead of workspace-m
   await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover through the typed status action after dispatching." }), /task is not dispatched/i);
   const invalid = "semantic-priority-invalid";
   const dispatched = { schemaVersion: "goal-engine.event.v1", eventId: `${invalid}-dispatch`, goalId: invalid, occurredAt: "2024-01-01T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "legacy" } };
-  const settled = { schemaVersion: "goal-engine.event.v1", eventId: `${invalid}-settled`, goalId: invalid, occurredAt: "2024-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, nextAction: "continue" } };
-  writeHistory(invalid, [created(invalid), dispatched, settled]);
+  writeHistory(invalid, [created(invalid), dispatched]);
   pi = createMockPi(cwd); createGoalEngineExtension(pi);
-  await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover through typed status after reviewing the semantic failure." }), /nextAction|next_action|next action|semantic/i);
+  for (const params of [
+    { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "bad" },
+    { task_id: "t1", outcome: "succeeded", next_action: "Recover through typed status after reviewing the semantic failure." },
+  ]) {
+    await assert.rejects(() => invoke(pi, "goal_settle", params), (error) => {
+      assert.notEqual(error.code, "EXECUTOR_WORKSPACE_MISSING");
+      assert.match(error.message, /nextAction|next_action|next action|evidence|semantic/i);
+      return true;
+    });
+  }
 });

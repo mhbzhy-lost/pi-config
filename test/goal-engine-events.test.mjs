@@ -1498,6 +1498,20 @@ test("historical settled replay retains legacy settlement marker while strict v2
   assert.throws(() => appendEvent(root, v2Event("task.workspace_disposition_started", { ...started("integrate", goalId).data }, goalId), replayed.version), /settlement|identity|attempt|executorHead/i);
 });
 
+test("historical v1 dispatched and succeeded settled JSONL remains readable", () => {
+  const root = mkdtempSync(join(tmpdir(), "ge-v1-settled-replay-"));
+  const goalId = "v1-dispatched-succeeded";
+  const created = { schemaVersion: "goal-engine.event.v1", eventId: "created", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Legacy dispatched settlement", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } } } };
+  const dispatched = { schemaVersion: "goal-engine.event.v1", eventId: "dispatched", goalId, occurredAt: "2024-01-01T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "legacy" } };
+  const settled = { schemaVersion: "goal-engine.event.v1", eventId: "settled", goalId, occurredAt: "2024-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Review the legacy settled evidence and choose integration or preservation based on verification" } };
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${[created, dispatched, settled].map(JSON.stringify).join("\n")}\n`);
+  const projection = loadProjection(root, goalId);
+  assert.equal(projection.version, 3);
+  assert.equal(projection.tasks.get("t1").status, "succeeded");
+  assert.equal(projection.tasks.get("t1").settlement ?? null, null);
+});
+
 test("strict disposition settlement identity matrix permits only matching succeeded bindings", () => {
   for (const action of ["integrate", "discard", "preserve"]) {
     const succeeded = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(`strict-${action}`)), `strict-${action}`), "succeeded", `strict-${action}`);
