@@ -218,6 +218,24 @@ function assertOrphanRecoveryContract(error, expected) {
   assert.deepEqual(JSON.parse(match[1]), expected);
 }
 
+function orphanNotSettledRecoveryContract() {
+  const resources = { workspaceExists: true, branchExists: true, leaseExists: true };
+  return {
+    code: "ORPHANED_WORKSPACE_NOT_SETTLED",
+    observed: { taskId: "t1", candidate: { attempt: 1 }, resources },
+    remediation: "inspect the authoritative recovery state with goal_status before any workspace action",
+    stateChanged: false,
+    requiredNextAction: null,
+    blockingReason: {
+      code: "ORPHANED_WORKSPACE_NOT_SETTLED", requiresHumanDecision: true,
+      choices: [
+        { tool: "goal_integrate", params: { task_id: "t1", action: "discard" } },
+        { tool: "goal_integrate", params: { task_id: "t1", action: "preserve" } },
+      ],
+    },
+  };
+}
+
 function assertTaskMachineAction(task, expected) {
   assert.deepEqual(task.allowedActions, expected.allowedActions);
   const required = task.requiredNextAction;
@@ -2600,7 +2618,7 @@ test("orphan integrate rejects before recovery or Git effects", async () => {
   const fixture = await dispatchedRollbackFixture("integrate rejected");
   const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
   await assert.rejects(() => invoke(fixture.pi, "goal_integrate", { task_id: "t1", action: "integrate" }), (error) => {
-    assertOrphanRecoveryContract(error, { code: "ORPHANED_WORKSPACE_NOT_SETTLED", observed: error.observed, remediation: error.remediation, stateChanged: false, requiredNextAction: { tool: "goal_status", params: { goal_id: fixture.goalId } }, blockingReason: error.blockingReason }); return true;
+    assertOrphanRecoveryContract(error, orphanNotSettledRecoveryContract()); return true;
   });
   assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
 });
@@ -2664,7 +2682,9 @@ test("orphan recovery survives an origin HEAD advance on the same origin ref", a
     writeFileSync(join(fixture.cwd, `origin-${action}.txt`), `${action}\\n`); git(fixture.cwd, "add", "."); git(fixture.cwd, "commit", "-m", `test: origin ${action}`);
     const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
     if (action === "integrate") {
-      await assert.rejects(() => invoke(fixture.pi, "goal_integrate", { task_id: "t1", action }), (error) => error.code === "ORPHANED_WORKSPACE_NOT_SETTLED");
+      await assert.rejects(() => invoke(fixture.pi, "goal_integrate", { task_id: "t1", action }), (error) => {
+        assertOrphanRecoveryContract(error, orphanNotSettledRecoveryContract()); return true;
+      });
       assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
       assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).some((event) => event.type === "task.workspace_orphan_recovered"), false);
     } else {
@@ -2679,7 +2699,22 @@ test("orphan recovery survives an origin HEAD advance on the same origin ref", a
 test("orphan inventory drift compares two real snapshots after the configured barrier", async () => {
   const fixture = await dispatchedRollbackFixture("inventory drift"); let calls = 0; let afterCommit;
   const pi = createMockPi(fixture.cwd); createGoalEngineExtension(pi, { inspectOrphanedExecutorWorkspaceBarrier(lease) { if (++calls === 2) { commitWorkspaceChange(lease, "race.txt", "race\\n", "test: orphan inventory race"); afterCommit = fullRejectionSnapshot(fixture.cwd, fixture.goalId); } return { kind: "none" }; } });
-  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }), (error) => error.code === "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED");
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }), (error) => {
+    assertOrphanRecoveryContract(error, {
+      code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+      observed: { taskId: "t1", candidate: { attempt: 1 }, resources: { workspaceExists: true, branchExists: true, leaseExists: true } },
+      remediation: "inspect the authoritative recovery state with goal_status before any workspace action",
+      stateChanged: false,
+      requiredNextAction: { tool: "goal_status", params: { goal_id: fixture.goalId } },
+      blockingReason: {
+        code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+        resources: { workspaceExists: true, branchExists: true, leaseExists: true },
+        observed: "executor workspace identity changed between recovery inventories",
+      },
+    });
+    assert.equal(Object.hasOwn(error.blockingReason, "choices"), false);
+    return true;
+  });
   assert.equal(calls, 2); assert.ok(afterCommit); assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), afterCommit);
   assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_orphan_recovered").length, 0);
 });
