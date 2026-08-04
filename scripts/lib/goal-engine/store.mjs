@@ -8,6 +8,8 @@ const REGISTRY_SCHEMA_VERSION = "goal-engine.registry.v1";
 const LOCK_TIMEOUT_MS = 1500;
 const LOCK_WAIT_MS = 10;
 const IDENTITY_PROBE_FRESH_MS = 1400;
+const OWNER_PROTOCOL = "goal-engine.writer-owner.v2";
+const OWNER_IDENTITY_KIND = "ps-lstart-utc";
 let selfBirthIdentity;
 const ownerIdentityFreshness = new Map();
 
@@ -74,20 +76,18 @@ export function acquireWriterLock(stateRoot) {
     const candidate = `${lockPath}.candidate-${process.pid}-${randomUUID()}`;
     try {
       try {
-        mkdirSync(candidate, { mode: 0o700 });
-        chmodSync(candidate, 0o700);
-        const ownerPath = join(candidate, "owner.json");
-        writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString(), birthIdentity }) + "\n", { mode: 0o600 });
-        chmodSync(ownerPath, 0o600);
-        renameSync(candidate, lockPath);
+        writeOwnerCandidate(candidate, token, birthIdentity);
+        // link(2) is no-clobber: unlike rename(2), it cannot replace even an
+        // empty legacy lock directory.
+        linkSync(candidate, lockPath);
         return { token };
       } catch (error) {
-        if (existsSync(candidate)) rmSync(candidate, { recursive: true, force: true });
-        if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+        if (error.code !== "EEXIST") throw error;
         const owner = readLockOwner(lockPath);
         if (ownerState(owner) === "dead") quarantineStaleLock(lockPath);
       }
     } finally {
+      if (existsSync(candidate)) rmSync(candidate, { force: true });
       releaseRecoveryGuard(stateRoot, guard.token);
     }
     if (Date.now() >= deadline) throw lockTimeout();
@@ -95,15 +95,25 @@ export function acquireWriterLock(stateRoot) {
   }
 }
 
+function writeOwnerCandidate(path, token, birthIdentity) {
+  writeFileSync(path, JSON.stringify({ protocol: OWNER_PROTOCOL, identityKind: OWNER_IDENTITY_KIND, pid: process.pid, token, createdAt: new Date().toISOString(), birthIdentity }) + "\n", { flag: "wx", mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
+// New locks are files.  The directory fallback is read-only migration support.
 function readLockOwner(lockPath) {
+  return readOwner(lockPath) ?? readOwner(join(lockPath, "owner.json"));
+}
+
+function readOwner(path) {
   try {
-    const owner = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8"));
-    return validOwner(owner) ? owner : null;
+    const owner = JSON.parse(readFileSync(path, "utf8"));
+    return Number.isInteger(owner?.pid) && owner.pid > 0 ? owner : null;
   } catch { return null; }
 }
 
 function validOwner(owner) {
-  return Number.isInteger(owner?.pid) && owner.pid > 0 && typeof owner.token === "string" && owner.token.length > 0 && typeof owner.createdAt === "string" && !Number.isNaN(Date.parse(owner.createdAt)) && typeof owner.birthIdentity === "string" && owner.birthIdentity.length > 0;
+  return Number.isInteger(owner?.pid) && owner.pid > 0 && typeof owner.token === "string" && owner.token.length > 0 && typeof owner.createdAt === "string" && !Number.isNaN(Date.parse(owner.createdAt)) && typeof owner.birthIdentity === "string" && owner.birthIdentity.length > 0 && owner.protocol === OWNER_PROTOCOL && owner.identityKind === OWNER_IDENTITY_KIND;
 }
 
 function currentProcessBirthIdentity() {
@@ -129,6 +139,8 @@ function ownerState(owner) {
   if (!owner) return "unknown";
   try { process.kill(owner.pid, 0); }
   catch (error) { return error.code === "ESRCH" ? "dead" : "unknown"; }
+  // A live owner predating this protocol has no safely comparable identity.
+  if (!validOwner(owner)) return "unknown";
   const key = `${owner.pid}:${owner.birthIdentity}`;
   // A newly published owner cannot be stale merely because no caller has probed
   // it yet.  This avoids a ps fan-out for every waiter while bounding recovery.
@@ -159,7 +171,7 @@ export function acquireRecoveryGuard(stateRoot, deadline) {
   const birthIdentity = currentProcessBirthIdentity();
   const candidate = `${guardPath}.candidate-${process.pid}-${randomUUID()}`;
   try {
-    writeFileSync(candidate, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString(), birthIdentity }) + "\n", { flag: "wx", mode: 0o600 });
+    writeOwnerCandidate(candidate, token, birthIdentity);
     while (true) {
       try {
         linkSync(candidate, guardPath);
@@ -178,10 +190,7 @@ export function acquireRecoveryGuard(stateRoot, deadline) {
 }
 
 function readRecoveryGuardOwner(guardPath) {
-  try {
-    const owner = JSON.parse(readFileSync(guardPath, "utf8"));
-    return validOwner(owner) ? owner : null;
-  } catch { return null; }
+  return readOwner(guardPath);
 }
 
 function quarantineStaleGuard(guardPath) {

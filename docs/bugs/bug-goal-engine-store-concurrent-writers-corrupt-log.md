@@ -18,7 +18,7 @@ CAS 的 replay/version check 只在单个进程内执行，未与 JSONL append�
 
 ## 修复
 
-在 state root 使用 `mkdir` 原子创建 `.writer.lock`，以 owner token/PID 协议串行整个写入事务；存活 owner 有界等待，死亡 PID 的锁原子 quarantine 后清理。projection 和 registry 的临时文件使用本调用唯一身份，release 复核 token 后才删除锁。
+在 state root 先完整写入唯一的 `0600` regular-file owner candidate（含 protocol 与 identity-kind），再以 `linkSync` 原子 no-clobber 发布 `.writer.lock`，以 owner token/PID 协议串行整个写入事务；不得以可覆盖空目录的 rename 发布。遗留目录 `.writer.lock/owner.json` 仅兼容读取：死亡 PID 可 quarantine，存活或未知 owner 有界等待并保留。projection 和 registry 的临时文件使用本调用唯一身份，release 复核 token 后才删除锁。
 
 ## 验证
 

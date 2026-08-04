@@ -18,7 +18,7 @@
 
 ## 修复
 
-在 state root 内先创建本调用唯一 candidate 目录，写完并设置 `0700` 目录和 `0600` owner.json 后，单次原子 rename 发布为 `.writer.lock`。缺失或损坏的最终 owner 属于不可能由新协议产生的残留，原子 quarantine 后删除；竞争失败只清理本调用 candidate。
+在 state root 内先完整写入唯一的 `0600` regular-file candidate owner（含 protocol 与 identity-kind），再以 `linkSync` 原子 no-clobber 发布为 `.writer.lock`；不得用目录 rename。旧 `.writer.lock` regular owner file（兼容读取遗留目录的 `owner.json`） 只作兼容读取：PID ESRCH 可隔离，live/unknown 保留。
 
 ## 验证
 

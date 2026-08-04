@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent, loadProjection, listGoals, acquireWriterLock, releaseWriterLock, acquireRecoveryGuard, releaseRecoveryGuard, updateRegistry } from "../scripts/lib/goal-engine/store.mjs";
@@ -12,7 +12,10 @@ function event(type, data, goalId = "concurrent-goal") {
 
 function root() { return mkdtempSync(join(tmpdir(), "ge-concurrent-")); }
 function birthIdentity(pid = process.pid) { return execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).trim(); }
-function owner(pid, token, birth = birthIdentity(pid)) { return { pid, token, createdAt: new Date().toISOString(), birthIdentity: birth }; }
+function owner(pid, token, birth = birthIdentity(pid)) { return { protocol: "goal-engine.writer-owner.v2", identityKind: "ps-lstart-utc", pid, token, createdAt: new Date().toISOString(), birthIdentity: birth }; }
+function legacyOwner(pid, token, birth) { return { pid, token, createdAt: new Date().toISOString(), ...(birth ? { birthIdentity: birth } : {}) }; }
+function writeLegacyLock(lock, value) { mkdirSync(lock, { recursive: true }); writeFileSync(join(lock, "owner.json"), typeof value === "string" ? value : JSON.stringify(value)); }
+function readWriterOwner(stateRoot) { return JSON.parse(readFileSync(join(stateRoot, ".writer.lock"), "utf8")); }
 
 function createGoal(stateRoot, goalId = "concurrent-goal") {
   appendEvent(stateRoot, event("goal.created", {
@@ -57,6 +60,11 @@ if (process.argv[2] === "guard-owner") {
   acquireWriterLock(process.argv[3]);
   process.stdout.write("acquired\n");
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500);
+} else if (process.argv[2] === "legacy-writer-owner-hold") {
+  const lock = join(process.argv[3], ".writer.lock");
+  writeLegacyLock(lock, legacyOwner(process.pid, "legacy-holder", birthIdentity()));
+  process.stdout.write("acquired\n");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500);
 } else if (process.argv[2] === "worker") {
   const barrier = process.argv[6];
   if (barrier) {
@@ -92,8 +100,7 @@ if (process.argv[2] === "guard-owner") {
       const stateRoot = root();
       createGoal(stateRoot);
       const lock = join(stateRoot, ".writer.lock");
-      mkdirSync(lock, { recursive: true });
-      writeFileSync(join(lock, "owner.json"), JSON.stringify(owner(999999, "dead-owner", "already-dead")));
+      writeLegacyLock(lock, legacyOwner(999999, "dead-owner", "already-dead"));
 
       const results = await Promise.all([...Array(12)].map((_, workerId) => worker(stateRoot, `${round}-${workerId}`)));
       const detail = results.map((result, workerId) => ({ workerId, code: result.code, message: result.message }));
@@ -148,7 +155,7 @@ if (process.argv[2] === "guard-owner") {
     const replacementReceipt = acquireWriterLock(stateRoot);
 
     releaseWriterLock(stateRoot, staleReceipt.token);
-    assert.equal(JSON.parse(readFileSync(join(stateRoot, ".writer.lock/owner.json"), "utf8")).token, replacementReceipt.token);
+    assert.equal(readWriterOwner(stateRoot).token, replacementReceipt.token);
     releaseWriterLock(stateRoot, replacementReceipt.token);
     assert.equal(existsSync(join(stateRoot, ".writer.lock")), false);
   });
@@ -181,12 +188,49 @@ if (process.argv[2] === "guard-owner") {
     assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:lock|candidate|quarantine|\.tmp)/.test(name)), []);
   });
 
+  test("empty legacy lock times out and is never rename-clobbered", () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    const lock = join(stateRoot, ".writer.lock");
+    mkdirSync(lock);
+    const started = Date.now();
+    assert.throws(() => appendEvent(stateRoot, checkpoint("empty-lock"), 1), (error) => error.code === "GOAL_ENGINE_STORE_LOCK_TIMEOUT");
+    assert.ok(Date.now() - started >= 1400);
+    assert.equal(statSync(lock).isDirectory(), true);
+    assert.deepEqual(readdirSync(lock), []);
+  });
+
+  test("new writer lock is a private complete regular file", () => {
+    const stateRoot = root();
+    const receipt = acquireWriterLock(stateRoot);
+    const lock = join(stateRoot, ".writer.lock");
+    const metadata = statSync(lock);
+    assert.equal(metadata.isFile(), true);
+    assert.equal(metadata.mode & 0o777, 0o600);
+    assert.deepEqual(Object.keys(readWriterOwner(stateRoot)).sort(), ["birthIdentity", "createdAt", "identityKind", "pid", "protocol", "token"].sort());
+    releaseWriterLock(stateRoot, receipt.token);
+  });
+
+  test("live legacy directory owner without protocol remains fail closed", () => {
+    const stateRoot = root(); createGoal(stateRoot);
+    const lock = join(stateRoot, ".writer.lock");
+    writeLegacyLock(lock, legacyOwner(process.pid, "legacy-live", "different-birth"));
+    assert.throws(() => appendEvent(stateRoot, checkpoint("legacy-live"), 1), (error) => error.code === "GOAL_ENGINE_STORE_LOCK_TIMEOUT");
+    assert.equal(readFileSync(join(lock, "owner.json"), "utf8").includes("legacy-live"), true);
+  });
+
+  test("dead pre-birth recovery guard is recovered", () => {
+    const stateRoot = root(); createGoal(stateRoot);
+    writeFileSync(join(stateRoot, ".writer.recovery.guard"), JSON.stringify(legacyOwner(999999, "dead-pre-birth")));
+    assert.equal(appendEvent(stateRoot, checkpoint("pre-birth"), 1).version, 2);
+    assert.equal(existsSync(join(stateRoot, ".writer.recovery.guard")), false);
+  });
+
   test("malformed writer lock owner fails closed without deletion", () => {
     const stateRoot = root();
     createGoal(stateRoot);
     const lock = join(stateRoot, ".writer.lock");
-    mkdirSync(lock, { recursive: true });
-    writeFileSync(join(lock, "owner.json"), "not json");
+    writeLegacyLock(lock, "not json");
 
     assert.throws(() => appendEvent(stateRoot, checkpoint("malformed-owner"), 1), (error) => error.code === "GOAL_ENGINE_STORE_LOCK_TIMEOUT");
     assert.equal(readFileSync(join(lock, "owner.json"), "utf8"), "not json");
@@ -196,8 +240,7 @@ if (process.argv[2] === "guard-owner") {
     const stateRoot = root();
     createGoal(stateRoot);
     const lock = join(stateRoot, ".writer.lock");
-    mkdirSync(lock, { recursive: true });
-    writeFileSync(join(lock, "owner.json"), JSON.stringify(owner(999999, "dead-owner", "already-dead")));
+    writeLegacyLock(lock, legacyOwner(999999, "dead-owner", "already-dead"));
     assert.equal(appendEvent(stateRoot, checkpoint("stale"), 1).version, 2);
     assert.equal(existsSync(lock), false);
     assert.deepEqual(readdirSync(stateRoot).filter((name) => name.includes("quarantine")), []);
@@ -248,8 +291,7 @@ if (process.argv[2] === "guard-owner") {
     const stateRoot = root();
     createGoal(stateRoot);
     const lock = join(stateRoot, ".writer.lock");
-    mkdirSync(lock, { recursive: true });
-    writeFileSync(join(lock, "owner.json"), JSON.stringify(owner(process.pid, "reused-writer", "different-birth")));
+    writeLegacyLock(lock, owner(process.pid, "reused-writer", "different-birth"));
     writeFileSync(join(stateRoot, ".writer.recovery.guard"), JSON.stringify(owner(process.pid, "reused-guard", "different-birth")));
 
     assert.equal(appendEvent(stateRoot, checkpoint("pid-reuse"), 1).version, 2);
@@ -269,10 +311,10 @@ if (process.argv[2] === "guard-owner") {
     assert.equal(existsSync(join(stateRoot, "registry.json")), false);
   });
 
-  test("locale and timezone canonical birth identity keeps a live writer owner", async () => {
+  test("locale and timezone legacy owner without protocol remains fail closed", async () => {
     const stateRoot = root();
     createGoal(stateRoot);
-    const holder = spawn(process.execPath, [import.meta.filename, "writer-owner-hold", stateRoot], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TZ: "Pacific/Auckland", LC_ALL: "C" } });
+    const holder = spawn(process.execPath, [import.meta.filename, "legacy-writer-owner-hold", stateRoot], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TZ: "Pacific/Auckland", LC_ALL: "C" } });
     let output = "";
     await new Promise((resolve, reject) => {
       holder.stdout.on("data", (chunk) => { output += chunk; if (output.includes("acquired\n")) resolve(); });
@@ -294,8 +336,7 @@ if (process.argv[2] === "guard-owner") {
     const stateRoot = root();
     createGoal(stateRoot);
     const lock = join(stateRoot, ".writer.lock");
-    mkdirSync(lock, { recursive: true });
-    writeFileSync(join(lock, "owner.json"), JSON.stringify(owner(process.pid, "live-owner")));
+    writeLegacyLock(lock, owner(process.pid, "live-owner"));
     assert.throws(() => appendEvent(stateRoot, checkpoint("timeout"), 1), (error) => error.code === "GOAL_ENGINE_STORE_LOCK_TIMEOUT");
     assert.equal(JSON.parse(readFileSync(join(lock, "owner.json"), "utf8")).token, "live-owner");
     assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:\.tmp|candidate|quarantine)/.test(name)), []);
