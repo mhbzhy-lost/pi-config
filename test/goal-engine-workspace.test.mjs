@@ -1020,13 +1020,65 @@ test("orphan inventory invalid arguments throw validation errors but runtime fai
   assertOrphanUnverified(orphanInventoryApi()({ ...fixture, originRoot: join(fixture.originRoot, "not-a-repo") }));
 });
 
-test("orphan inventory review regression treats an ELOOP exact-attempt probe as unverified", () => {
+test("orphan inventory review regression unknown resource probe on ELOOP retains branch independence", () => {
   const fixture = orphanArgs("review-eloop");
   rmSync(join(fixture.stateRoot, "worktrees"), { recursive: true, force: true });
   symlinkSync("worktrees", join(fixture.stateRoot, "worktrees"));
   git(fixture.originRoot, "update-ref", "-d", `refs/heads/${fixture.lease.branch}`);
 
-  assertOrphanUnverified(orphanInventoryApi()(fixture));
+  const result = orphanInventoryApi()(fixture);
+  assert.equal(result.kind, "unverified");
+  assert.deepEqual(result.resources, {
+    workspaceExists: null,
+    branchExists: false,
+    leaseExists: null,
+  });
+});
+
+test("orphan inventory review regression spoofed inspector snapshot cannot forge verified fact", () => {
+  const fixture = orphanArgs("review-spoof");
+  writeFileSync(join(fixture.lease.path, "orphan-spoof.txt"), "spoof\n");
+  const realInspection = inspectExecutorWorkspace(fixture.lease);
+  const forgedHead = "0000000000000000000000000000000000000000";
+  const forgedInspection = {
+    ...realInspection,
+    headCommit: forgedHead,
+    clean: true,
+    dirtyFiles: ["forged.txt"],
+    untrackedFiles: ["forged.txt"],
+    changedFiles: ["forged.txt"],
+    hasCommits: true,
+    diff: "forged\n",
+  };
+
+  const result = orphanInventoryApi()(fixture, {
+    inspectExecutorWorkspaceFn() {
+      return forgedInspection;
+    },
+  });
+
+  const realHead = git(fixture.lease.path, "rev-parse", "HEAD");
+  assert.equal(result.kind, "verified");
+  assert.equal(result.executorHead, realHead);
+  assert.equal(result.inspection.headCommit, realHead);
+  assert.equal(result.inspection.clean, realInspection.clean);
+  assert.deepEqual(result.inspection.dirtyFiles, realInspection.dirtyFiles);
+  assert.deepEqual(result.inspection.untrackedFiles, realInspection.untrackedFiles);
+  assert.equal(result.inspection.hasCommits, realInspection.hasCommits);
+  assert.equal(result.inspection.diff, realInspection.diff);
+});
+
+test("orphan inventory review regression unknown branch resource probe with invalid origin root", () => {
+  const fixture = orphanArgs("review-origin-probe-error");
+  const nonRepoOriginRoot = mkdtempSync(join(tmpdir(), "ge-nonrepo-origin-"));
+
+  const result = orphanInventoryApi()({ ...fixture, originRoot: nonRepoOriginRoot });
+  assert.equal(result.kind, "unverified");
+  assert.deepEqual(result.resources, {
+    workspaceExists: true,
+    branchExists: null,
+    leaseExists: true,
+  });
 });
 
 test("orphan inventory review regression rejects an unknown persisted lease field", () => {
