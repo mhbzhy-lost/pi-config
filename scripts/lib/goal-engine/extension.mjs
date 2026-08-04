@@ -50,8 +50,12 @@ function preflightError(code, observed, remediation, requiredNextAction) {
   return error;
 }
 
-function settlementIdentityError(code, observed, requiredNextAction) {
-  return preflightError(code, observed, "return to the executor workspace, verify the settled attempt and commit identity, then retry goal_integrate", requiredNextAction);
+function settlementIdentityError(code, observed, requiredNextAction, remediation = "return to the executor workspace, verify the settled attempt and commit identity, then retry goal_integrate") {
+  return preflightError(code, observed, remediation, requiredNextAction);
+}
+
+function isInspectionInternalHeadDrift(error) {
+  return String(error?.message || error) === "Executor workspace HEAD changed during inspection";
 }
 
 function inspectionSnapshotsMatch(first, second) {
@@ -688,6 +692,9 @@ export function createGoalEngineExtension(pi, options = {}) {
         try {
           confirmedInspection = inspectExecutorWorkspaceFn(lease);
         } catch (error) {
+          if (isInspectionInternalHeadDrift(error)) {
+            throw settlementIdentityError("EXECUTOR_SETTLEMENT_HEAD_MISMATCH", `workspace=${lease.path}; inspection=${error.message}`, retry, "return to the same Executor worktree, verify the same Executor worktree HEAD and cleanliness, then retry goal_settle");
+          }
           throw workspaceMutationError(error, retry);
         }
         if (!inspectionSnapshotsMatch(inspection, confirmedInspection)) {
@@ -975,6 +982,9 @@ export function createGoalEngineExtension(pi, options = {}) {
         try {
           confirmedInspection = inspectExecutorWorkspaceFn(lease);
         } catch (error) {
+          if (isInspectionInternalHeadDrift(error)) {
+            throw settlementIdentityError("EXECUTOR_SETTLEMENT_HEAD_MISMATCH", `workspace=${lease.path}; inspection=${error.message}`, retry);
+          }
           throw workspaceMutationError(error, retry);
         }
         if (!inspectionSnapshotsMatch(activeInspection, confirmedInspection)) {
