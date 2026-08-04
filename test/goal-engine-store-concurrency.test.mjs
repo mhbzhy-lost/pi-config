@@ -11,7 +11,7 @@ function event(type, data, goalId = "concurrent-goal") {
 }
 
 function root() { return mkdtempSync(join(tmpdir(), "ge-concurrent-")); }
-function birthIdentity(pid = process.pid) { return execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim(); }
+function birthIdentity(pid = process.pid) { return execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).trim(); }
 function owner(pid, token, birth = birthIdentity(pid)) { return { pid, token, createdAt: new Date().toISOString(), birthIdentity: birth }; }
 
 function createGoal(stateRoot, goalId = "concurrent-goal") {
@@ -53,7 +53,16 @@ if (process.argv[2] === "guard-owner") {
 } else if (process.argv[2] === "writer-owner") {
   acquireWriterLock(process.argv[3]);
   process.stdout.write("acquired");
+} else if (process.argv[2] === "writer-owner-hold") {
+  acquireWriterLock(process.argv[3]);
+  process.stdout.write("acquired\n");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500);
 } else if (process.argv[2] === "worker") {
+  const barrier = process.argv[6];
+  if (barrier) {
+    process.stdout.write("ready\n");
+    while (!existsSync(barrier)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  }
   try {
     appendEvent(process.argv[3], checkpoint(process.argv[4], process.argv[5]), 1);
     process.stdout.write(JSON.stringify({ ok: true }));
@@ -144,15 +153,32 @@ if (process.argv[2] === "guard-owner") {
     assert.equal(existsSync(join(stateRoot, ".writer.lock")), false);
   });
 
-  test("concurrent different goals retain every registry entry", async () => {
+  test("50-process different-goal barrier retains every registry entry", async () => {
     const stateRoot = root();
-    const goalIds = [...Array(8)].map((_, index) => `concurrent-goal-${index}`);
+    const goalIds = [...Array(50)].map((_, index) => `concurrent-goal-${index}`);
     for (const goalId of goalIds) createGoal(stateRoot, goalId);
-
-    const results = await Promise.all(goalIds.map((goalId, index) => worker(stateRoot, String(index), goalId)));
-    assert.deepEqual(results, Array(8).fill({ ok: true }));
-    assert.deepEqual(listGoals(stateRoot).sort(), goalIds);
+    const barrier = join(stateRoot, ".start-barrier");
+    const children = goalIds.map((goalId, index) => {
+      const child = spawn(process.execPath, [import.meta.filename, "worker", stateRoot, String(index), goalId, barrier], { stdio: ["ignore", "pipe", "pipe"] });
+      let output = ""; let error = "";
+      const ready = new Promise((resolve, reject) => {
+        child.stdout.on("data", (chunk) => { output += chunk; if (output.includes("ready\n")) resolve(); });
+        child.stderr.on("data", (chunk) => { error += chunk; });
+        child.on("error", reject);
+      });
+      const result = new Promise((resolve, reject) => child.on("exit", (code) => {
+        const line = output.trim().split("\n").at(-1);
+        code === 0 ? resolve(JSON.parse(line)) : reject(new Error(error || output));
+      }));
+      return { ready, result };
+    });
+    await Promise.all(children.map(({ ready }) => ready));
+    writeFileSync(barrier, "start\n");
+    const results = await Promise.all(children.map(({ result }) => result));
+    assert.deepEqual(results, Array(50).fill({ ok: true }));
+    assert.deepEqual(listGoals(stateRoot).sort(), [...goalIds].sort());
     for (const goalId of goalIds) assert.equal(loadProjection(stateRoot, goalId).version, 2);
+    assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:lock|candidate|quarantine|\.tmp)/.test(name)), []);
   });
 
   test("malformed writer lock owner fails closed without deletion", () => {
@@ -241,6 +267,27 @@ if (process.argv[2] === "guard-owner") {
       (error) => error.code === "GOAL_ENGINE_STORE_LOCK_LOST",
     );
     assert.equal(existsSync(join(stateRoot, "registry.json")), false);
+  });
+
+  test("locale and timezone canonical birth identity keeps a live writer owner", async () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    const holder = spawn(process.execPath, [import.meta.filename, "writer-owner-hold", stateRoot], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TZ: "Pacific/Auckland", LC_ALL: "C" } });
+    let output = "";
+    await new Promise((resolve, reject) => {
+      holder.stdout.on("data", (chunk) => { output += chunk; if (output.includes("acquired\n")) resolve(); });
+      holder.on("error", reject);
+      holder.on("exit", (code) => { if (!output.includes("acquired\n")) reject(new Error(`holder exited ${code}`)); });
+    });
+    const contender = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ["--input-type=module", "--eval", `import { appendEvent } from ${JSON.stringify(new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url).href)}; try { appendEvent(${JSON.stringify(stateRoot)}, ${JSON.stringify(checkpoint("locale"))}, 1); console.log("ok"); } catch (error) { console.log(error.code); }`], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TZ: "UTC", LC_ALL: "C" } });
+      let result = ""; let error = "";
+      child.stdout.on("data", (chunk) => { result += chunk; }); child.stderr.on("data", (chunk) => { error += chunk; });
+      child.on("exit", (code) => code === 0 ? resolve(result.trim()) : reject(new Error(error)));
+    });
+    assert.equal(contender, "GOAL_ENGINE_STORE_LOCK_TIMEOUT");
+    assert.equal(JSON.parse(readFileSync(join(stateRoot, ".writer.lock/owner.json"), "utf8")).pid, holder.pid);
+    await new Promise((resolve) => holder.on("exit", resolve));
   });
 
   test("live writer lock times out without deleting another owner lock", () => {

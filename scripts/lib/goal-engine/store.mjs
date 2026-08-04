@@ -7,6 +7,9 @@ import { applyEvent, createProjection } from "./events.mjs";
 const REGISTRY_SCHEMA_VERSION = "goal-engine.registry.v1";
 const LOCK_TIMEOUT_MS = 1500;
 const LOCK_WAIT_MS = 10;
+const IDENTITY_PROBE_FRESH_MS = 1400;
+let selfBirthIdentity;
+const ownerIdentityFreshness = new Map();
 
 export function appendEvent(stateRoot, event, expectedVersion) {
   const lock = acquireWriterLock(stateRoot);
@@ -56,6 +59,17 @@ export function acquireWriterLock(stateRoot) {
   const birthIdentity = currentProcessBirthIdentity();
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
+    const observed = readLockOwner(lockPath);
+    if (observed && Date.now() - Date.parse(observed.createdAt) < IDENTITY_PROBE_FRESH_MS) {
+      let alive = true;
+      try { process.kill(observed.pid, 0); }
+      catch (error) { alive = error.code !== "ESRCH"; }
+      if (alive) {
+        if (Date.now() >= deadline) throw lockTimeout();
+        sleep(LOCK_WAIT_MS);
+        continue;
+      }
+    }
     const guard = acquireRecoveryGuard(stateRoot, deadline);
     const candidate = `${lockPath}.candidate-${process.pid}-${randomUUID()}`;
     try {
@@ -93,12 +107,20 @@ function validOwner(owner) {
 }
 
 function currentProcessBirthIdentity() {
-  try { return processBirthIdentity(process.pid); }
-  catch { throw identityUnavailable(); }
+  if (selfBirthIdentity) return selfBirthIdentity;
+  try {
+    selfBirthIdentity = processBirthIdentity(process.pid);
+    return selfBirthIdentity;
+  } catch { throw identityUnavailable(); }
 }
 
 function processBirthIdentity(pid) {
-  const identity = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  // lstart is localized and timezone-formatted unless ps is invoked canonically.
+  const identity = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+  }).trim();
   if (!identity) throw new Error("process birth identity unavailable");
   return identity;
 }
@@ -107,8 +129,17 @@ function ownerState(owner) {
   if (!owner) return "unknown";
   try { process.kill(owner.pid, 0); }
   catch (error) { return error.code === "ESRCH" ? "dead" : "unknown"; }
-  try { return processBirthIdentity(owner.pid) === owner.birthIdentity ? "live" : "dead"; }
-  catch { return "unknown"; }
+  const key = `${owner.pid}:${owner.birthIdentity}`;
+  // A newly published owner cannot be stale merely because no caller has probed
+  // it yet.  This avoids a ps fan-out for every waiter while bounding recovery.
+  const publishedAt = Date.parse(owner.createdAt);
+  const fresh = ownerIdentityFreshness.get(key);
+  if (Date.now() - publishedAt < IDENTITY_PROBE_FRESH_MS || (fresh && Date.now() - fresh < IDENTITY_PROBE_FRESH_MS)) return "live";
+  try {
+    const state = processBirthIdentity(owner.pid) === owner.birthIdentity ? "live" : "dead";
+    if (state === "live") ownerIdentityFreshness.set(key, Date.now());
+    return state;
+  } catch { return "unknown"; }
 }
 
 function quarantineStaleLock(lockPath) {
