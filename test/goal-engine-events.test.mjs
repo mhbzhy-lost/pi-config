@@ -112,6 +112,38 @@ test("unsafe historical v2 create recovers atomically through a safe amendment",
   assert.equal(registry.goals[goalId].updatedAt, projection.updatedAt);
 });
 
+test("historical v1 and v2 workflow amendments replay deterministically with legacy-only workflow values", () => {
+  const illegalWorkflow = "unsafe";
+
+  const v2GoalId = "legacy-v2-workflow-replay";
+  const v2Root = mkdtempSync(join(tmpdir(), "ge-legacy-v2-workflow-"));
+  const v2Created = { schemaVersion: "goal-engine.event.v2", eventId: "legacy-workflow-v2-created", goalId: v2GoalId, occurredAt: "2024-02-01T00:00:00.000Z", type: "goal.created", data: { objective: "Replay workflow change in historical goal", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } };
+  const v2Amended = { schemaVersion: "goal-engine.event.v2", eventId: "legacy-workflow-v2-amendment", goalId: v2GoalId, occurredAt: "2024-02-01T00:00:01.000Z", type: "goal.amended", data: { reason: "Retain existing historical workflow when strict validator evolves", updateTasks: { t1: { workflow: illegalWorkflow } } } };
+  const v2EventsPath = join(v2Root, "goals", v2GoalId, "events.jsonl");
+  mkdirSync(join(v2Root, "goals", v2GoalId), { recursive: true });
+  writeFileSync(v2EventsPath, `${JSON.stringify(v2Created)}\n${JSON.stringify(v2Amended)}\n`);
+  const v2ReplayA = loadProjection(v2Root, v2GoalId);
+  const v2ReplayB = loadProjection(v2Root, v2GoalId);
+  assert.equal(v2ReplayA.version, 2);
+  assert.equal(v2ReplayA.tasks.get("t1").workflow, illegalWorkflow);
+  assert.deepEqual(v2ReplayB.tasks.get("t1").workflow, v2ReplayA.tasks.get("t1").workflow);
+  assert.deepEqual(v2ReplayB.tasks.get("t1"), v2ReplayA.tasks.get("t1"));
+
+  const v1GoalId = "legacy-v1-workflow-replay";
+  const v1Root = mkdtempSync(join(tmpdir(), "ge-legacy-v1-workflow-"));
+  const v1Created = { schemaVersion: "goal-engine.event.v1", eventId: "legacy-workflow-v1-created", goalId: v1GoalId, occurredAt: "2024-02-02T00:00:00.000Z", type: "goal.created", data: { objective: "Replay legacy workflow change in historical goal", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } };
+  const v1Amended = { schemaVersion: "goal-engine.event.v1", eventId: "legacy-workflow-v1-amendment", goalId: v1GoalId, occurredAt: "2024-02-02T00:00:01.000Z", type: "goal.amended", data: { reason: "Retain historical workflow update semantics while replaying", updateTasks: { t1: { workflow: illegalWorkflow } } } };
+  const v1EventsPath = join(v1Root, "goals", v1GoalId, "events.jsonl");
+  mkdirSync(join(v1Root, "goals", v1GoalId), { recursive: true });
+  writeFileSync(v1EventsPath, `${JSON.stringify(v1Created)}\n${JSON.stringify(v1Amended)}\n`);
+  const v1ReplayA = loadProjection(v1Root, v1GoalId);
+  const v1ReplayB = loadProjection(v1Root, v1GoalId);
+  assert.equal(v1ReplayA.version, 2);
+  assert.equal(v1ReplayA.tasks.get("t1").workflow, illegalWorkflow);
+  assert.deepEqual(v1ReplayB.tasks.get("t1").workflow, v1ReplayA.tasks.get("t1").workflow);
+  assert.deepEqual(v1ReplayB.tasks.get("t1"), v1ReplayA.tasks.get("t1"));
+});
+
 test("v2 create and amend reject pending tasks that cannot compile dispatch IR atomically", () => {
   const created = {
     objective: "Valid objective",
@@ -957,7 +989,28 @@ test("v2 pending replacement succeeds while accepted and unreleased replacements
   }
 });
 
+test("amend allows never-dispatched and discarded released pending tasks", () => {
+  const amend = (projection, data) => applyEvent(projection, v2Event("goal.amended", {
+    reason: "Allow pending tasks after workspace resources are fully released",
+    ...data,
+  }, "amend-allowed-goal"));
+  let neverDispatched = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  neverDispatched = amend(neverDispatched, { updateTasks: { t1: { description: "changed" } } });
+  assert.equal(neverDispatched.tasks.get("t1").description, "changed");
+  const neverDispatchedRemoval = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  assert.throws(() => amend(neverDispatchedRemoval, { removeTasks: ["t1"] }), /non-empty|tasks/i);
+  assert.equal(neverDispatchedRemoval.tasks.has("t1"), true);
+
+  let released = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  released.tasks.get("t1").workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "disposed", disposition: "discarded", released: true };
+  released = amend(released, { updateTasks: { t1: { description: "changed again" } } });
+  assert.equal(released.tasks.get("t1").description, "changed again");
+  assert.throws(() => amend(released, { removeTasks: ["t1"] }), /non-empty|tasks/i);
+  assert.equal(released.tasks.has("t1"), true);
+});
+
 test("workflow amendments apply to never-dispatched and discarded released pending tasks", () => {
+  const snapshot = (projection) => structuredClone({ version: projection.version, tasks: [...projection.tasks] });
   const amend = (projection, data) => applyEvent(projection, v2Event("goal.amended", {
     reason: "Allow pending task workflow changes after workspace release",
     ...data,
@@ -972,7 +1025,9 @@ test("workflow amendments apply to never-dispatched and discarded released pendi
   assert.equal(released.tasks.get("t1").workflow, "docs-only");
 
   const invalid = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  const before = snapshot(invalid);
   assert.throws(() => amend(invalid, { updateTasks: { t1: { workflow: "unsafe" } } }), /workflow/i);
+  assert.deepEqual(snapshot(invalid), before);
   assert.equal(invalid.tasks.get("t1").workflow, "tdd");
 });
 
