@@ -53,9 +53,9 @@ export function applyEvent(projection, event, { replay = false } = {}) {
   switch (event.type) {
     case "goal.created": goalCreated(next, event, replay); break;
     case "task.dispatched": taskDispatched(next, event.data, event.schemaVersion); break;
-    case "task.settled": taskSettled(next, event.data, event.occurredAt); break;
+    case "task.settled": taskSettled(next, event.data, event.occurredAt, event.schemaVersion, replay); break;
     case "task.accepted": taskAccepted(next, event.data, event.schemaVersion); break;
-    case "task.workspace_disposition_started": workspaceDispositionStarted(next, event.data, event.schemaVersion); break;
+    case "task.workspace_disposition_started": workspaceDispositionStarted(next, event.data, event.schemaVersion, replay); break;
     case "task.workspace_disposition_applied": workspaceDispositionApplied(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposed": workspaceDisposed(next, event.data, event.schemaVersion); break;
     case "goal.amended": goalAmended(next, event.data, event.schemaVersion, replay); break;
@@ -93,7 +93,7 @@ function copyProjection(p) {
     scope: [...p.scope],
     nonGoals: [...p.nonGoals],
     dod: [...p.dod],
-    tasks: new Map([...p.tasks].map(([k, v]) => [k, { ...v, workspace: v.workspace ? { ...v.workspace } : null, evidence: [...v.evidence], deps: [...v.deps], writePaths: [...(v.writePaths || [])], acceptance: v.acceptance ? { ...v.acceptance, criteria: [...v.acceptance.criteria], commands: [...v.acceptance.commands] } : null }])),
+    tasks: new Map([...p.tasks].map(([k, v]) => [k, { ...v, workspace: v.workspace ? { ...v.workspace } : null, settlement: v.settlement ? { ...v.settlement } : null, evidence: [...v.evidence], deps: [...v.deps], writePaths: [...(v.writePaths || [])], acceptance: v.acceptance ? { ...v.acceptance, criteria: [...v.acceptance.criteria], commands: [...v.acceptance.commands] } : null }])),
     eventIds: new Set(p.eventIds),
   };
 }
@@ -135,6 +135,7 @@ function goalCreated(p, event, replay) {
       contractHash: null,
       workspace: null,
       acceptanceVerification: null,
+      settlement: null,
     });
   }
   if (event.schemaVersion === "goal-engine.event.v2" && !replay) assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
@@ -155,13 +156,14 @@ function taskDispatched(p, data, schemaVersion) {
     assertWorkspaceRedispatchable(task);
     validateWorkspace(workspace, task.attempts + 1);
     task.workspace = { ...workspace, phase: "active" };
+    task.settlement = null;
   }
   task.status = "dispatched";
   task.attempts++;
   task.contractHash = contractHash;
 }
 
-function taskSettled(p, data, occurredAt) {
+function taskSettled(p, data, occurredAt, schemaVersion, replay) {
   requireActive(p);
   const { taskId, outcome, evidence, evidenceSource, nextAction } = data;
   const task = requireTask(p, taskId);
@@ -174,11 +176,29 @@ function taskSettled(p, data, occurredAt) {
 
   task.lastSettledOutcome = outcome;
   if (outcome === "succeeded") {
+    if (schemaVersion === "goal-engine.event.v2") {
+      const hasAttempt = Object.hasOwn(data, "attempt");
+      const hasHead = Object.hasOwn(data, "executorHead");
+      if (hasAttempt !== hasHead) throw new Error("settlement identity requires both attempt and executorHead");
+      if (hasAttempt) {
+        if (!Number.isInteger(data.attempt) || data.attempt < 1 || typeof data.executorHead !== "string" || !data.executorHead) {
+          throw new Error("invalid settlement attempt or executorHead");
+        }
+        const workspace = requireWorkspace(task, data.attempt);
+        task.settlement = { attempt: workspace.attempt, executorHead: data.executorHead };
+      } else if (!replay) {
+        throw new Error("settlement identity requires attempt and executorHead");
+      } else {
+        task.settlement = null;
+      }
+    }
     task.status = "succeeded";
     task.evidence.push({ ...evidence, source: evidenceSource || "self_produced", ts: occurredAt });
   } else if (outcome === "failed") {
+    task.settlement = null;
     task.status = "pending";
   } else {
+    task.settlement = null;
     task.status = "blocked";
     task.blockedReason = data.reason || null;
   }
@@ -202,7 +222,7 @@ function taskAccepted(p, data, schemaVersion) {
   task.status = "accepted";
 }
 
-function workspaceDispositionStarted(p, data, schemaVersion) {
+function workspaceDispositionStarted(p, data, schemaVersion, replay) {
   requireV2(schemaVersion);
   const { taskId, attempt, requestedAction, strategy, executorHead, originHeadBefore, originRef } = data;
   const task = requireTask(p, taskId);
@@ -215,6 +235,14 @@ function workspaceDispositionStarted(p, data, schemaVersion) {
     throw new Error("discard and preserve dispositions require settled task");
   }
   for (const [name, value] of Object.entries({ strategy, executorHead, originHeadBefore })) if (!value || typeof value !== "string") throw new Error(`${name} is required`);
+  if (task.status === "succeeded") {
+    const settlement = task.settlement;
+    if (!settlement) {
+      if (!replay) throw new Error("settlement identity is required before workspace disposition");
+    } else if (settlement.attempt !== attempt || settlement.executorHead !== executorHead) {
+      throw new Error("settlement identity does not match workspace disposition");
+    }
+  }
   if (originRef !== undefined && (typeof originRef !== "string" || !originRef)) throw new Error("originRef must be a non-empty string");
   Object.assign(workspace, { requestedAction, strategy, executorHead, originHeadBefore, ...(originRef ? { originRef, legacyOriginRef: false } : { legacyOriginRef: true }), phase: "disposing" });
 }
@@ -329,7 +357,7 @@ function goalAmended(p, data, schemaVersion, replay) {
     candidate.set(taskId, {
       description: def.description, deps: def.deps || [], writePaths: def.writePaths, acceptance: def.acceptance,
       workflow: def.workflow || "tdd", status: "pending", evidence: [], attempts: 0,
-      lastSettledOutcome: null, contractHash: null, workspace: null, acceptanceVerification: null,
+      lastSettledOutcome: null, contractHash: null, workspace: null, acceptanceVerification: null, settlement: null,
     });
   }
   for (const [taskId, updates] of Object.entries(updateTasks || {})) {

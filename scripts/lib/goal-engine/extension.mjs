@@ -50,6 +50,10 @@ function preflightError(code, observed, remediation, requiredNextAction) {
   return error;
 }
 
+function settlementIdentityError(code, observed, requiredNextAction) {
+  return preflightError(code, observed, "return to the executor workspace, verify the settled attempt and commit identity, then retry goal_integrate", requiredNextAction);
+}
+
 function workspaceMutationError(error, requiredNextAction) {
   const observed = String(error?.message || error);
   const code = /persisted lease not found/i.test(observed) ? "EXECUTOR_LEASE_NOT_FOUND"
@@ -618,18 +622,33 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
 
-      const settleEvent = makeEvent("task.settled", {
+      const settlementData = {
         taskId: params.task_id,
         outcome: params.outcome,
         evidence: params.evidence || null,
         evidenceSource: params.evidence_source || "self_produced",
         nextAction: params.next_action,
         reason: params.reason || null,
-      }, goalId);
-      // Validate the event first so reducer errors retain priority over Git preflight.
-      const candidate = applyEvent(projection, settleEvent);
+      };
+      const task = projection.tasks.get(params.task_id);
+      // Validate semantic reducer errors before touching Git. A non-empty sentinel
+      // exercises strict v2 settlement binding without claiming persisted identity.
       if (params.outcome === "succeeded") {
-        const task = projection.tasks.get(params.task_id);
+        settlementData.attempt = task?.workspace?.attempt ?? 1;
+        settlementData.executorHead = "candidate-settlement-validation";
+      }
+      let candidate;
+      try {
+        candidate = applyEvent(projection, makeEvent("task.settled", settlementData, goalId));
+      } catch (error) {
+        if (params.outcome === "succeeded" && task?.status === "dispatched" && /workspace is required/i.test(error.message)) {
+          throw workspaceMutationError(error, { tool: "goal_status", params: { goal_id: goalId } });
+        }
+        throw error;
+      }
+      if (params.outcome === "succeeded") {
+        void candidate;
+        if (!task) throw new Error(`unknown task: ${params.task_id}`);
         const retry = { tool: "goal_status", params: { goal_id: goalId } };
         const remediation = "return to the same Executor worktree, create an authorized commit and make it clean, then retry goal_settle";
         let lease;
@@ -657,7 +676,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         } catch (error) {
           throw preflightError("EXECUTOR_WRITE_PATH_VIOLATION", `workspace=${lease.path}; changedFiles=${inspection.changedFiles.join(",")}; ${error.message}`, remediation, retry);
         }
+        settlementData.attempt = lease.attempt;
+        settlementData.executorHead = inspection.headCommit;
       }
+      const settleEvent = makeEvent("task.settled", settlementData, goalId);
       projection = appendEventFn(root, settleEvent, projection.version);
 
       const cpEvent = makeEvent("goal.checkpoint", { nextAction: params.next_action }, goalId);
@@ -920,6 +942,16 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
       // This guard deliberately precedes every recovery probe, event append, HEAD
       // read, and cleanup action. Patch equivalence on another ref is not consent.
+      if (taskWorkspace.phase === "active" && task.status === "succeeded") {
+        const settlement = task.settlement;
+        const retry = { tool: "goal_status", params: { goal_id: goalId } };
+        if (!settlement) {
+          throw settlementIdentityError("EXECUTOR_SETTLEMENT_IDENTITY_MISSING", `workspace=${lease.path}; settlement=missing`, retry);
+        }
+        if (settlement.attempt !== taskWorkspace.attempt || settlement.attempt !== lease.attempt || settlement.executorHead !== activeInspection.headCommit) {
+          throw settlementIdentityError("EXECUTOR_SETTLEMENT_HEAD_MISMATCH", `workspace=${lease.path}; settlementAttempt=${settlement.attempt}; leaseAttempt=${lease.attempt}; settlementHead=${settlement.executorHead}; observedHead=${activeInspection.headCommit}`, retry);
+        }
+      }
       if (currentOriginRef(cwd) !== taskWorkspace.originRef) {
         throw new Error(`Origin ref mismatch (expected ${taskWorkspace.originRef})`);
       }
@@ -985,9 +1017,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
 
         const strategy = params.strategy || DEFAULT_DISPOSITION_STRATEGY;
-        const executorHead = action === "integrate"
-          ? inspection.headCommit
-          : gitHead(lease.path);
+        const executorHead = inspection.headCommit;
 
         const startedEvent = makeEvent("task.workspace_disposition_started", {
           taskId,
