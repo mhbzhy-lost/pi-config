@@ -239,17 +239,20 @@ test("pending contract oracle catches derived composite ids and requirement comb
   assert.throws(() => assertPendingTaskContractsCompile(p, "/workspace/project"), /requirements.*32/);
 });
 
-test("completed optional context is stable, bounded, and skips oversized facts", () => {
+test("completed optional context retains ordered facts/files and makes every omission explicit", () => {
   const p = buildProjection();
   const completed = p.tasks.get("t1");
   completed.status = "accepted";
-  completed.evidence = Array.from({ length: 40 }, (_, i) => ({ type: "log", ref: `evidence-${i}` }));
-  completed.evidence.unshift({ type: "log", ref: "x".repeat(4097) });
-  completed.writePaths = ["src/ok.ts", ...Array.from({ length: 40 }, (_, i) => `src/${i}.ts`)];
+  completed.evidence = [{ type: "log", ref: "证".repeat(2049) }, ...Array.from({ length: 31 }, (_, i) => ({ type: "log", ref: `evidence-${i}` }))];
+  completed.writePaths = ["src/ok.ts", "src/ok.ts", ...Array.from({ length: 32 }, (_, i) => `src/${i}.ts`)];
   const first = compileTaskContract(p, "t2", "/workspace/project");
   const second = compileTaskContract(p, "t2", "/workspace/project");
-  assert.ok(first.context.knownFacts.length <= 32);
-  assert.ok(first.context.relevantFiles.length <= 32);
+  assert.deepEqual(first.context.knownFacts.slice(0, 2), ["Goal: Build auth module", "Scope: src/auth/"]);
+  assert.match(first.context.knownFacts.at(-1), /Context omitted: facts=4; files=2/);
+  assert.deepEqual(first.context.relevantFiles.slice(0, 2), ["src/ok.ts", "src/0.ts"]);
+  assert.equal(first.context.knownFacts.length, 32);
+  assert.equal(first.context.relevantFiles.length, 32);
   assert.ok(first.context.knownFacts.every((fact) => Buffer.byteLength(fact, "utf8") <= 4096));
+  assert.ok(first.context.knownFacts.every((fact) => !fact.endsWith("证")));
   assert.deepEqual(first.context, second.context);
 });

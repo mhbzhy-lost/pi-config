@@ -1678,6 +1678,25 @@ test("goal_accept completed historical verdict is durable authority without appe
   assert.equal(readGoalEvents(cwd, goalId).length, before);
 });
 
+test("goal_amend validates the complete candidate against lexical origin cwd before append", async () => {
+  const cwd = tmpCwd();
+  const objective = "Amend origin command validation";
+  const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "initial task", writePaths: ["src/t1.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
+  const before = readGoalEvents(cwd, goalId).length;
+  await assert.rejects(
+    () => invoke(pi, "goal_amend", { reason: "Reject an added command that hardcodes the actual origin cwd", add_tasks: [{ id: "t2", description: "unsafe add", writePaths: ["src/t2.ts"], acceptance: { criteria: ["works"], commands: [`node ${cwd}/scripts/test.mjs`] }, workflow: "tdd" }] }),
+    (error) => error.code === "INVALID_GOAL_CONTRACT" && /hardcode origin cwd.*stateChanged=false/i.test(error.message),
+  );
+  await assert.rejects(
+    () => invoke(pi, "goal_amend", { reason: "Reject an updated command that hardcodes the actual origin cwd", update_tasks: { t1: { acceptance: { criteria: ["works"], commands: [`node ${cwd}/scripts/test.mjs`] } } } }),
+    (error) => error.code === "INVALID_GOAL_CONTRACT" && /hardcode origin cwd.*stateChanged=false/i.test(error.message),
+  );
+  assert.equal(readGoalEvents(cwd, goalId).length, before);
+});
+
 test("goal_amend rejects accepted acceptance rewrite without appending an event", async () => {
   const cwd = tmpCwd();
   const objective = "Amend accepted proof protection goal";

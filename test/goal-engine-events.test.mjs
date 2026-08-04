@@ -17,6 +17,11 @@ function makeEvent(type, data, goalId = "test-goal") {
   };
 }
 
+test("v2 reducers have no ambient cwd dependency", () => {
+  const source = readFileSync(new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /process\.cwd\s*\(/);
+});
+
 test("v2 create and amend reject pending tasks that cannot compile dispatch IR atomically", () => {
   const created = {
     objective: "Valid objective",
