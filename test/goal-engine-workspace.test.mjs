@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
@@ -849,9 +849,27 @@ function assertOrphanUnverified(result) {
   assert.ok(result.observed || result.error, "unverified inventory must retain observed evidence or an error");
 }
 
+function canonicalPath(value) {
+  try {
+    return typeof value === "string" ? realpathSync(value) : value;
+  } catch {
+    return value;
+  }
+}
+
 function assertOrphanVerified(result, lease) {
   assert.equal(result.kind, "verified");
-  assert.deepEqual(result.lease, lease);
+  assert.equal(result.lease.goalId, lease.goalId);
+  assert.equal(result.lease.taskId, lease.taskId);
+  assert.equal(result.lease.attempt, lease.attempt);
+  assert.equal(result.lease.baseCommit, lease.baseCommit);
+  assert.equal(result.lease.originRef, lease.originRef);
+  assert.equal(result.lease.branch, lease.branch);
+  assert.equal(result.lease.ownerToken, lease.ownerToken);
+  assert.equal(canonicalPath(result.lease.path), canonicalPath(lease.path));
+  assert.equal(canonicalPath(result.lease.originRoot), canonicalPath(lease.originRoot));
+  assert.equal(canonicalPath(result.lease.stateRoot), canonicalPath(lease.stateRoot));
+  assert.equal(canonicalPath(result.lease.leasePath), canonicalPath(lease.leasePath));
   assert.equal(result.inspection.hasCommits, true);
   assert.equal(result.executorHead, git(lease.path, "rev-parse", "HEAD"));
 }
@@ -867,7 +885,7 @@ test("orphan inventory resource bitmap covers 000 through 111", () => {
     }
     const [workspaceExists, branchExists, leaseExists] = bitmap.split("").map(Number);
     if (!workspaceExists) git(fixture.originRoot, "worktree", "remove", "--force", fixture.lease.path);
-    if (!branchExists) git(fixture.originRoot, "branch", "-D", fixture.lease.branch);
+    if (!branchExists) git(fixture.originRoot, "update-ref", "-d", `refs/heads/${fixture.lease.branch}`);
     if (!leaseExists) rmSync(fixture.lease.leasePath, { force: true });
     const result = orphanInventoryApi()({ ...fixture });
     assert.deepEqual(result.resources, { workspaceExists: Boolean(workspaceExists), branchExists: Boolean(branchExists), leaseExists: Boolean(leaseExists) });
@@ -894,7 +912,10 @@ test("orphan inventory commit-range identity distinguishes invalid and usable hi
     const fixture = orphanArgs(`range-${scenario.replace(/ /g, "-")}`);
     const lease = { ...fixture.lease };
     if (scenario === "missing base") lease.baseCommit = "0000000000000000000000000000000000000000";
-    if (scenario === "unrelated base") lease.baseCommit = git(initRepo(), "rev-parse", "HEAD");
+    if (scenario === "unrelated base") {
+      const unrelatedBaseTree = git(fixture.originRoot, "rev-parse", "HEAD^{tree}");
+      lease.baseCommit = git(fixture.originRoot, "commit-tree", unrelatedBaseTree, "-m", "test: unrelated base");
+    }
     if (scenario === "empty descendant") git(lease.path, "commit", "--allow-empty", "-m", "test: empty");
     if (scenario === "clean non-empty descendant") { writeFileSync(join(lease.path, "child.txt"), "child\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "test: child"); }
     writeFileSync(lease.leasePath, JSON.stringify(lease));
