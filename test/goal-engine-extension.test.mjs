@@ -2491,44 +2491,45 @@ function verifiedOrphanAmendContract() {
   };
 }
 
-test("verified orphan amend blocks remove, update, and replacement without side effects", async () => {
-  const replacement = { id: "t1", description: "Replacement task", deps: [], writePaths: ["src/replacement.ts"], acceptance: { criteria: ["replacement"], commands: ["true"] }, workflow: "tdd" };
-  for (const params of [
-    { remove_tasks: ["t1"] },
-    { update_tasks: { t1: { description: "Legitimate changed description" } } },
-    { remove_tasks: ["t1"], add_tasks: [replacement] },
-  ]) {
-    const fixture = await twoTaskRollbackOrphanFixture(JSON.stringify(params));
+for (const { name, params } of [
+  { name: "remove", params: { remove_tasks: ["t1"] } },
+  { name: "update", params: { update_tasks: { t1: { description: "Legitimate changed description" } } } },
+  { name: "remove and add replacement", params: { remove_tasks: ["t1"], add_tasks: [{ id: "t1", description: "Replacement task", deps: [], writePaths: ["src/replacement.ts"], acceptance: { criteria: ["replacement"], commands: ["true"] }, workflow: "tdd" }] } },
+]) {
+  test(`verified orphan amend blocks ${name} without side effects`, async () => {
+    const fixture = await twoTaskRollbackOrphanFixture(`verified ${name}`);
     const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
     await assert.rejects(() => invoke(fixture.pi, "goal_amend", { reason: "Do not bypass verified orphan recovery", ...params }), (error) => {
       assertOrphanRecoveryContract(error, verifiedOrphanAmendContract());
       return true;
     });
     assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
-  }
-});
+  });
+}
 
-test("unverified orphan amend blocks remove and update without side effects", async () => {
-  const expected = {
-    code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
-    observed: { taskId: "t1", candidate: { attempt: 1 }, resources: { workspaceExists: true, branchExists: true, leaseExists: false } },
-    remediation: "inspect the authoritative recovery state with goal_status before any workspace action",
-    stateChanged: false,
-    requiredNextAction: { tool: "goal_status", params: { goal_id: null } },
-    blockingReason: { code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED", resources: { workspaceExists: true, branchExists: true, leaseExists: false }, observed: "partial executor workspace resources" },
-  };
-  for (const params of [{ remove_tasks: ["t1"] }, { update_tasks: { t1: { description: "Legitimate changed description" } } }]) {
-    const fixture = await twoTaskRollbackOrphanFixture(JSON.stringify(params), { removeLease: true });
+for (const { name, params } of [
+  { name: "remove", params: { remove_tasks: ["t1"] } },
+  { name: "update", params: { update_tasks: { t1: { description: "Legitimate changed description" } } } },
+]) {
+  test(`unverified orphan amend blocks ${name} without side effects`, async () => {
+    const fixture = await twoTaskRollbackOrphanFixture(`unverified ${name}`, { removeLease: true });
     const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
-    expected.requiredNextAction.params.goal_id = fixture.goalId;
+    const expected = {
+      code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+      observed: { taskId: "t1", candidate: { attempt: 1 }, resources: { workspaceExists: true, branchExists: true, leaseExists: false } },
+      remediation: "inspect the authoritative recovery state with goal_status before any workspace action",
+      stateChanged: false,
+      requiredNextAction: { tool: "goal_status", params: { goal_id: fixture.goalId } },
+      blockingReason: { code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED", resources: { workspaceExists: true, branchExists: true, leaseExists: false }, observed: "partial executor workspace resources" },
+    };
     await assert.rejects(() => invoke(fixture.pi, "goal_amend", { reason: "Do not bypass unverified orphan recovery", ...params }), (error) => {
       assert.equal(Object.hasOwn(error.blockingReason, "choices"), false);
       assertOrphanRecoveryContract(error, expected);
       return true;
     });
     assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
-  }
-});
+  });
+}
 
 test("invalid contract takes priority over verified orphan amend without side effects", async () => {
   const fixture = await twoTaskRollbackOrphanFixture("invalid priority");
