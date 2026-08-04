@@ -364,3 +364,41 @@ test("terminal goal lifecycle makes every task non-runnable", () => {
     }
   }
 });
+
+test("orphan graph overlay selects candidate attempts and blocks only listed frontier tasks", () => {
+  const projection = projectionState({
+    first: taskState({ attempts: 1, workspace: { phase: "disposed", disposition: "discarded", released: true, attempt: 1 } }),
+    second: taskState(),
+  });
+  assert.equal(graph.nextDispatchAttempt(projection, "first"), 2);
+  assert.equal(graph.nextDispatchAttempt(projection, "second"), 1);
+  assert.equal(graph.nextDispatchAttempt(projectionState({ done: taskState({ status: "accepted" }) }), "done"), null);
+  assert.deepEqual(graph.runnableFrontier(projection, { blockedTaskIds: new Set(["first"]) }), ["second"]);
+});
+
+test("orphan graph overlay advertises verified recovery and non-destructive unverified state", () => {
+  const verified = graph.orphanWorkspaceActionState("t1", {
+    kind: "orphaned",
+    verified: true,
+    attempt: 1,
+    resources: { workspace: true, branch: true, lease: true },
+  });
+  assert.deepEqual(verified, {
+    allowedActions: ["goal_integrate"],
+    requiredNextAction: null,
+    blockingReason: {
+      code: "ORPHANED_EXECUTOR_WORKSPACE",
+      requiresHumanDecision: true,
+      choices: [
+        { tool: "goal_integrate", params: { task_id: "t1", action: "discard" } },
+        { tool: "goal_integrate", params: { task_id: "t1", action: "preserve" } },
+      ],
+    },
+  });
+  const unverified = graph.orphanWorkspaceActionState("t1", { kind: "orphaned", verified: false, resources: { workspace: true, branch: true, lease: false } });
+  assert.equal(unverified.blockingReason.code, "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED");
+  assert.equal(unverified.requiredNextAction, null);
+  assert.deepEqual(unverified.allowedActions, []);
+  assert.equal(Object.hasOwn(unverified.blockingReason, "choices"), false);
+  assert.deepEqual(unverified.blockingReason.resources, { workspace: true, branch: true, lease: false });
+});

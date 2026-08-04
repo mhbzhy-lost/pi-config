@@ -2391,3 +2391,66 @@ test("semantic priority keeps task-state and reducer errors ahead of workspace-m
     });
   }
 });
+
+function rollbackDispatchToCreated(cwd, goalId, createdBytes) {
+  const root = join(cwd, ".state/goal-engine");
+  writeFileSync(goalEventsPath(cwd, goalId), createdBytes.events);
+  if (createdBytes.projection === null) rmSync(join(root, "goals", goalId, "projection.json"), { force: true });
+  else writeFileSync(join(root, "goals", goalId, "projection.json"), createdBytes.projection);
+  writeFileSync(join(root, "registry.json"), createdBytes.registry);
+}
+
+async function dispatchedRollbackFixture(label, { removeLease = false } = {}) {
+  const cwd = tmpCwd();
+  const objective = `Event rollback orphan ${label}`;
+  const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Create a rollback orphan", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  const created = Object.fromEntries(["events", "projection", "registry"].map((key, index) => [key, persistedStateBytes(cwd, goalId)[index]]));
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  if (removeLease) rmSync(workspaceState(cwd, goalId, "t1").leasePath);
+  rollbackDispatchToCreated(cwd, goalId, created);
+  const restarted = createMockPi(cwd);
+  createGoalEngineExtension(restarted);
+  return { cwd, goalId, pi: restarted, workspace: dispatched.workspace };
+}
+
+test("event rollback verified orphan status and dispatch are side-effect free", async () => {
+  const fixture = await dispatchedRollbackFixture("verified");
+  const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
+  const status = JSON.parse(await invoke(fixture.pi, "goal_status", {}));
+  assert.deepEqual(status.runnable, []);
+  assert.deepEqual(status.tasks.t1.allowedActions, ["goal_integrate"]);
+  assert.equal(status.tasks.t1.requiredNextAction, null);
+  assert.deepEqual(status.tasks.t1.blockingReason, {
+    code: "ORPHANED_EXECUTOR_WORKSPACE", requiresHumanDecision: true,
+    choices: [
+      { tool: "goal_integrate", params: { task_id: "t1", action: "discard" } },
+      { tool: "goal_integrate", params: { task_id: "t1", action: "preserve" } },
+    ],
+  });
+  assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
+  await assert.rejects(() => invoke(fixture.pi, "goal_dispatch", { task_id: "t1" }), (error) => {
+    assert.equal(error.code, "ORPHANED_EXECUTOR_WORKSPACE");
+    assert.match(error.message, /observed=.*remediation=.*stateChanged=false/);
+    assert.equal(error.requiredNextAction, null);
+    assert.deepEqual(error.blockingReason, status.tasks.t1.blockingReason);
+    return true;
+  });
+  assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
+});
+
+test("event rollback unverified orphan has no destructive recovery choices", async () => {
+  const fixture = await dispatchedRollbackFixture("unverified", { removeLease: true });
+  const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
+  const status = JSON.parse(await invoke(fixture.pi, "goal_status", {}));
+  assert.deepEqual(status.runnable, []);
+  assert.equal(status.tasks.t1.blockingReason.code, "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED");
+  assert.equal(status.tasks.t1.requiredNextAction, null);
+  assert.equal(Object.hasOwn(status.tasks.t1.blockingReason, "choices"), false);
+  assert.ok(status.tasks.t1.blockingReason.resources);
+  assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
+  await assert.rejects(() => invoke(fixture.pi, "goal_dispatch", { task_id: "t1" }), (error) => error.code === "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED" && (error.requiredNextAction === null || error.requiredNextAction?.tool === "goal_status"));
+  assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
+});
