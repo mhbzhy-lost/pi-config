@@ -2180,5 +2180,5 @@ test("semantic priority keeps task-state and reducer errors ahead of workspace-m
   const settled = { schemaVersion: "goal-engine.event.v1", eventId: `${invalid}-settled`, goalId: invalid, occurredAt: "2024-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, nextAction: "continue" } };
   writeHistory(invalid, [created(invalid), dispatched, settled]);
   pi = createMockPi(cwd); createGoalEngineExtension(pi);
-  await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover through typed status after reviewing the semantic failure." }), /nextAction|next action|semantic/i);
+  await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover through typed status after reviewing the semantic failure." }), /nextAction|next_action|next action|semantic/i);
 });
