@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, existsSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
@@ -828,4 +828,123 @@ test("inspectExecutorWorkspaceResources tracks workspace, branch, and lease life
     branchExists: true,
     leaseExists: true,
   });
+});
+
+function orphanInventoryApi() {
+  assert.equal(typeof workspace.inspectOrphanedExecutorWorkspace, "function", "inspectOrphanedExecutorWorkspace must be exported");
+  return workspace.inspectOrphanedExecutorWorkspace;
+}
+
+function orphanArgs(goalId = "orphan", taskId = "t1", attempt = 1) {
+  const originRoot = initRepo();
+  const stateRoot = tmpStateRoot();
+  const baseCommit = git(originRoot, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId, taskId, attempt, originRoot, stateRoot, baseCommit });
+  return { goalId, taskId, attempt, originRoot, stateRoot, lease };
+}
+
+function assertOrphanUnverified(result) {
+  assert.equal(result.kind, "unverified");
+  assert.deepEqual(Object.keys(result.resources).sort(), ["branchExists", "leaseExists", "workspaceExists"]);
+  assert.ok(result.observed || result.error, "unverified inventory must retain observed evidence or an error");
+}
+
+function assertOrphanVerified(result, lease) {
+  assert.equal(result.kind, "verified");
+  assert.deepEqual(result.lease, lease);
+  assert.equal(result.inspection.hasCommits, true);
+  assert.equal(result.executorHead, git(lease.path, "rev-parse", "HEAD"));
+}
+
+test("orphan inventory resource bitmap covers 000 through 111", () => {
+  orphanInventoryApi();
+  for (const bitmap of ["000", "001", "010", "011", "100", "101", "110", "111"]) {
+    const fixture = orphanArgs(`bitmap-${bitmap}`);
+    if (bitmap === "111") {
+      writeFileSync(join(fixture.lease.path, "child.txt"), "child\n");
+      git(fixture.lease.path, "add", "child.txt");
+      git(fixture.lease.path, "commit", "-m", "test: child");
+    }
+    const [workspaceExists, branchExists, leaseExists] = bitmap.split("").map(Number);
+    if (!workspaceExists) git(fixture.originRoot, "worktree", "remove", "--force", fixture.lease.path);
+    if (!branchExists) git(fixture.originRoot, "branch", "-D", fixture.lease.branch);
+    if (!leaseExists) rmSync(fixture.lease.leasePath, { force: true });
+    const result = orphanInventoryApi()({ ...fixture });
+    assert.deepEqual(result.resources, { workspaceExists: Boolean(workspaceExists), branchExists: Boolean(branchExists), leaseExists: Boolean(leaseExists) });
+    if (bitmap === "000") assert.equal(result.kind, "none");
+    else if (bitmap === "111") assertOrphanVerified(result, fixture.lease);
+    else assertOrphanUnverified(result);
+  }
+});
+
+test("orphan inventory persisted lease envelope rejects malformed and canonical mismatches", () => {
+  orphanInventoryApi();
+  for (const field of ["malformed JSON", "goalId", "taskId", "attempt", "stateRoot", "path", "originRoot", "branch"]) {
+    const fixture = orphanArgs(`envelope-${field.replace(/ /g, "-")}`);
+    const other = orphanArgs(`envelope-other-${field.replace(/ /g, "-")}`);
+    const value = field === "attempt" ? 2 : field === "branch" ? other.lease.branch : field === "goalId" ? other.goalId : field === "taskId" ? other.taskId : field === "path" ? other.lease.path : field === "originRoot" ? other.originRoot : other.stateRoot;
+    writeFileSync(fixture.lease.leasePath, field === "malformed JSON" ? "{" : JSON.stringify({ ...fixture.lease, [field]: value }));
+    assertOrphanUnverified(orphanInventoryApi()(fixture));
+  }
+});
+
+test("orphan inventory commit-range identity distinguishes invalid and usable histories", () => {
+  orphanInventoryApi();
+  for (const scenario of ["missing base", "unrelated base", "no ahead", "empty descendant", "clean non-empty descendant"]) {
+    const fixture = orphanArgs(`range-${scenario.replace(/ /g, "-")}`);
+    const lease = { ...fixture.lease };
+    if (scenario === "missing base") lease.baseCommit = "0000000000000000000000000000000000000000";
+    if (scenario === "unrelated base") lease.baseCommit = git(initRepo(), "rev-parse", "HEAD");
+    if (scenario === "empty descendant") git(lease.path, "commit", "--allow-empty", "-m", "test: empty");
+    if (scenario === "clean non-empty descendant") { writeFileSync(join(lease.path, "child.txt"), "child\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "test: child"); }
+    writeFileSync(lease.leasePath, JSON.stringify(lease));
+    const result = orphanInventoryApi()(fixture);
+    if (scenario === "clean non-empty descendant") assertOrphanVerified(result, lease);
+    else assertOrphanUnverified(result);
+  }
+});
+
+test("orphan inventory live Git identity returns unverified without throwing", () => {
+  orphanInventoryApi();
+  for (const scenario of ["origin ref", "live branch", "unreadable git metadata"]) {
+    const fixture = orphanArgs(`live-${scenario.replace(/ /g, "-")}`);
+    if (scenario === "origin ref") git(fixture.originRoot, "switch", "-c", "other-origin");
+    if (scenario === "live branch") git(fixture.lease.path, "switch", "-c", "wrong-live-branch");
+    if (scenario === "unreadable git metadata") chmodSync(join(fixture.lease.path, ".git"), 0o000);
+    let result;
+    assert.doesNotThrow(() => { result = orphanInventoryApi()(fixture); });
+    if (scenario === "unreadable git metadata") chmodSync(join(fixture.lease.path, ".git"), 0o644);
+    assertOrphanUnverified(result);
+  }
+});
+
+test("orphan inventory canonical roots and paths accept aliases but reject other real locations", () => {
+  orphanInventoryApi();
+  const fixture = orphanArgs("canonical");
+  writeFileSync(join(fixture.lease.path, "child.txt"), "child\n"); git(fixture.lease.path, "add", "."); git(fixture.lease.path, "commit", "-m", "test: child");
+  const originAlias = `${fixture.originRoot}-alias`; const stateAlias = `${fixture.stateRoot}-alias`;
+  symlinkSync(fixture.originRoot, originAlias); symlinkSync(fixture.stateRoot, stateAlias);
+  assertOrphanVerified(orphanInventoryApi()({ ...fixture, originRoot: originAlias, stateRoot: stateAlias }), fixture.lease);
+  for (const field of ["path", "originRoot", "stateRoot"]) {
+    const other = orphanArgs(`canonical-other-${field}`);
+    const lease = { ...fixture.lease, [field]: field === "path" ? other.lease.path : other[field] };
+    writeFileSync(fixture.lease.leasePath, JSON.stringify(lease));
+    assertOrphanUnverified(orphanInventoryApi()(fixture));
+    writeFileSync(fixture.lease.leasePath, JSON.stringify(fixture.lease));
+  }
+});
+
+test("orphan inventory exact-attempt no-scan ignores complete attempt two", () => {
+  orphanInventoryApi();
+  const fixture = orphanArgs("no-scan", "t1", 2);
+  const result = orphanInventoryApi()({ ...fixture, attempt: 1 });
+  assert.equal(result.kind, "none");
+  assert.deepEqual(result.resources, { workspaceExists: false, branchExists: false, leaseExists: false });
+});
+
+test("orphan inventory invalid arguments throw validation errors but runtime failures are unverified", () => {
+  orphanInventoryApi();
+  const fixture = orphanArgs("invalid");
+  for (const args of [{ ...fixture, goalId: "../unsafe" }, { ...fixture, taskId: "bad/name" }, { ...fixture, attempt: 0 }, { ...fixture, originRoot: undefined }, { ...fixture, stateRoot: undefined }]) assert.throws(() => orphanInventoryApi()(args), /invalid|required|attempt/i);
+  assertOrphanUnverified(orphanInventoryApi()({ ...fixture, originRoot: join(fixture.originRoot, "not-a-repo") }));
 });
