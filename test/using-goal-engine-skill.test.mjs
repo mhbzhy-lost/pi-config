@@ -47,3 +47,26 @@ test("uses status-driven recovery and complete success or failure loops", async 
   assert.match(body, /(amend|goal_amend)[\s\S]{0,180}(re-init|重新 init|重新初始化)/i);
   assert.match(body, /(不要|禁止)[\s\S]{0,100}(手工清理|手动清理)[\s\S]{0,100}(worktree|工作树)/i);
 });
+
+test("initializes from the current project and classifies workflows by their actual work", async () => {
+  const { body } = await loadSkill();
+  assert.match(body, /(当前项目|current project)[\s\S]{0,100}(repository|workspace|仓库|工作区)[\s\S]{0,100}(有效|valid)[\s\S]{0,80}HEAD/i);
+  assert.match(body, /(未来|future)[\s\S]{0,120}(Executor worktree|执行器 worktree|执行器工作树)/i);
+  assert.doesNotMatch(body, /(Executor worktree|执行器 worktree|执行器工作树)[\s\S]{0,80}(有效|valid)[\s\S]{0,80}HEAD/i);
+  assert.match(body, /no active goal[\s\S]{0,100}(初始化检查|initialization checks)/i);
+  assert.match(body, /tdd[\s\S]{0,160}(逻辑变更|logic)[\s\S]{0,100}RED/i);
+  assert.match(body, /existing-tests[\s\S]{0,180}(真实|real)[\s\S]{0,120}(覆盖|cover)/i);
+  assert.match(body, /docs-only[\s\S]{0,180}(纯文档|pure documentation)[\s\S]{0,160}(脚本|scripts)[\s\S]{0,120}(配置|configuration)[\s\S]{0,120}(运行时|runtime)/i);
+  assert.match(body, /(混合|mixed)[\s\S]{0,100}(拆分|split)/i);
+});
+
+test("keeps Goal Engine mutation at the Host typed-tool boundary", async () => {
+  const { body } = await loadSkill();
+  assert.match(body, /(只|only)[\s\S]{0,100}(Pi Host|Host)[\s\S]{0,160}(七个|seven)[\s\S]{0,100}(typed tools|类型工具)/i);
+  assert.match(body, /(shell|CLI)[\s\S]{0,120}(禁止|不得|不要)[\s\S]{0,120}(Goal Engine|目标引擎)/i);
+  assert.match(body, /(内部 core scripts|internal core scripts)[\s\S]{0,100}(禁止|不得|不要)/i);
+  assert.match(body, /(搜索源码|search source)[\s\S]{0,140}(schema|ABI)/i);
+  assert.match(body, /(缺|missing)[\s\S]{0,100}(schema|工具|tools)[\s\S]{0,140}(停止|stop)[\s\S]{0,140}(Host|宿主)/i);
+  assert.match(body, /(当前|current)[\s\S]{0,100}(ToolDefinition|工具定义)[\s\S]{0,100}(schema|类型)/i);
+  assert.match(body, /(Git precheck|Git 预检)[\s\S]{0,100}(不受此禁止|not subject)/i);
+});
