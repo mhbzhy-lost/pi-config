@@ -176,6 +176,23 @@ test("registers seven goal engine tools", () => {
   }
 });
 
+test("tool descriptions state when to use them and when not to", () => {
+  const pi = createMockPi(tmpCwd());
+  createGoalEngineExtension(pi);
+  assert.deepEqual(
+    Object.fromEntries(pi.tools.map(({ name, description }) => [name, description])),
+    {
+      goal_init: "当跨多轮、compaction 或多个独立验收 task 时使用；创建并持久化 task DAG。不要用于单步短任务或已有 active goal 时重复创建。",
+      goal_status: "当存在或可能存在 active goal 时，在每个协调轮次开始及 compact/reload 后首先使用；返回恢复权威的 projection 和 machine action。不要凭对话历史猜进度。",
+      goal_dispatch: "当 goal_status 显示 task 的 requiredNextAction 为 goal_dispatch/runnable 且无未释放 workspace 时使用；原样交付 typed subagent contract。不要自行拼 prompt 或重复派 active task。",
+      goal_settle: "当 executor 已终止且有真实结果或工件时使用；记录结果，succeeded 必须有 evidence。不要在运行中 settle、编造证据或把命令字符串当 artifact。",
+      goal_integrate: "当 task 已 settle 且 accept 前需处置 workspace 时使用；选择 integrate、discard 或 preserve，integrate 后释放 workspace。不要未 settle 调用；preserve 仅人类明确保留现场。",
+      goal_accept: "当 task succeeded、机械验收通过且 workspace 已 integrated+released 时，或重试同一验收确认时使用；验收 task 并可完成 goal。不要只凭 executor completed 声明。",
+      goal_amend: "当人类明确改范围/DAG，或 blocked/preserved 需调整计划时使用；只改安全 pending task。不要用于正常推进或绕过门禁。",
+    },
+  );
+});
+
 test("tool execution rejects a missing cwd context", async () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);

@@ -282,7 +282,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   registerGoalTool(pi, {
     name: "goal_init",
-    description: "创建长任务 goal。将目标结构化为 task DAG（含 writePaths、acceptance、workflow），持久化到 .state/goal-engine/。用于 24h+ 跨多次 compaction 的任务。主 agent 作为 coordinator 驱动执行。",
+    description: "当跨多轮、compaction 或多个独立验收 task 时使用；创建并持久化 task DAG。不要用于单步短任务或已有 active goal 时重复创建。",
     parameters: {
       type: "object",
       properties: {
@@ -355,7 +355,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   registerGoalTool(pi, {
     name: "goal_status",
-    description: "获取当前活跃 goal 的完整恢复上下文。compact 后必须首先调用。返回：objective、task 状态、可执行前沿、next_action、进度、每个 task 的 writePaths 和 acceptance。",
+    description: "当存在或可能存在 active goal 时，在每个协调轮次开始及 compact/reload 后首先使用；返回恢复权威的 projection 和 machine action。不要凭对话历史猜进度。",
     parameters: {
       type: "object",
       properties: { goal_id: { type: "string" } },
@@ -377,7 +377,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   registerGoalTool(pi, {
     name: "goal_dispatch",
-    description: "为 task 分配独立 git worktree，编译 dispatch-ir.v1 契约（execution.cwd 指向 worktree），标记为 dispatched。返回的 contract 直接传给 subagent tool 派发 executor。",
+    description: "当 goal_status 显示 task 的 requiredNextAction 为 goal_dispatch/runnable 且无未释放 workspace 时使用；原样交付 typed subagent contract。不要自行拼 prompt 或重复派 active task。",
     parameters: {
       type: "object",
       properties: {
@@ -478,7 +478,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   registerGoalTool(pi, {
     name: "goal_settle",
-    description: "记录 executor 执行结果。succeeded 必须附带 evidence（artifact 引用，非命令字符串）。failed 将 task 重置为 pending（可重试）。同时记录 checkpoint。",
+    description: "当 executor 已终止且有真实结果或工件时使用；记录结果，succeeded 必须有 evidence。不要在运行中 settle、编造证据或把命令字符串当 artifact。",
     parameters: {
       type: "object",
       properties: {
@@ -532,7 +532,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   registerGoalTool(pi, {
     name: "goal_accept",
-    description: "验收一个 succeeded 的 task。如果所有 task 都 accepted，自动触发 goal 完成并返回 completion_verdict。",
+    description: "当 task succeeded、机械验收通过且 workspace 已 integrated+released 时，或重试同一验收确认时使用；验收 task 并可完成 goal。不要只凭 executor completed 声明。",
     parameters: {
       type: "object",
       properties: {
@@ -613,7 +613,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   registerGoalTool(pi, {
     name: "goal_amend",
-    description: "修改 goal 的 task DAG（增删改 task）。需要 reason（≥10字符）。仅可修改没有 workspace 或已 discarded 且 released 的 pending task。用于人类介入调整方向。新增 task 必须含 writePaths 和 acceptance。",
+    description: "当人类明确改范围/DAG，或 blocked/preserved 需调整计划时使用；只改安全 pending task。不要用于正常推进或绕过门禁。",
     parameters: {
       type: "object",
       properties: {
@@ -670,7 +670,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   registerGoalTool(pi, {
     name: "goal_integrate",
-    description: "将 executor worktree 的成果合回主 worktree（cherry-pick 或 merge），或丢弃。在 goal_accept 之前调用。合回后自动释放 worktree。",
+    description: "当 task 已 settle 且 accept 前需处置 workspace 时使用；选择 integrate、discard 或 preserve，integrate 后释放 workspace。不要未 settle 调用；preserve 仅人类明确保留现场。",
     parameters: {
       type: "object",
       properties: {
