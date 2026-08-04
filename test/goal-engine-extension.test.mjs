@@ -1057,9 +1057,9 @@ test("action recovery: disposed append can be repaired from projection snapshot 
   assert.notEqual(originHeadAfterFailure, originHeadBeforeIntegration);
 
   const stateAfterFailure = workspaceState(cwd, goalId, "t1");
-  assert.equal(stateAfterFailure.workspaceExists, true);
-  assert.equal(stateAfterFailure.leaseExists, true);
-  assert.equal(stateAfterFailure.branchExists, true);
+  assert.equal(stateAfterFailure.workspaceExists, false);
+  assert.equal(stateAfterFailure.leaseExists, false);
+  assert.equal(stateAfterFailure.branchExists, false);
 
   const projectionAfterFailure = loadProjection(join(cwd, ".state/goal-engine"), goalId);
   const taskAfterFailure = projectionAfterFailure.tasks.get("t1");
@@ -1203,9 +1203,9 @@ test("event failure: disposed append durable-then-throw keeps disposed and rejec
   assert.equal(taskAfterFailure.workspace.released, true);
 
   const stateAfterFailure = workspaceState(cwd, goalId, "t1");
-  assert.equal(stateAfterFailure.workspaceExists, true);
-  assert.equal(stateAfterFailure.leaseExists, true);
-  assert.equal(stateAfterFailure.branchExists, true);
+  assert.equal(stateAfterFailure.workspaceExists, false);
+  assert.equal(stateAfterFailure.leaseExists, false);
+  assert.equal(stateAfterFailure.branchExists, false);
 
   const eventsAfterFailure = readGoalEvents(cwd, goalId).filter((event) => ["task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"].includes(event.type));
   assert.equal(eventsAfterFailure.filter((event) => event.type === "task.workspace_disposition_started").length, 1);

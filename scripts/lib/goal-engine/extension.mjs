@@ -648,9 +648,7 @@ export function createGoalEngineExtension(pi, options = {}) {
             throw new Error("preserve disposition requires workspace, branch, and lease to remain available");
           }
         } else if (resources.workspaceExists || resources.branchExists || resources.leaseExists) {
-          releaseExecutorWorkspace(terminalLease, {
-            disposition: action === "integrate" ? "integrated-cleanup" : "discarded-cleanup",
-          });
+          throw new Error("disposed workspace still has resources; manual recovery required");
         }
 
         activeLeases.delete(key);
@@ -686,16 +684,6 @@ export function createGoalEngineExtension(pi, options = {}) {
           return false;
         }
 
-        // Persisting can fail. Do it before cleanup so a failed append never turns
-        // an originRef-rejected retry into an irreversible resource release.
-        const disposedEvent = makeEvent("task.workspace_disposed", {
-          taskId,
-          attempt: currentWorkspace.attempt,
-          action: currentWorkspace.requestedAction,
-          released: true,
-        }, goalId);
-        projection = appendEventFn(root, disposedEvent, projection.version);
-
         const resourcesBefore = inspectExecutorWorkspaceResources(lease);
         if (resourcesBefore.workspaceExists || resourcesBefore.branchExists || resourcesBefore.leaseExists) {
           releaseExecutorWorkspace(
@@ -710,6 +698,15 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (resourcesAfter.workspaceExists || resourcesAfter.branchExists || resourcesAfter.leaseExists) {
           throw new Error("failed to release workspace resources after disposal");
         }
+
+        // A released fact is durable evidence of an already-completed cleanup.
+        const disposedEvent = makeEvent("task.workspace_disposed", {
+          taskId,
+          attempt: currentWorkspace.attempt,
+          action: currentWorkspace.requestedAction,
+          released: true,
+        }, goalId);
+        projection = appendEventFn(root, disposedEvent, projection.version);
         return true;
       };
 

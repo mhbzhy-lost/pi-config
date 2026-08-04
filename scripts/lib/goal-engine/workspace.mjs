@@ -192,8 +192,10 @@ export function inspectExecutorWorkspace(lease) {
   if (!existsSync(lease.path)) throw new Error("Executor workspace is missing");
 
   const headCommit = git(lease.path, "rev-parse", "HEAD");
-  const statusOutput = git(lease.path, "status", "--porcelain=v1", "-uno");
-  const dirtyFiles = statusOutput ? statusOutput.split("\n").map((line) => line.slice(3)) : [];
+  const statusOutput = git(lease.path, "status", "--porcelain=v1");
+  const dirtyFiles = statusOutput
+    ? statusOutput.split("\n").map((line) => line.slice(3)).filter((file) => file && !file.startsWith(".pi-subagents/"))
+    : [];
   const untrackedOutput = git(lease.path, "ls-files", "--others", "--exclude-standard");
   const untrackedFiles = untrackedOutput
     ? untrackedOutput.split("\n").filter((file) => file && !file.startsWith(".pi-subagents/"))
@@ -329,15 +331,18 @@ function hasRebaseState(cwd) {
   return existsSync(path.join(absoluteGitDir, "rebase-merge")) || existsSync(path.join(absoluteGitDir, "rebase-apply"));
 }
 
+function userVisibleStatus(origin) {
+  const status = git(origin, "status", "--porcelain=v1");
+  return status.split("\n").filter((line) => line && line.slice(3) !== ".state/" && !line.slice(3).startsWith(".state/goal-engine/"));
+}
+
 function assertOriginPreflight(origin, { originRef, originHeadBefore }) {
   let currentRef;
   try { currentRef = git(origin, "symbolic-ref", "--quiet", "HEAD"); } catch { throw new Error("Origin ref preflight failed: detached HEAD"); }
   if (currentRef !== originRef) throw new Error(`Origin ref mismatch (expected ${originRef}, got ${currentRef})`);
   const currentHead = git(origin, "rev-parse", "HEAD");
   if (originHeadBefore && currentHead !== originHeadBefore) throw new Error("Origin HEAD mismatch before integration");
-  const status = git(origin, "status", "--porcelain=v1");
-  const userChanges = status.split("\n").filter((line) => line && line.slice(3) !== ".state/" && !line.slice(3).startsWith(".state/goal-engine/"));
-  if (userChanges.length > 0) throw new Error("Origin must be clean before integration");
+  if (userVisibleStatus(origin).length > 0) throw new Error("Origin must be clean before integration");
   if (["CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD"].some((ref) => refExists(origin, ref)) || hasRebaseState(origin)) {
     throw new Error("Origin Git sequencer is active; refusing to modify user operation");
   }
@@ -371,7 +376,7 @@ function recoverGoalSequencer(origin, { strategy, lease, executorHead, originRef
     throw new Error("Git sequencer is not provably owned by this Goal; preserving Git operation");
   }
   git(origin, strategy, "--abort");
-  if (git(origin, "symbolic-ref", "--quiet", "HEAD") !== originRef || git(origin, "rev-parse", "HEAD") !== originHeadBefore || git(origin, "status", "--porcelain=v1") !== "") {
+  if (git(origin, "symbolic-ref", "--quiet", "HEAD") !== originRef || git(origin, "rev-parse", "HEAD") !== originHeadBefore || userVisibleStatus(origin).length > 0) {
     throw new Error("Goal sequencer abort did not restore origin identity; manual recovery required");
   }
   return true;
