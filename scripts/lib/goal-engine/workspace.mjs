@@ -320,11 +320,24 @@ export function inspectOrphanedExecutorWorkspace({ goalId, taskId, attempt, orig
 
   const expected = workspacePaths(stateRoot, goalId, taskId, attempt);
   const branch = `ge/${goalId}/${taskId}/${attempt}`;
-  let resources = { workspaceExists: false, branchExists: false, leaseExists: false };
+  const resources = { workspaceExists: null, branchExists: null, leaseExists: null };
+  const probeErrors = {};
+  const probe = (field, fn) => {
+    try {
+      resources[field] = fn();
+    } catch (error) {
+      probeErrors[field] = error instanceof Error ? error.message : String(error);
+    }
+  };
+  // Probe each exact resource independently. An unknown resource is not absent,
+  // and every probe must run so the result records the complete observation.
+  probe("workspaceExists", () => probePath(expected.workspacePath));
+  probe("leaseExists", () => probePath(expected.leasePath));
+  probe("branchExists", () => refExists(originRoot, `refs/heads/${branch}`));
+  if (Object.keys(probeErrors).length > 0) {
+    return { kind: "unverified", resources, error: probeErrors };
+  }
   try {
-    resources.workspaceExists = probePath(expected.workspacePath);
-    resources.leaseExists = probePath(expected.leasePath);
-    resources.branchExists = refExists(originRoot, `refs/heads/${branch}`);
     if (!resources.workspaceExists && !resources.branchExists && !resources.leaseExists) return { kind: "none", resources };
     if (!resources.workspaceExists || !resources.branchExists || !resources.leaseExists) {
       return { kind: "unverified", resources, observed: "partial executor workspace resources" };
@@ -361,18 +374,26 @@ export function inspectOrphanedExecutorWorkspace({ goalId, taskId, attempt, orig
     };
 
     const first = canonicalSnapshot();
-    const firstInspection = inspectExecutorWorkspaceFn(first.pinnedLease);
+    // A supplied callback is only a deterministic scheduling barrier. Its
+    // result is deliberately ignored; verified facts always come from the
+    // production inspector.
+    if (inspectExecutorWorkspaceFn !== inspectExecutorWorkspace) {
+      inspectExecutorWorkspaceFn(first.pinnedLease);
+    }
+    const firstInspection = inspectExecutorWorkspace(first.pinnedLease);
     const second = canonicalSnapshot();
     if (first.leaseText !== second.leaseText || first.persistedOrigin !== second.persistedOrigin
       || first.persistedState !== second.persistedState || first.persistedPath !== second.persistedPath
-      || first.currentOriginRef !== second.currentOriginRef || first.workspaceHead !== second.workspaceHead) {
+      || first.currentOriginRef !== second.currentOriginRef || first.workspaceHead !== second.workspaceHead
+      || firstInspection.headCommit !== first.workspaceHead) {
       return { kind: "unverified", resources, observed: "executor workspace identity changed during inspection" };
     }
-    const secondInspection = inspectExecutorWorkspaceFn(second.pinnedLease);
+    const secondInspection = inspectExecutorWorkspace(second.pinnedLease);
     const third = canonicalSnapshot();
     if (second.leaseText !== third.leaseText || second.persistedOrigin !== third.persistedOrigin
       || second.persistedState !== third.persistedState || second.persistedPath !== third.persistedPath
       || second.currentOriginRef !== third.currentOriginRef || second.workspaceHead !== third.workspaceHead
+      || secondInspection.headCommit !== second.workspaceHead
       || inspectionSnapshot(firstInspection) !== inspectionSnapshot(secondInspection)) {
       return { kind: "unverified", resources, observed: "executor workspace inspection changed during verification" };
     }
