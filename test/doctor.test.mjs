@@ -342,6 +342,27 @@ test("inspectConfiguration reports malformed allowlisted Skill frontmatter and c
   }
 });
 
+test("inspectConfiguration reports boolean description frontmatter and continues", async () => {
+  const root = await mkdtemp(join(tmpdir(), "doctor-"));
+  try {
+    await mkdir(join(root, "skill-overrides", "writing-plans"), { recursive: true });
+    await writeFile(join(root, "skill-overrides", "skills.list"), "writing-plans\n");
+    await writeFile(join(root, "skill-overrides", "writing-plans", "SKILL.md"), "---\nname: writing-plans\ndescription: true\n---\n");
+    await mkdir(join(root, "pi", "extensions"), { recursive: true });
+    await mkdir(join(root, "scripts"), { recursive: true });
+    await writeFile(join(root, "pi", "settings.json"), "{}");
+    await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
+    await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
+
+    const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
+    assert.ok(issues.includes("invalid frontmatter for allowlisted skill: writing-plans: unsupported string scalar"));
+    assert.ok(issues.includes("unexpected Skill whitelist"));
+    assert.ok(issues.includes("missing Pi package: pi-subagents@0.37.2"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("inspectConfiguration reports the actual Pi executable version", async () => {
   const issues = await inspectConfiguration(repoRoot, { readPiVersion: async () => "0.80.9" });
   assert.ok(issues.includes("unexpected Pi version: 0.80.9; supported 0.82.0, 0.82.1, 0.83.0"));

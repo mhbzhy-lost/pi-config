@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { piHostModuleUrl } from "./helpers/pi-host.mjs";
 import test from "node:test";
 import createSkillWhitelistExtension from "../scripts/lib/skill-whitelist-extension.mjs";
-import { loadDesiredSkills } from "../scripts/lib/skill-whitelist.mjs";
+import { loadDesiredSkills, resolveSkillSource } from "../scripts/lib/skill-whitelist.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -49,6 +49,40 @@ test("resources_discover rejects a malformed local list", async () => {
     await assert.rejects(handlers.get("resources_discover")({ cwd: root }, {}), /invalid skill name: Bad_Name/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveSkillSource and Pi loader agree on description scalar fixtures", async () => {
+  const fixtures = [
+    ["true", false], ["false", false], ["123", false], ["~", false],
+    [".nan", false], [".inf", false], ["2026-08-05", false], ["null", false],
+    ['"true"', true], ["'123'", true], ['"2026-08-05"', true], ["描述 fixture", true],
+  ];
+  const { loadSkillsFromDir } = await import(piHostModuleUrl);
+
+  for (const [description, valid] of fixtures) {
+    const root = await mkdtemp(join(tmpdir(), "skill-scalar-"));
+    try {
+      const skillPath = join(root, "skill-overrides", "writing-plans");
+      await mkdir(skillPath, { recursive: true });
+      await writeFile(join(skillPath, "SKILL.md"), `---\nname: writing-plans\ndescription: ${description}\n---\n`);
+
+      if (valid) {
+        assert.equal(await resolveSkillSource(root, "writing-plans"), skillPath, description);
+      } else {
+        await assert.rejects(resolveSkillSource(root, "writing-plans"), /unsupported string scalar/, description);
+      }
+
+      const result = await loadSkillsFromDir({ dir: skillPath, source: "allowlist" });
+      if (valid) {
+        assert.equal(result.skills.length, 1, description);
+        assert.equal(typeof result.skills[0].description, "string", description);
+      } else {
+        assert.equal(result.skills.length, 0, description);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
