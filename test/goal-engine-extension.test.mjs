@@ -2430,12 +2430,11 @@ async function dispatchedRollbackFixture(label, { removeLease = false } = {}) {
   await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Create a rollback orphan", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
   const created = Object.fromEntries(["events", "projection", "registry"].map((key, index) => [key, persistedStateBytes(cwd, goalId)[index]]));
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
-  const started = readGoalEvents(cwd, goalId).at(-1).data;
   if (removeLease) rmSync(workspaceState(cwd, goalId, "t1").leasePath);
   rollbackDispatchToCreated(cwd, goalId, created);
   const restarted = createMockPi(cwd);
   createGoalEngineExtension(restarted);
-  return { cwd, goalId, pi: restarted, workspace: dispatched.workspace, started };
+  return { cwd, goalId, pi: restarted, workspace: dispatched.workspace };
 }
 
 test("event rollback verified orphan status and dispatch are side-effect free", async () => {
@@ -2555,17 +2554,20 @@ test("status removes only an orphaned task from a multi-task runnable frontier",
 
 test("orphan recover discard records recovery before the three disposition phases", async () => {
   const fixture = await dispatchedRollbackFixture("recover discard");
+  const originHeadBefore = git(fixture.cwd, "rev-parse", "HEAD");
   const result = JSON.parse(await invoke(fixture.pi, "goal_integrate", { task_id: "t1", action: "discard" }));
   assert.deepEqual(result, { action: "discarded", released: true });
   const events = readGoalEvents(fixture.cwd, fixture.goalId);
+  const [recoveryEvent, startedEvent] = events.slice(-4);
   assert.deepEqual(events.slice(-4).map((event) => event.type), ["task.workspace_orphan_recovered", "task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"]);
-  const recovery = events.at(-4).data;
+  const recovery = recoveryEvent.data;
+  assert.deepEqual(startedEvent.data, { taskId: "t1", attempt: 1, requestedAction: "discard", strategy: "cherry-pick", executorHead: recovery.executorHead, originHeadBefore, originRef: recovery.workspace.originRef });
   assert.deepEqual({ taskId: recovery.taskId, attempt: recovery.attempt, workspace: recovery.workspace, executorHead: recovery.executorHead }, { taskId: "t1", attempt: 1, workspace: fixture.workspace, executorHead: git(fixture.workspace.path, "rev-parse", "HEAD") });
   assert.equal(typeof recovery.reason, "string"); assert.ok(recovery.reason.length > 0);
   assert.deepEqual(workspaceState(fixture.cwd, fixture.goalId, "t1"), { workspacePath: workspaceState(fixture.cwd, fixture.goalId, "t1").workspacePath, leasePath: workspaceState(fixture.cwd, fixture.goalId, "t1").leasePath, branch: workspaceState(fixture.cwd, fixture.goalId, "t1").branch, workspaceExists: false, leaseExists: false, branchExists: false });
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
   assert.equal(projection.status, "pending"); assert.equal(projection.attempts, 1);
-  assert.deepEqual(projection.workspace, { ...recovery.workspace, executorHead: recovery.executorHead, phase: "disposed", recovery: "orphaned", requestedAction: fixture.started.requestedAction, strategy: fixture.started.strategy, originHeadBefore: fixture.started.originHeadBefore, originRef: fixture.started.originRef, disposition: "discarded", released: true });
+  assert.deepEqual(projection.workspace, { ...recovery.workspace, executorHead: recovery.executorHead, phase: "disposed", recovery: "orphaned", requestedAction: startedEvent.data.requestedAction, strategy: startedEvent.data.strategy, originHeadBefore: startedEvent.data.originHeadBefore, originRef: startedEvent.data.originRef, disposition: "discarded", released: true });
   const status = JSON.parse(await invoke(fixture.pi, "goal_status", {}));
   assert.deepEqual(status.runnable, ["t1"]);
   assert.equal(JSON.parse(await invoke(fixture.pi, "goal_dispatch", { task_id: "t1" })).workspace.attempt, 2);
@@ -2573,15 +2575,18 @@ test("orphan recover discard records recovery before the three disposition phase
 
 test("orphan recover preserve blocks redispatch with an exact discard action", async () => {
   const fixture = await dispatchedRollbackFixture("recover preserve");
+  const originHeadBefore = git(fixture.cwd, "rev-parse", "HEAD");
   assert.deepEqual(JSON.parse(await invoke(fixture.pi, "goal_integrate", { task_id: "t1", action: "preserve" })), { action: "preserved", released: false, path: fixture.workspace.path, branch: fixture.workspace.branch });
+  const [recoveryEvent, startedEvent] = readGoalEvents(fixture.cwd, fixture.goalId).slice(-4);
   assert.deepEqual(readGoalEvents(fixture.cwd, fixture.goalId).slice(-4).map((event) => event.type), ["task.workspace_orphan_recovered", "task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"]);
+  assert.deepEqual(startedEvent.data, { taskId: "t1", attempt: 1, requestedAction: "preserve", strategy: "cherry-pick", executorHead: recoveryEvent.data.executorHead, originHeadBefore, originRef: recoveryEvent.data.workspace.originRef });
   const resources = workspaceState(fixture.cwd, fixture.goalId, "t1");
   assert.equal(resources.workspaceExists, true);
   assert.equal(resources.leaseExists, true);
   assert.equal(resources.branchExists, true);
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
-  const recovery = readGoalEvents(fixture.cwd, fixture.goalId).at(-4).data;
-  assert.deepEqual(projection.workspace, { ...recovery.workspace, executorHead: recovery.executorHead, phase: "disposed", recovery: "orphaned", requestedAction: fixture.started.requestedAction, strategy: fixture.started.strategy, originHeadBefore: fixture.started.originHeadBefore, originRef: fixture.started.originRef, disposition: "preserved", released: false });
+  const recovery = recoveryEvent.data;
+  assert.deepEqual(projection.workspace, { ...recovery.workspace, executorHead: recovery.executorHead, phase: "disposed", recovery: "orphaned", requestedAction: startedEvent.data.requestedAction, strategy: startedEvent.data.strategy, originHeadBefore: startedEvent.data.originHeadBefore, originRef: startedEvent.data.originRef, disposition: "preserved", released: false });
   const status = JSON.parse(await invoke(fixture.pi, "goal_status", {}));
   assert.deepEqual(status.runnable, []);
   assertTaskMachineAction(status.tasks.t1, { allowedActions: ["goal_integrate"], requiredTool: "goal_integrate", requiredParams: { task_id: "t1", action: "discard" }, blockingReason: status.tasks.t1.blockingReason });
@@ -2599,13 +2604,24 @@ test("orphan integrate rejects before recovery or Git effects", async () => {
 
 test("orphan identity failures reject discard and preserve without side effects", async () => {
   const cases = [
-    { label: "partial", mutate: (f) => rmSync(workspaceState(f.cwd, f.goalId, "t1").leasePath) },
-    { label: "tampered", mutate: (f) => { const path = workspaceState(f.cwd, f.goalId, "t1").leasePath; const lease = JSON.parse(readFileSync(path)); lease.taskId = "other"; writeFileSync(path, JSON.stringify(lease)); } },
-    { label: "origin ref", mutate: (f) => git(f.cwd, "checkout", "-b", "other-origin") },
+    { label: "partial", mutate: (f) => rmSync(workspaceState(f.cwd, f.goalId, "t1").leasePath), blockingReason: { code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED", resources: { workspaceExists: true, branchExists: true, leaseExists: false }, observed: "partial executor workspace resources" } },
+    { label: "tampered", mutate: (f) => { const path = workspaceState(f.cwd, f.goalId, "t1").leasePath; const lease = JSON.parse(readFileSync(path)); lease.taskId = "other"; writeFileSync(path, JSON.stringify(lease)); }, blockingReason: { code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED", resources: { workspaceExists: true, branchExists: true, leaseExists: true }, error: "invalid persisted lease envelope" } },
+    { label: "origin ref", mutate: (f) => git(f.cwd, "checkout", "-b", "other-origin"), blockingReason: { code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED", resources: { workspaceExists: true, branchExists: true, leaseExists: true }, error: "origin ref mismatch" } },
   ];
-  for (const { label, mutate } of cases) for (const action of ["discard", "preserve"]) {
+  for (const { label, mutate, blockingReason } of cases) for (const action of ["discard", "preserve"]) {
     const fixture = await dispatchedRollbackFixture(`${label} ${action}`); mutate(fixture); const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
-    await assert.rejects(() => invoke(fixture.pi, "goal_integrate", { task_id: "t1", action }), (error) => error.code === "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED" && (assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: fixture.goalId } }), !Object.hasOwn(error.blockingReason, "choices")));
+    await assert.rejects(() => invoke(fixture.pi, "goal_integrate", { task_id: "t1", action }), (error) => {
+      assertOrphanRecoveryContract(error, {
+        code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+        observed: { taskId: "t1", candidate: { attempt: 1 }, resources: blockingReason.resources },
+        remediation: "inspect the authoritative recovery state with goal_status before any workspace action",
+        stateChanged: false,
+        requiredNextAction: { tool: "goal_status", params: { goal_id: fixture.goalId } },
+        blockingReason,
+      });
+      assert.equal(Object.hasOwn(error.blockingReason, "choices"), false);
+      return true;
+    });
     assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before, `${label}/${action}`);
   }
 });
