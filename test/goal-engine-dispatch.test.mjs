@@ -3,6 +3,7 @@ import test from "node:test";
 import { compileCodingDispatchIR, renderDispatchPrompt } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
 import { compileTaskContract } from "../scripts/lib/goal-engine/dispatch.mjs";
 import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
+import { validateRepoRelativePath, validateTaskDefinitions } from "../scripts/lib/goal-engine/task-definition.mjs";
 
 function makeEvent(type, data, goalId = "dispatch-test") {
   return { schemaVersion: "goal-engine.event.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
@@ -64,6 +65,31 @@ test("compileCodingDispatchIR rejects path traversal in writePaths", () => {
     () => compileCodingDispatchIR(input, { cwd: "/workspace/project" }),
     /repo-relative/,
   );
+});
+
+test("init writePaths and dispatch IR share the repo-relative POSIX matrix", () => {
+  for (const path of ["a\0b", "src\\x", "/tmp/x", "C:\\x", "\\\\host\\share", "src/../x", "src/*", "src/?", "src/[x]", "src/**/x"]) {
+    assert.throws(() => validateRepoRelativePath(path), /repo-relative|unsupported/);
+    const input = validInput();
+    input.boundaries.writePaths = [path];
+    assert.throws(() => compileCodingDispatchIR(input, { cwd: "/workspace/project" }), /repo-relative|unsupported/);
+  }
+  for (const path of ["src/x.ts", "src/generated/**"]) {
+    assert.equal(validateRepoRelativePath(path), path);
+    const input = validInput();
+    input.boundaries.writePaths = [path];
+    assert.deepEqual(compileCodingDispatchIR(input, { cwd: "/workspace/project" }).boundaries.writePaths, [path]);
+  }
+});
+
+test("task commands reject origin absolute cd but allow executor-relative dynamic cwd", () => {
+  const task = (command) => ({ description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: [command] }, workflow: "tdd" });
+  for (const command of ['cd "/tmp"', "cd '/tmp'", "cd -- /tmp", "true && cd /tmp", "true || cd /tmp", "true; cd /tmp", "true | cd /tmp", "(cd /tmp)", "echo ok\ncd /tmp", "node -e 'x' # /origin/project"]) {
+    assert.throws(() => validateTaskDefinitions(["t1"], { t1: task(command) }, { cwd: "/origin/project" }), /absolute cd|origin cwd/);
+  }
+  for (const command of ["cd relative/subdir", "echo 'cd /tmp'", "echo $PWD"]) {
+    assert.doesNotThrow(() => validateTaskDefinitions(["t1"], { t1: task(command) }, { cwd: "/origin/project" }));
+  }
 });
 
 test("renderDispatchPrompt produces structured markdown", () => {
