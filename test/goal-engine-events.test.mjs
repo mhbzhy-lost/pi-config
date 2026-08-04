@@ -1498,6 +1498,47 @@ test("historical settled replay retains legacy settlement marker while strict v2
   assert.throws(() => appendEvent(root, v2Event("task.workspace_disposition_started", { ...started("integrate", goalId).data }, goalId), replayed.version), /settlement|identity|attempt|executorHead/i);
 });
 
+function replaySettlementHistory(goalId, settlementIdentity = {}, startedIdentity = null) {
+  const root = mkdtempSync(join(tmpdir(), "ge-settlement-replay-matrix-"));
+  const events = [
+    fixedV2Event("goal.created", v2Created(goalId).data, goalId, "2024-01-01T00:00:00.000Z", `${goalId}-created`),
+    fixedV2Event("task.dispatched", { taskId: "t1", contractHash: "h", workspace: { attempt: 1, path: "/tmp/history", branch: "ge/history/t1/1", baseCommit: "base", originRef: "refs/heads/main" } }, goalId, "2024-01-01T00:00:01.000Z", `${goalId}-dispatched`),
+    fixedV2Event("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria", ...settlementIdentity }, goalId, "2024-01-01T00:00:02.000Z", `${goalId}-settled`),
+  ];
+  if (startedIdentity) events.push(fixedV2Event("task.workspace_disposition_started", { taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "merge", executorHead: "executor-head", originHeadBefore: "origin-before", ...startedIdentity }, goalId, "2024-01-01T00:00:03.000Z", `${goalId}-started`));
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${events.map(JSON.stringify).join("\n")}\n`);
+  return loadProjection(root, goalId);
+}
+
+test("historical pre-gate v2 unbound settlement and started disposition remain replayable", () => {
+  const projection = replaySettlementHistory("unbound-started-replay", {}, {});
+  const task = projection.tasks.get("t1");
+  assert.equal(task.status, "succeeded");
+  assert.equal(task.settlement ?? null, null);
+  assert.equal(task.workspace.phase, "disposing");
+  assert.equal(task.workspace.requestedAction, "integrate");
+});
+
+test("historical v2 complete settlement binding replays and remains exact through disposition", () => {
+  const projection = replaySettlementHistory("bound-started-replay", { attempt: 1, executorHead: "executor-head" }, {});
+  const task = projection.tasks.get("t1");
+  assert.deepEqual(task.settlement, { attempt: 1, executorHead: "executor-head" });
+  assert.equal(task.workspace.phase, "disposing");
+});
+
+test("historical v2 half-bound settlement identity fails closed", () => {
+  for (const [goalId, identity] of [
+    ["attempt-only-settlement", { attempt: 1 }],
+    ["head-only-settlement", { executorHead: "executor-head" }],
+  ]) assert.throws(() => replaySettlementHistory(goalId, identity), /settlement|attempt|executorHead|identity/i);
+});
+
+test("historical v2 contradictory settlement and disposition identities fail closed", () => {
+  assert.throws(() => replaySettlementHistory("wrong-settlement-attempt", { attempt: 2, executorHead: "executor-head" }), /settlement|attempt|workspace|identity/i);
+  assert.throws(() => replaySettlementHistory("wrong-started-head", { attempt: 1, executorHead: "executor-head" }, { executorHead: "different-head" }), /settlement|executorHead|identity|mismatch/i);
+});
+
 test("historical v1 dispatched and succeeded settled JSONL remains readable", () => {
   const root = mkdtempSync(join(tmpdir(), "ge-v1-settled-replay-"));
   const goalId = "v1-dispatched-succeeded";
