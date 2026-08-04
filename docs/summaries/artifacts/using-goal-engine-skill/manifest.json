@@ -106,7 +106,7 @@
   "currentChange": {
     "redStaticTest": {
       "artifact": "red-static-test.txt",
-      "sha256": "b8fbb523858c3305fe35df2ea7d72b311be7d915c610f6ab0f931e2267b0d685",
+      "sha256": "187c315ad4c6cf65d90e6784ebc0d1107b9bc4c7603f0f8799ce9af02342c0b1",
       "result": "7 tests: 6 pass, 1 expected lifecycle assertion failure"
     },
     "greenStaticTest": {

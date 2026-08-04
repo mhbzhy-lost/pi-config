@@ -19,7 +19,7 @@
 test at test/using-goal-engine-skill.test.mjs:63:1
 ✖ requires executor acceptance before settle and status-gated lifecycle transitions (0.9355ms)
   AssertionError [ERR_ASSERTION]: The input did not match the regular expression /成功路径[\s\S]{0,900}status[\s\S]{0,120}dispatch[\s\S]{0,220}Executor[\s\S]{0,220}(acceptance commands|验收命令)[\s\S]{0,180}(worktree|工作树)[\s\S]{0,180}settle[\s\S]{0,120}status[\s\S]{0,120}integrate[\s\S]{0,120}status[\s\S]{0,240}(当前项目|current project)[\s\S]{0,180}(最终回归|final regression)[\s\S]{0,180}accept/i. Input:
-  
+
   '# 使用 Goal Engine\n' +
     '\n' +
     '以 Pi Host 当前 ToolDefinition 提供的 typed schema 和 `goal_status` machine action 为权威；绝不按记忆发明工具或参数。\n' +
@@ -76,7 +76,7 @@ test at test/using-goal-engine-skill.test.mjs:63:1
     '- 不直接编辑 events 或 projection，不手工清理 Goal worktree。\n' +
     '- 不凭对话历史猜状态；reload、compaction、恢复后首先 `goal_status`。\n' +
     '- 不以 re-init 代替 amend，也不在未 settle 时处置 workspace。\n'
-  
+
       at TestContext.<anonymous> (file:///private/tmp/pi-config-using-goal-engine-review-lifecycle/test/using-goal-engine-skill.test.mjs:65:10)
       at async Test.run (node:internal/test_runner/test:1389:7)
       at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
