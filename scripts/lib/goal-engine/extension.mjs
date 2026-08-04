@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
 import { appendEvent, loadProjection, listGoals } from "./store.mjs";
 import { compileTaskContract, assertPendingTaskContractsCompile } from "./dispatch.mjs";
@@ -347,6 +348,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   const loadProjectionFn = store.loadProjection || loadProjection;
   const listGoalsFn = store.listGoals || listGoals;
   const inspectExecutorWorkspaceFn = options.inspectExecutorWorkspace || inspectExecutorWorkspace;
+  const inspectOrphanedExecutorWorkspaceBarrier = options.inspectOrphanedExecutorWorkspaceBarrier;
   const activeLeases = new Map();
   let turnsSinceSettle = 0;
 
@@ -910,7 +912,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   registerGoalTool(pi, {
     name: "goal_integrate",
-    description: "当 task 已 settle 且 accept 前需处置 workspace 时使用；选择 integrate、discard 或 preserve，integrate 后释放 workspace。不要未 settle 调用；preserve 仅人类明确保留现场。",
+    description: "当已 settle 或 status 报告 verified orphan 时使用；正常 workspace 可 integrate/discard/preserve，orphan 仅 discard/preserve。不要 integrate orphan 或手工清资源。",
     parameters: {
       type: "object",
       properties: {
@@ -928,12 +930,72 @@ export function createGoalEngineExtension(pi, options = {}) {
 
       let projection = loadProjectionFn(root, goalId);
       const taskId = params.task_id;
-      const task = projection.tasks.get(taskId);
+      let task = projection.tasks.get(taskId);
       if (!task) throw new Error(`unknown task: ${taskId}`);
 
       const action = params.action;
       const key = leaseKey(cwd, goalId, taskId);
-      const taskWorkspace = task.workspace;
+      let taskWorkspace = task.workspace;
+
+      // A pending task without a projection workspace may still own the exact
+      // next-attempt workspace after an interrupted dispatch append. Recover
+      // only a verified snapshot; the supplied callback is a scheduling
+      // barrier, never a source of recovery facts.
+      const candidateAttempt = task.status === "pending" && !taskWorkspace
+        ? nextDispatchAttempt(projection, taskId)
+        : null;
+      if (candidateAttempt !== null) {
+        const inspectOrphan = () => inspectOrphanedExecutorWorkspace({
+          goalId, taskId, attempt: candidateAttempt, originRoot: cwd, stateRoot: root,
+        }, { inspectExecutorWorkspaceFn: inspectOrphanedExecutorWorkspaceBarrier || inspectExecutorWorkspaceFn });
+        const firstInventory = inspectOrphan();
+        if (firstInventory.kind !== "none") {
+          const unverified = (inventory) => {
+            const actionState = orphanWorkspaceActionState(taskId, inventory);
+            throw orphanRecoveryError(
+              "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
+              { taskId, candidate: { attempt: candidateAttempt }, resources: inventory.resources },
+              "inspect the authoritative recovery state with goal_status before any workspace action",
+              { tool: "goal_status", params: { goal_id: goalId } },
+              actionState.blockingReason,
+            );
+          };
+          if (firstInventory.kind !== "verified") unverified(firstInventory);
+          if (action === "integrate") {
+            const actionState = orphanWorkspaceActionState(taskId, firstInventory);
+            throw orphanRecoveryError(
+              "ORPHANED_WORKSPACE_NOT_SETTLED",
+              { taskId, candidate: { attempt: candidateAttempt }, resources: firstInventory.resources },
+              "inspect the authoritative recovery state with goal_status before any workspace action",
+              { tool: "goal_status", params: { goal_id: goalId } },
+              actionState.blockingReason,
+            );
+          }
+          const secondInventory = inspectOrphan();
+          if (secondInventory.kind !== "verified" || !isDeepStrictEqual(firstInventory, secondInventory)) {
+            unverified(secondInventory);
+          }
+          const recoveryEvent = makeEvent("task.workspace_orphan_recovered", {
+            taskId,
+            attempt: candidateAttempt,
+            workspace: {
+              attempt: firstInventory.lease.attempt,
+              path: firstInventory.lease.path,
+              branch: firstInventory.lease.branch,
+              baseCommit: firstInventory.lease.baseCommit,
+              originRef: firstInventory.lease.originRef,
+            },
+            executorHead: firstInventory.executorHead,
+            reason: "verified exact orphan executor workspace recovery",
+          }, goalId);
+          appendEventFn(root, recoveryEvent, projection.version);
+          projection = loadProjectionFn(root, goalId);
+          const recoveredTask = projection.tasks.get(taskId);
+          if (!recoveredTask) throw new Error(`unknown task: ${taskId}`);
+          task = recoveredTask;
+          taskWorkspace = recoveredTask.workspace;
+        }
+      }
       if (!taskWorkspace || !taskWorkspace.phase) {
         throw new Error("workspace is not initialized for disposition");
       }
