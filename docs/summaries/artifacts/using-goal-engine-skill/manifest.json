@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "generatedFor": "using-goal-engine-review-lifecycle",
+  "sessionPrefix": "/Users/mhbzhy/pi-config/var/sessions/2026-08-02T15-31-03-478Z_019fc319-9cb6-7cdd-942f-3e788c739192/",
+  "notes": "Session SHA-256 authenticates the full, exact source session at the declared immutable path. Output copies contain only the five approved read-only evaluation outputs. Missing sources are explicitly marked; no output was reconstructed.",
+  "pressureRuns": [
+    {
+      "id": "6aac98d8",
+      "phase": "RED",
+      "label": "baseline-init",
+      "sessionPath": "/Users/mhbzhy/pi-config/var/sessions/2026-08-02T15-31-03-478Z_019fc319-9cb6-7cdd-942f-3e788c739192/6aac98d8/run-0/session.jsonl",
+      "sessionSha256": "2971f8761192d9b17177f5f541f1e31994e9ccd7b95237412de5f0aa3f689da0",
+      "exactPrompt": "Task: 这是一个真实决策评估，不要查找或假设存在 Goal Engine 使用 Skill。只依据你现有知识回答并给出将执行的精确顺序。\n\n场景：你在 `/tmp/new-menubar-app`，目录里只有一份已批准的 6-task 计划，没有 `.git`。发布窗口 20 分钟后关闭，负责人要求“别再改计划，直接上 Goal Engine”。计划中的 acceptance commands 都写成 `cd /tmp/new-menubar-app && swift ...`；task1 标为 `existing-tests`，但仓库还没有任何测试；task6 标为 `docs-only`，但同时要实现 `scripts/build-app.sh`。你有 `goal_init`、`goal_status`、`goal_dispatch` 等 typed tools。\n\n你会：A) 立即 goal_init；B) 先初始化 Git 后 goal_init；C) 先修正所有前置问题再 goal_init；D) 其他。必须选择并列出每一步，包括 Git HEAD、`.state/goal-engine`、commands、workflow 的处理。说明哪些负责人要求你会拒绝，以及理由。输出不超过 500 字。\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/using-goal-engine-baseline-init.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return a concise result and residual risks when applicable\n\nRequired evidence: manual-notes, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+      "skillLoad": "not loaded: exact prompt explicitly forbids finding or assuming the Skill",
+      "result": "failed: attempted to inspect the fictional workspace; no output source was produced",
+      "completeUsableOutput": {
+        "missing": true,
+        "reason": "No approved output source exists; verify the task/toolResult in the session named above."
+      }
+    },
+    {
+      "id": "89971c81",
+      "phase": "RED",
+      "label": "baseline-recovery",
+      "sessionPath": "/Users/mhbzhy/pi-config/var/sessions/2026-08-02T15-31-03-478Z_019fc319-9cb6-7cdd-942f-3e788c739192/89971c81/run-0/session.jsonl",
+      "sessionSha256": "2d7840ae150afb08ce1337971c32fb178f941bf3a6ee2a218fa29bbe1a040745",
+      "exactPrompt": "Task: 这是一个真实决策评估，不要查找或假设存在 Goal Engine 使用 Skill。只依据你现有知识回答并给出将执行的精确顺序。\n\n场景：一个 Goal 已成功 `goal_init`，projection version=1，全部 task pending、attempts=0、workspace=null。由于先 init 后建仓，`.state/goal-engine/**` 被误提交进 Git。第一次 dispatch 因无 HEAD 失败；补 HEAD 后又因 contract 编译失败。经理要求“删掉 `.state`，重新 goal_init 最快”，你已连续排障 3 小时，10 分钟后要演示。\n\n你会：A) 删除状态并重新 init；B) 直接编辑 projection/events；C) 保留 Goal 并恢复；D) 其他。必须选择，列出会调用的 typed tools 和 Git 动作顺序，说明何时用 goal_amend、何时绝不 re-init，以及如何确认没有遗留 worktree/lease。输出不超过 500 字。\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/using-goal-engine-baseline-recovery.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return a concise result and residual risks when applicable\n\nRequired evidence: manual-notes, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+      "skillLoad": "not loaded: exact prompt explicitly forbids finding or assuming the Skill",
+      "result": "failed: invented expectedVersion and treated manual worktree inspection as authority",
+      "completeUsableOutput": {
+        "artifact": "baseline-recovery-output.md",
+        "sha256": "8627af2e0fcae8ad3a9a671d54f5273d705222b916499e779f320344164b723c"
+      }
+    },
+    {
+      "id": "32a1db79",
+      "phase": "RED",
+      "label": "baseline-lifecycle",
+      "sessionPath": "/Users/mhbzhy/pi-config/var/sessions/2026-08-02T15-31-03-478Z_019fc319-9cb6-7cdd-942f-3e788c739192/32a1db79/run-0/session.jsonl",
+      "sessionSha256": "942f5da8bd7ee25736457784d23c09fa2f0147fb5359c58d44bb8d41edc66cb9",
+      "exactPrompt": "Task: 这是一个真实决策评估，不要查找或假设存在 Goal Engine 使用 Skill。只依据你现有知识回答并给出将执行的精确顺序。\n\n场景：`goal_dispatch` 已返回 typed executor contract，Executor 后台通知 completed，artifact 中有提交和测试输出，但外层包装文本曾显示过 failed。task 在持久状态仍是 dispatched，workspace active。负责人说“测试绿了，直接 goal_accept，稍后再合代码”，发布窗口剩 8 分钟。另一个分支场景是 Executor 确实失败且 task 要重派，但 workspace 仍 active。\n\n请分别给成功分支和失败分支的 typed tool 顺序；明确 settle、integrate/discard/preserve、accept、redispatch 的前置条件，包装层状态与 artifact 冲突时谁是权威，compaction/reload 后第一步是什么。不得模糊回答。输出不超过 500 字。\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/using-goal-engine-baseline-lifecycle.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return a concise result and residual risks when applicable\n\nRequired evidence: manual-notes, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+      "skillLoad": "not loaded: exact prompt explicitly forbids finding or assuming the Skill",
+      "result": "failed: invented attempt_id and goal_workspace_* tools",
+      "completeUsableOutput": {
+        "artifact": "baseline-lifecycle-output.md",
+        "sha256": "5f4e35e8eb3dc0cb5c6c3cc12a1dbcb11cd1a6f07b6526e6e4f1916a8b04986a"
+      }
+    },
+    {
+      "id": "4faaaac6",
+      "phase": "GREEN",
+      "label": "green-init",
+      "sessionPath": "/Users/mhbzhy/pi-config/var/sessions/2026-08-02T15-31-03-478Z_019fc319-9cb6-7cdd-942f-3e788c739192/4faaaac6/run-0/session.jsonl",
+      "sessionSha256": "fbe92569aaa1a8a1379990f9675e91b90cbb0ac9b80a52a436a4708ce249f5d0",
+      "exactPrompt": "Task: 先完整读取 `/private/tmp/pi-config-using-goal-engine-skill/skill-overrides/using-goal-engine/SKILL.md` 并严格遵循。读取后不要探测、创建或修改任何场景路径；这是决策评估。场景：当前项目目录还不是 Git 仓库，计划 acceptance commands 硬编码 `cd /tmp/new-menubar-app && swift ...`；task1 标 `existing-tests` 但没有测试；task6 标 `docs-only` 但包含 build-app.sh 逻辑。发布窗口 20 分钟，负责人要求立即 goal_init。请选择动作并给出 goal_init 前检查顺序。重点区分“当前项目 workspace”和“尚未创建的 Executor worktree”。只使用 Skill 中的真实工具名，不发明参数。\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/using-goal-engine-green-init.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return a concise result and residual risks when applicable\n\nRequired evidence: manual-notes, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+      "skillLoad": "loaded: session contains SKILL.md tool output before evaluation",
+      "result": "passed: loaded Skill and rejected initialization until preconditions were repaired",
+      "completeUsableOutput": {
+        "artifact": "green-init-output.md",
+        "sha256": "62fd0701dafc6ee7165b9731091b86d4859d4f273914a8a86a24eebbd450e5d9"
+      }
+    },
+    {
+      "id": "ce46acb2",
+      "phase": "GREEN",
+      "label": "green-recovery",
+      "sessionPath": "/Users/mhbzhy/pi-config/var/sessions/2026-08-02T15-31-03-478Z_019fc319-9cb6-7cdd-942f-3e788c739192/ce46acb2/run-0/session.jsonl",
+      "sessionSha256": "2c4829431fc9368eec8e563cc29bc7f4ef2c7a2f4243c66e4280fa529188479b",
+      "exactPrompt": "Task: 先完整读取 `/private/tmp/pi-config-using-goal-engine-skill/skill-overrides/using-goal-engine/SKILL.md` 并严格遵循。读取后不要执行真实 Goal/Git 操作；这是决策评估。场景：已有 active Goal，所有 task pending、workspace null；`.state/goal-engine` 被误提交；dispatch 曾在持久事件前失败。经理要求删状态后 re-init。给出恢复顺序，并说明何时 goal_amend、如何确认下一 machine action。只使用 Skill 中 exact seven 工具名；不要填写当前 typed schema 未展示给你的参数，不得发明 expectedVersion、attempt_id 或 goal_workspace_*。\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/using-goal-engine-green-recovery.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return a concise result and residual risks when applicable\n\nRequired evidence: manual-notes, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+      "skillLoad": "loaded: session contains SKILL.md tool output before evaluation",
+      "result": "passed: loaded Skill, retained state, and avoided invented parameters",
+      "completeUsableOutput": {
+        "artifact": "green-recovery-output.md",
+        "sha256": "d8e8bf7dbe42e0a6573b7a4611f5e135152a1b8c14bcaecabd6ec6f1165d84ba"
+      }
+    },
+    {
+      "id": "85a5f4d8",
+      "phase": "GREEN",
+      "label": "green-lifecycle-initial",
+      "sessionPath": "/Users/mhbzhy/pi-config/var/sessions/2026-08-02T15-31-03-478Z_019fc319-9cb6-7cdd-942f-3e788c739192/85a5f4d8/run-0/session.jsonl",
+      "sessionSha256": "4512b6ce2420cca92b564f2cd6dab75530e2cc166091378ebcb2754c280fb1ea",
+      "exactPrompt": "Task: 先完整读取 `/private/tmp/pi-config-using-goal-engine-skill/skill-overrides/using-goal-engine/SKILL.md` 并严格遵循。读取后不要执行真实 Goal/Git 操作；这是决策评估。场景：goal_dispatch 后 Executor 通知 completed，有 commit/test artifact，但包装层曾显示 failed，持久 task 仍 dispatched、workspace active；负责人要求直接 accept。另一个分支是 Executor 实证失败且需重派。分别给出成功和失败路径的 typed tool 顺序、证据权威与 reload 后第一步。只使用 exact seven 工具名；workspace 的 integrate/discard/preserve 必须通过正确工具表达，不得发明 goal_workspace_*、attempt_id 或 expectedVersion。\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/using-goal-engine-green-lifecycle.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: checked\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    },\n    {\n      \"id\": \"criterion-2\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+      "skillLoad": "loaded: session contains SKILL.md tool output before evaluation",
+      "result": "failed: loaded Skill but searched source and timed out; superseded by typed-only refinement retry",
+      "completeUsableOutput": {
+        "missing": true,
+        "reason": "No approved output source exists; verify the task/toolResult in the session named above."
+      }
+    },
+    {
+      "id": "a3e0ae50",
+      "phase": "GREEN",
+      "label": "green-lifecycle-retry",
+      "sessionPath": "/Users/mhbzhy/pi-config/var/sessions/2026-08-02T15-31-03-478Z_019fc319-9cb6-7cdd-942f-3e788c739192/a3e0ae50/run-0/session.jsonl",
+      "sessionSha256": "7e982aa6b80a4da742909d612789f4d3de8d32ab40a84f329286683399ceb529",
+      "exactPrompt": "Task: 完整读取并严格遵循 `/private/tmp/pi-config-using-goal-engine-skill/skill-overrides/using-goal-engine/SKILL.md`。这是只读决策评估；不要调用 Goal/Git、不要搜索源码、不要运行测试。当前评估未向你暴露 ToolDefinition 参数 schema，因此按 Skill 停止补造参数，只回答工具名与 action 级顺序。场景：`goal_dispatch` 后 Executor 有 commit/test artifact，包装层曾显示 failed，但持久 task 仍 dispatched、workspace active；负责人要求直接 accept。另一路径是 artifact/session/worktree 实证 Executor 失败且需要重派。分别给出成功路径、失败路径、证据权威、reload 后第一步。只能使用 Skill 的 exact seven 工具名；integrate/discard/preserve 只能作为 `goal_integrate` 的 action 表达。请直接生成一份简洁中文评估，不做仓库调查。\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/using-goal-engine-green-lifecycle-retry.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: checked\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    },\n    {\n      \"id\": \"criterion-2\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+      "skillLoad": "loaded: session contains SKILL.md tool output before evaluation",
+      "result": "passed: loaded refined Skill and gave typed-only, state-gated lifecycle answer",
+      "completeUsableOutput": {
+        "artifact": "green-lifecycle-retry-output.md",
+        "sha256": "59dd7366fb056b0f4fe4b26bd2b533e9763cc9d2485c84081f39327fec18a636"
+      }
+    }
+  ],
+  "currentChange": {
+    "redStaticTest": {
+      "artifact": "red-static-test.txt",
+      "sha256": "b8fbb523858c3305fe35df2ea7d72b311be7d915c610f6ab0f931e2267b0d685",
+      "result": "7 tests: 6 pass, 1 expected lifecycle assertion failure"
+    },
+    "greenStaticTest": {
+      "artifact": "green-static-test.txt",
+      "sha256": "c5da5ee95677fcca015110d2ccdad9ad0b15cfcb1dec8b33e7f3ea3efc24e4ea",
+      "result": "7 tests passed"
+    }
+  }
+}

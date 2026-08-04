@@ -1,0 +1,15 @@
+✔ discovers the Git-managed using-goal-engine Skill from the global allowlist (2.147167ms)
+✔ documents the exact typed ABI without invented parameters or workspace tools (1.186667ms)
+✔ requires Git and task-definition checks before initialization (1.081209ms)
+✔ uses status-driven recovery and complete success or failure loops (0.856958ms)
+✔ initializes from the current project and classifies workflows by their actual work (0.836625ms)
+✔ requires executor acceptance before settle and status-gated lifecycle transitions (1.225791ms)
+✔ keeps Goal Engine mutation at the Host typed-tool boundary (0.819416ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 48.07475

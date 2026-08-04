@@ -62,9 +62,9 @@ Skill 完成后，使用同类 fresh-context 场景复测，Agent 必须：
 - 只使用 `goal_init`、`goal_status`、`goal_dispatch`、`goal_settle`、`goal_integrate`、`goal_accept`、`goal_amend`。
 - 不虚构 `expectedVersion`、`attempt_id` 或 `goal_workspace_*`。
 - init 前要求有效 Git HEAD，并确保 `.state/goal-engine/` 不受 Git 跟踪。
-- acceptance commands 从 Executor worktree 执行，不硬编码 origin `cd`。
-- compact/reload/新协调轮次先调用 `goal_status`，服从 machine action。
-- 成功路径严格执行 settle → integrate → accept；失败/blocked 路径先 discard active workspace，再 redispatch 或 amend。
+- Executor acceptance commands 在 settle 前从 Executor worktree 执行并留下 artifact；integrate 后需要的最终回归只在当前项目 workspace 执行。
+- compact/reload/新协调轮次及每个 durable mutation 后先调用 `goal_status`，只执行 machine action / requiredNextAction。
+- 成功路径严格执行 status → dispatch → Executor acceptance → status → settle → status → integrate → status → 当前项目最终回归（如需要）→ accept；verified failed/blocked 路径执行 status → settle → status → integrate(discard) → status → dispatch/amend。
 - 不直接编辑 events/projection，不用重新 init 代替 amendment。
 
 ## GREEN：加载 Skill 后复测
@@ -83,15 +83,13 @@ Agent 保留 active Goal 和事件历史，拒绝删除状态后 re-init；先 `
 
 首次复测因场景没有暴露 ToolDefinition，Agent 搜索内部源码后超时，不能计为通过。Skill 随后新增 typed-only 边界：schema 只能来自当前 Pi Host，不得经源码或 CLI 重建；Host 能力缺失时停止。
 
-重试时 Agent 未搜索源码或运行测试，正确给出：
+重试时 Agent 未搜索源码或运行测试，正确给出 status-gated 的成功与失败处置，拒绝从 dispatched 直接 accept，且没有虚构 `expectedVersion`、`attempt_id` 或额外 workspace 工具。初始生命周期 GREEN 因搜索源码超时而失败；typed-only refinement 后的 retry 成功。
 
-```text
-成功：goal_status → goal_settle → goal_integrate(integrate) → acceptance → goal_accept
-失败：goal_status → goal_settle → goal_integrate(discard) → goal_status → goal_dispatch/goal_amend
-reload：goal_status
-```
+## 可复核压力证据
 
-它明确拒绝从 dispatched 直接 accept，且没有虚构 `expectedVersion`、`attempt_id` 或额外 workspace 工具。
+最小证据包位于 [`artifacts/using-goal-engine-skill/`](artifacts/using-goal-engine-skill/)：[`manifest.json`](artifacts/using-goal-engine-skill/manifest.json) 逐项记录七个 exact prompt、run/session ID、Skill 加载状态、结果、完整 session 的绝对可复核路径及 SHA-256。五份允许读取的完整输出副本和本次静态 RED/GREEN 输出也在该目录，各自 SHA-256 记入 manifest。
+
+`6aac98d8`（RED 初始化）和 `85a5f4d8`（初始 GREEN 生命周期）没有允许的输出源；manifest 明确标为 missing，并保留 session task/toolResult 的路径和 SHA-256，未重构或捏造输出。证据包只包含指定 session 和指定输出，不包含凭据或无关 transcript。
 
 ## 评估结论
 
