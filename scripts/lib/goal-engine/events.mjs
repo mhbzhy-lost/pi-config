@@ -55,6 +55,8 @@ export function applyEvent(projection, event, { replay = false } = {}) {
     case "task.dispatched": taskDispatched(next, event.data, event.schemaVersion); break;
     case "task.settled": taskSettled(next, event.data, event.occurredAt, event.schemaVersion, replay); break;
     case "task.accepted": taskAccepted(next, event.data, event.schemaVersion); break;
+    case "task.workspace_orphan_recovered": workspaceOrphanRecovered(next, event.data, event.schemaVersion); break;
+    case "task.workspace_preservation_released": workspacePreservationReleased(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposition_started": workspaceDispositionStarted(next, event.data, event.schemaVersion, replay); break;
     case "task.workspace_disposition_applied": workspaceDispositionApplied(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposed": workspaceDisposed(next, event.data, event.schemaVersion); break;
@@ -235,6 +237,9 @@ function workspaceDispositionStarted(p, data, schemaVersion, replay) {
     throw new Error("discard and preserve dispositions require settled task");
   }
   for (const [name, value] of Object.entries({ strategy, executorHead, originHeadBefore })) if (!value || typeof value !== "string") throw new Error(`${name} is required`);
+  if (workspace.recovery === "orphaned" && executorHead !== workspace.executorHead) {
+    throw new Error("orphan recovery executorHead does not match workspace identity");
+  }
   if (task.status === "succeeded") {
     const settlement = task.settlement;
     if (!settlement) {
@@ -274,8 +279,70 @@ function workspaceDisposed(p, data, schemaVersion) {
   if (workspace.disposition === "discarded" && task.status === "succeeded") task.status = "pending";
 }
 
+function workspaceOrphanRecovered(p, data, schemaVersion) {
+  requireV2(schemaVersion);
+  requireActive(p);
+  requireExactFields(data, ["taskId", "attempt", "workspace", "executorHead", "reason"], "orphan recovery data");
+  const { taskId, attempt, workspace, executorHead, reason } = data;
+  requireNonEmptyStrings({ taskId, executorHead, reason }, "orphan recovery");
+  if (!Number.isInteger(attempt) || attempt < 1) throw new Error("invalid orphan recovery attempt");
+  validateRecoveryWorkspace(workspace, attempt);
+  const task = requireTask(p, taskId);
+  if (task.status !== "pending") throw new Error(`orphan recovery requires pending task: ${taskId}`);
+  if (attempt !== task.attempts + 1) throw new Error("orphan recovery attempt must be the next candidate");
+  if (!workspaceReleasedForRetry(task)) throw new Error("orphan recovery requires no workspace or a retry-released workspace");
+  task.attempts = attempt;
+  task.lastSettledOutcome = "failed";
+  task.settlement = null;
+  task.workspace = { ...workspace, executorHead, phase: "active", recovery: "orphaned" };
+}
+
+function workspacePreservationReleased(p, data, schemaVersion) {
+  requireV2(schemaVersion);
+  requireActive(p);
+  requireExactFields(data, ["taskId", "attempt", "executorHead", "released"], "preservation release data");
+  const { taskId, attempt, executorHead, released } = data;
+  requireNonEmptyStrings({ taskId, executorHead }, "preservation release");
+  if (!Number.isInteger(attempt) || attempt < 1) throw new Error("invalid preservation release attempt");
+  if (released !== true) throw new Error("preservation release requires released=true");
+  const task = requireTask(p, taskId);
+  const workspace = requireWorkspace(task, attempt);
+  if (workspace.phase !== "disposed" || workspace.disposition !== "preserved" || workspace.released !== false
+    || workspace.preservedResourcesReleased === true) throw new Error("workspace is not an unreleased preservation");
+  if (workspace.executorHead !== executorHead) throw new Error("preservation release executorHead mismatch");
+  workspace.preservedResourcesReleased = true;
+  task.status = "pending";
+  task.settlement = null;
+  task.lastSettledOutcome = "failed";
+  delete task.blockedReason;
+}
+
 function requireV2(schemaVersion) {
   if (schemaVersion !== "goal-engine.event.v2") throw new Error("workspace disposition events require goal-engine.event.v2");
+}
+
+function requireExactFields(value, fields, label) {
+  if (!isPlainObject(value) || Object.keys(value).length !== fields.length || fields.some((field) => !Object.hasOwn(value, field))) {
+    throw new Error(`${label} must contain exactly: ${fields.join(", ")}`);
+  }
+}
+
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function requireNonEmptyStrings(values, label) {
+  for (const [name, value] of Object.entries(values)) {
+    if (typeof value !== "string" || !value.trim()) throw new Error(`${label} ${name} must be a non-empty string`);
+  }
+}
+
+function validateRecoveryWorkspace(workspace, expectedAttempt) {
+  requireExactFields(workspace, ["attempt", "path", "branch", "baseCommit", "originRef"], "orphan recovery workspace");
+  if (workspace.attempt !== expectedAttempt) throw new Error("workspace attempt mismatch");
+  requireNonEmptyStrings({ path: workspace.path, branch: workspace.branch, baseCommit: workspace.baseCommit, originRef: workspace.originRef }, "orphan recovery workspace");
 }
 
 function validateWorkspace(workspace, expectedAttempt) {
@@ -286,8 +353,9 @@ function validateWorkspace(workspace, expectedAttempt) {
 
 function assertWorkspaceRedispatchable(task) {
   if (!task.workspace) return;
-  const { phase, disposition, released } = task.workspace;
-  const isReleasable = phase === "disposed" && disposition === "discarded" && released === true;
+  const { phase, disposition, released, preservedResourcesReleased } = task.workspace;
+  const isReleasable = phase === "disposed" && ((disposition === "discarded" && released === true)
+    || (disposition === "preserved" && preservedResourcesReleased === true));
   if (isReleasable) return;
   throw new Error(
     `workspace redispatch error: existing workspace must be disposed, discarded, and released before redispatch (phase=${phase}, disposition=${disposition}, released=${released})`,
@@ -383,7 +451,8 @@ function goalAmended(p, data, schemaVersion, replay) {
 
 function workspaceReleasedForRetry(task) {
   const workspace = task.workspace;
-  return !workspace || (workspace.phase === "disposed" && workspace.disposition === "discarded" && workspace.released === true);
+  return !workspace || (workspace.phase === "disposed" && ((workspace.disposition === "discarded" && workspace.released === true)
+    || (workspace.disposition === "preserved" && workspace.preservedResourcesReleased === true)));
 }
 
 function assertTaskUpdatable(task, taskId, schemaVersion) {

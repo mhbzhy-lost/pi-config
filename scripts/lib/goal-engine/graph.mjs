@@ -20,10 +20,7 @@ export function validateDAG(tasks) {
 export function nextDispatchAttempt(projection, taskId) {
   const task = projection?.tasks?.get(taskId);
   if (projection?.lifecycle !== "active" || task?.status !== "pending") return null;
-  const workspace = task.workspace;
-  return !workspace || (workspace.phase === "disposed" && workspace.disposition === "discarded" && workspace.released === true)
-    ? task.attempts + 1
-    : null;
+  return workspaceReleasedForRetry(task.workspace) ? task.attempts + 1 : null;
 }
 
 export function runnableFrontier(projection, { blockedTaskIds = new Set() } = {}) {
@@ -31,9 +28,7 @@ export function runnableFrontier(projection, { blockedTaskIds = new Set() } = {}
   const frontier = [];
   for (const [taskId, task] of projection.tasks) {
     if (blockedTaskIds.has(taskId) || task.status !== "pending") continue;
-    const workspaceRedispatchable = !task.workspace
-      || (task.workspace.phase === "disposed" && task.workspace.disposition === "discarded" && task.workspace.released === true);
-    if (!workspaceRedispatchable) continue;
+    if (!workspaceReleasedForRetry(task.workspace)) continue;
     const depsReady = task.deps.every((dep) => projection.tasks.get(dep)?.status === "accepted");
     if (depsReady) frontier.push(taskId);
   }
@@ -66,6 +61,11 @@ function actionState(tool, taskId, params, reason, blockingReason = null) {
     requiredNextAction: { tool, params: { task_id: taskId, ...params }, reason },
     blockingReason,
   };
+}
+
+function workspaceReleasedForRetry(workspace) {
+  return !workspace || (workspace.phase === "disposed" && ((workspace.disposition === "discarded" && workspace.released === true)
+    || (workspace.disposition === "preserved" && workspace.preservedResourcesReleased === true)));
 }
 
 function dependencyBlockingReason(task, projection) {
@@ -121,8 +121,8 @@ export function taskActionState(projection, taskId) {
     return noAction("workspace disposition is missing required action or strategy");
   }
 
-  if (workspace?.phase === "disposed" && workspace.disposition === "preserved") {
-    return actionState("goal_amend", taskId, {}, "Workspace was preserved and requires manual resolution");
+  if (workspace?.phase === "disposed" && workspace.disposition === "preserved" && workspace.preservedResourcesReleased !== true) {
+    return actionState("goal_integrate", taskId, { action: "discard" }, "Preserved workspace must be explicitly released before retrying");
   }
 
   switch (task.status) {
@@ -149,9 +149,7 @@ export function taskActionState(projection, taskId) {
         return noAction();
       }
 
-      const workspaceRedispatchable = !workspace
-        || (workspace.phase === "disposed" && workspace.disposition === "discarded" && workspace.released === true);
-      if (!workspaceRedispatchable) {
+      if (!workspaceReleasedForRetry(workspace)) {
         return noAction(`workspace is not redispatchable and blocks dispatch: phase=${workspace.phase}, disposition=${workspace.disposition}, released=${workspace.released}`);
       }
 
