@@ -229,6 +229,52 @@ test("historical v1 JSONL remove add update replacement replays in candidate ord
   assert.deepEqual(replayed.tasks.get("t1").acceptance.criteria, ["refined"]);
 });
 
+test("v1 duplicate remove amendments reject atomically in the store", () => {
+  const goalId = "v1-duplicate-remove-goal";
+  const root = tmpRoot();
+  const created = {
+    schemaVersion: "goal-engine.event.v1", eventId: "duplicate-remove-created", goalId,
+    occurredAt: "2025-02-05T06:07:08.000Z", type: "goal.created",
+    data: {
+      objective: "Reject duplicate remove amendments without changing persisted state", scope: [], nonGoals: [], dod: [], tasks: ["t1"],
+      taskDefs: { t1: { description: "original", deps: [], writePaths: ["original.ts"], acceptance: { criteria: ["original"], commands: ["true"] }, workflow: "tdd" } },
+    },
+  };
+  appendEvent(root, created, 0);
+  const eventsPath = join(root, `goals/${goalId}/events.jsonl`);
+  const projectionPath = join(root, `goals/${goalId}/projection.json`);
+  const registryPath = join(root, "registry.json");
+  const before = {
+    events: readFileSync(eventsPath, "utf8"),
+    projection: readFileSync(projectionPath, "utf8"),
+    registry: readFileSync(registryPath, "utf8"),
+  };
+
+  for (const { eventId, data } of [
+    { eventId: "duplicate-remove-only", data: { reason: "Reject duplicate v1 remove IDs before candidate construction", removeTasks: ["t1", "t1"] } },
+    {
+      eventId: "duplicate-remove-replacement",
+      data: {
+        reason: "Reject duplicate v1 replacement remove IDs before candidate construction",
+        removeTasks: ["t1", "t1"],
+        addTasks: { t1: { description: "replacement", deps: [], writePaths: ["replacement.ts"], acceptance: { criteria: ["replacement"], commands: ["true"] }, workflow: "tdd" } },
+        updateTasks: { t1: { description: "refined replacement" } },
+      },
+    },
+  ]) {
+    assert.throws(
+      () => appendEvent(root, { schemaVersion: "goal-engine.event.v1", eventId, goalId, occurredAt: "2025-02-05T06:07:09.000Z", type: "goal.amended", data }, 1),
+      /duplicate remove task: t1/,
+    );
+    assert.equal(readFileSync(eventsPath, "utf8"), before.events);
+    assert.equal(readFileSync(projectionPath, "utf8"), before.projection);
+    assert.equal(readFileSync(registryPath, "utf8"), before.registry);
+    const projection = loadProjection(root, goalId);
+    assert.equal(projection.version, 1);
+    assert.deepEqual([...projection.tasks.keys()], ["t1"]);
+  }
+});
+
 test("historical v1 and v2 amendments update a task added by the same event", () => {
   const goalId = "fixed-add-update-replay";
   const created = {

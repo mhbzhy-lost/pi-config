@@ -283,7 +283,12 @@ function goalAmended(p, data, schemaVersion) {
 
   // v1 only replays its historical amendment semantics. New v2 amendments retain
   // the pending-and-released workspace gate established by the contract freeze.
-  const removedTaskIds = new Set(removeTasks || []);
+  const removeTaskIds = removeTasks || [];
+  const removedTaskIds = new Set();
+  for (const taskId of removeTaskIds) {
+    if (removedTaskIds.has(taskId)) throw new Error(`duplicate remove task: ${taskId}`);
+    removedTaskIds.add(taskId);
+  }
   for (const taskId of removedTaskIds) assertTaskRemovable(requireTask(p, taskId), taskId, schemaVersion);
   for (const taskId of Object.keys(addTasks || {})) {
     if (p.tasks.has(taskId) && !removedTaskIds.has(taskId)) throw new Error(`task already exists: ${taskId}`);
