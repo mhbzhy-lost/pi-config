@@ -1043,6 +1043,85 @@ export function createGoalEngineExtension(pi, options = {}) {
         };
       };
 
+      if (taskWorkspace.phase === "disposed"
+        && taskWorkspace.disposition === "preserved"
+        && action === "discard") {
+        // A preserved workspace is historically disposed, but explicit discard is
+        // a separate, durable release operation.  Inventory first so a missing
+        // lease can be synthesized only after all destructive resources are gone.
+        const retry = { tool: "goal_status", params: { goal_id: goalId } };
+        const expectedLease = workspaceLeaseIdentityFromProjection(taskWorkspace, goalId, taskId, cwd, root);
+        let resources;
+        try {
+          resources = inspectExecutorWorkspaceResources(expectedLease);
+        } catch (error) {
+          throw workspaceMutationError(error, retry);
+        }
+        const resourceValues = [resources.workspaceExists, resources.branchExists, resources.leaseExists];
+        const allResourcesPresent = resourceValues.every((value) => value === true);
+        const noResourcesPresent = resourceValues.every((value) => value === false);
+        if (!allResourcesPresent && !noResourcesPresent) {
+          if (!resources.leaseExists) {
+            throw workspaceMutationError(new Error("Executor workspace persisted lease not found"), retry);
+          }
+          throw workspaceMutationError(new Error("preserved workspace resource inventory is partial or unknown"), retry);
+        }
+
+        if (taskWorkspace.preservedResourcesReleased === true) {
+          if (!noResourcesPresent) {
+            throw workspaceMutationError(new Error("preserved release is durable but workspace resources remain"), retry);
+          }
+          activeLeases.delete(key);
+          return JSON.stringify({ action: "discarded", released: true });
+        }
+
+        if (allResourcesPresent) {
+          let lease;
+          let firstInspection;
+          let confirmedInspection;
+          try {
+            // Do not permit the recovery lease fallback while any resource exists.
+            lease = resolveLease(task, goalId, taskId, cwd, root, { allowSynthetic: false });
+            if (currentOriginRef(cwd) !== taskWorkspace.originRef) {
+              throw new Error(`workspace identity origin ref mismatch (expected ${taskWorkspace.originRef})`);
+            }
+            firstInspection = inspectExecutorWorkspaceFn(lease);
+            confirmedInspection = inspectExecutorWorkspaceFn(lease);
+          } catch (error) {
+            if (isInspectionInternalHeadDrift(error)) {
+              throw workspaceMutationError(new Error(`workspace identity inspection drift: ${error.message}`), retry);
+            }
+            throw workspaceMutationError(error, retry);
+          }
+          if (!inspectionSnapshotsMatch(firstInspection, confirmedInspection)
+            || firstInspection.headCommit !== taskWorkspace.executorHead
+            || confirmedInspection.headCommit !== taskWorkspace.executorHead) {
+            throw workspaceMutationError(new Error(`workspace identity inspection mismatch: expectedHead=${taskWorkspace.executorHead}; firstHead=${firstInspection.headCommit}; secondHead=${confirmedInspection.headCommit}`), retry);
+          }
+          try {
+            releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup" });
+            resources = inspectExecutorWorkspaceResources(lease);
+          } catch (error) {
+            throw workspaceMutationError(error, retry);
+          }
+          if (resources.workspaceExists || resources.branchExists || resources.leaseExists) {
+            throw workspaceMutationError(new Error("failed to release preserved workspace resources"), retry);
+          }
+        }
+
+        // With no resources, a retry may use projection identity only; the event
+        // records the completed cleanup and is deliberately appended afterwards.
+        const releaseEvent = makeEvent("task.workspace_preservation_released", {
+          taskId,
+          attempt: taskWorkspace.attempt,
+          executorHead: taskWorkspace.executorHead,
+          released: true,
+        }, goalId);
+        projection = appendEventFn(root, releaseEvent, projection.version);
+        activeLeases.delete(key);
+        return JSON.stringify({ action: "discarded", released: true });
+      }
+
       if (taskWorkspace.phase === "disposed") {
         const expectedDisposition = { integrate: "integrated", discard: "discarded", preserve: "preserved" };
         if (taskWorkspace.disposition !== expectedDisposition[action]) {
