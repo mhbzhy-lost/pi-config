@@ -19,7 +19,7 @@
       },
       "committedSessionExcerpt": {
         "artifact": "red-baseline-init-session-excerpt.jsonl",
-        "sha256": "f594377cb863310e4e7f8349cea969ebcd89fc525205f2c70d25205aa2ede744",
+        "sha256": "ca85eebd618d481b7ca154498d63e9fdef7a3bcc59f2c347940aaf0e2e343b8e",
         "scope": "user task, ls toolCall, and Path not found toolResult; observable behavior before any final output, not a reconstructed final output"
       }
     },
@@ -94,7 +94,7 @@
       },
       "committedSessionExcerpt": {
         "artifact": "green-lifecycle-initial-session-excerpt.jsonl",
-        "sha256": "54232db462087646ee41cef18f7ac84cb804237dd2a7e843a86dc2943da92573",
+        "sha256": "e2eb59c7d84cb05abc557653bd5e6ed64ce9437f8db5f5299f32e094939d3a60",
         "scope": "user task, Skill read, and all subsequent non-thinking toolCall/toolResult through timeout; observable behavior before any final output, not a reconstructed final output"
       }
     },
