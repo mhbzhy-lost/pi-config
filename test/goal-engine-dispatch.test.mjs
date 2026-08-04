@@ -119,8 +119,20 @@ test("compileTaskContract produces valid dispatch-ir.v1", () => {
   assert.deepEqual(contract.boundaries.writePaths, ["src/auth/token.ts", "test/auth/token.test.mjs"]);
   assert.deepEqual(contract.acceptance.commands, ["node --test test/auth/token.test.mjs"]);
   assert.equal(contract.workflow.mode, "tdd");
+  assert.equal(Object.hasOwn(contract.workflow, "reason"), false);
   assert.equal(contract.execution.cwd, "/workspace/project");
   assert.ok(contract.hash);
+});
+
+test("compileTaskContract adds a reason for existing-tests workflow", () => {
+  const p = buildProjection();
+  p.tasks.get("t1").workflow = "existing-tests";
+
+  const contract = compileTaskContract(p, "t1", "/workspace/project");
+
+  assert.equal(contract.workflow.mode, "existing-tests");
+  assert.ok(contract.workflow.reason);
+  assert.match(contract.workflow.reason, /acceptance|existing test/i);
 });
 
 test("compileTaskContract adds a reason for docs-only workflow", () => {

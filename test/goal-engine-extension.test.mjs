@@ -355,6 +355,27 @@ test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", asy
   assert.equal(result.contract.execution.cwd, result.workspace.path);
 });
 
+test("goal_dispatch supports existing-tests tasks with a workflow reason", async () => {
+  const cwd = tmpCwd();
+  initGitRepo(cwd);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  await invoke(pi, "goal_init", {
+    objective: "Existing acceptance suite goal",
+    tasks: [{ id: "verify", description: "Verify the implementation with the existing acceptance suite", deps: [], writePaths: ["src/verified.ts"], acceptance: { criteria: ["Existing acceptance suite passes"], commands: ["node --test test/verified.test.mjs"] }, workflow: "existing-tests" }],
+  });
+
+  const result = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "verify" }));
+
+  assert.equal(result.status, "dispatched");
+  assert.equal(result.contract.workflow.mode, "existing-tests");
+  assert.ok(result.contract.workflow.reason);
+  assert.match(result.contract.workflow.reason, /acceptance|existing test/i);
+  assert.ok(result.workspace);
+  assert.equal(result.contract.execution.cwd, result.workspace.path);
+});
+
 test("goal_dispatch supports docs-only tasks with a workflow reason", async () => {
   const cwd = tmpCwd();
   initGitRepo(cwd);
