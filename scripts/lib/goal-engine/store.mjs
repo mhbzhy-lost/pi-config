@@ -23,18 +23,13 @@ export function appendEvent(stateRoot, event, expectedVersion) {
   let registryTmp = null;
 
   try {
-    assertWriterLockOwned(stateRoot, lock.token);
-    const current = rebuildProjection(eventsPath);
-    if (current.version !== expectedVersion) throw projectionConflict(expectedVersion, current.version);
+    const current = replayAndCheckVersion(stateRoot, eventsPath, expectedVersion, lock.token);
     const next = applyEvent(current, event);
     const registry = prepareRegistryUpdate(stateRoot, event, next, lock.token);
 
     mkdirSync(goalDir, { recursive: true });
-    assertWriterLockOwned(stateRoot, lock.token);
-    appendFileSync(eventsPath, JSON.stringify(event) + "\n", { mode: 0o600 });
-    assertWriterLockOwned(stateRoot, lock.token);
-    writeFileSync(projectionTmp, JSON.stringify(serializeProjection(next), null, 2) + "\n", { mode: 0o600 });
-    renameSync(projectionTmp, projectionPath);
+    appendJsonlWithWriterReceipt(stateRoot, eventsPath, event, lock.token);
+    publishProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, next, lock.token);
     registryTmp = publishRegistry(stateRoot, registry, identity, lock.token);
     return next;
   } finally {
@@ -233,6 +228,24 @@ function identityUnavailable() { return Object.assign(new Error("goal engine sto
 function writerLockLost() { return Object.assign(new Error("goal engine store writer lock was lost"), { code: "GOAL_ENGINE_STORE_LOCK_LOST" }); }
 function projectionConflict(expected, current) { return Object.assign(new Error(`projection version conflict: expected ${expected}, current ${current}`), { code: "PROJECTION_CONFLICT" }); }
 
+function replayAndCheckVersion(stateRoot, eventsPath, expectedVersion, writerToken) {
+  assertWriterLockOwned(stateRoot, writerToken);
+  const current = rebuildProjection(eventsPath);
+  if (current.version !== expectedVersion) throw projectionConflict(expectedVersion, current.version);
+  return current;
+}
+
+function appendJsonlWithWriterReceipt(stateRoot, eventsPath, event, writerToken) {
+  assertWriterLockOwned(stateRoot, writerToken);
+  appendFileSync(eventsPath, JSON.stringify(event) + "\n", { mode: 0o600 });
+}
+
+function publishProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, projection, writerToken) {
+  assertWriterLockOwned(stateRoot, writerToken);
+  writeFileSync(projectionTmp, JSON.stringify(serializeProjection(projection), null, 2) + "\n", { mode: 0o600 });
+  renameSync(projectionTmp, projectionPath);
+}
+
 function rebuildProjection(eventsPath) {
   let projection = createProjection();
   if (!existsSync(eventsPath)) return projection;
@@ -274,6 +287,9 @@ function validateRegistry(registry) {
   }
   for (const [goalId, entry] of Object.entries(registry.goals)) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry) || !["active", "blocked", "completed", "cancelled"].includes(entry.lifecycle) || typeof entry.objective !== "string" || typeof entry.updatedAt !== "string" || Number.isNaN(Date.parse(entry.updatedAt)) || (entry.lifecycle === "active") !== activeIds.has(goalId)) throw new TypeError("invalid goal engine registry");
+  }
+  for (const goalId of activeIds) {
+    if (!Object.hasOwn(registry.goals, goalId) || registry.goals[goalId].lifecycle !== "active") throw new TypeError("invalid goal engine registry");
   }
 }
 

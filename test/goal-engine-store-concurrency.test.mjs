@@ -159,6 +159,7 @@ if (process.argv[2] === "guard-owner") {
     const cases = [
       (registry) => { registry.goals["concurrent-goal"] = []; },
       (registry) => { registry.active_goal_ids = ["concurrent-goal", "concurrent-goal"]; },
+      (registry) => { registry.active_goal_ids = ["concurrent-goal", "phantom"]; },
       (registry) => { registry.goals["concurrent-goal"].updatedAt = "not-a-time"; },
       (registry) => { registry.active_goal_ids = []; },
     ];
@@ -178,27 +179,34 @@ if (process.argv[2] === "guard-owner") {
     const storePath = new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url);
     const eventsUrl = new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).href;
     const source = readFileSync(storePath, "utf8");
+    const jsonlCall = "    appendJsonlWithWriterReceipt(stateRoot, eventsPath, event, lock.token);";
+    const projectionCall = "    publishProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, next, lock.token);";
     const mutations = [
-      ["registry prepare", "    const registry = prepareRegistryUpdate(stateRoot, event, next, lock.token);", "    releaseWriterLock(stateRoot, lock.token);\n    const registry = prepareRegistryUpdate(stateRoot, event, next, lock.token);"],
-      ["JSONL append", "    appendFileSync(eventsPath, JSON.stringify(event) + \"\\n\", { mode: 0o600 });", "    releaseWriterLock(stateRoot, lock.token);\n    appendFileSync(eventsPath, JSON.stringify(event) + \"\\n\", { mode: 0o600 });"],
-      ["projection publish", "    writeFileSync(projectionTmp, JSON.stringify(serializeProjection(next), null, 2) + \"\\n\", { mode: 0o600 });", "    releaseWriterLock(stateRoot, lock.token);\n    writeFileSync(projectionTmp, JSON.stringify(serializeProjection(next), null, 2) + \"\\n\", { mode: 0o600 });"],
-      ["registry publish", "    registryTmp = publishRegistry(stateRoot, registry, identity, lock.token);", "    releaseWriterLock(stateRoot, lock.token);\n    registryTmp = publishRegistry(stateRoot, registry, identity, lock.token);"],
+      ["replay version", "    const current = replayAndCheckVersion(stateRoot, eventsPath, expectedVersion, lock.token);", []],
+      ["registry prepare", "    const registry = prepareRegistryUpdate(stateRoot, event, next, lock.token);", []],
+      ["JSONL append", jsonlCall, []],
+      // Skipping earlier stages isolates this boundary only; it does not claim
+      // WAL or power-loss atomicity across the events, projection, and registry files.
+      ["projection publish", projectionCall, [jsonlCall]],
+      ["registry publish", "    registryTmp = publishRegistry(stateRoot, registry, identity, lock.token);", [jsonlCall, projectionCall]],
     ];
-    for (const [name, needle, replacement] of mutations) {
-      assert.equal(source.split(needle).length - 1, 1, `${name} replacement must be exact once`);
+    for (const [name, boundaryCall, skippedCalls] of mutations) {
+      assert.equal(source.split(boundaryCall).length - 1, 1, `${name} boundary replacement must be exact once`);
+      for (const skippedCall of skippedCalls) assert.equal(source.split(skippedCall).length - 1, 1, `${name} isolation replacement must be exact once`);
+      const replacement = `    releaseWriterLock(stateRoot, lock.token);\n${boundaryCall}\n    console.log("stage-marker");`;
       const stateRoot = root(); createGoal(stateRoot);
       const mutantPath = join(stateRoot, `store-${name.replaceAll(" ", "-")}.mjs`);
-      writeFileSync(mutantPath, source.replace('from "./events.mjs"', `from ${JSON.stringify(eventsUrl)}`).replace(needle, replacement));
+      let mutantSource = source.replace('from "./events.mjs"', `from ${JSON.stringify(eventsUrl)}`).replace(boundaryCall, replacement);
+      for (const skippedCall of skippedCalls) mutantSource = mutantSource.replace(skippedCall, "    void 0;");
+      writeFileSync(mutantPath, mutantSource);
       const goalDir = join(stateRoot, "goals/concurrent-goal");
       const before = [readFileSync(join(goalDir, "events.jsonl"), "utf8"), readFileSync(join(goalDir, "projection.json"), "utf8"), readFileSync(join(stateRoot, "registry.json"), "utf8")];
       const program = `import { appendEvent } from ${JSON.stringify(new URL(`file://${mutantPath}`).href)}; const event = ${JSON.stringify(checkpoint(`mutant-${name}`))}; try { appendEvent(${JSON.stringify(stateRoot)}, event, 1); console.log('success'); } catch (error) { console.log(error.code); }`;
       const output = execFileSync(process.execPath, ["--input-type=module", "--eval", program], { encoding: "utf8" }).trim();
       assert.equal(output, "GOAL_ENGINE_STORE_LOCK_LOST", name);
       const after = [readFileSync(join(goalDir, "events.jsonl"), "utf8"), readFileSync(join(goalDir, "projection.json"), "utf8"), readFileSync(join(stateRoot, "registry.json"), "utf8")];
-      // A mutant is killed when it cannot report a successful, consistent append:
-      // prepare is stopped before writes; later stages expose their partial write.
-      if (name === "registry prepare") assert.deepEqual(after, before, name);
-      else assert.notDeepEqual(after, before, name);
+      assert.deepEqual(after, before, name);
+      assert.equal(output.includes("stage-marker"), false, `${name} must not return from its boundary`);
       rmSync(mutantPath, { force: true });
     }
   });

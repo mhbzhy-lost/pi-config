@@ -10,7 +10,7 @@ writer receipt 已释放、缺失、陈旧，或 `.writer.lock` owner 是 legacy
 
 ## 3. 根因
 
-旧实现只在 registry 最终发布处比较 token，且未要求 owner 是 v2 完整 owner；其余持久化阶段未显式绑定 receipt。
+旧实现把 `assertWriterLockOwned` 与 replay/version read、JSONL append、projection tmp+rename 放成可分离的相邻语句；source mutant 可在 assert 后、IO 前 release token。旧 oracle 又把 JSONL/projection/registry 的 partial write 当作“后续阶段会暴露”的 kill 条件，因而错误接受越界写入。
 
 ## 4. 影响范围
 
@@ -18,8 +18,8 @@ writer receipt 已释放、缺失、陈旧，或 `.writer.lock` owner 是 legacy
 
 ## 5. 修复方案
 
-统一 `assertWriterLockOwned(stateRoot, token)`：只接受合法 v2 owner 且精确 token，其他情况稳定抛 `GOAL_ENGINE_STORE_LOCK_LOST`。append 在 replay/version、registry prepare、JSONL、projection 和 registry publish 边界复核同一 receipt。
+统一 `assertWriterLockOwned(stateRoot, token)`：只接受合法 v2 owner 且精确 token，其他情况稳定抛 `GOAL_ENGINE_STORE_LOCK_LOST`。将 replay/version read、JSONL append、projection tmp+rename、registry publish 分别封装为内部 boundary function，并在每个函数第一步复核同一 receipt；prepare 也保留内部校验。
 
 ## 6. 验证方案
 
-隔离源码 mutant 对四个 release-before-stage 替换逐一机械确认一次，再运行一致性 probe；四者均无法成功 append（prepare 无写入，后续阶段暴露部分写入）并被稳定 kill。此证明仅覆盖进程内 receipt 边界，不声称跨文件断电原子性。
+隔离源码 mutant 对 replay/version、prepare、JSONL、projection、registry 五个 release-before-boundary 替换逐一机械确认一次，再运行一致性 probe；五者均在阶段副作用前抛 `GOAL_ENGINE_STORE_LOCK_LOST`，events/projection/registry 全部字节不变；统一 stage marker 也不得到达。projection 和 registry mutant 仅为隔离目标而跳过先前阶段，不声称跨文件 WAL 或断电原子性。

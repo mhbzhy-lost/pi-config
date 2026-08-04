@@ -2,7 +2,7 @@
 
 ## 1. 现象
 
-可解析的 `registry.goals.g=[]` 会通过旧校验；append 返回新版本并写入 JSONL/projection，数组仍留在 registry。
+可解析的 `registry.goals.g=[]` 曾会通过旧校验；此外 `active_goal_ids=['concurrent-goal','phantom']` 中没有对应 `goals.phantom` entry 也会通过。append 会返回新版本并写入 JSONL/projection，坏索引仍留在 registry。
 
 ## 2. 触发条件
 
@@ -10,7 +10,7 @@ registry 顶层 schema 正确，但 active 索引重复、goal entry 为数组/�
 
 ## 3. 根因
 
-旧 `validateRegistry` 仅验证顶层 `goals` 是对象，未闭合每个 goal entry 和 active 索引的双向不变量。
+旧 `validateRegistry` 仅从 `goals` entries 遍历到 active 索引，未反向遍历 `active_goal_ids` 并以 `Object.hasOwn` 验证其确有自有 entry；因此 phantom ID 漏检。
 
 ## 4. 影响范围
 
@@ -22,4 +22,4 @@ registry 顶层 schema 正确，但 active 索引重复、goal entry 为数组/�
 
 ## 6. 验证方案
 
-TDD 覆盖 `goals.g=[]` 等 parseable 损坏，断言 JSONL/projection/registry 字节不变、无临时工件、修复后同 expectedVersion 仅追加一次；mutation oracle 还验证 release-before-prepare 被 receipt 门禁杀死。
+TDD 覆盖 `goals.g=[]`、`active_goal_ids=['concurrent-goal','phantom']` 等 parseable 损坏，断言 JSONL/projection/registry 字节不变、无临时工件、修复后同 expectedVersion 仅追加一次；mutation oracle 还验证 release-before-prepare 被 receipt 门禁杀死。
