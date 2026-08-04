@@ -236,6 +236,8 @@ test("goal_init rejects unsafe Git preflight before creating state", async () =>
     { name: "unborn HEAD", setup: () => { const cwd = mkdtempSync(join(tmpdir(), "ge-unborn-")); git(cwd, "init"); return cwd; } },
     { name: "state directory not ignored", setup: () => { const cwd = mkdtempSync(join(tmpdir(), "ge-unignored-")); initGitRepo(cwd); return cwd; } },
     { name: "repository subdirectory", setup: () => { const cwd = tmpCwd(); mkdirSync(join(cwd, "child")); return join(cwd, "child"); } },
+    { name: "detached HEAD", setup: () => { const cwd = tmpCwd(); git(cwd, "checkout", "--detach"); return cwd; } },
+    { name: "tracked state entry", setup: () => { const cwd = tmpCwd(); mkdirSync(join(cwd, ".state/goal-engine"), { recursive: true }); writeFileSync(join(cwd, ".state/goal-engine/old.json"), "{}\n"); git(cwd, "add", "-f", ".state/goal-engine/old.json"); git(cwd, "commit", "-m", "test: tracked state"); return cwd; } },
   ];
   for (const fixture of cases) {
     const cwd = fixture.setup();
@@ -243,11 +245,25 @@ test("goal_init rejects unsafe Git preflight before creating state", async () =>
     createGoalEngineExtension(pi);
     await assert.rejects(
       () => invoke(pi, "goal_init", { objective: `Unsafe ${fixture.name}`, tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] }),
-      /GIT_INFRASTRUCTURE_ERROR|UNSAFE_GIT_CWD|INVALID_GIT_HEAD|DETACHED_GIT_HEAD|STATE_NOT_IGNORED|STATE_TRACKED/,
+      (error) => /GIT_INFRASTRUCTURE_ERROR|UNSAFE_GIT_CWD|INVALID_GIT_HEAD|DETACHED_GIT_HEAD|STATE_NOT_IGNORED|STATE_TRACKED/.test(error.code)
+        && /observed=.*remediation=.*stateChanged=false/.test(error.message),
       fixture.name,
     );
-    assert.equal(existsSync(join(cwd, ".state/goal-engine")), false, `${fixture.name} must leave no state`);
+    assert.deepEqual(readGoalEvents(cwd, objectiveToGoalId(`Unsafe ${fixture.name}`)), [], `${fixture.name} must not append events`);
+    assert.equal(existsSync(join(cwd, ".state/goal-engine/worktrees")), false, `${fixture.name} must not allocate worktrees`);
+    if (fixture.name !== "tracked state entry") assert.equal(existsSync(join(cwd, ".state/goal-engine")), false, `${fixture.name} must leave no state`);
   }
+});
+
+test("goal_init wraps invalid task contracts before any persistent side effect", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await assert.rejects(
+    () => invoke(pi, "goal_init", { objective: "Bad contract", tasks: [{ id: "t1", description: "task", writePaths: ["src/*"], acceptance: { criteria: ["works"], commands: ["cd -- /tmp"] }, workflow: "tdd" }] }),
+    (error) => error.code === "INVALID_TASK_CONTRACT" && /observed=.*unsupported.*remediation=.*stateChanged=false/i.test(error.message),
+  );
+  assert.equal(existsSync(join(cwd, ".state/goal-engine")), false);
 });
 
 test("goal_init active-goal error embeds actionable goal_status next action", async () => {

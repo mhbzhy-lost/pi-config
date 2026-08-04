@@ -368,7 +368,11 @@ export function createGoalEngineExtension(pi, options = {}) {
           workflow: t.workflow || "tdd",
         };
       }
-      validateTaskDefinitions(taskIds, taskDefs);
+      try {
+        validateTaskDefinitions(taskIds, taskDefs, { cwd });
+      } catch (error) {
+        throw initError("INVALID_TASK_CONTRACT", error.message, "correct task commands and writePaths, then retry goal_init");
+      }
 
       const event = makeEvent("goal.created", {
         objective: params.objective,

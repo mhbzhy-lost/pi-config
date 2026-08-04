@@ -1,4 +1,5 @@
 import { validateDAG } from "./graph.mjs";
+import { normalizeRepoRelativePosixPath } from "./repo-path.mjs";
 
 const ID = /^[A-Za-z0-9._-]{1,160}$/;
 const WORKFLOWS = new Set(["tdd", "existing-tests", "docs-only"]);
@@ -9,22 +10,18 @@ function nonEmpty(value, label) {
 }
 
 export function validateRepoRelativePath(value, label = "writePath") {
-  const path = nonEmpty(value, label);
-  if (path.includes("\\") || path.startsWith("/") || /^[A-Za-z]:/.test(path) || path.split("/").some((part) => !part || part === "." || part === "..")) {
-    throw new Error(`${label} must be a repo-relative POSIX path`);
-  }
-  return path;
+  return normalizeRepoRelativePosixPath(value, label);
 }
 
-function validateCommand(value, label) {
+function validateCommand(value, label, cwd) {
   const command = nonEmpty(value, label);
-  // Only command-position cd is dangerous; quoted prose such as echo 'cd /tmp' is not.
-  if (/(?:^|(?:&&|\|\||;|\n)\s*)cd\s+\//.test(command)) throw new Error(`${label} must not use absolute cd`);
-  if (/process\.cwd\(\)|\$PWD|\$\{PWD\}/.test(command)) throw new Error(`${label} must not hardcode origin cwd`);
+  // Shell separators put cd in command position; echo 'cd /tmp' does not.
+  if (/(?:^|&&|\|\||;|\||\n|\()\s*cd\s+(?:--\s+)?["']?\//.test(command)) throw new Error(`${label} must not use absolute cd`);
+  if (cwd && command.includes(cwd)) throw new Error(`${label} must not hardcode origin cwd`);
   return command;
 }
 
-export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true } = {}) {
+export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd } = {}) {
   if (!Array.isArray(tasks) || (requireNonEmpty && tasks.length === 0)) throw new Error("tasks must be non-empty");
   if (!taskDefs || typeof taskDefs !== "object" || Array.isArray(taskDefs)) throw new Error("taskDefs is required");
   const ids = new Set();
@@ -49,7 +46,7 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
     def.writePaths.forEach((path, index) => validateRepoRelativePath(path, `taskDef ${id} writePaths[${index}]`));
     if (!def.acceptance || !Array.isArray(def.acceptance.criteria) || !def.acceptance.criteria.length || !Array.isArray(def.acceptance.commands) || !def.acceptance.commands.length) throw new Error(`taskDef ${id} requires non-empty acceptance criteria and commands`);
     def.acceptance.criteria.forEach((value, index) => nonEmpty(value, `taskDef ${id} acceptance.criteria[${index}]`));
-    def.acceptance.commands.forEach((value, index) => validateCommand(value, `taskDef ${id} acceptance.commands[${index}]`));
+    def.acceptance.commands.forEach((value, index) => validateCommand(value, `taskDef ${id} acceptance.commands[${index}]`, cwd));
     if (!WORKFLOWS.has(def.workflow || "tdd")) throw new Error(`taskDef ${id} workflow is not supported`);
     graph.set(id, { deps: def.deps });
   }

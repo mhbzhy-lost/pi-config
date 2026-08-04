@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { normalizeRepoRelativePosixPath } from "./repo-path.mjs";
 
 const CONTRACT_VERSION = "dispatch-ir.v1";
 const MAX_ARRAY_ITEMS = 32;
@@ -58,16 +59,7 @@ function normalizeStringArray(value, location, { minItems = 0, item = normalizeS
 }
 
 function normalizeRepoRelativePath(value, location) {
-  const normalized = normalizeString(value, location);
-  if (normalized.includes("\0") || normalized.includes("\\") || normalized.startsWith("/") || /^[A-Za-z]:[\\/]/.test(normalized) || normalized.startsWith("\\\\")) {
-    fail(`${location} must be a repo-relative POSIX path`);
-  }
-  const recursive = normalized.endsWith("/**");
-  const base = recursive ? normalized.slice(0, -3) : normalized;
-  if (!base || base.endsWith("/") || /[*?\[\]]/.test(base)) fail(`${location} contains an unsupported path pattern`);
-  const segments = base.split("/");
-  if (segments.some((s) => !s || s === "." || s === "..")) fail(`${location} must be a repo-relative POSIX path (unsafe segment)`);
-  return recursive ? `${segments.join("/")}/**` : segments.join("/");
+  return normalizeRepoRelativePosixPath(normalizeString(value, location), location);
 }
 
 function normalizeWorkflow(value) {
