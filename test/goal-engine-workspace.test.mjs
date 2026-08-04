@@ -305,6 +305,27 @@ test("integration preserves user cherry-pick sequencer before side effects", () 
   assert.deepEqual({ head: git(origin, "rev-parse", "HEAD"), ref: git(origin, "symbolic-ref", "--quiet", "HEAD"), status: git(origin, "status", "--porcelain=v1"), marker: git(origin, "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD") }, before);
 });
 
+test("integration preserves range-external ancestor cherry-pick sequencer before side effects", () => {
+  const origin = initRepo();
+  writeFileSync(join(origin, "conflict.txt"), "executor ancestor\n"); git(origin, "add", "."); git(origin, "commit", "-m", "test: executor ancestor");
+  const markedAncestor = git(origin, "rev-parse", "HEAD");
+  writeFileSync(join(origin, "base.txt"), "lease base\n"); git(origin, "add", "."); git(origin, "commit", "-m", "test: lease base");
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "range-external-cherry", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+  writeFileSync(join(lease.path, "feature.ts"), "x\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "test: result");
+  const executorHead = git(lease.path, "rev-parse", "HEAD");
+  writeFileSync(join(origin, "conflict.txt"), "user operation\n"); git(origin, "commit", "-am", "test: user conflict");
+  const originHeadBefore = git(origin, "rev-parse", "HEAD");
+  assert.throws(() => git(origin, "cherry-pick", markedAncestor));
+  const before = { head: git(origin, "rev-parse", "HEAD"), ref: git(origin, "symbolic-ref", "--quiet", "HEAD"), status: git(origin, "status", "--porcelain=v1"), marker: git(origin, "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD") };
+  assert.throws(() => integrateExecutorWorkspace(lease, { strategy: "cherry-pick", executorHead, originHeadBefore }), /not provably owned|sequencer/i);
+  assert.deepEqual({ head: git(origin, "rev-parse", "HEAD"), ref: git(origin, "symbolic-ref", "--quiet", "HEAD"), status: git(origin, "status", "--porcelain=v1"), marker: git(origin, "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD") }, before);
+  assert.ok(existsSync(lease.path));
+  assert.ok(existsSync(lease.leasePath));
+  assert.equal(git(origin, "merge-base", "--is-ancestor", markedAncestor, executorHead), "");
+  assert.equal(git(origin, "rev-list", `${baseCommit}..${executorHead}`).includes(markedAncestor), false);
+});
+
 test("integration preserves user merge sequencer before side effects", () => {
   const origin = initRepo();
   writeFileSync(join(origin, "conflict.txt"), "base\n"); git(origin, "add", "."); git(origin, "commit", "-m", "test: base conflict");

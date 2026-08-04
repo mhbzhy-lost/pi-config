@@ -355,8 +355,17 @@ function goalOwnsSequencer(origin, strategy, lease, executorHead) {
   const marked = git(origin, "rev-parse", marker);
   if (strategy === "merge") return marked === executorHead;
   try {
+    // The marker must be selected by the same base..executor range that the
+    // integration command cherry-picks. An executor ancestor at or before the
+    // base is a user operation, not evidence of Goal ownership.
     git(lease.path, "merge-base", "--is-ancestor", marked, executorHead);
-    return true;
+    try {
+      git(lease.path, "merge-base", "--is-ancestor", marked, lease.baseCommit);
+      return false;
+    } catch (error) {
+      if (error?.status === 1) return true;
+      throw error;
+    }
   } catch (error) {
     if (error?.status === 1) return false;
     throw error;
