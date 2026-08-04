@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
@@ -232,13 +232,13 @@ test("goal_init creates goal and returns runnable frontier", async () => {
 
 test("goal_init rejects unsafe Git preflight before creating state", async () => {
   const cases = [
-    { name: "non Git cwd", setup: () => mkdtempSync(join(tmpdir(), "ge-unsafe-")) },
-    { name: "unborn HEAD", setup: () => { const cwd = mkdtempSync(join(tmpdir(), "ge-unborn-")); git(cwd, "init"); return cwd; } },
-    { name: "state directory not ignored", setup: () => { const cwd = mkdtempSync(join(tmpdir(), "ge-unignored-")); initGitRepo(cwd); return cwd; } },
-    { name: "repository subdirectory", setup: () => { const cwd = tmpCwd(); mkdirSync(join(cwd, "child")); return join(cwd, "child"); } },
-    { name: "detached HEAD", setup: () => { const cwd = tmpCwd(); git(cwd, "checkout", "--detach"); return cwd; } },
-    { name: "tracked state entry", setup: () => { const cwd = tmpCwd(); mkdirSync(join(cwd, ".state/goal-engine"), { recursive: true }); writeFileSync(join(cwd, ".state/goal-engine/old.json"), "{}\n"); git(cwd, "add", "-f", ".state/goal-engine/old.json"); git(cwd, "commit", "-m", "test: tracked state"); return cwd; } },
-    { name: "corrupt index", setup: () => { const cwd = tmpCwd(); writeFileSync(join(cwd, ".git/index"), "not a git index"); return cwd; } },
+    { name: "non Git cwd", expectedCode: "GIT_INFRASTRUCTURE_ERROR", setup: () => mkdtempSync(join(tmpdir(), "ge-unsafe-")) },
+    { name: "unborn HEAD", expectedCode: "INVALID_GIT_HEAD", setup: () => { const cwd = mkdtempSync(join(tmpdir(), "ge-unborn-")); git(cwd, "init"); return cwd; } },
+    { name: "state directory not ignored", expectedCode: "STATE_NOT_IGNORED", setup: () => { const cwd = mkdtempSync(join(tmpdir(), "ge-unignored-")); initGitRepo(cwd); return cwd; } },
+    { name: "repository subdirectory", expectedCode: "UNSAFE_GIT_CWD", setup: () => { const cwd = tmpCwd(); mkdirSync(join(cwd, "child")); return join(cwd, "child"); } },
+    { name: "detached HEAD", expectedCode: "DETACHED_GIT_HEAD", setup: () => { const cwd = tmpCwd(); git(cwd, "checkout", "--detach"); return cwd; } },
+    { name: "tracked state entry", expectedCode: "STATE_TRACKED", setup: () => { const cwd = tmpCwd(); mkdirSync(join(cwd, ".state/goal-engine"), { recursive: true }); writeFileSync(join(cwd, ".state/goal-engine/old.json"), "{}\n"); git(cwd, "add", "-f", ".state/goal-engine/old.json"); git(cwd, "commit", "-m", "test: tracked state"); return cwd; } },
+    { name: "corrupt index", expectedCode: "GIT_INFRASTRUCTURE_ERROR", setup: () => { const cwd = tmpCwd(); writeFileSync(join(cwd, ".git/index"), "not a git index"); return cwd; } },
   ];
   for (const fixture of cases) {
     const cwd = fixture.setup();
@@ -246,7 +246,7 @@ test("goal_init rejects unsafe Git preflight before creating state", async () =>
     createGoalEngineExtension(pi);
     await assert.rejects(
       () => invoke(pi, "goal_init", { objective: `Unsafe ${fixture.name}`, tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] }),
-      (error) => /GIT_INFRASTRUCTURE_ERROR|UNSAFE_GIT_CWD|INVALID_GIT_HEAD|DETACHED_GIT_HEAD|STATE_NOT_IGNORED|STATE_TRACKED/.test(error.code)
+      (error) => error.code === fixture.expectedCode
         && /observed=.*remediation=.*stateChanged=false/.test(error.message),
       fixture.name,
     );
@@ -1678,8 +1678,13 @@ test("goal_accept completed historical verdict is durable authority without appe
   assert.equal(readGoalEvents(cwd, goalId).length, before);
 });
 
-test("goal_amend validates the complete candidate against lexical origin cwd before append", async () => {
-  const cwd = tmpCwd();
+test("goal_amend rejects lexical symlink and canonical realpath origin commands before append", async (t) => {
+  const canonicalCwd = tmpCwd();
+  const lexicalCwd = join(mkdtempSync(join(tmpdir(), "ge-amend-link-")), "repo");
+  try { symlinkSync(canonicalCwd, lexicalCwd, "dir"); }
+  catch (error) { t.skip(`symlink fixture unavailable: ${error.message}`); return; }
+  const cwd = lexicalCwd;
+  const physicalCwd = realpathSync(lexicalCwd);
   const objective = "Amend origin command validation";
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd);
@@ -1687,11 +1692,11 @@ test("goal_amend validates the complete candidate against lexical origin cwd bef
   await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "initial task", writePaths: ["src/t1.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
   const before = readGoalEvents(cwd, goalId).length;
   await assert.rejects(
-    () => invoke(pi, "goal_amend", { reason: "Reject an added command that hardcodes the actual origin cwd", add_tasks: [{ id: "t2", description: "unsafe add", writePaths: ["src/t2.ts"], acceptance: { criteria: ["works"], commands: [`node ${cwd}/scripts/test.mjs`] }, workflow: "tdd" }] }),
+    () => invoke(pi, "goal_amend", { reason: "Reject an added command that hardcodes the lexical symlink origin cwd", add_tasks: [{ id: "t2", description: "unsafe add", writePaths: ["src/t2.ts"], acceptance: { criteria: ["works"], commands: [`node ${cwd}/scripts/test.mjs`] }, workflow: "tdd" }] }),
     (error) => error.code === "INVALID_GOAL_CONTRACT" && /hardcode origin cwd.*stateChanged=false/i.test(error.message),
   );
   await assert.rejects(
-    () => invoke(pi, "goal_amend", { reason: "Reject an updated command that hardcodes the actual origin cwd", update_tasks: { t1: { acceptance: { criteria: ["works"], commands: [`node ${cwd}/scripts/test.mjs`] } } } }),
+    () => invoke(pi, "goal_amend", { reason: "Reject an updated command that hardcodes the canonical physical origin cwd", update_tasks: { t1: { acceptance: { criteria: ["works"], commands: [`node ${physicalCwd}/scripts/test.mjs`] } } } }),
     (error) => error.code === "INVALID_GOAL_CONTRACT" && /hardcode origin cwd.*stateChanged=false/i.test(error.message),
   );
   assert.equal(readGoalEvents(cwd, goalId).length, before);
