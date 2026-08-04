@@ -164,6 +164,36 @@ test("inspectExecutorWorkspace reports changed files and write path boundaries",
   assert.doesNotThrow(() => assertWorkspaceChangesWithinPaths(globInspection, ["src/**"]));
 });
 
+test("writePaths requires both sides of rename and copy to be owned", () => {
+  const origin = initRepo();
+  const stateRoot = tmpStateRoot();
+  mkdirSync(join(origin, "forbidden"), { recursive: true });
+  writeFileSync(join(origin, "forbidden/secret.txt"), "secret\n");
+  writeFileSync(join(origin, "forbidden/source.txt"), "copy source content that is long enough to be detected reliably\n");
+  git(origin, "add", ".");
+  git(origin, "commit", "-m", "test: add protected sources");
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+
+  const renameLease = allocateExecutorWorkspace({ goalId: "rename-gate", taskId: "t1", attempt: 1, originRoot: origin, stateRoot, baseCommit });
+  mkdirSync(join(renameLease.path, "allowed"), { recursive: true });
+  git(renameLease.path, "mv", "forbidden/secret.txt", "allowed/secret.txt");
+  git(renameLease.path, "commit", "-m", "test: move secret");
+  const renameInspection = inspectExecutorWorkspace(renameLease);
+  assert.deepEqual(renameInspection.changedFiles, ["allowed/secret.txt", "forbidden/secret.txt"]);
+  assert.throws(() => workspace.assertWorkspaceChangesWithinPaths(renameInspection, ["allowed/**"]), /forbidden\/secret\.txt/);
+  assert.doesNotThrow(() => workspace.assertWorkspaceChangesWithinPaths(renameInspection, ["allowed/**", "forbidden/**"]));
+
+  const copyLease = allocateExecutorWorkspace({ goalId: "copy-gate", taskId: "t1", attempt: 1, originRoot: origin, stateRoot, baseCommit });
+  mkdirSync(join(copyLease.path, "allowed"), { recursive: true });
+  writeFileSync(join(copyLease.path, "allowed/copy.txt"), "copy source content that is long enough to be detected reliably\n");
+  git(copyLease.path, "add", ".");
+  git(copyLease.path, "commit", "-m", "test: copy secret");
+  const copyInspection = inspectExecutorWorkspace(copyLease);
+  assert.deepEqual(copyInspection.changedFiles, ["allowed/copy.txt", "forbidden/source.txt"]);
+  assert.throws(() => workspace.assertWorkspaceChangesWithinPaths(copyInspection, ["allowed/**"]), /forbidden\/source\.txt/);
+  assert.doesNotThrow(() => workspace.assertWorkspaceChangesWithinPaths(copyInspection, ["allowed/**", "forbidden/**"]));
+});
+
 test("assertWorkspaceChangesWithinPaths rejects NUL-byte paths", () => {
   const inspection = { changedFiles: ["shared/\u0000path.txt"] };
 

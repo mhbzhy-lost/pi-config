@@ -559,6 +559,41 @@ test("goal_integrate rejects changedFiles outside writePaths and keeps workspace
   assert.equal(state.branchExists, true);
 });
 
+test("goal_integrate rejects rename from forbidden source while preserving retry resources", async () => {
+  const cwd = tmpCwd();
+  const objective = "Rename source write-path gate goal";
+  const goalId = objectiveToGoalId(objective);
+  const run = initGitRepo(cwd);
+  mkdirSync(join(cwd, "forbidden"), { recursive: true });
+  writeFileSync(join(cwd, "forbidden/secret.txt"), "secret\n");
+  run("add", ".");
+  run("commit", "-m", "test: add protected source");
+  const originHeadBefore = git(cwd, "rev-parse", "HEAD");
+
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [{ id: "t1", description: "Move protected source", deps: [], writePaths: ["allowed/**"], acceptance: { criteria: ["source is gated"], commands: ["true"] }, workflow: "tdd" }],
+  });
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  mkdirSync(join(dispatched.workspace.path, "allowed"), { recursive: true });
+  git(dispatched.workspace.path, "mv", "forbidden/secret.txt", "allowed/secret.txt");
+  git(dispatched.workspace.path, "commit", "-m", "test: move protected source");
+  await invoke(pi, "goal_settle", {
+    task_id: "t1", outcome: "succeeded",
+    evidence: { type: "diff", ref: "git diff HEAD~1" }, evidence_source: "self_produced",
+    next_action: "Attempt integration and verify the forbidden rename source is rejected.",
+  });
+
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }), /writePaths|forbidden|mismatch/i);
+  assert.equal(git(cwd, "rev-parse", "HEAD"), originHeadBefore);
+  const state = workspaceState(cwd, goalId, "t1");
+  assert.equal(state.workspaceExists, true);
+  assert.equal(state.branchExists, true);
+  assert.equal(state.leaseExists, true);
+});
+
 test("goal_integrate rejects rogue commit appended after started event (rogue)", async () => {
   const cwd = tmpCwd();
   const objective = "Started rogue recovery test goal";

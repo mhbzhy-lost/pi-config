@@ -9,6 +9,28 @@ function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
+function gitRaw(cwd, ...args) {
+  return execFileSync("git", args, { cwd, encoding: "utf8" });
+}
+
+function parseChangedPaths(output) {
+  const tokens = output.split("\0");
+  if (tokens.at(-1) === "") tokens.pop();
+  const paths = [];
+  for (let index = 0; index < tokens.length;) {
+    const status = tokens[index++];
+    if (!status) continue;
+    if (/^[RC]/.test(status)) {
+      if (index + 1 >= tokens.length) throw new Error("Invalid git rename/copy status output");
+      paths.push(tokens[index++], tokens[index++]);
+    } else {
+      if (index >= tokens.length) throw new Error("Invalid git name-status output");
+      paths.push(tokens[index++]);
+    }
+  }
+  return [...new Set(paths)].sort();
+}
+
 function safeId(value, field) {
   if (typeof value !== "string" || !ID_RE.test(value) || value.includes("..")) throw new Error(`Invalid ${field}`);
   return value;
@@ -171,8 +193,8 @@ export function inspectExecutorWorkspace(lease) {
 
   const changedOutput = headCommit === lease.baseCommit
     ? ""
-    : git(lease.path, "diff", "--name-only", `${lease.baseCommit}..${headCommit}`);
-  const changedFiles = changedOutput ? changedOutput.split("\n").filter(Boolean) : [];
+    : gitRaw(lease.path, "diff", "--name-status", "-z", "--find-renames", "--find-copies-harder", `${lease.baseCommit}..${headCommit}`);
+  const changedFiles = changedOutput ? parseChangedPaths(changedOutput) : [];
 
   let diff = "";
   if (headCommit !== lease.baseCommit) {
