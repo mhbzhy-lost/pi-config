@@ -28,13 +28,35 @@ function frontmatterError(name, reason) {
   return new Error(`invalid frontmatter for allowlisted skill: ${name}: ${reason}`);
 }
 
+function lexSingleLineScalar(value) {
+  let quote = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (quote === "'") {
+      if (character === "'" && value[index + 1] === "'") index += 1;
+      else if (character === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (character === "\\") index += 1;
+      else if (character === '"') quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"') quote = character;
+    else if (character === "#" && index > 0 && /\s/u.test(value[index - 1])) return value.slice(0, index).trim();
+  }
+  return value.trim();
+}
+
 function isSupportedDescriptionScalar(value) {
-  const description = value.trim();
-  if (/^"[^"\\\r\n]+"$/u.test(description) || /^'[^'\r\n]+'$/u.test(description)) return true;
+  const description = lexSingleLineScalar(value);
+  if (/^'(?:[^'\r\n]|'')*'$/u.test(description)) return true;
+  if (/^"(?:[^"\\\r\n]|\\["\\/bfnrt])*"$/u.test(description)) return true;
   if (/^(?:~|null|true|false)$/iu.test(description)) return false;
   if (/^\d{4}-\d{2}-\d{2}$/u.test(description)) return true;
   if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/iu.test(description)) return false;
   if (/^[+-]?\.(?:nan|inf)$/iu.test(description)) return false;
+  if (/:\s/u.test(description)) return false;
   return /^\p{L}/u.test(description);
 }
 
