@@ -1055,6 +1055,18 @@ function started(action, goalId = "v2-goal") {
   return v2Event("task.workspace_disposition_started", { taskId: "t1", attempt: 1, requestedAction: action, strategy: "merge", executorHead: "executor-head", originHeadBefore: "origin-before" }, goalId);
 }
 
+test("settlement identity strictly binds succeeded v2 attempt and HEAD", () => {
+  const dispatched = v2Dispatched(applyEvent(createProjection(), v2Created()));
+  const base = { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria" };
+  assert.throws(() => applyEvent(dispatched, v2Event("task.settled", base)), /attempt|executorHead|settlement/i);
+  assert.throws(() => applyEvent(dispatched, v2Event("task.settled", { ...base, attempt: 2, executorHead: "head-1" })), /attempt/i);
+  const settled = applyEvent(dispatched, v2Event("task.settled", { ...base, attempt: 1, executorHead: "head-1" }));
+  assert.deepEqual(settled.tasks.get("t1").settlement, { attempt: 1, executorHead: "head-1" });
+  assert.throws(() => applyEvent(settled, started("integrate")), /settlement|executorHead/i);
+  const matching = started("integrate"); matching.data.executorHead = "head-1";
+  assert.doesNotThrow(() => applyEvent(settled, matching));
+});
+
 test("schema downgrade rejects v1 accepted after a v2 event", () => {
   let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
   assert.throws(() => applyEvent(p, makeEvent("task.accepted", { taskId: "t1" }, "v2-goal")), /schema downgrade/);

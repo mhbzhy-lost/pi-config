@@ -1161,6 +1161,22 @@ test("goal_settle rejects dirty executor workspace without state changes", async
   assert.deepEqual(persistedStateBytes(cwd, goalId), before);
 });
 
+test("goal_settle persists settlement identity from the inspected executor HEAD", async () => {
+  const cwd = tmpCwd();
+  const objective = "Settlement identity persistence";
+  const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: { criteria: ["allowed"], commands: ["true"] }, workflow: "tdd" }] });
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+  commitWorkspaceChange(dispatched, "src/allowed.ts", "export const allowed = true;\n", "feat: allowed");
+  const head = git(dispatched.path, "rev-parse", "HEAD");
+  await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/allowed.ts" }, next_action: "Integrate the inspected executor commit after verifying settlement identity." });
+  const settled = readGoalEvents(cwd, goalId).find((event) => event.type === "task.settled");
+  assert.deepEqual({ attempt: settled.data.attempt, executorHead: settled.data.executorHead }, { attempt: dispatched.attempt, executorHead: head });
+  assert.deepEqual(loadProjection(join(cwd, ".state/goal-engine"), goalId).tasks.get("t1").settlement, { attempt: dispatched.attempt, executorHead: head });
+});
+
 test("goal_settle permits clean authorized commits with runtime-only artifacts", async () => {
   const cwd = tmpCwd();
   const objective = "Clean settle gate test goal";
