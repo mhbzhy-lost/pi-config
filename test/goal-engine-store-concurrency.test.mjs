@@ -93,6 +93,40 @@ if (process.argv[2] === "guard-owner") {
     }
   });
 
+  test("malformed registry fails before event or projection writes and retries at the same version", () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    const goalDir = join(stateRoot, "goals/concurrent-goal");
+    const eventsPath = join(goalDir, "events.jsonl");
+    const projectionPath = join(goalDir, "projection.json");
+    const registryPath = join(stateRoot, "registry.json");
+    const validRegistry = readFileSync(registryPath, "utf8");
+    writeFileSync(registryPath, "{ malformed registry");
+    const before = {
+      events: readFileSync(eventsPath, "utf8"),
+      projection: readFileSync(projectionPath, "utf8"),
+      registry: readFileSync(registryPath, "utf8"),
+      replayVersion: loadProjection(stateRoot, "concurrent-goal").version,
+      projectionFileVersion: JSON.parse(readFileSync(projectionPath, "utf8")).version,
+    };
+
+    assert.throws(() => appendEvent(stateRoot, checkpoint("malformed-registry"), 1), SyntaxError);
+    assert.equal(readFileSync(eventsPath, "utf8"), before.events);
+    assert.equal(readFileSync(projectionPath, "utf8"), before.projection);
+    assert.equal(readFileSync(registryPath, "utf8"), before.registry);
+    assert.equal(loadProjection(stateRoot, "concurrent-goal").version, before.replayVersion);
+    assert.equal(JSON.parse(readFileSync(projectionPath, "utf8")).version, before.projectionFileVersion);
+    assert.deepEqual(readdirSync(stateRoot).filter((name) => /(?:writer|guard|tmp|candidate|quarantine)/.test(name)), []);
+    assert.deepEqual(readdirSync(goalDir).filter((name) => /(?:tmp|candidate|quarantine)/.test(name)), []);
+
+    writeFileSync(registryPath, validRegistry);
+    assert.equal(appendEvent(stateRoot, checkpoint("malformed-registry"), 1).version, 2);
+    assert.equal(readFileSync(eventsPath, "utf8").trim().split("\n").length, 2);
+    assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 2);
+    assert.equal(JSON.parse(readFileSync(projectionPath, "utf8")).version, 2);
+    assert.deepEqual(listGoals(stateRoot), ["concurrent-goal"]);
+  });
+
   test("stale writer receipt cannot release a replacement writer lock", () => {
     const stateRoot = root();
     const staleReceipt = acquireWriterLock(stateRoot);

@@ -20,12 +20,13 @@ export function appendEvent(stateRoot, event, expectedVersion) {
     const current = rebuildProjection(eventsPath);
     if (current.version !== expectedVersion) throw projectionConflict(expectedVersion, current.version);
     const next = applyEvent(current, event);
+    const registry = prepareRegistryUpdate(stateRoot, event, next);
 
     mkdirSync(goalDir, { recursive: true });
     appendFileSync(eventsPath, JSON.stringify(event) + "\n", { mode: 0o600 });
     writeFileSync(projectionTmp, JSON.stringify(serializeProjection(next), null, 2) + "\n", { mode: 0o600 });
     renameSync(projectionTmp, projectionPath);
-    registryTmp = updateRegistry(stateRoot, event, next, identity, lock.token);
+    registryTmp = publishRegistry(stateRoot, registry, identity, lock.token);
     return next;
   } finally {
     if (existsSync(projectionTmp)) rmSync(projectionTmp, { force: true });
@@ -187,10 +188,13 @@ function serializeProjection(p) {
 }
 
 export function updateRegistry(stateRoot, event, projection, identity, writerToken) {
-  const owner = readLockOwner(join(stateRoot, ".writer.lock"));
-  if (!writerToken || owner?.token !== writerToken) throw writerLockLost();
+  return publishRegistry(stateRoot, prepareRegistryUpdate(stateRoot, event, projection), identity, writerToken);
+}
+
+function prepareRegistryUpdate(stateRoot, event, projection) {
   const registryPath = join(stateRoot, "registry.json");
   const registry = existsSync(registryPath) ? JSON.parse(readFileSync(registryPath, "utf8")) : { schema_version: REGISTRY_SCHEMA_VERSION, active_goal_ids: [], goals: {} };
+  validateRegistry(registry);
   const goalId = event.goalId;
   if (!registry.goals[goalId]) registry.goals[goalId] = {};
   registry.goals[goalId].lifecycle = projection.lifecycle;
@@ -199,6 +203,19 @@ export function updateRegistry(stateRoot, event, projection, identity, writerTok
   const idx = registry.active_goal_ids.indexOf(goalId);
   if (projection.lifecycle === "active" && idx === -1) registry.active_goal_ids.push(goalId);
   else if (projection.lifecycle !== "active" && idx !== -1) registry.active_goal_ids.splice(idx, 1);
+  return registry;
+}
+
+function validateRegistry(registry) {
+  if (!registry || typeof registry !== "object" || Array.isArray(registry) || registry.schema_version !== REGISTRY_SCHEMA_VERSION || !Array.isArray(registry.active_goal_ids) || !registry.active_goal_ids.every((goalId) => typeof goalId === "string") || !registry.goals || typeof registry.goals !== "object" || Array.isArray(registry.goals)) {
+    throw new TypeError("invalid goal engine registry");
+  }
+}
+
+function publishRegistry(stateRoot, registry, identity, writerToken) {
+  const owner = readLockOwner(join(stateRoot, ".writer.lock"));
+  if (!writerToken || owner?.token !== writerToken) throw writerLockLost();
+  const registryPath = join(stateRoot, "registry.json");
   mkdirSync(dirname(registryPath), { recursive: true });
   const tmpPath = `${registryPath}.${identity}.tmp`;
   writeFileSync(tmpPath, JSON.stringify(registry, null, 2) + "\n", { mode: 0o600 });
