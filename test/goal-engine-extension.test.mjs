@@ -238,6 +238,7 @@ test("goal_init rejects unsafe Git preflight before creating state", async () =>
     { name: "repository subdirectory", setup: () => { const cwd = tmpCwd(); mkdirSync(join(cwd, "child")); return join(cwd, "child"); } },
     { name: "detached HEAD", setup: () => { const cwd = tmpCwd(); git(cwd, "checkout", "--detach"); return cwd; } },
     { name: "tracked state entry", setup: () => { const cwd = tmpCwd(); mkdirSync(join(cwd, ".state/goal-engine"), { recursive: true }); writeFileSync(join(cwd, ".state/goal-engine/old.json"), "{}\n"); git(cwd, "add", "-f", ".state/goal-engine/old.json"); git(cwd, "commit", "-m", "test: tracked state"); return cwd; } },
+    { name: "corrupt index", setup: () => { const cwd = tmpCwd(); writeFileSync(join(cwd, ".git/index"), "not a git index"); return cwd; } },
   ];
   for (const fixture of cases) {
     const cwd = fixture.setup();
@@ -264,6 +265,22 @@ test("goal_init wraps invalid task contracts before any persistent side effect",
     (error) => error.code === "INVALID_TASK_CONTRACT" && /observed=.*unsupported.*remediation=.*stateChanged=false/i.test(error.message),
   );
   assert.equal(existsSync(join(cwd, ".state/goal-engine")), false);
+});
+
+test("goal_init rejects bounded task contracts and wrapper escapes before state", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  const base = { id: "t1", description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" };
+  const invalid = [
+    [{ ...base, description: "x".repeat(4097) }],
+    [{ ...base, acceptance: { criteria: ["works"], commands: ["sh -c 'cd /tmp'"] } }],
+    Array.from({ length: 33 }, (_, i) => ({ ...base, id: `t${i}` })),
+  ];
+  for (const tasks of invalid) {
+    await assert.rejects(() => invoke(pi, "goal_init", { objective: `bounded ${Math.random()}`, tasks }), (error) => error.code === "INVALID_TASK_CONTRACT" && /stateChanged=false/.test(error.message));
+    assert.equal(existsSync(join(cwd, ".state/goal-engine")), false);
+  }
 });
 
 test("goal_init active-goal error embeds actionable goal_status next action", async () => {

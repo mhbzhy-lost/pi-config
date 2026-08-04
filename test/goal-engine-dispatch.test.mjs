@@ -92,6 +92,32 @@ test("task commands reject origin absolute cd but allow executor-relative dynami
   }
 });
 
+test("init and dispatch enforce shared byte and collection limits", () => {
+  const task = (overrides = {}) => ({ description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd", ...overrides });
+  for (const [field, value] of [["description", "x".repeat(4097)], ["writePaths", ["x".repeat(4097)]], ["acceptance", { criteria: ["x".repeat(4097)], commands: ["true"] }], ["acceptance", { criteria: ["works"], commands: ["x".repeat(4097)] }]]) {
+    assert.throws(() => validateTaskDefinitions(["t1"], { t1: task({ [field]: value }) }), /4096|bytes/);
+  }
+  for (const [field, value] of [["tasks", Array.from({ length: 33 }, (_, i) => `t${i}`)], ["deps", Array.from({ length: 33 }, (_, i) => `d${i}`)], ["writePaths", Array.from({ length: 33 }, (_, i) => `src/${i}`)], ["criteria", Array.from({ length: 33 }, (_, i) => `c${i}`)], ["commands", Array.from({ length: 33 }, () => "true")]]) {
+    const def = task(field === "deps" ? { deps: value } : field === "writePaths" ? { writePaths: value } : field === "criteria" ? { acceptance: { criteria: value, commands: ["true"] } } : field === "commands" ? { acceptance: { criteria: ["works"], commands: value } } : {});
+    const tasks = field === "tasks" ? value : ["t1"];
+    const defs = field === "tasks" ? Object.fromEntries(value.map((id) => [id, task()])) : { t1: def };
+    assert.throws(() => validateTaskDefinitions(tasks, defs), /32/);
+  }
+  const input = validInput({ title: "x".repeat(4097) });
+  assert.throws(() => compileCodingDispatchIR(input, { cwd: "/workspace/project" }), /4096.*bytes/);
+  input.title = "ok";
+  input.requirements = Array.from({ length: 33 }, (_, i) => `r${i}`);
+  assert.throws(() => compileCodingDispatchIR(input, { cwd: "/workspace/project" }), /32/);
+});
+
+test("task commands reject wrapper absolute cd and origin aliases conservatively", () => {
+  const task = (command) => ({ description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: [command] }, workflow: "tdd" });
+  for (const command of ["sh -c 'cd /tmp'", 'bash -lc "cd /tmp"', "eval 'cd /tmp'", "xargs sh -c 'cd /tmp'", "cd /physical/origin"]) {
+    assert.throws(() => validateTaskDefinitions(["t1"], { t1: task(command) }, { cwd: "/origin", realpathCwd: "/physical/origin" }), /absolute cd|origin cwd/);
+  }
+  for (const command of ["echo 'cd /tmp'", "cd relative", "echo $PWD"]) assert.doesNotThrow(() => validateTaskDefinitions(["t1"], { t1: task(command) }, { cwd: "/origin", realpathCwd: "/physical/origin" }));
+});
+
 test("renderDispatchPrompt produces structured markdown", () => {
   const ir = compileCodingDispatchIR(validInput(), { cwd: "/workspace/project" });
   const prompt = renderDispatchPrompt(ir);

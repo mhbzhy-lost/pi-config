@@ -52,6 +52,23 @@ test("real Pi host uses execution context cwd instead of process cwd", async () 
   }
 });
 
+test("real Pi host rejects goal_init outside Git without state", async () => {
+  const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-unsafe-host-"));
+  const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-host-"));
+  let result;
+  try {
+    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    await loader.reload();
+    result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: SessionManager.inMemory(projectCwd) });
+    await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
+    const init = result.session.getToolDefinition("goal_init");
+    await assert.rejects(() => init.execute("goal-init-unsafe-host", { objective: "Unsafe host", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] } }] }, new AbortController().signal, undefined, { cwd: projectCwd }), /GIT_INFRASTRUCTURE_ERROR: observed=.*remediation=.*stateChanged=false/);
+    assert.equal(existsSync(join(projectCwd, ".state/goal-engine")), false);
+  } finally {
+    try { result?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
+  }
+});
+
 test("real Pi host executes goal_status through ToolDefinition.execute", async () => {
   const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-project-"));
   const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-host-"));
