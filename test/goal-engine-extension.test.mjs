@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
 import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
-import { inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
+import { allocateExecutorWorkspace, inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 
 test("external evidence classification matrix only promotes external_review from external", () => {
   const projectionFor = (evidence) => ({ tasks: new Map([["t1", { evidence }]]) });
@@ -2439,6 +2439,9 @@ test("event rollback verified orphan status and dispatch are side-effect free", 
     return true;
   });
   assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
+  assert.equal(workspaceState(fixture.cwd, fixture.goalId, "t1", 2).workspaceExists, false);
+  assert.equal(workspaceState(fixture.cwd, fixture.goalId, "t1", 2).leaseExists, false);
+  assert.equal(workspaceState(fixture.cwd, fixture.goalId, "t1", 2).branchExists, false);
 });
 
 test("event rollback unverified orphan has no destructive recovery choices", async () => {
@@ -2449,8 +2452,62 @@ test("event rollback unverified orphan has no destructive recovery choices", asy
   assert.equal(status.tasks.t1.blockingReason.code, "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED");
   assert.equal(status.tasks.t1.requiredNextAction, null);
   assert.equal(Object.hasOwn(status.tasks.t1.blockingReason, "choices"), false);
-  assert.ok(status.tasks.t1.blockingReason.resources);
+  assert.deepEqual(status.tasks.t1.blockingReason.resources, { workspaceExists: true, branchExists: true, leaseExists: false });
   assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
   await assert.rejects(() => invoke(fixture.pi, "goal_dispatch", { task_id: "t1" }), (error) => error.code === "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED" && (error.requiredNextAction === null || error.requiredNextAction?.tool === "goal_status"));
   assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
+});
+
+
+test("status detects an exact attempt two orphan after a discarded failed attempt", async () => {
+  const cwd = tmpCwd();
+  const objective = "Attempt two exact orphan";
+  const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "retry", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_dispatch", { task_id: "t1" });
+  await invoke(pi, "goal_settle", { task_id: "t1", outcome: "failed", next_action: "Discard this failed executor workspace before retrying." });
+  await invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" });
+  const disposed = loadProjection(join(cwd, ".state/goal-engine"), goalId).tasks.get("t1");
+  assert.equal(disposed.workspace.phase, "disposed");
+  assert.equal(disposed.workspace.disposition, "discarded");
+  assert.equal(disposed.workspace.released, true);
+  assert.equal(disposed.attempts, 1);
+  allocateExecutorWorkspace({ goalId, taskId: "t1", attempt: 2, originRoot: cwd, stateRoot: join(cwd, ".state/goal-engine"), baseCommit: git(cwd, "rev-parse", "HEAD") });
+  const restarted = createMockPi(cwd);
+  createGoalEngineExtension(restarted);
+  const status = JSON.parse(await invoke(restarted, "goal_status", {}));
+  assert.deepEqual(status.runnable, []);
+  assert.equal(status.tasks.t1.attempts, 1);
+  assert.equal(status.tasks.t1.blockingReason.code, "ORPHANED_EXECUTOR_WORKSPACE");
+});
+
+test("status removes only an orphaned task from a multi-task runnable frontier", async () => {
+  const cwd = tmpCwd(); const objective = "Multi task exact orphan"; const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd); createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [
+    { id: "t1", description: "orphan", deps: [], writePaths: ["src/one.ts"], acceptance: { criteria: ["one"], commands: ["true"] }, workflow: "tdd" },
+    { id: "t2", description: "normal", deps: [], writePaths: ["src/two.ts"], acceptance: { criteria: ["two"], commands: ["true"] }, workflow: "tdd" },
+  ] });
+  allocateExecutorWorkspace({ goalId, taskId: "t1", attempt: 1, originRoot: cwd, stateRoot: join(cwd, ".state/goal-engine"), baseCommit: git(cwd, "rev-parse", "HEAD") });
+  const before = fullRejectionSnapshot(cwd, goalId); const restarted = createMockPi(cwd); createGoalEngineExtension(restarted);
+  const status = JSON.parse(await invoke(restarted, "goal_status", {}));
+  assert.deepEqual(status.runnable, ["t2"]);
+  assert.equal(status.tasks.t1.blockingReason.code, "ORPHANED_EXECUTOR_WORKSPACE");
+  assertTaskMachineAction(status.tasks.t2, { allowedActions: ["goal_dispatch"], requiredTool: "goal_dispatch", requiredParams: { task_id: "t2" }, blockingReason: null });
+  assert.deepEqual(fullRejectionSnapshot(cwd, goalId), before);
+});
+
+test("invalid historical contract takes priority over an exact orphan on dispatch", async () => {
+  const cwd = tmpCwd(); const goalId = "unsafe-contract-orphan-priority"; const root = join(cwd, ".state/goal-engine");
+  const created = { schemaVersion: "goal-engine.event.v2", eventId: "unsafe-priority-create", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Unsafe contract orphan priority", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: [`cd ${cwd} && true`] }, workflow: "tdd" } } } };
+  mkdirSync(join(root, "goals", goalId), { recursive: true }); writeFileSync(goalEventsPath(cwd, goalId), `${JSON.stringify(created)}\n`);
+  writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: created.data.objective, updatedAt: created.occurredAt } } }));
+  allocateExecutorWorkspace({ goalId, taskId: "t1", attempt: 1, originRoot: cwd, stateRoot: root, baseCommit: git(cwd, "rev-parse", "HEAD") });
+  const pi = createMockPi(cwd); createGoalEngineExtension(pi);
+  const status = JSON.parse(await invoke(pi, "goal_status", {})); assert.equal(status.tasks.t1.blockingReason.code, "ORPHANED_EXECUTOR_WORKSPACE");
+  const before = fullRejectionSnapshot(cwd, goalId);
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), (error) => { assert.equal(error.code, "INVALID_TASK_CONTRACT"); assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } }); return true; });
+  assert.deepEqual(fullRejectionSnapshot(cwd, goalId), before);
 });

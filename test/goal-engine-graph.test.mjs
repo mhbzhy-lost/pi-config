@@ -366,22 +366,28 @@ test("terminal goal lifecycle makes every task non-runnable", () => {
 });
 
 test("orphan graph overlay selects candidate attempts and blocks only listed frontier tasks", () => {
-  const projection = projectionState({
-    first: taskState({ attempts: 1, workspace: { phase: "disposed", disposition: "discarded", released: true, attempt: 1 } }),
-    second: taskState(),
-  });
-  assert.equal(graph.nextDispatchAttempt(projection, "first"), 2);
-  assert.equal(graph.nextDispatchAttempt(projection, "second"), 1);
-  assert.equal(graph.nextDispatchAttempt(projectionState({ done: taskState({ status: "accepted" }) }), "done"), null);
+  const cases = [
+    ["active pending without workspace", taskState(), 1],
+    ["disposed discarded released", taskState({ attempts: 1, workspace: { phase: "disposed", disposition: "discarded", released: true, attempt: 1 } }), 2],
+    ["active workspace", taskState({ workspace: { phase: "active", attempt: 1 } }), null],
+    ["preserved workspace", taskState({ workspace: { phase: "disposed", disposition: "preserved", released: false, attempt: 1 } }), null],
+    ["disposed unreleased", taskState({ workspace: { phase: "disposed", disposition: "discarded", released: false, attempt: 1 } }), null],
+    ["non-pending", taskState({ status: "dispatched" }), null],
+  ];
+  for (const [label, task, expected] of cases) {
+    assert.equal(graph.nextDispatchAttempt(projectionState({ task }), "task"), expected, label);
+  }
+  assert.equal(graph.nextDispatchAttempt(projectionState({ done: taskState({ status: "accepted" }) }, { lifecycle: "completed" }), "done"), null);
+  assert.equal(graph.nextDispatchAttempt(projectionState({}), "unknown"), null);
+  const projection = projectionState({ first: cases[1][1], second: taskState() });
   assert.deepEqual(graph.runnableFrontier(projection, { blockedTaskIds: new Set(["first"]) }), ["second"]);
 });
 
 test("orphan graph overlay advertises verified recovery and non-destructive unverified state", () => {
   const verified = graph.orphanWorkspaceActionState("t1", {
-    kind: "orphaned",
-    verified: true,
+    kind: "verified",
     attempt: 1,
-    resources: { workspace: true, branch: true, lease: true },
+    resources: { workspaceExists: true, branchExists: true, leaseExists: true },
   });
   assert.deepEqual(verified, {
     allowedActions: ["goal_integrate"],
@@ -395,10 +401,10 @@ test("orphan graph overlay advertises verified recovery and non-destructive unve
       ],
     },
   });
-  const unverified = graph.orphanWorkspaceActionState("t1", { kind: "orphaned", verified: false, resources: { workspace: true, branch: true, lease: false } });
+  const unverified = graph.orphanWorkspaceActionState("t1", { kind: "unverified", resources: { workspaceExists: true, branchExists: true, leaseExists: false } });
   assert.equal(unverified.blockingReason.code, "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED");
   assert.equal(unverified.requiredNextAction, null);
   assert.deepEqual(unverified.allowedActions, []);
   assert.equal(Object.hasOwn(unverified.blockingReason, "choices"), false);
-  assert.deepEqual(unverified.blockingReason.resources, { workspace: true, branch: true, lease: false });
+  assert.deepEqual(unverified.blockingReason.resources, { workspaceExists: true, branchExists: true, leaseExists: false });
 });
