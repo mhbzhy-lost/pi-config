@@ -213,6 +213,60 @@ test("goal_status returns active task from historical v2 JSONL", async () => {
   assert.deepEqual(status.runnable, ["t1"]);
 });
 
+test("historical workspace-less succeeded settle returns workspace-missing without state changes", async () => {
+  const cwd = tmpCwd();
+  const goalId = "historical-workspace-less-settle";
+  const root = join(cwd, ".state/goal-engine");
+  const created = { schemaVersion: "goal-engine.event.v1", eventId: "legacy-workspace-less-created", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Historical workspace-less settlement", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } };
+  const dispatched = { schemaVersion: "goal-engine.event.v1", eventId: "legacy-workspace-less-dispatched", goalId, occurredAt: "2024-01-01T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "legacy-contract" } };
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(goalEventsPath(cwd, goalId), `${JSON.stringify(created)}\n${JSON.stringify(dispatched)}\n`);
+  writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: created.data.objective, updatedAt: dispatched.occurredAt } } }));
+  const before = { events: readFileSync(goalEventsPath(cwd, goalId), "utf8"), projection: existsSync(join(root, "goals", goalId, "projection.json")) ? readFileSync(join(root, "goals", goalId, "projection.json"), "utf8") : null, registry: readFileSync(join(root, "registry.json"), "utf8") };
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  await assert.rejects(
+    () => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover this historical task through the typed goal status action before retrying." }),
+    (error) => error.code === "EXECUTOR_WORKSPACE_MISSING" && /observed=.*workspace is required.*remediation=.*stateChanged=false.*requiredNextAction/.test(error.message) && error.requiredNextAction?.tool === "goal_status" && error.requiredNextAction.params.goal_id === goalId,
+  );
+  assert.deepEqual({ events: readFileSync(goalEventsPath(cwd, goalId), "utf8"), projection: existsSync(join(root, "goals", goalId, "projection.json")) ? readFileSync(join(root, "goals", goalId, "projection.json"), "utf8") : null, registry: readFileSync(join(root, "registry.json"), "utf8") }, before);
+});
+
+test("goal_settle classifies Git infrastructure workspace inspection without side effects", async () => {
+  const cwd = tmpCwd();
+  const objective = "Git infrastructure settle fixture";
+  const goalId = objectiveToGoalId(objective);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Break Git metadata", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+  renameSync(join(workspace.path, ".git"), join(workspace.path, ".git-unreadable"));
+  const before = rejectionSnapshot(cwd, goalId);
+  await assert.rejects(
+    () => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Repair the executor Git metadata and recover through typed goal status before retrying." }),
+    (error) => error.code === "GIT_INFRASTRUCTURE_ERROR" && /observed=.*remediation=.*stateChanged=false.*requiredNextAction/.test(error.message),
+  );
+  assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+});
+
+test("goal_settle permits failed and blocked dirty no-commit workspaces", async () => {
+  for (const outcome of ["failed", "blocked"]) {
+    const cwd = tmpCwd();
+    const objective = `${outcome} dirty settle fixture`;
+    const goalId = objectiveToGoalId(objective);
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi);
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Leave ordinary dirty work", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+    writeFileSync(join(workspace.path, "ordinary-dirty.txt"), "dirty\n");
+    await invoke(pi, "goal_settle", { task_id: "t1", outcome, reason: outcome === "blocked" ? "Waiting for an external dependency before the executor can continue." : undefined, next_action: "Keep the dirty executor workspace available for the selected typed disposition action." });
+    const status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+    assert.equal(status.tasks.t1.status, outcome === "failed" ? "pending" : "blocked");
+    assert.equal(existsSync(join(workspace.path, "ordinary-dirty.txt")), true);
+  }
+});
+
 test("historical unsafe dispatch is rejected before workspace allocation while status remains readable", async () => {
   const cwd = tmpCwd();
   const goalId = "historical-unsafe-dispatch";
