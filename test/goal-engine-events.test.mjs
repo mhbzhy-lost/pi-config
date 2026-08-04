@@ -203,6 +203,32 @@ test("goal.amended adds and removes tasks", () => {
   assert.deepEqual(p.tasks.get("t3").deps, ["t1"]);
 });
 
+test("historical v1 JSONL remove add update replacement replays in candidate order", () => {
+  const goalId = "fixed-remove-add-replay";
+  const created = {
+    schemaVersion: "goal-engine.event.v1", eventId: "remove-add-created", goalId,
+    occurredAt: "2025-02-04T05:06:07.000Z", type: "goal.created",
+    data: {
+      objective: "Replay a historical task replacement", scope: [], nonGoals: [], dod: [], tasks: ["t1"],
+      taskDefs: { t1: { description: "original", deps: [], writePaths: ["original.ts"], acceptance: { criteria: ["original"], commands: ["true"] }, workflow: "tdd" } },
+    },
+  };
+  const replacement = {
+    reason: "Replay historical remove add update task replacement in order",
+    removeTasks: ["t1"],
+    addTasks: { t1: { description: "replacement", deps: [], writePaths: ["replacement.ts"], acceptance: { criteria: ["replacement"], commands: ["true"] }, workflow: "tdd" } },
+    updateTasks: { t1: { description: "refined", writePaths: ["refined.ts"], acceptance: { criteria: ["refined"], commands: ["node --test test/refined.test.mjs"] } } },
+  };
+  const root = tmpRoot();
+  appendEvent(root, created, 0);
+  appendEvent(root, { schemaVersion: "goal-engine.event.v1", eventId: "remove-add-amended", goalId, occurredAt: "2025-02-04T05:06:08.000Z", type: "goal.amended", data: replacement }, 1);
+  const replayed = loadProjection(root, goalId);
+  assert.equal(replayed.version, 2);
+  assert.equal(replayed.tasks.get("t1").description, "refined");
+  assert.deepEqual(replayed.tasks.get("t1").writePaths, ["refined.ts"]);
+  assert.deepEqual(replayed.tasks.get("t1").acceptance.criteria, ["refined"]);
+});
+
 test("historical v1 and v2 amendments update a task added by the same event", () => {
   const goalId = "fixed-add-update-replay";
   const created = {
@@ -585,6 +611,41 @@ test("amend rejects accepted and unreleased workspace tasks atomically", () => {
     task.workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "disposed", disposition, released: disposition === "integrated" };
     assert.throws(() => amend(projection, { removeTasks: ["t1"] }), /workspace|pending|amend/i);
     assert.throws(() => amend(projection, { updateTasks: { t1: { description: "changed" } } }), /workspace|pending|amend/i);
+  }
+});
+
+test("v2 pending replacement succeeds while accepted and unreleased replacements reject atomically", () => {
+  const replacement = {
+    reason: "Replace the original task only after its removal gate allows it",
+    removeTasks: ["t1"],
+    addTasks: { t1: { description: "replacement", deps: [], writePaths: ["replacement.ts"], acceptance: { criteria: ["replacement"], commands: ["true"] }, workflow: "tdd" } },
+    updateTasks: { t1: { description: "refined" } },
+  };
+  const amend = (projection) => applyEvent(projection, v2Event("goal.amended", replacement, "replacement-gate-goal"));
+  const snapshot = (projection) => structuredClone({ version: projection.version, tasks: [...projection.tasks] });
+
+  const pending = applyEvent(createProjection(), v2Created("replacement-gate-goal"));
+  const replaced = amend(pending);
+  assert.equal(replaced.version, 2);
+  assert.equal(replaced.tasks.get("t1").description, "refined");
+
+  const rejected = [
+    { status: "accepted" },
+    { status: "dispatched", phase: "active" },
+    { status: "succeeded", phase: "disposing" },
+    { status: "blocked", phase: "applied" },
+    { status: "pending", phase: "disposed", disposition: "preserved", released: false },
+    { status: "pending", phase: "disposed", disposition: "integrated", released: true },
+    { status: "pending", phase: "disposed", disposition: "discarded", released: false },
+  ];
+  for (const fixture of rejected) {
+    const projection = applyEvent(createProjection(), v2Created("replacement-gate-goal"));
+    const task = projection.tasks.get("t1");
+    task.status = fixture.status;
+    if (fixture.phase) task.workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: fixture.phase, disposition: fixture.disposition, released: fixture.released };
+    const before = snapshot(projection);
+    assert.throws(() => amend(projection), /pending|workspace|remove/i);
+    assert.deepEqual(snapshot(projection), before);
   }
 });
 

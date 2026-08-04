@@ -286,14 +286,17 @@ function goalAmended(p, data, schemaVersion) {
   const removedTaskIds = new Set(removeTasks || []);
   for (const taskId of removedTaskIds) assertTaskRemovable(requireTask(p, taskId), taskId, schemaVersion);
   for (const taskId of Object.keys(addTasks || {})) {
-    if (p.tasks.has(taskId)) throw new Error(`task already exists: ${taskId}`);
+    if (p.tasks.has(taskId) && !removedTaskIds.has(taskId)) throw new Error(`task already exists: ${taskId}`);
   }
   for (const taskId of Object.keys(updateTasks || {})) {
-    if (removedTaskIds.has(taskId)) throw new Error(`cannot update task scheduled for removal: ${taskId}`);
+    const isReplacement = removedTaskIds.has(taskId);
+    if (isReplacement && !Object.hasOwn(addTasks || {}, taskId)) {
+      throw new Error(`cannot update task scheduled for removal: ${taskId}`);
+    }
     const existingTask = p.tasks.get(taskId);
-    if (existingTask) {
+    if (existingTask && !isReplacement) {
       assertTaskUpdatable(existingTask, taskId, schemaVersion);
-    } else if (!Object.hasOwn(addTasks || {}, taskId)) {
+    } else if (!existingTask && !Object.hasOwn(addTasks || {}, taskId)) {
       requireTask(p, taskId);
     }
   }
