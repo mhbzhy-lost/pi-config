@@ -308,7 +308,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     return active[0];
   };
 
-  const resolveWorkspaceLease = (task, goalId, taskId, cwd, root) => {
+  const resolveWorkspaceLease = (task, goalId, taskId, cwd, root, { allowSynthetic = false } = {}) => {
     const expected = workspaceLeaseIdentityFromProjection(task.workspace, goalId, taskId, cwd, root);
     let lease;
 
@@ -322,25 +322,27 @@ export function createGoalEngineExtension(pi, options = {}) {
 
     if (lease) {
       assertLeaseIdentity(lease, expected, "persisted");
-    } else {
+    } else if (allowSynthetic) {
       lease = {
         ...expected,
         ownerToken: "restored",
         createdAt: new Date().toISOString(),
       };
+    } else {
+      throw new Error("Executor workspace persisted lease not found");
     }
 
     return lease;
   };
 
-  const resolveLease = (task, goalId, taskId, cwd, root) => {
+  const resolveLease = (task, goalId, taskId, cwd, root, options) => {
     const key = leaseKey(cwd, goalId, taskId);
     const expected = workspaceLeaseIdentityFromProjection(task.workspace, goalId, taskId, cwd, root);
     const cached = activeLeases.get(key);
     if (cached) {
       assertLeaseIdentity(cached, expected, "cached");
     }
-    const lease = resolveWorkspaceLease(task, goalId, taskId, cwd, root);
+    const lease = resolveWorkspaceLease(task, goalId, taskId, cwd, root, options);
     activeLeases.set(key, lease);
     return lease;
   };
@@ -627,10 +629,20 @@ export function createGoalEngineExtension(pi, options = {}) {
           lease = resolveLease(task, goalId, params.task_id, cwd, root);
           inspection = inspectExecutorWorkspace(lease);
         } catch (error) {
-          throw preflightError("EXECUTOR_COMMIT_REQUIRED", error.message, remediation, retry);
+          const observed = error.message;
+          const code = /persisted lease not found/.test(observed) ? "EXECUTOR_LEASE_NOT_FOUND"
+            : /workspace identity|lease .*mismatch/.test(observed) ? "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH"
+              : "GIT_INFRASTRUCTURE_ERROR";
+          throw preflightError(code, observed, "stop modifying the workspace and wait for typed recovery guidance", retry);
         }
-        if (!inspection.hasCommits) {
-          throw preflightError("EXECUTOR_COMMIT_REQUIRED", `workspace=${lease.path}; hasCommits=false`, remediation, retry);
+        if (!inspection.descendant) {
+          throw preflightError("EXECUTOR_COMMIT_RANGE_INVALID", `workspace=${lease.path}; descendant=false`, remediation, retry);
+        }
+        if (inspection.aheadCount === 0) {
+          throw preflightError("EXECUTOR_COMMIT_REQUIRED", `workspace=${lease.path}; aheadCount=0`, remediation, retry);
+        }
+        if (!inspection.treeChanged) {
+          throw preflightError("EXECUTOR_COMMIT_RANGE_EMPTY", `workspace=${lease.path}; aheadCount=${inspection.aheadCount}; treeChanged=false`, remediation, retry);
         }
         if (!inspection.clean) {
           throw preflightError("EXECUTOR_WORKSPACE_DIRTY", `workspace=${lease.path}; dirtyFiles=${inspection.dirtyFiles.join(",")}; untrackedFiles=${inspection.untrackedFiles.join(",")}`, remediation, retry);
@@ -867,7 +879,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           throw new Error(`workspace strategy mismatch (expected ${taskWorkspace.strategy}, got ${strategy})`);
         }
 
-        const terminalLease = resolveLease(task, goalId, taskId, cwd, root);
+        const terminalLease = resolveLease(task, goalId, taskId, cwd, root, { allowSynthetic: true });
         if (currentOriginRef(cwd) !== taskWorkspace.originRef) {
           throw new Error(`Origin ref mismatch (expected ${taskWorkspace.originRef})`);
         }
@@ -888,7 +900,10 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (taskWorkspace.legacyOriginRef || !taskWorkspace.originRef) {
         throw new Error("legacy/manual recovery required: workspace disposition has no originRef");
       }
-      const lease = resolveLease(task, goalId, taskId, cwd, root);
+      const lease = resolveLease(task, goalId, taskId, cwd, root, { allowSynthetic: taskWorkspace.phase !== "active" });
+      // An active disposition has no durable recovery event yet: prove the exact
+      // lease and executor identity before reading origin HEAD or starting cleanup.
+      const activeInspection = taskWorkspace.phase === "active" ? inspectExecutorWorkspace(lease) : null;
       // This guard deliberately precedes every recovery probe, event append, HEAD
       // read, and cleanup action. Patch equivalence on another ref is not consent.
       if (currentOriginRef(cwd) !== taskWorkspace.originRef) {
@@ -944,9 +959,8 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (currentOriginRef(cwd) !== lease.originRef) {
           throw new Error(`Origin ref mismatch (expected ${lease.originRef})`);
         }
-        let inspection;
+        let inspection = activeInspection;
         if (action === "integrate") {
-          inspection = inspectExecutorWorkspace(lease);
           if (!inspection.hasCommits) {
             throw new Error("No commits to integrate");
           }

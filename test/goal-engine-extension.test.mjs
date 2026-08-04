@@ -987,8 +987,8 @@ test("goal_settle rejects succeeded no-op workspace and failed settle still allo
 
 test("goal_settle classifies ancestor, empty, and missing persisted lease before appending", async () => {
   const cases = [
-    { name: "ancestor", prepare(workspace) { git(workspace.path, "reset", "--hard", workspace.baseCommit); }, code: "EXECUTOR_COMMIT_RANGE_INVALID" },
-    { name: "empty", prepare(workspace) { git(workspace.path, "commit", "--allow-empty", "-m", "test: empty"); }, code: "EXECUTOR_COMMIT_RANGE_EMPTY" },
+    { name: "ancestor", prepare(workspace) { git(workspace.path, "reset", "--hard", "HEAD~2"); }, code: "EXECUTOR_COMMIT_RANGE_INVALID" },
+    { name: "empty", prepare(workspace) { git(workspace.path, "reset", "--hard", workspace.baseCommit); git(workspace.path, "commit", "--allow-empty", "-m", "test: empty"); }, code: "EXECUTOR_COMMIT_RANGE_EMPTY" },
     { name: "missing lease", prepare(workspace, state) { renameSync(state.leasePath, `${state.leasePath}.removed`); }, code: "EXECUTOR_LEASE_NOT_FOUND" },
   ];
   for (const scenario of cases) {
