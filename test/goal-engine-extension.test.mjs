@@ -2220,13 +2220,17 @@ test("inspection race: goal_settle rejects HEAD drift after the first real inspe
   const objective = "Settlement inspection TOCTOU race";
   const goalId = objectiveToGoalId(objective);
   let rejectionSnapshot;
+  let mutated = false;
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi, {
     inspectExecutorWorkspace(lease) {
-      const inspectedA = inspectExecutorWorkspace(lease);
-      commitWorkspaceChange(lease, "src/race-b.ts", "export const raceB = true;\n", "test: competing clean commit B");
-      rejectionSnapshot = fullRejectionSnapshot(cwd, goalId);
-      return inspectedA;
+      const inspected = inspectExecutorWorkspace(lease);
+      if (!mutated) {
+        mutated = true;
+        commitWorkspaceChange(lease, "src/race-b.ts", "export const raceB = true;\n", "test: competing clean commit B");
+        rejectionSnapshot = fullRejectionSnapshot(cwd, goalId);
+      }
+      return inspected;
     },
   });
   await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
@@ -2249,16 +2253,18 @@ test("inspection race: succeeded dispositions reject HEAD drift before started e
     const objective = `Disposition inspection TOCTOU ${action}`;
     const goalId = objectiveToGoalId(objective);
     let armed = false;
+    let mutated = false;
     let rejectionSnapshot;
     const pi = createMockPi(cwd);
     createGoalEngineExtension(pi, {
       inspectExecutorWorkspace(lease) {
-        const inspectedA = inspectExecutorWorkspace(lease);
-        if (armed) {
+        const inspected = inspectExecutorWorkspace(lease);
+        if (armed && !mutated) {
+          mutated = true;
           commitWorkspaceChange(lease, "src/race-b.ts", `export const ${action}RaceB = true;\n`, "test: competing clean commit B");
           rejectionSnapshot = fullRejectionSnapshot(cwd, goalId);
         }
-        return inspectedA;
+        return inspected;
       },
     });
     await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
