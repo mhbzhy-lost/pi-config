@@ -223,8 +223,8 @@ test("taskActionState returns action matrix for matrix states", () => {
         task: taskState({ status: "succeeded", workspace: { phase: "disposed", disposition: "preserved", released: false, attempt: 1, requestedAction: "preserve", strategy: "merge" } }),
       }),
       expected: {
-        allowedActions: ["goal_amend"],
-        requiredNextAction: { tool: "goal_amend", params: { task_id: "task" } },
+        allowedActions: ["goal_integrate"],
+        requiredNextAction: { tool: "goal_integrate", params: { task_id: "task", action: "discard" } },
         blockingReason: null,
       },
     },
@@ -407,4 +407,12 @@ test("orphan graph overlay advertises verified recovery and non-destructive unve
   assert.deepEqual(unverified.allowedActions, []);
   assert.equal(Object.hasOwn(unverified.blockingReason, "choices"), false);
   assert.deepEqual(unverified.blockingReason.resources, { workspaceExists: true, branchExists: true, leaseExists: false });
+});
+
+
+test("released preserved workspace is redispatchable in graph", () => {
+  const projection = projectionState({ task: taskState({ attempts: 1, workspace: { phase: "disposed", disposition: "preserved", released: false, preservedResourcesReleased: true, attempt: 1 } }) });
+  assert.equal(graph.nextDispatchAttempt(projection, "task"), 2);
+  assert.deepEqual(graph.runnableFrontier(projection), ["task"]);
+  assertActionCase(graph.taskActionState(projection, "task"), { allowedActions: ["goal_dispatch"], requiredNextAction: { tool: "goal_dispatch", params: { task_id: "task" } }, blockingReason: null });
 });

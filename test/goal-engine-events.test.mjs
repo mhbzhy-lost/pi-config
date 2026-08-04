@@ -1574,3 +1574,42 @@ test("strict disposition settlement identity matrix permits only matching succee
     assert.doesNotThrow(() => applyEvent(projection, started(action, goalId)));
   }
 });
+
+function orphanRecoveryFixture(goalId = "orphan-recovery-goal") {
+  let projection = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "failed", goalId);
+  const task = projection.tasks.get("t1"); task.status = "pending"; task.settlement = null;
+  Object.assign(task.workspace, { phase: "disposed", disposition: "discarded", released: true });
+  return projection;
+}
+function orphanRecoveredEvent(data = {}, goalId = "orphan-recovery-goal", schemaVersion = "goal-engine.event.v2") {
+  return { schemaVersion, eventId: crypto.randomUUID(), goalId, type: "task.workspace_orphan_recovered", occurredAt: "2026-02-03T04:05:06.000Z", data: { taskId: "t1", attempt: 2, workspace: { attempt: 2, path: "/tmp/recovered", branch: "ge/t1/2", baseCommit: "base-2", originRef: "refs/heads/main" }, executorHead: "recovered-head", reason: "verified orphan workspace was recovered before resource cleanup", ...data } };
+}
+function preservedReleaseFixture(goalId = "preservation-release-goal", status = "succeeded") {
+  const p = applyEvent(createProjection(), v2Created(goalId));
+  Object.assign(p.tasks.get("t1"), { status, attempts: 1, settlement: { attempt: 1, executorHead: "preserved-head" }, workspace: { attempt: 1, path: "/tmp/preserved", branch: "ge/t1/1", baseCommit: "base-1", originRef: "refs/heads/main", phase: "disposed", disposition: "preserved", released: false, executorHead: "preserved-head" } }); return p;
+}
+function preservationReleasedEvent(data = {}, goalId = "preservation-release-goal", schemaVersion = "goal-engine.event.v2") { return { schemaVersion, eventId: crypto.randomUUID(), goalId, type: "task.workspace_preservation_released", occurredAt: "2026-02-03T04:05:07.000Z", data: { taskId: "t1", attempt: 1, executorHead: "preserved-head", released: true, ...data } }; }
+
+test("orphan recovery strict v2 reducer accepts exact next-attempt identity", () => {
+  const task = applyEvent(orphanRecoveryFixture(), orphanRecoveredEvent()).tasks.get("t1");
+  assert.equal(task.status, "pending"); assert.equal(task.attempts, 2); assert.equal(task.lastSettledOutcome, "failed"); assert.equal(task.settlement, null);
+  assert.deepEqual(task.workspace, { attempt: 2, path: "/tmp/recovered", branch: "ge/t1/2", baseCommit: "base-2", originRef: "refs/heads/main", executorHead: "recovered-head", phase: "active", recovery: "orphaned" });
+});
+test("orphan recovery rejects invalid matrix atomically", () => {
+  const cases = [["v1", () => orphanRecoveredEvent({}, undefined, "goal-engine.event.v1")], ["wrong attempt", () => orphanRecoveredEvent({ attempt: 3 })], ["workspace attempt", () => orphanRecoveredEvent({ workspace: { ...orphanRecoveredEvent().data.workspace, attempt: 3 } })], ...["path", "branch", "baseCommit", "originRef"].map((field) => [`missing ${field}`, () => { const e = orphanRecoveredEvent(); delete e.data.workspace[field]; return e; }]), ["executorHead", () => orphanRecoveredEvent({ executorHead: "" })], ["reason", () => orphanRecoveredEvent({ reason: "" })], ["nonpending", () => { const p = orphanRecoveryFixture(); p.tasks.get("t1").status = "dispatched"; return [p, orphanRecoveredEvent()]; }], ["active", () => { const p = orphanRecoveryFixture(); p.tasks.get("t1").workspace = { attempt: 1, path: "/tmp/active", branch: "ge/t1/1", baseCommit: "base", phase: "active" }; return [p, orphanRecoveredEvent()]; }], ["duplicate", () => { const p = orphanRecoveryFixture(); p.tasks.get("t1").workspace.recovery = "orphaned"; return [p, orphanRecoveredEvent()]; }], ["terminal", () => { const p = orphanRecoveryFixture(); p.lifecycle = "completed"; return [p, orphanRecoveredEvent()]; }]];
+  for (const [label, make] of cases) { const value = make(); const [p, e] = Array.isArray(value) ? value : [orphanRecoveryFixture(), value]; const before = structuredClone({ lifecycle: p.lifecycle, tasks: [...p.tasks] }); assert.throws(() => applyEvent(p, e), /v2|attempt|workspace|path|branch|baseCommit|originRef|executorHead|reason|pending|active|recovery|lifecycle|terminal/i, label); assert.deepEqual(structuredClone({ lifecycle: p.lifecycle, tasks: [...p.tasks] }), before, label); }
+});
+test("orphan recovery roundtrip and recovered HEAD gates disposition", () => {
+  const p = applyEvent(orphanRecoveryFixture(), orphanRecoveredEvent()); const wrong = started("discard"); wrong.data.attempt = 2; wrong.data.executorHead = "other-head"; assert.throws(() => applyEvent(p, wrong), /executorHead|settlement|attempt/i); const matching = started("discard"); matching.data.attempt = 2; matching.data.executorHead = "recovered-head"; assert.doesNotThrow(() => applyEvent(p, matching));
+  const root = tmpRoot(); const goalId = "orphan-store"; const events = [v2Created(goalId), v2Event("task.dispatched", { taskId: "t1", contractHash: "h1", workspace: { attempt: 1, path: "/tmp/one", branch: "ge/t1/1", baseCommit: "base-1" } }, goalId), v2Event("task.settled", { taskId: "t1", outcome: "failed", evidence: { type: "file", path: "a.ts" }, nextAction: "discard orphan", }, goalId)]; const discard = started("discard", goalId); events.push(discard, v2Event("task.workspace_disposition_applied", { ...discard.data, action: "discard", originHead: "origin-after" }, goalId), v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "discard", released: true }, goalId), orphanRecoveredEvent({}, goalId)); let stored; events.forEach((event, index) => { stored = appendEvent(root, event, index); }); assert.deepEqual(loadProjection(root, goalId).tasks.get("t1"), stored.tasks.get("t1"));
+});
+test("preservation release strict v2 preserves history and makes pending", () => {
+  for (const status of ["succeeded", "pending"]) { const task = applyEvent(preservedReleaseFixture(`release-${status}`, status), preservationReleasedEvent({}, `release-${status}`)).tasks.get("t1"); assert.equal(task.status, "pending"); assert.equal(task.settlement, null); assert.equal(task.workspace.disposition, "preserved"); assert.equal(task.workspace.released, false); assert.equal(task.preservedResourcesReleased, true); }
+});
+test("preservation release rejects invalid matrix atomically", () => {
+  const cases = [["v1", () => [preservedReleaseFixture(), preservationReleasedEvent({}, undefined, "goal-engine.event.v1")]], ["not preserved", () => { const p = preservedReleaseFixture(); p.tasks.get("t1").workspace.disposition = "discarded"; return [p, preservationReleasedEvent()]; }], ["not disposed", () => { const p = preservedReleaseFixture(); p.tasks.get("t1").workspace.phase = "active"; return [p, preservationReleasedEvent()]; }], ["attempt", () => [preservedReleaseFixture(), preservationReleasedEvent({ attempt: 2 })]], ["head", () => [preservedReleaseFixture(), preservationReleasedEvent({ executorHead: "other" })]], ["released", () => [preservedReleaseFixture(), preservationReleasedEvent({ released: false })]], ["duplicate", () => { const p = preservedReleaseFixture(); p.tasks.get("t1").preservedResourcesReleased = true; return [p, preservationReleasedEvent()]; }]];
+  for (const [label, make] of cases) { const [p, e] = make(); const before = structuredClone([...p.tasks]); assert.throws(() => applyEvent(p, e), /v2|preserv|disposed|attempt|executorHead|released/i, label); assert.deepEqual(structuredClone([...p.tasks]), before, label); }
+});
+test("released preservation permits amend and redispatch while unreleased remains blocked", () => {
+  const amend = (p) => applyEvent(p, v2Event("goal.amended", { reason: "Safe cleanup permits a pending contract amendment", updateTasks: { t1: { description: "amended" } } }, p.goalId)); assert.throws(() => amend(preservedReleaseFixture()), /workspace|pending|amend/i); const released = applyEvent(preservedReleaseFixture(), preservationReleasedEvent()); assert.equal(amend(released).tasks.get("t1").description, "amended"); assert.equal(applyEvent(released, v2Event("task.dispatched", { taskId: "t1", contractHash: "h2", workspace: { attempt: 2, path: "/tmp/retry", branch: "ge/t1/2", baseCommit: "base-2" } })).tasks.get("t1").attempts, 2);
+});
