@@ -158,16 +158,22 @@ function commitWorkspaceChange(lease, filePath, content, message) {
 
 function persistedStateBytes(cwd, goalId) {
   const root = join(cwd, ".state/goal-engine");
+  const bytes = (path) => existsSync(path) ? readFileSync(path) : null;
   return [
-    readFileSync(goalEventsPath(cwd, goalId), "utf8"),
-    readFileSync(join(root, "goals", goalId, "projection.json"), "utf8"),
-    readFileSync(join(root, "registry.json"), "utf8"),
+    bytes(goalEventsPath(cwd, goalId)),
+    bytes(join(root, "goals", goalId, "projection.json")),
+    bytes(join(root, "registry.json")),
   ];
 }
 
-function rejectionSnapshot(cwd, goalId) {
+function rejectionSnapshot(cwd, goalId, taskId = "t1", attempt = 1) {
+  const workspace = workspaceState(cwd, goalId, taskId, attempt);
+  const bytes = (path) => existsSync(path) ? readFileSync(path) : null;
+  const workspaceGit = (args) => workspace.workspaceExists ? git(workspace.workspacePath, ...args) : null;
   return {
     state: persistedStateBytes(cwd, goalId),
+    origin: { head: git(cwd, "rev-parse", "HEAD"), ref: git(cwd, "symbolic-ref", "--short", "HEAD"), status: git(cwd, "status", "--porcelain=v1") },
+    workspace: { ...workspace, head: workspaceGit(["rev-parse", "HEAD"]), ref: workspaceGit(["symbolic-ref", "--short", "HEAD"]), status: workspaceGit(["status", "--porcelain=v1"]), leaseBytes: bytes(workspace.leasePath) },
     refs: git(cwd, "for-each-ref", "--format=%(refname):%(objectname)", "refs/heads"),
     worktrees: git(cwd, "worktree", "list", "--porcelain"),
   };
@@ -2114,4 +2120,65 @@ test("goal_amend rejects accepted acceptance rewrite without appending an event"
   const beforeEvents = readGoalEvents(cwd, goalId).length;
   await assert.rejects(() => invoke(pi, "goal_amend", { reason: "Do not rewrite acceptance proof after the task has been accepted", update_tasks: { t1: { acceptance: { criteria: ["rewritten"], commands: ["false"] } } } }), /pending|accepted|update/i);
   assert.equal(readGoalEvents(cwd, goalId).length, beforeEvents);
+});
+
+test("historical settled active v2 without settlement binding returns actionable identity-missing status with zero side effects", async () => {
+  const cwd = tmpCwd();
+  const goalId = "historical-unbound-succeeded";
+  const root = join(cwd, ".state/goal-engine");
+  const events = [
+    { schemaVersion: "goal-engine.event.v2", eventId: "unbound-created", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Historical unbound succeeded", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } },
+    { schemaVersion: "goal-engine.event.v2", eventId: "unbound-dispatched", goalId, occurredAt: "2024-01-01T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "legacy", workspace: { attempt: 1, path: "/tmp/historical", branch: "ge/historical/t1/1", baseCommit: "base" } } },
+    { schemaVersion: "goal-engine.event.v2", eventId: "unbound-settled", goalId, occurredAt: "2024-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, nextAction: "Review the historical evidence before selecting a recovery action" } },
+  ];
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(goalEventsPath(cwd, goalId), `${events.map(JSON.stringify).join("\n")}\n`);
+  writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: events[0].data.objective, updatedAt: events[2].occurredAt } } }));
+  const pi = createMockPi(cwd); createGoalEngineExtension(pi);
+  const before = rejectionSnapshot(cwd, goalId);
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }), (error) => {
+    assert.equal(error.code, "EXECUTOR_SETTLEMENT_IDENTITY_MISSING");
+    assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } });
+    return true;
+  });
+  assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+});
+
+test("post-settle HEAD drift rejects every succeeded disposition before started event or Git side effect", async () => {
+  for (const action of ["integrate", "discard", "preserve"]) {
+    const cwd = tmpCwd();
+    const objective = `Post-settle ${action} drift`;
+    const goalId = objectiveToGoalId(objective);
+    const pi = createMockPi(cwd); createGoalEngineExtension(pi);
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "drift", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
+    commitWorkspaceChange(workspace, "src/x.ts", "export const x = 1;\n", "feat: settled");
+    await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use a typed disposition after inspecting the settled executor commit." });
+    git(workspace.path, "commit", "--allow-empty", "-m", "test: post-settle drift");
+    const before = rejectionSnapshot(cwd, goalId);
+    await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action }), (error) => error.code === "EXECUTOR_SETTLEMENT_HEAD_MISMATCH" && /stateChanged=false/.test(error.message));
+    assert.deepEqual(rejectionSnapshot(cwd, goalId), before);
+    assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.workspace_disposition_started").length, 0);
+  }
+});
+
+test("semantic priority keeps task-state and reducer errors ahead of workspace-missing recovery", async () => {
+  const cwd = tmpCwd();
+  const root = join(cwd, ".state/goal-engine");
+  const writeHistory = (goalId, events) => {
+    mkdirSync(join(root, "goals", goalId), { recursive: true });
+    writeFileSync(goalEventsPath(cwd, goalId), `${events.map(JSON.stringify).join("\n")}\n`);
+    writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: events[0].data.objective, updatedAt: events.at(-1).occurredAt } } }));
+  };
+  const created = (goalId) => ({ schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-created`, goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: goalId, scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } } } });
+  const pending = "semantic-priority-pending";
+  writeHistory(pending, [created(pending)]);
+  let pi = createMockPi(cwd); createGoalEngineExtension(pi);
+  await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover through the typed status action after dispatching." }), /task is not dispatched/i);
+  const invalid = "semantic-priority-invalid";
+  const dispatched = { schemaVersion: "goal-engine.event.v1", eventId: `${invalid}-dispatch`, goalId: invalid, occurredAt: "2024-01-01T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "legacy" } };
+  const settled = { schemaVersion: "goal-engine.event.v1", eventId: `${invalid}-settled`, goalId: invalid, occurredAt: "2024-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, nextAction: "continue" } };
+  writeHistory(invalid, [created(invalid), dispatched, settled]);
+  pi = createMockPi(cwd); createGoalEngineExtension(pi);
+  await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover through typed status after reviewing the semantic failure." }), /nextAction|next action|semantic/i);
 });

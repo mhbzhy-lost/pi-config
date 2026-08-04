@@ -58,6 +58,8 @@ test("auditGoal reports healthy for well-maintained goal (v2 integrated+released
     outcome: "succeeded",
     evidence: { type: "external_review", ref: "independent-review-healthy" },
     evidenceSource: "external",
+    attempt: 1,
+    executorHead: "executor-head-healthy",
     nextAction: "Accept t1 and verify all acceptance criteria are satisfied",
   }, goalId), v++);
 
@@ -163,6 +165,8 @@ test("auditGoal detects all self-produced evidence (v2 integrated+released)", ()
     outcome: "succeeded",
     evidence: { type: "diff", ref: "git diff HEAD~1" },
     evidenceSource: "self_produced",
+    attempt: 1,
+    executorHead: "executor-head-self",
     nextAction: "Accept t1 and verify goal completion criteria are satisfied",
   }, goalId), v++);
 
@@ -267,6 +271,8 @@ test("auditGoal detects incomplete workspace disposition while disposing", () =>
     outcome: "succeeded",
     evidence: { type: "file", path: "src/x.ts" },
     evidenceSource: "pre_existing",
+    attempt: 1,
+    executorHead: "executor-head-disposing",
     nextAction: "Verify the completed change against acceptance criteria and release notes",
   }, goalId), v++);
 
@@ -311,6 +317,8 @@ test("auditGoal detects unreleased integrated workspace in applied phase", () =>
     outcome: "succeeded",
     evidence: { type: "file", path: "src/x.ts" },
     evidenceSource: "pre_existing",
+    attempt: 1,
+    executorHead: "executor-head-applied",
     nextAction: "Verify the completed change against acceptance criteria and release notes",
   }, goalId), v++);
 

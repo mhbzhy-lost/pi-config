@@ -1478,3 +1478,42 @@ test("v2 amendment cannot bypass task contract validation or empty the DAG", () 
     assert.deepEqual(structuredClone({ version: projection.version, tasks: [...projection.tasks] }), before);
   }
 });
+
+test("historical settled replay retains legacy settlement marker while strict v2 mutations require an exact binding", () => {
+  const root = mkdtempSync(join(tmpdir(), "ge-settlement-history-"));
+  const goalId = "historical-settled-identity";
+  const events = [
+    fixedV2Event("goal.created", v2Created(goalId).data, goalId, "2024-01-01T00:00:00.000Z", "history-created"),
+    fixedV2Event("task.dispatched", { taskId: "t1", contractHash: "h", workspace: { attempt: 1, path: "/tmp/history", branch: "ge/history/t1/1", baseCommit: "base" } }, goalId, "2024-01-01T00:00:01.000Z", "history-dispatched"),
+    fixedV2Event("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria" }, goalId, "2024-01-01T00:00:02.000Z", "history-settled"),
+  ];
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${events.map(JSON.stringify).join("\n")}\n`);
+  const replayed = loadProjection(root, goalId);
+  assert.equal(replayed.tasks.get("t1").status, "succeeded");
+  assert.equal(replayed.tasks.get("t1").settlement ?? null, null);
+  for (const action of ["integrate", "discard", "preserve"]) {
+    assert.throws(() => applyEvent(replayed, { ...started(action, goalId), eventId: crypto.randomUUID() }), /settlement|identity|attempt|executorHead/i);
+  }
+  assert.throws(() => appendEvent(root, v2Event("task.workspace_disposition_started", { ...started("integrate", goalId).data }, goalId), replayed.version), /settlement|identity|attempt|executorHead/i);
+});
+
+test("strict disposition settlement identity matrix permits only matching succeeded bindings", () => {
+  for (const action of ["integrate", "discard", "preserve"]) {
+    const succeeded = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(`strict-${action}`)), `strict-${action}`), "succeeded", `strict-${action}`);
+    for (const mutation of [
+      (event) => { delete event.data.executorHead; },
+      (event) => { event.data.attempt = 2; },
+      (event) => { event.data.executorHead = "wrong-head"; },
+    ]) {
+      const event = started(action, `strict-${action}`); mutation(event);
+      assert.throws(() => applyEvent(succeeded, event), /settlement|attempt|executorHead|identity/i, `${action} must reject mismatched succeeded settlement`);
+    }
+    assert.doesNotThrow(() => applyEvent(succeeded, started(action, `strict-${action}`)));
+  }
+  for (const outcome of ["failed", "blocked"]) for (const action of ["discard", "preserve"]) {
+    const goalId = `${outcome}-${action}-unbound`;
+    const projection = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), outcome, goalId);
+    assert.doesNotThrow(() => applyEvent(projection, started(action, goalId)));
+  }
+});
