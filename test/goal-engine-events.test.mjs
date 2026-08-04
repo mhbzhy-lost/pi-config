@@ -24,6 +24,43 @@ test("v2 reducers have no ambient cwd dependency", () => {
   assert.doesNotMatch(source, /process\.cwd\s*\(/);
 });
 
+test("historical v2 JSONL replays task-contract-gated create and amend while new mutations remain strict", () => {
+  const root = mkdtempSync(join(tmpdir(), "ge-legacy-v2-"));
+  const goalId = "legacy-v2";
+  const created = { schemaVersion: "goal-engine.event.v2", eventId: "legacy-create", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Restore historical v2 goal", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["cd /tmp && true"] }, workflow: "tdd" } } } };
+  const amended = { schemaVersion: "goal-engine.event.v2", eventId: "legacy-amend", goalId, occurredAt: "2024-01-01T00:00:01.000Z", type: "goal.amended", data: { reason: "Correct historical task command for later recovery", updateTasks: { t1: { acceptance: { criteria: ["works"], commands: ["cd /var/tmp && true"] } } } } };
+  const eventsPath = join(root, "goals", goalId, "events.jsonl");
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(eventsPath, `${JSON.stringify(created)}\n${JSON.stringify(amended)}\n`);
+
+  assert.throws(() => applyEvent(createProjection(), created), /must not use absolute cd/);
+  const safeCreated = structuredClone(created);
+  safeCreated.eventId = "new-safe-create";
+  safeCreated.data.taskDefs.t1.acceptance.commands = ["true"];
+  const safeProjection = applyEvent(createProjection(), safeCreated);
+  assert.throws(() => applyEvent(safeProjection, amended), /must not use absolute cd/);
+
+  const replayed = loadProjection(root, goalId);
+  assert.equal(replayed.version, 2);
+  assert.equal(replayed.lifecycle, "active");
+  assert.deepEqual(replayed.tasks.get("t1").acceptance.commands, ["cd /var/tmp && true"]);
+
+  const appendRoot = mkdtempSync(join(tmpdir(), "ge-legacy-v2-append-"));
+  const unsafeCreate = structuredClone(created);
+  unsafeCreate.eventId = "new-unsafe-create";
+  assert.throws(() => appendEvent(appendRoot, unsafeCreate, 0), /must not use absolute cd/);
+  assert.equal(existsSync(join(appendRoot, "goals", goalId, "events.jsonl")), false);
+  assert.equal(existsSync(join(appendRoot, "goals", goalId, "projection.json")), false);
+  assert.equal(existsSync(join(appendRoot, "registry.json")), false);
+
+  appendEvent(appendRoot, safeCreated, 0);
+  const before = { events: readFileSync(join(appendRoot, "goals", goalId, "events.jsonl"), "utf8"), projection: readFileSync(join(appendRoot, "goals", goalId, "projection.json"), "utf8"), registry: readFileSync(join(appendRoot, "registry.json"), "utf8") };
+  const unsafeAmend = structuredClone(amended);
+  unsafeAmend.eventId = "new-unsafe-amend";
+  assert.throws(() => appendEvent(appendRoot, unsafeAmend, 1), /must not use absolute cd/);
+  assert.deepEqual({ events: readFileSync(join(appendRoot, "goals", goalId, "events.jsonl"), "utf8"), projection: readFileSync(join(appendRoot, "goals", goalId, "projection.json"), "utf8"), registry: readFileSync(join(appendRoot, "registry.json"), "utf8") }, before);
+});
+
 test("v2 create and amend reject pending tasks that cannot compile dispatch IR atomically", () => {
   const created = {
     objective: "Valid objective",

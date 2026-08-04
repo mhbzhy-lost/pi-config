@@ -171,6 +171,24 @@ function assertTaskMachineAction(task, expected) {
   assert.deepEqual(task.blockingReason, expected.blockingReason);
 }
 
+test("goal_status returns active task from historical v2 JSONL", async () => {
+  const cwd = tmpCwd();
+  const goalId = "legacy-status-v2";
+  const root = join(cwd, ".state/goal-engine");
+  const event = { schemaVersion: "goal-engine.event.v2", eventId: "legacy-status-create", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Restore legacy status", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["cd /tmp && true"] }, workflow: "tdd" } } } };
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${JSON.stringify(event)}\n`);
+  writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: event.data.objective, updatedAt: event.occurredAt } } }));
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  const status = JSON.parse(await invoke(pi, "goal_status", {}));
+  assert.equal(status.goalId, goalId);
+  assert.equal(status.lifecycle, "active");
+  assert.equal(status.tasks.t1.status, "pending");
+  assert.deepEqual(status.runnable, ["t1"]);
+});
+
 test("registers seven goal engine tools", () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);
