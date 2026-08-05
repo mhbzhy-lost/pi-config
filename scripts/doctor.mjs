@@ -2,10 +2,11 @@
 import { createRequire } from "node:module";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFile as execFileCallback } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
+import { access, lstat, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { homedir } from "node:os";
 import { loadDesiredSkills, parseSkillList } from "./lib/skill-whitelist.mjs";
 import { auditGoalContractIntegrity } from "./lib/goal-contract/authorization-audit.mjs";
 
@@ -157,19 +158,28 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   const issues = [];
   issues.push(...await inspectGoalContractIntegrity(repoRoot));
   const listPath = join(repoRoot, "skill-overrides", "skills.list");
-  const localListPath = join(repoRoot, "skill-overrides", "skills.local.list");
-  const desired = await loadDesiredSkills(repoRoot, listPath, localListPath);
+  const desired = await loadDesiredSkills(repoRoot, listPath, null);
   const globalSkills = parseSkillList(await readFile(listPath, "utf8"));
 
   if (JSON.stringify(globalSkills) !== JSON.stringify(EXPECTED_GLOBAL_SKILLS)) {
     issues.push("unexpected Skill whitelist");
   }
 
+  const globalSkillsDir = join(homedir(), ".agents", "skills");
   for (const [name, source] of desired) {
     try {
       await access(join(source, "SKILL.md"), constants.R_OK);
     } catch {
       issues.push(`unreadable allowlisted skill: ${name}`);
+    }
+    const linkPath = join(globalSkillsDir, name);
+    try {
+      const stats = await lstat(linkPath);
+      if (!stats.isSymbolicLink()) {
+        issues.push(`~/.agents/skills/${name} exists but is not a symlink`);
+      }
+    } catch {
+      issues.push(`~/.agents/skills/${name} is missing (run: node scripts/sync-skills.mjs)`);
     }
   }
 

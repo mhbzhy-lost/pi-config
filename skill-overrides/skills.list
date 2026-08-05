@@ -1,5 +1,8 @@
-# Pi 全局 Skill 白名单。
-# 只有此文件列出的 Skill 才由 skill-whitelist Extension 注入 Pi。
+# Pi Skill 同步清单。
+# sync-skills 脚本将此处列出的 Skill 从仓内解析后软链接到 ~/.agents/skills/，
+# 供 Pi whitelist extension 和 Codex 等跨工具共享发现。
+# 仅管理仓内 skill-overrides/ 和 vendor/ 中的共享 skill；
+# 个人/机器特定的 skill 直接放入 ~/.agents/skills/ 即可自动加载。
 
 external-llm-review
 git-commit-convention

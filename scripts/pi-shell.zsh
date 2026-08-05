@@ -10,7 +10,7 @@ _pi_config_invoke() {
     return 1
   fi
 
-  "$_PI_CONFIG_UPSTREAM_PI" --no-skills "$@"
+  "$_PI_CONFIG_UPSTREAM_PI" "$@"
 }
 
 _pi_config_alt_screen() (
@@ -28,8 +28,8 @@ _pi_config_alt_screen() (
 )
 
 pi() {
-  local mode="${PI_ALT_SCREEN:-auto}"
-  if [[ "$mode" == "always" || ( "$mode" != "never" && -t 0 && -t 1 ) ]]; then
+  local mode="${PI_ALT_SCREEN:-never}"
+  if [[ "$mode" == "always" || ( "$mode" == "auto" && -t 0 && -t 1 ) ]]; then
     _pi_config_alt_screen "$@"
   else
     _pi_config_invoke "$@"

@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import test from "node:test";
 import createSkillWhitelistExtension from "../scripts/lib/skill-whitelist-extension.mjs";
-import { loadDesiredSkills } from "../scripts/lib/skill-whitelist.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const globalSkillsDir = join(homedir(), ".agents", "skills");
 
-test("extension contributes exactly the allowlisted skill directories", async () => {
+test("extension discovers global skills from ~/.agents/skills and project skills", async (t) => {
   const handlers = new Map();
   createSkillWhitelistExtension({
     on(name, handler) {
@@ -21,10 +22,18 @@ test("extension contributes exactly the allowlisted skill directories", async ()
     {},
   );
 
-  const expected = [...(await loadDesiredSkills(repoRoot, join(repoRoot, "skill-overrides", "skills.list"), join(repoRoot, "skill-overrides", "skills.local.list"))).values()];
-  assert.deepEqual(result.skillPaths.slice(0, expected.length), expected);
-  for (const extra of result.skillPaths.slice(expected.length)) {
-    assert.match(extra, /\.pi\/skills\//);
+  const globalPaths = result.skillPaths.filter((p) => p.startsWith(globalSkillsDir));
+  const projectPaths = result.skillPaths.filter((p) => !p.startsWith(globalSkillsDir));
+
+  if (globalPaths.length === 0) {
+    t.skip("~/.agents/skills is empty (run: node scripts/sync-skills.mjs)");
+    return;
+  }
+  for (const p of globalPaths) {
+    assert.match(p, /\.agents\/skills\//, `unexpected global skill path: ${p}`);
+  }
+  for (const p of projectPaths) {
+    assert.match(p, /\.pi\/skills\/|\.agents\/skills\//, `unexpected project skill path: ${p}`);
   }
 });
 

@@ -1,26 +1,22 @@
-import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { readdir, stat } from "node:fs/promises";
-import { loadDesiredSkills } from "./skill-whitelist.mjs";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const listPath = join(repoRoot, "skill-overrides", "skills.list");
-const localListPath = join(repoRoot, "skill-overrides", "skills.local.list");
-
-async function discoverProjectSkills(cwd) {
-  const skillsDir = join(cwd, ".pi", "skills");
+async function discoverSkillsInDir(skillsDir) {
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true });
     const paths = [];
     for (const entry of entries) {
       if (entry.name.startsWith(".")) continue;
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       const skillPath = join(skillsDir, entry.name);
       try {
+        const s = await stat(skillPath);
+        if (!s.isDirectory()) continue;
         await stat(join(skillPath, "SKILL.md"));
         paths.push(skillPath);
       } catch {
-        // No SKILL.md, skip
+        // Not a directory, no SKILL.md, or broken symlink — skip
       }
     }
     return paths;
@@ -29,10 +25,19 @@ async function discoverProjectSkills(cwd) {
   }
 }
 
+async function discoverProjectSkills(cwd) {
+  const results = await Promise.all([
+    discoverSkillsInDir(join(cwd, ".pi", "skills")),
+    discoverSkillsInDir(join(cwd, ".agents", "skills")),
+  ]);
+  return results.flat();
+}
+
+const globalSkillsDir = join(homedir(), ".agents", "skills");
+
 export default function createSkillWhitelistExtension(pi) {
   pi.on("resources_discover", async (event) => {
-    const desired = await loadDesiredSkills(repoRoot, listPath, localListPath);
-    const skillPaths = [...desired.values()];
+    const skillPaths = await discoverSkillsInDir(globalSkillsDir);
 
     const cwd = event?.cwd;
     if (cwd) {
