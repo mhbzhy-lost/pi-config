@@ -41,6 +41,28 @@ function orphanRecoveryError(code, observed, remediation, requiredNextAction, bl
   return error;
 }
 
+function assertNoOrphanedExecutorWorkspace(goalId, taskId, attempt, cwd, root) {
+  const orphanInventory = inspectOrphanedExecutorWorkspace({
+    goalId, taskId, attempt, originRoot: cwd, stateRoot: root,
+  });
+  if (orphanInventory.kind === "none") return;
+
+  const actionState = orphanWorkspaceActionState(taskId, orphanInventory);
+  const code = actionState.blockingReason.code;
+  const observed = {
+    taskId,
+    candidate: { attempt },
+    resources: orphanInventory.resources,
+  };
+  const remediation = code === "ORPHANED_EXECUTOR_WORKSPACE"
+    ? "review the orphaned executor workspace and explicitly choose discard or preserve via goal_integrate"
+    : "inspect the authoritative recovery state with goal_status before any workspace action";
+  const requiredNextAction = code === "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED"
+    ? { tool: "goal_status", params: { goal_id: goalId } }
+    : null;
+  throw orphanRecoveryError(code, observed, remediation, requiredNextAction, actionState.blockingReason);
+}
+
 function gitOutput(cwd, args, code, observed, remediation, allowedStatuses = [], requiredNextAction) {
   try { return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(); }
   catch (error) {
@@ -564,25 +586,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
 
       const attempt = candidateAttempt;
-      const orphanInventory = inspectOrphanedExecutorWorkspace({
-        goalId, taskId: params.task_id, attempt, originRoot: cwd, stateRoot: root,
-      });
-      if (orphanInventory.kind !== "none") {
-        const actionState = orphanWorkspaceActionState(params.task_id, orphanInventory);
-        const code = actionState.blockingReason.code;
-        const observed = {
-          taskId: params.task_id,
-          candidate: { attempt },
-          resources: orphanInventory.resources,
-        };
-        const remediation = code === "ORPHANED_EXECUTOR_WORKSPACE"
-          ? "review the orphaned executor workspace and explicitly choose discard or preserve via goal_integrate"
-          : "inspect the authoritative recovery state with goal_status before any workspace action";
-        const requiredNextAction = code === "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED"
-          ? { tool: "goal_status", params: { goal_id: goalId } }
-          : null;
-        throw orphanRecoveryError(code, observed, remediation, requiredNextAction, actionState.blockingReason);
-      }
+      assertNoOrphanedExecutorWorkspace(goalId, params.task_id, attempt, cwd, root);
       const baseCommit = gitHead(cwd);
       const lease = allocateExecutorWorkspace({
         goalId,
@@ -906,6 +910,16 @@ export function createGoalEngineExtension(pi, options = {}) {
       } catch (error) {
         throw initError("INVALID_GOAL_CONTRACT", error.message, "correct derived task, goal metadata, or requirements limits, then retry goal_amend");
       }
+
+      const affectedTaskIds = [...new Set([
+        ...(params.remove_tasks || []),
+        ...Object.keys(params.update_tasks || {}),
+      ])].filter((taskId) => projection.tasks.has(taskId));
+      for (const taskId of affectedTaskIds) {
+        const attempt = nextDispatchAttempt(projection, taskId);
+        if (attempt !== null) assertNoOrphanedExecutorWorkspace(goalId, taskId, attempt, cwd, root);
+      }
+
       const updated = appendEventFn(root, event, projection.version);
       return statusResponse(updated, cwd, root);
     },
