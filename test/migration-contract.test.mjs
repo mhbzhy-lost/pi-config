@@ -102,7 +102,7 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
   await assert.rejects(access(join(repoRoot, "pi", "extensions", "subagent.ts")));
 });
 
-test("configuration cycles only authenticated models", async () => {
+test("configuration contains expected models and defaults", async () => {
   const settings = JSON.parse(await readFile(join(repoRoot, "pi", "settings.json"), "utf8"));
 
   assert.equal(settings.defaultProvider, "openai-codex");
