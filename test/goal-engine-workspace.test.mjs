@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
@@ -549,15 +549,54 @@ for (const [label, mutate] of [
   ["untracked", (lease) => writeFileSync(join(lease.path, "fence-untracked.txt"), "race\n")],
   ["new HEAD", (lease) => { writeFileSync(join(lease.path, "fence-commit.txt"), "race\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "test: fence race"); }],
   ["new live branch", (lease) => git(lease.path, "switch", "-c", "fence-other-live-branch")],
+  ["persisted leasePath field", (lease) => {
+    const current = JSON.parse(readFileSync(lease.leasePath, "utf8"));
+    writeFileSync(lease.leasePath, JSON.stringify({ ...current, leasePath: "/forged/runtime-field" }));
+  }],
 ]) test(`preserved release primitive fence rejects ${label} callback race and retains every resource`, () => {
   const origin = initRepo(); const lease = allocateExecutorWorkspace({ goalId: `fence-${label.replaceAll(" ", "-")}`, taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit: git(origin, "rev-parse", "HEAD") });
   writeFileSync(join(lease.path, "clean.txt"), "clean\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "test: clean preserved workspace");
   const expectedExecutorHead = git(lease.path, "rev-parse", "HEAD"); let calls = 0;
-  assert.throws(() => releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup", expectedExecutorHead, requireClean: true, beforeDestructiveCleanupFn(currentLease) { calls += 1; mutate(currentLease); return { clean: true, headCommit: expectedExecutorHead }; } }), /identity|HEAD|branch|clean/i, label);
-  assert.equal(calls, 1, label); assert.equal(existsSync(lease.path), true, label); assert.ok(git(origin, "branch", "--list", lease.branch), label); assert.equal(existsSync(lease.leasePath), true, label);
+  const expectedError = label === "persisted leasePath field" ? /identity|lease|envelope/i : /identity|HEAD|branch|clean/i;
+  assert.throws(
+    () => releaseExecutorWorkspace(
+      lease,
+      {
+        disposition: "discarded-cleanup",
+        expectedExecutorHead,
+        requireClean: true,
+        beforeDestructiveCleanupFn(currentLease) {
+          calls += 1;
+          mutate(currentLease);
+          if (label === "persisted leasePath field") {
+            return {
+              clean: true,
+              headCommit: expectedExecutorHead,
+              hasCommits: true,
+              dirtyFiles: ["forged.txt"],
+              untrackedFiles: ["forged.txt"],
+              changedFiles: ["forged.txt"],
+              diff: "forged\n",
+            };
+          }
+          return { clean: true, headCommit: expectedExecutorHead };
+        },
+      },
+    ),
+    expectedError,
+    label,
+  );
+  assert.equal(calls, 1, label);
+  assert.equal(existsSync(lease.path), true, label);
+  assert.ok(git(origin, "branch", "--list", lease.branch), label);
+  assert.equal(existsSync(lease.leasePath), true, label);
   if (label === "untracked") assert.equal(existsSync(join(lease.path, "fence-untracked.txt")), true);
   if (label === "new HEAD") assert.notEqual(git(lease.path, "rev-parse", "HEAD"), expectedExecutorHead);
   if (label === "new live branch") assert.equal(git(lease.path, "symbolic-ref", "--short", "HEAD"), "fence-other-live-branch");
+  if (label === "persisted leasePath field") {
+    const persisted = JSON.parse(readFileSync(lease.leasePath, "utf8"));
+    assert.equal(persisted.leasePath, "/forged/runtime-field");
+  }
 });
 
 test("preserved release primitive fence ignores callback inspection and permits clean runtime artifacts", () => {
