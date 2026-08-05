@@ -1,8 +1,8 @@
 {
   "lastChangelogVersion": "0.83.0",
   "theme": "light",
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-sol",
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek-v4-flash",
   "hideThinkingBlock": true,
   "packages": [
     {
@@ -45,7 +45,11 @@
   "enabledModels": [
     "openai-codex/gpt-5.6-sol",
     "openai-codex/gpt-5.6-terra",
-    "openai-codex/gpt-5.3-codex-spark"
+    "openai-codex/gpt-5.3-codex-spark",
+    "deepseek/deepseek-v4-flash",
+    "codex-pool/gpt-5.6-sol",
+    "anthropic-idealab/claude-opus-4-6",
+    "openai-idealab/Peach-07-17-DogFooding"
   ],
-  "defaultThinkingLevel": "low"
+  "defaultThinkingLevel": "max"
 }
