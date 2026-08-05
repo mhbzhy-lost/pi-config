@@ -52,7 +52,7 @@ Agent 只调用 Pi Host 暴露的七个 typed tools；调用前从当前 ToolDef
 
 成功路径：`status → dispatch → 原样 dispatch-ir.v1 → Executor acceptance commands 在其 worktree 运行并产出 artifact → status → settle → status → integrate → status → 当前项目 workspace（如需要）最终回归 → accept`。Executor acceptance 必须在 settle 前完成；`goal_integrate(integrate)` 释放 worktree 后，才可在当前项目 workspace 运行需要的最终回归。仅在 status 的 requiredNextAction 指向 `goal_accept`、任务 succeeded 且验收通过时 accept。
 
-失败路径：包装层报告 failed/timeout 时，先核对 artifact、session 和 worktree，再 `goal_status` 并遵从 requiredNextAction；证据 ambiguous 时停止，不 rationalize 为失败或成功。证据 verified failed/blocked 时：`status → settle → status → goal_integrate(discard) → status → dispatch/amend`；每一步均以最新 requiredNextAction 为准。未 settle 不处置 workspace；只有人类明确要求保留现场才选择 preserve，preserved/blocked 先 amend，不要 re-init。
+失败路径：包装层报告 failed/timeout 时，先核对 artifact、session 和 worktree，再 `goal_status` 并遵从 requiredNextAction；证据 ambiguous 时停止，不 rationalize 为失败或成功。证据 verified failed/blocked 时：`status → settle → status → goal_integrate(discard) → status → dispatch/amend`；每一步均以最新 requiredNextAction 为准。未 settle 不处置 workspace；只有人类明确要求保留现场才选择 preserve。普通 blocked 先 amend；preserved 按下方资源释放流程处理，不要 re-init。
 
 ## 孤儿与冲突恢复
 
