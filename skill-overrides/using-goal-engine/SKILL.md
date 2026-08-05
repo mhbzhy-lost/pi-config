@@ -60,14 +60,14 @@ Agent 只调用 Pi Host 暴露的七个 typed tools；调用前从当前 ToolDef
 
 处理三类 orphan 状态：
 
-- `ORPHANED_EXECUTOR_WORKSPACE`：若 status 已 `verified`，读取 `goal_status` 中的 `human`/`requiredNextAction`。
+- `ORPHANED_EXECUTOR_WORKSPACE`：若 status 已 `verified`，读取 `goal_status` 的 `blockingReason.choices`；这些是 human decision，不是 machine action。
   - `requiredNextAction` 为 `null` 时，**仅停止并等待人类明确选择**；不得默认或优先 `preserve` 或 `discard`。
   - 在有人类选择后，调用 `goal_integrate(discard)` 或 `goal_integrate(preserve)` 执行。
 - `ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED`：**只**再次 `goal_status`，不得 `goal_integrate(discard|preserve)`。
 - `ORPHANED_WORKSPACE_NOT_SETTLED`：表示已验证的 orphan integrate 无效，先 `goal_status` 回到 verified 再按人类 `discard`/`preserve` 选择继续。
 
 `preserved`/已保留资源未释放时，唯一机器动作是 `goal_integrate(discard)`；不得 `goal_amend`。
-未释放后先 `goal_status` 重新确认；若已释放，再 `goal_status` 按 `dispatch`/`amend` 的 requiredNextAction 执行。
+处置后先 `goal_status` 重新确认；释放后按最新 `goal_status` 的 `dispatch`/`amend` requiredNextAction 执行。
 
 `.state` 目录不得提交，不得在 `.state` 上执行 `reset` 或 `restore`；不得在命令行手工删除 `lease`（租约）、`worktree`（工作树）、`branch`（分支）。
 
