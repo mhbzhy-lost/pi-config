@@ -687,20 +687,46 @@ export function inspectExecutorWorkspaceResources(lease) {
 
 function assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean) {
   try {
-    const persisted = loadExecutorWorkspaceLease({
-      goalId: lease.goalId, taskId: lease.taskId, attempt: lease.attempt, stateRoot: lease.stateRoot,
-    });
-    const persistedKeys = Object.keys(persisted).filter((field) => field !== "leasePath").sort();
-    if (JSON.stringify(persistedKeys) !== JSON.stringify([...PERSISTED_LEASE_FIELDS].sort())
-      || PERSISTED_LEASE_FIELDS.some((field) => persisted[field] !== lease[field])) {
-      throw new Error("persisted lease does not match supplied lease");
+    const paths = workspacePaths(lease.stateRoot, lease.goalId, lease.taskId, lease.attempt);
+    let persisted;
+    try {
+      persisted = JSON.parse(readFileSync(paths.leasePath, "utf8"));
+    } catch (error) {
+      throw new Error(`Executor workspace lease is invalid: ${lease.goalId}/${lease.taskId}/${lease.attempt}`);
     }
-    const inspection = inspectExecutorWorkspace(persisted);
+
+    if (!persisted || typeof persisted !== "object" || Array.isArray(persisted)
+      || Object.getPrototypeOf(persisted) !== Object.prototype
+      || JSON.stringify(Object.keys(persisted).sort()) !== JSON.stringify([...PERSISTED_LEASE_FIELDS].sort())) {
+      throw new Error("Executor workspace lease envelope is invalid");
+    }
+
+    const expected = {
+      goalId: lease.goalId,
+      taskId: lease.taskId,
+      attempt: lease.attempt,
+      stateRoot: path.resolve(lease.stateRoot),
+      path: paths.workspacePath,
+      originRoot: lease.originRoot,
+      baseCommit: lease.baseCommit,
+      originRef: lease.originRef,
+      branch: lease.branch,
+      ownerToken: lease.ownerToken,
+      createdAt: lease.createdAt,
+    };
+    for (const field of PERSISTED_LEASE_FIELDS) {
+      if (persisted[field] !== expected[field]) {
+        throw new Error(`Executor workspace lease ${field} does not match`);
+      }
+    }
+
+    const inspectedLease = { ...persisted, leasePath: paths.leasePath };
+    const inspection = inspectExecutorWorkspace(inspectedLease);
     if (inspection.headCommit !== expectedExecutorHead) {
       throw new Error(`HEAD mismatch (expected ${expectedExecutorHead}, got ${inspection.headCommit})`);
     }
     if (requireClean && !inspection.clean) throw new Error("workspace must be clean");
-    return persisted;
+    return inspectedLease;
   } catch (error) {
     throw new Error(`workspace identity fence failed: ${error instanceof Error ? error.message : String(error)}`);
   }
