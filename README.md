@@ -17,7 +17,7 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.83.0
 pi --version
 ```
 
-本仓已验证 Pi `0.82.0`、`0.82.1` 和 `0.83.0`，初始化默认安装 `0.83.0`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Plan Harness smoke。
+本仓已验证 Pi `0.82.0`、`0.82.1` 和 `0.83.0`，初始化默认安装 `0.83.0`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
 
 ## 初始化
 
@@ -113,12 +113,6 @@ basic-memory doctor --local
 
 `~/.zshrc` 中的 `pi-config` 受控区块由 `init-pi.sh` 维护，不要手工复制或改写；否则 Pi
 会回到默认配置根并重新启用默认 Skill 发现。
-
-## 计划执行仓
-
-批准计划通过`/plan-run <计划路径>`启动thin Host和Standalone Plan Runner，并在独立accumulator/Attempt worktree中执行。无路径或资源冲突的Task可以并行；Executor只由官方`pi-subagents` RPC派发。
-
-完成必须同时满足Plan终态为`validated`、`validatedHead == headCommit`以及accumulator产物审查通过。Host退出、Executor进程退出或格式化status文本都不能单独证明完成。验证不会自动合回或push；Attention、恢复、dispatch uncertain、单Writer集成和显式merge-back见[Pi计划执行仓说明](docs/pi-plan-execution-capsule.md)及[Harness运行手册](docs/knowledge/plan-runner-pi-subagents-harness.md)。
 
 ## 升级 Superpowers
 

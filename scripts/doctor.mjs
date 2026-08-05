@@ -22,7 +22,6 @@ const EXPECTED_GLOBAL_SKILLS = [
   "test-driven-development",
   "writing-skills",
   "writing-plans",
-  "plan-runner-dispatch",
   "subagent-dispatch",
   "using-goal-engine",
   "exa-search",
@@ -32,18 +31,6 @@ const EXPECTED_GLOBAL_SKILLS = [
 const REQUIRED_PROFILES = {
   executor: { model: "openai-codex/gpt-5.6-terra", subagent: false, extensions: undefined },
   spark: { model: "openai-codex/gpt-5.3-codex-spark", subagent: false, extensions: undefined },
-  "plan-runner": {
-    model: "openai-codex/gpt-5.6-sol",
-    subagent: false,
-    extensions: undefined,
-    childExtension: ".pi-subagents/plan-runner-entry.mjs",
-    requiredTools: ["plan_open"],
-    forbiddenTools: [
-      "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
-      "subagent", "subagent_wait", "subagent_supervisor", "plan_executor_supervisor", "contact_supervisor",
-    ],
-  },
-  "plan-reviewer": { model: "openai-codex/gpt-5.6-sol", subagent: false, extensions: undefined },
 };
 const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/spawn.mjs",
@@ -255,22 +242,6 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     if (expected.childExtension && profile.subagentOnlyExtensions !== expected.childExtension) issues.push(`unexpected ${name} child extension`);
   }
 
-  for (const extension of ["plan-launcher.ts"]) {
-    try {
-      await access(join(repoRoot, "pi", "extensions", extension), constants.R_OK);
-    } catch {
-      issues.push(`missing required Plan child extension: pi/extensions/${extension}`);
-    }
-  }
-
-  for (const extension of ["plan-capsule.ts", "plan-runner.ts"]) {
-    try {
-      await access(join(repoRoot, "pi", "child-extensions", extension), constants.R_OK);
-    } catch {
-      issues.push(`missing required Plan child extension: pi/child-extensions/${extension}`);
-    }
-  }
-
   const gitignore = await readIfExists(join(repoRoot, ".gitignore"));
   if (!gitignore?.split(/\r?\n/).includes("/var/")) issues.push("runtime namespace is not ignored: /var/");
 
@@ -284,15 +255,8 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   for (const legacy of LEGACY_RUNTIME_FILES) {
     try {
       await access(join(repoRoot, legacy));
-      issues.push(`legacy generic Plan runtime still exists: ${legacy}`);
+      issues.push(`legacy generic subagent runtime still exists: ${legacy}`);
     } catch {}
-  }
-
-  for (const relativeSource of ["coordinator.mjs", "plan-runner-dependencies.mjs", "pi-subagents-execution-backend.mjs"]) {
-    const source = await readIfExists(join(repoRoot, "scripts", "lib", "plan", relativeSource));
-    if (/spawnPiAgent|createMonitor|stopAgent|interruptAgent/.test(source ?? "")) {
-      issues.push(`Executor production path retains legacy runtime: ${relativeSource}`);
-    }
   }
 
   try {
@@ -424,7 +388,7 @@ export async function inspectConfiguration(repoRoot, options = {}) {
 
 const LIMITATIONS = [
   "limitation: an unbound RPC dispatch that cannot be uniquely reconciled enters dispatch_uncertain and is never spawned again automatically",
-  "limitation: formatted RPC status text is diagnostic only; Plan lifecycle uses event, Git, and official artifact facts",
+  "limitation: formatted RPC status text is diagnostic only; task lifecycle uses event, Git, and official artifact facts",
 ];
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;

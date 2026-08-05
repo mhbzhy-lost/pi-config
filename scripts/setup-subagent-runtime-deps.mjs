@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 const execFile = promisify(execFileCallback);
 const scriptPath = fileURLToPath(import.meta.url);
 
-export function buildPlanRuntimeInstallCommand(piNpmDir) {
+export function buildSubagentRuntimeInstallCommand(piNpmDir) {
   return {
     command: "npm",
     args: [
@@ -16,18 +16,18 @@ export function buildPlanRuntimeInstallCommand(piNpmDir) {
   };
 }
 
-export async function installPlanRuntimeDependencies({
+export async function installSubagentRuntimeDependencies({
   piNpmDir = resolve(import.meta.dirname, "../pi/npm"),
   env = process.env,
   run = execFile,
 } = {}) {
   await run("npm", ["uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo"], { env });
-  const { command, args } = buildPlanRuntimeInstallCommand(piNpmDir);
+  const { command, args } = buildSubagentRuntimeInstallCommand(piNpmDir);
   await run(command, args, { env });
   return { piNpmDir };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
-  const { piNpmDir } = await installPlanRuntimeDependencies();
-  process.stdout.write(`Plan runtime dependencies installed in ${piNpmDir}\n`);
+  const { piNpmDir } = await installSubagentRuntimeDependencies();
+  process.stdout.write(`Subagent runtime dependencies installed in ${piNpmDir}\n`);
 }
