@@ -79,3 +79,32 @@ test("keeps Goal Engine mutation at the Host typed-tool boundary", async () => {
   assert.match(body, /(当前|current)[\s\S]{0,100}(ToolDefinition|工具定义)[\s\S]{0,100}(schema|类型)/i);
   assert.match(body, /(Git precheck|Git 预检)[\s\S]{0,100}(不受此禁止|not subject)/i);
 });
+
+test("gives status-only, human-decided orphan workspace recovery guidance", async () => {
+  const { body } = await loadSkill();
+
+  // These are resource-specific prohibitions, not the general worktree-cleanup rule.
+  assert.match(body, /\.state[\s\S]{0,120}(不提交|不得提交|禁止提交|do not commit|never commit)[\s\S]{0,80}(commit|提交)|(?:不提交|不得提交|禁止提交|do not commit|never commit)[\s\S]{0,120}\.state/i);
+  assert.match(body, /\.state[\s\S]{0,140}(不得|禁止|不要|不)(?:执行)?[\s\S]{0,40}(reset|restore)|(不得|禁止|不要|不)[\s\S]{0,100}(reset|restore)[\s\S]{0,100}\.state/i);
+  for (const resource of ["lease|租约", "worktree|工作树", "branch|分支"]) {
+    assert.match(body, new RegExp(`(不得|禁止|不要|不)[\\s\\S]{0,80}(手工|手动|命令行|CLI|shell)[\\s\\S]{0,100}(删除|delete|remove)[\\s\\S]{0,100}(${resource})|(${resource})[\\s\\S]{0,100}(不得|禁止|不要|不)[\\s\\S]{0,80}(手工|手动|命令行|CLI|shell)[\\s\\S]{0,100}(删除|delete|remove)`, "i"));
+  }
+
+  assert.match(body, /Origin must be clean[\s\S]{0,220}(停止|stop)[\s\S]{0,160}goal_status/i);
+  assert.match(body, /Executor workspace already exists[\s\S]{0,220}(停止|stop)[\s\S]{0,160}goal_status/i);
+  assert.match(body, /(Origin must be clean|Executor workspace already exists)[\s\S]{0,260}(不得|禁止|不要|不)[\s\S]{0,100}(raw Git|Git 修复|git fix)/i);
+  for (const code of ["ORPHANED_EXECUTOR_WORKSPACE", "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED", "ORPHANED_WORKSPACE_NOT_SETTLED"]) assert.match(body, new RegExp(`\\b${code}\\b`));
+
+  assert.match(body, /(ORPHANED_EXECUTOR_WORKSPACE|verified orphan)[\s\S]{0,300}(goal_status|status)[\s\S]{0,300}(human|人类)[\s\S]{0,160}(choice|选择)/i);
+  assert.match(body, /(human|人类)[\s\S]{0,180}(明确|explicit)[\s\S]{0,180}(选择|choice)[\s\S]{0,180}goal_integrate\((discard|preserve)\)/i);
+  assert.match(body, /(不得|禁止|不要|不)[\s\S]{0,100}(默认|优先|default|prefer)[\s\S]{0,120}(preserve|discard)/i);
+  assert.match(body, /requiredNextAction[\s\S]{0,100}null[\s\S]{0,180}(停止|等待|stop|wait)[\s\S]{0,180}(选择|choice|人类|human)/i);
+
+  assert.match(body, /ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED[\s\S]{0,260}(只|only)[\s\S]{0,100}goal_status/i);
+  assert.match(body, /ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED[\s\S]{0,260}(不得|禁止|不要|不)[\s\S]{0,140}(discard|preserve)/i);
+  assert.match(body, /ORPHANED_WORKSPACE_NOT_SETTLED[\s\S]{0,220}(无效|invalid)[\s\S]{0,180}(verified|已验证)[\s\S]{0,160}(选择|choice)/i);
+
+  assert.match(body, /(preserved|已保留)[\s\S]{0,200}(resources|资源)[\s\S]{0,160}(未释放|not released)[\s\S]{0,180}(唯一|only)[\s\S]{0,100}(机器动作|machine action)[\s\S]{0,180}goal_integrate\(discard\)/i);
+  assert.match(body, /(preserved|已保留)[\s\S]{0,300}(未释放|not released)[\s\S]{0,180}(不得|禁止|不要|不)[\s\S]{0,100}goal_amend/i);
+  assert.match(body, /(释放后|after release)[\s\S]{0,160}goal_status[\s\S]{0,180}(dispatch|amend)/i);
+});
