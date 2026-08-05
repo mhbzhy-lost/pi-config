@@ -61,8 +61,10 @@ Agent 只调用 Pi Host 暴露的七个 typed tools；调用前从当前 ToolDef
 处理三类 orphan 状态：
 
 - `ORPHANED_EXECUTOR_WORKSPACE`：若 status 已 `verified`，读取 `goal_status` 的 `blockingReason.choices`；这些是 human decision，不是 machine action。
-  - `requiredNextAction` 为 `null` 时，**仅停止并等待人类明确选择**；不得默认或优先 `preserve` 或 `discard`。
-  - 在有人类选择后，调用 `goal_integrate(discard)` 或 `goal_integrate(preserve)` 执行。
+  - 当 `requiredNextAction` 为 `null` 且 `blockingReason.choices` 有多个 choice 时，立即使用**提问工具**要求人类只回答 `discard` 或 `preserve`，随后结束当前轮次并等待回复。
+  - 收到用户对 `discard` 或 `preserve` 的明确回复前，**不得调用** `goal_integrate`；“最快修好”“发布deadline”“authority”或“授权清理”不应等同于明确选择。
+  - 人类回复后**必须明确选择** `discard` 或 `preserve`，先 `goal_status` 重新确认，再按实际 typed schema 调用 `goal_integrate(discard)` 或 `goal_integrate(preserve)`。
+  - `preserve` 不应视为更安全、可逆、保护 artifact 的默认方案；不得自动偏向任一项。
 - `ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED`：**只**再次 `goal_status`，不得 `goal_integrate(discard|preserve)`。
 - `ORPHANED_WORKSPACE_NOT_SETTLED`：表示已验证的 orphan integrate 无效，先 `goal_status` 回到 verified 再按人类 `discard`/`preserve` 选择继续。
 
