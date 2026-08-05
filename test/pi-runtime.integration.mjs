@@ -10,12 +10,12 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const shellIntegration = join(repoRoot, "scripts", "pi-shell.zsh");
 const piBinary = process.env.PI_REAL_BIN;
 
-test("real Pi RPC loads the controlled Skills plus audited package Skills", async () => {
+test("real Pi RPC loads required auto-discovered Skills without retired products", async () => {
   assert.ok(piBinary, "PI_REAL_BIN must point to a supported Pi 0.82.x runtime");
   const controlledSkills = await loadDesiredSkills(
     repoRoot,
     join(repoRoot, "skill-overrides", "skills.list"),
-    join(repoRoot, "skill-overrides", "skills.local.list"),
+    null,
   );
 
   const result = spawnSync(
@@ -53,10 +53,13 @@ test("real Pi RPC loads the controlled Skills plus audited package Skills", asyn
   const skills = response.data.commands
     .filter((command) => command.source === "skill")
     .map((command) => command.name);
-  assert.deepEqual(skills, [
+  const requiredSkills = [
     ...[...controlledSkills.keys()].map((name) => `skill:${name}`),
     "skill:cache-stats",
     "skill:external-llm-review-provider",
     "skill:manage-providers",
-  ]);
+  ];
+  for (const required of requiredSkills) assert.ok(skills.includes(required), `missing required Skill: ${required}`);
+  assert.equal(new Set(skills).size, skills.length, "auto-discovered Skills must be unique");
+  assert.equal(skills.includes("skill:plan-runner-dispatch"), false);
 });

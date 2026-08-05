@@ -10,7 +10,7 @@ _pi_config_invoke() {
     return 1
   fi
 
-  "$_PI_CONFIG_UPSTREAM_PI" "$@"
+  "$_PI_CONFIG_UPSTREAM_PI" --no-skills "$@"
 }
 
 _pi_config_alt_screen() (

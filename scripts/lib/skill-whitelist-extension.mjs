@@ -2,12 +2,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readdir, stat } from "node:fs/promises";
 
+const RETIRED_SKILL_NAMES = new Set(["plan-runner-dispatch"]);
+
 async function discoverSkillsInDir(skillsDir) {
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true });
     const paths = [];
     for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
+      if (entry.name.startsWith(".") || RETIRED_SKILL_NAMES.has(entry.name)) continue;
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       const skillPath = join(skillsDir, entry.name);
       try {
