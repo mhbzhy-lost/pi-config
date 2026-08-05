@@ -11,9 +11,9 @@ const ERROR_MESSAGE_LIMIT = 1024;
 export const BROKER_FRAME_LIMIT_BYTES = 64 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
-const METHODS = Object.freeze(["ping", "spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.ack", "supervisor.reply", "caller.followup", "subscribe"] as const);
-const PUSH_TYPES = Object.freeze(["execution.started", "execution.completed", "supervisor.request", "root.closing", "subscription.ready"] as const);
-const GRANT_ROLES = Object.freeze(["plan-runner", "executor"] as const);
+const METHODS = Object.freeze(["ping", "subscribe"] as const);
+const PUSH_TYPES = Object.freeze(["root.closing", "subscription.ready"] as const);
+const GRANT_ROLES = Object.freeze(["executor"] as const);
 const PROCESS_TERMINAL_STATES = Object.freeze(["pending", "observed", "unknown", "not-started"] as const);
 const PROCESS_TERMINAL_REASONS = Object.freeze([
   "observer-unavailable",
@@ -253,7 +253,7 @@ export async function setBrokerSocketPermissions(socketPath) {
   await chmod(socketPath, 0o600);
 }
 
-export function parseBrokerRequest(value, { supervisorRequestId } = {}) {
+export function parseBrokerRequest(value) {
   const request = exactObject(value, "request", ["schemaVersion", "requestId", "rootSessionId", "callerRunId", "callerToken", "method", "params"]);
   if (request.schemaVersion !== REQUEST_SCHEMA_VERSION) fail("request.schemaVersion is unsupported");
   identity(request.requestId, "requestId");
@@ -261,48 +261,8 @@ export function parseBrokerRequest(value, { supervisorRequestId } = {}) {
   identity(request.callerRunId, "callerRunId");
   callerToken(request.callerToken);
   if (typeof request.method !== "string" || !METHODS.includes(request.method)) fail("request.method is unsupported");
-  record(request.params, "request.params");
-  if (request.method === "spawn.lookup") {
-    exactObject(request.params, "params", ["spawnKey"]);
-    identity(request.params.spawnKey, "params.spawnKey");
-  }
-  if (request.method === "caller.followup") {
-    if (!Object.hasOwn(request.params, "wakeId")) fail("params.wakeId is required");
-    if (!Object.hasOwn(request.params, "reason")) fail("params.reason is required");
-    exactObject(request.params, "params", ["wakeId", "reason"]);
-    identity(request.params.wakeId, "params.wakeId");
-    if (request.params.reason !== "plan-opened") fail("params.reason is unsupported");
-  }
-  if (request.method === "supervisor.ack") {
-    exactObject(request.params, "params", ["requestId"]);
-    identity(request.params.requestId, "params.requestId");
-  }
-  if (request.method === "supervisor.reply") {
-    identity(request.params.replyTo, "params.replyTo");
-    if (supervisorRequestId !== undefined && request.params.replyTo !== identity(supervisorRequestId, "supervisorRequestId")) {
-      fail("params.replyTo must equal the canonical supervisor requestId");
-    }
-  }
+  exactObject(request.params, "params", []);
   return request;
-}
-
-export function createSupervisorRequestPush({ rootSessionId, callerRunId, upstreamDetails }) {
-  const details = record(upstreamDetails, "upstreamDetails");
-  const requestId = identity(details.id, "upstreamDetails.id");
-  const executorRunId = identity(details.runId, "upstreamDetails.runId");
-  const data = { ...details };
-  delete data.id;
-  delete data.runId;
-  for (const key of Object.keys(data)) {
-    if (key.endsWith("Id")) fail(`upstreamDetails contains unsupported secondary identity ${key}`);
-  }
-  return parseBrokerPush({
-    schemaVersion: PUSH_SCHEMA_VERSION,
-    rootSessionId,
-    callerRunId,
-    type: "supervisor.request",
-    data: { requestId, executorRunId, ...data },
-  });
 }
 
 export function parseBrokerPush(value) {
@@ -311,31 +271,7 @@ export function parseBrokerPush(value) {
   identity(push.rootSessionId, "rootSessionId");
   identity(push.callerRunId, "callerRunId");
   if (typeof push.type !== "string" || !PUSH_TYPES.includes(push.type)) fail("push.type is unsupported");
-  record(push.data, "push.data");
-  if (push.type === "execution.started" || push.type === "execution.completed") {
-    const required = ["dispatchId", "runId", "asyncDir", "cwd", "sessionId", "state"];
-    const allowed = push.type === "execution.completed" ? [...required, "processTerminal"] : required;
-    for (const key of Object.keys(push.data)) if (!allowed.includes(key)) fail(`push.data contains unknown field ${key}`);
-    for (const key of required) {
-      if (!Object.hasOwn(push.data, key)) fail(`push.data is missing required field ${key}`);
-      if (["dispatchId", "runId", "state"].includes(key)) identity(push.data[key], `push.data.${key}`);
-      else if (typeof push.data[key] !== "string" || push.data[key].length === 0) fail(`push.data.${key} must be a non-empty string`);
-    }
-    if (Object.hasOwn(push.data, "processTerminal")) {
-      parseProcessTerminal(push.data.processTerminal);
-      if (push.data.processTerminal.state !== push.data.state) fail("push.data.processTerminal.state must match push.data.state");
-    }
-  }
-  if (push.type === "supervisor.request") {
-    identity(push.data.requestId, "push.data.requestId");
-    identity(push.data.executorRunId, "push.data.executorRunId");
-    for (const key of Object.keys(push.data)) {
-      if (key.endsWith("Id") && key !== "requestId" && key !== "executorRunId") {
-        fail(`push.data contains unsupported secondary identity ${key}`);
-      }
-    }
-  }
-  if (push.type === "subscription.ready") exactObject(push.data, "push.data", []);
+  exactObject(push.data, "push.data", []);
   assertPushFrameSize(push);
   return push;
 }

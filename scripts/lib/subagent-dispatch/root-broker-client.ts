@@ -187,19 +187,6 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
 
   const api = {
     ping: () => request("ping"),
-    spawn: (params: Record<string, unknown>, options: { requestId?: string; spawnKey?: string } = {}) => {
-      const { spawnKey: _modelSpawnKey, ...clean } = params;
-      return request("spawn", { ...clean, async: true, clarify: false, ...(options.spawnKey !== undefined ? { spawnKey: options.spawnKey } : {}) }, options);
-    },
-    lookupSpawn: ({ spawnKey }: { spawnKey: string }) => request("spawn.lookup", { spawnKey }),
-    status: (params: Record<string, unknown>) => request("status", params),
-    steer: (params: Record<string, unknown>) => request("steer", params),
-    interrupt: (params: Record<string, unknown>) => request("interrupt", params),
-    stop: (params: Record<string, unknown>) => request("stop", params),
-    supervisorPending: () => request("supervisor.pending"),
-    supervisorAcknowledge: (requestId: string) => request("supervisor.ack", { requestId }),
-    supervisorReply: (params: Record<string, unknown>) => request("supervisor.reply", params),
-    callerFollowUp: (params: Record<string, unknown>) => request("caller.followup", params),
     subscribe,
     dispose() {
       if (disposed) return;
