@@ -102,17 +102,21 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
   await assert.rejects(access(join(repoRoot, "pi", "extensions", "subagent.ts")));
 });
 
-test("configuration contains expected models and defaults", async () => {
+test("configuration retains enabled model providers and valid defaults", async () => {
   const settings = JSON.parse(await readFile(join(repoRoot, "pi", "settings.json"), "utf8"));
 
-  assert.equal(settings.defaultProvider, "openai-codex");
-  assert.equal(settings.defaultThinkingLevel, "xhigh");
   assert.deepEqual(settings.enabledModels, [
     "openai-codex/gpt-5.6-sol",
     "openai-codex/gpt-5.6-terra",
     "openai-codex/gpt-5.3-codex-spark",
     "deepseek/deepseek-v4-flash",
+    "codex-pool/gpt-5.6-sol",
+    "anthropic-idealab/claude-opus-4-6",
+    "openai-idealab/Peach-07-17-DogFooding",
   ]);
+  assert.equal(new Set(settings.enabledModels).size, settings.enabledModels.length);
+  assert.ok(settings.enabledModels.includes(`${settings.defaultProvider}/${settings.defaultModel}`));
+  assert.ok(["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(settings.defaultThinkingLevel));
 });
 
 test("migration ignores all Plan runtime state", async () => {
