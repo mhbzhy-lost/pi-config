@@ -42,7 +42,7 @@
 - Consumes: `main=61ab540`、`origin/main=29f8a15`、存档分支已存在。
 - Produces: 一个包含 `origin/main` 历史、保留本地 Goal Engine 候选且 `pi/settings.json` 已提交 blob 不被远端旧配置覆盖的 `main` HEAD。
 
-- [ ] **Step 1: 固定主工作树证据**
+- [x] **Step 1: 固定主工作树证据**
 
 在 `/Users/mhbzhy/pi-config` cwd 运行：
 
@@ -54,7 +54,7 @@ git rev-parse 183567f037a61b5fdcf78e93d27a9c8ebb2f0002^{commit}
 
 Expected: 主工作树仅显示本计划文档；settings 已 stash，Local Skill 已由 `.git/info/exclude` 隐藏；所有 ref 与 Global Constraints 一致。
 
-- [ ] **Step 2: 提交计划文档**
+- [x] **Step 2: 提交计划文档**
 
 ```bash
 git add docs/superpowers/plans/2026-08-05-plan-runner-removal.md
@@ -63,7 +63,7 @@ git commit -m "docs(plan-runner): 记录退役实施计划"
 
 Expected: commit 仅包含本计划。
 
-- [ ] **Step 3: 把远端四个分叉提交合入 main，但保留本地已提交 settings blob**
+- [x] **Step 3: 把远端四个分叉提交合入 main，但保留本地已提交 settings blob**
 
 ```bash
 git fetch origin main
@@ -87,7 +87,7 @@ git commit -m "chore(main): 合并远端配置历史"
 
 Expected: merge commit 同时包含当前 `main` 与 `origin/main`；settings blob 等于 `61ab540`。
 
-- [ ] **Step 4: 核对 merge 后边界**
+- [x] **Step 4: 核对 merge 后边界**
 
 ```bash
 git merge-base --is-ancestor origin/main HEAD
@@ -131,7 +131,7 @@ Expected: 两个 ancestry 检查成功；`main` clean；用户 settings 仍在�
 - Produces: `BrokerGrant.role: "executor"`；wire methods 仅保留 Root-owned Executor 实际需要的 `ping` 与 `subscribe`；`createRootBrokerUpstream({rpc})` 不再提供 recovery/resume/Plan Supervisor closure。
 - Produces: `RootBrokerServer.start(): Promise<void>`、`RootBrokerServer.close(): Promise<void>`、direct Executor grant/ownership/terminal-cleanup 行为继续可用。
 
-- [ ] **Step 1: 加载 TDD skill 并建立 tests-only RED**
+- [x] **Step 1: 加载 TDD skill 并建立 tests-only RED**
 
 在当前 `main` 先加载 `test-driven-development`，然后创建静态退役契约：
 
@@ -173,7 +173,7 @@ test("broker grants only direct executors and exposes no caller control protocol
 });
 ```
 
-- [ ] **Step 2: 运行 RED 并确认失败原因精确**
+- [x] **Step 2: 运行 RED 并确认失败原因精确**
 
 ```bash
 node --test test/plan-runner-removal.test.mjs test/root-subagent-broker-protocol.test.mjs
@@ -181,14 +181,14 @@ node --test test/plan-runner-removal.test.mjs test/root-subagent-broker-protocol
 
 Expected: FAIL 仅因旧文件仍存在、旧符号仍存在、method/role 仍包含 Plan caller；不得是 import 或语法错误。
 
-- [ ] **Step 3: 提交 tests-only RED**
+- [x] **Step 3: 提交 tests-only RED**
 
 ```bash
 git add test/plan-runner-removal.test.mjs test/root-subagent-broker-protocol.test.mjs
 git commit -m "test(runtime): 固定 Plan caller 退役边界"
 ```
 
-- [ ] **Step 4: 最小化 Root Broker production surface**
+- [x] **Step 4: 最小化 Root Broker production surface**
 
 实施以下精确边界：
 
@@ -218,7 +218,7 @@ export function createRootBrokerUpstream({ rpc }: { rpc: any }) {
 }
 ```
 
-- [ ] **Step 5: 收窄测试而不删除通用安全覆盖**
+- [x] **Step 5: 收窄测试而不删除通用安全覆盖**
 
 `test/root-subagent-broker.test.mjs` 必须保留或重写为以下行为测试：
 
@@ -235,7 +235,7 @@ export function createRootBrokerUpstream({ rpc }: { rpc: any }) {
 
 `test/subagent-supervisor-adapter.test.mjs` 保留 native/project `subagent_supervisor` membrane 与 mailbox 测试，删除所有 `installRootOwnedSubagent`、`plan_executor_supervisor`、Plan Attention 测试。
 
-- [ ] **Step 6: 运行 GREEN**
+- [x] **Step 6: 运行 GREEN**
 
 ```bash
 node --test \
@@ -251,7 +251,7 @@ node --test \
 
 Expected: 全部 PASS；无 Plan caller/revival 测试被保留为 production requirement。
 
-- [ ] **Step 7: 提交 GREEN**
+- [x] **Step 7: 提交 GREEN**
 
 ```bash
 git add -A pi/extensions/subagent-runtime.ts pi/child-extensions scripts/lib/subagent-dispatch test
@@ -286,7 +286,7 @@ git commit -m "refactor(runtime): 移除 Plan caller 恢复协议"
 - Produces: package script `setup:subagent-runtime`；exports `buildSubagentRuntimeInstallCommand(piNpmDir)` 与 `installSubagentRuntimeDependencies(options)`。
 - Produces: Doctor 继续检查 executor/spark、subagent runtime、Root Broker components、Goal exact-seven ABI，不再要求 Plan profiles/extensions/skill。
 
-- [ ] **Step 1: 写 tests-only RED**
+- [x] **Step 1: 写 tests-only RED**
 
 先加载 `test-driven-development`，再把混合测试改成以下新契约：
 
@@ -307,7 +307,7 @@ assert.doesNotMatch(source, /setup:plan-runtime/);
 
 `test/doctor.test.mjs` 的成功 fixture 不创建 Plan agent/extension/skill，并继续断言 Root Broker、Goal ABI、依赖版本缺失会报错。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 ```bash
 node --test \
@@ -323,14 +323,14 @@ node --test \
 
 Expected: FAIL 仅因旧 script/Doctor/rules surface 仍存在。
 
-- [ ] **Step 3: 提交 tests-only RED**
+- [x] **Step 3: 提交 tests-only RED**
 
 ```bash
 git add test/package-scripts.test.mjs test/init-pi.test.mjs test/doctor.test.mjs test/skill-list.test.mjs test/global-rules.test.mjs test/migration-contract.test.mjs test/pi-subagents-compat.test.mjs test/plan-runner-removal.test.mjs
 git commit -m "test(config): 固定 Plan Runner 配置退役契约"
 ```
 
-- [ ] **Step 4: 重命名通用依赖安装入口**
+- [x] **Step 4: 重命名通用依赖安装入口**
 
 目标 exports：
 
@@ -356,7 +356,7 @@ export async function installSubagentRuntimeDependencies({
 
 CLI 输出改为 `Subagent runtime dependencies installed in ...`；`init-pi.sh` 调用 `npm run setup:subagent-runtime`。
 
-- [ ] **Step 5: 删除配置公开面并保留 Goal/subagent 门禁**
+- [x] **Step 5: 删除配置公开面并保留 Goal/subagent 门禁**
 
 - `package.json` 删除 `test:plan`、`test:plan-harness`、`setup:plan-runtime`，增加 `setup:subagent-runtime`。
 - `skills.list` 删除 `plan-runner-dispatch`，保留 `subagent-dispatch` 与 `using-goal-engine`。
@@ -365,7 +365,7 @@ CLI 输出改为 `Subagent runtime dependencies installed in ...`；`init-pi.sh`
 - `scripts/doctor.mjs` 删除 `plan-runner-dispatch`、`plan-runner`/`plan-reviewer` profile、Plan extensions、`scripts/lib/plan/**` 检查；保留 executor/spark、Root components、Goal exact-seven ABI、runtime dependency probe。
 - `test/migration-contract.test.mjs` 不再断言 Plan profile/state；仍覆盖 executor owner extension、Goal Engine 与 `.pi-subagents` ignore。
 
-- [ ] **Step 6: 运行 GREEN 和安装 dry contract**
+- [x] **Step 6: 运行 GREEN 和安装 dry contract**
 
 ```bash
 node --test \
@@ -382,7 +382,7 @@ npm run doctor
 
 Expected: 全部 PASS；Doctor 不依赖任何 Plan 文件。
 
-- [ ] **Step 7: 提交 GREEN**
+- [x] **Step 7: 提交 GREEN**
 
 ```bash
 git add -A package.json init-pi.sh scripts/setup-subagent-runtime-deps.mjs scripts/setup-plan-runtime-deps.mjs scripts/doctor.mjs skill-overrides/skills.list pi/AGENTS.md README.md test
@@ -441,7 +441,7 @@ git commit -m "refactor(config): 通用化子代理运行时配置"
 - Consumes: Task 2/3 已无 production import 或配置引用。
 - Produces: production tree 无 Plan extension/profile/Skill/domain；Goal Contract registry 仅保留非 Plan goal `footer-native-child-conversation`，且 `active_goal_ids` 不再引用被删 goal。
 
-- [ ] **Step 1: 扩展 tests-only RED 为完整 production-surface 断言**
+- [x] **Step 1: 扩展 tests-only RED 为完整 production-surface 断言**
 
 在 `test/plan-runner-removal.test.mjs` 增加：
 
@@ -469,7 +469,7 @@ assert.deepEqual(registry.active_goal_ids, []);
 assert.deepEqual(Object.keys(registry.goals), ["footer-native-child-conversation"]);
 ```
 
-- [ ] **Step 2: 运行 RED 并提交 tests-only commit**
+- [x] **Step 2: 运行 RED 并提交 tests-only commit**
 
 ```bash
 node --test test/plan-runner-removal.test.mjs
@@ -478,7 +478,7 @@ git add test/plan-runner-removal.test.mjs
 git commit -m "test(plan-runner): 固定产品表面删除契约"
 ```
 
-- [ ] **Step 3: 删除 production、Skill、Plan state 与专属测试**
+- [x] **Step 3: 删除 production、Skill、Plan state 与专属测试**
 
 ```bash
 git rm -r \
@@ -519,7 +519,7 @@ git ls-files 'test/plan-*.test.mjs' 'test/plan-*.integration.mjs' -z | xargs -0 
 }
 ```
 
-- [ ] **Step 4: 把 deterministic provider 收窄为通用 subagent fixture**
+- [x] **Step 4: 把 deterministic provider 收窄为通用 subagent fixture**
 
 删除 `test/deterministic-provider.test.mjs` 与 `test/fixtures/deterministic-provider-state.mjs` 中所有 `plan_*`、Plan Attention、amendment、runner bootstrap 分支；保留：
 
@@ -530,7 +530,7 @@ git ls-files 'test/plan-*.test.mjs' 'test/plan-*.integration.mjs' -z | xargs -0 
 
 目标导出不含 `decideDeterministicAmendmentTurn` 或 Plan bootstrap state；`test/fixtures/deterministic-provider.mjs` 只导入通用 decision 函数。
 
-- [ ] **Step 5: 删除现行 Plan 文档，保留 Goal/shared runtime 历史**
+- [x] **Step 5: 删除现行 Plan 文档，保留 Goal/shared runtime 历史**
 
 按 Files 清单执行 `git rm`。对 `docs/bugs/bug-plan-*.md`、`docs/bugs/bug-flat-plan-*.md` 使用 tracked glob 删除；不要删除 `bug-goal-*`，也不要根据正文中的单次历史提及批删 shared Root Broker/Goal 文档。
 
@@ -552,7 +552,7 @@ git rm \
   docs/superpowers/plans/2026-08-02-plan-runner-production-convergence.md
 ```
 
-- [ ] **Step 6: 运行 GREEN、import 扫描和 Goal Contract audit**
+- [x] **Step 6: 运行 GREEN、import 扫描和 Goal Contract audit**
 
 ```bash
 node --test test/plan-runner-removal.test.mjs test/deterministic-provider.test.mjs
@@ -563,7 +563,7 @@ npm run doctor
 
 Expected: tests/Doctor PASS；两项 production scan 无输出。
 
-- [ ] **Step 7: 提交 GREEN**
+- [x] **Step 7: 提交 GREEN**
 
 ```bash
 git add -A
@@ -584,7 +584,7 @@ git commit -m "refactor(plan-runner): 删除退役产品与专属资产"
 - Consumes: Task 2–4 cumulative diff。
 - Produces: 可审计的测试结果、允许残留说明、两轮以内独立 review 结论和 production-ready/Not Ready 判定。
 
-- [ ] **Step 1: 核对 production surface 与 archive refs**
+- [x] **Step 1: 核对 production surface 与 archive refs**
 
 ```bash
 git status --short
@@ -596,7 +596,7 @@ test "$(git rev-parse fix/plan-supervisor-bound-wake)" = 02c4151c4a46156862c3fcc
 
 Expected: clean；refs 未移动；production scan 无输出。
 
-- [ ] **Step 2: 运行 Goal Engine 冻结与 Skill 回归**
+- [x] **Step 2: 运行 Goal Engine 冻结与 Skill 回归**
 
 ```bash
 node --test \
@@ -614,7 +614,7 @@ npm run doctor
 
 Expected: Goal Engine 310/310、Skill/discovery 28/28、Doctor OK；若远端合并改变测试数，摘要必须给出精确新总数且零失败。
 
-- [ ] **Step 3: 运行通用 subagent/Root Broker 回归**
+- [x] **Step 3: 运行通用 subagent/Root Broker 回归**
 
 ```bash
 node --test \
@@ -630,7 +630,7 @@ node --test \
 
 Expected: 全部保留测试 PASS；命令 glob 不应匹配已删除的 Plan-only tests。
 
-- [ ] **Step 4: 运行全仓回归并做基线归因**
+- [x] **Step 4: 运行全仓回归并做基线归因**
 
 ```bash
 npm test
@@ -640,7 +640,7 @@ npm run test:subagents
 
 Expected: 不新增失败。任何失败必须记录 test name、是否在 `61ab540` 可复现、与 removal diff 的关联；不得把既有失败写成 GREEN。
 
-- [ ] **Step 5: 独立 review，最多两轮**
+- [x] **Step 5: 独立 review，最多两轮**
 
 review 必须检查：
 
@@ -653,7 +653,7 @@ review 必须检查：
 
 若发现 bug，必须先创建中文六要素 `docs/bugs/bug-<摘要>.md`，再按 tests-only RED → minimal GREEN 修复；之后只允许第二轮 cumulative review。
 
-- [ ] **Step 6: 写中文验证摘要并提交**
+- [x] **Step 6: 写中文验证摘要并提交**
 
 摘要必须列出：archive/ref、删除边界、保留边界、定向测试、全仓结果与基线失败、review 结论、用户文件 hash、是否 production-ready。
 
@@ -680,7 +680,7 @@ Expected: `main` clean。
 - Consumes: clean、review-approved、包含 `origin/main` ancestry 的 `main` HEAD。
 - Produces: 远端 archive 分支与 `origin/main` 更新；用户 settings 从固定 stash 复原，Local Skill 继续本地 exclude。
 
-- [ ] **Step 1: 固定部署前用户证据**
+- [x] **Step 1: 固定部署前用户证据**
 
 ```bash
 git status --short
@@ -692,7 +692,7 @@ git status --short --branch
 
 Expected: `main` clean、包含 origin tip；固定 stash 与 Local Skill 证据有效。
 
-- [ ] **Step 2: 先推送不可变 archive ref**
+- [x] **Step 2: 先推送不可变 archive ref**
 
 主 agent 在主工作树 cwd 运行：
 
@@ -702,7 +702,7 @@ git push origin archive/plan-runner-before-removal-20260805:archive/plan-runner-
 
 Expected: 远端 archive 指向 `61ab540`；禁止 `--force`。
 
-- [ ] **Step 3: 推送前复验用户内容与关键门禁**
+- [x] **Step 3: 推送前复验用户内容与关键门禁**
 
 ```bash
 find skill-overrides/aliyun-beijing-server -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/aliyun-beijing-after.sha256
@@ -714,7 +714,7 @@ node --test test/plan-runner-removal.test.mjs
 
 Expected: Local Skill 内容逐字节一致；Doctor/removal contract PASS；settings 仍安全保存在固定 stash commit。
 
-- [ ] **Step 4: 复原本地 settings 并验证**
+- [x] **Step 4: 复原本地 settings 并验证**
 
 ```bash
 git stash apply 183567f037a61b5fdcf78e93d27a9c8ebb2f0002
@@ -724,7 +724,7 @@ git status --short --branch
 
 Expected: 只显示 `M pi/settings.json`；stash 记录暂不 drop，保留恢复证据。
 
-- [ ] **Step 5: 非强制推送 main 并核对远端**
+- [x] **Step 5: 非强制推送 main 并核对远端**
 
 ```bash
 git push origin main
