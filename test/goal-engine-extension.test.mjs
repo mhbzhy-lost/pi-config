@@ -2957,6 +2957,23 @@ test("preserved release rejects a deterministic second-inspection HEAD race with
   assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released").length, 0);
 });
 
+for (const [label, mutate] of [
+  ["untracked", (lease) => writeFileSync(join(lease.path, "post-inspection-untracked.txt"), "race\n")],
+  ["commit", (lease) => commitWorkspaceChange(lease, "post-inspection-commit.ts", "export const race = true;\n", "test: post-inspection preserved race")],
+]) test(`post-inspection preserved cleanup fence rejects ${label} barrier mutation without releasing preservation`, async () => {
+  const fixture = await disposedPreservedFixture("succeeded"); let calls = 0; let afterMutation;
+  const pi = createMockPi(fixture.cwd);
+  createGoalEngineExtension(pi, { beforePreservedWorkspaceCleanupBarrier(lease) {
+    calls += 1; mutate(lease); afterMutation = fullRejectionSnapshot(fixture.cwd, fixture.goalId); return { clean: true, headCommit: "forged" };
+  } });
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }), (error) => {
+    assert.equal(error.code, "EXECUTOR_WORKSPACE_IDENTITY_MISMATCH", label); assert.deepEqual(error.requiredNextAction, { tool: "goal_status", params: { goal_id: fixture.goalId } }); return true;
+  });
+  assert.equal(calls, 1, label); assert.ok(afterMutation, label); assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), afterMutation, label);
+  const resources = workspaceState(fixture.cwd, fixture.goalId, "t1"); assert.deepEqual([resources.workspaceExists, resources.branchExists, resources.leaseExists], [true, true, true], label);
+  assert.equal(readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released").length, 0, label);
+});
+
 test("invalid historical contract takes priority over an exact orphan on dispatch", async () => {
   const cwd = tmpCwd(); const goalId = "unsafe-contract-orphan-priority"; const root = join(cwd, ".state/goal-engine");
   const created = { schemaVersion: "goal-engine.event.v2", eventId: "unsafe-priority-create", goalId, occurredAt: "2024-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Unsafe contract orphan priority", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: [`cd ${cwd} && true`] }, workflow: "tdd" } } } };
