@@ -100,6 +100,13 @@ test("gives status-only, human-decided orphan workspace recovery guidance", asyn
   assert.match(body, /(不得|禁止|不要|不)[\s\S]{0,100}(默认|优先|default|prefer)[\s\S]{0,120}(preserve|discard)/i);
   assert.match(body, /requiredNextAction[\s\S]{0,100}null[\s\S]{0,180}(停止|等待|stop|wait)[\s\S]{0,180}(选择|choice|人类|human)/i);
 
+  // Orphan handling must stop at multi-choice requests and never treat pressure/authority as an explicit discard/preserve decision.
+  assert.match(body, /requiredNextAction[\s\S]{0,120}null[\s\S]{0,220}(blockingReason\.choices|choices)[\s\S]{0,160}(多个|multiple)[\s\S]{0,140}(choice|选择)/i);
+  assert.match(body, /requiredNextAction[\s\S]{0,120}null[\s\S]{0,220}(不得|不应|不能|不要)[\s\S]{0,120}goal_integrate/i);
+  assert.match(body, /(提问工具|询问用户|向用户提问|ask the user|ask user)[\s\S]{0,180}(discard|preserve)[\s\S]{0,180}(结束当前轮次|结束本轮|end the turn|停止)/i);
+  assert.match(body, /(发布压力|最快修好|authority|授权|deadline)[\s\S]{0,180}(不能|不应|不得|不要)[\s\S]{0,180}(将|视作|映射|替代|当成|等同)[\s\S]{0,180}(discard|preserve|明确|explicit)[\s\S]{0,120}(选择|choice)/i);
+  assert.match(body, /(preserve|保留)[\s\S]{0,180}(不是|不应|不得)[\s\S]{0,140}(更安全|可逆|默认|安全|reversible|default|artifact|保护)/i);
+  assert.match(body, /(人类|人工|human)[\s\S]{0,200}(回复|回复后|回应|answer|response)[\s\S]{0,180}(必须|应当|需)[\s\S]{0,140}(明确|指向|选择|点选)[\s\S]{0,120}(discard|preserve)/i);
   assert.match(body, /ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED[\s\S]{0,260}(只|only)[\s\S]{0,100}goal_status/i);
   assert.match(body, /ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED[\s\S]{0,260}(不得|禁止|不要|不)[\s\S]{0,140}(discard|preserve)/i);
   assert.match(body, /ORPHANED_WORKSPACE_NOT_SETTLED[\s\S]{0,220}(无效|invalid)[\s\S]{0,180}(verified|已验证)[\s\S]{0,160}(选择|choice)/i);
