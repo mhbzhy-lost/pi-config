@@ -99,7 +99,7 @@ uv run --no-project \
 
 **stdout 输出**：模型返回的 review markdown（Strengths / Critical / Important / Minor / Checklist Coverage / Assessment）。**stderr** 是诊断信息。
 
-未提交工作区评审（plan-runner harness 使用）：
+未提交工作区评审：
 
 ```bash
 uv run --no-project \

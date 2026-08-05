@@ -39,7 +39,7 @@ async function emitRunner(pi, type, event = {}, ctx = {}) {
 test("project startup installs Root Broker listeners before synchronous upstream recovery events", async () => {
   const pi = piRunner();
   const rootSessionId = `recovery-order-${process.pid}`;
-  const runId = "recovered-plan-runner";
+  const runId = "recovered-executor";
   let broker;
 
   installHeadlessTypedSubagentRuntime(pi, {
@@ -52,7 +52,7 @@ test("project startup installs Root Broker listeners before synchronous upstream
           id: runId,
           pid: 4242,
           sessionId: rootSessionId,
-          agent: "plan-runner",
+          agent: "executor",
           cwd: "/repo",
           asyncDir: `/async/${runId}`,
         });
@@ -65,7 +65,7 @@ test("project startup installs Root Broker listeners before synchronous upstream
         events: pi.events,
         captureProcessBirthIdentity: async () => "recovered-birth",
         upstream: {
-          ping() {}, spawn() {}, status() {}, steer() {}, interrupt() {}, stop() {}, dispose() {},
+          ping() {}, stop() {}, dispose() {},
         },
       });
       await broker.start();

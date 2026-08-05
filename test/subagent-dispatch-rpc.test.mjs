@@ -103,7 +103,7 @@ test("maps control calls to their same-named RPC methods", async () => {
 
   for (const [method, params] of [
     ["status", { id: "run-1" }],
-    ["resume", { id: "plan-runner-1", message: "A durable Root broker wake is pending." }],
+    ["resume", { id: "resumable-child-1", message: "A durable child resume is pending." }],
     ["steer", { id: "run-1", message: "Use the approved decision." }],
     ["interrupt", { id: "run-1" }],
     ["stop", { id: "run-1" }],
@@ -195,7 +195,7 @@ test("renewable client forwards resume to the active generation", async () => {
   const client = createRenewableTypedSubagentRpcClient(() => createTypedSubagentRpcClient(events, {
     randomUUID: () => "renewable-resume-1",
   }));
-  const params = { id: "plan-runner-1", message: "A durable Root broker wake is pending." };
+  const params = { id: "resumable-child-1", message: "A durable child resume is pending." };
   const request = client.resume(params);
 
   assert.equal(events.emitted[0].value.method, "resume");

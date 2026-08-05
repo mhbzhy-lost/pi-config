@@ -76,7 +76,7 @@ test("production runtime lifecycle identity and retry cleanup contract", async (
   const entry = await text("pi/extensions/subagent-runtime.ts");
 
   assert.match(entry, /const lifecycleSessionId = resolveCurrentSessionId\(ctx\.sessionManager\);/);
-  assert.match(entry, /new RootBrokerServer\(\{ rootSessionId, lifecycleSessionId, upstream, events: pi\.events, recordRevivalDiagnostic:/);
+  assert.match(entry, /new RootBrokerServer\(\{ rootSessionId, lifecycleSessionId, upstream, events: pi\.events \}\)/);
   assert.match(entry, /closeAndUnbindRootBroker\(pi, broker\)/);
   assert.doesNotMatch(entry, /closeRootSession\(\);\s*\}\s*finally\s*\{\s*unbindRootBroker/);
 });

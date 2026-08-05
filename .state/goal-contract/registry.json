@@ -1,19 +1,8 @@
 {
   "schema_version": "goal_contract.registry.v1",
   "state_root": ".state/goal-contract",
-  "active_goal_ids": [
-    "plan-ir-v3-complete-capsule-contract"
-  ],
+  "active_goal_ids": [],
   "goals": {
-    "plan-runner-pi-subagents-parallel-harness": {
-      "goal_id": "plan-runner-pi-subagents-parallel-harness",
-      "contract_dir": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness",
-      "recovery": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness/recovery.md",
-      "state": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness/state.json",
-      "feature_list": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness/feature-list.json",
-      "evidence": ".state/goal-contract/goals/plan-runner-pi-subagents-parallel-harness/evidence.jsonl",
-      "status": "completed"
-    },
     "footer-native-child-conversation": {
       "goal_id": "footer-native-child-conversation",
       "contract_dir": ".state/goal-contract/goals/footer-native-child-conversation",
@@ -22,15 +11,6 @@
       "feature_list": ".state/goal-contract/goals/footer-native-child-conversation/feature-list.json",
       "evidence": ".state/goal-contract/goals/footer-native-child-conversation/evidence.jsonl",
       "status": "completed"
-    },
-    "plan-ir-v3-complete-capsule-contract": {
-      "goal_id": "plan-ir-v3-complete-capsule-contract",
-      "contract_dir": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract",
-      "recovery": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract/recovery.md",
-      "state": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract/state.json",
-      "feature_list": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract/feature-list.json",
-      "evidence": ".state/goal-contract/goals/plan-ir-v3-complete-capsule-contract/evidence.jsonl",
-      "status": "active"
     }
   }
 }
