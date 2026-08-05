@@ -146,6 +146,32 @@ test("Root broker registry keeps exact Pi ownership", async () => {
   assert.deepEqual(started, ["start"]);
 });
 
+test("Root broker startup rolls back an earlier lifecycle listener when later registration fails", async () => {
+  const rootSessionId = `root-start-rollback-${process.pid}-${Date.now()}`;
+  const bus = new EventBus();
+  let registrations = 0;
+  const events = {
+    on(type, handler) {
+      registrations += 1;
+      if (registrations === 2) throw new Error("terminal listener registration failed");
+      return bus.on(type, handler);
+    },
+  };
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    events,
+    captureProcessBirthIdentity: async () => "birth-start-rollback",
+    writeGrant: async () => "/tmp/unreachable-start-rollback-grant",
+  });
+
+  await assert.rejects(broker.start(), /terminal listener registration failed/);
+  assert.equal(bus.handlers.get("subagent:async-started")?.size ?? 0, 0);
+  await bus.emit("subagent:async-started", startedEvent(rootSessionId, "executor-after-failed-start"));
+  assert.equal(broker.ownedRuns.size, 0);
+});
+
 test("broker frame decoder preserves split UTF-8 and rejects oversized frames", () => {
   const decoder = createBrokerFrameDecoder();
   const frame = Buffer.from(`${JSON.stringify({ diagnostic: "中文" })}\n`, "utf8");

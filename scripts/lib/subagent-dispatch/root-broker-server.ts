@@ -139,6 +139,10 @@ export class RootBrokerServer {
       this.unsubscribeStarted = this.events?.on("subagent:async-started", (event) => this.observeStarted(event));
       this.unsubscribeTerminal = this.events?.on("subagent:process-terminal", (event) => this.observeTerminal(event));
     } catch (error) {
+      try { this.unsubscribeTerminal?.(); } catch { /* preserve the startup failure */ }
+      this.unsubscribeTerminal = undefined;
+      try { this.unsubscribeStarted?.(); } catch { /* preserve the startup failure */ }
+      this.unsubscribeStarted = undefined;
       this.server = undefined;
       await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
       await rm(socketPath, { force: true });
