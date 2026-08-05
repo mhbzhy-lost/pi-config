@@ -102,7 +102,7 @@ test("migration keeps the Plan profiles and child extension isolated", async () 
   await assert.rejects(access(join(repoRoot, "pi", "extensions", "subagent.ts")));
 });
 
-test("configuration cycles only authenticated OpenAI Codex models", async () => {
+test("configuration cycles only authenticated models", async () => {
   const settings = JSON.parse(await readFile(join(repoRoot, "pi", "settings.json"), "utf8"));
 
   assert.equal(settings.defaultProvider, "openai-codex");
@@ -110,6 +110,7 @@ test("configuration cycles only authenticated OpenAI Codex models", async () => 
     "openai-codex/gpt-5.6-sol",
     "openai-codex/gpt-5.6-terra",
     "openai-codex/gpt-5.3-codex-spark",
+    "deepseek/deepseek-v4-flash",
   ]);
 });
 
