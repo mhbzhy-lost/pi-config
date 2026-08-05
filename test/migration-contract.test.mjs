@@ -106,6 +106,7 @@ test("configuration cycles only authenticated models", async () => {
   const settings = JSON.parse(await readFile(join(repoRoot, "pi", "settings.json"), "utf8"));
 
   assert.equal(settings.defaultProvider, "openai-codex");
+  assert.equal(settings.defaultThinkingLevel, "xhigh");
   assert.deepEqual(settings.enabledModels, [
     "openai-codex/gpt-5.6-sol",
     "openai-codex/gpt-5.6-terra",
