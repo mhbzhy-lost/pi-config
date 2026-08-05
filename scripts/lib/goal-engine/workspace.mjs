@@ -685,15 +685,52 @@ export function inspectExecutorWorkspaceResources(lease) {
   return { workspaceExists, branchExists, leaseExists };
 }
 
-export function releaseExecutorWorkspace(lease, { disposition } = {}) {
+function assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean) {
+  try {
+    const persisted = loadExecutorWorkspaceLease({
+      goalId: lease.goalId, taskId: lease.taskId, attempt: lease.attempt, stateRoot: lease.stateRoot,
+    });
+    const persistedKeys = Object.keys(persisted).filter((field) => field !== "leasePath").sort();
+    if (JSON.stringify(persistedKeys) !== JSON.stringify([...PERSISTED_LEASE_FIELDS].sort())
+      || PERSISTED_LEASE_FIELDS.some((field) => persisted[field] !== lease[field])) {
+      throw new Error("persisted lease does not match supplied lease");
+    }
+    const inspection = inspectExecutorWorkspace(persisted);
+    if (inspection.headCommit !== expectedExecutorHead) {
+      throw new Error(`HEAD mismatch (expected ${expectedExecutorHead}, got ${inspection.headCommit})`);
+    }
+    if (requireClean && !inspection.clean) throw new Error("workspace must be clean");
+    return persisted;
+  } catch (error) {
+    throw new Error(`workspace identity fence failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+export function releaseExecutorWorkspace(lease, { disposition, expectedExecutorHead, requireClean, beforeDestructiveCleanupFn } = {}) {
   const validDispositions = ["integrated-cleanup", "failed-cleanup", "discarded-cleanup", "preserved"];
   if (!validDispositions.includes(disposition)) throw new Error(`Invalid disposition: ${disposition}`);
-
-  if (disposition === "preserved") {
-    return { released: false, preserved: true, disposition };
+  const fenced = expectedExecutorHead !== undefined || requireClean !== undefined || beforeDestructiveCleanupFn !== undefined;
+  if (fenced && (disposition !== "discarded-cleanup"
+    || typeof expectedExecutorHead !== "string" || !expectedExecutorHead
+    || requireClean !== true
+    || (beforeDestructiveCleanupFn !== undefined && typeof beforeDestructiveCleanupFn !== "function"))) {
+    throw new Error("Invalid preserved cleanup fence options");
   }
 
+  if (disposition === "preserved") return { released: false, preserved: true, disposition };
+
   const origin = lease.originRoot;
+  let fencedLease;
+  if (fenced) {
+    fencedLease = assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean);
+    try {
+      // This is a scheduling barrier only; its result is never trusted.
+      beforeDestructiveCleanupFn?.(fencedLease);
+    } catch (error) {
+      throw new Error(`workspace identity fence failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    fencedLease = assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean);
+  }
 
   if (existsSync(lease.path)) {
     if (disposition === "integrated-cleanup") {
@@ -707,12 +744,10 @@ export function releaseExecutorWorkspace(lease, { disposition } = {}) {
 
   const branchExists = git(origin, "branch", "--list", lease.branch);
   if (branchExists) {
-    git(origin, "branch", "-D", lease.branch);
+    if (fenced) git(origin, "update-ref", "-d", `refs/heads/${fencedLease.branch}`, expectedExecutorHead);
+    else git(origin, "branch", "-D", lease.branch);
   }
 
-  if (lease.leasePath && existsSync(lease.leasePath)) {
-    rmSync(lease.leasePath, { force: true });
-  }
-
+  if (lease.leasePath && existsSync(lease.leasePath)) rmSync(lease.leasePath, { force: true });
   return { released: true, preserved: false, disposition };
 }

@@ -370,6 +370,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   const loadProjectionFn = store.loadProjection || loadProjection;
   const listGoalsFn = store.listGoals || listGoals;
   const inspectExecutorWorkspaceFn = options.inspectExecutorWorkspace || inspectExecutorWorkspace;
+  const beforePreservedWorkspaceCleanupBarrier = options.beforePreservedWorkspaceCleanupBarrier;
   const inspectOrphanedExecutorWorkspaceBarrier = options.inspectOrphanedExecutorWorkspaceBarrier;
   const betweenOrphanInventoriesBarrier = options.betweenOrphanInventoriesBarrier;
   const activeLeases = new Map();
@@ -1113,7 +1114,12 @@ export function createGoalEngineExtension(pi, options = {}) {
             throw workspaceMutationError(new Error(`workspace identity inspection mismatch: expectedHead=${taskWorkspace.executorHead}; firstHead=${firstInspection.headCommit}; secondHead=${confirmedInspection.headCommit}`), retry);
           }
           try {
-            releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup" });
+            releaseExecutorWorkspace(lease, {
+              disposition: "discarded-cleanup",
+              expectedExecutorHead: taskWorkspace.executorHead,
+              requireClean: true,
+              beforeDestructiveCleanupFn: beforePreservedWorkspaceCleanupBarrier,
+            });
             resources = inspectExecutorWorkspaceResources(lease);
           } catch (error) {
             throw workspaceMutationError(error, retry);
