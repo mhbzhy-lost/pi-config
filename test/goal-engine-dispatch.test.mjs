@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compileCodingDispatchIR, renderDispatchPrompt } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
+import { compileCodingDispatchIR, renderDispatchPrompt, splitDispatchEnvelope } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
 import { compileTaskContract, assertPendingTaskContractsCompile } from "../scripts/lib/goal-engine/dispatch.mjs";
 import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
 import { validateRepoRelativePath, validateTaskDefinitions } from "../scripts/lib/goal-engine/task-definition.mjs";
@@ -33,6 +33,21 @@ test("compileCodingDispatchIR validates and hashes", () => {
   assert.equal(ir.taskId, "test-goal.t1");
   assert.equal(ir.agent, "executor");
   assert.ok(/^[a-f0-9]{64}$/.test(ir.hash));
+});
+
+test("splitDispatchEnvelope separates the hash from the exact subagent typed contract", () => {
+  const ir = compileCodingDispatchIR(validInput(), { cwd: "/workspace/project" });
+
+  const { contract, contractHash } = splitDispatchEnvelope(ir);
+
+  assert.equal(Object.hasOwn(contract, "hash"), false);
+  assert.equal(contractHash, ir.hash);
+  assert.deepEqual(Object.keys(contract).sort(), [
+    "acceptance", "agent", "boundaries", "context", "execution", "objective",
+    "requirements", "risk", "taskId", "title", "version", "workflow",
+  ]);
+  assert.equal(compileCodingDispatchIR(contract, { cwd: contract.execution.cwd }).hash, contractHash);
+  assert.equal(Object.isFrozen(contract), true);
 });
 
 test("compileCodingDispatchIR rejects unknown fields", () => {

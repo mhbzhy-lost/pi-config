@@ -164,6 +164,14 @@ export function compileCodingDispatchIR(input, { cwd } = {}) {
   return deepFreeze(ir);
 }
 
+export function splitDispatchEnvelope(ir) {
+  if (!isPlainObject(ir) || !/^[a-f0-9]{64}$/.test(ir.hash ?? "")) {
+    fail("compiled dispatch IR with SHA-256 hash is required");
+  }
+  const { hash: contractHash, ...transportContract } = ir;
+  return deepFreeze({ contract: deepFreeze(transportContract), contractHash });
+}
+
 export function renderDispatchPrompt(ir) {
   const ordered = (items) => items.length === 0 ? "_None declared._" : items.map((item, i) => `${i + 1}. ${JSON.stringify(item)}`).join("\n");
   const workflowReason = ir.workflow.reason === undefined ? "" : `\n- Exemption reason: ${JSON.stringify(ir.workflow.reason)}`;
