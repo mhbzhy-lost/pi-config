@@ -1,0 +1,113 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  hashGoalMetadataProposal,
+  recordHumanChoice,
+} from "../scripts/lib/goal-engine/human-decision.mjs";
+
+function challenge(overrides = {}) {
+  return {
+    id: "decision-1",
+    kind: "orphan_disposition",
+    sessionId: "session-1",
+    requestedAt: "2026-08-05T00:00:00.000Z",
+    choices: ["discard", "preserve"],
+    ...overrides,
+  };
+}
+
+function inputEvent(overrides = {}) {
+  return {
+    id: "entry-1",
+    role: "user",
+    source: "interactive",
+    sessionId: "session-1",
+    occurredAt: "2026-08-05T00:00:01.000Z",
+    text: "discard",
+    ...overrides,
+  };
+}
+
+test("records only an exact post-challenge orphan choice from the same real user session", () => {
+  assert.deepEqual(recordHumanChoice({
+    inputEvent: inputEvent(), challenge: challenge(), sessionId: "session-1",
+  }), {
+    challengeId: "decision-1",
+    kind: "orphan_disposition",
+    choice: "discard",
+    userEntryId: "entry-1",
+    sessionId: "session-1",
+    source: "interactive",
+  });
+
+  assert.equal(recordHumanChoice({
+    inputEvent: inputEvent({ id: "entry-2", source: "rpc", text: "保留" }),
+    challenge: challenge(), sessionId: "session-1",
+  }).choice, "preserve");
+});
+
+test("rejects extension messages cross-session input stale input and ambiguous prose", () => {
+  const cases = [
+    [inputEvent({ source: "extension" }), /interactive|rpc/],
+    [inputEvent({ role: "assistant" }), /user/],
+    [inputEvent({ sessionId: "session-2" }), /session/],
+    [inputEvent({ occurredAt: "2026-08-04T23:59:59.000Z" }), /after.*challenge/],
+    [inputEvent({ text: "discard or preserve" }), /exactly one|exact/],
+    [inputEvent({ text: "Earlier I said discard" }), /exactly one|exact/],
+    [inputEvent({ text: "discard\npreserve" }), /exactly one|exact/],
+  ];
+  for (const [input, pattern] of cases) {
+    assert.throws(() => recordHumanChoice({ inputEvent: input, challenge: challenge(), sessionId: "session-1" }), pattern);
+  }
+});
+
+test("hashes normalized goal metadata deterministically and preserves semantic array order", () => {
+  const proposal = {
+    objective: "  Harden Goal Engine  ",
+    scope: ["src", "test"],
+    nonGoals: ["Plan Runner"],
+    dod: ["All tests pass"],
+  };
+  const first = hashGoalMetadataProposal(proposal);
+  const second = hashGoalMetadataProposal({
+    dod: ["All tests pass"], nonGoals: ["Plan Runner"], scope: ["src", "test"], objective: "Harden Goal Engine",
+  });
+  assert.match(first, /^[a-f0-9]{64}$/);
+  assert.equal(first, second);
+  assert.notEqual(first, hashGoalMetadataProposal({ ...proposal, scope: ["test", "src"] }));
+});
+
+test("metadata approval requires a presented proposal hash and explicit approval after challenge", () => {
+  const proposalHash = hashGoalMetadataProposal({
+    objective: "Harden Goal Engine", scope: ["src"], nonGoals: [], dod: ["Tests pass"],
+  });
+  const metadataChallenge = challenge({
+    kind: "goal_metadata_approval",
+    choices: ["approve", "reject"],
+    proposalHash,
+    proposalPresented: true,
+  });
+
+  assert.deepEqual(recordHumanChoice({
+    inputEvent: inputEvent({ text: "批准" }), challenge: metadataChallenge, sessionId: "session-1",
+  }), {
+    challengeId: "decision-1",
+    kind: "goal_metadata_approval",
+    choice: "approve",
+    proposalHash,
+    userEntryId: "entry-1",
+    sessionId: "session-1",
+    source: "interactive",
+  });
+  assert.throws(() => recordHumanChoice({
+    inputEvent: inputEvent({ text: "继续" }), challenge: metadataChallenge, sessionId: "session-1",
+  }), /exact/);
+  assert.throws(() => recordHumanChoice({
+    inputEvent: inputEvent({ text: "批准" }),
+    challenge: { ...metadataChallenge, proposalPresented: false }, sessionId: "session-1",
+  }), /presented/);
+  assert.throws(() => recordHumanChoice({
+    inputEvent: inputEvent({ text: "批准" }),
+    challenge: { ...metadataChallenge, proposalHash: undefined }, sessionId: "session-1",
+  }), /proposalHash/);
+});
