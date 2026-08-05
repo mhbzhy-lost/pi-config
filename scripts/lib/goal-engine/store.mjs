@@ -255,7 +255,16 @@ function rebuildProjection(eventsPath) {
 }
 
 function serializeProjection(p) {
-  return { goalId: p.goalId, version: p.version, lifecycle: p.lifecycle, objective: p.objective, scope: p.scope, nonGoals: p.nonGoals, dod: p.dod, tasks: Object.fromEntries(p.tasks), checkpointCount: p.checkpointCount, completionVerdict: p.completionVerdict, blockedReason: p.blockedReason, nextAction: p.nextAction, createdAt: p.createdAt, updatedAt: p.updatedAt, eventSchemaVersion: p.eventSchemaVersion };
+  return {
+    goalId: p.goalId, version: p.version, lifecycle: p.lifecycle, objective: p.objective,
+    scope: p.scope, nonGoals: p.nonGoals, dod: p.dod, tasks: Object.fromEntries(p.tasks),
+    checkpointCount: p.checkpointCount, completionVerdict: p.completionVerdict,
+    blockedReason: p.blockedReason, nextAction: p.nextAction, createdAt: p.createdAt,
+    updatedAt: p.updatedAt, eventSchemaVersion: p.eventSchemaVersion,
+    epoch: p.epoch, completionHistory: p.completionHistory, coordinationState: p.coordinationState,
+    sessionBindings: p.sessionBindings, continuity: p.continuity, actionOffer: p.actionOffer,
+    pendingHumanDecision: p.pendingHumanDecision, contractHistory: p.contractHistory,
+  };
 }
 
 export function updateRegistry(stateRoot, event, projection, identity, writerToken) {

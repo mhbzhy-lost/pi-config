@@ -1881,3 +1881,185 @@ test("preserved work becomes amendable and redispatchable only after preservatio
   assert.equal(projection.tasks.get("t1").description, "released preserved work");
   assert.equal(applyEvent(projection, dispatchEvent()).tasks.get("t1").attempts, 2);
 });
+
+function v3Event(type, data, goalId = "test-goal", occurredAt = "2026-08-05T00:00:00.000Z") {
+  return { schemaVersion: "goal-engine.event.v3", eventId: crypto.randomUUID(), goalId, type, occurredAt, data };
+}
+
+function completedEpochProjection() {
+  let projection = createProjection();
+  projection = applyEvent(projection, makeEvent("goal.created", {
+    objective: "Preserve a completed milestone while accepting follow-up work",
+    scope: ["src/"], nonGoals: [], dod: ["All accepted evidence remains immutable"],
+    tasks: ["t1"],
+    taskDefs: { t1: { description: "original work", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } },
+  }));
+  projection = applyEvent(projection, makeEvent("goal.checkpoint", {
+    nextAction: "Dispatch the original task after checking the authoritative status",
+  }));
+  projection = applyEvent(projection, makeEvent("task.dispatched", { taskId: "t1", contractHash: "legacy-contract" }));
+  projection = applyEvent(projection, makeEvent("task.settled", {
+    taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/a.ts" },
+    evidenceSource: "self_produced", nextAction: "Accept the original task after reviewing its evidence carefully",
+  }));
+  projection = applyEvent(projection, makeEvent("task.accepted", { taskId: "t1" }));
+  return applyEvent(projection, makeEvent("goal.completed", { verdict: "COMPLETE" }));
+}
+
+test("completed goal clears stale actions and records immutable epoch history", () => {
+  const projection = completedEpochProjection();
+
+  assert.equal(projection.lifecycle, "completed");
+  assert.equal(projection.epoch, 1);
+  assert.equal(projection.nextAction, null);
+  assert.equal(projection.blockedReason, null);
+  assert.equal(projection.actionOffer, null);
+  assert.deepEqual(projection.completionHistory, [{
+    epoch: 1,
+    verdict: "COMPLETE",
+    completedAt: projection.updatedAt,
+    eventVersion: projection.version,
+  }]);
+  assert.equal(projection.coordinationState, "quiescent");
+});
+
+test("completed goal records discovery and reopens into a new immutable epoch", () => {
+  let projection = completedEpochProjection();
+  projection = applyEvent(projection, v3Event("goal.session_bound", { sessionId: "session-1", leafId: "leaf-1" }));
+  projection = applyEvent(projection, v3Event("goal.discovery_recorded", {
+    id: "obs-1", summary: "Follow up the completed implementation", paths: ["src/b.ts"],
+    source: "user_intent", sessionId: "session-1", userEntryId: "entry-1",
+  }));
+  projection = applyEvent(projection, v3Event("goal.discovery_resolved", {
+    id: "obs-1", disposition: "tasked", taskId: "t2", reason: "The follow-up belongs to this goal",
+  }));
+  projection = applyEvent(projection, v3Event("goal.reopened", {
+    reason: "Turn the related follow-up into a new task", observationIds: ["obs-1"],
+  }));
+  projection = applyEvent(projection, v3Event("goal.amended", {
+    reason: "Add the follow-up task without changing accepted history",
+    addTasks: { t2: { description: "follow-up", deps: ["t1"], writePaths: ["src/b.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } },
+  }));
+
+  assert.equal(projection.lifecycle, "active");
+  assert.equal(projection.epoch, 2);
+  assert.equal(projection.tasks.get("t1").status, "accepted");
+  assert.equal(projection.tasks.get("t1").evidence.length, 1);
+  assert.equal(projection.tasks.get("t2").status, "pending");
+  assert.equal(projection.continuity.observations["obs-1"].status, "tasked");
+  assert.equal(projection.continuity.observations["obs-1"].taskId, "t2");
+  assert.equal(projection.completionHistory.length, 1);
+
+  assert.throws(() => applyEvent(projection, v3Event("goal.amended", {
+    reason: "Accepted task definitions must remain frozen forever",
+    updateTasks: { t1: { description: "rewrite history" } },
+  })), /non-pending|accepted/);
+  assert.throws(() => applyEvent(projection, v3Event("goal.amended", {
+    reason: "Accepted tasks cannot be removed from a later epoch",
+    removeTasks: ["t1"],
+  })), /non-pending|accepted/);
+});
+
+test("reopen rejects untriaged discoveries and non-accepted historical tasks", () => {
+  let completed = completedEpochProjection();
+  completed = applyEvent(completed, v3Event("goal.discovery_recorded", {
+    id: "obs-open", summary: "Untriaged follow-up", paths: ["src/c.ts"], source: "user_intent", sessionId: "session-1",
+  }));
+  assert.throws(() => applyEvent(completed, v3Event("goal.reopened", {
+    reason: "Cannot reopen before tasking the discovery", observationIds: ["obs-open"],
+  })), /tasked/);
+
+  const notCompleted = applyEvent(createProjection(), { ...v2Created("active-v3"), goalId: "active-v3" });
+  assert.throws(() => applyEvent(notCompleted, v3Event("goal.reopened", {
+    reason: "An active goal cannot open another epoch", observationIds: ["obs"],
+  }, "active-v3")), /completed/);
+});
+
+test("v3 session continuity events are durable and detached sessions stop watching", () => {
+  let projection = completedEpochProjection();
+  projection = applyEvent(projection, v3Event("goal.session_bound", { sessionId: "session-1", leafId: "leaf-1" }));
+  assert.equal(projection.coordinationState, "watching");
+  assert.deepEqual(projection.sessionBindings, [{ sessionId: "session-1", leafId: "leaf-1", state: "watching", boundAt: projection.updatedAt }]);
+
+  projection = applyEvent(projection, v3Event("goal.continuity_checkpointed", {
+    sessionId: "session-1", reason: "manual", modifiedFiles: ["src/a.ts", "src/a.ts"],
+    nextAction: "Inspect goal status before changing any follow-up implementation",
+  }));
+  assert.equal(projection.continuity.lastCheckpoint.sessionId, "session-1");
+  assert.deepEqual(projection.continuity.lastCheckpoint.modifiedFiles, ["src/a.ts"]);
+
+  projection = applyEvent(projection, v3Event("goal.session_detached", {
+    sessionId: "session-1", reason: "The user moved this session to unrelated work",
+  }));
+  assert.equal(projection.sessionBindings[0].state, "detached");
+  assert.equal(projection.coordinationState, "quiescent");
+});
+
+test("goal contract amendment requires a real approval identity and preserves old metadata", () => {
+  let projection = applyEvent(createProjection(), v2Created("contract-v3"));
+  const proposalHash = "a".repeat(64);
+  const changes = { objective: "Updated objective", scope: ["src/", "test/"] };
+  const event = (approval) => v3Event("goal.contract_amended", { proposalHash, changes, approval }, "contract-v3");
+
+  assert.throws(() => applyEvent(projection, event(undefined)), /approval/);
+  assert.throws(() => applyEvent(projection, event({ entryId: "entry-1", sessionId: "session-1", source: "extension" })), /interactive|rpc/);
+
+  projection = applyEvent(projection, event({ entryId: "entry-1", sessionId: "session-1", source: "interactive" }));
+  assert.equal(projection.objective, "Updated objective");
+  assert.deepEqual(projection.scope, ["src/", "test/"]);
+  assert.deepEqual(projection.contractHistory, [{
+    proposalHash,
+    approval: { entryId: "entry-1", sessionId: "session-1", source: "interactive" },
+    previous: { objective: "Workspace disposition test", scope: [], nonGoals: [], dod: [] },
+    updated: { objective: "Updated objective", scope: ["src/", "test/"], nonGoals: [], dod: [] },
+  }]);
+});
+
+test("released blocked task can retry or supersede but active workspace fails closed", () => {
+  const goalId = "blocked-v3";
+  let blocked = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "blocked", goalId);
+  assert.equal(blocked.coordinationState, "blocked");
+  assert.throws(() => applyEvent(blocked, v3Event("task.block_resolved", {
+    taskId: "t1", resolution: "retry", reason: "Retry after resolving the external blocker",
+  }, goalId)), /workspace.*released/i);
+
+  const disposition = started("discard", goalId);
+  blocked = applyEvent(blocked, disposition);
+  blocked = applyEvent(blocked, v2Event("task.workspace_disposition_applied", {
+    taskId: "t1", attempt: 1, action: "discard", strategy: "merge", executorHead: "executor-head", originHead: "origin-after",
+  }, goalId));
+  blocked = applyEvent(blocked, v2Event("task.workspace_disposed", {
+    taskId: "t1", attempt: 1, action: "discard", released: true,
+  }, goalId));
+
+  const retried = applyEvent(blocked, v3Event("task.block_resolved", {
+    taskId: "t1", resolution: "retry", reason: "Retry after resolving the external blocker",
+  }, goalId));
+  assert.equal(retried.tasks.get("t1").status, "pending");
+  assert.equal(retried.tasks.get("t1").blockedReason, undefined);
+  assert.equal(retried.coordinationState, "ready");
+
+  const superseded = applyEvent(blocked, v3Event("task.block_resolved", {
+    taskId: "t1", resolution: "supersede", replacementTaskId: "t2", reason: "Replace the obsolete blocked implementation",
+  }, goalId));
+  assert.equal(superseded.tasks.get("t1").status, "superseded");
+  assert.equal(superseded.tasks.get("t1").supersededBy, "t2");
+});
+
+test("store projection snapshot serializes v3 epoch and continuity fields", () => {
+  const root = tmpRoot();
+  const goalId = "v3-store-snapshot";
+  appendEvent(root, v2Created(goalId), 0);
+  appendEvent(root, v3Event("goal.session_bound", { sessionId: "session-store", leafId: "leaf-store" }, goalId), 1);
+
+  const persisted = JSON.parse(readFileSync(join(root, "goals", goalId, "projection.json"), "utf8"));
+  assert.equal(persisted.epoch, 1);
+  assert.equal(persisted.coordinationState, "ready");
+  assert.deepEqual(persisted.sessionBindings, [{
+    sessionId: "session-store", leafId: "leaf-store", state: "watching", boundAt: persisted.updatedAt,
+  }]);
+  assert.deepEqual(persisted.continuity, { observations: {}, lastCheckpoint: null });
+  assert.deepEqual(persisted.completionHistory, []);
+  assert.deepEqual(persisted.contractHistory, []);
+  assert.equal(persisted.actionOffer, null);
+});
