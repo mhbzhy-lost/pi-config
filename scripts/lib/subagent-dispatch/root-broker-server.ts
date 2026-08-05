@@ -42,6 +42,7 @@ type Dependencies = {
   readFile?: typeof nodeReadFile;
   artifactPollIntervalMs?: number;
   lifecycleSessionId?: string;
+  setSocketPermissions?: typeof setBrokerSocketPermissions;
 };
 
 const MAX_BUFFER = 64 * 1024;
@@ -92,6 +93,7 @@ export class RootBrokerServer {
   terminalTimeoutMs: number;
   readFile: typeof nodeReadFile;
   artifactPollIntervalMs: number;
+  setSocketPermissions: typeof setBrokerSocketPermissions;
 
   constructor({
     rootSessionId,
@@ -105,6 +107,7 @@ export class RootBrokerServer {
     terminalTimeoutMs = 5_000,
     readFile = nodeReadFile,
     artifactPollIntervalMs = 50,
+    setSocketPermissions: applySocketPermissions = setBrokerSocketPermissions,
   }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
@@ -119,6 +122,7 @@ export class RootBrokerServer {
     this.terminalTimeoutMs = terminalTimeoutMs;
     this.readFile = readFile;
     this.artifactPollIntervalMs = artifactPollIntervalMs;
+    this.setSocketPermissions = applySocketPermissions;
   }
 
   async start() {
@@ -135,7 +139,7 @@ export class RootBrokerServer {
         server!.once("error", fail);
         server!.listen(socketPath, () => { server?.off("error", fail); resolve(); });
       });
-      await setBrokerSocketPermissions(socketPath);
+      await this.setSocketPermissions(socketPath);
       this.unsubscribeStarted = this.events?.on("subagent:async-started", (event) => this.observeStarted(event));
       this.unsubscribeTerminal = this.events?.on("subagent:process-terminal", (event) => this.observeTerminal(event));
     } catch (error) {
@@ -143,9 +147,14 @@ export class RootBrokerServer {
       this.unsubscribeTerminal = undefined;
       try { this.unsubscribeStarted?.(); } catch { /* preserve the startup failure */ }
       this.unsubscribeStarted = undefined;
+      const destroyLateSocket = (socket: Socket) => socket.destroy();
+      server?.on("connection", destroyLateSocket);
+      for (const socket of this.sockets) socket.destroy();
+      try { await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve()); } catch { /* preserve the startup failure */ }
+      server?.off("connection", destroyLateSocket);
+      this.sockets.clear();
       this.server = undefined;
-      await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
-      await rm(socketPath, { force: true });
+      try { await rm(socketPath, { force: true }); } catch { /* preserve the startup failure */ }
       throw error;
     }
   }

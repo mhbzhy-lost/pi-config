@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdirSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { createConnection } from "node:net";
 import test from "node:test";
 
-import { brokerGrantPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
+import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { createBrokerFrameDecoder, createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
 import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
@@ -170,6 +172,68 @@ test("Root broker startup rolls back an earlier lifecycle listener when later re
   assert.equal(bus.handlers.get("subagent:async-started")?.size ?? 0, 0);
   await bus.emit("subagent:async-started", startedEvent(rootSessionId, "executor-after-failed-start"));
   assert.equal(broker.ownedRuns.size, 0);
+});
+
+test("Root broker preserves the startup error when socket cleanup also fails", async (t) => {
+  const rootSessionId = `root-start-error-${process.pid}-${Date.now()}`;
+  const socketPath = brokerSocketPath(rootSessionId);
+  const bus = new EventBus();
+  let registrations = 0;
+  const events = {
+    on(type, handler) {
+      registrations += 1;
+      if (registrations === 2) {
+        rmSync(socketPath, { force: true });
+        mkdirSync(socketPath);
+        throw new Error("original listener startup failure");
+      }
+      return bus.on(type, handler);
+    },
+  };
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    events,
+  });
+  t.after(async () => {
+    await rm(socketPath, { force: true, recursive: true });
+  });
+
+  await assert.rejects(broker.start(), /original listener startup failure/);
+});
+
+test("Root broker closes an accepted socket before waiting for failed startup transport", async (t) => {
+  const rootSessionId = `root-start-socket-${process.pid}-${Date.now()}`;
+  const socketPath = brokerSocketPath(rootSessionId);
+  let client;
+  let broker;
+  broker = new RootBrokerServer({
+    rootSessionId,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    setSocketPermissions: async () => {
+      client = createConnection(socketPath);
+      client.on("error", () => undefined);
+      await new Promise((resolve) => client.once("connect", resolve));
+      while (broker.sockets.size === 0) await new Promise((resolve) => setImmediate(resolve));
+      throw new Error("socket permission startup failure");
+    },
+  });
+  t.after(async () => {
+    client?.destroy();
+    await broker.closeRootSession().catch(() => undefined);
+    await rm(socketPath, { force: true, recursive: true });
+  });
+
+  let timeout;
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error("startup rollback deadline exceeded")), 500);
+  });
+  try {
+    await assert.rejects(Promise.race([broker.start(), deadline]), /socket permission startup failure/);
+  } finally {
+    clearTimeout(timeout);
+  }
+  assert.equal(broker.sockets.size, 0);
 });
 
 test("broker frame decoder preserves split UTF-8 and rejects oversized frames", () => {
