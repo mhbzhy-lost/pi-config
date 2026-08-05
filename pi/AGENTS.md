@@ -4,18 +4,14 @@
 
 ## TDD
 
-**绝对红线**：任何产生逻辑变更的 coding，动手前必须先加载 `test-driven-development` skill 并严格执行其流程。先写实现再补测试 = 违规，回退重来。
+**绝对红线**：任何产生逻辑变更的 coding，动手前必须先加载 `test-driven-development` skill 并严格执行其流程。
 豁免：单行改动 / 纯文档变更 / 已有测试覆盖（必须显式声明豁免理由）。
 
 ## Subagent
 
-所有 subagent 派发必须遵循 `subagent-dispatch` skill 的要求。
-尽可能保持主 agent 上下文的信息有效性和高抽象层级，有相对独立的任务都尽可能交给 subagent 去做，原则上主 agent 只负责收集报告、形成决策、编写计划。
+原则上主 agent 只负责收集报告、形成决策、编写计划，不直接执行 coding 任务，除非用户要求主 agent 直接执行。executor 负责执行具体 coding 计划，其他探索类任务可派发通用 subagent。
 
-## Bugfix
-
-遇到任何 bug/issue/incident 等非预期表现需要修复时，禁止直接修。
-必须先写 `docs/bugs/bug-<摘要>.md`（根因分析 6 要素），然后再执行修复。
+禁止：每个 subagent 任务完成后都做全量独立审查。
 
 ## Git Commit 规范
 
@@ -24,9 +20,9 @@ commit message 格式与主观约束见 `git-commit-convention` skill。
 
 ## 输出语言
 
-编写 skill 可全英文；技术文档（需要人审的文章）默认中文。
+任何 markdown 格式文件都必须使用中文编写。
 
-禁止：人审材料使用英文。
+例外：skill frontmatter 允许使用英文。
 
 ## 决策报告
 
@@ -40,8 +36,9 @@ commit message 格式与主观约束见 `git-commit-convention` skill。
 
 ## Playwright 浏览器操作
 
-尽可能使用 headless 模式进行操作。
+默认使用 headless 模式进行操作。
 除非需要用户手动登录验证，或用户明确要求使用 headed/前台模式。
+headed 模式获取登录态后，应将登录态共享给 headless 模式，并使用 headless 模式继续任务。
 
 禁止：在有登录态/无需用户干预的情况下自行决定使用 headed/前台模式。
 
@@ -51,29 +48,27 @@ commit message 格式与主观约束见 `git-commit-convention` skill。
 
 计划文档必须使用中文撰写（代码片段、命令、文件路径等技术标识除外）。
 
-每个 Task 必须在 `**Files:**` 前声明可选的 `**Deps:**` 字段，列出依赖的上游任务（如 `**Deps:** Task 1, Task 2`）。无依赖时省略该字段。
+必须给出 DAG 依赖图，每个任务必须声明 `Deps`（无依赖时标记为 `none`）；DAG 图与 `Deps` 字段必须一致，并清晰表达任务是否可并发。子任务划分应使整个计划的并发度尽可能高。
+
+拆分与调度原则：
+1. 涉及模块间依赖，应先执行接口定义任务，后执行实现任务。接口定义任务应产出稳定接口契约、共享 mock 数据和 test helpers，使依赖方能够基于契约和测试替身独立编写并验证测试，避免下游重复构造。
+2. 被较多任务依赖的基础服务任务应前置执行；若其产出可切分，应进一步拆为独立切片，下游仅依赖所需切片，避免单个枢纽任务阻塞全图。
+3. 识别 DAG 中制约整体完成时间的关键路径，优先拆分关键路径上可独立交付的工作，使其能够并行推进；不得为了拆分而产生无法独立测试或验收的任务。
+4. 依赖边必须声明理由与目标产物（接口契约 / 共享 fixture / 数据依赖 / 顺序要求），依赖应收窄到「上游任务的某个产物」而非整个任务；写不出具体理由的依赖边必须删除。逐条反问「上游未完成时，下游能否开始并产出可验收结果」；若能，则删除该依赖。已有其他路径能够表达的重复依赖边也应删除。
+5. 任务必须自包含：所需上下文（接口签名、fixture、文件路径、验收标准）写入任务描述本身；禁止以「同一执行者延续上下文更方便」为由串联任务。
+6. DAG 图之后必须附上按拓扑序分组的并行调度组（Wave），便于人类快速校验分层是否合理。Wave 不是派发屏障：实际派发按依赖边触发，任务的所有前驱完成后即可派发，无需等待同 Wave 其余任务。格式示例：
+   ```
+   Wave 1: T1, T2, T3      （无依赖，并行）
+   Wave 2: T4, T5           （依赖 T1，并行）
+   Wave 3: T6               （依赖 T4+T5）
+   ```
+7. 对外部接口、数据格式、权限或技术可行性存在不确定性时，应将验证工作拆为可独立执行的前置探索任务，并尽早并行派发。探索任务只产出明确决策、接口契约或共享样例；下游仅依赖其实际需要的产物。
+8. 设备、端口、测试环境、外部服务限流等资源竞争属于调度约束，不属于任务依赖。任务应声明所需资源，由执行器限制同时运行数量，不得为资源竞争添加 DAG 依赖边。
+9. 避免过早设置依赖所有实现分支的统一集成任务。集成与契约测试应按可独立验收的业务切片拆分，并只依赖该切片需要的产物；最终全量回归作为验收终点，不阻塞与其无关的后续任务。
+10. 并发执行的隔离由 harness 层保证。每个任务应声明 `WritePaths`，用于识别多个任务共同修改的写入热点。出现重叠时，优先通过稳定接口或职责拆分消除共同写入；确实无法拆分时，设置专门的集成任务处理语义合并，不得仅因文件重叠而串联实现任务。
 
 计划完成后使用提问工具让用户选择执行方式：
 
 1. **Subagent-Driven**：主 agent 自行编排计划执行，任务间可审查。主 agent 读取计划的 `Deps` 字段构建 DAG；无依赖任务并行派发（后台模式），有依赖的等上游完成后再派发。
 2. **Inline Execution**：按 skill 原始流程在当前会话逐任务执行，适合简单计划或无需门禁的场景；忽略其引用的未纳入白名单的 sub-skill。
 3. **Plan Runner Dispatch**：加载 `plan-runner-dispatch` skill，通过 `/plan-run` 将计划交给独立的 plan-runner agent 在专属 Plan Session 中执行，适合需要隔离执行环境和结构化生命周期管控的场景。
-
-## Goal Engine 长任务协议
-
-若 `goal_status` 返回非 `NO_ACTIVE_GOAL`，主 agent 进入 coordinator 模式：
-
-1. 每轮开始先调用 `goal_status`，以其返回值为唯一任务上下文
-2. 从 `runnable` 列表中选择 task，调用 `goal_dispatch` 获取 dispatch-ir.v1 contract + executor worktree
-3. 将 contract 直接传给 `subagent` tool 派发 executor（executor 在独立 worktree 中工作）
-4. executor 完成后，调用 `goal_settle` 记录结果和 evidence
-5. 审查 executor 成果，调用 `goal_integrate`（integrate/discard/preserve）决定是否合回主 worktree
-6. 验收通过则调用 `goal_accept`；全部 accepted 则 goal 自动完成
-7. 人类随时可以插话修改方向（通过 `goal_amend` 或直接对话）
-
-禁止：
-- compact 后从压缩摘要推断进度而不调用 goal_status
-- 跳过 goal_dispatch 直接派 executor（必须通过 dispatch-ir.v1 契约 + 独立 worktree）
-- settle 时不填 next_action 或填写模糊词
-- 用纯命令字符串（如 "npm test"）作为 evidence
-- 未调用 goal_integrate 就直接 goal_accept（必须先决定 worktree 成果处置）
