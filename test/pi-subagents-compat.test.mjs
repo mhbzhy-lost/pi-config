@@ -339,10 +339,10 @@ test("flat runtime compat probe source retires standalone boundaries", async () 
 test("builds the exact top-level runtime dependency install command", async () => {
   let setup = {};
   try {
-    setup = await import("../scripts/setup-plan-runtime-deps.mjs");
+    setup = await import("../scripts/setup-subagent-runtime-deps.mjs");
   } catch {}
-  assert.equal(typeof setup.buildPlanRuntimeInstallCommand, "function");
-  assert.deepEqual(setup.buildPlanRuntimeInstallCommand("/tmp/pi/npm"), {
+  assert.equal(typeof setup.buildSubagentRuntimeInstallCommand, "function");
+  assert.deepEqual(setup.buildSubagentRuntimeInstallCommand("/tmp/pi/npm"), {
     command: "npm",
     args: [
       "install", "--prefix", "/tmp/pi/npm", "--save-exact",
@@ -352,10 +352,10 @@ test("builds the exact top-level runtime dependency install command", async () =
 });
 
 test("uninstalls retired Todo before installing exact runtime dependencies", async () => {
-  const setup = await import("../scripts/setup-plan-runtime-deps.mjs");
-  assert.equal(typeof setup.installPlanRuntimeDependencies, "function");
+  const setup = await import("../scripts/setup-subagent-runtime-deps.mjs");
+  assert.equal(typeof setup.installSubagentRuntimeDependencies, "function");
   const calls = [];
-  const result = await setup.installPlanRuntimeDependencies({
+  const result = await setup.installSubagentRuntimeDependencies({
     piNpmDir: "/tmp/pi/npm",
     env: { PATH: "/test/bin" },
     run: async (...args) => calls.push(args),

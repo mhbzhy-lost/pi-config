@@ -12,7 +12,6 @@ const expectedGlobalSkills = [
   "test-driven-development",
   "writing-skills",
   "writing-plans",
-  "plan-runner-dispatch",
   "subagent-dispatch",
   "using-goal-engine",
   "exa-search",

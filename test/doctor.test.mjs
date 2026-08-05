@@ -164,13 +164,13 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    for (const skill of ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "using-goal-engine", "exa-search", "playwright", "browser-auth-session", "goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7"]) {
+    for (const skill of ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "subagent-dispatch", "using-goal-engine", "exa-search", "playwright", "browser-auth-session", "goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7"]) {
       await mkdir(join(root, "skill-overrides", skill), { recursive: true });
       await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), `---\nname: ${skill}\ndescription: fixture\n---\n`);
     }
     await writeFile(
       join(root, "skill-overrides", "skills.list"),
-      "external-llm-review\ngit-commit-convention\ntest-driven-development\nwriting-skills\nwriting-plans\nplan-runner-dispatch\nsubagent-dispatch\nusing-goal-engine\nexa-search\nplaywright\nbrowser-auth-session\n",
+      "external-llm-review\ngit-commit-convention\ntest-driven-development\nwriting-skills\nwriting-plans\nsubagent-dispatch\nusing-goal-engine\nexa-search\nplaywright\nbrowser-auth-session\n",
     );
     await writeFile(
       join(root, "skill-overrides", "skills.local.list"),
@@ -188,9 +188,6 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
     await writeFile(join(root, "pi", "extensions", "subagent-runtime.ts"), "");
     await mkdir(join(root, "pi", "child-extensions"), { recursive: true });
-    await writeFile(join(root, "pi", "child-extensions", "plan-capsule.ts"), "");
-    await writeFile(join(root, "pi", "extensions", "plan-launcher.ts"), "");
-    await writeFile(join(root, "pi", "child-extensions", "plan-runner.ts"), "");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
     await mkdir(join(root, "scripts", "lib", "subagent-dispatch"), { recursive: true });
     for (const source of ["root-broker-server.ts", "root-broker-client.ts", "root-broker-protocol.ts", "root-broker-registry.ts"]) {
@@ -201,11 +198,8 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     for (const [name, model, tools] of [
       ["executor", "openai-codex/gpt-5.6-terra", "read"],
       ["spark", "openai-codex/gpt-5.3-codex-spark", "read"],
-      ["plan-runner", "openai-codex/gpt-5.6-sol", "plan_open,read,grep"],
-      ["plan-reviewer", "openai-codex/gpt-5.6-sol", "read"],
     ]) {
-      const childExtension = name === "plan-runner" ? "subagentOnlyExtensions: .pi-subagents/plan-runner-entry.mjs\n" : "";
-      await writeFile(join(root, "pi", "agents", `${name}.md`), `---\nmodel: ${model}\n${childExtension}tools: ${tools}\n---\n`);
+      await writeFile(join(root, "pi", "agents", `${name}.md`), `---\nmodel: ${model}\ntools: ${tools}\n---\n`);
     }
     await writeFile(
       join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"),
@@ -217,19 +211,6 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "build", "compile", "index.mjs"), "export {};\n");
 
     assert.deepEqual(await inspectConfiguration(root, { readPiVersion: async () => "0.82.1", readBasicMemoryVersion: async () => "0.22.1" }), []);
-
-    const runnerPath = join(root, "pi", "agents", "plan-runner.md");
-    for (const tool of [
-      "plan_status", "plan_continue", "plan_verify", "plan_block", "plan_read_revision", "plan_amend",
-      "subagent", "subagent_wait", "subagent_supervisor", "plan_executor_supervisor",
-    ]) {
-      await writeFile(
-        runnerPath,
-        `---\nmodel: openai-codex/gpt-5.6-sol\nsubagentOnlyExtensions: .pi-subagents/plan-runner-entry.mjs\ntools: plan_open,read,grep,${tool}\n---\n`,
-      );
-      const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1", readBasicMemoryVersion: async () => "0.22.1" });
-      assert.ok(issues.includes(`forbidden plan-runner control tool: ${tool}`));
-    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -238,7 +219,7 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
 test("inspectConfiguration accepts additional valid local skills", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
-    const globalSkills = ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "plan-runner-dispatch", "subagent-dispatch", "using-goal-engine", "exa-search", "playwright", "browser-auth-session"];
+    const globalSkills = ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "subagent-dispatch", "using-goal-engine", "exa-search", "playwright", "browser-auth-session"];
     const localSkills = ["goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7", "crash-analyzer-usage"];
     await mkdir(join(root, "skill-overrides"), { recursive: true });
     for (const skill of [...globalSkills, ...localSkills]) {
@@ -416,7 +397,7 @@ test("inspectConfiguration reports a failed pi-subagents RPC probe", async () =>
   }
 });
 
-test("inspectConfiguration reports the final plan execution contract gaps", async () => {
+test("inspectConfiguration reports generic runtime contract gaps without requiring retired products", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
@@ -440,9 +421,7 @@ test("inspectConfiguration reports the final plan execution contract gaps", asyn
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "unknown" });
     assert.ok(issues.includes("unexpected Pi version: unknown; supported 0.82.0, 0.82.1, 0.83.0"));
     assert.ok(issues.includes("unexpected executor extension isolation"));
-    assert.ok(issues.includes("missing required agent profile: plan-runner"));
-    assert.ok(issues.includes("missing required Plan child extension: pi/child-extensions/plan-capsule.ts"));
-    assert.ok(issues.includes("missing required Plan child extension: pi/child-extensions/plan-runner.ts"));
+    assert.equal(issues.some((issue) => /plan-runner|plan-capsule|Plan child/.test(issue)), false);
     assert.ok(issues.includes("unexpected Skill whitelist"));
     assert.ok(issues.includes("runtime namespace is not ignored: /var/"));
     assert.ok(issues.includes("legacy Task 7 runtime still exists: scripts/lib/subagent-jobs.mjs"));
