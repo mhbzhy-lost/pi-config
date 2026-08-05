@@ -47,6 +47,8 @@ epoch 1: created → tasks → completed
   completionHistory: [
     { epoch: 1, verdict: "COMPLETE", completedAt, eventVersion }
   ],
+  coordinationState: "ready" | "needs_triage" | "blocked" | "recovery_required" | "watching" | "quiescent",
+  sessionBindings: [{ sessionId, leafId, state: "watching" | "detached", boundAt }],
   continuity: {
     observations: {
       "obs-...": {
@@ -92,9 +94,11 @@ epoch 1: created → tasks → completed
 
 ### 3.2 新事件
 
+- `goal.session_bound` / `goal.session_detached`：只让绑定 session 的 follow-up 触发 continuity gate，避免仓库级误锁。
 - `goal.discovery_recorded`：Extension 自动或 `goal_amend` 显式记录发现。
-- `goal.discovery_resolved`：将发现关联 task，或标为 out-of-scope/duplicate。
+- `goal.discovery_resolved`：将发现关联 task，或标为 out-of-scope/duplicate/new_goal/deferred。
 - `goal.contract_amended`：经真实用户批准后 append-only 修改 Objective/Scope/Non-Goals/DoD，并保存 proposal hash 与旧值摘要。
+- `task.block_resolved`：workspace 已释放后将 blocked task retry，或冻结旧 task并新增 replacement；修复当前 graph 要求 amend、reducer 又拒绝 blocked task 的死路。
 - `goal.continuity_checkpointed`：compaction/reload/shutdown 前的最小恢复快照。
 - `goal.reopened`：completed → active，`epoch += 1`，保留 completionHistory。
 - `goal.action_offered` / `goal.action_consumed`：把 status 的 machine action 变成一次性 capability。
@@ -117,9 +121,11 @@ epoch 1: created → tasks → completed
 
 ```js
 {
+  operation: "patch_active" | "resolve_blocked" | "triage" | "reopen_completed" | "detach_session",
   reason,
+  basis: { epoch, discovery_ids? },
   add_tasks?, remove_tasks?, update_tasks?,
-  update_goal?: { objective?, scope?, non_goals?, dod? },
+  update_goal?: { objective?, scope?, non_goals?, dod?, proposal_hash, approval_entry_id },
   context_update?: {
     summary,
     discoveries?: [{ id?, summary, paths?, evidence? }],
@@ -139,6 +145,7 @@ epoch 1: created → tasks → completed
 规则：
 
 - active Goal：可增加新发现任务；不要求先重写完整 writing plan。
+- blocked task：使用 `operation=resolve_blocked`，仅在 workspace 已释放时允许 `retry` 或 `supersede + replacement`，不得用普通 pending patch 绕过。
 - `update_goal` 会改变 Objective/Scope/Non-Goals/DoD，必须绑定真实用户批准的 proposal hash；Agent 不能仅凭自己的判断调用。
 - completed Goal：只有 `add_tasks` 且所有 untriaged discovery 已随 amendment 解析时，原子追加 `goal.reopened` + `goal.amended`；旧 accepted tasks 不变。
 - 仅 out-of-scope/duplicate 解析时不 reopen。
@@ -163,7 +170,8 @@ Extension 在同一 Git root 中按以下顺序选 candidate：
 ### 5.2 `before_agent_start`
 
 - active Goal：注入 goalId/epoch/version/machine action/未解析 discoveries。
-- recent completed Goal：注入“当前 epoch 已完成但可 reopen；相关小修复必须先 status→amend”。
+- completed-watching Goal 的绑定 session 收到新用户 entry 时，按 entry ID 幂等追加 untriaged discovery；不自动判断相关/无关，也不自动 reopen。
+- recent completed Goal：注入“当前 epoch 已完成但可 reopen；先 status→triage/amend”。
 - compact/reload 后：附加 lastCheckpoint，并明确“摘要不是权威，先 goal_status”。
 
 ### 5.3 `tool_call` 写门禁
@@ -174,13 +182,13 @@ Extension 在同一 Git root 中按以下顺序选 candidate：
 - coding `subagent` 的 `boundaries.writePaths`；
 - shell-policy 已分类为文件/Git mutation 的 `bash`。
 
-当路径与 active/recent completed Goal 相交，但没有对应 active task/action token 时：
+当绑定 session 存在 recovery latch/untriaged discovery，或路径与 active Goal 相交但没有对应 task/action token 时：
 
 1. 追加 `goal.discovery_recorded`，保存脱敏后的用户意图摘要、路径和 session identity；
 2. block 当前写调用；
 3. 返回 `goal_status → goal_amend(add_tasks=...)` 或 `resolve_discoveries(out_of_scope)` 的具体恢复动作。
 
-读取、搜索、测试和纯诊断不阻塞。无关工作通过 out-of-scope resolution 解锁，不要求创建新 Goal。
+读取、搜索、测试和纯诊断不阻塞。无关工作通过 out-of-scope/new_goal resolution 或 `detach_session` 解锁，不要求旧 Goal 永久占用整个仓库。`goal_amend` 与 edit/write 同一批出现时仍阻断写操作，必须等 amendment durable 后下一轮再写。
 
 ## 6. Compaction 与 Session 恢复
 
@@ -190,6 +198,7 @@ Extension 在同一 Git root 中按以下顺序选 candidate：
 
 - 从 `preparation.fileOps.modifiedFiles`、当前 projection、最新用户 entry identity 构造定长、脱敏 checkpoint；
 - append `goal.continuity_checkpointed`；
+- append 失败时取消 compaction并设置 `recovery_required` latch，不能静默丢状态；
 - 不替换 Pi 默认摘要，不把完整 tool output 或凭据写入 Goal state。
 
 ### `session_compact`
@@ -219,6 +228,7 @@ Extension 在同一 Git root 中按以下顺序选 candidate：
 - Goal projection 保存 `contract_hash`。
 - `tool_call(subagent)` hook 对输入重新 canonicalize/hash；taskId 命中 Goal task时必须与 projection hash 完全一致，否则 block。
 - `tool_result(subagent)` 取得 runId 后 append `task.executor_bound`。
+- `tool_call` 是早期诊断；subagent runtime 的 execute-time spawn identity resolver 必须再次从 Goal dispatch ticket核对 taskId/cwd/attempt/hash，防止后加载 hook 改参绕过。
 - `goal_settle` 必须查到该 runId 的 official terminal proof；不能只信 completion prose。
 
 ## 8. Worktree 与 Acceptance 证明
@@ -229,11 +239,12 @@ Extension 在同一 Git root 中按以下顺序选 candidate：
 - integrate/release 前检查 worktree 下无 active process cwd；发现验收启动的 App/Server 时 fail closed。
 - acceptance command 由受控 process group 运行，结束/超时后统一 teardown。
 - accept 前在独立 validation workspace 对 integrated commit 复跑 commands；workspace 不继承 Executor 新增的 ignored/untracked 文件。
-- validation workspace 的 runtime dependencies 必须来自显式 setup contract或仓库既有 baseline，不得静默复制 Executor ignored 文件。
+- task acceptance 可声明 `setup_commands`；validation workspace 先运行这些命令再运行 acceptance commands。未声明时不得静默复制 origin/Executor 的 ignored runtime dependencies。
 
 ## 9. 兼容与迁移
 
 - v1/v2 events 继续按历史语义 replay；缺失字段默认 `epoch=1`、空 continuity/history。
+- 历史 blocked task 首个 v3 recovery event映射为 `coordinationState=blocked`，允许 typed `resolve_blocked`，不改写旧事件。
 - 历史 completed Goal 第一次新 amendment 时追加 v3 `goal.reopened`，不改写旧日志。
 - 旧调用无 action token只允许只读 `goal_status`；status 返回迁移后的 token schema。
 - exact-seven ABI 测试必须继续断言工具名集合完全相等。
@@ -259,11 +270,11 @@ Extension 在同一 Git root 中按以下顺序选 candidate：
 
 ## 11. 完成判据
 
-- completed Goal 后第一次相关写入被 block，并自动留下可在新 session 中恢复的 discovery。
+- completed-watching Goal 的绑定 session 收到后续用户消息即持久化 discovery；第一次写入在 triage 前被 block。
 - 单任务 `goal_amend` 可原子 reopen completed Goal，旧 accepted evidence 不变，epoch 递增。
 - threshold/overflow/manual compaction 后第一轮可从 Goal event log恢复 discovery、next action 和 modified paths。
 - 任何 mutation 都不能跳过最新 status action token；失败尝试会消费 token。
 - orphan discard/preserve 没有真实用户 input event 时不可执行。
-- Goal dispatch 输出可直接作为 subagent typed input；任意字段漂移都在 tool_call 前被阻止。
+- Goal dispatch 输出可直接作为 subagent typed input；任意字段漂移都在 tool_call 和 execute-time spawn resolver 两处被阻止。
 - settle 前有 official terminal proof；release 前无 owner process；accept 在 clean validation workspace 复跑。
 - 全部功能继续只暴露七个 Goal tools，legacy logs 可重放，writer concurrency tests 全绿。

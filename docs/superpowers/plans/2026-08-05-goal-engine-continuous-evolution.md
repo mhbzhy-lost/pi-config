@@ -45,7 +45,8 @@ G3 Action capability ───────────> G5 Human decision ──
 G2 Dispatch ABI ───────────────────────────────────────┼──> G6 Extension integration ──> G7 Executor terminal binding ──> G8 Validation/process release ──> G10 Full verification
 G9 Shell broad-stage gate ─────────────────────────────┘                 │
 Worktree lifecycle T2-T4 ────────────────────────────────────────────────┘
-G6 ───────────────────────────────────────────────────────> G9 Skill/migration docs ───────────────────────────────────────────────┘
+G6 ───────────────────────────────────────────────────────> G9b Skill/Doctor ──────────────────────────────────────────────────────┤
+G1 + G6 ──────────────────────────────────────────────────> G9c Legacy snapshot importer ──────────────────────────────────────────┘
 ```
 
 依赖理由：
@@ -62,7 +63,7 @@ G6 ─────────────────────────�
 - **Wave 1:** G1、G2、G3、G9a（shell broad-stage gate）
 - **Wave 2:** G4、G5；同时执行 worktree lifecycle 计划的 T1/T2
 - **Wave 3:** G6；同时继续 worktree lifecycle T3/T4/T5/T6
-- **Wave 4:** G7、G9b（Skill/迁移文档）
+- **Wave 4:** G7、G9b（Skill）、G9c（legacy snapshot importer + Doctor）
 - **Wave 5:** G8
 - **Wave 6:** G10
 
@@ -77,18 +78,19 @@ Wave 不是派发屏障；所有前驱完成即可派发。
 **WritePaths:**
 - `docs/bugs/bug-goal-engine-completed-goal-cannot-capture-followups.md`
 - `docs/bugs/bug-goal-completed-retains-stale-next-action.md`
+- `docs/bugs/bug-goal-engine-blocked-task-required-amend-is-unexecutable.md`
 - `scripts/lib/goal-engine/events.mjs`
 - `scripts/lib/goal-engine/store.mjs`
 - `test/goal-engine-events.test.mjs`
 
 **Interfaces:**
-- Produces events: `goal.discovery_recorded`、`goal.discovery_resolved`、`goal.continuity_checkpointed`、`goal.reopened`、`goal.contract_amended`
-- Produces projection: `epoch`、`completionHistory`、`continuity`
+- Produces events: `goal.session_bound/detached`、`goal.discovery_recorded/resolved`、`goal.continuity_checkpointed`、`goal.reopened`、`goal.contract_amended`、`task.block_resolved`
+- Produces projection: `epoch`、`completionHistory`、`coordinationState`、`sessionBindings`、`continuity`
 - `goal.completed` clears `nextAction/blockedReason` and appends history
 
 - [ ] **Step 1: 写两份根因文档**
 
-记录 completed 后 `requireActive` 拒绝 amend、settle-only checkpoint 导致小修复在 compaction 丢失，以及 `goalCompleted()` 未清空过期 nextAction。
+记录 completed 后 `requireActive` 拒绝 amend、settle-only checkpoint 导致小修复在 compaction 丢失、`goalCompleted()` 未清空过期 nextAction，以及 graph 对 released blocked task 要求 amend而 reducer 又只允许 pending update 的死路。
 
 - [ ] **Step 2: 写 RED reducer tests**
 
@@ -104,7 +106,7 @@ test("completed goal records discovery and reopens into a new immutable epoch", 
 });
 ```
 
-另断言 completed 后 `nextAction === null`，不能 update/remove accepted t1；`goal.contract_amended` 保存旧 metadata 摘要/proposal hash，缺用户 approval identity 时 reducer 拒绝。
+另断言 completed 后 `nextAction === null`，不能 update/remove accepted t1；`goal.contract_amended` 保存旧 metadata 摘要/proposal hash，缺用户 approval identity 时 reducer 拒绝。blocked task workspace释放后可 `task.block_resolved(retry)` 回 pending，或 `supersede` 后新增 replacement；未释放时拒绝。
 
 - [ ] **Step 3: 验证 RED**
 
@@ -121,7 +123,7 @@ v1/v2 projection 默认 epoch 1/空 continuity；只有 v3 允许 reopen。`goal
 Run: `node --test test/goal-engine-events.test.mjs`
 
 ```bash
-git add docs/bugs/bug-goal-engine-completed-goal-cannot-capture-followups.md docs/bugs/bug-goal-completed-retains-stale-next-action.md scripts/lib/goal-engine/events.mjs scripts/lib/goal-engine/store.mjs test/goal-engine-events.test.mjs
+git add docs/bugs/bug-goal-engine-completed-goal-cannot-capture-followups.md docs/bugs/bug-goal-completed-retains-stale-next-action.md docs/bugs/bug-goal-engine-blocked-task-required-amend-is-unexecutable.md scripts/lib/goal-engine/events.mjs scripts/lib/goal-engine/store.mjs test/goal-engine-events.test.mjs
 git commit -m "feat(goal-engine): 支持完成目标按纪元重新开启"
 ```
 
@@ -240,15 +242,16 @@ git commit -m "feat(goal-engine): 为机器动作签发一次性能力"
 - Produces:
 
 ```js
-selectContinuityCandidate({ projections, cwd, paths })
-buildDiscovery({ userText, paths, sessionId, source })
+selectContinuityCandidate({ projections, cwd, paths, sessionId })
+buildSessionBinding({ projection, sessionId, leafId })
+buildDiscovery({ userText, userEntryId, paths, sessionId, source })
 buildContinuityCheckpoint({ projection, sessionId, reason, modifiedFiles, userEntryId })
 formatRecoveryInjection(projection)
 ```
 
 - [ ] **Step 1: 写 RED**
 
-覆盖唯一 active、最近 completed path overlap、多候选歧义、无关路径、secret redaction、2KB 上限、modifiedFiles 去重和 deterministic output。
+覆盖唯一 active、completed-watching 的绑定 session、detached session、多候选歧义、无关路径、user entry 幂等、secret redaction、2KB 上限、modifiedFiles 去重和 deterministic output。
 
 - [ ] **Step 2: 验证 RED**
 
@@ -301,7 +304,7 @@ Expected: FAIL，模块不存在。
 
 - [ ] **Step 3: 最小 GREEN**
 
-允许规范化的 `discard/丢弃` 与 `preserve/保留`，但包含两者、引用旧消息或 extension source 均拒绝。
+允许规范化的 `discard/丢弃` 与 `preserve/保留`，但包含两者、引用旧消息或 extension source 均拒绝。相同机制对 Goal metadata proposal hash 做显式批准绑定。
 
 - [ ] **Step 4: 提交**
 
@@ -331,13 +334,16 @@ git commit -m "fix(goal-engine): 将孤儿处置绑定真实用户选择"
 
 Mock 必须支持 `input/before_agent_start/tool_call/session_before_compact/session_compact/session_start`。测试场景：
 
-1. completed Goal 后 `edit` 相交路径被 block并记录 discovery；
-2. `goal_amend(add_tasks + resolve_discoveries + action_token)` 原子 reopen epoch 2；
-3. out-of-scope resolution 不 reopen并解锁无关路径；
-4. compaction 写 checkpoint，下一轮注入 goalId/epoch并要求 status；
-5. mutation 没 token、错 token、重放 token均拒绝；
-6. `update_goal` 未绑定真实用户批准的 proposal hash 时拒绝，批准后 append `goal.contract_amended`；
-7. exact tool names 仍是七个。
+1. completed-watching Goal 的绑定 session 收到新 user entry即记录 discovery，`edit` 在 triage 前被 block；
+2. `goal_amend(operation=reopen_completed, add_tasks + resolve_discoveries + action_token)` 原子 reopen epoch 2；
+3. `triage(out_of_scope|new_goal)` 或 `detach_session` 不 reopen并解锁无关路径；
+4. released blocked task 用 `resolve_blocked` retry/supersede，不再返回不可执行 amend；
+5. compaction 写 checkpoint，写失败取消 compact并设置 recovery latch，下一轮注入 goalId/epoch并要求 status；
+6. mutation 没 token、错 token、重放 token均拒绝；
+7. `update_goal` 未绑定真实用户批准的 proposal hash 时拒绝，批准后 append `goal.contract_amended`；
+8. replay/IO failure 必须以 isError/throw fail-closed，不能返回成功 envelope 内的 `ERROR:` 文本；
+9. 同 objective 的独立新 Goal使用稳定 slug+唯一后缀，不与 completed event目录碰撞；
+10. exact tool names 仍是七个。
 
 - [ ] **Step 2: 验证 RED**
 
@@ -347,7 +353,7 @@ Expected: FAIL，缺 hook/schema/action token。
 
 - [ ] **Step 3: 最小 GREEN**
 
-`goal_status` 发 offer event后返回 token；mutation handler第一步 append consume event，再做业务预检。`goal_amend` 在 completed 上先验证完整 candidate，再原子 append reopen/amend/resolve 事件序列。
+`goal_status` 发 offer event后返回 token；mutation handler第一步 append consume event，再做业务预检。`goal_amend` 使用 strict discriminated `operation` union；旧扁平参数只通过 `prepareArguments` 兼容。completed reopen、blocked resolve、triage/detach 各自原子 append事件序列。
 
 - [ ] **Step 4: overflow/reload 真实 Host GREEN**
 
@@ -371,9 +377,11 @@ git commit -m "feat(goal-engine): 自动持久化发现并恢复压缩上下文"
 - `scripts/lib/goal-engine/executor-binding.mjs`
 - `scripts/lib/goal-engine/events.mjs`
 - `scripts/lib/goal-engine/extension.mjs`
+- `scripts/lib/subagent-dispatch/extension.ts`
 - `scripts/lib/subagent-dispatch/root-broker-server.ts`
 - `scripts/lib/subagent-dispatch/root-broker-registry.ts`
 - `test/goal-engine-executor-binding.test.mjs`
+- `test/subagent-dispatch-rpc.test.mjs`
 - `test/root-subagent-broker.test.mjs`
 - `test/goal-engine-extension.test.mjs`
 
@@ -389,22 +397,22 @@ getTerminalProof(runId: string): ProcessTerminalProof | undefined
 
 - [ ] **Step 1: 记录根因与写 RED**
 
-测试 Goal contract title/context 任一字符变化时 `tool_call(subagent)` 被 block；精确 contract通过。subagent result绑定 runId；terminal proof缺失/identity conflict时 settle失败，observed proof才成功。
+测试 Goal contract title/context 任一字符变化时 `tool_call(subagent)` 被 block；精确 contract通过。再模拟后加载 hook 在 Goal preflight 后改参，断言 subagent execute-time spawn resolver仍拒绝。subagent result绑定 runId；terminal proof缺失/identity conflict时 settle失败，observed proof才成功。
 
 - [ ] **Step 2: 验证 RED**
 
-Run: `node --test test/goal-engine-executor-binding.test.mjs test/root-subagent-broker.test.mjs test/goal-engine-extension.test.mjs`
+Run: `node --test test/goal-engine-executor-binding.test.mjs test/subagent-dispatch-rpc.test.mjs test/root-subagent-broker.test.mjs test/goal-engine-extension.test.mjs`
 
 Expected: FAIL，缺查询接口/binding event/hash preflight。
 
 - [ ] **Step 3: 最小 GREEN**
 
-Root Broker 只暴露冻结副本查询，不开放 Map或Git操作。Goal hook对 taskId命中才校验；非 Goal subagent不受影响。
+Root Broker 只暴露冻结副本查询，不开放 Map或Git操作。Goal hook对 taskId命中才做早期校验；subagent execute-time resolver从持久 dispatch ticket按 taskId/cwd/attempt重新计算 hash。非 Goal coding run与 generic reviewer不受影响。
 
 - [ ] **Step 4: 提交**
 
 ```bash
-git add docs/bugs/bug-goal-engine-settle-lacks-executor-terminal-binding.md scripts/lib/goal-engine/executor-binding.mjs scripts/lib/goal-engine/events.mjs scripts/lib/goal-engine/extension.mjs scripts/lib/subagent-dispatch/root-broker-server.ts scripts/lib/subagent-dispatch/root-broker-registry.ts test/goal-engine-executor-binding.test.mjs test/root-subagent-broker.test.mjs test/goal-engine-extension.test.mjs
+git add docs/bugs/bug-goal-engine-settle-lacks-executor-terminal-binding.md scripts/lib/goal-engine/executor-binding.mjs scripts/lib/goal-engine/events.mjs scripts/lib/goal-engine/extension.mjs scripts/lib/subagent-dispatch/extension.ts scripts/lib/subagent-dispatch/root-broker-server.ts scripts/lib/subagent-dispatch/root-broker-registry.ts test/goal-engine-executor-binding.test.mjs test/subagent-dispatch-rpc.test.mjs test/root-subagent-broker.test.mjs test/goal-engine-extension.test.mjs
 git commit -m "fix(goal-engine): 绑定执行契约运行与终止证明"
 ```
 
@@ -417,10 +425,13 @@ git commit -m "fix(goal-engine): 绑定执行契约运行与终止证明"
 **WritePaths:**
 - `docs/bugs/bug-goal-engine-accepts-workspace-dependent-on-ignored-files.md`
 - `scripts/lib/goal-engine/acceptance-runner.mjs`
+- `scripts/lib/goal-engine/task-definition.mjs`
+- `scripts/lib/goal-engine/dispatch.mjs`
 - `scripts/lib/goal-engine/workspace.mjs`
 - `scripts/lib/goal-engine/extension.mjs`
 - `scripts/lib/worktree-lifecycle/managed-worktree.mjs`
 - `test/goal-engine-acceptance-runner.test.mjs`
+- `test/goal-engine-dispatch.test.mjs`
 - `test/goal-engine-workspace.test.mjs`
 - `test/worktree-lifecycle-managed.test.mjs`
 
@@ -428,7 +439,7 @@ git commit -m "fix(goal-engine): 绑定执行契约运行与终止证明"
 - Produces:
 
 ```js
-runAcceptanceInValidationWorkspace({ repoRoot, commit, commands, owner, timeoutMs })
+runAcceptanceInValidationWorkspace({ repoRoot, commit, setupCommands, commands, owner, timeoutMs })
 ```
 
 - Process group必须在 success/failure/timeout 后 terminal；release前 inventory 无 active cwd owner
@@ -445,12 +456,12 @@ Expected: FAIL，accept不复跑或release忽略进程。
 
 - [ ] **Step 3: 最小 GREEN**
 
-Validation workspace从 integrated commit创建，不复制 Executor ignored/untracked 文件；显式 dependency setup属于 task contract，缺失即失败。command运行在独立 process group，finally终止并验证 birth identity。
+Validation workspace从 integrated commit创建，不复制 Executor ignored/untracked 文件。task acceptance schema 增加可选 `setup_commands: string[]`，validation只运行声明的 setup；未声明时缺 dependency 即失败。setup/acceptance commands 均运行在独立 process group，finally终止并验证 birth identity。
 
 - [ ] **Step 4: 提交**
 
 ```bash
-git add docs/bugs/bug-goal-engine-accepts-workspace-dependent-on-ignored-files.md scripts/lib/goal-engine/acceptance-runner.mjs scripts/lib/goal-engine/workspace.mjs scripts/lib/goal-engine/extension.mjs scripts/lib/worktree-lifecycle/managed-worktree.mjs test/goal-engine-acceptance-runner.test.mjs test/goal-engine-workspace.test.mjs test/worktree-lifecycle-managed.test.mjs
+git add docs/bugs/bug-goal-engine-accepts-workspace-dependent-on-ignored-files.md scripts/lib/goal-engine/acceptance-runner.mjs scripts/lib/goal-engine/task-definition.mjs scripts/lib/goal-engine/dispatch.mjs scripts/lib/goal-engine/workspace.mjs scripts/lib/goal-engine/extension.mjs scripts/lib/worktree-lifecycle/managed-worktree.mjs test/goal-engine-acceptance-runner.test.mjs test/goal-engine-dispatch.test.mjs test/goal-engine-workspace.test.mjs test/worktree-lifecycle-managed.test.mjs
 git commit -m "fix(goal-engine): 在干净工作树复验并阻止活跃进程释放"
 ```
 
@@ -489,21 +500,19 @@ git commit -m "fix(git): 阻止 Agent 宽泛暂存并发文件"
 
 ---
 
-### Task G9b: Skill、Doctor 与旧 Goal Contract 语义迁移
+### Task G9b: Skill 与旧 Goal Contract 语义迁移
 
 **Deps:** G6
 
 **WritePaths:**
 - `skill-overrides/using-goal-engine/SKILL.md`
 - `pi/AGENTS.md`
-- `scripts/doctor.mjs`
 - `test/using-goal-engine-skill.test.mjs`
-- `test/doctor.test.mjs`
 - `docs/superpowers/specs/2026-08-05-goal-engine-continuous-evolution-design.md`
 
 **Interfaces:**
 - 文档流程：小问题 `status → amend(single task)`，无需 writing-plans；completed Goal相关写入先 reopen
-- Doctor报告 continuity debt、stale action offer、unresolved human decision
+- Skill规范 continuity debt、stale action offer、unresolved human decision 的处理
 
 - [ ] **Step 1: 写 docs tests RED**
 
@@ -511,26 +520,70 @@ git commit -m "fix(git): 阻止 Agent 宽泛暂存并发文件"
 
 - [ ] **Step 2: 验证 RED**
 
-Run: `node --test test/using-goal-engine-skill.test.mjs test/doctor.test.mjs`
+Run: `node --test test/using-goal-engine-skill.test.mjs`
 
-Expected: FAIL，文档和 Doctor缺新语义。
+Expected: FAIL，文档缺新语义。
 
 - [ ] **Step 3: 最小 GREEN**
 
-明确 `.state/goal-contract` 只作历史参考，不作为第二 runtime；恢复顺序改为 Goal projection → continuity checkpoint → observations → task DAG/evidence。
+明确 `.state/goal-contract` 不作为第二 runtime；恢复顺序改为 Goal projection → continuity checkpoint → observations → task DAG/evidence。旧数据只允许走 G9c 的只读 snapshot importer。
 
 - [ ] **Step 4: 提交**
 
 ```bash
-git add skill-overrides/using-goal-engine/SKILL.md pi/AGENTS.md scripts/doctor.mjs test/using-goal-engine-skill.test.mjs test/doctor.test.mjs docs/superpowers/specs/2026-08-05-goal-engine-continuous-evolution-design.md
+git add skill-overrides/using-goal-engine/SKILL.md pi/AGENTS.md test/using-goal-engine-skill.test.mjs docs/superpowers/specs/2026-08-05-goal-engine-continuous-evolution-design.md
 git commit -m "docs(goal-engine): 规范持续演进与压缩恢复流程"
+```
+
+---
+
+### Task G9c: 旧 Goal Contract 一次性只读快照导入
+
+**Deps:** G1, G6
+
+**WritePaths:**
+- `scripts/lib/goal-engine/legacy-goal-contract-import.mjs`
+- `scripts/doctor.mjs`
+- `test/goal-engine-legacy-import.test.mjs`
+- `test/doctor.test.mjs`
+
+**Interfaces:**
+- Produces:
+
+```js
+inspectLegacyGoalContract({ repoRoot, goalDir }) => { valid, hashes, snapshot, diagnostics }
+importLegacySnapshot({ root, snapshot, expectedVersion }) => projection
+```
+
+- [ ] **Step 1: 写 RED**
+
+用当前 `footer-native-child-conversation` 的脱敏 fixture覆盖：多文件一致、重复导入幂等、state/recovery/feature-list矛盾、缺文件、损坏 JSON。任何 invalid case均断言 Goal Engine events/registry零变化。
+
+- [ ] **Step 2: 验证 RED**
+
+Run: `node --test test/goal-engine-legacy-import.test.mjs`
+
+Expected: FAIL，importer不存在。
+
+- [ ] **Step 3: 最小 GREEN**
+
+对 `goal-contract.md/recovery.md/state.json/feature-list.json/evidence.jsonl/amendments.jsonl` 逐文件 SHA-256并交叉验证。仅生成一个 `legacy.snapshot_imported` v3 event；evidence标 `pre_existing/legacy_unverified`，状态默认为 completed+quiescent，不自动绑定 session或满足新 DoD。
+
+- [ ] **Step 4: Doctor 与提交**
+
+Doctor只报告可导入/冲突诊断，不自动执行导入。
+
+```bash
+node --test test/goal-engine-legacy-import.test.mjs test/doctor.test.mjs
+git add scripts/lib/goal-engine/legacy-goal-contract-import.mjs scripts/doctor.mjs test/goal-engine-legacy-import.test.mjs test/doctor.test.mjs
+git commit -m "feat(goal-engine): 只读导入旧目标契约快照"
 ```
 
 ---
 
 ### Task G10: 迁移、真实 Pi Canary 与独立复审
 
-**Deps:** G7, G8, G9a, G9b
+**Deps:** G7, G8, G9a, G9b, G9c
 
 **WritePaths:**
 - `docs/summaries/2026-08-05-goal-engine-continuous-evolution-verification.md`
