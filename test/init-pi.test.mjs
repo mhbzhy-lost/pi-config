@@ -41,6 +41,12 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
       "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"--prefix\" && \"$3\" == \"run\" && \"$4\" == \"setup:subagent-runtime\" ]]; then mkdir -p \"$2/pi/npm/node_modules/typebox\"; printf '{\\\"version\\\":\\\"1.1.38\\\"}' > \"$2/pi/npm/node_modules/typebox/package.json\"; fi\n",
     );
     await chmod(fakeNpm, 0o755);
+    const fakeNode = join(fakeBin, "node");
+    await writeFile(
+      fakeNode,
+      "#!/usr/bin/env bash\nif [[ \"$1\" == */scripts/sync-skills.mjs ]]; then printf 'node sync-skills markers=%s,%s,%s,%s\\n' \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"; exit 0; fi\nexec \"$REAL_NODE\" \"$@\"\n",
+    );
+    await chmod(fakeNode, 0o755);
     await writeFile(
       fakePi,
       "#!/usr/bin/env bash\nprintf 'pi-real registry=%s %s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" && \"$2\" == \"npm:pi-subagents@0.37.2\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.37.2\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
@@ -63,6 +69,8 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
       HOME: home,
       PATH: `${fakeBin}:${process.env.PATH}`,
       COMMAND_LOG: commandLog,
+      FIXTURE_REPO: fixtureRepo,
+      REAL_NODE: process.execPath,
       PI_REAL_BIN: fakePi,
       PI_SUBAGENT_CHILD: "1",
       PI_SUBAGENT_FANOUT_CHILD: "1",
@@ -99,6 +107,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:pi-subagents@0\.37\.2/);
     assert.doesNotMatch(commands, /rpiv-todo/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:subagent-runtime markers=1,1,parent-session,1/);
+    assert.match(commands, /node sync-skills markers=1,1,parent-session,1/);
     const typeboxPackage = JSON.parse(await readFile(join(fixtureRepo, "pi", "npm", "node_modules", "typebox", "package.json"), "utf8"));
     assert.equal(typeboxPackage.version, "1.1.38");
     assert.match(commands, /npm registry= test markers=,,,/);

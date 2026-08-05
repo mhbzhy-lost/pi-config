@@ -33,7 +33,7 @@ test("shell integration makes bare pi use the repository configuration", async (
     assert.deepEqual(JSON.parse(await readFile(output, "utf8")), {
       config: join(repoRoot, "pi"),
       sessions: join(repoRoot, "var", "sessions"),
-      args: ["--no-skills", "--version"],
+      args: ["--version"],
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -59,7 +59,7 @@ test("bare pi uses the alternate screen for an interactive launch", async () => 
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "\u001b[?1049h\u001b[2J\u001b[H\u001b[?1049l");
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n");
+    assert.equal(await readFile(output, "utf8"), "\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -84,7 +84,7 @@ test("pi-inline bypasses alternate screen explicitly", async () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "");
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n--version\n");
+    assert.equal(await readFile(output, "utf8"), "--version\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -110,7 +110,7 @@ test("pi-full runs pi in the alternate screen and restores the primary screen", 
     assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "\u001b[?1049h\u001b[2J\u001b[H\u001b[?1049l");
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n--version\n");
+    assert.equal(await readFile(output, "utf8"), "--version\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

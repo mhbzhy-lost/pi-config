@@ -46,6 +46,8 @@ fi
 NPM_CONFIG_REGISTRY="$NPM_REGISTRY" PI_CODING_AGENT_DIR="$SCRIPT_DIR/pi" "$pi_binary" install "npm:pi-subagents@$PI_SUBAGENTS_VERSION"
 NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm --prefix "$SCRIPT_DIR" run setup:subagent-runtime
 
+node "$SCRIPT_DIR/scripts/sync-skills.mjs"
+
 mkdir -p "$(dirname -- "$ZSHRC_PATH")"
 node - "$ZSHRC_PATH" "$SHELL_INTEGRATION" <<'NODE'
 const fs = require("node:fs");
