@@ -172,6 +172,36 @@ function checkGitContextOverride(tokens, environment = []) {
   return undefined;
 }
 
+function checkBroadGitStaging(tokens) {
+  if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
+  const subcommand = gitSubcommand(tokens);
+  if (!subcommand) return undefined;
+  const subcommandIndex = tokens.findIndex((token, index) => index > 0 && token === subcommand);
+  const args = tokens.slice(subcommandIndex + 1);
+
+  if (subcommand === "add" && args.some((arg) =>
+    arg === "-A" || arg === "--all" || arg.startsWith("--all=") || arg === "." || arg === "./"
+  )) {
+    return violation("GIT_BROAD_STAGING", "Agent 必须使用显式路径暂存，禁止宽泛 git add");
+  }
+
+  if (subcommand === "commit") {
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === "--") break;
+      if (["-m", "--message", "-F", "--file"].includes(arg)) {
+        index += 1;
+        continue;
+      }
+      if (arg.startsWith("--message=") || arg.startsWith("--file=")) continue;
+      if (arg === "--all" || /^-[^-]*a/.test(arg)) {
+        return violation("GIT_BROAD_STAGING", "Agent 必须使用显式路径暂存，禁止 git commit 自动暂存");
+      }
+    }
+  }
+  return undefined;
+}
+
 function checkDestructiveGit(tokens) {
   if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
   const subcommand = gitSubcommand(tokens);
@@ -219,6 +249,8 @@ function checkSingleCommand(command, cwd, workspaceRoot) {
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);
     if (gitViolation) return gitViolation;
+    const broadStagingViolation = checkBroadGitStaging(tokens);
+    if (broadStagingViolation) return broadStagingViolation;
     const gitContextViolation = checkGitContextOverride(tokens, environment);
     if (gitContextViolation) return gitContextViolation;
     const wrapperViolation = checkShellWrapper(tokens, commandCwd, workspaceRoot);
@@ -319,6 +351,8 @@ export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }) {
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);
     if (gitViolation) return gitViolation;
+    const broadStagingViolation = checkBroadGitStaging(tokens);
+    if (broadStagingViolation) return broadStagingViolation;
     const gitContextViolation = checkGitContextOverride(tokens, environment);
     if (gitContextViolation) return gitContextViolation;
     const wrapperViolation = checkShellWrapper(tokens, commandCwd, workspaceRoot);

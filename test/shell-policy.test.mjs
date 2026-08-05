@@ -81,6 +81,25 @@ test("blocks a sibling of the canonical temporary directory", () => {
   assertBlocked(`rm -rf ${sibling}`, "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
 });
 
+test("blocks broad agent staging while allowing explicit quoted paths", () => {
+  for (const command of [
+    "git add -A",
+    "git add --all",
+    "git add .",
+    "git add -- .",
+    "git add './'",
+    'git commit -am "fix(git): 收紧暂存范围"',
+    'git commit -a -m "fix(git): 收紧暂存范围"',
+    'git commit --all -m "fix(git): 收紧暂存范围"',
+  ]) {
+    assertBlocked(command, "GIT_BROAD_STAGING", /显式路径/, undefined);
+  }
+
+  assert.equal(policy("git add scripts/lib/shell-policy.mjs test/shell-policy.test.mjs"), undefined);
+  assert.equal(policy("git add -- 'docs/bugs/file name.md'"), undefined);
+  assert.equal(policy('git commit -m "fix(git): 收紧暂存范围"'), undefined);
+});
+
 test("blocks invalid commit messages from inline, file, amend, and skip forms", () => {
   assert.equal(policy('git commit -m "feat: 添加登录校验"'), undefined);
   assertBlocked('git commit -m "feature: 添加登录校验"', "COMMIT_MESSAGE_INVALID", /type/);
