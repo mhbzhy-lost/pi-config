@@ -69,7 +69,7 @@ Plan Runner 已从 `main` 的可部署产品表面、共享 runtime 协议、配
 
 - 用户 `pi/settings.json` 已从固定 stash `183567f037a61b5fdcf78e93d27a9c8ebb2f0002` 恢复。
 - 恢复后 SHA-256：`7b9c3ace7929e9c3a3e13dfb024188f55a619089f002fa754083971e60559adf`。
-- 该文件保持为未暂存本地修改，不进入任何退役、合并或验证提交。
+- 该用户版本保持为未暂存本地修改，未进入任何提交；`9877644` 中受版本管理的 `pi/settings.json` 是远端配置冲突解决结果，不是该用户 blob。
 - `skill-overrides/aliyun-beijing-server/` 由本仓库 `.git/info/exclude` 的 `/skill-overrides/aliyun-beijing-server/` 规则本地忽略；目录内容未修改、未暂存、未提交。
 - 固定 settings stash 暂时保留为额外恢复证据；未创建其他 stash。
 
