@@ -31,6 +31,7 @@ __pycache__/
 
 # Pi runtime (subagent artifacts)
 /.pi-subagents/
+/.state/goal-engine/
 /pi/models-store.json
 
 # Secrets
