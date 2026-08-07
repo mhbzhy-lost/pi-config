@@ -350,6 +350,19 @@ function machineActionForProjection(projection, cwd, root) {
     }
     return null;
   }
+  // Keep independent runnable work moving before asking an already dispatched
+  // task to settle. Orphaned workspaces remain excluded for recovery handling.
+  for (const [taskId] of projection.tasks) {
+    const attempt = nextDispatchAttempt(projection, taskId);
+    if (attempt === null) continue;
+    const inventory = inspectOrphanedExecutorWorkspace({
+      goalId: projection.goalId, taskId, attempt, originRoot: cwd, stateRoot: root,
+    });
+    const required = taskActionState(projection, taskId).requiredNextAction;
+    if (inventory.kind === "none" && required?.tool === "goal_dispatch") {
+      return { tool: required.tool, params: { goal_id: projection.goalId, ...required.params } };
+    }
+  }
   for (const [taskId] of projection.tasks) {
     const attempt = nextDispatchAttempt(projection, taskId);
     if (attempt !== null) {

@@ -3437,6 +3437,34 @@ test("production status issues one-shot action tokens and dispatch returns an ex
   await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", action_token: status.action_token }), /consumed|status|offer/i);
 });
 
+test("production status dispatches every runnable task before offering settlement for an earlier dispatched task", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  const objective = "Parallel runnable dispatch status";
+  const goalId = objectiveToGoalId(objective);
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [
+      { id: "t1", description: "first independent task", deps: [], writePaths: ["src/first.ts"], acceptance: { criteria: ["first works"], commands: ["true"] }, workflow: "tdd" },
+      { id: "t2", description: "second independent task", deps: [], writePaths: ["src/second.ts"], acceptance: { criteria: ["second works"], commands: ["true"] }, workflow: "tdd" },
+    ],
+  });
+
+  let status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  assert.deepEqual(status.machineAction, { tool: "goal_dispatch", params: { goal_id: goalId, task_id: "t1" } });
+  await invoke(pi, "goal_dispatch", { task_id: "t1", action_token: status.action_token });
+
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  assert.deepEqual(status.runnable, ["t2"]);
+  assert.deepEqual(status.machineAction, { tool: "goal_dispatch", params: { goal_id: goalId, task_id: "t2" } });
+  await invoke(pi, "goal_dispatch", { task_id: "t2", action_token: status.action_token });
+
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  assert.deepEqual(status.runnable, []);
+  assert.deepEqual(status.machineAction, { tool: "goal_settle", params: { goal_id: goalId, task_id: "t1" } });
+});
+
 test("production resolve_blocked consumes the task offer and atomically updates a retried contract", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
