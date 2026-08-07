@@ -20,6 +20,22 @@ function makeEvent(type, data, goalId = "test-goal") {
   };
 }
 
+function applyLegacyEvent(projection, event) {
+  return applyEvent(projection, event, { replay: true });
+}
+
+function replayLegacyCreate(event) {
+  return applyLegacyEvent(createProjection(), event);
+}
+
+function plannedCriterion(id, statement = id, evidenceKinds = ["tests"]) {
+  return { id, statement, evidenceKinds };
+}
+
+function plannedEvent(type, data, goalId = "planned-goal", occurredAt = "2026-08-08T00:00:00.000Z") {
+  return { schemaVersion: "planned.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt, data };
+}
+
 test("v2 reducers have no ambient cwd dependency", () => {
   const source = readFileSync(new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /process\.cwd\s*\(/);
@@ -34,11 +50,11 @@ test("historical v2 JSONL replays task-contract-gated create and amend while new
   mkdirSync(join(root, "goals", goalId), { recursive: true });
   writeFileSync(eventsPath, `${JSON.stringify(created)}\n${JSON.stringify(amended)}\n`);
 
-  assert.throws(() => applyEvent(createProjection(), created), /must not use absolute cd/);
+  assert.throws(() => applyEvent(createProjection(), created), /replay-only/);
   const safeCreated = structuredClone(created);
   safeCreated.eventId = "new-safe-create";
   safeCreated.data.taskDefs.t1.acceptance.commands = ["true"];
-  const safeProjection = applyEvent(createProjection(), safeCreated);
+  const safeProjection = replayLegacyCreate(safeCreated);
   assert.throws(() => applyEvent(safeProjection, amended), /must not use absolute cd/);
 
   const replayed = loadProjection(root, goalId);
@@ -49,17 +65,21 @@ test("historical v2 JSONL replays task-contract-gated create and amend while new
   const appendRoot = mkdtempSync(join(tmpdir(), "ge-legacy-v2-append-"));
   const unsafeCreate = structuredClone(created);
   unsafeCreate.eventId = "new-unsafe-create";
-  assert.throws(() => appendEvent(appendRoot, unsafeCreate, 0), /must not use absolute cd/);
+  assert.throws(() => appendEvent(appendRoot, unsafeCreate, 0), /replay-only/);
   assert.equal(existsSync(join(appendRoot, "goals", goalId, "events.jsonl")), false);
   assert.equal(existsSync(join(appendRoot, "goals", goalId, "projection.json")), false);
   assert.equal(existsSync(join(appendRoot, "registry.json")), false);
 
-  appendEvent(appendRoot, safeCreated, 0);
-  const before = { events: readFileSync(join(appendRoot, "goals", goalId, "events.jsonl"), "utf8"), projection: readFileSync(join(appendRoot, "goals", goalId, "projection.json"), "utf8"), registry: readFileSync(join(appendRoot, "registry.json"), "utf8") };
+  const appendEventsPath = join(appendRoot, "goals", goalId, "events.jsonl");
+  mkdirSync(join(appendRoot, "goals", goalId), { recursive: true });
+  writeFileSync(appendEventsPath, `${JSON.stringify(safeCreated)}\n`);
+  const before = readFileSync(appendEventsPath, "utf8");
   const unsafeAmend = structuredClone(amended);
   unsafeAmend.eventId = "new-unsafe-amend";
   assert.throws(() => appendEvent(appendRoot, unsafeAmend, 1), /must not use absolute cd/);
-  assert.deepEqual({ events: readFileSync(join(appendRoot, "goals", goalId, "events.jsonl"), "utf8"), projection: readFileSync(join(appendRoot, "goals", goalId, "projection.json"), "utf8"), registry: readFileSync(join(appendRoot, "registry.json"), "utf8") }, before);
+  assert.equal(readFileSync(appendEventsPath, "utf8"), before);
+  assert.equal(existsSync(join(appendRoot, "goals", goalId, "projection.json")), false);
+  assert.equal(existsSync(join(appendRoot, "registry.json")), false);
 });
 
 test("historical v2 create replay rejects cyclic and unknown dependencies while retaining absolute-cd compatibility", () => {
@@ -145,44 +165,44 @@ test("historical v1 and v2 workflow amendments replay deterministically with leg
   assert.deepEqual(v1ReplayB.tasks.get("t1"), v1ReplayA.tasks.get("t1"));
 });
 
-test("v2 create and amend reject pending tasks that cannot compile dispatch IR atomically", () => {
+test("planned create and amend reject pending tasks that cannot compile dispatch IR atomically", () => {
   const created = {
     objective: "Valid objective",
     scope: [], nonGoals: [], dod: [], tasks: ["t1"],
-    taskDefs: { t1: { description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } },
+    taskDefs: { t1: { description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: [plannedCriterion("works")] }, workflow: "tdd" } },
   };
-  assert.throws(() => applyEvent(createProjection(), { ...makeEvent("goal.created", created, "g".repeat(160)), schemaVersion: "goal-engine.event.v2" }), /taskId.*160/);
+  assert.throws(() => applyEvent(createProjection(), plannedEvent("goal.created", created, "g".repeat(160))), /taskId.*160/);
   assert.equal(createProjection().tasks.size, 0);
 
-  let p = applyEvent(createProjection(), { ...makeEvent("goal.created", created), schemaVersion: "goal-engine.event.v2" });
+  const p = applyEvent(createProjection(), plannedEvent("goal.created", created));
   const before = p;
-  assert.throws(() => applyEvent(p, { ...makeEvent("goal.amended", {
+  assert.throws(() => applyEvent(p, plannedEvent("goal.amended", {
     reason: "Add a task whose derived requirements exceed the dispatch limit",
-    updateTasks: { t1: { acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `criterion ${i}`), commands: ["true"] } } },
-  }), schemaVersion: "goal-engine.event.v2" }), /requirements.*32/);
+    updateTasks: { t1: { acceptance: { criteria: Array.from({ length: 32 }, (_, i) => plannedCriterion(`criterion-${i}`, `criterion ${i}`)) } } },
+  })), /requirements.*32/);
   assert.equal(p, before);
   assert.equal(p.tasks.get("t1").acceptance.criteria.length, 1);
 });
 
-test("v2 metadata-derived create and amendment gates leave projections atomic", () => {
-  const task = { description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" };
+test("planned metadata-derived create and amendment gates leave projections atomic", () => {
+  const task = { description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: [plannedCriterion("works")] }, workflow: "existing-tests" };
   const createCases = [
     ["objective", { objective: "o".repeat(4097), scope: [], nonGoals: [], dod: [] }],
     ["scope", { objective: "scope", scope: ["s".repeat(4090)], nonGoals: [], dod: [] }],
     ["nonGoals", { objective: "non-goals", scope: [], nonGoals: Array.from({ length: 33 }, (_, i) => `n${i}`), dod: [] }],
-    ["dod", { objective: "dod", scope: [], nonGoals: [], dod: ["proof"], taskDefs: { t1: { ...task, acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `c${i}`), commands: ["true"] } } } }],
+    ["dod", { objective: "dod", scope: [], nonGoals: [], dod: ["proof"], taskDefs: { t1: { ...task, acceptance: { criteria: Array.from({ length: 32 }, (_, i) => plannedCriterion(`c${i}`)) } } } }],
     ["composite", { objective: "composite", scope: [], nonGoals: [], dod: [], goalId: "g".repeat(160) }],
   ];
   for (const [name, data] of createCases) {
     const projection = createProjection();
-    const event = { ...makeEvent("goal.created", { ...data, tasks: ["t1"], taskDefs: data.taskDefs || { t1: task } }, data.goalId || "metadata-goal"), schemaVersion: "goal-engine.event.v2" };
+    const event = plannedEvent("goal.created", { ...data, tasks: ["t1"], taskDefs: data.taskDefs || { t1: task } }, data.goalId || "metadata-goal");
     assert.throws(() => applyEvent(projection, event), /objective|knownFacts|decisions|requirements|taskId|4096|32|160/i, name);
     assert.equal(projection.version, 0, `${name} must not mutate the original projection`);
     assert.equal(projection.tasks.size, 0);
   }
-  let projection = applyEvent(createProjection(), { ...makeEvent("goal.created", { objective: "amend", scope: [], nonGoals: [], dod: ["proof"], tasks: ["t1"], taskDefs: { t1: task } }), schemaVersion: "goal-engine.event.v2" });
+  const projection = applyEvent(createProjection(), plannedEvent("goal.created", { objective: "amend", scope: [], nonGoals: [], dod: ["proof"], tasks: ["t1"], taskDefs: { t1: task } }));
   const before = structuredClone({ version: projection.version, tasks: [...projection.tasks] });
-  assert.throws(() => applyEvent(projection, { ...makeEvent("goal.amended", { reason: "Derived requirements must remain bounded during amendment", updateTasks: { t1: { acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `criterion ${i}`), commands: ["true"] } } } }), schemaVersion: "goal-engine.event.v2" }), /requirements.*32/i);
+  assert.throws(() => applyEvent(projection, plannedEvent("goal.amended", { reason: "Derived requirements must remain bounded during amendment", updateTasks: { t1: { acceptance: { criteria: Array.from({ length: 32 }, (_, i) => plannedCriterion(`criterion-${i}`, `criterion ${i}`)) } } } })), /requirements.*32/i);
   assert.deepEqual(structuredClone({ version: projection.version, tasks: [...projection.tasks] }), before);
 });
 
@@ -194,7 +214,7 @@ test("legacy v1 create replays oversized historical shapes unchanged", () => {
     return [id, { description: i === 0 ? "d".repeat(4097) : "legacy task", deps: [], writePaths: [i === 0 ? "../unsafe-path" : `src/${i}.ts`], acceptance: { criteria: [], commands: [] }, workflow: "legacy-workflow" }];
   }));
   const tasks = Object.keys(taskDefs);
-  const projection = applyEvent(createProjection(), makeEvent("goal.created", { objective: "legacy", scope: [], nonGoals: [], dod: [], tasks, taskDefs }, goalId));
+  const projection = replayLegacyCreate(makeEvent("goal.created", { objective: "legacy", scope: [], nonGoals: [], dod: [], tasks, taskDefs }, goalId));
   assert.equal(projection.version, 1);
   assert.equal(projection.eventSchemaVersion, "goal-engine.event.v1");
   assert.equal(projection.tasks.size, 33);
@@ -207,7 +227,7 @@ test("v2 create and amend replay identically across child-process cwd values", (
     { schemaVersion: "goal-engine.event.v2", eventId: "amend", goalId: "cwd-replay", occurredAt: "2025-01-01T00:00:01.000Z", type: "goal.amended", data: { reason: "Add an independently replayable pending task", addTasks: { t2: { description: "second", deps: ["t1"], writePaths: ["src/b.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" } } } },
   ];
   const moduleUrl = pathToFileURL(new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).pathname).href;
-  const program = `const {createProjection,applyEvent}=await import(process.argv[1]); let p=createProjection(); for (const e of JSON.parse(process.argv[2])) p=applyEvent(p,e); console.log(JSON.stringify({goalId:p.goalId,version:p.version,objective:p.objective,scope:p.scope,nonGoals:p.nonGoals,dod:p.dod,tasks:[...p.tasks]}));`;
+  const program = `const {createProjection,applyEvent}=await import(process.argv[1]); let p=createProjection(); for (const e of JSON.parse(process.argv[2])) p=applyEvent(p,e,{replay:p.version===0}); console.log(JSON.stringify({goalId:p.goalId,version:p.version,objective:p.objective,scope:p.scope,nonGoals:p.nonGoals,dod:p.dod,tasks:[...p.tasks]}));`;
   const first = mkdtempSync(join(tmpdir(), "ge-replay-a-"));
   const second = mkdtempSync(join(tmpdir(), "ge-replay-b-"));
   const replay = (cwd) => JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", program, moduleUrl, JSON.stringify(events)], { cwd, encoding: "utf8", env: { ...process.env, GOAL_ENGINE_REPLAY_CWD: cwd } }));
@@ -224,7 +244,7 @@ test("createProjection returns empty state", () => {
 
 test("goal.created initializes projection", () => {
   let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
+  p = applyLegacyEvent(p, makeEvent("goal.created", {
     objective: "Build auth module",
     scope: ["src/auth/"],
     nonGoals: ["UI changes"],
@@ -274,13 +294,13 @@ test("duplicate eventId is rejected", () => {
     objective: "X", scope: [], nonGoals: [], dod: [],
     tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
   });
-  p = applyEvent(p, event);
+  p = applyLegacyEvent(p, event);
   assert.throws(() => applyEvent(p, event), /duplicate eventId/);
 });
 
 test("terminal lifecycle rejects further events", () => {
   let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
+  p = applyLegacyEvent(p, makeEvent("goal.created", {
     objective: "X", scope: [], nonGoals: [], dod: [],
     tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
   }));
@@ -296,7 +316,7 @@ test("terminal lifecycle rejects further events", () => {
 
 test("task lifecycle: pending → dispatched → succeeded → accepted", () => {
   let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
+  p = applyLegacyEvent(p, makeEvent("goal.created", {
     objective: "Lifecycle test", scope: [], nonGoals: [], dod: [],
     tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["node --test test/x.test.mjs"] }, workflow: "tdd" } },
   }));
@@ -321,7 +341,7 @@ test("task lifecycle: pending → dispatched → succeeded → accepted", () => 
 
 test("task.settled failed resets to pending for retry", () => {
   let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
+  p = applyLegacyEvent(p, makeEvent("goal.created", {
     objective: "Retry test", scope: [], nonGoals: [], dod: [],
     tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
   }));
@@ -334,7 +354,7 @@ test("task.settled failed resets to pending for retry", () => {
 
 test("task.settled rejects vague nextAction", () => {
   let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
+  p = applyLegacyEvent(p, makeEvent("goal.created", {
     objective: "Vague test", scope: [], nonGoals: [], dod: [],
     tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
   }));
@@ -348,7 +368,7 @@ test("task.settled rejects vague nextAction", () => {
 test("task.settled rejects illegal evidence sources and external non-review atomically", () => {
   const dispatched = () => {
     let projection = createProjection();
-    projection = applyEvent(projection, makeEvent("goal.created", {
+    projection = applyLegacyEvent(projection, makeEvent("goal.created", {
       objective: "Evidence source validation", scope: [], nonGoals: [], dod: [],
       tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
     }));
@@ -377,7 +397,7 @@ test("task.settled rejects illegal evidence sources and external non-review atom
 
 test("task.settled rejects command-type evidence", () => {
   let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
+  p = applyLegacyEvent(p, makeEvent("goal.created", {
     objective: "Cmd evidence test", scope: [], nonGoals: [], dod: [],
     tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
   }));
@@ -390,7 +410,7 @@ test("task.settled rejects command-type evidence", () => {
 
 test("goal.completed rejects when tasks not all accepted", () => {
   let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
+  p = applyLegacyEvent(p, makeEvent("goal.created", {
     objective: "Gate test", scope: [], nonGoals: [], dod: [],
     tasks: ["t1", "t2"],
     taskDefs: {
@@ -410,7 +430,7 @@ test("goal.completed rejects when tasks not all accepted", () => {
 
 test("goal.amended adds and removes tasks", () => {
   let p = createProjection();
-  p = applyEvent(p, makeEvent("goal.created", {
+  p = applyLegacyEvent(p, makeEvent("goal.created", {
     objective: "Amend test", scope: [], nonGoals: [], dod: [],
     tasks: ["t1", "t2"],
     taskDefs: {
@@ -447,8 +467,8 @@ test("historical v1 JSONL remove add update replacement replays in candidate ord
     updateTasks: { t1: { description: "refined", writePaths: ["refined.ts"], acceptance: { criteria: ["refined"], commands: ["node --test test/refined.test.mjs"] } } },
   };
   const root = tmpRoot();
-  appendEvent(root, created, 0);
-  appendEvent(root, { schemaVersion: "goal-engine.event.v1", eventId: "remove-add-amended", goalId, occurredAt: "2025-02-04T05:06:08.000Z", type: "goal.amended", data: replacement }, 1);
+  const amended = { schemaVersion: "goal-engine.event.v1", eventId: "remove-add-amended", goalId, occurredAt: "2025-02-04T05:06:08.000Z", type: "goal.amended", data: replacement };
+  writeLegacyEventLog(root, goalId, [created, amended]);
   const replayed = loadProjection(root, goalId);
   assert.equal(replayed.version, 2);
   assert.equal(replayed.tasks.get("t1").description, "refined");
@@ -467,15 +487,11 @@ test("v1 duplicate remove amendments reject atomically in the store", () => {
       taskDefs: { t1: { description: "original", deps: [], writePaths: ["original.ts"], acceptance: { criteria: ["original"], commands: ["true"] }, workflow: "tdd" } },
     },
   };
-  appendEvent(root, created, 0);
+  writeLegacyEventLog(root, goalId, [created]);
   const eventsPath = join(root, `goals/${goalId}/events.jsonl`);
   const projectionPath = join(root, `goals/${goalId}/projection.json`);
   const registryPath = join(root, "registry.json");
-  const before = {
-    events: readFileSync(eventsPath, "utf8"),
-    projection: readFileSync(projectionPath, "utf8"),
-    registry: readFileSync(registryPath, "utf8"),
-  };
+  const before = readFileSync(eventsPath, "utf8");
 
   for (const { eventId, data } of [
     { eventId: "duplicate-remove-only", data: { reason: "Reject duplicate v1 remove IDs before candidate construction", removeTasks: ["t1", "t1"] } },
@@ -493,9 +509,9 @@ test("v1 duplicate remove amendments reject atomically in the store", () => {
       () => appendEvent(root, { schemaVersion: "goal-engine.event.v1", eventId, goalId, occurredAt: "2025-02-05T06:07:09.000Z", type: "goal.amended", data }, 1),
       /duplicate remove task: t1/,
     );
-    assert.equal(readFileSync(eventsPath, "utf8"), before.events);
-    assert.equal(readFileSync(projectionPath, "utf8"), before.projection);
-    assert.equal(readFileSync(registryPath, "utf8"), before.registry);
+    assert.equal(readFileSync(eventsPath, "utf8"), before);
+    assert.equal(existsSync(projectionPath), false);
+    assert.equal(existsSync(registryPath), false);
     const projection = loadProjection(root, goalId);
     assert.equal(projection.version, 1);
     assert.deepEqual([...projection.tasks.keys()], ["t1"]);
@@ -518,21 +534,21 @@ test("historical v1 and v2 amendments update a task added by the same event", ()
     updateTasks: { t2: { description: "updated new work", writePaths: ["updated-t2.ts"], acceptance: { criteria: ["updated"], commands: ["node --test test/t2.test.mjs"] } } },
   };
   const root = tmpRoot();
-  appendEvent(root, created, 0);
-  appendEvent(root, { schemaVersion: "goal-engine.event.v1", eventId: "fixed-amended", goalId, occurredAt: "2025-02-03T04:05:07.000Z", type: "goal.amended", data: amendmentData }, 1);
+  const amended = { schemaVersion: "goal-engine.event.v1", eventId: "fixed-amended", goalId, occurredAt: "2025-02-03T04:05:07.000Z", type: "goal.amended", data: amendmentData };
+  writeLegacyEventLog(root, goalId, [created, amended]);
   const replayed = loadProjection(root, goalId);
   assert.equal(replayed.version, 2);
   assert.equal(replayed.tasks.get("t2").description, "updated new work");
   assert.deepEqual(replayed.tasks.get("t2").writePaths, ["updated-t2.ts"]);
 
-  let v2 = applyEvent(createProjection(), { ...created, schemaVersion: "goal-engine.event.v2", eventId: "fixed-v2-created", goalId: "fixed-v2-add-update" });
+  let v2 = replayLegacyCreate({ ...created, schemaVersion: "goal-engine.event.v2", eventId: "fixed-v2-created", goalId: "fixed-v2-add-update" });
   v2 = applyEvent(v2, { schemaVersion: "goal-engine.event.v2", eventId: "fixed-v2-amended", goalId: "fixed-v2-add-update", occurredAt: "2025-02-03T04:05:07.000Z", type: "goal.amended", data: amendmentData });
   assert.equal(v2.tasks.get("t2").description, "updated new work");
 });
 
 test("v2 dispatch requires downstream dependencies accepted", () => {
   const goalId = "dispatch-runnable-goal";
-  let p = applyEvent(
+  let p = applyLegacyEvent(
     createProjection(),
     v2Event(
       "goal.created",
@@ -571,7 +587,7 @@ test("v2 dispatch requires downstream dependencies accepted", () => {
 
 test("rejected dispatch keeps task and workspace state unchanged", () => {
   const goalId = "dispatch-immutable-goal";
-  let p = applyEvent(
+  let p = applyLegacyEvent(
     createProjection(),
     v2Event(
       "goal.created",
@@ -632,7 +648,7 @@ test("rejected dispatch keeps task and workspace state unchanged", () => {
 
 test("amendment updateTasks with dependency cycle is rejected and projection unchanged", () => {
   const goalId = "amend-cycle-goal";
-  let p = applyEvent(
+  let p = applyLegacyEvent(
     createProjection(),
     makeEvent(
       "goal.created",
@@ -695,7 +711,7 @@ test("amendment updateTasks with dependency cycle is rejected and projection unc
 
 test("amendment unknown dependency is rejected and projection unchanged", () => {
   const goalId = "amend-unknown-goal";
-  let p = applyEvent(
+  let p = applyLegacyEvent(
     createProjection(),
     makeEvent(
       "goal.created",
@@ -767,11 +783,17 @@ function tmpRoot() {
   return mkdtempSync(join(tmpdir(), "ge-store-"));
 }
 
+function writeLegacyEventLog(root, goalId, events) {
+  const goalDir = join(root, "goals", goalId);
+  mkdirSync(goalDir, { recursive: true });
+  writeFileSync(join(goalDir, "events.jsonl"), `${events.map(JSON.stringify).join("\n")}\n`);
+}
+
 test("appendEvent writes events.jsonl and projection.json", () => {
   const root = tmpRoot();
-  const event = makeEvent("goal.created", {
+  const event = plannedEvent("goal.created", {
     objective: "Store test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
+    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: [plannedCriterion("x")] }, workflow: "tdd" } },
   }, "store-goal");
 
   const proj = appendEvent(root, event, 0);
@@ -791,14 +813,14 @@ test("appendEvent writes events.jsonl and projection.json", () => {
 
 test("appendEvent rejects stale expectedVersion", () => {
   const root = tmpRoot();
-  const e1 = makeEvent("goal.created", {
+  const e1 = plannedEvent("goal.created", {
     objective: "Version test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
+    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: [plannedCriterion("x")] }, workflow: "tdd" } },
   }, "ver-goal");
 
   appendEvent(root, e1, 0);
 
-  const e2 = makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }, "ver-goal");
+  const e2 = plannedEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }, "ver-goal");
   assert.throws(
     () => appendEvent(root, e2, 0),
     /projection version conflict: expected 0, current 1/,
@@ -807,9 +829,9 @@ test("appendEvent rejects stale expectedVersion", () => {
 
 test("loadProjection rebuilds from events.jsonl", () => {
   const root = tmpRoot();
-  const e1 = makeEvent("goal.created", {
+  const e1 = plannedEvent("goal.created", {
     objective: "Load test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
+    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: [plannedCriterion("x")] }, workflow: "tdd" } },
   }, "load-goal");
 
   appendEvent(root, e1, 0);
@@ -859,7 +881,7 @@ test("v2 dispatch dependency gate rejects downstream before acceptance atomicall
       t2: { description: "downstream", deps: ["t1"], writePaths: ["src/t2.ts"], acceptance: { criteria: ["t2 works"], commands: ["true"] }, workflow: "tdd" },
     },
   }, goalId, "2025-03-02T00:00:00.000Z", "v2-created");
-  const projection = applyEvent(createProjection(), created);
+  const projection = replayLegacyCreate(created);
   const before = structuredClone({ version: projection.version, eventSchemaVersion: projection.eventSchemaVersion, tasks: [...projection.tasks] });
   assert.throws(() => applyEvent(projection, fixedV2Event("task.dispatched", {
     taskId: "t2", contractHash: "v2-t2", workspace: { attempt: 1, path: "/tmp/t2", branch: "ge/t2/1", baseCommit: "base" },
@@ -876,7 +898,7 @@ test("dispatch downgrade rejects v1 after v2 history and v2 retains dependency g
       t2: { description: "downstream", deps: ["t1"], writePaths: ["src/t2.ts"], acceptance: { criteria: ["t2 works"], commands: ["true"] }, workflow: "tdd" },
     } },
   };
-  let projection = applyEvent(createProjection(), created);
+  let projection = replayLegacyCreate(created);
   assert.throws(() => applyEvent(projection, fixedV2Event("task.dispatched", {
     taskId: "t2", contractHash: "upgraded-t2", workspace: { attempt: 1, path: "/tmp/t2", branch: "ge/t2/1", baseCommit: "base" },
   }, goalId, "2025-03-03T00:00:01.000Z", "mixed-v2-t2")), /dependencies are not accepted: t1/);
@@ -897,9 +919,9 @@ test("listGoals returns active goal ids", () => {
   const root = tmpRoot();
   assert.deepEqual(listGoals(root), []);
 
-  const e1 = makeEvent("goal.created", {
+  const e1 = plannedEvent("goal.created", {
     objective: "List test", scope: [], nonGoals: [], dod: [],
-    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
+    tasks: ["t1"], taskDefs: { t1: { description: "a", deps: [], writePaths: ["a.ts"], acceptance: { criteria: [plannedCriterion("x")] }, workflow: "tdd" } },
   }, "list-goal");
 
   appendEvent(root, e1, 0);
@@ -908,7 +930,7 @@ test("listGoals returns active goal ids", () => {
 
 // v2 disposition invariant regressions (incremental to the restored v1 suite).
 test("amend rejects accepted and unreleased workspace tasks atomically", () => {
-  const base = applyEvent(createProjection(), v2Created("amend-gate-goal"));
+  const base = replayLegacyCreate(v2Created("amend-gate-goal"));
   const amend = (projection, data) => applyEvent(projection, v2Event("goal.amended", {
     reason: "Prevent rewriting executed task proof and workspace identity",
     ...data,
@@ -965,7 +987,7 @@ test("v2 pending replacement succeeds while accepted and unreleased replacements
   const amend = (projection) => applyEvent(projection, v2Event("goal.amended", replacement, "replacement-gate-goal"));
   const snapshot = (projection) => structuredClone({ version: projection.version, tasks: [...projection.tasks] });
 
-  const pending = applyEvent(createProjection(), v2Created("replacement-gate-goal"));
+  const pending = replayLegacyCreate(v2Created("replacement-gate-goal"));
   const replaced = amend(pending);
   assert.equal(replaced.version, 2);
   assert.equal(replaced.tasks.get("t1").description, "refined");
@@ -980,7 +1002,7 @@ test("v2 pending replacement succeeds while accepted and unreleased replacements
     { status: "pending", phase: "disposed", disposition: "discarded", released: false },
   ];
   for (const fixture of rejected) {
-    const projection = applyEvent(createProjection(), v2Created("replacement-gate-goal"));
+    const projection = replayLegacyCreate(v2Created("replacement-gate-goal"));
     const task = projection.tasks.get("t1");
     task.status = fixture.status;
     if (fixture.phase) task.workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: fixture.phase, disposition: fixture.disposition, released: fixture.released };
@@ -995,14 +1017,14 @@ test("amend allows never-dispatched and discarded released pending tasks", () =>
     reason: "Allow pending tasks after workspace resources are fully released",
     ...data,
   }, "amend-allowed-goal"));
-  let neverDispatched = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  let neverDispatched = replayLegacyCreate(v2Created("amend-allowed-goal"));
   neverDispatched = amend(neverDispatched, { updateTasks: { t1: { description: "changed" } } });
   assert.equal(neverDispatched.tasks.get("t1").description, "changed");
-  const neverDispatchedRemoval = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  const neverDispatchedRemoval = replayLegacyCreate(v2Created("amend-allowed-goal"));
   assert.throws(() => amend(neverDispatchedRemoval, { removeTasks: ["t1"] }), /non-empty|tasks/i);
   assert.equal(neverDispatchedRemoval.tasks.has("t1"), true);
 
-  let released = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  let released = replayLegacyCreate(v2Created("amend-allowed-goal"));
   released.tasks.get("t1").workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "disposed", disposition: "discarded", released: true };
   released = amend(released, { updateTasks: { t1: { description: "changed again" } } });
   assert.equal(released.tasks.get("t1").description, "changed again");
@@ -1016,16 +1038,16 @@ test("workflow amendments apply to never-dispatched and discarded released pendi
     reason: "Allow pending task workflow changes after workspace release",
     ...data,
   }, "amend-allowed-goal"));
-  let neverDispatched = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  let neverDispatched = replayLegacyCreate(v2Created("amend-allowed-goal"));
   neverDispatched = amend(neverDispatched, { updateTasks: { t1: { workflow: "existing-tests" } } });
   assert.equal(neverDispatched.tasks.get("t1").workflow, "existing-tests");
 
-  let released = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  let released = replayLegacyCreate(v2Created("amend-allowed-goal"));
   released.tasks.get("t1").workspace = { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc", phase: "disposed", disposition: "discarded", released: true };
   released = amend(released, { updateTasks: { t1: { workflow: "docs-only" } } });
   assert.equal(released.tasks.get("t1").workflow, "docs-only");
 
-  const invalid = applyEvent(createProjection(), v2Created("amend-allowed-goal"));
+  const invalid = replayLegacyCreate(v2Created("amend-allowed-goal"));
   const before = snapshot(invalid);
   assert.throws(() => amend(invalid, { updateTasks: { t1: { workflow: "unsafe" } } }), /workflow/i);
   assert.deepEqual(snapshot(invalid), before);
@@ -1057,7 +1079,7 @@ function started(action, goalId = "v2-goal") {
 }
 
 test("settlement identity strictly binds succeeded v2 attempt and HEAD", () => {
-  const dispatched = v2Dispatched(applyEvent(createProjection(), v2Created()));
+  const dispatched = v2Dispatched(replayLegacyCreate(v2Created()));
   const base = { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria" };
   assert.throws(() => applyEvent(dispatched, v2Event("task.settled", base)), /attempt|executorHead|settlement/i);
   assert.throws(() => applyEvent(dispatched, v2Event("task.settled", { ...base, attempt: 2, executorHead: "head-1" })), /attempt/i);
@@ -1069,7 +1091,7 @@ test("settlement identity strictly binds succeeded v2 attempt and HEAD", () => {
 });
 
 test("redispatch clears stale settlement identity", () => {
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created())));
   const task = p.tasks.get("t1");
   // A discarded settled task is the reducer's redispatchable recovery state.
   Object.assign(task.workspace, { phase: "disposed", disposition: "discarded", released: true });
@@ -1079,12 +1101,12 @@ test("redispatch clears stale settlement identity", () => {
 });
 
 test("schema downgrade rejects v1 accepted after a v2 event", () => {
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created())));
   assert.throws(() => applyEvent(p, makeEvent("task.accepted", { taskId: "t1" }, "v2-goal")), /schema downgrade/);
 });
 
 test("legacy v1 history remains replayable and explicitly unverified", () => {
-  let p = applyEvent(createProjection(), makeEvent("goal.created", { objective: "Legacy", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] } } } }));
+  let p = replayLegacyCreate(makeEvent("goal.created", { objective: "Legacy", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] } } } }));
   p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
   p = applyEvent(p, makeEvent("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "a.ts" }, nextAction: "Verify the complete implementation meets the required acceptance criteria" }));
   p = applyEvent(p, makeEvent("task.accepted", { taskId: "t1" }));
@@ -1093,14 +1115,14 @@ test("legacy v1 history remains replayable and explicitly unverified", () => {
 });
 
 test("legacy v2 started without originRef replays with explicit legacy marker", () => {
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created())));
   p = applyEvent(p, started("integrate"));
   assert.equal(p.tasks.get("t1").workspace.legacyOriginRef, true);
   assert.equal(p.tasks.get("t1").workspace.originRef, undefined);
 });
 
 test("v2 started persists a valid originRef", () => {
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created())));
   const event = started("integrate"); event.data.originRef = "refs/heads/main";
   p = applyEvent(p, event);
   assert.equal(p.tasks.get("t1").workspace.originRef, "refs/heads/main");
@@ -1108,7 +1130,7 @@ test("v2 started persists a valid originRef", () => {
 });
 
 test("workspace disposition rebase advances only the exact disposing origin identity", () => {
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created())));
   const start = started("integrate");
   start.data.originRef = "refs/heads/main";
   p = applyEvent(p, start);
@@ -1155,7 +1177,7 @@ test("historical v1 accepted amendment JSONL replays while v2 accepted amendment
     event("goal-engine.event.v1", "v1-amended", "2025-01-01T00:00:04.000Z", "goal.amended", { reason: "Preserve historical rewritten acceptance proof during v1 log replay", updateTasks: { t1: { acceptance: { criteria: ["historically rewritten proof"], commands: ["node --test test/historical.test.mjs"] } } } }),
   ];
   const root = tmpRoot();
-  v1Events.forEach((item, index) => appendEvent(root, item, index));
+  writeLegacyEventLog(root, goalId, v1Events);
   const replayed = loadProjection(root, goalId);
   assert.equal(replayed.version, 5);
   assert.equal(replayed.tasks.get("t1").status, "accepted");
@@ -1177,25 +1199,25 @@ test("historical v1 accepted amendment JSONL replays while v2 accepted amendment
     v2("v2-accepted", "2025-01-02T00:00:06.000Z", "task.accepted", { taskId: "t1", workspaceAttempt: 1 }),
   ];
   let v2Projection = createProjection();
-  for (const item of v2Events) v2Projection = applyEvent(v2Projection, item);
+  for (const [index, item] of v2Events.entries()) v2Projection = applyEvent(v2Projection, item, { replay: index === 0 });
   const before = structuredClone({ version: v2Projection.version, tasks: [...v2Projection.tasks] });
   assert.throws(() => applyEvent(v2Projection, v2("v2-amended", "2025-01-02T00:00:07.000Z", "goal.amended", { reason: "Reject rewriting accepted v2 task proof after the contract freeze", updateTasks: { t1: { acceptance: { criteria: ["rewritten"], commands: ["false"] } } } })), /pending|accepted|amend/i);
   assert.deepEqual(structuredClone({ version: v2Projection.version, tasks: [...v2Projection.tasks] }), before);
 });
 
 test("disposition requires settled status and compatible outcome", () => {
-  let p = v2Dispatched(applyEvent(createProjection(), v2Created()));
+  let p = v2Dispatched(replayLegacyCreate(v2Created()));
   for (const action of ["integrate", "discard", "preserve"]) assert.throws(() => applyEvent(p, started(action)), /settled|status|succeeded/);
   p = v2Settled(p, "failed");
   assert.throws(() => applyEvent(p, started("integrate")), /succeeded/);
   for (const action of ["discard", "preserve"]) assert.doesNotThrow(() => applyEvent(p, started(action)));
-  let blocked = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created("blocked-goal")), "blocked-goal"), "blocked", "blocked-goal");
+  let blocked = v2Settled(v2Dispatched(replayLegacyCreate(v2Created("blocked-goal")), "blocked-goal"), "blocked", "blocked-goal");
   assert.throws(() => applyEvent(blocked, started("integrate", "blocked-goal")), /succeeded/);
   for (const action of ["discard", "preserve"]) assert.doesNotThrow(() => applyEvent(blocked, started(action, "blocked-goal")));
 });
 
 test("disposition applied preserves started identity", () => {
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created())));
   const start = started("integrate");
   p = applyEvent(p, start);
   const data = { ...start.data, action: "integrate", originHead: "origin-after" };
@@ -1205,7 +1227,7 @@ test("disposition applied preserves started identity", () => {
 
 test("discarded succeeded resets pending and pending remains pending", () => {
   for (const outcome of ["succeeded", "failed"]) {
-    let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(`${outcome}-goal`)), `${outcome}-goal`), outcome, `${outcome}-goal`);
+    let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created(`${outcome}-goal`)), `${outcome}-goal`), outcome, `${outcome}-goal`);
     const start = started("discard", `${outcome}-goal`);
     p = applyEvent(p, start);
     p = applyEvent(p, v2Event("task.workspace_disposition_applied", { ...start.data, action: "discard", originHead: "origin-after" }, `${outcome}-goal`));
@@ -1215,14 +1237,14 @@ test("discarded succeeded resets pending and pending remains pending", () => {
 });
 
 test("v1 projection upgrades on v2 and rejects every later v1 event", () => {
-  let p = applyEvent(createProjection(), makeEvent("goal.created", { objective: "Upgrade", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] } } } }));
+  let p = replayLegacyCreate(makeEvent("goal.created", { objective: "Upgrade", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] } } } }));
   p = applyEvent(p, v2Event("task.dispatched", { taskId: "t1", contractHash: "h1", workspace: { attempt: 1, path: "/tmp/work", branch: "task/t1", baseCommit: "abc" } }, "test-goal"));
   assert.equal(p.eventSchemaVersion, "goal-engine.event.v2");
   assert.throws(() => applyEvent(p, makeEvent("goal.checkpoint", { nextAction: "Verify the complete implementation meets the required acceptance criteria" })), /schema downgrade/);
 });
 
 test("disposition applied retains attempt phase and action gates", () => {
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created())));
   const start = started("integrate"); p = applyEvent(p, start);
   assert.throws(() => applyEvent(p, v2Event("task.workspace_disposition_applied", { ...start.data, attempt: 2, action: "integrate", originHead: "origin-after" })), /attempt/);
   assert.throws(() => applyEvent(p, v2Event("task.workspace_disposition_applied", { ...start.data, action: "discard", originHead: "origin-after" })), /action/);
@@ -1232,7 +1254,7 @@ test("disposition applied retains attempt phase and action gates", () => {
 
 test("redispatch attempt2 is rejected after failed settle when active workspace is still attempt1", () => {
   const goalId = "failed-active-redispatch-goal";
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "failed", goalId);
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created(goalId)), goalId), "failed", goalId);
   const failedWorkspace = p.tasks.get("t1").workspace;
   assert.equal(failedWorkspace.phase, "active");
 
@@ -1256,7 +1278,7 @@ test("redispatch attempt2 is rejected after failed settle when active workspace 
 
 test("preserved terminal workspace blocks redispatch", () => {
   const goalId = "preserve-vs-discard-redispatch-goal";
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "failed", goalId);
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created(goalId)), goalId), "failed", goalId);
 
   const preserveStart = started("preserve", goalId);
   p = applyEvent(p, preserveStart);
@@ -1281,7 +1303,7 @@ test("preserved terminal workspace blocks redispatch", () => {
 
 test("discarded released workspace allows redispatch retry", () => {
   const goalId = "discard-retry-redispatch-goal";
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "failed", goalId);
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created(goalId)), goalId), "failed", goalId);
   const start = started("discard", goalId);
   p = applyEvent(p, start);
   p = applyEvent(p, v2Event("task.workspace_disposition_applied", { ...start.data, action: "discard", originHead: "origin-after" }, goalId));
@@ -1303,7 +1325,7 @@ test("discarded released workspace allows redispatch retry", () => {
 
 test("v2 without integrated or released succeeded rejects accept", () => {
   const goalId = "without-integrated-accept-goal";
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "succeeded", goalId);
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created(goalId)), goalId), "succeeded", goalId);
 
   const start = started("preserve", goalId);
   p = applyEvent(p, start);
@@ -1315,7 +1337,7 @@ test("v2 without integrated or released succeeded rejects accept", () => {
 
 test("terminal dispose event is rejected when terminal state already emitted", () => {
   const goalId = "terminal-dispose-repeat-goal";
-  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "succeeded", goalId);
+  let p = v2Settled(v2Dispatched(replayLegacyCreate(v2Created(goalId)), goalId), "succeeded", goalId);
   const start = started("integrate", goalId);
   p = applyEvent(p, start);
   p = applyEvent(p, v2Event("task.workspace_disposition_applied", { ...start.data, action: "integrate", originHead: "origin-after" }, goalId));
@@ -1437,18 +1459,18 @@ test("v2 terminal disposition store round-trip preserves schema and acceptance",
   let replayed = createProjection();
   let replayedTwice = createProjection();
 
-  for (const event of events) {
-    replayed = applyEvent(replayed, event);
+  for (const [index, event] of events.entries()) {
+    replayed = applyEvent(replayed, event, { replay: index === 0 });
   }
 
-  for (const event of events) {
-    replayedTwice = applyEvent(replayedTwice, event);
+  for (const [index, event] of events.entries()) {
+    replayedTwice = applyEvent(replayedTwice, event, { replay: index === 0 });
   }
 
   assert.deepEqual(replayed, replayedTwice);
   assert.deepEqual(expectedEvents, events);
   const root = tmpRoot();
-  events.forEach((event, index) => appendEvent(root, event, index));
+  writeLegacyEventLog(root, goalId, events);
   const storedEvents = readFileSync(join(root, `goals/${goalId}/events.jsonl`), "utf8")
     .trim()
     .split("\n")
@@ -1479,28 +1501,29 @@ test("v2 terminal disposition store round-trip preserves schema and acceptance",
   assert.equal(replayed.version, events.length);
 });
 
-test("v2 creation rejects malformed task contracts atomically while v1 replay remains isolated", () => {
-  const valid = { objective: "Validate new task contracts", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } };
+test("planned creation rejects malformed task contracts atomically while v1 replay remains isolated", () => {
+  const valid = { objective: "Validate new task contracts", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: [plannedCriterion("works")] }, workflow: "tdd" } } };
   const invalids = [
     { tasks: [], taskDefs: {} }, { tasks: ["t1", "t1"] },
     { taskDefs: { t1: { ...valid.taskDefs.t1, deps: ["missing"] } } },
     { taskDefs: { t1: { ...valid.taskDefs.t1, deps: ["t1"] } } },
     { taskDefs: { t1: { ...valid.taskDefs.t1, writePaths: ["../escape"] } } },
-    { taskDefs: { t1: { ...valid.taskDefs.t1, acceptance: { criteria: [], commands: ["true"] } } } },
-    { taskDefs: { t1: { ...valid.taskDefs.t1, acceptance: { criteria: ["works"], commands: ["cd /tmp && true"] } } } },
+    { taskDefs: { t1: { ...valid.taskDefs.t1, acceptance: { criteria: [] } } } },
+    { taskDefs: { t1: { ...valid.taskDefs.t1, acceptance: { criteria: [plannedCriterion("works")], commands: ["true"] } } } },
     { taskDefs: { t1: { ...valid.taskDefs.t1, workflow: "unsupported" } } },
   ];
   for (const patch of invalids) {
     const before = createProjection();
-    assert.throws(() => applyEvent(before, v2Event("goal.created", { ...valid, ...patch }, "contract-gate")), /task|taskDefs|deps|dep|cycle|path|acceptance|workflow|command/i);
+    assert.throws(() => applyEvent(before, plannedEvent("goal.created", { ...valid, ...patch }, "contract-gate")), /task|taskDefs|deps|dep|cycle|path|acceptance|workflow|command/i);
     assert.equal(before.version, 0); assert.equal(before.tasks.size, 0);
   }
-  const legacy = applyEvent(createProjection(), makeEvent("goal.created", { ...valid, tasks: ["t1", "t1"] }, "legacy-contract-replay"));
+  const legacyTask = { ...valid.taskDefs.t1, acceptance: { criteria: ["works"], commands: ["true"] } };
+  const legacy = replayLegacyCreate(makeEvent("goal.created", { ...valid, tasks: ["t1", "t1"], taskDefs: { t1: legacyTask } }, "legacy-contract-replay"));
   assert.equal(legacy.tasks.size, 1);
 });
 
 test("v2 amendment cannot bypass task contract validation or empty the DAG", () => {
-  const projection = applyEvent(createProjection(), v2Created("amend-contract-gate"));
+  const projection = replayLegacyCreate(v2Created("amend-contract-gate"));
   const before = structuredClone({ version: projection.version, tasks: [...projection.tasks] });
   for (const data of [
     { reason: "Reject unsafe updated path through new amendment validator", updateTasks: { t1: { writePaths: ["/tmp/x"] } } },
@@ -1588,7 +1611,7 @@ test("historical v1 dispatched and succeeded settled JSONL remains readable", ()
 
 test("strict disposition settlement identity matrix permits only matching succeeded bindings", () => {
   for (const action of ["integrate", "discard", "preserve"]) {
-    const succeeded = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(`strict-${action}`)), `strict-${action}`), "succeeded", `strict-${action}`);
+    const succeeded = v2Settled(v2Dispatched(replayLegacyCreate(v2Created(`strict-${action}`)), `strict-${action}`), "succeeded", `strict-${action}`);
     for (const mutation of [
       (event) => { delete event.data.executorHead; },
       (event) => { event.data.attempt = 2; },
@@ -1601,7 +1624,7 @@ test("strict disposition settlement identity matrix permits only matching succee
   }
   for (const outcome of ["failed", "blocked"]) for (const action of ["discard", "preserve"]) {
     const goalId = `${outcome}-${action}-unbound`;
-    const projection = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), outcome, goalId);
+    const projection = v2Settled(v2Dispatched(replayLegacyCreate(v2Created(goalId)), goalId), outcome, goalId);
     assert.doesNotThrow(() => applyEvent(projection, started(action, goalId)));
   }
 });
@@ -1640,7 +1663,7 @@ function orphanRecoveredEvent(data = {}, goalId = "orphan-recovery-goal", schema
 }
 
 function orphanRecoveryBaseline(goalId = "orphan-recovery-goal") {
-  return applyEvent(createProjection(), v2Created(goalId));
+  return replayLegacyCreate(v2Created(goalId));
 }
 
 function discardAttemptOne(goalId = "orphan-attempt-two-goal") {
@@ -1827,7 +1850,7 @@ test("orphan recovery store round-trip uses only legal history before recovery",
   ];
   const discard = started("discard", "orphan-store");
   history.push(discard, v2Event("task.workspace_disposition_applied", { ...discard.data, action: "discard", originHead: "origin-after" }, "orphan-store"), v2Event("task.workspace_disposed", { taskId: "t1", attempt: 1, action: "discard", released: true }, "orphan-store"), recovery);
-  history.forEach((event, index) => appendEvent(root, event, index));
+  writeLegacyEventLog(root, "orphan-store", history);
   assert.deepEqual(loadProjection(root, "orphan-store").tasks.get("t1"), projection.tasks.get("t1"));
 });
 
@@ -1919,7 +1942,7 @@ function v3Event(type, data, goalId = "test-goal", occurredAt = "2026-08-05T00:0
 
 function completedEpochProjection() {
   let projection = createProjection();
-  projection = applyEvent(projection, makeEvent("goal.created", {
+  projection = applyLegacyEvent(projection, makeEvent("goal.created", {
     objective: "Preserve a completed milestone while accepting follow-up work",
     scope: ["src/"], nonGoals: [], dod: ["All accepted evidence remains immutable"],
     tasks: ["t1"],
@@ -2000,7 +2023,7 @@ test("reopen rejects untriaged discoveries and non-accepted historical tasks", (
     reason: "Cannot reopen before tasking the discovery", observationIds: ["obs-open"],
   })), /tasked/);
 
-  const notCompleted = applyEvent(createProjection(), { ...v2Created("active-v3"), goalId: "active-v3" });
+  const notCompleted = replayLegacyCreate({ ...v2Created("active-v3"), goalId: "active-v3" });
   assert.throws(() => applyEvent(notCompleted, v3Event("goal.reopened", {
     reason: "An active goal cannot open another epoch", observationIds: ["obs"],
   }, "active-v3")), /completed/);
@@ -2027,7 +2050,7 @@ test("v3 session continuity events are durable and detached sessions stop watchi
 });
 
 test("goal contract amendment requires a real approval identity and preserves old metadata", () => {
-  let projection = applyEvent(createProjection(), v2Created("contract-v3"));
+  let projection = replayLegacyCreate(v2Created("contract-v3"));
   const proposalHash = "a".repeat(64);
   const changes = { objective: "Updated objective", scope: ["src/", "test/"] };
   const event = (approval) => v3Event("goal.contract_amended", { proposalHash, changes, approval }, "contract-v3");
@@ -2048,7 +2071,7 @@ test("goal contract amendment requires a real approval identity and preserves ol
 
 test("released blocked task can retry or supersede but active workspace fails closed", () => {
   const goalId = "blocked-v3";
-  let blocked = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created(goalId)), goalId), "blocked", goalId);
+  let blocked = v2Settled(v2Dispatched(replayLegacyCreate(v2Created(goalId)), goalId), "blocked", goalId);
   assert.equal(blocked.coordinationState, "blocked");
   assert.throws(() => applyEvent(blocked, v3Event("task.block_resolved", {
     taskId: "t1", resolution: "retry", reason: "Retry after resolving the external blocker",
@@ -2080,7 +2103,7 @@ test("released blocked task can retry or supersede but active workspace fails cl
 test("store projection snapshot serializes v3 epoch and continuity fields", () => {
   const root = tmpRoot();
   const goalId = "v3-store-snapshot";
-  appendEvent(root, v2Created(goalId), 0);
+  writeLegacyEventLog(root, goalId, [v2Created(goalId)]);
   appendEvent(root, v3Event("goal.session_bound", { sessionId: "session-store", leafId: "leaf-store" }, goalId), 1);
 
   const persisted = JSON.parse(readFileSync(join(root, "goals", goalId, "projection.json"), "utf8"));
@@ -2114,7 +2137,7 @@ test("new_goal discovery disposition closes continuity debt without reopening th
 });
 
 test("v3 action offer persists and can be consumed exactly once", () => {
-  let projection = applyEvent(createProjection(), v3Event("goal.created", {
+  let projection = replayLegacyCreate(v3Event("goal.created", {
     objective: "Persist status action offers", scope: [], nonGoals: [], dod: [], tasks: ["t1"],
     taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } },
   }));
@@ -2132,13 +2155,62 @@ test("v3 action offer persists and can be consumed exactly once", () => {
   assert.throws(() => applyEvent(projection, v3Event("goal.action_consumed", consumed)), /consumed/);
 });
 
+test("completed Planned goals keep continuity events in planned.v1", () => {
+  const goalId = "planned-continuity";
+  let projection = applyEvent(createProjection(), plannedEvent("goal.created", {
+    objective: "Finish one Planned epoch and record related follow-up work",
+    scope: [], nonGoals: [], dod: [], tasks: ["t1"],
+    taskDefs: { t1: { description: "planned work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [plannedCriterion("proof")] }, workflow: "tdd" } },
+  }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.dispatched", {
+    taskId: "t1", contractHash: "planned-hash",
+    workspace: { attempt: 1, path: "/tmp/planned-work", branch: "ge/planned/t1/1", baseCommit: "base" },
+  }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.settled", {
+    taskId: "t1", outcome: "succeeded", evidence: { type: "test_output", ref: "planned-tests" },
+    evidenceSource: "self_produced", nextAction: "Integrate the verified Planned task before accepting its evidence", attempt: 1, executorHead: "executor-head",
+  }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.workspace_disposition_started", {
+    taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "merge", executorHead: "executor-head", originHeadBefore: "origin-before",
+  }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.workspace_disposition_applied", {
+    taskId: "t1", attempt: 1, action: "integrate", strategy: "merge", executorHead: "executor-head", originHead: "origin-after",
+  }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.workspace_disposed", {
+    taskId: "t1", attempt: 1, action: "integrate", released: true,
+  }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.accepted", { taskId: "t1", workspaceAttempt: 1 }, goalId));
+  projection = applyEvent(projection, plannedEvent("goal.completed", { verdict: "COMPLETE" }, goalId));
+
+  const continued = applyEvent(projection, plannedEvent("goal.session_bound", {
+    sessionId: "session-planned", leafId: "leaf-planned",
+  }, goalId));
+  assert.equal(continued.eventSchemaVersion, "planned.v1");
+  assert.equal(continued.lifecycle, "completed");
+  assert.equal(continued.sessionBindings[0].state, "watching");
+});
+
 test("planned.v1 is an isolated persisted generation with strict criteria", () => {
   const created = { schemaVersion: "planned.v1", eventId: "planned-created", goalId: "planned-generation", occurredAt: "2026-08-08T00:00:00.000Z", type: "goal.created", data: { objective: "Create a planned goal", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "Implement planned core", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "proof", statement: "Prove behavior", evidenceKinds: ["tests", "changed-files"] }] }, workflow: "tdd" } } } };
   const projection = applyEvent(createProjection(), created);
   assert.equal(projection.eventSchemaVersion, "planned.v1");
   assert.deepEqual(projection.tasks.get("t1").acceptance, created.data.taskDefs.t1.acceptance);
-  assert.throws(() => applyEvent(projection, { ...created, eventId: "legacy-mix", type: "goal.checkpoint", data: { nextAction: "Use the isolated planned generation for every future event" }, schemaVersion: "goal-engine.event.v3" }), /mixed event generations/);
+
+  const checkpointed = applyEvent(projection, plannedEvent("goal.checkpoint", {
+    nextAction: "Inspect the Planned task contract before dispatching task t1 with its exact hash",
+  }, created.goalId));
+  assert.equal(checkpointed.eventSchemaVersion, "planned.v1");
+  assert.equal(checkpointed.version, 2);
+
+  assert.throws(() => applyEvent(checkpointed, { ...created, eventId: "legacy-mix", type: "goal.checkpoint", data: { nextAction: "Use the isolated planned generation for every future event" }, schemaVersion: "goal-engine.event.v3" }), /mixed event generations/);
   assert.throws(() => applyEvent(createProjection(), { ...created, eventId: "legacy-new", schemaVersion: "goal-engine.event.v3" }), /replay-only/);
+  assert.throws(() => applyEvent(createProjection(), { ...created, eventId: "unknown-new", schemaVersion: "planned.v2" }), /invalid schemaVersion/);
+
+  const legacy = replayLegacyCreate(v2Created("legacy-generation"));
+  assert.throws(() => applyEvent(legacy, plannedEvent("goal.checkpoint", {
+    nextAction: "Reject a Planned event appended to an active legacy generation",
+  }, legacy.goalId)), /mixed event generations/);
+
   const malformed = structuredClone(created);
   malformed.eventId = "planned-malformed";
   malformed.data.taskDefs.t1.acceptance.commands = ["true"];

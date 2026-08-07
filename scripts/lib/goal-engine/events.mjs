@@ -61,7 +61,8 @@ export function applyEvent(projection, event, { replay = false } = {}) {
   }
 
   const completedContinuation = projection.lifecycle === "completed"
-    && event.schemaVersion === "goal-engine.event.v3" && COMPLETED_V3_EVENTS.has(event.type);
+    && (event.schemaVersion === "goal-engine.event.v3" || event.schemaVersion === PLANNED_SCHEMA_VERSION)
+    && COMPLETED_V3_EVENTS.has(event.type);
   if (TERMINAL_LIFECYCLES.has(projection.lifecycle) && !completedContinuation) {
     throw new Error(`goal is terminal: ${projection.lifecycle}`);
   }
@@ -410,7 +411,9 @@ function requireV2(schemaVersion) {
 }
 
 function requireV3(schemaVersion, eventType) {
-  if (schemaVersion !== "goal-engine.event.v3") throw new Error(`${eventType} requires goal-engine.event.v3`);
+  if (schemaVersion !== "goal-engine.event.v3" && schemaVersion !== PLANNED_SCHEMA_VERSION) {
+    throw new Error(`${eventType} requires goal-engine.event.v3 or planned.v1`);
+  }
 }
 
 function requireExactFields(value, fields, label) {
