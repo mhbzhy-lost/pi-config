@@ -8,7 +8,7 @@ const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
 const TERMINAL_LIFECYCLES = new Set(["completed", "blocked", "cancelled"]);
 const COMPLETED_V3_EVENTS = new Set([
   "goal.session_bound", "goal.session_detached", "goal.discovery_recorded", "goal.discovery_resolved",
-  "goal.continuity_checkpointed", "goal.reopened",
+  "goal.continuity_checkpointed", "goal.reopened", "goal.action_offered", "goal.action_consumed",
 ]);
 const VALID_EVIDENCE_TYPES = new Set(["diff", "file", "test_output", "screenshot", "log", "external_review"]);
 const VALID_EVIDENCE_SOURCES = new Set(["self_produced", "pre_existing", "external"]);
@@ -84,6 +84,8 @@ export function applyEvent(projection, event, { replay = false } = {}) {
     case "goal.discovery_recorded": goalDiscoveryRecorded(next, event, event.schemaVersion); break;
     case "goal.discovery_resolved": goalDiscoveryResolved(next, event, event.schemaVersion); break;
     case "goal.continuity_checkpointed": goalContinuityCheckpointed(next, event, event.schemaVersion); break;
+    case "goal.action_offered": goalActionOffered(next, event.data, event.schemaVersion); break;
+    case "goal.action_consumed": goalActionConsumed(next, event.data, event.schemaVersion); break;
     case "goal.reopened": goalReopened(next, event.data, event.schemaVersion); break;
     case "task.block_resolved": taskBlockResolved(next, event.data, event.schemaVersion); break;
     case "goal.blocked": goalBlocked(next, event.data); break;
@@ -550,7 +552,7 @@ function goalDiscoveryResolved(p, event, schemaVersion) {
   requireV3(schemaVersion, event.type);
   const { id, disposition, taskId, reason } = event.data;
   requireNonEmptyStrings({ id, disposition, reason }, "discovery resolution");
-  if (!new Set(["tasked", "out_of_scope", "duplicate"]).has(disposition)) throw new Error(`invalid discovery disposition: ${disposition}`);
+  if (!new Set(["tasked", "out_of_scope", "duplicate", "new_goal"]).has(disposition)) throw new Error(`invalid discovery disposition: ${disposition}`);
   const observation = p.continuity.observations[id];
   if (!observation) throw new Error(`unknown discovery: ${id}`);
   if (observation.status !== "untriaged") throw new Error(`discovery is already resolved: ${id}`);
@@ -582,6 +584,33 @@ function goalContinuityCheckpointed(p, event, schemaVersion) {
     nextAction,
     occurredAt: event.occurredAt,
   };
+}
+
+function goalActionOffered(p, data, schemaVersion) {
+  requireV3(schemaVersion, "goal.action_offered");
+  requireNonEmptyStrings({
+    id: data.id, nonce: data.nonce, goalId: data.goalId, sessionId: data.sessionId,
+    tool: data.tool, token: data.token,
+  }, "action offer");
+  if (data.goalId !== p.goalId) throw new Error("action offer goalId mismatch");
+  if (data.projectionVersion !== p.version + 1) throw new Error("action offer projection version mismatch");
+  if (!isPlainObject(data.params)) throw new Error("action offer params must be an object");
+  if (data.consumed !== false) throw new Error("new action offer must be unconsumed");
+  if (!/^goal-action\.v1:[a-f0-9]{64}$/.test(data.token)) throw new Error("invalid action offer token");
+  p.actionOffer = structuredClone(data);
+}
+
+function goalActionConsumed(p, data, schemaVersion) {
+  requireV3(schemaVersion, "goal.action_consumed");
+  const offer = p.actionOffer;
+  if (!offer) throw new Error("no action offer is active");
+  if (offer.consumed) throw new Error("action offer is already consumed");
+  if (p.version !== offer.projectionVersion) throw new Error("action offer projection version is stale");
+  requireNonEmptyStrings({ offerId: data.offerId, token: data.token, tool: data.tool, sessionId: data.sessionId }, "action consumption");
+  if (data.offerId !== offer.id || data.token !== offer.token || data.tool !== offer.tool || data.sessionId !== offer.sessionId) {
+    throw new Error("action consumption does not match the active offer");
+  }
+  offer.consumed = true;
 }
 
 function goalReopened(p, data, schemaVersion) {

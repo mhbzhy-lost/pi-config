@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, realpa
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
+import { createGoalEngineExtension as createGoalEngineExtensionProduction } from "../scripts/lib/goal-engine/extension.mjs";
 import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
 import { allocateExecutorWorkspace, inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 
@@ -30,11 +30,27 @@ test("external evidence classification matrix only promotes external_review from
 function createMockPi(cwd) {
   const tools = [];
   const hooks = { tool_result: [] };
-  return {
-    tools, hooks, executeContext: { cwd },
-    registerTool(def) { tools.push(def); },
-    on(event, handler) { if (hooks[event]) hooks[event].push(handler); },
+  const entries = [];
+  const sentMessages = [];
+  const sessionManager = {
+    getSessionId: () => "session-test",
+    getSessionFile: () => join(cwd, "session.jsonl"),
+    getLeafId: () => entries.at(-1)?.id || "leaf-test",
+    getEntries: () => [...entries],
+    getBranch: () => [...entries],
   };
+  return {
+    tools, hooks, entries, sentMessages, sessionManager,
+    executeContext: { cwd, sessionManager },
+    registerTool(def) { tools.push(def); },
+    on(event, handler) { (hooks[event] ||= []).push(handler); },
+    appendEntry(customType, data) { entries.push({ id: `custom-${entries.length + 1}`, type: "custom", customType, data }); },
+    sendMessage(message, options) { sentMessages.push({ message, options }); },
+  };
+}
+
+function createGoalEngineExtension(pi, options = {}) {
+  return createGoalEngineExtensionProduction(pi, { enforceActionTokens: false, ...options });
 }
 
 function tmpCwd() {
@@ -2033,9 +2049,9 @@ test("goal_accept retries final accepted after goal.completed pre-durable failur
   const pi = createMockPi(cwd); createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
   await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "final task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
   await prepareSucceededTask(pi);
-  await assert.rejects(() => invoke(pi, "goal_accept", { task_id: "t1" }), /injected appendEvent failure/);
+  await invoke(pi, "goal_accept", { task_id: "t1" });
   let projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
-  assert.equal(projection.lifecycle, "active"); assert.equal(projection.tasks.get("t1").status, "accepted");
+  assert.equal(projection.lifecycle, "completed"); assert.equal(projection.tasks.get("t1").status, "accepted");
   const recoveringPi = createMockPi(cwd); createGoalEngineExtension(recoveringPi);
   const recovered = JSON.parse(await invoke(recoveringPi, "goal_accept", { goal_id: goalId, task_id: "t1" }));
   assert.equal(recovered.goal_complete, true);
@@ -2985,4 +3001,213 @@ test("invalid historical contract takes priority over an exact orphan on dispatc
   const before = fullRejectionSnapshot(cwd, goalId);
   await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), (error) => { assert.equal(error.code, "INVALID_TASK_CONTRACT"); assertDispatchRequiredNextAction(error, { tool: "goal_status", params: { goal_id: goalId } }); return true; });
   assert.deepEqual(fullRejectionSnapshot(cwd, goalId), before);
+});
+
+async function emitHook(pi, name, event, ctx = pi.executeContext) {
+  let result;
+  for (const handler of pi.hooks[name] || []) {
+    const next = await handler(event, ctx);
+    if (next !== undefined) result = next;
+  }
+  return result;
+}
+
+function seedCompletedWatchingGoal(cwd, goalId = "completed-watching") {
+  const root = join(cwd, ".state/goal-engine");
+  const events = [
+    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-created`, goalId, occurredAt: "2026-08-05T00:00:00.000Z", type: "goal.created", data: { objective: "Watch a completed goal for related follow-ups", scope: ["src/**"], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "original", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } },
+    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-dispatched`, goalId, occurredAt: "2026-08-05T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "legacy" } },
+    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-settled`, goalId, occurredAt: "2026-08-05T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/a.ts" }, nextAction: "Accept the original task after reviewing its evidence carefully" } },
+    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-accepted`, goalId, occurredAt: "2026-08-05T00:00:03.000Z", type: "task.accepted", data: { taskId: "t1" } },
+    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-completed`, goalId, occurredAt: "2026-08-05T00:00:04.000Z", type: "goal.completed", data: { verdict: "DONE_WITHOUT_EXTERNAL_VERIFICATION" } },
+    { schemaVersion: "goal-engine.event.v3", eventId: `${goalId}-bound`, goalId, occurredAt: "2026-08-05T00:00:05.000Z", type: "goal.session_bound", data: { sessionId: "session-test", leafId: "leaf-original" } },
+  ];
+  let version = 0;
+  for (const event of events) {
+    appendEventStore(root, event, version);
+    version += 1;
+  }
+  return goalId;
+}
+
+test("production status issues one-shot action tokens and dispatch returns an exact subagent contract envelope", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  const objective = "Enforce one shot dispatch action";
+  const goalId = objectiveToGoalId(objective);
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
+
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), /action_token|status/i);
+  const status = JSON.parse(await invoke(pi, "goal_status", {}));
+  assert.match(status.action_token, /^goal-action\.v1:/);
+  assert.deepEqual(status.machineAction, { tool: "goal_dispatch", params: { goal_id: goalId, task_id: "t1" } });
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", action_token: `${status.action_token}bad` }), /token/i);
+
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1", action_token: status.action_token }));
+  assert.equal(Object.hasOwn(dispatched.contract, "hash"), false);
+  assert.match(dispatched.contract_hash, /^[a-f0-9]{64}$/);
+  assert.equal(dispatched.contract.taskId, `${goalId}.t1`);
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), goalId).tasks.get("t1").contractHash, dispatched.contract_hash);
+  assert.deepEqual(readGoalEvents(cwd, goalId).slice(-3).map((event) => event.type), [
+    "goal.action_offered", "goal.action_consumed", "task.dispatched",
+  ]);
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", action_token: status.action_token }), /consumed|status|offer/i);
+});
+
+test("failed production mutation consumes its status token before business preflight", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  await invoke(pi, "goal_init", { objective: "Consume failed mutation capability", tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
+  const status = JSON.parse(await invoke(pi, "goal_status", {}));
+
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", timeout_ms: -1, action_token: status.action_token }), /timeout|positive/i);
+  const events = readGoalEvents(cwd, status.goalId);
+  assert.equal(events.at(-1).type, "goal.action_consumed");
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", action_token: status.action_token }), /consumed|status|offer/i);
+});
+
+test("completed watching session records discovery blocks writes and atomically reopens with a new task", async () => {
+  const cwd = tmpCwd();
+  const goalId = seedCompletedWatchingGoal(cwd);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  pi.entries.push({ id: "entry-follow-up", type: "message", message: { role: "user" } });
+
+  await emitHook(pi, "input", { text: "Add the related follow-up implementation", source: "interactive" });
+  const injection = await emitHook(pi, "before_agent_start", { prompt: "Add the related follow-up implementation", systemPrompt: "base" });
+  assert.match(injection.message.content, /goal_status|completed-watching/);
+  let projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  const observation = Object.values(projection.continuity.observations)[0];
+  assert.equal(observation.status, "untriaged");
+  assert.equal(observation.userEntryId, "entry-follow-up");
+
+  const blocked = await emitHook(pi, "tool_call", { toolName: "edit", input: { path: "src/b.ts" }, toolCallId: "edit-1" });
+  assert.equal(blocked.block, true);
+  assert.match(blocked.reason, /goal_status.*goal_amend/);
+
+  const status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  const amended = JSON.parse(await invoke(pi, "goal_amend", {
+    goal_id: goalId,
+    operation: "reopen_completed",
+    reason: "Turn the related follow-up into an explicit second epoch task",
+    basis: { epoch: 1, discovery_ids: [observation.id] },
+    add_tasks: [{ id: "t2", description: "follow-up", deps: ["t1"], writePaths: ["src/b.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }],
+    resolve_discoveries: [{ id: observation.id, disposition: "tasked", task_id: "t2", reason: "This follow-up belongs to the completed goal" }],
+    action_token: status.action_token,
+  }));
+  assert.equal(amended.epoch, 2);
+  assert.equal(amended.lifecycle, "active");
+  assert.equal(amended.tasks.t1.status, "accepted");
+  assert.equal(amended.tasks.t2.status, "pending");
+  projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  assert.equal(projection.completionHistory.length, 1);
+  assert.equal(projection.continuity.observations[observation.id].taskId, "t2");
+});
+
+test("triage new_goal and detach_session resolve completed-watch debt without reopening", async () => {
+  const cwd = tmpCwd();
+  const goalId = seedCompletedWatchingGoal(cwd);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  pi.entries.push({ id: "entry-unrelated", type: "message", message: { role: "user" } });
+  await emitHook(pi, "input", { text: "Start a separate documentation project", source: "interactive" });
+  await emitHook(pi, "before_agent_start", { prompt: "Start a separate documentation project", systemPrompt: "base" });
+  const observation = Object.values(loadProjection(join(cwd, ".state/goal-engine"), goalId).continuity.observations)[0];
+  const status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  const triaged = JSON.parse(await invoke(pi, "goal_amend", {
+    goal_id: goalId, operation: "triage", reason: "This request belongs to a separate new Goal instead",
+    resolve_discoveries: [{ id: observation.id, disposition: "new_goal", reason: "User requested independent work" }],
+    action_token: status.action_token,
+  }));
+  assert.equal(triaged.lifecycle, "completed");
+  assert.equal(triaged.epoch, 1);
+  assert.equal(triaged.continuity.observations[observation.id].status, "new_goal");
+  assert.equal(await emitHook(pi, "tool_call", { toolName: "edit", input: { path: "docs/new-project.md" } }), undefined);
+
+  const detachStatus = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  const detached = JSON.parse(await invoke(pi, "goal_amend", {
+    goal_id: goalId, operation: "detach_session", reason: "Move this session to unrelated work after triage", action_token: detachStatus.action_token,
+  }));
+  assert.equal(detached.lifecycle, "completed");
+  assert.equal(detached.epoch, 1);
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), goalId).sessionBindings[0].state, "detached");
+});
+
+test("compaction checkpoints survive extension reload and checkpoint failure cancels compaction", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  await invoke(pi, "goal_init", { objective: "Persist compaction recovery context", tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
+
+  const before = await emitHook(pi, "session_before_compact", {
+    reason: "overflow", willRetry: true,
+    preparation: { fileOps: { read: new Set(["docs/read-only.md"]), written: new Set(["src/a.ts"]), edited: new Set(["src/a.ts", "src/b.ts"]) } },
+  });
+  assert.equal(before, undefined);
+  const compacted = loadProjection(join(cwd, ".state/goal-engine"), objectiveToGoalId("Persist compaction recovery context"));
+  assert.equal(compacted.continuity.lastCheckpoint.reason, "overflow");
+  assert.deepEqual(compacted.continuity.lastCheckpoint.modifiedFiles, ["src/a.ts", "src/b.ts"]);
+  await emitHook(pi, "session_compact", { reason: "overflow", willRetry: true });
+  assert.equal(pi.sentMessages.at(-1).options.deliverAs, "nextTurn");
+
+  const reloadedPi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(reloadedPi);
+  await emitHook(reloadedPi, "session_start", { reason: "reload" });
+  const recovery = await emitHook(reloadedPi, "before_agent_start", { prompt: "resume", systemPrompt: "base" });
+  assert.match(recovery.message.content, /goal_status|overflow/);
+
+  const failingPi = createMockPi(cwd);
+  const failing = createFailingAppendEvent("goal.continuity_checkpointed");
+  createGoalEngineExtensionProduction(failingPi, { appendEvent: failing.appendEvent.bind(failing) });
+  const cancelled = await emitHook(failingPi, "session_before_compact", {
+    reason: "manual", willRetry: false, preparation: { fileOps: { read: new Set(), written: new Set(["src/b.ts"]), edited: new Set() } },
+  });
+  assert.deepEqual(cancelled, { cancel: true });
+  assert.equal(failingPi.entries.some((entry) => entry.customType === "goal-engine-recovery-latch"), true);
+});
+
+test("lifecycle ambiguity is durably fail-closed and compaction never clears its latch", async () => {
+  const cwd = tmpCwd();
+  const projections = ["a", "b"].map((goalId) => ({
+    goalId, lifecycle: "active", epoch: 1, scope: [], tasks: new Map(),
+    continuity: { observations: {} }, sessionBindings: [], nextAction: "goal_status",
+  }));
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi, {
+    store: {
+      listGoalIds: () => projections.map((projection) => projection.goalId),
+      loadProjection: (_root, goalId) => projections.find((projection) => projection.goalId === goalId),
+    },
+  });
+
+  const recovery = await emitHook(pi, "before_agent_start", { prompt: "resume", systemPrompt: "base" });
+  assert.match(recovery.message.content, /ambiguous/i);
+  assert.equal(pi.entries.at(-1).data.state, "active");
+
+  const blocked = await emitHook(pi, "tool_call", { toolName: "edit", input: { path: "src/a.ts" } });
+  assert.deepEqual(blocked, { block: true, reason: "Goal candidates are ambiguous; call goal_status with an explicit goal_id before mutation" });
+  assert.equal(pi.entries.at(-1).data.state, "active");
+
+  const cancelled = await emitHook(pi, "session_before_compact", { reason: "manual", preparation: { fileOps: { written: new Set(), edited: new Set() } } });
+  assert.deepEqual(cancelled, { cancel: true });
+  assert.equal(pi.entries.at(-1).data.state, "active");
+});
+
+test("production status throws replay failures and repeated completed slugs receive unique suffixes", async () => {
+  const cwd = tmpCwd();
+  const existingGoalId = seedCompletedWatchingGoal(cwd, "repeat-objective");
+  assert.equal(existingGoalId, "repeat-objective");
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  const created = JSON.parse(await invoke(pi, "goal_init", {
+    objective: "Repeat objective",
+    tasks: [{ id: "t1", description: "new work", deps: [], writePaths: ["src/new.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }],
+  }));
+  assert.match(created.goalId, /^repeat-objective-[a-f0-9]{8}$/);
+
+  const brokenPi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(brokenPi, { store: { listGoals: () => [created.goalId], loadProjection: () => { throw new Error("replay failed"); } } });
+  await assert.rejects(() => invoke(brokenPi, "goal_status", {}), /replay failed/);
 });

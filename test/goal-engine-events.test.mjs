@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
+import { issueActionOffer, verifyAndConsumeActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
 import { appendEvent, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
 import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -2062,4 +2063,41 @@ test("store projection snapshot serializes v3 epoch and continuity fields", () =
   assert.deepEqual(persisted.completionHistory, []);
   assert.deepEqual(persisted.contractHistory, []);
   assert.equal(persisted.actionOffer, null);
+});
+
+test("new_goal discovery disposition closes continuity debt without reopening the completed epoch", () => {
+  let projection = completedEpochProjection();
+  projection = applyEvent(projection, v3Event("goal.discovery_recorded", {
+    id: "obs-new-goal", summary: "A separate project request", paths: ["docs/new-project.md"],
+    source: "user_intent", sessionId: "session-1",
+  }));
+
+  projection = applyEvent(projection, v3Event("goal.discovery_resolved", {
+    id: "obs-new-goal", disposition: "new_goal", reason: "User chose a separate Goal for unrelated work",
+  }));
+
+  assert.equal(projection.lifecycle, "completed");
+  assert.equal(projection.epoch, 1);
+  assert.equal(projection.continuity.observations["obs-new-goal"].status, "new_goal");
+  assert.equal(projection.coordinationState, "quiescent");
+  assert.equal(projection.tasks.get("t1").status, "accepted");
+});
+
+test("v3 action offer persists and can be consumed exactly once", () => {
+  let projection = applyEvent(createProjection(), v3Event("goal.created", {
+    objective: "Persist status action offers", scope: [], nonGoals: [], dod: [], tasks: ["t1"],
+    taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } },
+  }));
+  const offer = issueActionOffer(projection, {
+    tool: "goal_dispatch", params: { goal_id: projection.goalId, task_id: "t1" },
+  }, "session-1");
+  projection = applyEvent(projection, v3Event("goal.action_offered", offer));
+  assert.deepEqual(projection.actionOffer, offer);
+
+  const consumed = verifyAndConsumeActionOffer(projection, {
+    token: offer.token, tool: offer.tool, params: offer.params, sessionId: "session-1",
+  });
+  projection = applyEvent(projection, v3Event("goal.action_consumed", consumed));
+  assert.equal(projection.actionOffer.consumed, true);
+  assert.throws(() => applyEvent(projection, v3Event("goal.action_consumed", consumed)), /consumed/);
 });
