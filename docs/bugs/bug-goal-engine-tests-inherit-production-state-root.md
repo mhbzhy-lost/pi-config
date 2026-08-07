@@ -12,7 +12,7 @@
 
 ## 根因
 
-`createGoalEngineExtension()` 的生产默认值正确读取 `process.env`，但测试 wrapper 没有显式注入隔离环境。真实 Host 测试同样直接加载生产 Extension，且测试文件没有在普通 legacy 用例中清除继承的 `PI_CODING_GOAL_DIR`。
+`createGoalEngineExtension()` 的生产默认值正确读取 `process.env`，但测试 wrapper 最初没有显式注入隔离环境。首轮修复只覆盖了 `enforceActionTokens: false` wrapper；同文件约 20 个 production action-token 用例仍直接调用生产 factory 并继承环境。真实 Host 测试也直接加载生产 Extension，因此必须在普通 legacy 用例中清除继承值。
 
 ## 触发条件
 
@@ -22,12 +22,12 @@
 
 ## 修复方案
 
-1. Extension 单元测试 wrapper 默认注入空 `goalStateEnv`，只有 global state 专项用例显式传入临时目录。
+1. Extension 单元测试的 legacy 与 production-action-token wrapper 都默认注入空 `goalStateEnv`，只有 global state 专项用例显式传入临时目录；禁止测试散落直接调用生产 factory。
 2. 真实 Host 测试文件在普通 legacy 用例中屏蔽继承值；`PI_CODING_GOAL_DIR` 专项用例临时设置独立目录，并在 finally 中恢复环境和删除 fixture。
 3. 禁止测试使用真实 `var/goals`，也不得依赖调用者恰好未设置环境变量。
 
 ## 验证方法
 
 - 先以临时非空 `PI_CODING_GOAL_DIR` 运行既有 legacy init 用例，确认旧 fixture 被重定向并失败。
-- GREEN 后在同样的继承环境下运行 Extension 测试，确认仍只写测试自有路径。
+- 分别选择普通 legacy settle 用例和 production action-token 用例，在同样的继承环境下运行；GREEN 后确认两类测试仍只写测试自有路径。
 - 运行真实 Host 双 cwd 专项，确认只产生两个临时 namespace，仓库 cwd 和真实生产 Goal 根均不受影响。

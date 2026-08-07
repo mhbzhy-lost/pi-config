@@ -5,7 +5,7 @@ import { cpSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSy
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { createGoalEngineExtension as createGoalEngineExtensionProduction } from "../scripts/lib/goal-engine/extension.mjs";
+import { createGoalEngineExtension as createGoalEngineExtensionFactory } from "../scripts/lib/goal-engine/extension.mjs";
 import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
 import { allocateExecutorWorkspace, inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope } from "../scripts/lib/goal-engine/state-scope.mjs";
@@ -50,8 +50,12 @@ function createMockPi(cwd) {
   };
 }
 
+function createGoalEngineExtensionProduction(pi, options = {}) {
+  return createGoalEngineExtensionFactory(pi, { goalStateEnv: {}, ...options });
+}
+
 function createGoalEngineExtension(pi, options = {}) {
-  return createGoalEngineExtensionProduction(pi, { enforceActionTokens: false, goalStateEnv: {}, ...options });
+  return createGoalEngineExtensionProduction(pi, { enforceActionTokens: false, ...options });
 }
 
 function tmpCwd() {
@@ -3431,6 +3435,51 @@ test("production status issues one-shot action tokens and dispatch returns an ex
     "goal.action_offered", "goal.action_consumed", "task.dispatched",
   ]);
   await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", action_token: status.action_token }), /consumed|status|offer/i);
+});
+
+test("production resolve_blocked consumes the task offer and atomically updates a retried contract", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  const objective = "Recover blocked task contract";
+  const goalId = objectiveToGoalId(objective);
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }],
+  });
+
+  let offer = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_dispatch", { task_id: "t1", action_token: offer.action_token });
+  offer = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_settle", {
+    task_id: "t1",
+    outcome: "blocked",
+    reason: "The task contract omitted its required bug document write path",
+    next_action: "Discard the empty workspace and amend the blocked task contract before retrying",
+    action_token: offer.action_token,
+  });
+  offer = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_integrate", { task_id: "t1", action: "discard", action_token: offer.action_token });
+  offer = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  assert.deepEqual(offer.machineAction, { tool: "goal_amend", params: { goal_id: goalId, task_id: "t1" } });
+
+  const amendment = {
+    goal_id: goalId,
+    operation: "resolve_blocked",
+    reason: "Retry after adding the mandatory bug root-cause document to the task boundary",
+    blocked_resolution: "retry",
+    blocked_task_id: "t1",
+    update_tasks: { t1: { writePaths: ["src/a.ts", "docs/bugs/bug-required.md"] } },
+    action_token: offer.action_token,
+  };
+  const recovered = JSON.parse(await invoke(pi, "goal_amend", amendment));
+  assert.equal(recovered.coordinationState, "ready");
+  assert.equal(recovered.tasks.t1.status, "pending");
+  assert.deepEqual(recovered.tasks.t1.writePaths, ["src/a.ts", "docs/bugs/bug-required.md"]);
+  assert.deepEqual(readGoalEvents(cwd, goalId).slice(-3).map((event) => event.type), [
+    "goal.action_consumed", "task.block_resolved", "goal.amended",
+  ]);
+  await assert.rejects(() => invoke(pi, "goal_amend", amendment), /consumed|offer|status|token/i);
 });
 
 test("failed production mutation consumes its status token before business preflight", async () => {

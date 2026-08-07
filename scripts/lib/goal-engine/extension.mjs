@@ -579,7 +579,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     }
     const offer = projection.actionOffer;
     if (!offer) throw new Error(`goal_status must issue an action offer before ${tool}`);
-    const supplied = { goal_id: goalId, task_id: params.task_id, action: params.action, strategy: params.strategy, operation: params.operation, challenge_id: params.challenge_id };
+    const supplied = { goal_id: goalId, task_id: params.task_id ?? params.blocked_task_id, action: params.action, strategy: params.strategy, operation: params.operation, challenge_id: params.challenge_id };
     const boundParams = {};
     for (const key of Object.keys(offer.params)) {
       if (supplied[key] === undefined) throw new Error(`action offer params do not match: missing ${key}`);
@@ -1225,7 +1225,10 @@ export function createGoalEngineExtension(pi, options = {}) {
           ...(params.replacement_task_id ? { replacementTaskId: params.replacement_task_id } : {}),
           reason: params.reason,
         }, goalId)];
-        if (params.blocked_resolution === "supersede") events.push(amendmentEvent());
+        const hasAmendmentPayload = Object.keys(addTasks).length > 0
+          || (params.remove_tasks?.length || 0) > 0
+          || Object.keys(params.update_tasks || {}).length > 0;
+        if (params.blocked_resolution === "supersede" || hasAmendmentPayload) events.push(amendmentEvent());
         return statusResponse(applyAndAppendSequence(events), cwd, root);
       }
       if (!params.operation && enforceActionTokens) throw new Error("goal_amend operation is required");
