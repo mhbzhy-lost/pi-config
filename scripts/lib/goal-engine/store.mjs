@@ -13,6 +13,40 @@ const OWNER_IDENTITY_KIND = "ps-lstart-utc";
 let selfBirthIdentity;
 const ownerIdentityFreshness = new Map();
 
+export function appendEventBatch(stateRoot, events, expectedVersion) {
+  validateEventBatch(events);
+  const lock = acquireWriterLock(stateRoot);
+  const goalDir = join(stateRoot, "goals", events[0].goalId);
+  const eventsPath = join(goalDir, "events.jsonl");
+  const projectionPath = join(goalDir, "projection.json");
+  const identity = `${process.pid}-${randomUUID()}`;
+  const eventsTmp = `${eventsPath}.${identity}.tmp`;
+  const projectionTmp = `${projectionPath}.${identity}.tmp`;
+  let registryTmp = null;
+  let durable = false;
+
+  try {
+    let next = replayAndCheckVersion(stateRoot, eventsPath, expectedVersion, lock.token);
+    for (const event of events) next = applyEvent(next, event);
+    const registry = prepareRegistryUpdate(stateRoot, events.at(-1), next, lock.token);
+
+    mkdirSync(goalDir, { recursive: true });
+    writeBatchJsonlAndRename(stateRoot, eventsPath, eventsTmp, events, lock.token);
+    durable = true;
+    publishBatchProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, next, lock.token);
+    registryTmp = publishBatchRegistry(stateRoot, registry, identity, lock.token);
+    return next;
+  } catch (error) {
+    if (durable) throw batchDurableFailure(error);
+    throw error;
+  } finally {
+    if (existsSync(eventsTmp)) rmSync(eventsTmp, { force: true });
+    if (existsSync(projectionTmp)) rmSync(projectionTmp, { force: true });
+    if (registryTmp && existsSync(registryTmp)) rmSync(registryTmp, { force: true });
+    releaseWriterLock(stateRoot, lock.token);
+  }
+}
+
 export function appendEvent(stateRoot, event, expectedVersion) {
   const lock = acquireWriterLock(stateRoot);
   const goalDir = join(stateRoot, "goals", event.goalId);
@@ -50,6 +84,14 @@ export function listGoals(stateRoot) {
   if (!existsSync(registryPath)) return [];
   const registry = JSON.parse(readFileSync(registryPath, "utf8"));
   return registry.active_goal_ids || [];
+}
+
+export function listGoalIds(stateRoot) {
+  const registryPath = join(stateRoot, "registry.json");
+  if (!existsSync(registryPath)) return [];
+  const registry = JSON.parse(readFileSync(registryPath, "utf8"));
+  validateRegistry(registry);
+  return Object.keys(registry.goals).sort();
 }
 
 export function acquireWriterLock(stateRoot) {
@@ -227,6 +269,15 @@ function lockTimeout() { return Object.assign(new Error("goal engine store write
 function identityUnavailable() { return Object.assign(new Error("goal engine store process birth identity unavailable"), { code: "GOAL_ENGINE_STORE_LOCK_IDENTITY_UNAVAILABLE" }); }
 function writerLockLost() { return Object.assign(new Error("goal engine store writer lock was lost"), { code: "GOAL_ENGINE_STORE_LOCK_LOST" }); }
 function projectionConflict(expected, current) { return Object.assign(new Error(`projection version conflict: expected ${expected}, current ${current}`), { code: "PROJECTION_CONFLICT" }); }
+function batchDurableFailure(cause) { return Object.assign(new Error(`goal engine event batch may already be durable: ${cause.message}`, { cause }), { code: "GOAL_ENGINE_STORE_BATCH_DURABLE" }); }
+
+function validateEventBatch(events) {
+  if (!Array.isArray(events) || events.length === 0) throw new TypeError("event batch must be a non-empty array");
+  const goalId = events[0]?.goalId;
+  if (typeof goalId !== "string" || !goalId.trim() || events.some((event) => event?.goalId !== goalId)) {
+    throw new TypeError("event batch must contain one non-empty goalId");
+  }
+}
 
 function replayAndCheckVersion(stateRoot, eventsPath, expectedVersion, writerToken) {
   assertWriterLockOwned(stateRoot, writerToken);
@@ -240,10 +291,22 @@ function appendJsonlWithWriterReceipt(stateRoot, eventsPath, event, writerToken)
   appendFileSync(eventsPath, JSON.stringify(event) + "\n", { mode: 0o600 });
 }
 
+function writeBatchJsonlAndRename(stateRoot, eventsPath, eventsTmp, events, writerToken) {
+  assertWriterLockOwned(stateRoot, writerToken);
+  const previous = existsSync(eventsPath) ? readFileSync(eventsPath, "utf8") : "";
+  writeFileSync(eventsTmp, previous + events.map((event) => JSON.stringify(event) + "\n").join(""), { flag: "wx", mode: 0o600 });
+  assertWriterLockOwned(stateRoot, writerToken);
+  renameSync(eventsTmp, eventsPath);
+}
+
 function publishProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, projection, writerToken) {
   assertWriterLockOwned(stateRoot, writerToken);
   writeFileSync(projectionTmp, JSON.stringify(serializeProjection(projection), null, 2) + "\n", { mode: 0o600 });
   renameSync(projectionTmp, projectionPath);
+}
+
+function publishBatchProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, projection, writerToken) {
+  return publishProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, projection, writerToken);
 }
 
 function rebuildProjection(eventsPath) {
@@ -305,6 +368,10 @@ function validateRegistry(registry) {
 export function assertWriterLockOwned(stateRoot, token) {
   const owner = readLockOwner(join(stateRoot, ".writer.lock"));
   if (!token || !validOwner(owner) || owner.token !== token) throw writerLockLost();
+}
+
+function publishBatchRegistry(stateRoot, registry, identity, writerToken) {
+  return publishRegistry(stateRoot, registry, identity, writerToken);
 }
 
 function publishRegistry(stateRoot, registry, identity, writerToken) {

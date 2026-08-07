@@ -4,7 +4,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, statSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { appendEvent, loadProjection, listGoals, acquireWriterLock, releaseWriterLock, acquireRecoveryGuard, releaseRecoveryGuard, updateRegistry } from "../scripts/lib/goal-engine/store.mjs";
+import { appendEvent, appendEventBatch, loadProjection, listGoals, acquireWriterLock, releaseWriterLock, acquireRecoveryGuard, releaseRecoveryGuard, updateRegistry } from "../scripts/lib/goal-engine/store.mjs";
 
 function event(type, data, goalId = "concurrent-goal") {
   return { schemaVersion: "goal-engine.event.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
@@ -16,6 +16,17 @@ function owner(pid, token, birth = birthIdentity(pid)) { return { protocol: "goa
 function legacyOwner(pid, token, birth) { return { pid, token, createdAt: new Date().toISOString(), ...(birth ? { birthIdentity: birth } : {}) }; }
 function writeLegacyLock(lock, value) { mkdirSync(lock, { recursive: true }); writeFileSync(join(lock, "owner.json"), typeof value === "string" ? value : JSON.stringify(value)); }
 function readWriterOwner(stateRoot) { return JSON.parse(readFileSync(join(stateRoot, ".writer.lock"), "utf8")); }
+
+function faultInjectedBatchStore(stateRoot, marker, fault) {
+  const storePath = new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url);
+  const eventsUrl = new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).href;
+  const source = readFileSync(storePath, "utf8");
+  assert.equal(source.split(marker).length - 1, 1, "batch fault boundary must be unique");
+  const path = join(stateRoot, `fault-store-${crypto.randomUUID()}.mjs`);
+  writeFileSync(path, source.replace('from "./events.mjs"', `from ${JSON.stringify(eventsUrl)}`)
+    .replace(marker, `    throw new Error(${JSON.stringify(fault)});`));
+  return path;
+}
 
 function createGoal(stateRoot, goalId = "concurrent-goal") {
   appendEvent(stateRoot, event("goal.created", {
@@ -78,6 +89,56 @@ if (process.argv[2] === "guard-owner") {
     process.stdout.write(JSON.stringify({ ok: false, code: error.code, message: error.message }));
   }
 } else {
+  test("appendEventBatch validates and publishes all inner events at one CAS version", () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    const goalDir = join(stateRoot, "goals/concurrent-goal");
+    const before = [readFileSync(join(goalDir, "events.jsonl"), "utf8"), readFileSync(join(goalDir, "projection.json"), "utf8"), readFileSync(join(stateRoot, "registry.json"), "utf8")];
+    const valid = checkpoint("batch-valid");
+    const invalid = checkpoint("batch-invalid"); invalid.data.nextAction = "short";
+
+    assert.throws(() => appendEventBatch(stateRoot, [valid, invalid], 1));
+    assert.deepEqual([readFileSync(join(goalDir, "events.jsonl"), "utf8"), readFileSync(join(goalDir, "projection.json"), "utf8"), readFileSync(join(stateRoot, "registry.json"), "utf8")], before);
+    const next = appendEventBatch(stateRoot, [checkpoint("batch-one"), checkpoint("batch-two")], 1);
+    assert.equal(next.version, 3);
+    assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 3);
+    assert.equal(readFileSync(join(goalDir, "events.jsonl"), "utf8").trim().split("\n").length, 3);
+  });
+
+  test("appendEventBatch makes the full batch durable before projection or registry publish", async () => {
+    for (const marker of [
+      "    publishBatchProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, next, lock.token);",
+      "    registryTmp = publishBatchRegistry(stateRoot, registry, identity, lock.token);",
+    ]) {
+      const stateRoot = root();
+      createGoal(stateRoot);
+      const eventsPath = join(stateRoot, "goals/concurrent-goal/events.jsonl");
+      const before = readFileSync(eventsPath, "utf8");
+      const path = faultInjectedBatchStore(stateRoot, marker, "after-batch-rename");
+      const store = await import(new URL(`file://${path}`).href);
+      try {
+        assert.throws(() => store.appendEventBatch(stateRoot, [checkpoint("rename-one"), checkpoint("rename-two")], 1), (error) => error.code === "GOAL_ENGINE_STORE_BATCH_DURABLE");
+        assert.notEqual(readFileSync(eventsPath, "utf8"), before);
+        assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 3);
+      } finally { rmSync(path, { force: true }); }
+    }
+  });
+
+  test("appendEventBatch rename failure keeps the old complete log", async () => {
+    const stateRoot = root();
+    createGoal(stateRoot);
+    const goalDir = join(stateRoot, "goals/concurrent-goal");
+    const eventsPath = join(goalDir, "events.jsonl");
+    const before = readFileSync(eventsPath, "utf8");
+    const path = faultInjectedBatchStore(stateRoot, "  renameSync(eventsTmp, eventsPath);", "before-batch-rename");
+    const store = await import(new URL(`file://${path}`).href);
+    try {
+      assert.throws(() => store.appendEventBatch(stateRoot, [checkpoint("rename-one"), checkpoint("rename-two")], 1), /before-batch-rename/);
+      assert.equal(readFileSync(eventsPath, "utf8"), before);
+      assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 1);
+    } finally { rmSync(path, { force: true }); }
+  });
+
   test("state-root writer lock serializes version check, log, projection, and registry across processes", async () => {
     const stateRoot = root();
     createGoal(stateRoot);
