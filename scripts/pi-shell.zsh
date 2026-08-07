@@ -3,6 +3,7 @@ typeset -g _PI_CONFIG_UPSTREAM_PI="${PI_REAL_BIN:-${commands[pi]:-}}"
 
 export PI_CODING_AGENT_DIR="$_PI_CONFIG_ROOT/pi"
 export PI_CODING_AGENT_SESSION_DIR="${PI_CODING_AGENT_SESSION_DIR:-$_PI_CONFIG_ROOT/var/sessions}"
+export PI_CODING_GOAL_DIR="${PI_CODING_GOAL_DIR:-$_PI_CONFIG_ROOT/var/goals}"
 
 _pi_config_invoke() {
   if [[ -z "$_PI_CONFIG_UPSTREAM_PI" || ! -x "$_PI_CONFIG_UPSTREAM_PI" ]]; then

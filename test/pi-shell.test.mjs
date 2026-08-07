@@ -15,7 +15,7 @@ test("shell integration makes bare pi use the repository configuration", async (
     const fakePi = join(root, "pi-real");
     await writeFile(
       fakePi,
-      `#!/usr/bin/env bash\nnode -e 'require("fs").writeFileSync(process.env.OUTPUT, JSON.stringify({ config: process.env.PI_CODING_AGENT_DIR, sessions: process.env.PI_CODING_AGENT_SESSION_DIR, args: process.argv.slice(1) }))' -- "$@"\n`,
+      `#!/usr/bin/env bash\nnode -e 'require("fs").writeFileSync(process.env.OUTPUT, JSON.stringify({ config: process.env.PI_CODING_AGENT_DIR, sessions: process.env.PI_CODING_AGENT_SESSION_DIR, goals: process.env.PI_CODING_GOAL_DIR, args: process.argv.slice(1) }))' -- "$@"\n`,
     );
     await chmod(fakePi, 0o755);
 
@@ -24,7 +24,7 @@ test("shell integration makes bare pi use the repository configuration", async (
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
       {
         encoding: "utf8",
-        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_AGENT_SESSION_DIR: "" },
+        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_AGENT_SESSION_DIR: "", PI_CODING_GOAL_DIR: "" },
       },
     );
 
@@ -33,8 +33,39 @@ test("shell integration makes bare pi use the repository configuration", async (
     assert.deepEqual(JSON.parse(await readFile(output, "utf8")), {
       config: join(repoRoot, "pi"),
       sessions: join(repoRoot, "var", "sessions"),
+      goals: join(repoRoot, "var", "goals"),
       args: ["--no-skills", "--version"],
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("shell integration preserves a custom Goal state directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-shell-goals-"));
+  try {
+    const output = join(root, "goal-dir.txt");
+    const fakePi = join(root, "pi-real");
+    await writeFile(fakePi, "#!/usr/bin/env bash\nprintf '%s' \"$PI_CODING_GOAL_DIR\" > \"$OUTPUT\"\n");
+    await chmod(fakePi, 0o755);
+
+    const result = spawnSync(
+      "zsh",
+      ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PI_REAL_BIN: fakePi,
+          OUTPUT: output,
+          PI_CODING_GOAL_DIR: "/tmp/custom-pi-goals",
+        },
+      },
+    );
+
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(await readFile(output, "utf8"), "/tmp/custom-pi-goals");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
