@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
+import { hashGoalMetadataProposal } from "../scripts/lib/goal-engine/human-decision.mjs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -199,6 +200,216 @@ test("real Pi host compaction checkpoint reloads from durable session and Goal l
     const recovery = await result.session.extensionRunner.emitBeforeAgentStart("resume", undefined, "base", {});
     assert.match(recovery.messages[0].content, /overflow|goal_status/);
     assert.equal(result.session.sessionManager.getSessionId(), sessionId);
+  } finally {
+    try { result?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
+  }
+});
+
+async function withMetadataHost(run) {
+  const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-metadata-negative-project-"));
+  const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-metadata-negative-host-"));
+  let host;
+  const makeHost = async (manager) => {
+    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    await loader.reload();
+    host = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
+    await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
+    return host;
+  };
+  try {
+    execFileSync("git", ["init"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.name", "Goal Engine Test"], { cwd: projectCwd });
+    writeFileSync(join(projectCwd, "README.md"), "fixture\n");
+    writeFileSync(join(projectCwd, ".gitignore"), ".state/goal-engine/\n");
+    execFileSync("git", ["add", "."], { cwd: projectCwd });
+    execFileSync("git", ["commit", "-m", "test: initialize fixture"], { cwd: projectCwd });
+    await makeHost(SessionManager.create(projectCwd, join(agentDir, "sessions")));
+    const signal = new AbortController().signal;
+    const execute = (name, id, args, context = { cwd: projectCwd, sessionManager: host.session.sessionManager }) => host.session.getToolDefinition(name).execute(id, args, signal, undefined, context);
+    const initialized = JSON.parse((await execute("goal_init", "metadata-negative-init", { objective: "Original metadata", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] })).details.value);
+    const root = join(projectCwd, ".state/goal-engine");
+    appendEvent(root, { schemaVersion: "goal-engine.event.v3", eventId: "metadata-negative-discovery", goalId: initialized.goalId, occurredAt: new Date().toISOString(), type: "goal.discovery_recorded", data: { id: "metadata-negative-discovery", summary: "Metadata change requires an amendment offer", paths: [], source: "user_intent", sessionId: host.session.sessionManager.getSessionId() } }, loadProjection(root, initialized.goalId).version);
+    await run({ projectCwd, makeHost, execute, initialized, getHost: () => host });
+  } finally {
+    try { host?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
+  }
+}
+
+const metadataProposal = async (execute, goalId, id = "metadata-propose") => JSON.parse((await execute("goal_amend", id, {
+  goal_id: goalId,
+  operation: "propose_update_goal",
+  reason: "User requests an objective amendment",
+  changes: { objective: "Amended metadata" },
+})).details.value);
+
+test("real Pi host metadata rpc approval produces an approved offer and applies", async () => {
+  await withMetadataHost(async ({ execute, initialized, getHost }) => {
+    const proposal = await metadataProposal(execute, initialized.goalId, "metadata-rpc-propose");
+    await getHost().session.extensionRunner.emitInput("approve", undefined, "rpc");
+    const offer = JSON.parse((await execute("goal_status", "metadata-rpc-status", { goal_id: initialized.goalId })).details.value);
+    assert.equal(offer.machineAction.tool, "goal_amend");
+    const applied = JSON.parse((await execute("goal_amend", "metadata-rpc-apply", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: offer.action_token })).details.value);
+    assert.equal(applied.objective, "Amended metadata");
+  });
+});
+
+test("real Pi host metadata ambiguous input and extension source never approve", async (t) => {
+  for (const [label, input, source] of [["ambiguous", "approve and reject", "interactive"], ["extension", "approve", "extension"]]) await t.test(label, async () => {
+    await withMetadataHost(async ({ execute, initialized, getHost }) => {
+      await metadataProposal(execute, initialized.goalId, `metadata-${label}-propose`);
+      await getHost().session.extensionRunner.emitInput(input, undefined, source);
+      const status = JSON.parse((await execute("goal_status", `metadata-${label}-status`, { goal_id: initialized.goalId })).details.value);
+      assert.notEqual(status.machineAction?.params?.operation, "update_goal");
+      assert.equal(status.action_token, null);
+      assert.equal(status.metadataDecision.status, "AWAITING_USER_DECISION");
+    });
+  });
+});
+
+test("real Pi host metadata reject terminal offer survives base metadata changes across reload", async () => {
+  await withMetadataHost(async ({ projectCwd, makeHost, execute, initialized, getHost }) => {
+    const ordinary = JSON.parse((await execute("goal_status", "metadata-reject-ordinary-status", { goal_id: initialized.goalId })).details.value);
+    assert.equal(ordinary.machineAction.tool, "goal_amend");
+    await metadataProposal(execute, initialized.goalId, "metadata-reject-propose");
+    await getHost().session.extensionRunner.emitInput("reject", undefined, "interactive");
+    const manager = getHost().session.sessionManager;
+    manager.appendMessage({ role: "assistant", content: [], provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }, stopReason: "stop" });
+    const sessionFile = manager.getSessionFile(); const sessionDir = manager.getSessionDir();
+    getHost().session.dispose();
+    await makeHost(SessionManager.open(sessionFile, sessionDir, projectCwd));
+    const ctx = { cwd: projectCwd, sessionManager: getHost().session.sessionManager };
+    const root = join(projectCwd, ".state/goal-engine");
+    const projection = loadProjection(root, initialized.goalId);
+    const changes = { objective: "Externally amended after rejection", scope: [], nonGoals: [], dod: [] };
+    appendEvent(root, { schemaVersion: "goal-engine.event.v3", eventId: "metadata-reject-post-terminal-amendment", goalId: initialized.goalId, occurredAt: new Date().toISOString(), type: "goal.contract_amended", data: { proposalHash: hashGoalMetadataProposal(changes), changes, approval: { entryId: "metadata-reject-post-terminal-entry", sessionId: "external-session", source: "rpc" } } }, projection.version);
+    const assertTerminalOffer = (status) => {
+      const actionOffer = loadProjection(root, initialized.goalId).actionOffer;
+      assert.ok(actionOffer);
+      assert.equal(status.machineAction.tool, "goal_amend");
+      assert.deepEqual(status.machineAction.params, ordinary.machineAction.params);
+      assert.equal(status.machineAction.tool, actionOffer.tool);
+      assert.deepEqual(status.machineAction.params, actionOffer.params);
+      assert.equal(status.action_token, actionOffer.token);
+      assert.equal(status.metadataDecision.status, "REJECTED");
+    };
+    const status = JSON.parse((await execute("goal_status", "metadata-reject-status", { goal_id: initialized.goalId }, ctx)).details.value);
+    assert.equal(status.metadataDecision.status, "REJECTED");
+    assertTerminalOffer(status);
+    await getHost().session.extensionRunner.emitInput("approve", undefined, "interactive");
+    const afterApprove = JSON.parse((await execute("goal_status", "metadata-reject-after-approve-status", { goal_id: initialized.goalId }, ctx)).details.value);
+    assert.equal(afterApprove.metadataDecision.status, "REJECTED");
+    assertTerminalOffer(afterApprove);
+  });
+});
+
+test("real Pi host metadata presentation and non_goals use the public API", async () => {
+  await withMetadataHost(async ({ projectCwd, execute, initialized, getHost }) => {
+    const proposal = JSON.parse((await execute("goal_amend", "metadata-presentation-propose", {
+      goal_id: initialized.goalId, operation: "propose_update_goal", reason: "Present the complete normalized proposal",
+      changes: { objective: "Presented metadata", scope: ["docs"], non_goals: ["internal names"], dod: ["verified"] },
+    })).details.value);
+    assert.equal(proposal.reason, "Present the complete normalized proposal");
+    assert.deepEqual(proposal.base_metadata, { objective: "Original metadata", scope: [], non_goals: [], dod: [] });
+    assert.deepEqual(proposal.target_metadata, { objective: "Presented metadata", scope: ["docs"], non_goals: ["internal names"], dod: ["verified"] });
+    assert.match(proposal.proposal_hash, /.+/);
+    assert.deepEqual(proposal.choices, ["approve", "reject"]);
+    await getHost().session.extensionRunner.emitInput("approve", undefined, "interactive");
+    const offer = JSON.parse((await execute("goal_status", "metadata-presentation-status", { goal_id: initialized.goalId })).details.value);
+    await execute("goal_amend", "metadata-presentation-apply", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: offer.action_token });
+    assert.deepEqual(loadProjection(join(projectCwd, ".state/goal-engine"), initialized.goalId).nonGoals, ["internal names"]);
+    await assert.rejects(() => execute("goal_amend", "metadata-nonGoals-private", {
+      goal_id: initialized.goalId, operation: "propose_update_goal", reason: "Reject internal name", changes: { nonGoals: ["private"] },
+    }), /nonGoals|schema|additional/i);
+  });
+});
+
+test("real Pi host metadata cross-session approval and token are isolated", async () => {
+  await withMetadataHost(async ({ projectCwd, makeHost, execute, initialized, getHost }) => {
+    const proposal = await metadataProposal(execute, initialized.goalId, "metadata-cross-session-propose");
+    await getHost().session.extensionRunner.emitInput("approve", undefined, "interactive");
+    const offerA = JSON.parse((await execute("goal_status", "metadata-cross-session-status-a", { goal_id: initialized.goalId })).details.value);
+    getHost().session.dispose();
+    await makeHost(SessionManager.create(projectCwd, join(projectCwd, "other-sessions")));
+    const statusB = JSON.parse((await execute("goal_status", "metadata-cross-session-status-b", { goal_id: initialized.goalId })).details.value);
+    assert.notEqual(statusB.machineAction?.params?.operation, "update_goal");
+    await assert.rejects(() => execute("goal_amend", "metadata-cross-session-apply", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: offerA.action_token }), /session|approval|offer/i);
+  });
+});
+
+test("real Pi host metadata stale proposal requires reproposal without machine action", async () => {
+  await withMetadataHost(async ({ projectCwd, execute, initialized }) => {
+    await metadataProposal(execute, initialized.goalId, "metadata-stale-propose");
+    const root = join(projectCwd, ".state/goal-engine"); const projection = loadProjection(root, initialized.goalId);
+    const changes = { objective: "Externally amended metadata", scope: [], nonGoals: [], dod: [] };
+    appendEvent(root, { schemaVersion: "goal-engine.event.v3", eventId: "metadata-stale-amendment", goalId: initialized.goalId, occurredAt: new Date().toISOString(), type: "goal.contract_amended", data: { proposalHash: hashGoalMetadataProposal(changes), changes, approval: { entryId: "metadata-stale-entry", sessionId: "external-session", source: "rpc" } } }, projection.version);
+    const status = JSON.parse((await execute("goal_status", "metadata-stale-status", { goal_id: initialized.goalId })).details.value);
+    assert.equal(status.machineAction, null); assert.equal(status.action_token, null);
+    assert.equal(status.metadataDecision.status, "REPROPOSE_REQUIRED");
+  });
+});
+
+test("real Pi host metadata exact challenge binding rejects wrong id and replay", async () => {
+  await withMetadataHost(async ({ execute, initialized, getHost }) => {
+    const proposal = await metadataProposal(execute, initialized.goalId, "metadata-exact-propose");
+    await getHost().session.extensionRunner.emitInput("approve", undefined, "interactive");
+    const offer = JSON.parse((await execute("goal_status", "metadata-exact-status", { goal_id: initialized.goalId })).details.value);
+    await assert.rejects(() => execute("goal_amend", "metadata-exact-wrong", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: "wrong-challenge", action_token: offer.action_token }), /challenge|approval|offer/i);
+    await execute("goal_amend", "metadata-exact-apply", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: offer.action_token });
+    await assert.rejects(() => execute("goal_amend", "metadata-exact-replay", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: offer.action_token }), /consumed|approval|offer/i);
+  });
+});
+
+test("real Pi host metadata proposal approval lifecycle survives reload and is non-replayable", async () => {
+  const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-metadata-project-"));
+  const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-metadata-host-"));
+  let result;
+  try {
+    execFileSync("git", ["init"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.name", "Goal Engine Test"], { cwd: projectCwd });
+    writeFileSync(join(projectCwd, "README.md"), "fixture\n");
+    writeFileSync(join(projectCwd, ".gitignore"), ".state/goal-engine/\n");
+    execFileSync("git", ["add", "."], { cwd: projectCwd });
+    execFileSync("git", ["commit", "-m", "test: initialize fixture"], { cwd: projectCwd });
+    const makeSession = async (manager) => {
+      const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+      await loader.reload();
+      const host = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
+      await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
+      return host;
+    };
+    result = await makeSession(SessionManager.create(projectCwd, join(agentDir, "sessions")));
+    const ctx = { cwd: projectCwd, sessionManager: result.session.sessionManager };
+    const signal = new AbortController().signal;
+    const execute = (name, id, args, context = ctx) => result.session.getToolDefinition(name).execute(id, args, signal, undefined, context);
+    const initialized = JSON.parse((await execute("goal_init", "metadata-init", { objective: "Original metadata", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] })).details.value);
+    // This first assertion is intentionally RED on HEAD: proposal is absent from the public Host schema.
+    const proposal = JSON.parse((await execute("goal_amend", "metadata-propose", { goal_id: initialized.goalId, operation: "propose_update_goal", reason: "User requests an objective amendment", changes: { objective: "Amended metadata" } })).details.value);
+    assert.equal(proposal.status, "METADATA_PROPOSAL_PENDING");
+    assert.match(proposal.challenge_id, /.+/);
+    assert.match(proposal.proposal_hash, /.+/);
+    await result.session.extensionRunner.emitInput("approve", undefined, "interactive");
+    const offer = JSON.parse((await execute("goal_status", "metadata-status", { goal_id: initialized.goalId })).details.value);
+    assert.equal(offer.machineAction.tool, "goal_amend");
+    assert.deepEqual(offer.machineAction.params, { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id });
+    assert.ok(offer.action_token);
+    const sessionFile = result.session.sessionManager.getSessionFile();
+    const sessionDir = result.session.sessionManager.getSessionDir();
+    result.session.sessionManager.appendMessage({ role: "assistant", content: [], provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }, stopReason: "stop" });
+    result.session.dispose(); result = undefined;
+    result = await makeSession(SessionManager.open(sessionFile, sessionDir, projectCwd));
+    const reloadCtx = { cwd: projectCwd, sessionManager: result.session.sessionManager };
+    const recovered = JSON.parse((await execute("goal_status", "metadata-recovered-status", { goal_id: initialized.goalId }, reloadCtx)).details.value);
+    assert.equal(recovered.machineAction.params.challenge_id, proposal.challenge_id);
+    const applied = JSON.parse((await execute("goal_amend", "metadata-apply", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: recovered.action_token }, reloadCtx)).details.value);
+    assert.equal(applied.objective, "Amended metadata");
+    const events = readFileSync(join(projectCwd, ".state/goal-engine/goals", initialized.goalId, "events.jsonl"), "utf8");
+    assert.match(events, /contract_amended/); assert.match(events, /approval/);
+    result.session.dispose(); result = undefined;
+    result = await makeSession(SessionManager.open(sessionFile, sessionDir, projectCwd));
+    await assert.rejects(() => execute("goal_amend", "metadata-replay", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: recovered.action_token }, { cwd: projectCwd, sessionManager: result.session.sessionManager }), /consumed|approval|offer/i);
+    await assert.rejects(() => execute("goal_amend", "metadata-strict-cross-operation", { operation: "update_goal", challenge_id: proposal.challenge_id, action_token: "bad", changes: {} }, { cwd: projectCwd, sessionManager: result.session.sessionManager }), /schema|argument|unknown|additional/i);
   } finally {
     try { result?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
   }

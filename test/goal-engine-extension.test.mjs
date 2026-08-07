@@ -458,6 +458,75 @@ test("historical safe ignored state dispatch remains available", async () => {
   assert.equal(dispatched.workspace.attempt, 1);
 });
 
+test("goal_amend exposes a strict discriminated seven-operation schema", () => {
+  const pi = createMockPi(tmpCwd());
+  createGoalEngineExtension(pi);
+  const schema = pi.tools.find((tool) => tool.name === "goal_amend").parameters;
+  assert.equal(schema.type, "object");
+  assert.equal(schema.anyOf.length, 7);
+  for (const branch of schema.anyOf) {
+    assert.equal(branch.additionalProperties, false);
+    assert.ok(branch.properties.operation.const);
+    assert.ok(Object.hasOwn(branch.properties, "goal_id"), "goal_id remains optional in every branch");
+    assert.equal(branch.required.includes("goal_id"), false);
+  }
+  const branch = (operation) => schema.anyOf.find((candidate) => candidate.properties.operation.const === operation);
+  const propose = branch("propose_update_goal");
+  const update = branch("update_goal");
+  const reopen = branch("reopen_completed");
+  const triage = branch("triage");
+  const detach = branch("detach_session");
+  assert.deepEqual(propose.required.sort(), ["changes", "operation", "reason"].sort());
+  assert.equal(Object.hasOwn(propose.properties, "action_token"), false);
+  assert.deepEqual(Object.keys(update.properties).sort(), ["action_token", "challenge_id", "goal_id", "operation"]);
+  assert.deepEqual(update.required.sort(), ["action_token", "challenge_id", "operation"].sort());
+  assert.equal(detach.required.includes("session_id"), false);
+
+  const basis = reopen.properties.basis;
+  assert.equal(basis.additionalProperties, false);
+  assert.deepEqual(basis.required, ["epoch"]);
+  const discovery = triage.properties.resolve_discoveries.items;
+  assert.equal(discovery.additionalProperties, false);
+  assert.deepEqual(discovery.required.sort(), ["disposition", "id", "reason"]);
+  const task = reopen.properties.add_tasks.items;
+  assert.deepEqual(task.required.sort(), ["acceptance", "description", "id", "writePaths"]);
+  assert.equal(task.additionalProperties, false);
+  assert.equal(task.properties.acceptance.additionalProperties, false);
+  assert.deepEqual(task.properties.acceptance.required.sort(), ["commands", "criteria"]);
+  const updateAcceptance = branch("patch_active").properties.update_tasks.additionalProperties.properties.acceptance;
+  assert.equal(updateAcceptance.additionalProperties, false);
+  assert.deepEqual(updateAcceptance.required.sort(), ["commands", "criteria"]);
+});
+
+test("goal_amend prepareArguments fail-closed validates strict operation shapes", () => {
+  const pi = createMockPi(tmpCwd());
+  createGoalEngineExtension(pi);
+  const prepare = pi.tools.find((tool) => tool.name === "goal_amend").prepareArguments;
+  const discovery = { id: "d1", disposition: "tasked", reason: "The completed goal needs a follow-up", task_id: "t2" };
+  const task = { id: "t2", description: "Follow-up", writePaths: ["src/t2.ts"], acceptance: { criteria: ["works"], commands: ["true"] } };
+  assert.deepEqual(prepare({ reason: "legacy patch", action_token: "token" }), { operation: "patch_active", reason: "legacy patch", action_token: "token" });
+  for (const invalid of [
+    { operation: "invalid", reason: "x", action_token: "t" },
+    { operation: "patch_active", reason: "x" },
+    { operation: "patch_active", reason: "x", action_token: "t", changes: {} },
+    { operation: "propose_update_goal", reason: "x", changes: {}, action_token: "t" },
+    { operation: "update_goal", challenge_id: "c", action_token: "t", changes: {} },
+    { operation: "reopen_completed", reason: "x", action_token: "t", basis: {}, resolve_discoveries: [discovery], add_tasks: [task] },
+    { operation: "triage", reason: "x", action_token: "t", resolve_discoveries: [{ id: "d1" }] },
+    { operation: "patch_active", reason: "x", action_token: "t", update_tasks: { t1: { unknown: true } } },
+    { operation: "patch_active", reason: "x", action_token: "t", update_tasks: { t1: { workflow: "unsafe" } } },
+  ]) assert.throws(() => prepare(invalid), /valid|mixed|missing|invalid|shape/i);
+  for (const valid of [
+    { operation: "patch_active", reason: "x", action_token: "t" },
+    { operation: "resolve_blocked", reason: "x", action_token: "t", blocked_resolution: "retry", blocked_task_id: "t1" },
+    { operation: "triage", reason: "x", action_token: "t", resolve_discoveries: [discovery] },
+    { operation: "reopen_completed", reason: "x", action_token: "t", basis: { epoch: 1, discovery_ids: ["d1"] }, resolve_discoveries: [discovery], add_tasks: [task] },
+    { operation: "detach_session", reason: "x", action_token: "t" },
+    { operation: "propose_update_goal", reason: "x", changes: { objective: "new" } },
+    { operation: "update_goal", challenge_id: "c", action_token: "t" },
+  ]) assert.deepEqual(prepare(valid), valid);
+});
+
 test("registers seven goal engine tools", () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);
@@ -3166,6 +3235,100 @@ test("compaction checkpoints survive extension reload and checkpoint failure can
   });
   assert.deepEqual(cancelled, { cancel: true });
   assert.equal(failingPi.entries.some((entry) => entry.customType === "goal-engine-recovery-latch"), true);
+});
+
+test("metadata terminal state restores ordinary machineAction after consumed and rejected decisions", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  const initialized = JSON.parse(await invoke(pi, "goal_init", { objective: "Metadata terminal progress", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] }));
+  const root = join(cwd, ".state/goal-engine");
+  const initialProjection = loadProjection(root, initialized.goalId);
+  appendEventStore(root, { schemaVersion: "goal-engine.event.v3", eventId: "metadata-terminal-discovery", goalId: initialized.goalId, occurredAt: new Date().toISOString(), type: "goal.discovery_recorded", data: { id: "metadata-terminal-discovery", summary: "Terminal metadata must restore the ordinary action", paths: [], source: "user_intent", sessionId: "session-test" } }, initialProjection.version);
+  const ordinary = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
+  assert.equal(ordinary.machineAction.tool, "goal_amend");
+  const proposed = JSON.parse(await invoke(pi, "goal_amend", { goal_id: initialized.goalId, operation: "propose_update_goal", reason: "Show terminal audit does not block", changes: { objective: "Updated metadata" } }));
+  await emitHook(pi, "input", { source: "interactive", text: "approve" });
+  const approval = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
+  await invoke(pi, "goal_amend", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposed.challenge_id, action_token: approval.action_token });
+  const assertTerminalOffer = (status) => {
+    const actionOffer = loadProjection(root, initialized.goalId).actionOffer;
+    assert.ok(actionOffer);
+    assert.equal(status.machineAction.tool, ordinary.machineAction.tool);
+    assert.deepEqual(status.machineAction.params, ordinary.machineAction.params);
+    assert.equal(status.machineAction.tool, actionOffer.tool);
+    assert.deepEqual(status.machineAction.params, actionOffer.params);
+    assert.equal(status.action_token, actionOffer.token);
+  };
+  const consumed = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
+  assert.equal(consumed.metadataDecision.status, "CONSUMED");
+  assertTerminalOffer(consumed);
+
+  const rejectedProposal = JSON.parse(await invoke(pi, "goal_amend", { goal_id: initialized.goalId, operation: "propose_update_goal", reason: "Reject without blocking dispatch", changes: { objective: "Rejected metadata" } }));
+  await emitHook(pi, "input", { source: "interactive", text: "reject" });
+  const rejected = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
+  assert.equal(rejected.metadataDecision.status, "REJECTED");
+  assertTerminalOffer(rejected);
+  await emitHook(pi, "input", { source: "interactive", text: "approve" });
+  const afterApprove = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
+  assert.equal(afterApprove.metadataDecision.status, "REJECTED");
+  assertTerminalOffer(afterApprove);
+  assert.notEqual(afterApprove.machineAction?.params?.challenge_id, rejectedProposal.challenge_id);
+});
+
+test("metadata latch status appends cleared tombstone before every metadata response", async () => {
+  const cwd = tmpCwd(); const pi = createMockPi(cwd); createGoalEngineExtensionProduction(pi);
+  const initialized = JSON.parse(await invoke(pi, "goal_init", { objective: "Metadata latch", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] }));
+  const proposal = JSON.parse(await invoke(pi, "goal_amend", { goal_id: initialized.goalId, operation: "propose_update_goal", reason: "Pending proposal", changes: { objective: "Changed" } }));
+  const assertCleared = async (expected) => {
+    pi.appendEntry("goal-engine-recovery-latch", { state: "active", goalId: initialized.goalId, reason: "injected" });
+    await emitHook(pi, "session_start", { reason: "reload" });
+    const status = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
+    assert.equal(status.metadataDecision.status, expected);
+    assert.equal(pi.entries.at(-1).customType, "goal-engine-recovery-latch");
+    assert.equal(pi.entries.at(-1).data.state, "cleared");
+    return status;
+  };
+  await assertCleared("AWAITING_USER_DECISION");
+  await emitHook(pi, "input", { source: "interactive", text: "approve" });
+  const approved = await assertCleared("APPROVED");
+  await invoke(pi, "goal_amend", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: approved.action_token });
+  await assertCleared("CONSUMED");
+});
+
+test("metadata persistence fails closed when appendEntry is absent", async () => {
+  const cwd = tmpCwd(); const missing = createMockPi(cwd); delete missing.appendEntry; createGoalEngineExtensionProduction(missing);
+  const initialized = JSON.parse(await invoke(missing, "goal_init", { objective: "Metadata persistence", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] }));
+  await assert.rejects(() => invoke(missing, "goal_amend", { goal_id: initialized.goalId, operation: "propose_update_goal", reason: "must persist", changes: { objective: "Never pending" } }), /appendEntry|persist/i);
+  const ordinary = JSON.parse(await invoke(missing, "goal_status", { goal_id: initialized.goalId }));
+  assert.equal(ordinary.metadataDecision, undefined);
+});
+
+test("metadata persistence keeps reject terminal when tombstone append fails without raw input", async () => {
+  const pi = createMockPi(tmpCwd()); const durableAppend = pi.appendEntry.bind(pi);
+  pi.appendEntry = (type, data) => {
+    if (type === "goal-engine-metadata-rejected") throw new Error("reject tombstone append failed");
+    durableAppend(type, data);
+  };
+  createGoalEngineExtensionProduction(pi);
+  const rejectedGoal = JSON.parse(await invoke(pi, "goal_init", { objective: "Metadata reject persistence", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] }));
+  await invoke(pi, "goal_amend", { goal_id: rejectedGoal.goalId, operation: "propose_update_goal", reason: "No raw user input", changes: { objective: "Never revive" } });
+  await emitHook(pi, "input", { source: "interactive", text: "reject" });
+  const terminal = JSON.parse(await invoke(pi, "goal_status", { goal_id: rejectedGoal.goalId }));
+  assert.equal(terminal.metadataDecision.status, "REJECTED");
+  assert.equal(terminal.machineAction.tool, "goal_dispatch");
+  assert.ok(terminal.action_token);
+  for (const entry of pi.entries.filter((entry) => entry.type === "custom" && entry.customType.startsWith("goal-engine-metadata-"))) {
+    assert.equal(Object.hasOwn(entry.data, "text"), false);
+    assert.equal(Object.hasOwn(entry.data, "inputText"), false);
+    assert.equal(Object.hasOwn(entry.data, "rawInput"), false);
+  }
+
+  await emitHook(pi, "session_start", { reason: "reload" });
+  const restored = JSON.parse(await invoke(pi, "goal_status", { goal_id: rejectedGoal.goalId }));
+  assert.equal(restored.metadataDecision.status, "REJECTED");
+  assert.equal(restored.machineAction.tool, "goal_dispatch");
+  assert.ok(restored.action_token);
 });
 
 test("lifecycle ambiguity is durably fail-closed and compaction never clears its latch", async () => {

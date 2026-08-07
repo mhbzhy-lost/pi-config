@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import { hashGoalMetadataProposal, recordHumanChoice } from "./human-decision.mjs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
 import { appendEvent, appendEventBatch, loadProjection, listGoals, listGoalIds } from "./store.mjs";
 import { compileTaskContract, assertPendingTaskContractsCompile } from "./dispatch.mjs";
@@ -265,12 +266,14 @@ function toolResult(value) {
 }
 
 function registerGoalTool(pi, definition) {
-  const { handler, ...publicDefinition } = definition;
+  const { handler, prepareArguments, prepareInExecute = true, ...publicDefinition } = definition;
   if (typeof handler !== "function") throw new Error(`Goal tool ${definition.name} is missing its domain handler`);
   pi.registerTool({
     ...publicDefinition,
+    ...(prepareArguments ? { prepareArguments } : {}),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return toolResult(await handler(params, ctx));
+      const prepared = prepareArguments && prepareInExecute ? prepareArguments(params) : params;
+      return toolResult(await handler(prepared, ctx));
     },
   });
 }
@@ -410,6 +413,42 @@ function statusResponse(projection, cwd, root, { machineAction = null, actionTok
   }, null, 2);
 }
 
+function validateSchema(schema, value, path = "goal_amend") {
+  if (schema.anyOf) {
+    if (!schema.anyOf.some((branch) => { try { validateSchema(branch, value, path); return true; } catch { return false; } })) throw new Error(`${path} schema invalid operation or challenge shape`);
+    return;
+  }
+  if (schema.type === "object") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path} schema expected object`);
+    for (const key of schema.required || []) if (!Object.hasOwn(value, key)) throw new Error(`${path} schema missing ${key}`);
+    if (schema.minProperties && Object.keys(value).length < schema.minProperties) throw new Error(`${path} schema requires properties`);
+    for (const [key, child] of Object.entries(schema.properties || {})) if (Object.hasOwn(value, key)) validateSchema(child, value[key], `${path}.${key}`);
+    if (schema.additionalProperties === false) for (const key of Object.keys(value)) if (!Object.hasOwn(schema.properties || {}, key)) throw new Error(`${path} schema additional property ${key}`);
+    if (typeof schema.additionalProperties === "object") for (const [key, child] of Object.entries(value)) if (!Object.hasOwn(schema.properties || {}, key)) validateSchema(schema.additionalProperties, child, `${path}.${key}`);
+  } else if (schema.type === "array") {
+    if (!Array.isArray(value)) throw new Error(`${path} schema expected array`);
+    for (const item of value) validateSchema(schema.items, item, `${path}[]`);
+  } else if (schema.type === "string" && typeof value !== "string") throw new Error(`${path} schema expected string`);
+  else if (schema.type === "integer" && !Number.isInteger(value)) throw new Error(`${path} schema expected integer`);
+  if (schema.const !== undefined && value !== schema.const) throw new Error(`${path} schema invalid const`);
+  if (schema.enum && !schema.enum.includes(value)) throw new Error(`${path} schema invalid enum`);
+}
+
+const string = { type: "string" };
+const acceptanceSchema = { type: "object", properties: { criteria: { type: "array", items: string }, commands: { type: "array", items: string } }, required: ["criteria", "commands"], additionalProperties: false };
+const taskSchema = { type: "object", properties: { id: string, description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, required: ["id", "description", "writePaths", "acceptance"], additionalProperties: false };
+const resolutionSchema = { type: "object", properties: { id: string, disposition: { type: "string", enum: ["tasked", "out_of_scope", "duplicate", "new_goal"] }, task_id: string, reason: string }, required: ["id", "disposition", "reason"], additionalProperties: false };
+const updateTaskSchema = { type: "object", properties: { description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, additionalProperties: false };
+const goalAmendSchema = { type: "object", anyOf: [
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "patch_active" }, reason: string, action_token: string, add_tasks: { type: "array", items: taskSchema }, remove_tasks: { type: "array", items: string }, update_tasks: { type: "object", additionalProperties: updateTaskSchema } }, required: ["operation", "reason", "action_token"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "resolve_blocked" }, reason: string, action_token: string, blocked_resolution: { type: "string", enum: ["retry", "supersede"] }, blocked_task_id: string, replacement_task_id: string, add_tasks: { type: "array", items: taskSchema }, remove_tasks: { type: "array", items: string }, update_tasks: { type: "object", additionalProperties: updateTaskSchema } }, required: ["operation", "reason", "action_token", "blocked_resolution", "blocked_task_id"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "triage" }, reason: string, action_token: string, resolve_discoveries: { type: "array", items: resolutionSchema } }, required: ["operation", "reason", "action_token", "resolve_discoveries"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "reopen_completed" }, reason: string, action_token: string, basis: { type: "object", properties: { epoch: { type: "integer" }, discovery_ids: { type: "array", items: string } }, required: ["epoch"], additionalProperties: false }, resolve_discoveries: { type: "array", items: resolutionSchema }, add_tasks: { type: "array", items: taskSchema } }, required: ["operation", "reason", "action_token", "basis", "resolve_discoveries", "add_tasks"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "detach_session" }, reason: string, action_token: string, session_id: string }, required: ["operation", "reason", "action_token"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "propose_update_goal" }, reason: string, changes: { type: "object", properties: { objective: string, scope: { type: "array", items: string }, non_goals: { type: "array", items: string }, dod: { type: "array", items: string } }, additionalProperties: false, minProperties: 1 } }, required: ["operation", "reason", "changes"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "update_goal" }, challenge_id: string, action_token: string }, required: ["operation", "challenge_id", "action_token"], additionalProperties: false },
+] };
+
 export function createGoalEngineExtension(pi, options = {}) {
   const store = options.store || {};
   const appendEventFn = options.appendEvent || store.appendEvent || appendEvent;
@@ -431,6 +470,33 @@ export function createGoalEngineExtension(pi, options = {}) {
   let turnsSinceSettle = 0;
   let pendingInput = null;
   let recoveryLatch = null;
+  const metadataChallenges = new Map();
+  const persistMetadata = (type, data) => {
+    if (typeof pi.appendEntry !== "function") throw new Error(`Cannot persist ${type}: pi.appendEntry is unavailable`);
+    pi.appendEntry(type, data);
+  };
+  const restoreMetadata = (ctx) => {
+    metadataChallenges.clear();
+    for (const entry of ctx.sessionManager?.getEntries?.() || []) {
+      if (entry.type !== "custom" || !entry.customType?.startsWith("goal-engine-metadata-")) continue;
+      const data = entry.data;
+      if (!data?.id) continue;
+      const current = metadataChallenges.get(data.id) || {};
+      metadataChallenges.set(data.id, { ...current, ...(entry.customType === "goal-engine-metadata-challenge" ? { challenge: data } : {}), ...(entry.customType === "goal-engine-metadata-decision" ? { decision: { ...data, id: data.receiptId } } : {}), ...(entry.customType === "goal-engine-metadata-rejected" ? { rejected: true } : {}), ...(entry.customType === "goal-engine-metadata-consumed" ? { consumed: true } : {}) });
+    }
+  };
+  const metadataState = (projection, sessionId) => {
+    const records = [...metadataChallenges.values()].filter((record) => record.challenge?.goalId === projection.goalId && record.challenge?.sessionId === sessionId);
+    const record = records.at(-1);
+    if (!record) return null;
+    const applied = projection.contractHistory?.some((entry) => entry.proposalHash === record.challenge.proposalHash);
+    const base = record.challenge.baseMetadata && hashGoalMetadataProposal(record.challenge.baseMetadata) === hashGoalMetadataProposal({ objective: projection.objective, scope: projection.scope, nonGoals: projection.nonGoals, dod: projection.dod });
+    if (applied || record.consumed) return { status: "CONSUMED", record };
+    if (record.rejected || record.decision?.choice === "reject") return { status: "REJECTED", record };
+    if (!base) return { status: "REPROPOSE_REQUIRED", record };
+    if (record.decision?.choice === "approve") return { status: "APPROVED", record };
+    return { status: "AWAITING_USER_DECISION", record };
+  };
 
   const activateRecoveryLatch = (goalId, error) => {
     recoveryLatch = { state: "active", goalId: goalId || recoveryLatch?.goalId || "unknown", reason: String(error?.message || error) };
@@ -445,7 +511,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     }
     const offer = projection.actionOffer;
     if (!offer) throw new Error(`goal_status must issue an action offer before ${tool}`);
-    const supplied = { goal_id: goalId, task_id: params.task_id, action: params.action, strategy: params.strategy, operation: params.operation };
+    const supplied = { goal_id: goalId, task_id: params.task_id, action: params.action, strategy: params.strategy, operation: params.operation, challenge_id: params.challenge_id };
     const boundParams = {};
     for (const key of Object.keys(offer.params)) {
       if (supplied[key] === undefined) throw new Error(`action offer params do not match: missing ${key}`);
@@ -626,7 +692,12 @@ export function createGoalEngineExtension(pi, options = {}) {
       let projection = loadProjectionFn(root, goalId);
       if (!projection) return "NO_ACTIVE_GOAL";
       if (!enforceActionTokens) return statusResponse(projection, cwd, root);
-      const machineAction = machineActionForProjection(projection, cwd, root);
+      const metadata = metadataState(projection, sessionIdentity(ctx));
+      let machineAction = metadata?.status === "APPROVED"
+        ? { tool: "goal_amend", params: { goal_id: goalId, operation: "update_goal", challenge_id: metadata.record.challenge.id } }
+        : metadata?.status === "AWAITING_USER_DECISION" || metadata?.status === "REPROPOSE_REQUIRED"
+          ? null
+          : machineActionForProjection(projection, cwd, root);
       let actionToken = null;
       if (machineAction) {
         const offer = issueActionOffer(projection, machineAction, sessionIdentity(ctx));
@@ -639,7 +710,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         pi.appendEntry?.("goal-engine-recovery-latch", clearedLatch);
         recoveryLatch = clearedLatch;
       }
-      return response;
+      if (!metadata) return response;
+      const parsed = JSON.parse(response);
+      parsed.metadataDecision = { status: metadata.status };
+      return JSON.stringify(parsed, null, 2);
     },
   });
 
@@ -966,65 +1040,40 @@ export function createGoalEngineExtension(pi, options = {}) {
   registerGoalTool(pi, {
     name: "goal_amend",
     description: "当人类明确改范围/DAG，或 blocked/preserved 需调整计划时使用；只改安全 pending task。不要用于正常推进或绕过门禁。",
-    parameters: {
-      type: "object",
-      properties: {
-        goal_id: { type: "string" },
-        operation: { type: "string", enum: ["patch_active", "resolve_blocked", "triage", "reopen_completed", "detach_session", "update_goal"] },
-        reason: { type: "string", description: "修改原因（≥10字符）" },
-        action_token: { type: "string" },
-        basis: {
-          type: "object",
-          properties: { epoch: { type: "integer" }, discovery_ids: { type: "array", items: { type: "string" } } },
-          required: ["epoch"],
-        },
-        resolve_discoveries: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: { id: { type: "string" }, disposition: { type: "string", enum: ["tasked", "out_of_scope", "duplicate", "new_goal"] }, task_id: { type: "string" }, reason: { type: "string" } },
-            required: ["id", "disposition", "reason"],
-          },
-        },
-        session_id: { type: "string" },
-        blocked_resolution: { type: "string", enum: ["retry", "supersede"] },
-        blocked_task_id: { type: "string" },
-        replacement_task_id: { type: "string" },
-        add_tasks: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string" }, description: { type: "string" },
-              deps: { type: "array", items: { type: "string" } },
-              writePaths: { type: "array", items: { type: "string" } },
-              acceptance: { type: "object", properties: { criteria: { type: "array", items: { type: "string" } }, commands: { type: "array", items: { type: "string" } } }, required: ["criteria", "commands"] },
-              workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] },
-            },
-            required: ["id", "description", "writePaths", "acceptance"],
-          },
-        },
-        remove_tasks: { type: "array", items: { type: "string" } },
-        update_tasks: {
-          type: "object",
-          additionalProperties: {
-            type: "object",
-            properties: { description: { type: "string" }, deps: { type: "array", items: { type: "string" } }, writePaths: { type: "array", items: { type: "string" } }, acceptance: { type: "object" }, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } },
-          },
-        },
-      },
-      required: ["operation", "reason", "action_token"],
-    },
+    parameters: goalAmendSchema,
+    prepareInExecute: enforceActionTokens,
     prepareArguments(args) {
-      if (!args || typeof args !== "object" || args.operation !== undefined) return args;
-      return { ...args, operation: "patch_active" };
+      const prepared = !args || typeof args !== "object" || args.operation !== undefined ? args : { ...args, operation: "patch_active" };
+      validateSchema(goalAmendSchema, prepared);
+      return prepared;
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScope(ctx);
       const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
+      if (params.operation === "propose_update_goal") {
+        const baseMetadata = { objective: projection.objective, scope: projection.scope, nonGoals: projection.nonGoals, dod: projection.dod };
+        const targetMetadata = { ...baseMetadata, ...params.changes, ...(params.changes.non_goals !== undefined ? { nonGoals: params.changes.non_goals } : {}) };
+        delete targetMetadata.non_goals;
+        const challenge = { id: crypto.randomUUID(), kind: "goal_metadata_approval", goalId, sessionId: sessionIdentity(ctx), requestedAt: new Date().toISOString(), baseVersion: projection.version, reason: params.reason, baseMetadata, targetMetadata, proposalHash: hashGoalMetadataProposal(targetMetadata), choices: ["approve", "reject"], proposalPresented: true };
+        persistMetadata("goal-engine-metadata-challenge", challenge);
+        metadataChallenges.set(challenge.id, { challenge });
+        const publicMetadata = (metadata) => ({ objective: metadata.objective, scope: metadata.scope, non_goals: metadata.nonGoals, dod: metadata.dod });
+        return JSON.stringify({ status: "METADATA_PROPOSAL_PENDING", challenge_id: challenge.id, reason: challenge.reason, base_metadata: publicMetadata(baseMetadata), target_metadata: publicMetadata(targetMetadata), proposal_hash: challenge.proposalHash, choices: challenge.choices });
+      }
+      const metadataBeforeConsume = params.operation === "update_goal" ? metadataState(projection, sessionIdentity(ctx)) : null;
       projection = consumeOfferedAction(projection, params, "goal_amend", goalId, ctx, root);
+      if (params.operation === "update_goal") {
+        const state = metadataBeforeConsume;
+        if (state?.status !== "APPROVED" || state.record.challenge.id !== params.challenge_id) throw new Error("metadata challenge approval is missing, stale, consumed, or mismatched");
+        const { challenge, decision } = state.record;
+        const event = makeGoalEvent("goal.contract_amended", { proposalHash: challenge.proposalHash, approval: { entryId: decision.id, sessionId: decision.sessionId, source: decision.source }, changes: challenge.targetMetadata }, goalId);
+        const updated = appendEventFn(root, event, projection.version);
+        persistMetadata("goal-engine-metadata-consumed", { id: challenge.id });
+        metadataChallenges.set(challenge.id, { ...state.record, consumed: true });
+        return statusResponse(updated, cwd, root);
+      }
 
       const addTasks = {};
       if (params.add_tasks) {
@@ -1551,13 +1600,32 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   const loadAllProjections = (root) => listGoalIdsFn(root).map((goalId) => loadProjectionFn(root, goalId)).filter(Boolean);
 
-  pi.on("input", (event) => {
+  pi.on("input", (event, ctx) => {
     if (event.source !== "interactive" && event.source !== "rpc") return { action: "continue" };
     pendingInput = { text: event.text, source: event.source, entryId: event.entryId || null };
+    try {
+      const candidates = [...metadataChallenges.values()].filter((record) => !record.decision && !record.rejected && !record.consumed);
+      const record = candidates.at(-1);
+      let sessionId = event.sessionId || record?.challenge?.sessionId;
+      try { sessionId = sessionIdentity(ctx); } catch { /* Pi input hooks do not expose context on every transport */ }
+      if (record && record.challenge.sessionId === sessionId) {
+        const occurredAt = new Date(Math.max(Date.now(), Date.parse(record.challenge.requestedAt) + 1)).toISOString();
+        const inputEvent = { role: "user", source: event.source, sessionId, occurredAt, text: event.text, id: event.entryId || crypto.randomUUID() };
+        const choice = recordHumanChoice({ inputEvent, challenge: record.challenge, sessionId });
+        const decision = { id: crypto.randomUUID(), ...choice, sessionId, source: event.source };
+        persistMetadata("goal-engine-metadata-decision", { id: record.challenge.id, receiptId: decision.id, challengeId: record.challenge.id, choice: decision.choice, proposalHash: decision.proposalHash, sessionId: decision.sessionId, source: decision.source });
+        metadataChallenges.set(record.challenge.id, { ...record, decision });
+        if (decision.choice === "reject") {
+          try { persistMetadata("goal-engine-metadata-rejected", { id: record.challenge.id }); } catch { /* durable decision receipt is terminal audit authority */ }
+          metadataChallenges.set(record.challenge.id, { ...metadataChallenges.get(record.challenge.id), rejected: true });
+        }
+      }
+    } catch { /* ambiguous/non-user input never creates a receipt */ }
     return { action: "continue" };
   });
 
   pi.on("session_start", (_event, ctx) => {
+    restoreMetadata(ctx);
     const entries = ctx.sessionManager?.getEntries?.() || [];
     const latch = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === "goal-engine-recovery-latch");
     recoveryLatch = latch?.data?.state === "active" ? latch.data : null;
