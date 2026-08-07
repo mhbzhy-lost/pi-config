@@ -39,6 +39,9 @@
       },
       "worker": {
         "disabled": true
+      },
+      "executor": {
+        "model": "deepseek/deepseek-v4-flash"
       }
     }
   },
@@ -46,10 +49,7 @@
     "openai-codex/gpt-5.6-sol",
     "openai-codex/gpt-5.6-terra",
     "openai-codex/gpt-5.3-codex-spark",
-    "deepseek/deepseek-v4-flash",
-    "codex-pool/gpt-5.6-sol",
-    "anthropic-idealab/claude-opus-4-6",
-    "openai-idealab/Peach-07-17-DogFooding"
+    "deepseek/deepseek-v4-flash"
   ],
   "defaultThinkingLevel": "max"
 }
