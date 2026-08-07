@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -111,6 +111,51 @@ test("identity creation is private, idempotent, and rejects a mismatched cwd", (
       (error) => error.code === "GOAL_STATE_IDENTITY_MISMATCH" && /different\/repo/.test(error.message),
     );
     assert.equal(JSON.parse(readFileSync(identityPath, "utf8")).canonicalCwd, "/different/repo");
+  } finally {
+    fixture.dispose();
+    globalRoot.dispose();
+  }
+});
+
+test("identity verification rejects broad namespace and file permissions without repairing them", () => {
+  for (const target of ["namespace", "identity"]) {
+    const fixture = arena();
+    const globalRoot = arena("goal-state-global-");
+    try {
+      const scope = resolveGoalStateScope({ cwd: fixture.root, env: { PI_CODING_GOAL_DIR: globalRoot.root } });
+      ensureGoalStateIdentity(scope);
+      const path = target === "namespace" ? scope.preferredRoot : join(scope.preferredRoot, "identity.json");
+      chmodSync(path, target === "namespace" ? 0o755 : 0o644);
+
+      assert.throws(
+        () => ensureGoalStateIdentity(scope),
+        (error) => error.code === "GOAL_STATE_IDENTITY_INSECURE" && error.message.includes(path),
+      );
+      assert.equal(statSync(path).mode & 0o777, target === "namespace" ? 0o755 : 0o644);
+    } finally {
+      fixture.dispose();
+      globalRoot.dispose();
+    }
+  }
+});
+
+test("identity verification refuses a symlink even when its target has matching private content", () => {
+  const fixture = arena();
+  const globalRoot = arena("goal-state-global-");
+  try {
+    const scope = resolveGoalStateScope({ cwd: fixture.root, env: { PI_CODING_GOAL_DIR: globalRoot.root } });
+    ensureGoalStateIdentity(scope);
+    const identityPath = join(scope.preferredRoot, "identity.json");
+    const outsideTarget = join(globalRoot.root, "outside-identity.json");
+    writeFileSync(outsideTarget, readFileSync(identityPath), { mode: 0o600 });
+    unlinkSync(identityPath);
+    symlinkSync(outsideTarget, identityPath);
+
+    assert.throws(
+      () => ensureGoalStateIdentity(scope),
+      (error) => error.code === "GOAL_STATE_IDENTITY_INSECURE" && /symbolic link|symlink/i.test(error.message),
+    );
+    assert.equal(statSync(outsideTarget).mode & 0o777, 0o600);
   } finally {
     fixture.dispose();
     globalRoot.dispose();

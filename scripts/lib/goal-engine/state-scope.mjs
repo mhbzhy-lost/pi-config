@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
 const IDENTITY_SCHEMA = "goal-engine.cwd-identity.v1";
@@ -71,17 +71,41 @@ export function ensureGoalStateIdentity(scope) {
   mkdirSync(scope.preferredRoot, { recursive: true, mode: 0o700 });
   const identityPath = join(scope.preferredRoot, "identity.json");
   const expectedBytes = `${JSON.stringify(scope.identity, null, 2)}\n`;
+
+  const directoryBefore = lstatSync(scope.preferredRoot);
+  if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink() || (directoryBefore.mode & 0o777) !== 0o700) {
+    throw codedError("GOAL_STATE_IDENTITY_INSECURE", `namespace directory is not a private non-symlink directory: ${scope.preferredRoot}`);
+  }
+
   try {
     writeFileSync(identityPath, expectedBytes, { encoding: "utf8", flag: "wx", mode: 0o600 });
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
   }
 
+  let descriptor;
   let observed;
   try {
-    observed = JSON.parse(readFileSync(identityPath, "utf8"));
+    const pathMetadata = lstatSync(identityPath);
+    if (pathMetadata.isSymbolicLink()) {
+      throw codedError("GOAL_STATE_IDENTITY_INSECURE", `identity path is a symbolic link: ${identityPath}`);
+    }
+    descriptor = openSync(identityPath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    const fileMetadata = fstatSync(descriptor);
+    if (!fileMetadata.isFile() || (fileMetadata.mode & 0o777) !== 0o600) {
+      throw codedError("GOAL_STATE_IDENTITY_INSECURE", `identity is not a private regular file: ${identityPath}`);
+    }
+    observed = JSON.parse(readFileSync(descriptor, "utf8"));
+    const directoryAfter = lstatSync(scope.preferredRoot);
+    if (directoryAfter.dev !== directoryBefore.dev || directoryAfter.ino !== directoryBefore.ino
+      || !directoryAfter.isDirectory() || directoryAfter.isSymbolicLink() || (directoryAfter.mode & 0o777) !== 0o700) {
+      throw codedError("GOAL_STATE_IDENTITY_INSECURE", `namespace directory identity changed during verification: ${scope.preferredRoot}`);
+    }
   } catch (error) {
+    if (error?.code === "GOAL_STATE_IDENTITY_INSECURE") throw error;
     throw codedError("GOAL_STATE_IDENTITY_MISMATCH", `identity at ${identityPath} is unreadable: ${error.message}`);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
   if (JSON.stringify(observed) !== JSON.stringify(scope.identity)) {
     throw codedError(

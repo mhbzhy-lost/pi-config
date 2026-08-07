@@ -17,7 +17,12 @@ const piModule = await import(pathToFileURL(join(piRoot, "dist/index.js")).href)
 const { createAgentSession, DefaultResourceLoader, SessionManager } = piModule;
 
 // Ordinary legacy fixtures must never inherit the invoking Pi process's production Goal root.
+const inheritedGoalStateDir = process.env.PI_CODING_GOAL_DIR;
 delete process.env.PI_CODING_GOAL_DIR;
+test.after(() => {
+  if (inheritedGoalStateDir === undefined) delete process.env.PI_CODING_GOAL_DIR;
+  else process.env.PI_CODING_GOAL_DIR = inheritedGoalStateDir;
+});
 
 test("real Pi host uses execution context cwd instead of process cwd", async () => {
   const processCwd = await mkdtemp(join(tmpdir(), "goal-engine-process-"));

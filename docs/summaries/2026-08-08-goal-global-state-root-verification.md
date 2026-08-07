@@ -95,7 +95,7 @@ node --test test/pi-shell.test.mjs
 # 5/5
 
 node --test test/goal-engine-state-scope.test.mjs
-# 10/10
+# 初始 10/10；外源复审补强权限与 symlink 门禁后 12/12
 
 node --test test/goal-engine-extension.test.mjs
 # 124/124
@@ -105,6 +105,9 @@ node --test test/goal-engine-runtime.integration.mjs
 
 node --test test/goal-engine-extension.test.mjs test/goal-engine-events.test.mjs test/goal-engine-workspace.test.mjs
 # 修复一次既有 nonexistent-cwd 错误合同回归后，相关三组回归通过；最终 Extension 单组再次通过 124/124
+
+npm test
+# 830/831；唯一失败为既有 pi/settings.json enabledModels 与 test/migration-contract.test.mjs 期望不一致，和本改动无关
 ```
 
 真实 Host 专项验证了：
