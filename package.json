@@ -10,6 +10,8 @@
     "test:integration": "node --test test/pi-runtime.integration.mjs",
     "test:subagents": "node --test test/pi-subagents-runtime.integration.mjs",
     "setup:subagent-runtime": "node scripts/setup-subagent-runtime-deps.mjs",
-    "doctor": "node scripts/doctor.mjs"
+    "doctor": "node scripts/doctor.mjs",
+    "worktree": "node scripts/worktree-lifecycle.mjs",
+    "worktree:audit": "node scripts/worktree-lifecycle.mjs audit"
   }
 }

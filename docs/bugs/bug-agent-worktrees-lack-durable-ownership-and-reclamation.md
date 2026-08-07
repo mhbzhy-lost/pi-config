@@ -26,3 +26,9 @@
 ## 6. 修复方向
 
 建立统一 worktree lifecycle registry 和受控 create/release/preserve 接口；每个创建动作必须先持久化 owner 与 recovery intent。只读 audit 将 active、reclaimable、preserved、dirty、sequencer、unmanaged 分开；普通完成路径自动执行无 `--force` 的 worktree-only 回收，branch 删除独立决策。Doctor 报告 cleanup debt，Agent shell 禁止绕过受控入口直接创建或销毁 worktree。
+
+## 7. Task 1 根因补充：inventory 不能从名称或单次 probe 推断可回收
+
+`git worktree list --porcelain` 的路径或 branch 名不是 owner 的证据；并且路径可包含空格、换行，普通按行/空白切分会把同一个 worktree 错配为多个记录。历史资源没有 durable allocation intent 时，inventory 只能报告 `unmanaged`，不能把它升级为 `reclaimable`。同理，状态、sequencer、进程或文件系统 probe 任一失败都表示信息不足，必须保守归入不可自动动作的类别（例如 `active`），而不是根据“看起来 clean”推断可删除。
+
+Task 1 因此只实现 NUL-safe 的只读 inventory 与稳定分类：主工作树为 `main`；有 owner 但仍活跃、dirty、处于 sequencer、保留、cleanup debt 或缺失时分别显式标记；只有有明确可释放 allocation 且所有安全 probe 成功的 clean linked worktree 才是 `reclaimable`。inventory/CLI 不执行 `worktree remove`、`branch -d/-D` 或其他 Git mutation；branch 删除永远是独立的人工决策。
