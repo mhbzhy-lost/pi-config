@@ -16,6 +16,7 @@ Usage:
 
 import json
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -28,6 +29,7 @@ from pathlib import Path
 
 BASE_STATE_DIR = Path(tempfile.gettempdir()) / "pi-playwright-mcp"
 CLIENT_TIMEOUT = 60.0
+IDLE_TIMEOUT_DEFAULT = 1800.0
 
 _instance_name: str | None = None
 _instance_explicit = False
@@ -47,6 +49,21 @@ def pid_file() -> Path:
 
 def log_file() -> Path:
     return state_dir() / "daemon.log"
+
+
+def last_activity_file() -> Path:
+    return state_dir() / "last_activity"
+
+
+def idle_timeout_from_env() -> float:
+    """Idle timeout from PI_PLAYWRIGHT_IDLE_TIMEOUT, else the default."""
+    raw = os.environ.get("PI_PLAYWRIGHT_IDLE_TIMEOUT")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return IDLE_TIMEOUT_DEFAULT
 
 
 def mcp_pid_file() -> Path:
@@ -117,6 +134,10 @@ def do_start(headless: bool = False):
     if _instance_name is None:
         _instance_name = uuid.uuid4().hex[:8]
 
+    reaped = reap_idle_instances(idle_timeout_from_env())
+    if reaped:
+        print(f"Reaped idle instances: {', '.join(reaped)}")
+
     ensure_state_dir()
 
     if is_running():
@@ -153,6 +174,44 @@ def do_start(headless: bool = False):
     sys.exit(1)
 
 
+def reap_idle_instances(idle_timeout: float) -> list[str]:
+    """Stop other instances whose daemon is alive but idle past the timeout.
+
+    Instances without a last_activity file (created before this feature) are
+    conservatively skipped.  Returns the names of reaped instances.
+    """
+    reaped = []
+    if not BASE_STATE_DIR.exists():
+        return reaped
+    for d in sorted(BASE_STATE_DIR.iterdir()):
+        if not d.is_dir() or d.name == _instance_name:
+            continue
+        pid = read_pid(d / "daemon.pid")
+        if pid is None or not (d / "server.sock").exists():
+            continue
+        act = d / "last_activity"
+        if not act.exists():
+            continue
+        try:
+            stamp = float(act.read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if time.time() - stamp < idle_timeout:
+            continue
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        for f in ["daemon.pid", "server.sock", "mcp.pid", "last_activity", "daemon.log"]:
+            (d / f).unlink(missing_ok=True)
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+        reaped.append(d.name)
+    return reaped
+
+
 def do_stop():
     resolve_instance()
     pid = read_pid(pid_file())
@@ -162,7 +221,7 @@ def do_stop():
         except (ProcessLookupError, PermissionError):
             pass
 
-    for f in [pid_file(), socket_path(), mcp_pid_file()]:
+    for f in [pid_file(), socket_path(), mcp_pid_file(), last_activity_file(), log_file()]:
         f.unlink(missing_ok=True)
 
     try:
@@ -185,7 +244,7 @@ def do_stopall():
         except (ProcessLookupError, PermissionError):
             pass
         d = BASE_STATE_DIR / name
-        for f in ["daemon.pid", "server.sock", "mcp.pid"]:
+        for f in ["daemon.pid", "server.sock", "mcp.pid", "last_activity", "daemon.log"]:
             (d / f).unlink(missing_ok=True)
         try:
             d.rmdir()
@@ -264,14 +323,24 @@ def do_tools():
         print(f"  {t['name']:30s} {desc}")
 
 
-def run_daemon(headless: bool):
-    """Daemon: manages MCP subprocess and proxies via Unix socket with threads."""
+def run_daemon(headless: bool, idle_timeout: float = IDLE_TIMEOUT_DEFAULT):
+    """Daemon: manages MCP subprocess and proxies via Unix socket with threads.
+
+    Exits on its own when no client connects for idle_timeout seconds and no
+    request is waiting for an MCP response.  Each accepted connection refreshes
+    the activity timestamp (also persisted to the last_activity state file so
+    other processes can reap this instance).
+    """
     ensure_state_dir()
     socket_path().unlink(missing_ok=True)
 
-    mcp_cmd = ["npx", "-y", "@playwright/mcp"]
-    if headless:
-        mcp_cmd.append("--headless")
+    injected = os.environ.get("PI_PLAYWRIGHT_MCP_CMD")
+    if injected:
+        mcp_cmd = shlex.split(injected)
+    else:
+        mcp_cmd = ["npx", "-y", "@playwright/mcp"]
+        if headless:
+            mcp_cmd.append("--headless")
 
     mcp = subprocess.Popen(
         mcp_cmd,
@@ -368,13 +437,25 @@ def run_daemon(headless: bool):
         except (json.JSONDecodeError, ConnectionResetError, OSError):
             conn.close()
 
+    last_activity = time.time()
+
+    def touch_activity():
+        nonlocal last_activity
+        last_activity = time.time()
+        try:
+            last_activity_file().write_text(f"{last_activity:.3f}")
+        except OSError:
+            pass
+
     try:
         while mcp.poll() is None:
             try:
                 conn, _ = server.accept()
             except socket.timeout:
-                continue
-
+                if pending or time.time() - last_activity < idle_timeout:
+                    continue
+                break
+            touch_activity()
             t = threading.Thread(target=handle_client, args=(conn,), daemon=True)
             t.start()
 
@@ -445,7 +526,13 @@ def main():
         do_tools()
     elif cmd == "_daemon":
         headless = "--headless" in argv
-        run_daemon(headless)
+        idle_timeout = idle_timeout_from_env()
+        if "--idle-timeout" in argv:
+            try:
+                idle_timeout = float(argv[argv.index("--idle-timeout") + 1])
+            except (IndexError, ValueError):
+                pass
+        run_daemon(headless, idle_timeout)
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)

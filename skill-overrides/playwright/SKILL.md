@@ -11,6 +11,15 @@ Control a persistent Playwright MCP browser through `playwright.py` and its Unix
 
 **Core principle:** `start` -> discover runtime tools -> interact with `call` -> stop the exact instance you own. Snapshot before element interaction.
 
+## Auto-Recleaning (safety net)
+
+Callers that crash or forget `stop` no longer leak processes forever. Two automatic layers keep stray daemons from piling up:
+
+- **Idle timeout:** a daemon with no client connections for the idle threshold exits on its own and tears down the MCP/Chrome chain. Threshold resolution: `_daemon --idle-timeout <seconds>` > env `PI_PLAYWRIGHT_IDLE_TIMEOUT` > default **1800s (30 min)**.
+- **Reap on start:** every `start` first stops other instances whose daemon is alive but idle past the threshold, then starts the new one.
+
+You should still call `stop` explicitly when you are done — the safety net is a fallback, not a replacement.
+
 ## Lifecycle
 
 ```bash
