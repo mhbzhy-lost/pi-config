@@ -3,7 +3,7 @@ import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { tmpdir } from "node:os";
+import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
 import { allocateExecutorWorkspace, inspectExecutorWorkspace, integrateExecutorWorkspace, releaseExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 
@@ -11,8 +11,11 @@ function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
+const temporaryArena = createTemporaryArenaSync("goal-engine-workspace-");
+test.after(() => temporaryArena.disposeSync());
+
 function initRepo() {
-  const dir = mkdtempSync(join(tmpdir(), "ge-ws-"));
+  const dir = temporaryArena.mkdtempSync("ge-ws-");
   git(dir, "init");
   git(dir, "config", "user.email", "test@test.com");
   git(dir, "config", "user.name", "Test");
@@ -23,7 +26,7 @@ function initRepo() {
 }
 
 function tmpStateRoot() {
-  return mkdtempSync(join(tmpdir(), "ge-ws-state-"));
+  return temporaryArena.mkdtempSync("ge-ws-state-");
 }
 
 test("inspectExecutorWorkspace rejects an ancestor HEAD on the live branch", () => {
@@ -1184,7 +1187,7 @@ test("orphan inventory review regression spoofed inspector snapshot cannot forge
 
 test("orphan inventory review regression unknown branch resource probe with invalid origin root", () => {
   const fixture = orphanArgs("review-origin-probe-error");
-  const nonRepoOriginRoot = mkdtempSync(join(tmpdir(), "ge-nonrepo-origin-"));
+  const nonRepoOriginRoot = temporaryArena.mkdtempSync("ge-nonrepo-origin-");
 
   const result = orphanInventoryApi()({ ...fixture, originRoot: nonRepoOriginRoot });
   assert.equal(result.kind, "unverified");

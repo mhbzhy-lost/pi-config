@@ -4,11 +4,16 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFi
 import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { hashGoalMetadataProposal } from "../scripts/lib/goal-engine/human-decision.mjs";
 import { allocateExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import test from "node:test";
+
+const temporaryArena = createTemporaryArenaSync("goal-engine-runtime-");
+test.after(() => temporaryArena.disposeSync());
+async function mkdtemp(prefix) { return temporaryArena.mkdtempSync(basename(prefix)); }
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const globalModules = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();

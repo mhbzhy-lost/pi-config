@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, renameSync, rmSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { cpSync, readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, renameSync, rmSync } from "node:fs";
+import { basename, join, dirname } from "node:path";
 import { tmpdir } from "node:os";
+import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { createGoalEngineExtension as createGoalEngineExtensionFactory } from "../scripts/lib/goal-engine/extension.mjs";
 import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
 import { allocateExecutorWorkspace, inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope } from "../scripts/lib/goal-engine/state-scope.mjs";
+
+const temporaryArena = createTemporaryArenaSync("goal-engine-extension-");
+test.after(() => temporaryArena.disposeSync());
+function mkdtempSync(prefix) { return temporaryArena.mkdtempSync(basename(prefix)); }
 
 test("external evidence classification matrix only promotes external_review from external", () => {
   const projectionFor = (evidence) => ({ tasks: new Map([["t1", { evidence }]]) });
