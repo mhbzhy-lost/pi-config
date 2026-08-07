@@ -486,6 +486,50 @@ test("Goal-owned merge sequencer recovers then atomically aborts a retry conflic
   assert.throws(() => git(origin, "rev-parse", "-q", "--verify", "MERGE_HEAD"));
 });
 
+test("inspectOriginIntegrationBaseline accepts only a clean forward advance", () => {
+  const origin = initRepo();
+  const baseCommit = git(origin, "rev-parse", "HEAD");
+  const lease = allocateExecutorWorkspace({ goalId: "origin-forward", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit });
+
+  writeFileSync(join(origin, "forward.txt"), "forward\n");
+  git(origin, "add", "forward.txt");
+  git(origin, "commit", "-m", "test: forward baseline");
+  const persistedBaseline = git(origin, "rev-parse", "HEAD");
+
+  writeFileSync(join(origin, "later.txt"), "later\n");
+  git(origin, "add", "later.txt");
+  git(origin, "commit", "-m", "test: later forward commit");
+  const currentForwardHead = git(origin, "rev-parse", "HEAD");
+  assert.deepEqual(workspace.inspectOriginIntegrationBaseline(lease, {
+    originHeadBefore: persistedBaseline,
+    allowForwardAdvance: true,
+  }), {
+    originRef: "refs/heads/main",
+    currentHead: currentForwardHead,
+    previousOriginHeadBefore: persistedBaseline,
+    rebased: true,
+  });
+
+  git(origin, "branch", "divergent", baseCommit);
+  git(origin, "switch", "divergent");
+  writeFileSync(join(origin, "divergent.txt"), "divergent\n");
+  git(origin, "add", "divergent.txt");
+  git(origin, "commit", "-m", "test: divergent origin commit");
+  git(origin, "branch", "-f", "main", "HEAD");
+  git(origin, "switch", "main");
+  const divergentHead = git(origin, "rev-parse", "HEAD");
+
+  assert.throws(
+    () => workspace.inspectOriginIntegrationBaseline(lease, {
+      originHeadBefore: persistedBaseline,
+      allowForwardAdvance: true,
+    }),
+    /not a clean forward advance/i,
+  );
+  assert.equal(git(origin, "rev-parse", "HEAD"), divergentHead);
+  assert.equal(git(origin, "status", "--porcelain=v1"), "");
+});
+
 test("integrateExecutorWorkspace cherry-picks executor commit into origin", () => {
   const origin = initRepo();
   const stateRoot = tmpStateRoot();

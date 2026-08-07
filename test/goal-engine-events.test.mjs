@@ -1107,6 +1107,36 @@ test("v2 started persists a valid originRef", () => {
   assert.equal(p.tasks.get("t1").workspace.legacyOriginRef, false);
 });
 
+test("workspace disposition rebase advances only the exact disposing origin identity", () => {
+  let p = v2Settled(v2Dispatched(applyEvent(createProjection(), v2Created())));
+  const start = started("integrate");
+  start.data.originRef = "refs/heads/main";
+  p = applyEvent(p, start);
+
+  const rebase = (overrides = {}) => v2Event("task.workspace_disposition_rebased", {
+    taskId: "t1",
+    attempt: 1,
+    previousOriginHeadBefore: "origin-before",
+    originHeadBefore: "origin-forward",
+    originRef: "refs/heads/main",
+    reason: "clean-forward-origin-advance",
+    ...overrides,
+  });
+
+  assert.throws(() => applyEvent(p, rebase({ attempt: 2 })), /attempt|workspace/i);
+  assert.throws(() => applyEvent(p, rebase({ previousOriginHeadBefore: "wrong-old-head" })), /previous|origin.*head|identity/i);
+  assert.throws(() => applyEvent(p, rebase({ originRef: "refs/heads/other" })), /origin.*ref|identity/i);
+  assert.throws(() => applyEvent(p, rebase({ originHeadBefore: "origin-before" })), /advance|different|origin.*head/i);
+  assert.throws(() => applyEvent(p, rebase({ reason: "agent-decided" })), /reason/i);
+
+  p = applyEvent(p, rebase());
+  const workspace = p.tasks.get("t1").workspace;
+  assert.equal(workspace.phase, "disposing");
+  assert.equal(workspace.originHeadBefore, "origin-forward");
+  assert.equal(workspace.originRef, "refs/heads/main");
+  assert.throws(() => applyEvent(p, rebase()), /previous|origin.*head|identity/i);
+});
+
 test("historical v1 accepted amendment JSONL replays while v2 accepted amendment is rejected", () => {
   const goalId = "fixed-amendment-history";
   const event = (schemaVersion, eventId, occurredAt, type, data) => ({ schemaVersion, eventId, goalId, occurredAt, type, data });

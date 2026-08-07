@@ -75,6 +75,7 @@ export function applyEvent(projection, event, { replay = false } = {}) {
     case "task.workspace_orphan_recovered": workspaceOrphanRecovered(next, event.data, event.schemaVersion); break;
     case "task.workspace_preservation_released": workspacePreservationReleased(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposition_started": workspaceDispositionStarted(next, event.data, event.schemaVersion, replay); break;
+    case "task.workspace_disposition_rebased": workspaceDispositionRebased(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposition_applied": workspaceDispositionApplied(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposed": workspaceDisposed(next, event.data, event.schemaVersion); break;
     case "goal.amended": goalAmended(next, event.data, event.schemaVersion, replay); break;
@@ -288,6 +289,37 @@ function workspaceDispositionStarted(p, data, schemaVersion, replay) {
   }
   if (originRef !== undefined && (typeof originRef !== "string" || !originRef)) throw new Error("originRef must be a non-empty string");
   Object.assign(workspace, { requestedAction, strategy, executorHead, originHeadBefore, ...(originRef ? { originRef, legacyOriginRef: false } : { legacyOriginRef: true }), phase: "disposing" });
+}
+
+function workspaceDispositionRebased(p, data, schemaVersion) {
+  requireV2(schemaVersion);
+  requireExactFields(data, [
+    "taskId",
+    "attempt",
+    "previousOriginHeadBefore",
+    "originHeadBefore",
+    "originRef",
+    "reason",
+  ], "workspace disposition rebase data");
+  const { taskId, attempt, previousOriginHeadBefore, originHeadBefore, originRef, reason } = data;
+  requireNonEmptyStrings({ taskId, previousOriginHeadBefore, originHeadBefore, originRef, reason }, "workspace disposition rebase");
+  const workspace = requireWorkspace(requireTask(p, taskId), attempt);
+  if (workspace.phase !== "disposing" || workspace.requestedAction !== "integrate") {
+    throw new Error("workspace disposition rebase requires disposing integration");
+  }
+  if (previousOriginHeadBefore !== workspace.originHeadBefore) {
+    throw new Error("workspace disposition rebase previous origin head identity mismatch");
+  }
+  if (originRef !== workspace.originRef) {
+    throw new Error("workspace disposition rebase origin ref identity mismatch");
+  }
+  if (originHeadBefore === previousOriginHeadBefore) {
+    throw new Error("workspace disposition rebase must advance to a different origin head");
+  }
+  if (reason !== "clean-forward-origin-advance") {
+    throw new Error("invalid workspace disposition rebase reason");
+  }
+  workspace.originHeadBefore = originHeadBefore;
 }
 
 function workspaceDispositionApplied(p, data, schemaVersion) {

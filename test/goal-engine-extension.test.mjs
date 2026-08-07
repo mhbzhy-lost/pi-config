@@ -1465,6 +1465,135 @@ test("goal_integrate rejects rogue commit appended after started event (rogue)",
 });
 
 
+test("goal_integrate rejects dirty origin before persisting disposition_started", async () => {
+  const cwd = tmpCwd();
+  const objective = "Dirty origin preflight before disposition goal";
+  const goalId = objectiveToGoalId(objective);
+  initGitRepo(cwd);
+
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [{ id: "t1", description: "Write scoped source", deps: [], writePaths: ["src/preflight.ts"], acceptance: { criteria: ["preflight"], commands: ["true"] }, workflow: "tdd" }],
+  });
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  commitWorkspaceChange(dispatched.workspace, "src/preflight.ts", "export const preflight = true;\n", "feat: preflight write");
+  await invoke(pi, "goal_settle", {
+    task_id: "t1",
+    outcome: "succeeded",
+    evidence: { type: "diff", ref: "git diff HEAD~1 -- src/preflight.ts" },
+    evidence_source: "self_produced",
+    next_action: "Reject dirty origin before freezing a workspace disposition baseline",
+  });
+
+  writeFileSync(join(cwd, "unrelated-dirty.txt"), "dirty\n");
+  const before = persistedStateBytes(cwd, goalId);
+  await assert.rejects(
+    () => invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" }),
+    /origin must be clean/i,
+  );
+
+  assert.deepEqual(persistedStateBytes(cwd, goalId), before);
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  assert.equal(projection.tasks.get("t1").workspace.phase, "active");
+  assert.equal(readGoalEvents(cwd, goalId).filter((event) => event.type === "task.workspace_disposition_started").length, 0);
+});
+
+test("disposing integrate retry durably rebinds a clean forward origin before integration", async () => {
+  const cwd = tmpCwd();
+  const objective = "Forward origin disposition retry goal";
+  const goalId = objectiveToGoalId(objective);
+  initGitRepo(cwd);
+
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [{ id: "t1", description: "Write scoped source", deps: [], writePaths: ["src/retry.ts"], acceptance: { criteria: ["retry"], commands: ["true"] }, workflow: "tdd" }],
+  });
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  commitWorkspaceChange(dispatched.workspace, "src/retry.ts", "export const retry = true;\n", "feat: retry write");
+  const executorHead = git(dispatched.workspace.path, "rev-parse", "HEAD");
+  await invoke(pi, "goal_settle", {
+    task_id: "t1",
+    outcome: "succeeded",
+    evidence: { type: "diff", ref: "git diff HEAD~1 -- src/retry.ts" },
+    evidence_source: "self_produced",
+    next_action: "Resume disposing integration after a clean unrelated origin commit",
+  });
+
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  const originHeadBefore = git(cwd, "rev-parse", "HEAD");
+  appendEventStore(join(cwd, ".state/goal-engine"), {
+    schemaVersion: "goal-engine.event.v2",
+    eventId: "forward-origin-started-event",
+    goalId,
+    type: "task.workspace_disposition_started",
+    occurredAt: new Date().toISOString(),
+    data: {
+      taskId: "t1",
+      attempt: 1,
+      requestedAction: "integrate",
+      strategy: "cherry-pick",
+      executorHead,
+      originHeadBefore,
+      originRef: git(cwd, "symbolic-ref", "--quiet", "HEAD"),
+    },
+  }, projection.version);
+
+  writeFileSync(join(cwd, "unrelated.txt"), "unrelated\n");
+  const dirtyPi = createMockPi(cwd);
+  createGoalEngineExtension(dirtyPi);
+  await assert.rejects(
+    () => invoke(dirtyPi, "goal_integrate", { task_id: "t1", action: "integrate" }),
+    /origin must be clean/i,
+  );
+  assert.equal(readGoalEvents(cwd, goalId).some((event) => event.type === "task.workspace_disposition_rebased"), false);
+
+  git(cwd, "add", "unrelated.txt");
+  git(cwd, "commit", "-m", "chore: commit unrelated origin change");
+  const forwardHead = git(cwd, "rev-parse", "HEAD");
+  assert.notEqual(forwardHead, originHeadBefore);
+
+  const retryPi = createMockPi(cwd);
+  createGoalEngineExtension(retryPi);
+  const result = JSON.parse(await invoke(retryPi, "goal_integrate", { task_id: "t1", action: "integrate" }));
+  assert.equal(result.action, "integrated");
+  assert.equal(result.released, true);
+  assert.equal(readFileSync(join(cwd, "src/retry.ts"), "utf8"), "export const retry = true;\n");
+
+  const events = readGoalEvents(cwd, goalId);
+  const rebaseEvents = events.filter((event) => event.type === "task.workspace_disposition_rebased");
+  assert.equal(rebaseEvents.length, 1);
+  assert.deepEqual(rebaseEvents[0].data, {
+    taskId: "t1",
+    attempt: 1,
+    previousOriginHeadBefore: originHeadBefore,
+    originHeadBefore: forwardHead,
+    originRef: "refs/heads/main",
+    reason: "clean-forward-origin-advance",
+  });
+  assert.deepEqual(
+    events.filter((event) => [
+      "task.workspace_disposition_started",
+      "task.workspace_disposition_rebased",
+      "task.workspace_disposition_applied",
+      "task.workspace_disposed",
+    ].includes(event.type)).slice(-4).map((event) => event.type),
+    [
+      "task.workspace_disposition_started",
+      "task.workspace_disposition_rebased",
+      "task.workspace_disposition_applied",
+      "task.workspace_disposed",
+    ],
+  );
+
+  const replayed = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  assert.equal(replayed.tasks.get("t1").workspace.phase, "disposed");
+  assert.equal(replayed.tasks.get("t1").workspace.originHeadBefore, forwardHead);
+});
+
 test("goal_integrate rejects identity-mismatched lease branch before side effects (identity)", async () => {
   const cwd = tmpCwd();
   const objective = "Identity mismatch branch recovery goal";

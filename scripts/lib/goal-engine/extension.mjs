@@ -27,6 +27,7 @@ import {
   inspectExecutorWorkspaceResources,
   assertWorkspaceChangesWithinPaths,
   isExecutorWorkspaceIntegrated,
+  inspectOriginIntegrationBaseline,
   integrateExecutorWorkspace,
   releaseExecutorWorkspace,
 } from "./workspace.mjs";
@@ -1594,6 +1595,9 @@ export function createGoalEngineExtension(pi, options = {}) {
 
         const strategy = params.strategy || DEFAULT_DISPOSITION_STRATEGY;
         const executorHead = inspection.headCommit;
+        const originBaseline = action === "integrate"
+          ? inspectOriginIntegrationBaseline(lease, { originRef: lease.originRef })
+          : { currentHead: gitHead(cwd) };
 
         const startedEvent = makeGoalEvent("task.workspace_disposition_started", {
           taskId,
@@ -1601,7 +1605,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           requestedAction: action,
           strategy,
           executorHead,
-          originHeadBefore: gitHead(cwd),
+          originHeadBefore: originBaseline.currentHead,
           originRef: lease.originRef,
         }, goalId);
         projection = appendEventFn(root, startedEvent, projection.version);
@@ -1630,16 +1634,34 @@ export function createGoalEngineExtension(pi, options = {}) {
           throw new Error(`workspace strategy mismatch (expected ${taskWorkspace.strategy}, got ${strategy})`);
         }
 
-        if (action === "integrate" && !isExecutorWorkspaceIntegrated(lease, { strategy, executorHead: taskWorkspace.executorHead })) {
-          integrateExecutorWorkspace(lease, { strategy, executorHead: taskWorkspace.executorHead, originRef: taskWorkspace.originRef, originHeadBefore: taskWorkspace.originHeadBefore });
+        let disposingWorkspace = taskWorkspace;
+        if (action === "integrate" && !isExecutorWorkspaceIntegrated(lease, { strategy, executorHead: disposingWorkspace.executorHead })) {
+          const originBaseline = inspectOriginIntegrationBaseline(lease, {
+            originRef: disposingWorkspace.originRef,
+            originHeadBefore: disposingWorkspace.originHeadBefore,
+            allowForwardAdvance: true,
+          });
+          if (originBaseline.rebased) {
+            const rebasedEvent = makeGoalEvent("task.workspace_disposition_rebased", {
+              taskId,
+              attempt: disposingWorkspace.attempt,
+              previousOriginHeadBefore: disposingWorkspace.originHeadBefore,
+              originHeadBefore: originBaseline.currentHead,
+              originRef: disposingWorkspace.originRef,
+              reason: "clean-forward-origin-advance",
+            }, goalId);
+            projection = appendEventFn(root, rebasedEvent, projection.version);
+            disposingWorkspace = projection.tasks.get(taskId).workspace;
+          }
+          integrateExecutorWorkspace(lease, { strategy, executorHead: disposingWorkspace.executorHead, originRef: disposingWorkspace.originRef, originHeadBefore: disposingWorkspace.originHeadBefore });
         }
 
         const appliedEvent = makeGoalEvent("task.workspace_disposition_applied", {
           taskId,
-          attempt: taskWorkspace.attempt,
+          attempt: disposingWorkspace.attempt,
           action,
           strategy,
-          executorHead: taskWorkspace.executorHead,
+          executorHead: disposingWorkspace.executorHead,
           originHead: gitHead(cwd),
         }, goalId);
         projection = appendEventFn(root, appliedEvent, projection.version);

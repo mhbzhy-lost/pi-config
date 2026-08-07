@@ -573,10 +573,30 @@ function assertOriginPreflight(origin, { originRef, originHeadBefore }) {
   const currentHead = git(origin, "rev-parse", "HEAD");
   if (originHeadBefore && currentHead !== originHeadBefore) throw new Error("Origin HEAD mismatch before integration");
   if (userVisibleStatus(origin).length > 0) throw new Error("Origin must be clean before integration");
-  if (["CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD"].some((ref) => refExists(origin, ref)) || hasRebaseState(origin)) {
+  if (["CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD"].some((ref) => refExists(origin, ref)) || hasRebaseState(origin) || hasSequencerState(origin)) {
     throw new Error("Origin Git sequencer is active; refusing to modify user operation");
   }
   return currentHead;
+}
+
+export function inspectOriginIntegrationBaseline(lease, {
+  originRef = lease.originRef,
+  originHeadBefore,
+  allowForwardAdvance = false,
+} = {}) {
+  if (typeof originRef !== "string" || !originRef) throw new Error("Invalid lease: missing originRef");
+  const currentHead = assertOriginPreflight(lease.originRoot, { originRef });
+  if (!originHeadBefore || currentHead === originHeadBefore) {
+    return { originRef, currentHead, previousOriginHeadBefore: originHeadBefore || null, rebased: false };
+  }
+  if (!allowForwardAdvance) throw new Error("Origin HEAD mismatch before integration");
+  try {
+    git(lease.originRoot, "merge-base", "--is-ancestor", originHeadBefore, currentHead);
+  } catch (error) {
+    if (error?.status === 1) throw new Error("Origin HEAD is not a clean forward advance of the persisted integration baseline");
+    throw error;
+  }
+  return { originRef, currentHead, previousOriginHeadBefore: originHeadBefore, rebased: true };
 }
 
 function goalOwnsSequencer(origin, strategy, lease, executorHead) {
