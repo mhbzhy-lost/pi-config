@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { hashGoalMetadataProposal } from "../scripts/lib/goal-engine/human-decision.mjs";
 import { allocateExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
@@ -15,6 +15,9 @@ const globalModules = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).
 const piRoot = join(globalModules, "@earendil-works/pi-coding-agent");
 const piModule = await import(pathToFileURL(join(piRoot, "dist/index.js")).href);
 const { createAgentSession, DefaultResourceLoader, SessionManager } = piModule;
+
+// Ordinary legacy fixtures must never inherit the invoking Pi process's production Goal root.
+delete process.env.PI_CODING_GOAL_DIR;
 
 test("real Pi host uses execution context cwd instead of process cwd", async () => {
   const processCwd = await mkdtemp(join(tmpdir(), "goal-engine-process-"));
@@ -53,6 +56,94 @@ test("real Pi host uses execution context cwd instead of process cwd", async () 
       await rm(projectCwd, { recursive: true, force: true });
       await rm(processCwd, { recursive: true, force: true });
     }
+  }
+});
+
+test("real Pi host isolates PI_CODING_GOAL_DIR by canonical project cwd", async () => {
+  const goalBase = await mkdtemp(join(tmpdir(), "goal-engine-global-host-"));
+  const projects = [
+    await mkdtemp(join(tmpdir(), "goal-engine-global-project-a-")),
+    await mkdtemp(join(tmpdir(), "goal-engine-global-project-b-")),
+  ];
+  const agentDirs = [
+    await mkdtemp(join(tmpdir(), "goal-engine-global-agent-a-")),
+    await mkdtemp(join(tmpdir(), "goal-engine-global-agent-a-reload-")),
+    await mkdtemp(join(tmpdir(), "goal-engine-global-agent-b-")),
+  ];
+  const hosts = [];
+  const initializeRepo = (cwd) => {
+    execFileSync("git", ["init"], { cwd });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd });
+    execFileSync("git", ["config", "user.name", "Goal Engine Test"], { cwd });
+    writeFileSync(join(cwd, "README.md"), "fixture\n");
+    execFileSync("git", ["add", "README.md"], { cwd });
+    execFileSync("git", ["commit", "-m", "test: initialize global Goal fixture"], { cwd });
+  };
+  const startHost = async (cwd, agentDir) => {
+    const loader = new DefaultResourceLoader({
+      cwd,
+      agentDir,
+      additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")],
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+    await loader.reload();
+    const sessionManager = SessionManager.create(cwd, join(agentDir, "sessions"));
+    const host = await createAgentSession({ cwd, agentDir, resourceLoader: loader, sessionManager });
+    await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
+    hosts.push(host);
+    return host;
+  };
+
+  try {
+    projects.forEach(initializeRepo);
+    process.env.PI_CODING_GOAL_DIR = goalBase;
+
+    const first = await startHost(projects[0], agentDirs[0]);
+    const firstContext = { cwd: projects[0], sessionManager: first.session.sessionManager };
+    const firstInit = first.session.getToolDefinition("goal_init");
+    const firstGoal = JSON.parse((await firstInit.execute("global-host-a-init", {
+      objective: "Global host A",
+      tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] } }],
+    }, new AbortController().signal, undefined, firstContext)).details.value);
+    first.session.dispose();
+    hosts.splice(hosts.indexOf(first), 1);
+
+    const reloaded = await startHost(projects[0], agentDirs[1]);
+    const reloadedStatus = reloaded.session.getToolDefinition("goal_status");
+    const recovered = JSON.parse((await reloadedStatus.execute(
+      "global-host-a-status",
+      { goal_id: firstGoal.goalId },
+      new AbortController().signal,
+      undefined,
+      { cwd: projects[0], sessionManager: reloaded.session.sessionManager },
+    )).details.value);
+    assert.equal(recovered.goalId, firstGoal.goalId);
+
+    const second = await startHost(projects[1], agentDirs[2]);
+    const secondInit = second.session.getToolDefinition("goal_init");
+    await secondInit.execute("global-host-b-init", {
+      objective: "Global host B",
+      tasks: [{ id: "t1", description: "Task", writePaths: ["b"], acceptance: { criteria: ["x"], commands: ["true"] } }],
+    }, new AbortController().signal, undefined, { cwd: projects[1], sessionManager: second.session.sessionManager });
+
+    const namespaces = readdirSync(goalBase).sort();
+    assert.equal(namespaces.length, 2);
+    const identities = namespaces.map((namespace) => JSON.parse(readFileSync(join(goalBase, namespace, "identity.json"), "utf8")));
+    assert.deepEqual(
+      identities.map((identity) => identity.canonicalCwd).sort(),
+      projects.map((cwd) => realpathSync(cwd)).sort(),
+    );
+    assert.equal(new Set(identities.map((identity) => identity.namespace)).size, 2);
+    for (const cwd of projects) assert.equal(existsSync(join(cwd, ".state", "goal-engine")), false);
+  } finally {
+    delete process.env.PI_CODING_GOAL_DIR;
+    for (const host of hosts) host.session.dispose();
+    for (const agentDir of agentDirs) await rm(agentDir, { recursive: true, force: true });
+    for (const project of projects) await rm(project, { recursive: true, force: true });
+    await rm(goalBase, { recursive: true, force: true });
   }
 });
 

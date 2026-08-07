@@ -51,7 +51,7 @@ function createMockPi(cwd) {
 }
 
 function createGoalEngineExtension(pi, options = {}) {
-  return createGoalEngineExtensionProduction(pi, { enforceActionTokens: false, ...options });
+  return createGoalEngineExtensionProduction(pi, { enforceActionTokens: false, goalStateEnv: {}, ...options });
 }
 
 function tmpCwd() {
