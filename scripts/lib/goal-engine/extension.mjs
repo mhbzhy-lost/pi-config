@@ -19,6 +19,7 @@ import {
 import { applyEvent, createProjection } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
+import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.mjs";
 import {
   allocateExecutorWorkspace,
   loadExecutorWorkspaceLease,
@@ -122,7 +123,7 @@ function workspaceMutationError(error, requiredNextAction) {
   return preflightError(code, observed, "stop modifying the workspace and use the typed goal_status recovery action", requiredNextAction);
 }
 
-function assertRepositoryPreflight(cwd, { operation, requiredNextAction }) {
+function assertRepositoryPreflight(cwd, { operation, requiredNextAction, stateStorage = "legacy" }) {
   const retry = `repair Git and retry ${operation}`;
   const realpathRemediation = requiredNextAction ? retry : "repair filesystem access and retry goal_init";
   const physicalCwd = realpathForPreflight(cwd, `cwd realpath could not be read: ${cwd}`, realpathRemediation, requiredNextAction);
@@ -131,14 +132,16 @@ function assertRepositoryPreflight(cwd, { operation, requiredNextAction }) {
   gitOutput(cwd, ["rev-parse", "--verify", "HEAD"], "INVALID_GIT_HEAD", "HEAD is unborn or invalid", `create a commit on an attached branch before ${operation}`, [], requiredNextAction);
   const ref = gitOutput(cwd, ["symbolic-ref", "--quiet", "HEAD"], "DETACHED_GIT_HEAD", "HEAD is detached", `checkout an attached branch before ${operation}`, [1], requiredNextAction);
   if (!ref) throw preflightError("DETACHED_GIT_HEAD", "HEAD is detached", `checkout an attached branch before ${operation}`, requiredNextAction);
-  const tracked = gitOutput(cwd, ["ls-files", "--", STATE_ROOT_REL], "GIT_INFRASTRUCTURE_ERROR", "could not inspect tracked state entries", retry, [], requiredNextAction);
-  if (tracked) throw preflightError("STATE_TRACKED", `tracked entries: ${tracked}`, `remove .state/goal-engine from the Git index before retrying ${operation}`, requiredNextAction);
-  const ignored = gitOutput(cwd, ["check-ignore", "-q", ".state/goal-engine/"], "GIT_INFRASTRUCTURE_ERROR", "could not inspect .state/goal-engine ignore rule", "repair Git ignore configuration", [1], requiredNextAction);
-  if (ignored === null) throw preflightError("STATE_NOT_IGNORED", ".state/goal-engine/ is not ignored", `add .state/goal-engine/ to .gitignore before retrying ${operation}`, requiredNextAction);
+  if (stateStorage === "legacy") {
+    const tracked = gitOutput(cwd, ["ls-files", "--", STATE_ROOT_REL], "GIT_INFRASTRUCTURE_ERROR", "could not inspect tracked state entries", retry, [], requiredNextAction);
+    if (tracked) throw preflightError("STATE_TRACKED", `tracked entries: ${tracked}`, `remove .state/goal-engine from the Git index before retrying ${operation}`, requiredNextAction);
+    const ignored = gitOutput(cwd, ["check-ignore", "-q", ".state/goal-engine/"], "GIT_INFRASTRUCTURE_ERROR", "could not inspect .state/goal-engine ignore rule", "repair Git ignore configuration", [1], requiredNextAction);
+    if (ignored === null) throw preflightError("STATE_NOT_IGNORED", ".state/goal-engine/ is not ignored", `add .state/goal-engine/ to .gitignore before retrying ${operation}`, requiredNextAction);
+  }
 }
 
-function assertInitPreflight(cwd, root) {
-  assertRepositoryPreflight(cwd, { operation: "goal_init" });
+function assertInitPreflight(cwd, stateStorage) {
+  assertRepositoryPreflight(cwd, { operation: "goal_init", stateStorage });
 }
 
 function validateProjectionForDispatch(projection, cwd) {
@@ -461,6 +464,37 @@ export function createGoalEngineExtension(pi, options = {}) {
   const loadProjectionFn = store.loadProjection || loadProjection;
   const listGoalsFn = store.listGoals || listGoals;
   const listGoalIdsFn = store.listGoalIds || listGoalIds;
+  const goalStateEnv = options.goalStateEnv ?? process.env;
+  const executionScopeFor = (ctx, { operation = "read", goalId } = {}) => {
+    const legacyScope = executionScope(ctx);
+    let resolvedStateScope;
+    try {
+      resolvedStateScope = resolveGoalStateScope({ cwd: legacyScope.cwd, env: goalStateEnv });
+    } catch (error) {
+      if (operation === "init" && error?.code === "ENOENT") {
+        throw preflightError(
+          "GIT_INFRASTRUCTURE_ERROR",
+          `cwd realpath could not be read: ${legacyScope.cwd}`,
+          "repair filesystem access and retry goal_init",
+        );
+      }
+      throw error;
+    }
+    const stateScope = {
+      ...resolvedStateScope,
+      legacyRoot: legacyScope.root,
+    };
+    const selected = selectGoalStateRoot(stateScope, {
+      operation,
+      goalId,
+      listActive: listGoalsFn,
+      hasGoal: (root, candidateGoalId) => Boolean(loadProjectionFn(root, candidateGoalId)),
+    });
+    if (selected.storage === "global" && operation !== "init" && listGoalIdsFn(selected.root).length > 0) {
+      ensureGoalStateIdentity(stateScope);
+    }
+    return { cwd: legacyScope.cwd, root: selected.root, storage: selected.storage, stateScope };
+  };
   const enforceActionTokens = options.enforceActionTokens !== false;
   const eventSchemaVersion = enforceActionTokens ? CURRENT_EVENT_VERSION : LEGACY_EVENT_VERSION;
   const makeGoalEvent = (type, data, goalId) => makeEvent(type, data, goalId, eventSchemaVersion);
@@ -642,8 +676,9 @@ export function createGoalEngineExtension(pi, options = {}) {
       required: ["objective", "tasks"],
     },
     async handler(params, ctx) {
-      const { cwd, root } = executionScope(ctx);
-      assertInitPreflight(cwd, root);
+      const { cwd, root, storage, stateScope } = executionScopeFor(ctx, { operation: "init" });
+      assertInitPreflight(cwd, storage);
+      if (storage === "global") ensureGoalStateIdentity(stateScope);
       const activeGoals = listGoalsFn(root);
       if (activeGoals.length > 0) {
         const goalId = activeGoals[0];
@@ -718,7 +753,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       required: [],
     },
     async handler(params, ctx) {
-      const { cwd, root } = executionScope(ctx);
+      const { cwd, root } = executionScopeFor(ctx, { operation: "read", goalId: params.goal_id });
       const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) return "NO_ACTIVE_GOAL";
       let projection = loadProjectionFn(root, goalId);
@@ -781,7 +816,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       required: ["task_id", "action_token"],
     },
     async handler(params, ctx) {
-      const { cwd, root } = executionScope(ctx);
+      const { cwd, root, storage } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
       const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
@@ -804,6 +839,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       assertRepositoryPreflight(cwd, {
         operation: "goal_dispatch",
         requiredNextAction: { tool: "goal_dispatch", params: { goal_id: goalId, task_id: params.task_id } },
+        stateStorage: storage,
       });
       try {
         validateProjectionForDispatch(projection, cwd);
@@ -909,7 +945,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       required: ["task_id", "outcome", "next_action", "action_token"],
     },
     async handler(params, ctx) {
-      const { cwd, root } = executionScope(ctx);
+      const { cwd, root } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
       const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
@@ -1012,7 +1048,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       required: ["task_id", "action_token"],
     },
     async handler(params, ctx) {
-      const { root } = executionScope(ctx);
+      const { root } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
       // Terminal goals are deliberately addressable only by explicit identity.
       if (!params.goal_id) {
         const activeGoalId = resolveGoalId(null, root);
@@ -1098,7 +1134,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       return prepared;
     },
     async handler(params, ctx) {
-      const { cwd, root } = executionScope(ctx);
+      const { cwd, root } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
       const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
@@ -1232,7 +1268,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       required: ["task_id", "action", "action_token"],
     },
     async handler(params, ctx) {
-      const { cwd, root } = executionScope(ctx);
+      const { cwd, root } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
       const goalId = resolveGoalId(params.goal_id, root);
       if (!goalId) throw new Error("No active goal");
 
@@ -1742,7 +1778,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   pi.on("before_agent_start", (_event, ctx) => {
     try {
-      const { cwd, root } = executionScope(ctx);
+      const { cwd, root } = executionScopeFor(ctx);
       const projections = loadAllProjections(root);
       if (recoveryLatch) return { message: { customType: "goal-engine-recovery", content: `Goal recovery latch is active for ${recoveryLatch.goalId}. Call goal_status before mutation.`, display: true } };
       if (projections.length === 0) return undefined;
@@ -1770,7 +1806,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     const writeTools = new Set(["write", "edit", "subagent", "bash"]);
     if (!writeTools.has(event.toolName)) return undefined;
     let cwd, root;
-    try { ({ cwd, root } = executionScope(ctx)); }
+    try { ({ cwd, root } = executionScopeFor(ctx)); }
     catch (error) {
       activateRecoveryLatch(null, error);
       return { block: true, reason: "Goal recovery failed; call goal_status before mutation" };
@@ -1804,7 +1840,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   pi.on("session_before_compact", (event, ctx) => {
     let cwd, root, projections, selected;
     try {
-      ({ cwd, root } = executionScope(ctx));
+      ({ cwd, root } = executionScopeFor(ctx));
       projections = loadAllProjections(root);
       const fileOps = event.preparation?.fileOps;
       const modifiedFiles = [...new Set([...(fileOps?.written || []), ...(fileOps?.edited || [])])].sort();
@@ -1838,7 +1874,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   });
 
   pi.on("session_compact", (_event, ctx) => {
-    const { cwd, root } = executionScope(ctx);
+    const { cwd, root } = executionScopeFor(ctx);
     const projections = loadAllProjections(root);
     const selected = selectContinuityCandidate({ projections, cwd, paths: [], sessionId: sessionIdentity(ctx) });
     if (selected.status !== "selected") return undefined;
@@ -1850,7 +1886,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   // --- tool_result hook: checkpoint reminder ---
   pi.on("tool_result", (event, ctx) => {
     let root;
-    try { ({ root } = executionScope(ctx)); } catch { return undefined; }
+    try { ({ root } = executionScopeFor(ctx)); } catch { return undefined; }
     if (event.isError) return undefined;
     if (["goal_settle", "goal_status", "goal_init", "goal_dispatch", "goal_accept", "goal_amend", "goal_integrate"].includes(event.toolName)) return undefined;
 

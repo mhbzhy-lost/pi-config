@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, renameSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, renameSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { createGoalEngineExtension as createGoalEngineExtensionProduction } from "../scripts/lib/goal-engine/extension.mjs";
 import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
 import { allocateExecutorWorkspace, inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
+import { ensureGoalStateIdentity, resolveGoalStateScope } from "../scripts/lib/goal-engine/state-scope.mjs";
 
 test("external evidence classification matrix only promotes external_review from external", () => {
   const projectionFor = (evidence) => ({ tasks: new Map([["t1", { evidence }]]) });
@@ -66,6 +67,20 @@ function objectiveToGoalId(objective) {
   return objective.toLowerCase().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 80);
 }
 
+function oneTaskGoal(objective) {
+  return {
+    objective,
+    tasks: [{
+      id: "t1",
+      description: "exercise Goal state storage",
+      deps: [],
+      writePaths: ["src/t1.ts"],
+      acceptance: { criteria: ["state remains recoverable"], commands: ["true"] },
+      workflow: "tdd",
+    }],
+  };
+}
+
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
@@ -90,6 +105,118 @@ async function invoke(pi, name, params = {}) {
   }
   return text;
 }
+
+test("configured Goal state root keeps new structured artifacts outside the repository", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "ge-global-origin-"));
+  const goalBase = mkdtempSync(join(tmpdir(), "ge-global-state-"));
+  try {
+    initGitRepo(cwd);
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi, { goalStateEnv: { PI_CODING_GOAL_DIR: goalBase } });
+    const objective = "Global state root";
+    const goalId = objectiveToGoalId(objective);
+
+    await invoke(pi, "goal_init", oneTaskGoal(objective));
+
+    const namespaces = readdirSync(goalBase);
+    assert.equal(namespaces.length, 1);
+    const stateRoot = join(goalBase, namespaces[0]);
+    assert.equal(existsSync(join(stateRoot, "identity.json")), true);
+    assert.equal(existsSync(join(stateRoot, "registry.json")), true);
+    assert.equal(existsSync(join(stateRoot, "goals", goalId, "events.jsonl")), true);
+    assert.equal(existsSync(join(cwd, ".state", "goal-engine")), false);
+
+    const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+    assert.equal(dispatched.workspace.path.startsWith(join(stateRoot, "worktrees") + "/"), true);
+    assert.equal(existsSync(dispatched.workspace.path), true);
+    assert.equal(existsSync(join(cwd, ".state", "goal-engine", "worktrees")), false);
+    await invoke(pi, "goal_settle", {
+      task_id: "t1",
+      outcome: "failed",
+      reason: "Global state path exercise is complete",
+      next_action: "Discard the clean test workspace after verifying its global state path",
+    });
+    await invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" });
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(goalBase, { recursive: true, force: true });
+  }
+});
+
+test("configured Goal state root pins an active legacy Goal in place", async () => {
+  const cwd = tmpCwd();
+  const goalBase = mkdtempSync(join(tmpdir(), "ge-global-state-"));
+  try {
+    const legacyPi = createMockPi(cwd);
+    createGoalEngineExtension(legacyPi);
+    const objective = "Legacy active root";
+    const goalId = objectiveToGoalId(objective);
+    await invoke(legacyPi, "goal_init", oneTaskGoal(objective));
+
+    const restartedPi = createMockPi(cwd);
+    createGoalEngineExtension(restartedPi, { goalStateEnv: { PI_CODING_GOAL_DIR: goalBase } });
+    const status = JSON.parse(await invoke(restartedPi, "goal_status", { goal_id: goalId }));
+
+    assert.equal(status.goalId, goalId);
+    assert.equal(existsSync(goalEventsPath(cwd, goalId)), true);
+    assert.deepEqual(readdirSync(goalBase), []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(goalBase, { recursive: true, force: true });
+  }
+});
+
+test("configured Goal state root cuts new Goals over after a legacy Goal completes", async () => {
+  const cwd = tmpCwd();
+  const goalBase = mkdtempSync(join(tmpdir(), "ge-global-state-"));
+  try {
+    const legacyPi = createMockPi(cwd);
+    createGoalEngineExtension(legacyPi);
+    await invoke(legacyPi, "goal_init", oneTaskGoal("Completed legacy root"));
+    await prepareSucceededTask(legacyPi);
+    await invoke(legacyPi, "goal_accept", { task_id: "t1" });
+
+    const globalPi = createMockPi(cwd);
+    createGoalEngineExtension(globalPi, { goalStateEnv: { PI_CODING_GOAL_DIR: goalBase } });
+    const objective = "First global root";
+    const goalId = objectiveToGoalId(objective);
+    await invoke(globalPi, "goal_init", oneTaskGoal(objective));
+
+    const scope = resolveGoalStateScope({ cwd, env: { PI_CODING_GOAL_DIR: goalBase } });
+    assert.equal(existsSync(join(scope.preferredRoot, "goals", goalId, "events.jsonl")), true);
+    assert.equal(existsSync(goalEventsPath(cwd, goalId)), false);
+    const oldStatus = JSON.parse(await invoke(globalPi, "goal_status", { goal_id: objectiveToGoalId("Completed legacy root") }));
+    assert.equal(oldStatus.lifecycle, "completed");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(goalBase, { recursive: true, force: true });
+  }
+});
+
+test("configured Goal state root rejects simultaneous global and legacy authorities", async () => {
+  const cwd = tmpCwd();
+  const goalBase = mkdtempSync(join(tmpdir(), "ge-global-state-"));
+  try {
+    const legacyPi = createMockPi(cwd);
+    createGoalEngineExtension(legacyPi);
+    const objective = "Conflicting state roots";
+    await invoke(legacyPi, "goal_init", oneTaskGoal(objective));
+
+    const scope = resolveGoalStateScope({ cwd, env: { PI_CODING_GOAL_DIR: goalBase } });
+    ensureGoalStateIdentity(scope);
+    cpSync(scope.legacyRoot, scope.preferredRoot, { recursive: true });
+
+    const conflictedPi = createMockPi(cwd);
+    createGoalEngineExtension(conflictedPi, { goalStateEnv: { PI_CODING_GOAL_DIR: goalBase } });
+    await assert.rejects(
+      () => invoke(conflictedPi, "goal_status", {}),
+      (error) => error.code === "GOAL_STATE_ROOT_CONFLICT" && /global.*legacy|legacy.*global/i.test(error.message),
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(goalBase, { recursive: true, force: true });
+  }
+});
 
 function initGitRepo(cwd) {
   const run = (...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
