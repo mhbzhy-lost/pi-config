@@ -2732,6 +2732,29 @@ test("status detects an exact attempt two orphan after a discarded failed attemp
   assert.deepEqual(status.runnable, []);
   assert.equal(status.tasks.t1.attempts, 1);
   assert.equal(status.tasks.t1.blockingReason.code, "ORPHANED_EXECUTOR_WORKSPACE");
+
+  const productionPi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(productionPi);
+  const challenge = JSON.parse(await invoke(productionPi, "goal_status", { goal_id: goalId }));
+  assert.equal(challenge.orphanDecision.attempt, 2);
+  await emitHook(productionPi, "input", { source: "interactive", text: "discard" });
+  const offer = JSON.parse(await invoke(productionPi, "goal_status", { goal_id: goalId }));
+  assert.deepEqual(offer.machineAction, { tool: "goal_integrate", params: { goal_id: goalId, task_id: "t1", action: "discard" } });
+  const result = JSON.parse(await invoke(productionPi, "goal_integrate", { ...offer.machineAction.params, action_token: offer.action_token }));
+  assert.deepEqual(result, { action: "discarded", released: true });
+  const recovered = loadProjection(join(cwd, ".state/goal-engine"), goalId).tasks.get("t1");
+  assert.equal(recovered.attempts, 2);
+  assert.equal(recovered.workspace.attempt, 2);
+  assert.equal(recovered.workspace.phase, "disposed");
+  assert.equal(recovered.workspace.disposition, "discarded");
+  assert.deepEqual(workspaceState(cwd, goalId, "t1", 2), {
+    workspacePath: workspaceState(cwd, goalId, "t1", 2).workspacePath,
+    leasePath: workspaceState(cwd, goalId, "t1", 2).leasePath,
+    branch: workspaceState(cwd, goalId, "t1", 2).branch,
+    workspaceExists: false,
+    leaseExists: false,
+    branchExists: false,
+  });
 });
 
 test("status removes only an orphaned task from a multi-task runnable frontier", async () => {
@@ -3356,6 +3379,109 @@ test("lifecycle ambiguity is durably fail-closed and compaction never clears its
   const cancelled = await emitHook(pi, "session_before_compact", { reason: "manual", preparation: { fileOps: { written: new Set(), edited: new Set() } } });
   assert.deepEqual(cancelled, { cancel: true });
   assert.equal(pi.entries.at(-1).data.state, "active");
+});
+
+test("orphan human challenge production authorization is sanitized and idempotent", async () => {
+  const fixture = await dispatchedRollbackFixture("human challenge authorization");
+  const pi = createMockPi(fixture.cwd); createGoalEngineExtensionProduction(pi);
+  const first = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  assert.deepEqual(first.orphanDecision, { status: "AWAITING_USER_DECISION", goalId: fixture.goalId, taskId: "t1", attempt: 1, challenge_id: first.orphanDecision.challenge_id, inventory: first.orphanDecision.inventory, inventory_hash: first.orphanDecision.inventory_hash, choices: ["discard", "preserve"] });
+  assert.match(first.orphanDecision.inventory_hash, /^[a-f0-9]{64}$/);
+  assert.deepEqual(Object.keys(first.orphanDecision.inventory).sort(), ["baseCommit", "branch", "executorHead", "originRef", "resources"]);
+  for (const forbidden of ["ownerToken", "leasePath", "originRoot", "stateRoot", "path", "command", "toolOutput"]) assert.equal(JSON.stringify(first.orphanDecision.inventory).includes(forbidden), false);
+  const challenges = pi.entries.filter((entry) => entry.customType === "goal-engine-orphan-disposition-challenge"); assert.equal(challenges.length, 1);
+  const second = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  assert.equal(second.orphanDecision.challenge_id, first.orphanDecision.challenge_id); assert.equal(pi.entries.filter((entry) => entry.customType === "goal-engine-orphan-disposition-challenge").length, challenges.length);
+  const proposal = JSON.parse(await invoke(pi, "goal_amend", { goal_id: fixture.goalId, operation: "propose_update_goal", reason: "Metadata alongside orphan", changes: { objective: "Metadata approved first" } }));
+  await emitHook(pi, "input", { source: "interactive", text: "approve" });
+  const metadataOnly = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  assert.equal(metadataOnly.metadataDecision.status, "APPROVED");
+  assert.equal(metadataOnly.orphanDecision.status, "AWAITING_USER_DECISION");
+  const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard", challenge_id: first.orphanDecision.challenge_id, action_token: "fake-token" }), /decision|authorization|token|offer/i);
+  assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
+  await emitHook(pi, "input", { source: "extension", text: "discard" }); await emitHook(pi, "input", { source: "interactive", text: "discard later" });
+  assert.equal(JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId })).orphanDecision.status, "AWAITING_USER_DECISION");
+  await emitHook(pi, "input", { source: "interactive", text: "discard" });
+  const composed = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  assert.equal(composed.metadataDecision.status, "APPROVED");
+  assert.equal(composed.orphanDecision.status, "DECIDED");
+  assert.deepEqual(composed.machineAction, { tool: "goal_amend", params: { goal_id: fixture.goalId, operation: "update_goal", challenge_id: proposal.challenge_id } });
+  const composedOffer = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).actionOffer;
+  assert.deepEqual({ tool: composedOffer.tool, params: composedOffer.params }, composed.machineAction);
+  await invoke(pi, "goal_amend", { ...composed.machineAction.params, action_token: composed.action_token });
+  const offer = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  assert.deepEqual(offer.machineAction, { tool: "goal_integrate", params: { goal_id: fixture.goalId, task_id: "t1", action: "discard" } });
+  const actionOffer = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).actionOffer;
+  assert.equal(actionOffer.tool, offer.machineAction.tool);
+  assert.deepEqual(actionOffer.params, offer.machineAction.params);
+  const wrongBefore = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "preserve", challenge_id: first.orphanDecision.challenge_id, action_token: offer.action_token }), /action|token|offer/i);
+  assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), wrongBefore);
+  await invoke(pi, "goal_integrate", { ...offer.machineAction.params, action_token: offer.action_token });
+  const consumed = pi.entries.find((entry) => entry.customType === "goal-engine-orphan-disposition-consumed"); assert.ok(consumed);
+  assert.deepEqual(Object.keys(consumed.data).sort(), ["action", "challenge_id", "receipt_id"]);
+  await assert.rejects(() => invoke(pi, "goal_integrate", { ...offer.machineAction.params, action_token: offer.action_token }), /consumed|token|offer/i);
+});
+
+test("orphan cross-session production decision and action token authorization are isolated", async () => {
+  const fixture = await dispatchedRollbackFixture("cross-session authorization"); const pi = createMockPi(fixture.cwd); createGoalEngineExtensionProduction(pi);
+  const sessionA = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  await emitHook(pi, "input", { source: "rpc", text: "preserve" }); const offerA = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  pi.sessionManager.getSessionId = () => "session-other";
+  const sessionB = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  assert.equal(sessionB.orphanDecision.status, "AWAITING_USER_DECISION"); assert.notEqual(sessionB.orphanDecision.challenge_id, sessionA.orphanDecision.challenge_id); assert.equal(sessionB.action_token, null);
+  const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "preserve", challenge_id: sessionA.orphanDecision.challenge_id, action_token: offerA.action_token }), /session|challenge|token|offer/i);
+  assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
+});
+
+test("orphan challenge authorization fails closed for unverified and stale inventory", async () => {
+  const unverified = await dispatchedRollbackFixture("challenge unverified", { removeLease: true }); const unverifiedPi = createMockPi(unverified.cwd); createGoalEngineExtensionProduction(unverifiedPi);
+  const status = JSON.parse(await invoke(unverifiedPi, "goal_status", { goal_id: unverified.goalId }));
+  assert.equal(status.orphanDecision.status, "REINSPECTION_REQUIRED");
+  assert.equal(status.action_token, null);
+  assert.equal(Object.hasOwn(status.orphanDecision, "choices"), false);
+  assert.equal(unverifiedPi.entries.some((entry) => entry.customType === "goal-engine-orphan-disposition-challenge"), false);
+
+  const stale = await dispatchedRollbackFixture("challenge stale inventory"); const stalePi = createMockPi(stale.cwd); createGoalEngineExtensionProduction(stalePi);
+  const offered = JSON.parse(await invoke(stalePi, "goal_status", { goal_id: stale.goalId }));
+  const staleLeasePath = workspaceState(stale.cwd, stale.goalId, "t1").leasePath;
+  const originalLease = JSON.parse(readFileSync(staleLeasePath, "utf8"));
+  const writeOwnerToken = (ownerToken) => writeFileSync(staleLeasePath, `${JSON.stringify({ ...originalLease, ownerToken })}\n`);
+  writeOwnerToken("second-lease-identity");
+  await emitHook(stalePi, "input", { source: "interactive", text: "preserve" });
+  const reinspected = JSON.parse(await invoke(stalePi, "goal_status", { goal_id: stale.goalId }));
+  assert.equal(reinspected.orphanDecision.status, "AWAITING_USER_DECISION");
+  assert.notEqual(reinspected.orphanDecision.challenge_id, offered.orphanDecision.challenge_id);
+  assert.notEqual(reinspected.orphanDecision.inventory_hash, offered.orphanDecision.inventory_hash);
+  assert.equal(reinspected.action_token, null);
+  const durableAppend = stalePi.appendEntry.bind(stalePi);
+  writeOwnerToken("third-lease-identity");
+  stalePi.appendEntry = (type, data) => {
+    if (type === "goal-engine-orphan-disposition-challenge") throw new Error("new orphan challenge append failed");
+    durableAppend(type, data);
+  };
+  await assert.rejects(() => invoke(stalePi, "goal_status", { goal_id: stale.goalId }), /new orphan challenge append failed/);
+  stalePi.appendEntry = durableAppend;
+  writeOwnerToken("second-lease-identity");
+  const afterRollback = JSON.parse(await invoke(stalePi, "goal_status", { goal_id: stale.goalId }));
+  assert.notEqual(afterRollback.orphanDecision.challenge_id, reinspected.orphanDecision.challenge_id);
+  assert.equal(afterRollback.orphanDecision.status, "AWAITING_USER_DECISION");
+});
+
+test("orphan decision survives a failed production disposition and re-signs its token", async () => {
+  const fixture = await dispatchedRollbackFixture("decision retry"); const pi = createMockPi(fixture.cwd); createGoalEngineExtensionProduction(pi);
+  const challenge = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  await emitHook(pi, "input", { source: "interactive", text: "preserve" }); const offer = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  const originRef = git(fixture.cwd, "symbolic-ref", "--quiet", "HEAD");
+  try {
+    git(fixture.cwd, "checkout", "-b", "orphan-retry-wrong-origin");
+    await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "preserve", challenge_id: challenge.orphanDecision.challenge_id, action_token: offer.action_token }), /origin|ref|mismatch|failed/i);
+  } finally { git(fixture.cwd, "checkout", originRef.replace("refs/heads/", "")); }
+  const retried = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
+  assert.equal(retried.orphanDecision.challenge_id, challenge.orphanDecision.challenge_id);
+  assert.equal(retried.orphanDecision.status, "DECIDED"); assert.notEqual(retried.action_token, offer.action_token);
 });
 
 test("production status throws replay failures and repeated completed slugs receive unique suffixes", async () => {

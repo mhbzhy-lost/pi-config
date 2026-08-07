@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { isAbsolute, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
@@ -471,19 +472,49 @@ export function createGoalEngineExtension(pi, options = {}) {
   let pendingInput = null;
   let recoveryLatch = null;
   const metadataChallenges = new Map();
+  const orphanChallenges = new Map();
   const persistMetadata = (type, data) => {
     if (typeof pi.appendEntry !== "function") throw new Error(`Cannot persist ${type}: pi.appendEntry is unavailable`);
     pi.appendEntry(type, data);
   };
   const restoreMetadata = (ctx) => {
-    metadataChallenges.clear();
+    metadataChallenges.clear(); orphanChallenges.clear();
     for (const entry of ctx.sessionManager?.getEntries?.() || []) {
-      if (entry.type !== "custom" || !entry.customType?.startsWith("goal-engine-metadata-")) continue;
+      if (entry.type !== "custom") continue;
       const data = entry.data;
-      if (!data?.id) continue;
-      const current = metadataChallenges.get(data.id) || {};
-      metadataChallenges.set(data.id, { ...current, ...(entry.customType === "goal-engine-metadata-challenge" ? { challenge: data } : {}), ...(entry.customType === "goal-engine-metadata-decision" ? { decision: { ...data, id: data.receiptId } } : {}), ...(entry.customType === "goal-engine-metadata-rejected" ? { rejected: true } : {}), ...(entry.customType === "goal-engine-metadata-consumed" ? { consumed: true } : {}) });
+      if (entry.customType?.startsWith("goal-engine-metadata-")) {
+        if (!data?.id) continue;
+        const current = metadataChallenges.get(data.id) || {};
+        metadataChallenges.set(data.id, { ...current, ...(entry.customType === "goal-engine-metadata-challenge" ? { challenge: data } : {}), ...(entry.customType === "goal-engine-metadata-decision" ? { decision: { ...data, id: data.receiptId } } : {}), ...(entry.customType === "goal-engine-metadata-rejected" ? { rejected: true } : {}), ...(entry.customType === "goal-engine-metadata-consumed" ? { consumed: true } : {}) });
+      }
+      if (!entry.customType?.startsWith("goal-engine-orphan-disposition-") || !data?.challenge_id && !data?.id) continue;
+      const id = data.challenge_id || data.id; const current = orphanChallenges.get(id) || {};
+      orphanChallenges.set(id, { ...current, ...(entry.customType.endsWith("challenge") ? { challenge: data } : {}), ...(entry.customType.endsWith("decision") ? { decision: { ...data, id: data.receipt_id } } : {}), ...(entry.customType.endsWith("stale") ? { stale: true } : {}), ...(entry.customType.endsWith("consumed") ? { consumed: true } : {}) });
     }
+  };
+  const stableHash = (value) => {
+    const canonical = (item) => Array.isArray(item) ? item.map(canonical) : item && typeof item === "object"
+      ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, canonical(item[key])])) : item;
+    return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+  };
+  const orphanRecord = (goalId, taskId, attempt, sessionId, inventory) => {
+    const hash = stableHash(inventory);
+    const records = [...orphanChallenges.values()].filter((r) => r.challenge?.goalId === goalId && r.challenge?.taskId === taskId && r.challenge?.attempt === attempt && r.challenge?.sessionId === sessionId);
+    let record = records.at(-1);
+    if (record?.stale || record?.consumed) {
+      record = null;
+    } else if (record && record.challenge.inventoryHash !== hash) {
+      persistMetadata("goal-engine-orphan-disposition-stale", { challenge_id: record.challenge.id });
+      orphanChallenges.set(record.challenge.id, { ...record, stale: true });
+      record = null;
+    }
+    if (!record) {
+      const presentation = { baseCommit: inventory.lease.baseCommit, branch: inventory.lease.branch, executorHead: inventory.executorHead, originRef: inventory.lease.originRef, resources: inventory.resources };
+      const challenge = { id: crypto.randomUUID(), kind: "orphan_disposition", goalId, taskId, attempt, sessionId, requestedAt: new Date().toISOString(), choices: ["discard", "preserve"], inventory: presentation, inventoryHash: hash };
+      persistMetadata("goal-engine-orphan-disposition-challenge", challenge);
+      record = { challenge }; orphanChallenges.set(challenge.id, record);
+    }
+    return record;
   };
   const metadataState = (projection, sessionId) => {
     const records = [...metadataChallenges.values()].filter((record) => record.challenge?.goalId === projection.goalId && record.challenge?.sessionId === sessionId);
@@ -692,15 +723,32 @@ export function createGoalEngineExtension(pi, options = {}) {
       let projection = loadProjectionFn(root, goalId);
       if (!projection) return "NO_ACTIVE_GOAL";
       if (!enforceActionTokens) return statusResponse(projection, cwd, root);
-      const metadata = metadataState(projection, sessionIdentity(ctx));
-      let machineAction = metadata?.status === "APPROVED"
+      const sessionId = sessionIdentity(ctx);
+      const metadata = metadataState(projection, sessionId);
+      let orphanDecision = null;
+      let orphanAction = null;
+      for (const [taskId] of projection.tasks) {
+        const attempt = nextDispatchAttempt(projection, taskId);
+        if (attempt === null) continue;
+        const inventory = inspectOrphanedExecutorWorkspace({ goalId, taskId, attempt, originRoot: cwd, stateRoot: root });
+        if (inventory.kind === "none") continue;
+        if (inventory.kind !== "verified") { orphanDecision = { status: "REINSPECTION_REQUIRED", goalId, taskId, attempt }; break; }
+        const record = orphanRecord(goalId, taskId, attempt, sessionId, inventory);
+        const challenge = record.challenge;
+        if (record.decision && !record.stale && !record.consumed && record.decision.choice && challenge.inventoryHash === stableHash(inventory)) {
+          orphanDecision = { status: "DECIDED", goalId, taskId, attempt, challenge_id: challenge.id, inventory: challenge.inventory, inventory_hash: challenge.inventoryHash, choice: record.decision.choice };
+          orphanAction = { tool: "goal_integrate", params: { goal_id: goalId, task_id: taskId, action: record.decision.choice } };
+        } else orphanDecision = { status: "AWAITING_USER_DECISION", goalId, taskId, attempt, challenge_id: challenge.id, inventory: challenge.inventory, inventory_hash: challenge.inventoryHash, choices: ["discard", "preserve"] };
+        break;
+      }
+      const machineAction = metadata?.status === "APPROVED"
         ? { tool: "goal_amend", params: { goal_id: goalId, operation: "update_goal", challenge_id: metadata.record.challenge.id } }
         : metadata?.status === "AWAITING_USER_DECISION" || metadata?.status === "REPROPOSE_REQUIRED"
           ? null
-          : machineActionForProjection(projection, cwd, root);
+          : orphanAction || machineActionForProjection(projection, cwd, root);
       let actionToken = null;
       if (machineAction) {
-        const offer = issueActionOffer(projection, machineAction, sessionIdentity(ctx));
+        const offer = issueActionOffer(projection, machineAction, sessionId);
         projection = appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId), projection.version);
         actionToken = offer.token;
       }
@@ -710,9 +758,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         pi.appendEntry?.("goal-engine-recovery-latch", clearedLatch);
         recoveryLatch = clearedLatch;
       }
-      if (!metadata) return response;
+      if (!metadata && !orphanDecision) return response;
       const parsed = JSON.parse(response);
-      parsed.metadataDecision = { status: metadata.status };
+      if (metadata) parsed.metadataDecision = { status: metadata.status };
+      if (orphanDecision) parsed.orphanDecision = orphanDecision;
       return JSON.stringify(parsed, null, 2);
     },
   });
@@ -1177,6 +1226,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         action: { type: "string", enum: ["integrate", "discard", "preserve"], description: "integrate=合回主 worktree, discard=丢弃并清理, preserve=保留 worktree 不合回" },
         strategy: { type: "string", enum: ["cherry-pick", "merge"], description: "合回策略（默认 cherry-pick）" },
         action_token: { type: "string" },
+        challenge_id: { type: "string" },
       },
       required: ["task_id", "action", "action_token"],
     },
@@ -1186,8 +1236,28 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (!goalId) throw new Error("No active goal");
 
       let projection = loadProjectionFn(root, goalId);
-      projection = consumeOfferedAction(projection, params, "goal_integrate", goalId, ctx, root);
       const taskId = params.task_id;
+      // The orphan gate is checked before consuming an offer or touching workspace state.
+      const pendingAttempt = nextDispatchAttempt(projection, taskId);
+      let orphanAuthorization = null;
+      if (enforceActionTokens && pendingAttempt !== null) {
+        const inventory = inspectOrphanedExecutorWorkspace({ goalId, taskId, attempt: pendingAttempt, originRoot: cwd, stateRoot: root });
+        if (inventory.kind === "verified") {
+          const sessionId = sessionIdentity(ctx);
+          const eligible = [...orphanChallenges.values()].filter((record) => record.challenge
+            && !record.stale && !record.consumed
+            && record.challenge.sessionId === sessionId
+            && record.challenge.goalId === goalId
+            && record.challenge.taskId === taskId
+            && record.challenge.attempt === pendingAttempt
+            && record.challenge.inventoryHash === stableHash(inventory)
+            && record.decision?.choice === params.action);
+          const record = params.challenge_id ? orphanChallenges.get(params.challenge_id) : eligible.length === 1 ? eligible[0] : null;
+          if (!record || !eligible.includes(record)) throw new Error("orphan challenge authorization/action token is required");
+          orphanAuthorization = record;
+        }
+      }
+      projection = consumeOfferedAction(projection, params, "goal_integrate", goalId, ctx, root);
       let task = projection.tasks.get(taskId);
       if (!task) throw new Error(`unknown task: ${taskId}`);
 
@@ -1199,9 +1269,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       // next-attempt workspace after an interrupted dispatch append. Recover
       // only a verified snapshot; the supplied callback is a scheduling
       // barrier, never a source of recovery facts.
-      const candidateAttempt = task.status === "pending" && !taskWorkspace
-        ? nextDispatchAttempt(projection, taskId)
-        : null;
+      const candidateAttempt = nextDispatchAttempt(projection, taskId);
       if (candidateAttempt !== null) {
         const inspectOrphan = () => inspectOrphanedExecutorWorkspace({
           goalId, taskId, attempt: candidateAttempt, originRoot: cwd, stateRoot: root,
@@ -1593,6 +1661,11 @@ export function createGoalEngineExtension(pi, options = {}) {
 
       const finalWorkspace = projection.tasks.get(taskId).workspace;
       finalWorkspace.released = released;
+      if (orphanAuthorization && finalWorkspace.phase === "disposed") {
+        const consumed = { challenge_id: orphanAuthorization.challenge.id, receipt_id: orphanAuthorization.decision.id, action };
+        persistMetadata("goal-engine-orphan-disposition-consumed", consumed);
+        orphanChallenges.set(orphanAuthorization.challenge.id, { ...orphanAuthorization, consumed: true });
+      }
       return JSON.stringify(formatDispositionResponse(finalWorkspace));
     },
 
@@ -1603,6 +1676,20 @@ export function createGoalEngineExtension(pi, options = {}) {
   pi.on("input", (event, ctx) => {
     if (event.source !== "interactive" && event.source !== "rpc") return { action: "continue" };
     pendingInput = { text: event.text, source: event.source, entryId: event.entryId || null };
+    let hookSessionId;
+    try { hookSessionId = sessionIdentity(ctx); } catch { hookSessionId = event.sessionId; }
+
+    try {
+      const orphan = [...orphanChallenges.values()].filter((record) => !record.decision && !record.stale && !record.consumed && record.challenge?.sessionId === hookSessionId).at(-1);
+      if (orphan) {
+        const occurredAt = new Date(Math.max(Date.now(), Date.parse(orphan.challenge.requestedAt) + 1)).toISOString();
+        const receipt = recordHumanChoice({ inputEvent: { role: "user", source: event.source, sessionId: hookSessionId, occurredAt, text: event.text, id: event.entryId || crypto.randomUUID() }, challenge: orphan.challenge, sessionId: hookSessionId });
+        const decision = { id: crypto.randomUUID(), ...receipt };
+        persistMetadata("goal-engine-orphan-disposition-decision", { challenge_id: orphan.challenge.id, receipt_id: decision.id, choice: decision.choice, sessionId: decision.sessionId, source: decision.source, user_entry_id: decision.userEntryId });
+        orphanChallenges.set(orphan.challenge.id, { ...orphan, decision });
+      }
+    } catch { /* input for another challenge or ambiguous input never creates an orphan receipt */ }
+
     try {
       const candidates = [...metadataChallenges.values()].filter((record) => !record.decision && !record.rejected && !record.consumed);
       const record = candidates.at(-1);
@@ -1620,7 +1707,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           metadataChallenges.set(record.challenge.id, { ...metadataChallenges.get(record.challenge.id), rejected: true });
         }
       }
-    } catch { /* ambiguous/non-user input never creates a receipt */ }
+    } catch { /* input for another challenge or ambiguous input never creates a metadata receipt */ }
     return { action: "continue" };
   });
 

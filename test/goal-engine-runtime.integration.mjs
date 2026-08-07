@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { hashGoalMetadataProposal } from "../scripts/lib/goal-engine/human-decision.mjs";
+import { allocateExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -358,6 +359,53 @@ test("real Pi host metadata exact challenge binding rejects wrong id and replay"
     await execute("goal_amend", "metadata-exact-apply", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: offer.action_token });
     await assert.rejects(() => execute("goal_amend", "metadata-exact-replay", { goal_id: initialized.goalId, operation: "update_goal", challenge_id: proposal.challenge_id, action_token: offer.action_token }), /consumed|approval|offer/i);
   });
+});
+
+test("real Pi host orphan human authorization survives reload and is non-replayable", async () => {
+  const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-orphan-host-project-"));
+  const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-orphan-host-"));
+  let host;
+  const makeHost = async (manager) => {
+    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    await loader.reload();
+    host = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
+    await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
+  };
+  try {
+    execFileSync("git", ["init"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.name", "Goal Engine Test"], { cwd: projectCwd });
+    writeFileSync(join(projectCwd, "README.md"), "fixture\n"); writeFileSync(join(projectCwd, ".gitignore"), ".state/goal-engine/\n");
+    execFileSync("git", ["add", "."], { cwd: projectCwd }); execFileSync("git", ["commit", "-m", "test: orphan fixture"], { cwd: projectCwd });
+    await makeHost(SessionManager.create(projectCwd, join(agentDir, "sessions")));
+    const signal = new AbortController().signal;
+    const execute = (name, id, args) => host.session.getToolDefinition(name).execute(id, args, signal, undefined, { cwd: projectCwd, sessionManager: host.session.sessionManager });
+    const initialized = JSON.parse((await execute("goal_init", "orphan-init", { objective: "Real host exact orphan authorization", tasks: [{ id: "t1", description: "orphan", writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] })).details.value);
+    const stateRoot = join(projectCwd, ".state/goal-engine");
+    const lease = allocateExecutorWorkspace({ goalId: initialized.goalId, taskId: "t1", attempt: 1, originRoot: projectCwd, stateRoot, baseCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectCwd, encoding: "utf8" }).trim() });
+    const first = JSON.parse((await execute("goal_status", "orphan-status-a", { goal_id: initialized.goalId })).details.value);
+    assert.equal(first.orphanDecision.status, "AWAITING_USER_DECISION");
+    assert.match(first.orphanDecision.inventory_hash, /^[a-f0-9]{64}$/);
+    assert.deepEqual(Object.keys(first.orphanDecision.inventory).sort(), ["baseCommit", "branch", "executorHead", "originRef", "resources"]);
+    for (const forbidden of ["ownerToken", "leasePath", "originRoot", "stateRoot", "path", "command", "toolOutput"]) assert.equal(JSON.stringify(first.orphanDecision.inventory).includes(forbidden), false);
+    await host.session.extensionRunner.emitInput("discard", undefined, "interactive");
+    const manager = host.session.sessionManager;
+    manager.appendMessage({ role: "assistant", content: [], provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }, stopReason: "stop" });
+    const sessionFile = manager.getSessionFile(); const sessionDir = manager.getSessionDir(); host.session.dispose();
+    await makeHost(SessionManager.open(sessionFile, sessionDir, projectCwd));
+    const offer = JSON.parse((await execute("goal_status", "orphan-status-reloaded", { goal_id: initialized.goalId })).details.value);
+    assert.deepEqual(offer.machineAction, { tool: "goal_integrate", params: { goal_id: initialized.goalId, task_id: "t1", action: "discard" } });
+    assert.equal(offer.action_token, loadProjection(stateRoot, initialized.goalId).actionOffer.token);
+    await execute("goal_integrate", "orphan-discard", { goal_id: initialized.goalId, task_id: "t1", action: "discard", challenge_id: first.orphanDecision.challenge_id, action_token: offer.action_token });
+    const consumed = host.session.sessionManager.getEntries().find((entry) => entry.customType === "goal-engine-orphan-disposition-consumed");
+    assert.ok(consumed); assert.equal(JSON.stringify(consumed.data).includes("ownerToken"), false);
+    assert.equal(JSON.stringify(consumed.data).includes(first.orphanDecision.challenge_id), true); assert.equal(JSON.stringify(consumed.data).includes("discard"), true);
+    assert.equal(existsSync(lease.path), false); assert.equal(existsSync(lease.leasePath), false);
+    assert.equal(execFileSync("git", ["branch", "--list", lease.branch], { cwd: projectCwd, encoding: "utf8" }).trim(), "");
+    await assert.rejects(() => execute("goal_integrate", "orphan-discard-replay", { goal_id: initialized.goalId, task_id: "t1", action: "discard", challenge_id: first.orphanDecision.challenge_id, action_token: offer.action_token }), /consumed|token|offer/i);
+  } finally {
+    try { host?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
+  }
 });
 
 test("real Pi host metadata proposal approval lifecycle survives reload and is non-replayable", async () => {
