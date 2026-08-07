@@ -2,8 +2,10 @@ import { validateDAG } from "./graph.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.mjs";
 
-const SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]);
-const SCHEMA_RANK = new Map([...SCHEMA_VERSIONS].map((version, index) => [version, index + 1]));
+const LEGACY_SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]);
+const PLANNED_SCHEMA_VERSION = "planned.v1";
+const SCHEMA_VERSIONS = new Set([...LEGACY_SCHEMA_VERSIONS, PLANNED_SCHEMA_VERSION]);
+const SCHEMA_RANK = new Map([["goal-engine.event.v1", 1], ["goal-engine.event.v2", 2], ["goal-engine.event.v3", 3]]);
 const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
 const TERMINAL_LIFECYCLES = new Set(["completed", "blocked", "cancelled"]);
 const COMPLETED_V3_EVENTS = new Set([
@@ -53,7 +55,8 @@ export function applyEvent(projection, event, { replay = false } = {}) {
   }
 
   validateGoalIdentity(projection, event);
-  if (projection.eventSchemaVersion && SCHEMA_RANK.get(event.schemaVersion) < SCHEMA_RANK.get(projection.eventSchemaVersion)) {
+  validateGeneration(projection, event, replay);
+  if (LEGACY_SCHEMA_VERSIONS.has(event.schemaVersion) && projection.eventSchemaVersion && SCHEMA_RANK.get(event.schemaVersion) < SCHEMA_RANK.get(projection.eventSchemaVersion)) {
     throw new Error(`schema downgrade from ${projection.eventSchemaVersion} is not allowed`);
   }
 
@@ -108,6 +111,16 @@ function validateEnvelope(event) {
   if (!event.data || typeof event.data !== "object" || Array.isArray(event.data)) throw new Error("invalid data");
 }
 
+function validateGeneration(projection, event, replay) {
+  if (!projection.eventSchemaVersion) {
+    if (event.schemaVersion !== PLANNED_SCHEMA_VERSION && !replay) throw new Error("legacy event generations are replay-only");
+    return;
+  }
+  if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION || event.schemaVersion === PLANNED_SCHEMA_VERSION) {
+    if (event.schemaVersion !== projection.eventSchemaVersion) throw new Error(`mixed event generations are not allowed: ${projection.eventSchemaVersion} and ${event.schemaVersion}`);
+  }
+}
+
 function validateGoalIdentity(projection, event) {
   if (projection.goalId === null) {
     if (event.type !== "goal.created") throw new Error("goal.created must be first event");
@@ -123,7 +136,7 @@ function copyProjection(p) {
     scope: [...p.scope],
     nonGoals: [...p.nonGoals],
     dod: [...p.dod],
-    tasks: new Map([...p.tasks].map(([k, v]) => [k, { ...v, workspace: v.workspace ? { ...v.workspace } : null, settlement: v.settlement ? { ...v.settlement } : null, evidence: [...v.evidence], deps: [...v.deps], writePaths: [...(v.writePaths || [])], acceptance: v.acceptance ? { ...v.acceptance, criteria: [...v.acceptance.criteria], commands: [...v.acceptance.commands] } : null }])),
+    tasks: new Map([...p.tasks].map(([k, v]) => [k, { ...v, workspace: v.workspace ? { ...v.workspace } : null, settlement: v.settlement ? { ...v.settlement } : null, evidence: [...v.evidence], deps: [...v.deps], writePaths: [...(v.writePaths || [])], acceptance: v.acceptance ? { ...v.acceptance, criteria: structuredClone(v.acceptance.criteria), ...(v.acceptance.commands ? { commands: [...v.acceptance.commands] } : {}) } : null }])),
     eventIds: new Set(p.eventIds),
     completionHistory: (p.completionHistory || []).map((entry) => ({ ...entry })),
     sessionBindings: (p.sessionBindings || []).map((binding) => ({ ...binding })),
@@ -139,7 +152,8 @@ function copyProjection(p) {
 
 function goalCreated(p, event, replay) {
   const { objective, scope, nonGoals, dod, tasks, taskDefs } = event.data;
-  if (event.schemaVersion !== "goal-engine.event.v1" && !replay) validateTaskDefinitions(tasks, taskDefs);
+  if (event.schemaVersion === PLANNED_SCHEMA_VERSION) validateTaskDefinitions(tasks, taskDefs, { planned: true });
+  else if (event.schemaVersion !== "goal-engine.event.v1" && !replay) validateTaskDefinitions(tasks, taskDefs);
   if (!objective || typeof objective !== "string") throw new Error("objective is required");
   if (!Array.isArray(tasks) || tasks.length === 0) throw new Error("tasks must be non-empty");
   if (!taskDefs || typeof taskDefs !== "object") throw new Error("taskDefs is required");
@@ -159,14 +173,17 @@ function goalCreated(p, event, replay) {
     if (!def) throw new Error(`missing taskDef for ${taskId}`);
     if (!def.description) throw new Error(`taskDef ${taskId} missing description`);
     if (!Array.isArray(def.writePaths) || def.writePaths.length === 0) throw new Error(`taskDef ${taskId} missing writePaths`);
-    if (!def.acceptance || !Array.isArray(def.acceptance.criteria) || !Array.isArray(def.acceptance.commands)) {
-      throw new Error(`taskDef ${taskId} missing acceptance (criteria + commands)`);
+    if (!def.acceptance || !Array.isArray(def.acceptance.criteria)
+      || (event.schemaVersion !== PLANNED_SCHEMA_VERSION && !Array.isArray(def.acceptance.commands))) {
+      throw new Error(`taskDef ${taskId} missing acceptance${event.schemaVersion === PLANNED_SCHEMA_VERSION ? " criteria" : " (criteria + commands)"}`);
     }
     p.tasks.set(taskId, {
       description: def.description,
       deps: def.deps || [],
       writePaths: def.writePaths,
-      acceptance: { criteria: def.acceptance.criteria, commands: def.acceptance.commands },
+      acceptance: event.schemaVersion === PLANNED_SCHEMA_VERSION
+        ? { criteria: structuredClone(def.acceptance.criteria) }
+        : { criteria: def.acceptance.criteria, commands: def.acceptance.commands },
       workflow: def.workflow || "tdd",
       status: "pending",
       evidence: [],
@@ -178,7 +195,8 @@ function goalCreated(p, event, replay) {
       settlement: null,
     });
   }
-  if (event.schemaVersion !== "goal-engine.event.v1" && !replay) assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
+  if (event.schemaVersion === PLANNED_SCHEMA_VERSION) assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
+  else if (event.schemaVersion !== "goal-engine.event.v1" && !replay) assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
   if (event.schemaVersion !== "goal-engine.event.v1" && replay) validateDAG(p.tasks);
 }
 
@@ -491,7 +509,7 @@ function goalAmended(p, data, schemaVersion, replay) {
     ...task,
     deps: [...task.deps],
     writePaths: [...task.writePaths],
-    acceptance: { ...task.acceptance, criteria: [...task.acceptance.criteria], commands: [...task.acceptance.commands] },
+    acceptance: { ...task.acceptance, criteria: structuredClone(task.acceptance.criteria), ...(task.acceptance.commands ? { commands: [...task.acceptance.commands] } : {}) },
   }]));
   for (const taskId of removeTasks || []) candidate.delete(taskId);
   for (const [taskId, def] of Object.entries(addTasks || {})) {
@@ -511,12 +529,14 @@ function goalAmended(p, data, schemaVersion, replay) {
     if (updates.acceptance) task.acceptance = updates.acceptance;
     if (updates.workflow !== undefined) task.workflow = updates.workflow;
   }
-  if (schemaVersion !== "goal-engine.event.v1" && !replay) {
+  if (schemaVersion === PLANNED_SCHEMA_VERSION) {
+    validateTaskDefinitions([...candidate.keys()], Object.fromEntries(candidate), { planned: true });
+  } else if (schemaVersion !== "goal-engine.event.v1" && !replay) {
     validateTaskDefinitions([...candidate.keys()], Object.fromEntries(candidate));
   } else {
     validateDAG(candidate);
   }
-  if (schemaVersion !== "goal-engine.event.v1" && !replay) {
+  if ((schemaVersion === PLANNED_SCHEMA_VERSION) || (schemaVersion !== "goal-engine.event.v1" && !replay)) {
     const candidateProjection = { ...p, tasks: candidate };
     assertPendingTaskContractsCompile(candidateProjection, DISPATCH_VALIDATION_SENTINEL);
   }

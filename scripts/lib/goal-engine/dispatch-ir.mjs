@@ -92,11 +92,10 @@ function normalizeBoundaries(value) {
 }
 
 function normalizeAcceptance(value) {
-  const acceptance = validateObject(value, "acceptance", ["criteria", "commands"]);
-  return {
-    criteria: normalizeStringArray(acceptance.criteria, "acceptance.criteria", { minItems: 1 }),
-    commands: normalizeStringArray(acceptance.commands, "acceptance.commands", { minItems: 1 }),
-  };
+  const acceptance = validateObject(value, "acceptance", ["criteria", "commands"], ["criteria"]);
+  const normalized = { criteria: normalizeStringArray(acceptance.criteria, "acceptance.criteria", { minItems: 1 }) };
+  if (Object.hasOwn(acceptance, "commands")) normalized.commands = normalizeStringArray(acceptance.commands, "acceptance.commands", { minItems: 1 });
+  return normalized;
 }
 
 function normalizeExecution(value, baseCwd) {

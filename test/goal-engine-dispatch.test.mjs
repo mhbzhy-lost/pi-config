@@ -169,7 +169,7 @@ function buildProjection() {
         workflow: "tdd",
       },
     },
-  }));
+  }), { replay: true });
   return p;
 }
 
@@ -273,4 +273,31 @@ test("completed optional context retains ordered facts/files and makes every omi
   assert.ok(first.context.knownFacts.every((fact) => Buffer.byteLength(fact, "utf8") <= 4096));
   assert.ok(first.context.knownFacts.every((fact) => !fact.endsWith("证")));
   assert.deepEqual(first.context, second.context);
+});
+
+
+test("planned criteria transport is canonical and never carries commands", () => {
+  const criterion = { id: "criterion-1", statement: "Ship the feature", evidenceKinds: ["tests", "changed-files"] };
+  const projection = {
+    goalId: "planned-goal", objective: "planned objective", scope: [], nonGoals: [], dod: [],
+    tasks: new Map([["t1", { description: "planned task", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [criterion] }, workflow: "tdd", status: "pending", evidence: [] }]]),
+  };
+  const first = compileTaskContract(projection, "t1", "/workspace/project");
+  const second = compileTaskContract(projection, "t1", "/workspace/project");
+  const encoded = JSON.stringify({ id: "criterion-1", statement: "Ship the feature", evidenceKinds: ["tests", "changed-files"] });
+  assert.deepEqual(first.acceptance, { criteria: [encoded] });
+  assert.deepEqual(first.acceptance, second.acceptance);
+  assert.ok(first.requirements.includes(encoded));
+  assert.equal(JSON.stringify(first).includes("commands"), false);
+});
+
+test("planned task definitions require exact structured criteria", () => {
+  const valid = { description: "planned task", deps: [], writePaths: ["src/x.mjs"], workflow: "tdd", acceptance: { criteria: [{ id: "proof", statement: "Prove it", evidenceKinds: ["tests"] }] } };
+  assert.doesNotThrow(() => validateTaskDefinitions(["t1"], { t1: valid }, { planned: true }));
+  for (const acceptance of [
+    { criteria: [{ id: "proof", statement: "Prove it", evidenceKinds: ["tests"], extra: true }] },
+    { criteria: [{ id: "proof", statement: "Prove it", evidenceKinds: ["unknown"] }] },
+    { criteria: [{ id: "proof", statement: "Prove it", evidenceKinds: ["tests"] }, { id: "proof", statement: "Again", evidenceKinds: ["tests"] }] },
+    { criteria: [{ id: "proof", statement: "Prove it", evidenceKinds: ["tests"] }], commands: ["true"] },
+  ]) assert.throws(() => validateTaskDefinitions(["t1"], { t1: { ...valid, acceptance } }, { planned: true }), /criteria|acceptance|duplicate|invalid/);
 });

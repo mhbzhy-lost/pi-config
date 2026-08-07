@@ -4,6 +4,8 @@ import { MAX_CONTRACT_ARRAY_ITEMS, assertContractArray, assertContractString } f
 
 const ID = /^[A-Za-z0-9._-]{1,160}$/;
 const WORKFLOWS = new Set(["tdd", "existing-tests", "docs-only"]);
+const CRITERION_ID = /^[A-Za-z0-9._-]{1,160}$/;
+const EVIDENCE_KINDS = new Set(["changed-files", "tests", "command", "manual-review"]);
 
 function nonEmpty(value, label) {
   return assertContractString(value, label);
@@ -22,7 +24,7 @@ function validateCommand(value, label, cwd, realpathCwd) {
   return command;
 }
 
-export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd } = {}) {
+export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd, planned = false } = {}) {
   if (!Array.isArray(tasks) || (requireNonEmpty && tasks.length === 0)) throw new Error("tasks must be non-empty");
   if (tasks.length > MAX_CONTRACT_ARRAY_ITEMS) throw new Error(`tasks must contain at most ${MAX_CONTRACT_ARRAY_ITEMS} items`);
   if (!taskDefs || typeof taskDefs !== "object" || Array.isArray(taskDefs)) throw new Error("taskDefs is required");
@@ -47,14 +49,33 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
     assertContractArray(def.writePaths, `taskDef ${id} writePaths`);
     if (!def.writePaths.length) throw new Error(`taskDef ${id} missing writePaths`);
     def.writePaths.forEach((path, index) => validateRepoRelativePath(path, `taskDef ${id} writePaths[${index}]`));
-    if (!def.acceptance) throw new Error(`taskDef ${id} requires non-empty acceptance criteria and commands`);
-    assertContractArray(def.acceptance.criteria, `taskDef ${id} acceptance.criteria`);
-    assertContractArray(def.acceptance.commands, `taskDef ${id} acceptance.commands`);
-    if (!def.acceptance.criteria.length || !def.acceptance.commands.length) throw new Error(`taskDef ${id} requires non-empty acceptance criteria and commands`);
-    def.acceptance.criteria.forEach((value, index) => nonEmpty(value, `taskDef ${id} acceptance.criteria[${index}]`));
-    def.acceptance.commands.forEach((value, index) => validateCommand(value, `taskDef ${id} acceptance.commands[${index}]`, cwd, realpathCwd));
+    if (!def.acceptance || typeof def.acceptance !== "object" || Array.isArray(def.acceptance)) throw new Error(`taskDef ${id} requires acceptance`);
+    if (planned) validatePlannedAcceptance(def.acceptance, id);
+    else {
+      assertContractArray(def.acceptance.criteria, `taskDef ${id} acceptance.criteria`);
+      assertContractArray(def.acceptance.commands, `taskDef ${id} acceptance.commands`);
+      if (!def.acceptance.criteria.length || !def.acceptance.commands.length) throw new Error(`taskDef ${id} requires non-empty acceptance criteria and commands`);
+      def.acceptance.criteria.forEach((value, index) => nonEmpty(value, `taskDef ${id} acceptance.criteria[${index}]`));
+      def.acceptance.commands.forEach((value, index) => validateCommand(value, `taskDef ${id} acceptance.commands[${index}]`, cwd, realpathCwd));
+    }
     if (!WORKFLOWS.has(def.workflow || "tdd")) throw new Error(`taskDef ${id} workflow is not supported`);
     graph.set(id, { deps: def.deps });
   }
   validateDAG(graph);
+}
+
+function validatePlannedAcceptance(acceptance, taskId) {
+  if (Object.keys(acceptance).length !== 1 || !Object.hasOwn(acceptance, "criteria")) throw new Error(`taskDef ${taskId} planned acceptance must contain only criteria`);
+  assertContractArray(acceptance.criteria, `taskDef ${taskId} acceptance.criteria`);
+  if (!acceptance.criteria.length) throw new Error(`taskDef ${taskId} acceptance.criteria must be non-empty`);
+  const ids = new Set();
+  acceptance.criteria.forEach((criterion, index) => {
+    if (!criterion || typeof criterion !== "object" || Array.isArray(criterion) || Object.keys(criterion).length !== 3
+      || !["id", "statement", "evidenceKinds"].every((key) => Object.hasOwn(criterion, key))) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] must contain exactly id, statement, evidenceKinds`);
+    if (!CRITERION_ID.test(criterion.id || "") || ids.has(criterion.id)) throw new Error(`taskDef ${taskId} acceptance.criteria has invalid or duplicate id: ${criterion.id}`);
+    ids.add(criterion.id);
+    nonEmpty(criterion.statement, `taskDef ${taskId} acceptance.criteria[${index}].statement`);
+    assertContractArray(criterion.evidenceKinds, `taskDef ${taskId} acceptance.criteria[${index}].evidenceKinds`);
+    if (!criterion.evidenceKinds.length || criterion.evidenceKinds.some((kind) => !EVIDENCE_KINDS.has(kind))) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}].evidenceKinds is invalid`);
+  });
 }

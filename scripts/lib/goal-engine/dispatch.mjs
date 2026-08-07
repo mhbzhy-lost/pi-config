@@ -50,7 +50,7 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
     requirements: [
       task.description,
       "Before reporting completed, create at least one clean commit containing only approved writePaths; if no commit is warranted, return NEEDS_CONTEXT instead of completed.",
-      ...task.acceptance.criteria,
+      ...task.acceptance.criteria.map(encodeCriterion),
       ...projection.dod.map((d) => `Goal DoD: ${d}`),
     ],
     context: { knownFacts, decisions, relevantFiles },
@@ -59,14 +59,21 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
       excludedWork: projection.nonGoals,
       forbiddenActions: ["Do not modify files outside declared writePaths", "Do not amend goal contract or state files"],
     },
-    acceptance: {
-      criteria: task.acceptance.criteria,
-      commands: task.acceptance.commands,
-    },
+    acceptance: task.acceptance.commands
+      ? { criteria: task.acceptance.criteria.map(encodeCriterion), commands: task.acceptance.commands }
+      : { criteria: task.acceptance.criteria.map(encodeCriterion) },
     execution: { cwd, timeoutMs },
   };
 
   return compileCodingDispatchIR(input, { cwd });
+}
+
+export function encodeCriterion(criterion) {
+  // Legacy projections retain their historical string criteria only during replay.
+  if (typeof criterion === "string") return criterion;
+  const { id, statement, evidenceKinds } = criterion;
+  // JSON is unambiguous and its fixed key order makes this transport stable.
+  return JSON.stringify({ id, statement, evidenceKinds: [...evidenceKinds] });
 }
 
 function boundedOptional(items, limit = MAX_CONTRACT_ARRAY_ITEMS) {

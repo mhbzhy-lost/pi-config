@@ -2131,3 +2131,16 @@ test("v3 action offer persists and can be consumed exactly once", () => {
   assert.equal(projection.actionOffer.consumed, true);
   assert.throws(() => applyEvent(projection, v3Event("goal.action_consumed", consumed)), /consumed/);
 });
+
+test("planned.v1 is an isolated persisted generation with strict criteria", () => {
+  const created = { schemaVersion: "planned.v1", eventId: "planned-created", goalId: "planned-generation", occurredAt: "2026-08-08T00:00:00.000Z", type: "goal.created", data: { objective: "Create a planned goal", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "Implement planned core", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "proof", statement: "Prove behavior", evidenceKinds: ["tests", "changed-files"] }] }, workflow: "tdd" } } } };
+  const projection = applyEvent(createProjection(), created);
+  assert.equal(projection.eventSchemaVersion, "planned.v1");
+  assert.deepEqual(projection.tasks.get("t1").acceptance, created.data.taskDefs.t1.acceptance);
+  assert.throws(() => applyEvent(projection, { ...created, eventId: "legacy-mix", type: "goal.checkpoint", data: { nextAction: "Use the isolated planned generation for every future event" }, schemaVersion: "goal-engine.event.v3" }), /mixed event generations/);
+  assert.throws(() => applyEvent(createProjection(), { ...created, eventId: "legacy-new", schemaVersion: "goal-engine.event.v3" }), /replay-only/);
+  const malformed = structuredClone(created);
+  malformed.eventId = "planned-malformed";
+  malformed.data.taskDefs.t1.acceptance.commands = ["true"];
+  assert.throws(() => applyEvent(createProjection(), malformed), /only criteria/);
+});
