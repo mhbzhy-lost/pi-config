@@ -95,16 +95,16 @@ node --test test/pi-shell.test.mjs
 # 5/5
 
 node --test test/goal-engine-state-scope.test.mjs
-# 初始 10/10；外源复审补强权限与 symlink 门禁后 12/12
+# 初始 10/10；外源复审补强权限、symlink 与不可用根目录门禁后 13/13
 
 node --test test/goal-engine-extension.test.mjs
-# 124/124
+# 初始 124/124；补充空 global status 与非 init cwd 错误门禁后 126/126
 
 node --test test/goal-engine-runtime.integration.mjs
 # 18/18
 
 node --test test/goal-engine-extension.test.mjs test/goal-engine-events.test.mjs test/goal-engine-workspace.test.mjs
-# 修复一次既有 nonexistent-cwd 错误合同回归后，相关三组回归通过；最终 Extension 单组再次通过 124/124
+# 修复一次既有 nonexistent-cwd 错误合同回归后，相关三组回归通过；最终 Extension 单组通过 126/126
 
 npm test
 # 830/831；唯一失败为既有 pi/settings.json enabledModels 与 test/migration-contract.test.mjs 期望不一致，和本改动无关
@@ -116,6 +116,18 @@ npm test
 - identity 中 canonical cwd 分别匹配两个仓库；
 - 同 cwd 新 session 可恢复原 Goal；
 - 两个仓库均不产生 `.state/goal-engine`。
+
+## 外源复审
+
+使用 DeepSeek 对 `fb0bbe6..HEAD` 完成两轮上限的穷举式复审：
+
+- Round 1 的真实问题是已存在 namespace/identity 未复验 `0700/0600` 和 symlink；已用 `lstat + O_NOFOLLOW + fstat` 修复并增加 RED。
+- Round 2 的真实问题是全局根不可写时泄漏原生错误，以及非 init 操作的 cwd realpath 错误未结构化；已增加 `GOAL_STATE_ROOT_UNAVAILABLE` 和统一 `GIT_INFRASTRUCTURE_ERROR`。
+- “空 global root 会使 status 抛 ENOENT”不成立：`store.listGoals()` 对缺失 registry 返回空数组；新增真实 Extension 用例证明 `goal_status` 返回 `NO_ACTIVE_GOAL` 且 global/legacy 均零写入。
+- “read 默认 global 会创建 identity”不成立：identity 仅在 global registry 已包含 Goal 时复验；空 status 专项确认无副作用。
+- 摘要长度、legacy 非 canonical 字符串和冲突 fixture 等其余项不影响安全：完整 identity 防摘要碰撞，legacy 保留原绝对路径是为了不破坏既有 worktree lease。
+
+按两轮上限停止外源调用；未把外源严重度直接当作修复依据。
 
 ## 回滚与后续边界
 

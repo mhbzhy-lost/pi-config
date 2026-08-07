@@ -106,6 +106,23 @@ async function invoke(pi, name, params = {}) {
   return text;
 }
 
+test("configured Goal state root keeps empty goal_status read-only before initialization", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "ge-global-empty-origin-"));
+  const goalBase = mkdtempSync(join(tmpdir(), "ge-global-empty-state-"));
+  try {
+    initGitRepo(cwd);
+    const pi = createMockPi(cwd);
+    createGoalEngineExtension(pi, { goalStateEnv: { PI_CODING_GOAL_DIR: goalBase } });
+
+    assert.equal(await invoke(pi, "goal_status", {}), "NO_ACTIVE_GOAL");
+    assert.deepEqual(readdirSync(goalBase), []);
+    assert.equal(existsSync(join(cwd, ".state", "goal-engine")), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(goalBase, { recursive: true, force: true });
+  }
+});
+
 test("configured Goal state root keeps new structured artifacts outside the repository", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "ge-global-origin-"));
   const goalBase = mkdtempSync(join(tmpdir(), "ge-global-state-"));
@@ -749,6 +766,19 @@ test("goal_init rejects a nonexistent absolute cwd before creating state", async
       && /GIT_INFRASTRUCTURE_ERROR: observed=cwd realpath could not be read: .*; remediation=repair filesystem access and retry goal_init; stateChanged=false/.test(error.message),
   );
   assert.equal(existsSync(join(cwd, ".state/goal-engine")), false);
+});
+
+test("goal_status rejects a nonexistent absolute cwd with the stable filesystem contract", async () => {
+  const cwd = join(tmpdir(), `ge-missing-status-${crypto.randomUUID()}`);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+
+  await assert.rejects(
+    () => invoke(pi, "goal_status", {}),
+    (error) => error.code === "GIT_INFRASTRUCTURE_ERROR"
+      && /observed=cwd realpath could not be read: .*stateChanged=false/.test(error.message),
+  );
+  assert.equal(existsSync(join(cwd, ".state", "goal-engine")), false);
 });
 
 test("goal_init metadata-derived dispatch gates reject atomically", async () => {

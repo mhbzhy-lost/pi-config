@@ -93,6 +93,29 @@ test("state scope rejects a relative PI_CODING_GOAL_DIR before creating files", 
   }
 });
 
+test("identity creation reports an unavailable global root without falling back to legacy", () => {
+  const fixture = arena();
+  const globalRoot = arena("goal-state-global-");
+  const blockedParent = join(globalRoot.root, "blocked");
+  mkdirSync(blockedParent, { mode: 0o500 });
+  try {
+    const scope = resolveGoalStateScope({
+      cwd: fixture.root,
+      env: { PI_CODING_GOAL_DIR: join(blockedParent, "goals") },
+    });
+
+    assert.throws(
+      () => ensureGoalStateIdentity(scope),
+      (error) => error.code === "GOAL_STATE_ROOT_UNAVAILABLE" && error.message.includes(scope.preferredRoot),
+    );
+    assert.equal(statSync(blockedParent).mode & 0o777, 0o500);
+  } finally {
+    chmodSync(blockedParent, 0o700);
+    fixture.dispose();
+    globalRoot.dispose();
+  }
+});
+
 test("identity creation is private, idempotent, and rejects a mismatched cwd", () => {
   const fixture = arena();
   const globalRoot = arena("goal-state-global-");

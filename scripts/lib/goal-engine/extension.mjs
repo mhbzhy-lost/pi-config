@@ -471,11 +471,13 @@ export function createGoalEngineExtension(pi, options = {}) {
     try {
       resolvedStateScope = resolveGoalStateScope({ cwd: legacyScope.cwd, env: goalStateEnv });
     } catch (error) {
-      if (operation === "init" && error?.code === "ENOENT") {
+      if (["ENOENT", "EACCES", "ELOOP", "ENOTDIR"].includes(error?.code)) {
         throw preflightError(
           "GIT_INFRASTRUCTURE_ERROR",
           `cwd realpath could not be read: ${legacyScope.cwd}`,
-          "repair filesystem access and retry goal_init",
+          operation === "init"
+            ? "repair filesystem access and retry goal_init"
+            : "restore filesystem access to ExtensionContext.cwd and retry the typed Goal operation",
         );
       }
       throw error;

@@ -68,11 +68,16 @@ export function resolveGoalStateScope({ cwd, env = process.env }) {
 
 export function ensureGoalStateIdentity(scope) {
   if (scope.storage !== "global" || scope.preferredRoot === scope.legacyRoot) return;
-  mkdirSync(scope.preferredRoot, { recursive: true, mode: 0o700 });
+  let directoryBefore;
+  try {
+    mkdirSync(scope.preferredRoot, { recursive: true, mode: 0o700 });
+    directoryBefore = lstatSync(scope.preferredRoot);
+  } catch (error) {
+    throw codedError("GOAL_STATE_ROOT_UNAVAILABLE", `cannot access namespace ${scope.preferredRoot}: ${error.message}`);
+  }
   const identityPath = join(scope.preferredRoot, "identity.json");
   const expectedBytes = `${JSON.stringify(scope.identity, null, 2)}\n`;
 
-  const directoryBefore = lstatSync(scope.preferredRoot);
   if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink() || (directoryBefore.mode & 0o777) !== 0o700) {
     throw codedError("GOAL_STATE_IDENTITY_INSECURE", `namespace directory is not a private non-symlink directory: ${scope.preferredRoot}`);
   }
@@ -80,7 +85,9 @@ export function ensureGoalStateIdentity(scope) {
   try {
     writeFileSync(identityPath, expectedBytes, { encoding: "utf8", flag: "wx", mode: 0o600 });
   } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
+    if (error?.code !== "EEXIST") {
+      throw codedError("GOAL_STATE_ROOT_UNAVAILABLE", `cannot create identity ${identityPath}: ${error.message}`);
+    }
   }
 
   let descriptor;
