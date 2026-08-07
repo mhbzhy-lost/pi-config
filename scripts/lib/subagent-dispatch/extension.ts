@@ -76,10 +76,9 @@ const CODING_SCHEMA = {
     acceptance: {
       type: "object",
       additionalProperties: false,
-      required: ["criteria", "commands"],
+      required: ["criteria"],
       properties: {
         criteria: { ...stringList, minItems: 1 },
-        commands: { ...stringList, minItems: 1 },
       },
     },
     execution: {
@@ -245,11 +244,6 @@ function codingSpawnParams(ir, prompt) {
         "residual-risks",
         "no-staged-files",
       ],
-      verify: ir.acceptance.commands.map((command, index) => ({
-        id: `verify-${index + 1}`,
-        command,
-        cwd: ir.execution.cwd,
-      })),
     },
   };
 }

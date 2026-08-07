@@ -38,7 +38,6 @@ function contract(overrides = {}) {
     },
     acceptance: {
       criteria: ["Initial user and thinking appear in normalized output."],
-      commands: ["node --test test/subagent-native-conversation.test.mjs"],
     },
     execution: { timeoutMs: 900_000 },
   };
@@ -114,7 +113,6 @@ test("renders the complete child prompt in a fixed section order", () => {
       "## Forbidden Actions",
       "## Workflow",
       "## Acceptance Criteria",
-      "## Verification Commands",
       "## Escalation",
       "## Required Report",
     ],
@@ -149,11 +147,22 @@ test("rejects missing fields and unknown keys at every object level", () => {
     contract({ context: { surprise: true } }),
     contract({ boundaries: { surprise: true } }),
     contract({ acceptance: { surprise: true } }),
+    contract({ acceptance: { criteria: ["A criterion."], commands: ["node --test injected.mjs"] } }),
     contract({ execution: { surprise: true } }),
     contract({ workflow: { surprise: true } }),
   ]) {
     expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(invalid, { cwd: "/repo" }));
   }
+});
+
+test("rejects commands as an unknown acceptance field in the new strict schema", () => {
+  assert.throws(() => compileCodingDispatchIR(contract({
+    acceptance: { criteria: ["A criterion."], commands: ["node --test injected.mjs"] },
+  }), { cwd: "/repo" }), (error) => {
+    assert.equal(error.code, "INVALID_CONTRACT");
+    assert.equal(error.detail, "acceptance.commands");
+    return true;
+  });
 });
 
 test("uses stable error codes for unsupported versions and agents", () => {

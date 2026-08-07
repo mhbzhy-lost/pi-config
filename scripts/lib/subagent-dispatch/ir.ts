@@ -166,10 +166,9 @@ function normalizeBoundaries(value) {
 }
 
 function normalizeAcceptance(value) {
-  const acceptance = validateObject(value, "acceptance", ["criteria", "commands"]);
+  const acceptance = validateObject(value, "acceptance", ["criteria"]);
   return {
     criteria: normalizeStringArray(acceptance.criteria, "acceptance.criteria", { minItems: 1 }),
-    commands: normalizeStringArray(acceptance.commands, "acceptance.commands", { minItems: 1 }),
   };
 }
 

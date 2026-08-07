@@ -30,7 +30,6 @@ function codingContract(overrides = {}) {
     },
     acceptance: {
       criteria: ["The main Agent sees only the project-owned facade."],
-      commands: ["node --test test/subagent-runtime-membrane.test.mjs"],
     },
     execution: { timeoutMs: 900_000 },
   };
@@ -594,6 +593,8 @@ test("compiles a coding contract and returns a typed async handle", async () => 
   assert.equal(spawn.params.clarify, false);
   assert.equal(spawn.params.timeoutMs, 900_000);
   assert.deepEqual(spawn.params.acceptance.criteria, ["The main Agent sees only the project-owned facade."]);
+  assert.equal(Object.hasOwn(spawn.params.acceptance, "verify"), false);
+  assert.doesNotMatch(spawn.params.task, /Verification Commands|node --test/);
   assert.doesNotMatch(result.content[0].text, /Authoritative Known Facts/);
   assert.equal(
     result.content[0].text,
