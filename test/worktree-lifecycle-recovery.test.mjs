@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -35,6 +35,7 @@ function snapshot(f, a) {
 }
 function assertSnapshot(f, a, before) { assert.deepEqual(snapshot(f, a), before); }
 function assertKept(f, a, branchRef = a.branchRef) { assert.equal(existsSync(a.path), true); assert.equal(git(f.root, "show-ref", "--verify", "--quiet", branchRef), ""); }
+function lifecycleCli(root, ...args) { return spawnSync(process.execPath, [resolve("scripts/worktree-lifecycle.mjs"), ...args], { cwd: root, encoding: "utf8" }); }
 
 // The classifier is deliberately read through the namespace: old production lacks it,
 // so this is a business RED rather than an import-time fixture failure.
@@ -215,6 +216,23 @@ test("RED reconciliation applies the inventory owner token, not a replacement ob
   const commandObserver = ({ cwd, args }) => { if (cwd === f.root && JSON.stringify(args) === JSON.stringify(["rev-parse", "--git-common-dir"]) && ++commonProbes === 2) { const m = manifest(f, a.id); m.ownerToken = "worktree-owner.v1:" + "c".repeat(64); writeFileSync(lease(f, a.id), JSON.stringify(m)); chmodSync(lease(f, a.id), 0o600); replaced = true; } };
   const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true, commandObserver }); const item = factsById(report.items)[a.id];
   assert.equal(replaced, true); assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"]); assertKept(f, a); assert.deepEqual(readFileSync(lease(f, a.id)), Buffer.from(JSON.stringify({ ...JSON.parse(before), ownerToken: "worktree-owner.v1:" + "c".repeat(64) })));
+});
+
+test("RED reconcile CLI defaults to a redacted dry-run and applies only through the manager", (t) => {
+  const f = repo(t); const a = allocation(f); reclaim(f, a); const before = snapshot(f, a);
+  const dry = lifecycleCli(f.root, "reconcile", "--json"); assert.equal(dry.status, 0, dry.stderr); const report = JSON.parse(dry.stdout);
+  assert.equal(report.apply, false); assert.equal(JSON.stringify(report).includes(a.ownerToken), false); const item = factsById(report.items)[a.id]; assert.equal(item.path, a.path); assert.equal(item.registration.path, a.path); assert.equal(item.registration.branch, a.branchRef); assertSnapshot(f, a, before);
+  const text = lifecycleCli(f.root, "reconcile"); assert.equal(text.status, 0, text.stderr); assert.equal(text.stdout.includes("undefined"), false);
+  const applied = lifecycleCli(f.root, "reconcile", "--apply", "--json"); assert.equal(applied.status, 0, applied.stderr); assert.equal(JSON.parse(applied.stdout).apply, true); assert.equal(existsSync(a.path), false); assert.equal(git(f.root, "show-ref", "--verify", "--quiet", a.branchRef), "");
+});
+
+test("RED lifecycle CLI parses flags per command before touching resources", (t) => {
+  const f = repo(t); const cases = [
+    ["audit irrelevant known", ["audit", "--id", "x"]], ["reconcile irrelevant known", ["reconcile", "--id", "x"]], ["release irrelevant known", ["release", "--path", "x", "--id", "x", "--owner-token", "t"]],
+    ["duplicate", ["reconcile", "--json", "--json"]], ["unknown", ["audit", "--wat"]], ["positional", ["audit", "extra"]], ["missing value", ["create", "--id"]], ["apply equals", ["reconcile", "--apply=false"]], ["create apply", ["create", "--apply"]],
+    ["adopt irrelevant", ["adopt", "--reason", "x"]], ["preserve irrelevant", ["preserve", "--branch", "x"]],
+  ];
+  for (const [name, args] of cases) { const before = git(f.root, "worktree", "list", "--porcelain", "-z"); const result = lifecycleCli(f.root, ...args); assert.equal(result.status, 2, name); assert.match(result.stderr, /^WORKTREE_LIFECYCLE_CLI_USAGE:/, name); assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z"), before, name); }
 });
 
 test("RED duplicate released 001 receipts are not passed to the manager", async (t) => {

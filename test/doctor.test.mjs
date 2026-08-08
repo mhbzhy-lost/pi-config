@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { inspectConfiguration, inspectGoalContractIntegrity } from "../scripts/doctor.mjs";
+import * as doctor from "../scripts/doctor.mjs";
+import { createManagedWorktree } from "../scripts/lib/worktree-lifecycle/managed-worktree.mjs";
+import { markDisposition } from "../scripts/lib/worktree-lifecycle/registry.mjs";
+const { inspectConfiguration, inspectGoalContractIntegrity } = doctor;
 import { canonicalJsonSha256 } from "../scripts/lib/goal-contract/authorization-audit.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -620,6 +623,28 @@ test("doctor validates Goal Contract integrity for registered goals", async () =
 
 test("doctor accepts current registered Goal Contract integrity", async () => {
   assert.deepEqual(await inspectGoalContractIntegrity(repoRoot), []);
+});
+
+test("RED worktree lifecycle doctor warnings are stable, redacted, and not readiness issues", async () => {
+  const format = doctor.formatWorktreeLifecycleWarnings;
+  assert.equal(typeof format, "function", "doctor must export formatWorktreeLifecycleWarnings");
+  const warnings = format({ items: [
+    { code: "WORKTREE_CLEANUP_DEBT", resources: "001", path: "/safe", ownerToken: "secret", owner: "owner", lastError: "error", probe: "probe" },
+    { code: null, resources: "111", path: "/ignored" },
+  ] });
+  assert.deepEqual(warnings, ["[warning] WORKTREE_CLEANUP_DEBT 001 /safe"]);
+  assert.equal(JSON.stringify(warnings).match(/secret|owner|error|probe/), null);
+  const root = await mkdtemp(join(tmpdir(), "doctor-worktree-"));
+  try {
+    const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+    git("init", "--initial-branch=main"); git("config", "user.email", "test@example.invalid"); git("config", "user.name", "Test"); await writeFile(join(root, "a"), "a\n"); git("add", "a"); git("commit", "-m", "initial");
+    const allocation = createManagedWorktree({ originRoot: root, id: "safe", branch: "safe", baseCommit: git("rev-parse", "HEAD"), owner: { kind: "test", id: "one" } });
+    markDisposition({ originRoot: root, id: allocation.id, ownerToken: allocation.ownerToken, disposition: "reclaimable" });
+    const report = await doctor.inspectWorktreeLifecycle(root); const item = report.items.find((entry) => entry.id === allocation.id);
+    assert.equal(report.apply, false); assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_CLEANUP_DEBT", "release-worktree-only"]); assert.equal(item.path, allocation.path); assert.equal(git("show-ref", "--verify", "--quiet", allocation.branchRef), "");
+    const issues = await inspectConfigurationWithValidatedVersions(repoRoot);
+    assert.equal(issues.some((issue) => issue.includes("WORKTREE_")), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("doctor CLI reports Root broker readiness without retired Host terminology", async () => {
