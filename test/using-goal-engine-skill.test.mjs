@@ -4,6 +4,7 @@ import test from "node:test";
 
 const skillPath = new URL("../skill-overrides/using-goal-engine/SKILL.md", import.meta.url);
 const whitelistPath = new URL("../skill-overrides/skills.list", import.meta.url);
+const agentsPath = new URL("../pi/AGENTS.md", import.meta.url);
 const exactTools = ["goal_init", "goal_status", "goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"];
 
 async function loadSkill() {
@@ -78,6 +79,16 @@ test("keeps Goal Engine mutation at the Host typed-tool boundary", async () => {
   assert.match(body, /(缺|missing)[\s\S]{0,100}(schema|工具|tools)[\s\S]{0,140}(停止|stop)[\s\S]{0,140}(Host|宿主)/i);
   assert.match(body, /(当前|current)[\s\S]{0,100}(ToolDefinition|工具定义)[\s\S]{0,100}(schema|类型)/i);
   assert.match(body, /(Git precheck|Git 预检)[\s\S]{0,100}(不受此禁止|not subject)/i);
+});
+
+test("keeps pi AGENTS worktree cleanup constrained to explicit managed ownership", async () => {
+  const agents = await readFile(agentsPath, "utf8");
+
+  assert.match(agents, /禁止 raw `git worktree add\/remove\/prune\/move\/repair\/lock\/unlock`/i);
+  assert.match(agents, /仅可经 typed Goal disposition 或 `node scripts\/worktree-lifecycle\.mjs \.\.\.` managed lifecycle CLI/i);
+  assert.match(agents, /owner CAS 与明确授权/i);
+  assert.match(agents, /禁止 `--force` removal、raw branch cleanup/i);
+  assert.match(agents, /`\/tmp`、TTL、clean 状态均不构成删除授权/i);
 });
 
 test("requires typed disposition or managed lifecycle ownership for worktree cleanup", async () => {
