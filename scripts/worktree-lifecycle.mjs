@@ -4,92 +4,94 @@ import { inventoryRepositoryWorktrees, reconcileManagedWorktrees } from "./lib/w
 import { createManagedWorktree, preserveManagedWorktree, releaseManagedWorktree } from "./lib/worktree-lifecycle/managed-worktree.mjs";
 import { activateAllocation, beginAllocation } from "./lib/worktree-lifecycle/registry.mjs";
 
-const args = process.argv.slice(2);
-const command = args[0] && !args[0].startsWith("-") ? args[0] : "audit";
-const flags = command === "audit" && args[0]?.startsWith("-") ? args : args.slice(1);
+const SCHEMAS = {
+  audit: { flags: new Set(["json"]), values: new Set() },
+  reconcile: { flags: new Set(["json", "apply"]), values: new Set() },
+  create: { flags: new Set(["json"]), values: new Set(["id", "branch", "base", "owner-kind", "owner-id"]) },
+  adopt: { flags: new Set(["json"]), values: new Set(["id", "branch", "base", "owner-kind", "owner-id", "path"]) },
+  release: { flags: new Set(["json"]), values: new Set(["id", "owner-token"]) },
+  preserve: { flags: new Set(["json"]), values: new Set(["id", "owner-token", "reason"]) },
+};
 
-function option(name, { required = true } = {}) {
-  const index = flags.indexOf(`--${name}`);
-  const value = index >= 0 ? flags[index + 1] : undefined;
-  if (value !== undefined && !value.startsWith("--")) return value;
-  if (!required) return undefined;
-  const error = new Error(`Missing --${name}`);
+function usage(message) {
+  const error = new Error(message);
   error.code = "WORKTREE_LIFECYCLE_CLI_USAGE";
   throw error;
 }
 
-function print(value) {
-  if (flags.includes("--json")) return console.log(JSON.stringify(value));
+function parseCommand(argv) {
+  const first = argv[0];
+  const command = !first || first.startsWith("-") ? "audit" : first;
+  const schema = SCHEMAS[command];
+  if (!schema) usage(`Unknown command: ${command}`);
+  const tokens = command === "audit" && first?.startsWith("-") ? argv : argv.slice(1);
+  const values = Object.create(null);
+  const flags = new Set();
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token.startsWith("--")) usage(`Unexpected value: ${token}`);
+    if (token.includes("=")) usage(`Option values must use a separate argument: ${token}`);
+    const name = token.slice(2);
+    if (!schema.flags.has(name) && !schema.values.has(name)) usage(`Unknown or irrelevant option: ${token}`);
+    if (flags.has(name)) usage(`Duplicate ${token}`);
+    flags.add(name);
+    if (schema.values.has(name)) {
+      const value = tokens[++index];
+      if (value === undefined || value === "" || value.startsWith("--")) usage(`Missing --${name}`);
+      values[name] = value;
+    }
+  }
+  for (const name of schema.values) if (values[name] === undefined) usage(`Missing --${name}`);
+  return { command, json: flags.has("json"), apply: flags.has("apply"), values };
+}
+
+function escapeSingleLine(value) {
+  return String(value ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) => {
+    const escapes = { "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r" };
+    return escapes[character] ?? `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
+  });
+}
+
+function print(value, json) {
+  if (json) return console.log(JSON.stringify(value));
   const items = Array.isArray(value) ? value : value?.items;
   if (items) {
-    for (const fact of items) console.log(`${fact.state ?? "unknown"}\t${fact.path ?? fact.registration?.path ?? ""}\t${fact.automaticAction ?? "none"}`);
+    for (const fact of items) console.log(`${fact?.state ?? "unknown"}\t${escapeSingleLine(fact?.path ?? fact?.registration?.path)}\t${fact?.automaticAction ?? "none"}`);
     return;
   }
-  console.log(`${value?.state ?? "unknown"}\t${value?.id ?? ""}\t${value?.path ?? ""}`);
+  console.log(`${value?.state ?? "unknown"}\t${value?.id ?? ""}\t${escapeSingleLine(value?.path)}`);
 }
 
-function owner() {
-  return { kind: option("owner-kind"), id: option("owner-id") };
-}
-
-try {
-  const allowed = new Set(["--json", "--apply", "--id", "--branch", "--base", "--owner-kind", "--owner-id", "--owner-token", "--reason", "--path"]);
-  if (flags.some((flag) => flag.startsWith("--") && !allowed.has(flag))) { const error = new Error("Unknown option"); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
-  for (const flag of allowed) if (flags.filter((value) => value === flag).length > 1) { const error = new Error(`Duplicate ${flag}`); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
-  const valueFlags = new Set(["--id", "--branch", "--base", "--owner-kind", "--owner-id", "--owner-token", "--reason", "--path"]);
-  for (let index = 0; index < flags.length; index += 1) if (!flags[index].startsWith("--") && (!valueFlags.has(flags[index - 1]) || flags[index].startsWith("--"))) { const error = new Error(`Unexpected value: ${flags[index]}`); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
-  if (command === "audit") {
-    if (flags.includes("--apply")) { const error = new Error("--apply requires reconcile"); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
-    print(await inventoryRepositoryWorktrees({ originRoot: process.cwd() }));
-  } else if (command === "reconcile") {
-    print(await reconcileManagedWorktrees({ originRoot: process.cwd(), apply: flags.includes("--apply") }));
-  } else if (command === "create") {
-    print(createManagedWorktree({
-      originRoot: process.cwd(),
-      id: option("id"),
-      branch: option("branch"),
-      baseCommit: option("base"),
-      owner: owner(),
-    }));
-  } else if (command === "adopt") {
-    const allocation = beginAllocation({
-      originRoot: process.cwd(),
-      id: option("id"),
-      path: option("path"),
-      branch: option("branch"),
-      baseCommit: option("base"),
-      owner: owner(),
-    });
-    const headCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
-      cwd: allocation.path,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    print(activateAllocation({
-      originRoot: process.cwd(),
-      id: allocation.id,
-      ownerToken: allocation.ownerToken,
-      headCommit,
-    }));
-  } else if (command === "release") {
-    print(releaseManagedWorktree({
-      originRoot: process.cwd(),
-      id: option("id"),
-      ownerToken: option("owner-token"),
-    }));
-  } else if (command === "preserve") {
-    print(preserveManagedWorktree({
-      originRoot: process.cwd(),
-      id: option("id"),
-      ownerToken: option("owner-token"),
-      reason: option("reason"),
-    }));
-  } else {
-    const error = new Error(`Unknown command: ${command}`);
-    error.code = "WORKTREE_LIFECYCLE_CLI_USAGE";
-    throw error;
+const parsed = (() => {
+  try { return parseCommand(process.argv.slice(2)); }
+  catch (error) {
+    console.error(`${error.code || "WORKTREE_LIFECYCLE_ERROR"}: ${error.message}`);
+    process.exitCode = error.code === "WORKTREE_LIFECYCLE_CLI_USAGE" ? 2 : 1;
+    return null;
   }
-} catch (error) {
-  console.error(`${error.code || "WORKTREE_LIFECYCLE_ERROR"}: ${error.message}`);
-  process.exitCode = 2;
+})();
+
+if (parsed) {
+  try {
+    const { command, json, apply, values } = parsed;
+    const owner = () => ({ kind: values["owner-kind"], id: values["owner-id"] });
+    if (command === "audit") {
+      print(await inventoryRepositoryWorktrees({ originRoot: process.cwd() }), json);
+    } else if (command === "reconcile") {
+      print(await reconcileManagedWorktrees({ originRoot: process.cwd(), apply }), json);
+    } else if (command === "create") {
+      print(createManagedWorktree({ originRoot: process.cwd(), id: values.id, branch: values.branch, baseCommit: values.base, owner: owner() }), json);
+    } else if (command === "adopt") {
+      const allocation = beginAllocation({ originRoot: process.cwd(), id: values.id, path: values.path, branch: values.branch, baseCommit: values.base, owner: owner() });
+      const headCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: allocation.path, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+      print(activateAllocation({ originRoot: process.cwd(), id: allocation.id, ownerToken: allocation.ownerToken, headCommit }), json);
+    } else if (command === "release") {
+      print(releaseManagedWorktree({ originRoot: process.cwd(), id: values.id, ownerToken: values["owner-token"] }), json);
+    } else {
+      print(preserveManagedWorktree({ originRoot: process.cwd(), id: values.id, ownerToken: values["owner-token"], reason: values.reason }), json);
+    }
+  } catch (error) {
+    console.error(`${error.code || "WORKTREE_LIFECYCLE_ERROR"}: ${error.message}`);
+    process.exitCode = 1;
+  }
 }

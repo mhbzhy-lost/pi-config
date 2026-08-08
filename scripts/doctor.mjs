@@ -158,6 +158,22 @@ export async function inspectWorktreeLifecycle(repoRoot) {
   return reconcileManagedWorktrees({ originRoot: repoRoot });
 }
 
+export function formatWorktreeLifecycleWarnings(report) {
+  if (!report || typeof report !== "object" || !Array.isArray(report.items)) return [];
+  const escapeSingleLine = (value) => String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) => {
+    const escapes = { "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r" };
+    return escapes[character] ?? `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
+  });
+  const warnings = [];
+  for (const item of report.items) {
+    if (!item || typeof item !== "object" || item.code == null || typeof item.code !== "string") continue;
+    const resources = typeof item.resources === "string" ? item.resources : "";
+    const path = typeof item.path === "string" ? escapeSingleLine(item.path) : "";
+    warnings.push(`[warning] ${item.code} ${resources} ${path}`.trimEnd());
+  }
+  return warnings;
+}
+
 export async function inspectConfiguration(repoRoot, options = {}) {
   const issues = [];
   issues.push(...await inspectGoalContractIntegrity(repoRoot));
@@ -412,7 +428,7 @@ if (isMain) {
   try {
     const issues = await inspectConfiguration(repoRoot);
     const lifecycle = await inspectWorktreeLifecycle(repoRoot);
-    for (const item of lifecycle.items) if (item.code) console.warn(`[warning] ${item.code} ${item.resources} ${item.path ?? ""}`);
+    for (const warning of formatWorktreeLifecycleWarnings(lifecycle)) console.warn(warning);
     if (issues.length === 0) {
       console.log("[ok] Pi Skill allowlist extension is ready");
       console.log("[ok] Root subagent broker: ready");
