@@ -9,6 +9,7 @@ import { markDisposition } from "../scripts/lib/worktree-lifecycle/registry.mjs"
 import * as inventory from "../scripts/lib/worktree-lifecycle/inventory.mjs";
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
+function branchHead(cwd, ref) { try { return execFileSync("git", ["rev-parse", "--verify", `${ref}^{commit}`], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return null; } }
 function repo(t, prefix = "worktree-recovery-") {
   const arena = createTemporaryArenaSync(prefix); t.after(() => arena.disposeSync());
   const root = arena.mkdtempSync("repo-"); git(root, "init", "--initial-branch=main"); git(root, "config", "user.email", "test@example.invalid"); git(root, "config", "user.name", "Test");
@@ -185,4 +186,41 @@ test("RED released 001 apply verifies idempotence through all origin identity pr
 test("RED inventory observer sees all origin identity and registration probes", async (t) => {
   const f = repo(t); const commands = []; await inventory.inventoryRepositoryWorktrees({ originRoot: f.root, commandObserver: (x) => commands.push(x) });
   for (const args of [["rev-parse", "--show-toplevel"], ["rev-parse", "--git-common-dir"], ["worktree", "list", "--porcelain", "-z"]]) assert.equal(commands.some((x) => x.cwd === f.root && JSON.stringify(x.args) === JSON.stringify(args)), true, `missing observer event for ${args.join(" ")}`);
+});
+
+test("RED malformed legacy manifests fail closed without leaking their sentinel", async (t) => {
+  for (const [id, raw] of [["schema-only", { schemaVersion: 1 }], ["missing-path", { schemaVersion: 1, id: "missing-path", state: "reclaimable" }], ["missing-id", { schemaVersion: 1, path: "/missing", state: "reclaimable" }], ["missing-state", { schemaVersion: 1, id: "missing-state", path: "/missing" }]]) await t.test(id, async (t) => {
+    const f = repo(t, "malformed-legacy-"); const secret = `legacy-secret-${id}`;
+    mkdirSync(join(f.root, ".state/worktree-lifecycle/leases"), { recursive: true, mode: 0o700 }); writeFileSync(lease(f, id), JSON.stringify({ ...raw, secret })); chmodSync(lease(f, id), 0o600);
+    let inventoryReport, report;
+    await assert.doesNotReject(async () => { inventoryReport = await inventory.inventoryRepositoryWorktrees({ originRoot: f.root }); });
+    await assert.doesNotReject(async () => { report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); });
+    for (const result of [inventoryReport, report.items]) {
+      assert.equal(JSON.stringify(result).includes(secret), false);
+      assert.equal(result.some((item) => item.code === "WORKTREE_IDENTITY_MISMATCH" && item.automaticAction === "none"), true);
+    }
+  });
+});
+
+test("RED current 001 receipts require their branch to exist at the receipt head", async (t) => {
+  for (const [name, mutate] of [["deleted", (f, a) => git(f.root, "update-ref", "-d", a.branchRef)], ["moved", (f, a) => { writeFileSync(join(f.root, "other"), "other\n"); git(f.root, "add", "other"); git(f.root, "commit", "-m", "other"); git(f.root, "update-ref", a.branchRef, "HEAD"); }]]) await t.test(name, async (t) => {
+    const f = repo(t, "001-branch-"); const a = allocation(f); crashReceipt(f, a); const before = readFileSync(lease(f, a.id)); const main = git(f.root, "rev-parse", "refs/heads/main"); mutate(f, a);
+    const branchBefore = branchHead(f.root, a.branchRef); const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); const item = factsById(report.items)[a.id];
+    assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"]); assert.equal(manifest(f, a.id).state, "reclaimable"); assert.deepEqual(readFileSync(lease(f, a.id)), before); assert.equal(git(f.root, "rev-parse", "refs/heads/main"), main); assert.equal(branchHead(f.root, a.branchRef), branchBefore);
+  });
+});
+
+test("RED reconciliation applies the inventory owner token, not a replacement observed later", async (t) => {
+  const f = repo(t); const a = allocation(f); reclaim(f, a); const before = readFileSync(lease(f, a.id)); let commonProbes = 0, replaced = false;
+  const commandObserver = ({ cwd, args }) => { if (cwd === f.root && JSON.stringify(args) === JSON.stringify(["rev-parse", "--git-common-dir"]) && ++commonProbes === 2) { const m = manifest(f, a.id); m.ownerToken = "worktree-owner.v1:" + "c".repeat(64); writeFileSync(lease(f, a.id), JSON.stringify(m)); chmodSync(lease(f, a.id), 0o600); replaced = true; } };
+  const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true, commandObserver }); const item = factsById(report.items)[a.id];
+  assert.equal(replaced, true); assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"]); assertKept(f, a); assert.deepEqual(readFileSync(lease(f, a.id)), Buffer.from(JSON.stringify({ ...JSON.parse(before), ownerToken: "worktree-owner.v1:" + "c".repeat(64) })));
+});
+
+test("RED duplicate released 001 receipts are not passed to the manager", async (t) => {
+  const f = repo(t); const first = allocation(f, "released-first"); const second = allocation(f, "released-second"); reclaim(f, first); reclaim(f, second); releaseManagedWorktree({ originRoot: f.root, id: first.id, ownerToken: first.ownerToken }); releaseManagedWorktree({ originRoot: f.root, id: second.id, ownerToken: second.ownerToken });
+  const duplicate = { ...manifest(f, second.id), path: manifest(f, first.id).path, branchRef: manifest(f, first.id).branchRef }; writeFileSync(lease(f, second.id), JSON.stringify(duplicate)); chmodSync(lease(f, second.id), 0o600); const before = [readFileSync(lease(f, first.id)), readFileSync(lease(f, second.id))], refs = git(f.root, "show-ref"); let topLevels = 0;
+  const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true, commandObserver: ({ cwd, args }) => { if (cwd === f.root && JSON.stringify(args) === JSON.stringify(["rev-parse", "--show-toplevel"])) topLevels += 1; } });
+  for (const id of [first.id, second.id]) assert.deepEqual([factsById(report.items)[id].code, factsById(report.items)[id].automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"]);
+  assert.equal(topLevels, 2, "only inventory-before and inventory-after may probe the origin top-level"); assert.deepEqual([readFileSync(lease(f, first.id)), readFileSync(lease(f, second.id))], before); assert.equal(git(f.root, "show-ref"), refs);
 });
