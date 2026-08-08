@@ -573,10 +573,15 @@ test("goal_settle failed and blocked dirty no-commit recovery characterizes disc
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     writeFileSync(join(workspace.path, "ordinary-dirty.txt"), "dirty\n");
     await invoke(pi, "goal_settle", { task_id: "t1", outcome, reason: outcome === "blocked" ? "Waiting for an external dependency before the executor can continue." : undefined, next_action: "Keep the dirty executor workspace available for the selected typed disposition action." });
-    await invoke(pi, "goal_integrate", { task_id: "t1", action });
-    assert.equal(existsSync(workspace.path), action === "preserve");
-    assert.equal(git(cwd, "branch", "--list", workspace.branch) !== "", action === "preserve");
-    if (action === "preserve") assert.equal(existsSync(join(workspace.path, "ordinary-dirty.txt")), true);
+    if (action === "discard") {
+      await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action }), /unsafe release|dirty/i);
+      assert.equal(existsSync(workspace.path), true);
+    } else {
+      await invoke(pi, "goal_integrate", { task_id: "t1", action });
+      assert.equal(existsSync(workspace.path), true);
+    }
+    assert.notEqual(git(cwd, "branch", "--list", workspace.branch), "");
+    assert.equal(existsSync(join(workspace.path, "ordinary-dirty.txt")), true);
   }
 });
 
@@ -1307,7 +1312,7 @@ test("goal_dispatch before-durable append failure cleans resources and rethrows"
   assert.equal(after.tasks.get("t1").attempts, 0);
   assert.deepEqual(workspaceState(cwd, goalId, "t1"), {
     workspacePath: join(cwd, ".state/goal-engine/worktrees", `${goalId}-t1-1`), leasePath: join(cwd, ".state/goal-engine/worktrees", `.${goalId}-t1-1.lease.json`), branch: `ge/${goalId}/t1/1`,
-    workspaceExists: false, leaseExists: false, branchExists: false,
+    workspaceExists: false, leaseExists: false, branchExists: true,
   });
 });
 
@@ -1442,7 +1447,7 @@ test("goal_integrate recovers a persisted workspace lease after extension restar
   assert.equal(result.action, "integrated");
   assert.equal(result.released, true);
   assert.ok(existsSync(join(cwd, "src/result.ts")));
-  assert.equal(git("branch", "--list", dispatched.workspace.branch), "");
+  assert.ok(git("branch", "--list", dispatched.workspace.branch));
 });
 
 test("goal_accept requires integrated workspace before acceptance", async () => {
@@ -1559,7 +1564,7 @@ test("goal_settle rejects succeeded no-op workspace and failed settle still allo
   const postDiscardState = workspaceState(cwd, goalId, "t1");
   assert.equal(postDiscardState.workspaceExists, false);
   assert.equal(postDiscardState.leaseExists, false);
-  assert.equal(postDiscardState.branchExists, false);
+  assert.equal(postDiscardState.branchExists, true);
   assert.equal(existsSync(join(cwd, "src/noop.ts")), false);
 });
 
@@ -2359,7 +2364,7 @@ test("action recovery: disposed append can be repaired from projection snapshot 
   const stateAfterFailure = workspaceState(cwd, goalId, "t1");
   assert.equal(stateAfterFailure.workspaceExists, false);
   assert.equal(stateAfterFailure.leaseExists, false);
-  assert.equal(stateAfterFailure.branchExists, false);
+  assert.equal(stateAfterFailure.branchExists, true);
 
   const projectionAfterFailure = loadProjection(join(cwd, ".state/goal-engine"), goalId);
   const taskAfterFailure = projectionAfterFailure.tasks.get("t1");
@@ -2505,7 +2510,7 @@ test("event failure: disposed append durable-then-throw keeps disposed and rejec
   const stateAfterFailure = workspaceState(cwd, goalId, "t1");
   assert.equal(stateAfterFailure.workspaceExists, false);
   assert.equal(stateAfterFailure.leaseExists, false);
-  assert.equal(stateAfterFailure.branchExists, false);
+  assert.equal(stateAfterFailure.branchExists, true);
 
   const eventsAfterFailure = readGoalEvents(cwd, goalId).filter((event) => ["task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"].includes(event.type));
   assert.equal(eventsAfterFailure.filter((event) => event.type === "task.workspace_disposition_started").length, 1);
@@ -3269,7 +3274,7 @@ test("status detects an exact attempt two orphan after a discarded failed attemp
     branch: workspaceState(cwd, goalId, "t1", 2).branch,
     workspaceExists: false,
     leaseExists: false,
-    branchExists: false,
+    branchExists: true,
   });
 });
 
@@ -3303,7 +3308,7 @@ test("orphan recover discard records recovery before the three disposition phase
   assert.deepEqual(startedEvent.data, { taskId: "t1", attempt: 1, requestedAction: "discard", strategy: "cherry-pick", executorHead: recovery.executorHead, originHeadBefore, originRef: recovery.workspace.originRef });
   assert.deepEqual({ taskId: recovery.taskId, attempt: recovery.attempt, workspace: recovery.workspace, executorHead: recovery.executorHead }, { taskId: "t1", attempt: 1, workspace: fixture.workspace, executorHead: executorHeadBefore });
   assert.equal(typeof recovery.reason, "string"); assert.ok(recovery.reason.length > 0);
-  assert.deepEqual(workspaceState(fixture.cwd, fixture.goalId, "t1"), { workspacePath: workspaceState(fixture.cwd, fixture.goalId, "t1").workspacePath, leasePath: workspaceState(fixture.cwd, fixture.goalId, "t1").leasePath, branch: workspaceState(fixture.cwd, fixture.goalId, "t1").branch, workspaceExists: false, leaseExists: false, branchExists: false });
+  assert.deepEqual(workspaceState(fixture.cwd, fixture.goalId, "t1"), { workspacePath: workspaceState(fixture.cwd, fixture.goalId, "t1").workspacePath, leasePath: workspaceState(fixture.cwd, fixture.goalId, "t1").leasePath, branch: workspaceState(fixture.cwd, fixture.goalId, "t1").branch, workspaceExists: false, leaseExists: false, branchExists: true });
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
   assert.equal(projection.status, "pending"); assert.equal(projection.attempts, 1);
   assert.deepEqual(projection.workspace, { ...recovery.workspace, executorHead: recovery.executorHead, phase: "disposed", recovery: "orphaned", requestedAction: startedEvent.data.requestedAction, strategy: startedEvent.data.strategy, originHeadBefore: startedEvent.data.originHeadBefore, originRef: startedEvent.data.originRef, legacyOriginRef: false, originHead: appliedEvent.data.originHead, disposition: "discarded", released: true });
@@ -3410,7 +3415,7 @@ test("orphan recovery survives an origin HEAD advance on the same origin ref", a
       const result = JSON.parse(await invoke(fixture.pi, "goal_integrate", { task_id: "t1", action }));
       assert.equal(result.action, action === "discard" ? "discarded" : "preserved");
       const resources = workspaceState(fixture.cwd, fixture.goalId, "t1");
-      assert.deepEqual([resources.workspaceExists, resources.leaseExists, resources.branchExists], action === "discard" ? [false, false, false] : [true, true, true]);
+      assert.deepEqual([resources.workspaceExists, resources.leaseExists, resources.branchExists], action === "discard" ? [false, false, true] : [true, true, true]);
     }
   }
 });
@@ -3479,7 +3484,7 @@ async function disposedPreservedFixture(kind) {
 
 function assertReleasedPreservation(fixture, executorHead) {
   const resources = workspaceState(fixture.cwd, fixture.goalId, "t1");
-  assert.deepEqual([resources.workspaceExists, resources.leaseExists, resources.branchExists], [false, false, false]);
+  assert.deepEqual([resources.workspaceExists, resources.leaseExists, resources.branchExists], [false, false, true]);
   const releases = readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released");
   assert.equal(releases.length, 1);
   assert.deepEqual(releases[0].data, { taskId: "t1", attempt: 1, executorHead, released: true });
@@ -3498,7 +3503,7 @@ test("preserved release discard cleans orphan and succeeded fixtures before one 
     createGoalEngineWithAppendInjection(pi, { appendEvent(root, event, version) {
       if (event.type === "task.workspace_preservation_released") {
         const state = workspaceState(fixture.cwd, fixture.goalId, "t1");
-        assert.deepEqual([state.workspaceExists, state.leaseExists, state.branchExists], [false, false, false]); observedCleanup = true;
+        assert.deepEqual([state.workspaceExists, state.leaseExists, state.branchExists], [false, false, true]); observedCleanup = true;
       }
       return appendEventStore(root, event, version);
     } });
@@ -3526,7 +3531,7 @@ test("preserved release append failures recover only after cleanup is provably c
     createGoalEngineWithAppendInjection(pi, { appendEvent: injected.appendEvent });
     await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" }), name);
     const resources = workspaceState(fixture.cwd, fixture.goalId, "t1");
-    assert.deepEqual([resources.workspaceExists, resources.leaseExists, resources.branchExists], [false, false, false]);
+    assert.deepEqual([resources.workspaceExists, resources.leaseExists, resources.branchExists], [false, false, true]);
     const releasesBeforeRetry = readGoalEvents(fixture.cwd, fixture.goalId).filter((event) => event.type === "task.workspace_preservation_released");
     const projectionBeforeRetry = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
     assert.equal(releasesBeforeRetry.length, durable ? 1 : 0);

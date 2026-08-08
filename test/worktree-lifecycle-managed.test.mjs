@@ -106,6 +106,17 @@ test("managed module exposes only the three frozen resource APIs", () => {
   assert.deepEqual(Object.keys(managed).sort(), ["createManagedWorktree", "preserveManagedWorktree", "releaseManagedWorktree"]);
 });
 
+test("managed create accepts an explicit path while retaining its default path", (t) => {
+  const f = repoFixture(t);
+  const explicitPath = join(f.root, ".state", "goal-engine", "worktrees", "goal-task-1");
+  const explicit = createManagedWorktree({ ...createOptions(f, { id: "explicit-path", branch: "topic-explicit" }), path: explicitPath });
+  const defaulted = createManagedWorktree(createOptions(f, { id: "default-path", branch: "topic-default" }));
+
+  assert.equal(explicit.path, explicitPath);
+  assert.equal(manifest(f.root, explicit.id).path, explicitPath);
+  assert.equal(defaulted.path, join(f.root, ".state", "worktree-lifecycle", "worktrees", "default-path"));
+});
+
 test("managed create persists intent first, reinspects real Git identity, and activates the exact worktree", (t) => {
   const f = repoFixture(t);
   const observed = [];

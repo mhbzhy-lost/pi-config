@@ -186,10 +186,11 @@ function classifyCreateRecovery(manifest, commandObserver) {
   return { safe: false, reason: "worktree path and Git registration disagree" };
 }
 
-export function createManagedWorktree({ originRoot, id, branch, baseCommit, owner, fault, commandObserver } = {}) {
+export function createManagedWorktree({ originRoot, id, branch, baseCommit, owner, path: explicitPath, fault, commandObserver } = {}) {
   const root = canonicalRoot(originRoot, commandObserver);
   const normalizedId = requireId(id);
-  const path = join(root, ".state/worktree-lifecycle/worktrees", normalizedId);
+  // Registry canonicalizes and gates both default and explicit candidates.
+  const path = explicitPath ?? join(root, ".state/worktree-lifecycle/worktrees", normalizedId);
   let allocation;
   try {
     allocation = beginAllocation({ originRoot: root, id: normalizedId, path, branch, baseCommit, owner, fault, commandObserver });

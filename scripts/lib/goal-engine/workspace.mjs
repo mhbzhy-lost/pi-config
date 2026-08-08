@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { createManagedWorktree, preserveManagedWorktree, releaseManagedWorktree } from "../worktree-lifecycle/managed-worktree.mjs";
+import { markDisposition } from "../worktree-lifecycle/registry.mjs";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -92,6 +94,12 @@ function matchesWritePath(writePath, changedFile) {
   return false;
 }
 
+const MANAGED_OWNER_TOKEN = /^worktree-owner\.v1:[a-f0-9]{64}$/;
+
+function managedAllocationId(originRoot, goalId, taskId, attempt) {
+  return `goal-${createHash("sha256").update(`${originRoot}\0${goalId}\0${taskId}\0${attempt}`).digest("hex")}`;
+}
+
 function workspacePaths(stateRoot, goalId, taskId, attempt) {
   const worktreesRoot = path.resolve(stateRoot, "worktrees");
   const name = `${goalId}-${taskId}-${attempt}`;
@@ -125,28 +133,53 @@ export function allocateExecutorWorkspace({ goalId, taskId, attempt, originRoot,
   const existingBranch = git(originRoot, "branch", "--list", branch);
   if (existingBranch) throw new Error(`Branch already exists: ${branch}`);
 
-  mkdirSync(worktreesRoot, { recursive: true });
-  git(originRoot, "worktree", "add", "-b", branch, workspacePath, baseCommit);
-
-  const lease = {
-    goalId,
-    taskId,
-    attempt,
-    originRoot: path.resolve(originRoot),
-    stateRoot: path.resolve(stateRoot),
-    baseCommit,
-    originRef,
-    path: workspacePath,
+  const canonicalOriginRoot = realpathSync(originRoot);
+  const allocationId = managedAllocationId(canonicalOriginRoot, goalId, taskId, attempt);
+  const managed = createManagedWorktree({
+    originRoot: canonicalOriginRoot,
+    id: allocationId,
     branch,
-    ownerToken: randomUUID(),
-    createdAt: new Date().toISOString(),
+    baseCommit,
+    path: workspacePath,
+    owner: { kind: "goal-engine", id: allocationId },
+  });
+  const lease = {
+    goalId, taskId, attempt,
+    originRoot: canonicalOriginRoot,
+    stateRoot: path.resolve(stateRoot),
+    baseCommit: managed.baseCommit,
+    originRef,
+    path: managed.path,
+    branch: managed.branchRef.slice("refs/heads/".length),
+    ownerToken: managed.ownerToken,
+    createdAt: managed.createdAt,
   };
 
-  const tmpPath = `${leasePath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(lease, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmpPath, leasePath);
-
+  try {
+    const tmpPath = `${leasePath}.${process.pid}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(lease, null, 2) + "\n", { mode: 0o600 });
+    renameSync(tmpPath, leasePath);
+  } catch (error) {
+    try {
+      markDisposition({ originRoot: canonicalOriginRoot, id: allocationId, ownerToken: managed.ownerToken, disposition: "reclaimable" });
+      releaseManagedWorktree({ originRoot: canonicalOriginRoot, id: allocationId, ownerToken: managed.ownerToken });
+    } catch (cleanupError) {
+      throw new Error(`workspace lease write failed; managed cleanup failed: ${cleanupError.message}`, { cause: error });
+    }
+    throw error;
+  }
   return { ...lease, leasePath };
+}
+
+export function markExecutorWorkspaceCleanupDebt(lease, reason) {
+  if (!MANAGED_OWNER_TOKEN.test(lease?.ownerToken || "")) return;
+  const id = managedAllocationId(realpathSync(lease.originRoot), lease.goalId, lease.taskId, lease.attempt);
+  markDisposition({
+    originRoot: lease.originRoot,
+    id,
+    ownerToken: lease.ownerToken,
+    disposition: { state: "cleanup-debt", reason, lastError: { code: "AMBIGUOUS_DISPATCH_COMMIT", message: reason } },
+  });
 }
 
 export function loadExecutorWorkspaceLease({ goalId, taskId, attempt, stateRoot }) {
@@ -761,6 +794,27 @@ export function releaseExecutorWorkspace(lease, { disposition, expectedExecutorH
     || requireClean !== true
     || (beforeDestructiveCleanupFn !== undefined && typeof beforeDestructiveCleanupFn !== "function"))) {
     throw new Error("Invalid preserved cleanup fence options");
+  }
+
+  if (MANAGED_OWNER_TOKEN.test(lease.ownerToken)) {
+    const id = managedAllocationId(realpathSync(lease.originRoot), lease.goalId, lease.taskId, lease.attempt);
+    if (disposition === "preserved") {
+      preserveManagedWorktree({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken, reason: "goal workspace preserved" });
+      return { released: false, preserved: true, disposition };
+    }
+    if (fenced) {
+      const fencedLease = assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean);
+      try {
+        beforeDestructiveCleanupFn?.(fencedLease);
+      } catch (error) {
+        throw new Error(`workspace identity fence failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean);
+    }
+    markDisposition({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken, disposition: "reclaimable" });
+    releaseManagedWorktree({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken });
+    if (lease.leasePath && existsSync(lease.leasePath)) rmSync(lease.leasePath, { force: true });
+    return { released: true, preserved: false, disposition };
   }
 
   if (disposition === "preserved") return { released: false, preserved: true, disposition };

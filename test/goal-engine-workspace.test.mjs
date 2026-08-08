@@ -20,6 +20,7 @@ function initRepo() {
   git(dir, "config", "user.email", "test@test.com");
   git(dir, "config", "user.name", "Test");
   writeFileSync(join(dir, "README.md"), "hello\n");
+  writeFileSync(join(dir, ".gitignore"), ".state/\n");
   git(dir, "add", ".");
   git(dir, "commit", "-m", "init");
   return dir;
@@ -579,7 +580,7 @@ test("integrateExecutorWorkspace with expected executor head must reject head mi
   assert.equal(existsSync(join(origin, "expected-head-second.ts")), false);
 });
 
-test("releaseExecutorWorkspace removes worktree and branch", () => {
+test("managed release removes the worktree and lease but retains its branch", () => {
   const origin = initRepo();
   const stateRoot = tmpStateRoot();
   const baseCommit = git(origin, "rev-parse", "HEAD");
@@ -589,7 +590,8 @@ test("releaseExecutorWorkspace removes worktree and branch", () => {
 
   releaseExecutorWorkspace(lease, { disposition: "integrated-cleanup" });
   assert.equal(existsSync(lease.path), false);
-  assert.equal(git(origin, "branch", "--list", branch), "");
+  assert.ok(git(origin, "branch", "--list", branch));
+  assert.equal(existsSync(lease.leasePath), false);
 });
 
 for (const [label, mutate] of [
@@ -649,7 +651,7 @@ for (const [label, mutate] of [
 test("preserved release primitive fence ignores callback inspection and permits clean runtime artifacts", () => {
   const origin = initRepo(); const lease = allocateExecutorWorkspace({ goalId: "fence-success", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit: git(origin, "rev-parse", "HEAD") });
   writeFileSync(join(lease.path, "clean.txt"), "clean\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "test: clean preserved workspace");
-  mkdirSync(join(lease.path, ".pi-subagents"), { recursive: true }); writeFileSync(join(lease.path, ".pi-subagents", "runtime.json"), "{}\n");
+  mkdirSync(join(lease.path, ".state", "runtime"), { recursive: true }); writeFileSync(join(lease.path, ".state", "runtime", "runtime.json"), "{}\n");
   let calls = 0;
   releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup", expectedExecutorHead: git(lease.path, "rev-parse", "HEAD"), requireClean: true, beforeDestructiveCleanupFn() { calls += 1; return { clean: false, headCommit: "forged" }; } });
   assert.equal(calls, 1); assert.equal(existsSync(lease.path), false);
@@ -662,7 +664,7 @@ test("preserved release primitive fence rejects an already dirty workspace", () 
   assert.equal(existsSync(join(lease.path, "dirty.txt")), true); assert.equal(existsSync(lease.path), true); assert.equal(existsSync(lease.leasePath), true);
 });
 
-test("releaseExecutorWorkspace(discarded-cleanup) partial cleanup should restore workspace, branch, and lease", () => {
+test("managed release fails closed when the registered workspace path is missing", () => {
   const origin = initRepo();
   const stateRoot = tmpStateRoot();
   const baseCommit = git(origin, "rev-parse", "HEAD");
@@ -685,11 +687,11 @@ test("releaseExecutorWorkspace(discarded-cleanup) partial cleanup should restore
     leaseExists: true,
   });
 
-  releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup" });
+  assert.throws(() => releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup" }), /missing|identity/i);
   assert.deepEqual(workspace.inspectExecutorWorkspaceResources(lease), {
     workspaceExists: false,
-    branchExists: false,
-    leaseExists: false,
+    branchExists: true,
+    leaseExists: true,
   });
 });
 
@@ -928,7 +930,7 @@ test("inspectExecutorWorkspaceResources tracks workspace, branch, and lease life
   releaseExecutorWorkspace(releaseLease, { disposition: "integrated-cleanup" });
   assert.deepEqual(workspace.inspectExecutorWorkspaceResources(releaseLease), {
     workspaceExists: false,
-    branchExists: false,
+    branchExists: true,
     leaseExists: false,
   });
 

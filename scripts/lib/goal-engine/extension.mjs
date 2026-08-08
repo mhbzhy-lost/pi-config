@@ -29,6 +29,7 @@ import { validateTaskDefinitions } from "./task-definition.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.mjs";
 import {
   allocateExecutorWorkspace,
+  markExecutorWorkspaceCleanupDebt,
   loadExecutorWorkspaceLease,
   inspectExecutorWorkspace,
   inspectOrphanedExecutorWorkspace,
@@ -46,6 +47,12 @@ const CHECKPOINT_REMINDER_THRESHOLD = 5;
 const LEGACY_EVENT_VERSION = "goal-engine.event.v2";
 const CURRENT_EVENT_VERSION = "goal-engine.event.v3";
 const DEFAULT_DISPOSITION_STRATEGY = "cherry-pick";
+const MANAGED_OWNER_TOKEN = /^worktree-owner\.v1:[a-f0-9]{64}$/;
+
+function workspaceResourcesRemain(lease, resources) {
+  return resources.workspaceExists || resources.leaseExists
+    || (typeof lease.ownerToken === "string" && lease.ownerToken !== "restored" && !MANAGED_OWNER_TOKEN.test(lease.ownerToken) && resources.branchExists);
+}
 
 function initError(code, observed, remediation) {
   return Object.assign(new Error(`${code}: observed=${observed}; remediation=${remediation}; stateChanged=false`), { code });
@@ -979,6 +986,11 @@ export function createGoalEngineExtension(pi, options = {}) {
           }
           throw err;
         } else {
+          try {
+            markExecutorWorkspaceCleanupDebt(lease, "dispatch event append outcome is ambiguous; retain workspace for recovery");
+          } catch (cleanupError) {
+            throw new Error(`${err.message}; managed cleanup debt could not be persisted: ${cleanupError.message}`, { cause: err });
+          }
           throw ambiguousDispatchCommitError(goalId, params.task_id, attempt, err);
         }
       }
@@ -1513,9 +1525,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         } catch (error) {
           throw workspaceMutationError(error, retry);
         }
-        const resourceValues = [resources.workspaceExists, resources.branchExists, resources.leaseExists];
-        const allResourcesPresent = resourceValues.every((value) => value === true);
-        const noResourcesPresent = resourceValues.every((value) => value === false);
+        const allResourcesPresent = resources.workspaceExists && resources.branchExists && resources.leaseExists;
+        // A managed release intentionally retains its branch after removing the
+        // path, registration, and Goal lease; that branch alone is not cleanup debt.
+        const noResourcesPresent = !resources.workspaceExists && !resources.leaseExists;
         if (!allResourcesPresent && !noResourcesPresent) {
           if (!resources.leaseExists) {
             throw workspaceMutationError(new Error("Executor workspace persisted lease not found"), retry);
@@ -1565,7 +1578,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           } catch (error) {
             throw workspaceMutationError(error, retry);
           }
-          if (resources.workspaceExists || resources.branchExists || resources.leaseExists) {
+          if (workspaceResourcesRemain(lease, resources)) {
             throw workspaceMutationError(new Error("failed to release preserved workspace resources"), retry);
           }
         }
@@ -1604,7 +1617,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           if (!(resources.workspaceExists && resources.branchExists && resources.leaseExists)) {
             throw new Error("preserve disposition requires workspace, branch, and lease to remain available");
           }
-        } else if (resources.workspaceExists || resources.branchExists || resources.leaseExists) {
+        } else if (workspaceResourcesRemain(terminalLease, resources)) {
           throw new Error("disposed workspace still has resources; manual recovery required");
         }
 
@@ -1683,7 +1696,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
 
         const resourcesBefore = inspectExecutorWorkspaceResources(lease);
-        if (resourcesBefore.workspaceExists || resourcesBefore.branchExists || resourcesBefore.leaseExists) {
+        if (workspaceResourcesRemain(lease, resourcesBefore)) {
           releaseExecutorWorkspace(
             lease,
             {
@@ -1693,7 +1706,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
 
         const resourcesAfter = inspectExecutorWorkspaceResources(lease);
-        if (resourcesAfter.workspaceExists || resourcesAfter.branchExists || resourcesAfter.leaseExists) {
+        if (workspaceResourcesRemain(lease, resourcesAfter)) {
           throw new Error("failed to release workspace resources after disposal");
         }
 
