@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
@@ -21,6 +21,7 @@ function lease(f, id) { return join(f.root, ".state/worktree-lifecycle/leases", 
 function manifest(f, id) { return JSON.parse(readFileSync(lease(f, id), "utf8")); }
 function factsById(facts) { return Object.fromEntries(facts.filter((x) => x.id).map((x) => [x.id, x])); }
 function oneShotFault(operation, phase) { let fired = false; return (event) => { if (!fired && event.operation === operation && event.phase === phase) { fired = true; const error = new Error("fault"); error.code = "TEST_FAULT"; throw error; } }; }
+function crashReceipt(f, a) { reclaim(f, a); assert.throws(() => releaseManagedWorktree({ originRoot: f.root, id: a.id, ownerToken: a.ownerToken, fault: oneShotFault("worktree-remove", "after") }), (error) => error?.code === "TEST_FAULT"); }
 function stateTree(root, relative = "") {
   const path = join(root, relative); const stat = lstatSync(path); const entry = { path: relative, type: stat.isDirectory() ? "directory" : stat.isFile() ? "file" : stat.isSymbolicLink() ? "symlink" : "other", mode: stat.mode & 0o777, mtimeMs: stat.mtimeMs, ...(stat.isFile() ? { bytes: readFileSync(path) } : {}) };
   return [entry, ...(stat.isDirectory() ? readdirSync(path).sort().flatMap((name) => stateTree(root, join(relative, name))) : [])];
@@ -122,7 +123,8 @@ test("RED authorization rejection table keeps path registration and branch", asy
 test("RED owner CAS race refuses removal when observer sees origin identity probe", async (t) => {
   const f = repo(t); const a = allocation(f); reclaim(f, a); let raced = false;
   const commandObserver = ({ cwd, args }) => { if (!raced && cwd === f.root && JSON.stringify(args) === JSON.stringify(["rev-parse", "--show-toplevel"])) { raced = true; const m = manifest(f, a.id); m.ownerToken = "worktree-owner.v1:" + "b".repeat(64); writeFileSync(lease(f, a.id), JSON.stringify(m)); chmodSync(lease(f, a.id), 0o600); } };
-  await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true, commandObserver }); assert.equal(raced, true, "reconcile must forward commandObserver"); assertKept(f, a);
+  const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true, commandObserver }); assert.equal(raced, true, "reconcile must forward commandObserver"); assertKept(f, a);
+  const item = factsById(report.items)[a.id]; assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"], "a stale owner CAS result must fail closed in this report");
 });
 
 test("RED TTL uses explicit young and old times and changes diagnostics only", async (t) => {
@@ -130,4 +132,56 @@ test("RED TTL uses explicit young and old times and changes diagnostics only", a
   const young = factsById((await inventory.reconcileManagedWorktrees({ originRoot: f.root, ttlMs: 1_000, now: created + 500, commandObserver: (x) => commands.push(x) })).items)[a.id];
   const old = factsById((await inventory.reconcileManagedWorktrees({ originRoot: f.root, ttlMs: 1_000, now: created + 2_000, commandObserver: (x) => commands.push(x) })).items)[a.id];
   assert.notEqual(young.severity, old.severity); assert.deepEqual({ resources: young.resources, state: young.state, automaticAction: young.automaticAction }, { resources: old.resources, state: old.state, automaticAction: old.automaticAction }); assert.ok(commands.length > 0, "observer must be forwarded");
+});
+
+test("RED current 001 receipts bind canonical common directory and a real path", async (t) => {
+  const cases = [
+    ["another canonical common directory", (f, m) => ({ ...m, gitCommonDir: f.arena.mkdtempSync("other-common-") })],
+    ["missing candidate below symlink ancestor", (f, m) => { const ancestor = join(f.arena.mkdtempSync("path-parent-"), "linked"); symlinkSync(f.arena.path, ancestor); return { ...m, path: join(ancestor, "missing") }; }],
+  ];
+  for (const [name, alter] of cases) await t.test(name, async (t) => {
+    const f = repo(t, "strict-current-001-"); const a = allocation(f); crashReceipt(f, a); const m = alter(f, manifest(f, a.id)); writeFileSync(lease(f, a.id), JSON.stringify(m)); chmodSync(lease(f, a.id), 0o600);
+    const before = readFileSync(lease(f, a.id)); const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); const item = factsById(report.items)[a.id];
+    assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"]); assert.equal(manifest(f, a.id).state, "reclaimable"); assert.deepEqual(readFileSync(lease(f, a.id)), before);
+  });
+});
+
+test("RED 001 inventory rejects every parent directory symlink without leaking leases", async (t) => {
+  for (const relative of [".state", ".state/worktree-lifecycle"]) await t.test(relative, async (t) => {
+    const f = repo(t, "parent-link-"); const a = allocation(f); crashReceipt(f, a); const source = join(f.root, relative), outside = f.arena.mkdtempSync("moved-state-"); const moved = join(outside, "contents"); renameSync(source, moved); symlinkSync(moved, source);
+    const before = readFileSync(lease(f, a.id)); const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); const text = JSON.stringify(report); const item = factsById(report.items)[a.id];
+    assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"]); assert.equal(text.includes(a.owner.id), false); assert.equal(text.includes(a.ownerToken), false); assert.deepEqual(readFileSync(lease(f, a.id)), before);
+  });
+});
+
+test("RED manifest state semantics reject shape-valid inconsistent receipts without apply mutation", async (t) => {
+  const cases = [
+    ["preserved needs head", (m) => ({ ...m, state: "preserved", disposition: { state: "preserved", reason: "hold" }, headCommit: null })],
+    ["preserved forbids lastError", (m) => ({ ...m, state: "preserved", disposition: { state: "preserved", reason: "hold" }, lastError: { code: "E", message: "legal", at: m.updatedAt } })],
+    ["cleanup-debt needs lastError", (m) => ({ ...m, state: "cleanup-debt", disposition: { state: "cleanup-debt", reason: "debt" }, lastError: null })],
+    ["active needs head", (m) => ({ ...m, state: "active", disposition: null, headCommit: null })],
+    ["allocating forbids head", (m) => ({ ...m, state: "allocating", disposition: null, headCommit: m.baseCommit })],
+    ["released disposition must agree", (m) => ({ ...m, state: "released", disposition: { state: "preserved", reason: "wrong" }, headCommit: null })],
+  ];
+  for (const [name, alter] of cases) await t.test(name, async (t) => {
+    const f = repo(t, "state-semantics-"); const a = allocation(f); const changed = alter(manifest(f, a.id)); writeFileSync(lease(f, a.id), JSON.stringify(changed)); chmodSync(lease(f, a.id), 0o600); const before = readFileSync(lease(f, a.id));
+    const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); assert.equal(report.items.some((x) => x.code === "WORKTREE_IDENTITY_MISMATCH"), true); assert.deepEqual(readFileSync(lease(f, a.id)), before);
+  });
+});
+
+test("RED duplicate current 001 receipts sharing path and branch are never candidates", async (t) => {
+  const f = repo(t); const first = allocation(f, "first"); const second = allocation(f, "second"); crashReceipt(f, first); crashReceipt(f, second); const duplicate = { ...manifest(f, second.id), path: manifest(f, first.id).path, branchRef: manifest(f, first.id).branchRef }; writeFileSync(lease(f, second.id), JSON.stringify(duplicate)); chmodSync(lease(f, second.id), 0o600);
+  const before = [readFileSync(lease(f, first.id)), readFileSync(lease(f, second.id))]; const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true });
+  for (const id of [first.id, second.id]) assert.deepEqual([factsById(report.items)[id].code, factsById(report.items)[id].automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"]); assert.deepEqual([readFileSync(lease(f, first.id)), readFileSync(lease(f, second.id))], before);
+});
+
+test("RED released 001 apply verifies idempotence through all origin identity probes", async (t) => {
+  const f = repo(t); const a = allocation(f); reclaim(f, a); releaseManagedWorktree({ originRoot: f.root, id: a.id, ownerToken: a.ownerToken }); const before = readFileSync(lease(f, a.id)); const commands = [];
+  const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true, commandObserver: (x) => commands.push(x) }); const topLevels = commands.filter((x) => x.cwd === f.root && JSON.stringify(x.args) === JSON.stringify(["rev-parse", "--show-toplevel"]));
+  assert.ok(topLevels.length >= 3, "inventory-before, manager verification, and inventory-after must each probe origin identity"); assert.equal(factsById(report.items)[a.id].state, "released"); assert.equal(git(f.root, "show-ref", "--verify", "--quiet", a.branchRef), ""); assert.deepEqual(readFileSync(lease(f, a.id)), before);
+});
+
+test("RED inventory observer sees all origin identity and registration probes", async (t) => {
+  const f = repo(t); const commands = []; await inventory.inventoryRepositoryWorktrees({ originRoot: f.root, commandObserver: (x) => commands.push(x) });
+  for (const args of [["rev-parse", "--show-toplevel"], ["rev-parse", "--git-common-dir"], ["worktree", "list", "--porcelain", "-z"]]) assert.equal(commands.some((x) => x.cwd === f.root && JSON.stringify(x.args) === JSON.stringify(args)), true, `missing observer event for ${args.join(" ")}`);
 });
