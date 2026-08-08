@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, statSync, readdirSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, statSync, readdirSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { createValidationWorkspace, runCleanValidation, releaseValidationWorkspace } from "../scripts/lib/goal-engine/acceptance-runner.mjs";
+
+const fs = createRequire(import.meta.url)("node:fs");
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function fixture(t) {
@@ -141,6 +145,29 @@ test("validation supervisor has a safe environment and managed-worktree cwd", as
 function leaseFile(lease) { return join(lease.stateRoot, "validation-leases", `${lease.id}.json`); }
 function worktreeCount(origin) { return git(origin, "worktree", "list", "--porcelain").split("\nworktree ").length; }
 function release(t, lease) { t.after(() => { try { releaseValidationWorkspace(lease, { expectedHead: lease.integratedHead }); } catch {} }); }
+
+test("validation initial lease publication never replaces a file raced into its final path", (t) => {
+  const f = fixture(t); const taskId = "initial-lease-race"; const leaseFile = join(f.state, "validation-leases", `validation-${createHash("sha256").update(`${realpathSync(f.origin)}\0g\0${taskId}\0${1}`).digest("hex")}.json`);
+  const originalRename = fs.renameSync; const racedContents = "existing-0600-lease"; let injected = false; let created;
+  t.after(() => { if (created) try { releaseValidationWorkspace(created, { expectedHead: f.head }); } catch {} });
+  fs.renameSync = (from, to, ...args) => {
+    if (!injected && to === leaseFile) { injected = true; writeFileSync(to, racedContents, { mode: 0o600, flag: "wx" }); }
+    return originalRename(from, to, ...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => { created = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId, attempt: 1, integratedHead: f.head, validationPlan: strictPlan() }); }, /lease|exist|replace|publish/i);
+  } finally {
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  }
+  assert.equal(injected, true);
+  assert.equal(readFileSync(leaseFile, "utf8"), racedContents);
+  assert.equal(statSync(leaseFile).mode & 0o777, 0o600);
+  assert.equal(worktreeCount(f.origin), 1);
+  assert.equal(existsSync(join(f.origin, ".state", "worktree-lifecycle", "leases")), false);
+  assert.equal(spawnSync("git", ["show-ref", "--verify", "--quiet", "refs/heads/ge-validation/g/initial-lease-race/1"], { cwd: f.origin }).status, 1);
+});
 
 // This table deliberately exercises preflight only: no invalid input may allocate Git or lease state.
 test("preflight rejects malformed plans without allocating a worktree, branch, manifest, or lease", (t) => {

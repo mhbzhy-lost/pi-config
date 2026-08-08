@@ -361,6 +361,32 @@ test("release fails closed when a post-remove global inventory finds a deleted w
   assert.ok(Number(readFileSync(counterPath, "utf8")) >= 3);
 });
 
+test("release records cleanup debt when its branch moves after managed worktree removal", (t) => {
+  const f = repoFixture(t, "worktree-managed-post-remove-branch-drift-");
+  writeFileSync(join(f.root, "alternate.txt"), "alternate\n");
+  git(f.root, "add", "alternate.txt"); git(f.root, "commit", "-m", "alternate");
+  const alternateHead = git(f.root, "rev-parse", "HEAD");
+  const allocation = createManagedWorktree(createOptions(f));
+  markReclaimable(f, allocation);
+  let injected = false;
+  const fault = (event) => {
+    if (!injected && event.operation === "worktree-remove" && event.phase === "after") {
+      injected = true;
+      git(f.root, "branch", "-f", allocation.branchRef.slice("refs/heads/".length), alternateHead);
+    }
+  };
+
+  assert.throws(
+    () => releaseManagedWorktree({ originRoot: f.root, id: allocation.id, ownerToken: allocation.ownerToken, fault }),
+    assertCode("WORKTREE_LIFECYCLE_IDENTITY_MISMATCH"),
+  );
+  assert.equal(injected, true);
+  assert.equal(manifest(f.root, allocation.id).state, "cleanup-debt");
+  assert.equal(existsSync(allocation.path), false);
+  assert.equal(registeredPaths(f.root).includes(allocation.path), false);
+  assert.equal(git(f.root, "rev-parse", allocation.branchRef), alternateHead);
+});
+
 test("release retries idempotently without phantom released at remove/publish crash boundaries", async (t) => {
   for (const operation of ["worktree-remove", "released-write"]) {
     for (const phase of ["before", "after"]) {
