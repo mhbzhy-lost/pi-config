@@ -254,6 +254,28 @@ test("returns coding reminders only for source edits", () => {
   }
 });
 
+test("blocks raw mutating git worktree lifecycle commands through global options, absolute executables, and wrappers", () => {
+  for (const command of [
+    "git worktree add /tmp/unmanaged topic",
+    "git --no-pager worktree remove /tmp/unmanaged",
+    "git -c advice.detachedHead=false worktree prune",
+    "/usr/bin/git worktree move /tmp/old /tmp/new",
+    "sudo git worktree repair",
+    "command git worktree lock /tmp/unmanaged",
+    "env LANG=C git worktree unlock /tmp/unmanaged",
+    "bash -c 'git worktree add /tmp/unmanaged topic'",
+  ]) {
+    assertBlocked(command, "GIT_WORKTREE_LIFECYCLE_BYPASS", /worktree lifecycle bypass/, undefined);
+  }
+});
+
+test("allows read-only git worktree list variants and the managed lifecycle CLI", () => {
+  assert.equal(policy("git worktree list"), undefined);
+  assert.equal(policy("git worktree list --porcelain -z"), undefined);
+  assert.equal(policy("git --no-pager worktree list --verbose"), undefined);
+  assert.equal(policy("node scripts/worktree-lifecycle.mjs release --id task --owner-token token"), undefined);
+});
+
 test("blocks destructive git commands that cannot be undone", () => {
   assertBlocked("git reset --hard", "GIT_DESTRUCTIVE", /不可逆 Git/);
   assertBlocked("git reset --hard HEAD~1", "GIT_DESTRUCTIVE", /不可逆 Git/);

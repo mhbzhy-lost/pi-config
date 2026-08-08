@@ -21,6 +21,10 @@
 **绝对红线**：git管理的信息必须脱敏。
 对于进入会话记录之类的风险，在用户明确授权的情况下可临时豁免，但必须提示用户有泄露风险。
 
+## Worktree 生命周期
+
+禁止 raw `git worktree add/remove/prune/move/repair/lock/unlock`，不得猜测性 cleanup；只读 `git worktree list` 可用。创建、销毁、repair、lock 仅可经 typed Goal disposition 或 `node scripts/worktree-lifecycle.mjs ...` managed lifecycle CLI，且须 owner CAS 与明确授权。禁止 `--force` removal、raw branch cleanup；`/tmp`、TTL、clean 状态均不构成删除授权。
+
 ## Git Commit 规范
 
 commit message 格式与主观约束见 `git-commit-convention` skill。

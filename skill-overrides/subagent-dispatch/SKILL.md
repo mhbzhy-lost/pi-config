@@ -13,6 +13,8 @@ The project-owned `subagent` tool is the only delegation entry.
 
 Use `spark` only for low-risk work with one declared write path and at most eight requirements. Use `executor` otherwise.
 
+禁止 raw git worktree add/remove/prune/move/repair/lock/unlock：只可走 managed lifecycle CLI `node scripts/worktree-lifecycle.mjs ...` 或 typed Goal disposition，并须 owner CAS 与明确授权；不得 `--force` remove、raw branch cleanup，`/tmp`、TTL、clean 均不构成删除授权。
+
 ```js
 subagent({
   version: "dispatch-ir.v1",

@@ -202,6 +202,18 @@ function checkBroadGitStaging(tokens) {
   return undefined;
 }
 
+function checkGitWorktreeLifecycle(tokens) {
+  if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
+  const subcommand = gitSubcommand(tokens);
+  if (subcommand !== "worktree") return undefined;
+  const worktreeIndex = tokens.indexOf(subcommand);
+  const lifecycleCommand = tokens.slice(worktreeIndex + 1).find((token) => !token.startsWith("-"));
+  if (new Set(["add", "remove", "prune", "move", "repair", "lock", "unlock"]).has(lifecycleCommand)) {
+    return violation("GIT_WORKTREE_LIFECYCLE_BYPASS", "worktree lifecycle bypass：必须使用受管 lifecycle CLI");
+  }
+  return undefined;
+}
+
 function checkDestructiveGit(tokens) {
   if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
   const subcommand = gitSubcommand(tokens);
@@ -249,6 +261,8 @@ function checkSingleCommand(command, cwd, workspaceRoot) {
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);
     if (gitViolation) return gitViolation;
+    const worktreeLifecycleViolation = checkGitWorktreeLifecycle(tokens);
+    if (worktreeLifecycleViolation) return worktreeLifecycleViolation;
     const broadStagingViolation = checkBroadGitStaging(tokens);
     if (broadStagingViolation) return broadStagingViolation;
     const gitContextViolation = checkGitContextOverride(tokens, environment);
@@ -351,6 +365,8 @@ export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }) {
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);
     if (gitViolation) return gitViolation;
+    const worktreeLifecycleViolation = checkGitWorktreeLifecycle(tokens);
+    if (worktreeLifecycleViolation) return worktreeLifecycleViolation;
     const broadStagingViolation = checkBroadGitStaging(tokens);
     if (broadStagingViolation) return broadStagingViolation;
     const gitContextViolation = checkGitContextOverride(tokens, environment);

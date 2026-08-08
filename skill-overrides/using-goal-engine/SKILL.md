@@ -42,6 +42,7 @@ description: Use when starting, resuming, amending, recovering, dispatching, or 
 Agent 只调用 Pi Host 暴露的七个 typed tools；调用前从当前 ToolDefinition 读取类型 schema。不得臆造参数；包装层的 failed/timeout 文字不能替代 artifact、session 和 worktree 的实证。
 
 - shell/CLI 禁止调用 Goal Engine mutation；普通 Git precheck 不受此禁止影响。
+- 禁止 raw git worktree add/remove/prune/move/repair/lock/unlock；仅可按 typed Goal disposition 或 managed lifecycle CLI `node scripts/worktree-lifecycle.mjs ...`，并要求 owner CAS 与明确授权。不得 `--force` remove、raw branch cleanup；`/tmp`、TTL、clean 不构成删除授权。
 - internal core scripts 禁止直接运行。
 - 搜索源码不得用于补造 schema 或 ABI。
 - 缺 schema/工具时停止并请求恢复 Pi Host 能力。

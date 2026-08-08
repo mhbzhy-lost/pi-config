@@ -36,6 +36,18 @@ test("requires dispatch-ir.v1 for executor and spark coding work", async () => {
   assert.match(body, /deadline|urgency/i);
 });
 
+test("forbids raw worktree lifecycle bypass and speculative cleanup in coding dispatches", async () => {
+  const { body } = await loadSkill();
+
+  assert.match(body, /raw[\s\S]{0,80}git worktree[\s\S]{0,120}(add|remove|prune|move|repair|lock|unlock)/i);
+  assert.match(body, /managed lifecycle CLI|worktree-lifecycle\.mjs/i);
+  assert.match(body, /owner CAS|owner.*compare-and-swap/i);
+  assert.match(body, /typed Goal disposition/i);
+  assert.match(body, /--force[\s\S]{0,100}(remove|删除|移除)|(?:remove|删除|移除)[\s\S]{0,100}--force/i);
+  assert.match(body, /(\/tmp|TTL|clean)[\s\S]{0,140}(不.*授权|not.*authori)/i);
+  assert.match(body, /branch[\s\S]{0,100}(cleanup|清理|delete|删除)/i);
+});
+
 test("documents generic passthrough without owning runtime wait policy", async () => {
   const { body } = await loadSkill();
 
