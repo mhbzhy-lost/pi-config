@@ -18,6 +18,13 @@ import {
 } from "./continuity.mjs";
 import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
+import {
+  assertExecutorBindingTicketCurrent,
+  assertExecutorSettlementProof,
+  executorBoundEventData,
+  prepareExecutorBindingTicket,
+} from "./executor-binding.mjs";
+import { bindGoalExecutorCoordinator, inspectRootBrokerExecutorProof } from "../subagent-dispatch/root-broker-registry.ts";
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.mjs";
 import {
@@ -426,6 +433,7 @@ function statusResponse(projection, cwd, root, { machineAction = null, actionTok
         evidence_count: t.evidence.length,
         attempts: t.attempts,
         contractHash: t.contractHash,
+        ...(Object.hasOwn(t, "executorBinding") ? { executorBinding: t.executorBinding ? { ...t.executorBinding } : null } : {}),
         workspace: t.workspace ? { ...t.workspace } : null,
         allowedActions: actionState.allowedActions,
         requiredNextAction: actionState.requiredNextAction,
@@ -531,6 +539,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     return makeEvent(type, data, goalId, schemaVersionForMutation(projection, legacyEventSchemaVersion));
   };
   const inspectExecutorWorkspaceFn = options.inspectExecutorWorkspace || inspectExecutorWorkspace;
+  const inspectExecutorProofFn = options.inspectExecutorProof || ((runId) => inspectRootBrokerExecutorProof(pi, runId));
   const beforePreservedWorkspaceCleanupBarrier = options.beforePreservedWorkspaceCleanupBarrier;
   const inspectOrphanedExecutorWorkspaceBarrier = options.inspectOrphanedExecutorWorkspaceBarrier;
   const betweenOrphanInventoriesBarrier = options.betweenOrphanInventoriesBarrier;
@@ -564,6 +573,61 @@ export function createGoalEngineExtension(pi, options = {}) {
       ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, canonical(item[key])])) : item;
     return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
   };
+  const workspaceLeaseId = (lease) => createHash("sha256").update(lease.ownerToken).digest("hex");
+  const executorCoordinator = {
+    prepareSpawn({ contract, contractHash, ctx }) {
+      const { cwd, root } = executionScopeFor(ctx);
+      const tickets = [];
+      for (const goalId of listGoalsFn(root)) {
+        const projection = loadProjectionFn(root, goalId);
+        const ticket = prepareExecutorBindingTicket({
+          projection,
+          contract,
+          contractHash,
+          controlCwd: cwd,
+          workspaceLeaseIdForTask(taskId) {
+            const task = projection.tasks.get(taskId);
+            const lease = resolveLease(task, goalId, taskId, cwd, root);
+            const inspection = inspectExecutorWorkspace(lease);
+            if (!inspection.clean || inspection.aheadCount !== 0 || inspection.headCommit !== task.workspace.baseCommit) {
+              throw preflightError("EXECUTOR_BINDING_MISMATCH", "Goal workspace changed before executor spawn", "inspect goal_status and do not attribute the existing workspace changes to a new run");
+            }
+            return workspaceLeaseId(lease);
+          },
+        });
+        if (ticket) tickets.push(ticket);
+      }
+      if (tickets.length > 1) throw preflightError("EXECUTOR_BINDING_MISMATCH", "coding spawn matches multiple Goal tickets", "inspect Goal state and retry the exact dispatched contract");
+      return tickets[0] ?? null;
+    },
+    bindSpawn(ticket, binding) {
+      const { root } = executionScopeFor({ cwd: ticket.controlCwd }, { goalId: ticket.goalId });
+      let projection = loadProjectionFn(root, ticket.goalId);
+      const task = assertExecutorBindingTicketCurrent(ticket, projection);
+      const currentLeaseId = workspaceLeaseId(resolveLease(task, ticket.goalId, ticket.taskId, ticket.controlCwd, root));
+      if (currentLeaseId !== ticket.workspaceLeaseId) {
+        throw preflightError("EXECUTOR_BINDING_MISMATCH", "workspace lease identity changed after spawn", "inspect goal_status and do not bind this run");
+      }
+      const data = executorBoundEventData(ticket, binding);
+      if (task.executorBinding) {
+        const expected = { ...data }; delete expected.taskId;
+        if (isDeepStrictEqual(task.executorBinding, expected)) return task.executorBinding;
+        throw preflightError("EXECUTOR_BINDING_MISMATCH", "attempt already has a different executor binding", "do not replace the bound run; inspect goal_status");
+      }
+      const event = makeGoalEvent("task.executor_bound", data, ticket.goalId, projection);
+      try {
+        projection = appendEventFn(root, event, projection.version);
+      } catch (error) {
+        const recovered = loadProjectionFn(root, ticket.goalId);
+        const observed = recovered.tasks.get(ticket.taskId)?.executorBinding;
+        const expected = { ...data }; delete expected.taskId;
+        if (isDeepStrictEqual(observed, expected)) return observed;
+        throw error;
+      }
+      return projection.tasks.get(ticket.taskId).executorBinding;
+    },
+  };
+  bindGoalExecutorCoordinator(pi, executorCoordinator);
   const orphanRecord = (goalId, taskId, attempt, sessionId, inventory) => {
     const hash = stableHash(inventory);
     const records = [...orphanChallenges.values()].filter((r) => r.challenge?.goalId === goalId && r.challenge?.taskId === taskId && r.challenge?.attempt === attempt && r.challenge?.sessionId === sessionId);
@@ -974,8 +1038,13 @@ export function createGoalEngineExtension(pi, options = {}) {
         reason: params.reason || null,
       };
       const task = projection.tasks.get(params.task_id);
+      if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION && task) {
+        let proof = null;
+        try { proof = await inspectExecutorProofFn(task.executorBinding?.runId); } catch { /* mapped to a stable missing-proof boundary below */ }
+        settlementData.executorProof = assertExecutorSettlementProof({ task, proof });
+      }
       // Validate semantic reducer errors before touching Git. A non-empty sentinel
-      // exercises strict v2 settlement binding without claiming persisted identity.
+      // exercises strict settlement binding without claiming persisted Git identity.
       if (params.outcome === "succeeded") {
         settlementData.attempt = task?.workspace?.attempt ?? 1;
         settlementData.executorHead = "candidate-settlement-validation";

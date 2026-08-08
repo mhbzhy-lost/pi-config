@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer, Socket } from "node:net";
 import { readFile as nodeReadFile, rm } from "node:fs/promises";
 import path from "node:path";
@@ -51,6 +51,22 @@ class TerminalDeadlineError extends Error {
   code = "ROOT_TERMINAL_DEADLINE";
 }
 
+function canonical(value: any): any {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+}
+
+function proofId(value: any) {
+  return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+}
+
+function frozen<T>(value: T): T {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as any)) frozen(child);
+  return Object.freeze(value);
+}
+
 function failure(request: any, code: string, message: string) {
   return createBrokerFailureResponse({
     requestId: request?.requestId ?? "invalid-request",
@@ -72,6 +88,7 @@ export class RootBrokerServer {
   executorGrants = new Map<string, Promise<{ callerToken: string }>>();
   ownedRuns = new Map<string, OwnedRun>();
   terminalProofs = new Map<string, any>();
+  terminalConflicts = new Set<string>();
   forcePendingRuns = new Set<string>();
   terminalWaiters = new Map<string, Set<(proof: any) => void>>();
   startedObservations = new Map<string, Promise<void>>();
@@ -184,8 +201,14 @@ export class RootBrokerServer {
     this.ownedRuns.set(facts.runId, initial);
     const observation = (async () => {
       let birthIdentity: string | null = null;
-      let identityState: OwnedRun["identityState"] = "verified";
-      try { birthIdentity = await this.captureProcessBirthIdentity(facts.pid); } catch { identityState = "unavailable"; }
+      let identityState: OwnedRun["identityState"] = "unavailable";
+      try {
+        const observedBirthIdentity = await this.captureProcessBirthIdentity(facts.pid);
+        if (typeof observedBirthIdentity === "string" && observedBirthIdentity.trim().length > 0) {
+          birthIdentity = observedBirthIdentity;
+          identityState = "verified";
+        }
+      } catch { /* missing birth identity remains unavailable */ }
       const current = this.ownedRuns.get(facts.runId) ?? initial;
       this.ownedRuns.set(facts.runId, { ...current, birthIdentity, identityState: current.identityState === "conflict" ? "conflict" : identityState });
       await this.ensureExecutorOwner(facts.runId);
@@ -205,17 +228,48 @@ export class RootBrokerServer {
     const { runId: _runId, ...terminal } = value;
     try { parseProcessTerminal(terminal); } catch (error) { throw new Error(`invalid official terminal: ${error instanceof Error ? error.message : String(error)}`); }
     if (terminal.state !== "observed") throw new Error(`official terminal is non-observed (${String(terminal.state)})`);
-    this.terminalProofs.set(run.runId, value);
+    const accepted = frozen(structuredClone(value));
+    const existing = this.terminalProofs.get(run.runId);
+    if (existing) {
+      if (proofId(existing) !== proofId(accepted)) this.terminalConflicts.add(run.runId);
+      return existing;
+    }
+    this.terminalProofs.set(run.runId, accepted);
     const waiters = this.terminalWaiters.get(run.runId);
     this.terminalWaiters.delete(run.runId);
-    for (const resolve of waiters ?? []) resolve(value);
-    return value;
+    for (const resolve of waiters ?? []) resolve(accepted);
+    return accepted;
   }
 
   observeTerminal(event: any) {
     const run = typeof event?.runId === "string" ? this.ownedRuns.get(event.runId) : undefined;
     if (!run) return;
     try { this.acceptTerminalProof(run, event); } catch { /* strict official proof is the only authority */ }
+  }
+
+  inspectExecutorProof(runId: string) {
+    const run = this.ownedRuns.get(runId);
+    if (!run) return null;
+    const proof = this.terminalProofs.get(runId);
+    const runner = proof?.instances?.find((instance: any) => instance.kind === "runner" && instance.processInstanceId === proof.runnerProcessInstanceId);
+    const successful = Boolean(runner && proof.instances.every((instance: any) => instance.exitCode === 0 && instance.signal === null));
+    return frozen({
+      schemaVersion: "root-broker.executor-proof.v1",
+      ownership: {
+        rootSessionId: run.rootSessionId,
+        runId: run.runId,
+        role: run.role,
+        asyncDir: run.asyncDir,
+        sessionId: run.sessionId,
+        identityState: run.identityState,
+      },
+      terminal: proof ? {
+        proofId: proofId(proof),
+        observedAt: proof.observedAt,
+        outcome: successful ? "succeeded" : "failed",
+      } : null,
+      terminalConflict: this.terminalConflicts.has(runId),
+    });
   }
 
   async pollTerminalArtifact(run: OwnedRun, cancelled: () => boolean, setCancelSleep: (cancel: () => void) => void) {
@@ -586,6 +640,7 @@ export class RootBrokerServer {
       this.executorGrants.clear();
       this.ownedRuns.clear();
       this.terminalProofs.clear();
+      this.terminalConflicts.clear();
       this.forcePendingRuns.clear();
       this.terminalWaiters.clear();
       this.startedObservations.clear();

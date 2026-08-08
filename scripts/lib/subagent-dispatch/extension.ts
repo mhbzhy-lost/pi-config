@@ -6,6 +6,7 @@ import { createTypedSubagentRpcClient } from "./rpc-client.ts";
 import { createHeadlessSubagentApi } from "./runtime-membrane.ts";
 import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
+import { findGoalExecutorCoordinator } from "./root-broker-registry.ts";
 
 const CLEANUP_KEY = "__typedSubagentRuntimeCleanup";
 const SHUTDOWN_DEBT_KEY = "__typedSubagentRuntimeShutdownDebt";
@@ -248,18 +249,35 @@ function codingSpawnParams(ir, prompt) {
   };
 }
 
-async function executeCoding(toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity) {
+async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator) {
   const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
   const prompt = renderCodingDispatchPrompt(ir);
   titleRegistry.prepare({ agent: ir.agent, task: prompt, title: ir.title });
   assertSpawnCapabilities(await rpc.ping(), ctx.cwd);
+  const goalCoordinator = configuredGoalCoordinator ?? findGoalExecutorCoordinator(pi);
+  const bindingRequest = { toolCallId, contract: input, contractHash: ir.hash, ctx };
+  const preflightTicket = await goalCoordinator?.prepareSpawn(bindingRequest);
   await prepareCodingSpawn(ir);
-  const hasSpawnIdentityResolver = typeof resolveCodingSpawnIdentity === "function";
-  const identity = hasSpawnIdentityResolver
+  const executionTicket = await goalCoordinator?.prepareSpawn(bindingRequest);
+  if ((preflightTicket?.ticketId ?? null) !== (executionTicket?.ticketId ?? null)) {
+    const error = new Error("Goal executor binding ticket changed at execute time");
+    error.code = "EXECUTOR_BINDING_MISMATCH";
+    throw error;
+  }
+  const customIdentity = typeof resolveCodingSpawnIdentity === "function"
     ? await resolveCodingSpawnIdentity({ toolCallId, contract: input, contractHash: ir.hash })
     : undefined;
-  if (hasSpawnIdentityResolver) assertCodingSpawnIdentity(identity);
+  if (customIdentity !== undefined) assertCodingSpawnIdentity(customIdentity);
+  if (executionTicket?.spawnIdentity && customIdentity
+      && (executionTicket.spawnIdentity.requestId !== customIdentity.requestId || executionTicket.spawnIdentity.spawnKey !== customIdentity.spawnKey)) {
+    const error = new Error("Goal executor spawn identity conflicts with the configured resolver");
+    error.code = "EXECUTOR_BINDING_MISMATCH";
+    throw error;
+  }
+  const identity = executionTicket?.spawnIdentity ?? customIdentity;
+  if (identity !== undefined) assertCodingSpawnIdentity(identity);
   const binding = spawnBinding(await rpc.spawn(codingSpawnParams(ir, prompt), identity));
+  if (executionTicket) await goalCoordinator.bindSpawn(executionTicket, binding);
   titleRegistry.remember(binding.runId, ir.title);
   const handle = {
     version: "coding-dispatch-handle.v1",
@@ -420,6 +438,7 @@ export function createTypedSubagentExtension(
     renderSubagentResult,
     prepareCodingSpawn = async () => {},
     resolveCodingSpawnIdentity,
+    goalExecutorCoordinator,
     beforeDispose = async () => {},
     retainOnBeforeDisposeFailure = false,
     afterBeforeDispose = async () => {},
@@ -476,7 +495,7 @@ export function createTypedSubagentExtension(
       try {
         if (!isRecord(input)) return failure("INVALID_DISPATCH", "subagent input must be an object");
         if (Object.hasOwn(input, "action")) return await executeControl(input, rpc);
-        if (Object.hasOwn(input, "version")) return await executeCoding(toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity);
+        if (Object.hasOwn(input, "version")) return await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator);
         return await executeGeneric(input, ctx, rpc, titleRegistry);
       } catch (error) {
         const code = error?.code

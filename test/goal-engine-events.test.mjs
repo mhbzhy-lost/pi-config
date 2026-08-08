@@ -2162,19 +2162,28 @@ test("completed Planned goals keep continuity events in planned.v1", () => {
     scope: [], nonGoals: [], dod: [], tasks: ["t1"],
     taskDefs: { t1: { description: "planned work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [plannedCriterion("proof")] }, workflow: "tdd" } },
   }, goalId));
+  const contractHash = "a".repeat(64);
+  const baseCommit = "b".repeat(40);
+  const executorHead = "c".repeat(40);
   projection = applyEvent(projection, plannedEvent("task.dispatched", {
-    taskId: "t1", contractHash: "planned-hash",
-    workspace: { attempt: 1, path: "/tmp/planned-work", branch: "ge/planned/t1/1", baseCommit: "base" },
+    taskId: "t1", contractHash,
+    workspace: { attempt: 1, path: "/tmp/planned-work", branch: "ge/planned/t1/1", baseCommit },
+  }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.executor_bound", {
+    taskId: "t1", attempt: 1, runId: "run-planned-continuity", contractHash,
+    asyncDir: "/tmp/run-planned-continuity", workspacePath: "/tmp/planned-work",
+    workspaceLeaseId: "d".repeat(64), headAtDispatch: baseCommit,
   }, goalId));
   projection = applyEvent(projection, plannedEvent("task.settled", {
     taskId: "t1", outcome: "succeeded", evidence: { type: "test_output", ref: "planned-tests" },
-    evidenceSource: "self_produced", nextAction: "Integrate the verified Planned task before accepting its evidence", attempt: 1, executorHead: "executor-head",
+    evidenceSource: "self_produced", nextAction: "Integrate the verified Planned task before accepting its evidence", attempt: 1, executorHead,
+    executorProof: { runId: "run-planned-continuity", proofId: "e".repeat(64), rootSessionId: "root-planned", observedAt: 1_700_000_000_000, outcome: "succeeded" },
   }, goalId));
   projection = applyEvent(projection, plannedEvent("task.workspace_disposition_started", {
-    taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "merge", executorHead: "executor-head", originHeadBefore: "origin-before",
+    taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "merge", executorHead, originHeadBefore: baseCommit,
   }, goalId));
   projection = applyEvent(projection, plannedEvent("task.workspace_disposition_applied", {
-    taskId: "t1", attempt: 1, action: "integrate", strategy: "merge", executorHead: "executor-head", originHead: "origin-after",
+    taskId: "t1", attempt: 1, action: "integrate", strategy: "merge", executorHead, originHead: "f".repeat(40),
   }, goalId));
   projection = applyEvent(projection, plannedEvent("task.workspace_disposed", {
     taskId: "t1", attempt: 1, action: "integrate", released: true,

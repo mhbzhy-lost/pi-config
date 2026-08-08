@@ -8,6 +8,7 @@ import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/l
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { createBrokerFrameDecoder, createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
 import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import * as rootBrokerRegistry from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 
 class EventBus {
   handlers = new Map();
@@ -110,6 +111,89 @@ test("Root broker grants, serves, and drains one directly owned Executor", async
   client.dispose();
 });
 
+test("Root broker exposes an immutable read-only ownership and successful terminal proof snapshot", async (t) => {
+  const rootSessionId = "root-proof-snapshot";
+  const runId = "executor-proof";
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    captureProcessBirthIdentity: async () => "birth-proof",
+    writeGrant: async () => "/tmp/nonexistent-proof-grant",
+  });
+  t.after(() => broker.closeRootSession().catch(() => undefined));
+  await broker.observeStarted(startedEvent(rootSessionId, runId));
+  const emittedProof = observedProof(runId);
+  broker.observeTerminal(emittedProof);
+
+  assert.equal(typeof broker.inspectExecutorProof, "function");
+  const snapshot = broker.inspectExecutorProof(runId);
+  emittedProof.instances[0].exitCode = 9;
+  emittedProof.observedAt += 10;
+  assert.deepEqual(broker.inspectExecutorProof(runId), snapshot);
+  assert.deepEqual(Object.keys(snapshot).sort(), ["ownership", "schemaVersion", "terminal", "terminalConflict"]);
+  assert.deepEqual(snapshot.ownership, {
+    rootSessionId,
+    runId,
+    role: "executor",
+    asyncDir: `/tmp/${runId}`,
+    sessionId: rootSessionId,
+    identityState: "verified",
+  });
+  assert.equal(snapshot.terminal.outcome, "succeeded");
+  assert.equal(snapshot.terminal.observedAt, 1_700_000_000_000);
+  assert.match(snapshot.terminal.proofId, /^[a-f0-9]{64}$/);
+  assert.equal(snapshot.terminalConflict, false);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(snapshot.ownership), true);
+  assert.equal(Object.isFrozen(snapshot.terminal), true);
+  for (const forbidden of ["removeWorktree", "deleteBranch", "cleanupGit", "releaseWorkspace"]) {
+    assert.equal(Object.hasOwn(snapshot, forbidden), false);
+    assert.equal(typeof broker[forbidden], "undefined");
+  }
+});
+
+test("Root broker never marks a missing process birth identity as verified ownership", async () => {
+  const rootSessionId = "root-missing-birth";
+  const runId = "executor-missing-birth";
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    captureProcessBirthIdentity: async () => null,
+    writeGrant: async () => "/tmp/nonexistent-missing-birth-grant",
+  });
+  await broker.observeStarted(startedEvent(rootSessionId, runId));
+
+  assert.equal(broker.inspectExecutorProof(runId).ownership.identityState, "unavailable");
+});
+
+test("Root broker marks conflicting official terminal proofs instead of replacing the first proof", async (t) => {
+  const rootSessionId = "root-proof-conflict";
+  const runId = "executor-proof-conflict";
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    captureProcessBirthIdentity: async () => "birth-proof-conflict",
+    writeGrant: async () => "/tmp/nonexistent-proof-conflict-grant",
+  });
+  t.after(() => broker.closeRootSession().catch(() => undefined));
+  await broker.observeStarted(startedEvent(rootSessionId, runId));
+  const first = observedProof(runId);
+  broker.observeTerminal(first);
+  broker.observeTerminal({
+    ...first,
+    observedAt: first.observedAt + 1,
+    instances: first.instances.map((instance) => ({ ...instance, closeObservedAt: instance.closeObservedAt + 1 })),
+  });
+
+  const snapshot = broker.inspectExecutorProof(runId);
+  assert.equal(snapshot.terminalConflict, true);
+  assert.equal(snapshot.terminal.observedAt, first.observedAt);
+  assert.equal(snapshot.terminal.outcome, "succeeded");
+});
+
 test("Root broker rejects malformed, foreign, and conflicting started ownership", async () => {
   const captures = [];
   const broker = new RootBrokerServer({
@@ -129,6 +213,20 @@ test("Root broker rejects malformed, foreign, and conflicting started ownership"
   await broker.observeStarted({ ...startedEvent("root-started", "executor-conflict"), pid: 54321 });
   assert.equal(broker.ownedRuns.get("executor-conflict")?.identityState, "conflict");
   assert.deepEqual(captures, [43210]);
+});
+
+test("Root broker registry exposes only the bound broker's read-only executor proof", () => {
+  assert.equal(typeof rootBrokerRegistry.inspectRootBrokerExecutorProof, "function");
+  const pi = { events: {} };
+  const snapshot = Object.freeze({ schemaVersion: "root-broker.executor-proof.v1", ownership: Object.freeze({ runId: "run-1" }), terminal: null, terminalConflict: false });
+  const broker = { inspectExecutorProof(runId) { assert.equal(runId, "run-1"); return snapshot; } };
+  bindRootBroker(pi, broker);
+  try {
+    assert.strictEqual(rootBrokerRegistry.inspectRootBrokerExecutorProof(pi, "run-1"), snapshot);
+  } finally {
+    unbindRootBroker(pi, broker);
+  }
+  assert.throws(() => rootBrokerRegistry.inspectRootBrokerExecutorProof(pi, "run-1"), /unavailable/);
 });
 
 test("Root broker registry keeps exact Pi ownership", async () => {

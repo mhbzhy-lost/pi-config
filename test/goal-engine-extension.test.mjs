@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, renameSync, rmSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,6 +11,7 @@ import { createGoalEngineExtension as createGoalEngineExtensionFactory } from ".
 import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
 import { allocateExecutorWorkspace, inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope } from "../scripts/lib/goal-engine/state-scope.mjs";
+import { findGoalExecutorCoordinator } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 
 const temporaryArena = createTemporaryArenaSync("goal-engine-extension-");
 test.after(() => temporaryArena.disposeSync());
@@ -47,6 +49,8 @@ function createMockPi(cwd) {
   };
   return {
     tools, hooks, entries, sentMessages, sessionManager,
+    executorProofs: new Map(),
+    executorBindingSequence: 0,
     executeContext: { cwd, sessionManager },
     registerTool(def) { tools.push(def); },
     on(event, handler) { (hooks[event] ||= []).push(handler); },
@@ -56,7 +60,11 @@ function createMockPi(cwd) {
 }
 
 function createGoalEngineExtensionProduction(pi, options = {}) {
-  return createGoalEngineExtensionFactory(pi, { goalStateEnv: {}, ...options });
+  return createGoalEngineExtensionFactory(pi, {
+    goalStateEnv: {},
+    inspectExecutorProof(runId) { return pi.executorProofs.get(runId) ?? null; },
+    ...options,
+  });
 }
 
 function createGoalEngineExtension(pi, options = {}) {
@@ -122,6 +130,36 @@ async function invoke(pi, name, params = {}) {
     assert.equal(result.details.value, text);
   } else {
     assert.deepEqual(result.details.value, JSON.parse(text));
+  }
+  if (name === "goal_dispatch") {
+    const dispatched = typeof result.details.value === "string" ? JSON.parse(result.details.value) : result.details.value;
+    if (dispatched?.status === "dispatched") {
+      const compiled = dispatched.contract;
+      const contractHash = dispatched.contract_hash ?? compiled?.hash;
+      const contract = compiled?.hash ? Object.fromEntries(Object.entries(compiled).filter(([key]) => key !== "hash")) : compiled;
+      const coordinator = findGoalExecutorCoordinator(pi);
+      const ticket = await coordinator?.prepareSpawn({ contract, contractHash, ctx: pi.executeContext });
+      if (ticket) {
+        const suffix = ++pi.executorBindingSequence;
+        const fixtureIdentity = ticket.ticketId.slice(0, 24);
+        const runId = `fixture-run-${fixtureIdentity}`;
+        const asyncDir = `/tmp/goal-engine-fixture-run-${fixtureIdentity}`;
+        await coordinator.bindSpawn(ticket, { runId, asyncDir });
+        pi.executorProofs.set(runId, {
+          schemaVersion: "root-broker.executor-proof.v1",
+          ownership: {
+            rootSessionId: pi.sessionManager.getSessionId(),
+            runId,
+            role: "executor",
+            asyncDir,
+            sessionId: pi.sessionManager.getSessionId(),
+            identityState: "verified",
+          },
+          terminal: { proofId: createHash("sha256").update(`${runId}\0${asyncDir}`).digest("hex"), observedAt: 1_700_000_000_000 + suffix, outcome: "succeeded" },
+          terminalConflict: false,
+        });
+      }
+    }
   }
   return text;
 }
@@ -1628,7 +1666,13 @@ test("goal_settle persists settlement identity from the inspected executor HEAD"
   await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/allowed.ts" }, next_action: "Integrate the inspected executor commit after verifying settlement identity." });
   const settled = readGoalEvents(cwd, goalId).find((event) => event.type === "task.settled");
   assert.deepEqual({ attempt: settled.data.attempt, executorHead: settled.data.executorHead }, { attempt: dispatched.attempt, executorHead: head });
-  assert.deepEqual(loadProjection(join(cwd, ".state/goal-engine"), goalId).tasks.get("t1").settlement, { attempt: dispatched.attempt, executorHead: head });
+  const task = loadProjection(join(cwd, ".state/goal-engine"), goalId).tasks.get("t1");
+  assert.deepEqual(task.settlement, {
+    attempt: dispatched.attempt,
+    executorHead: head,
+    executorRunId: task.executorBinding.runId,
+    terminalProofId: task.lastExecutorProof.proofId,
+  });
 });
 
 test("goal_settle permits clean authorized commits with runtime-only artifacts", async () => {
@@ -1987,13 +2031,17 @@ test("goal_integrate follows planned.v1 three-phase flow and accepts with worksp
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
 
   const dispatchEvents = readGoalEvents(cwd, goalId);
-  const dispatchEvent = dispatchEvents.at(-1);
+  const dispatchEvent = dispatchEvents.find((event) => event.type === "task.dispatched");
+  const bindingEvent = dispatchEvents.at(-1);
   assert.equal(dispatchEvent.schemaVersion, "planned.v1");
   assert.equal(dispatchEvent.type, "task.dispatched");
   assert.ok(dispatchEvent.data.workspace, "dispatch event should include workspace snapshot");
   assert.equal(dispatchEvent.data.workspace.attempt, 1);
   assert.equal(dispatchEvent.data.workspace.path, dispatched.workspace.path);
   assert.equal(dispatchEvent.data.workspace.branch, dispatched.workspace.branch);
+  assert.equal(bindingEvent.schemaVersion, "planned.v1");
+  assert.equal(bindingEvent.type, "task.executor_bound");
+  assert.match(bindingEvent.data.runId, /^fixture-run-[a-f0-9]{24}$/);
 
   commitWorkspaceChange(dispatched.workspace, "src/integrate.ts", "export const integrate = true;\n", "feat: v2 integrate");
   const settle = pi.tools.find((t) => t.name === "goal_settle");
@@ -3573,19 +3621,25 @@ async function emitHook(pi, name, event, ctx = pi.executeContext) {
 }
 
 function seedCompletedWatchingGoal(cwd, goalId = "completed-watching") {
+  const baseCommit = "b".repeat(40);
+  const executorHead = "e".repeat(40);
+  const contractHash = "c".repeat(64);
+  const runId = "completed-fixture-run";
+  const proofId = "f".repeat(64);
   const workspace = {
     attempt: 1,
     path: join(cwd, ".state/goal-engine/worktrees", `${goalId}-t1-1`),
     branch: `ge/${goalId}/t1/1`,
-    baseCommit: "base-commit",
+    baseCommit,
     originRef: "refs/heads/main",
   };
   const events = [
     { schemaVersion: "planned.v1", eventId: `${goalId}-created`, goalId, occurredAt: "2026-08-05T00:00:00.000Z", type: "goal.created", data: { objective: "Watch a completed goal for related follow-ups", scope: ["src/**"], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "original", deps: [], writePaths: ["src/a.ts"], acceptance: plannedAcceptance("works"), workflow: "tdd" } } } },
-    { schemaVersion: "planned.v1", eventId: `${goalId}-dispatched`, goalId, occurredAt: "2026-08-05T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "planned-contract", workspace } },
-    { schemaVersion: "planned.v1", eventId: `${goalId}-settled`, goalId, occurredAt: "2026-08-05T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/a.ts" }, evidenceSource: "self_produced", nextAction: "Accept the original task after reviewing its evidence carefully", attempt: 1, executorHead: "executor-head" } },
-    { schemaVersion: "planned.v1", eventId: `${goalId}-disposing`, goalId, occurredAt: "2026-08-05T00:00:03.000Z", type: "task.workspace_disposition_started", data: { taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "cherry-pick", executorHead: "executor-head", originHeadBefore: "base-commit", originRef: "refs/heads/main" } },
-    { schemaVersion: "planned.v1", eventId: `${goalId}-applied`, goalId, occurredAt: "2026-08-05T00:00:04.000Z", type: "task.workspace_disposition_applied", data: { taskId: "t1", attempt: 1, action: "integrate", strategy: "cherry-pick", executorHead: "executor-head", originHead: "integrated-head" } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-dispatched`, goalId, occurredAt: "2026-08-05T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash, workspace } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-executor-bound`, goalId, occurredAt: "2026-08-05T00:00:01.500Z", type: "task.executor_bound", data: { taskId: "t1", attempt: 1, runId, contractHash, asyncDir: "/tmp/completed-fixture-run", workspacePath: workspace.path, workspaceLeaseId: "d".repeat(64), headAtDispatch: baseCommit } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-settled`, goalId, occurredAt: "2026-08-05T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/a.ts" }, evidenceSource: "self_produced", nextAction: "Accept the original task after reviewing its evidence carefully", attempt: 1, executorHead, executorProof: { runId, proofId, rootSessionId: "root-session-fixture", observedAt: 1_700_000_000_000, outcome: "succeeded" } } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-disposing`, goalId, occurredAt: "2026-08-05T00:00:03.000Z", type: "task.workspace_disposition_started", data: { taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "cherry-pick", executorHead, originHeadBefore: baseCommit, originRef: "refs/heads/main" } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-applied`, goalId, occurredAt: "2026-08-05T00:00:04.000Z", type: "task.workspace_disposition_applied", data: { taskId: "t1", attempt: 1, action: "integrate", strategy: "cherry-pick", executorHead, originHead: "integrated-head" } },
     { schemaVersion: "planned.v1", eventId: `${goalId}-disposed`, goalId, occurredAt: "2026-08-05T00:00:05.000Z", type: "task.workspace_disposed", data: { taskId: "t1", attempt: 1, action: "integrate", released: true } },
     { schemaVersion: "planned.v1", eventId: `${goalId}-accepted`, goalId, occurredAt: "2026-08-05T00:00:06.000Z", type: "task.accepted", data: { taskId: "t1", workspaceAttempt: 1 } },
     { schemaVersion: "planned.v1", eventId: `${goalId}-completed`, goalId, occurredAt: "2026-08-05T00:00:07.000Z", type: "goal.completed", data: { verdict: "DONE_WITHOUT_EXTERNAL_VERIFICATION" } },
@@ -3614,8 +3668,8 @@ test("production status issues one-shot action tokens and dispatch returns an ex
   assert.match(dispatched.contract_hash, /^[a-f0-9]{64}$/);
   assert.equal(dispatched.contract.taskId, `${goalId}.t1`);
   assert.equal(loadProjection(join(cwd, ".state/goal-engine"), goalId).tasks.get("t1").contractHash, dispatched.contract_hash);
-  assert.deepEqual(readGoalEvents(cwd, goalId).slice(-3).map((event) => event.type), [
-    "goal.action_offered", "goal.action_consumed", "task.dispatched",
+  assert.deepEqual(readGoalEvents(cwd, goalId).slice(-4).map((event) => event.type), [
+    "goal.action_offered", "goal.action_consumed", "task.dispatched", "task.executor_bound",
   ]);
   await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", action_token: status.action_token }), /consumed|status|offer/i);
 });

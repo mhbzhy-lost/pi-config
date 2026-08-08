@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { validateDAG } from "./graph.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.mjs";
@@ -35,6 +36,7 @@ export function createProjection() {
     nonGoals: [],
     dod: [],
     tasks: new Map(),
+    executorRunIds: new Set(),
     eventIds: new Set(),
     checkpointCount: 0,
     completionVerdict: null,
@@ -82,6 +84,7 @@ export function applyEvent(projection, event, { replay = false } = {}) {
   switch (event.type) {
     case "goal.created": goalCreated(next, event, replay); break;
     case "task.dispatched": taskDispatched(next, event.data, event.schemaVersion); break;
+    case "task.executor_bound": taskExecutorBound(next, event.data, event.schemaVersion); break;
     case "task.settled": taskSettled(next, event.data, event.occurredAt, event.schemaVersion, replay); break;
     case "task.accepted": taskAccepted(next, event.data, event.schemaVersion); break;
     case "task.workspace_orphan_recovered": workspaceOrphanRecovered(next, event.data, event.schemaVersion); break;
@@ -139,13 +142,28 @@ function validateGoalIdentity(projection, event) {
   if (event.type === "goal.created") throw new Error("goal already created");
 }
 
+function copyTask(task) {
+  return {
+    ...task,
+    workspace: task.workspace ? { ...task.workspace } : null,
+    ...(Object.hasOwn(task, "executorBinding") ? { executorBinding: task.executorBinding ? { ...task.executorBinding } : null } : {}),
+    ...(Object.hasOwn(task, "lastExecutorProof") ? { lastExecutorProof: task.lastExecutorProof ? { ...task.lastExecutorProof } : null } : {}),
+    settlement: task.settlement ? { ...task.settlement } : null,
+    evidence: [...task.evidence],
+    deps: [...task.deps],
+    writePaths: [...(task.writePaths || [])],
+    acceptance: task.acceptance ? { ...task.acceptance, criteria: structuredClone(task.acceptance.criteria), ...(task.acceptance.commands ? { commands: [...task.acceptance.commands] } : {}) } : null,
+  };
+}
+
 function copyProjection(p) {
   return {
     ...p,
     scope: [...p.scope],
     nonGoals: [...p.nonGoals],
     dod: [...p.dod],
-    tasks: new Map([...p.tasks].map(([k, v]) => [k, { ...v, workspace: v.workspace ? { ...v.workspace } : null, settlement: v.settlement ? { ...v.settlement } : null, evidence: [...v.evidence], deps: [...v.deps], writePaths: [...(v.writePaths || [])], acceptance: v.acceptance ? { ...v.acceptance, criteria: structuredClone(v.acceptance.criteria), ...(v.acceptance.commands ? { commands: [...v.acceptance.commands] } : {}) } : null }])),
+    tasks: new Map([...p.tasks].map(([k, v]) => [k, copyTask(v)])),
+    executorRunIds: new Set(p.executorRunIds || []),
     eventIds: new Set(p.eventIds),
     completionHistory: (p.completionHistory || []).map((entry) => ({ ...entry })),
     sessionBindings: (p.sessionBindings || []).map((binding) => ({ ...binding })),
@@ -200,6 +218,7 @@ function goalCreated(p, event, replay) {
       lastSettledOutcome: null,
       contractHash: null,
       workspace: null,
+      ...(event.schemaVersion === PLANNED_SCHEMA_VERSION ? { executorBinding: null, lastExecutorProof: null } : {}),
       acceptanceVerification: null,
       settlement: null,
     });
@@ -228,6 +247,56 @@ function taskDispatched(p, data, schemaVersion) {
   task.status = "dispatched";
   task.attempts++;
   task.contractHash = contractHash;
+  if (schemaVersion === PLANNED_SCHEMA_VERSION) {
+    task.executorBinding = null;
+    task.lastExecutorProof = null;
+  }
+}
+
+function taskExecutorBound(p, data, schemaVersion) {
+  requireActive(p);
+  if (schemaVersion !== PLANNED_SCHEMA_VERSION) throw new Error("executor binding requires planned.v1");
+  requireExactFields(data, [
+    "taskId", "attempt", "runId", "contractHash", "asyncDir",
+    "workspacePath", "workspaceLeaseId", "headAtDispatch",
+  ], "executor binding data");
+  const task = requireTask(p, data.taskId);
+  if (task.status !== "dispatched") throw new Error(`task is not dispatched: ${data.taskId} (${task.status})`);
+  if (task.executorBinding) throw new Error(`executor binding is already bound and immutable: ${data.taskId}`);
+  if (!Number.isSafeInteger(data.attempt) || data.attempt < 1 || data.attempt !== task.attempts) {
+    throw new Error("executor binding attempt mismatch");
+  }
+  requireNonEmptyStrings({
+    runId: data.runId,
+    contractHash: data.contractHash,
+    asyncDir: data.asyncDir,
+    workspacePath: data.workspacePath,
+    workspaceLeaseId: data.workspaceLeaseId,
+    headAtDispatch: data.headAtDispatch,
+  }, "executor binding");
+  if (!/^[A-Za-z0-9._-]{1,160}$/.test(data.runId)) throw new Error("executor binding runId is invalid");
+  if (!/^[a-f0-9]{64}$/.test(data.contractHash) || data.contractHash !== task.contractHash) throw new Error("executor binding contractHash mismatch");
+  if (!isAbsolute(data.asyncDir) || data.asyncDir.includes("\0")) throw new Error("executor binding asyncDir must be absolute");
+  const workspace = requireWorkspace(task, data.attempt);
+  if (data.workspacePath !== workspace.path) throw new Error("executor binding workspacePath mismatch");
+  if (!/^[a-f0-9]{64}$/.test(data.workspaceLeaseId)) throw new Error("executor binding workspaceLeaseId mismatch");
+  if (!/^[a-f0-9]{40}$/.test(data.headAtDispatch) || data.headAtDispatch !== workspace.baseCommit) throw new Error("executor binding headAtDispatch mismatch");
+  if (p.executorRunIds.has(data.runId)) throw new Error(`executor runId is already bound or reused: ${data.runId}`);
+  const { taskId: _taskId, ...binding } = data;
+  task.executorBinding = { ...binding };
+  p.executorRunIds.add(data.runId);
+}
+
+function validatedExecutorProof(task, data) {
+  const binding = task.executorBinding;
+  if (!binding) throw new Error("executor terminal proof requires an executor binding");
+  requireExactFields(data.executorProof, ["runId", "proofId", "rootSessionId", "observedAt", "outcome"], "executor terminal proof");
+  requireNonEmptyStrings({ runId: data.executorProof.runId, proofId: data.executorProof.proofId, rootSessionId: data.executorProof.rootSessionId, outcome: data.executorProof.outcome }, "executor terminal proof");
+  if (data.executorProof.runId !== binding.runId) throw new Error("executor terminal proof runId mismatch");
+  if (!/^[a-f0-9]{64}$/.test(data.executorProof.proofId)) throw new Error("executor terminal proofId is invalid");
+  if (typeof data.executorProof.observedAt !== "number" || !Number.isFinite(data.executorProof.observedAt)) throw new Error("executor terminal observedAt is invalid");
+  if (data.executorProof.outcome !== "succeeded") throw new Error("executor terminal proof is not successful");
+  return { ...data.executorProof };
 }
 
 function taskSettled(p, data, occurredAt, schemaVersion, replay) {
@@ -240,8 +309,10 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
   validateEvidenceSource(evidenceSource, evidence);
   validateNextAction(nextAction);
   if (outcome === "succeeded") validateEvidence(evidence);
+  const executorProof = schemaVersion === PLANNED_SCHEMA_VERSION ? validatedExecutorProof(task, data) : null;
 
   task.lastSettledOutcome = outcome;
+  task.lastExecutorProof = executorProof;
   if (outcome === "succeeded") {
     if (schemaVersion !== "goal-engine.event.v1") {
       const hasAttempt = Object.hasOwn(data, "attempt");
@@ -252,7 +323,10 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
           throw new Error("invalid settlement attempt or executorHead");
         }
         const workspace = requireWorkspace(task, data.attempt);
-        task.settlement = { attempt: workspace.attempt, executorHead: data.executorHead };
+        const executorIdentity = executorProof
+          ? { executorRunId: task.executorBinding.runId, terminalProofId: executorProof.proofId }
+          : {};
+        task.settlement = { attempt: workspace.attempt, executorHead: data.executorHead, ...executorIdentity };
       } else if (!replay) {
         throw new Error("settlement identity requires attempt and executorHead");
       } else {
@@ -528,7 +602,9 @@ function goalAmended(p, data, schemaVersion, replay) {
     candidate.set(taskId, {
       description: def.description, deps: def.deps || [], writePaths: def.writePaths, acceptance: def.acceptance,
       workflow: def.workflow || "tdd", status: "pending", evidence: [], attempts: 0,
-      lastSettledOutcome: null, contractHash: null, workspace: null, acceptanceVerification: null, settlement: null,
+      lastSettledOutcome: null, contractHash: null, workspace: null,
+      ...(schemaVersion === PLANNED_SCHEMA_VERSION ? { executorBinding: null, lastExecutorProof: null } : {}),
+      acceptanceVerification: null, settlement: null,
     });
   }
   for (const [taskId, updates] of Object.entries(updateTasks || {})) {
