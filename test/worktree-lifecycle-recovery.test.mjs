@@ -20,6 +20,7 @@ function reclaim(f, a) { markDisposition({ originRoot: f.root, id: a.id, ownerTo
 function lease(f, id) { return join(f.root, ".state/worktree-lifecycle/leases", `${id}.json`); }
 function manifest(f, id) { return JSON.parse(readFileSync(lease(f, id), "utf8")); }
 function factsById(facts) { return Object.fromEntries(facts.filter((x) => x.id).map((x) => [x.id, x])); }
+function stringLeaves(value) { return typeof value === "string" ? [value] : value && typeof value === "object" ? Object.values(value).flatMap(stringLeaves) : []; }
 function oneShotFault(operation, phase) { let fired = false; return (event) => { if (!fired && event.operation === operation && event.phase === phase) { fired = true; const error = new Error("fault"); error.code = "TEST_FAULT"; throw error; } }; }
 function crashReceipt(f, a) { reclaim(f, a); assert.throws(() => releaseManagedWorktree({ originRoot: f.root, id: a.id, ownerToken: a.ownerToken, fault: oneShotFault("worktree-remove", "after") }), (error) => error?.code === "TEST_FAULT"); }
 function stateTree(root, relative = "") {
@@ -150,7 +151,7 @@ test("RED 001 inventory rejects every parent directory symlink without leaking l
   for (const relative of [".state", ".state/worktree-lifecycle"]) await t.test(relative, async (t) => {
     const f = repo(t, "parent-link-"); const a = allocation(f); crashReceipt(f, a); const source = join(f.root, relative), outside = f.arena.mkdtempSync("moved-state-"); const moved = join(outside, "contents"); renameSync(source, moved); symlinkSync(moved, source);
     const before = readFileSync(lease(f, a.id)); const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); const text = JSON.stringify(report); const item = report.items.find((x) => x.code === "WORKTREE_IDENTITY_MISMATCH");
-    assert.ok(item, "an untrusted parent directory must produce a generic identity mismatch"); assert.equal(item.automaticAction, "none"); assert.equal(text.includes(a.ownerId), false); assert.equal(text.includes(a.ownerToken), false); assert.deepEqual(readFileSync(lease(f, a.id)), before);
+    assert.ok(item, "an untrusted parent directory must produce a generic identity mismatch"); assert.equal(item.automaticAction, "none"); assert.equal(stringLeaves(report).includes(a.ownerId), false); assert.equal(text.includes(a.ownerToken), false); assert.deepEqual(readFileSync(lease(f, a.id)), before);
   });
 });
 
