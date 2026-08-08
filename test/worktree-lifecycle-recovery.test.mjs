@@ -204,8 +204,8 @@ test("RED malformed legacy manifests fail closed without leaking their sentinel"
 
 test("RED current 001 receipts require their branch to exist at the receipt head", async (t) => {
   for (const [name, mutate] of [["deleted", (f, a) => git(f.root, "update-ref", "-d", a.branchRef)], ["moved", (f, a) => { writeFileSync(join(f.root, "other"), "other\n"); git(f.root, "add", "other"); git(f.root, "commit", "-m", "other"); git(f.root, "update-ref", a.branchRef, "HEAD"); }]]) await t.test(name, async (t) => {
-    const f = repo(t, "001-branch-"); const a = allocation(f); crashReceipt(f, a); const before = readFileSync(lease(f, a.id)); const main = git(f.root, "rev-parse", "refs/heads/main"); mutate(f, a);
-    const branchBefore = branchHead(f.root, a.branchRef); const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); const item = factsById(report.items)[a.id];
+    const f = repo(t, "001-branch-"); const a = allocation(f); crashReceipt(f, a); const before = readFileSync(lease(f, a.id)); mutate(f, a);
+    const main = git(f.root, "rev-parse", "refs/heads/main"); const branchBefore = branchHead(f.root, a.branchRef); const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); const item = factsById(report.items)[a.id];
     assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"]); assert.equal(manifest(f, a.id).state, "reclaimable"); assert.deepEqual(readFileSync(lease(f, a.id)), before); assert.equal(git(f.root, "rev-parse", "refs/heads/main"), main); assert.equal(branchHead(f.root, a.branchRef), branchBefore);
   });
 });
