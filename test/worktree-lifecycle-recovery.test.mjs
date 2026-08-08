@@ -20,33 +20,47 @@ function reclaim(f, a) { markDisposition({ originRoot: f.root, id: a.id, ownerTo
 function lease(f, id) { return join(f.root, ".state/worktree-lifecycle/leases", `${id}.json`); }
 function manifest(f, id) { return JSON.parse(readFileSync(lease(f, id), "utf8")); }
 function factsById(facts) { return Object.fromEntries(facts.filter((x) => x.id).map((x) => [x.id, x])); }
-function oneShotFault(operation, phase) { let fired = false; return (event) => { if (!fired && event.operation === operation && event.phase === phase) { fired = true; throw new Error("fault"); } }; }
+function oneShotFault(operation, phase) { let fired = false; return (event) => { if (!fired && event.operation === operation && event.phase === phase) { fired = true; const error = new Error("fault"); error.code = "TEST_FAULT"; throw error; } }; }
+function stateTree(root, relative = "") {
+  const path = join(root, relative); const stat = lstatSync(path); const entry = { path: relative, type: stat.isDirectory() ? "directory" : stat.isFile() ? "file" : stat.isSymbolicLink() ? "symlink" : "other", mode: stat.mode & 0o777, mtimeMs: stat.mtimeMs, ...(stat.isFile() ? { bytes: readFileSync(path) } : {}) };
+  return [entry, ...(stat.isDirectory() ? readdirSync(path).sort().flatMap((name) => stateTree(root, join(relative, name))) : [])];
+}
 function snapshot(f, a) {
   const index = join(f.root, ".git", "index"); const file = lease(f, a.id);
   const take = (p) => ({ bytes: readFileSync(p), mode: statSync(p).mode & 0o777, mtimeMs: statSync(p).mtimeMs });
-  return { manifest: take(file), index: take(index), porcelain: git(f.root, "worktree", "list", "--porcelain", "-z"), refs: git(f.root, "show-ref"), path: existsSync(a.path), names: readdirSync(join(f.root, ".state/worktree-lifecycle/leases")).sort() };
+  return { manifest: take(file), index: take(index), porcelain: git(f.root, "worktree", "list", "--porcelain", "-z"), refs: git(f.root, "show-ref"), path: existsSync(a.path), stateTree: stateTree(join(f.root, ".state/worktree-lifecycle")) };
 }
-function assertSnapshot(f, a, before) {
-  const after = snapshot(f, a); assert.deepEqual(after, before); const state = join(f.root, ".state/worktree-lifecycle");
-  assert.deepEqual(readdirSync(state).filter((x) => /(?:lock|tmp|temp)/i.test(x)), [], "dry-run left state lock/temp");
-}
+function assertSnapshot(f, a, before) { assert.deepEqual(snapshot(f, a), before); }
 function assertKept(f, a, branchRef = a.branchRef) { assert.equal(existsSync(a.path), true); assert.equal(git(f.root, "show-ref", "--verify", "--quiet", branchRef), ""); }
 
 // The classifier is deliberately read through the namespace: old production lacks it,
 // so this is a business RED rather than an import-time fixture failure.
-test("RED reconciliation resource classifier enumerates every 000..111 bitmap", () => {
+test("RED reconciliation resource classifier requires current manifest authority and safety facts", () => {
   const classify = inventory.classifyReconciliationResources;
   assert.equal(typeof classify, "function", "inventory must export classifyReconciliationResources");
   const expected = {
-    "000": "none", "001": "release-worktree-only", "010": "none", "011": "none",
-    "100": "none", "101": "none", "110": "none", "111": "release-worktree-only",
+    "000": ["WORKTREE_IDENTITY_MISMATCH", "none"], "001": ["WORKTREE_CLEANUP_DEBT", "release-worktree-only"],
+    "010": ["WORKTREE_IDENTITY_MISMATCH", "none"], "011": ["WORKTREE_IDENTITY_MISMATCH", "none"],
+    "100": ["WORKTREE_UNMANAGED", "none"], "101": ["WORKTREE_IDENTITY_MISMATCH", "none"],
+    "110": ["WORKTREE_UNMANAGED", "none"], "111": ["WORKTREE_CLEANUP_DEBT", "release-worktree-only"],
   };
-  for (const [resources, automaticAction] of Object.entries(expected)) assert.deepEqual(classify(resources), { resources, automaticAction }, resources);
+  const safe = { manifestAuthority: "current", state: "reclaimable", disposition: "reclaimable", clean: true, identity: true, active: false, operation: null, probeFailed: false };
+  for (const [resources, [code, automaticAction]] of Object.entries(expected)) {
+    const result = classify({ ...safe, resources });
+    assert.equal(result.resources, resources, resources); assert.equal(result.code, code, resources); assert.equal(result.automaticAction, automaticAction, resources);
+  }
+  for (const resources of ["001", "111"]) {
+    for (const override of [{ manifestAuthority: "legacy" }, { manifestAuthority: "invalid" }, { active: true }, { clean: false }, { operation: "sequencer" }, { state: "active" }]) {
+      const result = classify({ ...safe, resources, ...override });
+      assert.equal(result.automaticAction, "none", `${resources} ${JSON.stringify(override)}`);
+    }
+  }
 });
 
 test("RED real repository integrates strict 111 and crash receipt 001", async (t) => {
   const f = repo(t); const full = allocation(f, "full"); reclaim(f, full); const missing = allocation(f, "missing"); reclaim(f, missing);
-  assert.throws(() => releaseManagedWorktree({ originRoot: f.root, id: missing.id, ownerToken: missing.ownerToken, fault: oneShotFault("worktree-remove", "after") }), /fault/);
+  assert.throws(() => releaseManagedWorktree({ originRoot: f.root, id: missing.id, ownerToken: missing.ownerToken, fault: oneShotFault("worktree-remove", "after") }), (error) => error?.code === "TEST_FAULT");
+  assert.equal(manifest(f, missing.id).state, "reclaimable", "crash fixture must retain its durable reclaimable manifest");
   const facts = factsById(await inventory.inventoryRepositoryWorktrees({ originRoot: f.root }));
   assert.deepEqual([facts.full.resources, facts.full.automaticAction], ["111", "release-worktree-only"]);
   assert.deepEqual([facts.missing.resources, facts.missing.automaticAction], ["001", "release-worktree-only"]);
@@ -56,13 +70,14 @@ test("RED strict manifest matrix rejects every unauthorized shape without remova
   const cases = [
     ["0640 mode", (m) => m, (f, a) => chmodSync(lease(f, a.id), 0o640)],
     ["filename/id mismatch", (m) => ({ ...m, id: "other" })], ["manifest symlink", (m) => m, (f, a, m) => { const outside = f.arena.mkdtempSync("outside-"); const target = join(outside, "safe.json"); writeFileSync(target, JSON.stringify(m)); rmSync(lease(f, a.id)); symlinkSync(target, lease(f, a.id)); }],
-    ["noncanonical origin", (m) => ({ ...m, originRoot: join(m.originRoot, ".") })], ["noncanonical path", (m) => ({ ...m, path: join(m.path, ".") })], ["noncanonical common", (m) => ({ ...m, gitCommonDir: join(m.gitCommonDir, ".") })],
+    ["noncanonical origin", (m) => ({ ...m, originRoot: `${m.originRoot}/.` }), "originRoot"], ["noncanonical path", (m) => ({ ...m, path: `${m.path}/.` }), "path"], ["noncanonical common", (m) => ({ ...m, gitCommonDir: `${m.gitCommonDir}/.` }), "gitCommonDir"],
     ["illegal ref", (m) => ({ ...m, branchRef: "refs/heads/bad..ref" })], ["missing base", (m) => ({ ...m, baseCommit: "f".repeat(40) })], ["backwards timestamps", (m) => ({ ...m, createdAt: "2030-01-02T00:00:00.000Z", updatedAt: "2030-01-01T00:00:00.000Z" })],
     ["state/disposition conflict", (m) => ({ ...m, state: "active", disposition: { state: "reclaimable", reason: "x" } })], ["reclaimable lastError", (m) => ({ ...m, lastError: { code: "E", message: "legal error", at: "2020-01-01T00:00:00.000Z" } })],
   ];
   for (const [name, alter, prepare] of cases) await t.test(name, async (t) => {
-    const f = repo(t, `strict-${name.replace(/[^A-Za-z0-9]/g, "-")}-`); const a = allocation(f); reclaim(f, a); const changed = alter(manifest(f, a.id));
-    if (!prepare) { writeFileSync(lease(f, a.id), JSON.stringify(changed)); chmodSync(lease(f, a.id), 0o600); } else prepare(f, a, changed);
+    const f = repo(t, `strict-${name.replace(/[^A-Za-z0-9]/g, "-")}-`); const a = allocation(f); reclaim(f, a); const original = manifest(f, a.id); const changed = alter(original);
+    if (typeof prepare === "string") { assert.notEqual(changed[prepare], original[prepare]); assert.equal(resolve(changed[prepare]), resolve(original[prepare])); }
+    if (!prepare || typeof prepare === "string") { writeFileSync(lease(f, a.id), JSON.stringify(changed)); chmodSync(lease(f, a.id), 0o600); } else prepare(f, a, changed);
     const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true });
     assert.equal(report.items.some((x) => x.code === "WORKTREE_IDENTITY_MISMATCH"), true); assertKept(f, a);
   });
@@ -88,7 +103,8 @@ test("RED report recursively redacts cleanup-debt manifest and probe sentinels",
 
 test("RED 001 apply releases receipt branchRef and preserves it in dry-run", async (t) => {
   const f = repo(t); const a = allocation(f); reclaim(f, a); const branchRef = a.branchRef;
-  assert.throws(() => releaseManagedWorktree({ originRoot: f.root, id: a.id, ownerToken: a.ownerToken, fault: oneShotFault("worktree-remove", "after") }), /fault/);
+  assert.throws(() => releaseManagedWorktree({ originRoot: f.root, id: a.id, ownerToken: a.ownerToken, fault: oneShotFault("worktree-remove", "after") }), (error) => error?.code === "TEST_FAULT");
+  assert.equal(manifest(f, a.id).state, "reclaimable", "crash fixture must retain its durable reclaimable manifest");
   const before = snapshot(f, a); const dry = await inventory.reconcileManagedWorktrees({ originRoot: f.root }); assert.equal(factsById(dry.items)[a.id].resources, "001"); assertSnapshot(f, a, before);
   const applied = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); assert.equal(factsById(applied.items)[a.id].state, "released"); assert.equal(git(f.root, "show-ref", "--verify", "--quiet", branchRef), "");
 });
