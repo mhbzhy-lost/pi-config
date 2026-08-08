@@ -24,8 +24,8 @@ function fixture(t) {
 function strictPlan() {
   return {
     schema: "dispatch-ir.v1.validation-plan",
-    limits: { timeoutMs: 5_000, maxOutputBytes: 64 * 1024 },
-    actions: [{ id: "clean-check", kind: "node", executable: process.execPath, args: ["check.mjs"] }],
+    limits: { timeoutMs: 5_000, maxOutputBytes: 64 * 1024, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 },
+    actions: [{ id: "clean-check", kind: "validation", executable: process.execPath, args: ["check.mjs"] }],
   };
 }
 
@@ -50,7 +50,7 @@ test("validation rejects non-current/full identity and isolates HOME TMPDIR and 
   const f = fixture(t);
   const plan = {
     ...strictPlan(),
-    actions: [{ id: "environment", kind: "node", executable: process.execPath, args: ["-e", "const fs=require('fs'); if(process.env.SECRET_SENTINEL||!fs.existsSync(process.env.HOME)||!fs.existsSync(process.env.TMPDIR)) process.exit(7)"] }],
+    actions: [{ id: "environment", kind: "validation", executable: process.execPath, args: ["-e", "const fs=require('fs'); if(process.env.SECRET_SENTINEL||!fs.existsSync(process.env.HOME)||!fs.existsSync(process.env.TMPDIR)) process.exit(7)"] }],
   };
   assert.throws(() => createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "bad", attempt: 1, integratedHead: f.head.slice(0, 7), validationPlan: plan }), /full|SHA|identity/i);
   const previous = process.env.SECRET_SENTINEL;
@@ -64,8 +64,8 @@ test("validation rejects non-current/full identity and isolates HOME TMPDIR and 
 test("validation enforces byte limits and proves its whole process group terminal", async (t) => {
   const f = fixture(t);
   const plan = {
-    schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 100, maxOutputBytes: 5 },
-    actions: [{ id: "descendant", kind: "node", executable: process.execPath, args: ["-e", "process.stdout.write('ééé'); process.stderr.write('界'); const {spawn}=require('child_process'); spawn(process.execPath,['-e','process.on(\\\"SIGTERM\\\",()=>{});setInterval(()=>{},1000)'],{detached:false,stdio:'ignore'}); setTimeout(()=>process.exit(0),10)"] }],
+    schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 100, maxOutputBytes: 5, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 },
+    actions: [{ id: "descendant", kind: "validation", executable: process.execPath, args: ["-e", "process.stdout.write('ééé'); process.stderr.write('界'); const {spawn}=require('child_process'); spawn(process.execPath,['-e','process.on(\\\"SIGTERM\\\",()=>{});setInterval(()=>{},1000)'],{detached:false,stdio:'ignore'}); setTimeout(()=>process.exit(0),10)"] }],
   };
   const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "group", attempt: 1, integratedHead: f.head, validationPlan: plan });
   const result = await runCleanValidation({ lease, actionId: "descendant" });
