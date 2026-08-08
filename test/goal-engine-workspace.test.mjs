@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
 import { allocateExecutorWorkspace, inspectExecutorWorkspace, integrateExecutorWorkspace, releaseExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
+import { releaseManagedWorktree } from "../scripts/lib/worktree-lifecycle/managed-worktree.mjs";
+import { markDisposition } from "../scripts/lib/worktree-lifecycle/registry.mjs";
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -580,6 +583,34 @@ test("integrateExecutorWorkspace with expected executor head must reject head mi
   assert.equal(existsSync(join(origin, "expected-head-second.ts")), false);
 });
 
+test("managed release retry unlinks only the matching Goal lease after the manager already released", () => {
+  const origin = initRepo();
+  const lease = allocateExecutorWorkspace({ goalId: "released-retry", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit: git(origin, "rev-parse", "HEAD") });
+  const id = `goal-${createHash("sha256").update(`${lease.originRoot}\0${lease.goalId}\0${lease.taskId}\0${lease.attempt}`).digest("hex")}`;
+  markDisposition({ originRoot: origin, id, ownerToken: lease.ownerToken, disposition: "reclaimable" });
+  releaseManagedWorktree({ originRoot: origin, id, ownerToken: lease.ownerToken });
+
+  releaseExecutorWorkspace(lease, { disposition: "failed-cleanup", expectedExecutorHead: lease.baseCommit });
+  assert.equal(existsSync(lease.path), false);
+  assert.equal(existsSync(lease.leasePath), false);
+  assert.ok(git(origin, "branch", "--list", lease.branch));
+  assert.doesNotThrow(() => releaseExecutorWorkspace(lease, { disposition: "failed-cleanup", expectedExecutorHead: lease.baseCommit }));
+});
+
+test("managed release rejects a manifest identity mismatch before removal", () => {
+  const origin = initRepo();
+  const lease = allocateExecutorWorkspace({ goalId: "receipt-fence", taskId: "t1", attempt: 1, originRoot: origin, stateRoot: tmpStateRoot(), baseCommit: git(origin, "rev-parse", "HEAD") });
+  const id = `goal-${createHash("sha256").update(`${lease.originRoot}\0${lease.goalId}\0${lease.taskId}\0${lease.attempt}`).digest("hex")}`;
+  const manifestFile = join(origin, ".state", "worktree-lifecycle", "leases", `${id}.json`);
+  const receipt = JSON.parse(readFileSync(manifestFile, "utf8"));
+  writeFileSync(manifestFile, JSON.stringify({ ...receipt, ownerId: "replacement-owner" }));
+
+  assert.throws(() => releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup", expectedExecutorHead: lease.baseCommit }), /receipt|identity|owner/i);
+  assert.equal(existsSync(lease.path), true);
+  assert.equal(existsSync(lease.leasePath), true);
+  assert.ok(git(origin, "branch", "--list", lease.branch));
+});
+
 test("managed release removes the worktree and lease but retains its branch", () => {
   const origin = initRepo();
   const stateRoot = tmpStateRoot();
@@ -588,7 +619,7 @@ test("managed release removes the worktree and lease but retains its branch", ()
   const lease = allocateExecutorWorkspace({ goalId: "g", taskId: "t1", attempt: 1, originRoot: origin, stateRoot, baseCommit });
   const branch = lease.branch;
 
-  releaseExecutorWorkspace(lease, { disposition: "integrated-cleanup" });
+  releaseExecutorWorkspace(lease, { disposition: "integrated-cleanup", expectedExecutorHead: lease.baseCommit });
   assert.equal(existsSync(lease.path), false);
   assert.ok(git(origin, "branch", "--list", branch));
   assert.equal(existsSync(lease.leasePath), false);
@@ -687,7 +718,7 @@ test("managed release fails closed when the registered workspace path is missing
     leaseExists: true,
   });
 
-  assert.throws(() => releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup" }), /missing|identity/i);
+  assert.throws(() => releaseExecutorWorkspace(lease, { disposition: "discarded-cleanup", expectedExecutorHead: lease.baseCommit }), /missing|identity/i);
   assert.deepEqual(workspace.inspectExecutorWorkspaceResources(lease), {
     workspaceExists: false,
     branchExists: true,
@@ -927,7 +958,7 @@ test("inspectExecutorWorkspaceResources tracks workspace, branch, and lease life
     /./,
   );
 
-  releaseExecutorWorkspace(releaseLease, { disposition: "integrated-cleanup" });
+  releaseExecutorWorkspace(releaseLease, { disposition: "integrated-cleanup", expectedExecutorHead: releaseLease.baseCommit });
   assert.deepEqual(workspace.inspectExecutorWorkspaceResources(releaseLease), {
     workspaceExists: false,
     branchExists: true,
@@ -941,7 +972,7 @@ test("inspectExecutorWorkspaceResources tracks workspace, branch, and lease life
     leaseExists: true,
   });
 
-  releaseExecutorWorkspace(preserveLease, { disposition: "preserved" });
+  releaseExecutorWorkspace(preserveLease, { disposition: "preserved", expectedExecutorHead: preserveLease.baseCommit });
   assert.deepEqual(workspace.inspectExecutorWorkspaceResources(preserveLease), {
     workspaceExists: true,
     branchExists: true,

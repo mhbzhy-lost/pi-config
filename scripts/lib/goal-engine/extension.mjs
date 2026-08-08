@@ -952,7 +952,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         });
       } catch (err) {
         try {
-          releaseExecutorWorkspace(lease, { disposition: "failed-cleanup" });
+          releaseExecutorWorkspace(lease, { disposition: "failed-cleanup", expectedExecutorHead: lease.baseCommit });
         } catch (cleanupErr) {
           throw new Error(`${err.message}; workspace cleanup also failed: ${cleanupErr.message}`, { cause: err });
         }
@@ -980,7 +980,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           activeLeases.set(leaseKey(cwd, goalId, params.task_id), lease);
         } else if (outcome === "not_committed") {
           try {
-            releaseExecutorWorkspace(lease, { disposition: "failed-cleanup" });
+            releaseExecutorWorkspace(lease, { disposition: "failed-cleanup", expectedExecutorHead: lease.baseCommit });
           } catch (cleanupErr) {
             throw new Error(`${err.message}; workspace cleanup also failed: ${cleanupErr.message}`, { cause: err });
           }
@@ -1685,6 +1685,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           if (!(resources.workspaceExists && resources.branchExists && resources.leaseExists)) {
             throw new Error("preserve disposition requires workspace, branch, and lease to remain available");
           }
+          releaseExecutorWorkspace(lease, { disposition: "preserved", expectedExecutorHead: currentWorkspace.executorHead });
           const disposedEvent = makeGoalEvent("task.workspace_disposed", {
             taskId,
             attempt: currentWorkspace.attempt,
@@ -1701,6 +1702,7 @@ export function createGoalEngineExtension(pi, options = {}) {
             lease,
             {
               disposition: currentWorkspace.requestedAction === "integrate" ? "integrated-cleanup" : "discarded-cleanup",
+              expectedExecutorHead: currentWorkspace.executorHead,
             },
           );
         }

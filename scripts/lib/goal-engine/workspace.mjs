@@ -785,24 +785,46 @@ function assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean) 
   }
 }
 
+function assertManagedReceiptFence(lease, id, receipt, expectedExecutorHead) {
+  const expected = {
+    id,
+    ownerKind: "goal-engine",
+    ownerId: id,
+    ownerToken: lease.ownerToken,
+    originRoot: realpathSync(lease.originRoot),
+    path: path.resolve(lease.path),
+    branchRef: `refs/heads/${lease.branch}`,
+    baseCommit: lease.baseCommit,
+    headCommit: expectedExecutorHead,
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    if (receipt?.[field] !== value) throw new Error(`managed receipt identity ${field} mismatch`);
+  }
+}
+
 export function releaseExecutorWorkspace(lease, { disposition, expectedExecutorHead, requireClean, beforeDestructiveCleanupFn } = {}) {
   const validDispositions = ["integrated-cleanup", "failed-cleanup", "discarded-cleanup", "preserved"];
   if (!validDispositions.includes(disposition)) throw new Error(`Invalid disposition: ${disposition}`);
   const fenced = expectedExecutorHead !== undefined || requireClean !== undefined || beforeDestructiveCleanupFn !== undefined;
-  if (fenced && (disposition !== "discarded-cleanup"
-    || typeof expectedExecutorHead !== "string" || !expectedExecutorHead
-    || requireClean !== true
-    || (beforeDestructiveCleanupFn !== undefined && typeof beforeDestructiveCleanupFn !== "function"))) {
+  const validHead = typeof expectedExecutorHead === "string" && /^[0-9a-f]{40}$/i.test(expectedExecutorHead);
+  if (MANAGED_OWNER_TOKEN.test(lease.ownerToken) && !validHead) throw new Error("Managed release requires an exact full expectedExecutorHead");
+  const managed = MANAGED_OWNER_TOKEN.test(lease.ownerToken);
+  if (fenced && ((!managed && (disposition !== "discarded-cleanup" || !validHead || requireClean !== true
+    || (beforeDestructiveCleanupFn !== undefined && typeof beforeDestructiveCleanupFn !== "function")))
+    || (managed && (requireClean !== undefined || beforeDestructiveCleanupFn !== undefined)
+      && (disposition !== "discarded-cleanup" || requireClean !== true
+        || (beforeDestructiveCleanupFn !== undefined && typeof beforeDestructiveCleanupFn !== "function"))))) {
     throw new Error("Invalid preserved cleanup fence options");
   }
 
-  if (MANAGED_OWNER_TOKEN.test(lease.ownerToken)) {
+  if (managed) {
     const id = managedAllocationId(realpathSync(lease.originRoot), lease.goalId, lease.taskId, lease.attempt);
     if (disposition === "preserved") {
-      preserveManagedWorktree({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken, reason: "goal workspace preserved" });
+      const receipt = preserveManagedWorktree({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken, reason: "goal workspace preserved" });
+      assertManagedReceiptFence(lease, id, receipt, expectedExecutorHead);
       return { released: false, preserved: true, disposition };
     }
-    if (fenced) {
+    if (requireClean !== undefined || beforeDestructiveCleanupFn !== undefined) {
       const fencedLease = assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean);
       try {
         beforeDestructiveCleanupFn?.(fencedLease);
@@ -811,8 +833,16 @@ export function releaseExecutorWorkspace(lease, { disposition, expectedExecutorH
       }
       assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean);
     }
-    markDisposition({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken, disposition: "reclaimable" });
-    releaseManagedWorktree({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken });
+    let releasedReceipt;
+    try {
+      releasedReceipt = releaseManagedWorktree({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken });
+    } catch (error) {
+      if (error?.code !== "WORKTREE_LIFECYCLE_NOT_RECLAIMABLE") throw error;
+      const reclaimableReceipt = markDisposition({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken, disposition: "reclaimable" });
+      assertManagedReceiptFence(lease, id, reclaimableReceipt, expectedExecutorHead);
+      releasedReceipt = releaseManagedWorktree({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken });
+    }
+    assertManagedReceiptFence(lease, id, releasedReceipt, expectedExecutorHead);
     if (lease.leasePath && existsSync(lease.leasePath)) rmSync(lease.leasePath, { force: true });
     return { released: true, preserved: false, disposition };
   }
