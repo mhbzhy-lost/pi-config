@@ -178,3 +178,29 @@ test("validation enforces byte limits and proves its whole process group termina
   assert.equal(result.outputBytes <= 5, true);
   assert.equal(result.truncated, true);
 });
+
+test("validation records an independent stable supervisor rather than its short-lived action", async (t) => {
+  const f = fixture(t); const marker = join(f.state, "action.pid");
+  const plan = { ...strictPlan(), actions: [{ id: "supervised", kind: "validation", executable: process.execPath, args: ["-e", `const fs=require('fs'); fs.writeFileSync(${JSON.stringify(marker)},String(process.pid)); setTimeout(()=>process.exit(0),200)`] }] };
+  const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "stable-supervisor", attempt: 1, integratedHead: f.head, validationPlan: plan });
+  const run = runCleanValidation({ lease, actionId: "supervised" }); void run.catch(() => {});
+  let actionPid; let runtimePid; let runtimeBirth; let completed = false;
+  try {
+    for (let i = 0; i < 100 && !existsSync(marker); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(existsSync(marker), true, "action did not write its PID marker");
+    actionPid = Number(readFileSync(marker, "utf8"));
+    const durable = JSON.parse(readFileSync(leaseFile(lease), "utf8")); runtimePid = durable.runtime.pid; runtimeBirth = durable.runtime.pidBirthIdentity;
+    assert.equal(Number.isSafeInteger(runtimePid) && runtimePid > 0, true);
+    assert.notEqual(runtimePid, actionPid);
+    assert.doesNotThrow(() => process.kill(runtimePid, 0)); assert.doesNotThrow(() => process.kill(actionPid, 0));
+    const result = await run;
+    assert.equal(result.pid, runtimePid); assert.equal(result.pidBirthIdentity, runtimeBirth);
+    assert.match(result.processGroupTerminalProof, /^[a-f0-9]{64}$/);
+    assert.throws(() => process.kill(runtimePid, 0), /ESRCH/); assert.throws(() => process.kill(actionPid, 0), /ESRCH/);
+    completed = true;
+  } finally {
+    if (!completed) for (const pid of new Set([actionPid, runtimePid])) if (Number.isSafeInteger(pid) && pid > 0) try { process.kill(pid, "SIGKILL"); } catch {}
+    await run.catch(() => {});
+    releaseValidationWorkspace(lease, { expectedHead: lease.integratedHead });
+  }
+});
