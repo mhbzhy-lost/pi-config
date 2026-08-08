@@ -148,17 +148,23 @@ function release(t, lease) { t.after(() => { try { releaseValidationWorkspace(le
 
 test("validation initial lease publication never replaces a file raced into its final path", (t) => {
   const f = fixture(t); const taskId = "initial-lease-race"; const leaseFile = join(f.state, "validation-leases", `validation-${createHash("sha256").update(`${realpathSync(f.origin)}\0g\0${taskId}\0${1}`).digest("hex")}.json`);
-  const originalRename = fs.renameSync; const racedContents = "existing-0600-lease"; let injected = false; let created;
-  t.after(() => { if (created) try { releaseValidationWorkspace(created, { expectedHead: f.head }); } catch {} });
-  fs.renameSync = (from, to, ...args) => {
-    if (!injected && to === leaseFile) { injected = true; writeFileSync(to, racedContents, { mode: 0o600, flag: "wx" }); }
-    return originalRename(from, to, ...args);
+  const originalRename = fs.renameSync; const originalLink = fs.linkSync; const originalOpen = fs.openSync; const originalWrite = fs.writeFileSync; const racedContents = "existing-0600-lease"; let injected = false; let created;
+  const inject = (file) => {
+    if (!injected && file === leaseFile) { injected = true; originalWrite(file, racedContents, { mode: 0o600, flag: "wx" }); }
   };
+  t.after(() => { if (created) try { releaseValidationWorkspace(created, { expectedHead: f.head }); } catch {} });
+  fs.renameSync = (from, to, ...args) => { inject(to); return originalRename(from, to, ...args); };
+  fs.linkSync = (from, to, ...args) => { inject(to); return originalLink(from, to, ...args); };
+  fs.openSync = (file, ...args) => { inject(file); return originalOpen(file, ...args); };
+  fs.writeFileSync = (file, ...args) => { inject(file); return originalWrite(file, ...args); };
   syncBuiltinESMExports();
   try {
     assert.throws(() => { created = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId, attempt: 1, integratedHead: f.head, validationPlan: strictPlan() }); }, /lease|exist|replace|publish/i);
   } finally {
     fs.renameSync = originalRename;
+    fs.linkSync = originalLink;
+    fs.openSync = originalOpen;
+    fs.writeFileSync = originalWrite;
     syncBuiltinESMExports();
   }
   assert.equal(injected, true);
