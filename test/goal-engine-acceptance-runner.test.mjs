@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { createValidationWorkspace, runCleanValidation, releaseValidationWorkspace } from "../scripts/lib/goal-engine/acceptance-runner.mjs";
 
@@ -28,6 +29,67 @@ function strictPlan() {
     actions: [{ id: "clean-check", kind: "validation", executable: process.execPath, args: ["check.mjs"] }],
   };
 }
+
+async function waitUntil(check, message, timeout = 5_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+
+function workerResult(child) {
+  return new Promise((resolve, reject) => {
+    let receipt;
+    child.once("message", (message) => { receipt = message; });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      try { assert.equal(code, 0, "capacity worker did not exit cleanly"); assert.ok(receipt, "capacity worker omitted IPC receipt"); resolve(receipt); }
+      catch (error) { reject(error); }
+    });
+  });
+}
+
+test("validation allocation serializes cross-process capacity before managed Git creation", async (t) => {
+  const f = fixture(t); const barrier = join(f.state, "capacity-barrier"); mkdirSync(barrier);
+  const workers = []; const results = []; const receipts = []; const runnerUrl = pathToFileURL(join(process.cwd(), "scripts/lib/goal-engine/acceptance-runner.mjs")).href;
+  const source = String.raw`const fs=require('node:fs'),path=require('node:path'),{syncBuiltinESMExports}=require('node:module');const [configText,index]=process.argv.slice(1),c=JSON.parse(configText),ready=path.join(c.barrier,'ready-'+index),start=path.join(c.barrier,'start'),reached=path.join(c.barrier,'reached-'+index),release=path.join(c.barrier,'release');const original=fs.writeFileSync;let intercepted=false;const initialLeaseTemp=file=>typeof file==='string'&&path.basename(path.dirname(file))==='validation-leases'&&/^\.validation-[a-f0-9]{64}\.\d+\.\d+$/.test(path.basename(file));fs.writeFileSync=(file,...args)=>{if(!intercepted&&initialLeaseTemp(file)){intercepted=true;original(reached,'',{flag:'wx',mode:0o600});const cell=new Int32Array(new SharedArrayBuffer(4)),end=Date.now()+5000;while(!fs.existsSync(release)&&Date.now()<end)Atomics.wait(cell,0,0,10);if(!fs.existsSync(release))throw Error('release barrier timeout')}return original(file,...args)};syncBuiltinESMExports();const waitStart=()=>{const end=Date.now()+5000;while(!fs.existsSync(start)){if(Date.now()>=end)throw Error('start barrier timeout');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)}};(async()=>{try{const m=await import(c.runnerUrl);original(ready,'',{flag:'wx',mode:0o600});waitStart();const lease=m.createValidationWorkspace({...c.input,taskId:'capacity-'+index});process.send({success:true,lease})}catch(error){process.send({success:false,capacityConflict:/capacity conflict/i.test(String(error&&error.message))})}})();`;
+  const config = JSON.stringify({ runnerUrl, barrier, input: { originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "placeholder", attempt: 1, integratedHead: f.head, validationPlan: strictPlan() } });
+  try {
+    for (let i = 0; i < 10; i++) { const child = spawn(process.execPath, ["-e", source, config, String(i)], { stdio: ["ignore", "ignore", "ignore", "ipc"] }); workers.push(child); results.push(workerResult(child)); }
+    await waitUntil(() => readdirSync(barrier).filter((name) => name.startsWith("ready-")).length === workers.length, "capacity workers did not reach the start barrier");
+    writeFileSync(join(barrier, "start"), "", { mode: 0o600 });
+    await waitUntil(() => readdirSync(barrier).some((name) => name.startsWith("reached-")), "no capacity worker reached initial reservation");
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    writeFileSync(join(barrier, "release"), "", { mode: 0o600 });
+    const outcomes = await Promise.all(results); receipts.push(...outcomes.filter((outcome) => outcome.success));
+    const durable = readdirSync(join(f.state, "validation-leases")).map((name) => JSON.parse(readFileSync(join(f.state, "validation-leases", name), "utf8"))).filter((lease) => lease.state !== "released");
+    assert.equal(durable.length, 1, "capacity reservation exceeded one durable nonreleased lease");
+    assert.equal(worktreeCount(f.origin), 2, "capacity conflicts must occur before managed Git creation");
+    assert.equal(outcomes.filter((outcome) => outcome.success).length, 1, "anonymous success count");
+    assert.equal(outcomes.filter((outcome) => !outcome.success && outcome.capacityConflict).length, workers.length - 1, "anonymous capacity-conflict count");
+  } finally {
+    if (!existsSync(join(barrier, "release"))) writeFileSync(join(barrier, "release"), "", { mode: 0o600 });
+    const outcomes = await Promise.all(results.map((result) => result.catch(() => null))); for (const outcome of outcomes) if (outcome?.success && !receipts.includes(outcome)) receipts.push(outcome);
+    for (const receipt of receipts) try { releaseValidationWorkspace(receipt.lease, { expectedHead: f.head }); } catch {}
+    await Promise.all(workers.map(async (child) => { if (child.exitCode === null) { await new Promise((resolve) => setTimeout(resolve, 200)); if (child.exitCode === null) child.kill("SIGKILL"); } }));
+  }
+});
+
+test("run fails closed when a preexisting start authorization is forged", async (t) => {
+  const f = fixture(t); const marker = join(f.state, "forged-start-marker");
+  const plan = { ...strictPlan(), actions: [{ id: "marker", kind: "validation", executable: process.execPath, args: ["-e", `require('fs').writeFileSync(${JSON.stringify(marker)},'ran')`] }] };
+  const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "forged-start", attempt: 1, integratedHead: f.head, validationPlan: plan }); release(t, lease);
+  const run = runCleanValidation({ lease, actionId: "marker" });
+  const running = JSON.parse(readFileSync(leaseFile(lease), "utf8")); const runtime = running.runtime.path;
+  writeFileSync(join(runtime, "start"), JSON.stringify({ forged: true }), { mode: 0o600 });
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  const error = await run.then(() => null, (reason) => reason);
+  const durable = JSON.parse(readFileSync(leaseFile(lease), "utf8")); const supervisorPid = durable.runtime?.pid;
+  let supervisorGone = false; try { process.kill(supervisorPid, 0); } catch (reason) { supervisorGone = reason.code === "ESRCH"; }
+  assert.deepEqual({ failedClosed: error instanceof Error, markerAbsent: !existsSync(marker), cleanupDebt: durable.state === "cleanup-debt", exactSupervisorGone: supervisorGone }, { failedClosed: true, markerAbsent: true, cleanupDebt: true, exactSupervisorGone: true });
+});
 
 test("validation binds an immutable trusted exact Host plan and rejects caller commands", (t) => {
   const f = fixture(t);
