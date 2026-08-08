@@ -257,7 +257,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   const goalCoordinator = configuredGoalCoordinator ?? findGoalExecutorCoordinator(pi);
   const bindingRequest = { toolCallId, contract: input, contractHash: ir.hash, ctx };
   const preflightTicket = await goalCoordinator?.prepareSpawn(bindingRequest);
-  await prepareCodingSpawn(ir);
+  await prepareCodingSpawn(ir, preflightTicket);
   const executionTicket = await goalCoordinator?.prepareSpawn(bindingRequest);
   if ((preflightTicket?.ticketId ?? null) !== (executionTicket?.ticketId ?? null)) {
     const error = new Error("Goal executor binding ticket changed at execute time");

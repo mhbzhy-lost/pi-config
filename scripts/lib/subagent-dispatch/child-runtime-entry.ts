@@ -29,7 +29,10 @@ async function canonicalTarget(targetUrl: unknown) {
   try { const url = targetUrl instanceof URL ? targetUrl : new URL(targetUrl); if (url.protocol !== "file:") throw new TypeError(); targetPath = fileURLToPath(url); } catch { throw new TypeError("targetUrl must be a file: URL"); }
   const canonical = await realpath(targetPath);
   if (!(await stat(canonical)).isFile()) throw new TypeError("targetUrl must resolve to a regular file");
-  return pathToFileURL(canonical).href;
+  const resolved = pathToFileURL(canonical);
+  const source = targetUrl instanceof URL ? targetUrl : new URL(targetUrl);
+  resolved.search = source.search;
+  return resolved.href;
 }
 async function namespace(cwd: string) {
   const directoryPath = path.join(cwd, ".pi-subagents");

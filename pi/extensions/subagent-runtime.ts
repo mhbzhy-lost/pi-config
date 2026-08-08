@@ -85,13 +85,22 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     },
     renderSubagentResult,
     rpc,
-    async prepareCodingSpawn(ir: { agent: string; execution: { cwd?: string } }) {
+    async prepareCodingSpawn(ir: { agent: string; execution: { cwd?: string }; acceptance: { criteria: string[] } }, ticket: any) {
       if (ir.agent !== "executor") return;
       await materializeChildRuntimeEntry({
         cwd: ir.execution.cwd!,
         fileName: "root-session-owner-entry.mjs",
         targetUrl: new URL("../child-extensions/root-session-owner.ts", import.meta.url),
       });
+      if (!ticket) return;
+      const criteria = ticket.acceptanceCriteria ?? ir.acceptance.criteria.map((criterion: string) => {
+        try { return JSON.parse(criterion).id; } catch { return criterion; }
+      });
+      const identity = { goalId: ticket.goalId, taskId: ticket.taskId, attempt: ticket.attempt, runId: process.env.PI_SUBAGENT_RUN_ID ?? "", contractHash: ticket.contractHash, head: ticket.headAtDispatch };
+      const target = new URL("../child-extensions/acceptance-evidence.ts", import.meta.url);
+      target.searchParams.set("identity", JSON.stringify(identity));
+      target.searchParams.set("criteria", JSON.stringify(criteria));
+      await materializeChildRuntimeEntry({ cwd: ir.execution.cwd!, fileName: "acceptance-evidence-entry.mjs", targetUrl: target });
     },
     retainOnBeforeDisposeFailure: true,
   });
