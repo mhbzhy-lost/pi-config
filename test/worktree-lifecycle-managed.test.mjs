@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
@@ -286,6 +286,24 @@ test("a reserved branch that moved away from baseCommit is retained as cleanup d
   assert.equal(manifest(f.root, "task-one").state, "cleanup-debt");
   assert.equal(existsSync(join(f.root, ".state/worktree-lifecycle/worktrees/task-one")), false);
   assert.equal(refExists(f.root, "refs/heads/topic-task-one"), true);
+});
+
+test("release fails closed for a real active worktree cwd and records cleanup debt", async (t) => {
+  const f = repoFixture(t, "worktree-managed-active-cwd-");
+  const allocation = createManagedWorktree(createOptions(f));
+  markReclaimable(f, allocation);
+  const holder = spawn(process.execPath, ["-e", "process.stdout.write('ready\\n'); setInterval(() => {}, 1000)"], {
+    cwd: allocation.path, stdio: ["ignore", "pipe", "ignore"],
+  });
+  await new Promise((resolve) => holder.stdout.once("data", resolve));
+  t.after(() => { try { process.kill(holder.pid, "SIGKILL"); } catch {} });
+
+  assert.throws(
+    () => releaseManagedWorktree({ originRoot: f.root, id: allocation.id, ownerToken: allocation.ownerToken }),
+    assertCode("WORKTREE_LIFECYCLE_UNSAFE_RELEASE"),
+  );
+  assert.equal(manifest(f.root, allocation.id).state, "cleanup-debt");
+  assert.equal(existsSync(allocation.path), true);
 });
 
 test("release retries idempotently without phantom released at remove/publish crash boundaries", async (t) => {
