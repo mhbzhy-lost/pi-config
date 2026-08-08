@@ -121,9 +121,9 @@ test("RED authorization rejection table keeps path registration and branch", asy
 });
 
 test("RED owner CAS race refuses removal when observer sees origin identity probe", async (t) => {
-  const f = repo(t); const a = allocation(f); reclaim(f, a); let raced = false;
-  const commandObserver = ({ cwd, args }) => { if (!raced && cwd === f.root && JSON.stringify(args) === JSON.stringify(["rev-parse", "--show-toplevel"])) { raced = true; const m = manifest(f, a.id); m.ownerToken = "worktree-owner.v1:" + "b".repeat(64); writeFileSync(lease(f, a.id), JSON.stringify(m)); chmodSync(lease(f, a.id), 0o600); } };
-  const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true, commandObserver }); assert.equal(raced, true, "reconcile must forward commandObserver"); assertKept(f, a);
+  const f = repo(t); const a = allocation(f); reclaim(f, a); let raced = false, originTopLevelProbes = 0;
+  const commandObserver = ({ cwd, args }) => { if (cwd === f.root && JSON.stringify(args) === JSON.stringify(["rev-parse", "--show-toplevel"])) { originTopLevelProbes += 1; if (originTopLevelProbes === 2) { raced = true; const m = manifest(f, a.id); m.ownerToken = "worktree-owner.v1:" + "b".repeat(64); writeFileSync(lease(f, a.id), JSON.stringify(m)); chmodSync(lease(f, a.id), 0o600); } } };
+  const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true, commandObserver }); assert.equal(raced, true, "replace the token only at the manager canonical probe, after inventory-before"); assert.ok(originTopLevelProbes >= 3, "inventory-before, manager verification, and inventory-after must probe origin identity"); assertKept(f, a);
   const item = factsById(report.items)[a.id]; assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"], "a stale owner CAS result must fail closed in this report");
 });
 
@@ -149,8 +149,8 @@ test("RED current 001 receipts bind canonical common directory and a real path",
 test("RED 001 inventory rejects every parent directory symlink without leaking leases", async (t) => {
   for (const relative of [".state", ".state/worktree-lifecycle"]) await t.test(relative, async (t) => {
     const f = repo(t, "parent-link-"); const a = allocation(f); crashReceipt(f, a); const source = join(f.root, relative), outside = f.arena.mkdtempSync("moved-state-"); const moved = join(outside, "contents"); renameSync(source, moved); symlinkSync(moved, source);
-    const before = readFileSync(lease(f, a.id)); const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); const text = JSON.stringify(report); const item = factsById(report.items)[a.id];
-    assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_IDENTITY_MISMATCH", "none"]); assert.equal(text.includes(a.owner.id), false); assert.equal(text.includes(a.ownerToken), false); assert.deepEqual(readFileSync(lease(f, a.id)), before);
+    const before = readFileSync(lease(f, a.id)); const report = await inventory.reconcileManagedWorktrees({ originRoot: f.root, apply: true }); const text = JSON.stringify(report); const item = report.items.find((x) => x.code === "WORKTREE_IDENTITY_MISMATCH");
+    assert.ok(item, "an untrusted parent directory must produce a generic identity mismatch"); assert.equal(item.automaticAction, "none"); assert.equal(text.includes(a.ownerId), false); assert.equal(text.includes(a.ownerToken), false); assert.deepEqual(readFileSync(lease(f, a.id)), before);
   });
 });
 
