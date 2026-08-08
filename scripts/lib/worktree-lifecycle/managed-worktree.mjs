@@ -272,18 +272,28 @@ function sequencerOperation(path, commandObserver) {
   return null;
 }
 
+function activeWorkspaceUsers(worktreePath) {
+  // NUL fields avoid locale/whitespace parsing ambiguity.  lsof uses status 1
+  // for "no matches", but never treat output accompanying it as clear.
+  const probe = spawnSync("lsof", ["-n", "-Fpc0", "+D", worktreePath], {
+    encoding: "buffer", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000, maxBuffer: 1024 * 1024,
+  });
+  if (probe.error || probe.signal || (probe.status !== 0 && probe.status !== 1) || probe.stderr.length) {
+    throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree process inventory is unavailable", probe.error);
+  }
+  const fields = probe.stdout.toString("utf8").split("\0").filter(Boolean);
+  if (fields.some((field) => !/^[pc]/.test(field))) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree process inventory is malformed");
+  const pids = fields.filter((field) => /^p\d+$/.test(field)).map((field) => field.slice(1));
+  if (probe.status === 1 && pids.length) return pids;
+  return pids;
+}
+
 function assertSafeRelease(manifest, commandObserver) {
   const identity = inspectIdentity(manifest, commandObserver);
   // Git's clean status does not reveal a server whose cwd is this worktree.
   // Refuse release rather than guessing when the process inventory is unavailable.
-  let cwdUsers;
-  try {
-    cwdUsers = execFileSync("lsof", ["-t", "+D", manifest.path], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch (cause) {
-    if (cause?.status === 1) cwdUsers = "";
-    else throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree process inventory is unavailable", cause);
-  }
-  if (cwdUsers) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree cannot be released: active cwd/process");
+  const cwdUsers = activeWorkspaceUsers(manifest.path);
+  if (cwdUsers.length) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree cannot be released: active cwd/process");
   if (manifest.headCommit !== identity.headCommit) {
     throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree HEAD changed after becoming reclaimable");
   }

@@ -1,75 +1,49 @@
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, rmSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { createManagedWorktree, releaseManagedWorktree } from "../worktree-lifecycle/managed-worktree.mjs";
 import { markDisposition } from "../worktree-lifecycle/registry.mjs";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const PLAN_KEYS = ["schema", "limits", "actions"];
+const LIMIT_KEYS = ["timeoutMs", "maxOutputBytes", "terminationGraceMs", "maxConcurrentWorkspaces"];
+const ACTION_KEYS = ["id", "kind", "executable", "args"];
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(); }
 function safe(value, name) { if (typeof value !== "string" || !ID.test(value)) throw new Error(`Invalid ${name}`); return value; }
+function exact(value, keys) { return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)); }
 function allocationId(root, goalId, taskId, attempt) { return `validation-${createHash("sha256").update(`${root}\0${goalId}\0${taskId}\0${attempt}`).digest("hex")}`; }
-function birth(pid) {
-  try { return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim() || null; } catch { return null; }
+function hash(value) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+function freeze(value) { return Object.freeze(structuredClone(value)); }
+function birth(pid) { try { const output = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "lstart=", "-o", "command="], { encoding: "buffer", stdio: ["ignore", "pipe", "ignore"] }); return output.length ? createHash("sha256").update(output).digest("hex") : null; } catch { return null; } }
+function groupPids(pgid) { try { return execFileSync("ps", ["-axo", "pid=,pgid="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).split("\n").map((line) => line.trim().split(/\s+/)).filter(([pid, group]) => /^\d+$/.test(pid) && group === String(pgid)).map(([pid]) => Number(pid)); } catch { return null; } }
+function leasePath(stateRoot, id) { return path.join(stateRoot, "validation-leases", `${id}.json`); }
+function readLease(stateRoot, id) { const file = leasePath(stateRoot, id); try { const value = JSON.parse(readFileSync(file, "utf8")); if (!exact(value, ["schema", "id", "originRoot", "stateRoot", "goalId", "taskId", "attempt", "integratedHead", "path", "branch", "ownerToken", "plan", "planHash", "state"]) || value.schema !== "dispatch-ir.v1.validation-lease" || value.planHash !== hash(value.plan)) throw new Error(); return value; } catch { throw new Error("Validation lease is invalid"); } }
+function writeLease(lease, create = false) { const file = leasePath(lease.stateRoot, lease.id); mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); const tmp = `${file}.${process.pid}.${Date.now()}`; writeFileSync(tmp, JSON.stringify(lease), { mode: 0o600, flag: "wx" }); try { if (create && existsSync(file)) throw new Error("Validation lease already exists"); renameSync(tmp, file); } finally { try { unlinkSync(tmp); } catch {} } }
+function validatePlan(plan) {
+  if (!exact(plan, PLAN_KEYS) || plan.schema !== "dispatch-ir.v1.validation-plan" || !exact(plan.limits, LIMIT_KEYS) || !Array.isArray(plan.actions) || plan.actions.length < 1 || plan.actions.length > 16) throw new Error("Invalid validation plan");
+  const l = plan.limits;
+  if (!Number.isInteger(l.timeoutMs) || l.timeoutMs < 50 || l.timeoutMs > 1800000 || !Number.isInteger(l.maxOutputBytes) || l.maxOutputBytes < 1 || l.maxOutputBytes > 1000000 || !Number.isInteger(l.terminationGraceMs) || l.terminationGraceMs < 50 || l.terminationGraceMs > 5000 || !Number.isInteger(l.maxConcurrentWorkspaces) || l.maxConcurrentWorkspaces < 1 || l.maxConcurrentWorkspaces > 4) throw new Error("Invalid validation limits");
+  const ids = new Set(); let validation = false;
+  for (const action of plan.actions) { if (!exact(action, ACTION_KEYS) || !ID.test(action.id) || ids.has(action.id) || !["setup", "validation"].includes(action.kind) || typeof action.executable !== "string" || !path.isAbsolute(action.executable) || !Array.isArray(action.args) || action.args.some((arg) => typeof arg !== "string" || arg.includes("\0") || Buffer.byteLength(arg) > 8192)) throw new Error("Invalid validation action"); ids.add(action.id); validation ||= action.kind === "validation"; }
+  if (!validation) throw new Error("Validation plan requires validation action"); return structuredClone(plan);
 }
-function cleanAt(lease) {
-  if (!existsSync(lease.path) || git(lease.path, "rev-parse", "HEAD") !== lease.integratedHead) throw new Error("Validation workspace Git identity mismatch");
-  if (git(lease.path, "status", "--porcelain=v1", "-z") !== "") throw new Error("Validation workspace must be clean");
-}
+function cleanAt(lease) { if (!existsSync(lease.path) || git(lease.path, "rev-parse", "HEAD") !== lease.integratedHead) throw new Error("Validation workspace Git identity mismatch"); if (git(lease.path, "status", "--porcelain=v1", "-z") !== "") throw new Error("Validation workspace must be clean"); }
+function activeLeases(stateRoot) { const dir = path.join(stateRoot, "validation-leases"); if (!existsSync(dir)) return []; try { return readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => readLease(stateRoot, name.slice(0, -5))).filter((lease) => lease.state !== "released"); } catch { throw new Error("Validation lease store unavailable"); } }
 
-/** Create an independent checkout at the exact integrated commit, never from executor state. */
-export function createValidationWorkspace({ originRoot, stateRoot, goalId, taskId, attempt, integratedHead } = {}) {
-  safe(goalId, "goalId"); safe(taskId, "taskId");
-  if (!Number.isInteger(attempt) || attempt < 1 || typeof stateRoot !== "string") throw new Error("Invalid validation allocation");
-  const root = realpathSync(originRoot);
-  const head = git(root, "rev-parse", "--verify", `${integratedHead}^{commit}`);
-  if (head !== integratedHead) throw new Error("integratedHead must be a full current commit SHA");
-  const id = allocationId(root, goalId, taskId, attempt);
-  const workspacePath = path.resolve(stateRoot, "validation-worktrees", `${goalId}-${taskId}-${attempt}`);
-  const managed = createManagedWorktree({ originRoot: root, id, branch: `ge-validation/${goalId}/${taskId}/${attempt}`, baseCommit: head, path: workspacePath, owner: { kind: "goal-validation", id } });
-  const lease = { id, originRoot: root, path: managed.path, ownerToken: managed.ownerToken, integratedHead: head, goalId, taskId, attempt };
-  cleanAt(lease);
-  return lease;
+export function createValidationWorkspace(input = {}) {
+  if (!exact(input, ["originRoot", "stateRoot", "goalId", "taskId", "attempt", "integratedHead", "validationPlan"]) && !exact(input, ["originRoot", "stateRoot", "goalId", "taskId", "attempt", "integratedHead", "validationPlan", "originRef"])) throw new Error("Invalid validation allocation");
+  const { originRoot, stateRoot, goalId, taskId, attempt, integratedHead, validationPlan, originRef = "HEAD" } = input; safe(goalId, "goalId"); safe(taskId, "taskId"); if (!Number.isInteger(attempt) || attempt < 1 || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) throw new Error("Invalid validation allocation"); if (!/^[a-f0-9]{40}$/.test(integratedHead)) throw new Error("integratedHead must be a full SHA");
+  const plan = validatePlan(validationPlan); const root = realpathSync(originRoot); const current = git(root, "rev-parse", "--verify", `${originRef}^{commit}`); if (current !== integratedHead) throw new Error("integratedHead must be the current full commit SHA");
+  const id = allocationId(root, goalId, taskId, attempt); const active = activeLeases(stateRoot); if (active.some((x) => x.goalId === goalId && x.taskId === taskId) || active.length >= Math.min(plan.limits.maxConcurrentWorkspaces, ...active.map((x) => x.plan.limits.maxConcurrentWorkspaces))) throw new Error("Validation lease capacity conflict");
+  const workspacePath = path.resolve(stateRoot, "validation-worktrees", `${goalId}-${taskId}-${attempt}`); const lease = { schema: "dispatch-ir.v1.validation-lease", id, originRoot: root, stateRoot: path.resolve(stateRoot), goalId, taskId, attempt, integratedHead, path: workspacePath, branch: `ge-validation/${goalId}/${taskId}/${attempt}`, ownerToken: null, plan, planHash: hash(plan), state: "creating" }; writeLease(lease, true);
+  try { const managed = createManagedWorktree({ originRoot: root, id, branch: lease.branch, baseCommit: integratedHead, path: workspacePath, owner: { kind: "goal-validation", id } }); lease.ownerToken = managed.ownerToken; lease.path = managed.path; lease.state = "active"; writeLease(lease); cleanAt(lease); return freeze({ ...lease, validationPlan: plan }); } catch (error) { lease.state = "cleanup-debt"; try { writeLease(lease); } catch {} throw error; }
 }
-
-function killGroup(pid) { try { process.kill(-pid, "SIGTERM"); } catch {} }
-function forceKillGroup(pid) { try { process.kill(-pid, "SIGKILL"); } catch {} }
-
-/** Run an explicit host-provided action in a detached process group and return terminal proof. */
-export function runCleanValidation({ lease, command, args = [], timeoutMs = 30 * 60_000, maxOutputBytes = 1_000_000 } = {}) {
-  if (!lease || typeof command !== "string" || !Array.isArray(args) || !Number.isInteger(timeoutMs) || timeoutMs < 1) throw new Error("Invalid validation plan");
-  cleanAt(lease);
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: lease.path, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HOME: path.join(lease.path, ".validation-home"), TMPDIR: path.join(lease.path, ".validation-tmp") } });
-    const identity = birth(child.pid);
-    if (!identity) { killGroup(child.pid); reject(new Error("Unable to establish PID birth identity")); return; }
-    let output = ""; let timedOut = false; let settled = false;
-    const collect = (chunk) => { if (Buffer.byteLength(output) < maxOutputBytes) output += chunk.toString().slice(0, maxOutputBytes - Buffer.byteLength(output)); };
-    child.stdout.on("data", collect); child.stderr.on("data", collect);
-    const timer = setTimeout(() => { timedOut = true; killGroup(child.pid); setTimeout(() => forceKillGroup(child.pid), 100); }, timeoutMs);
-    child.once("error", (error) => { clearTimeout(timer); reject(error); });
-    child.once("close", (code, signal) => {
-      if (settled) return; settled = true; clearTimeout(timer);
-      // A PID can be reused; terminal proof is the original birth identity plus no live matching PID.
-      const terminal = birth(child.pid) === null;
-      if (!terminal) { reject(new Error("Validation process group is not terminal")); return; }
-      let workspaceClean = false;
-      try { cleanAt(lease); workspaceClean = true; } catch (error) { reject(error); return; }
-      resolve({ status: timedOut ? "timed_out" : code === 0 ? "passed" : "failed", code, signal, output, terminal, pid: child.pid, pidBirthIdentity: identity, workspaceClean });
-    });
-  });
+function loaded(unsafe) { if (!unsafe || typeof unsafe.id !== "string" || typeof unsafe.stateRoot !== "string") throw new Error("Invalid validation lease receipt"); const lease = readLease(unsafe.stateRoot, unsafe.id); for (const key of ["originRoot", "path", "ownerToken", "integratedHead", "planHash"]) if (unsafe[key] !== lease[key]) throw new Error("Validation lease receipt mismatch"); if (lease.state !== "active") throw new Error("Validation lease is not active"); cleanAt(lease); return lease; }
+function safeEnv(home, tmp) { const env = {}; for (const key of ["PATH", "LANG", "LC_ALL", "TZ"]) if (process.env[key]) env[key] = process.env[key]; return { ...env, CI: "1", HOME: home, TMPDIR: tmp }; }
+async function terminate(pgid, grace) { const before = groupPids(pgid); if (before === null) throw new Error("Process group probe unavailable"); try { process.kill(-pgid, "SIGTERM"); } catch {} await new Promise((r) => setTimeout(r, grace)); let pids = groupPids(pgid); if (pids === null) throw new Error("Process group probe unavailable"); if (pids.length) { try { process.kill(-pgid, "SIGKILL"); } catch {} for (let i = 0; i < 30; i++) { await new Promise((r) => setTimeout(r, 20)); pids = groupPids(pgid); if (pids === null) throw new Error("Process group probe unavailable"); if (!pids.length) break; } } if (pids.length) throw new Error("Process group is not terminal"); return `pgid:${pgid}; initial:${before.join(",")}; terminal:empty`; }
+export function runCleanValidation(input = {}) {
+  if (!exact(input, ["lease", "actionId"]) || typeof input.actionId !== "string") throw new Error("runCleanValidation accepts only lease and actionId"); const lease = loaded(input.lease); const action = lease.plan.actions.find((item) => item.id === input.actionId); if (!action) throw new Error("Unknown validation action");
+  return new Promise((resolve, reject) => { const runtime = path.join(lease.stateRoot, "validation-runtime", `${lease.id}-${Date.now()}`); mkdirSync(runtime, { recursive: true, mode: 0o700 }); const home = path.join(runtime, "home"); const tmp = path.join(runtime, "tmp"); mkdirSync(home, { mode: 0o700 }); mkdirSync(tmp, { mode: 0o700 }); const child = spawn(action.executable, action.args, { cwd: lease.path, detached: true, stdio: ["ignore", "pipe", "pipe"], env: safeEnv(home, tmp) }); const identity = birth(child.pid); if (!identity) { try { process.kill(-child.pid, "SIGKILL"); } catch {} reject(new Error("Unable to establish PID birth identity")); return; } let chunks = [], bytes = 0, truncated = false, timedOut = false; const collect = (chunk) => { const room = lease.plan.limits.maxOutputBytes - bytes; if (room <= 0) { truncated = true; return; } const data = Buffer.from(chunk); chunks.push(data.subarray(0, room)); bytes += Math.min(room, data.length); truncated ||= data.length > room; }; child.stdout.on("data", collect); child.stderr.on("data", collect); const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, "SIGTERM"); } catch {} }, lease.plan.limits.timeoutMs); child.once("error", (error) => { clearTimeout(timer); reject(error); }); child.once("close", async (code, signal) => { clearTimeout(timer); try { if (birth(child.pid) !== null) throw new Error("Process birth identity conflict"); const proof = await terminate(child.pid, lease.plan.limits.terminationGraceMs); cleanAt(loaded(input.lease)); rmSync(runtime, { recursive: true, force: true }); resolve({ status: timedOut ? "timed_out" : code === 0 ? "passed" : "failed", code, signal, output: Buffer.concat(chunks).toString("utf8"), outputBytes: bytes, truncated, terminal: true, pid: child.pid, pidBirthIdentity: identity, processGroupTerminalProof: proof, workspaceClean: true }); } catch (error) { try { lease.state = "cleanup-debt"; writeLease(lease); } catch {} reject(error); } }); });
 }
-
-export function releaseValidationWorkspace(lease, { expectedHead } = {}) {
-  if (!lease || expectedHead !== lease.integratedHead) throw new Error("Validation release identity mismatch");
-  cleanAt(lease);
-  // No validation process may retain this workspace as cwd. A portable ps probe is
-  // deliberately conservative: inability to inspect is a release failure.
-  let cwdUsers;
-  try { cwdUsers = execFileSync("lsof", ["-t", "+D", lease.path], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
-  catch (error) { if (error.status === 1) cwdUsers = ""; else throw new Error("Unable to verify validation workspace processes"); }
-  if (cwdUsers) throw new Error("Validation workspace has active cwd/process");
-  const reclaimable = markDisposition({ originRoot: lease.originRoot, id: lease.id, ownerToken: lease.ownerToken, disposition: "reclaimable" });
-  if (reclaimable.headCommit !== expectedHead) throw new Error("Validation release HEAD identity mismatch");
-  return releaseManagedWorktree({ originRoot: lease.originRoot, id: lease.id, ownerToken: lease.ownerToken });
-}
+export function releaseValidationWorkspace(unsafe, { expectedHead } = {}) { const lease = loaded(unsafe); if (expectedHead !== lease.integratedHead) throw new Error("Validation release identity mismatch"); const users = groupPids(process.pid); if (users === null) throw new Error("Process probe unavailable"); const reclaimable = markDisposition({ originRoot: lease.originRoot, id: lease.id, ownerToken: lease.ownerToken, disposition: "reclaimable" }); if (reclaimable.headCommit !== expectedHead) throw new Error("Validation release HEAD identity mismatch"); const result = releaseManagedWorktree({ originRoot: lease.originRoot, id: lease.id, ownerToken: lease.ownerToken }); lease.state = "released"; writeLease(lease); return result; }
