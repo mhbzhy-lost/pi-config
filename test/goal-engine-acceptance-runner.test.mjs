@@ -61,6 +61,21 @@ test("validation rejects non-current/full identity and isolates HOME TMPDIR and 
   assert.equal(result.status, "passed");
 });
 
+test("validation supervisor has a safe environment and managed-worktree cwd", async (t) => {
+  const f = fixture(t); const sentinel = "VALIDATION_SUPERVISOR_SENTINEL"; const previous = process.env[sentinel]; const observation = join(f.state, "supervisor-observation.json");
+  process.env[sentinel] = "fixed-non-sensitive-sentinel";
+  t.after(() => { if (previous === undefined) delete process.env[sentinel]; else process.env[sentinel] = previous; });
+  const managedPath = join(f.state, "validation-worktrees", "g-supervisor-isolation-1");
+  const source = `const{execFileSync}=require('child_process'),fs=require('fs');const p=process.ppid;const environment=execFileSync('/bin/ps',['eww','-p',String(p),'-o','command='],{encoding:'utf8'});const cwd=execFileSync('/usr/sbin/lsof',['-a','-p',String(p),'-d','cwd','-Fn'],{encoding:'utf8'}).split('\\n').find(x=>x.startsWith('n'))?.slice(1);fs.writeFileSync(${JSON.stringify(observation)},JSON.stringify({noSentinel:!environment.includes(${JSON.stringify(sentinel)}),managedCwd:cwd===${JSON.stringify(managedPath)}}));`;
+  const plan = { ...strictPlan(), actions: [{ id: "clean-check", kind: "validation", executable: process.execPath, args: ["-e", source] }] };
+  const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "supervisor-isolation", attempt: 1, integratedHead: f.head, validationPlan: plan });
+  assert.equal(lease.path, managedPath);
+  const result = await runCleanValidation({ lease, actionId: "clean-check" });
+  const observed = JSON.parse(readFileSync(observation, "utf8"));
+  assert.deepEqual(observed, { noSentinel: true, managedCwd: true }, "supervisor environment or cwd is not isolated");
+  assert.equal(result.status, "passed");
+});
+
 function leaseFile(lease) { return join(lease.stateRoot, "validation-leases", `${lease.id}.json`); }
 function worktreeCount(origin) { return git(origin, "worktree", "list", "--porcelain").split("\nworktree ").length; }
 function release(t, lease) { t.after(() => { try { releaseValidationWorkspace(lease, { expectedHead: lease.integratedHead }); } catch {} }); }
@@ -156,6 +171,26 @@ test("run rejects managed owner drift before the action marker is produced", asy
   assert.equal(JSON.parse(readFileSync(manifestFile, "utf8")).ownerToken, replacementOwner);
 });
 
+test("run rechecks managed ownership after recording its supervisor and before action start", async (t) => {
+  const f = fixture(t); const marker = join(f.state, "post-supervisor-owner-marker");
+  const plan = { ...strictPlan(), actions: [{ id: "marker", kind: "validation", executable: process.execPath, args: ["-e", `require('fs').writeFileSync(${JSON.stringify(marker)},'ran')`] }] };
+  const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "post-supervisor-owner", attempt: 1, integratedHead: f.head, validationPlan: plan });
+  const manifestFile = join(f.origin, ".state", "worktree-lifecycle", "leases", `${lease.id}.json`); const saved = readFileSync(manifestFile);
+  let runtimePid;
+  try {
+    const run = runCleanValidation({ lease, actionId: "marker" });
+    const running = JSON.parse(readFileSync(leaseFile(lease), "utf8")).state === "running";
+    const manifest = JSON.parse(saved); writeFileSync(manifestFile, JSON.stringify({ ...manifest, ownerToken: `worktree-owner.v1:${"b".repeat(64)}` }));
+    const rejected = await run.then(() => false, () => true);
+    const durable = JSON.parse(readFileSync(leaseFile(lease), "utf8")); runtimePid = durable.runtime.pid;
+    let supervisorGone = false; try { process.kill(runtimePid, 0); } catch (error) { supervisorGone = error.code === "ESRCH"; }
+    assert.deepEqual({ running, rejected, markerAbsent: !existsSync(marker), cleanupDebt: durable.state === "cleanup-debt", exactSupervisorGone: supervisorGone }, { running: true, rejected: true, markerAbsent: true, cleanupDebt: true, exactSupervisorGone: true });
+  } finally {
+    writeFileSync(manifestFile, saved, { mode: 0o600 });
+    if (Number.isSafeInteger(runtimePid) && runtimePid > 0) assert.throws(() => process.kill(runtimePid, 0), /ESRCH/);
+  }
+});
+
 test("run rejects a detached validation worktree even at the integrated HEAD before action", async (t) => {
   const f = fixture(t); const marker = join(f.state, "detached-marker");
   const plan = { ...strictPlan(), actions: [{ id: "marker", kind: "validation", executable: process.execPath, args: ["-e", `require('fs').writeFileSync(${JSON.stringify(marker)},'ran')`] }] };
@@ -176,6 +211,7 @@ test("validation enforces byte limits and proves its whole process group termina
   assert.equal(result.terminal, true);
   assert.match(result.processGroupTerminalProof, /.+/);
   assert.equal(result.outputBytes <= 5, true);
+  assert.equal(Buffer.byteLength(result.output, "utf8") <= 5, true);
   assert.equal(result.truncated, true);
 });
 
