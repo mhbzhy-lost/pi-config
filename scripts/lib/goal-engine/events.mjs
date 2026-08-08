@@ -3,9 +3,17 @@ import { validateTaskDefinitions } from "./task-definition.mjs";
 import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.mjs";
 
 const LEGACY_SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]);
-const PLANNED_SCHEMA_VERSION = "planned.v1";
+export const PLANNED_SCHEMA_VERSION = "planned.v1";
 const SCHEMA_VERSIONS = new Set([...LEGACY_SCHEMA_VERSIONS, PLANNED_SCHEMA_VERSION]);
 const SCHEMA_RANK = new Map([["goal-engine.event.v1", 1], ["goal-engine.event.v2", 2], ["goal-engine.event.v3", 3]]);
+
+export function schemaVersionForMutation(projection, legacyTargetVersion = "goal-engine.event.v3") {
+  const current = projection?.eventSchemaVersion;
+  if (!current || current === PLANNED_SCHEMA_VERSION) return PLANNED_SCHEMA_VERSION;
+  if (!LEGACY_SCHEMA_VERSIONS.has(current)) throw new Error(`unknown event generation: ${current}`);
+  if (!LEGACY_SCHEMA_VERSIONS.has(legacyTargetVersion)) throw new Error(`invalid legacy mutation generation: ${legacyTargetVersion}`);
+  return SCHEMA_RANK.get(legacyTargetVersion) >= SCHEMA_RANK.get(current) ? legacyTargetVersion : current;
+}
 const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
 const TERMINAL_LIFECYCLES = new Set(["completed", "blocked", "cancelled"]);
 const COMPLETED_V3_EVENTS = new Set([

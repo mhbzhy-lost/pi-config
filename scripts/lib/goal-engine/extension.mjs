@@ -16,7 +16,7 @@ import {
   formatRecoveryInjection,
   selectContinuityCandidate,
 } from "./continuity.mjs";
-import { applyEvent, createProjection } from "./events.mjs";
+import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.mjs";
@@ -145,7 +145,11 @@ function assertInitPreflight(cwd, stateStorage) {
 }
 
 function validateProjectionForDispatch(projection, cwd) {
-  validateTaskDefinitions([...projection.tasks.keys()], taskDefsFromProjection(projection), { cwd, realpathCwd: realpathSync(cwd) });
+  validateTaskDefinitions([...projection.tasks.keys()], taskDefsFromProjection(projection), {
+    cwd,
+    realpathCwd: realpathSync(cwd),
+    planned: projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION,
+  });
   assertPendingTaskContractsCompile(projection, cwd);
 }
 
@@ -453,7 +457,17 @@ function validateSchema(schema, value, path = "goal_amend") {
 }
 
 const string = { type: "string" };
-const acceptanceSchema = { type: "object", properties: { criteria: { type: "array", items: string }, commands: { type: "array", items: string } }, required: ["criteria", "commands"], additionalProperties: false };
+const criterionSchema = {
+  type: "object",
+  properties: {
+    id: string,
+    statement: string,
+    evidenceKinds: { type: "array", items: { type: "string", enum: ["changed-files", "tests", "command", "manual-review"] } },
+  },
+  required: ["id", "statement", "evidenceKinds"],
+  additionalProperties: false,
+};
+const acceptanceSchema = { type: "object", properties: { criteria: { type: "array", items: criterionSchema } }, required: ["criteria"], additionalProperties: false };
 const taskSchema = { type: "object", properties: { id: string, description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, required: ["id", "description", "writePaths", "acceptance"], additionalProperties: false };
 const resolutionSchema = { type: "object", properties: { id: string, disposition: { type: "string", enum: ["tasked", "out_of_scope", "duplicate", "new_goal"] }, task_id: string, reason: string }, required: ["id", "disposition", "reason"], additionalProperties: false };
 const updateTaskSchema = { type: "object", properties: { description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, additionalProperties: false };
@@ -511,8 +525,11 @@ export function createGoalEngineExtension(pi, options = {}) {
     return { cwd: legacyScope.cwd, root: selected.root, storage: selected.storage, stateScope };
   };
   const enforceActionTokens = options.enforceActionTokens !== false;
-  const eventSchemaVersion = enforceActionTokens ? CURRENT_EVENT_VERSION : LEGACY_EVENT_VERSION;
-  const makeGoalEvent = (type, data, goalId) => makeEvent(type, data, goalId, eventSchemaVersion);
+  const legacyEventSchemaVersion = enforceActionTokens ? CURRENT_EVENT_VERSION : LEGACY_EVENT_VERSION;
+  const makeGoalEvent = (type, data, goalId, projection = null) => {
+    if (type !== "goal.created" && !projection) throw new Error(`projection is required to write ${type}`);
+    return makeEvent(type, data, goalId, schemaVersionForMutation(projection, legacyEventSchemaVersion));
+  };
   const inspectExecutorWorkspaceFn = options.inspectExecutorWorkspace || inspectExecutorWorkspace;
   const beforePreservedWorkspaceCleanupBarrier = options.beforePreservedWorkspaceCleanupBarrier;
   const inspectOrphanedExecutorWorkspaceBarrier = options.inspectOrphanedExecutorWorkspaceBarrier;
@@ -604,7 +621,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       params: boundParams,
       sessionId: sessionIdentity(ctx),
     });
-    return appendEventFn(root, makeGoalEvent("goal.action_consumed", consumed, goalId), projection.version);
+    return appendEventFn(root, makeGoalEvent("goal.action_consumed", consumed, goalId, projection), projection.version);
   };
 
   const resolveGoalId = (goalId, root) => {
@@ -666,25 +683,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         dod: { type: "array", items: { type: "string" }, description: "Definition of Done 条目" },
         tasks: {
           type: "array",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string" },
-              description: { type: "string" },
-              deps: { type: "array", items: { type: "string" } },
-              writePaths: { type: "array", items: { type: "string" }, description: "允许写入的路径" },
-              acceptance: {
-                type: "object",
-                properties: {
-                  criteria: { type: "array", items: { type: "string" } },
-                  commands: { type: "array", items: { type: "string" }, description: "验证命令" },
-                },
-                required: ["criteria", "commands"],
-              },
-              workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] },
-            },
-            required: ["id", "description", "writePaths", "acceptance"],
-          },
+          items: taskSchema,
           description: "任务 DAG（含依赖、写入范围、验收标准）",
         },
       },
@@ -724,9 +723,9 @@ export function createGoalEngineExtension(pi, options = {}) {
         };
       }
       try {
-        validateTaskDefinitions(taskIds, taskDefs, { cwd, realpathCwd: realpathSync(cwd) });
+        validateTaskDefinitions(taskIds, taskDefs, { cwd, realpathCwd: realpathSync(cwd), planned: true });
       } catch (error) {
-        throw initError("INVALID_TASK_CONTRACT", error.message, "correct task commands and writePaths, then retry goal_init");
+        throw initError("INVALID_TASK_CONTRACT", error.message, "correct structured criteria and writePaths, then retry goal_init");
       }
 
       const event = makeGoalEvent("goal.created", {
@@ -747,7 +746,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (enforceActionTokens) {
         const candidate = applyEvent(createProjection(), event);
         const binding = buildSessionBinding({ projection: candidate, sessionId: sessionIdentity(ctx), leafId: ctx.sessionManager?.getLeafId?.() || "goal-init" });
-        projection = appendEventBatchFn(root, [event, makeGoalEvent("goal.session_bound", binding, goalId)], 0);
+        projection = appendEventBatchFn(root, [event, makeGoalEvent("goal.session_bound", binding, goalId, candidate)], 0);
       } else projection = appendEventFn(root, event, 0);
 
       return JSON.stringify({
@@ -800,7 +799,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       let actionToken = null;
       if (machineAction) {
         const offer = issueActionOffer(projection, machineAction, sessionId);
-        projection = appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId), projection.version);
+        projection = appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId, projection), projection.version);
         actionToken = offer.token;
       }
       const response = statusResponse(projection, cwd, root, { machineAction, actionToken });
@@ -899,7 +898,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           baseCommit,
           originRef: lease.originRef,
         },
-      }, goalId);
+      }, goalId, projection);
       try {
         appendEventFn(root, event, projection.version);
       } catch (err) {
@@ -983,7 +982,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
       let candidate;
       try {
-        candidate = applyEvent(projection, makeGoalEvent("task.settled", settlementData, goalId));
+        candidate = applyEvent(projection, makeGoalEvent("task.settled", settlementData, goalId, projection));
       } catch (error) {
         if (params.outcome === "succeeded" && task?.status === "dispatched" && /workspace is required/i.test(error.message)) {
           throw workspaceMutationError(error, { tool: "goal_status", params: { goal_id: goalId } });
@@ -1035,8 +1034,8 @@ export function createGoalEngineExtension(pi, options = {}) {
         settlementData.attempt = lease.attempt;
         settlementData.executorHead = confirmedInspection.headCommit;
       }
-      const settleEvent = makeGoalEvent("task.settled", settlementData, goalId);
-      const cpEvent = makeGoalEvent("goal.checkpoint", { nextAction: params.next_action }, goalId);
+      const settleEvent = makeGoalEvent("task.settled", settlementData, goalId, projection);
+      const cpEvent = makeGoalEvent("goal.checkpoint", { nextAction: params.next_action }, goalId, projection);
       projection = appendEventBatchFn(root, [settleEvent, cpEvent], projection.version);
 
       turnsSinceSettle = 0;
@@ -1106,11 +1105,11 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (projection.lifecycle !== "active") throw new Error(`goal is not active: ${projection.lifecycle}`);
 
       if (task.status === "succeeded") {
-        const acceptEvent = makeGoalEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId);
+        const acceptEvent = makeGoalEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId, projection);
         try {
           const afterAccept = applyEvent(projection, acceptEvent);
           projection = goalProgress(afterAccept).accepted === goalProgress(afterAccept).total
-            ? appendEventBatchFn(root, [acceptEvent, makeGoalEvent("goal.completed", { verdict: completionVerdictFor(afterAccept) }, goalId)], projection.version)
+            ? appendEventBatchFn(root, [acceptEvent, makeGoalEvent("goal.completed", { verdict: completionVerdictFor(afterAccept) }, goalId, projection)], projection.version)
             : appendEventFn(root, acceptEvent, projection.version);
         } catch (cause) {
           projection = reloadAfterFailure(cause, (recovered) => recovered.tasks.get(params.task_id)?.status === "accepted");
@@ -1125,7 +1124,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (projection.lifecycle === "completed") return respond(projection, projection.completionVerdict);
       const verdict = completionVerdictFor(projection);
       try {
-        projection = appendEventFn(root, makeGoalEvent("goal.completed", { verdict }, goalId), projection.version);
+        projection = appendEventFn(root, makeGoalEvent("goal.completed", { verdict }, goalId, projection), projection.version);
       } catch (cause) {
         projection = reloadAfterFailure(cause, (recovered) => recovered.lifecycle === "completed"
           && recovered.tasks.get(params.task_id)?.status === "accepted"
@@ -1169,7 +1168,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         const state = metadataBeforeConsume;
         if (state?.status !== "APPROVED" || state.record.challenge.id !== params.challenge_id) throw new Error("metadata challenge approval is missing, stale, consumed, or mismatched");
         const { challenge, decision } = state.record;
-        const event = makeGoalEvent("goal.contract_amended", { proposalHash: challenge.proposalHash, approval: { entryId: decision.id, sessionId: decision.sessionId, source: decision.source }, changes: challenge.targetMetadata }, goalId);
+        const event = makeGoalEvent("goal.contract_amended", { proposalHash: challenge.proposalHash, approval: { entryId: decision.id, sessionId: decision.sessionId, source: decision.source }, changes: challenge.targetMetadata }, goalId, projection);
         const updated = appendEventFn(root, event, projection.version);
         persistMetadata("goal-engine-metadata-consumed", { id: challenge.id });
         metadataChallenges.set(challenge.id, { ...state.record, consumed: true });
@@ -1188,18 +1187,22 @@ export function createGoalEngineExtension(pi, options = {}) {
         addTasks: Object.keys(addTasks).length > 0 ? addTasks : undefined,
         removeTasks: params.remove_tasks || undefined,
         updateTasks: params.update_tasks || undefined,
-      }, goalId);
+      }, goalId, projection);
       const resolutionEvents = () => (params.resolve_discoveries || []).map((resolution) => makeGoalEvent("goal.discovery_resolved", {
         id: resolution.id,
         disposition: resolution.disposition,
         ...(resolution.task_id ? { taskId: resolution.task_id } : {}),
         reason: resolution.reason,
-      }, goalId));
+      }, goalId, projection));
       const applyAndAppendSequence = (events) => {
         let candidate = projection;
         try {
           for (const candidateEvent of events) candidate = applyEvent(candidate, candidateEvent);
-          validateTaskDefinitions([...candidate.tasks.keys()], taskDefsFromProjection(candidate), { cwd, realpathCwd: realpathSync(cwd) });
+          validateTaskDefinitions([...candidate.tasks.keys()], taskDefsFromProjection(candidate), {
+            cwd,
+            realpathCwd: realpathSync(cwd),
+            planned: candidate.eventSchemaVersion === PLANNED_SCHEMA_VERSION,
+          });
           assertPendingTaskContractsCompile(candidate, cwd);
         } catch (error) {
           throw initError("INVALID_GOAL_CONTRACT", error.message, "correct the typed amendment operation and retry goal_amend after goal_status");
@@ -1219,7 +1222,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         const observationIds = params.basis?.discovery_ids || params.resolve_discoveries.map((resolution) => resolution.id);
         const events = [
           ...resolutionEvents(),
-          makeGoalEvent("goal.reopened", { reason: params.reason, observationIds }, goalId),
+          makeGoalEvent("goal.reopened", { reason: params.reason, observationIds }, goalId, projection),
           amendmentEvent(),
         ];
         return statusResponse(applyAndAppendSequence(events), cwd, root);
@@ -1227,7 +1230,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (params.operation === "detach_session") {
         const event = makeGoalEvent("goal.session_detached", {
           sessionId: params.session_id || sessionIdentity(ctx), reason: params.reason,
-        }, goalId);
+        }, goalId, projection);
         return statusResponse(applyAndAppendSequence([event]), cwd, root);
       }
       if (params.operation === "resolve_blocked") {
@@ -1237,7 +1240,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           taskId, resolution: params.blocked_resolution,
           ...(params.replacement_task_id ? { replacementTaskId: params.replacement_task_id } : {}),
           reason: params.reason,
-        }, goalId)];
+        }, goalId, projection)];
         const hasAmendmentPayload = Object.keys(addTasks).length > 0
           || (params.remove_tasks?.length || 0) > 0
           || Object.keys(params.update_tasks || {}).length > 0;
@@ -1250,7 +1253,11 @@ export function createGoalEngineExtension(pi, options = {}) {
       const event = amendmentEvent();
       try {
         const candidate = applyEvent(projection, event);
-        validateTaskDefinitions([...candidate.tasks.keys()], taskDefsFromProjection(candidate), { cwd, realpathCwd: realpathSync(cwd) });
+        validateTaskDefinitions([...candidate.tasks.keys()], taskDefsFromProjection(candidate), {
+          cwd,
+          realpathCwd: realpathSync(cwd),
+          planned: candidate.eventSchemaVersion === PLANNED_SCHEMA_VERSION,
+        });
         assertPendingTaskContractsCompile(candidate, cwd);
       } catch (error) {
         throw initError("INVALID_GOAL_CONTRACT", error.message, "correct derived task, goal metadata, or requirements limits, then retry goal_amend");
@@ -1386,7 +1393,7 @@ export function createGoalEngineExtension(pi, options = {}) {
             },
             executorHead: firstInventory.executorHead,
             reason: "verified exact orphan executor workspace recovery",
-          }, goalId);
+          }, goalId, projection);
           appendEventFn(root, recoveryEvent, projection.version);
           projection = loadProjectionFn(root, goalId);
           const recoveredTask = projection.tasks.get(taskId);
@@ -1501,7 +1508,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           attempt: taskWorkspace.attempt,
           executorHead: taskWorkspace.executorHead,
           released: true,
-        }, goalId);
+        }, goalId, projection);
         projection = appendEventFn(root, releaseEvent, projection.version);
         activeLeases.delete(key);
         return JSON.stringify({ action: "discarded", released: true });
@@ -1601,7 +1608,7 @@ export function createGoalEngineExtension(pi, options = {}) {
             attempt: currentWorkspace.attempt,
             action: currentWorkspace.requestedAction,
             released: false,
-          }, goalId);
+          }, goalId, projection);
           projection = appendEventFn(root, disposedEvent, projection.version);
           return false;
         }
@@ -1627,7 +1634,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           attempt: currentWorkspace.attempt,
           action: currentWorkspace.requestedAction,
           released: true,
-        }, goalId);
+        }, goalId, projection);
         projection = appendEventFn(root, disposedEvent, projection.version);
         return true;
       };
@@ -1661,7 +1668,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           executorHead,
           originHeadBefore: originBaseline.currentHead,
           originRef: lease.originRef,
-        }, goalId);
+        }, goalId, projection);
         projection = appendEventFn(root, startedEvent, projection.version);
 
         const nextTask = projection.tasks.get(taskId);
@@ -1676,7 +1683,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           strategy,
           executorHead: nextTask.workspace.executorHead,
           originHead: gitHead(cwd),
-        }, goalId);
+        }, goalId, projection);
         projection = appendEventFn(root, appliedEvent, projection.version);
       } else if (taskWorkspace.phase === "disposing") {
         if (taskWorkspace.requestedAction !== action) {
@@ -1703,7 +1710,7 @@ export function createGoalEngineExtension(pi, options = {}) {
               originHeadBefore: originBaseline.currentHead,
               originRef: disposingWorkspace.originRef,
               reason: "clean-forward-origin-advance",
-            }, goalId);
+            }, goalId, projection);
             projection = appendEventFn(root, rebasedEvent, projection.version);
             disposingWorkspace = projection.tasks.get(taskId).workspace;
           }
@@ -1717,7 +1724,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           strategy,
           executorHead: disposingWorkspace.executorHead,
           originHead: gitHead(cwd),
-        }, goalId);
+        }, goalId, projection);
         projection = appendEventFn(root, appliedEvent, projection.version);
       } else if (taskWorkspace.phase === "applied") {
         if (taskWorkspace.requestedAction !== action) {
@@ -1810,7 +1817,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       let projection = projections.find((candidate) => candidate.goalId === selected.goalId);
       if (pendingInput && projection.lifecycle === "completed" && projection.sessionBindings.some((binding) => binding.sessionId === sessionId && binding.state === "watching")) {
         const discovery = buildDiscovery({ userText: pendingInput.text, userEntryId: pendingInput.entryId || ctx.sessionManager?.getLeafId?.() || crypto.randomUUID(), paths: [], sessionId, source: "user_intent" });
-        if (!projection.continuity.observations[discovery.id]) projection = appendEventFn(root, makeGoalEvent("goal.discovery_recorded", discovery, projection.goalId), projection.version);
+        if (!projection.continuity.observations[discovery.id]) projection = appendEventFn(root, makeGoalEvent("goal.discovery_recorded", discovery, projection.goalId, projection), projection.version);
       }
       pendingInput = null;
       return { message: { customType: "goal-engine-recovery", content: formatRecoveryInjection(projection), display: true } };
@@ -1883,7 +1890,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       userEntryId: ctx.sessionManager?.getLeafId?.() || undefined,
     });
     try {
-      appendEventFn(root, makeGoalEvent("goal.continuity_checkpointed", checkpoint, projection.goalId), projection.version);
+      appendEventFn(root, makeGoalEvent("goal.continuity_checkpointed", checkpoint, projection.goalId, projection), projection.version);
       return undefined;
     } catch (error) {
       activateRecoveryLatch(projection.goalId, error);

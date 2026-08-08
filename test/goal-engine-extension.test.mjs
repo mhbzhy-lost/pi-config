@@ -76,6 +76,17 @@ function objectiveToGoalId(objective) {
   return objective.toLowerCase().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 80);
 }
 
+function plannedAcceptance(statements, { id = "criterion-1", evidenceKinds = ["tests"] } = {}) {
+  const values = Array.isArray(statements) ? statements : [statements];
+  return {
+    criteria: values.map((statement, index) => ({
+      id: values.length === 1 ? id : `${id}-${index + 1}`,
+      statement,
+      evidenceKinds: [...evidenceKinds],
+    })),
+  };
+}
+
 function oneTaskGoal(objective) {
   return {
     objective,
@@ -84,7 +95,7 @@ function oneTaskGoal(objective) {
       description: "exercise Goal state storage",
       deps: [],
       writePaths: ["src/t1.ts"],
-      acceptance: { criteria: ["state remains recoverable"], commands: ["true"] },
+      acceptance: plannedAcceptance("state remains recoverable"),
       workflow: "tdd",
     }],
   };
@@ -266,6 +277,24 @@ function readGoalEvents(cwd, goalId) {
   const raw = readFileSync(path, "utf8").trim();
   if (!raw) return [];
   return raw.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function writeGoalHistory(cwd, events, { lifecycle = "active" } = {}) {
+  const goalId = events[0].goalId;
+  const root = join(cwd, ".state/goal-engine");
+  mkdirSync(join(root, "goals", goalId), { recursive: true });
+  writeFileSync(goalEventsPath(cwd, goalId), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  writeFileSync(join(root, "registry.json"), JSON.stringify({
+    schema_version: "goal-engine.registry.v1",
+    active_goal_ids: lifecycle === "active" ? [goalId] : [],
+    goals: {
+      [goalId]: {
+        lifecycle,
+        objective: events[0].data.objective,
+        updatedAt: events.at(-1).occurredAt,
+      },
+    },
+  }));
 }
 
 function createFailingAppendEvent(targetType) {
@@ -460,7 +489,7 @@ test("goal_settle classifies Git infrastructure workspace inspection without sid
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Break Git metadata", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Break Git metadata", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
   const gitFile = join(workspace.path, ".git");
   assert.match(readFileSync(gitFile, "utf8"), /^gitdir: /);
@@ -479,7 +508,7 @@ test("goal_settle classifies top-level identity mismatch without side effects", 
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Fall back to parent repository", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Fall back to parent repository", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
   renameSync(join(workspace.path, ".git"), join(workspace.path, ".git-moved"));
   const before = rejectionSnapshot(cwd, goalId);
@@ -502,7 +531,7 @@ test("goal_settle failed and blocked dirty no-commit recovery characterizes disc
     const goalId = objectiveToGoalId(objective);
     const pi = createMockPi(cwd);
     createGoalEngineExtension(pi);
-    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Leave ordinary dirty work", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Leave ordinary dirty work", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     writeFileSync(join(workspace.path, "ordinary-dirty.txt"), "dirty\n");
     await invoke(pi, "goal_settle", { task_id: "t1", outcome, reason: outcome === "blocked" ? "Waiting for an external dependency before the executor can continue." : undefined, next_action: "Keep the dirty executor workspace available for the selected typed disposition action." });
@@ -609,6 +638,11 @@ test("historical safe ignored state dispatch remains available", async () => {
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   assert.equal(dispatched.status, "dispatched");
   assert.equal(dispatched.workspace.attempt, 1);
+  assert.deepEqual(dispatched.contract.acceptance.commands, ["true"]);
+  assert.deepEqual(readGoalEvents(cwd, goalId).map((record) => record.schemaVersion), [
+    "goal-engine.event.v2",
+    "goal-engine.event.v2",
+  ]);
 });
 
 test("goal_amend exposes a strict discriminated seven-operation schema", () => {
@@ -645,10 +679,13 @@ test("goal_amend exposes a strict discriminated seven-operation schema", () => {
   assert.deepEqual(task.required.sort(), ["acceptance", "description", "id", "writePaths"]);
   assert.equal(task.additionalProperties, false);
   assert.equal(task.properties.acceptance.additionalProperties, false);
-  assert.deepEqual(task.properties.acceptance.required.sort(), ["commands", "criteria"]);
+  assert.deepEqual(task.properties.acceptance.required, ["criteria"]);
+  assert.deepEqual(task.properties.acceptance.properties.criteria.items.required.sort(), ["evidenceKinds", "id", "statement"]);
+  assert.equal(task.properties.acceptance.properties.criteria.items.additionalProperties, false);
   const updateAcceptance = branch("patch_active").properties.update_tasks.additionalProperties.properties.acceptance;
   assert.equal(updateAcceptance.additionalProperties, false);
-  assert.deepEqual(updateAcceptance.required.sort(), ["commands", "criteria"]);
+  assert.deepEqual(updateAcceptance.required, ["criteria"]);
+  assert.equal(Object.hasOwn(updateAcceptance.properties, "commands"), false);
 });
 
 test("goal_amend prepareArguments fail-closed validates strict operation shapes", () => {
@@ -656,7 +693,7 @@ test("goal_amend prepareArguments fail-closed validates strict operation shapes"
   createGoalEngineExtension(pi);
   const prepare = pi.tools.find((tool) => tool.name === "goal_amend").prepareArguments;
   const discovery = { id: "d1", disposition: "tasked", reason: "The completed goal needs a follow-up", task_id: "t2" };
-  const task = { id: "t2", description: "Follow-up", writePaths: ["src/t2.ts"], acceptance: { criteria: ["works"], commands: ["true"] } };
+  const task = { id: "t2", description: "Follow-up", writePaths: ["src/t2.ts"], acceptance: plannedAcceptance(["works"]) };
   assert.deepEqual(prepare({ reason: "legacy patch", action_token: "token" }), { operation: "patch_active", reason: "legacy patch", action_token: "token" });
   for (const invalid of [
     { operation: "invalid", reason: "x", action_token: "t" },
@@ -718,6 +755,116 @@ test("tool execution rejects a missing cwd context", async () => {
   );
 });
 
+test("goal_init writes strict planned.v1 records and rejects commands atomically", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  const objective = "Strict Planned writer";
+  const goalId = objectiveToGoalId(objective);
+
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [{
+      id: "t1",
+      description: "persist a structured criterion",
+      writePaths: ["src/planned.ts"],
+      acceptance: plannedAcceptance("planned criterion remains bound", {
+        id: "planned-bound",
+        evidenceKinds: ["changed-files", "tests"],
+      }),
+      workflow: "tdd",
+    }],
+  });
+
+  const events = readGoalEvents(cwd, goalId);
+  assert.deepEqual(events.map((event) => event.type), ["goal.created"]);
+  assert.deepEqual(events.map((event) => event.schemaVersion), ["planned.v1"]);
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
+  assert.deepEqual(projection.tasks.get("t1").acceptance, plannedAcceptance("planned criterion remains bound", {
+    id: "planned-bound",
+    evidenceKinds: ["changed-files", "tests"],
+  }));
+
+  const invalidCwd = tmpCwd();
+  const invalidPi = createMockPi(invalidCwd);
+  createGoalEngineExtension(invalidPi);
+  await assert.rejects(
+    () => invoke(invalidPi, "goal_init", {
+      objective: "Reject Planned commands",
+      tasks: [{
+        id: "t1",
+        description: "reject command transport",
+        writePaths: ["src/rejected.ts"],
+        acceptance: { ...plannedAcceptance("commands never enter Planned"), commands: ["true"] },
+        workflow: "tdd",
+      }],
+    }),
+    (error) => error.code === "INVALID_TASK_CONTRACT" && /commands|unknown field|only criteria/i.test(error.message),
+  );
+  assert.deepEqual(readGoalEvents(invalidCwd, objectiveToGoalId("Reject Planned commands")), []);
+});
+
+test("planned.v1 production lifecycle keeps every writer record in one generation", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  const objective = "Planned production writer lifecycle";
+  const goalId = objectiveToGoalId(objective);
+
+  await invoke(pi, "goal_init", {
+    objective,
+    tasks: [{
+      id: "t1",
+      description: "exercise every production writer phase",
+      writePaths: ["src/t1.ts"],
+      acceptance: plannedAcceptance("all writer phases retain generation", { id: "writer-generation" }),
+      workflow: "tdd",
+    }],
+  });
+  await emitHook(pi, "session_before_compact", {
+    reason: "overflow",
+    willRetry: true,
+    preparation: { fileOps: { read: new Set(), written: new Set(["src/t1.ts"]), edited: new Set() } },
+  });
+
+  let status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", {
+    task_id: "t1",
+    action_token: status.action_token,
+  }));
+  assert.equal(Object.hasOwn(dispatched.contract.acceptance, "commands"), false);
+  assert.deepEqual(dispatched.contract.acceptance.criteria, [
+    JSON.stringify({ id: "writer-generation", statement: "all writer phases retain generation", evidenceKinds: ["tests"] }),
+  ]);
+  commitWorkspaceChange(dispatched.workspace, "src/t1.ts", "export const planned = true;\n", "feat: planned writer lifecycle");
+
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_settle", {
+    task_id: "t1",
+    outcome: "succeeded",
+    evidence: { type: "diff", ref: "git diff HEAD~1 -- src/t1.ts" },
+    evidence_source: "self_produced",
+    next_action: "Integrate the Planned writer fixture and verify its complete event generation",
+    action_token: status.action_token,
+  });
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_integrate", {
+    task_id: "t1",
+    action: "integrate",
+    action_token: status.action_token,
+  });
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_accept", { task_id: "t1", action_token: status.action_token });
+
+  const events = readGoalEvents(cwd, goalId);
+  assert.ok(events.some((event) => event.type === "goal.session_bound"));
+  assert.ok(events.some((event) => event.type === "goal.continuity_checkpointed"));
+  assert.ok(events.some((event) => event.type === "goal.action_offered"));
+  assert.ok(events.some((event) => event.type === "task.workspace_disposition_started"));
+  assert.ok(events.some((event) => event.type === "goal.completed"));
+  assert.deepEqual(new Set(events.map((event) => event.schemaVersion)), new Set(["planned.v1"]));
+});
+
 test("goal_init creates goal and returns runnable frontier", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
@@ -728,8 +875,8 @@ test("goal_init creates goal and returns runnable frontier", async () => {
     objective: "Build the authentication module with token validation",
     dod: ["All auth tests pass"],
     tasks: [
-      { id: "t1", description: "Implement token validation logic", deps: [], writePaths: ["src/auth/token.ts"], acceptance: { criteria: ["Handles expiry"], commands: ["node --test test/token.test.mjs"] }, workflow: "tdd" },
-      { id: "t2", description: "Add session management layer", deps: ["t1"], writePaths: ["src/auth/session.ts"], acceptance: { criteria: ["Session persists"], commands: ["node --test test/session.test.mjs"] }, workflow: "tdd" },
+      { id: "t1", description: "Implement token validation logic", deps: [], writePaths: ["src/auth/token.ts"], acceptance: plannedAcceptance(["Handles expiry"]), workflow: "tdd" },
+      { id: "t2", description: "Add session management layer", deps: ["t1"], writePaths: ["src/auth/session.ts"], acceptance: plannedAcceptance(["Session persists"]), workflow: "tdd" },
     ],
   }));
 
@@ -754,7 +901,7 @@ test("goal_init rejects unsafe Git preflight before creating state", async () =>
     const pi = createMockPi(cwd);
     createGoalEngineExtension(pi);
     await assert.rejects(
-      () => invoke(pi, "goal_init", { objective: `Unsafe ${fixture.name}`, tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] }),
+      () => invoke(pi, "goal_init", { objective: `Unsafe ${fixture.name}`, tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] }),
       (error) => error.code === fixture.expectedCode
         && /observed=.*remediation=.*stateChanged=false/.test(error.message),
       fixture.name,
@@ -770,7 +917,7 @@ test("goal_init rejects a nonexistent absolute cwd before creating state", async
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
   await assert.rejects(
-    () => invoke(pi, "goal_init", { objective: "Missing cwd", tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] }),
+    () => invoke(pi, "goal_init", { objective: "Missing cwd", tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] }),
     (error) => error.code === "GIT_INFRASTRUCTURE_ERROR"
       && /GIT_INFRASTRUCTURE_ERROR: observed=cwd realpath could not be read: .*; remediation=repair filesystem access and retry goal_init; stateChanged=false/.test(error.message),
   );
@@ -791,12 +938,12 @@ test("goal_status rejects a nonexistent absolute cwd with the stable filesystem 
 });
 
 test("goal_init metadata-derived dispatch gates reject atomically", async () => {
-  const base = { id: "t1", description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" };
+  const base = { id: "t1", description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["works"]), workflow: "existing-tests" };
   const cases = [
     ["objective fact", { objective: "o".repeat(4097), tasks: [base] }],
     ["scope joined fact", { objective: "scope gate", scope: ["s".repeat(4090)], tasks: [base] }],
     ["non-goals", { objective: "non-goals gate", non_goals: Array.from({ length: 33 }, (_, i) => `non-goal ${i}`), tasks: [base] }],
-    ["DoD requirements", { objective: "dod gate", dod: ["goal proof"], tasks: [{ ...base, acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `criterion ${i}`), commands: ["true"] } }] }],
+    ["DoD requirements", { objective: "dod gate", dod: ["goal proof"], tasks: [{ ...base, acceptance: plannedAcceptance(Array.from({ length: 32 }, (_, i) => `criterion ${i}`)) }] }],
     ["composite id", { objective: "g".repeat(80), tasks: [{ ...base, id: "t".repeat(80) }] }],
   ];
   for (const [name, params] of cases) {
@@ -819,7 +966,7 @@ test("goal_init wraps invalid task contracts before any persistent side effect",
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
   await assert.rejects(
-    () => invoke(pi, "goal_init", { objective: "Bad contract", tasks: [{ id: "t1", description: "task", writePaths: ["src/*"], acceptance: { criteria: ["works"], commands: ["cd -- /tmp"] }, workflow: "tdd" }] }),
+    () => invoke(pi, "goal_init", { objective: "Bad contract", tasks: [{ id: "t1", description: "task", writePaths: ["src/*"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] }),
     (error) => error.code === "INVALID_TASK_CONTRACT" && /observed=.*unsupported.*remediation=.*stateChanged=false/i.test(error.message),
   );
   assert.equal(existsSync(join(cwd, ".state/goal-engine")), false);
@@ -829,10 +976,10 @@ test("goal_init rejects bounded task contracts and wrapper escapes before state"
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  const base = { id: "t1", description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" };
+  const base = { id: "t1", description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" };
   const invalid = [
     [{ ...base, description: "x".repeat(4097) }],
-    [{ ...base, acceptance: { criteria: ["works"], commands: ["sh -c 'cd /tmp'"] } }],
+    [{ ...base, acceptance: { ...plannedAcceptance(["works"]), commands: ["sh -c 'cd /tmp'"] } }],
     Array.from({ length: 33 }, (_, i) => ({ ...base, id: `t${i}` })),
   ];
   for (const tasks of invalid) {
@@ -845,17 +992,17 @@ test("goal_init preflights derived dispatch contracts before appending", async (
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  const task = { id: "t1", description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: Array.from({ length: 32 }, (_, i) => `criterion ${i}`), commands: ["true"] }, workflow: "tdd" };
+  const task = { id: "t1", description: "task", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(Array.from({ length: 32 }, (_, i) => `criterion ${i}`)), workflow: "tdd" };
   await assert.rejects(() => invoke(pi, "goal_init", { objective: "Derived contract failure", tasks: [task] }), (error) => error.code === "INVALID_GOAL_CONTRACT" && /observed=.*requirements.*remediation=.*stateChanged=false/i.test(error.message));
   assert.equal(existsSync(join(cwd, ".state/goal-engine")), false);
-  await assert.rejects(() => invoke(pi, "goal_init", { objective: "!!!", tasks: [{ ...task, acceptance: { criteria: ["works"], commands: ["true"] } }] }), (error) => error.code === "INVALID_GOAL_CONTRACT" && /observed=.*objective.*remediation=.*stateChanged=false/i.test(error.message));
+  await assert.rejects(() => invoke(pi, "goal_init", { objective: "!!!", tasks: [{ ...task, acceptance: plannedAcceptance(["works"]) }] }), (error) => error.code === "INVALID_GOAL_CONTRACT" && /observed=.*objective.*remediation=.*stateChanged=false/i.test(error.message));
 });
 
 test("goal_init active-goal error embeds actionable goal_status next action", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  const params = { objective: "Only active goal", tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] };
+  const params = { objective: "Only active goal", tasks: [{ id: "t1", description: "task", writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] };
   await invoke(pi, "goal_init", params);
   await assert.rejects(() => invoke(pi, "goal_init", { ...params, objective: "Another goal" }), (error) =>
     error.code === "ACTIVE_GOAL_EXISTS"
@@ -872,7 +1019,7 @@ test("goal_status returns full recovery context", async () => {
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective: "Status recovery test goal",
-    tasks: [{ id: "t1", description: "First task work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "First task work", deps: [], writePaths: ["a.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }],
   });
 
   const status = pi.tools.find((t) => t.name === "goal_status");
@@ -897,7 +1044,7 @@ test("goal_status exposes machine action state across lifecycle (machine action)
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective: "Machine action state goal",
-    tasks: [{ id: "t1", description: "Flow task for machine action assertions", deps: [], writePaths: ["src/machine.ts"], acceptance: { criteria: ["flow"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Flow task for machine action assertions", deps: [], writePaths: ["src/machine.ts"], acceptance: plannedAcceptance(["flow"]), workflow: "tdd" }],
   });
 
   let snapshot = JSON.parse(await invoke(pi, "goal_status", {}));
@@ -975,7 +1122,7 @@ test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", asy
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective: "Dispatch IR test goal",
-    tasks: [{ id: "t1", description: "Implement the widget parser module", deps: [], writePaths: ["src/parser.ts"], acceptance: { criteria: ["Parses valid input"], commands: ["node --test test/parser.test.mjs"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Implement the widget parser module", deps: [], writePaths: ["src/parser.ts"], acceptance: plannedAcceptance(["Parses valid input"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -987,7 +1134,10 @@ test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", asy
   assert.equal(result.contract.agent, "executor");
   assert.ok(result.contract.hash);
   assert.deepEqual(result.contract.boundaries.writePaths, ["src/parser.ts"]);
-  assert.deepEqual(result.contract.acceptance.commands, ["node --test test/parser.test.mjs"]);
+  assert.equal(Object.hasOwn(result.contract.acceptance, "commands"), false);
+  assert.deepEqual(result.contract.acceptance.criteria, [
+    JSON.stringify({ id: "criterion-1", statement: "Parses valid input", evidenceKinds: ["tests"] }),
+  ]);
   assert.ok(result.workspace);
   assert.ok(result.workspace.path.includes("worktrees"));
   assert.ok(result.workspace.branch.startsWith("ge/"));
@@ -1003,7 +1153,7 @@ test("goal_dispatch supports existing-tests tasks with a workflow reason", async
 
   await invoke(pi, "goal_init", {
     objective: "Existing acceptance suite goal",
-    tasks: [{ id: "verify", description: "Verify the implementation with the existing acceptance suite", deps: [], writePaths: ["src/verified.ts"], acceptance: { criteria: ["Existing acceptance suite passes"], commands: ["node --test test/verified.test.mjs"] }, workflow: "existing-tests" }],
+    tasks: [{ id: "verify", description: "Verify the implementation with the existing acceptance suite", deps: [], writePaths: ["src/verified.ts"], acceptance: plannedAcceptance(["Existing acceptance suite passes"]), workflow: "existing-tests" }],
   });
 
   const result = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "verify" }));
@@ -1025,7 +1175,7 @@ test("goal_dispatch supports docs-only tasks with a workflow reason", async () =
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective: "Independent documentation review goal",
-    tasks: [{ id: "review", description: "Review implementation and write the acceptance report", deps: [], writePaths: ["reports/review.md"], acceptance: { criteria: ["Report has verdict"], commands: ["test -f reports/review.md"] }, workflow: "docs-only" }],
+    tasks: [{ id: "review", description: "Review implementation and write the acceptance report", deps: [], writePaths: ["reports/review.md"], acceptance: plannedAcceptance(["Report has verdict"]), workflow: "docs-only" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -1044,7 +1194,7 @@ test("goal_dispatch cleans the workspace when contract compilation fails", async
   const init = pi.tools.find((t) => t.name === "goal_init");
   await assert.rejects(() => invoke(pi, "goal_init", {
     objective: "Dispatch cleanup test goal",
-    tasks: [{ id: "t1", description: "Compile an invalid path-boundary contract", deps: [], writePaths: ["../../etc/passwd"], acceptance: { criteria: ["Compilation fails"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Compile an invalid path-boundary contract", deps: [], writePaths: ["../../etc/passwd"], acceptance: plannedAcceptance(["Compilation fails"]), workflow: "tdd" }],
   }), /repo-relative/);
 
   const worktreesRoot = join(cwd, ".state/goal-engine/worktrees");
@@ -1065,7 +1215,7 @@ test("goal_dispatch durable-then-throw acknowledges committed dispatch and survi
   createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "durable dispatch", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "durable dispatch", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }],
   });
 
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
@@ -1109,7 +1259,7 @@ test("goal_dispatch before-durable append failure cleans resources and rethrows"
   createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "before durable", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "before durable", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }],
   });
   const before = loadProjection(join(cwd, ".state/goal-engine"), goalId);
   await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), /injected appendEvent failure/);
@@ -1139,7 +1289,7 @@ test("ambiguous dispatch recovery failure preserves resources and reports stable
   });
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "ambiguous", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "ambiguous", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }],
   });
   await assert.rejects(
     () => invoke(pi, "goal_dispatch", { task_id: "t1" }),
@@ -1170,7 +1320,7 @@ test("ambiguous dispatch durable identity conflict preserves resources and event
   });
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "identity conflict", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "identity conflict", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }],
   });
 
   await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), (error) => error.code === "AMBIGUOUS_DISPATCH_COMMIT");
@@ -1204,7 +1354,7 @@ test("ambiguous dispatch wrong goal recovery preserves resources", async () => {
   });
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "wrong goal", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "wrong goal", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }],
   });
 
   await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), (error) => error.code === "AMBIGUOUS_DISPATCH_COMMIT");
@@ -1227,7 +1377,7 @@ test("goal_integrate recovers a persisted workspace lease after extension restar
   const init = firstPi.tools.find((t) => t.name === "goal_init");
   await invoke(firstPi, "goal_init", {
     objective: "Restart integration test goal",
-    tasks: [{ id: "t1", description: "Create a persisted executor artifact", deps: [], writePaths: ["src/result.ts"], acceptance: { criteria: ["result exists"], commands: ["test -f src/result.ts"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Create a persisted executor artifact", deps: [], writePaths: ["src/result.ts"], acceptance: plannedAcceptance(["result exists"]), workflow: "tdd" }],
   });
 
   const dispatch = firstPi.tools.find((t) => t.name === "goal_dispatch");
@@ -1269,7 +1419,7 @@ test("goal_accept requires integrated workspace before acceptance", async () => 
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "The only task in this goal", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "The only task in this goal", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -1308,7 +1458,7 @@ test("goal_integrate requires a settled task and keeps active workspace for pre-
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Work before settle", deps: [], writePaths: ["src/pre.ts"], acceptance: { criteria: ["pre-settlement"], commands: ["node --test test/pre.test.mjs"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Work before settle", deps: [], writePaths: ["src/pre.ts"], acceptance: plannedAcceptance(["pre-settlement"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -1339,7 +1489,7 @@ test("goal_settle rejects succeeded no-op workspace and failed settle still allo
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "No-op integrate failure path", deps: [], writePaths: ["src/noop.ts"], acceptance: { criteria: ["noop"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "No-op integrate failure path", deps: [], writePaths: ["src/noop.ts"], acceptance: plannedAcceptance(["noop"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -1387,7 +1537,7 @@ test("goal_settle classifies ancestor, empty, and missing persisted lease before
     const goalId = objectiveToGoalId(objective);
     const pi = createMockPi(cwd);
     createGoalEngineExtension(pi);
-    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write authorized source", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write authorized source", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: x");
     scenario.prepare(workspace, workspaceState(cwd, goalId, "t1"));
@@ -1415,7 +1565,7 @@ test("goal_settle classifies unrelated, wrong live branch, tampered lease, and p
     const goalId = objectiveToGoalId(objective);
     const pi = createMockPi(cwd);
     createGoalEngineExtension(pi);
-    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write source", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write source", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: x");
     scenario.prepare(workspace, workspaceState(cwd, goalId, "t1"));
@@ -1436,7 +1586,7 @@ test("active discard and preserve classify live branch and missing lease without
     const goalId = objectiveToGoalId(objective);
     const pi = createMockPi(cwd);
     createGoalEngineExtension(pi);
-    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Disposition", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Disposition", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     await invoke(pi, "goal_settle", { task_id: "t1", outcome: "failed", next_action: "Dispose the executor workspace using the selected typed disposition action." });
     scenario.prepare(workspace, workspaceState(cwd, goalId, "t1"));
@@ -1452,7 +1602,7 @@ test("goal_settle rejects dirty executor workspace without state changes", async
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: { criteria: ["allowed"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: plannedAcceptance(["allowed"]), workflow: "tdd" }] });
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   commitWorkspaceChange(dispatched.workspace, "src/allowed.ts", "export const allowed = true;\n", "feat: allowed");
   writeFileSync(join(dispatched.workspace.path, "src", "staged.ts"), "staged\n");
@@ -1471,7 +1621,7 @@ test("goal_settle persists settlement identity from the inspected executor HEAD"
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: { criteria: ["allowed"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: plannedAcceptance(["allowed"]), workflow: "tdd" }] });
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
   commitWorkspaceChange(dispatched, "src/allowed.ts", "export const allowed = true;\n", "feat: allowed");
   const head = git(dispatched.path, "rev-parse", "HEAD");
@@ -1486,7 +1636,7 @@ test("goal_settle permits clean authorized commits with runtime-only artifacts",
   const objective = "Clean settle gate test goal";
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: { criteria: ["allowed"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: plannedAcceptance(["allowed"]), workflow: "tdd" }] });
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   commitWorkspaceChange(dispatched.workspace, "src/allowed.ts", "export const allowed = true;\n", "feat: allowed");
   mkdirSync(join(dispatched.workspace.path, ".pi-subagents"), { recursive: true });
@@ -1507,7 +1657,7 @@ test("goal_settle rejects changedFiles outside writePaths and keeps workspace fo
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Write forbidden file", deps: [], writePaths: ["src/allowed.ts"], acceptance: { criteria: ["write gated"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Write forbidden file", deps: [], writePaths: ["src/allowed.ts"], acceptance: plannedAcceptance(["write gated"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -1546,7 +1696,7 @@ test("goal_settle rejects rename from forbidden source while preserving retry re
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Move protected source", deps: [], writePaths: ["allowed/**"], acceptance: { criteria: ["source is gated"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Move protected source", deps: [], writePaths: ["allowed/**"], acceptance: plannedAcceptance(["source is gated"]), workflow: "tdd" }],
   });
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   mkdirSync(join(dispatched.workspace.path, "allowed"), { recursive: true });
@@ -1579,7 +1729,7 @@ test("goal_integrate rejects rogue commit appended after started event (rogue)",
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: { criteria: ["allowed write"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Write allowed source", deps: [], writePaths: ["src/allowed.ts"], acceptance: plannedAcceptance(["allowed write"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -1599,7 +1749,7 @@ test("goal_integrate rejects rogue commit appended after started event (rogue)",
   const projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
   const originHeadBefore = git(cwd, "rev-parse", "HEAD");
   appendEventStore(join(cwd, ".state/goal-engine"), {
-    schemaVersion: "goal-engine.event.v2",
+    schemaVersion: "planned.v1",
     eventId: "rogue-started-event",
     goalId,
     type: "task.workspace_disposition_started",
@@ -1641,7 +1791,7 @@ test("goal_integrate rejects dirty origin before persisting disposition_started"
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Write scoped source", deps: [], writePaths: ["src/preflight.ts"], acceptance: { criteria: ["preflight"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Write scoped source", deps: [], writePaths: ["src/preflight.ts"], acceptance: plannedAcceptance(["preflight"]), workflow: "tdd" }],
   });
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   commitWorkspaceChange(dispatched.workspace, "src/preflight.ts", "export const preflight = true;\n", "feat: preflight write");
@@ -1676,7 +1826,7 @@ test("disposing integrate retry durably rebinds a clean forward origin before in
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Write scoped source", deps: [], writePaths: ["src/retry.ts"], acceptance: { criteria: ["retry"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Write scoped source", deps: [], writePaths: ["src/retry.ts"], acceptance: plannedAcceptance(["retry"]), workflow: "tdd" }],
   });
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   commitWorkspaceChange(dispatched.workspace, "src/retry.ts", "export const retry = true;\n", "feat: retry write");
@@ -1692,7 +1842,7 @@ test("disposing integrate retry durably rebinds a clean forward origin before in
   const projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
   const originHeadBefore = git(cwd, "rev-parse", "HEAD");
   appendEventStore(join(cwd, ".state/goal-engine"), {
-    schemaVersion: "goal-engine.event.v2",
+    schemaVersion: "planned.v1",
     eventId: "forward-origin-started-event",
     goalId,
     type: "task.workspace_disposition_started",
@@ -1772,7 +1922,7 @@ test("goal_integrate rejects identity-mismatched lease branch before side effect
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Write scoped source", deps: [], writePaths: ["src/identity.ts"], acceptance: { criteria: ["identity check"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Write scoped source", deps: [], writePaths: ["src/identity.ts"], acceptance: plannedAcceptance(["identity check"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -1818,7 +1968,7 @@ test("goal_integrate rejects identity-mismatched lease branch before side effect
   assert.equal(git(cwd, "rev-parse", "HEAD"), originHeadBefore);
 });
 
-test("goal_integrate follows v2 three-phase flow and accepts with workspaceAttempt", async () => {
+test("goal_integrate follows planned.v1 three-phase flow and accepts with workspaceAttempt", async () => {
   const cwd = tmpCwd();
   const objective = "Normal v2 integrate flow goal";
   const goalId = objectiveToGoalId(objective);
@@ -1830,7 +1980,7 @@ test("goal_integrate follows v2 three-phase flow and accepts with workspaceAttem
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Commit with allowed path", deps: [], writePaths: ["src/integrate.ts"], acceptance: { criteria: ["integrated"], commands: ["node --test test/integrate.test.mjs"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Commit with allowed path", deps: [], writePaths: ["src/integrate.ts"], acceptance: plannedAcceptance(["integrated"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -1838,7 +1988,7 @@ test("goal_integrate follows v2 three-phase flow and accepts with workspaceAttem
 
   const dispatchEvents = readGoalEvents(cwd, goalId);
   const dispatchEvent = dispatchEvents.at(-1);
-  assert.equal(dispatchEvent.schemaVersion, "goal-engine.event.v2");
+  assert.equal(dispatchEvent.schemaVersion, "planned.v1");
   assert.equal(dispatchEvent.type, "task.dispatched");
   assert.ok(dispatchEvent.data.workspace, "dispatch event should include workspace snapshot");
   assert.equal(dispatchEvent.data.workspace.attempt, 1);
@@ -1890,7 +2040,7 @@ test("goal_integrate follows v2 three-phase flow and accepts with workspaceAttem
   assert.equal(accepted.goal_complete, true);
 
   const acceptedEvents = readGoalEvents(cwd, goalId).filter((event) => event.type === "task.accepted");
-  assert.equal(acceptedEvents.at(-1).schemaVersion, "goal-engine.event.v2");
+  assert.equal(acceptedEvents.at(-1).schemaVersion, "planned.v1");
   assert.equal(acceptedEvents.at(-1).data.workspaceAttempt, 1);
 
   const projectionAfterAccept = loadProjection(join(cwd, ".state/goal-engine"), goalId);
@@ -1911,7 +2061,7 @@ test("failed settle keeps active workspace and blocks redispatch until discard",
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Work that failed", deps: [], writePaths: ["src/fail.ts"], acceptance: { criteria: ["fails"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Work that failed", deps: [], writePaths: ["src/fail.ts"], acceptance: plannedAcceptance(["fails"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -1957,7 +2107,7 @@ test("preserve keeps workspace and rejects discard after a tampered lease", asyn
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Work to preserve", deps: [], writePaths: ["src/preserve.ts"], acceptance: { criteria: ["preserved"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Work to preserve", deps: [], writePaths: ["src/preserve.ts"], acceptance: plannedAcceptance(["preserved"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -2008,8 +2158,8 @@ test("dependent pending task cannot be dispatched when dependency is not accepte
   await invoke(pi, "goal_init", {
     objective: "Dependent dispatch guard test goal",
     tasks: [
-      { id: "t1", description: "Base task", deps: [], writePaths: ["src/base.ts"], acceptance: { criteria: ["base done"], commands: ["true"] }, workflow: "tdd" },
-      { id: "t2", description: "Dependent task", deps: ["t1"], writePaths: ["src/depend.ts"], acceptance: { criteria: ["depend done"], commands: ["true"] }, workflow: "tdd" },
+      { id: "t1", description: "Base task", deps: [], writePaths: ["src/base.ts"], acceptance: plannedAcceptance(["base done"]), workflow: "tdd" },
+      { id: "t2", description: "Dependent task", deps: ["t1"], writePaths: ["src/depend.ts"], acceptance: plannedAcceptance(["depend done"]), workflow: "tdd" },
     ],
   });
 
@@ -2036,7 +2186,7 @@ test("action recovery: applied append retry should skip duplicate Git integratio
   const init = initPi.tools.find((t) => t.name === "goal_init");
   await invoke(initPi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Simulate applied append failure recovery", deps: [], writePaths: ["src/event.ts"], acceptance: { criteria: ["recover"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Simulate applied append failure recovery", deps: [], writePaths: ["src/event.ts"], acceptance: plannedAcceptance(["recover"]), workflow: "tdd" }],
   });
 
   const dispatch = initPi.tools.find((t) => t.name === "goal_dispatch");
@@ -2133,7 +2283,7 @@ test("action recovery: disposed append can be repaired from projection snapshot 
   const init = initPi.tools.find((t) => t.name === "goal_init");
   await invoke(initPi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Simulate disposed append recovery", deps: [], writePaths: ["src/dispose.ts"], acceptance: { criteria: ["recover"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Simulate disposed append recovery", deps: [], writePaths: ["src/dispose.ts"], acceptance: plannedAcceptance(["recover"]), workflow: "tdd" }],
   });
 
   const dispatch = initPi.tools.find((t) => t.name === "goal_dispatch");
@@ -2227,7 +2377,7 @@ test("event failure: applied preserve retry rejects a different strategy", async
   const init = initPi.tools.find((t) => t.name === "goal_init");
   await invoke(initPi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Preserve strategy identity", deps: [], writePaths: ["src/preserve-strategy.ts"], acceptance: { criteria: ["preserve"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Preserve strategy identity", deps: [], writePaths: ["src/preserve-strategy.ts"], acceptance: plannedAcceptance(["preserve"]), workflow: "tdd" }],
   });
 
   const dispatched = JSON.parse(await invoke(initPi, "goal_dispatch", { task_id: "t1" }));
@@ -2277,7 +2427,7 @@ test("event failure: disposed append durable-then-throw keeps disposed and rejec
   const init = initPi.tools.find((t) => t.name === "goal_init");
   await invoke(initPi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "Simulate durable-then-throw recovery", deps: [], writePaths: ["src/durable.ts"], acceptance: { criteria: ["recover"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "Simulate durable-then-throw recovery", deps: [], writePaths: ["src/durable.ts"], acceptance: plannedAcceptance(["recover"]), workflow: "tdd" }],
   });
 
   const dispatch = initPi.tools.find((t) => t.name === "goal_dispatch");
@@ -2342,7 +2492,7 @@ test("goal_settle rejects vague next_action", async () => {
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective: "Vague action test goal",
-    tasks: [{ id: "t1", description: "work item", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "work item", deps: [], writePaths: ["a.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }],
   });
 
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
@@ -2363,7 +2513,7 @@ test("tool_result hook appends reminder when checkpoint overdue", async () => {
   const init = pi.tools.find((t) => t.name === "goal_init");
   await invoke(pi, "goal_init", {
     objective: "Hook test goal for reminder",
-    tasks: [{ id: "t1", description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "work", deps: [], writePaths: ["a.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }],
   });
 
   const hook = pi.hooks.tool_result[0];
@@ -2386,7 +2536,7 @@ test("goal_amend rejects an active workspace remove without releasing resources"
   initGitRepo(cwd);
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Protected active task", deps: [], writePaths: ["src/protected.ts"], acceptance: { criteria: ["protected"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Protected active task", deps: [], writePaths: ["src/protected.ts"], acceptance: plannedAcceptance(["protected"]), workflow: "tdd" }] });
   await invoke(pi, "goal_dispatch", { task_id: "t1" });
   const beforeEvents = readGoalEvents(cwd, goalId).length;
   await assert.rejects(() => invoke(pi, "goal_amend", { reason: "Do not delete a task that still owns active workspace resources", remove_tasks: ["t1"] }), /pending|workspace|remove/i);
@@ -2411,7 +2561,7 @@ test("goal_accept retries final accepted after goal.completed pre-durable failur
   initGitRepo(cwd);
   const injected = createFailingAppendEvent("goal.completed");
   const pi = createMockPi(cwd); createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "final task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "final task", deps: [], writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   await prepareSucceededTask(pi);
   await invoke(pi, "goal_accept", { task_id: "t1" });
   let projection = loadProjection(join(cwd, ".state/goal-engine"), goalId);
@@ -2429,7 +2579,7 @@ test("goal_accept task.accepted durable-then-throw recovers and completes exactl
   const cwd = tmpCwd(); const objective = "Accepted durable retry"; const goalId = objectiveToGoalId(objective);
   initGitRepo(cwd); const injected = createDurableThenThrowAppendEvent("task.accepted");
   const pi = createMockPi(cwd); createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "durable task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "durable task", deps: [], writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   await prepareSucceededTask(pi);
   assert.equal(JSON.parse(await invoke(pi, "goal_accept", { task_id: "t1" })).goal_complete, true);
   const events = readGoalEvents(cwd, goalId);
@@ -2441,7 +2591,7 @@ test("goal_accept goal.completed durable-then-throw returns completion retry exa
   const cwd = tmpCwd(); const objective = "Completion durable retry"; const goalId = objectiveToGoalId(objective);
   initGitRepo(cwd); const injected = createDurableThenThrowAppendEvent("goal.completed");
   const pi = createMockPi(cwd); createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "durable completion", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "durable completion", deps: [], writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   await prepareSucceededTask(pi);
   assert.equal(JSON.parse(await invoke(pi, "goal_accept", { task_id: "t1" })).goal_complete, true);
   const before = readGoalEvents(cwd, goalId).length;
@@ -2455,8 +2605,8 @@ test("goal_accept non-final accepted durable retry does not append and remains i
   initGitRepo(cwd); const injected = createDurableThenThrowAppendEvent("task.accepted");
   const pi = createMockPi(cwd); createGoalEngineExtension(pi, { appendEvent: injected.appendEvent });
   await invoke(pi, "goal_init", { objective, tasks: [
-    { id: "t1", description: "first durable task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
-    { id: "t2", description: "remaining task", deps: [], writePaths: ["src/t2.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" },
+    { id: "t1", description: "first durable task", deps: [], writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" },
+    { id: "t2", description: "remaining task", deps: [], writePaths: ["src/t2.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" },
   ] });
   await prepareSucceededTask(pi, "t1");
   const result = JSON.parse(await invoke(pi, "goal_accept", { task_id: "t1" }));
@@ -2470,7 +2620,7 @@ test("goal_accept non-final accepted durable retry does not append and remains i
 test("goal_accept completed historical verdict is durable authority without append", async () => {
   const cwd = tmpCwd(); const objective = "Historical verdict retry"; const goalId = objectiveToGoalId(objective);
   initGitRepo(cwd); const pi = createMockPi(cwd); createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "historical evidence", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "historical evidence", deps: [], writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   await prepareSucceededTask(pi); await invoke(pi, "goal_accept", { task_id: "t1" });
   const before = readGoalEvents(cwd, goalId).length;
   const retryPi = createMockPi(cwd);
@@ -2484,7 +2634,7 @@ test("goal_accept completed historical verdict is durable authority without appe
   assert.equal(readGoalEvents(cwd, goalId).length, before);
 });
 
-test("goal_amend rejects lexical symlink and canonical realpath origin commands before append", async (t) => {
+test("goal_amend rejects commands on added and updated Planned tasks before append", async (t) => {
   const canonicalCwd = tmpCwd();
   const lexicalCwd = join(mkdtempSync(join(tmpdir(), "ge-amend-link-")), "repo");
   try { symlinkSync(canonicalCwd, lexicalCwd, "dir"); }
@@ -2495,15 +2645,15 @@ test("goal_amend rejects lexical symlink and canonical realpath origin commands 
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "initial task", writePaths: ["src/t1.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "initial task", writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] });
   const before = readGoalEvents(cwd, goalId).length;
   await assert.rejects(
-    () => invoke(pi, "goal_amend", { reason: "Reject an added command that hardcodes the lexical symlink origin cwd", add_tasks: [{ id: "t2", description: "unsafe add", writePaths: ["src/t2.ts"], acceptance: { criteria: ["works"], commands: [`node ${cwd}/scripts/test.mjs`] }, workflow: "tdd" }] }),
-    (error) => error.code === "INVALID_GOAL_CONTRACT" && /hardcode origin cwd.*stateChanged=false/i.test(error.message),
+    () => invoke(pi, "goal_amend", { reason: "Reject an added command that hardcodes the lexical symlink origin cwd", add_tasks: [{ id: "t2", description: "unsafe add", writePaths: ["src/t2.ts"], acceptance: { ...plannedAcceptance(["works"]), commands: [`node ${cwd}/scripts/test.mjs`] }, workflow: "tdd" }] }),
+    (error) => error.code === "INVALID_GOAL_CONTRACT" && /commands|only criteria|additional property.*stateChanged=false/i.test(error.message),
   );
   await assert.rejects(
-    () => invoke(pi, "goal_amend", { reason: "Reject an updated command that hardcodes the canonical physical origin cwd", update_tasks: { t1: { acceptance: { criteria: ["works"], commands: [`node ${physicalCwd}/scripts/test.mjs`] } } } }),
-    (error) => error.code === "INVALID_GOAL_CONTRACT" && /hardcode origin cwd.*stateChanged=false/i.test(error.message),
+    () => invoke(pi, "goal_amend", { reason: "Reject an updated command that hardcodes the canonical physical origin cwd", update_tasks: { t1: { acceptance: { ...plannedAcceptance(["works"]), commands: [`node ${physicalCwd}/scripts/test.mjs`] } } } }),
+    (error) => error.code === "INVALID_GOAL_CONTRACT" && /commands|only criteria|additional property.*stateChanged=false/i.test(error.message),
   );
   assert.equal(readGoalEvents(cwd, goalId).length, before);
 });
@@ -2514,7 +2664,7 @@ test("goal_amend applies workflow only to safe pending tasks", async () => {
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "workflow task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "workflow task", deps: [], writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["works"]), workflow: "existing-tests" }] });
 
   const amended = JSON.parse(await invoke(pi, "goal_amend", { reason: "Change the pending task to a test-first implementation workflow", update_tasks: { t1: { workflow: "tdd" } } }));
   assert.equal(amended.tasks.t1.workflow, "tdd");
@@ -2536,8 +2686,8 @@ test("goal_amend rejects accepted acceptance rewrite without appending an event"
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", { objective, tasks: [
-    { id: "t1", description: "Accepted protected task", deps: [], writePaths: ["src/accepted.ts"], acceptance: { criteria: ["accepted"], commands: ["true"] }, workflow: "tdd" },
-    { id: "t2", description: "Keep goal active after t1 acceptance", deps: ["t1"], writePaths: ["src/pending.ts"], acceptance: { criteria: ["pending"], commands: ["true"] }, workflow: "tdd" },
+    { id: "t1", description: "Accepted protected task", deps: [], writePaths: ["src/accepted.ts"], acceptance: plannedAcceptance(["accepted"]), workflow: "tdd" },
+    { id: "t2", description: "Keep goal active after t1 acceptance", deps: ["t1"], writePaths: ["src/pending.ts"], acceptance: plannedAcceptance(["pending"]), workflow: "tdd" },
   ] });
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   commitWorkspaceChange(dispatched.workspace, "src/accepted.ts", "export const accepted = true;\n", "feat: accepted proof");
@@ -2545,16 +2695,39 @@ test("goal_amend rejects accepted acceptance rewrite without appending an event"
   await invoke(pi, "goal_integrate", { task_id: "t1", action: "integrate" });
   await invoke(pi, "goal_accept", { task_id: "t1" });
   const beforeEvents = readGoalEvents(cwd, goalId).length;
-  await assert.rejects(() => invoke(pi, "goal_amend", { reason: "Do not rewrite acceptance proof after the task has been accepted", update_tasks: { t1: { acceptance: { criteria: ["rewritten"], commands: ["false"] } } } }), /pending|accepted|update/i);
+  await assert.rejects(() => invoke(pi, "goal_amend", { reason: "Do not rewrite acceptance proof after the task has been accepted", update_tasks: { t1: { acceptance: plannedAcceptance(["rewritten"]) } } }), /pending|accepted|update/i);
   assert.equal(readGoalEvents(cwd, goalId).length, beforeEvents);
 });
 
-test("settlement identity missing after a real dispatch reaches the integrate gate with zero side effects", async () => {
+test("settlement identity missing after a real legacy dispatch reaches the integrate gate with zero side effects", async () => {
   const cwd = tmpCwd();
   const objective = "Historical unbound succeeded with real executor identity";
   const goalId = objectiveToGoalId(objective);
+  const created = {
+    schemaVersion: "goal-engine.event.v2",
+    eventId: "legacy-unbound-created",
+    goalId,
+    occurredAt: "2024-01-01T00:00:00.000Z",
+    type: "goal.created",
+    data: {
+      objective,
+      scope: [],
+      nonGoals: [],
+      dod: [],
+      tasks: ["t1"],
+      taskDefs: {
+        t1: {
+          description: "real executor",
+          deps: [],
+          writePaths: ["src/x.ts"],
+          acceptance: { criteria: ["works"], commands: ["true"] },
+          workflow: "tdd",
+        },
+      },
+    },
+  };
+  writeGoalHistory(cwd, [created]);
   const pi = createMockPi(cwd); createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "real executor", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
   const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
   commitWorkspaceChange(workspace, "src/x.ts", "export const real = true;\n", "feat: authorized executor proof");
   const rawSettled = { schemaVersion: "goal-engine.event.v2", eventId: "unbound-settled", goalId, occurredAt: "2024-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, nextAction: "Review the historical evidence before selecting a recovery action" } };
@@ -2575,7 +2748,7 @@ test("post-settle HEAD drift rejects every succeeded disposition before started 
     const objective = `Post-settle ${action} drift`;
     const goalId = objectiveToGoalId(objective);
     const pi = createMockPi(cwd); createGoalEngineExtension(pi);
-    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "drift", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "drift", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     commitWorkspaceChange(workspace, "src/x.ts", "export const x = 1;\n", "feat: settled");
     await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use a typed disposition after inspecting the settled executor commit." });
@@ -2597,7 +2770,7 @@ test("post-settle allow-empty HEAD drift rejects integrate before started event"
   const objective = "Post-settle allow-empty executor drift";
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd); createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "empty drift", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "empty drift", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
   commitWorkspaceChange(workspace, "src/x.ts", "export const emptyDrift = true;\n", "feat: settle before empty drift");
   await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use a typed disposition after inspecting the settled executor commit." });
@@ -2618,7 +2791,7 @@ test("post-settle wrong live branch rejects identity mismatch before started eve
   const objective = "Post-settle wrong live branch";
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd); createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "branch identity", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "branch identity", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
   commitWorkspaceChange(workspace, "src/x.ts", "export const branch = true;\n", "feat: branch identity");
   await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use the typed disposition after inspecting the settled executor commit." });
@@ -2652,7 +2825,7 @@ test("inspection race: goal_settle rejects HEAD drift after the first real inspe
       return inspected;
     },
   });
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
   commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: clean commit A");
 
@@ -2688,7 +2861,7 @@ test("inspection race: succeeded dispositions reject HEAD drift before started e
         return inspected;
       },
     });
-    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: clean commit A");
     await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use a typed disposition after inspecting the settled executor commit." });
@@ -2729,7 +2902,7 @@ test("inspection-internal HEAD drift: goal_settle preserves the competing-commit
       return inspected;
     },
   });
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
   commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: clean commit A");
   await assert.rejects(() => invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Recover through typed status after verifying the executor workspace." }), (error) => {
@@ -2764,7 +2937,7 @@ test("inspection-internal HEAD drift: succeeded dispositions preserve the compet
         return inspected;
       },
     });
-    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+    await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "race", deps: [], writePaths: ["src/**"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
     const workspace = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" })).workspace;
     commitWorkspaceChange(workspace, "src/x.ts", "export const x = true;\n", "feat: clean commit A");
     await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/x.ts" }, next_action: "Use typed disposition after inspecting the settled executor commit." });
@@ -2825,7 +2998,7 @@ async function dispatchedRollbackFixture(label, { removeLease = false } = {}) {
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Create a rollback orphan", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Create a rollback orphan", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   const created = Object.fromEntries(["events", "projection", "registry"].map((key, index) => [key, persistedStateBytes(cwd, goalId)[index]]));
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   if (removeLease) rmSync(workspaceState(cwd, goalId, "t1").leasePath);
@@ -2842,8 +3015,8 @@ async function twoTaskRollbackOrphanFixture(label, { removeLease = false } = {})
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", { objective, tasks: [
-    { id: "t1", description: "Orphaned original task", deps: [], writePaths: ["src/t1.ts"], acceptance: { criteria: ["t1"], commands: ["true"] }, workflow: "tdd" },
-    { id: "t2", description: "Unaffected pending task", deps: [], writePaths: ["src/t2.ts"], acceptance: { criteria: ["t2"], commands: ["true"] }, workflow: "tdd" },
+    { id: "t1", description: "Orphaned original task", deps: [], writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["t1"]), workflow: "tdd" },
+    { id: "t2", description: "Unaffected pending task", deps: [], writePaths: ["src/t2.ts"], acceptance: plannedAcceptance(["t2"]), workflow: "tdd" },
   ] });
   const created = Object.fromEntries(["events", "projection", "registry"].map((key, index) => [key, persistedStateBytes(cwd, goalId)[index]]));
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
@@ -2874,7 +3047,7 @@ function verifiedOrphanAmendContract() {
 for (const { name, params } of [
   { name: "remove", params: { remove_tasks: ["t1"] } },
   { name: "update", params: { update_tasks: { t1: { description: "Legitimate changed description" } } } },
-  { name: "remove and add replacement", params: { remove_tasks: ["t1"], add_tasks: [{ id: "t1", description: "Replacement task", deps: [], writePaths: ["src/replacement.ts"], acceptance: { criteria: ["replacement"], commands: ["true"] }, workflow: "tdd" }] } },
+  { name: "remove and add replacement", params: { remove_tasks: ["t1"], add_tasks: [{ id: "t1", description: "Replacement task", deps: [], writePaths: ["src/replacement.ts"], acceptance: plannedAcceptance(["replacement"]), workflow: "tdd" }] } },
 ]) {
   test(`verified orphan amend blocks ${name} without side effects`, async () => {
     const fixture = await twoTaskRollbackOrphanFixture(`verified ${name}`);
@@ -3011,7 +3184,7 @@ test("status detects an exact attempt two orphan after a discarded failed attemp
   const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "retry", deps: [], writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "retry", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
   await invoke(pi, "goal_dispatch", { task_id: "t1" });
   await invoke(pi, "goal_settle", { task_id: "t1", outcome: "failed", next_action: "Discard this failed executor workspace before retrying." });
   await invoke(pi, "goal_integrate", { task_id: "t1", action: "discard" });
@@ -3056,8 +3229,8 @@ test("status removes only an orphaned task from a multi-task runnable frontier",
   const cwd = tmpCwd(); const objective = "Multi task exact orphan"; const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd); createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", { objective, tasks: [
-    { id: "t1", description: "orphan", deps: [], writePaths: ["src/one.ts"], acceptance: { criteria: ["one"], commands: ["true"] }, workflow: "tdd" },
-    { id: "t2", description: "normal", deps: [], writePaths: ["src/two.ts"], acceptance: { criteria: ["two"], commands: ["true"] }, workflow: "tdd" },
+    { id: "t1", description: "orphan", deps: [], writePaths: ["src/one.ts"], acceptance: plannedAcceptance(["one"]), workflow: "tdd" },
+    { id: "t2", description: "normal", deps: [], writePaths: ["src/two.ts"], acceptance: plannedAcceptance(["two"]), workflow: "tdd" },
   ] });
   allocateExecutorWorkspace({ goalId, taskId: "t1", attempt: 1, originRoot: cwd, stateRoot: join(cwd, ".state/goal-engine"), baseCommit: git(cwd, "rev-parse", "HEAD") });
   const before = fullRejectionSnapshot(cwd, goalId); const restarted = createMockPi(cwd); createGoalEngineExtension(restarted);
@@ -3248,7 +3421,7 @@ async function disposedPreservedFixture(kind) {
   }
   const cwd = tmpCwd(); const objective = "Succeeded preserved release fixture"; const goalId = objectiveToGoalId(objective);
   const pi = createMockPi(cwd); createGoalEngineExtension(pi);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "preserved", deps: [], writePaths: ["src/release.ts"], acceptance: { criteria: ["release"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "preserved", deps: [], writePaths: ["src/release.ts"], acceptance: plannedAcceptance(["release"]), workflow: "tdd" }] });
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   commitWorkspaceChange(dispatched.workspace, "src/release.ts", "export const released = true;\n", "test: preserved release");
   await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "diff", ref: "git diff HEAD~1 -- src/release.ts" }, evidence_source: "self_produced", next_action: "Preserve the clean executor workspace pending explicit release." });
@@ -3400,20 +3573,25 @@ async function emitHook(pi, name, event, ctx = pi.executeContext) {
 }
 
 function seedCompletedWatchingGoal(cwd, goalId = "completed-watching") {
-  const root = join(cwd, ".state/goal-engine");
+  const workspace = {
+    attempt: 1,
+    path: join(cwd, ".state/goal-engine/worktrees", `${goalId}-t1-1`),
+    branch: `ge/${goalId}/t1/1`,
+    baseCommit: "base-commit",
+    originRef: "refs/heads/main",
+  };
   const events = [
-    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-created`, goalId, occurredAt: "2026-08-05T00:00:00.000Z", type: "goal.created", data: { objective: "Watch a completed goal for related follow-ups", scope: ["src/**"], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "original", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" } } } },
-    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-dispatched`, goalId, occurredAt: "2026-08-05T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "legacy" } },
-    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-settled`, goalId, occurredAt: "2026-08-05T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/a.ts" }, nextAction: "Accept the original task after reviewing its evidence carefully" } },
-    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-accepted`, goalId, occurredAt: "2026-08-05T00:00:03.000Z", type: "task.accepted", data: { taskId: "t1" } },
-    { schemaVersion: "goal-engine.event.v1", eventId: `${goalId}-completed`, goalId, occurredAt: "2026-08-05T00:00:04.000Z", type: "goal.completed", data: { verdict: "DONE_WITHOUT_EXTERNAL_VERIFICATION" } },
-    { schemaVersion: "goal-engine.event.v3", eventId: `${goalId}-bound`, goalId, occurredAt: "2026-08-05T00:00:05.000Z", type: "goal.session_bound", data: { sessionId: "session-test", leafId: "leaf-original" } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-created`, goalId, occurredAt: "2026-08-05T00:00:00.000Z", type: "goal.created", data: { objective: "Watch a completed goal for related follow-ups", scope: ["src/**"], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "original", deps: [], writePaths: ["src/a.ts"], acceptance: plannedAcceptance("works"), workflow: "tdd" } } } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-dispatched`, goalId, occurredAt: "2026-08-05T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "planned-contract", workspace } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-settled`, goalId, occurredAt: "2026-08-05T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/a.ts" }, evidenceSource: "self_produced", nextAction: "Accept the original task after reviewing its evidence carefully", attempt: 1, executorHead: "executor-head" } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-disposing`, goalId, occurredAt: "2026-08-05T00:00:03.000Z", type: "task.workspace_disposition_started", data: { taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "cherry-pick", executorHead: "executor-head", originHeadBefore: "base-commit", originRef: "refs/heads/main" } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-applied`, goalId, occurredAt: "2026-08-05T00:00:04.000Z", type: "task.workspace_disposition_applied", data: { taskId: "t1", attempt: 1, action: "integrate", strategy: "cherry-pick", executorHead: "executor-head", originHead: "integrated-head" } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-disposed`, goalId, occurredAt: "2026-08-05T00:00:05.000Z", type: "task.workspace_disposed", data: { taskId: "t1", attempt: 1, action: "integrate", released: true } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-accepted`, goalId, occurredAt: "2026-08-05T00:00:06.000Z", type: "task.accepted", data: { taskId: "t1", workspaceAttempt: 1 } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-completed`, goalId, occurredAt: "2026-08-05T00:00:07.000Z", type: "goal.completed", data: { verdict: "DONE_WITHOUT_EXTERNAL_VERIFICATION" } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-bound`, goalId, occurredAt: "2026-08-05T00:00:08.000Z", type: "goal.session_bound", data: { sessionId: "session-test", leafId: "leaf-original" } },
   ];
-  let version = 0;
-  for (const event of events) {
-    appendEventStore(root, event, version);
-    version += 1;
-  }
+  writeGoalHistory(cwd, events, { lifecycle: "completed" });
   return goalId;
 }
 
@@ -3423,7 +3601,7 @@ test("production status issues one-shot action tokens and dispatch returns an ex
   createGoalEngineExtensionProduction(pi);
   const objective = "Enforce one shot dispatch action";
   const goalId = objectiveToGoalId(objective);
-  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] });
 
   await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), /action_token|status/i);
   const status = JSON.parse(await invoke(pi, "goal_status", {}));
@@ -3451,8 +3629,8 @@ test("production status dispatches every runnable task before offering settlemen
   await invoke(pi, "goal_init", {
     objective,
     tasks: [
-      { id: "t1", description: "first independent task", deps: [], writePaths: ["src/first.ts"], acceptance: { criteria: ["first works"], commands: ["true"] }, workflow: "tdd" },
-      { id: "t2", description: "second independent task", deps: [], writePaths: ["src/second.ts"], acceptance: { criteria: ["second works"], commands: ["true"] }, workflow: "tdd" },
+      { id: "t1", description: "first independent task", deps: [], writePaths: ["src/first.ts"], acceptance: plannedAcceptance(["first works"]), workflow: "tdd" },
+      { id: "t2", description: "second independent task", deps: [], writePaths: ["src/second.ts"], acceptance: plannedAcceptance(["second works"]), workflow: "tdd" },
     ],
   });
 
@@ -3478,7 +3656,7 @@ test("production resolve_blocked consumes the task offer and atomically updates 
   const goalId = objectiveToGoalId(objective);
   await invoke(pi, "goal_init", {
     objective,
-    tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }],
   });
 
   let offer = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
@@ -3519,7 +3697,7 @@ test("failed production mutation consumes its status token before business prefl
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
   createGoalEngineExtensionProduction(pi);
-  await invoke(pi, "goal_init", { objective: "Consume failed mutation capability", tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective: "Consume failed mutation capability", tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] });
   const status = JSON.parse(await invoke(pi, "goal_status", {}));
 
   await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", timeout_ms: -1, action_token: status.action_token }), /timeout|positive/i);
@@ -3553,7 +3731,7 @@ test("completed watching session records discovery blocks writes and atomically 
     operation: "reopen_completed",
     reason: "Turn the related follow-up into an explicit second epoch task",
     basis: { epoch: 1, discovery_ids: [observation.id] },
-    add_tasks: [{ id: "t2", description: "follow-up", deps: ["t1"], writePaths: ["src/b.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }],
+    add_tasks: [{ id: "t2", description: "follow-up", deps: ["t1"], writePaths: ["src/b.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }],
     resolve_discoveries: [{ id: observation.id, disposition: "tasked", task_id: "t2", reason: "This follow-up belongs to the completed goal" }],
     action_token: status.action_token,
   }));
@@ -3599,7 +3777,7 @@ test("compaction checkpoints survive extension reload and checkpoint failure can
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
   createGoalEngineExtensionProduction(pi);
-  await invoke(pi, "goal_init", { objective: "Persist compaction recovery context", tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }] });
+  await invoke(pi, "goal_init", { objective: "Persist compaction recovery context", tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] });
 
   const before = await emitHook(pi, "session_before_compact", {
     reason: "overflow", willRetry: true,
@@ -3632,10 +3810,10 @@ test("metadata terminal state restores ordinary machineAction after consumed and
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
   createGoalEngineExtensionProduction(pi);
-  const initialized = JSON.parse(await invoke(pi, "goal_init", { objective: "Metadata terminal progress", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] }));
+  const initialized = JSON.parse(await invoke(pi, "goal_init", { objective: "Metadata terminal progress", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] }));
   const root = join(cwd, ".state/goal-engine");
   const initialProjection = loadProjection(root, initialized.goalId);
-  appendEventStore(root, { schemaVersion: "goal-engine.event.v3", eventId: "metadata-terminal-discovery", goalId: initialized.goalId, occurredAt: new Date().toISOString(), type: "goal.discovery_recorded", data: { id: "metadata-terminal-discovery", summary: "Terminal metadata must restore the ordinary action", paths: [], source: "user_intent", sessionId: "session-test" } }, initialProjection.version);
+  appendEventStore(root, { schemaVersion: "planned.v1", eventId: "metadata-terminal-discovery", goalId: initialized.goalId, occurredAt: new Date().toISOString(), type: "goal.discovery_recorded", data: { id: "metadata-terminal-discovery", summary: "Terminal metadata must restore the ordinary action", paths: [], source: "user_intent", sessionId: "session-test" } }, initialProjection.version);
   const ordinary = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
   assert.equal(ordinary.machineAction.tool, "goal_amend");
   const proposed = JSON.parse(await invoke(pi, "goal_amend", { goal_id: initialized.goalId, operation: "propose_update_goal", reason: "Show terminal audit does not block", changes: { objective: "Updated metadata" } }));
@@ -3669,7 +3847,7 @@ test("metadata terminal state restores ordinary machineAction after consumed and
 
 test("metadata latch status appends cleared tombstone before every metadata response", async () => {
   const cwd = tmpCwd(); const pi = createMockPi(cwd); createGoalEngineExtensionProduction(pi);
-  const initialized = JSON.parse(await invoke(pi, "goal_init", { objective: "Metadata latch", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] }));
+  const initialized = JSON.parse(await invoke(pi, "goal_init", { objective: "Metadata latch", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] }));
   const proposal = JSON.parse(await invoke(pi, "goal_amend", { goal_id: initialized.goalId, operation: "propose_update_goal", reason: "Pending proposal", changes: { objective: "Changed" } }));
   const assertCleared = async (expected) => {
     pi.appendEntry("goal-engine-recovery-latch", { state: "active", goalId: initialized.goalId, reason: "injected" });
@@ -3689,7 +3867,7 @@ test("metadata latch status appends cleared tombstone before every metadata resp
 
 test("metadata persistence fails closed when appendEntry is absent", async () => {
   const cwd = tmpCwd(); const missing = createMockPi(cwd); delete missing.appendEntry; createGoalEngineExtensionProduction(missing);
-  const initialized = JSON.parse(await invoke(missing, "goal_init", { objective: "Metadata persistence", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] }));
+  const initialized = JSON.parse(await invoke(missing, "goal_init", { objective: "Metadata persistence", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] }));
   await assert.rejects(() => invoke(missing, "goal_amend", { goal_id: initialized.goalId, operation: "propose_update_goal", reason: "must persist", changes: { objective: "Never pending" } }), /appendEntry|persist/i);
   const ordinary = JSON.parse(await invoke(missing, "goal_status", { goal_id: initialized.goalId }));
   assert.equal(ordinary.metadataDecision, undefined);
@@ -3702,7 +3880,7 @@ test("metadata persistence keeps reject terminal when tombstone append fails wit
     durableAppend(type, data);
   };
   createGoalEngineExtensionProduction(pi);
-  const rejectedGoal = JSON.parse(await invoke(pi, "goal_init", { objective: "Metadata reject persistence", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] }));
+  const rejectedGoal = JSON.parse(await invoke(pi, "goal_init", { objective: "Metadata reject persistence", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] }));
   await invoke(pi, "goal_amend", { goal_id: rejectedGoal.goalId, operation: "propose_update_goal", reason: "No raw user input", changes: { objective: "Never revive" } });
   await emitHook(pi, "input", { source: "interactive", text: "reject" });
   const terminal = JSON.parse(await invoke(pi, "goal_status", { goal_id: rejectedGoal.goalId }));
@@ -3860,7 +4038,7 @@ test("production status throws replay failures and repeated completed slugs rece
   createGoalEngineExtensionProduction(pi);
   const created = JSON.parse(await invoke(pi, "goal_init", {
     objective: "Repeat objective",
-    tasks: [{ id: "t1", description: "new work", deps: [], writePaths: ["src/new.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" }],
+    tasks: [{ id: "t1", description: "new work", deps: [], writePaths: ["src/new.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }],
   }));
   assert.match(created.goalId, /^repeat-objective-[a-f0-9]{8}$/);
 
