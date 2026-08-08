@@ -17,12 +17,43 @@ export function installAcceptanceEvidence(pi: any, options: Options) {
     name: "submit_acceptance_evidence",
     label: "Submit acceptance evidence",
     description: "Submit canonical, bound acceptance evidence for this executor run.",
-    parameters: { type: "object", additionalProperties: false },
+    parameters: {
+      type: "object", additionalProperties: false,
+      required: ["outcome", "criteria", "commandsRun", "changedFiles"],
+      properties: {
+        outcome: { enum: ["succeeded", "failed"] },
+        criteria: {
+          type: "array", minItems: 1, maxItems: 32,
+          items: {
+            type: "object", additionalProperties: false, required: ["id", "status", "evidence"],
+            properties: {
+              id: { type: "string", minLength: 1, maxLength: 160 },
+              status: { type: "string", enum: ["satisfied", "not-satisfied", "not-applicable"] },
+              evidence: { type: "array", minItems: 1, maxItems: 32, items: { type: "string", pattern: "^(?:sha256:[a-f0-9]{64}|cas://sha256/[a-f0-9]{64})$" } },
+            },
+          },
+        },
+        commandsRun: {
+          type: "array", maxItems: 32,
+          items: {
+            type: "object", additionalProperties: false, required: ["command", "result", "outputRef"],
+            properties: {
+              command: { type: "string", minLength: 1, maxLength: 4096 },
+              result: { type: "string", enum: ["passed", "failed"] },
+              outputRef: { type: "string", pattern: "^(?:sha256:[a-f0-9]{64}|cas://sha256/[a-f0-9]{64})$" },
+            },
+          },
+        },
+        changedFiles: { type: "array", maxItems: 32, items: { type: "string", minLength: 1, maxLength: 4096, pattern: "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\0\\\\]+$" } },
+      },
+    },
     async execute(_id: string, input: unknown) {
       if (closed) return failure(new Error("acceptance evidence runtime is closed"));
       try {
         if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("evidence must be an object");
-        const { outcome, ...evidence } = input as Record<string, unknown>;
+        if (Object.hasOwn(input, "identity")) throw new Error("identity is runtime-bound and must not be supplied");
+        const { outcome, ...payload } = input as Record<string, unknown>;
+        const evidence = { identity: options.identity, ...payload };
         const receipt = await materializeSettlementEvidence(evidence, {
           directory: path.join(options.cwd, ".pi-subagents", "acceptance-evidence"),
           expectedIdentity: options.identity,

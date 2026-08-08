@@ -29,6 +29,22 @@ function notificationColor(text: string): "error" | "warning" | "success" {
   return "success";
 }
 
+function evidenceCriterionIds(criteria: unknown): string[] {
+  if (!Array.isArray(criteria) || !criteria.length) throw new Error("executor acceptance criteria are unavailable");
+  const ids = criteria.map((criterion) => {
+    if (typeof criterion !== "string" || !criterion.trim()) throw new Error("executor acceptance criterion is invalid");
+    if (!criterion.trimStart().startsWith("{")) return criterion;
+    let planned: unknown;
+    try { planned = JSON.parse(criterion); } catch { throw new Error("executor planned acceptance criterion is malformed"); }
+    if (!planned || typeof planned !== "object" || Array.isArray(planned) || Object.keys(planned).length !== 3
+      || !Object.hasOwn(planned, "id") || !Object.hasOwn(planned, "statement") || !Object.hasOwn(planned, "evidenceKinds")
+      || typeof (planned as { id?: unknown }).id !== "string" || !(planned as { id: string }).id.trim()) throw new Error("executor planned acceptance criterion is invalid");
+    return (planned as { id: string }).id;
+  });
+  if (new Set(ids).size !== ids.length) throw new Error("executor acceptance criteria contain duplicate IDs");
+  return ids;
+}
+
 export default function subagentRuntime(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.PI_SUBAGENT_FANOUT_CHILD === "1") return;
   const completionBatch = loadConfig().completionBatch;
@@ -87,15 +103,13 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     rpc,
     async prepareCodingSpawn(ir: { agent: string; execution: { cwd?: string }; acceptance: { criteria: string[] } }, ticket: any) {
       if (ir.agent !== "executor") return;
+      const criteria = ticket ? evidenceCriterionIds(ir.acceptance.criteria) : undefined;
       await materializeChildRuntimeEntry({
         cwd: ir.execution.cwd!,
         fileName: "root-session-owner-entry.mjs",
         targetUrl: new URL("../child-extensions/root-session-owner.ts", import.meta.url),
       });
       if (!ticket) return;
-      const criteria = ticket.acceptanceCriteria ?? ir.acceptance.criteria.map((criterion: string) => {
-        try { return JSON.parse(criterion).id; } catch { return criterion; }
-      });
       const identity = { goalId: ticket.goalId, taskId: ticket.taskId, attempt: ticket.attempt, runId: process.env.PI_SUBAGENT_RUN_ID ?? "", contractHash: ticket.contractHash, head: ticket.headAtDispatch };
       const target = new URL("../child-extensions/acceptance-evidence.ts", import.meta.url);
       target.searchParams.set("identity", JSON.stringify(identity));
