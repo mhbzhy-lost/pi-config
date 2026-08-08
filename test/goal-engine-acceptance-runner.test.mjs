@@ -277,6 +277,37 @@ test("validation enforces byte limits and proves its whole process group termina
   assert.equal(result.truncated, true);
 });
 
+test("release records cleanup debt when the managed owner identity drifts", async (t) => {
+  const f = fixture(t);
+  const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "release-owner-drift", attempt: 1, integratedHead: f.head, validationPlan: strictPlan() });
+  const manifestFile = join(f.origin, ".state", "worktree-lifecycle", "leases", `${lease.id}.json`);
+  const manifest = JSON.parse(readFileSync(manifestFile, "utf8")); const replacementOwner = `worktree-owner.v1:${"c".repeat(64)}`;
+  writeFileSync(manifestFile, JSON.stringify({ ...manifest, ownerToken: replacementOwner }));
+
+  await assert.rejects(async () => releaseValidationWorkspace(lease, { expectedHead: f.head }), /owner|identity|managed|lease/i);
+  assert.equal(JSON.parse(readFileSync(leaseFile(lease), "utf8")).state, "cleanup-debt");
+  const retained = JSON.parse(readFileSync(manifestFile, "utf8"));
+  assert.equal(retained.ownerToken, replacementOwner);
+  assert.equal(retained.path, lease.path); assert.equal(retained.branchRef, `refs/heads/${lease.branch}`);
+  assert.equal(existsSync(lease.path), true);
+  assert.equal(git(f.origin, "worktree", "list", "--porcelain").includes(`worktree ${lease.path}\nHEAD ${f.head}\nbranch refs/heads/${lease.branch}`), true);
+  assert.doesNotThrow(() => git(f.origin, "show-ref", "--verify", "--quiet", `refs/heads/${lease.branch}`));
+});
+
+test("release records cleanup debt when the validation worktree path is missing", async (t) => {
+  const f = fixture(t);
+  const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "release-missing-path", attempt: 1, integratedHead: f.head, validationPlan: strictPlan() });
+  const manifestFile = join(f.origin, ".state", "worktree-lifecycle", "leases", `${lease.id}.json`); const manifest = readFileSync(manifestFile, "utf8");
+  rmSync(lease.path, { recursive: true, force: true });
+
+  await assert.rejects(async () => releaseValidationWorkspace(lease, { expectedHead: f.head }), /path|identity|managed|Git|lease/i);
+  assert.equal(JSON.parse(readFileSync(leaseFile(lease), "utf8")).state, "cleanup-debt");
+  assert.equal(readFileSync(manifestFile, "utf8"), manifest);
+  assert.equal(existsSync(lease.path), false);
+  assert.equal(git(f.origin, "worktree", "list", "--porcelain").includes(`worktree ${lease.path}\nHEAD ${f.head}\nbranch refs/heads/${lease.branch}`), true);
+  assert.doesNotThrow(() => git(f.origin, "show-ref", "--verify", "--quiet", `refs/heads/${lease.branch}`));
+});
+
 test("validation records an independent stable supervisor rather than its short-lived action", async (t) => {
   const f = fixture(t); const marker = join(f.state, "action.pid");
   const plan = { ...strictPlan(), actions: [{ id: "supervised", kind: "validation", executable: process.execPath, args: ["-e", `const fs=require('fs'); fs.writeFileSync(${JSON.stringify(marker)},String(process.pid)); setTimeout(()=>process.exit(0),200)`] }] };
