@@ -19,10 +19,13 @@ function option(name, { required = true } = {}) {
 }
 
 function print(value) {
-  if (flags.includes("--json")) console.log(JSON.stringify(value));
-  else if (Array.isArray(value)) {
-    for (const fact of value) console.log(`${fact.state}\t${fact.registration.path}\t${fact.automaticAction}`);
-  } else console.log(`${value.state}\t${value.id}\t${value.path}`);
+  if (flags.includes("--json")) return console.log(JSON.stringify(value));
+  const items = Array.isArray(value) ? value : value?.items;
+  if (items) {
+    for (const fact of items) console.log(`${fact.state ?? "unknown"}\t${fact.path ?? fact.registration?.path ?? ""}\t${fact.automaticAction ?? "none"}`);
+    return;
+  }
+  console.log(`${value?.state ?? "unknown"}\t${value?.id ?? ""}\t${value?.path ?? ""}`);
 }
 
 function owner() {
@@ -32,6 +35,9 @@ function owner() {
 try {
   const allowed = new Set(["--json", "--apply", "--id", "--branch", "--base", "--owner-kind", "--owner-id", "--owner-token", "--reason", "--path"]);
   if (flags.some((flag) => flag.startsWith("--") && !allowed.has(flag))) { const error = new Error("Unknown option"); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
+  for (const flag of allowed) if (flags.filter((value) => value === flag).length > 1) { const error = new Error(`Duplicate ${flag}`); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
+  const valueFlags = new Set(["--id", "--branch", "--base", "--owner-kind", "--owner-id", "--owner-token", "--reason", "--path"]);
+  for (let index = 0; index < flags.length; index += 1) if (!flags[index].startsWith("--") && (!valueFlags.has(flags[index - 1]) || flags[index].startsWith("--"))) { const error = new Error(`Unexpected value: ${flags[index]}`); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
   if (command === "audit") {
     if (flags.includes("--apply")) { const error = new Error("--apply requires reconcile"); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
     print(await inventoryRepositoryWorktrees({ originRoot: process.cwd() }));
