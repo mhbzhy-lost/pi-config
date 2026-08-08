@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { createManagedWorktree, releaseManagedWorktree } from "../scripts/lib/worktree-lifecycle/managed-worktree.mjs";
@@ -35,7 +36,8 @@ function snapshot(f, a) {
 }
 function assertSnapshot(f, a, before) { assert.deepEqual(snapshot(f, a), before); }
 function assertKept(f, a, branchRef = a.branchRef) { assert.equal(existsSync(a.path), true); assert.equal(git(f.root, "show-ref", "--verify", "--quiet", branchRef), ""); }
-function lifecycleCli(root, ...args) { return spawnSync(process.execPath, [resolve("scripts/worktree-lifecycle.mjs"), ...args], { cwd: root, encoding: "utf8" }); }
+const lifecycleCliScript = fileURLToPath(new URL("../scripts/worktree-lifecycle.mjs", import.meta.url));
+function lifecycleCli(root, ...args) { return spawnSync(process.execPath, [lifecycleCliScript, ...args], { cwd: root, encoding: "utf8" }); }
 
 // The classifier is deliberately read through the namespace: old production lacks it,
 // so this is a business RED rather than an import-time fixture failure.
