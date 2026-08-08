@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { inventoryRepositoryWorktrees } from "./lib/worktree-lifecycle/inventory.mjs";
+import { inventoryRepositoryWorktrees, reconcileManagedWorktrees } from "./lib/worktree-lifecycle/inventory.mjs";
 import { createManagedWorktree, preserveManagedWorktree, releaseManagedWorktree } from "./lib/worktree-lifecycle/managed-worktree.mjs";
 import { activateAllocation, beginAllocation } from "./lib/worktree-lifecycle/registry.mjs";
 
@@ -30,8 +30,13 @@ function owner() {
 }
 
 try {
+  const allowed = new Set(["--json", "--apply", "--id", "--branch", "--base", "--owner-kind", "--owner-id", "--owner-token", "--reason", "--path"]);
+  if (flags.some((flag) => flag.startsWith("--") && !allowed.has(flag))) { const error = new Error("Unknown option"); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
   if (command === "audit") {
+    if (flags.includes("--apply")) { const error = new Error("--apply requires reconcile"); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
     print(await inventoryRepositoryWorktrees({ originRoot: process.cwd() }));
+  } else if (command === "reconcile") {
+    print(await reconcileManagedWorktrees({ originRoot: process.cwd(), apply: flags.includes("--apply") }));
   } else if (command === "create") {
     print(createManagedWorktree({
       originRoot: process.cwd(),

@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { loadDesiredSkills, parseSkillList } from "./lib/skill-whitelist.mjs";
 import { createGoalEngineExtension } from "./lib/goal-engine/extension.mjs";
 import { auditGoalContractIntegrity } from "./lib/goal-contract/authorization-audit.mjs";
+import { reconcileManagedWorktrees } from "./lib/worktree-lifecycle/inventory.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -151,6 +152,10 @@ export async function inspectGoalContractIntegrity(repoRoot) {
     }
   }
   return issues;
+}
+
+export async function inspectWorktreeLifecycle(repoRoot) {
+  return reconcileManagedWorktrees({ originRoot: repoRoot });
 }
 
 export async function inspectConfiguration(repoRoot, options = {}) {
@@ -406,6 +411,8 @@ if (isMain) {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   try {
     const issues = await inspectConfiguration(repoRoot);
+    const lifecycle = await inspectWorktreeLifecycle(repoRoot);
+    for (const item of lifecycle.items) if (item.code) console.warn(`[warning] ${item.code} ${item.resources} ${item.path ?? ""}`);
     if (issues.length === 0) {
       console.log("[ok] Pi Skill allowlist extension is ready");
       console.log("[ok] Root subagent broker: ready");
