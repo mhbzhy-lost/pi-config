@@ -925,14 +925,14 @@ test("planned.v1 production lifecycle keeps every writer record in one generatio
   commitWorkspaceChange(dispatched.workspace, "src/t1.ts", "export const planned = true;\n", "feat: planned writer lifecycle");
 
   status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
-  await invoke(pi, "goal_settle", {
+  await assert.rejects(() => invoke(pi, "goal_settle", {
     task_id: "t1",
     outcome: "succeeded",
     evidence: { type: "diff", ref: "git diff HEAD~1 -- src/t1.ts" },
     evidence_source: "self_produced",
     next_action: "Integrate the Planned writer fixture and verify its complete event generation",
     action_token: status.action_token,
-  });
+  }), /subagent_evidence.*main_verification|dual.*evidence/i);
   status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
   await invoke(pi, "goal_integrate", {
     task_id: "t1",
