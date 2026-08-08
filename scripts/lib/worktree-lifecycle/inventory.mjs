@@ -93,6 +93,33 @@ const exact = (x, keys) =>
   JSON.stringify(Object.keys(x).sort()) === JSON.stringify([...keys].sort());
 const canonical = (x) =>
   typeof x === "string" && isAbsolute(x) && resolve(x) === x;
+function validLegacyManifest(m, name) {
+  const keys = [
+    "schemaVersion",
+    "id",
+    "path",
+    "originRoot",
+    "ownerKind",
+    "ownerId",
+    "ownerToken",
+    "state",
+  ];
+  return (
+    exact(m, keys) &&
+    m.schemaVersion === 1 &&
+    typeof m.id === "string" &&
+    idRE.test(m.id) &&
+    basename(m.id) === m.id &&
+    name === `${m.id}.json` &&
+    canonical(m.path) &&
+    typeof m.originRoot === "string" &&
+    canonical(m.originRoot) &&
+    typeof m.ownerKind === "string" &&
+    typeof m.ownerId === "string" &&
+    typeof m.ownerToken === "string" &&
+    STATES.has(m.state)
+  );
+}
 function validManifest(m, name, repo, mode, probe, observer) {
   if (
     mode !== 0o600 ||
@@ -176,13 +203,30 @@ function validManifest(m, name, repo, mode, probe, observer) {
       ).ok
     )
       return false;
-  return run(
-    repo.root,
-    ["check-ref-format", m.branchRef],
-    "ref",
-    probe,
-    observer,
-  ).ok;
+  if (
+    !run(
+      repo.root,
+      ["check-ref-format", m.branchRef],
+      "ref",
+      probe,
+      observer,
+    ).ok
+  )
+    return false;
+  if (
+    m.headCommit &&
+    ["active", "reclaimable", "preserved"].includes(m.state)
+  ) {
+    const branch = run(
+      repo.root,
+      ["rev-parse", "--verify", `${m.branchRef}^{commit}`],
+      "branch",
+      probe,
+      observer,
+    );
+    if (!branch.ok || branch.stdout.trim() !== m.headCommit) return false;
+  }
+  return true;
 }
 function canonicalCandidate(path) {
   try {
@@ -230,7 +274,10 @@ function manifests(root, repo, probe, observer) {
           const st = lstatSync(file);
           if (!st.isFile() || st.isSymbolicLink()) throw 0;
           const m = JSON.parse(readFileSync(file, "utf8"));
-          if (m.schemaVersion === 1) return { manifest: m, name, legacy: true };
+          if (m.schemaVersion === 1)
+            return validLegacyManifest(m, name)
+              ? { manifest: m, name, legacy: true }
+              : { invalid: true, name };
           return validManifest(m, name, repo, st.mode & 0o777, probe, observer)
             ? { manifest: m, name }
             : { invalid: true, name };
@@ -409,7 +456,7 @@ function output(f, ttlMs, now) {
         : "diagnostic",
   };
 }
-export async function inventoryRepositoryWorktrees({
+async function inspectRepositoryWorktrees({
   originRoot,
   activeProcessCwds = [],
   probe,
@@ -433,18 +480,22 @@ export async function inventoryRepositoryWorktrees({
     commandObserver,
   );
   if (!top.ok || !common.ok)
-    return [
-      output(
-        {
-          registration: { path: root },
-          main: true,
-          pathExists: existsSync(root),
-          probeFailed: true,
-        },
-        ttlMs,
-        now,
-      ),
-    ];
+    return {
+      repo: null,
+      candidates: [],
+      items: [
+        output(
+          {
+            registration: { path: root },
+            main: true,
+            pathExists: existsSync(root),
+            probeFailed: true,
+          },
+          ttlMs,
+          now,
+        ),
+      ],
+    };
   let repo;
   try {
     repo = {
@@ -456,18 +507,22 @@ export async function inventoryRepositoryWorktrees({
       ),
     };
   } catch {
-    return [
-      output(
-        {
-          registration: { path: root },
-          main: true,
-          pathExists: existsSync(root),
-          probeFailed: true,
-        },
-        ttlMs,
-        now,
-      ),
-    ];
+    return {
+      repo: null,
+      candidates: [],
+      items: [
+        output(
+          {
+            registration: { path: root },
+            main: true,
+            pathExists: existsSync(root),
+            probeFailed: true,
+          },
+          ttlMs,
+          now,
+        ),
+      ],
+    };
   }
   const list = run(
     repo.root,
@@ -477,18 +532,22 @@ export async function inventoryRepositoryWorktrees({
     commandObserver,
   );
   if (!list.ok)
-    return [
-      output(
-        {
-          registration: { path: repo.root },
-          main: true,
-          pathExists: true,
-          probeFailed: true,
-        },
-        ttlMs,
-        now,
-      ),
-    ];
+    return {
+      repo: null,
+      candidates: [],
+      items: [
+        output(
+          {
+            registration: { path: repo.root },
+            main: true,
+            pathExists: true,
+            probeFailed: true,
+          },
+          ttlMs,
+          now,
+        ),
+      ],
+    };
   const es = manifests(repo.root, repo, probe, commandObserver),
     regs = parseWorktreePorcelain(list.stdout),
     used = new Set(),
@@ -638,7 +697,57 @@ export async function inventoryRepositoryWorktrees({
         ),
       );
     }
-  return facts;
+  const candidates = es
+    .filter((e) => e.manifest && !e.legacy && !duplicates.has(e))
+    .map((e) => ({
+      manifest: e.manifest,
+      item: facts.find((item) => item.id === e.manifest.id),
+    }))
+    .filter(({ manifest, item }) =>
+      (manifest.state === "reclaimable" &&
+        item?.automaticAction === "release-worktree-only" &&
+        ["001", "111"].includes(item.resources)) ||
+      (manifest.state === "released" && item?.state === "released" && item.resources === "001"),
+    )
+    .map(({ manifest }) => ({
+      id: manifest.id,
+      ownerToken: manifest.ownerToken,
+      state: manifest.state,
+      identity: {
+        originRoot: manifest.originRoot,
+        gitCommonDir: manifest.gitCommonDir,
+        path: manifest.path,
+        branchRef: manifest.branchRef,
+        headCommit: manifest.headCommit,
+      },
+    }));
+  return { repo, items: facts, candidates };
+}
+async function inspectRepositoryWorktreesSafe(options) {
+  try {
+    return await inspectRepositoryWorktrees(options);
+  } catch {
+    const root = resolve(options.originRoot);
+    return {
+      repo: null,
+      candidates: [],
+      items: [
+        output(
+          {
+            registration: { path: root },
+            main: true,
+            pathExists: existsSync(root),
+            probeFailed: true,
+          },
+          options.ttlMs,
+          options.now,
+        ),
+      ],
+    };
+  }
+}
+export async function inventoryRepositoryWorktrees(options = {}) {
+  return (await inspectRepositoryWorktreesSafe(options)).items;
 }
 export async function reconcileManagedWorktrees({
   originRoot,
@@ -649,68 +758,55 @@ export async function reconcileManagedWorktrees({
   probe,
   commandObserver,
 } = {}) {
-  let items = await inventoryRepositoryWorktrees({
+  const options = {
     originRoot,
     activeProcessCwds,
-    probe,
-    commandObserver,
     ttlMs,
     now,
-  });
-  if (!apply) return { apply: false, items };
+    probe,
+    commandObserver,
+  };
+  const before = await inspectRepositoryWorktreesSafe(options);
+  if (!apply) return { apply: false, items: before.items };
   const failures = new Set();
-  const root = resolve(originRoot),
-    common = run(
-      root,
+  if (before.repo && before.candidates.length) {
+    const common = run(
+      before.repo.root,
       ["rev-parse", "--git-common-dir"],
       "origin",
       probe,
       commandObserver,
-    ),
-    es = manifests(
-      root,
-      {
-        root,
-        common: common.ok
-          ? realpathSync(
-              isAbsolute(common.stdout.trim())
-                ? common.stdout.trim()
-                : resolve(root, common.stdout.trim()),
-            )
-          : "",
-      },
-      probe,
-      commandObserver,
     );
-  for (const item of items.filter(
-    (x) =>
-      (x.automaticAction === "release-worktree-only" &&
-        ["001", "111"].includes(x.resources)) ||
-      (x.state === "released" && x.resources === "001" && x.id),
-  )) {
-    const e = es.find((x) => !x.legacy && x.manifest?.id === item.id);
-    if (!e) continue;
+    let canonicalCommon = null;
     try {
+      canonicalCommon = common.ok
+        ? realpathSync(
+            isAbsolute(common.stdout.trim())
+              ? common.stdout.trim()
+              : resolve(before.repo.root, common.stdout.trim()),
+          )
+        : null;
+    } catch {}
+    if (canonicalCommon !== before.repo.common) {
+      before.candidates.forEach((candidate) => failures.add(candidate.id));
+    } else {
       const { releaseManagedWorktree } = await import("./managed-worktree.mjs");
-      releaseManagedWorktree({
-        originRoot: root,
-        id: e.manifest.id,
-        ownerToken: e.manifest.ownerToken,
-        commandObserver,
-      });
-    } catch {
-      failures.add(item.id);
+      for (const candidate of before.candidates) {
+        try {
+        releaseManagedWorktree({
+          originRoot: before.repo.root,
+          id: candidate.id,
+          ownerToken: candidate.ownerToken,
+          commandObserver,
+        });
+        } catch {
+          failures.add(candidate.id);
+        }
+      }
     }
   }
-  items = await inventoryRepositoryWorktrees({
-    originRoot,
-    activeProcessCwds,
-    probe,
-    commandObserver,
-    ttlMs,
-    now,
-  });
-  items = items.map((item) =>
+  const after = await inspectRepositoryWorktreesSafe(options);
+  const items = after.items.map((item) =>
     failures.has(item.id) && item.state !== "cleanup-debt"
       ? { ...item, code: "WORKTREE_IDENTITY_MISMATCH", automaticAction: "none" }
       : item,
