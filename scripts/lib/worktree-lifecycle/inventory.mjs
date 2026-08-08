@@ -1,33 +1,719 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+} from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
-const KEYS = ["schemaVersion", "id", "ownerKind", "ownerId", "ownerToken", "originRoot", "gitCommonDir", "path", "branchRef", "baseCommit", "headCommit", "state", "createdAt", "updatedAt", "disposition", "lastError"];
-const STATES = new Set(["allocating", "active", "reclaimable", "preserved", "cleanup-debt", "released"]);
+const KEYS = [
+  "schemaVersion",
+  "id",
+  "ownerKind",
+  "ownerId",
+  "ownerToken",
+  "originRoot",
+  "gitCommonDir",
+  "path",
+  "branchRef",
+  "baseCommit",
+  "headCommit",
+  "state",
+  "createdAt",
+  "updatedAt",
+  "disposition",
+  "lastError",
+];
+const STATES = new Set([
+  "allocating",
+  "active",
+  "reclaimable",
+  "preserved",
+  "cleanup-debt",
+  "released",
+]);
 const DISP = new Set(["reclaimable", "preserved", "cleanup-debt", "released"]);
 const hash = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const idRE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const CODES = { main: null, active: "WORKTREE_OWNER_ACTIVE", reclaimable: "WORKTREE_CLEANUP_DEBT", preserved: "WORKTREE_PRESERVED", dirty: "WORKTREE_DIRTY", sequencer: "WORKTREE_SEQUENCER_ACTIVE", "cleanup-debt": "WORKTREE_CLEANUP_DEBT", unmanaged: "WORKTREE_UNMANAGED", missing: "WORKTREE_IDENTITY_MISMATCH", mismatch: "WORKTREE_IDENTITY_MISMATCH", released: null };
-export function parseWorktreePorcelain(text) { let current; const result=[]; for (const part of String(text).split("\0")) { if (!part) continue; const i=part.indexOf(" "); const key=i<0?part:part.slice(0,i), value=i<0?"":part.slice(i+1); if(key==="worktree") { current={path:value}; result.push(current); } else if(current) current[key]=(key==="bare"||key==="detached")?true:(value||true); } return result; }
-function run(cwd,args,kind,probe,commandObserver) { commandObserver?.({file:"git",cwd,args:[...args]}); const injected=probe?.({kind,cwd,args}); if(injected) return injected; try { return {ok:true,stdout:execFileSync("git",args,{cwd,encoding:"utf8",stdio:["ignore","pipe","pipe"],env:{...process.env,GIT_OPTIONAL_LOCKS:"0"}}),stderr:""}; } catch { return {ok:false,stdout:"",stderr:""}; } }
-const exact=(x,keys)=>x&&typeof x==="object"&&!Array.isArray(x)&&JSON.stringify(Object.keys(x).sort())===JSON.stringify([...keys].sort());
-const canonical=(x)=>typeof x==="string"&&isAbsolute(x)&&resolve(x)===x;
-function validManifest(m, name, repo, mode, probe, observer) {
-  if (mode !== 0o600 || !exact(m, KEYS) || m.schemaVersion !== "worktree-lifecycle.owner.v1" || typeof m.id !== "string" || !idRE.test(m.id) || basename(m.id) !== m.id || name !== `${m.id}.json`) return false;
-  if (!["ownerKind", "ownerId"].every(k => typeof m[k] === "string" && m[k].trim() === m[k] && m[k]) || !/^worktree-owner\.v1:[a-f0-9]{64}$/.test(m.ownerToken) || !["originRoot", "gitCommonDir", "path"].every(k => canonical(m[k]))) return false;
-  if (m.originRoot !== repo.root || !m.branchRef?.startsWith("refs/heads/") || !hash.test(m.baseCommit) || !(m.headCommit === null || hash.test(m.headCommit))) return false;
-  if (!STATES.has(m.state) || !Number.isFinite(Date.parse(m.createdAt)) || !Number.isFinite(Date.parse(m.updatedAt)) || Date.parse(m.createdAt) > Date.parse(m.updatedAt)) return false;
-  const dispositionOK = m.disposition === null || (exact(m.disposition, ["state", "reason"]) && DISP.has(m.disposition.state) && (m.disposition.reason === null || (typeof m.disposition.reason === "string" && m.disposition.reason.trim() === m.disposition.reason && m.disposition.reason)));
-  if (!dispositionOK) return false;
-  if (!(m.lastError === null || (exact(m.lastError, ["code", "message", "at"]) && typeof m.lastError.code === "string" && m.lastError.code && typeof m.lastError.message === "string" && m.lastError.message && Number.isFinite(Date.parse(m.lastError.at))))) return false;
-  if ((m.state === "reclaimable" && (m.disposition?.state !== "reclaimable" || !m.headCommit || m.lastError !== null)) || (m.state === "released" && (m.disposition?.state !== "released" || m.lastError !== null)) || (["preserved", "cleanup-debt"].includes(m.state) && m.disposition?.state !== m.state) || (["active", "allocating"].includes(m.state) && m.disposition !== null)) return false;
-  for (const rev of [m.baseCommit, ...(m.headCommit ? [m.headCommit] : [])]) if (!run(repo.root, ["rev-parse", "--verify", `${rev}^{commit}`], "object", probe, observer).ok) return false;
-  return run(repo.root, ["check-ref-format", m.branchRef], "ref", probe, observer).ok;
+const CODES = {
+  main: null,
+  active: "WORKTREE_OWNER_ACTIVE",
+  reclaimable: "WORKTREE_CLEANUP_DEBT",
+  preserved: "WORKTREE_PRESERVED",
+  dirty: "WORKTREE_DIRTY",
+  sequencer: "WORKTREE_SEQUENCER_ACTIVE",
+  "cleanup-debt": "WORKTREE_CLEANUP_DEBT",
+  unmanaged: "WORKTREE_UNMANAGED",
+  missing: "WORKTREE_IDENTITY_MISMATCH",
+  mismatch: "WORKTREE_IDENTITY_MISMATCH",
+  released: null,
+};
+export function parseWorktreePorcelain(text) {
+  let current;
+  const result = [];
+  for (const part of String(text).split("\0")) {
+    if (!part) continue;
+    const i = part.indexOf(" ");
+    const key = i < 0 ? part : part.slice(0, i),
+      value = i < 0 ? "" : part.slice(i + 1);
+    if (key === "worktree") {
+      current = { path: value };
+      result.push(current);
+    } else if (current)
+      current[key] =
+        key === "bare" || key === "detached" ? true : value || true;
+  }
+  return result;
 }
-function manifests(root,repo,probe,observer) { const dir=join(root,".state/worktree-lifecycle/leases"); try { const ds=lstatSync(dir); if(!ds.isDirectory()||ds.isSymbolicLink()) return [{invalid:true,name:"leases"}]; return readdirSync(dir).filter(n=>n.endsWith(".json")).map(name=>{const file=join(dir,name);try {const st=lstatSync(file);if(!st.isFile()||st.isSymbolicLink())throw 0;const m=JSON.parse(readFileSync(file,"utf8"));if(m.schemaVersion===1)return {manifest:m,name,legacy:true};return validManifest(m,name,repo,st.mode&0o777,probe,observer)?{manifest:m,name}:{invalid:true,name};}catch{return {invalid:true,name};}}); } catch(e) { return e?.code==="ENOENT"?[]:[{invalid:true,name:"leases"}]; } }
-export function classifyWorktreeFact(fact) { let state="active"; if(fact.probeFailed||fact.mismatch||fact.registration?.locked||fact.owner?.state==="cleanup-debt")state="cleanup-debt"; else if(fact.main)state="main"; else if(!fact.pathExists)state="missing"; else if(fact.active)state="active"; else if(fact.operation)state="sequencer"; else if(fact.clean===false)state="dirty"; else if(!fact.owner)state="unmanaged"; else if(fact.owner.state==="preserved")state="preserved"; else if(fact.owner.state==="released")state="released"; else if(fact.owner.state==="reclaimable"&&fact.clean===true&&fact.identity!==false)state="reclaimable"; const reasons=[];if(fact.probeFailed)reasons.push("probe-failed");if(fact.operation)reasons.push(`sequencer:${fact.operation}`);if(fact.clean===false)reasons.push("dirty");if(!fact.owner&&!fact.main)reasons.push("no-owner");return {state,reasons,automaticAction:state==="reclaimable"?"release-worktree-only":"none"}; }
-export function classifyReconciliationResources(f) { const resources=f.resources??"000"; const safe=(resources==="001"||resources==="111")&&f.manifestAuthority==="current"&&f.state==="reclaimable"&&f.disposition==="reclaimable"&&f.clean===true&&f.identity===true&&!f.active&&!f.operation&&!f.probeFailed&&!f.locked; const code=resources==="000"||resources==="010"||resources==="011"||resources==="101"?"WORKTREE_IDENTITY_MISMATCH":resources==="100"||resources==="110"?"WORKTREE_UNMANAGED":"WORKTREE_CLEANUP_DEBT"; return {resources,code,automaticAction:safe?"release-worktree-only":"none"}; }
-function identity(root,reg,m,probe,observer) { if(!m||!existsSync(reg.path)) return false; try { const path=realpathSync(reg.path); const top=run(path,["rev-parse","--show-toplevel"],"identity",probe,observer), common=run(path,["rev-parse","--git-common-dir"],"identity",probe,observer), branch=run(path,["symbolic-ref","-q","HEAD"],"identity",probe,observer), head=run(path,["rev-parse","--verify","HEAD^{commit}"],"identity",probe,observer); if(![top,common,branch,head].every(x=>x.ok))return false; return path===m.path&&realpathSync(top.stdout.trim())===m.path&&realpathSync(isAbsolute(common.stdout.trim())?common.stdout.trim():resolve(path,common.stdout.trim()))===m.gitCommonDir&&branch.stdout.trim()===m.branchRef&&head.stdout.trim()===m.headCommit&&reg.branch===m.branchRef&&m.originRoot===root; } catch{return false;} }
-function output(f,ttlMs,now) { const c=classifyWorktreeFact(f); const resources=`${f.pathExists?1:0}${f.registration?1:0}${f.manifestPresent?1:0}`; const rec=classifyReconciliationResources({...f,resources,state:f.owner?.state,disposition:f.owner?.disposition?.state,locked:f.registration?.locked}); const state=f.forceState??c.state; const action=f.legacy?c.automaticAction:(state==="reclaimable"?rec.automaticAction:"none"); const age=f.owner&&Number.isFinite(ttlMs)&&ttlMs>=0&&Number.isFinite(now)?now-Date.parse(f.owner.updatedAt||f.owner.createdAt):null; return {registration:f.registration,path:f.registration?.path??f.owner?.path??f.path,id:f.owner?.id??f.id,owner:f.owner?{kind:f.owner.ownerKind,id:f.owner.ownerId}:undefined,resources,state,reasons:c.reasons,automaticAction:action,code:f.mismatch?CODES.mismatch:(state==="reclaimable"?rec.code:CODES[state]),severity:state==="reclaimable"||state==="cleanup-debt"?(age!==null&&age<ttlMs?"diagnostic":"warning"):"diagnostic"}; }
-export async function inventoryRepositoryWorktrees({originRoot,activeProcessCwds=[],probe,commandObserver,ttlMs,now}={}) { const root=resolve(originRoot); const top=run(root,["rev-parse","--show-toplevel"],"origin",probe); const common=run(root,["rev-parse","--git-common-dir"],"origin",probe); if(!top.ok||!common.ok)return [output({registration:{path:root},main:true,pathExists:existsSync(root),probeFailed:true},ttlMs,now)]; let repo;try{repo={root:realpathSync(top.stdout.trim()),common:realpathSync(isAbsolute(common.stdout.trim())?common.stdout.trim():resolve(root,common.stdout.trim()))};}catch{return [output({registration:{path:root},main:true,pathExists:existsSync(root),probeFailed:true},ttlMs,now)];} const list=run(repo.root,["worktree","list","--porcelain","-z"],"list",probe,commandObserver); if(!list.ok)return [output({registration:{path:repo.root},main:true,pathExists:true,probeFailed:true},ttlMs,now)]; const es=manifests(repo.root,repo,probe,commandObserver), regs=parseWorktreePorcelain(list.stdout),used=new Set(), facts=[]; for(let i=0;i<regs.length;i++){const r=regs[i], ms=es.filter(e=>e.manifest&&resolve(e.manifest.path)===resolve(r.path));ms.forEach(e=>used.add(e));const e=ms.length===1?ms[0]:null,m=e?.manifest,pathExists=existsSync(r.path);let clean,operation,probeFailed=false;if(pathExists){const s=run(r.path,["status","--porcelain=v1","-z"],"status",probe,commandObserver);if(!s.ok)probeFailed=true;else{clean=s.stdout.length===0;for(const marker of ["MERGE_HEAD","CHERRY_PICK_HEAD","REVERT_HEAD","rebase-merge","rebase-apply","sequencer"]){const x=run(r.path,["rev-parse","--git-path",marker],"rev-parse",probe,commandObserver);if(!x.ok){probeFailed=true;break;}if(existsSync(x.stdout.trim())){operation=marker;break;}}}} const same=identity(repo.root,r,m,probe,commandObserver);facts.push(output({registration:r,owner:m,main:i===0||resolve(r.path)===repo.root,pathExists,manifestPresent:!!m,legacy:e?.legacy,manifestAuthority:e?.legacy?"legacy":m?"current":undefined,mismatch:ms.length>1||(m&&!e.legacy&&!same),identity:e?.legacy?undefined:same,active:activeProcessCwds.some(x=>resolve(x)===resolve(r.path)||resolve(x).startsWith(`${resolve(r.path)}/`)),clean,operation,probeFailed},ttlMs,now));} for(const e of es)if(!used.has(e)){if(e.invalid){facts.push(output({id:e.name.replace(/\.json$/,"") ,path:join(repo.root,".state/worktree-lifecycle/leases",e.name),manifestPresent:true,mismatch:true},ttlMs,now));continue;}const m=e.manifest, pathExists=existsSync(m.path), registration=regs.find(r=>resolve(r.path)===resolve(m.path));const released=m.state==="released"&&!pathExists&&!registration;facts.push(output({owner:m,path:m.path,pathExists,registration,manifestPresent:true,legacy:e.legacy,manifestAuthority:e.legacy?"legacy":"current",identity:!e.legacy&&m.state==="reclaimable"&&!pathExists&&!registration,mismatch:!e.legacy&&!released,forceState:(!e.legacy&&m.state==="reclaimable"&&!pathExists&&!registration)?"reclaimable":released?"released":undefined,clean:true},ttlMs,now));} return facts; }
-export async function reconcileManagedWorktrees({originRoot,apply=false,activeProcessCwds=[],ttlMs=0,now=Date.now(),probe,commandObserver}={}) { let items=await inventoryRepositoryWorktrees({originRoot,activeProcessCwds,probe,commandObserver,ttlMs,now});if(!apply)return {apply:false,items};const root=resolve(originRoot), es=manifests(root,{root},probe,commandObserver);for(const item of items.filter(x=>x.automaticAction==="release-worktree-only"&&["001","111"].includes(x.resources)&&x.id)){const e=es.find(x=>!x.legacy&&x.manifest?.id===item.id);if(!e)continue;try{const {releaseManagedWorktree}=await import("./managed-worktree.mjs");releaseManagedWorktree({originRoot:root,id:e.manifest.id,ownerToken:e.manifest.ownerToken,commandObserver});}catch{}}items=await inventoryRepositoryWorktrees({originRoot,activeProcessCwds,probe,commandObserver,ttlMs,now});return {apply:true,items}; }
+function run(cwd, args, kind, probe, commandObserver) {
+  commandObserver?.({ file: "git", cwd, args: [...args] });
+  const injected = probe?.({ kind, cwd, args });
+  if (injected) return injected;
+  try {
+    return {
+      ok: true,
+      stdout: execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+      }),
+      stderr: "",
+    };
+  } catch {
+    return { ok: false, stdout: "", stderr: "" };
+  }
+}
+const exact = (x, keys) =>
+  x &&
+  typeof x === "object" &&
+  !Array.isArray(x) &&
+  JSON.stringify(Object.keys(x).sort()) === JSON.stringify([...keys].sort());
+const canonical = (x) =>
+  typeof x === "string" && isAbsolute(x) && resolve(x) === x;
+function validManifest(m, name, repo, mode, probe, observer) {
+  if (
+    mode !== 0o600 ||
+    !exact(m, KEYS) ||
+    m.schemaVersion !== "worktree-lifecycle.owner.v1" ||
+    typeof m.id !== "string" ||
+    !idRE.test(m.id) ||
+    basename(m.id) !== m.id ||
+    name !== `${m.id}.json`
+  )
+    return false;
+  if (
+    !["ownerKind", "ownerId"].every(
+      (k) => typeof m[k] === "string" && m[k].trim() === m[k] && m[k],
+    ) ||
+    !/^worktree-owner\.v1:[a-f0-9]{64}$/.test(m.ownerToken) ||
+    !["originRoot", "gitCommonDir", "path"].every((k) => canonical(m[k]))
+  )
+    return false;
+  if (
+    m.originRoot !== repo.root ||
+    m.gitCommonDir !== repo.common ||
+    !canonicalCandidate(m.path) ||
+    !m.branchRef?.startsWith("refs/heads/") ||
+    !hash.test(m.baseCommit) ||
+    !(m.headCommit === null || hash.test(m.headCommit))
+  )
+    return false;
+  if (
+    !STATES.has(m.state) ||
+    !Number.isFinite(Date.parse(m.createdAt)) ||
+    !Number.isFinite(Date.parse(m.updatedAt)) ||
+    Date.parse(m.createdAt) > Date.parse(m.updatedAt)
+  )
+    return false;
+  const dispositionOK =
+    m.disposition === null ||
+    (exact(m.disposition, ["state", "reason"]) &&
+      DISP.has(m.disposition.state) &&
+      (m.disposition.reason === null ||
+        (typeof m.disposition.reason === "string" &&
+          m.disposition.reason.trim() === m.disposition.reason &&
+          m.disposition.reason)));
+  if (!dispositionOK) return false;
+  if (
+    !(
+      m.lastError === null ||
+      (exact(m.lastError, ["code", "message", "at"]) &&
+        typeof m.lastError.code === "string" &&
+        m.lastError.code &&
+        typeof m.lastError.message === "string" &&
+        m.lastError.message &&
+        Number.isFinite(Date.parse(m.lastError.at)))
+    )
+  )
+    return false;
+  const committed = typeof m.headCommit === "string";
+  if (
+    (m.state === "allocating" &&
+      (committed || m.disposition !== null || m.lastError !== null)) ||
+    (m.state === "active" &&
+      (!committed || m.disposition !== null || m.lastError !== null)) ||
+    (["reclaimable", "preserved"].includes(m.state) &&
+      (!committed ||
+        m.disposition?.state !== m.state ||
+        m.lastError !== null)) ||
+    (m.state === "cleanup-debt" &&
+      (m.disposition?.state !== m.state || m.lastError === null)) ||
+    (m.state === "released" &&
+      (m.disposition?.state !== "released" || m.lastError !== null))
+  )
+    return false;
+  for (const rev of [m.baseCommit, ...(m.headCommit ? [m.headCommit] : [])])
+    if (
+      !run(
+        repo.root,
+        ["rev-parse", "--verify", `${rev}^{commit}`],
+        "object",
+        probe,
+        observer,
+      ).ok
+    )
+      return false;
+  return run(
+    repo.root,
+    ["check-ref-format", m.branchRef],
+    "ref",
+    probe,
+    observer,
+  ).ok;
+}
+function canonicalCandidate(path) {
+  try {
+    let cursor = path,
+      suffix = [];
+    while (!existsSync(cursor)) {
+      const parent = dirname(cursor);
+      if (parent === cursor) return false;
+      suffix.unshift(basename(cursor));
+      cursor = parent;
+    }
+    return (
+      suffix.reduce(
+        (value, part) => join(value, part),
+        realpathSync(cursor),
+      ) === path
+    );
+  } catch {
+    return false;
+  }
+}
+function manifests(root, repo, probe, observer) {
+  const parts = [".state", "worktree-lifecycle", "leases"];
+  let dir = root;
+  for (const part of parts) {
+    dir = join(dir, part);
+    try {
+      const stat = lstatSync(dir);
+      if (
+        !stat.isDirectory() ||
+        stat.isSymbolicLink() ||
+        realpathSync(dir) !== dir
+      )
+        return [{ invalid: true, name: "leases" }];
+    } catch (e) {
+      return e?.code === "ENOENT" ? [] : [{ invalid: true, name: "leases" }];
+    }
+  }
+  try {
+    return readdirSync(dir)
+      .filter((n) => n.endsWith(".json"))
+      .map((name) => {
+        const file = join(dir, name);
+        try {
+          const st = lstatSync(file);
+          if (!st.isFile() || st.isSymbolicLink()) throw 0;
+          const m = JSON.parse(readFileSync(file, "utf8"));
+          if (m.schemaVersion === 1) return { manifest: m, name, legacy: true };
+          return validManifest(m, name, repo, st.mode & 0o777, probe, observer)
+            ? { manifest: m, name }
+            : { invalid: true, name };
+        } catch {
+          return { invalid: true, name };
+        }
+      });
+  } catch {
+    return [{ invalid: true, name: "leases" }];
+  }
+}
+export function classifyWorktreeFact(fact) {
+  let state = "active";
+  if (
+    fact.probeFailed ||
+    fact.mismatch ||
+    fact.registration?.locked ||
+    fact.owner?.state === "cleanup-debt"
+  )
+    state = "cleanup-debt";
+  else if (fact.main) state = "main";
+  else if (!fact.pathExists) state = "missing";
+  else if (fact.active) state = "active";
+  else if (fact.operation) state = "sequencer";
+  else if (fact.clean === false) state = "dirty";
+  else if (!fact.owner) state = "unmanaged";
+  else if (fact.owner.state === "preserved") state = "preserved";
+  else if (fact.owner.state === "released") state = "released";
+  else if (
+    fact.owner.state === "reclaimable" &&
+    fact.clean === true &&
+    fact.identity !== false
+  )
+    state = "reclaimable";
+  const reasons = [];
+  if (fact.probeFailed) reasons.push("probe-failed");
+  if (fact.operation) reasons.push(`sequencer:${fact.operation}`);
+  if (fact.clean === false) reasons.push("dirty");
+  if (!fact.owner && !fact.main) reasons.push("no-owner");
+  return {
+    state,
+    reasons,
+    automaticAction: state === "reclaimable" ? "release-worktree-only" : "none",
+  };
+}
+export function classifyReconciliationResources(f) {
+  const resources = f.resources ?? "000";
+  const safe =
+    (resources === "001" || resources === "111") &&
+    f.manifestAuthority === "current" &&
+    f.state === "reclaimable" &&
+    f.disposition === "reclaimable" &&
+    f.clean === true &&
+    f.identity === true &&
+    !f.active &&
+    !f.operation &&
+    !f.probeFailed &&
+    !f.locked;
+  const code =
+    resources === "000" ||
+    resources === "010" ||
+    resources === "011" ||
+    resources === "101"
+      ? "WORKTREE_IDENTITY_MISMATCH"
+      : resources === "100" || resources === "110"
+        ? "WORKTREE_UNMANAGED"
+        : "WORKTREE_CLEANUP_DEBT";
+  return {
+    resources,
+    code,
+    automaticAction: safe ? "release-worktree-only" : "none",
+  };
+}
+function identity(root, reg, m, probe, observer) {
+  if (!m || !existsSync(reg.path)) return false;
+  try {
+    const path = realpathSync(reg.path);
+    const top = run(
+        path,
+        ["rev-parse", "--show-toplevel"],
+        "identity",
+        probe,
+        observer,
+      ),
+      common = run(
+        path,
+        ["rev-parse", "--git-common-dir"],
+        "identity",
+        probe,
+        observer,
+      ),
+      branch = run(
+        path,
+        ["symbolic-ref", "-q", "HEAD"],
+        "identity",
+        probe,
+        observer,
+      ),
+      head = run(
+        path,
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+        "identity",
+        probe,
+        observer,
+      );
+    if (![top, common, branch, head].every((x) => x.ok)) return false;
+    return (
+      path === m.path &&
+      realpathSync(top.stdout.trim()) === m.path &&
+      realpathSync(
+        isAbsolute(common.stdout.trim())
+          ? common.stdout.trim()
+          : resolve(path, common.stdout.trim()),
+      ) === m.gitCommonDir &&
+      branch.stdout.trim() === m.branchRef &&
+      head.stdout.trim() === m.headCommit &&
+      reg.branch === m.branchRef &&
+      m.originRoot === root
+    );
+  } catch {
+    return false;
+  }
+}
+function output(f, ttlMs, now) {
+  const c = classifyWorktreeFact(f);
+  const resources = `${f.pathExists ? 1 : 0}${f.registration ? 1 : 0}${f.manifestPresent ? 1 : 0}`;
+  const rec = classifyReconciliationResources({
+    ...f,
+    resources,
+    state: f.owner?.state,
+    disposition: f.owner?.disposition?.state,
+    locked: f.registration?.locked,
+  });
+  const state = f.forceState ?? c.state;
+  const action = f.mismatch
+    ? "none"
+    : f.legacy
+      ? c.automaticAction
+      : state === "reclaimable"
+        ? rec.automaticAction
+        : "none";
+  const age =
+    f.owner && Number.isFinite(ttlMs) && ttlMs >= 0 && Number.isFinite(now)
+      ? now - Date.parse(f.owner.updatedAt || f.owner.createdAt)
+      : null;
+  const registration = f.registration
+    ? {
+        path: f.registration.path,
+        HEAD: f.registration.HEAD,
+        branch: f.registration.branch,
+        locked: Boolean(f.registration.locked),
+        prunable: Boolean(f.registration.prunable),
+      }
+    : undefined;
+  return {
+    registration,
+    path: registration?.path ?? f.owner?.path ?? f.path,
+    id: f.owner?.id ?? f.id,
+    owner: f.owner
+      ? { kind: f.owner.ownerKind, id: f.owner.ownerId }
+      : undefined,
+    resources,
+    state,
+    reasons: c.reasons,
+    automaticAction: action,
+    code: f.mismatch
+      ? CODES.mismatch
+      : state === "reclaimable"
+        ? rec.code
+        : CODES[state],
+    severity:
+      state === "reclaimable" || state === "cleanup-debt"
+        ? age !== null && age < ttlMs
+          ? "diagnostic"
+          : "warning"
+        : "diagnostic",
+  };
+}
+export async function inventoryRepositoryWorktrees({
+  originRoot,
+  activeProcessCwds = [],
+  probe,
+  commandObserver,
+  ttlMs,
+  now,
+} = {}) {
+  const root = resolve(originRoot);
+  const top = run(
+    root,
+    ["rev-parse", "--show-toplevel"],
+    "origin",
+    probe,
+    commandObserver,
+  );
+  const common = run(
+    root,
+    ["rev-parse", "--git-common-dir"],
+    "origin",
+    probe,
+    commandObserver,
+  );
+  if (!top.ok || !common.ok)
+    return [
+      output(
+        {
+          registration: { path: root },
+          main: true,
+          pathExists: existsSync(root),
+          probeFailed: true,
+        },
+        ttlMs,
+        now,
+      ),
+    ];
+  let repo;
+  try {
+    repo = {
+      root: realpathSync(top.stdout.trim()),
+      common: realpathSync(
+        isAbsolute(common.stdout.trim())
+          ? common.stdout.trim()
+          : resolve(root, common.stdout.trim()),
+      ),
+    };
+  } catch {
+    return [
+      output(
+        {
+          registration: { path: root },
+          main: true,
+          pathExists: existsSync(root),
+          probeFailed: true,
+        },
+        ttlMs,
+        now,
+      ),
+    ];
+  }
+  const list = run(
+    repo.root,
+    ["worktree", "list", "--porcelain", "-z"],
+    "list",
+    probe,
+    commandObserver,
+  );
+  if (!list.ok)
+    return [
+      output(
+        {
+          registration: { path: repo.root },
+          main: true,
+          pathExists: true,
+          probeFailed: true,
+        },
+        ttlMs,
+        now,
+      ),
+    ];
+  const es = manifests(repo.root, repo, probe, commandObserver),
+    regs = parseWorktreePorcelain(list.stdout),
+    used = new Set(),
+    facts = [];
+  const duplicates = new Set();
+  for (const key of ["id", "path", "branchRef"]) {
+    const seen = new Map();
+    for (const e of es.filter((x) => x.manifest && !x.legacy)) {
+      const value = e.manifest[key];
+      if (seen.has(value)) {
+        duplicates.add(e);
+        duplicates.add(seen.get(value));
+      } else seen.set(value, e);
+    }
+  }
+  for (let i = 0; i < regs.length; i++) {
+    const r = regs[i],
+      ms = es.filter(
+        (e) => e.manifest && resolve(e.manifest.path) === resolve(r.path),
+      );
+    ms.forEach((e) => used.add(e));
+    const e = ms.length === 1 ? ms[0] : null,
+      m = e?.manifest,
+      pathExists = existsSync(r.path);
+    let clean,
+      operation,
+      probeFailed = false;
+    if (pathExists) {
+      const s = run(
+        r.path,
+        ["status", "--porcelain=v1", "-z"],
+        "status",
+        probe,
+        commandObserver,
+      );
+      if (!s.ok) probeFailed = true;
+      else {
+        clean = s.stdout.length === 0;
+        for (const marker of [
+          "MERGE_HEAD",
+          "CHERRY_PICK_HEAD",
+          "REVERT_HEAD",
+          "rebase-merge",
+          "rebase-apply",
+          "sequencer",
+        ]) {
+          const x = run(
+            r.path,
+            ["rev-parse", "--git-path", marker],
+            "rev-parse",
+            probe,
+            commandObserver,
+          );
+          if (!x.ok) {
+            probeFailed = true;
+            break;
+          }
+          if (existsSync(x.stdout.trim())) {
+            operation = marker;
+            break;
+          }
+        }
+      }
+    }
+    const same = identity(repo.root, r, m, probe, commandObserver);
+    facts.push(
+      output(
+        {
+          registration: r,
+          owner: m,
+          main: i === 0 || resolve(r.path) === repo.root,
+          pathExists,
+          manifestPresent: !!m,
+          legacy: e?.legacy,
+          manifestAuthority: e?.legacy ? "legacy" : m ? "current" : undefined,
+          mismatch:
+            ms.length > 1 || duplicates.has(e) || (m && !e.legacy && !same),
+          identity: e?.legacy ? undefined : same,
+          active: activeProcessCwds.some(
+            (x) =>
+              resolve(x) === resolve(r.path) ||
+              resolve(x).startsWith(`${resolve(r.path)}/`),
+          ),
+          clean,
+          operation,
+          probeFailed,
+        },
+        ttlMs,
+        now,
+      ),
+    );
+  }
+  for (const e of es)
+    if (!used.has(e)) {
+      if (e.invalid) {
+        facts.push(
+          output(
+            {
+              id: e.name.replace(/\.json$/, ""),
+              path: join(repo.root, ".state/worktree-lifecycle/leases", e.name),
+              manifestPresent: true,
+              mismatch: true,
+            },
+            ttlMs,
+            now,
+          ),
+        );
+        continue;
+      }
+      const m = e.manifest,
+        pathExists = existsSync(m.path),
+        registration = regs.find((r) => resolve(r.path) === resolve(m.path));
+      const released = m.state === "released" && !pathExists && !registration;
+      facts.push(
+        output(
+          {
+            owner: m,
+            path: m.path,
+            pathExists,
+            registration,
+            manifestPresent: true,
+            legacy: e.legacy,
+            manifestAuthority: e.legacy ? "legacy" : "current",
+            identity:
+              !e.legacy &&
+              m.state === "reclaimable" &&
+              !pathExists &&
+              !registration,
+            mismatch:
+              duplicates.has(e) ||
+              (!e.legacy &&
+                !released &&
+                !(m.state === "reclaimable" && !pathExists && !registration)),
+            forceState:
+              !e.legacy &&
+              m.state === "reclaimable" &&
+              !pathExists &&
+              !registration
+                ? "reclaimable"
+                : released
+                  ? "released"
+                  : undefined,
+            clean: true,
+          },
+          ttlMs,
+          now,
+        ),
+      );
+    }
+  return facts;
+}
+export async function reconcileManagedWorktrees({
+  originRoot,
+  apply = false,
+  activeProcessCwds = [],
+  ttlMs = 0,
+  now = Date.now(),
+  probe,
+  commandObserver,
+} = {}) {
+  let items = await inventoryRepositoryWorktrees({
+    originRoot,
+    activeProcessCwds,
+    probe,
+    commandObserver,
+    ttlMs,
+    now,
+  });
+  if (!apply) return { apply: false, items };
+  const failures = new Set();
+  const root = resolve(originRoot),
+    common = run(
+      root,
+      ["rev-parse", "--git-common-dir"],
+      "origin",
+      probe,
+      commandObserver,
+    ),
+    es = manifests(
+      root,
+      {
+        root,
+        common: common.ok
+          ? realpathSync(
+              isAbsolute(common.stdout.trim())
+                ? common.stdout.trim()
+                : resolve(root, common.stdout.trim()),
+            )
+          : "",
+      },
+      probe,
+      commandObserver,
+    );
+  for (const item of items.filter(
+    (x) =>
+      (x.automaticAction === "release-worktree-only" &&
+        ["001", "111"].includes(x.resources)) ||
+      (x.state === "released" && x.resources === "001" && x.id),
+  )) {
+    const e = es.find((x) => !x.legacy && x.manifest?.id === item.id);
+    if (!e) continue;
+    try {
+      const { releaseManagedWorktree } = await import("./managed-worktree.mjs");
+      releaseManagedWorktree({
+        originRoot: root,
+        id: e.manifest.id,
+        ownerToken: e.manifest.ownerToken,
+        commandObserver,
+      });
+    } catch {
+      failures.add(item.id);
+    }
+  }
+  items = await inventoryRepositoryWorktrees({
+    originRoot,
+    activeProcessCwds,
+    probe,
+    commandObserver,
+    ttlMs,
+    now,
+  });
+  items = items.map((item) =>
+    failures.has(item.id) && item.state !== "cleanup-debt"
+      ? { ...item, code: "WORKTREE_IDENTITY_MISMATCH", automaticAction: "none" }
+      : item,
+  );
+  return { apply: true, items };
+}
