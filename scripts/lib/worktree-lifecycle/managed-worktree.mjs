@@ -386,6 +386,9 @@ export function releaseManagedWorktree({ originRoot, id, ownerToken, fault, comm
       throw failure("WORKTREE_LIFECYCLE_IDENTITY_MISMATCH", "worktree removal did not release both path and registration");
     }
     assertNoDeletedResourceUsers(current.path);
+    if (branchHead(root, current.branchRef, commandObserver) !== current.headCommit) {
+      throw failure("WORKTREE_LIFECYCLE_IDENTITY_MISMATCH", "managed worktree branch changed during release");
+    }
     return markDisposition({
       originRoot: root,
       id: current.id,
