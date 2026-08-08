@@ -288,6 +288,52 @@ function activeWorkspaceUsers(worktreePath) {
   return pids;
 }
 
+function activeDeletedResourceUsers(worktreePath) {
+  // This is intentionally global: after removal, +D cannot inspect a vanished
+  // directory, while +L1 finds files which remain open after unlinking.
+  const probe = spawnSync("lsof", ["-n", "-Fpcfn0", "+L1"], {
+    encoding: "buffer", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000, maxBuffer: 1024 * 1024,
+  });
+  if (probe.error || probe.signal || (probe.status !== 0 && probe.status !== 1) || probe.stderr.length) {
+    throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "deleted resource process inventory is unavailable", probe.error);
+  }
+
+  let pid = null;
+  let file = false;
+  let matched = false;
+  for (const rawField of probe.stdout.toString("utf8").split("\0").filter(Boolean)) {
+    // lsof retains its documented newline record separators even when fields
+    // themselves are NUL-delimited.
+    if (rawField === "\n") continue;
+    const field = rawField[0] === "\n" ? rawField.slice(1) : rawField;
+    const kind = field[0];
+    const value = field.slice(1);
+    if ((rawField[0] === "\n" && !"pf".includes(kind)) || !"pcfn".includes(kind) || !value) {
+      throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "deleted resource process inventory is malformed");
+    }
+    if (kind === "p") {
+      if (!/^\d+$/.test(value)) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "deleted resource process inventory is malformed");
+      pid = value;
+      file = false;
+    } else if (kind === "c") {
+      if (!pid) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "deleted resource process inventory is malformed");
+    } else if (kind === "f") {
+      if (!pid) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "deleted resource process inventory is malformed");
+      file = true;
+    } else {
+      if (!pid || !file) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "deleted resource process inventory is malformed");
+      if (value === worktreePath || value.startsWith(`${worktreePath}/`) || value === `${worktreePath} (deleted)`) matched = true;
+    }
+  }
+  return matched;
+}
+
+function assertNoDeletedResourceUsers(worktreePath) {
+  if (activeDeletedResourceUsers(worktreePath)) {
+    throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree cannot be released: deleted resource remains open");
+  }
+}
+
 function assertSafeRelease(manifest, commandObserver) {
   const identity = inspectIdentity(manifest, commandObserver);
   // Git's clean status does not reveal a server whose cwd is this worktree.
@@ -331,6 +377,7 @@ export function releaseManagedWorktree({ originRoot, id, ownerToken, fault, comm
     if (resources.pathExists) {
       assertSafeRelease(current, commandObserver);
       maybeFault(fault, "worktree-remove", "before", { path: current.path });
+      assertSafeRelease(current, commandObserver);
       runGit(root, ["worktree", "remove", current.path], commandObserver);
       maybeFault(fault, "worktree-remove", "after", { path: current.path });
     }
@@ -338,6 +385,7 @@ export function releaseManagedWorktree({ originRoot, id, ownerToken, fault, comm
     if (after.probeError || after.pathExists || after.registration) {
       throw failure("WORKTREE_LIFECYCLE_IDENTITY_MISMATCH", "worktree removal did not release both path and registration");
     }
+    assertNoDeletedResourceUsers(current.path);
     return markDisposition({
       originRoot: root,
       id: current.id,
