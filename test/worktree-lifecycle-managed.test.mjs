@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -304,6 +304,61 @@ test("release fails closed for a real active worktree cwd and records cleanup de
   );
   assert.equal(manifest(f.root, allocation.id).state, "cleanup-debt");
   assert.equal(existsSync(allocation.path), true);
+});
+
+test("release rechecks the managed worktree immediately before remove", (t) => {
+  const f = repoFixture(t, "worktree-managed-pre-remove-race-");
+  const allocation = createManagedWorktree(createOptions(f));
+  markReclaimable(f, allocation);
+  let fd;
+  const fault = (event) => {
+    if (event.operation === "worktree-remove" && event.phase === "before") {
+      fd = openSync(join(allocation.path, "shared.txt"), "r");
+    }
+  };
+
+  try {
+    assert.throws(
+      () => releaseManagedWorktree({ originRoot: f.root, id: allocation.id, ownerToken: allocation.ownerToken, fault }),
+      assertCode("WORKTREE_LIFECYCLE_UNSAFE_RELEASE"),
+    );
+    assert.equal(manifest(f.root, allocation.id).state, "cleanup-debt");
+    assert.equal(existsSync(allocation.path), true);
+    assert.equal(registeredPaths(f.root).includes(allocation.path), true);
+    assert.equal(refExists(f.root, allocation.branchRef), true);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+});
+
+test("release fails closed when a post-remove global inventory finds a deleted worktree file", (t) => {
+  const f = repoFixture(t, "worktree-managed-post-remove-fence-");
+  const allocation = createManagedWorktree(createOptions(f));
+  markReclaimable(f, allocation);
+  const arena = createTemporaryArenaSync("worktree-managed-fake-lsof-");
+  t.after(() => arena.disposeSync());
+  const fakeBin = arena.mkdtempSync("bin-");
+  const counterPath = join(arena.path, "lsof-count");
+  const fakeLsof = join(fakeBin, "lsof");
+  const deletedPath = `${allocation.path}/shared.txt (deleted)`;
+  writeFileSync(fakeLsof, `#!${process.execPath}\nconst fs = require("node:fs");\nconst countPath = ${JSON.stringify(counterPath)};\nconst count = (Number(fs.existsSync(countPath) ? fs.readFileSync(countPath, "utf8") : "0") || 0) + 1;\nfs.writeFileSync(countPath, String(count));\nif (count >= 3) process.stdout.write(${JSON.stringify(`p4242\0cfixture\0f3\0n${deletedPath}\0`)});\nprocess.exit(1);\n`);
+  chmodSync(fakeLsof, 0o700);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${fakeBin}${process.platform === "win32" ? ";" : ":"}${originalPath ?? ""}`;
+  t.after(() => {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  });
+
+  assert.throws(
+    () => releaseManagedWorktree({ originRoot: f.root, id: allocation.id, ownerToken: allocation.ownerToken }),
+    assertCode("WORKTREE_LIFECYCLE_UNSAFE_RELEASE"),
+  );
+  assert.equal(manifest(f.root, allocation.id).state, "cleanup-debt");
+  assert.equal(existsSync(allocation.path), false);
+  assert.equal(registeredPaths(f.root).includes(allocation.path), false);
+  assert.equal(refExists(f.root, allocation.branchRef), true);
+  assert.ok(Number(readFileSync(counterPath, "utf8")) >= 3);
 });
 
 test("release retries idempotently without phantom released at remove/publish crash boundaries", async (t) => {
