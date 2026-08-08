@@ -107,3 +107,22 @@ test("RED reconcile forwards a constrained command observer and TTL changes diag
   assert.ok(commands.some((x) => x.args?.[0] === "worktree" && x.args[1] === "remove"), "manager observer must see apply");
   for (const x of commands) assert.equal(x.args?.includes("--force") || x.args?.includes("prune") || x.args?.some((v) => /delete-ref|branch/.test(v)), false);
 });
+
+// Preserve the two pre-existing recovery regressions while expanding the safety matrix.
+test("reconcile dry-run is redacted and apply releases only a durable reclaimable owner", async (t) => {
+  const f = repo(t); const a = allocation(f); reclaim(f, a);
+  const dry = await reconcileManagedWorktrees({ originRoot: f.root });
+  assert.equal(dry.items.find((item) => item.id === a.id).automaticAction, "release-worktree-only");
+  assert.equal(JSON.stringify(dry).includes(a.ownerToken), false);
+  assert.equal(existsSync(a.path), true);
+  const applied = await reconcileManagedWorktrees({ originRoot: f.root, apply: true });
+  assert.equal(applied.items.find((item) => item.id === a.id).state, "released");
+  assert.equal(existsSync(a.path), false);
+  assert.equal(git(f.root, "show-ref", "--verify", "--quiet", "refs/heads/safe"), "");
+});
+test("manifest-only malformed files fail closed without following symlinks", async (t) => {
+  const f = repo(t); mkdirSync(join(f.root, ".state/worktree-lifecycle/leases"), { recursive: true });
+  writeFileSync(join(f.root, ".state/worktree-lifecycle/leases/bad.json"), "{");
+  const report = await reconcileManagedWorktrees({ originRoot: f.root });
+  assert.equal(report.items.some((item) => item.code === "WORKTREE_IDENTITY_MISMATCH"), true);
+});
