@@ -274,6 +274,16 @@ function sequencerOperation(path, commandObserver) {
 
 function assertSafeRelease(manifest, commandObserver) {
   const identity = inspectIdentity(manifest, commandObserver);
+  // Git's clean status does not reveal a server whose cwd is this worktree.
+  // Refuse release rather than guessing when the process inventory is unavailable.
+  let cwdUsers;
+  try {
+    cwdUsers = execFileSync("lsof", ["-t", "+D", manifest.path], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch (cause) {
+    if (cause?.status === 1) cwdUsers = "";
+    else throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree process inventory is unavailable", cause);
+  }
+  if (cwdUsers) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree cannot be released: active cwd/process");
   if (manifest.headCommit !== identity.headCommit) {
     throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree HEAD changed after becoming reclaimable");
   }
