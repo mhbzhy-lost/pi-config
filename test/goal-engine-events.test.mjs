@@ -46,6 +46,31 @@ function plannedSettlementEvidence(identity, criterionId, mainSessionId) {
   return { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${sha256}.yaml`, sha256, subagentFingerprint: fingerprintSettlementEvidence(subagent, options), mainFingerprint: fingerprintSettlementEvidence(main, options), subagent, main, mainSessionId };
 }
 
+function completePlannedSettlementBatch(goalId, sha256) {
+  const contractHash = "a".repeat(64), baseCommit = "b".repeat(40), executorHead = "c".repeat(40);
+  const identity = { goalId, taskId: "t1", runId: "run-cas", attempt: 1, contractHash, head: executorHead };
+  const settlementEvidence = plannedSettlementEvidence(identity, "proof", "root-cas");
+  settlementEvidence.sha256 = sha256;
+  settlementEvidence.path = `acceptance-evidence/sha256/${sha256}.yaml`;
+  return [
+    plannedEvent("goal.created", { objective: "Publish a complete Planned settlement", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [plannedCriterion("proof")] }, workflow: "tdd" } } }, goalId),
+    plannedEvent("task.dispatched", { taskId: "t1", contractHash, workspace: { attempt: 1, path: "/tmp/cas", branch: "ge/cas/t1/1", baseCommit } }, goalId),
+    plannedEvent("task.executor_bound", { taskId: "t1", attempt: 1, runId: "run-cas", contractHash, asyncDir: "/tmp/run-cas", workspacePath: "/tmp/cas", workspaceLeaseId: "d".repeat(64), headAtDispatch: baseCommit }, goalId),
+    plannedEvent("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead, executorProof: { runId: "run-cas", proofId: "4".repeat(64), rootSessionId: "root-cas", observedAt: 1_700_000_000_000, outcome: "succeeded" }, settlementEvidence }, goalId),
+  ];
+}
+
+// A lone LF is semantically empty even though it has a byte; it must never gain
+// settlement authority merely because it satisfies the terminal-LF transport rule.
+test("settlement CAS rejects semantically empty content before a complete Planned batch publishes", () => {
+  const root = mkdtempSync(join(tmpdir(), "ge-settlement-empty-"));
+  const content = "\n";
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  assert.throws(() => appendEventBatchWithSettlementEvidence(root, completePlannedSettlementBatch("planned-empty-cas", sha256), 0, { sha256, content }), /empty|content|evidence/i);
+  assert.equal(existsSync(join(root, "acceptance-evidence", "sha256", `${sha256}.yaml`)), false);
+  assert.equal(loadProjection(root, "planned-empty-cas"), null);
+});
+
 test("settlement evidence batch rejects non-canonical artifact bytes before event publication", () => {
   const root = mkdtempSync(join(tmpdir(), "ge-settlement-cas-"));
   const content = "settlement: accepted\n";
