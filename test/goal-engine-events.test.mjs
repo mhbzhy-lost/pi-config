@@ -4,7 +4,7 @@ import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.
 import { fingerprintSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { issueActionOffer, verifyAndConsumeActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
 import { appendEvent, appendEventBatchWithSettlementEvidence, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
-import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync, linkSync, symlinkSync, lstatSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync, linkSync, symlinkSync, lstatSync, readlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -156,6 +156,67 @@ test("settlement evidence batch rejects non-canonical artifact bytes before even
   reject({ sha256: createHash("sha256").update("a".repeat(1_048_576) + "\n").digest("hex"), content: "a".repeat(1_048_576) + "\n" });
   reject({ sha256: createHash("sha256").update("é".repeat(524_288) + "\n").digest("hex"), content: "é".repeat(524_288) + "\n" });
 });
+
+function settlementCase(goalId = crypto.randomUUID()) {
+  const content = "settlement: accepted\n", sha256 = createHash("sha256").update(content).digest("hex");
+  return { root: mkdtempSync(join(tmpdir(), "ge-settlement-matrix-")), goalId, content, sha256, artifact: { sha256, content } };
+}
+function assertNoSettlementAuthority(root, goalId) {
+  assert.equal(existsSync(join(root, "goals", goalId, "events.jsonl")), false);
+  assert.equal(existsSync(join(root, "goals", goalId, "projection.json")), false);
+  assert.equal(existsSync(join(root, "registry.json")), false);
+}
+function settlementTarget(fixture) { return join(fixture.root, "acceptance-evidence", "sha256", `${fixture.sha256}.yaml`); }
+function rejectSettlement(fixture, events = completePlannedSettlementBatch(fixture.goalId, fixture.sha256), version = 0, artifact = fixture.artifact, error = /settlement|artifact|version|registry|event|illegal|JSON/i) {
+  assert.throws(() => appendEventBatchWithSettlementEvidence(fixture.root, events, version, artifact), error);
+  assertNoSettlementAuthority(fixture.root, fixture.goalId);
+}
+
+// Each preflight rejection is deliberately isolated: a regression in one must not
+// suppress the proof that every later gate remains before any durable authority.
+test("settlement preflight rejects event hash and canonical path bound to another artifact", () => {
+  const f = settlementCase("binding-wrong-hash"), wrong = "0".repeat(64), events = completePlannedSettlementBatch(f.goalId, f.sha256);
+  events.at(-1).data.settlementEvidence.sha256 = wrong;
+  events.at(-1).data.settlementEvidence.path = `acceptance-evidence/sha256/${wrong}.yaml`;
+  rejectSettlement(f, events, 0, f.artifact, /settlement event evidence/);
+  assert.equal(existsSync(settlementTarget(f)), false);
+});
+test("settlement preflight rejects event canonical path mismatch", () => {
+  const f = settlementCase("binding-wrong-path"), events = completePlannedSettlementBatch(f.goalId, f.sha256);
+  events.at(-1).data.settlementEvidence.path = `acceptance-evidence/sha256/${"0".repeat(64)}.yaml`;
+  rejectSettlement(f, events); assert.equal(existsSync(settlementTarget(f)), false);
+});
+test("settlement preflight rejects valid two-task evidence multiplicity", () => {
+  const f = settlementCase("binding-multiple"), events = completePlannedSettlementBatch(f.goalId, f.sha256), contractHash = "f".repeat(64), baseCommit = "1".repeat(40), executorHead = "2".repeat(40);
+  events[0].data.tasks.push("t2"); events[0].data.taskDefs.t2 = { description: "second work", deps: [], writePaths: ["src/y.mjs"], acceptance: { criteria: [plannedCriterion("proof2")] }, workflow: "tdd" };
+  const identity = { goalId: f.goalId, taskId: "t2", runId: "run-cas-2", attempt: 1, contractHash, head: executorHead }, evidence = plannedSettlementEvidence(identity, "proof2", "root-cas-2"); evidence.sha256 = f.sha256; evidence.path = `acceptance-evidence/sha256/${f.sha256}.yaml`;
+  events.push(plannedEvent("task.dispatched", { taskId: "t2", contractHash, workspace: { attempt: 1, path: "/tmp/cas-2", branch: "ge/cas/t2/1", baseCommit } }, f.goalId));
+  events.push(plannedEvent("task.executor_bound", { taskId: "t2", attempt: 1, runId: "run-cas-2", contractHash, asyncDir: "/tmp/run-cas-2", workspacePath: "/tmp/cas-2", workspaceLeaseId: "3".repeat(64), headAtDispatch: baseCommit }, f.goalId));
+  events.push(plannedEvent("task.settled", { taskId: "t2", outcome: "succeeded", attempt: 1, executorHead, executorProof: { runId: "run-cas-2", proofId: "4".repeat(64), rootSessionId: "root-cas-2", observedAt: 1_700_000_000_001, outcome: "succeeded" }, settlementEvidence: evidence }, f.goalId));
+  rejectSettlement(f, events, 0, f.artifact, /settlement event evidence/); assert.equal(existsSync(settlementTarget(f)), false);
+});
+test("settlement preflight rejects an otherwise complete illegal event", () => { const f = settlementCase("illegal-event"), events = completePlannedSettlementBatch(f.goalId, f.sha256); events[1].type = "task.illegal"; rejectSettlement(f, events); assert.equal(existsSync(settlementTarget(f)), false); });
+test("settlement preflight rejects expected version one on empty root", () => { const f = settlementCase("stale-empty"); rejectSettlement(f, undefined, 1); assert.equal(existsSync(settlementTarget(f)), false); });
+test("settlement preflight preserves invalid registry bytes", () => { const f = settlementCase("invalid-registry"), registry = join(f.root, "registry.json"); writeFileSync(registry, "not json\n"); assert.throws(() => appendEventBatchWithSettlementEvidence(f.root, completePlannedSettlementBatch(f.goalId, f.sha256), 0, f.artifact), /registry|JSON/); assert.equal(readFileSync(registry, "utf8"), "not json\n"); assert.equal(existsSync(settlementTarget(f)), false); assert.equal(existsSync(join(f.root, "goals", f.goalId, "events.jsonl")), false); assert.equal(existsSync(join(f.root, "goals", f.goalId, "projection.json")), false); });
+
+function unsafeTargetCase(kind) {
+  const f = settlementCase(`unsafe-preserve-${kind}`), target = settlementTarget(f); mkdirSync(join(f.root, "acceptance-evidence", "sha256"), { recursive: true });
+  if (kind === "symlink") symlinkSync("/tmp", target); else if (kind === "directory") mkdirSync(target); else { writeFileSync(target, kind === "different" ? "different: bytes\n" : f.content, { mode: kind === "0644" ? 0o644 : 0o600 }); if (kind === "hardlink") linkSync(target, `${target}.peer`); if (kind === "special") chmodSync(target, 0o4600); }
+  return { f, target, peer: `${target}.peer` };
+}
+for (const kind of ["symlink", "directory", "0644", "special", "different", "hardlink"]) test(`settlement unsafe ${kind} target is unchanged after rejection`, () => {
+  const { f, target, peer } = unsafeTargetCase(kind), before = lstatSync(target), bytes = before.isFile() ? readFileSync(target) : null, link = before.isSymbolicLink() ? readlinkSync(target) : null, peerBytes = existsSync(peer) ? readFileSync(peer) : null;
+  assert.throws(() => appendEventBatchWithSettlementEvidence(f.root, completePlannedSettlementBatch(f.goalId, f.sha256), 0, f.artifact), /unsafe|collision/);
+  const after = lstatSync(target); assert.equal(after.dev, before.dev); assert.equal(after.ino, before.ino); assert.equal(after.mode, before.mode); assert.equal(after.nlink, before.nlink); if (bytes) assert.deepEqual(readFileSync(target), bytes); if (link) assert.equal(readlinkSync(target), link); if (peerBytes) assert.deepEqual(readFileSync(peer), peerBytes); assertNoSettlementAuthority(f.root, f.goalId);
+});
+
+function rejectArtifactShape(name, artifact) { test(`settlement artifact rejects ${name} shape before authority`, () => { const f = settlementCase(`shape-${name.replaceAll(" ", "-")}`); rejectSettlement(f, undefined, 0, artifact(f), /artifact/); assert.equal(existsSync(settlementTarget(f)), false); }); }
+rejectArtifactShape("null prototype", (f) => Object.assign(Object.create(null), f.artifact));
+rejectArtifactShape("extra symbol", (f) => ({ ...f.artifact, [Symbol("extra")]: true }));
+rejectArtifactShape("extra string field", (f) => ({ ...f.artifact, extra: true }));
+rejectArtifactShape("sha256 accessor", (f) => Object.defineProperties({}, { sha256: { enumerable: true, get: () => f.sha256 }, content: { enumerable: true, value: f.content } }));
+rejectArtifactShape("content accessor", (f) => Object.defineProperties({}, { sha256: { enumerable: true, value: f.sha256 }, content: { enumerable: true, get: () => f.content } }));
+rejectArtifactShape("non-default data descriptors", (f) => Object.defineProperties({}, { sha256: { enumerable: true, writable: false, configurable: false, value: f.sha256 }, content: { enumerable: true, writable: false, configurable: false, value: f.content } }));
 
 test("v2 reducers have no ambient cwd dependency", () => {
   const source = readFileSync(new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url), "utf8");
