@@ -4,7 +4,7 @@ import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.
 import { fingerprintSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { issueActionOffer, verifyAndConsumeActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
 import { appendEvent, appendEventBatchWithSettlementEvidence, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
-import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync, linkSync, symlinkSync, lstatSync, readlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync, chmodSync, linkSync, symlinkSync, lstatSync, readlinkSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
@@ -2468,34 +2468,45 @@ test("two child settlements deterministically contend on the writer lock and sha
     process.send({ type: "done", snapshot: { goalId: input.goalId, version: projection.version, dev: stat.dev, ino: stat.ino, regular: stat.isFile(), mode: stat.mode & 0o7777, nlink: stat.nlink, bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") } });
   `;
   const children = [];
-  const messages = new Map();
-  const waitFor = (child, type) => new Promise((resolve, reject) => {
-    const onMessage = (message) => { if (message?.type === type) { cleanup(); resolve(message); } };
-    const onExit = (code, signal) => { cleanup(); reject(new Error("child exited before " + type + ": " + code + "/" + signal + " " + (messages.get(child)?.stderr ?? ""))); };
-    const cleanup = () => { child.off("message", onMessage); child.off("exit", onExit); };
-    child.on("message", onMessage); child.once("exit", onExit);
-  });
   const launch = (goalId, hold) => {
     const child = spawn(process.execPath, ["-e", `(async () => {${childProgram}})().catch(error => { console.error(error); process.exitCode = 1; })`], { cwd: process.cwd(), env: { ...process.env, DUAL_SETTLE_INPUT: JSON.stringify({ root, goalId, hold, sha256, content, storeUrl }) }, stdio: ["ignore", "pipe", "pipe", "ipc", "pipe"] });
-    children.push(child); messages.set(child, { stderr: "", exit: new Promise(resolve => child.once("exit", (code, signal) => resolve({ code, signal }))) }); child.stderr.on("data", chunk => { messages.get(child).stderr += chunk; }); return child;
+    const record = { child, stdout: "", stderr: "", cached: new Map(), counts: new Map(), delivered: new Map(), waiters: new Map(), terminal: null };
+    record.exit = new Promise(resolve => child.once("exit", (code, signal) => { record.terminal = { code, signal }; for (const waiters of record.waiters.values()) for (const waiter of waiters) waiter.reject(new Error("child exited before " + waiter.type + ": " + code + "/" + signal + " " + record.stderr)); record.waiters.clear(); resolve(record.terminal); }));
+    child.on("message", message => { const type = message?.type; if (!type) return; record.counts.set(type, (record.counts.get(type) ?? 0) + 1); const cached = record.cached.get(type) ?? []; cached.push(message); record.cached.set(type, cached); const waiters = record.waiters.get(type); const waiter = waiters?.shift(); if (waiter) { record.delivered.set(type, (record.delivered.get(type) ?? 0) + 1); waiter.resolve(message); if (!waiters.length) record.waiters.delete(type); } });
+    child.stdout.on("data", chunk => { record.stdout += chunk; });
+    child.stderr.on("data", chunk => { record.stderr += chunk; });
+    children.push(record); return record;
   };
+  const waitFor = (record, type) => {
+    const cached = record.cached.get(type) ?? [], delivered = record.delivered.get(type) ?? 0; if (delivered < cached.length) { record.delivered.set(type, delivered + 1); return Promise.resolve(cached[delivered]); }
+    if (record.terminal) return Promise.reject(new Error("child exited before " + type + ": " + record.terminal.code + "/" + record.terminal.signal + " " + record.stderr));
+    return new Promise((resolve, reject) => { const waiters = record.waiters.get(type) ?? []; waiters.push({ type, resolve, reject }); record.waiters.set(type, waiters); });
+  };
+  let watchdogFailure;
+  const watchdog = setTimeout(() => { watchdogFailure = new Error("dual settlement watchdog expired"); for (const { child } of children) if (child.exitCode === null) child.kill("SIGKILL"); }, 10_000);
   try {
     const first = launch("planned-dual-one", true), second = launch("planned-dual-two", false);
     await Promise.all([waitFor(first, "ready"), waitFor(second, "ready")]);
-    const firstHeld = waitFor(first, "lock-held"); first.send("go"); await firstHeld;
-    const secondAttempt = waitFor(second, "second-lock-attempt"); second.send("go"); await secondAttempt;
-    first.stdio[4].write("x"); first.stdio[4].end();
+    first.child.send("go"); await waitFor(first, "lock-held");
+    second.child.send("go"); await waitFor(second, "second-lock-attempt");
+    first.child.stdio[4].write("x"); first.child.stdio[4].end();
     const [one, two] = await Promise.all([waitFor(first, "done"), waitFor(second, "done")]);
-    const exits = await Promise.all(children.map(child => messages.get(child).exit));
-    for (const [index, exit] of exits.entries()) { assert.equal(exit.code, 0); assert.equal(exit.signal, null); assert.equal(messages.get(children[index]).stderr, ""); }
+    const exits = await Promise.all(children.map(record => record.exit));
+    if (watchdogFailure) throw watchdogFailure;
+    for (const [index, exit] of exits.entries()) { assert.equal(exit.code, 0); assert.equal(exit.signal, null); assert.equal(children[index].stdout, ""); assert.equal(children[index].stderr, ""); }
     assert.deepEqual(one.snapshot, { ...one.snapshot, goalId: "planned-dual-one", version: 4 }); assert.deepEqual(two.snapshot, { ...two.snapshot, goalId: "planned-dual-two", version: 4 });
     for (const key of ["dev", "ino", "regular", "mode", "nlink", "bytes", "sha256"]) assert.equal(one.snapshot[key], two.snapshot[key]);
     assert.deepEqual({ regular: one.snapshot.regular, mode: one.snapshot.mode, nlink: one.snapshot.nlink, bytes: one.snapshot.bytes, sha256: one.snapshot.sha256 }, { regular: true, mode: 0o600, nlink: 1, bytes: Buffer.byteLength(content), sha256 });
+    assert.equal(first.counts.get("ready"), 1); assert.equal(first.counts.get("lock-held"), 1); assert.equal(first.counts.get("done"), 1); assert.equal(first.counts.get("second-lock-attempt") ?? 0, 0);
+    assert.equal(second.counts.get("ready"), 1); assert.equal(second.counts.get("second-lock-attempt"), 1); assert.equal(second.counts.get("done"), 1); assert.equal(second.counts.get("lock-held") ?? 0, 0);
     for (const goalId of ["planned-dual-one", "planned-dual-two"]) { const lines = readFileSync(join(root, "goals", goalId, "events.jsonl"), "utf8").trim().split("\n").map(JSON.parse); assert.equal(lines.length, 4); assert(lines.every(event => event.goalId === goalId)); assert.equal(JSON.parse(readFileSync(join(root, "goals", goalId, "projection.json"), "utf8")).version, 4); }
     assert.deepEqual(listGoals(root).sort(), ["planned-dual-one", "planned-dual-two"]);
-    assert.equal(existsSync(join(root, "acceptance-evidence", "sha256", `${sha256}.yaml`)), true);
+    assert.deepEqual(readdirSync(join(root, "acceptance-evidence", "sha256")), [`${sha256}.yaml`]);
   } finally {
-    for (const child of children) { if (child.exitCode === null) child.kill("SIGTERM"); if (child.stdio[4] && !child.stdio[4].destroyed) child.stdio[4].destroy(); }
+    clearTimeout(watchdog);
+    for (const { child } of children) if (child.stdio[4] && !child.stdio[4].destroyed) child.stdio[4].destroy();
+    for (const { child } of children) if (child.exitCode === null) child.kill("SIGKILL");
+    await Promise.all(children.map(record => record.exit));
     rmSync(root, { recursive: true, force: true });
   }
 }, { timeout: 15_000 });
