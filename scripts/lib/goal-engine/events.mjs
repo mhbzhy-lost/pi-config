@@ -2,6 +2,7 @@ import { isAbsolute } from "node:path";
 import { validateDAG } from "./graph.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.mjs";
+import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence } from "./settlement-evidence.mjs";
 
 const LEGACY_SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]);
 export const PLANNED_SCHEMA_VERSION = "planned.v1";
@@ -302,6 +303,28 @@ function validatedExecutorProof(task, data) {
   return { ...data.executorProof };
 }
 
+function validatedPlannedSettlementEvidence(goalId, task, data, executorProof) {
+  requireExactFields(data, ["taskId", "outcome", "attempt", "executorHead", "executorProof", "settlementEvidence"], "planned succeeded settlement data");
+  const evidence = data.settlementEvidence;
+  requireExactFields(evidence, ["schemaVersion", "path", "sha256", "subagentFingerprint", "mainFingerprint", "subagent", "main", "mainSessionId"], "settlement evidence");
+  if (evidence.schemaVersion !== "goal-engine.settlement-evidence.v1") throw new Error("settlement evidence schemaVersion is invalid");
+  if (!/^[a-f0-9]{64}$/.test(evidence.sha256)) throw new Error("settlement evidence sha256 is invalid");
+  if (typeof evidence.path !== "string" || !new RegExp(`^acceptance-evidence/sha256/${evidence.sha256}\\.yaml$`).test(evidence.path)) {
+    throw new Error("settlement evidence path must be the exact relative CAS path");
+  }
+  if (!/^[a-f0-9]{64}$/.test(evidence.subagentFingerprint) || !/^[a-f0-9]{64}$/.test(evidence.mainFingerprint)) throw new Error("settlement evidence fingerprint is invalid");
+  if (typeof evidence.mainSessionId !== "string" || !evidence.mainSessionId.trim()) throw new Error("settlement evidence mainSessionId is required");
+  if (evidence.mainSessionId !== executorProof.rootSessionId) throw new Error("settlement evidence mainSessionId does not match official proof");
+  const identity = { goalId, taskId: data.taskId, runId: task.executorBinding.runId, attempt: data.attempt, contractHash: task.contractHash, head: data.executorHead };
+  const criteria = task.acceptance.criteria.map((criterion) => criterion.id);
+  const subagent = normalizeSettlementEvidence(evidence.subagent, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
+  const main = normalizeSettlementEvidence(evidence.main, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
+  if (fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" }) !== evidence.subagentFingerprint
+    || fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" }) !== evidence.mainFingerprint) throw new Error("settlement evidence fingerprint mismatch");
+  assertIndependentSettlementEvidence(subagent, main);
+  return { ...evidence, subagent, main };
+}
+
 function taskSettled(p, data, occurredAt, schemaVersion, replay) {
   requireActive(p);
   const { taskId, outcome, evidence, evidenceSource, nextAction } = data;
@@ -309,10 +332,14 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
   if (task.status !== "dispatched") throw new Error(`task is not dispatched: ${taskId} (${task.status})`);
   if (!["succeeded", "failed", "blocked"].includes(outcome)) throw new Error(`invalid outcome: ${outcome}`);
 
-  validateEvidenceSource(evidenceSource, evidence);
-  validateNextAction(nextAction);
-  if (outcome === "succeeded") validateEvidence(evidence);
-  const executorProof = schemaVersion === PLANNED_SCHEMA_VERSION ? validatedExecutorProof(task, data) : null;
+  const plannedSucceeded = schemaVersion === PLANNED_SCHEMA_VERSION && outcome === "succeeded";
+  if (!plannedSucceeded) {
+    validateEvidenceSource(evidenceSource, evidence);
+    validateNextAction(nextAction);
+    if (outcome === "succeeded") validateEvidence(evidence);
+  }
+  const executorProof = plannedSucceeded ? validatedExecutorProof(task, data) : null;
+  const settlementEvidence = plannedSucceeded ? validatedPlannedSettlementEvidence(p.goalId, task, data, executorProof) : null;
 
   task.lastSettledOutcome = outcome;
   task.lastExecutorProof = executorProof;
@@ -329,7 +356,7 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
         const executorIdentity = executorProof
           ? { executorRunId: task.executorBinding.runId, terminalProofId: executorProof.proofId }
           : {};
-        task.settlement = { attempt: workspace.attempt, executorHead: data.executorHead, ...executorIdentity };
+        task.settlement = { attempt: workspace.attempt, executorHead: data.executorHead, ...executorIdentity, ...(settlementEvidence ? { evidence: settlementEvidence } : {}) };
       } else if (!replay) {
         throw new Error("settlement identity requires attempt and executorHead");
       } else {
@@ -337,7 +364,7 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
       }
     }
     task.status = "succeeded";
-    task.evidence.push({ ...evidence, source: evidenceSource || "self_produced", ts: occurredAt });
+    if (!plannedSucceeded) task.evidence.push({ ...evidence, source: evidenceSource || "self_produced", ts: occurredAt });
   } else if (outcome === "failed") {
     task.settlement = null;
     task.status = "pending";
