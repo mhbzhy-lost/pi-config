@@ -205,18 +205,44 @@ function unsafeTargetCase(kind) {
   return { f, target, peer: `${target}.peer` };
 }
 for (const kind of ["symlink", "directory", "0644", "special", "different", "hardlink"]) test(`settlement unsafe ${kind} target is unchanged after rejection`, () => {
-  const { f, target, peer } = unsafeTargetCase(kind), before = lstatSync(target), bytes = before.isFile() ? readFileSync(target) : null, link = before.isSymbolicLink() ? readlinkSync(target) : null, peerBytes = existsSync(peer) ? readFileSync(peer) : null;
+  const { f, target, peer } = unsafeTargetCase(kind);
+  const snapshot = (path) => { const stat = lstatSync(path); return { dev: stat.dev, ino: stat.ino, mode: stat.mode, nlink: stat.nlink, isFile: stat.isFile(), isDirectory: stat.isDirectory(), isSymbolicLink: stat.isSymbolicLink(), bytes: stat.isFile() ? readFileSync(path) : null }; };
+  const before = snapshot(target), peerBefore = kind === "hardlink" ? snapshot(peer) : null, link = before.isSymbolicLink ? readlinkSync(target) : null;
+  if (kind === "0644") { assert.equal(before.isFile, true); assert.equal(before.mode & 0o7777, 0o644); }
+  if (kind === "special") { assert.equal(before.isFile, true); assert.equal(before.mode & 0o7777, 0o4600); }
+  if (kind === "directory") assert.equal(before.isDirectory, true);
+  if (kind === "symlink") assert.equal(before.isSymbolicLink, true);
+  if (kind === "hardlink") { assert.equal(before.dev, peerBefore.dev); assert.equal(before.ino, peerBefore.ino); assert.equal(before.nlink, 2); assert.equal(peerBefore.nlink, 2); }
   assert.throws(() => appendEventBatchWithSettlementEvidence(f.root, completePlannedSettlementBatch(f.goalId, f.sha256), 0, f.artifact), /unsafe|collision/);
-  const after = lstatSync(target); assert.equal(after.dev, before.dev); assert.equal(after.ino, before.ino); assert.equal(after.mode, before.mode); assert.equal(after.nlink, before.nlink); if (bytes) assert.deepEqual(readFileSync(target), bytes); if (link) assert.equal(readlinkSync(target), link); if (peerBytes) assert.deepEqual(readFileSync(peer), peerBytes); assertNoSettlementAuthority(f.root, f.goalId);
+  const after = snapshot(target), peerAfter = kind === "hardlink" ? snapshot(peer) : null;
+  assert.deepEqual(after, before); if (link !== null) assert.equal(readlinkSync(target), link);
+  if (kind === "0644") { assert.equal(after.isFile, true); assert.equal(after.mode & 0o7777, 0o644); }
+  if (kind === "special") { assert.equal(after.isFile, true); assert.equal(after.mode & 0o7777, 0o4600); }
+  if (kind === "directory") assert.equal(after.isDirectory, true);
+  if (kind === "symlink") assert.equal(after.isSymbolicLink, true);
+  if (kind === "hardlink") { assert.deepEqual(peerAfter, peerBefore); assert.equal(after.dev, peerAfter.dev); assert.equal(after.ino, peerAfter.ino); assert.equal(after.nlink, 2); assert.equal(peerAfter.nlink, 2); }
+  assertNoSettlementAuthority(f.root, f.goalId);
 });
 
 function rejectArtifactShape(name, artifact) { test(`settlement artifact rejects ${name} shape before authority`, () => { const f = settlementCase(`shape-${name.replaceAll(" ", "-")}`); rejectSettlement(f, undefined, 0, artifact(f), /artifact/); assert.equal(existsSync(settlementTarget(f)), false); }); }
 rejectArtifactShape("null prototype", (f) => Object.assign(Object.create(null), f.artifact));
 rejectArtifactShape("extra symbol", (f) => ({ ...f.artifact, [Symbol("extra")]: true }));
 rejectArtifactShape("extra string field", (f) => ({ ...f.artifact, extra: true }));
-rejectArtifactShape("sha256 accessor", (f) => Object.defineProperties({}, { sha256: { enumerable: true, get: () => f.sha256 }, content: { enumerable: true, value: f.content } }));
-rejectArtifactShape("content accessor", (f) => Object.defineProperties({}, { sha256: { enumerable: true, value: f.sha256 }, content: { enumerable: true, get: () => f.content } }));
-rejectArtifactShape("non-default data descriptors", (f) => Object.defineProperties({}, { sha256: { enumerable: true, writable: false, configurable: false, value: f.sha256 }, content: { enumerable: true, writable: false, configurable: false, value: f.content } }));
+rejectArtifactShape("sha256 accessor", (f) => Object.defineProperties({}, { sha256: { enumerable: true, configurable: true, get: () => f.sha256 }, content: { enumerable: true, writable: true, configurable: true, value: f.content } }));
+rejectArtifactShape("content accessor", (f) => Object.defineProperties({}, { sha256: { enumerable: true, writable: true, configurable: true, value: f.sha256 }, content: { enumerable: true, configurable: true, get: () => f.content } }));
+function nonDefaultDataDescriptor(property, flag) { return (f) => {
+  const artifact = { ...f.artifact };
+  Object.defineProperty(artifact, property, { ...Object.getOwnPropertyDescriptor(artifact, property), [flag]: false });
+  assert.equal(Object.getPrototypeOf(artifact), Object.prototype); assert.deepEqual(Reflect.ownKeys(artifact), ["sha256", "content"]);
+  for (const key of ["sha256", "content"]) { const descriptor = Object.getOwnPropertyDescriptor(artifact, key); assert.equal(descriptor.value, f.artifact[key]); assert.equal(descriptor.enumerable, key === property && flag === "enumerable" ? false : true); assert.equal(descriptor.writable, key === property && flag === "writable" ? false : true); assert.equal(descriptor.configurable, key === property && flag === "configurable" ? false : true); }
+  return artifact;
+}; }
+rejectArtifactShape("sha256 enumerable false data descriptor", nonDefaultDataDescriptor("sha256", "enumerable"));
+rejectArtifactShape("sha256 writable false data descriptor", nonDefaultDataDescriptor("sha256", "writable"));
+rejectArtifactShape("sha256 configurable false data descriptor", nonDefaultDataDescriptor("sha256", "configurable"));
+rejectArtifactShape("content enumerable false data descriptor", nonDefaultDataDescriptor("content", "enumerable"));
+rejectArtifactShape("content writable false data descriptor", nonDefaultDataDescriptor("content", "writable"));
+rejectArtifactShape("content configurable false data descriptor", nonDefaultDataDescriptor("content", "configurable"));
 
 test("v2 reducers have no ambient cwd dependency", () => {
   const source = readFileSync(new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url), "utf8");
