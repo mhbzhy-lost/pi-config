@@ -41,7 +41,8 @@ function plannedSettlementEvidence(identity, criterionId, mainSessionId) {
   const report = (ref) => ({ identity, criteria: [{ id: criterionId, status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
   const subagent = report(`sha256:${"2".repeat(64)}`), main = report(`sha256:${"3".repeat(64)}`);
   const options = { expectedIdentity: identity, expectedCriteria: [criterionId] };
-  return { schemaVersion: "settlement-evidence.v1", path: "/tmp/evidence/planned.yaml", sha256: "e".repeat(64), subagentFingerprint: fingerprintSettlementEvidence(subagent, options), mainFingerprint: fingerprintSettlementEvidence(main, options), subagent, main, mainSessionId };
+  const sha256 = "e".repeat(64);
+  return { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${sha256}.yaml`, sha256, subagentFingerprint: fingerprintSettlementEvidence(subagent, options), mainFingerprint: fingerprintSettlementEvidence(main, options), subagent, main, mainSessionId };
 }
 
 test("v2 reducers have no ambient cwd dependency", () => {
@@ -2183,8 +2184,7 @@ test("completed Planned goals keep continuity events in planned.v1", () => {
     workspaceLeaseId: "d".repeat(64), headAtDispatch: baseCommit,
   }, goalId));
   projection = applyEvent(projection, plannedEvent("task.settled", {
-    taskId: "t1", outcome: "succeeded", evidence: { type: "test_output", ref: "planned-tests" },
-    evidenceSource: "self_produced", nextAction: "Integrate the verified Planned task before accepting its evidence", attempt: 1, executorHead,
+    taskId: "t1", outcome: "succeeded", attempt: 1, executorHead,
     executorProof: { runId: "run-planned-continuity", proofId: "e".repeat(64), rootSessionId: "root-planned", observedAt: 1_700_000_000_000, outcome: "succeeded" },
     settlementEvidence: plannedSettlementEvidence({ goalId, taskId: "t1", runId: "run-planned-continuity", attempt: 1, contractHash, head: executorHead }, "proof", "root-planned"),
   }, goalId));
@@ -2249,13 +2249,13 @@ test("planned succeeded settlement requires exact independently verified dual ev
   const identity = { goalId, taskId: "t1", runId: "run-dual-evidence", attempt: 1, contractHash, head: executorHead };
   const report = (ref) => ({ identity, criteria: [{ id: "proof", status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
   const settlementEvidence = {
-    schemaVersion: "settlement-evidence.v1", path: "/tmp/evidence/dual.yaml", sha256: "e".repeat(64),
+    schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${"e".repeat(64)}.yaml`, sha256: "e".repeat(64),
     subagentFingerprint: null, mainFingerprint: null, subagent: report(`sha256:${"2".repeat(64)}`), main: report(`sha256:${"3".repeat(64)}`), mainSessionId: "root-dual",
   };
   settlementEvidence.subagentFingerprint = fingerprintSettlementEvidence(settlementEvidence.subagent, { expectedIdentity: identity, expectedCriteria: ["proof"] });
   settlementEvidence.mainFingerprint = fingerprintSettlementEvidence(settlementEvidence.main, { expectedIdentity: identity, expectedCriteria: ["proof"] });
   const settled = () => plannedEvent("task.settled", {
-    taskId: "t1", outcome: "succeeded", evidence: { type: "test_output", ref: "dual-tests" }, evidenceSource: "self_produced", nextAction: "Integrate only after independent evidence review completes", attempt: 1, executorHead,
+    taskId: "t1", outcome: "succeeded", attempt: 1, executorHead,
     executorProof: { runId: "run-dual-evidence", proofId: "4".repeat(64), rootSessionId: "root-dual", observedAt: 1_700_000_000_000, outcome: "succeeded" }, settlementEvidence,
   }, goalId);
   const accepted = applyEvent(projection, settled());
@@ -2263,7 +2263,13 @@ test("planned succeeded settlement requires exact independently verified dual ev
   for (const mutate of [
     (v) => delete v.settlementEvidence,
     (v) => { v.settlementEvidence.path = "relative.yaml"; },
+    (v) => { v.settlementEvidence.path = "/absolute.yaml"; },
+    (v) => { v.settlementEvidence.path = `acceptance-evidence\\sha256\\${"e".repeat(64)}.yaml`; },
+    (v) => { v.settlementEvidence.path = `acceptance-evidence/sha256/../${"e".repeat(64)}.yaml`; },
+    (v) => { v.settlementEvidence.path = `wrong-prefix/${"e".repeat(64)}.yaml`; },
+    (v) => { v.settlementEvidence.path = `acceptance-evidence/sha256/${"d".repeat(64)}.yaml`; },
     (v) => { v.settlementEvidence.sha256 = "bad"; },
+    (v) => { v.evidence = { type: "file", path: "legacy" }; },
     (v) => { v.settlementEvidence.subagent.identity.taskId = "other"; },
     (v) => { v.settlementEvidence.main.identity.runId = "other-run"; },
     (v) => { v.settlementEvidence.main.criteria[0].evidence = v.settlementEvidence.subagent.criteria[0].evidence; },
