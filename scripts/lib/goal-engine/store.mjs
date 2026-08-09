@@ -53,7 +53,8 @@ const MAX_SETTLEMENT_EVIDENCE_BYTES = 1_048_576;
 // holding its writer receipt; a failed append can therefore leave only an orphan.
 export function appendEventBatchWithSettlementEvidence(stateRoot, events, expectedVersion, artifact) {
   validateEventBatch(events);
-  const bytes = validateSettlementArtifact(artifact);
+  const artifactSnapshot = validateSettlementArtifact(artifact);
+  const { sha256, bytes } = artifactSnapshot;
   const canonicalRoot = resolve(stateRoot);
   const lock = acquireWriterLock(canonicalRoot);
   const goalDir = join(canonicalRoot, "goals", events[0].goalId);
@@ -66,9 +67,9 @@ export function appendEventBatchWithSettlementEvidence(stateRoot, events, expect
   try {
     let next = replayAndCheckVersion(canonicalRoot, eventsPath, expectedVersion, lock.token);
     for (const event of events) next = applyEvent(next, event);
-    assertSettlementEvidenceBinding(events, artifact.sha256);
+    assertSettlementEvidenceBinding(events, sha256);
     const registry = prepareRegistryUpdate(canonicalRoot, events.at(-1), next, lock.token);
-    publishSettlementArtifact(canonicalRoot, artifact.sha256, bytes, lock.token);
+    publishSettlementArtifact(canonicalRoot, sha256, bytes, lock.token);
     mkdirSync(goalDir, { recursive: true });
     writeBatchJsonlAndRename(canonicalRoot, eventsPath, eventsTmp, events, lock.token);
     durable = true;
@@ -87,12 +88,18 @@ export function appendEventBatchWithSettlementEvidence(stateRoot, events, expect
 }
 
 function validateSettlementArtifact(artifact) {
-  if (!artifact || typeof artifact !== "object" || Array.isArray(artifact) || Object.keys(artifact).length !== 2 || !Object.hasOwn(artifact, "sha256") || !Object.hasOwn(artifact, "content") || !/^[a-f0-9]{64}$/.test(artifact.sha256) || typeof artifact.content !== "string") throw new TypeError("invalid settlement evidence artifact");
-  const content = artifact.content;
+  if (!artifact || typeof artifact !== "object" || Array.isArray(artifact) || Object.getPrototypeOf(artifact) !== Object.prototype) throw new TypeError("invalid settlement evidence artifact");
+  const names = Object.getOwnPropertyNames(artifact);
+  if (names.length !== 2 || !names.includes("sha256") || !names.includes("content") || Object.getOwnPropertySymbols(artifact).length) throw new TypeError("invalid settlement evidence artifact");
+  const shaDescriptor = Object.getOwnPropertyDescriptor(artifact, "sha256");
+  const contentDescriptor = Object.getOwnPropertyDescriptor(artifact, "content");
+  if (!shaDescriptor || !contentDescriptor || !Object.hasOwn(shaDescriptor, "value") || !Object.hasOwn(contentDescriptor, "value")) throw new TypeError("invalid settlement evidence artifact");
+  const { value: sha256 } = shaDescriptor, { value: content } = contentDescriptor;
+  if (!/^[a-f0-9]{64}$/.test(sha256) || typeof content !== "string") throw new TypeError("invalid settlement evidence artifact");
   if (!content || content === "\n" || !content.endsWith("\n") || content.endsWith("\n\n") || content.includes("\r") || content.includes("\0") || /[\ud800-\udfff]/.test(content)) throw new TypeError("invalid settlement evidence content");
   const bytes = Buffer.from(content, "utf8");
-  if (bytes.length > MAX_SETTLEMENT_EVIDENCE_BYTES || bytes.toString("utf8") !== content || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) throw new TypeError("invalid settlement evidence content or hash");
-  return bytes;
+  if (bytes.length > MAX_SETTLEMENT_EVIDENCE_BYTES || bytes.toString("utf8") !== content || createHash("sha256").update(bytes).digest("hex") !== sha256) throw new TypeError("invalid settlement evidence content or hash");
+  return { sha256, bytes };
 }
 
 function assertSettlementEvidenceBinding(events, sha256) {
@@ -138,7 +145,7 @@ function lstatSafe(path) { try { return lstatSync(path); } catch (error) { if (e
 function fsyncDirectory(path) { const fd = openSync(path, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } }
 function assertExistingSettlementArtifact(path, bytes, sha256) {
   const stat = lstatSafe(path);
-  if (!stat || !stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) throw new TypeError("unsafe settlement evidence target");
+  if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o7777) !== 0o600) throw new TypeError("unsafe settlement evidence target");
   const existing = readFileSync(path);
   if (existing.length !== bytes.length || !existing.equals(bytes) || createHash("sha256").update(existing).digest("hex") !== sha256) throw new TypeError("settlement evidence collision");
 }
