@@ -3,8 +3,9 @@ import test from "node:test";
 import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
 import { fingerprintSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { issueActionOffer, verifyAndConsumeActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
-import { appendEvent, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
+import { appendEvent, appendEventBatchWithSettlementEvidence, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
 import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -44,6 +45,26 @@ function plannedSettlementEvidence(identity, criterionId, mainSessionId) {
   const sha256 = "e".repeat(64);
   return { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${sha256}.yaml`, sha256, subagentFingerprint: fingerprintSettlementEvidence(subagent, options), mainFingerprint: fingerprintSettlementEvidence(main, options), subagent, main, mainSessionId };
 }
+
+test("settlement evidence batch rejects non-canonical artifact bytes before event publication", () => {
+  const root = mkdtempSync(join(tmpdir(), "ge-settlement-cas-"));
+  const content = "settlement: accepted\n";
+  const artifact = { sha256: createHash("sha256").update(content).digest("hex"), content };
+  const reject = (candidate) => assert.throws(() => appendEventBatchWithSettlementEvidence(root, [makeEvent("goal.created", { objective: "x", scope: [], nonGoals: [], dod: [], tasks: [], taskDefs: {} })], 0, candidate), /artifact|evidence|hash|content|UTF-8/i);
+  assert.throws(() => appendEventBatchWithSettlementEvidence(root, [], 0, artifact), /batch/i);
+  reject({ ...artifact, sha256: "0".repeat(64) });
+  reject({ ...artifact, content: "settlement: accepted" });
+  reject({ ...artifact, content: "settlement: accepted\n\n" });
+  reject({ ...artifact, content: "settlement: \u0000accepted\n" });
+  reject({ ...artifact, content: "settlement: \ud800\n" });
+  reject({ ...artifact, content: "settlement: accepted\r\n" });
+  const exactAscii = "a".repeat(1_048_575) + "\n";
+  const exactUtf8 = "é".repeat(524_287) + "a\n";
+  assert.equal(Buffer.byteLength(exactAscii, "utf8"), 1_048_576);
+  assert.equal(Buffer.byteLength(exactUtf8, "utf8"), 1_048_576);
+  reject({ sha256: createHash("sha256").update("a".repeat(1_048_576) + "\n").digest("hex"), content: "a".repeat(1_048_576) + "\n" });
+  reject({ sha256: createHash("sha256").update("é".repeat(524_288) + "\n").digest("hex"), content: "é".repeat(524_288) + "\n" });
+});
 
 test("v2 reducers have no ambient cwd dependency", () => {
   const source = readFileSync(new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url), "utf8");
