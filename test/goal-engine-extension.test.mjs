@@ -3923,16 +3923,21 @@ test("compaction checkpoints survive extension reload and checkpoint failure can
   createGoalEngineExtensionProduction(pi);
   await invoke(pi, "goal_init", { objective: "Persist compaction recovery context", tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] });
 
-  const before = await emitHook(pi, "session_before_compact", {
-    reason: "overflow", willRetry: true,
-    preparation: { fileOps: { read: new Set(["docs/read-only.md"]), written: new Set(["src/a.ts"]), edited: new Set(["src/a.ts", "src/b.ts"]) } },
-  });
-  assert.equal(before, undefined);
+  for (const [reason, files] of [
+    ["overflow", ["src/a.ts", "src/b.ts"]],
+    ["manual", ["src/c.ts"]],
+  ]) {
+    const before = await emitHook(pi, "session_before_compact", {
+      reason, willRetry: true,
+      preparation: { fileOps: { read: new Set(["docs/read-only.md"]), written: new Set(files), edited: new Set() } },
+    });
+    assert.equal(before, undefined);
+    await emitHook(pi, "session_compact", { reason, willRetry: true });
+  }
   const compacted = loadProjection(join(cwd, ".state/goal-engine"), objectiveToGoalId("Persist compaction recovery context"));
-  assert.equal(compacted.continuity.lastCheckpoint.reason, "overflow");
-  assert.deepEqual(compacted.continuity.lastCheckpoint.modifiedFiles, ["src/a.ts", "src/b.ts"]);
-  await emitHook(pi, "session_compact", { reason: "overflow", willRetry: true });
-  assert.equal(pi.sentMessages.at(-1).options.deliverAs, "nextTurn");
+  assert.equal(compacted.continuity.lastCheckpoint.reason, "manual");
+  assert.deepEqual(compacted.continuity.lastCheckpoint.modifiedFiles, ["src/c.ts"]);
+  assert.deepEqual(pi.sentMessages.filter(({ options }) => options.deliverAs === "nextTurn"), []);
 
   const reloadedPi = createMockPi(cwd);
   createGoalEngineExtensionProduction(reloadedPi);
