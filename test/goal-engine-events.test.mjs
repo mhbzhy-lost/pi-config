@@ -4,10 +4,10 @@ import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.
 import { fingerprintSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { issueActionOffer, verifyAndConsumeActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
 import { appendEvent, appendEventBatchWithSettlementEvidence, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
-import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync, linkSync, symlinkSync, lstatSync, readlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync, linkSync, symlinkSync, lstatSync, readlinkSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 
@@ -2433,6 +2433,72 @@ test("planned.v1 is an isolated persisted generation with strict criteria", () =
   malformed.data.taskDefs.t1.acceptance.commands = ["true"];
   assert.throws(() => applyEvent(createProjection(), malformed), /only criteria/);
 });
+
+test("two child settlements deterministically contend on the writer lock and share one immutable artifact", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "ge-dual-settle-b1-"));
+  const content = "settlement: accepted\n", sha256 = createHash("sha256").update(content).digest("hex");
+  const storeUrl = pathToFileURL(join(process.cwd(), "scripts/lib/goal-engine/store.mjs")).href;
+  const childProgram = String.raw`
+    const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), { pathToFileURL } = require("node:url"), { syncBuiltinESMExports } = require("node:module");
+    const input = JSON.parse(process.env.DUAL_SETTLE_INPUT);
+    const originalLstat = fs.lstatSync, originalLink = fs.linkSync;
+    let held = false, attempted = false;
+    fs.lstatSync = function (p, ...args) {
+      const value = originalLstat.call(this, p, ...args);
+      if (input.hold && !held && p === input.root) { held = true; process.send({ type: "lock-held" }); fs.readSync(4, Buffer.alloc(1), 0, 1, null); }
+      return value;
+    };
+    fs.linkSync = function (candidate, target, ...args) {
+      try { return originalLink.call(this, candidate, target, ...args); }
+      catch (error) { if (!input.hold && !attempted && target === path.join(input.root, ".writer.lock") && error.code === "EEXIST") { attempted = true; process.send({ type: "second-lock-attempt" }); } throw error; }
+    };
+    syncBuiltinESMExports();
+    const event = (type, data) => ({ schemaVersion: "planned.v1", eventId: crypto.randomUUID(), goalId: input.goalId, type, occurredAt: "2026-08-08T00:00:00.000Z", data });
+    const identity = { goalId: input.goalId, taskId: "t1", runId: "run-" + input.goalId, attempt: 1, contractHash: "a".repeat(64), head: "c".repeat(40) };
+    const report = (ref) => ({ identity, criteria: [{ id: "proof", status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
+    const subagent = report("sha256:" + "2".repeat(64)), main = report("sha256:" + "3".repeat(64));
+    const evidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: "acceptance-evidence/sha256/" + input.sha256 + ".yaml", sha256: input.sha256, subagentFingerprint: null, mainFingerprint: null, subagent, main, mainSessionId: "root-cas" };
+    const { fingerprintSettlementEvidence } = await import(pathToFileURL(path.join(process.cwd(), "scripts/lib/goal-engine/settlement-evidence.mjs")).href);
+    evidence.subagentFingerprint = fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: ["proof"] }); evidence.mainFingerprint = fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: ["proof"] });
+    const batch = [event("goal.created", { objective: "dual", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "proof", statement: "proof", evidenceKinds: ["tests"] }] }, workflow: "tdd" } } }), event("task.dispatched", { taskId: "t1", contractHash: "a".repeat(64), workspace: { attempt: 1, path: "/tmp/cas", branch: "ge/cas", baseCommit: "b".repeat(40) } }), event("task.executor_bound", { taskId: "t1", attempt: 1, runId: identity.runId, contractHash: "a".repeat(64), asyncDir: "/tmp/cas", workspacePath: "/tmp/cas", workspaceLeaseId: "d".repeat(64), headAtDispatch: "b".repeat(40) }), event("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead: "c".repeat(40), executorProof: { runId: identity.runId, proofId: "4".repeat(64), rootSessionId: "root-cas", observedAt: 1700000000000, outcome: "succeeded" }, settlementEvidence: evidence })];
+    process.send({ type: "ready" }); await new Promise(resolve => process.once("message", resolve));
+    const { appendEventBatchWithSettlementEvidence } = await import(input.storeUrl);
+    const projection = appendEventBatchWithSettlementEvidence(input.root, batch, 0, { sha256: input.sha256, content: input.content });
+    const target = path.join(input.root, "acceptance-evidence", "sha256", input.sha256 + ".yaml"), stat = fs.lstatSync(target), bytes = fs.readFileSync(target);
+    process.send({ type: "done", snapshot: { goalId: input.goalId, version: projection.version, dev: stat.dev, ino: stat.ino, regular: stat.isFile(), mode: stat.mode & 0o7777, nlink: stat.nlink, bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") } });
+  `;
+  const children = [];
+  const messages = new Map();
+  const waitFor = (child, type) => new Promise((resolve, reject) => {
+    const onMessage = (message) => { if (message?.type === type) { cleanup(); resolve(message); } };
+    const onExit = (code, signal) => { cleanup(); reject(new Error("child exited before " + type + ": " + code + "/" + signal + " " + (messages.get(child)?.stderr ?? ""))); };
+    const cleanup = () => { child.off("message", onMessage); child.off("exit", onExit); };
+    child.on("message", onMessage); child.once("exit", onExit);
+  });
+  const launch = (goalId, hold) => {
+    const child = spawn(process.execPath, ["-e", `(async () => {${childProgram}})().catch(error => { console.error(error); process.exitCode = 1; })`], { cwd: process.cwd(), env: { ...process.env, DUAL_SETTLE_INPUT: JSON.stringify({ root, goalId, hold, sha256, content, storeUrl }) }, stdio: ["ignore", "pipe", "pipe", "ipc", "pipe"] });
+    children.push(child); messages.set(child, { stderr: "", exit: new Promise(resolve => child.once("exit", (code, signal) => resolve({ code, signal }))) }); child.stderr.on("data", chunk => { messages.get(child).stderr += chunk; }); return child;
+  };
+  try {
+    const first = launch("planned-dual-one", true), second = launch("planned-dual-two", false);
+    await Promise.all([waitFor(first, "ready"), waitFor(second, "ready")]);
+    const firstHeld = waitFor(first, "lock-held"); first.send("go"); await firstHeld;
+    const secondAttempt = waitFor(second, "second-lock-attempt"); second.send("go"); await secondAttempt;
+    first.stdio[4].write("x"); first.stdio[4].end();
+    const [one, two] = await Promise.all([waitFor(first, "done"), waitFor(second, "done")]);
+    const exits = await Promise.all(children.map(child => messages.get(child).exit));
+    for (const [index, exit] of exits.entries()) { assert.equal(exit.code, 0); assert.equal(exit.signal, null); assert.equal(messages.get(children[index]).stderr, ""); }
+    assert.deepEqual(one.snapshot, { ...one.snapshot, goalId: "planned-dual-one", version: 4 }); assert.deepEqual(two.snapshot, { ...two.snapshot, goalId: "planned-dual-two", version: 4 });
+    for (const key of ["dev", "ino", "regular", "mode", "nlink", "bytes", "sha256"]) assert.equal(one.snapshot[key], two.snapshot[key]);
+    assert.deepEqual({ regular: one.snapshot.regular, mode: one.snapshot.mode, nlink: one.snapshot.nlink, bytes: one.snapshot.bytes, sha256: one.snapshot.sha256 }, { regular: true, mode: 0o600, nlink: 1, bytes: Buffer.byteLength(content), sha256 });
+    for (const goalId of ["planned-dual-one", "planned-dual-two"]) { const lines = readFileSync(join(root, "goals", goalId, "events.jsonl"), "utf8").trim().split("\n").map(JSON.parse); assert.equal(lines.length, 4); assert(lines.every(event => event.goalId === goalId)); assert.equal(JSON.parse(readFileSync(join(root, "goals", goalId, "projection.json"), "utf8")).version, 4); }
+    assert.deepEqual(listGoals(root).sort(), ["planned-dual-one", "planned-dual-two"]);
+    assert.equal(existsSync(join(root, "acceptance-evidence", "sha256", `${sha256}.yaml`)), true);
+  } finally {
+    for (const child of children) { if (child.exitCode === null) child.kill("SIGTERM"); if (child.stdio[4] && !child.stdio[4].destroyed) child.stdio[4].destroy(); }
+    rmSync(root, { recursive: true, force: true });
+  }
+}, { timeout: 15_000 });
 
 test("planned succeeded settlement requires exact independently verified dual evidence", () => {
   const goalId = "planned-dual-evidence";
