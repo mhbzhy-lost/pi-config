@@ -89,7 +89,7 @@ export function appendEventBatchWithSettlementEvidence(stateRoot, events, expect
 function validateSettlementArtifact(artifact) {
   if (!artifact || typeof artifact !== "object" || Array.isArray(artifact) || Object.keys(artifact).length !== 2 || !Object.hasOwn(artifact, "sha256") || !Object.hasOwn(artifact, "content") || !/^[a-f0-9]{64}$/.test(artifact.sha256) || typeof artifact.content !== "string") throw new TypeError("invalid settlement evidence artifact");
   const content = artifact.content;
-  if (!content || !content.endsWith("\n") || content.endsWith("\n\n") || content.includes("\r") || content.includes("\0") || /[\ud800-\udfff]/.test(content)) throw new TypeError("invalid settlement evidence content");
+  if (!content || content === "\n" || !content.endsWith("\n") || content.endsWith("\n\n") || content.includes("\r") || content.includes("\0") || /[\ud800-\udfff]/.test(content)) throw new TypeError("invalid settlement evidence content");
   const bytes = Buffer.from(content, "utf8");
   if (bytes.length > MAX_SETTLEMENT_EVIDENCE_BYTES || bytes.toString("utf8") !== content || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) throw new TypeError("invalid settlement evidence content or hash");
   return bytes;
