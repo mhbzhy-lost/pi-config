@@ -2225,3 +2225,43 @@ test("planned.v1 is an isolated persisted generation with strict criteria", () =
   malformed.data.taskDefs.t1.acceptance.commands = ["true"];
   assert.throws(() => applyEvent(createProjection(), malformed), /only criteria/);
 });
+
+test("planned succeeded settlement requires exact independently verified dual evidence", () => {
+  const goalId = "planned-dual-evidence";
+  const contractHash = "a".repeat(64), baseCommit = "b".repeat(40), executorHead = "c".repeat(40);
+  let projection = applyEvent(createProjection(), plannedEvent("goal.created", {
+    objective: "Validate immutable dual settlement evidence", scope: [], nonGoals: [], dod: [], tasks: ["t1"],
+    taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [plannedCriterion("proof")] }, workflow: "tdd" } },
+  }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.dispatched", { taskId: "t1", contractHash, workspace: { attempt: 1, path: "/tmp/dual-evidence", branch: "ge/dual/t1/1", baseCommit } }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.executor_bound", {
+    taskId: "t1", attempt: 1, runId: "run-dual-evidence", contractHash, asyncDir: "/tmp/run-dual-evidence", workspacePath: "/tmp/dual-evidence", workspaceLeaseId: "d".repeat(64), headAtDispatch: baseCommit,
+  }, goalId));
+  const identity = { goalId, taskId: "t1", runId: "run-dual-evidence", attempt: 1, contractHash, head: executorHead };
+  const report = (ref) => ({ identity, criteria: [{ id: "proof", status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
+  const settlementEvidence = {
+    schemaVersion: "settlement-evidence.v1", path: "/tmp/evidence/dual.yaml", sha256: "e".repeat(64),
+    subagentFingerprint: "f".repeat(64), mainFingerprint: "1".repeat(64), subagent: report(`sha256:${"2".repeat(64)}`), main: report(`sha256:${"3".repeat(64)}`), mainSessionId: "root-dual",
+  };
+  const settled = () => plannedEvent("task.settled", {
+    taskId: "t1", outcome: "succeeded", evidence: { type: "test_output", ref: "dual-tests" }, evidenceSource: "self_produced", nextAction: "Integrate only after independent evidence review completes", attempt: 1, executorHead,
+    executorProof: { runId: "run-dual-evidence", proofId: "4".repeat(64), rootSessionId: "root-dual", observedAt: 1_700_000_000_000, outcome: "succeeded" }, settlementEvidence,
+  }, goalId);
+  const accepted = applyEvent(projection, settled());
+  assert.deepEqual(accepted.tasks.get("t1").settlement.evidence, settlementEvidence);
+  for (const mutate of [
+    (v) => delete v.settlementEvidence,
+    (v) => { v.settlementEvidence.path = "relative.yaml"; },
+    (v) => { v.settlementEvidence.sha256 = "bad"; },
+    (v) => { v.settlementEvidence.subagent.identity.taskId = "other"; },
+    (v) => { v.settlementEvidence.main.identity.runId = "other-run"; },
+    (v) => { v.settlementEvidence.main.criteria[0].evidence = v.settlementEvidence.subagent.criteria[0].evidence; },
+    (v) => { v.settlementEvidence.mainSessionId = "other-root"; },
+    (v) => { v.settlementEvidence.extra = true; },
+  ]) {
+    const bad = settled(); mutate(bad.data);
+    assert.throws(() => applyEvent(projection, bad), /settlement evidence|identity|independent|exactly|absolute|sha256/i);
+  }
+  const failed = plannedEvent("task.settled", { taskId: "t1", outcome: "failed", nextAction: "Retry after recording the failed Planned task result" }, goalId);
+  assert.equal(applyEvent(projection, failed).tasks.get("t1").status, "pending");
+});
