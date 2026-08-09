@@ -4,7 +4,7 @@ import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.
 import { fingerprintSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { issueActionOffer, verifyAndConsumeActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
 import { appendEvent, appendEventBatchWithSettlementEvidence, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
-import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync, linkSync, symlinkSync, lstatSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -69,6 +69,72 @@ test("settlement CAS rejects semantically empty content before a complete Planne
   assert.throws(() => appendEventBatchWithSettlementEvidence(root, completePlannedSettlementBatch("planned-empty-cas", sha256), 0, { sha256, content }), /empty|content|evidence/i);
   assert.equal(existsSync(join(root, "acceptance-evidence", "sha256", `${sha256}.yaml`)), false);
   assert.equal(loadProjection(root, "planned-empty-cas"), null);
+});
+
+test("settlement CAS phase A snapshots artifacts and fails closed before authority", () => {
+  const content = "settlement: accepted\n";
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  const artifact = { sha256, content };
+  const target = (root, hash = sha256) => join(root, "acceptance-evidence", "sha256", `${hash}.yaml`);
+  const authorityIsZero = (root, goalId, hash = sha256) => {
+    assert.equal(existsSync(target(root, hash)), false);
+    assert.equal(loadProjection(root, goalId), null);
+    assert.equal(existsSync(join(root, "registry.json")), false);
+  };
+
+  // A1: exact canonical location, bytes/mode, and no goal-local copy.
+  {
+    const root = mkdtempSync(join(tmpdir(), "ge-settlement-a1-")), goalId = "planned-a1";
+    const result = appendEventBatchWithSettlementEvidence(root, completePlannedSettlementBatch(goalId, sha256), 0, artifact);
+    assert.equal(result.version, 4);
+    assert.equal(readFileSync(target(root), "utf8"), content);
+    assert.equal(lstatSync(target(root)).mode & 0o7777, 0o600);
+    assert.equal(existsSync(join(root, "goals", goalId, "acceptance-evidence")), false);
+    assert.equal(loadProjection(root, goalId).version, 4);
+  }
+  // A2: both UTF-8 boundary payloads publish, while limit + 1 cannot publish authority.
+  for (const contentAtLimit of ["a".repeat(1_048_575) + "\n", "é".repeat(524_287) + "a\n"]) {
+    const hash = createHash("sha256").update(contentAtLimit).digest("hex"), root = mkdtempSync(join(tmpdir(), "ge-settlement-limit-"));
+    appendEventBatchWithSettlementEvidence(root, completePlannedSettlementBatch(`limit-${hash.slice(0, 4)}`, hash), 0, { sha256: hash, content: contentAtLimit });
+    assert.equal(readFileSync(target(root, hash), "utf8"), contentAtLimit);
+  }
+  for (const tooLarge of ["a".repeat(1_048_576) + "\n", "é".repeat(524_288) + "\n"]) {
+    const hash = createHash("sha256").update(tooLarge).digest("hex"), root = mkdtempSync(join(tmpdir(), "ge-settlement-over-")), goalId = `over-${hash.slice(0, 4)}`;
+    assert.throws(() => appendEventBatchWithSettlementEvidence(root, completePlannedSettlementBatch(goalId, hash), 0, { sha256: hash, content: tooLarge }), /content|hash/i);
+    authorityIsZero(root, goalId, hash);
+  }
+  // A3: valid batches with mismatched evidence, stale version, or invalid registry fail before CAS/events/projection/registry authority.
+  for (const kind of ["mismatch", "stale", "registry"]) {
+    const root = mkdtempSync(join(tmpdir(), "ge-settlement-preflight-")), goalId = `preflight-${kind}`;
+    if (kind === "registry") writeFileSync(join(root, "registry.json"), "not json\n");
+    const events = completePlannedSettlementBatch(goalId, sha256);
+    if (kind === "mismatch") events.at(-1).data.settlementEvidence.path = `acceptance-evidence/sha256/${"0".repeat(64)}.yaml`;
+    assert.throws(() => appendEventBatchWithSettlementEvidence(root, events, kind === "stale" ? 1 : 0, artifact), /settlement|version|registry|JSON/i);
+    assert.equal(existsSync(target(root)), false); assert.equal(loadProjection(root, goalId), null);
+  }
+  // A4: only an exact regular 0600 single-link matching target is idempotent.
+  {
+    const root = mkdtempSync(join(tmpdir(), "ge-settlement-existing-")), goalId = "existing-ok";
+    mkdirSync(join(root, "acceptance-evidence", "sha256"), { recursive: true }); writeFileSync(target(root), content, { mode: 0o600 });
+    appendEventBatchWithSettlementEvidence(root, completePlannedSettlementBatch(goalId, sha256), 0, artifact);
+  }
+  for (const kind of ["symlink", "directory", "0644", "different", "hardlink", "special"]) {
+    const root = mkdtempSync(join(tmpdir(), "ge-settlement-unsafe-")), goalId = `unsafe-${kind}`;
+    mkdirSync(join(root, "acceptance-evidence", "sha256"), { recursive: true });
+    if (kind === "symlink") symlinkSync("/tmp", target(root)); else if (kind === "directory") mkdirSync(target(root)); else { writeFileSync(target(root), kind === "different" ? "other: bytes\n" : content, { mode: kind === "0644" ? 0o644 : 0o600 }); if (kind === "hardlink") linkSync(target(root), `${target(root)}.link`); if (kind === "special") chmodSync(target(root), 0o4600); }
+    assert.throws(() => appendEventBatchWithSettlementEvidence(root, completePlannedSettlementBatch(goalId, sha256), 0, artifact), /unsafe|collision/i);
+    assert.equal(loadProjection(root, goalId), null); assert.equal(existsSync(join(root, "registry.json")), false);
+  }
+  // A5: accessors/prototypes are not data artifacts; a drifting hash must not publish bytes under later getter output.
+  for (const candidate of [Object.assign(Object.create({}), artifact), Object.defineProperty({}, "sha256", { enumerable: true, get: () => sha256 }), Object.defineProperties({}, { sha256: { enumerable: true, get: () => sha256 }, content: { enumerable: true, value: content } })]) {
+    const root = mkdtempSync(join(tmpdir(), "ge-settlement-shape-")), goalId = crypto.randomUUID();
+    assert.throws(() => appendEventBatchWithSettlementEvidence(root, completePlannedSettlementBatch(goalId, sha256), 0, candidate), /artifact/i); authorityIsZero(root, goalId);
+  }
+  const wrong = "f".repeat(64), drifting = { content }; let reads = 0;
+  Object.defineProperty(drifting, "sha256", { enumerable: true, get: () => ++reads <= 2 ? sha256 : wrong });
+  const root = mkdtempSync(join(tmpdir(), "ge-settlement-drift-")), goalId = "drifting-hash";
+  assert.throws(() => appendEventBatchWithSettlementEvidence(root, completePlannedSettlementBatch(goalId, wrong), 0, drifting), /artifact|settlement|hash/i);
+  authorityIsZero(root, goalId, wrong);
 });
 
 test("settlement evidence batch rejects non-canonical artifact bytes before event publication", () => {
