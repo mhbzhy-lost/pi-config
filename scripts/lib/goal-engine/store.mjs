@@ -1,6 +1,6 @@
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, linkSync, existsSync, chmodSync, rmSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, linkSync, existsSync, chmodSync, rmSync, unlinkSync, lstatSync, openSync, closeSync, fsyncSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { applyEvent, createProjection } from "./events.mjs";
 
@@ -45,6 +45,102 @@ export function appendEventBatch(stateRoot, events, expectedVersion) {
     if (registryTmp && existsSync(registryTmp)) rmSync(registryTmp, { force: true });
     releaseWriterLock(stateRoot, lock.token);
   }
+}
+
+const MAX_SETTLEMENT_EVIDENCE_BYTES = 1_048_576;
+
+// Publishes immutable evidence before the existing batch durability sequence while
+// holding its writer receipt; a failed append can therefore leave only an orphan.
+export function appendEventBatchWithSettlementEvidence(stateRoot, events, expectedVersion, artifact) {
+  validateEventBatch(events);
+  const bytes = validateSettlementArtifact(artifact);
+  const canonicalRoot = resolve(stateRoot);
+  const lock = acquireWriterLock(canonicalRoot);
+  const goalDir = join(canonicalRoot, "goals", events[0].goalId);
+  const eventsPath = join(goalDir, "events.jsonl");
+  const projectionPath = join(goalDir, "projection.json");
+  const identity = `${process.pid}-${randomUUID()}`;
+  const eventsTmp = `${eventsPath}.${identity}.tmp`;
+  const projectionTmp = `${projectionPath}.${identity}.tmp`;
+  let registryTmp = null, durable = false;
+  try {
+    let next = replayAndCheckVersion(canonicalRoot, eventsPath, expectedVersion, lock.token);
+    for (const event of events) next = applyEvent(next, event);
+    assertSettlementEvidenceBinding(events, artifact.sha256);
+    const registry = prepareRegistryUpdate(canonicalRoot, events.at(-1), next, lock.token);
+    publishSettlementArtifact(canonicalRoot, artifact.sha256, bytes, lock.token);
+    mkdirSync(goalDir, { recursive: true });
+    writeBatchJsonlAndRename(canonicalRoot, eventsPath, eventsTmp, events, lock.token);
+    durable = true;
+    publishBatchProjectionWithWriterReceipt(canonicalRoot, projectionTmp, projectionPath, next, lock.token);
+    registryTmp = publishBatchRegistry(canonicalRoot, registry, identity, lock.token);
+    return next;
+  } catch (error) {
+    if (durable) throw batchDurableFailure(error);
+    throw error;
+  } finally {
+    if (existsSync(eventsTmp)) rmSync(eventsTmp, { force: true });
+    if (existsSync(projectionTmp)) rmSync(projectionTmp, { force: true });
+    if (registryTmp && existsSync(registryTmp)) rmSync(registryTmp, { force: true });
+    releaseWriterLock(canonicalRoot, lock.token);
+  }
+}
+
+function validateSettlementArtifact(artifact) {
+  if (!artifact || typeof artifact !== "object" || Array.isArray(artifact) || Object.keys(artifact).length !== 2 || !Object.hasOwn(artifact, "sha256") || !Object.hasOwn(artifact, "content") || !/^[a-f0-9]{64}$/.test(artifact.sha256) || typeof artifact.content !== "string") throw new TypeError("invalid settlement evidence artifact");
+  const content = artifact.content;
+  if (!content || !content.endsWith("\n") || content.endsWith("\n\n") || content.includes("\r") || content.includes("\0") || /[\ud800-\udfff]/.test(content)) throw new TypeError("invalid settlement evidence content");
+  const bytes = Buffer.from(content, "utf8");
+  if (bytes.length > MAX_SETTLEMENT_EVIDENCE_BYTES || bytes.toString("utf8") !== content || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) throw new TypeError("invalid settlement evidence content or hash");
+  return bytes;
+}
+
+function assertSettlementEvidenceBinding(events, sha256) {
+  const evidence = events.map((event) => event?.data?.settlementEvidence).filter(Boolean);
+  const path = `acceptance-evidence/sha256/${sha256}.yaml`;
+  if (evidence.length !== 1 || evidence[0].sha256 !== sha256 || evidence[0].path !== path) throw new TypeError("settlement event evidence does not match artifact");
+}
+
+function publishSettlementArtifact(stateRoot, sha256, bytes, writerToken) {
+  assertWriterLockOwned(stateRoot, writerToken);
+  const evidenceDir = secureEvidenceDirectory(stateRoot);
+  const target = join(evidenceDir, `${sha256}.yaml`);
+  if (existsSync(target)) return assertExistingSettlementArtifact(target, bytes, sha256);
+  const tmp = join(evidenceDir, `.${sha256}.${process.pid}-${randomUUID()}.tmp`);
+  try {
+    const fd = openSync(tmp, "wx", 0o600);
+    try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+    chmodSync(tmp, 0o600);
+    assertWriterLockOwned(stateRoot, writerToken);
+    try { linkSync(tmp, target); } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      return assertExistingSettlementArtifact(target, bytes, sha256);
+    }
+    fsyncDirectory(evidenceDir);
+  } finally { if (existsSync(tmp)) rmSync(tmp, { force: true }); }
+}
+
+function secureEvidenceDirectory(stateRoot) {
+  let current = stateRoot;
+  for (const component of ["acceptance-evidence", "sha256"]) {
+    const before = lstatSafe(current);
+    if (!before || !before.isDirectory() || before.isSymbolicLink()) throw new TypeError("unsafe settlement evidence parent");
+    const next = join(current, component);
+    if (!existsSync(next)) mkdirSync(next, { mode: 0o700 });
+    const entry = lstatSafe(next);
+    if (!entry || !entry.isDirectory() || entry.isSymbolicLink()) throw new TypeError("unsafe settlement evidence directory");
+    current = next;
+  }
+  return current;
+}
+
+function lstatSafe(path) { try { return lstatSync(path); } catch (error) { if (error.code === "ENOENT") return null; throw error; } }
+function fsyncDirectory(path) { const fd = openSync(path, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } }
+function assertExistingSettlementArtifact(path, bytes, sha256) {
+  const stat = lstatSafe(path);
+  if (!stat || !stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) throw new TypeError("unsafe settlement evidence target");
+  const existing = readFileSync(path);
+  if (existing.length !== bytes.length || !existing.equals(bytes) || createHash("sha256").update(existing).digest("hex") !== sha256) throw new TypeError("settlement evidence collision");
 }
 
 export function appendEvent(stateRoot, event, expectedVersion) {
