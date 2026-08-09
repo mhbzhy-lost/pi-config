@@ -2097,16 +2097,6 @@ export function createGoalEngineExtension(pi, options = {}) {
     }
   });
 
-  pi.on("session_compact", (_event, ctx) => {
-    const { cwd, root } = executionScopeFor(ctx);
-    const projections = loadAllProjections(root);
-    const selected = selectContinuityCandidate({ projections, cwd, paths: [], sessionId: sessionIdentity(ctx) });
-    if (selected.status !== "selected") return undefined;
-    const projection = projections.find((candidate) => candidate.goalId === selected.goalId);
-    pi.sendMessage?.({ customType: "goal-engine-recovery", content: formatRecoveryInjection(projection), display: true }, { deliverAs: "nextTurn" });
-    return undefined;
-  });
-
   // --- tool_result hook: checkpoint reminder ---
   pi.on("tool_result", (event, ctx) => {
     let cwd, root;
