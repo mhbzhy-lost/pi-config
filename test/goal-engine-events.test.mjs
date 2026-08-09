@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
+import { fingerprintSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { issueActionOffer, verifyAndConsumeActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
 import { appendEvent, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
 import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -34,6 +35,13 @@ function plannedCriterion(id, statement = id, evidenceKinds = ["tests"]) {
 
 function plannedEvent(type, data, goalId = "planned-goal", occurredAt = "2026-08-08T00:00:00.000Z") {
   return { schemaVersion: "planned.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt, data };
+}
+
+function plannedSettlementEvidence(identity, criterionId, mainSessionId) {
+  const report = (ref) => ({ identity, criteria: [{ id: criterionId, status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
+  const subagent = report(`sha256:${"2".repeat(64)}`), main = report(`sha256:${"3".repeat(64)}`);
+  const options = { expectedIdentity: identity, expectedCriteria: [criterionId] };
+  return { schemaVersion: "settlement-evidence.v1", path: "/tmp/evidence/planned.yaml", sha256: "e".repeat(64), subagentFingerprint: fingerprintSettlementEvidence(subagent, options), mainFingerprint: fingerprintSettlementEvidence(main, options), subagent, main, mainSessionId };
 }
 
 test("v2 reducers have no ambient cwd dependency", () => {
@@ -2178,6 +2186,7 @@ test("completed Planned goals keep continuity events in planned.v1", () => {
     taskId: "t1", outcome: "succeeded", evidence: { type: "test_output", ref: "planned-tests" },
     evidenceSource: "self_produced", nextAction: "Integrate the verified Planned task before accepting its evidence", attempt: 1, executorHead,
     executorProof: { runId: "run-planned-continuity", proofId: "e".repeat(64), rootSessionId: "root-planned", observedAt: 1_700_000_000_000, outcome: "succeeded" },
+    settlementEvidence: plannedSettlementEvidence({ goalId, taskId: "t1", runId: "run-planned-continuity", attempt: 1, contractHash, head: executorHead }, "proof", "root-planned"),
   }, goalId));
   projection = applyEvent(projection, plannedEvent("task.workspace_disposition_started", {
     taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "merge", executorHead, originHeadBefore: baseCommit,
@@ -2241,8 +2250,10 @@ test("planned succeeded settlement requires exact independently verified dual ev
   const report = (ref) => ({ identity, criteria: [{ id: "proof", status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
   const settlementEvidence = {
     schemaVersion: "settlement-evidence.v1", path: "/tmp/evidence/dual.yaml", sha256: "e".repeat(64),
-    subagentFingerprint: "f".repeat(64), mainFingerprint: "1".repeat(64), subagent: report(`sha256:${"2".repeat(64)}`), main: report(`sha256:${"3".repeat(64)}`), mainSessionId: "root-dual",
+    subagentFingerprint: null, mainFingerprint: null, subagent: report(`sha256:${"2".repeat(64)}`), main: report(`sha256:${"3".repeat(64)}`), mainSessionId: "root-dual",
   };
+  settlementEvidence.subagentFingerprint = fingerprintSettlementEvidence(settlementEvidence.subagent, { expectedIdentity: identity, expectedCriteria: ["proof"] });
+  settlementEvidence.mainFingerprint = fingerprintSettlementEvidence(settlementEvidence.main, { expectedIdentity: identity, expectedCriteria: ["proof"] });
   const settled = () => plannedEvent("task.settled", {
     taskId: "t1", outcome: "succeeded", evidence: { type: "test_output", ref: "dual-tests" }, evidenceSource: "self_produced", nextAction: "Integrate only after independent evidence review completes", attempt: 1, executorHead,
     executorProof: { runId: "run-dual-evidence", proofId: "4".repeat(64), rootSessionId: "root-dual", observedAt: 1_700_000_000_000, outcome: "succeeded" }, settlementEvidence,
