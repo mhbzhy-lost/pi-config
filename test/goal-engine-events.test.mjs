@@ -7,7 +7,7 @@ import { appendEvent, appendEventBatchWithSettlementEvidence, loadProjection, li
 import { mkdtempSync, readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync, chmodSync, linkSync, symlinkSync, lstatSync, readlinkSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 
@@ -2510,6 +2510,63 @@ test("two child settlements deterministically contend on the writer lock and sha
     rmSync(root, { recursive: true, force: true });
   }
 }, { timeout: 15_000 });
+
+function runSettlementReplacementRed(boundary) {
+  const root = mkdtempSync(join(tmpdir(), `ge-settlement-b2-${boundary}-`));
+  const input = { root, boundary, storeUrl: pathToFileURL(join(process.cwd(), "scripts/lib/goal-engine/store.mjs")).href };
+  const child = String.raw`
+    (async () => {
+      const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
+      const { syncBuiltinESMExports } = require("node:module");
+      const input = JSON.parse(process.env.SETTLEMENT_REPLACEMENT_INPUT);
+      const content = "settlement: accepted\n", sha256 = crypto.createHash("sha256").update(content).digest("hex");
+      const evidenceDir = path.join(input.root, "acceptance-evidence", "sha256"), target = path.join(evidenceDir, sha256 + ".yaml"), staging = path.join(evidenceDir, ".attacker-" + input.boundary);
+      fs.mkdirSync(evidenceDir, { recursive: true });
+      if (input.boundary === "check" || input.boundary === "existing-read") fs.writeFileSync(target, content, { mode: 0o600 });
+      fs.writeFileSync(staging, content, { mode: 0o600 }); fs.chmodSync(staging, 0o600);
+      const snapshot = p => { const s = fs.lstatSync(p), bytes = s.isFile() ? fs.readFileSync(p) : null; return { dev: s.dev, ino: s.ino, regular: s.isFile(), mode: s.mode & 0o7777, nlink: s.nlink, bytes: bytes && bytes.toString("base64") }; };
+      const oldPath = input.boundary === "check" || input.boundary === "existing-read" ? target : null;
+      const attacker = snapshot(staging); let old = oldPath ? snapshot(oldPath) : null;
+      const original = { lstatSync: fs.lstatSync, openSync: fs.openSync, writeFileSync: fs.writeFileSync, linkSync: fs.linkSync, readFileSync: fs.readFileSync, fsyncSync: fs.fsyncSync, renameSync: fs.renameSync };
+      let hooks = 0, targetFd = null, dirFd = null, temp = null;
+      const replace = p => { hooks++; original.renameSync(staging, p); };
+      fs.lstatSync = function(p, ...a) { const v = original.lstatSync.call(this, p, ...a); if (input.boundary === "check" && hooks === 0 && p === target) replace(target); return v; };
+      fs.openSync = function(p, ...a) { const fd = original.openSync.call(this, p, ...a); if (input.boundary === "temp-write" && typeof p === "string" && p.startsWith(path.join(evidenceDir, "." + sha256 + ".")) && p.endsWith(".tmp")) temp = { path: p, fd }; if (input.boundary === "existing-read" && p === target) targetFd = fd; if (input.boundary === "directory-fsync" && p === evidenceDir) dirFd = fd; return fd; };
+      fs.writeFileSync = function(p, bytes, ...a) { const v = original.writeFileSync.call(this, p, bytes, ...a); if (input.boundary === "temp-write" && hooks === 0 && temp && p === temp.fd) { old = snapshot(temp.path); replace(temp.path); } return v; };
+      fs.linkSync = function(source, destination, ...a) { const v = original.linkSync.call(this, source, destination, ...a); if (input.boundary === "target-link" && hooks === 0 && destination === target) { old = snapshot(target); replace(target); } return v; };
+      fs.readFileSync = function(p, ...a) { const v = original.readFileSync.call(this, p, ...a); if (input.boundary === "existing-read" && hooks === 0 && (p === target || p === targetFd)) replace(target); return v; };
+      fs.fsyncSync = function(fd, ...a) { const v = original.fsyncSync.call(this, fd, ...a); if (input.boundary === "directory-fsync" && hooks === 0 && fd === dirFd) { old = snapshot(target); replace(target); } return v; };
+      syncBuiltinESMExports();
+      const { appendEventBatchWithSettlementEvidence, loadProjection } = await import(input.storeUrl);
+      const event = (type, data) => ({ schemaVersion: "planned.v1", eventId: crypto.randomUUID(), goalId: "replacement-" + input.boundary, type, occurredAt: "2026-08-08T00:00:00.000Z", data });
+      const identity = { goalId: "replacement-" + input.boundary, taskId: "t1", runId: "run-replacement", attempt: 1, contractHash: "a".repeat(64), head: "c".repeat(40) };
+      const report = ref => ({ identity, criteria: [{ id: "proof", status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
+      const subagent = report("sha256:" + "2".repeat(64)), main = report("sha256:" + "3".repeat(64));
+      const { fingerprintSettlementEvidence } = await import(require("node:url").pathToFileURL(path.join(process.cwd(), "scripts/lib/goal-engine/settlement-evidence.mjs")).href);
+      const evidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: "acceptance-evidence/sha256/" + sha256 + ".yaml", sha256, subagentFingerprint: fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: ["proof"] }), mainFingerprint: fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: ["proof"] }), subagent, main, mainSessionId: "root-cas" };
+      const batch = [event("goal.created", { objective: "replacement", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "proof", statement: "proof", evidenceKinds: ["tests"] }] }, workflow: "tdd" } } }), event("task.dispatched", { taskId: "t1", contractHash: "a".repeat(64), workspace: { attempt: 1, path: "/tmp/cas", branch: "ge/cas", baseCommit: "b".repeat(40) } }), event("task.executor_bound", { taskId: "t1", attempt: 1, runId: identity.runId, contractHash: "a".repeat(64), asyncDir: "/tmp/cas", workspacePath: "/tmp/cas", workspaceLeaseId: "d".repeat(64), headAtDispatch: "b".repeat(40) }), event("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead: "c".repeat(40), executorProof: { runId: identity.runId, proofId: "4".repeat(64), rootSessionId: "root-cas", observedAt: 1700000000000, outcome: "succeeded" }, settlementEvidence: evidence })];
+      let error = null; try { appendEventBatchWithSettlementEvidence(input.root, batch, 0, { sha256, content }); } catch (cause) { error = String(cause && cause.message); }
+      const replacedPath = input.boundary === "temp-write" ? temp.path : target;
+      let replacement = null; try { replacement = snapshot(replacedPath); } catch (cause) { if (cause.code !== "ENOENT") throw cause; }
+      process.stdout.write(JSON.stringify({ hooks, old, attacker, replacement, targetExists: fs.existsSync(target), error, authority: { events: fs.existsSync(path.join(input.root, "goals", identity.goalId, "events.jsonl")), projection: fs.existsSync(path.join(input.root, "goals", identity.goalId, "projection.json")), registry: fs.existsSync(path.join(input.root, "registry.json")), loaded: loadProjection(input.root, identity.goalId) } }));
+    })();
+  `;
+  try {
+    const runner = spawnSync(process.execPath, ["-e", child], { cwd: process.cwd(), env: { ...process.env, SETTLEMENT_REPLACEMENT_INPUT: JSON.stringify(input) }, encoding: "utf8", timeout: 10_000 });
+    assert.equal(runner.error, undefined); assert.equal(runner.status, 0, runner.stderr); assert.equal(runner.signal, null); assert.equal(runner.stderr, "");
+    const result = JSON.parse(runner.stdout); assert.equal(runner.stdout, JSON.stringify(result));
+    assert.equal(result.hooks, 1); assert.match(result.error ?? "", /identity|receipt|replacement|unsafe/i);
+    assert.deepEqual(result.replacement, result.attacker); assert.notDeepEqual([result.old.dev, result.old.ino], [result.replacement.dev, result.replacement.ino]); assert.deepEqual({ regular: result.replacement.regular, mode: result.replacement.mode, nlink: result.replacement.nlink }, { regular: true, mode: 0o600, nlink: 1 });
+    assert.deepEqual(result.authority, { events: false, projection: false, registry: false, loaded: null });
+    if (boundary === "temp-write") assert.equal(result.targetExists, false); else assert.equal(result.targetExists, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+test("settlement CAS replacement at check lstat fails closed", () => runSettlementReplacementRed("check"), { timeout: 15_000 });
+test("settlement CAS replacement at temp-write fails closed", () => runSettlementReplacementRed("temp-write"), { timeout: 15_000 });
+test("settlement CAS replacement at target-link fails closed", () => runSettlementReplacementRed("target-link"), { timeout: 15_000 });
+test("settlement CAS replacement at existing-read fails closed", () => runSettlementReplacementRed("existing-read"), { timeout: 15_000 });
+test("settlement CAS replacement at directory-fsync fails closed", () => runSettlementReplacementRed("directory-fsync"), { timeout: 15_000 });
 
 test("planned succeeded settlement requires exact independently verified dual evidence", () => {
   const goalId = "planned-dual-evidence";
