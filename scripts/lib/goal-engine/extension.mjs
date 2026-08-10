@@ -845,6 +845,9 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (!projection) return "NO_ACTIVE_GOAL";
       if (!enforceActionTokens) return statusResponse(projection, cwd, root);
       const sessionId = sessionIdentity(ctx);
+      if (projection.sessionBindings?.some((binding) => binding.sessionId === sessionId && binding.state === "detached")) {
+        return statusResponse(projection, cwd, root);
+      }
       const metadata = metadataState(projection, sessionId);
       let orphanDecision = null;
       let orphanAction = null;
