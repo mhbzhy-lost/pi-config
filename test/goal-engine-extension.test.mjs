@@ -4106,7 +4106,7 @@ test("production status throws replay failures and repeated completed slugs rece
   await assert.rejects(() => invoke(brokenPi, "goal_status", {}), /replay failed/);
 });
 
-test("active watching session detaches by preempting its fresh runnable dispatch offer", async () => {
+test("detached active session cannot reacquire a runnable offer while another session can", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
   createGoalEngineExtensionProduction(pi);
@@ -4115,10 +4115,28 @@ test("active watching session detaches by preempting its fresh runnable dispatch
   }));
   const status = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
   assert.deepEqual(status.machineAction, { tool: "goal_dispatch", params: { goal_id: initialized.goalId, task_id: "t1" } });
-  const beforeEvents = readGoalEvents(cwd, initialized.goalId).length;
+  const rejectionBefore = () => ({ persistent: fullRejectionSnapshot(cwd, initialized.goalId), entries: structuredClone(pi.entries) });
 
+  for (const params of [
+    { session_id: "session-other", action_token: status.action_token },
+    { action_token: "wrong-token" },
+  ]) {
+    const before = rejectionBefore();
+    await assert.rejects(() => invoke(pi, "goal_amend", {
+      goal_id: initialized.goalId, operation: "detach_session", reason: "Only the current session may detach", ...params,
+    }), /detach_session|token|offer/i);
+    assert.deepEqual(rejectionBefore(), before);
+  }
+  const refreshed = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
+  const staleBefore = rejectionBefore();
+  await assert.rejects(() => invoke(pi, "goal_amend", {
+    goal_id: initialized.goalId, operation: "detach_session", reason: "A replaced token is stale", action_token: status.action_token,
+  }), /consumed|token|offer/i);
+  assert.deepEqual(rejectionBefore(), staleBefore);
+
+  const beforeEvents = readGoalEvents(cwd, initialized.goalId).length;
   const detached = JSON.parse(await invoke(pi, "goal_amend", {
-    goal_id: initialized.goalId, operation: "detach_session", reason: "Leave runnable work for another session", action_token: status.action_token,
+    goal_id: initialized.goalId, operation: "detach_session", reason: "Leave runnable work for another session", action_token: refreshed.action_token,
   }));
   assert.equal(detached.lifecycle, "active");
   const events = readGoalEvents(cwd, initialized.goalId);
@@ -4126,10 +4144,25 @@ test("active watching session detaches by preempting its fresh runnable dispatch
   assert.deepEqual(events.slice(-2).map((event) => event.type), ["goal.action_consumed", "goal.session_detached"]);
   assert.equal(loadProjection(join(cwd, ".state/goal-engine"), initialized.goalId).sessionBindings[0].state, "detached");
   assert.equal(existsSync(join(cwd, ".state/goal-engine/worktrees", `${initialized.goalId}-t1-1`)), false);
-  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", action_token: status.action_token }), /consumed|status|offer/i);
+
+  const detachedBefore = rejectionBefore();
+  for (const params of [{}, { goal_id: initialized.goalId }]) {
+    const detachedStatus = JSON.parse(await invoke(pi, "goal_status", params));
+    assert.equal(detachedStatus.machineAction, null);
+    assert.equal(detachedStatus.action_token, null);
+    assert.deepEqual(rejectionBefore(), detachedBefore);
+  }
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1" }), /action_token|offer|status/i);
+  assert.deepEqual(rejectionBefore(), detachedBefore);
   assert.equal(await emitHook(pi, "before_agent_start", { prompt: "unrelated", systemPrompt: "base" }), undefined);
   assert.equal(await emitHook(pi, "tool_call", { toolName: "edit", input: { path: "src/a.ts" } }), undefined);
   assert.equal(await emitHook(pi, "session_before_compact", { reason: "overflow", preparation: { fileOps: { written: new Set(), edited: new Set() } } }), undefined);
+  await emitHook(pi, "session_compact", { reason: "overflow", willRetry: true });
   assert.equal(pi.sentMessages.length, 0);
   for (let i = 0; i < 5; i++) assert.equal(await emitHook(pi, "tool_result", { toolName: "bash", content: [{ type: "text", text: "ok" }], isError: false }), undefined);
+
+  pi.sessionManager.getSessionId = () => "session-other";
+  const otherStatus = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
+  assert.deepEqual(otherStatus.machineAction, { tool: "goal_dispatch", params: { goal_id: initialized.goalId, task_id: "t1" } });
+  assert.ok(otherStatus.action_token);
 });
