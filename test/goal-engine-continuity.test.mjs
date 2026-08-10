@@ -33,6 +33,17 @@ test("selects the unique active goal before path-based completed candidates", ()
   }), { status: "selected", goalId: "active", reason: "unique_active" });
 });
 
+test("does not select an active goal detached by the current session", () => {
+  const detached = goal({
+    goalId: "detached-active", lifecycle: "active",
+    sessionBindings: [{ sessionId: "session-1", state: "detached" }],
+  });
+
+  assert.deepEqual(selectContinuityCandidate({
+    projections: [detached], cwd: "/repo", paths: [], sessionId: "session-1",
+  }), { status: "none", reason: "no_related_goal" });
+});
+
 test("selects only a completed goal watched by the same session and ignores detached bindings", () => {
   const watching = goal({
     goalId: "watching", lifecycle: "completed",

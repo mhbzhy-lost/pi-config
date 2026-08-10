@@ -4105,3 +4105,31 @@ test("production status throws replay failures and repeated completed slugs rece
   createGoalEngineExtensionProduction(brokenPi, { store: { listGoals: () => [created.goalId], loadProjection: () => { throw new Error("replay failed"); } } });
   await assert.rejects(() => invoke(brokenPi, "goal_status", {}), /replay failed/);
 });
+
+test("active watching session detaches by preempting its fresh runnable dispatch offer", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  const initialized = JSON.parse(await invoke(pi, "goal_init", {
+    objective: "Detach runnable offer", tasks: [{ id: "t1", description: "implement", deps: [], writePaths: ["src/a.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }],
+  }));
+  const status = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
+  assert.deepEqual(status.machineAction, { tool: "goal_dispatch", params: { goal_id: initialized.goalId, task_id: "t1" } });
+  const beforeEvents = readGoalEvents(cwd, initialized.goalId).length;
+
+  const detached = JSON.parse(await invoke(pi, "goal_amend", {
+    goal_id: initialized.goalId, operation: "detach_session", reason: "Leave runnable work for another session", action_token: status.action_token,
+  }));
+  assert.equal(detached.lifecycle, "active");
+  const events = readGoalEvents(cwd, initialized.goalId);
+  assert.equal(events.length, beforeEvents + 2);
+  assert.deepEqual(events.slice(-2).map((event) => event.type), ["goal.action_consumed", "goal.session_detached"]);
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), initialized.goalId).sessionBindings[0].state, "detached");
+  assert.equal(existsSync(join(cwd, ".state/goal-engine/worktrees", `${initialized.goalId}-t1-1`)), false);
+  await assert.rejects(() => invoke(pi, "goal_dispatch", { task_id: "t1", action_token: status.action_token }), /consumed|status|offer/i);
+  assert.equal(await emitHook(pi, "before_agent_start", { prompt: "unrelated", systemPrompt: "base" }), undefined);
+  assert.equal(await emitHook(pi, "tool_call", { toolName: "edit", input: { path: "src/a.ts" } }), undefined);
+  assert.equal(await emitHook(pi, "session_before_compact", { reason: "overflow", preparation: { fileOps: { written: new Set(), edited: new Set() } } }), undefined);
+  assert.equal(pi.sentMessages.length, 0);
+  for (let i = 0; i < 5; i++) assert.equal(await emitHook(pi, "tool_result", { toolName: "bash", content: [{ type: "text", text: "ok" }], isError: false }), undefined);
+});
