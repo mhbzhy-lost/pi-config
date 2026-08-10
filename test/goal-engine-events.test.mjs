@@ -2527,17 +2527,18 @@ function runSettlementReplacementRed(boundary) {
       const snapshot = p => { const s = original.lstatSync(p), bytes = s.isFile() ? original.readFileSync(p) : null; return { dev: s.dev, ino: s.ino, regular: s.isFile(), mode: s.mode & 0o7777, nlink: s.nlink, bytes: bytes && bytes.toString("base64") }; };
       const expectedBytes = Buffer.from(content).toString("base64"), oldPath = input.boundary === "check" || input.boundary === "existing-read" ? target : null;
       const attacker = snapshot(staging); if (!attacker.regular || attacker.nlink !== 1 || attacker.bytes !== expectedBytes) throw new Error("invalid attacker staging"); let old = oldPath ? snapshot(oldPath) : null;
-      let hooks = 0, hookPhase = null, hookFailure = null, armed = false, instrumenting = false, targetFd = null, dirFd = null, temp = null, linkSource = null, opens = [];
-      const instrument = fn => { instrumenting = true; try { return fn(); } catch (cause) { hookFailure = cause; throw cause; } finally { instrumenting = false; } };
-      const candidate = (p, fd) => { if (instrumenting || typeof p !== "string" || !p.startsWith(path.join(evidenceDir, "." + sha256 + ".")) || !p.endsWith(".tmp")) return; if (temp && (temp.path !== p || temp.fd !== fd)) throw new Error("ambiguous evidence temp candidate"); temp = { path: p, fd }; };
-      const replace = p => instrument(() => { hooks++; hookPhase = "append"; if (input.fault) throw new Error("FIXTURE_HOOK_FAILURE:" + input.boundary); original.renameSync(staging, p); });
-      fs.lstatSync = function(p, ...a) { const v = original.lstatSync.call(this, p, ...a); if (armed && input.boundary === "check" && hooks === 0 && p === target) { old = snapshot(target); replace(target); } return v; };
-      fs.openSync = function(p, ...a) { const fd = original.openSync.call(this, p, ...a); opens.push(p); candidate(p, fd); if (armed) { if (input.boundary === "existing-read" && p === target) targetFd = fd; if (input.boundary === "directory-fsync" && p === evidenceDir) dirFd = fd; } return fd; };
-      fs.writeFileSync = function(p, bytes, ...a) { const v = original.writeFileSync.call(this, p, bytes, ...a); if (armed && input.boundary === "temp-write" && hooks === 0 && temp && p === temp.fd) { old = instrument(() => snapshot(temp.path)); replace(temp.path); } return v; };
-      fs.linkSync = function(source, destination, ...a) { const v = original.linkSync.call(this, source, destination, ...a); linkSource = source; if (armed && input.boundary === "target-link" && hooks === 0 && temp && source === temp.path && destination === target) { old = instrument(() => snapshot(target)); replace(target); } return v; };
-      fs.readFileSync = function(p, ...a) { const v = original.readFileSync.call(this, p, ...a); if (armed && input.boundary === "existing-read" && hooks === 0 && (p === target || (targetFd !== null && p === targetFd))) replace(target); return v; };
-      fs.fsyncSync = function(fd, ...a) { const v = original.fsyncSync.call(this, fd, ...a); if (armed && input.boundary === "directory-fsync" && hooks === 0 && dirFd !== null && fd === dirFd) { old = instrument(() => snapshot(target)); replace(target); } return v; };
+      let hooks = 0, hookPhase = null, hookFailure = null, phase = "setup", inAppend = false, targetFd = null, dirFd = null, temp = null, linkSource = null;
+      const guard = fn => { try { return fn(); } catch (cause) { hookFailure ??= cause; throw cause; } };
+      const candidate = (p, fd) => guard(() => { if (typeof p !== "string" || !p.startsWith(path.join(evidenceDir, "." + sha256 + ".")) || !p.endsWith(".tmp")) return; if (temp && (temp.path !== p || temp.fd !== fd)) throw new Error("ambiguous evidence temp candidate"); temp = { path: p, fd }; });
+      const replace = p => guard(() => { hooks++; hookPhase = phase; if (input.fault) throw new Error("FIXTURE_HOOK_FAILURE:" + input.boundary); original.renameSync(staging, p); });
+      fs.lstatSync = function(p, ...a) { const v = original.lstatSync.call(this, p, ...a); if (inAppend && input.boundary === "check" && hooks === 0 && p === target) guard(() => { old = snapshot(target); replace(target); }); return v; };
+      fs.openSync = function(p, ...a) { const fd = original.openSync.call(this, p, ...a); if (inAppend) guard(() => { candidate(p, fd); if (input.boundary === "existing-read" && p === target) targetFd = fd; if (input.boundary === "directory-fsync" && p === evidenceDir) dirFd = fd; }); return fd; };
+      fs.writeFileSync = function(p, bytes, ...a) { const v = original.writeFileSync.call(this, p, bytes, ...a); if (inAppend && input.boundary === "temp-write" && hooks === 0 && temp && p === temp.fd) guard(() => { old = snapshot(temp.path); replace(temp.path); }); return v; };
+      fs.linkSync = function(source, destination, ...a) { const v = original.linkSync.call(this, source, destination, ...a); if (inAppend) guard(() => { linkSource = source; if (input.boundary === "target-link" && hooks === 0 && temp && source === temp.path && destination === target) { old = snapshot(target); replace(target); } }); return v; };
+      fs.readFileSync = function(p, ...a) { const v = original.readFileSync.call(this, p, ...a); if (inAppend && input.boundary === "existing-read" && hooks === 0 && (p === target || (targetFd !== null && p === targetFd))) replace(target); return v; };
+      fs.fsyncSync = function(fd, ...a) { const v = original.fsyncSync.call(this, fd, ...a); if (inAppend && input.boundary === "directory-fsync" && hooks === 0 && dirFd !== null && fd === dirFd) guard(() => { old = snapshot(target); replace(target); }); return v; };
       syncBuiltinESMExports();
+      phase = "import";
       const { appendEventBatchWithSettlementEvidence, loadProjection } = await import(input.storeUrl);
       const event = (type, data) => ({ schemaVersion: "planned.v1", eventId: crypto.randomUUID(), goalId: "replacement-" + input.boundary, type, occurredAt: "2026-08-08T00:00:00.000Z", data });
       const identity = { goalId: "replacement-" + input.boundary, taskId: "t1", runId: "run-replacement", attempt: 1, contractHash: "a".repeat(64), head: "c".repeat(40) };
@@ -2546,11 +2547,11 @@ function runSettlementReplacementRed(boundary) {
       const { fingerprintSettlementEvidence } = await import(require("node:url").pathToFileURL(path.join(process.cwd(), "scripts/lib/goal-engine/settlement-evidence.mjs")).href);
       const evidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: "acceptance-evidence/sha256/" + sha256 + ".yaml", sha256, subagentFingerprint: fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: ["proof"] }), mainFingerprint: fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: ["proof"] }), subagent, main, mainSessionId: "root-cas" };
       const batch = [event("goal.created", { objective: "replacement", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "proof", statement: "proof", evidenceKinds: ["tests"] }] }, workflow: "tdd" } } }), event("task.dispatched", { taskId: "t1", contractHash: "a".repeat(64), workspace: { attempt: 1, path: "/tmp/cas", branch: "ge/cas", baseCommit: "b".repeat(40) } }), event("task.executor_bound", { taskId: "t1", attempt: 1, runId: identity.runId, contractHash: "a".repeat(64), asyncDir: "/tmp/cas", workspacePath: "/tmp/cas", workspaceLeaseId: "d".repeat(64), headAtDispatch: "b".repeat(40) }), event("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead: "c".repeat(40), executorProof: { runId: identity.runId, proofId: "4".repeat(64), rootSessionId: "root-cas", observedAt: 1700000000000, outcome: "succeeded" }, settlementEvidence: evidence })];
-      let error = null; armed = true; try { appendEventBatchWithSettlementEvidence(input.root, batch, 0, { sha256, content }); } catch (cause) { error = String(cause && cause.message); } finally { armed = false; }
-      if (hookFailure || hooks !== 1 || hookPhase !== "append") throw (hookFailure ?? new Error("fixture hook did not execute exactly once during append: " + JSON.stringify({ temp, linkSource, dirFd, opens })));
+      let error = null; phase = "append"; inAppend = true; try { appendEventBatchWithSettlementEvidence(input.root, batch, 0, { sha256, content }); } catch (cause) { error = String(cause && cause.message); } finally { phase = "post"; inAppend = false; }
+      if (hookFailure || hooks !== 1 || hookPhase !== "append") throw (hookFailure ?? new Error("fixture hook did not execute exactly once during append: " + JSON.stringify({ phase, temp, linkSource, dirFd })));
       const replacedPath = input.boundary === "temp-write" ? temp.path : target;
       let replacement = null; try { replacement = snapshot(replacedPath); } catch (cause) { if (cause.code !== "ENOENT") throw cause; }
-      process.stdout.write(JSON.stringify({ hooks, hookPhase, old, attacker, replacement, expectedBytes, targetExists: original.lstatSync.bind(original, target) && (() => { try { original.lstatSync(target); return true; } catch { return false; } })(), error, authority: { events: fs.existsSync(path.join(input.root, "goals", identity.goalId, "events.jsonl")), projection: fs.existsSync(path.join(input.root, "goals", identity.goalId, "projection.json")), registry: fs.existsSync(path.join(input.root, "registry.json")), loaded: loadProjection(input.root, identity.goalId) } }));
+      process.stdout.write(JSON.stringify({ hooks, hookPhase, phase, evidenceDir, temp, linkSource, dirFd, old, attacker, replacement, expectedBytes, targetExists: original.lstatSync.bind(original, target) && (() => { try { original.lstatSync(target); return true; } catch { return false; } })(), error, authority: { events: fs.existsSync(path.join(input.root, "goals", identity.goalId, "events.jsonl")), projection: fs.existsSync(path.join(input.root, "goals", identity.goalId, "projection.json")), registry: fs.existsSync(path.join(input.root, "registry.json")), loaded: loadProjection(input.root, identity.goalId) } }));
     })();
   `;
   try {
@@ -2564,10 +2565,15 @@ function runSettlementReplacementRed(boundary) {
     const runner = run(false);
     assert.equal(runner.error, undefined); assert.equal(runner.status, 0, runner.stderr); assert.equal(runner.signal, null); assert.equal(runner.stderr, "");
     const result = JSON.parse(runner.stdout); assert.equal(runner.stdout, JSON.stringify(result));
-    assert.equal(result.hooks, 1); assert.equal(result.hookPhase, "append"); assert.match(result.error ?? "", /identity|receipt|replacement|unsafe/i);
+    assert.equal(result.hooks, 1); assert.equal(result.hookPhase, "append"); assert.equal(result.phase, "post");
+    assert.equal(typeof result.temp?.path, "string"); assert.equal(typeof result.temp?.fd, "number");
+    assert.match(result.temp.path, new RegExp("^" + result.evidenceDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/\\." + createHash("sha256").update("settlement: accepted\n").digest("hex") + "\\.[^/]+\\.tmp$"));
+    if (boundary === "target-link") assert.equal(result.linkSource, result.temp.path);
+    if (boundary === "directory-fsync") assert.equal(typeof result.dirFd, "number");
     assert.equal(result.old.bytes, result.expectedBytes); assert.equal(result.attacker.bytes, result.expectedBytes); assert.deepEqual(result.replacement, result.attacker); assert.notDeepEqual([result.old.dev, result.old.ino], [result.replacement.dev, result.replacement.ino]); assert.deepEqual({ regular: result.replacement.regular, mode: result.replacement.mode, nlink: result.replacement.nlink }, { regular: true, mode: 0o600, nlink: 1 });
-    assert.deepEqual(result.authority, { events: false, projection: false, registry: false, loaded: null });
     if (boundary === "temp-write") assert.equal(result.targetExists, false); else assert.equal(result.targetExists, true);
+    assert.match(result.error ?? "", /identity|receipt|replacement|unsafe/i);
+    assert.deepEqual(result.authority, { events: false, projection: false, registry: false, loaded: null });
   } finally { /* each child owns and removes its separate root after terminal exit */ }
 }
 
