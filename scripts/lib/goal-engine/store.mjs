@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, linkSync, existsSync, chmodSync, rmSync, unlinkSync, lstatSync, openSync, closeSync, fsyncSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync, linkSync, existsSync, chmodSync, rmSync, unlinkSync, lstatSync, fstatSync, openSync, closeSync, fsyncSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -93,7 +93,9 @@ function validateSettlementArtifact(artifact) {
   if (names.length !== 2 || !names.includes("sha256") || !names.includes("content") || Object.getOwnPropertySymbols(artifact).length) throw new TypeError("invalid settlement evidence artifact");
   const shaDescriptor = Object.getOwnPropertyDescriptor(artifact, "sha256");
   const contentDescriptor = Object.getOwnPropertyDescriptor(artifact, "content");
-  if (!shaDescriptor || !contentDescriptor || !Object.hasOwn(shaDescriptor, "value") || !Object.hasOwn(contentDescriptor, "value")) throw new TypeError("invalid settlement evidence artifact");
+  if (!shaDescriptor || !contentDescriptor || !Object.hasOwn(shaDescriptor, "value") || !Object.hasOwn(contentDescriptor, "value")
+    || !shaDescriptor.enumerable || !shaDescriptor.writable || !shaDescriptor.configurable
+    || !contentDescriptor.enumerable || !contentDescriptor.writable || !contentDescriptor.configurable) throw new TypeError("invalid settlement evidence artifact");
   const { value: sha256 } = shaDescriptor, { value: content } = contentDescriptor;
   if (!/^[a-f0-9]{64}$/.test(sha256) || typeof content !== "string") throw new TypeError("invalid settlement evidence artifact");
   if (!content || content === "\n" || !content.endsWith("\n") || content.endsWith("\n\n") || content.includes("\r") || content.includes("\0") || /[\ud800-\udfff]/.test(content)) throw new TypeError("invalid settlement evidence content");
@@ -114,17 +116,29 @@ function publishSettlementArtifact(stateRoot, sha256, bytes, writerToken) {
   const target = join(evidenceDir, `${sha256}.yaml`);
   if (existsSync(target)) return assertExistingSettlementArtifact(target, bytes, sha256);
   const tmp = join(evidenceDir, `.${sha256}.${process.pid}-${randomUUID()}.tmp`);
+  let preserveUnsafeTemp = false;
   try {
     const fd = openSync(tmp, "wx", 0o600);
-    try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+    let tmpReceipt;
+    try {
+      writeFileSync(fd, bytes);
+      fsyncSync(fd);
+      tmpReceipt = fstatSync(fd);
+    } finally { closeSync(fd); }
     chmodSync(tmp, 0o600);
+    assertSameSettlementIdentity(tmp, tmpReceipt, "temporary receipt");
     assertWriterLockOwned(stateRoot, writerToken);
     try { linkSync(tmp, target); } catch (error) {
       if (error.code !== "EEXIST") throw error;
       return assertExistingSettlementArtifact(target, bytes, sha256);
     }
+    assertSameSettlementIdentity(target, tmpReceipt, "target link receipt", false);
     fsyncDirectory(evidenceDir);
-  } finally { if (existsSync(tmp)) rmSync(tmp, { force: true }); }
+    assertSameSettlementIdentity(target, tmpReceipt, "directory fsync receipt", false);
+  } catch (error) {
+    preserveUnsafeTemp = /receipt|identity|replacement|unsafe/i.test(String(error?.message));
+    throw error;
+  } finally { if (!preserveUnsafeTemp && existsSync(tmp)) rmSync(tmp, { force: true }); }
 }
 
 function secureEvidenceDirectory(stateRoot) {
@@ -143,10 +157,18 @@ function secureEvidenceDirectory(stateRoot) {
 
 function lstatSafe(path) { try { return lstatSync(path); } catch (error) { if (error.code === "ENOENT") return null; throw error; } }
 function fsyncDirectory(path) { const fd = openSync(path, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } }
+function sameSettlementIdentity(left, right) { return left.dev === right.dev && left.ino === right.ino; }
+function assertSameSettlementIdentity(path, receipt, boundary, requireSingleLink = true) {
+  const observed = lstatSafe(path);
+  if (!observed || !sameSettlementIdentity(observed, receipt)) throw new TypeError(`settlement evidence ${boundary} identity replacement`);
+  if (!observed.isFile() || observed.isSymbolicLink() || (requireSingleLink && observed.nlink !== 1) || (observed.mode & 0o7777) !== 0o600) throw new TypeError(`unsafe settlement evidence ${boundary}`);
+  return observed;
+}
 function assertExistingSettlementArtifact(path, bytes, sha256) {
-  const stat = lstatSafe(path);
-  if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o7777) !== 0o600) throw new TypeError("unsafe settlement evidence target");
+  const receipt = lstatSafe(path);
+  if (!receipt || !receipt.isFile() || receipt.isSymbolicLink() || receipt.nlink !== 1 || (receipt.mode & 0o7777) !== 0o600) throw new TypeError("unsafe settlement evidence target");
   const existing = readFileSync(path);
+  assertSameSettlementIdentity(path, receipt, "existing read receipt");
   if (existing.length !== bytes.length || !existing.equals(bytes) || createHash("sha256").update(existing).digest("hex") !== sha256) throw new TypeError("settlement evidence collision");
 }
 
