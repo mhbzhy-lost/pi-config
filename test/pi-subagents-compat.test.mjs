@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import * as compat from "../scripts/probes/pi-subagents-compat.mjs";
@@ -15,7 +15,7 @@ const {
 const { createSubagentsRpcClient, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } = compat;
 const repoRoot = process.cwd();
 const compatibleReport = {
-  piVersion: "0.83.0",
+  piVersion: "0.84.1",
   version: "0.37.2",
   typeboxVersion: "1.1.38",
   typeboxCompileResolvable: true,
@@ -43,7 +43,47 @@ function evaluate(report) {
 
 test("exports the stable RPC v1 method and supported Pi contracts", () => {
   assert.deepEqual(REQUIRED_METHODS, ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"]);
-  assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1", "0.83.0"]);
+  assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1", "0.83.0", "0.84.1"]);
+});
+
+test("loads the public Pi API after asynchronously resolving the npm global root", async () => {
+  const globalRoot = await mkdtemp(join(tmpdir(), "pi-global-root-"));
+  const packageRoot = join(globalRoot, "@earendil-works", "pi-coding-agent");
+  try {
+    await mkdir(join(packageRoot, "dist"), { recursive: true });
+    await writeFile(join(packageRoot, "package.json"), JSON.stringify({ type: "module" }));
+    await writeFile(join(packageRoot, "dist", "index.js"), "export const fixtureMarker = 'portable-pi-api';\n");
+
+    const piModule = await compat.loadPublicPiModule({
+      resolveGlobalNodeModules: async () => globalRoot,
+    });
+
+    assert.equal(piModule.fixtureMarker, "portable-pi-api");
+  } finally {
+    await rm(globalRoot, { recursive: true, force: true });
+  }
+});
+
+test("rejects an empty asynchronously resolved npm global root", async () => {
+  await assert.rejects(
+    compat.loadPublicPiModule({ resolveGlobalNodeModules: async () => "   " }),
+    /non-empty npm global module root/,
+  );
+});
+
+test("rejects a non-string asynchronously resolved npm global root", async () => {
+  await assert.rejects(
+    compat.loadPublicPiModule({ resolveGlobalNodeModules: async () => 42 }),
+    /non-empty npm global module root/,
+  );
+});
+
+test("preserves npm stderr when resolving the global root fails", async () => {
+  const resolverError = Object.assign(new Error("npm lookup failed"), { stderr: "fixture npm stderr" });
+  await assert.rejects(
+    compat.loadPublicPiModule({ resolveGlobalNodeModules: async () => { throw resolverError; } }),
+    /could not resolve the npm global module root: fixture npm stderr/,
+  );
 });
 
 test("pinned process-terminal event is declared and emitted by async execution", async () => {
@@ -234,10 +274,12 @@ test("accepts the flat runtime compatibility report", () => {
 });
 
 test("rejects runtime versions outside the explicit support set", () => {
-  for (const version of ["0.82.0", "0.82.1", "0.83.0"]) {
+  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1"]) {
     assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }), { ok: true, failures: [] });
   }
-  assert.deepEqual(evaluate({ ...compatibleReport, piVersion: "0.83.1" }).failures, ["unsupported Pi version: 0.83.1"]);
+  for (const version of ["0.83.1", "0.84.0"]) {
+    assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }).failures, [`unsupported Pi version: ${version}`]);
+  }
   assert.deepEqual(evaluate({ ...compatibleReport, version: "0.35.1" }).failures, ["unexpected pi-subagents version: 0.35.1"]);
   assert.deepEqual(evaluate({ ...compatibleReport, typeboxVersion: "1.1.24" }).failures, ["unexpected typebox version: 1.1.24"]);
 });

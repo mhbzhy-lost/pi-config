@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { createTestTui } from "./helpers/pi-tui.mjs";
 const jiti = createJiti(import.meta.url, {
   moduleCache: false,
   alias: {
@@ -8,7 +9,8 @@ const jiti = createJiti(import.meta.url, {
     "@earendil-works/pi-tui": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js",
   },
 });
-const { TUI, visibleWidth } = await jiti.import("@earendil-works/pi-tui");
+const piTui = await jiti.import("@earendil-works/pi-tui");
+const { visibleWidth } = piTui;
 const { CustomEditor } = await jiti.import("@earendil-works/pi-coding-agent");
 const { ReadOnlyBrowserEditor, SubagentTranscriptViewport } = await jiti.import("../pi/extensions/lib/subagent-session-viewport.ts");
 
@@ -18,8 +20,7 @@ const editorTheme = {
 };
 
 test("read-only browser editor preserves its draft while rendering no lines", () => {
-  const tui = new TUI({ width: 80, height: 24 });
-  tui.requestRender = () => {};
+  const { tui } = createTestTui(piTui);
   const editor = new ReadOnlyBrowserEditor(tui, editorTheme, {});
 
   editor.setText("unsent parent draft");

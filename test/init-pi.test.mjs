@@ -103,7 +103,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     const commands = await readFile(commandLog, "utf8");
     assert.match(commands, /git -C .* submodule update --init --recursive markers=1,1,parent-session,1/);
-    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.83\.0/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.84\.1/);
     assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:pi-subagents@0\.37\.2/);
     assert.doesNotMatch(commands, /rpiv-todo/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:subagent-runtime markers=1,1,parent-session,1/);

@@ -1,15 +1,47 @@
+import { execFile } from "node:child_process";
 import { join } from "node:path";
-import * as publicPiModule from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
+import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
+
+const execFileAsync = promisify(execFile);
+
+async function resolveGlobalNodeModules() {
+  const { stdout } = await execFileAsync(process.platform === "win32" ? "npm.cmd" : "npm", ["root", "-g"], { encoding: "utf8" });
+  return stdout.trimEnd();
+}
+
+function globalRootResolutionError(error) {
+  const stderr = typeof error?.stderr === "string" ? error.stderr.trim() : "";
+  return new Error(
+    `Pi public API could not resolve the npm global module root${stderr ? `: ${stderr}` : ""}`,
+    { cause: error },
+  );
+}
+
+export async function loadPublicPiModule({ globalNodeModules, resolveGlobalNodeModules: resolve = resolveGlobalNodeModules } = {}) {
+  let resolvedRoot;
+  try {
+    resolvedRoot = globalNodeModules ?? await resolve();
+  } catch (error) {
+    throw globalRootResolutionError(error);
+  }
+  if (typeof resolvedRoot !== "string" || !resolvedRoot.trim()) {
+    throw new Error("Pi public API requires a non-empty npm global module root");
+  }
+  const moduleUrl = pathToFileURL(join(resolvedRoot.trimEnd(), "@earendil-works/pi-coding-agent/dist/index.js")).href;
+  return import(moduleUrl);
+}
 
 export const REQUIRED_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];
-export const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0"];
+export const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1"];
 
 export async function assertBrowserTranscriptCompatibility({
   packageRoot,
-  piModule = publicPiModule,
+  piModule,
   jiti,
 } = {}) {
   if (!packageRoot || !jiti) throw new Error("pi-subagents browser compatibility requires packageRoot and jiti");
+  const resolvedPiModule = piModule ?? await loadPublicPiModule();
   for (const capability of [
     "AssistantMessageComponent",
     "BashExecutionComponent",
@@ -23,7 +55,7 @@ export async function assertBrowserTranscriptCompatibility({
     "ToolExecutionComponent",
     "UserMessageComponent",
   ]) {
-    if (typeof piModule[capability] !== "function") throw new Error(`pi-subagents browser compatibility missing ${capability}`);
+    if (typeof resolvedPiModule[capability] !== "function") throw new Error(`pi-subagents browser compatibility missing ${capability}`);
   }
   const transcriptModule = await jiti.import(join(packageRoot, "src/tui/fleet-transcript.ts"));
   const artifactsModule = await jiti.import(join(packageRoot, "src/shared/artifacts.ts"));

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PI_VERSION="0.83.0"
+PI_VERSION="0.84.1"
 PI_PACKAGE="@earendil-works/pi-coding-agent@$PI_VERSION"
 PI_SUBAGENTS_VERSION="0.37.2"
 NPM_REGISTRY="https://registry.npmjs.org"

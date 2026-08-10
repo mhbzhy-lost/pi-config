@@ -135,7 +135,7 @@ test("shutdown debt manager preserves three failed generations in order", async 
   assert.equal(store.__typedSubagentRuntimeShutdownDebt.debts.length, 0, "completed generations must release retained runtime ownership");
 });
 
-test("real Pi reload isolates the new RPC bridge and Broker start until old debt is repaid", async () => {
+test("real Pi reload keeps every RPC bridge inactive until old debt is repaid", async () => {
   const root = await mkdtemp(join(tmpdir(), "subagent-runtime-reload-"));
   const cleanupStore = {};
   const order = [];
@@ -163,7 +163,6 @@ test("real Pi reload isolates the new RPC bridge and Broker start until old debt
           if (current !== 1) return;
           firstDrainAttempts += 1;
           if (firstDrainAttempts === 1) throw new Error("controlled drain failure");
-          pi.events.emit("shutdown-debt:request", {});
         },
       });
       pi.on("session_start", async (event, ctx) => {
@@ -193,7 +192,8 @@ test("real Pi reload isolates the new RPC bridge and Broker start until old debt
     assert.deepEqual(order, ["upstream-start-1", "broker-start-1"]);
     await result.session.reload();
 
-    assert.deepEqual(replies, [1], "only the old bridge may answer while its shutdown debt is repaid");
+    // Pi 0.84 invalidates the old extension context and unsubscribes its event listeners before retry.
+    assert.deepEqual(replies, [], "disposed extension listeners must not answer while shutdown debt is repaid");
     assert.deepEqual(order, [
       "upstream-start-1",
       "broker-start-1",
@@ -207,7 +207,7 @@ test("real Pi reload isolates the new RPC bridge and Broker start until old debt
     assert.deepEqual(lifecycleErrors, ["controlled drain failure"]);
 
     loader.eventBus.emit("shutdown-debt:request", {});
-    assert.deepEqual(replies, [1, 2], "the new bridge activates only after the old bridge is cleaned");
+    assert.deepEqual(replies, [2], "the new bridge activates only after the old bridge is cleaned");
   } finally {
     if (result) {
       await result.session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });

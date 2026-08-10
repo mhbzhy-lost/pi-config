@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { createTestTui } from "./helpers/pi-tui.mjs";
 
 const jiti = createJiti(import.meta.url, {
   moduleCache: false,
@@ -9,7 +10,7 @@ const jiti = createJiti(import.meta.url, {
     "@earendil-works/pi-tui": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js",
   },
 });
-const { TUI } = await jiti.import("@earendil-works/pi-tui");
+const piTui = await jiti.import("@earendil-works/pi-tui");
 const { SubagentSessionBrowserState } = await jiti.import("../pi/extensions/lib/subagent-session-browser.ts");
 const { createBrowserInputController } = await jiti.import("../pi/extensions/custom-footer.ts");
 
@@ -28,38 +29,37 @@ test("real TUI input chain routes child navigation, transcript scrolling, and to
     scrollEnd: () => { calls.scrollEnd += 1; },
     toggleTools: () => { calls.toggleTools += 1; },
   });
-  const tui = new TUI({ width: 80, height: 24 });
-  tui.requestRender = () => {};
+  const { tui, dispatchInput } = createTestTui(piTui);
   const forwarded = [];
   tui.setFocus({ render: () => [], handleInput: (data) => forwarded.push(data) });
   tui.addInputListener(controller.handleTerminalInput);
 
-  TUI.prototype.handleInput.call(tui, "a");
+  dispatchInput("a");
   assert.deepEqual(forwarded, ["a"]);
 
-  TUI.prototype.handleInput.call(tui, "\x1bo");
+  dispatchInput("\x1bo");
   assert.equal(browser.snapshot().active, true);
   assert.equal(calls.enter, 1);
 
-  TUI.prototype.handleInput.call(tui, "\x1b[C");
+  dispatchInput("\x1b[C");
   assert.equal(browser.snapshot().selectedKey, "run-1:1");
-  TUI.prototype.handleInput.call(tui, "\x1b[1;1:3C");
-  TUI.prototype.handleInput.call(tui, "\x1b[D");
+  dispatchInput("\x1b[1;1:3C");
+  dispatchInput("\x1b[D");
   assert.equal(browser.snapshot().selectedKey, "run-1:0");
 
-  TUI.prototype.handleInput.call(tui, "\x1b[A");
-  TUI.prototype.handleInput.call(tui, "\x1b[1;1:2A");
-  TUI.prototype.handleInput.call(tui, "\x1b[1;1:3A");
-  TUI.prototype.handleInput.call(tui, "\x1b[B");
-  TUI.prototype.handleInput.call(tui, "k");
-  TUI.prototype.handleInput.call(tui, "j");
-  TUI.prototype.handleInput.call(tui, "\x1b[5~");
-  TUI.prototype.handleInput.call(tui, "\x1b[6~");
-  TUI.prototype.handleInput.call(tui, "\x1b[H");
-  TUI.prototype.handleInput.call(tui, "\x1b[F");
-  TUI.prototype.handleInput.call(tui, "x");
-  TUI.prototype.handleInput.call(tui, "\r");
-  TUI.prototype.handleInput.call(tui, "\x1b\x06");
+  dispatchInput("\x1b[A");
+  dispatchInput("\x1b[1;1:2A");
+  dispatchInput("\x1b[1;1:3A");
+  dispatchInput("\x1b[B");
+  dispatchInput("k");
+  dispatchInput("j");
+  dispatchInput("\x1b[5~");
+  dispatchInput("\x1b[6~");
+  dispatchInput("\x1b[H");
+  dispatchInput("\x1b[F");
+  dispatchInput("x");
+  dispatchInput("\r");
+  dispatchInput("\x1b\x06");
   assert.deepEqual(calls.moveChild, [1, -1]);
   assert.deepEqual(calls.scrollLines, [-1, -1, 1, -1, 1]);
   assert.deepEqual(calls.scrollPage, [-1, 1]);
@@ -68,12 +68,12 @@ test("real TUI input chain routes child navigation, transcript scrolling, and to
   assert.equal(calls.toggleTools, 1);
   assert.deepEqual(forwarded, ["a"]);
 
-  TUI.prototype.handleInput.call(tui, "\x1b[111;3u");
+  dispatchInput("\x1b[111;3u");
   assert.equal(browser.snapshot().active, false);
   assert.equal(calls.exit, 1);
-  TUI.prototype.handleInput.call(tui, "\x1b[111;3u");
+  dispatchInput("\x1b[111;3u");
   assert.equal(browser.snapshot().active, true);
-  TUI.prototype.handleInput.call(tui, "\x1b");
+  dispatchInput("\x1b");
   assert.equal(browser.snapshot().active, false);
   assert.equal(calls.exit, 2);
 });
@@ -81,8 +81,7 @@ test("real TUI input chain routes child navigation, transcript scrolling, and to
 test("real TUI input chain lets Escape reach the restored editor while an agent turn is active", () => {
   const browser = new SubagentSessionBrowserState();
   browser.trackStarted({ id: "run-1", asyncDir: "/tmp/run-1", cwd: "/repo", agents: ["executor"] });
-  const tui = new TUI({ width: 80, height: 24 });
-  tui.requestRender = () => {};
+  const { tui, dispatchInput } = createTestTui(piTui);
   let aborts = 0;
   const mainEditor = {
     render: () => [],
@@ -105,9 +104,9 @@ test("real TUI input chain lets Escape reach the restored editor while an agent 
   });
   tui.addInputListener(controller.handleTerminalInput);
 
-  TUI.prototype.handleInput.call(tui, "\x1bo");
+  dispatchInput("\x1bo");
   assert.equal(browser.snapshot().active, true);
-  TUI.prototype.handleInput.call(tui, "\x1b");
+  dispatchInput("\x1b");
 
   assert.equal(browser.snapshot().active, false);
   assert.equal(aborts, 1);
@@ -128,25 +127,24 @@ test("real TUI input chain ignores Kitty releases while preserving browser navig
     scrollEnd: () => {},
     toggleTools: () => {},
   });
-  const tui = new TUI({ width: 80, height: 24 });
-  tui.requestRender = () => {};
+  const { tui, dispatchInput } = createTestTui(piTui);
   const forwarded = [];
   tui.setFocus({ render: () => [], handleInput: (data) => forwarded.push(data) });
   tui.addInputListener(controller.handleTerminalInput);
 
-  TUI.prototype.handleInput.call(tui, "\x1b[111;3:1u");
+  dispatchInput("\x1b[111;3:1u");
   assert.equal(browser.snapshot().active, true);
 
-  TUI.prototype.handleInput.call(tui, "\x1b[1;1:1B");
+  dispatchInput("\x1b[1;1:1B");
   assert.deepEqual(calls.scrollLines, [1]);
-  TUI.prototype.handleInput.call(tui, "\x1b[1;1:3B");
+  dispatchInput("\x1b[1;1:3B");
   assert.deepEqual(calls.scrollLines, [1]);
 
-  TUI.prototype.handleInput.call(tui, "\x1b[1;1:1C");
+  dispatchInput("\x1b[1;1:1C");
   assert.equal(browser.snapshot().selectedKey, "run-1:1");
-  TUI.prototype.handleInput.call(tui, "\x1b[1;1:2C");
+  dispatchInput("\x1b[1;1:2C");
   assert.equal(browser.snapshot().selectedKey, "run-1:0");
-  TUI.prototype.handleInput.call(tui, "\x1b[1;1:3C");
+  dispatchInput("\x1b[1;1:3C");
   assert.equal(browser.snapshot().selectedKey, "run-1:0");
   assert.deepEqual(calls.moveChild, [1, 1]);
   assert.deepEqual(forwarded, []);
@@ -167,22 +165,21 @@ test("real TUI input chain toggles Alt+O only for Kitty press events", () => {
     scrollEnd: () => {},
     toggleTools: () => {},
   });
-  const tui = new TUI({ width: 80, height: 24 });
-  tui.requestRender = () => {};
+  const { tui, dispatchInput } = createTestTui(piTui);
   const forwarded = [];
   tui.setFocus({ render: () => [], handleInput: (data) => forwarded.push(data) });
   tui.addInputListener(controller.handleTerminalInput);
 
-  TUI.prototype.handleInput.call(tui, "\x1b[111;3:1u");
+  dispatchInput("\x1b[111;3:1u");
   assert.equal(browser.snapshot().active, true);
-  TUI.prototype.handleInput.call(tui, "\x1b[111;3:2u");
-  TUI.prototype.handleInput.call(tui, "\x1b[111;3:2u");
-  TUI.prototype.handleInput.call(tui, "\x1b[111;3:3u");
+  dispatchInput("\x1b[111;3:2u");
+  dispatchInput("\x1b[111;3:2u");
+  dispatchInput("\x1b[111;3:3u");
   assert.equal(browser.snapshot().active, true);
   assert.deepEqual(calls, { enter: 1, exit: 0 });
   assert.deepEqual(forwarded, []);
 
-  TUI.prototype.handleInput.call(tui, "\x1b[111;3:1u");
+  dispatchInput("\x1b[111;3:1u");
   assert.equal(browser.snapshot().active, false);
   assert.deepEqual(calls, { enter: 1, exit: 1 });
   assert.deepEqual(forwarded, []);

@@ -350,11 +350,11 @@ test("inspectConfiguration reports boolean description frontmatter and continues
 
 test("inspectConfiguration reports the actual Pi executable version", async () => {
   const issues = await inspectConfiguration(repoRoot, { readPiVersion: async () => "0.80.9" });
-  assert.ok(issues.includes("unexpected Pi version: 0.80.9; supported 0.82.0, 0.82.1, 0.83.0"));
+  assert.ok(issues.includes("unexpected Pi version: 0.80.9; supported 0.82.0, 0.82.1, 0.83.0, 0.84.1"));
 });
 
 test("inspectConfiguration accepts every supported Pi version", async () => {
-  for (const version of ["0.82.0", "0.82.1", "0.83.0"]) {
+  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1"]) {
     const issues = await inspectConfiguration(repoRoot, { readPiVersion: async () => version });
     assert.equal(issues.some((issue) => issue.startsWith("unexpected Pi version:")), false);
   }
@@ -423,7 +423,7 @@ test("inspectConfiguration reports generic runtime contract gaps without requiri
     await writeFile(join(root, ".gitignore"), "/var/plan-runs/\n");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "unknown" });
-    assert.ok(issues.includes("unexpected Pi version: unknown; supported 0.82.0, 0.82.1, 0.83.0"));
+    assert.ok(issues.includes("unexpected Pi version: unknown; supported 0.82.0, 0.82.1, 0.83.0, 0.84.1"));
     assert.ok(issues.includes("unexpected executor extension isolation"));
     assert.equal(issues.some((issue) => /plan-runner|plan-capsule|Plan child/.test(issue)), false);
     assert.ok(issues.includes("unexpected Skill whitelist"));

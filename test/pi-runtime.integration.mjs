@@ -11,7 +11,7 @@ const shellIntegration = join(repoRoot, "scripts", "pi-shell.zsh");
 const piBinary = process.env.PI_REAL_BIN;
 
 test("real Pi RPC loads required auto-discovered Skills without retired products", async () => {
-  assert.ok(piBinary, "PI_REAL_BIN must point to a supported Pi 0.82.x runtime");
+  assert.ok(piBinary, "PI_REAL_BIN must point to an explicitly supported Pi runtime");
   const controlledSkills = await loadDesiredSkills(
     repoRoot,
     join(repoRoot, "skill-overrides", "skills.list"),

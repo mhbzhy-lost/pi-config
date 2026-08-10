@@ -13,11 +13,11 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 ## 安装 Pi
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.83.0
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.1
 pi --version
 ```
 
-本仓已验证 Pi `0.82.0`、`0.82.1` 和 `0.83.0`，初始化默认安装 `0.83.0`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
+本仓已验证 Pi `0.82.0`、`0.82.1`、`0.83.0` 和 `0.84.1`，初始化默认安装 `0.84.1`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
 
 ## 初始化
 
@@ -28,7 +28,7 @@ pi --version
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
 - 初始化 Git submodule。
-- 安装并固定 Pi `0.83.0`。
+- 安装并固定 Pi `0.84.1`。
 - 在 `pi/npm` 顶层精确安装 `pi-subagents@0.37.2` 与 `typebox@1.1.38`。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。

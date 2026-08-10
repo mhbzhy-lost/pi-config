@@ -328,14 +328,21 @@ async function executeControl(input, rpc) {
 
 function shutdownDebtManager(cleanupStore) {
   const current = cleanupStore[SHUTDOWN_DEBT_KEY];
-  if (current?.lanes instanceof WeakMap) return current;
-  const manager = { lanes: new WeakMap(), debts: current?.debts instanceof Array ? current.debts : (current ? [current] : []) };
+  if (current?.lanes instanceof WeakMap) {
+    if (!(current.sessionLanes instanceof Set)) current.sessionLanes = new Set();
+    return current;
+  }
+  const manager = {
+    lanes: new WeakMap(),
+    sessionLanes: new Set(),
+    debts: current?.debts instanceof Array ? current.debts : (current ? [current] : []),
+  };
   cleanupStore[SHUTDOWN_DEBT_KEY] = manager;
   return manager;
 }
 
 function shutdownDebtLane(manager, pi) {
-  // ExtensionAPI objects change on reload; its event bus is the stable runtime lineage.
+  // ExtensionAPI objects change on reload; its event bus is only a fallback lineage.
   const identity = pi.events && (typeof pi.events === "object" || typeof pi.events === "function") ? pi.events : pi;
   let lane = manager.lanes.get(identity);
   if (!lane) {
@@ -346,14 +353,35 @@ function shutdownDebtLane(manager, pi) {
   return lane;
 }
 
+function sessionDebtLane(manager, ctx) {
+  // Pi reload recreates ExtensionAPI event facades; the live SessionManager is stable per session.
+  const identity = ctx?.sessionManager;
+  if (identity === null || (typeof identity !== "object" && typeof identity !== "function")) return undefined;
+  let lane = manager.lanes.get(identity);
+  if (!lane) {
+    lane = { debts: [] };
+    manager.lanes.set(identity, lane);
+  }
+  manager.sessionLanes.add(lane);
+  manager.debts = lane.debts;
+  return lane;
+}
+
+function hasPendingSessionDebt(manager) {
+  for (const lane of manager.sessionLanes) {
+    if (lane.debts.some((debt) => !debt.completed)) return true;
+  }
+  return false;
+}
+
 function releaseCompletedDebts(lane) {
   while (lane.debts[0]?.completed) lane.debts.shift();
 }
 
-async function repayDebts(lane, before) {
+async function repayDebts(lane, before, retryCtx) {
   for (const debt of [...lane.debts]) {
     if (debt === before) break;
-    if (!debt.completed) await debt.run(debt.event, debt.ctx, true);
+    if (!debt.completed) await debt.run(debt.event, retryCtx ?? debt.ctx, true);
   }
 }
 
@@ -450,7 +478,19 @@ export function createTypedSubagentExtension(
   void retainOnBeforeDisposeFailure;
   const registry = cleanupRegistry(cleanupStore);
   const debtManager = shutdownDebtManager(cleanupStore);
-  const debtLane = shutdownDebtLane(debtManager, pi);
+  let debtLane = shutdownDebtLane(debtManager, pi);
+  let shutdownDebt;
+  const bindSessionDebtLane = (ctx) => {
+    const lane = sessionDebtLane(debtManager, ctx);
+    if (!lane || lane === debtLane) return;
+    if (shutdownDebt) {
+      const debtIndex = debtLane.debts.indexOf(shutdownDebt);
+      if (debtIndex >= 0) debtLane.debts.splice(debtIndex, 1);
+      if (!lane.debts.includes(shutdownDebt)) lane.debts.push(shutdownDebt);
+    }
+    debtLane = lane;
+    debtManager.debts = lane.debts;
+  };
   const previous = registry.get(pi);
   if (previous?.debt && !previous.debt.completed) {
     Promise.resolve(previous.debt.run(previous.debt.event, previous.debt.ctx, true)).catch(() => {
@@ -505,7 +545,6 @@ export function createTypedSubagentExtension(
     },
   };
   const supervisorTool = supervisorAdapter ? createSupervisorTool(supervisorAdapter) : undefined;
-  let shutdownDebt;
   let ready;
   try {
     pi.registerTool(tool);
@@ -524,15 +563,18 @@ export function createTypedSubagentExtension(
     shutdownDebt.run = async (event, ctx, force = false) => {
       if (shutdownDebt.completed || (!force && registry.get(pi)?.token !== token)) return;
       if (!shutdownDebt.attempted) {
+        bindSessionDebtLane(ctx);
         shutdownDebt.event = event;
         shutdownDebt.ctx = ctx;
       }
       shutdownDebt.attempted = true;
       if (shutdownDebt.inFlight) return shutdownDebt.inFlight;
+      // Pi invalidates the old ExtensionContext after reload, so retries use the new live context.
+      const cleanupCtx = force && ctx !== undefined ? ctx : shutdownDebt.ctx;
       shutdownDebt.inFlight = (async () => {
-        await repayDebts(debtLane, shutdownDebt);
-        await beforeDispose(shutdownDebt.event, shutdownDebt.ctx);
-        await afterBeforeDispose(shutdownDebt.event, shutdownDebt.ctx);
+        await repayDebts(debtLane, shutdownDebt, cleanupCtx);
+        await beforeDispose(shutdownDebt.event, cleanupCtx);
+        await afterBeforeDispose(shutdownDebt.event, cleanupCtx);
         await dispose();
         if (registry.get(pi)?.token === token) registry.delete(pi);
         shutdownDebt.completed = true;
@@ -552,11 +594,12 @@ export function createTypedSubagentExtension(
       if (started) return;
       if (startFlight) return startFlight;
       startFlight = (async () => {
+        bindSessionDebtLane(ctx);
         if (shutdownDebt.attempted && !shutdownDebt.completed) {
           await shutdownDebt.run(event, ctx, true);
           return;
         }
-        await repayDebts(debtLane, shutdownDebt);
+        await repayDebts(debtLane, shutdownDebt, ctx);
         await beforeSessionStart(event, ctx);
         started = true;
       })();
@@ -619,7 +662,7 @@ export function installHeadlessTypedSubagentRuntime(pi, {
   const globalStore = globalThis;
   const globalCleanupKeys = ["__piSubagentRuntimeCleanup", "__piSubagentEventUnsubscribes"];
   const globalOwnership = globalCleanupKeys.map((key) => ({ key, present: Object.hasOwn(globalStore, key), value: globalStore[key] }));
-  const hiddenOwnership = debtLane.debts.some((debt) => !debt.completed);
+  const hiddenOwnership = debtLane.debts.some((debt) => !debt.completed) || hasPendingSessionDebt(debtManager);
   if (hiddenOwnership) {
     // Upstream performs best-effort global cleanup synchronously during bootstrap.
     // Hide the old generation until its ordered shutdown debt has been repaid.

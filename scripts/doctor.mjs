@@ -14,7 +14,7 @@ import { reconcileManagedWorktrees } from "./lib/worktree-lifecycle/inventory.mj
 
 const execFile = promisify(execFileCallback);
 
-const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0"];
+const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1"];
 const PI_SUBAGENTS_VERSION = "0.37.2";
 const TYPEBOX_VERSION = "1.1.38";
 const BASIC_MEMORY_VERSION = "0.22.1";
