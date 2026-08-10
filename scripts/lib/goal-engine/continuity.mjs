@@ -79,7 +79,8 @@ function resultForCandidates(candidates, selectedReason, ambiguousReason) {
 
 export function selectContinuityCandidate({ projections, cwd, paths = [], sessionId } = {}) {
   if (!Array.isArray(projections)) fail("projections must be an array");
-  const active = projections.filter((projection) => projection?.lifecycle === "active");
+  const active = projections.filter((projection) => projection?.lifecycle === "active"
+    && !(projection.sessionBindings || []).some((binding) => binding.sessionId === sessionId && binding.state === "detached"));
   const activeResult = resultForCandidates(active, "unique_active", "multiple_active");
   if (activeResult) return activeResult;
 

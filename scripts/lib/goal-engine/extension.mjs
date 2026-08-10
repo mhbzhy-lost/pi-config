@@ -1243,8 +1243,19 @@ export function createGoalEngineExtension(pi, options = {}) {
         const publicMetadata = (metadata) => ({ objective: metadata.objective, scope: metadata.scope, non_goals: metadata.nonGoals, dod: metadata.dod });
         return JSON.stringify({ status: "METADATA_PROPOSAL_PENDING", challenge_id: challenge.id, reason: challenge.reason, base_metadata: publicMetadata(baseMetadata), target_metadata: publicMetadata(targetMetadata), proposal_hash: challenge.proposalHash, choices: challenge.choices });
       }
-      const metadataBeforeConsume = params.operation === "update_goal" ? metadataState(projection, sessionIdentity(ctx)) : null;
-      projection = consumeOfferedAction(projection, params, "goal_amend", goalId, ctx, root);
+      const currentSessionId = sessionIdentity(ctx);
+      const metadataBeforeConsume = params.operation === "update_goal" ? metadataState(projection, currentSessionId) : null;
+      if (params.operation === "detach_session") {
+        if (params.session_id && params.session_id !== currentSessionId) throw new Error("detach_session may only target the current session");
+        if (!projection.sessionBindings?.some((binding) => binding.sessionId === currentSessionId && binding.state === "watching")) {
+          throw new Error("detach_session requires a watching binding for the current session");
+        }
+        const offer = projection.actionOffer;
+        if (!offer) throw new Error("goal_status must issue an action offer before goal_amend");
+        projection = consumeOfferedAction(projection, { ...params, ...offer.params }, offer.tool, goalId, ctx, root);
+      } else {
+        projection = consumeOfferedAction(projection, params, "goal_amend", goalId, ctx, root);
+      }
       if (params.operation === "update_goal") {
         const state = metadataBeforeConsume;
         if (state?.status !== "APPROVED" || state.record.challenge.id !== params.challenge_id) throw new Error("metadata challenge approval is missing, stale, consumed, or mismatched");
@@ -1994,8 +2005,8 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   // --- tool_result hook: checkpoint reminder ---
   pi.on("tool_result", (event, ctx) => {
-    let root;
-    try { ({ root } = executionScopeFor(ctx)); } catch { return undefined; }
+    let cwd, root;
+    try { ({ cwd, root } = executionScopeFor(ctx)); } catch { return undefined; }
     if (event.isError) return undefined;
     if (["goal_settle", "goal_status", "goal_init", "goal_dispatch", "goal_accept", "goal_amend", "goal_integrate"].includes(event.toolName)) return undefined;
 
@@ -2008,7 +2019,8 @@ export function createGoalEngineExtension(pi, options = {}) {
 
     let projection;
     try { projection = loadProjectionFn(root, activeGoals[0]); } catch { return undefined; }
-    if (!projection || projection.lifecycle !== "active") return undefined;
+    if (!projection || projection.lifecycle !== "active"
+      || projection.sessionBindings?.some((binding) => binding.sessionId === sessionIdentity(ctx) && binding.state === "detached")) return undefined;
 
     const reminder = `\n\n⚠️ [goal-engine] 活跃 goal "${projection.goalId}" 已 ${turnsSinceSettle} 轮未 settle。当前 runnable: [${runnableFrontier(projection).join(", ")}]。请推进任务或调用 goal_settle 更新状态。`;
     const content = (event.content || []).map((part, i) => {
