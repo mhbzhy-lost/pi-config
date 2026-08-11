@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { hashGoalMetadataProposal, recordHumanChoice } from "./human-decision.mjs";
+import { buildTransferChallenge, listCwdGoals, ownerSessionId, transferChallengeState, workspaceReleased } from "./session-transfer.mjs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
 import { appendEvent, appendEventBatch, loadProjection, listGoals, listGoalIds } from "./store.mjs";
 import { compileTaskContract, assertPendingTaskContractsCompile } from "./dispatch.mjs";
@@ -494,6 +495,8 @@ const goalAmendSchema = { type: "object", anyOf: [
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "detach_session" }, reason: string, action_token: string, session_id: string }, required: ["operation", "reason", "action_token"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "propose_update_goal" }, reason: string, changes: { type: "object", properties: { objective: string, scope: { type: "array", items: string }, non_goals: { type: "array", items: string }, dod: { type: "array", items: string } }, additionalProperties: false, minProperties: 1 } }, required: ["operation", "reason", "changes"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "update_goal" }, challenge_id: string, action_token: string }, required: ["operation", "challenge_id", "action_token"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "propose_transfer_session" }, reason: string }, required: ["goal_id", "operation", "reason"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "transfer_session" }, challenge_id: string, reason: string, action_token: string }, required: ["goal_id", "operation", "challenge_id", "reason", "action_token"], additionalProperties: false },
 ] };
 
 export function createGoalEngineExtension(pi, options = {}) {
@@ -556,12 +559,13 @@ export function createGoalEngineExtension(pi, options = {}) {
   let recoveryLatch = null;
   const metadataChallenges = new Map();
   const orphanChallenges = new Map();
+  const transferChallenges = new Map();
   const persistMetadata = (type, data) => {
     if (typeof pi.appendEntry !== "function") throw new Error(`Cannot persist ${type}: pi.appendEntry is unavailable`);
     pi.appendEntry(type, data);
   };
   const restoreMetadata = (ctx) => {
-    metadataChallenges.clear(); orphanChallenges.clear();
+    metadataChallenges.clear(); orphanChallenges.clear(); transferChallenges.clear();
     for (const entry of ctx.sessionManager?.getEntries?.() || []) {
       if (entry.type !== "custom") continue;
       const data = entry.data;
@@ -569,6 +573,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (!data?.id) continue;
         const current = metadataChallenges.get(data.id) || {};
         metadataChallenges.set(data.id, { ...current, ...(entry.customType === "goal-engine-metadata-challenge" ? { challenge: data } : {}), ...(entry.customType === "goal-engine-metadata-decision" ? { decision: { ...data, id: data.receiptId } } : {}), ...(entry.customType === "goal-engine-metadata-rejected" ? { rejected: true } : {}), ...(entry.customType === "goal-engine-metadata-consumed" ? { consumed: true } : {}) });
+      }
+      if (entry.customType?.startsWith("goal-engine-session-transfer-") && (data?.id || data?.challenge_id)) {
+        const id = data.id || data.challenge_id; const current = transferChallenges.get(id) || {};
+        transferChallenges.set(id, { ...current, ...(entry.customType.endsWith("challenge") ? { challenge: data } : {}), ...(entry.customType.endsWith("decision") ? { decision: data } : {}), ...(entry.customType.endsWith("rejected") ? { rejected: true } : {}), ...(entry.customType.endsWith("consumed") ? { consumed: true } : {}), ...(entry.customType.endsWith("stale") ? { stale: true } : {}) });
       }
       if (!entry.customType?.startsWith("goal-engine-orphan-disposition-") || !data?.challenge_id && !data?.id) continue;
       const id = data.challenge_id || data.id; const current = orphanChallenges.get(id) || {};
@@ -848,23 +856,31 @@ export function createGoalEngineExtension(pi, options = {}) {
   registerGoalTool(pi, {
     name: "goal_status",
     description: "当存在或可能存在 active goal 时，在每个协调轮次开始及 compact/reload 后首先使用；返回恢复权威的 projection 和 machine action。不要凭对话历史猜进度。",
-    parameters: {
-      type: "object",
-      properties: { goal_id: { type: "string" } },
-      required: [],
-    },
+    parameters: { type: "object", anyOf: [
+      { type: "object", properties: { goal_id: string }, additionalProperties: false },
+      { type: "object", properties: { list_cwd_goals: { type: "boolean", const: true } }, required: ["list_cwd_goals"], additionalProperties: false },
+      { type: "object", properties: { transfer_challenge_id: string }, required: ["transfer_challenge_id"], additionalProperties: false },
+    ] },
     async handler(params, ctx) {
       const { cwd, root } = executionScopeFor(ctx, { operation: "read", goalId: params.goal_id });
+      const sessionId = sessionIdentity(ctx);
+      if (params.list_cwd_goals === true) return JSON.stringify(listCwdGoals(loadAllProjections(root), sessionId));
+      if (params.transfer_challenge_id) {
+        const record = transferChallenges.get(params.transfer_challenge_id);
+        if (!record?.challenge || record.challenge.toSessionId !== sessionId) return "NO_ACTIVE_GOAL";
+        return JSON.stringify({ challenge_id: record.challenge.id, status: transferChallengeState(record, loadProjectionFn(root, record.challenge.goalId), sessionId, cwd) });
+      }
       const goalId = resolveGoalId(params.goal_id, root, ctx);
       if (!goalId) return "NO_ACTIVE_GOAL";
       let projection = loadProjectionFn(root, goalId);
       if (!projection) return "NO_ACTIVE_GOAL";
       if (!enforceActionTokens) return statusResponse(projection, cwd, root);
-      const sessionId = sessionIdentity(ctx);
       if (projection.sessionBindings?.some((binding) => binding.sessionId === sessionId && binding.state === "detached")) {
         return statusResponse(projection, cwd, root);
       }
       const metadata = metadataState(projection, sessionId);
+      const transfer = [...transferChallenges.values()].find((record) => record.challenge?.goalId === goalId && record.challenge?.toSessionId === sessionId);
+      const transferState = transfer ? transferChallengeState(transfer, projection, sessionId, cwd) : null;
       let orphanDecision = null;
       let orphanAction = null;
       for (const [taskId] of projection.tasks) {
@@ -881,11 +897,13 @@ export function createGoalEngineExtension(pi, options = {}) {
         } else orphanDecision = { status: "AWAITING_USER_DECISION", goalId, taskId, attempt, challenge_id: challenge.id, inventory: challenge.inventory, inventory_hash: challenge.inventoryHash, choices: ["discard", "preserve"] };
         break;
       }
-      const machineAction = metadata?.status === "APPROVED"
-        ? { tool: "goal_amend", params: { goal_id: goalId, operation: "update_goal", challenge_id: metadata.record.challenge.id } }
-        : metadata?.status === "AWAITING_USER_DECISION" || metadata?.status === "REPROPOSE_REQUIRED"
-          ? null
-          : orphanAction || machineActionForProjection(projection, cwd, root);
+      const machineAction = transferState === "APPROVED" && workspaceReleased(projection)
+        ? { tool: "goal_amend", params: { goal_id: goalId, operation: "transfer_session", challenge_id: transfer.challenge.id, reason: transfer.challenge.reason } }
+        : metadata?.status === "APPROVED"
+          ? { tool: "goal_amend", params: { goal_id: goalId, operation: "update_goal", challenge_id: metadata.record.challenge.id } }
+          : metadata?.status === "AWAITING_USER_DECISION" || metadata?.status === "REPROPOSE_REQUIRED"
+            ? null
+            : orphanAction || machineActionForProjection(projection, cwd, root);
       let actionToken = null;
       if (machineAction) {
         const offer = issueActionOffer(projection, machineAction, sessionId);
@@ -1252,6 +1270,13 @@ export function createGoalEngineExtension(pi, options = {}) {
       const goalId = resolveGoalId(params.goal_id, root, ctx);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
+      if (params.operation === "propose_transfer_session") {
+        if (!listCwdGoals(loadAllProjections(root), sessionIdentity(ctx)).some((item) => item.goalId === goalId)) throw new Error("transfer requires a visible goal");
+        const challenge = buildTransferChallenge({ projection, toSessionId: sessionIdentity(ctx), reason: params.reason, cwd });
+        persistMetadata("goal-engine-session-transfer-challenge", challenge);
+        transferChallenges.set(challenge.id, { challenge });
+        return JSON.stringify({ status: "TRANSFER_PENDING", challenge_id: challenge.id });
+      }
       if (params.operation === "propose_update_goal") {
         const baseMetadata = { objective: projection.objective, scope: projection.scope, nonGoals: projection.nonGoals, dod: projection.dod };
         const targetMetadata = { ...baseMetadata, ...params.changes, ...(params.changes.non_goals !== undefined ? { nonGoals: params.changes.non_goals } : {}) };
@@ -1264,6 +1289,18 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
       const currentSessionId = sessionIdentity(ctx);
       const metadataBeforeConsume = params.operation === "update_goal" ? metadataState(projection, currentSessionId) : null;
+      if (params.operation === "transfer_session") {
+        const record = transferChallenges.get(params.challenge_id);
+        if (!record?.challenge || transferChallengeState(record, projection, currentSessionId, cwd) !== "APPROVED" || !workspaceReleased(projection)) throw new Error("transfer challenge is missing, stale, or unsafe");
+        const offer = projection.actionOffer;
+        if (!offer) throw new Error("goal_status must issue an action offer before goal_amend");
+        projection = consumeOfferedAction(projection, params, "goal_amend", goalId, ctx, root);
+        const event = makeGoalEvent("goal.session_transferred", { fromSessionId: record.challenge.fromOwnerSessionId, toSessionId: currentSessionId, challengeId: record.challenge.id, reason: params.reason, ownershipRevision: projection.ownershipRevision + 1 }, goalId, projection);
+        const updated = appendEventFn(root, event, projection.version);
+        persistMetadata("goal-engine-session-transfer-consumed", { challenge_id: record.challenge.id });
+        transferChallenges.set(record.challenge.id, { ...record, consumed: true });
+        return statusResponse(updated, cwd, root);
+      }
       if (params.operation === "detach_session") {
         if (params.session_id && params.session_id !== currentSessionId) throw new Error("detach_session may only target the current session");
         if (!projection.sessionBindings?.some((binding) => binding.sessionId === currentSessionId && binding.state === "watching")) {
@@ -1886,6 +1923,18 @@ export function createGoalEngineExtension(pi, options = {}) {
         orphanChallenges.set(orphan.challenge.id, { ...orphan, decision });
       }
     } catch { /* input for another challenge or ambiguous input never creates an orphan receipt */ }
+
+    try {
+      const record = [...transferChallenges.values()].filter((candidate) => !candidate.decision && !candidate.rejected && !candidate.consumed && candidate.challenge?.toSessionId === hookSessionId).at(-1);
+      if (record) {
+        const occurredAt = new Date(Math.max(Date.now(), Date.parse(record.challenge.requestedAt) + 1)).toISOString();
+        const receipt = recordHumanChoice({ inputEvent: { role: "user", source: event.source, sessionId: hookSessionId, occurredAt, text: event.text, id: event.entryId || crypto.randomUUID() }, challenge: { ...record.challenge, sessionId: hookSessionId }, sessionId: hookSessionId });
+        const decision = { id: crypto.randomUUID(), ...receipt };
+        persistMetadata("goal-engine-session-transfer-decision", { id: record.challenge.id, ...decision });
+        transferChallenges.set(record.challenge.id, { ...record, decision, ...(decision.choice === "reject" ? { rejected: true } : {}) });
+        if (decision.choice === "reject") persistMetadata("goal-engine-session-transfer-rejected", { challenge_id: record.challenge.id });
+      }
+    } catch { /* only the challenge target's exact real-user input is durable */ }
 
     try {
       const candidates = [...metadataChallenges.values()].filter((record) => !record.decision && !record.rejected && !record.consumed);

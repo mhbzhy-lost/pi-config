@@ -18,7 +18,7 @@ export function schemaVersionForMutation(projection, legacyTargetVersion = "goal
 const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
 const TERMINAL_LIFECYCLES = new Set(["completed", "blocked", "cancelled"]);
 const COMPLETED_V3_EVENTS = new Set([
-  "goal.session_bound", "goal.session_detached", "goal.discovery_recorded", "goal.discovery_resolved",
+  "goal.session_bound", "goal.session_detached", "goal.session_transferred", "goal.discovery_recorded", "goal.discovery_resolved",
   "goal.continuity_checkpointed", "goal.reopened", "goal.action_offered", "goal.action_consumed",
 ]);
 const VALID_EVIDENCE_TYPES = new Set(["diff", "file", "test_output", "screenshot", "log", "external_review"]);
@@ -53,6 +53,7 @@ export function createProjection() {
     actionOffer: null,
     pendingHumanDecision: null,
     contractHistory: [],
+    ownershipRevision: 1,
   };
 }
 
@@ -97,6 +98,7 @@ export function applyEvent(projection, event, { replay = false } = {}) {
     case "goal.contract_amended": goalContractAmended(next, event.data, event.schemaVersion); break;
     case "goal.session_bound": goalSessionBound(next, event, event.schemaVersion); break;
     case "goal.session_detached": goalSessionDetached(next, event, event.schemaVersion); break;
+    case "goal.session_transferred": goalSessionTransferred(next, event, event.schemaVersion); break;
     case "goal.discovery_recorded": goalDiscoveryRecorded(next, event, event.schemaVersion); break;
     case "goal.discovery_resolved": goalDiscoveryResolved(next, event, event.schemaVersion); break;
     case "goal.continuity_checkpointed": goalContinuityCheckpointed(next, event, event.schemaVersion); break;
@@ -174,6 +176,7 @@ function copyProjection(p) {
     actionOffer: p.actionOffer ? structuredClone(p.actionOffer) : null,
     pendingHumanDecision: p.pendingHumanDecision ? structuredClone(p.pendingHumanDecision) : null,
     contractHistory: (p.contractHistory || []).map((entry) => structuredClone(entry)),
+    ownershipRevision: p.ownershipRevision || 1,
   };
 }
 
@@ -651,12 +654,18 @@ function assertTaskRemovable(task, taskId, schemaVersion) {
   if (!workspaceReleasedForRetry(task)) throw new Error(`cannot remove task with unreleased workspace: ${taskId}`);
 }
 
+export function ownerSessionId(projection) {
+  const binding = (projection?.sessionBindings || []).find((candidate) => candidate.state === "watching");
+  return binding?.sessionId || null;
+}
+
 function goalSessionBound(p, event, schemaVersion) {
   requireV3(schemaVersion, event.type);
+  requireExactFields(event.data, ["sessionId", "leafId"], "session binding");
   const { sessionId, leafId } = event.data;
   requireNonEmptyStrings({ sessionId, leafId }, "session binding");
-  const existing = p.sessionBindings[0];
-  if (existing && existing.sessionId !== sessionId) throw new Error("goal owner session is immutable");
+  const existing = ownerSessionId(p);
+  if (existing && existing !== sessionId) throw new Error("goal owner session is immutable");
   if (existing) throw new Error("goal owner session binding is immutable");
   p.sessionBindings.push({ sessionId, leafId, state: "watching", boundAt: event.occurredAt });
   p.coordinationState = coordinationStateFor(p);
@@ -669,6 +678,19 @@ function goalSessionDetached(p, event, schemaVersion) {
   const binding = p.sessionBindings.find((candidate) => candidate.sessionId === sessionId);
   if (!binding || binding.state !== "watching") throw new Error(`watching session binding not found: ${sessionId}`);
   Object.assign(binding, { state: "detached", detachedAt: event.occurredAt, reason });
+  p.coordinationState = coordinationStateFor(p);
+}
+
+function goalSessionTransferred(p, event, schemaVersion) {
+  requireV3(schemaVersion, event.type);
+  requireExactFields(event.data, ["fromSessionId", "toSessionId", "challengeId", "reason", "ownershipRevision"], "session transfer");
+  const { fromSessionId, toSessionId, challengeId, reason, ownershipRevision } = event.data;
+  if (fromSessionId !== null && (typeof fromSessionId !== "string" || !fromSessionId.trim())) throw new Error("invalid transfer source session");
+  requireNonEmptyStrings({ toSessionId, challengeId, reason }, "session transfer");
+  if (!Number.isSafeInteger(ownershipRevision) || ownershipRevision !== p.ownershipRevision + 1) throw new Error("invalid ownership revision");
+  if (ownerSessionId(p) !== fromSessionId) throw new Error("transfer source owner mismatch");
+  p.sessionBindings = [{ sessionId: toSessionId.trim(), leafId: "session-transfer", state: "watching", boundAt: event.occurredAt }];
+  p.ownershipRevision = ownershipRevision;
   p.coordinationState = coordinationStateFor(p);
 }
 

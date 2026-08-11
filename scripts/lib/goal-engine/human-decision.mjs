@@ -50,6 +50,8 @@ export function recordHumanChoice({ inputEvent, challenge, sessionId } = {}) {
   if (kind === "goal_metadata_approval") {
     if (challenge.proposalPresented !== true) fail("metadata proposal must be presented before approval");
     if (typeof challenge.proposalHash !== "string" || !/^[a-f0-9]{64}$/.test(challenge.proposalHash)) fail("valid proposalHash is required");
+  } else if (kind === "session_transfer_approval") {
+    if (!new Set(["批准", "approve", "拒绝", "reject"]).has(requiredString(inputEvent.text, "inputEvent.text").toLocaleLowerCase("en-US"))) fail("user input must exactly match one allowed choice");
   } else if (kind !== "orphan_disposition") {
     fail(`unsupported challenge kind: ${kind}`);
   }
