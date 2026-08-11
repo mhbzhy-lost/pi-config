@@ -55,7 +55,7 @@ test("real Pi host uses execution context cwd instead of process cwd", async () 
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     const init = result.session.getToolDefinition("goal_init");
     await init.execute("goal-init-dual-cwd", {
-      objective: "Project cwd registry", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] } }],
+      objective: "Project cwd registry", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] } }],
     }, new AbortController().signal, undefined, { cwd: projectCwd, sessionManager: result.session.sessionManager });
     assert.equal(existsSync(join(projectCwd, ".state/goal-engine/registry.json")), true);
     assert.equal(existsSync(join(processCwd, ".state/goal-engine/registry.json")), false);
@@ -116,7 +116,7 @@ test("real Pi host isolates PI_CODING_GOAL_DIR by canonical project cwd", async 
     const firstInit = first.session.getToolDefinition("goal_init");
     const firstGoal = JSON.parse((await firstInit.execute("global-host-a-init", {
       objective: "Global host A",
-      tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] } }],
+      tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] } }],
     }, new AbortController().signal, undefined, firstContext)).details.value);
     first.session.dispose();
     hosts.splice(hosts.indexOf(first), 1);
@@ -136,7 +136,7 @@ test("real Pi host isolates PI_CODING_GOAL_DIR by canonical project cwd", async 
     const secondInit = second.session.getToolDefinition("goal_init");
     await secondInit.execute("global-host-b-init", {
       objective: "Global host B",
-      tasks: [{ id: "t1", description: "Task", writePaths: ["b"], acceptance: { criteria: ["x"], commands: ["true"] } }],
+      tasks: [{ id: "t1", description: "Task", writePaths: ["b"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] } }],
     }, new AbortController().signal, undefined, { cwd: projects[1], sessionManager: second.session.sessionManager });
 
     const namespaces = readdirSync(goalBase).sort();
@@ -168,7 +168,7 @@ test("real Pi host rejects goal_init outside Git without state", async () => {
     result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     const init = result.session.getToolDefinition("goal_init");
-    await assert.rejects(() => init.execute("goal-init-unsafe-host", { objective: "Unsafe host", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] } }] }, new AbortController().signal, undefined, { cwd: projectCwd, sessionManager: result.session.sessionManager }), /GIT_INFRASTRUCTURE_ERROR: observed=.*remediation=.*stateChanged=false/);
+    await assert.rejects(() => init.execute("goal-init-unsafe-host", { objective: "Unsafe host", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] } }] }, new AbortController().signal, undefined, { cwd: projectCwd, sessionManager: result.session.sessionManager }), /GIT_INFRASTRUCTURE_ERROR: observed=.*remediation=.*stateChanged=false/);
     assert.equal(existsSync(join(projectCwd, ".state/goal-engine")), false);
   } finally {
     try { result?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
@@ -239,7 +239,7 @@ test("real Pi host validates and applies workflow amendments", async () => {
     const status = result.session.getToolDefinition("goal_status");
     const amend = result.session.getToolDefinition("goal_amend");
     const ctx = { cwd: projectCwd, sessionManager: result.session.sessionManager };
-    const initialized = JSON.parse((await init.execute("workflow-host-init", { objective: "Host workflow amendment", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "existing-tests" }] }, signal, undefined, ctx)).details.value);
+    const initialized = JSON.parse((await init.execute("workflow-host-init", { objective: "Host workflow amendment", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] }, workflow: "existing-tests" }] }, signal, undefined, ctx)).details.value);
     const projection = loadProjection(join(projectCwd, ".state/goal-engine"), initialized.goalId);
     appendEvent(join(projectCwd, ".state/goal-engine"), { schemaVersion: "goal-engine.event.v3", eventId: "workflow-host-discovery", goalId: initialized.goalId, occurredAt: new Date().toISOString(), type: "goal.discovery_recorded", data: { id: "workflow-host-discovery", summary: "Workflow change requested before dispatch", paths: [], source: "user_intent", sessionId: result.session.sessionManager.getSessionId() } }, projection.version);
     const offer = JSON.parse((await status.execute("workflow-host-status", { goal_id: initialized.goalId }, signal, undefined, ctx)).details.value);
@@ -275,7 +275,7 @@ test("real Pi host compaction checkpoint reloads from durable session and Goal l
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     const ctx = { cwd: projectCwd, sessionManager: result.session.sessionManager };
     const init = result.session.getToolDefinition("goal_init");
-    const initialized = JSON.parse((await init.execute("compact-init", { objective: "Host compaction reload", tasks: [{ id: "t1", description: "Task", writePaths: ["src/a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] }, new AbortController().signal, undefined, ctx)).details.value);
+    const initialized = JSON.parse((await init.execute("compact-init", { objective: "Host compaction reload", tasks: [{ id: "t1", description: "Task", writePaths: ["src/a.ts"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] }, workflow: "tdd" }] }, new AbortController().signal, undefined, ctx)).details.value);
     const compact = await result.session.extensionRunner.emit({
       type: "session_before_compact", reason: "overflow", willRetry: true, signal: new AbortController().signal, branchEntries: [],
       preparation: { firstKeptEntryId: "entry-1", messagesToSummarize: [], turnPrefixMessages: [], isSplitTurn: false, tokensBefore: 1, fileOps: { read: new Set(["docs/read-only.md"]), written: new Set(["src/a.ts"]), edited: new Set(["src/a.ts", "src/b.ts"]) }, settings: {} },
@@ -329,7 +329,7 @@ async function withMetadataHost(run) {
     await makeHost(SessionManager.create(projectCwd, join(agentDir, "sessions")));
     const signal = new AbortController().signal;
     const execute = (name, id, args, context = { cwd: projectCwd, sessionManager: host.session.sessionManager }) => host.session.getToolDefinition(name).execute(id, args, signal, undefined, context);
-    const initialized = JSON.parse((await execute("goal_init", "metadata-negative-init", { objective: "Original metadata", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] })).details.value);
+    const initialized = JSON.parse((await execute("goal_init", "metadata-negative-init", { objective: "Original metadata", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] }, workflow: "tdd" }] })).details.value);
     const root = join(projectCwd, ".state/goal-engine");
     appendEvent(root, { schemaVersion: "goal-engine.event.v3", eventId: "metadata-negative-discovery", goalId: initialized.goalId, occurredAt: new Date().toISOString(), type: "goal.discovery_recorded", data: { id: "metadata-negative-discovery", summary: "Metadata change requires an amendment offer", paths: [], source: "user_intent", sessionId: host.session.sessionManager.getSessionId() } }, loadProjection(root, initialized.goalId).version);
     await run({ projectCwd, makeHost, execute, initialized, getHost: () => host });
@@ -481,7 +481,7 @@ test("real Pi host orphan human authorization survives reload and is non-replaya
     await makeHost(SessionManager.create(projectCwd, join(agentDir, "sessions")));
     const signal = new AbortController().signal;
     const execute = (name, id, args) => host.session.getToolDefinition(name).execute(id, args, signal, undefined, { cwd: projectCwd, sessionManager: host.session.sessionManager });
-    const initialized = JSON.parse((await execute("goal_init", "orphan-init", { objective: "Real host exact orphan authorization", tasks: [{ id: "t1", description: "orphan", writePaths: ["src/x.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] })).details.value);
+    const initialized = JSON.parse((await execute("goal_init", "orphan-init", { objective: "Real host exact orphan authorization", tasks: [{ id: "t1", description: "orphan", writePaths: ["src/x.ts"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] }, workflow: "tdd" }] })).details.value);
     const stateRoot = join(projectCwd, ".state/goal-engine");
     const lease = allocateExecutorWorkspace({ goalId: initialized.goalId, taskId: "t1", attempt: 1, originRoot: projectCwd, stateRoot, baseCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectCwd, encoding: "utf8" }).trim() });
     const first = JSON.parse((await execute("goal_status", "orphan-status-a", { goal_id: initialized.goalId })).details.value);
@@ -532,7 +532,7 @@ test("real Pi host metadata proposal approval lifecycle survives reload and is n
     const ctx = { cwd: projectCwd, sessionManager: result.session.sessionManager };
     const signal = new AbortController().signal;
     const execute = (name, id, args, context = ctx) => result.session.getToolDefinition(name).execute(id, args, signal, undefined, context);
-    const initialized = JSON.parse((await execute("goal_init", "metadata-init", { objective: "Original metadata", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" }] })).details.value);
+    const initialized = JSON.parse((await execute("goal_init", "metadata-init", { objective: "Original metadata", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] }, workflow: "tdd" }] })).details.value);
     // This first assertion is intentionally RED on HEAD: proposal is absent from the public Host schema.
     const proposal = JSON.parse((await execute("goal_amend", "metadata-propose", { goal_id: initialized.goalId, operation: "propose_update_goal", reason: "User requests an objective amendment", changes: { objective: "Amended metadata" } })).details.value);
     assert.equal(proposal.status, "METADATA_PROPOSAL_PENDING");
