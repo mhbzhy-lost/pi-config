@@ -336,6 +336,16 @@ function goalEventsPath(cwd, goalId) {
   return join(cwd, ".state/goal-engine/goals", goalId, "events.jsonl");
 }
 
+function bindGoalToMockSession(cwd, goalId, sessionId = "session-test") {
+  const root = join(cwd, ".state/goal-engine");
+  const projection = loadProjection(root, goalId);
+  appendEventStore(root, {
+    schemaVersion: "planned.v1", eventId: `${goalId}-session-bound-${sessionId}`, goalId,
+    occurredAt: new Date().toISOString(), type: "goal.session_bound",
+    data: { sessionId, leafId: "leaf-test" },
+  }, projection.version);
+}
+
 function readGoalEvents(cwd, goalId) {
   const path = goalEventsPath(cwd, goalId);
   if (!existsSync(path)) return [];
@@ -715,17 +725,17 @@ test("historical safe ignored state dispatch remains available", async () => {
   ]);
 });
 
-test("goal_amend exposes a strict discriminated seven-operation schema", () => {
+test("goal_amend exposes a strict discriminated nine-operation schema", () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);
   const schema = pi.tools.find((tool) => tool.name === "goal_amend").parameters;
   assert.equal(schema.type, "object");
-  assert.equal(schema.anyOf.length, 7);
+  assert.equal(schema.anyOf.length, 9);
   for (const branch of schema.anyOf) {
     assert.equal(branch.additionalProperties, false);
     assert.ok(branch.properties.operation.const);
     assert.ok(Object.hasOwn(branch.properties, "goal_id"), "goal_id remains optional in every branch");
-    assert.equal(branch.required.includes("goal_id"), false);
+    assert.equal(branch.required.includes("goal_id"), ["propose_transfer_session", "transfer_session"].includes(branch.properties.operation.const));
   }
   const branch = (operation) => schema.anyOf.find((candidate) => candidate.properties.operation.const === operation);
   const propose = branch("propose_update_goal");
@@ -733,11 +743,15 @@ test("goal_amend exposes a strict discriminated seven-operation schema", () => {
   const reopen = branch("reopen_completed");
   const triage = branch("triage");
   const detach = branch("detach_session");
+  const proposeTransfer = branch("propose_transfer_session");
+  const transfer = branch("transfer_session");
   assert.deepEqual(propose.required.sort(), ["changes", "operation", "reason"].sort());
   assert.equal(Object.hasOwn(propose.properties, "action_token"), false);
   assert.deepEqual(Object.keys(update.properties).sort(), ["action_token", "challenge_id", "goal_id", "operation"]);
   assert.deepEqual(update.required.sort(), ["action_token", "challenge_id", "operation"].sort());
   assert.equal(detach.required.includes("session_id"), false);
+  assert.deepEqual(proposeTransfer.required.sort(), ["goal_id", "operation", "reason"].sort());
+  assert.deepEqual(transfer.required.sort(), ["goal_id", "operation", "challenge_id", "reason", "action_token"].sort());
 
   const basis = reopen.properties.basis;
   assert.equal(basis.additionalProperties, false);
@@ -2617,6 +2631,7 @@ test("goal_amend rejects an active workspace remove without releasing resources"
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Protected active task", deps: [], writePaths: ["src/protected.ts"], acceptance: plannedAcceptance(["protected"]), workflow: "tdd" }] });
+  bindGoalToMockSession(cwd, goalId);
   await invoke(pi, "goal_dispatch", { task_id: "t1" });
   const beforeEvents = readGoalEvents(cwd, goalId).length;
   await assert.rejects(() => invoke(pi, "goal_amend", { reason: "Do not delete a task that still owns active workspace resources", remove_tasks: ["t1"] }), /pending|workspace|remove/i);
@@ -2726,6 +2741,7 @@ test("goal_amend rejects commands on added and updated Planned tasks before appe
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "initial task", writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["works"]), workflow: "tdd" }] });
+  bindGoalToMockSession(cwd, goalId);
   const before = readGoalEvents(cwd, goalId).length;
   await assert.rejects(
     () => invoke(pi, "goal_amend", { reason: "Reject an added command that hardcodes the lexical symlink origin cwd", add_tasks: [{ id: "t2", description: "unsafe add", writePaths: ["src/t2.ts"], acceptance: { ...plannedAcceptance(["works"]), commands: [`node ${cwd}/scripts/test.mjs`] }, workflow: "tdd" }] }),
@@ -2745,6 +2761,7 @@ test("goal_amend applies workflow only to safe pending tasks", async () => {
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "workflow task", deps: [], writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["works"]), workflow: "existing-tests" }] });
+  bindGoalToMockSession(cwd, goalId);
 
   const amended = JSON.parse(await invoke(pi, "goal_amend", { reason: "Change the pending task to a test-first implementation workflow", update_tasks: { t1: { workflow: "tdd" } } }));
   assert.equal(amended.tasks.t1.workflow, "tdd");
@@ -2769,6 +2786,7 @@ test("goal_amend rejects accepted acceptance rewrite without appending an event"
     { id: "t1", description: "Accepted protected task", deps: [], writePaths: ["src/accepted.ts"], acceptance: plannedAcceptance(["accepted"]), workflow: "tdd" },
     { id: "t2", description: "Keep goal active after t1 acceptance", deps: ["t1"], writePaths: ["src/pending.ts"], acceptance: plannedAcceptance(["pending"]), workflow: "tdd" },
   ] });
+  bindGoalToMockSession(cwd, goalId);
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   commitWorkspaceChange(dispatched.workspace, "src/accepted.ts", "export const accepted = true;\n", "feat: accepted proof");
   await invoke(pi, "goal_settle", { task_id: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/accepted.ts" }, evidence_source: "self_produced", next_action: "Integrate this accepted proof task before recording its final acceptance" });
@@ -3079,6 +3097,7 @@ async function dispatchedRollbackFixture(label, { removeLease = false } = {}) {
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi);
   await invoke(pi, "goal_init", { objective, tasks: [{ id: "t1", description: "Create a rollback orphan", deps: [], writePaths: ["src/x.ts"], acceptance: plannedAcceptance(["x"]), workflow: "tdd" }] });
+  bindGoalToMockSession(cwd, goalId);
   const created = Object.fromEntries(["events", "projection", "registry"].map((key, index) => [key, persistedStateBytes(cwd, goalId)[index]]));
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   if (removeLease) rmSync(workspaceState(cwd, goalId, "t1").leasePath);
@@ -3098,6 +3117,7 @@ async function twoTaskRollbackOrphanFixture(label, { removeLease = false } = {})
     { id: "t1", description: "Orphaned original task", deps: [], writePaths: ["src/t1.ts"], acceptance: plannedAcceptance(["t1"]), workflow: "tdd" },
     { id: "t2", description: "Unaffected pending task", deps: [], writePaths: ["src/t2.ts"], acceptance: plannedAcceptance(["t2"]), workflow: "tdd" },
   ] });
+  bindGoalToMockSession(cwd, goalId);
   const created = Object.fromEntries(["events", "projection", "registry"].map((key, index) => [key, persistedStateBytes(cwd, goalId)[index]]));
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   if (removeLease) rmSync(workspaceState(cwd, goalId, "t1").leasePath);
@@ -3408,11 +3428,11 @@ test("orphan durable recovery append failures retry without duplicate recovery",
     const resourcesAfterFailure = workspaceState(fixture.cwd, fixture.goalId, "t1");
     assert.deepEqual([resourcesAfterFailure.workspaceExists, resourcesAfterFailure.leaseExists, resourcesAfterFailure.branchExists], [true, true, true]);
     if (factory === createFailingAppendEvent) {
-      assert.deepEqual(eventsAfterFailure.map((event) => event.type), ["goal.created"]);
+      assert.deepEqual(eventsAfterFailure.map((event) => event.type), ["goal.created", "goal.session_bound"]);
       assert.equal(recovered.length, 0);
       assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
     } else {
-      assert.deepEqual(eventsAfterFailure.map((event) => event.type), ["goal.created", "task.workspace_orphan_recovered"]);
+      assert.deepEqual(eventsAfterFailure.map((event) => event.type), ["goal.created", "goal.session_bound", "task.workspace_orphan_recovered"]);
       assert.equal(recovered.length, 1);
       assert.equal(eventsAfterFailure.some((event) => ["task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"].includes(event.type)), false);
       const active = loadProjection(join(fixture.cwd, ".state/goal-engine"), fixture.goalId).tasks.get("t1");
@@ -3422,7 +3442,7 @@ test("orphan durable recovery append failures retry without duplicate recovery",
     const retryPi = createMockPi(fixture.cwd); createGoalEngineExtension(retryPi);
     await invoke(retryPi, "goal_integrate", { task_id: "t1", action: "discard" });
     const finalEvents = readGoalEvents(fixture.cwd, fixture.goalId);
-    assert.deepEqual(finalEvents.map((event) => event.type), ["goal.created", "task.workspace_orphan_recovered", "task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"]);
+    assert.deepEqual(finalEvents.map((event) => event.type), ["goal.created", "goal.session_bound", "task.workspace_orphan_recovered", "task.workspace_disposition_started", "task.workspace_disposition_applied", "task.workspace_disposed"]);
     assert.equal(finalEvents.filter((event) => event.type === "task.workspace_orphan_recovered").length, 1);
   }
 });
@@ -3990,7 +4010,7 @@ test("lifecycle ambiguity is durably fail-closed and compaction never clears its
   const cwd = tmpCwd();
   const projections = ["a", "b"].map((goalId) => ({
     goalId, lifecycle: "active", epoch: 1, scope: [], tasks: new Map(),
-    continuity: { observations: {} }, sessionBindings: [], nextAction: "goal_status",
+    continuity: { observations: {} }, sessionBindings: [{ sessionId: "session-test", state: "watching" }], nextAction: "goal_status",
   }));
   const pi = createMockPi(cwd);
   createGoalEngineExtension(pi, {
@@ -4061,10 +4081,9 @@ test("orphan cross-session production decision and action token authorization ar
   const sessionA = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
   await emitHook(pi, "input", { source: "rpc", text: "preserve" }); const offerA = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
   pi.sessionManager.getSessionId = () => "session-other";
-  const sessionB = JSON.parse(await invoke(pi, "goal_status", { goal_id: fixture.goalId }));
-  assert.equal(sessionB.orphanDecision.status, "AWAITING_USER_DECISION"); assert.notEqual(sessionB.orphanDecision.challenge_id, sessionA.orphanDecision.challenge_id); assert.equal(sessionB.action_token, null);
+  assert.equal(await invoke(pi, "goal_status", { goal_id: fixture.goalId }), "NO_ACTIVE_GOAL");
   const before = fullRejectionSnapshot(fixture.cwd, fixture.goalId);
-  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "preserve", challenge_id: sessionA.orphanDecision.challenge_id, action_token: offerA.action_token }), /session|challenge|token|offer/i);
+  await assert.rejects(() => invoke(pi, "goal_integrate", { task_id: "t1", action: "preserve", challenge_id: sessionA.orphanDecision.challenge_id, action_token: offerA.action_token }), /No active goal|session|challenge|token|offer/i);
   assert.deepEqual(fullRejectionSnapshot(fixture.cwd, fixture.goalId), before);
 });
 
@@ -4186,10 +4205,10 @@ test("detached active session cannot reacquire a runnable offer while another se
   assert.equal(await emitHook(pi, "session_before_compact", { reason: "overflow", preparation: { fileOps: { written: new Set(), edited: new Set() } } }), undefined);
   await emitHook(pi, "session_compact", { reason: "overflow", willRetry: true });
   assert.equal(pi.sentMessages.length, 0);
-  for (let i = 0; i < 5; i++) assert.equal(await emitHook(pi, "tool_result", { toolName: "bash", content: [{ type: "text", text: "ok" }], isError: false }), undefined);
+  let reminder;
+  for (let i = 0; i < 5; i++) reminder = await emitHook(pi, "tool_result", { toolName: "bash", content: [{ type: "text", text: "ok" }], isError: false });
+  assert.match(reminder.content[0].text, /goal-engine/);
 
   pi.sessionManager.getSessionId = () => "session-other";
-  const otherStatus = JSON.parse(await invoke(pi, "goal_status", { goal_id: initialized.goalId }));
-  assert.deepEqual(otherStatus.machineAction, { tool: "goal_dispatch", params: { goal_id: initialized.goalId, task_id: "t1" } });
-  assert.ok(otherStatus.action_token);
+  assert.equal(await invoke(pi, "goal_status", { goal_id: initialized.goalId }), "NO_ACTIVE_GOAL");
 });

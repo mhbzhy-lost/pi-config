@@ -25,7 +25,7 @@ function goal(overrides = {}) {
 }
 
 test("selects the unique active goal before path-based completed candidates", () => {
-  const active = goal({ goalId: "active" });
+  const active = goal({ goalId: "active", sessionBindings: [{ sessionId: "session-1", state: "watching" }] });
   const completed = goal({ goalId: "completed", lifecycle: "completed", updatedAt: "2026-08-06T00:00:00.000Z" });
 
   assert.deepEqual(selectContinuityCandidate({
@@ -64,7 +64,7 @@ test("selects only a completed goal watched by the same session and ignores deta
 
 test("fails closed on multiple candidates and ignores unrelated paths", () => {
   assert.deepEqual(selectContinuityCandidate({
-    projections: [goal({ goalId: "b" }), goal({ goalId: "a" })], cwd: "/repo", paths: [], sessionId: "session-1",
+    projections: [goal({ goalId: "b", sessionBindings: [{ sessionId: "session-1", state: "watching" }] }), goal({ goalId: "a", sessionBindings: [{ sessionId: "session-1", state: "watching" }] })], cwd: "/repo", paths: [], sessionId: "session-1",
   }), { status: "ambiguous", goalIds: ["a", "b"], reason: "multiple_active" });
 
   const completedA = goal({ goalId: "done-a", lifecycle: "completed", scope: ["src/**"] });
