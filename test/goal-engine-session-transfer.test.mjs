@@ -3,7 +3,7 @@ import test from "node:test";
 import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -21,8 +21,23 @@ async function execute(pi, name, params = {}) {
   const result = await tool.execute("test", params, new AbortController().signal, undefined, pi.executeContext);
   return result.content[0].text;
 }
-async function input(pi, text) {
-  for (const handler of pi.hooks.input || []) await handler({ source: "interactive", text, entryId: "approval" }, pi.executeContext);
+async function input(pi, text, source = "interactive") {
+  for (const handler of pi.hooks.input || []) await handler({ source, text, entryId: crypto.randomUUID() }, pi.executeContext);
+}
+function bytes(path) { return existsSync(path) ? readFileSync(path).toString("hex") : null; }
+function stateInventory(cwd, pi) {
+  const root = join(cwd, ".state", "goal-engine");
+  const walk = (path) => existsSync(path) ? readdirSync(path, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? walk(join(path, entry.name)) : [[join(path, entry.name).slice(cwd.length), bytes(join(path, entry.name))]]) : [];
+  return {
+    state: walk(root).sort(([a], [b]) => a.localeCompare(b)),
+    entries: structuredClone(pi.entries),
+    branches: git(cwd, "branch", "--format=%(refname:short)"),
+    worktrees: git(cwd, "worktree", "list", "--porcelain"),
+  };
+}
+async function rejectsWithoutWrites(run, snapshot) {
+  await assert.rejects(run);
+  assert.deepEqual(snapshot.after(), snapshot.before);
 }
 function transferFixture() {
   const cwd = mkdtempSync(join(tmpdir(), "goal-transfer-"));
@@ -55,6 +70,69 @@ test("production Extension transfers an unowned Goal only through an approved ch
   await execute(target, "goal_amend", { ...approved.machineAction.params, action_token: approved.action_token });
   assert.equal(await execute(owner, "goal_status", { goal_id: goalId }), "NO_ACTIVE_GOAL");
   assert.equal(JSON.parse(await execute(target, "goal_status", { goal_id: goalId })).goalId, goalId);
+});
+
+test("transfer challenge rejection matrix keeps list and rejected paths side-effect free", async () => {
+  const { cwd, owner, target } = transferFixture();
+  const initialized = JSON.parse(await execute(owner, "goal_init", { objective: "Private Transfer Goal", tasks: [{ id: "t", description: "t", deps: [], writePaths: ["src/a"], workflow: "tdd", acceptance: { criteria: [{ id: "c", statement: "passes", evidenceKinds: ["tests"] }] } }] }));
+  const goalId = initialized.goalId;
+  const snapshot = () => ({ before: stateInventory(cwd, target), after: null });
+  const listSnapshot = snapshot();
+  const listed = JSON.parse(await execute(target, "goal_status", { list_cwd_goals: true }));
+  listSnapshot.after = stateInventory(cwd, target);
+  assert.deepEqual(listSnapshot.after, listSnapshot.before);
+  assert.deepEqual(Object.keys(listed[0]), ["goalId", "lifecycle", "ownerSessionId", "ownedByCurrentSession", "transferEligible", "transferBlockedReason"]);
+  assert.deepEqual(listed.map((item) => item.goalId), [...listed.map((item) => item.goalId)].sort());
+  assert.ok(Object.keys(listed[0]).every((key) => !["objective", "scope", "tasks", "checkpoint", "nextAction", "action_token", "evidence"].includes(key)));
+
+  const noChallenge = snapshot();
+  assert.equal(await execute(target, "goal_status", { transfer_challenge_id: "unknown" }), "NO_ACTIVE_GOAL");
+  noChallenge.after = stateInventory(cwd, target); assert.deepEqual(noChallenge.after, noChallenge.before);
+  await input(target, "批准"); // approval before a challenge is never retained
+  const proposal = JSON.parse(await execute(target, "goal_amend", { goal_id: goalId, operation: "propose_transfer_session", reason: "continue securely" }));
+  for (const text of ["同意", "批准一下"]) await input(target, text);
+  assert.equal(JSON.parse(await execute(target, "goal_status", { transfer_challenge_id: proposal.challenge_id })).status, "PENDING");
+  await input(target, "reject");
+  const rejected = JSON.parse(await execute(target, "goal_status", { transfer_challenge_id: proposal.challenge_id }));
+  assert.deepEqual(rejected, { challenge_id: proposal.challenge_id, status: "REJECTED" });
+  const rejectedSnapshot = snapshot();
+  await rejectsWithoutWrites(() => execute(target, "goal_amend", { goal_id: goalId, operation: "transfer_session", challenge_id: proposal.challenge_id, reason: "continue securely", action_token: "wrong" }), { before: rejectedSnapshot.before, after: () => stateInventory(cwd, target) });
+});
+
+test("approved transfer rejects mismatched offers and target ownership races without consuming metadata", async () => {
+  const { cwd, owner, target } = transferFixture();
+  const init = (pi, objective) => execute(pi, "goal_init", { objective, tasks: [{ id: "t", description: "t", deps: [], writePaths: ["src/a"], workflow: "tdd", acceptance: { criteria: [{ id: "c", statement: "passes", evidenceKinds: ["tests"] }] } }] });
+  const goalId = JSON.parse(await init(owner, "Race Transfer Goal")).goalId;
+  const proposal = JSON.parse(await execute(target, "goal_amend", { goal_id: goalId, operation: "propose_transfer_session", reason: "continue securely" }));
+  await input(target, "approve");
+  const approved = JSON.parse(await execute(target, "goal_status", { transfer_challenge_id: proposal.challenge_id }));
+  assert.deepEqual(approved.machineAction, { tool: "goal_amend", params: { goal_id: goalId, operation: "transfer_session", challenge_id: proposal.challenge_id, reason: "continue securely" } });
+  const offered = stateInventory(cwd, target);
+  for (const params of [
+    { ...approved.machineAction.params, action_token: "wrong" },
+    { ...approved.machineAction.params, challenge_id: "wrong", action_token: approved.action_token },
+    { ...approved.machineAction.params, goal_id: "wrong", action_token: approved.action_token },
+    { ...approved.machineAction.params, reason: "drift", action_token: approved.action_token },
+  ]) await rejectsWithoutWrites(() => execute(target, "goal_amend", params), { before: offered, after: () => stateInventory(cwd, target) });
+  await init(target, "Target Own Goal");
+  const raced = stateInventory(cwd, target);
+  assert.deepEqual(JSON.parse(await execute(target, "goal_status", { transfer_challenge_id: proposal.challenge_id })), { challenge_id: proposal.challenge_id, status: "TARGET_SESSION_HAS_ACTIVE_GOAL" });
+  assert.deepEqual(stateInventory(cwd, target), raced);
+  await rejectsWithoutWrites(() => execute(target, "goal_amend", { ...approved.machineAction.params, action_token: approved.action_token }), { before: raced, after: () => stateInventory(cwd, target) });
+});
+
+test("an approved transfer fails closed when the old owner activates a workspace", async () => {
+  const { cwd, owner, target } = transferFixture();
+  const initialized = JSON.parse(await execute(owner, "goal_init", { objective: "Unsafe Transfer Goal", tasks: [{ id: "t", description: "t", deps: [], writePaths: ["src/a"], workflow: "tdd", acceptance: { criteria: [{ id: "c", statement: "passes", evidenceKinds: ["tests"] }] } }] }));
+  const proposal = JSON.parse(await execute(target, "goal_amend", { goal_id: initialized.goalId, operation: "propose_transfer_session", reason: "continue securely" }));
+  await input(target, "approve");
+  const approved = JSON.parse(await execute(target, "goal_status", { transfer_challenge_id: proposal.challenge_id }));
+  const ownerStatus = JSON.parse(await execute(owner, "goal_status", { goal_id: initialized.goalId }));
+  await execute(owner, "goal_dispatch", { ...ownerStatus.machineAction.params, action_token: ownerStatus.action_token });
+  const unsafe = stateInventory(cwd, target);
+  assert.deepEqual(JSON.parse(await execute(target, "goal_status", { transfer_challenge_id: proposal.challenge_id })), { challenge_id: proposal.challenge_id, status: "ACTIVE_WORKSPACE" });
+  assert.deepEqual(stateInventory(cwd, target), unsafe);
+  await rejectsWithoutWrites(() => execute(target, "goal_amend", { ...approved.machineAction.params, action_token: approved.action_token }), { before: unsafe, after: () => stateInventory(cwd, target) });
 });
 
 test("approved session transfer advances owner while retaining the source binding audit trail", () => {
