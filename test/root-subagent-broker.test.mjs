@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createConnection } from "node:net";
@@ -219,7 +220,7 @@ test("Root broker registry exposes only the bound broker's read-only executor pr
   assert.equal(typeof rootBrokerRegistry.inspectRootBrokerExecutorProof, "function");
   const pi = { events: {} };
   const snapshot = Object.freeze({ schemaVersion: "root-broker.executor-proof.v1", ownership: Object.freeze({ runId: "run-1" }), terminal: null, terminalConflict: false });
-  const broker = { inspectExecutorProof(runId) { assert.equal(runId, "run-1"); return snapshot; } };
+  const broker = { rootSessionId: "root-registry-proof", inspectExecutorProof(runId) { assert.equal(runId, "run-1"); return snapshot; } };
   bindRootBroker(pi, broker);
   try {
     assert.strictEqual(rootBrokerRegistry.inspectRootBrokerExecutorProof(pi, "run-1"), snapshot);
@@ -229,9 +230,29 @@ test("Root broker registry exposes only the bound broker's read-only executor pr
   assert.throws(() => rootBrokerRegistry.inspectRootBrokerExecutorProof(pi, "run-1"), /unavailable/);
 });
 
+test("Root broker registry reload coexists with a legacy v1 WeakMap process slot", () => {
+  const registryUrl = new URL("../scripts/lib/subagent-dispatch/root-broker-registry.ts", import.meta.url).href;
+  const source = `
+    const legacyKey = Symbol.for("pi.root-subagent-broker-registry.v1");
+    const legacy = new WeakMap();
+    Object.defineProperty(process, legacyKey, { value: legacy, enumerable: false, configurable: false, writable: false });
+    const first = await import(${JSON.stringify(registryUrl)} + "?generation=first");
+    const second = await import(${JSON.stringify(registryUrl)} + "?generation=second");
+    const pi = { events: {} };
+    const broker = { rootSessionId: "root-legacy-slot", async start() {}, async closeRootSession() {} };
+    first.bindRootBroker(pi, broker);
+    if (second.requireRootBroker(pi, "root-legacy-slot") !== broker) throw new Error("new registry slot is not shared across module copies");
+    second.unbindRootBroker(pi, broker);
+    if (Object.getOwnPropertyDescriptor(process, legacyKey)?.value !== legacy) throw new Error("legacy slot was changed");
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", source], { encoding: "utf8" });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+});
+
 test("Root broker registry keeps exact Pi ownership", async () => {
   const pi = {};
-  const broker = { async start() {}, async closeRootSession() {} };
+  const broker = { rootSessionId: "root-exact-ownership", async start() {}, async closeRootSession() {} };
   bindRootBroker(pi, broker);
   assert.equal(requireRootBroker(pi), broker);
   assert.throws(() => bindRootBroker(pi, broker), /already bound/);
@@ -239,11 +260,38 @@ test("Root broker registry keeps exact Pi ownership", async () => {
   assert.throws(() => requireRootBroker(pi), /unavailable/);
 
   const started = [];
-  const managed = { async start() { started.push("start"); }, async closeRootSession() { started.push("close"); } };
+  const managed = { rootSessionId: "root-exact-managed", async start() { started.push("start"); }, async closeRootSession() { started.push("close"); } };
   await startAndBindRootBroker(pi, managed);
   assert.equal(requireRootBroker(pi), managed);
   unbindRootBroker(pi, managed);
   assert.deepEqual(started, ["start"]);
+});
+
+test("Root broker registry requires an explicit Root session identity across Pi facades", () => {
+  const runtimePi = { events: {} };
+  const probePi = { events: {} };
+  const broker = { rootSessionId: "root-facade-shared", async start() {}, async closeRootSession() {} };
+  const replacement = { rootSessionId: "root-facade-shared", async start() {}, async closeRootSession() {} };
+
+  bindRootBroker(runtimePi, broker);
+  try {
+    assert.throws(() => requireRootBroker(probePi), /unavailable/);
+    assert.strictEqual(requireRootBroker(probePi, "root-facade-shared"), broker);
+    assert.throws(() => requireRootBroker(runtimePi, "root-facade-missing"), /unavailable/);
+    assert.throws(() => requireRootBroker(probePi, ""), /identity is invalid/);
+    assert.throws(() => requireRootBroker(probePi, "root-facade-missing"), /unavailable/);
+    assert.throws(() => bindRootBroker(probePi, { rootSessionId: "root-facade-shared" }), /already bound/);
+
+    unbindRootBroker(runtimePi, broker);
+    bindRootBroker(runtimePi, replacement);
+    unbindRootBroker(runtimePi, broker);
+    assert.strictEqual(requireRootBroker(probePi, "root-facade-shared"), replacement);
+    unbindRootBroker(runtimePi, replacement);
+    assert.throws(() => requireRootBroker(probePi, "root-facade-shared"), /unavailable/);
+  } finally {
+    unbindRootBroker(runtimePi, broker);
+    unbindRootBroker(runtimePi, replacement);
+  }
 });
 
 test("Root broker startup rolls back an earlier lifecycle listener when later registration fails", async () => {

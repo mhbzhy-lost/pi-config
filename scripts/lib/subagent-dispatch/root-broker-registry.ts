@@ -1,6 +1,6 @@
 import type { RootBrokerServer } from "./root-broker-server.ts";
 
-const ROOT_BROKER_REGISTRY_KEY = Symbol.for("pi.root-subagent-broker-registry.v1");
+const ROOT_BROKER_REGISTRY_KEY = Symbol.for("pi.root-subagent-broker-registry.v2");
 const GOAL_EXECUTOR_COORDINATOR_KEY = Symbol.for("pi.goal-executor-coordinator-registry.v1");
 
 type GoalExecutorCoordinator = {
@@ -24,8 +24,35 @@ function processWeakRegistry<T>(key: symbol, label: string): WeakMap<object, T> 
   return descriptor.value as WeakMap<object, T>;
 }
 
-function rootBrokerRegistry(): WeakMap<object, RootBrokerServer> {
-  return processWeakRegistry<RootBrokerServer>(ROOT_BROKER_REGISTRY_KEY, "Root subagent broker");
+type RootBrokerRegistry = {
+  exact: WeakMap<object, RootBrokerServer>;
+  byRootSessionId: Map<string, RootBrokerServer>;
+};
+
+function rootBrokerRegistry(): RootBrokerRegistry {
+  const descriptor = Object.getOwnPropertyDescriptor(process, ROOT_BROKER_REGISTRY_KEY);
+  if (!descriptor) {
+    const registry: RootBrokerRegistry = { exact: new WeakMap<object, RootBrokerServer>(), byRootSessionId: new Map<string, RootBrokerServer>() };
+    Object.defineProperty(process, ROOT_BROKER_REGISTRY_KEY, {
+      value: registry,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+    return registry;
+  }
+  const registry = descriptor.value;
+  if (!registry || typeof registry !== "object" || !(registry.exact instanceof WeakMap) || !(registry.byRootSessionId instanceof Map)) {
+    throw new Error("Root subagent broker registry slot is invalid");
+  }
+  return registry as RootBrokerRegistry;
+}
+
+function rootSessionIdentity(rootSessionId: unknown): string {
+  if (typeof rootSessionId !== "string" || rootSessionId.trim().length === 0) {
+    throw new Error("Root subagent broker root session identity is invalid");
+  }
+  return rootSessionId;
 }
 
 function registryKey(pi: object): object {
@@ -53,23 +80,38 @@ export function findGoalExecutorCoordinator(pi: object): GoalExecutorCoordinator
 
 export function bindRootBroker(pi: object, broker: RootBrokerServer): void {
   const key = registryKey(pi);
-  if (brokers.has(key)) throw new Error("Root subagent broker is already bound");
-  brokers.set(key, broker);
+  const rootSessionId = rootSessionIdentity(broker?.rootSessionId);
+  if (brokers.exact.has(key) || brokers.byRootSessionId.has(rootSessionId)) throw new Error("Root subagent broker is already bound");
+  brokers.exact.set(key, broker);
+  brokers.byRootSessionId.set(rootSessionId, broker);
 }
 
-export function requireRootBroker(pi: object): RootBrokerServer {
-  const broker = brokers.get(registryKey(pi));
+export function requireRootBroker(pi: object, rootSessionId?: string): RootBrokerServer {
+  const exact = brokers.exact.get(registryKey(pi));
+  if (rootSessionId === undefined) {
+    if (!exact) throw new Error("Root subagent broker is unavailable");
+    return exact;
+  }
+  const identity = rootSessionIdentity(rootSessionId);
+  if (exact) {
+    if (exact.rootSessionId !== identity) throw new Error("Root subagent broker is unavailable");
+    return exact;
+  }
+  const broker = brokers.byRootSessionId.get(identity);
   if (!broker) throw new Error("Root subagent broker is unavailable");
   return broker;
 }
 
-export function inspectRootBrokerExecutorProof(pi: object, runId: string) {
-  return requireRootBroker(pi).inspectExecutorProof(runId);
+export function inspectRootBrokerExecutorProof(pi: object, runId: string, rootSessionId?: string) {
+  return requireRootBroker(pi, rootSessionId).inspectExecutorProof(runId);
 }
 
 export function unbindRootBroker(pi: object, broker?: RootBrokerServer): void {
   const key = registryKey(pi);
-  if (!broker || brokers.get(key) === broker) brokers.delete(key);
+  const exact = brokers.exact.get(key);
+  if (broker && exact !== broker) return;
+  brokers.exact.delete(key);
+  if (exact && brokers.byRootSessionId.get(exact.rootSessionId) === exact) brokers.byRootSessionId.delete(exact.rootSessionId);
 }
 
 export async function closeAndUnbindRootBroker(pi: object, broker = requireRootBroker(pi)): Promise<void> {

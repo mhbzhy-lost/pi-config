@@ -135,36 +135,60 @@ Use the deterministic compatibility marker from the assigned task.
           parameters: schema,
           async execute(_id, params) {
             const ping = await client.call("ping");
-            const spawned = await client.call("spawn", {
-              agent: "compat-worker",
-              task: params.mode === "attention"
+            const starts = [];
+            const unsubscribe = pi.events.on("subagent:async-started", (event) => starts.push(event));
+            try {
+              const task = params.mode === "attention"
                 ? "PI_SUBAGENTS_COMPAT_CHILD_ATTENTION"
-                : "PI_SUBAGENTS_COMPAT_CHILD_COMPLETE",
-              cwd: ${JSON.stringify(projectRoot)},
-              context: "fresh",
-              worktree: false,
-              async: true,
-              clarify: false,
-              acceptance: false,
-              artifacts: true,
-              output: ${JSON.stringify(outputPath)},
-              outputMode: "file-only",
-            });
-            spawnedAsyncDir = spawned.details?.asyncDir;
-            spawnedRunId = spawned.details?.runId;
-            return {
-              content: [{ type: "text", text: "compat executor dispatched" }],
-              details: {
-                ping,
-                spawned: spawned.details,
-                childEnv: {
-                  child: process.env.PI_SUBAGENT_CHILD ?? null,
-                  fanout: process.env.PI_SUBAGENT_FANOUT_CHILD ?? null,
-                  parentSession: process.env.PI_SUBAGENT_PARENT_SESSION ?? null,
+                : "PI_SUBAGENTS_COMPAT_CHILD_COMPLETE";
+              const workflowScript = "return await runs.run(" + JSON.stringify("compat-worker") + ", " + JSON.stringify({
+                agent: "compat-worker",
+                task,
+                async: true,
+                worktree: false,
+                acceptance: false,
+              }) + ");";
+              const spawned = await client.call("spawn", {
+                workflowScript,
+                cwd: ${JSON.stringify(projectRoot)},
+                context: "fresh",
+                worktree: false,
+                async: true,
+                artifacts: true,
+                output: ${JSON.stringify(outputPath)},
+                outputMode: "file-only",
+                mission: false,
+                chatProgress: "off",
+              });
+              const workflowRunId = spawned.details?.runId ?? spawned.details?.asyncId;
+              const deadline = Date.now() + 10_000;
+              let leaf;
+              while (!leaf && Date.now() < deadline) {
+                leaf = starts.find((event) => event?.workflowKey === "compat-worker"
+                  && event?.parentWorkflowRunId === workflowRunId
+                  && event?.agent === "compat-worker");
+                if (!leaf) await new Promise((resolve) => setTimeout(resolve, 25));
+              }
+              if (!leaf) throw new Error("workflow leaf start event did not arrive for " + workflowRunId);
+              spawnedAsyncDir = leaf.asyncDir;
+              spawnedRunId = leaf.runId ?? leaf.id;
+              return {
+                content: [{ type: "text", text: "compat executor dispatched" }],
+                details: {
+                  ping,
+                  workflowRoot: spawned.details,
+                  spawned: { ...leaf, runId: spawnedRunId, asyncDir: spawnedAsyncDir },
+                  childEnv: {
+                    child: process.env.PI_SUBAGENT_CHILD ?? null,
+                    fanout: process.env.PI_SUBAGENT_FANOUT_CHILD ?? null,
+                    parentSession: process.env.PI_SUBAGENT_PARENT_SESSION ?? null,
+                  },
+                  activeTools: [...pi.getActiveTools()].sort(),
                 },
-                activeTools: [...pi.getActiveTools()].sort(),
-              },
-            };
+              };
+            } finally {
+              unsubscribe?.();
+            }
           },
         });
         pi.registerTool({
@@ -298,8 +322,12 @@ Use the deterministic compatibility marker from the assigned task.
     assert.ok(details.activeTools.includes("subagent_wait"), JSON.stringify(details.activeTools));
     assert.ok(details.activeTools.includes("subagent_supervisor"), JSON.stringify(details.activeTools));
     assert.ok(!details.activeTools.includes("subagent"), JSON.stringify(details.activeTools));
+    assert.equal(typeof details.workflowRoot?.runId, "string");
     assert.equal(typeof details.spawned?.runId, "string");
     assert.equal(typeof details.spawned?.asyncDir, "string");
+    assert.equal(details.spawned.parentWorkflowRunId, details.workflowRoot.runId);
+    assert.equal(details.spawned.workflowKey, "compat-worker");
+    assert.notEqual(details.spawned.runId, details.workflowRoot.runId);
 
     const terminal = await waitForStatus(details.spawned.asyncDir, (status) => status.state !== "running" && status.state !== "queued");
     assert.equal(terminal.state, "complete", JSON.stringify(terminal));
@@ -341,7 +369,7 @@ test("installed runtime resolves a supported Pi and exact dependency versions", 
   const piVersion = execFileSync(piBinary, ["--version"], { encoding: "utf8" }).trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi version: ${piVersion}`);
   const piSubagentsVersion = execFileSync("node", ["-p", `require(${JSON.stringify(join(extension, "package.json"))}).version`], { encoding: "utf8" }).trim();
-  assert.equal(piSubagentsVersion, "0.37.2");
+  assert.equal(piSubagentsVersion, "0.45.2");
   const requireFromExtension = createRequire(join(extension, "package.json"));
   assert.match(requireFromExtension.resolve("typebox/compile"), /typebox/);
   const typeboxPackage = JSON.parse(execFileSync("node", ["-e", `process.stdout.write(require('fs').readFileSync(${JSON.stringify(join(repoRoot, "pi", "npm", "node_modules", "typebox", "package.json"))}, 'utf8'))`], { encoding: "utf8" }));

@@ -313,6 +313,39 @@ function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
+function createEventBus() {
+  const listeners = new Map();
+  return {
+    on(type, listener) {
+      const current = listeners.get(type) ?? new Set();
+      current.add(listener);
+      listeners.set(type, current);
+      return () => current.delete(listener);
+    },
+    emit(type, event) {
+      for (const listener of [...(listeners.get(type) ?? [])]) listener(event);
+    },
+  };
+}
+
+function workflowSpawnReply(pi, params, { runId, asyncDir, agent, sessionId = "/tmp/s" }) {
+  const workflowKey = params?.workflowScript?.match(/runs\.run\("([^"\\]+)"/)?.[1];
+  const workflowAgent = agent ?? params?.workflowScript?.match(/"agent":"([^"\\]+)"/)?.[1];
+  assert.ok(workflowKey, "workflow spawn must use a JSON-encoded runs.run key");
+  assert.ok(workflowAgent, "workflow spawn must use a JSON-encoded child agent");
+  const workflowRunId = `workflow-${runId}`;
+  pi.events.emit("subagent:async-started", {
+    id: runId,
+    runId,
+    asyncDir,
+    sessionId,
+    agent: workflowAgent,
+    workflowKey,
+    parentWorkflowRunId: workflowRunId,
+  });
+  return { details: { runId: workflowRunId, asyncDir: `/tmp/${workflowRunId}` } };
+}
+
 function integratedFixture(t) {
   const arena = createTemporaryArenaSync("executor-binding-");
   t.after(() => arena.disposeSync());
@@ -326,7 +359,7 @@ function integratedFixture(t) {
   git(cwd, "commit", "-q", "-m", "test: initialize fixture");
 
   const tools = [];
-  const eventIdentity = { on() { return () => {}; }, emit() {} };
+  const eventIdentity = createEventBus();
   const sessionManager = {
     getSessionId: () => "root-session-1",
     getSessionFile: () => join(cwd, "session.jsonl"),
@@ -423,7 +456,7 @@ async function initializeIntegratedDispatch(fixture, objective = "Integrated exe
 async function bindIntegratedRun(fixture, dispatched, { runId = "run-bound-1", asyncDir = "/tmp/run-bound-1" } = {}) {
   const rpc = {
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: "/tmp/s", cwd: fixture.cwd } }; },
-    async spawn() { return { details: { runId, asyncDir } }; },
+    async spawn(params) { return workflowSpawnReply(fixture.pi, params, { runId, asyncDir }); },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
   createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
@@ -594,11 +627,12 @@ test("workspace owner replacement after spawn prevents binding the returned run"
   let spawnCalls = 0;
   const rpc = {
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: "/tmp/s", cwd: fixture.cwd } }; },
-    async spawn() {
+    async spawn(params) {
       spawnCalls += 1;
+      const reply = workflowSpawnReply(fixture.pi, params, { runId: "run-replaced-owner", asyncDir: "/tmp/run-replaced-owner" });
       const lease = JSON.parse(readFileSync(leasePath, "utf8"));
       writeFileSync(leasePath, `${JSON.stringify({ ...lease, ownerToken: "replacement-owner-token" })}\n`);
-      return { details: { runId: "run-replaced-owner", asyncDir: "/tmp/run-replaced-owner" } };
+      return reply;
     },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
@@ -628,7 +662,10 @@ test("durable-then-throw executor binding append is acknowledged without spawnin
   let spawnCalls = 0;
   const rpc = {
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: "/tmp/s", cwd: fixture.cwd } }; },
-    async spawn() { spawnCalls += 1; return { details: { runId: "run-durable-binding", asyncDir: "/tmp/run-durable-binding" } }; },
+    async spawn(params) {
+      spawnCalls += 1;
+      return workflowSpawnReply(fixture.pi, params, { runId: "run-durable-binding", asyncDir: "/tmp/run-durable-binding" });
+    },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
   createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
@@ -671,7 +708,10 @@ test("non-Goal coding runs and generic reviewers remain spawnable without claimi
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: "/tmp/s", cwd: fixture.cwd } }; },
     async spawn(params, options) {
       calls.push({ params, options });
-      return { details: { runId: `unrelated-${calls.length}`, asyncDir: `/tmp/unrelated-${calls.length}` } };
+      return workflowSpawnReply(fixture.pi, params, {
+        runId: `unrelated-${calls.length}`,
+        asyncDir: `/tmp/unrelated-${calls.length}`,
+      });
     },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
@@ -704,10 +744,10 @@ test("Goal dispatch followed by the exact coding spawn persists the returned run
     async ping() {
       return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: join(fixture.cwd, "session.jsonl"), cwd: fixture.cwd } };
     },
-    async spawn(_params, options) {
+    async spawn(params, options) {
       assert.match(options.requestId, /^goal-executor-/);
       assert.equal(options.requestId, options.spawnKey);
-      return { details: { runId: "run-returned-1", asyncDir: "/tmp/run-returned-1" } };
+      return workflowSpawnReply(fixture.pi, params, { runId: "run-returned-1", asyncDir: "/tmp/run-returned-1", sessionId: join(fixture.cwd, "session.jsonl") });
     },
     async status() { return {}; },
     async steer() { return {}; },

@@ -4,6 +4,7 @@ import { compileCodingDispatchIR, CodingDispatchContractError } from "./ir.ts";
 import { renderCodingDispatchPrompt } from "./prompt.ts";
 import { createTypedSubagentRpcClient } from "./rpc-client.ts";
 import { createHeadlessSubagentApi } from "./runtime-membrane.ts";
+import { buildWorkflowSpawn, createWorkflowChildStartCollector } from "./workflow-spawn.ts";
 import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
 import { findGoalExecutorCoordinator } from "./root-broker-registry.ts";
@@ -185,6 +186,13 @@ function rpcResult(reply) {
   };
 }
 
+function lifecycleSessionIdentity(session) {
+  const sessionFile = session?.sessionFile;
+  if (sessionFile !== null && sessionFile !== undefined && !nonempty(sessionFile)) return undefined;
+  const identity = sessionFile ?? session?.sessionId;
+  return nonempty(identity) ? identity : undefined;
+}
+
 function assertSpawnCapabilities(result, cwd) {
   const methods = new Set(Array.isArray(result?.methods) ? result.methods : []);
   const session = result?.session;
@@ -192,7 +200,7 @@ function assertSpawnCapabilities(result, cwd) {
     result?.version !== 1
     || !methods.has("spawn")
     || !nonempty(session?.sessionId)
-    || !nonempty(session?.sessionFile)
+    || !lifecycleSessionIdentity(session)
     || !nonempty(session?.cwd)
     || session.cwd !== cwd
   ) {
@@ -222,38 +230,76 @@ function assertCodingSpawnIdentity(identity) {
   }
 }
 
-function codingSpawnParams(ir, prompt) {
-  return {
+const CODING_ACCEPTANCE_EVIDENCE = Object.freeze([
+  "changed-files",
+  "tests-added",
+  "commands-run",
+  "validation-output",
+  "residual-risks",
+  "no-staged-files",
+]);
+
+function codingWorkflowSpawnParams(ir, prompt, workflowKey) {
+  return buildWorkflowSpawn({
+    workflowKey,
     agent: ir.agent,
-    title: ir.title,
     task: prompt,
     cwd: ir.execution.cwd,
     context: "fresh",
-    async: true,
-    clarify: false,
-    artifacts: true,
-    output: false,
     timeoutMs: ir.execution.timeoutMs,
+    child: { output: false },
     acceptance: {
-      level: "verified",
       criteria: ir.acceptance.criteria,
-      evidence: [
-        "changed-files",
-        "tests-added",
-        "commands-run",
-        "validation-output",
-        "residual-risks",
-        "no-staged-files",
-      ],
+      evidence: CODING_ACCEPTANCE_EVIDENCE,
     },
-  };
+  });
 }
 
-async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator) {
+function genericWorkflowSpawnParams(input, ctx, workflowKey) {
+  const child = {};
+  for (const key of ["model", "output", "outputMode", "outputSchema", "skill", "reads", "progress", "acceptance"]) {
+    if (input[key] !== undefined) child[key] = input[key];
+  }
+  return buildWorkflowSpawn({
+    workflowKey,
+    agent: input.agent,
+    task: input.task,
+    cwd: input.cwd ?? ctx.cwd,
+    context: input.context ?? "fresh",
+    timeoutMs: input.timeoutMs,
+    artifacts: input.artifacts ?? true,
+    child,
+  });
+}
+
+async function spawnWorkflowLeaf(pi, rpc, {
+  workflowKey,
+  agent,
+  sessionId,
+  timeoutMs,
+  params,
+  identity,
+}) {
+  const collector = createWorkflowChildStartCollector(pi.events, {
+    workflowKey,
+    agent,
+    sessionId,
+    timeoutMs,
+  });
+  try {
+    const root = spawnBinding(await rpc.spawn(params, identity));
+    return await collector.waitFor(root);
+  } finally {
+    collector.cancel();
+  }
+}
+
+async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs) {
   const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
   const prompt = renderCodingDispatchPrompt(ir);
   titleRegistry.prepare({ agent: ir.agent, task: prompt, title: ir.title });
-  assertSpawnCapabilities(await rpc.ping(), ctx.cwd);
+  const capabilities = await rpc.ping();
+  assertSpawnCapabilities(capabilities, ctx.cwd);
   const goalCoordinator = configuredGoalCoordinator ?? findGoalExecutorCoordinator(pi);
   const bindingRequest = { toolCallId, contract: input, contractHash: ir.hash, ctx };
   const preflightTicket = await goalCoordinator?.prepareSpawn(bindingRequest);
@@ -276,12 +322,21 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   }
   const identity = executionTicket?.spawnIdentity ?? customIdentity;
   if (identity !== undefined) assertCodingSpawnIdentity(identity);
-  const binding = spawnBinding(await rpc.spawn(codingSpawnParams(ir, prompt), identity));
+  const dispatchId = identity?.spawnKey ?? createId();
+  const workflowKey = `typed-${dispatchId}`;
+  const binding = await spawnWorkflowLeaf(pi, rpc, {
+    workflowKey,
+    agent: ir.agent,
+    sessionId: lifecycleSessionIdentity(capabilities.session),
+    timeoutMs: workflowChildStartTimeoutMs ?? ir.execution.timeoutMs,
+    params: codingWorkflowSpawnParams(ir, prompt, workflowKey),
+    identity,
+  });
   if (executionTicket) await goalCoordinator.bindSpawn(executionTicket, binding);
   titleRegistry.remember(binding.runId, ir.title);
   const handle = {
     version: "coding-dispatch-handle.v1",
-    dispatchId: identity?.spawnKey ?? createId(),
+    dispatchId,
     taskId: ir.taskId,
     agent: ir.agent,
     title: ir.title,
@@ -295,7 +350,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   };
 }
 
-async function executeGeneric(input, ctx, rpc, titleRegistry) {
+async function executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs) {
   if (CODING_AGENTS.has(input.agent)) {
     return failure(
       "CODING_CONTRACT_REQUIRED",
@@ -306,15 +361,22 @@ async function executeGeneric(input, ctx, rpc, titleRegistry) {
     return failure("INVALID_GENERIC_DISPATCH", "generic dispatch requires non-empty agent, title, and task");
   }
   const title = normalizeSubagentTitle(input.title);
-  assertSpawnCapabilities(await rpc.ping(), ctx.cwd);
+  const capabilities = await rpc.ping();
+  assertSpawnCapabilities(capabilities, ctx.cwd);
   titleRegistry.prepare({ agent: input.agent, task: input.task, title });
-  const reply = await rpc.spawn({ ...input, title });
-  const binding = spawnBinding(reply);
+  const workflowKey = `typed-${createId()}`;
+  const binding = await spawnWorkflowLeaf(pi, rpc, {
+    workflowKey,
+    agent: input.agent,
+    sessionId: lifecycleSessionIdentity(capabilities.session),
+    timeoutMs: input.timeoutMs ?? workflowChildStartTimeoutMs ?? 120_000,
+    params: genericWorkflowSpawnParams(input, ctx, workflowKey),
+  });
   titleRegistry.remember(binding.runId, title);
   return {
     content: [{ type: "text", text: `Started ${input.agent}: ${title} (${binding.runId}). ${ASYNC_SPAWN_GUIDANCE}` }],
     isError: false,
-    details: { ...(reply?.details ?? reply ?? {}), ...binding, agent: input.agent, title },
+    details: { ...binding, agent: input.agent, title },
   };
 }
 
@@ -467,6 +529,7 @@ export function createTypedSubagentExtension(
     prepareCodingSpawn = async () => {},
     resolveCodingSpawnIdentity,
     goalExecutorCoordinator,
+    workflowChildStartTimeoutMs,
     beforeDispose = async () => {},
     retainOnBeforeDisposeFailure = false,
     afterBeforeDispose = async () => {},
@@ -476,6 +539,10 @@ export function createTypedSubagentExtension(
 ) {
   // Durable debt retention supersedes this legacy opt-in; retain it for callers on the old API.
   void retainOnBeforeDisposeFailure;
+  if (workflowChildStartTimeoutMs !== undefined
+      && (!Number.isSafeInteger(workflowChildStartTimeoutMs) || workflowChildStartTimeoutMs <= 0)) {
+    throw new TypeError("workflow child start timeout must be a positive safe integer");
+  }
   const registry = cleanupRegistry(cleanupStore);
   const debtManager = shutdownDebtManager(cleanupStore);
   let debtLane = shutdownDebtLane(debtManager, pi);
@@ -535,8 +602,8 @@ export function createTypedSubagentExtension(
       try {
         if (!isRecord(input)) return failure("INVALID_DISPATCH", "subagent input must be an object");
         if (Object.hasOwn(input, "action")) return await executeControl(input, rpc);
-        if (Object.hasOwn(input, "version")) return await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator);
-        return await executeGeneric(input, ctx, rpc, titleRegistry);
+        if (Object.hasOwn(input, "version")) return await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs);
+        return await executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs);
       } catch (error) {
         const code = error?.code
           ?? (error instanceof CodingDispatchContractError ? error.code : "SUBAGENT_RPC_FAILED");
@@ -758,7 +825,7 @@ export function installHeadlessTypedSubagentRuntime(pi, {
       }
       notificationState = { currentSessionId: null };
       completionNotifier = completionNotifierFactory(
-        createHeadlessSubagentApi(pi, { titleRegistry, captureEventSubscription }),
+        createHeadlessSubagentApi(pi, { titleRegistry, forceCompletionDisplay: true, captureEventSubscription }),
         notificationState,
       );
       if (!completionNotifier || typeof completionNotifier.dispose !== "function") {

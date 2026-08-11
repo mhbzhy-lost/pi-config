@@ -206,6 +206,20 @@ test("the production notification order suppresses the pre-event upstream messag
   assert.match(visible[0].content, /\*\*delegate\*\* \[First task\]/);
 });
 
+test("project completion notifier makes only completed subagent messages visible", () => {
+  const messages = [];
+  const source = { customType: "subagent-notify", content: "Background task completed: **delegate**", display: false };
+  const pi = { events: { on() {}, emit() {} }, sendMessage(message) { messages.push(message); } };
+  const api = createHeadlessSubagentApi(pi, { forceCompletionDisplay: true });
+
+  api.sendMessage(source);
+  api.sendMessage({ customType: "other-message", content: "hidden", display: false });
+
+  assert.equal(messages[0].display, true);
+  assert.equal(messages[1].display, false);
+  assert.equal(source.display, false);
+});
+
 test("grouped same-agent completions render each title in the header and matching numbered block", () => {
   const messages = [];
   const queued = ["First task", "Second task"];
@@ -559,9 +573,22 @@ test("executor and spark reject free-form task dispatch before RPC", async () =>
   assert.deepEqual(rpc.calls, []);
 });
 
-test("compiles a coding contract and returns a typed async handle", async () => {
+test("compiles a coding contract into one workflow root and returns its correlated leaf handle", async () => {
   const pi = createPi();
   const rpc = createRpc();
+  rpc.spawn = async (params) => {
+    rpc.calls.push({ method: "spawn", params });
+    pi.events.emit("subagent:async-started", {
+      id: "leaf-run-1",
+      runId: "leaf-run-1",
+      asyncDir: "/tmp/leaf-run-1",
+      sessionId: "/tmp/session.jsonl",
+      agent: "executor",
+      workflowKey: "typed-dispatch-1",
+      parentWorkflowRunId: "workflow-run-1",
+    });
+    return { text: "workflow spawned", details: { runId: "workflow-run-1", asyncDir: "/tmp/workflow-run-1" } };
+  };
   createTypedSubagentExtension(pi, {
     rpc,
     cleanupStore: {},
@@ -579,33 +606,48 @@ test("compiles a coding contract and returns a typed async handle", async () => 
     agent: "executor",
     title: "Install the typed subagent runtime",
     contractHash: result.details.contractHash,
-    runId: "run-1",
-    asyncDir: "/tmp/run-1",
+    runId: "leaf-run-1",
+    asyncDir: "/tmp/leaf-run-1",
   });
   assert.match(result.details.contractHash, /^[a-f0-9]{64}$/);
-  assert.equal(spawn.params.agent, "executor");
-  assert.equal(spawn.params.title, "Install the typed subagent runtime");
-  assert.match(spawn.params.task, /^# Coding Dispatch Contract v1/m);
-  assert.match(spawn.params.task, /## Authoritative Known Facts/);
+  for (const key of ["agent", "title", "task", "clarify", "acceptance"]) {
+    assert.equal(Object.hasOwn(spawn.params, key), false, `${key} must not reach public RPC spawn`);
+  }
   assert.equal(spawn.params.cwd, "/repo");
   assert.equal(spawn.params.context, "fresh");
   assert.equal(spawn.params.async, true);
-  assert.equal(spawn.params.clarify, false);
+  assert.equal(spawn.params.worktree, false);
+  assert.equal(spawn.params.mission, false);
+  assert.equal(spawn.params.chatProgress, "off");
   assert.equal(spawn.params.timeoutMs, 900_000);
-  assert.deepEqual(spawn.params.acceptance.criteria, ["The main Agent sees only the project-owned facade."]);
-  assert.equal(Object.hasOwn(spawn.params.acceptance, "verify"), false);
-  assert.doesNotMatch(spawn.params.task, /Verification Commands|node --test/);
+  assert.match(spawn.params.workflowScript, /runs\.run\("typed-dispatch-1"/);
+  assert.match(spawn.params.workflowScript, /# Coding Dispatch Contract v1/);
+  assert.match(spawn.params.workflowScript, /"level":"checked"/);
+  assert.doesNotMatch(spawn.params.workflowScript, /"verify"/);
   assert.doesNotMatch(result.content[0].text, /Authoritative Known Facts/);
   assert.equal(
     result.content[0].text,
-    "Started executor: Install the typed subagent runtime (run-1). Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.",
+    "Started executor: Install the typed subagent runtime (leaf-run-1). Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.",
   );
 });
 
-test("passes a non-coding agent prompt through RPC without rewriting it", async () => {
+test("compiles a non-coding agent prompt into one workflow leaf without rewriting its task", async () => {
   const pi = createPi();
   const rpc = createRpc();
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
+  rpc.spawn = async (params) => {
+    rpc.calls.push({ method: "spawn", params });
+    pi.events.emit("subagent:async-started", {
+      id: "leaf-review-1",
+      runId: "leaf-review-1",
+      asyncDir: "/tmp/leaf-review-1",
+      sessionId: "/tmp/session.jsonl",
+      agent: "reviewer",
+      workflowKey: "typed-generic-1",
+      parentWorkflowRunId: "workflow-review-1",
+    });
+    return { text: "workflow spawned", details: { runId: "workflow-review-1", asyncDir: "/tmp/workflow-review-1" } };
+  };
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, randomUUID: () => "generic-1" });
   const task = "  Review exactly this diff.\nPreserve this whitespace.  ";
   const params = {
     agent: "reviewer",
@@ -621,13 +663,37 @@ test("passes a non-coding agent prompt through RPC without rewriting it", async 
   const spawn = rpc.calls.find((call) => call.method === "spawn");
 
   assert.equal(result.isError, false);
-  assert.deepEqual(spawn.params, params);
-  assert.equal(spawn.params.task, task);
+  for (const key of ["agent", "title", "task", "clarify", "acceptance"]) {
+    assert.equal(Object.hasOwn(spawn.params, key), false, `${key} must not reach public RPC spawn`);
+  }
+  assert.equal(spawn.params.workflowScript.includes(task), false, "task must be JSON-escaped inside the workflow script");
+  assert.match(spawn.params.workflowScript, /Review exactly this diff\.\\nPreserve this whitespace/);
+  assert.equal(result.details.runId, "leaf-review-1");
+  assert.equal(result.details.asyncDir, "/tmp/leaf-review-1");
   assert.equal(result.details.title, "Review the diff");
   assert.equal(
     result.content[0].text,
-    "Started reviewer: Review the diff (run-1). Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.",
+    "Started reviewer: Review the diff (leaf-review-1). Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.",
   );
+});
+
+test("uses a bounded fallback while waiting for a generic leaf without input timeout", async () => {
+  const pi = createPi();
+  const rpc = createRpc();
+  rpc.spawn = async (params) => {
+    rpc.calls.push({ method: "spawn", params });
+    pi.events.emit("subagent:async-started", {
+      id: "fallback-leaf-1", runId: "fallback-leaf-1", asyncDir: "/tmp/fallback-leaf-1",
+      sessionId: "/tmp/session.jsonl", agent: "reviewer", workflowKey: "typed-fallback-1", parentWorkflowRunId: "workflow-fallback-1",
+    });
+    return { details: { runId: "workflow-fallback-1", asyncDir: "/tmp/workflow-fallback-1" } };
+  };
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, randomUUID: () => "fallback-1" });
+
+  const result = await execute(pi.tools[0], { agent: "reviewer", title: "Review fallback", task: "Review." });
+
+  assert.equal(result.isError, false);
+  assert.equal(rpc.calls.find((call) => call.method === "spawn").params.timeoutMs, undefined);
 });
 
 test("requires a safe generic title before RPC", async () => {
@@ -665,11 +731,53 @@ test("maps only approved control actions to RPC", async () => {
   assert.equal(rejected.details.code, "UNSUPPORTED_ACTION");
 });
 
+test("uses persistent sessionFile identity for workflow leaf correlation and falls back for --no-session", async () => {
+  const persistentPi = createPi();
+  const persistentRpc = createRpc({
+    ping: async () => ({ version: 1, methods: ["spawn"], session: { sessionId: "logical-session-id", sessionFile: "/var/sessions/persistent.jsonl", cwd: "/repo" } }),
+    async spawn(params) {
+      this.calls.push({ method: "spawn", params });
+      persistentPi.events.emit("subagent:async-started", {
+        id: "persistent-leaf", runId: "persistent-leaf", asyncDir: "/tmp/persistent-leaf",
+        sessionId: "/var/sessions/persistent.jsonl", agent: "executor",
+        workflowKey: "typed-persistent-1", parentWorkflowRunId: "persistent-root",
+      });
+      return { details: { runId: "persistent-root", asyncDir: "/tmp/persistent-root" } };
+    },
+  });
+  createTypedSubagentExtension(persistentPi, {
+    rpc: persistentRpc, cleanupStore: {}, randomUUID: () => "persistent-1", workflowChildStartTimeoutMs: 10,
+  });
+  const persistent = await execute(persistentPi.tools[0], codingContract());
+  assert.equal(persistent.isError, false);
+  assert.equal(persistent.details.runId, "persistent-leaf");
+
+  const noSessionPi = createPi();
+  const noSessionRpc = createRpc({
+    ping: async () => ({ version: 1, methods: ["spawn"], session: { sessionId: "no-session-id", sessionFile: null, cwd: "/repo" } }),
+    async spawn(params) {
+      this.calls.push({ method: "spawn", params });
+      noSessionPi.events.emit("subagent:async-started", {
+        id: "no-session-leaf", runId: "no-session-leaf", asyncDir: "/tmp/no-session-leaf",
+        sessionId: "no-session-id", agent: "executor",
+        workflowKey: "typed-no-session-1", parentWorkflowRunId: "no-session-root",
+      });
+      return { details: { runId: "no-session-root", asyncDir: "/tmp/no-session-root" } };
+    },
+  });
+  createTypedSubagentExtension(noSessionPi, {
+    rpc: noSessionRpc, cleanupStore: {}, randomUUID: () => "no-session-1", workflowChildStartTimeoutMs: 10,
+  });
+  const noSession = await execute(noSessionPi.tools[0], codingContract());
+  assert.equal(noSession.isError, false);
+  assert.equal(noSession.details.runId, "no-session-leaf");
+});
+
 test("fails closed when RPC capabilities or spawn identity are incomplete", async () => {
   for (const rpc of [
     createRpc({ ping: async () => ({ version: 1, methods: ["status"], session: { sessionId: "s", sessionFile: "/s", cwd: "/repo" } }) }),
     createRpc({ ping: async () => ({ version: 2, methods: ["spawn"], session: { sessionId: "s", sessionFile: "/s", cwd: "/repo" } }) }),
-    createRpc({ ping: async () => ({ version: 1, methods: ["spawn"], session: { sessionId: "s", sessionFile: null, cwd: "/repo" } }) }),
+    createRpc({ ping: async () => ({ version: 1, methods: ["spawn"], session: { sessionId: "s", sessionFile: 42, cwd: "/repo" } }) }),
     createRpc({ spawn: async () => ({ text: "missing handle", details: {} }) }),
   ]) {
     const pi = createPi();
@@ -678,6 +786,66 @@ test("fails closed when RPC capabilities or spawn identity are incomplete", asyn
     assert.equal(result.isError, true);
     assert.match(result.details.code, /CAPABILITY_MISMATCH|SPAWN_REPLY_INVALID/);
   }
+});
+
+test("uses the coding IR deadline when a delayed leaf exceeds the former fixed start limit", async () => {
+  const pi = createPi();
+  const rpc = createRpc({
+    async spawn(params) {
+      this.calls.push({ method: "spawn", params });
+      setTimeout(() => pi.events.emit("subagent:async-started", {
+        id: "delayed-leaf-1",
+        runId: "delayed-leaf-1",
+        asyncDir: "/tmp/delayed-leaf-1",
+        sessionId: "/tmp/session.jsonl",
+        agent: "executor",
+        workflowKey: "typed-delayed-1",
+        parentWorkflowRunId: "workflow-delayed-1",
+      }), 35);
+      return { text: "workflow spawned", details: { runId: "workflow-delayed-1", asyncDir: "/tmp/workflow-delayed-1" } };
+    },
+  });
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    randomUUID: () => "delayed-1",
+  });
+
+  const result = await execute(pi.tools[0], codingContract({ execution: { timeoutMs: 50 } }));
+
+  assert.equal(result.isError, false);
+  assert.equal(result.details.runId, "delayed-leaf-1");
+});
+
+test("does not bind a Goal executor ticket when the workflow root has no matching leaf", async () => {
+  const pi = createPi();
+  const rpc = createRpc({
+    async spawn(params) {
+      this.calls.push({ method: "spawn", params });
+      return { text: "workflow spawned", details: { runId: "workflow-run-1", asyncDir: "/tmp/workflow-run-1" } };
+    },
+  });
+  const bound = [];
+  const ticket = {
+    ticketId: "ticket-1",
+    spawnIdentity: { requestId: "dispatch-1", spawnKey: "dispatch-1" },
+  };
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    randomUUID: () => "dispatch-1",
+    workflowChildStartTimeoutMs: 10,
+    goalExecutorCoordinator: {
+      prepareSpawn() { return ticket; },
+      bindSpawn(_ticket, binding) { bound.push(binding); },
+    },
+  });
+
+  const result = await execute(pi.tools[0], codingContract());
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "WORKFLOW_CHILD_START_TIMEOUT");
+  assert.deepEqual(bound, []);
 });
 
 test("independent Pi runtimes do not dispose each other", () => {

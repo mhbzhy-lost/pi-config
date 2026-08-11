@@ -58,26 +58,41 @@ test("subscribes before emitting a request with the isolated runtime source", as
   client.dispose();
 });
 
-test("spawn forces detached non-clarifying execution without mutating its input", async () => {
+test("spawn forwards a normalized workflow payload without injecting direct-execution fields", async () => {
   const events = createEvents();
   const client = createTypedSubagentRpcClient(events, { randomUUID: () => "request-2" });
-  const params = { agent: "reviewer", task: "Review exactly this diff.", async: false, clarify: true };
+  const params = {
+    workflowScript: "return await runs.run('typed-request-1', { agent: 'reviewer', task: 'Review exactly this diff.', async: true, worktree: false });",
+    cwd: "/repo",
+    context: "fresh",
+    async: true,
+    worktree: false,
+    mission: false,
+    chatProgress: "off",
+  };
   const request = client.spawn(params);
 
-  assert.deepEqual(params, { agent: "reviewer", task: "Review exactly this diff.", async: false, clarify: true });
-  assert.deepEqual(events.emitted[0].value.params, {
-    agent: "reviewer",
-    task: "Review exactly this diff.",
+  assert.deepEqual(params, {
+    workflowScript: "return await runs.run('typed-request-1', { agent: 'reviewer', task: 'Review exactly this diff.', async: true, worktree: false });",
+    cwd: "/repo",
+    context: "fresh",
     async: true,
-    clarify: false,
+    worktree: false,
+    mission: false,
+    chatProgress: "off",
   });
+  const emitted = events.emitted[0].value.params;
   events.emit("subagents:rpc:v1:reply:request-2", {
     version: 1,
     requestId: "request-2",
     success: true,
-    data: { details: { runId: "run-1", asyncDir: "/tmp/run-1" } },
+    data: { details: { runId: "workflow-run-1", asyncDir: "/tmp/workflow-run-1" } },
   });
   await request;
+  assert.deepEqual(emitted, params);
+  assert.equal(Object.hasOwn(emitted, "clarify"), false);
+  assert.equal(Object.hasOwn(emitted, "agent"), false);
+  assert.equal(Object.hasOwn(emitted, "task"), false);
   client.dispose();
 });
 

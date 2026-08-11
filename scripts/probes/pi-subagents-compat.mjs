@@ -118,7 +118,7 @@ export function evaluatePlanHarnessCompatibility(report) {
   const failures = [];
 
   if (!SUPPORTED_PI_VERSIONS.includes(report.piVersion)) failures.push(`unsupported Pi version: ${report.piVersion}`);
-  if (report.version !== "0.37.2") failures.push(`unexpected pi-subagents version: ${report.version}`);
+  if (report.version !== "0.45.2") failures.push(`unexpected pi-subagents version: ${report.version}`);
   if (report.typeboxVersion !== "1.1.38") failures.push(`unexpected typebox version: ${report.typeboxVersion}`);
   if (report.typeboxCompileResolvable !== true) failures.push("typebox/compile is not resolvable from pi-subagents");
   if (report.rpcVersion !== 1) failures.push(`unexpected RPC version: ${report.rpcVersion}`);

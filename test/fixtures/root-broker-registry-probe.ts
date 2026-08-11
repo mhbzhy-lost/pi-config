@@ -8,10 +8,11 @@ if (!outputPath) throw new Error("PI_ROOT_BROKER_PROBE_OUTPUT is required");
 export default function rootBrokerRegistryProbe(pi: any): void {
   pi.on("session_start", (event: any, ctx: any) => {
     const sessionManager = ctx?.sessionManager;
+    const rootSessionId = sessionManager?.getSessionId?.();
     let broker: any;
     let error: string | null = null;
     try {
-      broker = requireRootBroker(pi);
+      broker = requireRootBroker(pi, rootSessionId);
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught);
     }

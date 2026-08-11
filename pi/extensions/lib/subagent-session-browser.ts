@@ -41,9 +41,9 @@ type RecordValue = Record<string, unknown>;
 
 const RECENT_RUN_LIMIT = 20;
 
-// pi-subagents 0.37.2 state contract: active states may advance; terminal states are immutable recent runs.
+// pi-subagents 0.45.2 state contract: active states may advance; terminal states are immutable recent runs.
 const ACTIVE_STATES = new Set(["queued", "running", "pending"]);
-const TERMINAL_STATES = new Set(["complete", "completed", "failed", "paused", "stopped", "detached", "timed-out"]);
+const TERMINAL_STATES = new Set(["complete", "completed", "failed", "paused", "stopped", "rejected", "detached", "timed-out"]);
 
 type StateClassification = "active" | "terminal" | "unknown";
 

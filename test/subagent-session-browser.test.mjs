@@ -305,7 +305,7 @@ test("keeps active pi-subagents states out of the recent cap and allows them to 
 });
 
 test("treats all pi-subagents terminal states as recent and immutable", () => {
-  for (const terminalState of ["complete", "completed", "failed", "paused", "stopped", "detached", "timed-out"]) {
+  for (const terminalState of ["complete", "completed", "failed", "paused", "stopped", "rejected", "detached", "timed-out"]) {
     const state = new SubagentSessionBrowserState();
     for (let index = 0; index < 21; index += 1) {
       const runId = `${terminalState}-${index}`;

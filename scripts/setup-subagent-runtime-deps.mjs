@@ -11,7 +11,7 @@ export function buildSubagentRuntimeInstallCommand(piNpmDir) {
     command: "npm",
     args: [
       "install", "--prefix", piNpmDir, "--save-exact",
-      "pi-subagents@0.37.2", "typebox@1.1.38",
+      "pi-subagents@0.45.2", "typebox@1.1.38",
     ],
   };
 }

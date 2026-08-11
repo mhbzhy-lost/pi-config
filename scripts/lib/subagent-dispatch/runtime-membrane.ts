@@ -84,6 +84,7 @@ export function createHeadlessSubagentApi(pi, {
 
   const events = pi.events && typeof pi.events === "object"
     ? new Proxy(pi.events, {
+  forceCompletionDisplay = false,
     get(target, property, receiver) {
       if (property === "emit") {
         return (type, payload) => target.emit(type, decorateLifecycle(type, payload, titleRegistry));
@@ -110,7 +111,11 @@ export function createHeadlessSubagentApi(pi, {
       if (property === "sendMessage") {
         return (message, options) => {
           if (suppressCompletionNotifications && message?.customType === "subagent-notify") return undefined;
-          return target.sendMessage(decorateVisibleMessage(message, titleRegistry), options);
+          const decorated = decorateVisibleMessage(message, titleRegistry);
+          const visible = forceCompletionDisplay && decorated?.customType === "subagent-notify"
+            ? { ...decorated, display: true }
+            : decorated;
+          return target.sendMessage(visible, options);
         };
       }
       if (property === "registerTool") {

@@ -152,7 +152,7 @@ export function createTypedSubagentRpcClient(
       if (params && typeof params === "object" && "action" in params) {
         throw new TypedSubagentRpcError("invalid_params", "RPC spawn does not accept action");
       }
-      return call("spawn", { ...params, async: true, clarify: false }, options);
+      return call("spawn", { ...params }, options);
     },
     status(params, options) {
       return call("status", params, options);
