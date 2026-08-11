@@ -77,6 +77,16 @@ test("hashes normalized goal metadata deterministically and preserves semantic a
   assert.notEqual(first, hashGoalMetadataProposal({ ...proposal, scope: ["test", "src"] }));
 });
 
+test("session transfer approval accepts only exact approved choices", () => {
+  const transfer = challenge({ kind: "session_transfer_approval", choices: ["approve", "reject"] });
+  assert.equal(recordHumanChoice({
+    inputEvent: inputEvent({ text: "批准" }), challenge: transfer, sessionId: "session-1",
+  }).choice, "approve");
+  assert.throws(() => recordHumanChoice({
+    inputEvent: inputEvent({ text: "同意" }), challenge: transfer, sessionId: "session-1",
+  }), /exact/);
+});
+
 test("metadata approval requires a presented proposal hash and explicit approval after challenge", () => {
   const proposalHash = hashGoalMetadataProposal({
     objective: "Harden Goal Engine", scope: ["src"], nonGoals: [], dod: ["Tests pass"],
