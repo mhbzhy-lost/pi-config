@@ -655,8 +655,8 @@ function assertTaskRemovable(task, taskId, schemaVersion) {
 }
 
 export function ownerSessionId(projection) {
-  const binding = (projection?.sessionBindings || [])[0];
-  return binding?.sessionId || null;
+  const bindings = projection?.sessionBindings || [];
+  return [...bindings].reverse().find((binding) => binding.state !== "transferred")?.sessionId || null;
 }
 
 function goalSessionBound(p, event, schemaVersion) {
@@ -689,7 +689,9 @@ function goalSessionTransferred(p, event, schemaVersion) {
   requireNonEmptyStrings({ toSessionId, challengeId, reason }, "session transfer");
   if (!Number.isSafeInteger(ownershipRevision) || ownershipRevision !== p.ownershipRevision + 1) throw new Error("invalid ownership revision");
   if (ownerSessionId(p) !== fromSessionId) throw new Error("transfer source owner mismatch");
-  p.sessionBindings = [{ sessionId: toSessionId.trim(), leafId: "session-transfer", state: "watching", boundAt: event.occurredAt }];
+  const source = p.sessionBindings.find((binding) => binding.sessionId === fromSessionId && binding.state === "watching");
+  Object.assign(source, { state: "transferred", transferredAt: event.occurredAt, transferredToSessionId: toSessionId.trim(), challengeId });
+  p.sessionBindings.push({ sessionId: toSessionId.trim(), leafId: "session-transfer", state: "watching", boundAt: event.occurredAt });
   p.ownershipRevision = ownershipRevision;
   p.coordinationState = coordinationStateFor(p);
 }

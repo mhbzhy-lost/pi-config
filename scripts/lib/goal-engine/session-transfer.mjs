@@ -6,17 +6,18 @@ function required(value, name) {
 }
 
 export function ownerSessionId(projection) {
-  const binding = (projection?.sessionBindings || [])[0];
-  return binding?.sessionId || null;
+  const bindings = projection?.sessionBindings || [];
+  return [...bindings].reverse().find((binding) => binding.state !== "transferred")?.sessionId || null;
 }
 
 export function workspaceReleased(projection) {
   return [...(projection?.tasks?.values?.() || [])].every((task) => !task.workspace || (task.workspace.phase === "disposed" && (task.workspace.released === true || task.workspace.preservedResourcesReleased === true)));
 }
 
-export function transferEligibility(projection, sessionId) {
+export function transferEligibility(projection, sessionId, { targetHasActiveGoal = false } = {}) {
   if (projection?.lifecycle !== "active") return "GOAL_NOT_ACTIVE";
   if (ownerSessionId(projection) === sessionId) return "ALREADY_OWNER";
+  if (targetHasActiveGoal) return "TARGET_SESSION_HAS_ACTIVE_GOAL";
   if (!workspaceReleased(projection)) return "ACTIVE_WORKSPACE";
   return null;
 }
@@ -24,7 +25,8 @@ export function transferEligibility(projection, sessionId) {
 export function listCwdGoals(projections, sessionId) {
   return projections.map((projection) => {
     const owner = ownerSessionId(projection);
-    const blocked = transferEligibility(projection, sessionId);
+    const targetHasActiveGoal = projections.some((candidate) => candidate.goalId !== projection.goalId && candidate.lifecycle === "active" && ownerSessionId(candidate) === sessionId);
+    const blocked = transferEligibility(projection, sessionId, { targetHasActiveGoal });
     return { goalId: projection.goalId, lifecycle: projection.lifecycle, ownerSessionId: owner, ownedByCurrentSession: owner === sessionId, transferEligible: blocked === null, transferBlockedReason: blocked };
   }).sort((a, b) => a.goalId.localeCompare(b.goalId));
 }

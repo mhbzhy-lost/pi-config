@@ -867,7 +867,15 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (params.transfer_challenge_id) {
         const record = transferChallenges.get(params.transfer_challenge_id);
         if (!record?.challenge || record.challenge.toSessionId !== sessionId) return "NO_ACTIVE_GOAL";
-        return JSON.stringify({ challenge_id: record.challenge.id, status: transferChallengeState(record, loadProjectionFn(root, record.challenge.goalId), sessionId, cwd) });
+        let projection = loadProjectionFn(root, record.challenge.goalId);
+        const status = transferChallengeState(record, projection, sessionId, cwd);
+        const targetHasActiveGoal = loadAllProjections(root).some((candidate) => candidate.goalId !== projection.goalId && candidate.lifecycle === "active" && ownerSessionId(candidate) === sessionId);
+        if (targetHasActiveGoal) return JSON.stringify({ challenge_id: record.challenge.id, status: "TARGET_SESSION_HAS_ACTIVE_GOAL" });
+        if (status !== "APPROVED" || !workspaceReleased(projection)) return JSON.stringify({ challenge_id: record.challenge.id, status });
+        const machineAction = { tool: "goal_amend", params: { goal_id: record.challenge.goalId, operation: "transfer_session", challenge_id: record.challenge.id, reason: record.challenge.reason } };
+        const offer = issueActionOffer(projection, machineAction, sessionId);
+        projection = appendEventFn(root, makeGoalEvent("goal.action_offered", offer, projection.goalId, projection), projection.version);
+        return JSON.stringify({ challenge_id: record.challenge.id, status, machineAction, action_token: offer.token });
       }
       const goalId = resolveGoalId(params.goal_id, root, ctx);
       if (!goalId) return "NO_ACTIVE_GOAL";
@@ -1266,11 +1274,18 @@ export function createGoalEngineExtension(pi, options = {}) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
-      const goalId = resolveGoalId(params.goal_id, root, ctx);
+      const transferOperation = params.operation === "propose_transfer_session" || params.operation === "transfer_session";
+      // Transfer is the sole unowned exception: it always requires an explicit ID,
+      // and never grants normal projection authority to the target session.
+      const goalId = transferOperation ? params.goal_id : resolveGoalId(params.goal_id, root, ctx);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
+      if (!projection || (!transferOperation && !ownedBySession(projection, sessionIdentity(ctx)))) throw new Error("No active goal");
       if (params.operation === "propose_transfer_session") {
-        if (!listCwdGoals(loadAllProjections(root), sessionIdentity(ctx)).some((item) => item.goalId === goalId)) throw new Error("transfer requires a visible goal");
+        const inventory = listCwdGoals(loadAllProjections(root), sessionIdentity(ctx));
+        const item = inventory.find((candidate) => candidate.goalId === goalId);
+        if (!item) throw new Error("transfer requires a visible goal");
+        if (item.transferBlockedReason) throw new Error(`transfer blocked: ${item.transferBlockedReason}`);
         const challenge = buildTransferChallenge({ projection, toSessionId: sessionIdentity(ctx), reason: params.reason, cwd });
         persistMetadata("goal-engine-session-transfer-challenge", challenge);
         transferChallenges.set(challenge.id, { challenge });
@@ -1290,7 +1305,8 @@ export function createGoalEngineExtension(pi, options = {}) {
       const metadataBeforeConsume = params.operation === "update_goal" ? metadataState(projection, currentSessionId) : null;
       if (params.operation === "transfer_session") {
         const record = transferChallenges.get(params.challenge_id);
-        if (!record?.challenge || transferChallengeState(record, projection, currentSessionId, cwd) !== "APPROVED" || !workspaceReleased(projection)) throw new Error("transfer challenge is missing, stale, or unsafe");
+        const targetHasActiveGoal = loadAllProjections(root).some((candidate) => candidate.goalId !== goalId && candidate.lifecycle === "active" && ownerSessionId(candidate) === currentSessionId);
+        if (!record?.challenge || targetHasActiveGoal || transferChallengeState(record, projection, currentSessionId, cwd) !== "APPROVED" || !workspaceReleased(projection)) throw new Error(targetHasActiveGoal ? "transfer blocked: TARGET_SESSION_HAS_ACTIVE_GOAL" : "transfer challenge is missing, stale, or unsafe");
         const offer = projection.actionOffer;
         if (!offer) throw new Error("goal_status must issue an action offer before goal_amend");
         const supplied = { goal_id: goalId, operation: params.operation, challenge_id: params.challenge_id, reason: params.reason };
