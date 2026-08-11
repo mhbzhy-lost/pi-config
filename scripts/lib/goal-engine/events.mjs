@@ -689,9 +689,11 @@ function goalSessionTransferred(p, event, schemaVersion) {
   requireNonEmptyStrings({ toSessionId, challengeId, reason }, "session transfer");
   if (!Number.isSafeInteger(ownershipRevision) || ownershipRevision !== p.ownershipRevision + 1) throw new Error("invalid ownership revision");
   if (ownerSessionId(p) !== fromSessionId) throw new Error("transfer source owner mismatch");
-  const source = [...p.sessionBindings].reverse().find((binding) => binding.sessionId === fromSessionId && binding.state !== "transferred");
-  if (!source) throw new Error(`transfer source session binding not found: ${fromSessionId}`);
-  Object.assign(source, { state: "transferred", transferredAt: event.occurredAt, transferredToSessionId: toSessionId.trim(), challengeId });
+  if (fromSessionId !== null) {
+    const source = [...p.sessionBindings].reverse().find((binding) => binding.sessionId === fromSessionId && binding.state !== "transferred");
+    if (!source) throw new Error(`transfer source session binding not found: ${fromSessionId}`);
+    Object.assign(source, { state: "transferred", transferredAt: event.occurredAt, transferredToSessionId: toSessionId.trim(), challengeId });
+  }
   p.sessionBindings.push({ sessionId: toSessionId.trim(), leafId: "session-transfer", state: "watching", boundAt: event.occurredAt });
   p.ownershipRevision = ownershipRevision;
   p.coordinationState = coordinationStateFor(p);

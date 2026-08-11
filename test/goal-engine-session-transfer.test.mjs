@@ -166,12 +166,17 @@ test("approved transfer moves a detached owner while retaining its detach audit 
   assert.equal(projection.ownershipRevision, 2);
 });
 
-test("transfer without a current source binding fails closed with a domain error", () => {
+test("approved transfer binds a historically unbound Goal without a source audit", () => {
   let projection = applyEvent(createProjection(), event("goal.created", {
-    objective: "Missing transfer source fixture", scope: [], nonGoals: [], dod: [], tasks: ["t"],
+    objective: "Historically unbound transfer fixture", scope: [], nonGoals: [], dod: [], tasks: ["t"],
     taskDefs: { t: { description: "t", deps: [], writePaths: ["src/a"], workflow: "tdd", acceptance: { criteria: [{ id: "c", statement: "passes", evidenceKinds: ["tests"] }] } } },
   }, "2026-08-10T00:00:00.000Z"));
-  assert.throws(() => applyEvent(projection, event("goal.session_transferred", {
+  assert.deepEqual(projection.sessionBindings, []);
+  projection = applyEvent(projection, event("goal.session_transferred", {
     fromSessionId: null, toSessionId: "B", challengeId: "challenge", reason: "approved", ownershipRevision: 2,
-  }, "2026-08-10T00:00:01.000Z")), /transfer source session binding not found/);
+  }, "2026-08-10T00:00:01.000Z"));
+  assert.deepEqual(projection.sessionBindings, [
+    { sessionId: "B", leafId: "session-transfer", state: "watching", boundAt: "2026-08-10T00:00:01.000Z" },
+  ]);
+  assert.equal(projection.ownershipRevision, 2);
 });
