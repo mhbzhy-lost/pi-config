@@ -1293,9 +1293,12 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (!record?.challenge || transferChallengeState(record, projection, currentSessionId, cwd) !== "APPROVED" || !workspaceReleased(projection)) throw new Error("transfer challenge is missing, stale, or unsafe");
         const offer = projection.actionOffer;
         if (!offer) throw new Error("goal_status must issue an action offer before goal_amend");
-        projection = consumeOfferedAction(projection, params, "goal_amend", goalId, ctx, root);
-        const event = makeGoalEvent("goal.session_transferred", { fromSessionId: record.challenge.fromOwnerSessionId, toSessionId: currentSessionId, challengeId: record.challenge.id, reason: params.reason, ownershipRevision: projection.ownershipRevision + 1 }, goalId, projection);
-        const updated = appendEventFn(root, event, projection.version);
+        const supplied = { goal_id: goalId, operation: params.operation, challenge_id: params.challenge_id, reason: params.reason };
+        const boundParams = Object.fromEntries(Object.keys(offer.params).map((key) => [key, supplied[key]]));
+        const consumed = verifyAndConsumeActionOffer(projection, { token: params.action_token, tool: "goal_amend", params: boundParams, sessionId: currentSessionId });
+        const consumedEvent = makeGoalEvent("goal.action_consumed", consumed, goalId, projection);
+        const transferEvent = makeGoalEvent("goal.session_transferred", { fromSessionId: record.challenge.fromOwnerSessionId, toSessionId: currentSessionId, challengeId: record.challenge.id, reason: params.reason, ownershipRevision: projection.ownershipRevision + 1 }, goalId, projection);
+        const updated = appendEventBatchFn(root, [consumedEvent, transferEvent], projection.version);
         persistMetadata("goal-engine-session-transfer-consumed", { challenge_id: record.challenge.id });
         transferChallenges.set(record.challenge.id, { ...record, consumed: true });
         return statusResponse(updated, cwd, root);
