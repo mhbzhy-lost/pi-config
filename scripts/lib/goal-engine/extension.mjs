@@ -871,7 +871,8 @@ export function createGoalEngineExtension(pi, options = {}) {
         const status = transferChallengeState(record, projection, sessionId, cwd);
         const targetHasActiveGoal = loadAllProjections(root).some((candidate) => candidate.goalId !== projection.goalId && candidate.lifecycle === "active" && ownerSessionId(candidate) === sessionId);
         if (targetHasActiveGoal) return JSON.stringify({ challenge_id: record.challenge.id, status: "TARGET_SESSION_HAS_ACTIVE_GOAL" });
-        if (status !== "APPROVED" || !workspaceReleased(projection)) return JSON.stringify({ challenge_id: record.challenge.id, status });
+        if (!workspaceReleased(projection)) return JSON.stringify({ challenge_id: record.challenge.id, status: "ACTIVE_WORKSPACE" });
+        if (status !== "APPROVED") return JSON.stringify({ challenge_id: record.challenge.id, status });
         const machineAction = { tool: "goal_amend", params: { goal_id: record.challenge.goalId, operation: "transfer_session", challenge_id: record.challenge.id, reason: record.challenge.reason } };
         const offer = issueActionOffer(projection, machineAction, sessionId);
         projection = appendEventFn(root, makeGoalEvent("goal.action_offered", offer, projection.goalId, projection), projection.version);
