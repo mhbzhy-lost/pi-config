@@ -7,6 +7,8 @@
 **绝对红线**：任何产生逻辑变更的 coding，动手前必须先加载 `test-driven-development` skill 并严格执行其流程。先写实现再补测试 = 违规，回退重来。
 豁免：单行改动 / 纯文档变更 / 已有测试覆盖（必须显式声明豁免理由）。
 
+生产或 Skill 逻辑修改前，必须先建立 `docs/bugs/bug-*.md`，并观察对应测试为 RED。
+
 ## Subagent
 
 所有 subagent 派发必须遵循 `subagent-dispatch` skill 的要求。

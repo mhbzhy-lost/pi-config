@@ -12,7 +12,7 @@ test("Pi loads migrated global rules and model-specific prompts", async () => {
   const anthropicSystem = await readFile(join(repoRoot, "pi", "SYSTEM.anthropic.md"), "utf8");
 
   assert.match(agents, /任何产生逻辑变更.*test-driven-development/s);
-  assert.match(agents, /docs\/bugs\/bug-/);
+  assert.match(agents, /生产或 Skill 逻辑修改前.*docs\/bugs\/bug-\*\.md.*观察对应测试为 RED/s);
   assert.match(qwenSystem, /Stop Rules/);
   assert.doesNotMatch(qwenSystem, /You are OpenCode/);
   assert.ok(anthropicSystem.length > 0);

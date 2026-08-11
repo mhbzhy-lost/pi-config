@@ -5,47 +5,38 @@ description: Use when delegating coding work to executor or spark, or non-coding
 
 # Subagent Dispatch
 
-The project-owned `subagent` tool is the only delegation entry.
+Use only the project-owned `subagent` tool.
 
 ## Coding
 
-`executor` and `spark` require a complete `dispatch-ir.v1`; never send them a free-form task. If required information is missing, stop and obtain it before dispatch. Deadlines never waive this contract. Never invent `delegate(...)` or substitute `background/prompt` fields. Placeholder values are missing information, not a complete contract.
+`executor` and `spark` require complete `dispatch-ir.v1`, never a free-form task. Deadlines never waive: missing information, placeholders, and guesses are incomplete; never invent `delegate(...)` or substitute `background/prompt`.
 
-Use `spark` only for low-risk work with one declared write path and at most eight requirements. Use `executor` otherwise.
+First verify cwd, relevant paths, and facts; fill required slots from the schema. Unknown information must not become `knownFacts`, placeholders, or guesses.
+
+Mechanical preflight: exact top-level/nested shape; no extra fields; repo-relative POSIX `relevantFiles`/`writePaths`; supported enumeration; non-empty required arrays; positive integer timeout; criteria-only acceptance. `tdd` reason forbidden; `existing-tests` and `docs-only` reason required.
+
+Use `spark` only for low-risk work with one write path and at most eight requirements; otherwise use `executor`.
 
 禁止 raw git worktree add/remove/prune/move/repair/lock/unlock：只可走 managed lifecycle CLI `node scripts/worktree-lifecycle.mjs ...` 或 typed Goal disposition，并须 owner CAS 与明确授权；不得 `--force` remove、raw branch cleanup，`/tmp`、TTL、clean 均不构成删除授权。
 
 ```js
 subagent({
-  version: "dispatch-ir.v1",
-  taskId: "fix-parser",
-  title: "Fix parser fallback",
-  agent: "spark",
-  risk: "low",
-  objective: "Reject malformed fallback input.",
-  workflow: { mode: "tdd" },
-  requirements: ["Add a failing regression test first."],
+  version: "dispatch-ir.v1", taskId: "harden-dispatch-skill", title: "Harden example",
+  agent: "executor", risk: "normal", objective: "Compile example.",
+  workflow: { mode: "tdd" }, requirements: ["Test first."],
   context: {
-    knownFacts: ["The parser owns fallback validation."],
-    decisions: ["Keep the public API unchanged."],
-    relevantFiles: ["src/parser.ts", "test/parser.test.ts"]
+    knownFacts: ["Source is verified."], decisions: ["Keep safety rules."],
+    relevantFiles: ["skill-overrides/subagent-dispatch/SKILL.md", "test/subagent-dispatch-skill.test.mjs"]
   },
-  boundaries: {
-    writePaths: ["src/parser.ts"],
-    excludedWork: ["No parser refactor."],
-    forbiddenActions: ["Do not commit."]
-  },
-  acceptance: {
-    criteria: ["Malformed input is rejected."],
-    commands: ["node --test test/parser.test.ts"]
-  },
-  execution: { cwd: "/workspace", timeoutMs: 900000 }
+  boundaries: { writePaths: ["skill-overrides/subagent-dispatch/SKILL.md"], excludedWork: ["No schema changes."], forbiddenActions: ["Do not commit."] },
+  acceptance: { criteria: ["Example compiles."] },
+  execution: { timeoutMs: 900000 }
 });
 ```
 
 ## Generic
 
-For generic non-coding delegation, use the enabled `delegate` agent with `{ agent, title, task }`. Title is a concise single-line display label; the task is forwarded unchanged.
+For generic delegation, use enabled `delegate` with `{ agent, title, task }`. Title is a concise label; task is forwarded unchanged.
 
 ```js
 subagent({ agent: "delegate", title: "Review current diff", task: "Inspect the current diff and report findings." });

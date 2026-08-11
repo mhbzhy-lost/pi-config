@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
+
+import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
 
 const skillPath = new URL("../skill-overrides/subagent-dispatch/SKILL.md", import.meta.url);
 const whitelistPath = new URL("../skill-overrides/skills.list", import.meta.url);
@@ -9,6 +12,12 @@ async function loadSkill() {
   const source = await readFile(skillPath, "utf8");
   const body = source.replace(/^---[\s\S]*?---\s*/, "");
   return { source, body };
+}
+
+function extractCodingExample(source) {
+  const match = source.match(/```js\nsubagent\(([\s\S]*?)\);\n```/);
+  assert.ok(match, "coding example must be a fenced subagent({...}) call");
+  return JSON.parse(JSON.stringify(vm.runInNewContext(`(${match[1]})`)));
 }
 
 test("allowlists the project subagent dispatch skill", async () => {
@@ -34,6 +43,25 @@ test("requires dispatch-ir.v1 for executor and spark coding work", async () => {
   assert.match(body, /never.*delegate\s*\(/i);
   assert.match(body, /placeholder/i);
   assert.match(body, /deadline|urgency/i);
+});
+
+test("compiles the fenced coding example and teaches a checked first dispatch", async () => {
+  const { source, body } = await loadSkill();
+  const contract = extractCodingExample(source);
+
+  assert.doesNotThrow(() => compileCodingDispatchIR(contract, { cwd: "/workspace" }));
+  assert.deepEqual(Object.keys(contract.acceptance), ["criteria"]);
+  assert.match(body, /核实 cwd、相关路径和事实|verify cwd, relevant paths, and facts/i);
+  assert.match(body, /不确定.*不得.*knownFacts|unknown.*not.*knownFacts/i);
+  assert.match(body, /exact top-level\/nested shape|精确.*顶层.*嵌套.*shape/i);
+  assert.match(body, /repo-relative.*POSIX.*relevantFiles.*writePaths|仓库相对.*POSIX.*relevantFiles.*writePaths/i);
+  assert.match(body, /tdd.*reason.*forbidden|tdd.*禁止.*reason/i);
+  assert.match(body, /existing-tests.*docs-only.*reason.*required|existing-tests.*docs-only.*reason.*必填/i);
+  assert.match(body, /enumeration|枚举/i);
+  assert.match(body, /non-empty|required arrays|非空.*必填.*数组/i);
+  assert.match(body, /positive integer.*timeout|正整数.*timeout/i);
+  assert.match(body, /criteria-only/i);
+  assert.match(body, /no extra fields|无额外字段/i);
 });
 
 test("forbids raw worktree lifecycle bypass and speculative cleanup in coding dispatches", async () => {
