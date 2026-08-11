@@ -6,7 +6,7 @@ function required(value, name) {
 }
 
 export function ownerSessionId(projection) {
-  const binding = (projection?.sessionBindings || []).find((entry) => entry.state === "watching");
+  const binding = (projection?.sessionBindings || [])[0];
   return binding?.sessionId || null;
 }
 

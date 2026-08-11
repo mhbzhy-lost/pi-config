@@ -655,7 +655,7 @@ function assertTaskRemovable(task, taskId, schemaVersion) {
 }
 
 export function ownerSessionId(projection) {
-  const binding = (projection?.sessionBindings || []).find((candidate) => candidate.state === "watching");
+  const binding = (projection?.sessionBindings || [])[0];
   return binding?.sessionId || null;
 }
 

@@ -703,8 +703,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     return appendEventFn(root, makeGoalEvent("goal.action_consumed", consumed, goalId, projection), projection.version);
   };
 
-  const ownedBySession = (projection, sessionId) => projection?.sessionBindings?.[0]?.sessionId === sessionId
-    && projection.sessionBindings[0].state === "watching";
+  const ownedBySession = (projection, sessionId) => ownerSessionId(projection) === sessionId;
   const resolveGoalId = (goalId, root, ctx) => {
     if (!enforceActionTokens) {
       if (goalId) return goalId;
