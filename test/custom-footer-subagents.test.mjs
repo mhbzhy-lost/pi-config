@@ -147,7 +147,7 @@ test("child selector separates selection from lifecycle glyphs and keeps selecte
   const selector = customFooterModule.formatBrowserSelector(snapshot, 200);
   assert.match(selector, /  ● executor/);
   assert.match(selector, /› ✓ 中文🙂 \(reviewer\)/);
-  assert.match(selector, /  ✗ tester/);
+  assert.match(selector, /  ! tester/);
   assert.match(selector, /  Ⅱ planner/);
   assert.match(selector, /  ■ writer/);
   assert.match(selector, /  \? observer/);

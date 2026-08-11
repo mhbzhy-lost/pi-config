@@ -1,9 +1,12 @@
+import { classifySubagentChildPresentation, type SubagentPresentationStatus } from "../../../scripts/lib/subagent-dispatch/presentation-status.ts";
+
 export interface BrowserChild {
   key: string;
   runId: string;
   index: number;
   agent: string;
   state: string;
+  presentation?: SubagentPresentationStatus;
   asyncDir: string;
   cwd: string;
   sessionId?: string;
@@ -44,6 +47,7 @@ const RECENT_RUN_LIMIT = 20;
 // pi-subagents 0.45.2 state contract: active states may advance; terminal states are immutable recent runs.
 const ACTIVE_STATES = new Set(["queued", "running", "pending"]);
 const TERMINAL_STATES = new Set(["complete", "completed", "failed", "paused", "stopped", "rejected", "detached", "timed-out"]);
+const PRESENTATION_STATUSES = new Set<SubagentPresentationStatus>(["running", "completed", "reported", "needs-context", "limited", "paused", "stopped", "runtime-failed"]);
 
 type StateClassification = "active" | "terminal" | "unknown";
 
@@ -88,7 +92,10 @@ export class SubagentSessionBrowserState {
       const cwd = stringValue(candidate.cwd);
       const index = numberValue(candidate.index);
       if (!runId || !key || !agent || !asyncDir || !cwd || index === undefined || key !== `${runId}:${index}`) continue;
-      const child: BrowserChild = { key, runId, index, agent, state: stringValue(candidate.state) ?? "unknown", asyncDir, cwd };
+      const persistedPresentation = stringValue(candidate.presentation);
+      const presentation = persistedPresentation && PRESENTATION_STATUSES.has(persistedPresentation as SubagentPresentationStatus)
+        ? persistedPresentation as SubagentPresentationStatus : undefined;
+      const child: BrowserChild = { key, runId, index, agent, state: stringValue(candidate.state) ?? "unknown", asyncDir, cwd, ...(presentation ? { presentation } : {}) };
       for (const field of ["sessionId", "sessionFile", "label", "transcriptPath", "model", "thinking"] as const) {
         const fieldValue = stringValue(candidate[field]);
         if (fieldValue) child[field] = fieldValue;
@@ -171,6 +178,7 @@ export class SubagentSessionBrowserState {
         asyncDir: run.asyncDir,
         cwd: run.cwd,
         ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+        ...(existing?.presentation ? { presentation: existing.presentation } : {}),
       };
       const label = stringValue(step.label) ?? stringValue(step.title) ?? existing?.label;
       const sessionFile = stringValue(step.sessionFile);
@@ -197,10 +205,16 @@ export class SubagentSessionBrowserState {
     const run = this.runs.get(runId);
     if (!run) return;
     const state = stringValue(event.state) ?? stringValue(event.status) ?? "complete";
-    run.children = run.children.map((child) => ({
-      ...child,
-      state: isTerminalState(child.state) ? child.state : state,
-    }));
+    const results = Array.isArray(event.results) ? event.results : [];
+    run.children = run.children.map((child) => {
+      const result = isRecord(results[child.index]) ? results[child.index] : undefined;
+      const childState = stringValue(result?.status) ?? stringValue(result?.state) ?? state;
+      return {
+        ...child,
+        state: isTerminalState(child.state) ? child.state : childState,
+        presentation: classifySubagentChildPresentation(result ?? event),
+      };
+    });
     this.trimRuns();
   }
 

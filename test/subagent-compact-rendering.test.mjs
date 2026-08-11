@@ -46,7 +46,7 @@ test("compact notification renders grouped titles and terminal states", () => {
       content: "Background task failed: **executor** [Build release]\n\nstack trace",
       details: { titles: ["Build release"] },
     }),
-    "✗ Build release · failed",
+    "◇ Build release · reported",
   );
   assert.equal(
     formatCompactSubagentNotification({
@@ -54,6 +54,13 @@ test("compact notification renders grouped titles and terminal states", () => {
       details: { titles: ["Await approval"] },
     }),
     "Ⅱ Await approval · paused",
+  );
+});
+
+test("compact notification renders stopped legacy notifications", () => {
+  assert.equal(
+    formatCompactSubagentNotification({ content: "Background task stopped: **executor** [Stopped task]" }),
+    "■ Stopped task · stopped",
   );
 });
 
@@ -117,4 +124,13 @@ test("compact status summarizes active, idle, error, and non-status results", ()
     ),
     "Stop requested for run-1.",
   );
+});
+
+test("compact notification uses leaf presentation metadata instead of raw failed lifecycle", () => {
+  const rendered = formatCompactSubagentNotification({
+    content: "Background tasks failed (2): **executor**, **reviewer**",
+    details: { titles: ["TDD RED", "Need context"], presentations: ["reported", "needs-context"] },
+  });
+  assert.equal(rendered, "◇ TDD RED · reported\n? Need context · needs-context");
+  assert.doesNotMatch(rendered, /✗|runtime-failed/);
 });

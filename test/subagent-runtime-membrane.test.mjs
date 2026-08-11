@@ -1180,3 +1180,23 @@ test("lifecycle registration failure rolls back runtime debt, registry ownership
   assert.equal(cleanupStore.__typedSubagentRuntimeCleanup.has(pi), false);
   assert.equal(cleanupStore.__typedSubagentRuntimeShutdownDebt.debts.length, 0);
 });
+
+test("completion lifecycle projects normalized status children without changing raw lifecycle", () => {
+  const emitted = [];
+  const api = createHeadlessSubagentApi({ events: { emit(type, payload) { emitted.push({ type, payload }); }, on() {} } });
+  const source = { state: "failed", success: true, results: [{ status: "completed", success: true, outputState: "present" }] };
+  api.events.emit("subagent:async-complete", source);
+  assert.equal(emitted[0].payload.state, "failed");
+  assert.equal(emitted[0].payload.results[0].status, "completed");
+  assert.equal(emitted[0].payload.presentation, "completed");
+});
+
+test("completion lifecycle adds a presentation projection without changing raw failed state", () => {
+  const emitted = [];
+  const api = createHeadlessSubagentApi({ events: { emit(type, payload) { emitted.push({ type, payload }); }, on() {} } });
+  const source = { runId: "run-report", state: "failed", outputState: "RED", acceptance: { accepted: false }, output: "tests-only RED" };
+  api.events.emit("subagent:async-complete", source);
+  assert.equal(emitted[0].payload.state, "failed");
+  assert.equal(emitted[0].payload.presentation, "reported");
+  assert.equal(source.presentation, undefined);
+});

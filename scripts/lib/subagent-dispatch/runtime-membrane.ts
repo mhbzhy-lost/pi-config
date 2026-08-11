@@ -6,6 +6,8 @@ const SUPERVISOR_TOOL_NAME = "subagent_supervisor";
 const STARTED_EVENT = "subagent:async-started";
 const COMPLETE_EVENT = "subagent:async-complete";
 
+import { classifySubagentPresentation } from "./presentation-status.ts";
+
 const blockedRegistration = () => undefined;
 
 function titleSuffix(title) {
@@ -13,14 +15,15 @@ function titleSuffix(title) {
 }
 
 function decorateLifecycle(type, payload, titleRegistry) {
-  if (!payload || typeof payload !== "object" || !titleRegistry) return payload;
-  if (type === STARTED_EVENT) {
+  if (!payload || typeof payload !== "object") return payload;
+  if (type === STARTED_EVENT && titleRegistry) {
     const title = titleRegistry.started(payload);
     return title ? { ...payload, title } : payload;
   }
   if (type === COMPLETE_EVENT) {
-    const title = titleRegistry.completed(payload);
-    return title ? { ...payload, title } : payload;
+    const presentation = classifySubagentPresentation(payload);
+    const title = titleRegistry?.completed?.({ ...payload, presentation });
+    return { ...payload, presentation, ...(title ? { title } : {}) };
   }
   return payload;
 }
@@ -31,9 +34,12 @@ function decorateCompletionContent(content, titleRegistry) {
   const grouped = /^Background tasks completed \(\d+\): /.test(firstLine);
   const titles = [];
   lines[0] = firstLine.replace(/\*\*([^*]+)\*\*/g, (match, agent) => {
-    const title = titleRegistry.takeCompleted(agent);
+    const detail = typeof titleRegistry.takeCompletedDetail === "function"
+      ? titleRegistry.takeCompletedDetail(agent)
+      : undefined;
+    const title = detail?.title ?? titleRegistry.takeCompleted(agent);
     if (!title) return match;
-    titles.push({ agent, title });
+    titles.push({ agent, title, presentation: detail?.presentation });
     return `**${agent}**${titleSuffix(title)}`;
   });
   if (grouped) {
@@ -45,7 +51,11 @@ function decorateCompletionContent(content, titleRegistry) {
       }
     }
   }
-  return { content: lines.join("\n"), titles: titles.map((entry) => entry.title) };
+  return {
+    content: lines.join("\n"),
+    titles: titles.map((entry) => entry.title),
+    presentations: titles.map((entry) => entry.presentation),
+  };
 }
 
 function decorateVisibleMessage(message, titleRegistry) {
@@ -64,7 +74,7 @@ function decorateVisibleMessage(message, titleRegistry) {
   if (message.customType === "subagent-notify") {
     const decorated = decorateCompletionContent(message.content, titleRegistry);
     return decorated.titles.length
-      ? { ...message, content: decorated.content, details: { ...(details ?? {}), titles: decorated.titles } }
+      ? { ...message, content: decorated.content, details: { ...(details ?? {}), titles: decorated.titles, ...(decorated.presentations.some(Boolean) ? { presentations: decorated.presentations } : {}) } }
       : message;
   }
   return message;
@@ -74,6 +84,7 @@ export function createHeadlessSubagentApi(pi, {
   supervisorAdapter,
   titleRegistry,
   suppressCompletionNotifications = false,
+  forceCompletionDisplay = false,
   captureSessionShutdown,
   captureSessionStart,
   captureEventSubscription,
@@ -84,7 +95,6 @@ export function createHeadlessSubagentApi(pi, {
 
   const events = pi.events && typeof pi.events === "object"
     ? new Proxy(pi.events, {
-  forceCompletionDisplay = false,
     get(target, property, receiver) {
       if (property === "emit") {
         return (type, payload) => target.emit(type, decorateLifecycle(type, payload, titleRegistry));

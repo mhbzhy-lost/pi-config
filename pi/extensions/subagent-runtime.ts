@@ -23,9 +23,10 @@ export function createRootBrokerUpstream({ rpc }: { rpc: any }) {
   });
 }
 
-function notificationColor(text: string): "error" | "warning" | "success" {
+function notificationColor(text: string): "error" | "warning" | "success" | "dim" {
   if (text.split("\n").some((line) => line.startsWith("✗"))) return "error";
-  if (text.split("\n").some((line) => line.startsWith("Ⅱ"))) return "warning";
+  if (text.split("\n").some((line) => /^(?:\?|!|Ⅱ|■)/.test(line))) return "warning";
+  if (text.split("\n").some((line) => line.startsWith("◇"))) return "dim";
   return "success";
 }
 

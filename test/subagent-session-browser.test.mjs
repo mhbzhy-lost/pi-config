@@ -416,3 +416,52 @@ test("retains selected colon-containing terminal run IDs under the recent cap", 
   assert.equal(state.snapshot().recentChildren.length, 20);
   assert.equal(state.snapshot().selectedKey, `${selectedRunId}:0`);
 });
+
+test("retains presentation separately from raw lifecycle through completion and legacy hydrate", () => {
+  const state = new SubagentSessionBrowserState();
+  startRun(state, "report-run", ["executor"]);
+  state.trackCompleted({ runId: "report-run", state: "failed", outputState: "RED", output: "tests-only RED" });
+  assert.equal(state.snapshot().children[0].state, "failed");
+  assert.equal(state.snapshot().children[0].presentation, "reported");
+  const legacy = SubagentSessionBrowserState.hydrate({ version: 1, children: [{ key: "old:0", runId: "old", index: 0, agent: "executor", state: "failed", asyncDir: "/tmp/old", cwd: "/repo" }] });
+  assert.equal(legacy.snapshot().children[0].presentation, undefined);
+});
+
+test("hydrates only known presentation values", () => {
+  const state = SubagentSessionBrowserState.hydrate({ version: 1, children: [{
+    key: "old:0", runId: "old", index: 0, agent: "executor", state: "completed", presentation: "unknown",
+    asyncDir: "/tmp/old", cwd: "/repo",
+  }] });
+  assert.equal(state.snapshot().children[0].presentation, undefined);
+});
+
+test("projects normalized result status and presentation to each child without rewriting lifecycle state", () => {
+  const state = new SubagentSessionBrowserState();
+  startRun(state, "normalized", ["executor", "reviewer"]);
+  state.trackCompleted({
+    runId: "normalized", state: "failed", results: [
+      { status: "completed", success: true, outputState: "present" },
+      { status: "failed", outputState: "absent", protocolError: "bad frame" },
+    ],
+  });
+  assert.deepEqual(state.snapshot().children.map(({ state: raw, presentation }) => ({ raw, presentation })), [
+    { raw: "completed", presentation: "completed" },
+    { raw: "failed", presentation: "runtime-failed" },
+  ]);
+});
+
+test("projects real completion results to each child without rewriting lifecycle state", () => {
+  const state = new SubagentSessionBrowserState();
+  startRun(state, "mixed", ["executor", "reviewer"]);
+  state.trackCompleted({
+    runId: "mixed", state: "failed", success: false, summary: "mixed completion",
+    results: [
+      { state: "failed", outputState: "present", summary: "TDD RED", acceptance: { status: "rejected" } },
+      { state: "rejected", outputState: "absent", protocolError: "bad frame" },
+    ],
+  });
+  assert.deepEqual(state.snapshot().children.map(({ state: raw, presentation }) => ({ raw, presentation })), [
+    { raw: "failed", presentation: "reported" },
+    { raw: "rejected", presentation: "runtime-failed" },
+  ]);
+});

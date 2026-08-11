@@ -48,7 +48,7 @@ export function createTitleRegistry({ maxEntries = 256 } = {}) {
     titleFor(runId) { return titles.get(runId); },
     completed(event) {
       const title = titles.get(event?.runId ?? event?.id);
-      if (title) completed.push({ agent: event?.agent, title });
+      if (title) completed.push({ agent: event?.agent, title, presentation: event?.presentation });
       while (completed.length > maxEntries) completed.shift();
       return title;
     },
@@ -57,6 +57,11 @@ export function createTitleRegistry({ maxEntries = 256 } = {}) {
       const index = completed.findIndex((entry) => entry.agent === agent);
       if (index < 0) return undefined;
       return completed.splice(index, 1)[0].title;
+    },
+    takeCompletedDetail(agent) {
+      const index = completed.findIndex((entry) => entry.agent === agent);
+      if (index < 0) return undefined;
+      return completed.splice(index, 1)[0];
     },
   });
 }

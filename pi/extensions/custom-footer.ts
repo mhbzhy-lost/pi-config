@@ -22,15 +22,25 @@ function store(): SubagentStatusStore {
   return root[SUBAGENT_STATUS_STORE] = { version: 1, children: Array.isArray(children) ? children : [] };
 }
 
-function lifecycleGlyph(state: string | undefined): string {
+function lifecycleGlyph(state: string | undefined, presentation?: string): string {
+  switch (presentation) {
+    case "completed": return "✓";
+    case "reported": return "◇";
+    case "needs-context": return "?";
+    case "limited": return "!";
+    case "paused": return "Ⅱ";
+    case "stopped": return "■";
+    case "runtime-failed": return "✗";
+  }
   switch (state?.toLowerCase()) {
     case "queued":
     case "running":
     case "pending": return "●";
     case "complete":
     case "completed": return "✓";
-    case "failed":
-    case "timed-out": return "✗";
+    // Legacy persistence has no structured completion metadata: never infer a runtime fault.
+    case "failed": return "◇";
+    case "timed-out": return "!";
     case "paused": return "Ⅱ";
     case "stopped":
     case "detached": return "■";
@@ -38,10 +48,10 @@ function lifecycleGlyph(state: string | undefined): string {
   }
 }
 
-function selectorChild(child: { key: string; agent: string; state?: string; label?: string }, selectedKey: string | undefined): string {
+function selectorChild(child: { key: string; agent: string; state?: string; presentation?: string; label?: string }, selectedKey: string | undefined): string {
   const title = child.label ? truncateToWidth(child.label, MAX_SELECTOR_TITLE_WIDTH, "…") : undefined;
   const label = title ? `${title} (${child.agent})` : child.agent;
-  return `${selectedKey === child.key ? "›" : " "} ${lifecycleGlyph(child.state)} ${label}`;
+  return `${selectedKey === child.key ? "›" : " "} ${lifecycleGlyph(child.state, child.presentation)} ${label}`;
 }
 
 export function formatBrowserSelector(snapshot: ReturnType<SubagentSessionBrowserState["snapshot"]>, width: number): string {
