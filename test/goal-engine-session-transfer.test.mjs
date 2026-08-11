@@ -148,3 +148,30 @@ test("approved session transfer advances owner while retaining the source bindin
   assert.deepEqual(projection.sessionBindings.map((binding) => binding.state), ["transferred", "watching"]);
   assert.equal(projection.ownershipRevision, 2);
 });
+
+test("approved transfer moves a detached owner while retaining its detach audit trail", () => {
+  let projection = applyEvent(createProjection(), event("goal.created", {
+    objective: "Detached transfer fixture", scope: [], nonGoals: [], dod: [], tasks: ["t"],
+    taskDefs: { t: { description: "t", deps: [], writePaths: ["src/a"], workflow: "tdd", acceptance: { criteria: [{ id: "c", statement: "passes", evidenceKinds: ["tests"] }] } } },
+  }, "2026-08-10T00:00:00.000Z"));
+  projection = applyEvent(projection, event("goal.session_bound", { sessionId: "A", leafId: "a" }, "2026-08-10T00:00:01.000Z"));
+  projection = applyEvent(projection, event("goal.session_detached", { sessionId: "A", reason: "owner ended" }, "2026-08-10T00:00:02.000Z"));
+  projection = applyEvent(projection, event("goal.session_transferred", {
+    fromSessionId: "A", toSessionId: "B", challengeId: "challenge", reason: "approved", ownershipRevision: 2,
+  }, "2026-08-10T00:00:03.000Z"));
+  assert.deepEqual(projection.sessionBindings, [
+    { sessionId: "A", leafId: "a", state: "transferred", boundAt: "2026-08-10T00:00:01.000Z", detachedAt: "2026-08-10T00:00:02.000Z", reason: "owner ended", transferredAt: "2026-08-10T00:00:03.000Z", transferredToSessionId: "B", challengeId: "challenge" },
+    { sessionId: "B", leafId: "session-transfer", state: "watching", boundAt: "2026-08-10T00:00:03.000Z" },
+  ]);
+  assert.equal(projection.ownershipRevision, 2);
+});
+
+test("transfer without a current source binding fails closed with a domain error", () => {
+  let projection = applyEvent(createProjection(), event("goal.created", {
+    objective: "Missing transfer source fixture", scope: [], nonGoals: [], dod: [], tasks: ["t"],
+    taskDefs: { t: { description: "t", deps: [], writePaths: ["src/a"], workflow: "tdd", acceptance: { criteria: [{ id: "c", statement: "passes", evidenceKinds: ["tests"] }] } } },
+  }, "2026-08-10T00:00:00.000Z"));
+  assert.throws(() => applyEvent(projection, event("goal.session_transferred", {
+    fromSessionId: null, toSessionId: "B", challengeId: "challenge", reason: "approved", ownershipRevision: 2,
+  }, "2026-08-10T00:00:01.000Z")), /transfer source session binding not found/);
+});
