@@ -695,9 +695,22 @@ export function createGoalEngineExtension(pi, options = {}) {
     return appendEventFn(root, makeGoalEvent("goal.action_consumed", consumed, goalId, projection), projection.version);
   };
 
-  const resolveGoalId = (goalId, root) => {
-    if (goalId) return goalId;
-    const active = listGoalsFn(root);
+  const ownedBySession = (projection, sessionId) => projection?.sessionBindings?.[0]?.sessionId === sessionId
+    && projection.sessionBindings[0].state === "watching";
+  const resolveGoalId = (goalId, root, ctx) => {
+    if (!enforceActionTokens) {
+      if (goalId) return goalId;
+      const active = listGoalsFn(root);
+      if (active.length === 0) return null;
+      if (active.length > 1) throw new Error(`Multiple active goals: ${active.join(", ")}. Specify goal_id.`);
+      return active[0];
+    }
+    const sessionId = sessionIdentity(ctx);
+    if (goalId) {
+      const projection = loadProjectionFn(root, goalId);
+      return !projection?.sessionBindings?.length || ownedBySession(projection, sessionId) ? goalId : null;
+    }
+    const active = listGoalsFn(root).filter((id) => ownedBySession(loadProjectionFn(root, id), sessionId));
     if (active.length === 0) return null;
     if (active.length > 1) throw new Error(`Multiple active goals: ${active.join(", ")}. Specify goal_id.`);
     return active[0];
@@ -764,7 +777,10 @@ export function createGoalEngineExtension(pi, options = {}) {
       const { cwd, root, storage, stateScope } = executionScopeFor(ctx, { operation: "init" });
       assertInitPreflight(cwd, storage);
       if (storage === "global") ensureGoalStateIdentity(stateScope);
-      const activeGoals = listGoalsFn(root);
+      const sessionId = sessionIdentity(ctx);
+      const activeGoals = enforceActionTokens
+        ? listGoalsFn(root).filter((id) => ownedBySession(loadProjectionFn(root, id), sessionId))
+        : listGoalsFn(root);
       if (activeGoals.length > 0) {
         const goalId = activeGoals[0];
         throw Object.assign(initError("ACTIVE_GOAL_EXISTS", `active goal=${goalId}`, "call goal_status before creating another goal"), {
@@ -839,7 +855,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScopeFor(ctx, { operation: "read", goalId: params.goal_id });
-      const goalId = resolveGoalId(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root, ctx);
       if (!goalId) return "NO_ACTIVE_GOAL";
       let projection = loadProjectionFn(root, goalId);
       if (!projection) return "NO_ACTIVE_GOAL";
@@ -905,7 +921,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     },
     async handler(params, ctx) {
       const { cwd, root, storage } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
-      const goalId = resolveGoalId(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root, ctx);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
       projection = consumeOfferedAction(projection, params, "goal_dispatch", goalId, ctx, root);
@@ -1039,7 +1055,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
-      const goalId = resolveGoalId(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root, ctx);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
       projection = consumeOfferedAction(projection, params, "goal_settle", goalId, ctx, root);
@@ -1149,7 +1165,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       const { root } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
       // Terminal goals are deliberately addressable only by explicit identity.
       if (!params.goal_id) {
-        const activeGoalId = resolveGoalId(null, root);
+        const activeGoalId = resolveGoalId(null, root, ctx);
         if (!activeGoalId) throw new Error("No active goal");
         params = { ...params, goal_id: activeGoalId };
       }
@@ -1233,7 +1249,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
-      const goalId = resolveGoalId(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root, ctx);
       if (!goalId) throw new Error("No active goal");
       let projection = loadProjectionFn(root, goalId);
       if (params.operation === "propose_update_goal") {
@@ -1389,7 +1405,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     },
     async handler(params, ctx) {
       const { cwd, root } = executionScopeFor(ctx, { operation: "mutate", goalId: params.goal_id });
-      const goalId = resolveGoalId(params.goal_id, root);
+      const goalId = resolveGoalId(params.goal_id, root, ctx);
       if (!goalId) throw new Error("No active goal");
 
       let projection = loadProjectionFn(root, goalId);
@@ -2021,9 +2037,10 @@ export function createGoalEngineExtension(pi, options = {}) {
     if (turnsSinceSettle < CHECKPOINT_REMINDER_THRESHOLD) return undefined;
 
     let projection;
-    try { projection = loadProjectionFn(root, activeGoals[0]); } catch { return undefined; }
-    if (!projection || projection.lifecycle !== "active"
-      || projection.sessionBindings?.some((binding) => binding.sessionId === sessionIdentity(ctx) && binding.state === "detached")) return undefined;
+    try { projection = loadProjectionFn(root, enforceActionTokens
+      ? activeGoals.find((id) => ownedBySession(loadProjectionFn(root, id), sessionIdentity(ctx)))
+      : activeGoals[0]); } catch { return undefined; }
+    if (!projection || projection.lifecycle !== "active" || (enforceActionTokens && !ownedBySession(projection, sessionIdentity(ctx)))) return undefined;
 
     const reminder = `\n\n⚠️ [goal-engine] 活跃 goal "${projection.goalId}" 已 ${turnsSinceSettle} 轮未 settle。当前 runnable: [${runnableFrontier(projection).join(", ")}]。请推进任务或调用 goal_settle 更新状态。`;
     const content = (event.content || []).map((part, i) => {

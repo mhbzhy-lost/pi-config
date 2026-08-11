@@ -655,9 +655,10 @@ function goalSessionBound(p, event, schemaVersion) {
   requireV3(schemaVersion, event.type);
   const { sessionId, leafId } = event.data;
   requireNonEmptyStrings({ sessionId, leafId }, "session binding");
-  const existing = p.sessionBindings.find((binding) => binding.sessionId === sessionId);
-  if (existing) Object.assign(existing, { leafId, state: "watching", boundAt: event.occurredAt });
-  else p.sessionBindings.push({ sessionId, leafId, state: "watching", boundAt: event.occurredAt });
+  const existing = p.sessionBindings[0];
+  if (existing && existing.sessionId !== sessionId) throw new Error("goal owner session is immutable");
+  if (existing) throw new Error("goal owner session binding is immutable");
+  p.sessionBindings.push({ sessionId, leafId, state: "watching", boundAt: event.occurredAt });
   p.coordinationState = coordinationStateFor(p);
 }
 
