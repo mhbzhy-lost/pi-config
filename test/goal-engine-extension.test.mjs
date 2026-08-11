@@ -35,13 +35,13 @@ test("external evidence classification matrix only promotes external_review from
   assert.equal(classifyGoalEvidence(externalReview).hasExternalReview, true);
 });
 
-function createMockPi(cwd) {
+function createMockPi(cwd, { sessionId = "session-test" } = {}) {
   const tools = [];
   const hooks = { tool_result: [] };
   const entries = [];
   const sentMessages = [];
   const sessionManager = {
-    getSessionId: () => "session-test",
+    getSessionId: () => sessionId,
     getSessionFile: () => join(cwd, "session.jsonl"),
     getLeafId: () => entries.at(-1)?.id || "leaf-test",
     getEntries: () => [...entries],
@@ -163,6 +163,33 @@ async function invoke(pi, name, params = {}) {
   }
   return text;
 }
+
+test("new session cannot recover or mutate another session's active Goal", async () => {
+  const cwd = tmpCwd();
+  const owner = createMockPi(cwd, { sessionId: "session-owner" });
+  createGoalEngineExtensionProduction(owner);
+  const objective = "Owner isolated Goal";
+  const goalId = objectiveToGoalId(objective);
+  await invoke(owner, "goal_init", oneTaskGoal(objective));
+  const ownerStatus = JSON.parse(await invoke(owner, "goal_status", {}));
+  assert.ok(ownerStatus.action_token);
+
+  const other = createMockPi(cwd, { sessionId: "session-other" });
+  createGoalEngineExtensionProduction(other);
+  assert.equal(await invoke(other, "goal_status", {}), "NO_ACTIVE_GOAL");
+  assert.equal((await emitHook(other, "before_agent_start", {})), undefined);
+  const before = fullRejectionSnapshot(cwd, goalId);
+  await assert.rejects(
+    () => invoke(other, "goal_dispatch", { goal_id: goalId, task_id: "t1", action_token: ownerStatus.action_token }),
+    /owner|active goal|session/i,
+  );
+  assert.deepEqual(fullRejectionSnapshot(cwd, goalId), before);
+
+  const ownObjective = "Other isolated Goal";
+  await invoke(other, "goal_init", oneTaskGoal(ownObjective));
+  assert.equal(JSON.parse(await invoke(other, "goal_status", {})).goalId, objectiveToGoalId(ownObjective));
+  assert.equal(JSON.parse(await invoke(owner, "goal_status", {})).goalId, goalId);
+});
 
 test("configured Goal state root keeps empty goal_status read-only before initialization", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "ge-global-empty-origin-"));
