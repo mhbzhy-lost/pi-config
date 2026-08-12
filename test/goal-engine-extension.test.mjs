@@ -3799,6 +3799,42 @@ test("production resolve_blocked consumes the task offer and atomically updates 
   await assert.rejects(() => invoke(pi, "goal_amend", amendment), /consumed|offer|status|token/i);
 });
 
+test("legacy blocked supersede replacement inherits hidden commands through the criteria-only schema", async () => {
+  const cwd = tmpCwd();
+  const goalId = "legacy-supersede-hidden-commands";
+  const root = join(cwd, ".state/goal-engine");
+  const workspace = {
+    attempt: 1,
+    path: join(root, "worktrees", `${goalId}-t1-1`),
+    branch: `ge/${goalId}/t1/1`,
+    baseCommit: "a".repeat(40),
+    originRef: "refs/heads/main",
+  };
+  const events = [
+    { schemaVersion: "goal-engine.event.v3", eventId: "legacy-created", goalId, occurredAt: "2026-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "Replace blocked legacy task", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "legacy blocked task", deps: [], writePaths: ["src/legacy.ts"], acceptance: { criteria: ["legacy behavior"], commands: ["node --test test/legacy.test.mjs"] }, workflow: "tdd" } } } },
+    { schemaVersion: "goal-engine.event.v3", eventId: "legacy-dispatched", goalId, occurredAt: "2026-01-01T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash: "b".repeat(64), workspace } },
+    { schemaVersion: "goal-engine.event.v3", eventId: "legacy-blocked", goalId, occurredAt: "2026-01-01T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "blocked", reason: "The legacy task needs an approved replacement", nextAction: "Discard the released workspace before superseding", attempt: 1 } },
+    { schemaVersion: "goal-engine.event.v3", eventId: "legacy-disposition-started", goalId, occurredAt: "2026-01-01T00:00:03.000Z", type: "task.workspace_disposition_started", data: { taskId: "t1", attempt: 1, requestedAction: "discard", strategy: "merge", executorHead: "c".repeat(40), originHeadBefore: "a".repeat(40), originRef: "refs/heads/main" } },
+    { schemaVersion: "goal-engine.event.v3", eventId: "legacy-disposition-applied", goalId, occurredAt: "2026-01-01T00:00:04.000Z", type: "task.workspace_disposition_applied", data: { taskId: "t1", attempt: 1, action: "discard", strategy: "merge", executorHead: "c".repeat(40), originHead: "a".repeat(40) } },
+    { schemaVersion: "goal-engine.event.v3", eventId: "legacy-disposed", goalId, occurredAt: "2026-01-01T00:00:05.000Z", type: "task.workspace_disposed", data: { taskId: "t1", attempt: 1, action: "discard", released: true } },
+    { schemaVersion: "goal-engine.event.v3", eventId: "legacy-bound", goalId, occurredAt: "2026-01-01T00:00:06.000Z", type: "goal.session_bound", data: { sessionId: "session-test", leafId: "legacy-fixture" } },
+  ];
+  writeGoalHistory(cwd, events);
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  const replacement = { id: "t2", description: "approved replacement", deps: [], writePaths: ["src/replacement.ts"], acceptance: plannedAcceptance("replacement criteria"), workflow: "tdd" };
+  const prepare = pi.tools.find((tool) => tool.name === "goal_amend").prepareArguments;
+  assert.throws(() => prepare({ operation: "resolve_blocked", reason: "x", action_token: "token", blocked_resolution: "supersede", blocked_task_id: "t1", replacement_task_id: "t2", add_tasks: [{ ...replacement, acceptance: { ...replacement.acceptance, commands: ["false"] } }] }), /additional property|schema/i);
+
+  const amended = JSON.parse(await invoke(pi, "goal_amend", {
+    goal_id: goalId, operation: "resolve_blocked", reason: "Human approved a criteria-only replacement", action_token: "unused", blocked_resolution: "supersede", blocked_task_id: "t1", replacement_task_id: "t2", add_tasks: [replacement],
+  }));
+  assert.equal(amended.tasks.t1.status, "superseded");
+  assert.deepEqual(amended.tasks.t2.acceptance.criteria, replacement.acceptance.criteria.map((criterion) => JSON.stringify(criterion)));
+  assert.deepEqual(amended.tasks.t2.acceptance.commands, ["node --test test/legacy.test.mjs"]);
+  assert.deepEqual(readGoalEvents(cwd, goalId).at(-1).data.addTasks.t2.acceptance.commands, ["node --test test/legacy.test.mjs"]);
+});
+
 test("failed production mutation consumes its status token before business preflight", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
