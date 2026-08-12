@@ -718,7 +718,9 @@ test("historical safe ignored state dispatch remains available", async () => {
   const dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
   assert.equal(dispatched.status, "dispatched");
   assert.equal(dispatched.workspace.attempt, 1);
-  assert.deepEqual(dispatched.contract.acceptance.commands, ["true"]);
+  assert.deepEqual(dispatched.contract.acceptance, { criteria: ["works"] });
+  assert.equal(Object.hasOwn(dispatched.contract.acceptance, "commands"), false);
+  assert.equal(JSON.stringify(dispatched.contract).includes("commands"), false);
   assert.deepEqual(readGoalEvents(cwd, goalId).map((record) => record.schemaVersion), [
     "goal-engine.event.v2",
     "goal-engine.event.v2",
