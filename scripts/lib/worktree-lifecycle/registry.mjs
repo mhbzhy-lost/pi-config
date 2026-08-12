@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -69,6 +69,11 @@ function runGit(cwd, args, commandObserver) {
   } catch (cause) {
     throw failure("WORKTREE_LIFECYCLE_GIT_ERROR", `git ${args.join(" ")} failed`, cause);
   }
+}
+
+function gitSucceeds(cwd, args, commandObserver) {
+  commandObserver?.({ file: "git", cwd, args: [...args] });
+  return spawnSync("git", args, { cwd, stdio: "ignore" }).status === 0;
 }
 
 function canonicalRepository(originRoot, commandObserver) {
@@ -557,6 +562,58 @@ export function activateAllocation({ originRoot, id, ownerToken: token, headComm
     if (inspected.headCommit !== expectedHead) throw failure("WORKTREE_LIFECYCLE_IDENTITY_MISMATCH", "activation HEAD does not match the worktree");
     const next = { ...current, headCommit: inspected.headCommit, state: "active", updatedAt: new Date().toISOString(), disposition: null, lastError: null };
     atomicManifestWrite(observed.path, next, lock, { fault, operation: "activate-write" });
+    return receipt(next, observed.path);
+  } finally { releaseReceipt(lock); }
+}
+
+export function reanchorAllocation({ originRoot, id, ownerToken: token, expectedHead, targetHead, fault, lockTimeoutMs, commandObserver } = {}) {
+  const repository = canonicalRepository(originRoot, commandObserver);
+  const normalizedId = requireId(id);
+  const expected = fullCommit(repository.originRoot, expectedHead, commandObserver);
+  const target = fullCommit(repository.originRoot, targetHead, commandObserver);
+  const lock = acquireRegistryLock(repository.originRoot, { lockTimeoutMs, fault });
+  try {
+    assertLockOwned(lock);
+    const observed = readManifest(repository.originRoot, normalizedId);
+    if (!observed.manifest) throw failure("WORKTREE_LIFECYCLE_MANIFEST_INVALID", "allocation manifest is missing");
+    const current = observed.manifest;
+    assertManifestRepository(current, repository);
+    assertOwner(current, token);
+    if (!["reclaimable", "cleanup-debt"].includes(current.state)) throw failure("WORKTREE_LIFECYCLE_NOT_RECLAIMABLE", "managed reanchor requires reclaimable or cleanup-debt state");
+    if (!gitSucceeds(repository.originRoot, ["merge-base", "--is-ancestor", target, expected], commandObserver)) throw failure("WORKTREE_LIFECYCLE_INVALID_INPUT", "target HEAD must be an ancestor of expected current HEAD");
+    const recoveryRef = `refs/worktree-lifecycle/recovery/${current.id}/${expected}`;
+    const identity = inspectWorktree(current, commandObserver);
+    const safe = () => {
+      const checked = inspectWorktree(current, commandObserver);
+      const status = runGit(current.path, ["status", "--porcelain=v1", "-z"], commandObserver);
+      const sequencer = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"].find((marker) => existsSync(runGit(current.path, ["rev-parse", "--git-path", marker], commandObserver)));
+      const probe = spawnSync("lsof", ["-n", "-Fpc0", "+D", current.path], { encoding: "buffer", stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
+      if (probe.error || probe.signal || (probe.status !== 0 && probe.status !== 1) || probe.stderr.length) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree process inventory is unavailable");
+      if (probe.stdout.toString("utf8").split("\0").some((x) => /^p\d+$/.test(x))) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree has active cwd/process");
+      if (status || sequencer || checked.registration.locked) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree must be clean, unlocked, and free of sequencers");
+      return checked;
+    };
+    if (identity.headCommit === target && current.headCommit === target) return receipt(current, observed.path);
+    if (identity.headCommit !== expected && !(identity.headCommit === target && current.headCommit === expected)) throw failure("WORKTREE_LIFECYCLE_IDENTITY_MISMATCH", "managed worktree HEAD does not match expected current HEAD");
+    safe();
+    const existing = gitSucceeds(repository.originRoot, ["show-ref", "--verify", "--quiet", recoveryRef], commandObserver)
+      ? fullCommit(repository.originRoot, recoveryRef, commandObserver) : null;
+    if (existing && existing !== expected) throw failure("WORKTREE_LIFECYCLE_IDENTITY_MISMATCH", "recovery ref has an unexpected value");
+    if (!existing) runGit(repository.originRoot, ["update-ref", recoveryRef, expected, ""], commandObserver);
+    if (identity.headCommit === target && current.headCommit === expected) {
+      safe();
+      const next = { ...current, headCommit: target, updatedAt: new Date().toISOString() };
+      atomicManifestWrite(observed.path, next, lock, { fault, operation: "reanchor-write" });
+      return receipt(next, observed.path);
+    }
+    if (current.headCommit !== expected) throw failure("WORKTREE_LIFECYCLE_IDENTITY_MISMATCH", "managed worktree HEAD does not match expected current HEAD");
+    maybeFault(fault, "reanchor-reset", "before", { path: current.path });
+    runGit(current.path, ["reset", "--hard", target], commandObserver);
+    maybeFault(fault, "reanchor-reset", "after", { path: current.path });
+    const after = safe();
+    if (after.headCommit !== target || fullCommit(repository.originRoot, current.branchRef, commandObserver) !== target) throw failure("WORKTREE_LIFECYCLE_IDENTITY_MISMATCH", "managed reanchor did not move branch and worktree to target");
+    const next = { ...current, headCommit: target, updatedAt: new Date().toISOString() };
+    atomicManifestWrite(observed.path, next, lock, { fault, operation: "reanchor-write" });
     return receipt(next, observed.path);
   } finally { releaseReceipt(lock); }
 }
