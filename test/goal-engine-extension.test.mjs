@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, renameSync, rmSync } from "node:fs";
+import { cpSync, readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, chmodSync, realpathSync, symlinkSync, renameSync, rmSync } from "node:fs";
 import { basename, join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
@@ -12,6 +12,7 @@ import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-
 import { allocateExecutorWorkspace, inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope } from "../scripts/lib/goal-engine/state-scope.mjs";
 import { findGoalExecutorCoordinator } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 
 const temporaryArena = createTemporaryArenaSync("goal-engine-extension-");
 test.after(() => temporaryArena.disposeSync());
@@ -35,7 +36,7 @@ test("external evidence classification matrix only promotes external_review from
   assert.equal(classifyGoalEvidence(externalReview).hasExternalReview, true);
 });
 
-function createMockPi(cwd, { sessionId = "session-test" } = {}) {
+function createMockPi(cwd, { sessionId = "session-test", autoSettlementEvidence = true } = {}) {
   const tools = [];
   const hooks = { tool_result: [] };
   const entries = [];
@@ -51,6 +52,7 @@ function createMockPi(cwd, { sessionId = "session-test" } = {}) {
     tools, hooks, entries, sentMessages, sessionManager,
     executorProofs: new Map(),
     executorBindingSequence: 0,
+    autoSettlementEvidence,
     executeContext: { cwd, sessionManager },
     registerTool(def) { tools.push(def); },
     on(event, handler) { (hooks[event] ||= []).push(handler); },
@@ -84,6 +86,18 @@ function objectiveToGoalId(objective) {
   return objective.toLowerCase().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 80);
 }
 
+function plannedSettlementEvidence({ goalId, taskId, runId, attempt, contractHash, head, criteria, mainSessionId }) {
+  const identity = { goalId, taskId, runId, attempt, contractHash, head };
+  const ids = criteria.map((criterion) => criterion.id);
+  const evidenceFor = (ref) => ({ identity, criteria: ids.map((id) => ({ id, status: "satisfied", evidence: [ref] })), commandsRun: [], changedFiles: ["src/a.ts"] });
+  const subagent = evidenceFor(`sha256:${"1".repeat(64)}`);
+  const main = evidenceFor(`sha256:${"2".repeat(64)}`);
+  const options = { expectedIdentity: identity, expectedCriteria: ids, outcome: "succeeded" };
+  const content = `${JSON.stringify({ main, mainSessionId, schemaVersion: "goal-engine.settlement-evidence.v1", subagent }, null, 2)}\n`;
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  return { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${sha256}.yaml`, sha256, subagentFingerprint: fingerprintSettlementEvidence(subagent, options), mainFingerprint: fingerprintSettlementEvidence(main, options), subagent, main, mainSessionId };
+}
+
 function plannedAcceptance(statements, { id = "criterion-1", evidenceKinds = ["tests"] } = {}) {
   const values = Array.isArray(statements) ? statements : [statements];
   return {
@@ -114,6 +128,32 @@ function git(cwd, ...args) {
 }
 
 async function invoke(pi, name, params = {}) {
+  if (name === "goal_settle" && params.outcome === "succeeded" && pi.autoSettlementEvidence && !params.subagent_evidence) {
+    const root = join(pi.executeContext.cwd, ".state/goal-engine");
+    const goalsDirectory = join(root, "goals");
+    const goalId = params.goal_id || (existsSync(goalsDirectory) ? readdirSync(goalsDirectory).find((entry) => existsSync(join(goalsDirectory, entry, "projection.json"))) : null);
+    const projection = goalId ? loadProjection(root, goalId) : null;
+    const task = projection?.tasks.get(params.task_id);
+    if (projection?.eventSchemaVersion === "planned.v1" && task?.executorBinding) {
+      let head;
+      try { head = git(task.workspace.path, "rev-parse", "HEAD"); } catch { head = null; }
+      if (head) {
+      const identity = { goalId: projection.goalId, taskId: params.task_id, runId: task.executorBinding.runId, attempt: task.workspace.attempt, contractHash: task.contractHash, head };
+      const criteria = task.acceptance.criteria.map(({ id }) => ({ id, status: "satisfied", evidence: [`sha256:${"1".repeat(64)}`] }));
+      const changedFiles = [task.writePaths[0]];
+      const child = { identity, criteria, commandsRun: [], changedFiles };
+      const main = { identity, criteria: criteria.map((entry) => ({ ...entry, evidence: [`sha256:${"2".repeat(64)}`] })), commandsRun: [], changedFiles };
+      const sha256 = fingerprintSettlementEvidence(child, { expectedIdentity: identity, expectedCriteria: task.acceptance.criteria.map(({ id }) => id), outcome: "succeeded" });
+      const directory = join(task.workspace.path, ".pi-subagents", "acceptance-evidence");
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      writeFileSync(git(task.workspace.path, "rev-parse", "--git-path", "info/exclude"), ".pi-subagents/\n", { flag: "a" });
+      const artifact = join(directory, `${sha256}.yaml`);
+      writeFileSync(artifact, serializeSettlementEvidenceYaml(child, { expectedIdentity: identity, expectedCriteria: task.acceptance.criteria.map(({ id }) => id), outcome: "succeeded" }), { mode: 0o600 });
+      chmodSync(artifact, 0o600);
+      params = { ...params, subagent_evidence: { sha256, content: child }, main_verification: main };
+      }
+    }
+  }
   const definition = pi.tools.find((tool) => tool.name === name);
   assert.ok(definition, `missing tool: ${name}`);
   const result = await definition.execute(
@@ -892,7 +932,7 @@ test("goal_init writes strict planned.v1 records and rejects commands atomically
 
 test("planned.v1 production lifecycle keeps every writer record in one generation", async () => {
   const cwd = tmpCwd();
-  const pi = createMockPi(cwd);
+  const pi = createMockPi(cwd, { autoSettlementEvidence: false });
   createGoalEngineExtensionProduction(pi);
   const objective = "Planned production writer lifecycle";
   const goalId = objectiveToGoalId(objective);
@@ -932,7 +972,14 @@ test("planned.v1 production lifecycle keeps every writer record in one generatio
     evidence_source: "self_produced",
     next_action: "Integrate the Planned writer fixture and verify its complete event generation",
     action_token: status.action_token,
-  }), /subagent_evidence.*main_verification|dual.*evidence/i);
+  }), /subagent_evidence|main_verification|dual.*evidence/i);
+  pi.autoSettlementEvidence = true;
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_settle", {
+    task_id: "t1", outcome: "succeeded",
+    next_action: "Integrate the Planned writer fixture and verify its complete event generation",
+    action_token: status.action_token,
+  });
   status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
   await invoke(pi, "goal_integrate", {
     task_id: "t1",
@@ -1715,12 +1762,11 @@ test("goal_settle persists settlement identity from the inspected executor HEAD"
   const settled = readGoalEvents(cwd, goalId).find((event) => event.type === "task.settled");
   assert.deepEqual({ attempt: settled.data.attempt, executorHead: settled.data.executorHead }, { attempt: dispatched.attempt, executorHead: head });
   const task = loadProjection(join(cwd, ".state/goal-engine"), goalId).tasks.get("t1");
-  assert.deepEqual(task.settlement, {
-    attempt: dispatched.attempt,
-    executorHead: head,
-    executorRunId: task.executorBinding.runId,
-    terminalProofId: task.lastExecutorProof.proofId,
-  });
+  assert.equal(task.settlement.attempt, dispatched.attempt);
+  assert.equal(task.settlement.executorHead, head);
+  assert.equal(task.settlement.executorRunId, task.executorBinding.runId);
+  assert.equal(task.settlement.terminalProofId, task.lastExecutorProof.proofId);
+  assert.ok(task.settlement.evidence);
 });
 
 test("goal_settle permits clean authorized commits with runtime-only artifacts", async () => {
@@ -3691,7 +3737,7 @@ function seedCompletedWatchingGoal(cwd, goalId = "completed-watching") {
     { schemaVersion: "planned.v1", eventId: `${goalId}-created`, goalId, occurredAt: "2026-08-05T00:00:00.000Z", type: "goal.created", data: { objective: "Watch a completed goal for related follow-ups", scope: ["src/**"], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "original", deps: [], writePaths: ["src/a.ts"], acceptance: plannedAcceptance("works"), workflow: "tdd" } } } },
     { schemaVersion: "planned.v1", eventId: `${goalId}-dispatched`, goalId, occurredAt: "2026-08-05T00:00:01.000Z", type: "task.dispatched", data: { taskId: "t1", contractHash, workspace } },
     { schemaVersion: "planned.v1", eventId: `${goalId}-executor-bound`, goalId, occurredAt: "2026-08-05T00:00:01.500Z", type: "task.executor_bound", data: { taskId: "t1", attempt: 1, runId, contractHash, asyncDir: "/tmp/completed-fixture-run", workspacePath: workspace.path, workspaceLeaseId: "d".repeat(64), headAtDispatch: baseCommit } },
-    { schemaVersion: "planned.v1", eventId: `${goalId}-settled`, goalId, occurredAt: "2026-08-05T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "src/a.ts" }, evidenceSource: "self_produced", nextAction: "Accept the original task after reviewing its evidence carefully", attempt: 1, executorHead, executorProof: { runId, proofId, rootSessionId: "root-session-fixture", observedAt: 1_700_000_000_000, outcome: "succeeded" } } },
+    { schemaVersion: "planned.v1", eventId: `${goalId}-settled`, goalId, occurredAt: "2026-08-05T00:00:02.000Z", type: "task.settled", data: { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead, executorProof: { runId, proofId, rootSessionId: "root-session-fixture", observedAt: 1_700_000_000_000, outcome: "succeeded" }, settlementEvidence: plannedSettlementEvidence({ goalId, taskId: "t1", runId, attempt: 1, contractHash, head: executorHead, criteria: plannedAcceptance("works").criteria, mainSessionId: "root-session-fixture" }) } },
     { schemaVersion: "planned.v1", eventId: `${goalId}-disposing`, goalId, occurredAt: "2026-08-05T00:00:03.000Z", type: "task.workspace_disposition_started", data: { taskId: "t1", attempt: 1, requestedAction: "integrate", strategy: "cherry-pick", executorHead, originHeadBefore: baseCommit, originRef: "refs/heads/main" } },
     { schemaVersion: "planned.v1", eventId: `${goalId}-applied`, goalId, occurredAt: "2026-08-05T00:00:04.000Z", type: "task.workspace_disposition_applied", data: { taskId: "t1", attempt: 1, action: "integrate", strategy: "cherry-pick", executorHead, originHead: "integrated-head" } },
     { schemaVersion: "planned.v1", eventId: `${goalId}-disposed`, goalId, occurredAt: "2026-08-05T00:00:05.000Z", type: "task.workspace_disposed", data: { taskId: "t1", attempt: 1, action: "integrate", released: true } },

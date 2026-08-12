@@ -18,7 +18,7 @@ import {
   formatRecoveryInjection,
   selectContinuityCandidate,
 } from "./continuity.mjs";
-import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation } from "./events.mjs";
+import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation, validateNextAction } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
 import {
   assertExecutorBindingTicketCurrent,
@@ -1116,6 +1116,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         reason: params.reason || null,
       };
       const task = projection.tasks.get(params.task_id);
+      if (params.outcome === "succeeded") validateNextAction(params.next_action);
       if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION && task) {
         let proof = null;
         try { proof = await inspectExecutorProofFn(task.executorBinding?.runId); } catch { /* mapped to a stable missing-proof boundary below */ }
@@ -1192,7 +1193,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
       }
       const { _artifact, ...eventData } = settlementData;
-      const settleEvent = makeGoalEvent("task.settled", eventData, goalId, projection);
+      const plannedEventData = projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION && params.outcome === "succeeded"
+        ? (({ taskId, outcome, attempt, executorHead, executorProof, settlementEvidence }) => ({ taskId, outcome, attempt, executorHead, executorProof, settlementEvidence }))(eventData)
+        : eventData;
+      const settleEvent = makeGoalEvent("task.settled", plannedEventData, goalId, projection);
       const cpEvent = makeGoalEvent("goal.checkpoint", { nextAction: params.next_action }, goalId, projection);
       projection = _artifact ? appendEventBatchWithSettlementEvidence(root, [settleEvent, cpEvent], projection.version, _artifact) : appendEventBatchFn(root, [settleEvent, cpEvent], projection.version);
 
