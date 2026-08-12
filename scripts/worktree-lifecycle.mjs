@@ -58,13 +58,15 @@ function escapeSingleLine(value) {
 }
 
 function print(value, json) {
-  if (json) return console.log(JSON.stringify(value));
-  const items = Array.isArray(value) ? value : value?.items;
+  const safeValue = value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "ownerToken")) : value;
+  if (json) return console.log(JSON.stringify(safeValue));
+  const items = Array.isArray(safeValue) ? safeValue : safeValue?.items;
   if (items) {
     for (const fact of items) console.log(`${fact?.state ?? "unknown"}\t${escapeSingleLine(fact?.path ?? fact?.registration?.path)}\t${fact?.automaticAction ?? "none"}`);
     return;
   }
-  console.log(`${value?.state ?? "unknown"}\t${value?.id ?? ""}\t${escapeSingleLine(value?.path)}`);
+  console.log(`${safeValue?.state ?? "unknown"}\t${safeValue?.id ?? ""}\t${escapeSingleLine(safeValue?.path)}`);
 }
 
 const parsed = (() => {
