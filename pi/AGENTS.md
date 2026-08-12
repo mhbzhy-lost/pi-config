@@ -4,7 +4,7 @@
 
 ## TDD
 
-**绝对红线**：任何产生逻辑变更的 coding，动手前必须先加载 `test-driven-development` skill 并严格执行其流程。先写实现再补测试 = 违规，回退重来。
+**绝对红线**：任何产生逻辑变更的 coding，动手前必须先加载 `test-driven-development` skill 并严格执行其流程。
 豁免：单行改动 / 纯文档变更 / 已有测试覆盖（必须显式声明豁免理由）。
 
 生产或 Skill 逻辑修改前，必须先建立 `docs/bugs/bug-*.md`，并观察对应测试为 RED。
@@ -26,6 +26,14 @@
 ## Worktree 生命周期
 
 禁止 raw `git worktree add/remove/prune/move/repair/lock/unlock`，不得猜测性 cleanup；只读 `git worktree list` 可用。创建、销毁、repair、lock 仅可经 typed Goal disposition 或 `node scripts/worktree-lifecycle.mjs ...` managed lifecycle CLI，且须 owner CAS 与明确授权。禁止 `--force` removal、raw branch cleanup；`/tmp`、TTL、clean 状态均不构成删除授权。
+
+## Bugfix
+
+遇到任何 bug/issue/incident 等非预期表现需要修复时，禁止直接修。
+必须先写 `docs/bugs/<日期>-<摘要>.md`：
+- 一句话 bug 描述
+- 复现流程
+- 修复方案
 
 ## Git Commit 规范
 
