@@ -237,6 +237,27 @@ test("keeps canonical hashes stable across object key order and sensitive to sem
   assert.notEqual(ordered.hash, differentCwd.hash);
 });
 
+test("normalizes execution.worktree false away while retaining true in the hash and prompt", () => {
+  const omitted = compileCodingDispatchIR(contract(), { cwd: "/repo" });
+  const disabled = compileCodingDispatchIR(contract({ execution: { worktree: false } }), { cwd: "/repo" });
+  const managed = compileCodingDispatchIR(contract({ execution: { worktree: true } }), { cwd: "/repo" });
+
+  assert.deepEqual(disabled.execution, omitted.execution);
+  assert.equal(omitted.hash, "0277a443fe03e26083044165b30043ecb005e00a4423f8c6cef1fcb4c55ab729");
+  assert.equal(disabled.hash, omitted.hash);
+  assert.deepEqual(managed.execution, { cwd: "/repo", timeoutMs: 900_000, worktree: true });
+  assert.notEqual(managed.hash, omitted.hash);
+  assert.match(renderCodingDispatchPrompt(managed), /Managed worktree: `true`/);
+  assert.doesNotMatch(renderCodingDispatchPrompt(disabled), /Managed worktree/);
+});
+
+test("rejects non-boolean and incorrectly layered worktree fields", () => {
+  for (const execution of [{ worktree: "true" }, { worktree: 1 }, { worktree: null }]) {
+    expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ execution }), { cwd: "/repo" }));
+  }
+  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ worktree: true }), { cwd: "/repo" }));
+});
+
 test("rejects invalid task ids, risk, timeout, array sizes, and oversized strings", () => {
   for (const taskId of ["", "contains space", "../escape", "x".repeat(161)]) {
     expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ taskId }), { cwd: "/repo" }));

@@ -169,6 +169,40 @@ test("Root broker never marks a missing process birth identity as verified owner
   assert.equal(broker.inspectExecutorProof(runId).ownership.identityState, "unavailable");
 });
 
+test("Root broker tracks a registered Generic facade leaf official proof without an Executor grant", async () => {
+  const rootSessionId = "root-generic-proof";
+  const runId = "generic-proof";
+  const grants = [];
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    writeGrant: async (grant) => { grants.push(grant); return "/tmp/nonexistent-generic-grant"; },
+  });
+  broker.registerFacadeRun({ runId, asyncDir: "/tmp/generic-proof", sessionId: rootSessionId, pid: 43210, agent: "reviewer", kind: "generic" });
+  broker.observeTerminal({ ...observedProof(runId), sessionId: rootSessionId, pid: 43210, asyncDir: "/tmp/generic-proof", agent: "reviewer" });
+
+  const proof = broker.inspectFacadeTerminalProof(runId);
+  assert.deepEqual(proof, {
+    runId,
+    state: "observed",
+    proofHash: proof.proofHash,
+    proof: observedProof(runId),
+    conflict: false,
+  });
+  assert.match(proof.proofHash, /^[a-f0-9]{64}$/);
+  assert.equal(broker.inspectExecutorProof(runId), null);
+  assert.deepEqual(grants, []);
+
+  broker.observeTerminal({ ...observedProof(runId), sessionId: rootSessionId, pid: 999, asyncDir: "/tmp/generic-proof", agent: "reviewer" });
+  broker.observeTerminal({ ...observedProof(runId), sessionId: rootSessionId, pid: 43210, asyncDir: "/tmp/foreign", agent: "reviewer" });
+  broker.observeTerminal({ ...observedProof(runId), sessionId: "foreign", pid: 43210, asyncDir: "/tmp/generic-proof", agent: "reviewer" });
+  assert.equal(broker.inspectFacadeTerminalProof(runId).conflict, false);
+  broker.observeTerminal({ ...observedProof(runId), sessionId: rootSessionId, pid: 43210, asyncDir: "/tmp/generic-proof", agent: "reviewer", observedAt: 2 });
+  assert.equal(broker.inspectFacadeTerminalProof(runId).conflict, true);
+  assert.equal(broker.inspectFacadeTerminalProof("unknown"), null);
+});
+
 test("Root broker marks conflicting official terminal proofs instead of replacing the first proof", async (t) => {
   const rootSessionId = "root-proof-conflict";
   const runId = "executor-proof-conflict";

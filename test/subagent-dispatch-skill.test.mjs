@@ -76,16 +76,26 @@ test("forbids raw worktree lifecycle bypass and speculative cleanup in coding di
   assert.match(body, /branch[\s\S]{0,100}(cleanup|清理|delete|删除)/i);
 });
 
-test("documents generic passthrough without owning runtime wait policy", async () => {
-  const { body } = await loadSkill();
+test("documents managed-worktree ABI, safe disposition, and compact valid examples", async () => {
+  const { source, body } = await loadSkill();
 
-  assert.match(body, /generic/i);
+  assert.match(body, /default.*false|false.*default/i);
+  assert.match(body, /parallel writes|explicit isolation/i);
+  assert.match(body, /Generic.*top-level.*worktree|top-level.*worktree.*Generic/i);
+  assert.match(body, /coding.*execution\.worktree|execution\.worktree.*coding/i);
+  assert.match(body, /completion.*not.*terminal|terminal.*not.*completion/i);
+  assert.match(body, /workspace_status[\s\S]{0,100}workspace_disposition/i);
+  assert.match(body, /Generic[\s\S]{0,80}(cannot|never|禁止).*integrate/i);
+  assert.match(body, /preserve[\s\S]{0,100}keep|discard[\s\S]{0,100}clean|integrate[\s\S]{0,100}writePaths/i);
+  assert.match(body, /observed.*terminal[\s\S]{0,100}(destructive|discard|integrate)/i);
+  assert.match(body, /WORKTREE_SOURCE_DIRTY/);
+  assert.match(body, /missing.*false[\s\S]{0,120}(cwd|RPC|prompt|hash)/i);
+  assert.match(body, /awaiting-disposition|long-lived/i);
   assert.match(body, /delegate/);
   assert.doesNotMatch(body, /advisor|researcher|reviewer/);
-  assert.match(body, /\{\s*agent\s*,\s*title\s*,\s*task\s*\}/);
-  assert.match(body, /title/i);
-  assert.match(body, /task.*unchanged|unchanged.*task/is);
-  assert.doesNotMatch(body, /\bstatus\b|runId|asyncDir|busy-?poll|\bsleep\b|completion notification|end the turn/i);
+  assert.match(source, /subagent\(\{\s*agent:\s*"delegate"[\s\S]{0,160}worktree:\s*true[\s\S]{0,200}\}\);/);
+  assert.match(source, /execution:\s*\{[^}]*worktree:\s*true/);
+  assert.doesNotMatch(body, /runId|asyncDir|busy-?poll|\bsleep\b|completion notification|end the turn/i);
   assert.doesNotMatch(body, /tasks\[\]|chain\[\]|fan-?out|Fable|proactive skill/i);
   assert.ok(body.trim().split(/\s+/).length <= 250, "skill body must stay within 250 words");
 });

@@ -99,13 +99,18 @@ function normalizeAcceptance(value) {
 }
 
 function normalizeExecution(value, baseCwd) {
-  const execution = validateObject(value, "execution", ["timeoutMs", "cwd"], ["timeoutMs"]);
+  const execution = validateObject(value, "execution", ["timeoutMs", "cwd", "worktree"], ["timeoutMs"]);
   if (!Number.isSafeInteger(execution.timeoutMs) || execution.timeoutMs <= 0) fail("execution.timeoutMs must be a positive safe integer");
   const root = normalizeString(baseCwd, "options.cwd");
   if (!path.isAbsolute(root) || root.includes("\0")) fail("options.cwd must be an absolute path");
   const requested = Object.hasOwn(execution, "cwd") ? normalizeString(execution.cwd, "execution.cwd") : root;
   if (requested.includes("\0")) fail("execution.cwd contains NUL");
-  return { cwd: path.resolve(root, requested), timeoutMs: execution.timeoutMs };
+  const normalized = { cwd: path.resolve(root, requested), timeoutMs: execution.timeoutMs };
+  if (Object.hasOwn(execution, "worktree")) {
+    if (typeof execution.worktree !== "boolean") fail("execution.worktree must be a boolean");
+    if (execution.worktree) normalized.worktree = true;
+  }
+  return normalized;
 }
 
 function canonicalize(value) {
@@ -185,6 +190,7 @@ export function renderDispatchPrompt(ir) {
     `- Risk: \`${ir.risk}\``,
     `- Working directory: ${JSON.stringify(ir.execution.cwd)}`,
     `- Timeout: \`${ir.execution.timeoutMs}ms\``,
+    ...(ir.execution.worktree === true ? ["- Managed worktree: `true`"] : []),
     `- Contract SHA-256: \`${ir.hash}\``,
     "",
     "## Objective",

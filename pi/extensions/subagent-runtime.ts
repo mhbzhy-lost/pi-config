@@ -102,6 +102,19 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     },
     renderSubagentResult,
     rpc,
+    resolveRootSessionId: (sessionManager: any) => resolveRootSessionId(sessionManager),
+    registerFacadeRun: (run: any) => {
+      if (!brokerReady || !broker) {
+        const error = new Error("FACADE_PROOF_UNAVAILABLE");
+        error.code = "FACADE_PROOF_UNAVAILABLE";
+        throw error;
+      }
+      broker.registerFacadeRun(run);
+    },
+    inspectFacadeTerminalProof: (runId: string) => {
+      if (!brokerReady || !broker) return { state: "unknown" };
+      try { return broker.inspectFacadeTerminalProof(runId) ?? { state: "unknown" }; } catch { return { state: "unknown" }; }
+    },
     async prepareCodingSpawn(ir: { agent: string; execution: { cwd?: string }; acceptance: { criteria: string[] } }, ticket: any) {
       if (ir.agent !== "executor") return;
       const criteria = ticket ? evidenceCriterionIds(ir.acceptance.criteria) : undefined;

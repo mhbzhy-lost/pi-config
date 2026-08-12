@@ -26,6 +26,7 @@ export function renderCodingDispatchPrompt(ir) {
     `- Risk: \`${ir.risk}\``,
     `- Working directory: ${scalar(ir.execution.cwd)}`,
     `- Timeout: \`${ir.execution.timeoutMs}ms\``,
+    ...(ir.execution.worktree === true ? ["- Managed worktree: `true`"] : []),
     `- Contract SHA-256: \`${ir.hash}\``,
     "",
     "## Objective",

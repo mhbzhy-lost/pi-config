@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -205,7 +205,7 @@ function dispatchProbeSource() {
   `;
 }
 
-test("project typed dispatch binds the real 0.45.2 workflow leaf to the Root Broker", async () => {
+test("project typed dispatch binds the real 0.45.2 workflow leaf to the Root Broker", { skip: !piBinary }, async () => {
   assert.ok(piBinary, "PI_REAL_BIN must identify the Pi 0.84.1 host used for this integration test");
   const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
@@ -228,12 +228,10 @@ test("project typed dispatch binds the real 0.45.2 workflow leaf to the Root Bro
       context: { knownFacts: ["pi-subagents is pinned to 0.45.2."], decisions: ["Bind only the leaf run."], relevantFiles: [] },
       boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
       acceptance: { criteria: ["The child returns the deterministic marker."] },
-      execution: { cwd: projectRoot, timeoutMs: 30_000 },
+      execution: { cwd: projectRoot, timeoutMs: 30_000, worktree: true },
     };
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
-    await mkdir(configRoot, { recursive: true });
-    await writeFile(provider, providerSource(contract));
-    await writeFile(dispatchProbe, dispatchProbeSource());
+    await writeFile(join(projectRoot, "README.md"), "temporary real-host fixture\n");
     await writeFile(join(projectRoot, ".pi", "agents", "executor.md"), `---
 name: executor
 description: deterministic typed workflow executor
@@ -244,6 +242,14 @@ subagentOnlyExtensions: .pi-subagents/root-session-owner-entry.mjs
 ---
 Return the deterministic child marker without modifying files.
 `);
+    await execFileAsync("git", ["init", "-q"], { cwd: projectRoot });
+    await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectRoot });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: projectRoot });
+    await execFileAsync("git", ["add", "README.md", ".pi/agents/executor.md"], { cwd: projectRoot });
+    await execFileAsync("git", ["commit", "-qm", "fixture"], { cwd: projectRoot });
+    await mkdir(configRoot, { recursive: true });
+    await writeFile(provider, providerSource(contract));
+    await writeFile(dispatchProbe, dispatchProbeSource());
 
     const result = await runRpcUntil(piBinary, [
       "--mode", "rpc", "--no-extensions",
@@ -274,6 +280,10 @@ Return the deterministic child marker without modifying files.
     const proof = probe.result.details.proof;
     assert.equal(typeof handle?.runId, "string");
     assert.equal(typeof handle?.asyncDir, "string");
+    assert.equal(typeof handle?.workspace_id, "string");
+    assert.equal(typeof handle?.dispatch_cwd, "string");
+    assert.notEqual(handle.dispatch_cwd, projectRoot);
+    assert.equal(handle.dispatch_cwd.startsWith(`${join(await realpath(projectRoot), ".state", "subagent-dispatch", "worktrees")}/`), true);
     assert.equal(proof?.ownership?.runId, handle.runId);
     assert.equal(proof.ownership.asyncDir, handle.asyncDir);
     assert.equal(proof.ownership.role, "executor");

@@ -20,6 +20,7 @@ export function createTitleRegistry({ maxEntries = 256 } = {}) {
   const pending = [];
   const titles = new Map();
   const completed = [];
+  const workflowRoots = new Map();
   const remember = (runId, title) => {
     if (typeof runId !== "string" || !runId || !title) return;
     titles.delete(runId);
@@ -45,6 +46,20 @@ export function createTitleRegistry({ maxEntries = 256 } = {}) {
       return title;
     },
     remember(runId, title) { remember(runId, normalizeSubagentTitle(title)); },
+    bindWorkflowRoot(runId) {
+      if (typeof runId !== "string" || !runId) return;
+      workflowRoots.set(runId, undefined);
+      while (workflowRoots.size > maxEntries) workflowRoots.delete(workflowRoots.keys().next().value);
+    },
+    bindWorkflowLeaf(rootRunId, leafRunId) {
+      if (typeof rootRunId !== "string" || !rootRunId || typeof leafRunId !== "string" || !leafRunId) return;
+      if (!workflowRoots.has(rootRunId)) return;
+      workflowRoots.set(rootRunId, leafRunId);
+    },
+    isFacadeWorkflowSuccess(event) {
+      const runId = event?.runId ?? event?.id;
+      return event?.success === true && typeof runId === "string" && Boolean(workflowRoots.get(runId));
+    },
     titleFor(runId) { return titles.get(runId); },
     completed(event) {
       const title = titles.get(event?.runId ?? event?.id);

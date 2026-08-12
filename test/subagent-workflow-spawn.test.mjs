@@ -31,6 +31,7 @@ function leafEvent(overrides = {}) {
     id: "leaf-run-1",
     runId: "leaf-run-1",
     asyncDir: "/tmp/leaf-run-1",
+    pid: 43210,
     sessionId: "session-1",
     agent: "executor",
     workflowKey: "typed-request-1",
@@ -177,6 +178,34 @@ test("binds a matching leaf event that arrived before the workflow root reply", 
   const binding = await collector.waitFor({ runId: "workflow-run-1" });
 
   assert.deepEqual(binding, { runId: "leaf-run-1", asyncDir: "/tmp/leaf-run-1" });
+  assert.equal(events.listenerCount("subagent:async-started"), 0);
+});
+
+test("keeps validated leaf identity private while reporting it to the internal binding hook", async () => {
+  const events = createEvents();
+  const internal = [];
+  const collector = createWorkflowChildStartCollector(events, {
+    workflowKey: "typed-request-1",
+    agent: "executor",
+    sessionId: "session-1",
+    timeoutMs: 50,
+    onBinding(binding) { internal.push(binding); },
+  });
+  const pending = collector.waitFor({ runId: "workflow-run-1" });
+  events.emit("subagent:async-started", leafEvent({ pid: 43210 }));
+
+  assert.deepEqual(await pending, { runId: "leaf-run-1", asyncDir: "/tmp/leaf-run-1" });
+  assert.deepEqual(internal, [{ runId: "leaf-run-1", asyncDir: "/tmp/leaf-run-1", sessionId: "session-1", pid: 43210, agent: "executor" }]);
+});
+
+test("buffered binding hook failure rejects within its watchdog and releases listener", async () => {
+  const events = createEvents(); const error = new Error("broker rejected identity");
+  const collector = createWorkflowChildStartCollector(events, { workflowKey: "typed-request-1", agent: "executor", sessionId: "session-1", timeoutMs: 50, onBinding() { throw error; } });
+  events.emit("subagent:async-started", leafEvent());
+  let watchdog;
+  try {
+    await assert.rejects(Promise.race([collector.waitFor({ runId: "workflow-run-1" }), new Promise((_, reject) => { watchdog = setTimeout(() => reject(new Error("buffered binding hook failure watchdog")), 50); })]), (actual) => actual === error);
+  } finally { clearTimeout(watchdog); }
   assert.equal(events.listenerCount("subagent:async-started"), 0);
 });
 

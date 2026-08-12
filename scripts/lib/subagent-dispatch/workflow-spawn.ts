@@ -92,10 +92,10 @@ function childBinding(event) {
   if (!nonempty(id) || (event?.runId !== undefined && event?.id !== undefined && event.runId !== event.id)) {
     throw new WorkflowSpawnError("WORKFLOW_CHILD_BINDING_INVALID", "workflow child start event has an invalid runId");
   }
-  if (!nonempty(event?.asyncDir)) {
-    throw new WorkflowSpawnError("WORKFLOW_CHILD_BINDING_INVALID", "workflow child start event is missing asyncDir");
+  if (!nonempty(event?.asyncDir) || !Number.isSafeInteger(event?.pid) || event.pid <= 0 || !nonempty(event?.sessionId) || !nonempty(event?.agent)) {
+    throw new WorkflowSpawnError("WORKFLOW_CHILD_BINDING_INVALID", "workflow child start event is missing validated identity");
   }
-  return { runId: id, asyncDir: event.asyncDir };
+  return { runId: id, asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid, agent: event.agent };
 }
 
 export function createWorkflowChildStartCollector(events, {
@@ -103,6 +103,7 @@ export function createWorkflowChildStartCollector(events, {
   agent: expectedAgent,
   sessionId: expectedSessionId,
   timeoutMs,
+  onBinding,
 } = {}) {
   workflowKey(expectedKey);
   if (!events || typeof events.on !== "function") throw new TypeError("workflow child collector requires an event bus");
@@ -112,6 +113,7 @@ export function createWorkflowChildStartCollector(events, {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new TypeError("workflow child collector timeoutMs must be a positive safe integer");
   }
+  if (onBinding !== undefined && typeof onBinding !== "function") throw new TypeError("workflow child collector binding hook must be a function");
 
   let rootRunId;
   let candidate;
@@ -139,9 +141,10 @@ export function createWorkflowChildStartCollector(events, {
   };
   const succeed = (binding) => {
     if (terminalError || candidate?.resolved) return;
+    try { onBinding?.({ runId: binding.runId, asyncDir: binding.asyncDir, sessionId: binding.sessionId, pid: binding.pid, agent: binding.agent }); } catch (error) { fail(error); return; }
     candidate = { ...binding, resolved: true };
     stop();
-    resolveWaiting?.(binding);
+    resolveWaiting?.({ runId: binding.runId, asyncDir: binding.asyncDir });
     rejectWaiting = undefined;
     resolveWaiting = undefined;
   };
@@ -156,7 +159,7 @@ export function createWorkflowChildStartCollector(events, {
       return;
     }
     if (candidate) {
-      if (candidate.runId !== binding.runId || candidate.asyncDir !== binding.asyncDir) {
+      if (candidate.runId !== binding.runId || candidate.asyncDir !== binding.asyncDir || candidate.sessionId !== binding.sessionId || candidate.pid !== binding.pid || candidate.agent !== binding.agent) {
         fail(new WorkflowSpawnError("WORKFLOW_CHILD_BINDING_INVALID", "workflow child start events disagree on leaf identity"));
       }
       return;
@@ -192,6 +195,7 @@ export function createWorkflowChildStartCollector(events, {
       drainingBuffered = false;
       if (terminalError) return Promise.reject(terminalError);
       if (candidate && !candidate.resolved) succeed(candidate);
+      if (terminalError) return Promise.reject(terminalError);
       if (candidate?.resolved) return Promise.resolve({ runId: candidate.runId, asyncDir: candidate.asyncDir });
       return new Promise((resolve, reject) => {
         resolveWaiting = resolve;

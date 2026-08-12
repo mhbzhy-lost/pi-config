@@ -106,6 +106,14 @@ export function inspectRootBrokerExecutorProof(pi: object, runId: string, rootSe
   return requireRootBroker(pi, rootSessionId).inspectExecutorProof(runId);
 }
 
+export function registerRootBrokerFacadeRun(pi: object, run: { runId: string; asyncDir: string; sessionId: string; pid: number; agent: string; kind: string }, rootSessionId?: string): void {
+  requireRootBroker(pi, rootSessionId).registerFacadeRun(run);
+}
+
+export function inspectRootBrokerFacadeTerminalProof(pi: object, runId: string, rootSessionId?: string) {
+  return requireRootBroker(pi, rootSessionId).inspectFacadeTerminalProof(runId);
+}
+
 export function unbindRootBroker(pi: object, broker?: RootBrokerServer): void {
   const key = registryKey(pi);
   const exact = brokers.exact.get(key);

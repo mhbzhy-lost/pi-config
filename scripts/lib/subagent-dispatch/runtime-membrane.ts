@@ -84,6 +84,7 @@ export function createHeadlessSubagentApi(pi, {
   supervisorAdapter,
   titleRegistry,
   suppressCompletionNotifications = false,
+  suppressSuccessfulCompletion,
   forceCompletionDisplay = false,
   captureSessionShutdown,
   captureSessionStart,
@@ -100,7 +101,10 @@ export function createHeadlessSubagentApi(pi, {
         return (type, payload) => target.emit(type, decorateLifecycle(type, payload, titleRegistry));
       }
       if (property === "on" && typeof captureEventSubscription === "function") {
-        return (type, handler) => captureEventSubscription(type, handler);
+        return (type, handler) => captureEventSubscription(type, (payload) => {
+          if (type === COMPLETE_EVENT && suppressSuccessfulCompletion?.(payload)) return;
+          handler(payload);
+        });
       }
       const value = Reflect.get(target, property, receiver);
       return typeof value === "function" ? value.bind(target) : value;

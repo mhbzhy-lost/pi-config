@@ -173,7 +173,7 @@ function normalizeAcceptance(value) {
 }
 
 function normalizeExecution(value, baseCwd) {
-  const execution = validateObject(value, "execution", ["timeoutMs", "cwd"], ["timeoutMs"]);
+  const execution = validateObject(value, "execution", ["timeoutMs", "cwd", "worktree"], ["timeoutMs"]);
   if (!Number.isSafeInteger(execution.timeoutMs) || execution.timeoutMs <= 0) {
     fail("INVALID_CONTRACT", "execution.timeoutMs must be a positive safe integer", "execution.timeoutMs");
   }
@@ -189,10 +189,17 @@ function normalizeExecution(value, baseCwd) {
     fail("INVALID_PATH", "execution.cwd contains NUL", "execution.cwd");
   }
 
-  return {
+  const normalized = {
     cwd: path.resolve(root, requested),
     timeoutMs: execution.timeoutMs,
   };
+  if (Object.hasOwn(execution, "worktree")) {
+    if (typeof execution.worktree !== "boolean") {
+      fail("INVALID_CONTRACT", "execution.worktree must be a boolean", "execution.worktree");
+    }
+    if (execution.worktree) normalized.worktree = true;
+  }
+  return normalized;
 }
 
 function canonicalize(value) {

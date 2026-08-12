@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
+import path from "node:path";
+import { createWorkspaceController } from "./workspace-controller.mjs";
 
 import { compileCodingDispatchIR, CodingDispatchContractError } from "./ir.ts";
 import { renderCodingDispatchPrompt } from "./prompt.ts";
@@ -13,6 +17,7 @@ const CLEANUP_KEY = "__typedSubagentRuntimeCleanup";
 const SHUTDOWN_DEBT_KEY = "__typedSubagentRuntimeShutdownDebt";
 const CODING_AGENTS = new Set(["executor", "spark"]);
 const CONTROL_ACTIONS = new Set(["status", "steer", "interrupt", "stop"]);
+const WORKSPACE_ORIGINS_KEY = "__typedSubagentWorkspaceOrigins";
 
 const stringList = {
   type: "array",
@@ -90,6 +95,7 @@ const CODING_SCHEMA = {
       properties: {
         cwd: { type: "string", minLength: 1, maxLength: 4096 },
         timeoutMs: { type: "integer", minimum: 1 },
+        worktree: { type: "boolean" },
       },
     },
   },
@@ -118,6 +124,7 @@ const GENERIC_SCHEMA = {
     acceptance: {},
     artifacts: { type: "boolean" },
     progress: { type: "boolean" },
+    worktree: { type: "boolean" },
     skill: {
       anyOf: [
         { type: "string", minLength: 1 },
@@ -132,6 +139,15 @@ const GENERIC_SCHEMA = {
       ],
     },
   },
+};
+
+const WORKSPACE_STATUS_SCHEMA = {
+  type: "object", additionalProperties: false, required: ["action", "workspace_id"],
+  properties: { action: { const: "workspace_status" }, workspace_id: { type: "string", minLength: 1, maxLength: 4096 } },
+};
+const WORKSPACE_DISPOSITION_SCHEMA = {
+  type: "object", additionalProperties: false, required: ["action", "workspace_id", "disposition", "action_token"],
+  properties: { action: { const: "workspace_disposition" }, workspace_id: { type: "string", minLength: 1, maxLength: 4096 }, disposition: { enum: ["integrate", "preserve", "discard"] }, strategy: { enum: ["cherry-pick", "merge"] }, action_token: { type: "string", minLength: 1, maxLength: 4096 } },
 };
 
 const CONTROL_SCHEMA = {
@@ -150,12 +166,12 @@ const CONTROL_SCHEMA = {
 
 export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
   type: "object",
-  anyOf: [CODING_SCHEMA, GENERIC_SCHEMA, CONTROL_SCHEMA],
+  anyOf: [CODING_SCHEMA, GENERIC_SCHEMA, CONTROL_SCHEMA, WORKSPACE_STATUS_SCHEMA, WORKSPACE_DISPOSITION_SCHEMA],
 });
 
 export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime.
 
-For executor or spark, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, and stop.`;
+For executor or spark, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, and stop. Optional worktree:true creates an isolated managed workspace. workspace_status and workspace_disposition are local workspace actions.`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 
@@ -279,31 +295,55 @@ async function spawnWorkflowLeaf(pi, rpc, {
   timeoutMs,
   params,
   identity,
+  titleRegistry,
+  onBinding,
 }) {
   const collector = createWorkflowChildStartCollector(pi.events, {
     workflowKey,
     agent,
     sessionId,
     timeoutMs,
+    onBinding,
   });
   try {
     const root = spawnBinding(await rpc.spawn(params, identity));
-    return await collector.waitFor(root);
+    titleRegistry.bindWorkflowRoot(root.runId);
+    const leaf = await collector.waitFor(root);
+    titleRegistry.bindWorkflowLeaf(root.runId, leaf.runId);
+    return leaf;
   } finally {
     collector.cancel();
   }
 }
 
-async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs) {
+function workspacePublic(value, proof) {
+  return { workspace_id: value.workspaceId, state: value.state, workspace_state: value.state, process_terminal: proof?.state ?? "unknown", ...(value.dispatchCwd ? { dispatch_cwd: value.dispatchCwd } : {}), ...(value.allowedDispositions ? { allowed_dispositions: value.allowedDispositions, ...(value.state === "active" && value.actionToken ? { action_token: value.actionToken } : {}) } : {}) };
+}
+function workspaceError(error, workspace) {
+  if (workspace?.workspaceId) {
+    const detail = error.detail ?? {};
+    error.detail = { ...detail, workspace_id: detail.workspace_id ?? workspace.workspaceId, workspace_state: detail.workspace_state ?? workspace.state };
+  }
+  return error;
+}
+function defaultCanonicalOrigin({ requestedCwd }) {
+  const cwd = realpathSync(requestedCwd);
+  return realpathSync(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" }).trim());
+}
+async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, workspace) {
   const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
   const prompt = renderCodingDispatchPrompt(ir);
-  titleRegistry.prepare({ agent: ir.agent, task: prompt, title: ir.title });
   const capabilities = await rpc.ping();
   assertSpawnCapabilities(capabilities, ctx.cwd);
   const goalCoordinator = configuredGoalCoordinator ?? findGoalExecutorCoordinator(pi);
   const bindingRequest = { toolCallId, contract: input, contractHash: ir.hash, ctx };
   const preflightTicket = await goalCoordinator?.prepareSpawn(bindingRequest);
-  await prepareCodingSpawn(ir, preflightTicket);
+  if (workspace?.requested && preflightTicket) { const error = new Error("managed workspace dispatch is unavailable for Goal-bound coding runs"); error.code = "WORKSPACE_GOAL_BOUND_FORBIDDEN"; throw error; }
+  if (workspace?.requested) workspace = await workspace.create();
+  const runtimeIr = workspace ? { ...ir, execution: { ...ir.execution, cwd: workspace.dispatchCwd, worktree: true } } : ir;
+  const runtimePrompt = workspace ? renderCodingDispatchPrompt(runtimeIr) : prompt;
+  await prepareCodingSpawn(runtimeIr, preflightTicket);
+  titleRegistry.prepare({ agent: runtimeIr.agent, task: runtimePrompt, title: runtimeIr.title });
   const executionTicket = await goalCoordinator?.prepareSpawn(bindingRequest);
   if ((preflightTicket?.ticketId ?? null) !== (executionTicket?.ticketId ?? null)) {
     const error = new Error("Goal executor binding ticket changed at execute time");
@@ -329,9 +369,12 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     agent: ir.agent,
     sessionId: lifecycleSessionIdentity(capabilities.session),
     timeoutMs: workflowChildStartTimeoutMs ?? ir.execution.timeoutMs,
-    params: codingWorkflowSpawnParams(ir, prompt, workflowKey),
+    params: codingWorkflowSpawnParams(runtimeIr, runtimePrompt, workflowKey),
     identity,
+    titleRegistry,
+    onBinding: workspace?.onBinding,
   });
+  if (workspace) workspace.controller.bindManagedSubagentWorkspaceRun({ originRoot: workspace.originRoot, workspaceId: workspace.workspaceId }, binding);
   if (executionTicket) await goalCoordinator.bindSpawn(executionTicket, binding);
   titleRegistry.remember(binding.runId, ir.title);
   const handle = {
@@ -342,6 +385,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     title: ir.title,
     contractHash: ir.hash,
     ...binding,
+    ...(workspace ? workspacePublic(workspace) : {}),
   };
   return {
     content: [{ type: "text", text: `Started ${handle.agent}: ${handle.title} (${handle.runId}). ${ASYNC_SPAWN_GUIDANCE}` }],
@@ -350,7 +394,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   };
 }
 
-async function executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs) {
+async function executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs, workspace) {
   if (CODING_AGENTS.has(input.agent)) {
     return failure(
       "CODING_CONTRACT_REQUIRED",
@@ -363,6 +407,7 @@ async function executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, work
   const title = normalizeSubagentTitle(input.title);
   const capabilities = await rpc.ping();
   assertSpawnCapabilities(capabilities, ctx.cwd);
+  if (workspace?.requested) workspace = await workspace.create();
   titleRegistry.prepare({ agent: input.agent, task: input.task, title });
   const workflowKey = `typed-${createId()}`;
   const binding = await spawnWorkflowLeaf(pi, rpc, {
@@ -370,14 +415,66 @@ async function executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, work
     agent: input.agent,
     sessionId: lifecycleSessionIdentity(capabilities.session),
     timeoutMs: input.timeoutMs ?? workflowChildStartTimeoutMs ?? 120_000,
-    params: genericWorkflowSpawnParams(input, ctx, workflowKey),
+    params: genericWorkflowSpawnParams(workspace ? { ...input, cwd: workspace.dispatchCwd } : input, ctx, workflowKey),
+    titleRegistry,
+    onBinding: workspace?.onBinding,
   });
+  if (workspace) workspace.controller.bindManagedSubagentWorkspaceRun({ originRoot: workspace.originRoot, workspaceId: workspace.workspaceId }, binding);
   titleRegistry.remember(binding.runId, title);
   return {
     content: [{ type: "text", text: `Started ${input.agent}: ${title} (${binding.runId}). ${ASYNC_SPAWN_GUIDANCE}` }],
     isError: false,
-    details: { ...binding, agent: input.agent, title },
+    details: { ...binding, agent: input.agent, title, ...(workspace ? workspacePublic(workspace) : {}) },
   };
+}
+
+function workspaceOrigins(cleanupStore) {
+  if (!(cleanupStore[WORKSPACE_ORIGINS_KEY] instanceof Map)) cleanupStore[WORKSPACE_ORIGINS_KEY] = new Map();
+  return cleanupStore[WORKSPACE_ORIGINS_KEY];
+}
+function managedWorkspace({ input, ctx, toolCallId, kind, controller, origins, resolveRootSessionId, registerFacadeRun, contractHash, createId, resolveCanonicalOrigin }) {
+  const rawCwd = kind === "generic" ? input.cwd ?? ctx.cwd : input.execution.cwd ?? ctx.cwd;
+  const requestedCwd = path.resolve(ctx.cwd, rawCwd);
+  let allocatedWorkspace;
+  return { requested: true, get workspaceId() { return allocatedWorkspace?.workspaceId; }, get state() { return allocatedWorkspace?.state; }, async create() {
+    if (typeof resolveRootSessionId !== "function") { const error = new Error("WORKSPACE_SESSION_ID_UNAVAILABLE"); error.code = "WORKSPACE_SESSION_ID_UNAVAILABLE"; throw error; }
+    if (typeof registerFacadeRun !== "function") { const error = new Error("FACADE_PROOF_UNAVAILABLE"); error.code = "FACADE_PROOF_UNAVAILABLE"; throw error; }
+    const rootSessionId = resolveRootSessionId(ctx.sessionManager);
+    if (!nonempty(rootSessionId)) { const error = new Error("WORKSPACE_SESSION_ID_UNAVAILABLE"); error.code = "WORKSPACE_SESSION_ID_UNAVAILABLE"; throw error; }
+    const originRoot = await resolveCanonicalOrigin({ requestedCwd, ctx });
+    let allocated;
+    try { allocated = controller.allocateManagedSubagentWorkspace({ workspaceId: createId(), kind, originRoot, requestedCwd, rootSessionId, toolCallId, contractHash, writePaths: kind === "coding" ? input.boundaries.writePaths : null }); }
+    catch (error) { if (error?.detail) error.detail = { workspace_id: error.detail.workspaceId, workspace_state: error.detail.state }; throw error; }
+    origins.set(allocated.workspaceId, originRoot);
+    allocatedWorkspace = allocated;
+    return { ...allocated, originRoot, controller, onBinding(binding) { registerFacadeRun({ ...binding, kind }); } };
+  } };
+}
+async function executeWorkspaceAction(input, ctx, controller, origins, inspectFacadeTerminalProof, resolveCanonicalOrigin) {
+  if (input.action === "workspace_disposition" && input.strategy !== undefined && input.disposition !== "integrate") {
+    return failure("INVALID_WORKSPACE_STRATEGY", "strategy is only valid for integrate");
+  }
+  let originRoot = origins.get(input.workspace_id);
+  if (!originRoot) {
+    try { originRoot = await resolveCanonicalOrigin({ requestedCwd: ctx.cwd, ctx }); } catch { return failure("WORKSPACE_NOT_FOUND", "workspace origin is unavailable"); }
+  }
+  if (!originRoot) return failure("WORKSPACE_NOT_FOUND", "workspace origin is unavailable");
+  let loaded;
+  try {
+    if (typeof controller.loadManagedSubagentWorkspace !== "function") return failure("WORKSPACE_NOT_FOUND", "workspace loader is unavailable");
+    loaded = await controller.loadManagedSubagentWorkspace({ originRoot, workspaceId: input.workspace_id });
+  } catch {
+    return failure("WORKSPACE_NOT_FOUND", "workspace is unavailable");
+  }
+  origins.set(input.workspace_id, originRoot);
+  let proof = { state: "unknown" };
+  if (loaded.runId) {
+    try { proof = (await inspectFacadeTerminalProof?.(loaded.runId)) ?? proof; } catch { return failure("WORKSPACE_PROOF_UNAVAILABLE", "workspace terminal proof is unavailable"); }
+  }
+  const value = input.action === "workspace_status"
+    ? controller.statusManagedSubagentWorkspace({ originRoot, workspaceId: input.workspace_id, terminalProof: proof })
+    : controller.disposeManagedSubagentWorkspace({ originRoot, workspaceId: input.workspace_id, disposition: input.disposition, strategy: input.strategy ?? "cherry-pick", actionToken: input.action_token, terminalProof: proof });
+  return { content: [{ type: "text", text: `Workspace ${value.workspaceId}: ${value.state}` }], isError: false, details: workspacePublic(value, proof) };
 }
 
 async function executeControl(input, rpc) {
@@ -535,6 +632,11 @@ export function createTypedSubagentExtension(
     afterBeforeDispose = async () => {},
     beforeSessionStart = async () => {},
     onSupervisorRequest,
+    workspaceController = createWorkspaceController(),
+    resolveRootSessionId,
+    registerFacadeRun,
+    inspectFacadeTerminalProof,
+    resolveCanonicalOrigin = defaultCanonicalOrigin,
   } = {},
 ) {
   // Durable debt retention supersedes this legacy opt-in; retain it for callers on the old API.
@@ -601,9 +703,16 @@ export function createTypedSubagentExtension(
     async execute(toolCallId, input, _signal, _onUpdate, ctx) {
       try {
         if (!isRecord(input)) return failure("INVALID_DISPATCH", "subagent input must be an object");
+        const origins = workspaceOrigins(cleanupStore);
+        if (input.action === "workspace_status" || input.action === "workspace_disposition") return await executeWorkspaceAction(input, ctx, workspaceController, origins, inspectFacadeTerminalProof, resolveCanonicalOrigin);
         if (Object.hasOwn(input, "action")) return await executeControl(input, rpc);
-        if (Object.hasOwn(input, "version")) return await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs);
-        return await executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs);
+        if (Object.hasOwn(input, "version")) {
+          const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
+          const workspace = ir.execution.worktree ? managedWorkspace({ input, ctx, toolCallId, kind: "coding", controller: workspaceController, origins, resolveRootSessionId, registerFacadeRun, contractHash: ir.hash, createId, resolveCanonicalOrigin }) : undefined;
+          try { return await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs, workspace); } catch (error) { throw workspaceError(error, workspace); }
+        }
+        const workspace = input.worktree === true ? managedWorkspace({ input, ctx, toolCallId, kind: "generic", controller: workspaceController, origins, resolveRootSessionId, registerFacadeRun, createId, resolveCanonicalOrigin }) : undefined;
+        try { return await executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs, workspace); } catch (error) { throw workspaceError(error, workspace); }
       } catch (error) {
         const code = error?.code
           ?? (error instanceof CodingDispatchContractError ? error.code : "SUBAGENT_RPC_FAILED");
@@ -825,7 +934,12 @@ export function installHeadlessTypedSubagentRuntime(pi, {
       }
       notificationState = { currentSessionId: null };
       completionNotifier = completionNotifierFactory(
-        createHeadlessSubagentApi(pi, { titleRegistry, forceCompletionDisplay: true, captureEventSubscription }),
+        createHeadlessSubagentApi(pi, {
+          titleRegistry,
+          forceCompletionDisplay: true,
+          suppressSuccessfulCompletion(event) { return titleRegistry.isFacadeWorkflowSuccess?.(event) === true; },
+          captureEventSubscription,
+        }),
         notificationState,
       );
       if (!completionNotifier || typeof completionNotifier.dispose !== "function") {

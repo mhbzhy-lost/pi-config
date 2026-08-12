@@ -35,6 +35,27 @@ test("compileCodingDispatchIR validates and hashes", () => {
   assert.ok(/^[a-f0-9]{64}$/.test(ir.hash));
 });
 
+test("mirrors execution.worktree normalization, hashing, and prompt rendering", () => {
+  const omitted = compileCodingDispatchIR(validInput(), { cwd: "/workspace/project" });
+  const disabled = compileCodingDispatchIR(validInput({ execution: { cwd: "/workspace/project", timeoutMs: 1800000, worktree: false } }), { cwd: "/workspace/project" });
+  const managed = compileCodingDispatchIR(validInput({ execution: { cwd: "/workspace/project", timeoutMs: 1800000, worktree: true } }), { cwd: "/workspace/project" });
+
+  assert.deepEqual(disabled.execution, omitted.execution);
+  assert.equal(disabled.hash, omitted.hash);
+  assert.deepEqual(managed.execution, { cwd: "/workspace/project", timeoutMs: 1800000, worktree: true });
+  assert.notEqual(managed.hash, omitted.hash);
+  assert.match(renderDispatchPrompt(managed), /Managed worktree: `true`/);
+  assert.doesNotMatch(renderDispatchPrompt(disabled), /Managed worktree/);
+});
+
+test("rejects non-boolean and incorrectly layered worktree fields", () => {
+  for (const worktree of ["true", 1, null]) {
+    const execution = { cwd: "/workspace/project", timeoutMs: 1800000, worktree };
+    assert.throws(() => compileCodingDispatchIR(validInput({ execution }), { cwd: "/workspace/project" }), /execution\.worktree must be a boolean/);
+  }
+  assert.throws(() => compileCodingDispatchIR(validInput({ worktree: true }), { cwd: "/workspace/project" }), /unknown field worktree/);
+});
+
 test("splitDispatchEnvelope separates the hash from the exact subagent typed contract", () => {
   const ir = compileCodingDispatchIR(validInput(), { cwd: "/workspace/project" });
 

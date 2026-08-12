@@ -32,6 +32,14 @@ type OwnedRun = {
   identityState: "verified" | "unavailable" | "conflict";
 };
 type StartedFacts = Pick<OwnedRun, "runId" | "role" | "asyncDir" | "sessionId" | "pid">;
+type FacadeRun = {
+  runId: string;
+  asyncDir: string;
+  sessionId: string;
+  pid: number;
+  agent: string;
+  kind: string;
+};
 type Dependencies = {
   writeGrant?: typeof writeBrokerGrant;
   randomToken?: () => string;
@@ -87,6 +95,7 @@ export class RootBrokerServer {
   grantPaths = new Set<string>();
   executorGrants = new Map<string, Promise<{ callerToken: string }>>();
   ownedRuns = new Map<string, OwnedRun>();
+  facadeRuns = new Map<string, FacadeRun>();
   terminalProofs = new Map<string, any>();
   terminalConflicts = new Set<string>();
   forcePendingRuns = new Set<string>();
@@ -187,6 +196,24 @@ export class RootBrokerServer {
     return { runId, role: "executor", asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid };
   }
 
+  registerFacadeRun(value: any): void {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || typeof value.runId !== "string" || value.runId.length === 0
+      || typeof value.asyncDir !== "string" || !path.isAbsolute(value.asyncDir)
+      || typeof value.sessionId !== "string" || value.sessionId !== this.lifecycleSessionId
+      || !Number.isSafeInteger(value.pid) || value.pid <= 0
+      || typeof value.agent !== "string" || value.agent.length === 0
+      || typeof value.kind !== "string" || value.kind.length === 0) {
+      throw new Error("Facade run identity is invalid");
+    }
+    const incoming: FacadeRun = { runId: value.runId, asyncDir: value.asyncDir, sessionId: value.sessionId, pid: value.pid, agent: value.agent, kind: value.kind };
+    const existing = this.facadeRuns.get(incoming.runId);
+    if (existing && (existing.asyncDir !== incoming.asyncDir || existing.sessionId !== incoming.sessionId || existing.pid !== incoming.pid || existing.agent !== incoming.agent || existing.kind !== incoming.kind)) {
+      throw new Error("Facade run identity conflicts");
+    }
+    this.facadeRuns.set(incoming.runId, existing ?? incoming);
+  }
+
   observeStarted(event: any): Promise<void> {
     const facts = this.startedFacts(event);
     if (!facts) return Promise.resolve();
@@ -197,6 +224,7 @@ export class RootBrokerServer {
       }
       return this.startedObservations.get(facts.runId) ?? Promise.resolve();
     }
+    this.registerFacadeRun({ ...facts, agent: event.agent, kind: "coding" });
     const initial: OwnedRun = { rootSessionId: this.rootSessionId, ...facts, birthIdentity: null, identityState: "unavailable" };
     this.ownedRuns.set(facts.runId, initial);
     const observation = (async () => {
@@ -220,15 +248,18 @@ export class RootBrokerServer {
     return observation.catch(() => undefined);
   }
 
-  acceptTerminalProof(run: OwnedRun, value: any) {
+  acceptTerminalProof(run: FacadeRun, value: any) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid official terminal: proof must be an object");
     if (typeof value.runId !== "string" || value.runId !== run.runId) {
       throw new Error(`official terminal runId mismatch: expected ${run.runId}, actual ${String(value.runId)}`);
     }
-    const { runId: _runId, ...terminal } = value;
+    for (const key of ["sessionId", "pid", "asyncDir", "agent"]) {
+      if (value[key] !== undefined && value[key] !== run[key as keyof FacadeRun]) throw new Error(`official terminal ${key} mismatch`);
+    }
+    const { runId: _runId, sessionId: _sessionId, pid: _pid, asyncDir: _asyncDir, agent: _agent, ...terminal } = value;
     try { parseProcessTerminal(terminal); } catch (error) { throw new Error(`invalid official terminal: ${error instanceof Error ? error.message : String(error)}`); }
     if (terminal.state !== "observed") throw new Error(`official terminal is non-observed (${String(terminal.state)})`);
-    const accepted = frozen(structuredClone(value));
+    const accepted = frozen(structuredClone({ runId: run.runId, ...terminal }));
     const existing = this.terminalProofs.get(run.runId);
     if (existing) {
       if (proofId(existing) !== proofId(accepted)) this.terminalConflicts.add(run.runId);
@@ -242,9 +273,16 @@ export class RootBrokerServer {
   }
 
   observeTerminal(event: any) {
-    const run = typeof event?.runId === "string" ? this.ownedRuns.get(event.runId) : undefined;
+    const run = typeof event?.runId === "string" ? this.facadeRuns.get(event.runId) : undefined;
     if (!run) return;
     try { this.acceptTerminalProof(run, event); } catch { /* strict official proof is the only authority */ }
+  }
+
+  inspectFacadeTerminalProof(runId: string) {
+    const run = this.facadeRuns.get(runId);
+    if (!run) return null;
+    const proof = this.terminalProofs.get(runId) ?? null;
+    return frozen({ runId, state: proof ? "observed" : "pending", proofHash: proof ? proofId(proof) : null, proof, conflict: this.terminalConflicts.has(runId) });
   }
 
   inspectExecutorProof(runId: string) {

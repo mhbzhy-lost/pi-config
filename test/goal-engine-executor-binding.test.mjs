@@ -339,6 +339,7 @@ function workflowSpawnReply(pi, params, { runId, asyncDir, agent, sessionId = "/
     runId,
     asyncDir,
     sessionId,
+    pid: 1,
     agent: workflowAgent,
     workflowKey,
     parentWorkflowRunId: workflowRunId,

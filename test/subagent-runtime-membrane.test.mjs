@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createHeadlessSubagentApi } from "../scripts/lib/subagent-dispatch/runtime-membrane.ts";
+import { createTitleRegistry } from "../scripts/lib/subagent-dispatch/title-registry.ts";
 import {
   createSupervisorRequestMailbox,
   createTypedSubagentExtension,
@@ -468,7 +469,7 @@ test("project subagent schema exposes an object root to OpenAI-compatible provid
 
   const schema = pi.tools[0].parameters;
   assert.equal(schema.type, "object");
-  assert.equal(schema.anyOf.length, 3);
+  assert.equal(schema.anyOf.length, 5);
   for (const [index, branch] of schema.anyOf.entries()) {
     assert.equal(branch.type, "object", `anyOf branch ${index} must expose an object root`);
   }
@@ -559,6 +560,116 @@ test("headless installation wires the title-aware completion notifier to session
   assert.equal(notifierDisposals, 1);
 });
 
+test("production upstream completion emits decorate each same-agent leaf once", async () => {
+  const pi = createPi();
+  const registry = createTitleRegistry();
+  const delivered = [];
+  let upstreamApi;
+
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) {
+      upstreamApi = api;
+      api.registerTool({ name: "subagent_supervisor", execute() {} });
+    },
+    titleRegistry: registry,
+    rpc: createRpc(),
+    cleanupStore: {},
+    resolveSessionId(sessionManager) { return sessionManager.id; },
+    completionNotifierFactory(api) {
+      const unsubscribe = api.events.on("subagent:async-complete", (event) => {
+        delivered.push(event.title);
+        api.sendMessage({
+          customType: "subagent-notify",
+          content: `Background task completed: **${event.agent}**`,
+        });
+      });
+      return { dispose: unsubscribe };
+    },
+  });
+  for (const handler of pi.handlers.get("session_start") ?? []) {
+    await handler({}, { sessionManager: { id: "session-1" } });
+  }
+
+  registry.prepare({ agent: "delegate", task: "first", title: "First task" });
+  upstreamApi.events.emit("subagent:async-started", { runId: "leaf-1", agent: "delegate", task: "first" });
+  registry.prepare({ agent: "delegate", task: "second", title: "Second task" });
+  upstreamApi.events.emit("subagent:async-started", { runId: "leaf-2", agent: "delegate", task: "second" });
+  upstreamApi.events.emit("subagent:async-complete", { runId: "leaf-1", agent: "delegate", success: true });
+  upstreamApi.events.emit("subagent:async-complete", { runId: "leaf-2", agent: "delegate", success: true });
+
+  assert.deepEqual(delivered, ["First task", "Second task"]);
+  assert.match(pi.messages[0].content, /\*\*delegate\*\* \[First task\]/);
+  assert.match(pi.messages[1].content, /\*\*delegate\*\* \[Second task\]/);
+  assert.equal(registry.takeCompleted("delegate"), undefined, "each completion must enqueue one title only");
+});
+
+test("confirmed facade workflow success is filtered before the completion notifier while its leaf remains visible", async () => {
+  const pi = createPi();
+  const registry = createTitleRegistry();
+  const delivered = [];
+  let upstreamApi;
+  const rpc = createRpc();
+  rpc.spawn = async () => {
+    upstreamApi.events.emit("subagent:async-started", {
+      id: "leaf-run-1", runId: "leaf-run-1", asyncDir: "/tmp/leaf-run-1",
+      sessionId: "/tmp/session.jsonl", pid: 101, agent: "reviewer", workflowKey: "typed-notify-1", parentWorkflowRunId: "workflow-root-1",
+    });
+    return { details: { runId: "workflow-root-1", asyncDir: "/tmp/workflow-root-1" } };
+  };
+
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) {
+      upstreamApi = api;
+      api.registerTool({ name: "subagent_supervisor", execute() {} });
+    },
+    titleRegistry: registry,
+    rpc,
+    cleanupStore: {},
+    randomUUID: () => "notify-1",
+    resolveSessionId(sessionManager) { return sessionManager.id; },
+    completionNotifierFactory(api) {
+      const unsubscribe = api.events.on("subagent:async-complete", (event) => {
+        delivered.push(event.runId);
+        api.sendMessage({
+          customType: "subagent-notify",
+          content: `Background task completed: **${event.agent}**\n\n${event.summary}`,
+        }, { triggerTurn: true });
+      });
+      return { dispose: unsubscribe };
+    },
+  });
+  for (const handler of pi.handlers.get("session_start") ?? []) {
+    await handler({}, { sessionManager: { id: "session-1" } });
+  }
+
+  const started = await execute(pi.tools.find((tool) => tool.name === "subagent"), {
+    agent: "reviewer", title: "真实业务", task: "交付业务摘要",
+  });
+  assert.equal(started.isError, false);
+  assert.equal(started.details.runId, "leaf-run-1");
+
+  upstreamApi.events.emit("subagent:async-complete", {
+    runId: "workflow-root-1", agent: "workflow", success: true, sessionId: "session-1", summary: "Async: delegate [leaf-run-1]",
+  });
+  assert.deepEqual(delivered, [], "the wrapper must not enter completion batching");
+  assert.deepEqual(pi.messages, [], "the wrapper must not send or trigger the main Agent");
+
+  upstreamApi.events.emit("subagent:async-complete", {
+    runId: "leaf-run-1", agent: "delegate", success: true, sessionId: "session-1", summary: "业务摘要",
+  });
+  assert.deepEqual(delivered, ["leaf-run-1"]);
+  assert.equal(pi.messages.length, 1);
+  assert.match(pi.messages[0].content, /\*\*delegate\*\* \[真实业务\]/);
+  assert.match(pi.messages[0].content, /业务摘要/);
+
+  upstreamApi.events.emit("subagent:async-complete", { runId: "user-workflow", agent: "workflow", success: true, sessionId: "session-1", summary: "用户 workflow" });
+  for (const state of ["failed", "paused", "stopped"]) {
+    upstreamApi.events.emit("subagent:async-complete", { runId: "workflow-root-1", agent: "workflow", success: false, state, sessionId: "session-1", summary: state });
+  }
+  assert.deepEqual(delivered, ["leaf-run-1", "user-workflow", "workflow-root-1", "workflow-root-1", "workflow-root-1"]);
+  assert.equal(pi.messages.length, 5, "unrelated workflow and internal non-success states remain visible");
+});
+
 test("executor and spark reject free-form task dispatch before RPC", async () => {
   const pi = createPi();
   const rpc = createRpc();
@@ -583,7 +694,7 @@ test("compiles a coding contract into one workflow root and returns its correlat
       runId: "leaf-run-1",
       asyncDir: "/tmp/leaf-run-1",
       sessionId: "/tmp/session.jsonl",
-      agent: "executor",
+      agent: "executor", pid: 102,
       workflowKey: "typed-dispatch-1",
       parentWorkflowRunId: "workflow-run-1",
     });
@@ -641,7 +752,7 @@ test("compiles a non-coding agent prompt into one workflow leaf without rewritin
       runId: "leaf-review-1",
       asyncDir: "/tmp/leaf-review-1",
       sessionId: "/tmp/session.jsonl",
-      agent: "reviewer",
+      agent: "reviewer", pid: 103,
       workflowKey: "typed-generic-1",
       parentWorkflowRunId: "workflow-review-1",
     });
@@ -684,7 +795,7 @@ test("uses a bounded fallback while waiting for a generic leaf without input tim
     rpc.calls.push({ method: "spawn", params });
     pi.events.emit("subagent:async-started", {
       id: "fallback-leaf-1", runId: "fallback-leaf-1", asyncDir: "/tmp/fallback-leaf-1",
-      sessionId: "/tmp/session.jsonl", agent: "reviewer", workflowKey: "typed-fallback-1", parentWorkflowRunId: "workflow-fallback-1",
+      sessionId: "/tmp/session.jsonl", pid: 104, agent: "reviewer", workflowKey: "typed-fallback-1", parentWorkflowRunId: "workflow-fallback-1",
     });
     return { details: { runId: "workflow-fallback-1", asyncDir: "/tmp/workflow-fallback-1" } };
   };
@@ -739,7 +850,7 @@ test("uses persistent sessionFile identity for workflow leaf correlation and fal
       this.calls.push({ method: "spawn", params });
       persistentPi.events.emit("subagent:async-started", {
         id: "persistent-leaf", runId: "persistent-leaf", asyncDir: "/tmp/persistent-leaf",
-        sessionId: "/var/sessions/persistent.jsonl", agent: "executor",
+        sessionId: "/var/sessions/persistent.jsonl", pid: 105, agent: "executor",
         workflowKey: "typed-persistent-1", parentWorkflowRunId: "persistent-root",
       });
       return { details: { runId: "persistent-root", asyncDir: "/tmp/persistent-root" } };
@@ -759,7 +870,7 @@ test("uses persistent sessionFile identity for workflow leaf correlation and fal
       this.calls.push({ method: "spawn", params });
       noSessionPi.events.emit("subagent:async-started", {
         id: "no-session-leaf", runId: "no-session-leaf", asyncDir: "/tmp/no-session-leaf",
-        sessionId: "no-session-id", agent: "executor",
+        sessionId: "no-session-id", pid: 106, agent: "executor",
         workflowKey: "typed-no-session-1", parentWorkflowRunId: "no-session-root",
       });
       return { details: { runId: "no-session-root", asyncDir: "/tmp/no-session-root" } };
@@ -798,7 +909,7 @@ test("uses the coding IR deadline when a delayed leaf exceeds the former fixed s
         runId: "delayed-leaf-1",
         asyncDir: "/tmp/delayed-leaf-1",
         sessionId: "/tmp/session.jsonl",
-        agent: "executor",
+        agent: "executor", pid: 107,
         workflowKey: "typed-delayed-1",
         parentWorkflowRunId: "workflow-delayed-1",
       }), 35);
