@@ -6,7 +6,7 @@
   "hideThinkingBlock": true,
   "packages": [
     {
-      "source": "npm:pi-subagents@0.37.2",
+      "source": "npm:pi-subagents@0.45.2",
       "extensions": [],
       "skills": [],
       "prompts": [],
