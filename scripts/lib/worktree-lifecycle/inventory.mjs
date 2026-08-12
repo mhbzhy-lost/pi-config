@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -273,13 +274,15 @@ function manifests(root, repo, probe, observer) {
         try {
           const st = lstatSync(file);
           if (!st.isFile() || st.isSymbolicLink()) throw 0;
-          const m = JSON.parse(readFileSync(file, "utf8"));
+          const bytes = readFileSync(file);
+          const m = JSON.parse(bytes.toString("utf8"));
+          const digest = createHash("sha256").update(bytes).digest("hex");
           if (m.schemaVersion === 1)
             return validLegacyManifest(m, name)
-              ? { manifest: m, name, legacy: true }
+              ? { manifest: m, name, legacy: true, digest }
               : { invalid: true, name };
           return validManifest(m, name, repo, st.mode & 0o777, probe, observer)
-            ? { manifest: m, name }
+            ? { manifest: m, name, digest }
             : { invalid: true, name };
         } catch {
           return { invalid: true, name };
@@ -721,7 +724,145 @@ async function inspectRepositoryWorktrees({
         headCommit: manifest.headCommit,
       },
     }));
-  return { repo, items: facts, candidates };
+  return { repo, items: facts, candidates, registrations: regs, manifests: es };
+}
+
+function cleanupSnapshot(inspected, probe, commandObserver) {
+  const { repo, registrations = [], manifests = [] } = inspected;
+  if (!repo) return null;
+  // An unreadable or invalid receipt cannot safely be treated as "no owner".
+  if (manifests.some((entry) => entry.invalid)) {
+    const error = new Error("Owner manifest inventory is invalid");
+    error.code = "WORKTREE_STALE_REGISTRATION_MANIFEST_INVALID";
+    throw error;
+  }
+  const owners = new Set(manifests.map((entry) => resolve(entry.manifest.path)));
+  const registrationsSnapshot = registrations.map((registration) => ({
+    path: resolve(registration.path),
+    HEAD: registration.HEAD === true ? true : registration.HEAD ?? null,
+    branch: registration.branch === true ? true : registration.branch ?? null,
+    // Preserve porcelain's reason verbatim: it is authorization material.
+    prunable: registration.prunable ?? null,
+  })).sort((a, b) => a.path.localeCompare(b.path));
+  const candidates = registrationsSnapshot.filter((registration) =>
+    registration.path !== repo.root && !existsSync(registration.path) &&
+    typeof registration.prunable === "string" && registration.prunable && !owners.has(registration.path),
+  ).map((registration) => {
+    if (registration.branch === null) return registration;
+    if (typeof registration.branch !== "string" || !registration.branch.startsWith("refs/heads/")) {
+      const error = new Error("Candidate branch is not a local branch or detached HEAD");
+      error.code = "WORKTREE_STALE_REGISTRATION_EXACTNESS_FAILED";
+      throw error;
+    }
+    const branch = run(repo.root, ["rev-parse", "--verify", `${registration.branch}^{commit}`], "cleanup-branch", probe, commandObserver);
+    if (!branch.ok) {
+      const error = new Error("Candidate branch cannot be resolved");
+      error.code = "WORKTREE_STALE_REGISTRATION_EXACTNESS_FAILED";
+      throw error;
+    }
+    return { ...registration, branchHead: branch.stdout.trim() };
+  });
+  const ownerManifests = manifests.map(({ name, digest }) => ({ name, digest })).sort((a, b) => a.name.localeCompare(b.name));
+  return { originRoot: repo.root, gitCommonDir: repo.common, registrations: registrationsSnapshot, candidates, ownerManifests };
+}
+function challengeFor(snapshot) {
+  return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+}
+/** Plan migration-only removal of abandoned Git administrative registrations. */
+export async function planStaleRegistrationCleanup(options = {}) {
+  const inspected = await inspectRepositoryWorktreesSafe(options);
+  const snapshot = cleanupSnapshot(inspected, options.probe, options.commandObserver);
+  if (!snapshot) {
+    const error = new Error("Repository inventory is unavailable");
+    error.code = "WORKTREE_STALE_REGISTRATION_INVENTORY_FAILED";
+    throw error;
+  }
+  return { apply: false, originRoot: snapshot.originRoot, gitCommonDir: snapshot.gitCommonDir,
+    candidates: snapshot.candidates, snapshot, snapshotChallenge: challengeFor(snapshot) };
+}
+/** Apply only the exact, freshly challenged migration plan. */
+export async function applyStaleRegistrationCleanup({ originRoot, challenge, probe, commandObserver } = {}) {
+  if (!/^[a-f0-9]{64}$/.test(challenge ?? "")) {
+    const error = new Error("A 64-character lowercase snapshot challenge is required");
+    error.code = "WORKTREE_STALE_REGISTRATION_CHALLENGE_REQUIRED";
+    throw error;
+  }
+  const before = await planStaleRegistrationCleanup({ originRoot, probe, commandObserver });
+  if (before.snapshotChallenge !== challenge) {
+    const error = new Error("Snapshot challenge does not match the current inventory");
+    error.code = "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH";
+    throw error;
+  }
+  if (!before.candidates.length) {
+    const gate = await planStaleRegistrationCleanup({ originRoot, probe, commandObserver });
+    if (gate.snapshotChallenge !== challenge) {
+      const error = new Error("Cleanup inventory changed before completion");
+      error.code = "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH";
+      throw error;
+    }
+    return { ...before, apply: true, removed: [] };
+  }
+  const gate = await planStaleRegistrationCleanup({ originRoot, probe, commandObserver });
+  if (gate.snapshotChallenge !== challenge) {
+    const error = new Error("Cleanup inventory changed before removal");
+    error.code = "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH";
+    throw error;
+  }
+  const refs = run(before.originRoot, ["show-ref"], "cleanup-refs", probe, commandObserver);
+  const mainHead = run(before.originRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "cleanup-head", probe, commandObserver);
+  const status = run(before.originRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], "cleanup-status", probe, commandObserver);
+  if (![refs, mainHead, status].every((x) => x.ok)) {
+    const error = new Error("Unable to establish cleanup invariants"); error.code = "WORKTREE_STALE_REGISTRATION_INVENTORY_FAILED"; throw error;
+  }
+  // Recheck after invariant probes: observers may expose a last-moment race.
+  const finalGate = await planStaleRegistrationCleanup({ originRoot, probe, commandObserver });
+  if (finalGate.snapshotChallenge !== challenge) {
+    const error = new Error("Cleanup inventory changed before removal");
+    error.code = "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH";
+    throw error;
+  }
+  const removedPaths = new Set();
+  for (const candidate of before.candidates) {
+    const current = await planStaleRegistrationCleanup({ originRoot, probe, commandObserver });
+    const expectedCurrent = {
+      ...before.snapshot,
+      registrations: before.snapshot.registrations.filter((entry) => !removedPaths.has(entry.path)),
+      candidates: before.snapshot.candidates.filter((entry) => !removedPaths.has(entry.path)),
+    };
+    if (current.snapshotChallenge !== challengeFor(expectedCurrent)) {
+      const error = new Error("Cleanup inventory changed before exact removal");
+      error.code = "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH";
+      throw error;
+    }
+    const removal = run(before.originRoot, ["worktree", "remove", candidate.path], "stale-registration-remove", probe, commandObserver);
+    if (!removal.ok) {
+      const error = new Error("Exact stale registration removal failed; cleanup debt remains");
+      error.code = "WORKTREE_STALE_REGISTRATION_REMOVE_FAILED";
+      throw error;
+    }
+    removedPaths.add(candidate.path);
+  }
+  const afterInspection = await inspectRepositoryWorktreesSafe({ originRoot, probe, commandObserver });
+  const afterSnapshot = cleanupSnapshot(afterInspection, probe, commandObserver);
+  const after = afterSnapshot ? { apply: false, originRoot: afterSnapshot.originRoot, gitCommonDir: afterSnapshot.gitCommonDir, candidates: afterSnapshot.candidates, snapshot: afterSnapshot, snapshotChallenge: challengeFor(afterSnapshot) } : null;
+  const afterPaths = new Set(afterSnapshot?.registrations.map((x) => x.path));
+  const expected = before.candidates.map((x) => x.path).sort();
+  // Approved paths must be absent from all Git registrations, not merely candidates.
+  const remaining = expected.filter((path) => afterPaths.has(path));
+  const approvedPaths = new Set(expected);
+  const expectedRegistrations = before.snapshot.registrations.filter((entry) => !approvedPaths.has(entry.path));
+  // Registrations created after the final gate are not authorized targets.
+  const unchangedRegistrations = expectedRegistrations.every((entry) =>
+    afterSnapshot?.registrations.some((actual) => JSON.stringify(actual) === JSON.stringify(entry)),
+  );
+  const refsAfter = run(before.originRoot, ["show-ref"], "cleanup-refs", probe, commandObserver);
+  const headAfter = run(before.originRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "cleanup-head", probe, commandObserver);
+  const statusAfter = run(before.originRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], "cleanup-status", probe, commandObserver);
+  const unchangedManifests = JSON.stringify(afterSnapshot?.ownerManifests) === JSON.stringify(before.snapshot.ownerManifests);
+  if (remaining.length || !unchangedRegistrations || !unchangedManifests || !refsAfter.ok || !headAfter.ok || !statusAfter.ok || refsAfter.stdout !== refs.stdout || headAfter.stdout !== mainHead.stdout || statusAfter.stdout !== status.stdout) {
+    const error = new Error("Cleanup postcondition verification failed"); error.code = "WORKTREE_STALE_REGISTRATION_POSTCONDITION_FAILED"; throw error;
+  }
+  return { ...before, apply: true, removed: expected };
 }
 async function inspectRepositoryWorktreesSafe(options) {
   try {

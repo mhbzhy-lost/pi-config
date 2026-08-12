@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { inventoryRepositoryWorktrees, reconcileManagedWorktrees } from "./lib/worktree-lifecycle/inventory.mjs";
+import { applyStaleRegistrationCleanup, inventoryRepositoryWorktrees, planStaleRegistrationCleanup, reconcileManagedWorktrees } from "./lib/worktree-lifecycle/inventory.mjs";
 import { createManagedWorktree, preserveManagedWorktree, releaseManagedWorktree } from "./lib/worktree-lifecycle/managed-worktree.mjs";
 import { activateAllocation, beginAllocation } from "./lib/worktree-lifecycle/registry.mjs";
 
 const SCHEMAS = {
   audit: { flags: new Set(["json"]), values: new Set() },
   reconcile: { flags: new Set(["json", "apply"]), values: new Set() },
+  "prune-stale-registrations": { flags: new Set(["json", "apply"]), values: new Set(["challenge"]) },
   create: { flags: new Set(["json"]), values: new Set(["id", "branch", "base", "owner-kind", "owner-id"]) },
   adopt: { flags: new Set(["json"]), values: new Set(["id", "branch", "base", "owner-kind", "owner-id", "path"]) },
   release: { flags: new Set(["json"]), values: new Set(["id", "owner-token"]) },
@@ -41,7 +42,9 @@ function parseCommand(argv) {
       values[name] = value;
     }
   }
-  for (const name of schema.values) if (values[name] === undefined) usage(`Missing --${name}`);
+  for (const name of schema.values) if (values[name] === undefined && !(command === "prune-stale-registrations" && name === "challenge" && !flags.has("apply"))) usage(`Missing --${name}`);
+  if (command === "prune-stale-registrations" && !flags.has("apply") && values.challenge !== undefined) usage("--challenge requires --apply");
+  if (command === "prune-stale-registrations" && flags.has("apply") && values.challenge === undefined) usage("Missing --challenge");
   return { command, json: flags.has("json"), apply: flags.has("apply"), values };
 }
 
@@ -79,6 +82,8 @@ if (parsed) {
       print(await inventoryRepositoryWorktrees({ originRoot: process.cwd() }), json);
     } else if (command === "reconcile") {
       print(await reconcileManagedWorktrees({ originRoot: process.cwd(), apply }), json);
+    } else if (command === "prune-stale-registrations") {
+      print(apply ? await applyStaleRegistrationCleanup({ originRoot: process.cwd(), challenge: values.challenge }) : await planStaleRegistrationCleanup({ originRoot: process.cwd() }), json);
     } else if (command === "create") {
       print(createManagedWorktree({ originRoot: process.cwd(), id: values.id, branch: values.branch, baseCommit: values.base, owner: owner() }), json);
     } else if (command === "adopt") {

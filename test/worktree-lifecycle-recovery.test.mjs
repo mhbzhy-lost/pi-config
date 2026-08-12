@@ -37,7 +37,198 @@ function snapshot(f, a) {
 function assertSnapshot(f, a, before) { assert.deepEqual(snapshot(f, a), before); }
 function assertKept(f, a, branchRef = a.branchRef) { assert.equal(existsSync(a.path), true); assert.equal(git(f.root, "show-ref", "--verify", "--quiet", branchRef), ""); }
 const lifecycleCliScript = fileURLToPath(new URL("../scripts/worktree-lifecycle.mjs", import.meta.url));
+
+// Real Git arena RED/green contract for migration-only stale registrations.
+test("stale registration cleanup challenges exact missing prunable unowned registrations and preserves invariants", async (t) => {
+  const f = repo(t, "stale-registration-");
+  const stale = join(f.arena.path, "gone");
+  const kept = join(f.arena.path, "kept");
+  git(f.root, "worktree", "add", "-b", "gone", stale, "HEAD");
+  git(f.root, "worktree", "add", "-b", "kept", kept, "HEAD");
+  rmSync(stale, { recursive: true, force: true });
+  const before = { head: git(f.root, "rev-parse", "HEAD"), refs: git(f.root, "show-ref"), kept: git(f.root, "worktree", "list", "--porcelain", "-z"), status: git(f.root, "status", "--porcelain=v1", "-z", "--untracked-files=all") };
+  const dry = lifecycleCli(f.root, "prune-stale-registrations", "--json");
+  assert.equal(dry.status, 0, dry.stderr);
+  const plan = JSON.parse(dry.stdout);
+  assert.match(plan.snapshotChallenge, /^[a-f0-9]{64}$/);
+  assert.equal(plan.candidates.some((x) => x.path === stale), true);
+  assert.equal(lifecycleCli(f.root, "prune-stale-registrations", "--apply", "--json").status, 2);
+  const bad = lifecycleCli(f.root, "prune-stale-registrations", "--apply", "--challenge", "a".repeat(64), "--json");
+  assert.equal(bad.status, 1); assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(stale), true);
+  const applied = lifecycleCli(f.root, "prune-stale-registrations", "--apply", "--challenge", plan.snapshotChallenge, "--json");
+  assert.equal(applied.status, 0, applied.stderr);
+  assert.deepEqual(JSON.parse(applied.stdout).removed, [stale]);
+  const afterList = git(f.root, "worktree", "list", "--porcelain", "-z");
+  assert.equal(afterList.includes(stale), false); assert.equal(afterList.includes(kept), true);
+  assert.equal(git(f.root, "rev-parse", "HEAD"), before.head); assert.equal(git(f.root, "show-ref"), before.refs); assert.equal(git(f.root, "status", "--porcelain=v1", "-z", "--untracked-files=all"), before.status);
+});
+
 function lifecycleCli(root, ...args) { return spawnSync(process.execPath, [lifecycleCliScript, ...args], { cwd: root, encoding: "utf8" }); }
+
+test("stale cleanup removes every approved missing registration sharing one challenge", async (t) => {
+  const f = repo(t, "stale-multiple-");
+  const first = join(f.arena.path, "first"), second = join(f.arena.path, "second");
+  git(f.root, "worktree", "add", "-b", "first", first, "HEAD");
+  git(f.root, "worktree", "add", "-b", "second", second, "HEAD");
+  rmSync(first, { recursive: true, force: true }); rmSync(second, { recursive: true, force: true });
+  const before = { refs: git(f.root, "show-ref"), head: git(f.root, "rev-parse", "HEAD"), status: git(f.root, "status", "--porcelain=v1", "-z", "--untracked-files=all") };
+  const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root });
+  assert.deepEqual(plan.candidates.map((candidate) => candidate.path), [first, second]);
+  const applied = await inventory.applyStaleRegistrationCleanup({ originRoot: f.root, challenge: plan.snapshotChallenge });
+  assert.deepEqual(applied.removed, [first, second]);
+  const registrations = git(f.root, "worktree", "list", "--porcelain", "-z");
+  assert.equal(registrations.includes(first), false); assert.equal(registrations.includes(second), false);
+  assert.equal(git(f.root, "show-ref"), before.refs); assert.equal(git(f.root, "rev-parse", "HEAD"), before.head); assert.equal(git(f.root, "status", "--porcelain=v1", "-z", "--untracked-files=all"), before.status);
+});
+
+test("stale cleanup retains the failed candidate and branches after partial exact removal", async (t) => {
+  const f = repo(t, "stale-partial-");
+  const first = join(f.arena.path, "first"), second = join(f.arena.path, "second");
+  git(f.root, "worktree", "add", "-b", "first", first, "HEAD");
+  git(f.root, "worktree", "add", "-b", "second", second, "HEAD");
+  rmSync(first, { recursive: true, force: true }); rmSync(second, { recursive: true, force: true });
+  const before = { refs: git(f.root, "show-ref"), head: git(f.root, "rev-parse", "HEAD"), status: git(f.root, "status", "--porcelain=v1", "-z", "--untracked-files=all") };
+  const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root }); let removals = 0;
+  await assert.rejects(inventory.applyStaleRegistrationCleanup({ originRoot: f.root, challenge: plan.snapshotChallenge, probe: ({ kind }) => kind === "stale-registration-remove" && ++removals === 2 ? { ok: false, stdout: "", stderr: "injected" } : null }), (error) => error?.code === "WORKTREE_STALE_REGISTRATION_REMOVE_FAILED");
+  const registrations = git(f.root, "worktree", "list", "--porcelain", "-z");
+  assert.equal(removals, 2); assert.equal(registrations.includes(first), false); assert.equal(registrations.includes(second), true);
+  assert.equal(git(f.root, "show-ref"), before.refs); assert.equal(git(f.root, "rev-parse", "HEAD"), before.head); assert.equal(git(f.root, "status", "--porcelain=v1", "-z", "--untracked-files=all"), before.status);
+});
+
+test("stale cleanup accepts detached missing registrations without changing HEAD or refs", async (t) => {
+  const f = repo(t, "stale-detached-"); const stale = join(f.arena.path, "gone");
+  git(f.root, "worktree", "add", "--detach", stale, "HEAD"); rmSync(stale, { recursive: true, force: true });
+  const before = { head: git(f.root, "rev-parse", "HEAD"), refs: git(f.root, "show-ref") };
+  const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root });
+  const candidate = plan.candidates.find((x) => x.path === stale);
+  assert.equal(candidate.branch, null); assert.equal(candidate.branchHead, undefined);
+  const applied = await inventory.applyStaleRegistrationCleanup({ originRoot: f.root, challenge: plan.snapshotChallenge });
+  assert.deepEqual(applied.removed, [stale]); assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(stale), false);
+  assert.equal(git(f.root, "rev-parse", "HEAD"), before.head); assert.equal(git(f.root, "show-ref"), before.refs);
+});
+
+test("stale cleanup candidate matrix excludes present, locked, nonprunable, and owned registrations", async (t) => {
+  for (const name of ["present", "locked", "nonprunable", "current-owner", "legacy-owner"]) await t.test(name, async (t) => {
+    const f = repo(t, `stale-candidate-${name}-`);
+    if (name.endsWith("owner")) {
+      const a = allocation(f, name); reclaim(f, a);
+      if (name === "legacy-owner") { const m = manifest(f, a.id); writeFileSync(lease(f, a.id), JSON.stringify({ schemaVersion: 1, id: m.id, path: m.path, originRoot: m.originRoot, ownerKind: m.ownerKind, ownerId: m.ownerId, ownerToken: m.ownerToken, state: m.state })); chmodSync(lease(f, a.id), 0o600); }
+      rmSync(a.path, { recursive: true, force: true });
+      const registrations = git(f.root, "worktree", "list", "--porcelain", "-z");
+      assert.equal(registrations.includes(a.path), true, "fixture must retain Git registration");
+      assert.equal(readFileSync(lease(f, a.id), "utf8").includes(a.path), true, "fixture manifest must match registration");
+      const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root }); assert.equal(plan.candidates.some((x) => x.path === a.path), false); return;
+    }
+    const path = join(f.arena.path, name); git(f.root, "worktree", "add", "-b", name, path, "HEAD");
+    if (name === "present") { const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root }); assert.equal(plan.candidates.some((x) => x.path === path), false); return; }
+    if (name === "locked") git(f.root, "worktree", "lock", path);
+    rmSync(path, { recursive: true, force: true });
+    const options = name === "nonprunable" ? { probe: ({ kind }) => kind === "list" ? { ok: true, stdout: git(f.root, "worktree", "list", "--porcelain", "-z").replace(/prunable [^\0]+\0/, "") } : null } : {};
+    const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root, ...options }); assert.equal(plan.candidates.some((x) => x.path === path), false);
+  });
+});
+
+test("stale cleanup invalid owner manifests fail closed and retain registration", async (t) => {
+  for (const [name, prepare] of [
+    ["malformed", (file) => writeFileSync(file, "{")],
+    ["symlink", (file, f) => { const target = join(f.arena.mkdtempSync("manifest-target-"), "x.json"); writeFileSync(target, "{}"); symlinkSync(target, file); }],
+    ["wrong-mode", (file) => { writeFileSync(file, "{}"); chmodSync(file, 0o644); }],
+  ]) await t.test(name, async (t) => {
+    const f = repo(t, `stale-invalid-${name}-`); const stale = join(f.arena.path, "gone"); git(f.root, "worktree", "add", "-b", "gone", stale, "HEAD"); rmSync(stale, { recursive: true, force: true });
+    const file = join(f.root, ".state/worktree-lifecycle/leases", "bad.json"); mkdirSync(join(f.root, ".state/worktree-lifecycle/leases"), { recursive: true }); prepare(file, f);
+    await assert.rejects(inventory.planStaleRegistrationCleanup({ originRoot: f.root }), (e) => e.code === "WORKTREE_STALE_REGISTRATION_MANIFEST_INVALID"); assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(stale), true);
+  });
+});
+
+test("stale cleanup CLI JSON exposes manifest digests but never owner tokens", (t) => {
+  const f = repo(t, "stale-redaction-"); const a = allocation(f, "owned"); reclaim(f, a);
+  const result = lifecycleCli(f.root, "prune-stale-registrations", "--json"); assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout); assert.equal(plan.snapshot.ownerManifests.some((x) => x.name === "owned.json" && /^[a-f0-9]{64}$/.test(x.digest)), true);
+  assert.equal(result.stdout.includes(a.ownerToken), false);
+});
+
+test("stale cleanup fresh gate rejects zero-candidate manifest drift", async (t) => {
+  const f = repo(t, "stale-empty-race-"); const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root });
+  let lists = 0, changed = false;
+  await assert.rejects(inventory.applyStaleRegistrationCleanup({ originRoot: f.root, challenge: plan.snapshotChallenge, commandObserver: ({ args }) => { if (args.join(" ") === "worktree list --porcelain -z" && ++lists === 2) { changed = true; mkdirSync(join(f.root, ".state/worktree-lifecycle/leases"), { recursive: true }); writeFileSync(join(f.root, ".state/worktree-lifecycle/leases", "bad.json"), "{"); chmodSync(join(f.root, ".state/worktree-lifecycle/leases", "bad.json"), 0o600); } } }), (e) => e.code === "WORKTREE_STALE_REGISTRATION_MANIFEST_INVALID" || e.code === "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH");
+  assert.equal(lists, 2, "drift must be introduced only at apply's fresh gate"); assert.equal(changed, true);
+});
+
+test("stale cleanup rejects an approved registration that becomes present after fake successful removal", async (t) => {
+  const f = repo(t, "stale-postcondition-");
+  const stale = join(f.arena.path, "approved");
+  git(f.root, "worktree", "add", "-b", "approved", stale, "HEAD");
+  rmSync(stale, { recursive: true, force: true });
+  const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root });
+  let fakeRemoval = false;
+  await assert.rejects(
+    inventory.applyStaleRegistrationCleanup({
+      originRoot: f.root,
+      challenge: plan.snapshotChallenge,
+      commandObserver: ({ args }) => {
+        if (args[0] === "worktree" && args[1] === "remove") {
+          mkdirSync(stale);
+          fakeRemoval = true;
+        }
+      },
+      probe: ({ kind }) => kind === "stale-registration-remove"
+        ? { ok: true, stdout: "", stderr: "" }
+        : null,
+    }),
+    (error) => error?.code === "WORKTREE_STALE_REGISTRATION_POSTCONDITION_FAILED",
+  );
+  assert.equal(fakeRemoval, true);
+  assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(stale), true);
+});
+
+test("stale cleanup removes only approved registration when a stale registration appears after final gate", async (t) => {
+  const f = repo(t, "stale-final-gate-race-"); const approved = join(f.arena.path, "approved"), added = join(f.arena.path, "added");
+  git(f.root, "worktree", "add", "-b", "approved", approved, "HEAD"); rmSync(approved, { recursive: true, force: true });
+  const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root }); let addedAtMutation = false;
+  const applied = await inventory.applyStaleRegistrationCleanup({ originRoot: f.root, challenge: plan.snapshotChallenge, commandObserver: ({ args }) => {
+    if (!addedAtMutation && args[0] === "worktree" && args[1] === "remove") { addedAtMutation = true; git(f.root, "worktree", "add", "--detach", added, "HEAD"); rmSync(added, { recursive: true, force: true }); }
+  } });
+  const registrations = git(f.root, "worktree", "list", "--porcelain", "-z");
+  assert.equal(addedAtMutation, true); assert.deepEqual(applied.removed, [approved]); assert.equal(registrations.includes(approved), false); assert.equal(registrations.includes(added), true, "post-gate stale registration must be retained");
+});
+
+test("stale cleanup binds exact prunable reason, manifests, and rejects drift before prune", async (t) => {
+  const f = repo(t, "stale-drift-"); const stale = join(f.arena.path, "gone");
+  git(f.root, "worktree", "add", "-b", "gone", stale, "HEAD"); rmSync(stale, { recursive: true, force: true });
+  const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root });
+  assert.equal(typeof plan.snapshot.registrations.find((x) => x.path === stale).prunable, "string");
+  assert.match(plan.snapshot.registrations.find((x) => x.path === stale).prunable, /gitdir file/);
+  const original = plan.snapshotChallenge;
+  const changedReason = await inventory.planStaleRegistrationCleanup({ originRoot: f.root, probe: ({ kind }) => kind === "list" ? { ok: true, stdout: git(f.root, "worktree", "list", "--porcelain", "-z").replace(/prunable [^\0]+/, "prunable altered-reason") } : null });
+  assert.notEqual(changedReason.snapshotChallenge, original, "reason is challenge material");
+  await assert.rejects(inventory.applyStaleRegistrationCleanup({ originRoot: f.root, challenge: original, probe: ({ kind }) => kind === "list" ? { ok: true, stdout: git(f.root, "worktree", "list", "--porcelain", "-z").replace(/prunable [^\0]+/, "prunable altered-reason") } : null }), (e) => e.code === "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH");
+  assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(stale), true);
+  const owned = allocation(f, "owner"); const before = await inventory.planStaleRegistrationCleanup({ originRoot: f.root });
+  let changed = false;
+  await assert.rejects(inventory.applyStaleRegistrationCleanup({ originRoot: f.root, challenge: before.snapshotChallenge, commandObserver: ({ args }) => { if (!changed && args.join(" ") === "show-ref") { changed = true; writeFileSync(lease(f, owned.id), Buffer.concat([readFileSync(lease(f, owned.id)), Buffer.from(" ")])); chmodSync(lease(f, owned.id), 0o600); } } }), (e) => e.code === "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH");
+  assert.equal(changed, true); assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(stale), true);
+});
+
+test("stale cleanup rejects added candidates and candidate branch HEAD drift", async (t) => {
+  const f = repo(t, "stale-matrix-"); const first = join(f.arena.path, "first");
+  git(f.root, "worktree", "add", "-b", "first", first, "HEAD"); rmSync(first, { recursive: true, force: true });
+  const plan = await inventory.planStaleRegistrationCleanup({ originRoot: f.root });
+  const second = join(f.arena.path, "second"); git(f.root, "worktree", "add", "-b", "second", second, "HEAD"); rmSync(second, { recursive: true, force: true });
+  await assert.rejects(inventory.applyStaleRegistrationCleanup({ originRoot: f.root, challenge: plan.snapshotChallenge }), (e) => e.code === "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH");
+  assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(first), true); assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(second), true);
+  const fresh = await inventory.planStaleRegistrationCleanup({ originRoot: f.root }); writeFileSync(join(f.root, "drift"), "x\n"); git(f.root, "add", "drift"); git(f.root, "commit", "-m", "drift"); git(f.root, "update-ref", "refs/heads/first", "HEAD");
+  await assert.rejects(inventory.applyStaleRegistrationCleanup({ originRoot: f.root, challenge: fresh.snapshotChallenge }), (e) => e.code === "WORKTREE_STALE_REGISTRATION_CHALLENGE_MISMATCH");
+  assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(first), true);
+});
+
+test("stale cleanup fails closed for invalid manifests and CLI rejects detached challenge", async (t) => {
+  const f = repo(t, "stale-invalid-"); const stale = join(f.arena.path, "gone");
+  git(f.root, "worktree", "add", "-b", "gone", stale, "HEAD"); rmSync(stale, { recursive: true, force: true });
+  mkdirSync(join(f.root, ".state/worktree-lifecycle/leases"), { recursive: true }); writeFileSync(join(f.root, ".state/worktree-lifecycle/leases", "bad.json"), "{"); chmodSync(join(f.root, ".state/worktree-lifecycle/leases", "bad.json"), 0o600);
+  await assert.rejects(inventory.planStaleRegistrationCleanup({ originRoot: f.root }), (e) => e.code === "WORKTREE_STALE_REGISTRATION_MANIFEST_INVALID");
+  assert.equal(lifecycleCli(f.root, "prune-stale-registrations", "--challenge", "a".repeat(64)).status, 2);
+  assert.equal(git(f.root, "worktree", "list", "--porcelain", "-z").includes(stale), true);
+});
 
 // The classifier is deliberately read through the namespace: old production lacks it,
 // so this is a business RED rather than an import-time fixture failure.
