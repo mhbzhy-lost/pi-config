@@ -1411,6 +1411,23 @@ export function createGoalEngineExtension(pi, options = {}) {
         const hasAmendmentPayload = Object.keys(addTasks).length > 0
           || (params.remove_tasks?.length || 0) > 0
           || Object.keys(params.update_tasks || {}).length > 0;
+        if (params.blocked_resolution === "supersede" && projection.eventSchemaVersion !== PLANNED_SCHEMA_VERSION) {
+          const source = projection.tasks.get(taskId);
+          const replacement = addTasks[params.replacement_task_id];
+          if (replacement) {
+            if (source?.status !== "blocked" || !Array.isArray(source.acceptance?.commands)) {
+              throw initError("INVALID_GOAL_CONTRACT", "legacy supersede source acceptance.commands must be an array", "correct the blocked legacy task contract and retry goal_amend after goal_status");
+            }
+            addTasks[params.replacement_task_id] = {
+              ...replacement,
+              acceptance: {
+                ...replacement.acceptance,
+                criteria: replacement.acceptance.criteria.map((criterion) => JSON.stringify(criterion)),
+                commands: [...source.acceptance.commands],
+              },
+            };
+          }
+        }
         if (params.blocked_resolution === "supersede" || hasAmendmentPayload) events.push(amendmentEvent());
         return statusResponse(applyAndAppendSequence(events), cwd, root);
       }
