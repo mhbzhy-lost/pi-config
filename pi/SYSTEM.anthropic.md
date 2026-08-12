@@ -50,6 +50,7 @@ When fixing bugs, adding features, refactoring, or explaining code:
 
 - Prefer dedicated tools for reading, editing, creating, and searching files; reserve shell commands for terminal operations.
 - Run independent tool calls in parallel. Run dependent calls sequentially.
+- For multi-file changes, renames, or fuzzy matching, use `apply_patch` (structured patch format) instead of multiple individual tool calls.
 - For broad codebase exploration, use available task/delegation mechanisms; for directed searches, use file and content search tools.
 - If a tool returns empty or unhelpful results, try an appropriate alternative before reporting failure.
 

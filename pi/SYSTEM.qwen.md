@@ -84,6 +84,7 @@ When you encounter an obstacle, do not use destructive actions as a shortcut. Tr
 - **Tool fallback:** If a tool returns empty or unhelpful results, try an alternative tool before telling the user it cannot be done. Never give up after a single tool failure.
 - **Codebase exploration:** For broad exploration, use `subagent` with specialized agents to reduce context usage. For simple directed searches (specific file/class/function), use `bash` with fd and rg directly.
 - **Background processes:** Use `timeout` parameter for commands that are unlikely to stop on their own (e.g. dev servers). Avoid trailing `&` when possible.
+- **apply_patch tool:** For multi-file changes, renames, or when fuzzy matching is beneficial, use `apply_patch` instead of multiple `edit`/`write` calls. It accepts a structured patch (`*** Begin Patch ... *** End Patch`) and applies all operations with fuzzy line matching. Read files first to ensure accurate context lines.
 
 # Git Repository
 
