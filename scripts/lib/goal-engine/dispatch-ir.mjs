@@ -5,7 +5,7 @@ import { MAX_CONTRACT_ARRAY_ITEMS, MAX_CONTRACT_STRING_BYTES } from "./contract-
 
 const CONTRACT_VERSION = "dispatch-ir.v1";
 const TASK_ID_PATTERN = /^[A-Za-z0-9._-]{1,160}$/;
-const AGENTS = new Set(["executor", "spark"]);
+const AGENTS = new Set(["executor"]);
 const RISKS = new Set(["low", "normal", "high"]);
 const WORKFLOW_MODES = new Set(["tdd", "existing-tests", "docs-only"]);
 
@@ -145,10 +145,6 @@ export function compileCodingDispatchIR(input, { cwd } = {}) {
 
   const requirements = normalizeStringArray(source.requirements, "requirements", { minItems: 1 });
   const boundaries = normalizeBoundaries(source.boundaries);
-
-  if (agent === "spark" && (risk !== "low" || boundaries.writePaths.length !== 1 || requirements.length > 8)) {
-    fail("spark requires risk=low, exactly one write path, and at most eight requirements");
-  }
 
   const canonical = {
     version,

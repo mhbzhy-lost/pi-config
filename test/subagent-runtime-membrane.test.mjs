@@ -670,13 +670,13 @@ test("confirmed facade workflow success is filtered before the completion notifi
   assert.equal(pi.messages.length, 5, "unrelated workflow and internal non-success states remain visible");
 });
 
-test("executor and spark reject free-form task dispatch before RPC", async () => {
+test("executor rejects free-form task dispatch before RPC", async () => {
   const pi = createPi();
   const rpc = createRpc();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
   const tool = pi.tools[0];
 
-  for (const agent of ["executor", "spark"]) {
+  for (const agent of ["executor"]) {
     const result = await execute(tool, { agent, task: "Implement it." });
     assert.equal(result.isError, true);
     assert.equal(result.details.code, "CODING_CONTRACT_REQUIRED");

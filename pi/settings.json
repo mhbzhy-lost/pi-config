@@ -1,7 +1,7 @@
 {
-  "lastChangelogVersion": "0.83.0",
+  "lastChangelogVersion": "0.84.1",
   "theme": "light",
-  "defaultProvider": "openai-codex",
+  "defaultProvider": "codex-pool",
   "defaultModel": "gpt-5.6-sol",
   "hideThinkingBlock": true,
   "packages": [
@@ -39,17 +39,19 @@
       },
       "worker": {
         "disabled": true
-      },
-      "executor": {
-        "model": "deepseek/deepseek-v4-flash"
       }
     }
   },
   "enabledModels": [
-    "openai-codex/gpt-5.6-sol",
-    "openai-codex/gpt-5.6-terra",
-    "openai-codex/gpt-5.3-codex-spark",
-    "deepseek/deepseek-v4-flash"
+    "codex-pool/gpt-5.6-sol",
+    "codex-pool/gpt-5.6-terra",
+    "anthropic-idealab/claude-opus-4-6",
+    "openai-idealab/Peach-07-17-DogFooding",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro"
   ],
-  "defaultThinkingLevel": "max"
+  "defaultThinkingLevel": "xhigh",
+  "goalEngine": {
+    "enabled": false
+  }
 }

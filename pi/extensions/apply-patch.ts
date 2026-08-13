@@ -45,12 +45,17 @@ export default function applyPatchTool(pi: ExtensionAPI) {
       );
       try {
         const result = await applyPatch(params.patch, ctx.cwd);
-        const lines: string[] = ["Success. Updated the following files:"];
+        const lines: string[] = [];
         for (const p of result.added) lines.push(`A ${p}`);
         for (const p of result.modified) lines.push(`M ${p}`);
         for (const p of result.deleted) lines.push(`D ${p}`);
         return {
           content: [{ type: "text", text: lines.join("\n") }],
+          details: {
+            added: result.added,
+            modified: result.modified,
+            deleted: result.deleted,
+          },
         };
       } catch (err: any) {
         return {

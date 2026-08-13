@@ -15,7 +15,7 @@ import { findGoalExecutorCoordinator } from "./root-broker-registry.ts";
 
 const CLEANUP_KEY = "__typedSubagentRuntimeCleanup";
 const SHUTDOWN_DEBT_KEY = "__typedSubagentRuntimeShutdownDebt";
-const CODING_AGENTS = new Set(["executor", "spark"]);
+const CODING_AGENTS = new Set(["executor"]);
 const CONTROL_ACTIONS = new Set(["status", "steer", "interrupt", "stop"]);
 const WORKSPACE_ORIGINS_KEY = "__typedSubagentWorkspaceOrigins";
 
@@ -47,7 +47,7 @@ const CODING_SCHEMA = {
     version: { const: "dispatch-ir.v1" },
     taskId: { type: "string", pattern: "^[A-Za-z0-9._-]{1,160}$" },
     title: { type: "string", minLength: 1, maxLength: 4096 },
-    agent: { enum: ["executor", "spark"] },
+    agent: { enum: ["executor"] },
     risk: { enum: ["low", "normal", "high"] },
     objective: { type: "string", minLength: 1, maxLength: 4096 },
     requirements: { ...stringList, minItems: 1 },
@@ -110,7 +110,7 @@ const GENERIC_SCHEMA = {
       type: "string",
       minLength: 1,
       maxLength: 256,
-      not: { enum: ["executor", "spark"] },
+      not: { enum: ["executor"] },
     },
     title: { type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\r\\n\\u0000-\\u001F\\u007F-\\u009F]+$" },
     task: { type: "string", minLength: 1, maxLength: 65536 },
@@ -171,7 +171,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
 
 export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime.
 
-For executor or spark, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, and stop. Optional worktree:true creates an isolated managed workspace. workspace_status and workspace_disposition are local workspace actions.`;
+For executor, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, and stop. Optional worktree:true creates an isolated managed workspace. workspace_status and workspace_disposition are local workspace actions.`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 

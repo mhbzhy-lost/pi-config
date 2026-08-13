@@ -189,7 +189,7 @@ export class RootBrokerServer {
     const runId = event?.runId ?? event?.id;
     if (typeof runId !== "string" || runId.length === 0
       || (event?.runId !== undefined && event?.id !== undefined && event.runId !== event.id)
-      || !["executor", "spark"].includes(event?.agent)
+      || event?.agent !== "executor"
       || !Number.isSafeInteger(event?.pid) || event.pid <= 0
       || typeof event?.asyncDir !== "string" || !path.isAbsolute(event.asyncDir)
       || event?.sessionId !== this.lifecycleSessionId) return;

@@ -9,6 +9,13 @@
 
 生产或 Skill 逻辑修改前，必须先建立 `docs/bugs/bug-*.md`，并观察对应测试为 RED。
 
+测试只允许验证逻辑行为（函数/脚本/校验器的输入输出、错误码、副作用）。禁止编写镜像配置或文档字面值的快照测试——例如「读 models.json 断言 provider 字段」「读 SKILL.md 断言包含某短语」「断言某文件存在/不存在」：这类测试把单一事实源（配置/代码）复制成双事实源，配置一改就要同步 N 处测试，只增加维护成本、不保证逻辑正确。
+
+## secret 泄露
+
+**绝对红线**：绝对不要自动轮换，一个 secret 会影响哪些服务难以统计，贸然轮换可能导致服务大面积瘫痪。
+发现泄露应做记录，同时继续当前任务，在任务结束时向用户输出泄露报告并给出处理建议即可。
+
 ## Subagent
 
 所有 subagent 派发必须遵循 `subagent-dispatch` skill 的要求。
@@ -64,6 +71,10 @@ headed 模式获取登录态后，应将登录态共享给 headless 模式，并
 
 禁止：在有登录态/无需用户干预的情况下自行决定使用 headed/前台模式。
 
+## goal engine
+
+不要使用，还不稳定。
+
 ## Skill 行为 Override
 
 ### `writing-plans`
@@ -88,4 +99,3 @@ headed 模式获取登录态后，应将登录态共享给 headless 模式，并
 
 1. **Subagent-Driven**：主 agent 自行编排计划执行，任务间可审查。主 agent 读取计划的 `Deps` 字段构建 DAG；无依赖任务并行派发（后台模式），有依赖的等上游完成后再派发。
 2. **Inline Execution**：按 skill 原始流程在当前会话逐任务执行，适合简单计划或无需门禁的场景；忽略其引用的未纳入白名单的 sub-skill。
-3. **Goal Engine**：通过 `goal_init` 将计划转为持久化 task DAG，由主 agent 按 Goal Engine typed tools 的说明持续编排、恢复和验收；适合跨会话、24h+、需要独立 worktree 与证据门禁的长任务。

@@ -199,8 +199,7 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     await writeFile(join(root, "pi", "child-extensions", "root-session-owner.ts"), "");
     await writeFile(join(root, ".gitignore"), "/var/\n");
     for (const [name, model, tools] of [
-      ["executor", "openai-codex/gpt-5.6-terra", "read"],
-      ["spark", "openai-codex/gpt-5.3-codex-spark", "read"],
+      ["executor", "codex-pool/gpt-5.6-terra", "read"],
     ]) {
       await writeFile(join(root, "pi", "agents", `${name}.md`), `---\nmodel: ${model}\ntools: ${tools}\n---\n`);
     }

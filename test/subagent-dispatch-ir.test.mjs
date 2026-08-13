@@ -182,23 +182,8 @@ test("enforces workflow modes and exemption reasons", () => {
   assert.equal(existing.workflow.reason, "The existing integration suite covers this renderer.");
 });
 
-test("limits spark to low-risk, single-file, small-scope work", () => {
-  const spark = compileCodingDispatchIR(contract({
-    agent: "spark",
-    risk: "low",
-    requirements: ["Change the label."],
-    boundaries: { writePaths: ["pi/extensions/custom-footer.ts"] },
-  }), { cwd: "/repo" });
-  assert.equal(spark.agent, "spark");
-
-  expectCode("SPARK_SCOPE_EXCEEDED", () => compileCodingDispatchIR(contract({ agent: "spark", risk: "normal" }), { cwd: "/repo" }));
-  expectCode("SPARK_SCOPE_EXCEEDED", () => compileCodingDispatchIR(contract({ agent: "spark", risk: "low" }), { cwd: "/repo" }));
-  expectCode("SPARK_SCOPE_EXCEEDED", () => compileCodingDispatchIR(contract({
-    agent: "spark",
-    risk: "low",
-    requirements: Array.from({ length: 9 }, (_, index) => `Requirement ${index + 1}`),
-    boundaries: { writePaths: ["pi/extensions/custom-footer.ts"] },
-  }), { cwd: "/repo" }));
+test("rejects the retired spark coding agent", () => {
+  expectCode("INVALID_AGENT", () => compileCodingDispatchIR(contract({ agent: "spark" }), { cwd: "/repo" }));
 });
 
 test("accepts normalized repo-relative paths and rejects path escapes", () => {
