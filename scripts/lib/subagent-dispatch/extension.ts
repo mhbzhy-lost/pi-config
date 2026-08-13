@@ -8,7 +8,7 @@ import { compileCodingDispatchIR, CodingDispatchContractError } from "./ir.ts";
 import { renderCodingDispatchPrompt } from "./prompt.ts";
 import { createTypedSubagentRpcClient } from "./rpc-client.ts";
 import { createHeadlessSubagentApi } from "./runtime-membrane.ts";
-import { buildWorkflowSpawn, createWorkflowChildStartCollector } from "./workflow-spawn.ts";
+import { buildWorkflowSpawn, createWorkflowChildStartCollector, childStartTimeoutMs } from "./workflow-spawn.ts";
 import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
 import { findGoalExecutorCoordinator } from "./root-broker-registry.ts";
@@ -368,7 +368,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     workflowKey,
     agent: ir.agent,
     sessionId: lifecycleSessionIdentity(capabilities.session),
-    timeoutMs: workflowChildStartTimeoutMs ?? ir.execution.timeoutMs,
+    timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, ir.execution.timeoutMs),
     params: codingWorkflowSpawnParams(runtimeIr, runtimePrompt, workflowKey),
     identity,
     titleRegistry,
@@ -414,7 +414,7 @@ async function executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, work
     workflowKey,
     agent: input.agent,
     sessionId: lifecycleSessionIdentity(capabilities.session),
-    timeoutMs: input.timeoutMs ?? workflowChildStartTimeoutMs ?? 120_000,
+    timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, input.timeoutMs ?? 120_000),
     params: genericWorkflowSpawnParams(workspace ? { ...input, cwd: workspace.dispatchCwd } : input, ctx, workflowKey),
     titleRegistry,
     onBinding: workspace?.onBinding,
