@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
-import { createSubagentWorkspace, discardSubagentWorkspace, integrateSubagentWorkspace, preserveSubagentWorkspace, snapshotSubagentWorkspace } from "../scripts/lib/subagent-dispatch/workspace.mjs";
+import { createSubagentWorkspace, discardSubagentWorkspace, integrateSubagentWorkspace, preserveSubagentWorkspace, releasePreservedSubagentWorkspace, snapshotSubagentWorkspace } from "../scripts/lib/subagent-dispatch/workspace.mjs";
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -122,4 +122,27 @@ test("createSubagentWorkspace refuses a dirty source except declared runtime sta
     originHeadAtAllocation: baseCommit, baseCommit, requestedCwd: originRoot,
     branch: "subagent/ws-dirty-1", writePaths: ["input.txt"],
   }), (error) => error?.code === "WORKTREE_SOURCE_DIRTY");
+});
+
+test("integration tolerates a clean forward origin advance", () => {
+  const originRoot = repo(); const baseCommit = git(originRoot, "rev-parse", "HEAD");
+  const lease = createSubagentWorkspace({ workspaceId: "ws-forward-1", kind: "coding", originRoot,
+    originRef: git(originRoot, "symbolic-ref", "--quiet", "HEAD"), originHeadAtAllocation: baseCommit, baseCommit,
+    requestedCwd: originRoot, branch: "subagent/ws-forward-1", writePaths: ["packages/child/**"] });
+  writeFileSync(join(lease.path, "packages", "child", "result.txt"), "done\n"); git(lease.path, "add", "."); git(lease.path, "commit", "-m", "child result");
+  writeFileSync(join(originRoot, "README.md"), "advance\n"); git(originRoot, "add", "README.md"); git(originRoot, "commit", "-m", "advance origin");
+  const snapshot = snapshotSubagentWorkspace({ lease, terminalProof: { state: "observed", conflict: false, proofHash: "proof-forward" } });
+  assert.equal(integrateSubagentWorkspace({ lease, snapshot }).integrated, true);
+  assert.equal(git(originRoot, "show", "HEAD:packages/child/result.txt"), "done");
+});
+
+test("releasePreservedSubagentWorkspace releases a preserved worktree", () => {
+  const originRoot = repo(); const baseCommit = git(originRoot, "rev-parse", "HEAD");
+  const lease = createSubagentWorkspace({ workspaceId: "ws-release-1", kind: "generic", originRoot,
+    originRef: git(originRoot, "symbolic-ref", "--quiet", "HEAD"), originHeadAtAllocation: baseCommit, baseCommit,
+    requestedCwd: originRoot, branch: "subagent/ws-release-1", writePaths: null });
+  const snapshot = snapshotSubagentWorkspace({ lease, terminalProof: { state: "pending", conflict: false } });
+  preserveSubagentWorkspace({ lease, snapshot });
+  releasePreservedSubagentWorkspace({ lease });
+  assert.equal(existsSync(lease.path), false);
 });

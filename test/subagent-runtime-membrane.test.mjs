@@ -742,6 +742,49 @@ test("compiles a coding contract into one workflow root and returns its correlat
   );
 });
 
+test("coding continuation dispatch rebinds its managed workspace run", async () => {
+  const pi = createPi();
+  const rpc = createRpc();
+  const bindings = [];
+  rpc.spawn = async (params) => {
+    rpc.calls.push({ method: "spawn", params });
+    pi.events.emit("subagent:async-started", {
+      id: "continuation-leaf-1",
+      runId: "continuation-leaf-1",
+      asyncDir: "/tmp/continuation-leaf-1",
+      sessionId: "/tmp/session.jsonl",
+      agent: "executor", pid: 103,
+      workflowKey: "typed-continuation-1",
+      parentWorkflowRunId: "continuation-workflow-1",
+    });
+    return { details: { runId: "continuation-workflow-1", asyncDir: "/tmp/continuation-workflow-1" } };
+  };
+  const workspaceController = {
+    bindManagedSubagentWorkspaceRun(workspace, binding) { bindings.push({ workspace, binding }); },
+  };
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    randomUUID: () => "continuation-1",
+    workspaceController,
+    resolveCanonicalOrigin: async () => "/repo",
+  });
+
+  const result = await execute(pi.tools[0], codingContract({
+    execution: {
+      timeoutMs: 900_000,
+      cwd: "/repo/.state/subagent-dispatch/worktrees/workspace-1/sub",
+      worktree: false,
+    },
+  }));
+
+  assert.equal(result.isError, false);
+  assert.deepEqual(bindings, [{
+    workspace: { originRoot: "/repo", workspaceId: "workspace-1" },
+    binding: { runId: "continuation-leaf-1", asyncDir: "/tmp/continuation-leaf-1" },
+  }]);
+});
+
 test("compiles a non-coding agent prompt into one workflow leaf without rewriting its task", async () => {
   const pi = createPi();
   const rpc = createRpc();
@@ -840,6 +883,62 @@ test("maps only approved control actions to RPC", async () => {
   const rejected = await execute(tool, { action: "resume", id: "run-1" });
   assert.equal(rejected.isError, true);
   assert.equal(rejected.details.code, "UNSUPPORTED_ACTION");
+});
+
+test("workspace_status text exposes action token and blocked reasons", async () => {
+  const pi = createPi();
+  const workspaceController = {
+    loadManagedSubagentWorkspace() { return { workspaceId: "workspace-1", state: "active", runId: "run-1" }; },
+    statusManagedSubagentWorkspace() {
+      return {
+        workspaceId: "workspace-1",
+        state: "active",
+        allowedDispositions: ["preserve", "discard"],
+        actionToken: "once-token",
+        integrateBlockedReasons: ["no-commits"],
+      };
+    },
+  };
+  createTypedSubagentExtension(pi, {
+    rpc: createRpc(), cleanupStore: {}, workspaceController,
+    inspectFacadeTerminalProof: async () => ({ state: "observed" }),
+    resolveCanonicalOrigin: async () => "/repo",
+  });
+
+  const result = await execute(pi.tools[0], { action: "workspace_status", workspace_id: "workspace-1" });
+
+  assert.equal(result.isError, false);
+  assert.match(result.content[0].text, /"workspace_id":"workspace-1"/);
+  assert.match(result.content[0].text, /"state":"active"/);
+  assert.match(result.content[0].text, /"action_token":"once-token"/);
+  assert.match(result.content[0].text, /"allowed_dispositions":\["preserve","discard"\]/);
+  assert.match(result.content[0].text, /"integrate_blocked_reasons":\["no-commits"\]/);
+});
+
+test("workspace_disposition release is accepted and releases preserved workspace", async () => {
+  const pi = createPi();
+  const releases = [];
+  const workspaceController = {
+    loadManagedSubagentWorkspace() { return { workspaceId: "workspace-1", state: "preserved", runId: null }; },
+    releaseManagedSubagentWorkspace(input) {
+      releases.push(input);
+      return { workspaceId: "workspace-1", state: "released" };
+    },
+    disposeManagedSubagentWorkspace() { throw new Error("release must not dispose through action token path"); },
+  };
+  createTypedSubagentExtension(pi, {
+    rpc: createRpc(), cleanupStore: {}, workspaceController,
+    resolveCanonicalOrigin: async () => "/repo",
+  });
+  const tool = pi.tools[0];
+  const dispositionSchema = tool.parameters.anyOf.find((branch) => branch.properties?.action?.const === "workspace_disposition");
+
+  assert.ok(dispositionSchema.properties.disposition.enum.includes("release"));
+  const result = await execute(tool, { action: "workspace_disposition", workspace_id: "workspace-1", disposition: "release" });
+
+  assert.equal(result.isError, false);
+  assert.equal(result.details.state, "released");
+  assert.deepEqual(releases, [{ originRoot: "/repo", workspaceId: "workspace-1" }]);
 });
 
 test("uses persistent sessionFile identity for workflow leaf correlation and falls back for --no-session", async () => {

@@ -42,18 +42,37 @@ test("rejects duplicate ids, tampering, insecure modes, and stale private leases
   assert.equal(active.record.state, "active");
 });
 
-test("recovers after allocation or activation crash and binds a run once", () => {
+test("recovers after allocation or activation crash and binds a run", () => {
   const allocating = ledger.allocateWorkspaceIntent(base("three"));
   assert.equal(ledger.recoverPrivateWorkspaceLease({ originRoot: origin, workspaceId: "three" }).record.state, "allocating");
   const active = ledger.activateWorkspace(allocating, { workspacePath: allocating.record.workspacePath, dispatchCwd: allocating.record.dispatchCwd, branchRef: allocating.record.branchRef, baseCommit: allocating.record.baseCommit });
   const reloaded = ledger.recoverPrivateWorkspaceLease({ originRoot: origin, workspaceId: "three" });
   const bound = ledger.bindWorkspaceRun({ lease: reloaded, runId: "run-3", asyncDir: "/tmp/async-3" });
   assert.equal(bound.record.runId, "run-3");
-  assert.throws(() => ledger.bindWorkspaceRun({ lease: bound, runId: "run-other", asyncDir: "/tmp/b" }), /already|run/i);
   const publicLoaded = ledger.loadWorkspace({ originRoot: origin, workspaceId: "three" });
   assert.equal(publicLoaded.asyncDir, "/tmp/async-3");
   assert.equal(JSON.stringify(publicLoaded).includes(reloaded.ownerToken), false);
   assert.equal(active.record.state, "active");
+});
+
+test("rebinds run for an active workspace with a prior bound run", () => {
+  let lease = ledger.allocateWorkspaceIntent(base("rebind-active"));
+  lease = ledger.activateWorkspace(lease, { workspacePath: lease.record.workspacePath, dispatchCwd: lease.record.dispatchCwd, branchRef: lease.record.branchRef, baseCommit: lease.record.baseCommit });
+  lease = ledger.bindWorkspaceRun({ lease, runId: "run-a", asyncDir: "/tmp/async-a" });
+  const rebound = ledger.bindWorkspaceRun({ lease, runId: "run-b", asyncDir: "/tmp/async-b" });
+
+  assert.equal(rebound.record.runId, "run-b");
+  assert.equal(rebound.record.asyncDir, "/tmp/async-b");
+});
+
+test("rejects rebind when state is not active while allowing an initial bind", () => {
+  let activeLease = ledger.allocateWorkspaceIntent(base("bind-initial"));
+  activeLease = ledger.activateWorkspace(activeLease, { workspacePath: activeLease.record.workspacePath, dispatchCwd: activeLease.record.dispatchCwd, branchRef: activeLease.record.branchRef, baseCommit: activeLease.record.baseCommit });
+  const initiallyBound = ledger.bindWorkspaceRun({ lease: activeLease, runId: "run-initial", asyncDir: "/tmp/async-initial" });
+  assert.equal(initiallyBound.record.runId, "run-initial");
+
+  const preserved = ledger.markWorkspaceState({ lease: initiallyBound, state: "preserved" });
+  assert.throws(() => ledger.bindWorkspaceRun({ lease: preserved, runId: "run-preserved", asyncDir: "/tmp/async-preserved" }), /state|reject/i);
 });
 
 test("issues a hashed one-shot action challenge bound to snapshot and disposition", () => {

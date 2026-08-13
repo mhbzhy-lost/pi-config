@@ -108,3 +108,49 @@ test("controller integrates coding workspace and rejects generic integration", (
   assert.equal(gs.allowedDispositions.includes("integrate"), false);
   assert.throws(() => controller.disposeManagedSubagentWorkspace({ originRoot: root, workspaceId: "generic", terminalProof: proof, disposition: "integrate", actionToken: gs.actionToken }), /allowed|forbidden/i);
 });
+
+test("controller status permits integration after a clean forward origin advance", () => {
+  const root = repo(); const workspace = controller.allocateManagedSubagentWorkspace(input(root, "forward-status"));
+  writeFileSync(join(workspace.workspacePath, "src", "done.txt"), "done\n"); git(workspace.workspacePath, "add", "."); git(workspace.workspacePath, "commit", "-m", "done");
+  writeFileSync(join(root, "README.md"), "advance\n"); git(root, "add", "README.md"); git(root, "commit", "-m", "advance origin");
+  const status = controller.statusManagedSubagentWorkspace({ originRoot: root, workspaceId: workspace.workspaceId, terminalProof: proof });
+  assert.ok(status.allowedDispositions.includes("integrate"));
+  assert.deepEqual(status.integrateBlockedReasons, []);
+});
+
+test("controller status reports write path and nonlinear origin integration blocks", () => {
+  const root = repo(); const outOfScope = controller.allocateManagedSubagentWorkspace(input(root, "out-of-scope"));
+  writeFileSync(join(outOfScope.workspacePath, "outside.txt"), "outside\n"); git(outOfScope.workspacePath, "add", "."); git(outOfScope.workspacePath, "commit", "-m", "outside");
+  const outOfScopeStatus = controller.statusManagedSubagentWorkspace({ originRoot: root, workspaceId: outOfScope.workspaceId, terminalProof: proof });
+  assert.equal(outOfScopeStatus.allowedDispositions.includes("integrate"), false);
+  assert.ok(outOfScopeStatus.integrateBlockedReasons.includes("writePaths-out-of-scope"));
+
+  writeFileSync(join(root, "README.md"), "advance\n"); git(root, "add", "README.md"); git(root, "commit", "-m", "advance origin");
+  const divergent = controller.allocateManagedSubagentWorkspace(input(root, "nonlinear"));
+  writeFileSync(join(divergent.workspacePath, "src", "done.txt"), "done\n"); git(divergent.workspacePath, "add", "."); git(divergent.workspacePath, "commit", "-m", "done");
+  git(root, "reset", "--hard", "HEAD^"); writeFileSync(join(root, "README.md"), "diverged\n"); git(root, "add", "README.md"); git(root, "commit", "-m", "diverged origin");
+  const divergentStatus = controller.statusManagedSubagentWorkspace({ originRoot: root, workspaceId: divergent.workspaceId, terminalProof: proof });
+  assert.equal(divergentStatus.allowedDispositions.includes("integrate"), false);
+  assert.ok(divergentStatus.integrateBlockedReasons.some((reason) => reason.startsWith("origin-")));
+});
+
+test("controller integrates after a clean forward origin advance", () => {
+  const root = repo(); const workspace = controller.allocateManagedSubagentWorkspace(input(root, "forward-integrate"));
+  writeFileSync(join(workspace.workspacePath, "src", "done.txt"), "done\n"); git(workspace.workspacePath, "add", "."); git(workspace.workspacePath, "commit", "-m", "done");
+  writeFileSync(join(root, "README.md"), "advance\n"); git(root, "add", "README.md"); git(root, "commit", "-m", "advance origin");
+  const status = controller.statusManagedSubagentWorkspace({ originRoot: root, workspaceId: workspace.workspaceId, terminalProof: proof });
+  assert.equal(controller.disposeManagedSubagentWorkspace({ originRoot: root, workspaceId: workspace.workspaceId, terminalProof: proof, disposition: "integrate", actionToken: status.actionToken }).state, "released");
+  assert.equal(git(root, "show", "HEAD:src/done.txt"), "done");
+  assert.match(git(root, "log", "--format=%s", "HEAD"), /done/);
+});
+
+test("controller releases a preserved workspace through owner-CAS", () => {
+  const root = repo(); const workspace = controller.allocateManagedSubagentWorkspace(input(root, "release-preserved", "generic"));
+  const status = controller.statusManagedSubagentWorkspace({ originRoot: root, workspaceId: workspace.workspaceId, terminalProof: { state: "pending" } });
+  controller.disposeManagedSubagentWorkspace({ originRoot: root, workspaceId: workspace.workspaceId, terminalProof: { state: "pending" }, disposition: "preserve", actionToken: status.actionToken });
+  const released = controller.releaseManagedSubagentWorkspace({ originRoot: root, workspaceId: workspace.workspaceId });
+  assert.equal(released.state, "released");
+  assert.equal(existsSync(workspace.workspacePath), false);
+  assert.equal(ledger.recoverPrivateWorkspaceLease({ originRoot: root, workspaceId: workspace.workspaceId }).record.state, "released");
+  assert.equal(JSON.parse(readFileSync(join(root, ".state", "worktree-lifecycle", "leases", `${workspace.workspaceId}.json`), "utf8")).state, "released");
+});

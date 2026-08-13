@@ -78,6 +78,18 @@ function describeWritePath(writePath) {
     return { type: "dir", prefix: `${dir}/`, raw: writePath };
   }
 
+  if (writePath.endsWith("/")) {
+    const dir = writePath.replace(/\/+$/, "");
+    if (!dir) {
+      throw new Error(`Invalid writePath: path must include a directory before "/"`);
+    }
+    if (dir.includes("*") || dir.includes("?") || dir.includes("[") || dir.includes("]") || dir.includes("{") || dir.includes("}")) {
+      throw new Error(`Invalid writePath pattern: unsupported glob`);
+    }
+    isRepoRelativePosixPath(dir, "writePath");
+    return { type: "dir", prefix: `${dir}/`, raw: writePath };
+  }
+
   isRepoRelativePosixPath(writePath, "writePath");
   return { type: "file", path: writePath, raw: writePath };
 }
@@ -461,11 +473,8 @@ export function assertWorkspaceChangesWithinPaths(inspection, writePaths) {
         throw new Error(`Invalid writePath: ${writePath}`);
       }
     }
-    if (writePath.includes("/")) {
-      const leadingOrTrailingSlash = writePath.startsWith("/") || writePath.endsWith("/");
-      if (leadingOrTrailingSlash) {
-        throw new Error(`Invalid writePath: ${writePath}`);
-      }
+    if (writePath.includes("/") && writePath.startsWith("/")) {
+      throw new Error(`Invalid writePath: ${writePath}`);
     }
 
     return describeWritePath(writePath);
@@ -488,7 +497,7 @@ export function assertWorkspaceChangesWithinPaths(inspection, writePaths) {
     const sortedInvalid = [...new Set(invalid)].sort();
     const sortedWritePaths = [...new Set(writePaths)].sort();
     throw new Error(
-      `writePaths mismatch: changed files outside writePaths: ${sortedInvalid.join(", ")}; writePaths: ${sortedWritePaths.join(", ")}`,
+      `writePaths mismatch: changed files outside writePaths: ${sortedInvalid.join(", ")}; writePaths: ${sortedWritePaths.join(", ")}; use "dir/**" or "dir/" for a directory`,
     );
   }
 }

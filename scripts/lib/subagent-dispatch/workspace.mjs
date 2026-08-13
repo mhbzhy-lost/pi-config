@@ -4,7 +4,7 @@ import { existsSync, lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { createManagedWorktree, preserveManagedWorktree, releaseManagedWorktree } from "../worktree-lifecycle/managed-worktree.mjs";
 import { markDisposition } from "../worktree-lifecycle/registry.mjs";
-import { assertWorkspaceChangesWithinPaths, inspectExecutorWorkspace, integrateExecutorWorkspace, isExecutorWorkspaceIntegrated } from "../goal-engine/workspace.mjs";
+import { assertWorkspaceChangesWithinPaths, inspectExecutorWorkspace, inspectOriginIntegrationBaseline, integrateExecutorWorkspace, isExecutorWorkspaceIntegrated } from "../goal-engine/workspace.mjs";
 
 const OWNER_KIND = "typed-subagent-workspace";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -85,10 +85,13 @@ export function integrateSubagentWorkspace({ lease, snapshot, strategy = "cherry
   const state = assertSnapshot(lease, snapshot, { destructive: true });
   if (!state.clean || !state.hasCommits || !state.descendant) fail("WORKTREE_INTEGRATE_UNSAFE", "workspace must be a clean descendant with commits");
   assertWorkspaceChangesWithinPaths({ changedFiles: state.changedFiles }, lease.writePaths);
-  if (state.originRef !== lease.originRef || state.originHead !== lease.originHeadAtAllocation || !clean(lease.originRoot)) fail("WORKTREE_ORIGIN_DRIFT", "origin changed before integration");
+  if (state.originRef !== lease.originRef || !clean(lease.originRoot)) fail("WORKTREE_ORIGIN_DRIFT", "origin changed before integration");
   if (!["cherry-pick", "merge"].includes(strategy)) fail("WORKTREE_INTEGRATE_FORBIDDEN", "unknown integration strategy");
   let result;
-  try { result = integrateExecutorWorkspace(goalLease(lease), { strategy, executorHead: state.headCommit, originRef: lease.originRef, originHeadBefore: lease.originHeadAtAllocation }); }
+  try {
+    const baseline = inspectOriginIntegrationBaseline(goalLease(lease), { originRef: lease.originRef, originHeadBefore: lease.originHeadAtAllocation, allowForwardAdvance: true });
+    result = integrateExecutorWorkspace(goalLease(lease), { strategy, executorHead: state.headCommit, originRef: lease.originRef, originHeadBefore: baseline.currentHead });
+  }
   catch (error) { fail("WORKTREE_INTEGRATE_CONFLICT", "integration failed; workspace preserved"); }
   try { markDisposition({ originRoot: lease.originRoot, id: lease.workspaceId, ownerToken: lease.ownerToken, disposition: "reclaimable" }); }
   catch (error) { error.phase = "managed-reclaimable"; throw error; }
@@ -97,5 +100,9 @@ export function integrateSubagentWorkspace({ lease, snapshot, strategy = "cherry
 export function isSubagentWorkspaceIntegrated({ lease, strategy, executorHead }) { return isExecutorWorkspaceIntegrated(goalLease(lease), { strategy, executorHead }); }
 export function reclaimSubagentWorkspace({ lease }) { return markDisposition({ originRoot: lease.originRoot, id: lease.workspaceId, ownerToken: lease.ownerToken, disposition: "reclaimable" }); }
 export function releaseReclaimableSubagentWorkspace({ lease }) { return releaseManagedWorktree({ originRoot: lease.originRoot, id: lease.workspaceId, ownerToken: lease.ownerToken }); }
+export function releasePreservedSubagentWorkspace({ lease }) {
+  markDisposition({ originRoot: lease.originRoot, id: lease.workspaceId, ownerToken: lease.ownerToken, disposition: "reclaimable" });
+  return releaseManagedWorktree({ originRoot: lease.originRoot, id: lease.workspaceId, ownerToken: lease.ownerToken });
+}
 export function preserveSubagentWorkspace({ lease, snapshot, reason = "subagent workspace preserved" }) { assertSnapshot(lease, snapshot); preserveManagedWorktree({ originRoot: lease.originRoot, id: lease.workspaceId, ownerToken: lease.ownerToken, reason }); return { preserved: true, released: false }; }
 export function discardSubagentWorkspace({ lease, snapshot }) { const state = assertSnapshot(lease, snapshot, { destructive: true }); if (!state.clean) fail("WORKTREE_DISCARD_UNSAFE", "workspace must be clean before discard"); reclaimSubagentWorkspace({ lease }); releaseReclaimableSubagentWorkspace({ lease }); return { preserved: false, released: true }; }

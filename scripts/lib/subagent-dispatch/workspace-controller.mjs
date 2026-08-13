@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { allocateWorkspaceIntent, activateWorkspace, bindWorkspaceRun, consumeWorkspaceAction, finalizeWorkspaceDisposition, issueWorkspaceAction, loadWorkspace, publicWorkspace, recoverPrivateWorkspaceLease } from "./workspace-ledger.mjs";
+import { allocateWorkspaceIntent, activateWorkspace, bindWorkspaceRun, consumeWorkspaceAction, finalizeWorkspaceDisposition, issueWorkspaceAction, loadWorkspace, markWorkspaceState, publicWorkspace, recoverPrivateWorkspaceLease } from "./workspace-ledger.mjs";
 import { assertWorkspaceChangesWithinPaths } from "../goal-engine/workspace.mjs";
-import { createSubagentWorkspace, discardSubagentWorkspace, integrateSubagentWorkspace, isSubagentWorkspaceIntegrated, preserveSubagentWorkspace, reclaimSubagentWorkspace, releaseReclaimableSubagentWorkspace, snapshotSubagentWorkspace } from "./workspace.mjs";
+import { createSubagentWorkspace, discardSubagentWorkspace, integrateSubagentWorkspace, isSubagentWorkspaceIntegrated, preserveSubagentWorkspace, reclaimSubagentWorkspace, releasePreservedSubagentWorkspace, releaseReclaimableSubagentWorkspace, snapshotSubagentWorkspace } from "./workspace.mjs";
 
 const fail = (code, message) => { const error = new Error(message); error.code = code; throw error; };
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -29,10 +29,27 @@ export function bindManagedSubagentWorkspaceRun(context, binding) { const lease 
 export function statusManagedSubagentWorkspace({ originRoot, workspaceId, terminalProof }) {
   let lease = recoverPrivateWorkspaceLease({ originRoot, workspaceId });
   if (lease.record.pendingDisposition) return recoverManagedSubagentWorkspace({ originRoot, workspaceId, terminalProof });
-  if (lease.record.state !== "active") return result(lease.record, { allowedDispositions: [] });
+  if (lease.record.state !== "active") return result(lease.record, { allowedDispositions: [], integrateBlockedReasons: [] });
   const workspaceLease = privateLease(lease.record); const snapshot = snapshotSubagentWorkspace({ lease: workspaceLease, terminalProof }); const allowed = ["preserve"];
-  if (terminalProof?.state === "observed" && terminalProof.conflict !== true && snapshot.clean) { allowed.push("discard"); if (lease.record.kind === "coding" && snapshot.hasCommits && snapshot.descendant && snapshot.originRef === lease.record.originRef && snapshot.originHead === lease.record.originHeadAtAllocation && snapshot.originClean) { try { assertWorkspaceChangesWithinPaths({ changedFiles: snapshot.changedFiles }, lease.record.writePaths); allowed.push("integrate"); } catch {} } }
-  const issued = issueWorkspaceAction({ lease, snapshotHash: snapshot.snapshotHash, allowed }); return result(issued.lease.record, { allowedDispositions: allowed, actionToken: issued.actionToken });
+  const integrateBlockedReasons = [];
+  if (terminalProof?.state !== "observed" || terminalProof.conflict === true) integrateBlockedReasons.push("terminal-unobserved");
+  if (lease.record.kind !== "coding") integrateBlockedReasons.push("generic-cannot-integrate");
+  if (!snapshot.clean) integrateBlockedReasons.push("workspace-dirty");
+  if (!snapshot.hasCommits) integrateBlockedReasons.push("no-commits");
+  if (!snapshot.descendant) integrateBlockedReasons.push("not-descendant");
+  if (snapshot.originRef !== lease.record.originRef) integrateBlockedReasons.push("origin-ref-drift");
+  if (!snapshot.originClean) integrateBlockedReasons.push("origin-dirty");
+  if (snapshot.originHead !== lease.record.originHeadAtAllocation) {
+    try { git(lease.record.originRoot, "merge-base", "--is-ancestor", lease.record.originHeadAtAllocation, snapshot.originHead); }
+    catch (error) { if (error?.status === 1) integrateBlockedReasons.push("origin-advanced-nonlinear"); else throw error; }
+  }
+  try { assertWorkspaceChangesWithinPaths({ changedFiles: snapshot.changedFiles }, lease.record.writePaths); }
+  catch { integrateBlockedReasons.push("writePaths-out-of-scope"); }
+  if (terminalProof?.state === "observed" && terminalProof.conflict !== true && snapshot.clean) {
+    allowed.push("discard");
+    if (integrateBlockedReasons.length === 0) allowed.push("integrate");
+  }
+  const issued = issueWorkspaceAction({ lease, snapshotHash: snapshot.snapshotHash, allowed }); return result(issued.lease.record, { allowedDispositions: allowed, actionToken: issued.actionToken, integrateBlockedReasons });
 }
 function faultAt(fault, point) { if (fault) fault(point); }
 function finalize(lease, state) { return result(finalizeWorkspaceDisposition({ lease, state }).record); }
@@ -66,5 +83,11 @@ export function disposeManagedSubagentWorkspace({ originRoot, workspaceId, termi
   lease = consumeWorkspaceAction({ lease, actionToken, snapshotHash: snapshot.snapshotHash, disposition, strategy: disposition === "integrate" ? strategy : null, proofHash: terminalProof?.proofHash ?? null, executorHead }); faultAt(fault, "after-consume");
   return recoverManagedSubagentWorkspace({ originRoot, workspaceId, terminalProof, fault });
 }
+export function releaseManagedSubagentWorkspace({ originRoot, workspaceId }) {
+  const lease = recoverPrivateWorkspaceLease({ originRoot, workspaceId });
+  if (lease.record.state !== "preserved") fail("WORKSPACE_LEDGER_STATE", "workspace is not preserved");
+  releasePreservedSubagentWorkspace({ lease: privateLease(lease.record) });
+  return result(markWorkspaceState({ lease, state: "released" }).record);
+}
 export function loadManagedSubagentWorkspace({ originRoot, workspaceId }) { return loadWorkspace({ originRoot, workspaceId }); }
-export function createWorkspaceController({ fault } = {}) { return { allocateManagedSubagentWorkspace: (input) => allocateManagedSubagentWorkspace({ ...input, fault: input.fault ?? fault }), bindManagedSubagentWorkspaceRun, loadManagedSubagentWorkspace, statusManagedSubagentWorkspace, disposeManagedSubagentWorkspace: (input) => disposeManagedSubagentWorkspace({ ...input, fault: input.fault ?? fault }), recoverManagedSubagentWorkspace: (input) => recoverManagedSubagentWorkspace({ ...input, fault: input.fault ?? fault }) }; }
+export function createWorkspaceController({ fault } = {}) { return { allocateManagedSubagentWorkspace: (input) => allocateManagedSubagentWorkspace({ ...input, fault: input.fault ?? fault }), bindManagedSubagentWorkspaceRun, loadManagedSubagentWorkspace, statusManagedSubagentWorkspace, disposeManagedSubagentWorkspace: (input) => disposeManagedSubagentWorkspace({ ...input, fault: input.fault ?? fault }), recoverManagedSubagentWorkspace: (input) => recoverManagedSubagentWorkspace({ ...input, fault: input.fault ?? fault }), releaseManagedSubagentWorkspace }; }
