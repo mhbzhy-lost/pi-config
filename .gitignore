@@ -32,6 +32,7 @@ __pycache__/
 # Pi runtime (subagent artifacts)
 /.pi-subagents/
 /.state/goal-engine/
+/.state/worktree-lifecycle/
 /pi/models-store.json
 
 # Secrets

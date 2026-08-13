@@ -2,7 +2,7 @@
 name: executor
 description: Deterministic coding subagent for precise multi-file implementation
 model: openai-codex/gpt-5.6-terra
-thinking: low
+thinking: medium
 temperature: 0
 tools: read,write,edit,bash,grep,find,ls,contact_supervisor
 subagentOnlyExtensions: .pi-subagents/root-session-owner-entry.mjs
