@@ -3,7 +3,7 @@ import test from "node:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, chmodSync, realpathSync, symlinkSync, renameSync, rmSync } from "node:fs";
-import { basename, join, dirname } from "node:path";
+import { basename, join, dirname, isAbsolute, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
@@ -146,7 +146,10 @@ async function invoke(pi, name, params = {}) {
       const sha256 = fingerprintSettlementEvidence(child, { expectedIdentity: identity, expectedCriteria: task.acceptance.criteria.map(({ id }) => id), outcome: "succeeded" });
       const directory = join(task.workspace.path, ".pi-subagents", "acceptance-evidence");
       mkdirSync(directory, { recursive: true, mode: 0o700 });
-      writeFileSync(git(task.workspace.path, "rev-parse", "--git-path", "info/exclude"), ".pi-subagents/\n", { flag: "a" });
+      const excludePath = git(task.workspace.path, "rev-parse", "--git-path", "info/exclude");
+      if (isAbsolute(excludePath) || existsSync(resolve(task.workspace.path, excludePath))) {
+        writeFileSync(isAbsolute(excludePath) ? excludePath : resolve(task.workspace.path, excludePath), ".pi-subagents/\n", { flag: "a" });
+      }
       const artifact = join(directory, `${sha256}.yaml`);
       writeFileSync(artifact, serializeSettlementEvidenceYaml(child, { expectedIdentity: identity, expectedCriteria: task.acceptance.criteria.map(({ id }) => id), outcome: "succeeded" }), { mode: 0o600 });
       chmodSync(artifact, 0o600);
