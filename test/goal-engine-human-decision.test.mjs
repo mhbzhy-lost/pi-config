@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createRuntimeActivationChallenge,
   hashGoalMetadataProposal,
   recordHumanChoice,
 } from "../scripts/lib/goal-engine/human-decision.mjs";
@@ -59,6 +60,22 @@ test("rejects extension messages cross-session input stale input and ambiguous p
   for (const [input, pattern] of cases) {
     assert.throws(() => recordHumanChoice({ inputEvent: input, challenge: challenge(), sessionId: "session-1" }), pattern);
   }
+});
+
+test("runtime activation approval is bound to its post-challenge interactive or RPC user decision", () => {
+  const activation = createRuntimeActivationChallenge({
+    goalId: "goal-1", contractHash: "a".repeat(64), baseHead: "b".repeat(40), sessionId: "session-1", proposalId: "proposal-1",
+  });
+  assert.equal(activation.kind, "runtime_activation_approval");
+  assert.deepEqual(recordHumanChoice({
+    inputEvent: inputEvent({ text: "approve", occurredAt: new Date(Date.parse(activation.requestedAt) + 1).toISOString() }), challenge: activation, sessionId: "session-1",
+  }), {
+    challengeId: activation.id, kind: "runtime_activation_approval", choice: "approve", goalId: "goal-1",
+    contractHash: "a".repeat(64), baseHead: "b".repeat(40), proposalId: "proposal-1", userEntryId: "entry-1", sessionId: "session-1", source: "interactive",
+  });
+  assert.throws(() => recordHumanChoice({ inputEvent: inputEvent({ occurredAt: activation.requestedAt }), challenge: activation, sessionId: "session-1" }), /after/);
+  assert.throws(() => recordHumanChoice({ inputEvent: inputEvent({ sessionId: "other" }), challenge: activation, sessionId: "session-1" }), /session/);
+  assert.throws(() => recordHumanChoice({ inputEvent: inputEvent({ source: "extension" }), challenge: activation, sessionId: "session-1" }), /interactive|rpc/);
 });
 
 test("hashes normalized goal metadata deterministically and preserves semantic array order", () => {

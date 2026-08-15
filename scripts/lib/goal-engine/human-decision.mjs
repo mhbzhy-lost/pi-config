@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const REAL_USER_SOURCES = new Set(["interactive", "rpc"]);
 const CHOICE_ALIASES = new Map([
@@ -50,6 +50,10 @@ export function recordHumanChoice({ inputEvent, challenge, sessionId } = {}) {
   if (kind === "goal_metadata_approval") {
     if (challenge.proposalPresented !== true) fail("metadata proposal must be presented before approval");
     if (typeof challenge.proposalHash !== "string" || !/^[a-f0-9]{64}$/.test(challenge.proposalHash)) fail("valid proposalHash is required");
+  } else if (kind === "runtime_activation_approval") {
+    for (const field of ["goalId", "contractHash", "baseHead", "proposalId"]) requiredString(challenge[field], `challenge.${field}`);
+    if (!/^[a-f0-9]{64}$/.test(challenge.contractHash)) fail("valid challenge.contractHash is required");
+    if (!/^[a-f0-9]{40,64}$/.test(challenge.baseHead)) fail("valid challenge.baseHead is required");
   } else if (kind === "session_transfer_approval") {
     if (!new Set(["批准", "approve", "拒绝", "reject"]).has(requiredString(inputEvent.text, "inputEvent.text").toLocaleLowerCase("en-US"))) fail("user input must exactly match one allowed choice");
   } else if (kind !== "orphan_disposition") {
@@ -61,10 +65,27 @@ export function recordHumanChoice({ inputEvent, challenge, sessionId } = {}) {
     kind,
     choice,
     ...(kind === "goal_metadata_approval" ? { proposalHash: challenge.proposalHash } : {}),
+    ...(kind === "runtime_activation_approval" ? {
+      goalId: challenge.goalId, contractHash: challenge.contractHash, baseHead: challenge.baseHead, proposalId: challenge.proposalId,
+    } : {}),
     userEntryId: requiredString(inputEvent.id, "inputEvent.id"),
     sessionId: boundSessionId,
     source: inputEvent.source,
   };
+}
+
+export function createRuntimeActivationChallenge({ goalId, contractHash, baseHead, sessionId, proposalId } = {}) {
+  const normalizedGoalId = requiredString(goalId, "goalId");
+  const normalizedContractHash = requiredString(contractHash, "contractHash");
+  const normalizedBaseHead = requiredString(baseHead, "baseHead");
+  const normalizedSessionId = requiredString(sessionId, "sessionId");
+  const normalizedProposalId = requiredString(proposalId, "proposalId");
+  if (!/^[a-f0-9]{64}$/.test(normalizedContractHash)) fail("contractHash must be a SHA-256 hash");
+  if (!/^[a-f0-9]{40,64}$/.test(normalizedBaseHead)) fail("baseHead must be a Git hash");
+  return Object.freeze({
+    id: randomUUID(), kind: "runtime_activation_approval", choices: ["approve", "reject"], requestedAt: new Date().toISOString(),
+    goalId: normalizedGoalId, contractHash: normalizedContractHash, baseHead: normalizedBaseHead, sessionId: normalizedSessionId, proposalId: normalizedProposalId,
+  });
 }
 
 export function hashGoalMetadataProposal({ objective, scope, nonGoals, dod } = {}) {
