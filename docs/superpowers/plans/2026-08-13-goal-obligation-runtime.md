@@ -18,7 +18,7 @@
 
 ## Global Constraints
 
-- 开始 R1 生产实现前，必须完成当前 `planned-goal` bootstrap；本计划不得通过 amend 塞入其明确排除 `goal_finalize`、idle 与 Convergent 的 scope。
+- R0–R13 全部完成并通过 R13 验收前，禁止使用 Goal Engine 执行、编排或验收本改造计划；全部任务必须按本计划 DAG 采用 Subagent-Driven 执行。既有 `planned-goal` 仅作为冻结的历史账本，不阻塞 R1–R13，待 R13 通过并启动 fresh Host 后再通过 typed 工具收尾。
 - 历史 `goal-engine.event.v1/v2/v3` 与当前 `planned.v1` 继续按原 generation replay/mutate；不得原地升级、混写或改变 completion protocol。
 - Root Goal ABI在 R1 后精确为八工具：`goal_init/status/dispatch/settle/integrate/accept/amend/finalize`；不得新增 `goal_observe` 或第九个工具。
 - 任何 production/Skill 逻辑修改必须先新增或补全中文 `docs/bugs/bug-*.md`，再写 tests-only RED、观察正确失败、最后最小 GREEN。
@@ -490,14 +490,14 @@ Wave不是派发屏障；全部前驱完成即可派发。R1/R2/R3与R5/R8的pro
 
 本计划不由任何Goal自举，固定采用Subagent-Driven执行：
 
-1. 先完成当前`planned-goal`的原始scope；在它active期间不得开始R1 production修改。当前Goal完成后，不为R0–R13创建新的Goal。
+1. R0–R13 全程不得创建、恢复、amend或使用任何Goal来执行、编排或验收本计划；当前`planned-goal`保持冻结且不构成R1 production前置，待R13通过并启动fresh Host后再单独typed收尾。
 2. 主Agent只读取本计划`Deps`构建DAG、派发Executor、核对terminal proof、处置managed workspace、运行必要的主工作区回归并形成验收决策；不直接实施production coding。
 3. 每个coding任务使用完整`dispatch-ir.v1`、criteria-only acceptance与独立managed worktree；由Executor严格执行bug文档→tests-only RED→最小GREEN。禁止自由文本coding派发。
 4. 无依赖任务按DAG并行派发；有前驱的任务只在所需产物已集成并验收后派发。并行写路径重叠时不抢写，按本计划既定接口或专门顺序集成处理。
 5. 子任务完成不等于可合入。主Agent先读取official terminal/workspace proof，再使用typed subagent workspace disposition；不得raw worktree或Git清理。
 6. R1之后每个中间提交仍必须保持`planned.v1` replay、action token、Executor contract、settlement与completion向后兼容，但该兼容性由tests和fresh child Pi Host验证，不由active Goal自证。
 7. R10–R12的新runtime canary必须使用独立临时Git repository、独立state root与fresh child Pi Host，不得复用当前cwd的Goal events、session、worktree或resource lease。
-8. R13通过后才重启主Pi Host、运行exact-eight Doctor并允许创建第一个production `goal-runtime.v1` Goal。Auto-continuation继续另立计划。
+8. R13通过后才重启主Pi Host、运行exact-eight Doctor、typed收尾既有`planned-goal`并允许创建第一个production `goal-runtime.v1` Goal。Auto-continuation继续另立计划。
 
 直接使用`planned.v1`或`goal-runtime.v1`管理R0–R13均视为循环控制面风险，明确禁止。
 
