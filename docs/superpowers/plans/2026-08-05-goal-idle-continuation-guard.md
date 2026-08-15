@@ -1,5 +1,7 @@
 # Goal Idle Continuation Guard 实施计划
 
+> **暂停执行：** 本计划保留为历史输入；应先完成 `docs/superpowers/plans/2026-08-13-goal-obligation-runtime.md` 的 Manual Preview，再按 obligation frontier 重新编写 auto-continuation 计划。当前不得派发其中 Task。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 当主 Agent真正 settled 且没有任何 queued/future wake 时，检查 Planned Goal 结构化状态；若计划尚未完成且存在可推进动作，自动触发新 turn，提示主 Agent从 `goal_status` 恢复并继续推进。

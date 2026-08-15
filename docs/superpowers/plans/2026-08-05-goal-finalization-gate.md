@@ -1,5 +1,7 @@
 # Goal Finalization Gate 实施计划
 
+> **已取代：** 本计划的 v4 与“修改 Planned 完成语义”假设已由 `docs/superpowers/plans/2026-08-13-goal-obligation-runtime.md` 的 R1/R11 取代，仅保留为历史设计输入，不得继续派发其中 Task。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 新增第八个 model-facing 工具 `goal_finalize`，作为 `planned` Goal/计划的唯一终局门禁：校验此前全部结构化状态与资源事实，取得真实用户外发授权，触发外源评审，只有评审无 Critical/Important 时才完成 Goal。

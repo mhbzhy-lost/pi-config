@@ -1,5 +1,7 @@
 # Convergent Goal 目标收敛执行实施计划
 
+> **已取代：** 本计划的互斥 `planned | convergent` 设计已由 `docs/superpowers/plans/2026-08-13-goal-obligation-runtime.md` 取代，仅保留为历史设计输入，不得继续派发其中 Task。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在同一个 Goal Engine 治理核心中新增 `convergent` 执行模式，使没有初始任务 DAG、但具备可验证终态的目标能够通过“完整观察→结构化 finding→动态修复→干净复验→稳定收敛”持续推进，直到 mode-aware `goal_finalize` 证明完成。
