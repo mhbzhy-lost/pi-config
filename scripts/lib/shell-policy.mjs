@@ -257,6 +257,7 @@ function checkShellWrapper(tokens, cwd, workspaceRoot) {
 function checkSingleCommand(command, cwd, workspaceRoot) {
   const commands = commandContext(command, cwd);
   for (const { tokens, environment, cwd: commandCwd } of commands) {
+    if (tokens.some((token) => token.endsWith("worktree-lifecycle.mjs")) && tokens.includes("--owner-token")) return violation("WORKTREE_OWNER_TOKEN_ARG_FORBIDDEN", "owner token 必须通过标准输入传递");
     const rmViolation = checkRm(tokens, commandCwd, workspaceRoot);
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);
@@ -361,6 +362,7 @@ export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }) {
   const skipCommitValidation = env.GIT_COMMIT_HOOK_SKIP === "1" || /(?:^|\s)GIT_COMMIT_HOOK_SKIP=1(?:\s|$)/.test(command);
   const commands = commandContext(command, cwd);
   for (const { tokens, environment, cwd: commandCwd, cd } of commands) {
+    if (tokens.some((token) => token.endsWith("worktree-lifecycle.mjs")) && tokens.includes("--owner-token")) return violation("WORKTREE_OWNER_TOKEN_ARG_FORBIDDEN", "owner token 必须通过标准输入传递");
     const rmViolation = checkRm(tokens, commandCwd, workspaceRoot);
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);

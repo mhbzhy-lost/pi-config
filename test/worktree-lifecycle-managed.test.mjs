@@ -480,10 +480,11 @@ test("managed CLI creates and preserves through the same owner protocol while pa
   const receipt = JSON.parse(created.stdout);
   assert.equal(receipt.state, "active");
 
+  assert.equal(Object.hasOwn(receipt, "ownerToken"), false);
   const preserved = spawnSync(process.execPath, [
-    script, "preserve", "--json", "--id", receipt.id, "--owner-token", receipt.ownerToken,
+    script, "preserve", "--json", "--id", receipt.id, "--owner-token-stdin",
     "--reason", "keep cli result",
-  ], { cwd: f.root, encoding: "utf8" });
+  ], { cwd: f.root, encoding: "utf8", input: manifest(f.root, receipt.id).ownerToken });
   assert.equal(preserved.status, 0, preserved.stderr);
   assert.equal(JSON.parse(preserved.stdout).state, "preserved");
 

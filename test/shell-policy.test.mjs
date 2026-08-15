@@ -273,7 +273,8 @@ test("allows read-only git worktree list variants and the managed lifecycle CLI"
   assert.equal(policy("git worktree list"), undefined);
   assert.equal(policy("git worktree list --porcelain -z"), undefined);
   assert.equal(policy("git --no-pager worktree list --verbose"), undefined);
-  assert.equal(policy("node scripts/worktree-lifecycle.mjs release --id task --owner-token token"), undefined);
+  assertBlocked("node scripts/worktree-lifecycle.mjs release --id task --owner-token token", "WORKTREE_OWNER_TOKEN_ARG_FORBIDDEN", /owner token/, undefined);
+  assert.equal(policy("node scripts/worktree-lifecycle.mjs release --id task --owner-token-stdin"), undefined);
 });
 
 test("blocks destructive git commands that cannot be undone", () => {

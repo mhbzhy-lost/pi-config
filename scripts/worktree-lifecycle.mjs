@@ -10,8 +10,8 @@ const SCHEMAS = {
   "prune-stale-registrations": { flags: new Set(["json", "apply"]), values: new Set(["challenge"]) },
   create: { flags: new Set(["json"]), values: new Set(["id", "branch", "base", "owner-kind", "owner-id"]) },
   adopt: { flags: new Set(["json"]), values: new Set(["id", "branch", "base", "owner-kind", "owner-id", "path"]) },
-  release: { flags: new Set(["json"]), values: new Set(["id", "owner-token"]) },
-  preserve: { flags: new Set(["json"]), values: new Set(["id", "owner-token", "reason"]) },
+  release: { flags: new Set(["json", "owner-token-stdin"]), values: new Set(["id"]) },
+  preserve: { flags: new Set(["json", "owner-token-stdin"]), values: new Set(["id", "reason"]) },
   reanchor: { flags: new Set(["json", "owner-token-stdin"]), values: new Set(["id", "expected-head", "target-head"]) },
 };
 
@@ -44,10 +44,22 @@ function parseCommand(argv) {
     }
   }
   for (const name of schema.values) if (values[name] === undefined && !(command === "prune-stale-registrations" && name === "challenge" && !flags.has("apply"))) usage(`Missing --${name}`);
-  if (command === "reanchor" && !flags.has("owner-token-stdin")) usage("reanchor requires --owner-token-stdin");
+  if (["release", "preserve", "reanchor"].includes(command) && !flags.has("owner-token-stdin")) usage(`${command} requires --owner-token-stdin`);
   if (command === "prune-stale-registrations" && !flags.has("apply") && values.challenge !== undefined) usage("--challenge requires --apply");
   if (command === "prune-stale-registrations" && flags.has("apply") && values.challenge === undefined) usage("Missing --challenge");
   return { command, json: flags.has("json"), apply: flags.has("apply"), values };
+}
+
+async function readOwnerToken() {
+  const token = await new Promise((resolve, reject) => {
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { input += chunk; });
+    process.stdin.on("end", () => resolve(input.trim()));
+    process.stdin.on("error", reject);
+  });
+  if (!token) usage("owner token stdin is empty");
+  return token;
 }
 
 function escapeSingleLine(value) {
@@ -95,18 +107,11 @@ if (parsed) {
       const headCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: allocation.path, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
       print(activateAllocation({ originRoot: process.cwd(), id: allocation.id, ownerToken: allocation.ownerToken, headCommit }), json);
     } else if (command === "release") {
-      print(releaseManagedWorktree({ originRoot: process.cwd(), id: values.id, ownerToken: values["owner-token"] }), json);
+      print(releaseManagedWorktree({ originRoot: process.cwd(), id: values.id, ownerToken: await readOwnerToken() }), json);
     } else if (command === "reanchor") {
-      const ownerToken = await new Promise((resolve, reject) => {
-        let input = "";
-        process.stdin.setEncoding("utf8");
-        process.stdin.on("data", (chunk) => { input += chunk; });
-        process.stdin.on("end", () => resolve(input.trim()));
-        process.stdin.on("error", reject);
-      });
-      print(reanchorManagedWorktree({ originRoot: process.cwd(), id: values.id, ownerToken, expectedHead: values["expected-head"], targetHead: values["target-head"] }), json);
+      print(reanchorManagedWorktree({ originRoot: process.cwd(), id: values.id, ownerToken: await readOwnerToken(), expectedHead: values["expected-head"], targetHead: values["target-head"] }), json);
     } else {
-      print(preserveManagedWorktree({ originRoot: process.cwd(), id: values.id, ownerToken: values["owner-token"], reason: values.reason }), json);
+      print(preserveManagedWorktree({ originRoot: process.cwd(), id: values.id, ownerToken: await readOwnerToken(), reason: values.reason }), json);
     }
   } catch (error) {
     console.error(`${error.code || "WORKTREE_LIFECYCLE_ERROR"}: ${error.message}`);
