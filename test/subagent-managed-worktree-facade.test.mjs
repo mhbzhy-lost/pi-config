@@ -106,6 +106,22 @@ test("workspace status uses fresh local proof and exposes only snake_case public
   assert.equal(calls.filter(([name]) => name === "load").length, 2);
 });
 
+test("workspace status content exposes the active disposition capability without private fields", async () => {
+  const { host } = workspaceActions();
+  const result = await host.tools[0].execute("call", { action: "workspace_status", workspace_id: "ws-1" }, undefined, undefined, { cwd: "/repo" });
+  const content = JSON.parse(result.content[0].text);
+
+  assert.deepEqual(content, {
+    workspace_id: "ws-1",
+    state: "active",
+    workspace_state: "active",
+    process_terminal: "running",
+    allowed_dispositions: ["integrate", "discard"],
+    action_token: "public-token",
+  });
+  assert.doesNotMatch(result.content[0].text, /ownerToken|privateProof|private terminal proof/i);
+});
+
 test("workspace disposition refreshes proof locally and rejects invalid strategy before every dependency", async () => {
   const { host, calls, client } = workspaceActions(); const tool = host.tools[0];
   const invalid = await tool.execute("call", { action: "workspace_disposition", workspace_id: "ws-1", disposition: "discard", strategy: "merge", action_token: "t" }, undefined, undefined, { cwd: "/repo" });
@@ -123,6 +139,7 @@ test("workspace reload fallback loads canonical origin, repopulates it, and omit
   const again = await host.tools[0].execute("call", { action: "workspace_status", workspace_id: "ws-1" }, undefined, undefined, { cwd: "/repo" });
   assert.equal(result.isError, false); assert.equal(calls[0][0], "load"); assert.equal(calls[0][1].originRoot, "/reloaded"); assert.equal(resolves, 1);
   assert.equal(Object.hasOwn(again.details, "action_token"), false);
+  assert.equal(Object.hasOwn(JSON.parse(again.content[0].text), "action_token"), false);
 });
 
 test("workspace resolver and loader failures return errors without proof or actions", async () => {

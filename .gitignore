@@ -33,6 +33,7 @@ __pycache__/
 /.pi-subagents/
 /.state/goal-engine/
 /.state/worktree-lifecycle/
+/.state/subagent-dispatch/
 /pi/models-store.json
 
 # Secrets

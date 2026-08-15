@@ -474,7 +474,8 @@ async function executeWorkspaceAction(input, ctx, controller, origins, inspectFa
   const value = input.action === "workspace_status"
     ? controller.statusManagedSubagentWorkspace({ originRoot, workspaceId: input.workspace_id, terminalProof: proof })
     : controller.disposeManagedSubagentWorkspace({ originRoot, workspaceId: input.workspace_id, disposition: input.disposition, strategy: input.strategy ?? "cherry-pick", actionToken: input.action_token, terminalProof: proof });
-  return { content: [{ type: "text", text: `Workspace ${value.workspaceId}: ${value.state}` }], isError: false, details: workspacePublic(value, proof) };
+  const publicWorkspace = workspacePublic(value, proof);
+  return { content: [{ type: "text", text: JSON.stringify(publicWorkspace) }], isError: false, details: publicWorkspace };
 }
 
 async function executeControl(input, rpc) {

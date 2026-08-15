@@ -105,3 +105,8 @@ test("migration ignores all Plan runtime state", async () => {
   const gitignore = await readFile(join(repoRoot, ".gitignore"), "utf8");
   assert.match(gitignore, /^\/var\/$/m);
 });
+
+test("migration ignores managed subagent workspace runtime state", async () => {
+  const gitignore = await readFile(join(repoRoot, ".gitignore"), "utf8");
+  assert.match(gitignore, /^\/.state\/subagent-dispatch\/$/m);
+});
