@@ -3805,6 +3805,64 @@ test("production status dispatches every runnable task before offering settlemen
   assert.deepEqual(status.machineAction, { tool: "goal_settle", params: { goal_id: goalId, task_id: "t1" } });
 });
 
+test("production status offers a bound DAG amendment for a superseded dependency", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtensionProduction(pi);
+  const objective = "Repair superseded dependency debt";
+  const goalId = objectiveToGoalId(objective);
+  const task = (id, deps = []) => ({ id, description: `implement ${id}`, deps, writePaths: [`src/${id}.ts`], acceptance: plannedAcceptance([`${id} works`]), workflow: "tdd" });
+  await invoke(pi, "goal_init", { objective, tasks: [task("source"), task("dependent", ["source"])] });
+
+  let status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  assert.deepEqual(status.machineAction, { tool: "goal_dispatch", params: { goal_id: goalId, task_id: "source" } }, "ordinary pending dependencies must not receive an amendment offer");
+  await invoke(pi, "goal_dispatch", { task_id: "source", action_token: status.action_token });
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  assert.deepEqual(status.machineAction, { tool: "goal_settle", params: { goal_id: goalId, task_id: "source" } }, "ordinary running dependencies must not receive an amendment offer");
+  await invoke(pi, "goal_settle", {
+    task_id: "source", outcome: "blocked", reason: "The source task needs an approved replacement", next_action: "Discard the clean workspace before explicitly superseding the blocked task", action_token: status.action_token,
+  });
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_integrate", { task_id: "source", action: "discard", action_token: status.action_token });
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_amend", {
+    goal_id: goalId, operation: "resolve_blocked", reason: "Explicitly replace the blocked source task", blocked_resolution: "supersede", blocked_task_id: "source", replacement_task_id: "replacement", add_tasks: [task("replacement")], action_token: status.action_token,
+  });
+
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  const replacementDispatch = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "replacement", action_token: status.action_token }));
+  commitWorkspaceChange(replacementDispatch.workspace, "src/replacement.ts", "export const replacement = true;\n", "test: accept replacement task");
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_settle", { task_id: "replacement", outcome: "succeeded", next_action: "Integrate the replacement task", action_token: status.action_token });
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_integrate", { task_id: "replacement", action: "integrate", action_token: status.action_token });
+  status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  await invoke(pi, "goal_accept", { task_id: "replacement", action_token: status.action_token });
+
+  const offer = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
+  assert.deepEqual(offer.runnable, []);
+  assert.deepEqual(offer.machineAction, { tool: "goal_amend", params: { goal_id: goalId, operation: "patch_active", task_id: "dependent" } });
+  assert.match(offer.action_token, /^goal-action\.v1:/);
+  for (const invalid of [
+    { operation: "patch_active", update_tasks: { source: { deps: ["replacement"] } } },
+    { operation: "patch_active", update_tasks: { dependent: { deps: ["replacement"], description: "unauthorized" } } },
+    { operation: "patch_active", update_tasks: { dependent: { deps: ["replacement"] }, replacement: { deps: [] } } },
+    { operation: "resolve_blocked", blocked_resolution: "retry", blocked_task_id: "dependent", update_tasks: { dependent: { deps: ["replacement"] } } },
+  ]) {
+    const before = persistedStateBytes(cwd, goalId);
+    await assert.rejects(() => invoke(pi, "goal_amend", { goal_id: goalId, reason: "Attempt an unauthorized dependency amendment", action_token: offer.action_token, ...invalid }), /offer|task|deps|operation|amend/i);
+    assert.deepEqual(persistedStateBytes(cwd, goalId), before);
+  }
+
+  const amendment = { goal_id: goalId, operation: "patch_active", reason: "Replace the superseded source dependency explicitly", update_tasks: { dependent: { deps: ["replacement"] } }, action_token: offer.action_token };
+  const amended = JSON.parse(await invoke(pi, "goal_amend", amendment));
+  assert.deepEqual(amended.tasks.dependent.deps, ["replacement"]);
+  assert.deepEqual(amended.runnable, ["dependent"]);
+  const beforeReplay = persistedStateBytes(cwd, goalId);
+  await assert.rejects(() => invoke(pi, "goal_amend", amendment), /consumed|offer|status|token/i);
+  assert.deepEqual(persistedStateBytes(cwd, goalId), beforeReplay);
+});
+
 test("production resolve_blocked consumes the task offer and atomically updates a retried contract", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);

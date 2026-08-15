@@ -412,6 +412,11 @@ function machineActionForProjection(projection, cwd, root) {
     const required = taskActionState(projection, taskId).requiredNextAction;
     if (required) return { tool: required.tool, params: { goal_id: projection.goalId, ...required.params } };
   }
+  for (const [taskId, task] of projection.tasks) {
+    if (task.status === "pending" && task.deps.some((depId) => projection.tasks.get(depId)?.status === "superseded")) {
+      return { tool: "goal_amend", params: { goal_id: projection.goalId, operation: "patch_active", task_id: taskId } };
+    }
+  }
   return null;
 }
 
@@ -707,7 +712,18 @@ export function createGoalEngineExtension(pi, options = {}) {
     }
     const offer = projection.actionOffer;
     if (!offer) throw new Error(`goal_status must issue an action offer before ${tool}`);
-    const supplied = { goal_id: goalId, task_id: params.task_id ?? params.blocked_task_id, action: params.action, strategy: params.strategy, operation: params.operation, challenge_id: params.challenge_id };
+    const offeredTaskId = offer.params.task_id;
+    const boundDependencyAmendment = offer.tool === "goal_amend" && offer.params.operation === "patch_active" && offeredTaskId !== undefined;
+    if (boundDependencyAmendment) {
+      const updateTaskIds = Object.keys(params.update_tasks || {});
+      const update = params.update_tasks?.[offeredTaskId];
+      if (tool !== "goal_amend" || params.operation !== "patch_active"
+        || params.add_tasks || params.remove_tasks || updateTaskIds.length !== 1 || updateTaskIds[0] !== offeredTaskId
+        || !update || Object.keys(update).length !== 1 || !Object.hasOwn(update, "deps")) {
+        throw new Error("bound dependency amendment must update only the offered task deps");
+      }
+    }
+    const supplied = { goal_id: goalId, task_id: params.task_id ?? params.blocked_task_id ?? (boundDependencyAmendment ? offeredTaskId : undefined), action: params.action, strategy: params.strategy, operation: params.operation, challenge_id: params.challenge_id };
     const boundParams = {};
     for (const key of Object.keys(offer.params)) {
       if (supplied[key] === undefined) throw new Error(`action offer params do not match: missing ${key}`);
