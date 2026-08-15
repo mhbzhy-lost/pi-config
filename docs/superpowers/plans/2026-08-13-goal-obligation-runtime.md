@@ -102,11 +102,13 @@ generationCapabilities(schemaVersion) => Object.freeze({
 
 固定矩阵：
 
-| Generation | Task contract | Executor | Settlement | Completion | Conditions |
-|---|---|---|---|---|---|
-| `goal-engine.event.v1/v2/v3` | historical | historical | historical | historical | false |
-| `planned.v1` | criteria-only | strict | dual-path | accept-auto | false |
-| `goal-runtime.v1` | criteria-only | strict | dual-path | goal-finalize | true |
+| Generation | Task contract | Executor | Settlement | Completion | Conditions | Execution revision |
+|---|---|---|---|---|---|---|
+| `goal-engine.event.v1/v2/v3` | legacy-commands | legacy | legacy | accept-auto | false | false |
+| `planned.v1` | criteria-only | strict | dual-path | accept-auto | false | false |
+| `goal-runtime.v1` | criteria-only | strict | dual-path | goal-finalize | true | true |
+
+历史 `goal-engine.event.v1/v2/v3` 的 capability 固定返回上述 union 内值；各历史 codec 仍按原代际 replay/mutate，禁止原地升级、混写或以字符串 fallback 代替 codec。
 
 ### Runtime init
 
@@ -199,7 +201,7 @@ type ConditionState = {
   definition: GoalCondition;
   status: "inactive" | "unsatisfied" | "observing" | "satisfied" | "stale" | "blocked";
   supportingEvidenceIds: string[];
-  lastObservationId: string | null;
+  lastObservationRunId: string | null;
   invalidationReason: string | null;
 };
 
@@ -208,7 +210,7 @@ type ObservationRunState = {
   conditionId: string;
   cycle: number;
   phase: "requested" | "lease_allocated" | "process_bound" | "terminal" | "recorded" | "released" | "cleanup_debt";
-  allocationId: string;
+  allocationId: string | null;
   leaseReceiptHash: string | null;
   processIdentityHash: string | null;
   terminalProofHash: string | null;
@@ -218,7 +220,7 @@ type ObservationRunState = {
 type FindingState = {
   findingId: string;
   conditionId: string;
-  observationId: string;
+  observationRunId: string;
   fingerprint: string;
   status: "open" | "repairing" | "reverification" | "resolved" | "rejected_by_user";
   episodeId: string | null;
@@ -229,7 +231,15 @@ type RepairEpisodeState = {
   conditionId: string;
   findingIds: string[];
   remediationTaskIds: string[];
-  status: "active" | "waiting_for_tasks" | "reverifying" | "resolved" | "blocked" | "cancelled";
+  status: "active" | "waiting_for_tasks" | "reverifying" | "resolved" | "blocked" | "cancel_pending" | "cancelled";
+  cancellation: {
+    ownedTaskIds: string[];
+    ownedRunIds: string[];
+    terminalProofRefs: string[];
+    workspaceClosureProofRefs: string[];
+    resourceClosureProofRefs: string[];
+    resourceDebt: boolean;
+  } | null;
 };
 
 type SuspensionState = {
@@ -240,6 +250,10 @@ type SuspensionState = {
   requestedAt: string;
   resourcesQuarantined: boolean;
 };
+
+Observation identity 一律使用 `runId`：`ConditionState.lastObservationRunId`、`FindingState.observationRunId`、`ObservationRunState.runId` 与 observation/finding/repair event payload 均指向同一 `runId`；不得使用未定义的 `observationId`。`allocationId` 在 `requested` 为 `null`，仅自 `lease_allocated` 起非空。
+
+取消先进入 durable `cancel_pending`；仅在关联 owned tasks/runs 全部 terminal，且每个受影响 workspace/resource 都有 quarantine 或 release proof 后，才可进入 `cancelled`。
 ```
 
 ### Current World Snapshot
@@ -314,7 +328,7 @@ all applicable planned/remediation tasks accepted or explicitly superseded
 AND all required conditions have fresh supporting evidence at current world snapshot
 AND each stability policy is independently auditable from evidence history
 AND no open/repairing/reverification finding
-AND no active/blocked/cancel-pending repair episode
+AND 无 active/blocked/cancel_pending Repair Episode，且无任何 `cancelled` Episode 的 `cancellation.resourceDebt`
 AND no active observation/executor/workspace/process/resource/cleanup debt
 AND no suspension, pending human decision or untriaged discovery
 AND execution revision/capability/action offer are current
@@ -347,6 +361,7 @@ repair.episode_opened
 repair.task_linked
 repair.reverification_requested
 repair.episode_resolved
+repair.episode_cancel_requested
 repair.episode_cancelled
 task.applicability_changed
 execution.amendment_proposed
@@ -357,6 +372,8 @@ goal.final_review_started
 goal.final_review_recorded
 goal.completed
 ```
+
+finding/repair payload 必填 `findingId`、`conditionId`、`runId`、`evidenceId`、`fingerprint`、`episodeId`、关联 remediation task IDs/runs、旧/新状态与原因；取消请求另含 terminal proof、workspace quarantine/release proof、resource quarantine/release proof 与 `resourceDebt`。
 
 `ready_for_finalization`是动态派生状态，不新增权威`condition.ready_for_finalization`事件。
 
@@ -501,17 +518,17 @@ Wave不是派发屏障；全部前驱完成即可派发。R1/R2/R3与R5/R8的pro
 
 **Interfaces:** 产出本计划“稳定接口”的逐字段设计、capability matrix、runtime entity FSM、managed-validation crash matrix与旧计划superseded标记。
 
-- [ ] 在design spec逐项复制并解释本计划的generation matrix、RuntimeGoalInit、GoalCondition、Projection states、CurrentWorldSnapshot、UserExecutionCapability和event payload。
-- [ ] 为每个Observation阶段列出五个事实：durable authority、允许重试、恢复输入、成功event、无法证明时的cleanup-debt结果。
-- [ ] 明确`planned.v1` accept-auto永不改变，runtime finalize不观察业务状态。
-- [ ] 在三个旧计划标题后写醒目标记：Convergent/finalization由本计划取代；idle暂停至Manual Preview完成。
-- [ ] 运行：
+- [x] 在design spec逐项复制并解释本计划的generation matrix、RuntimeGoalInit、GoalCondition、Projection states、CurrentWorldSnapshot、UserExecutionCapability和event payload。
+- [x] 为每个Observation阶段列出五个事实：durable authority、允许重试、恢复输入、成功event、无法证明时的cleanup-debt结果。
+- [x] 明确`planned.v1` accept-auto永不改变，runtime finalize不观察业务状态。
+- [x] 已核验三个旧计划标题有醒目标记：Convergent/finalization由本计划取代；idle暂停至Manual Preview完成；标记与新设计一致，无需修订。
+- [x] 已运行：
 
 ```bash
 git diff --check -- docs/superpowers/specs/2026-08-13-goal-obligation-runtime-design.md docs/superpowers/plans/2026-08-13-goal-obligation-runtime.md docs/superpowers/plans/2026-08-07-convergent-goal-execution.md docs/superpowers/plans/2026-08-05-goal-finalization-gate.md docs/superpowers/plans/2026-08-05-goal-idle-continuation-guard.md
 ```
 
-- [ ] 提交：
+- [x] 提交：
 
 ```bash
 git add docs/superpowers/specs/2026-08-13-goal-obligation-runtime-design.md docs/superpowers/plans/2026-08-13-goal-obligation-runtime.md docs/superpowers/plans/2026-08-07-convergent-goal-execution.md docs/superpowers/plans/2026-08-05-goal-finalization-gate.md docs/superpowers/plans/2026-08-05-goal-idle-continuation-guard.md
@@ -821,6 +838,7 @@ repairEpisodeTransition({ projection, episodeId, event })
 - [ ] 写RED：autonomous policy仅允许writePolicy∩Condition remediation scope内task；user-approved policy必须有独立capability。
 - [ ] 写RED：Task内部metadata为`kind=remediation/findingIds/episodeId`，但dispatch-ir不增加未知字段；criteria/TDD/workspace/evidence规则与strict Task一致。
 - [ ] 写RED：一个Episode可含多个Finding/Task；Task accepted只进入reverifying，不能resolve；只有后续fresh Condition PASS或真实用户reject才能关闭。
+- [ ] 写RED：取消先 append `repair.episode_cancel_requested` 并进入`cancel_pending`；关联 owned tasks/runs 全部 terminal，且 workspace/resource quarantine 或 release proof 完整后才可 append `repair.episode_cancelled`；带`resourceDebt`的 cancelled Episode阻止finalize。
 - [ ] 运行RED：
 
 ```bash
