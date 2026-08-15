@@ -5,7 +5,7 @@ import test from "node:test";
 const skillPath = new URL("../skill-overrides/using-goal-engine/SKILL.md", import.meta.url);
 const whitelistPath = new URL("../skill-overrides/skills.list", import.meta.url);
 const agentsPath = new URL("../pi/AGENTS.md", import.meta.url);
-const exactTools = ["goal_init", "goal_status", "goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"];
+const exactTools = ["goal_init", "goal_status", "goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend", "goal_finalize"];
 
 async function loadSkill() {
   const source = await readFile(skillPath, "utf8");
@@ -22,7 +22,7 @@ test("discovers the Git-managed using-goal-engine Skill from the global allowlis
 test("documents the exact typed ABI without invented parameters or workspace tools", async () => {
   const { body } = await loadSkill();
   for (const tool of exactTools) assert.match(body, new RegExp(`\\b${tool}\\b`));
-  const mentioned = [...body.matchAll(/\bgoal_[a-z_]+\b/g)].map((match) => match[0]);
+  const mentioned = [...body.matchAll(/\bgoal_(?!id\b)[a-z_]+\b/g)].map((match) => match[0]);
   assert.deepEqual([...new Set(mentioned)].sort(), [...exactTools].sort());
   assert.doesNotMatch(body, /expectedVersion|attempt_id|goal_workspace_/i);
   assert.match(body, /typed schema|类型 schema/i);
@@ -72,7 +72,7 @@ test("requires executor acceptance before settle and status-gated lifecycle tran
 
 test("keeps Goal Engine mutation at the Host typed-tool boundary", async () => {
   const { body } = await loadSkill();
-  assert.match(body, /(只|only)[\s\S]{0,100}(Pi Host|Host)[\s\S]{0,160}(七个|seven)[\s\S]{0,100}(typed tools|类型工具)/i);
+  assert.match(body, /(只|only)[\s\S]{0,100}(Pi Host|Host)[\s\S]{0,160}(八个|eight)[\s\S]{0,100}(typed tools|类型工具)/i);
   assert.match(body, /(shell|CLI)[\s\S]{0,120}(禁止|不得|不要)[\s\S]{0,120}(Goal Engine|目标引擎)/i);
   assert.match(body, /(内部 core scripts|internal core scripts)[\s\S]{0,100}(禁止|不得|不要)/i);
   assert.match(body, /(搜索源码|search source)[\s\S]{0,140}(schema|ABI)/i);

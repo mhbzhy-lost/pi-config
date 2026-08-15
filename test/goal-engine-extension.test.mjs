@@ -18,6 +18,18 @@ const temporaryArena = createTemporaryArenaSync("goal-engine-extension-");
 test.after(() => temporaryArena.disposeSync());
 function mkdtempSync(prefix) { return temporaryArena.mkdtempSync(basename(prefix)); }
 
+test("Root Goal ABI is exact-eight and goal_finalize rejects planned before side effects", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi);
+  assert.deepEqual(pi.tools.map((tool) => tool.name).sort(), ["goal_accept", "goal_amend", "goal_dispatch", "goal_finalize", "goal_init", "goal_integrate", "goal_settle", "goal_status"]);
+  const initialized = JSON.parse(await invoke(pi, "goal_init", oneTaskGoal("Finalize remains unsupported")));
+  const root = join(cwd, ".state/goal-engine");
+  const before = readFileSync(join(root, "goals", initialized.goalId, "events.jsonl"), "utf8");
+  await assert.rejects(() => invoke(pi, "goal_finalize", { goal_id: initialized.goalId, action_token: "unused", approval_entry_id: "approval-1" }), (error) => error.code === "FINALIZATION_UNSUPPORTED_GENERATION");
+  assert.equal(readFileSync(join(root, "goals", initialized.goalId, "events.jsonl"), "utf8"), before);
+});
+
 test("external evidence classification matrix only promotes external_review from external", () => {
   const projectionFor = (evidence) => ({ tasks: new Map([["t1", { evidence }]]) });
   for (const evidence of [
@@ -846,11 +858,11 @@ test("goal_amend prepareArguments fail-closed validates strict operation shapes"
   ]) assert.deepEqual(prepare(valid), valid);
 });
 
-test("registers seven goal engine tools", () => {
+test("registers exact-eight goal engine tools", () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);
   const names = pi.tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ["goal_accept", "goal_amend", "goal_dispatch", "goal_init", "goal_integrate", "goal_settle", "goal_status"]);
+  assert.deepEqual(names, ["goal_accept", "goal_amend", "goal_dispatch", "goal_finalize", "goal_init", "goal_integrate", "goal_settle", "goal_status"]);
   for (const definition of pi.tools) {
     assert.equal(typeof definition.execute, "function", `${definition.name} must expose execute`);
     assert.equal(Object.hasOwn(definition, "handler"), false, `${definition.name} must not expose handler`);
@@ -869,6 +881,7 @@ test("tool descriptions state when to use them and when not to", () => {
       goal_settle: "当 executor 已终止且有真实结果或工件时使用；记录结果，succeeded 必须有 evidence。不要在运行中 settle、编造证据或把命令字符串当 artifact。",
       goal_integrate: "当已 settle 或 status 报告 verified orphan 时使用；正常 workspace 可 integrate/discard/preserve，orphan 仅 discard/preserve。不要 integrate orphan 或手工清资源。",
       goal_accept: "当 task succeeded、机械验收通过且 workspace 已 integrated+released 时，或重试同一验收确认时使用；验收 task 并可完成 goal。不要只凭 executor completed 声明。",
+      goal_finalize: "终局工具 ABI 已冻结；R1 中所有现有 generation 均在任何评审、事件或资源副作用前拒绝，R11 才接通 runtime 终审。",
       goal_amend: "当人类明确改范围/DAG，或 blocked/preserved 需调整计划时使用；只改安全 pending task。不要用于正常推进或绕过门禁。",
     },
   );

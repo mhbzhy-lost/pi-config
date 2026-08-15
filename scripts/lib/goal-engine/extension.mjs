@@ -20,6 +20,7 @@ import {
 } from "./continuity.mjs";
 import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation, validateNextAction } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
+import { finalizeGoal } from "./finalization.mjs";
 import {
   assertExecutorBindingTicketCurrent,
   assertExecutorSettlementProof,
@@ -1312,6 +1313,27 @@ export function createGoalEngineExtension(pi, options = {}) {
         throw ambiguousAcceptCommitError(goalId, params.task_id);
       }
       return respond(projection, verdict);
+    },
+  });
+
+  registerGoalTool(pi, {
+    name: "goal_finalize",
+    description: "终局工具 ABI 已冻结；R1 中所有现有 generation 均在任何评审、事件或资源副作用前拒绝，R11 才接通 runtime 终审。",
+    parameters: {
+      type: "object",
+      properties: {
+        goal_id: { type: "string" },
+        action_token: { type: "string" },
+        approval_entry_id: { type: "string" },
+      },
+      required: ["action_token", "approval_entry_id"],
+      additionalProperties: false,
+    },
+    async handler(params, ctx) {
+      const { root } = executionScopeFor(ctx, { operation: "read", goalId: params.goal_id });
+      const goalId = resolveGoalId(params.goal_id, root, ctx);
+      const projection = goalId ? loadProjectionFn(root, goalId) : null;
+      return finalizeGoal(projection);
     },
   });
 

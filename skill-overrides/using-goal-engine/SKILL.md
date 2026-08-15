@@ -18,6 +18,7 @@ description: Use when starting, resuming, amending, recovering, dispatching, or 
 | `goal_integrate` | settle 后处置 workspace：`integrate`、`discard` 或 `preserve` |
 | `goal_accept` | succeeded、验收通过且已 integrate/released |
 | `goal_amend` | 人类改范围，或 blocked/preserved 需要改计划 |
+| `goal_finalize` | 已冻结的第八工具；当前所有 generation 均会拒绝，R11 前不得尝试 runtime 终局 |
 
 ## 初始化检查表
 
@@ -39,7 +40,7 @@ description: Use when starting, resuming, amending, recovering, dispatching, or 
 
 ## Typed-only 边界
 
-Agent 只调用 Pi Host 暴露的七个 typed tools；调用前从当前 ToolDefinition 读取类型 schema。不得臆造参数；包装层的 failed/timeout 文字不能替代 artifact、session 和 worktree 的实证。
+Agent 只调用 Pi Host 暴露的八个 typed tools；调用前从当前 ToolDefinition 读取类型 schema。不得臆造参数；包装层的 failed/timeout 文字不能替代 artifact、session 和 worktree 的实证。`goal_finalize({goal_id?, action_token, approval_entry_id})` 已冻结为第八工具，但 R1 中 `goal-engine.event.v1/v2/v3` 与 `planned.v1` 一律返回 `FINALIZATION_UNSUPPORTED_GENERATION`；不得把它用于 planned 自动完成、创建评审或声称 runtime 闭环可用。
 
 - shell/CLI 禁止调用 Goal Engine mutation；普通 Git precheck 不受此禁止影响。
 - 禁止 raw git worktree add/remove/prune/move/repair/lock/unlock；仅可按 typed Goal disposition 或 managed lifecycle CLI `node scripts/worktree-lifecycle.mjs ...`，并要求 owner CAS 与明确授权。不得 `--force` remove、raw branch cleanup；`/tmp`、TTL、clean 不构成删除授权。

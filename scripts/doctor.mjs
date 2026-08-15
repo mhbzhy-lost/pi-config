@@ -50,6 +50,7 @@ const GOAL_ENGINE_TOOL_NAMES = [
   "goal_accept",
   "goal_amend",
   "goal_integrate",
+  "goal_finalize",
 ];
 const GOAL_ENGINE_TOOL_SET = new Set(GOAL_ENGINE_TOOL_NAMES);
 const LEGACY_TASK7_FILES = [

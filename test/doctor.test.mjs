@@ -13,7 +13,7 @@ import { canonicalJsonSha256 } from "../scripts/lib/goal-contract/authorization-
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-const GOAL_ENGINE_TOOL_NAMES = ["goal_init", "goal_status", "goal_dispatch", "goal_settle", "goal_accept", "goal_amend", "goal_integrate"];
+const GOAL_ENGINE_TOOL_NAMES = ["goal_init", "goal_status", "goal_dispatch", "goal_settle", "goal_accept", "goal_amend", "goal_integrate", "goal_finalize"];
 
 async function inspectConfigurationWithValidatedVersions(root, options = {}) {
   const stateExisted = await goalEngineStateExists(root);
