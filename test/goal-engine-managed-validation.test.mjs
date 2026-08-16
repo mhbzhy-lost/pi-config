@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -26,7 +27,7 @@ function fixture(t) {
   git(originRoot, "add", "."); git(originRoot, "commit", "-m", "initial");
   return { originRoot, stateRoot, integratedHead: git(originRoot, "rev-parse", "HEAD") };
 }
-function plan() { return { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 2_000, maxOutputBytes: 1024, terminationGraceMs: 50, maxConcurrentWorkspaces: 2 }, actions: [{ id: "check", kind: "validation", executable: process.execPath, args: ["check.mjs"] }] }; }
+function plan() { return { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 2_000, maxOutputBytes: 1024, terminationGraceMs: 50, maxConcurrentWorkspaces: 4 }, actions: [{ id: "check", kind: "validation", executable: process.execPath, args: ["check.mjs"] }] }; }
 function input(f, ownerId = "run-one", resourceClaims = [], validationPlan = plan()) { return { ownerKind: "goal-validation", ownerId, originRoot: f.originRoot, stateRoot: f.stateRoot, integratedHead: f.integratedHead, plan: validationPlan, resourceClaims }; }
 function markerPlan(marker) { return { ...plan(), actions: [{ id: "check", kind: "validation", executable: process.execPath, args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started')`] }] }; }
 
@@ -59,34 +60,45 @@ test("start records one terminal artifact and reload recovery is idempotent befo
   assert.equal(inspectManagedValidation(completed).phase, "released");
 });
 
-test("process-bound callback observes durable supervisor identity before business authorization", { timeout: 10_000 }, async (t) => {
+test("recover validates a pending process-bound callback without starting business work", { timeout: 10_000 }, async (t) => {
   const f = fixture(t); const marker = join(f.stateRoot, "business-marker"); const prepared = prepareManagedValidation(input(f, "run-one", [], markerPlan(marker)));
-  let resolveAck, calls = 0; const acknowledged = new Promise((resolve) => { resolveAck = resolve; });
+  let resolveAck, enteredCallback; const acknowledged = new Promise((resolve) => { resolveAck = resolve; }); const entered = new Promise((resolve) => { enteredCallback = resolve; });
   const running = startManagedValidation(prepared, { onProcessBound: async (bound) => {
-    calls += 1;
     assert.equal(Object.isFrozen(bound), true);
     assert.deepEqual(Object.keys(bound).sort(), ["managedReceipt", "pid", "pidBirthIdentity", "processGroupId", "processIdentityHash"].sort());
     const durable = JSON.parse(readFileSync(prepared.receiptPath, "utf8"));
     assert.equal(durable.phase, "process_bound");
     assert.deepEqual(durable.process, { pid: bound.pid, pidBirthIdentity: bound.pidBirthIdentity, processGroupId: bound.processGroupId, processIdentityHash: bound.processIdentityHash });
-    assert.equal(existsSync(marker), false);
+    enteredCallback();
     await acknowledged;
   } });
-  await new Promise((resolve) => setTimeout(resolve, 75));
-  assert.equal(calls, 1); assert.equal(existsSync(marker), false);
-  resolveAck();
-  const completed = await running;
-  assert.equal(existsSync(marker), true);
-  assert.equal(completed.phase, "recorded");
-  releaseManagedValidation(completed, { expectedHead: f.integratedHead });
+  try {
+    await entered;
+    assert.equal((await recoverManagedValidation(prepared)).phase, "process_bound");
+    assert.equal((await recoverManagedValidation(prepared)).phase, "process_bound");
+    assert.equal(existsSync(marker), false);
+    resolveAck();
+    const completed = await running;
+    assert.equal(existsSync(marker), true);
+    assert.equal(completed.phase, "recorded");
+    releaseManagedValidation(completed, { expectedHead: f.integratedHead });
+  } finally { resolveAck?.(); }
 });
 
-test("callback rejection fails closed with cleanup debt and retained workspace", { timeout: 10_000 }, async (t) => {
-  const f = fixture(t); const marker = join(f.stateRoot, "rejected-business-marker"); const prepared = prepareManagedValidation(input(f, "run-one", [], markerPlan(marker)));
+test("callback rejection cleanup debt retains its resource claim", { timeout: 10_000 }, async (t) => {
+  const f = fixture(t); const marker = join(f.stateRoot, "rejected-business-marker"); const claim = [{ key: "callback-debt", mode: "exclusive", capacity: 1, reset: "clean" }]; const prepared = prepareManagedValidation(input(f, "run-one", claim, markerPlan(marker)));
   await assert.rejects(startManagedValidation(prepared, { onProcessBound: async () => { throw Error("durable ack rejected"); } }), /durable ack rejected/);
   const failed = inspectManagedValidation(prepared);
   assert.equal(failed.phase, "cleanup_debt"); assert.equal(existsSync(marker), false); assert.equal(existsSync(prepared.workspacePath), true);
   assert.throws(() => releaseManagedValidation(prepared, { expectedHead: f.integratedHead }), /debt|terminal|release/i);
+  assert.throws(() => prepareManagedValidation(input(f, "run-two", [{ key: "callback-debt", mode: "exclusive", capacity: 1, reset: "clean" }])), /resource|lease|conflict/i);
+});
+
+test("recover converts a parent process-group mismatch to cleanup debt", async (t) => {
+  const f = fixture(t); const prepared = prepareManagedValidation(input(f)); const stored = JSON.parse(readFileSync(prepared.receiptPath, "utf8"));
+  const parentProcess = { pid: process.pid, pidBirthIdentity: "unprovable", processGroupId: process.pid + 1 }; parentProcess.processIdentityHash = createHash("sha256").update(JSON.stringify(parentProcess)).digest("hex");
+  writeFileSync(prepared.receiptPath, JSON.stringify({ ...stored, phase: "process_bound", process: parentProcess, terminal: null, recorded: null }), { mode: 0o600 });
+  assert.equal((await recoverManagedValidation(prepared)).phase, "cleanup_debt");
 });
 
 test("recover leaves an unprovable process-bound receipt as cleanup debt without recording or releasing", async (t) => {
