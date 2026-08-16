@@ -97,10 +97,23 @@ export function repairEpisodeTransition({ projection, episodeId, event: input, w
   if (input.type === "condition.observation_recorded") {
     if (episode.status !== "reverifying" || input.conditionId !== episode.conditionId || !ID.test(input.runId || "") || !HASH.test(input.evidenceId || "")) fail("reobservation ledger references required");
     const { run, evidence } = ledger(projection, input.runId, input.evidenceId); const state = condition(projection, episode.conditionId);
-    if (!episode.ownedRunIds?.includes(input.runId) || !run || run.phase !== "recorded" || run.conditionId !== episode.conditionId || run.evidenceId !== input.evidenceId || state.supportingEvidenceIds?.at(-1) !== input.evidenceId || !evidence || evidence.conditionId !== episode.conditionId || evidence.verdict?.kind !== "passed") return Object.freeze({ events: Object.freeze([]) });
+    const supportingEvidenceRefs = state.supportingEvidenceIds?.map((supportingEvidenceId) => {
+      const supportingEvidence = projection.evidenceHistory?.find((row) => row?.evidenceId === supportingEvidenceId);
+      return supportingEvidence && { runId: supportingEvidence.run?.runId, evidenceId: supportingEvidenceId };
+    });
+    const supportsOwnedPasses = Array.isArray(supportingEvidenceRefs) && supportingEvidenceRefs.length > 0
+      && new Set(supportingEvidenceRefs.map((ref) => `${ref?.runId}\0${ref?.evidenceId}`)).size === supportingEvidenceRefs.length
+      && supportingEvidenceRefs.every((ref) => {
+        const supported = ledger(projection, ref?.runId, ref?.evidenceId);
+        return ID.test(ref?.runId || "") && HASH.test(ref?.evidenceId || "") && episode.ownedRunIds?.includes(ref.runId)
+          && ["recorded", "released"].includes(supported.run?.phase) && supported.run.conditionId === episode.conditionId
+          && supported.run.evidenceId === ref.evidenceId && supported.evidence?.conditionId === episode.conditionId
+          && supported.evidence.verdict?.kind === "passed";
+      });
+    if (!episode.ownedRunIds?.includes(input.runId) || !run || run.phase !== "recorded" || run.conditionId !== episode.conditionId || run.evidenceId !== input.evidenceId || !evidence || evidence.conditionId !== episode.conditionId || evidence.verdict?.kind !== "passed" || !supportsOwnedPasses || supportingEvidenceRefs.at(-1)?.runId !== input.runId || supportingEvidenceRefs.at(-1)?.evidenceId !== input.evidenceId) return Object.freeze({ events: Object.freeze([]) });
     const freshness = evaluateConditionGraph({ projection, worldSnapshot, gitRunner }).conditions.get(episode.conditionId);
     if (freshness?.status !== "fresh") return Object.freeze({ events: Object.freeze([]) });
-    return Object.freeze({ events: Object.freeze([event("repair.episode_resolved", { episodeId, conditionId: episode.conditionId, findingIds: [...episode.findingIds], oldStatus: "reverifying", newStatus: "resolved", reason: "fresh passed reobservation" })]) });
+    return Object.freeze({ events: Object.freeze([event("repair.episode_resolved", { episodeId, conditionId: episode.conditionId, findingIds: [...episode.findingIds], oldStatus: "reverifying", newStatus: "resolved", reason: "fresh passed reobservation", runId: input.runId, evidenceId: input.evidenceId, supportingEvidenceRefs })]) });
   }
   if (input.type === "repair.reject") {
     const subjectHash = rejectSubjectHash(projection, episode), c = validateCapability(input.capability, projection, episode, "reject", subjectHash, input.consumedAt);

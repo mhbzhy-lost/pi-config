@@ -668,7 +668,9 @@ export function createGoalEngineExtension(pi, options = {}) {
             try { appendEventBatchFn(root, [recordEvent, ...resolutionEvents], current.version); }
             catch (cause) {
               const recovered = loadProjectionFn(root, goalId);
-              if (recovered?.observationRuns.get(data.runId)?.phase !== "recorded" || recovered.observationRuns.get(data.runId)?.evidenceId !== data.evidenceId || recovered.repairEpisodes.get(episode.episodeId)?.status !== "resolved") throw cause;
+              const resolvedEpisode = recovered?.repairEpisodes.get(episode.episodeId);
+              const resolution = resolvedEpisode?.resolution;
+              if (recovered?.observationRuns.get(data.runId)?.phase !== "recorded" || recovered.observationRuns.get(data.runId)?.evidenceId !== data.evidenceId || resolvedEpisode?.status !== "resolved" || resolution?.runId !== data.runId || resolution?.evidenceId !== data.evidenceId || resolution?.supportingEvidenceRefs?.at(-1)?.runId !== data.runId || resolution?.supportingEvidenceRefs?.at(-1)?.evidenceId !== data.evidenceId) throw cause;
             }
             return;
           }
