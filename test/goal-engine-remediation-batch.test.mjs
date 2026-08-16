@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendEvent, appendEventBatch } from "../scripts/lib/goal-engine/store.mjs";
 import { remediationSubjectHash, taskContractHash } from "../scripts/lib/goal-engine/task-definition.mjs";
+import { validateRemediationTask } from "../scripts/lib/goal-engine/repair-policy.mjs";
 
 const task = { description: "Repair", deps: [], writePaths: ["src/**"], acceptance: { criteria: [{ id: "repair", statement: "Repair passes", evidenceKinds: ["tests"] }] }, workflow: "tdd" };
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `batch-${n}`, goalId: "runtime-goal", occurredAt: "2026-08-13T00:00:00.000Z", type, data }; }
@@ -35,6 +36,24 @@ test("store accepts only canonical autonomous and user-approved remediation batc
   }
 });
 
+test("store passes canonical remediation without optional deps to reducer validation", () => {
+  const projection = {
+    goalId: "runtime-goal", executionRevision: 1,
+    writePolicy: { allowedPaths: ["src/**"] },
+    conditions: new Map([["condition-1", { definition: { remediation: { policy: "autonomous", allowed_paths: ["src/**"] } } }]]),
+    findings: new Map(), repairEpisodes: new Map([["episode-1", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: [], status: "active" }]]),
+    repairChallenges: new Map(), tasks: new Map(), observationRuns: new Map(), evidenceHistory: [],
+  };
+  const plan = validateRemediationTask({
+    projection, episodeId: "episode-1", findingIds: ["finding-1"],
+    taskDef: { description: "Repair", writePaths: ["src/**"], acceptance: { criteria: [{ id: "repair", statement: "Repair passes", evidenceKinds: ["tests"] }] }, workflow: "tdd" },
+  });
+  assert.equal(Object.hasOwn(plan.taskDef, "deps"), false);
+  const root = mkdtempSync(join(tmpdir(), "goal-remediation-batch-"));
+  try { assert.throws(() => appendEventBatch(root, plan.events.map((entry, index) => event(entry.type, entry.data, index + 1)), 0), /goal.created must be first/); }
+  finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("store rejects split remediation materialization before any write", () => {
   const root = mkdtempSync(join(tmpdir(), "goal-remediation-batch-"));
   try {
@@ -54,6 +73,8 @@ test("store rejects every malformed Host remediation batch before any goals writ
     ["task update", () => { const events = plan(); events[0].data.updateTasks = { "other-task": {} }; return events; }],
     ["extra amendment data", () => { const events = plan(); events[0].data.extra = true; return events; }],
     ["extra task data", () => { const events = plan(); events[0].data.addTasks["repair-task-1"].extra = true; return events; }],
+    ["missing required workflow", () => { const events = plan(); delete events[0].data.addTasks["repair-task-1"].workflow; return events; }],
+    ["commands are not criteria-only", () => { const events = plan(); events[0].data.addTasks["repair-task-1"].acceptance.commands = ["npm test"]; return events; }],
     ["extra metadata", () => { const events = plan(); events[0].data.addTasks["repair-task-1"].metadata.extra = true; return events; }],
     ["task drift", () => { const events = plan(); events[1].data.taskId = "other-task"; return events; }],
     ["episode drift", () => { const events = plan({ approved: true }); events[1].data.episodeId = "other-episode"; return events; }],

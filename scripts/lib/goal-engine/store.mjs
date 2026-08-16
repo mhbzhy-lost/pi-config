@@ -420,7 +420,8 @@ function assertRemediationMaterializationBatch(events) {
     throw new Error("Host remediation batch has invalid amendment");
   }
   const [taskId] = Object.keys(data.addTasks), taskDef = data.addTasks[taskId], metadata = taskDef?.metadata;
-  if (!exactObject(taskDef, ["description", "deps", "writePaths", "acceptance", "workflow", "metadata"])) throw new Error("Host remediation batch has invalid task definition");
+  const taskDefFields = ["description", "writePaths", "acceptance", "workflow", "metadata"];
+  if (!exactObject(taskDef, Object.hasOwn(taskDef || {}, "deps") ? [...taskDefFields, "deps"] : taskDefFields)) throw new Error("Host remediation batch has invalid task definition");
   try {
     if (!exactObject(metadata, ["kind", "goalId", "executionRevision", "episodeId", "conditionId", "findingIds", "subjectHash", "taskDefHash"])) throw new Error("invalid metadata shape");
     validateTaskDefinitions([taskId], data.addTasks, { planned: true, hostInternalRemediation: true });
