@@ -1,0 +1,6 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+const api = await import("../scripts/lib/goal-engine/observation-runner.mjs").catch(() => ({}));
+test("request is intent-only and rejects caller verdict or command authority",()=>{ assert.equal(typeof api.requestObservation,"function"); assert.throws(()=>api.requestObservation({projection:{runtimeState:"active",conditions:new Map([["c",{definition:{id:"c"},status:"inactive"}]])},conditionId:"c",worldSnapshot:{safe:true},verdict:"passed"}),/unknown|invalid/i); });
+test("runner rejects release until a durable terminal recorded receipt",()=>{ assert.equal(typeof api.releaseObservation,"function"); assert.throws(()=>api.releaseObservation({phase:"process_bound"},{}),/recorded|terminal|receipt/i); });
+test("a projection that already durably recorded the run receives no second record event",()=>{ const runReceipt={runId:"r",phase:"terminal",terminal:{},cleanupDebt:false}; const projection={observationRuns:new Map([["r",{phase:"recorded",evidenceId:"e"}]])}; const result=api.recordObservation({projection,runReceipt,artifactRef:{},worldSnapshot:{},services:{}}); assert.equal(result.event,null); assert.equal(result.alreadyRecorded,true); });

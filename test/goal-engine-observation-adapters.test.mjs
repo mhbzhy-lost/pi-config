@@ -1,0 +1,8 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+const api = await import("../scripts/lib/goal-engine/observation-adapters.mjs").catch(() => ({}));
+const { createObservationAdapterRegistry, resolveObservationAdapter } = api;
+const plan={schema:"dispatch-ir.v1.validation-plan",limits:{timeoutMs:2000,maxOutputBytes:1024,terminationGraceMs:50,maxConcurrentWorkspaces:1},actions:[{id:"test",kind:"validation",executable:process.execPath,args:["test/fixtures/goal-observation/pass.test.mjs"]}]};
+const definition={ref:"host-test",version:"1",deterministic:true,resourceClaims:[{key:"fixture:test",mode:"exclusive",capacity:1,reset:"clean"}],reset:"clean",artifactClassifier:{pass:"passed",fail:"failed",inconclusive:"inconclusive",infrastructure_error:"infrastructure_error"},validationPlan:plan};
+test("registry accepts exact Host definitions and returns frozen public definitions",()=>{ const r=createObservationAdapterRegistry([definition]); const a=resolveObservationAdapter(r,{adapter:"host-test",environment:"local",fixtures:["sample"]}); assert.equal(a.ref,"host-test"); assert.equal(Object.isFrozen(a),true); assert.equal("executable" in a,false); assert.throws(()=>{a.version="2"},TypeError); });
+test("registry rejects caller execution authority and nondeterministic single",()=>{ assert.throws(()=>createObservationAdapterRegistry([{...definition,command:"bad"}]),/invalid|known/i); const r=createObservationAdapterRegistry([{...definition,deterministic:false}]); assert.throws(()=>resolveObservationAdapter(r,{adapter:"host-test",environment:"local",fixtures:[],stability:{mode:"single"}}),/deterministic/i); assert.throws(()=>resolveObservationAdapter(r,{adapter:"none",environment:"local",fixtures:[]}),/unknown/i); });
