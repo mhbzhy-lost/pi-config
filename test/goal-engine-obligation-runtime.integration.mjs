@@ -470,7 +470,7 @@ test("typed runtime goal_accept recovers a non-final remediation Task before ato
   };
   const accepting = pi(cwd); accepting.cwd = cwd; createGoalEngineExtension(accepting, { goalStateEnv: {}, enforceActionTokens: false, store });
   const firstAccepted = JSON.parse(await invoke(accepting, "goal_accept", { goal_id: fixture.goalId, task_id: taskId, action_token: "schema-required" }));
-  assert.equal(firstAccepted.goal_complete, false); assert.equal(fixture.tasks.get(taskId).status, "accepted"); assert.equal(episode.status, "waiting_for_tasks"); assert.equal(fixture.findings.get(episode.findingIds[0]).status, "repairing");
+  assert.equal(firstAccepted.goal_complete, false); assert.equal(fixture.tasks.get(taskId).status, "accepted"); assert.equal(fixture.repairEpisodes.get(episode.episodeId).status, "waiting_for_tasks"); assert.equal(fixture.findings.get(episode.findingIds[0]).status, "repairing");
   assert.deepEqual(events.map(entry => entry.type), ["task.accepted"]); assert.deepEqual(batches[0].map(entry => entry.type), ["task.accepted"]);
 
   const finalTask = fixture.tasks.get(secondTaskId); finalTask.status = "succeeded"; finalTask.workspace = { attempt: 1, phase: "disposed", disposition: "integrated", released: true };
