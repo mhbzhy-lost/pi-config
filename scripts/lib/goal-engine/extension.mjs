@@ -622,6 +622,14 @@ export function createGoalEngineExtension(pi, options = {}) {
   // through tool parameters. Store and CurrentWorld remain Extension-owned.
   const observationHostAvailable = () => runtimeHost?.adapterRegistry
     && typeof runtimeHost.artifactRefForRun === "function";
+  const canonicalManagedReceipt = (value, root) => {
+    const fields = ["id", "stateRoot", "receiptPath", "workspacePath", "phase", "terminal", "recorded", "recordCount", "cleanupDebt"];
+    if (!exactPlainObject(value, fields) || !nonEmptyString(value.id) || typeof value.stateRoot !== "string" || typeof value.receiptPath !== "string" || !(value.workspacePath === null || typeof value.workspacePath === "string")) throw Error("invalid managed public receipt");
+    const stateRoot = resolve(value.stateRoot), expectedRoot = resolve(root);
+    const badWorkspace = value.workspacePath !== null && (!isAbsolute(value.workspacePath) || !resolve(value.workspacePath).startsWith(`${expectedRoot}/`));
+    if (stateRoot !== expectedRoot || resolve(value.receiptPath) !== resolve(expectedRoot, "validation-runtime", `${value.id}.json`) || badWorkspace) throw Error("managed receipt identity conflict");
+    return value;
+  };
   const observationServices = (goalId, cwd, root, world) => ({
     adapterRegistry: runtimeHost.adapterRegistry,
     originRoot: cwd,
@@ -632,20 +640,21 @@ export function createGoalEngineExtension(pi, options = {}) {
       const current = loadProjectionFn(root, goalId);
       appendEventFn(root, makeEvent(type, data, goalId, "goal-runtime.v1"), current.version);
     },
-    ...(typeof runtimeHost.prepareManagedValidation === "function" ? { prepareManagedValidation: runtimeHost.prepareManagedValidation } : {}),
+    prepareManagedValidation(input) { return canonicalManagedReceipt((runtimeHost.prepareManagedValidation || prepareManagedValidation)(input), root); },
     ...(typeof runtimeHost.startManagedValidation === "function" ? { startManagedValidation: runtimeHost.startManagedValidation } : {}),
     ...(typeof runtimeHost.inspectManagedValidation === "function" ? { inspectManagedValidation: runtimeHost.inspectManagedValidation } : {}),
     ...(typeof runtimeHost.recoverManagedValidation === "function" ? { recoverManagedValidation: runtimeHost.recoverManagedValidation } : {}),
     ...(typeof runtimeHost.releaseManagedValidation === "function" ? { releaseManagedValidation: runtimeHost.releaseManagedValidation } : {}),
   });
-  const observationReceiptForRun = (projection, run, world) => {
+  const observationReceiptForRun = (projection, run) => {
     const condition = projection.conditions.get(run.conditionId);
-    const adapter = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
+    const adapter = condition && hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
+    if (!condition || run.cycle !== 0 || !/^[a-f0-9]{64}$/.test(run.worldSnapshotHash || "") || !/^[a-f0-9]{64}$/.test(run.resourceClaimsHash || "") || !Number.isSafeInteger(projection.executionRevision) || !/^[a-f0-9]{64}$/.test(projection.executionContractHash || "") || !/^[a-f0-9]{64}$/.test(condition.conditionHash || "") || !adapter?.ref || !adapter?.version) throw Error("observation run identity conflict");
     return {
       schema: "dispatch-ir.v1.observation-receipt", runId: run.runId, conditionId: run.conditionId,
       cycle: run.cycle, goalId: projection.goalId, executionRevision: projection.executionRevision,
       executionContractHash: projection.executionContractHash, conditionHash: condition.conditionHash,
-      worldSnapshotHash: "recovered-from-projection", resourceClaimsHash: "recovered-from-projection",
+      worldSnapshotHash: run.worldSnapshotHash, resourceClaimsHash: run.resourceClaimsHash,
       adapter: { ref: adapter.ref, version: adapter.version }, phase: run.phase,
       managedReceipt: null, terminal: null, recorded: run.evidenceId ? { evidenceId: run.evidenceId } : null,
       cleanupDebt: run.phase === "cleanup_debt",
@@ -660,6 +669,8 @@ export function createGoalEngineExtension(pi, options = {}) {
       const latest = runs.at(-1);
       if (!latest || !["released"].includes(latest.phase)) { selected = { conditionId, run: latest }; break; }
     }
+    const head = world.repo?.head || world.head;
+    if (typeof head !== "string" || !/^[a-f0-9]{40}$/.test(head) || head !== projection.runtimeBaseHead) return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] };
     if (!selected) {
       const ready = [...projection.conditions.keys()].every((conditionId) => {
         const run = [...projection.observationRuns.values()].filter((value) => value.conditionId === conditionId && value.cycle === 0).at(-1);
@@ -678,14 +689,26 @@ export function createGoalEngineExtension(pi, options = {}) {
         return { step: "request" };
       }
       if (selected.run.phase === "cleanup_debt") return { attention: ["RUNTIME_CALIBRATION_CLEANUP_DEBT"] };
-      let receipt = observationReceiptForRun(projection, selected.run, world);
+      let receipt = observationReceiptForRun(projection, selected.run);
       if (["requested", "lease_allocated", "process_bound"].includes(selected.run.phase)) {
+        if (selected.run.phase !== "requested") {
+          const condition = projection.conditions.get(selected.conditionId);
+          const adapter = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
+          const prepared = services.prepareManagedValidation({ ownerKind: "goal-observation", ownerId: receipt.runId, originRoot: cwd, stateRoot: root, integratedHead: head, plan: adapter.validationPlan, resourceClaims: adapter.resourceClaims });
+          if (prepared.id !== selected.run.allocationId) return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] };
+          receipt = { ...receipt, managedReceipt: prepared };
+        }
         const result = selected.run.phase === "requested"
           ? await startObservation(receipt, services)
           : await recoverObservation(receipt, services);
         return result.status === "attention" || result.status === "blocked" ? { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] } : { step: "start_or_recover" };
       }
       if (selected.run.phase === "terminal") {
+        const condition = projection.conditions.get(selected.conditionId);
+        const adapter = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
+        const prepared = services.prepareManagedValidation({ ownerKind: "goal-observation", ownerId: receipt.runId, originRoot: cwd, stateRoot: root, integratedHead: head, plan: adapter.validationPlan, resourceClaims: adapter.resourceClaims });
+        if (prepared.id !== selected.run.allocationId) return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] };
+        receipt = { ...receipt, managedReceipt: prepared };
         const recovered = await recoverObservation(receipt, services);
         if (recovered.phase === "cleanup_debt" || recovered.status === "attention") return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] };
         const artifactRef = await runtimeHost.artifactRefForRun({ goalId, runId: selected.run.runId, managedTerminal: recovered.runReceipt?.terminal || recovered.terminal });
@@ -697,8 +720,9 @@ export function createGoalEngineExtension(pi, options = {}) {
         // deterministic managed receipt before handing release to the runner.
         const condition = projection.conditions.get(selected.conditionId);
         const adapter = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
-        const prepare = services.prepareManagedValidation || prepareManagedValidation;
-        receipt = { ...receipt, managedReceipt: prepare({ ownerKind: "goal-observation", ownerId: receipt.runId, originRoot: cwd, stateRoot: root, integratedHead: world.repo?.head || world.head, plan: adapter.validationPlan, resourceClaims: adapter.resourceClaims }) };
+        const prepared = services.prepareManagedValidation({ ownerKind: "goal-observation", ownerId: receipt.runId, originRoot: cwd, stateRoot: root, integratedHead: head, plan: adapter.validationPlan, resourceClaims: adapter.resourceClaims });
+        if (prepared.id !== selected.run.allocationId) return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] };
+        receipt = { ...receipt, managedReceipt: prepared };
         const result = await releaseObservation({ ...receipt, phase: "recorded", recorded: { evidenceId: selected.run.evidenceId } }, services);
         return result.status === "attention" ? { attention: ["RUNTIME_CALIBRATION_CLEANUP_DEBT"] } : { step: "release" };
       }

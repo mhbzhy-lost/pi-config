@@ -172,15 +172,18 @@ test("Cycle0 reload retains allocation identity through each durable phase", asy
   }
 });
 
-test("Cycle0 rejects allocation and receipt-root identity mismatch without mutation", async () => {
-  for (const options of [{ allocation: "mismatch" }, { receiptRoot: "/tmp/outside-goal-root" }]) {
-    const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, options); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd); await invoke(api, "goal_status", {}); const before = observationEvents(cwd); const status = JSON.parse(await invoke(api, "goal_status", {}));
-    assert.equal(status.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.deepEqual(observationEvents(cwd), before); assert.equal(durable.calls.start, 0);
-  }
+test("Cycle0 rejects rebuilt allocation and receipt-root identity mismatch without mutation", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; const durable = observationHost(cwd, { allocation: "mismatch", holdProcess: true }); createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(first, cwd); await invoke(first, "goal_status", {}); await invoke(first, "goal_status", {});
+  const before = observationEvents(cwd), starts = durable.calls.start, recovers = durable.calls.recover;
+  const reloaded = pi(cwd, first.entries); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: durable }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager }); const status = JSON.parse(await invoke(reloaded, "goal_status", {}));
+  assert.equal(status.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.deepEqual(observationEvents(cwd).filter(name => name !== "goal.checkpoint"), before.filter(name => name !== "goal.checkpoint")); assert.equal(durable.calls.start, starts); assert.equal(durable.calls.recover, recovers);
+
+  const outside = repo(), outsideApi = pi(outside); outsideApi.cwd = outside; const invalid = observationHost(outside, { receiptRoot: "/tmp/outside-goal-root" }); createGoalEngineExtension(outsideApi, { goalStateEnv: {}, runtimeHost: invalid }); await approveCalibration(outsideApi, outside); await invoke(outsideApi, "goal_status", {}); const outsideBefore = observationEvents(outside); const outsideStatus = JSON.parse(await invoke(outsideApi, "goal_status", {}));
+  assert.equal(outsideStatus.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.deepEqual(observationEvents(outside).filter(name => name !== "goal.checkpoint"), outsideBefore.filter(name => name !== "goal.checkpoint")); assert.equal(invalid.calls.start, 0);
 });
 
 test("Cycle0 HEAD drift blocks inherited run and artifact safety rejects unsafe files", async () => {
-  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd); await invoke(api, "goal_status", {}); writeFileSync(join(cwd, "drift"), "x"); git(cwd, "add", "drift"); git(cwd, "commit", "-m", "drift"); const before = observationEvents(cwd); const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.deepEqual(observationEvents(cwd), before);
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd); await invoke(api, "goal_status", {}); writeFileSync(join(cwd, "drift"), "x"); git(cwd, "add", "drift"); git(cwd, "commit", "-m", "drift"); const before = observationEvents(cwd); const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.deepEqual(observationEvents(cwd).filter(name => name !== "goal.checkpoint"), before.filter(name => name !== "goal.checkpoint"));
   const bad = repo(), badApi = pi(bad); badApi.cwd = bad; const unsafe = observationHost(bad, { artifactMode: 0o644 }); createGoalEngineExtension(badApi, { goalStateEnv: {}, runtimeHost: unsafe }); await approveCalibration(badApi, bad); await statusUntil(badApi, "terminal"); const prior = observationEvents(bad); const unsafeStatus = JSON.parse(await invoke(badApi, "goal_status", {})); assert.equal(unsafeStatus.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.equal(observationEvents(bad).filter(name => name === "condition.observation_recorded").length, prior.filter(name => name === "condition.observation_recorded").length); assert.equal(JSON.stringify(unsafeStatus).includes("cycle0-artifact"), false);
 });
 

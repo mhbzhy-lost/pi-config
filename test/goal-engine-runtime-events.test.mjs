@@ -73,6 +73,8 @@ test("observation transitions require phase-exact hashed authority", () => {
   assert.throws(() => applyEvent(p, event("condition.observation_lease_allocated", { ...lease, extra: true }, 5)), /exact|phase|observation/i);
   assert.throws(() => applyEvent(p, event("condition.observation_lease_allocated", { ...lease, leaseReceiptHash: "bad" }, 5)), /lease|proof|phase/i);
   p = applyEvent(p, event("condition.observation_lease_allocated", lease, 5));
+  assert.equal(p.observationRuns.get("exact-run").worldSnapshotHash, hash(4));
+  assert.equal(p.observationRuns.get("exact-run").resourceClaimsHash, hash(5));
   assert.throws(() => applyEvent(p, event("condition.observation_process_bound", { runId: "exact-run", conditionId: "condition-1", processIdentityHash: hash(7), allocationId: "lease" }, 6)), /exact|phase|observation/i);
 });
 
