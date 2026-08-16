@@ -11,3 +11,9 @@
 ## 修复方案
 
 定义含当前 `runId`、`evidenceId` 及有序完整 `supportingEvidenceRefs` 的规范完成 payload；计划器和 reducer 都逐项验证这些引用属于同一 Episode、对应已记录的同 Condition PASS 证据和精确运行身份，并把深拷贝的 resolution identity 保存到 Episode。
+
+## Round2 补充：回放提前完成与已释放当前运行
+
+Reducer 回放曾仅以引用数量与归属判断完成：连续稳定策略尚缺少所需次数时，单条已归属 PASS 也可接受 resolution；同时当前（最后）引用的运行已 `released` 时仍可完成。复现时将 Condition 设为 `observing`、support 长度为 1，或释放 single/连续策略的最后一次运行后回放规范 resolution，旧实现都会错误变更 Episode。
+
+修复约束：Reducer 只能依据持久化 Projection 接受 `status=satisfied` 的完整稳定性账本。single 必须恰一条且满足环境要求；consecutive 必须等于 `count`，证据 sequence 严格相邻递增，并在要求时使用不同 `(environment.ref, environment.fingerprint)`。未知或畸形策略一律拒绝。所有早期 support 运行可为 `recorded` 或 `released`，但最后一个 support 必须精确对应 resolution 的当前 `runId/evidenceId`，且运行 phase 必须为 `recorded`。

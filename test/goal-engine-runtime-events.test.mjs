@@ -16,8 +16,8 @@ function hash(n) { return String(n).padStart(64, "0"); }
 function runtimeApprovalHash({ goalId = "runtime-goal", proposalId = "proposal", executionContractHash, baseHead = "a".repeat(40), sessionId = "session" }) { return createHash("sha256").update(JSON.stringify({ baseHead, executionContractHash, goalId, proposalId, sessionId })).digest("hex"); }
 function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); let p = applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), readiness: "draft" }, 1)); return applyEvent(p, event("goal.session_bound", { sessionId: "session", leafId: "leaf" }, 0)); }
 function calibrating() { let p = draft(); p = applyEvent(p, event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 2)); const approval = { proposalId: "proposal", executionContractHash: p.executionContractHash, baseHead: p.runtimeBaseHead, sessionId: "session" }; return applyEvent(p, event("goal.runtime_approval_recorded", { ...approval, proposalHash: runtimeApprovalHash(approval), userEntryId: "entry", capabilityDigest: hash(2) }, 3)); }
-function evidence(p, artifactId) { return { executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, head: "a".repeat(40), adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: "environment-1" }, fixtures: [{ ref: "sample", fingerprint: "fixture-1" }], artifact: { id: artifactId, hash: "9".repeat(64) } }; }
-function observationEvents(p, { runId, evidenceId, cycle, verdict = { kind: "passed" }, start }) {
+function evidence(p, artifactId, environment = { ref: "local", fingerprint: "environment-1" }) { return { executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, head: "a".repeat(40), adapter: { ref: "oracle", version: "1" }, environment, fixtures: [{ ref: "sample", fingerprint: "fixture-1" }], artifact: { id: artifactId, hash: "9".repeat(64) } }; }
+function observationEvents(p, { runId, evidenceId, cycle, verdict = { kind: "passed" }, start, environment }) {
   const data = { runId, conditionId: "condition-1" };
   const request = { ...data, cycle, head: "a".repeat(40), executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, adapter: { ref: "oracle", version: "1" }, worldSnapshotHash: hash(start), resourceClaimsHash: hash(start + 1) };
   return [
@@ -25,7 +25,7 @@ function observationEvents(p, { runId, evidenceId, cycle, verdict = { kind: "pas
     event("condition.observation_lease_allocated", { ...data, allocationId: `lease-${runId}`, leaseReceiptHash: hash(start + 2) }, start + 1),
     event("condition.observation_process_bound", { ...data, processIdentityHash: hash(start + 3) }, start + 2),
     event("condition.observation_terminal", { ...data, terminalProofHash: hash(start + 4) }, start + 3),
-    event("condition.observation_recorded", { ...data, evidenceId, verdict, evidence: evidence(p, `artifact-${runId}`) }, start + 4),
+    event("condition.observation_recorded", { ...data, evidenceId, verdict, evidence: evidence(p, `artifact-${runId}`, environment) }, start + 4),
   ];
 }
 function applyAll(p, entries) { for (const entry of entries) p = applyEvent(p, entry); return p; }
@@ -154,6 +154,35 @@ test("repair resolution reducer requires canonical owned evidence identity", () 
   for (const malformed of [{ ...canonical, runId: "other" }, { ...canonical, evidenceId: hash(201) }, { ...canonical, supportingEvidenceRefs: [{ runId: "other", evidenceId }] }, { ...canonical, supportingEvidenceRefs: [] }]) assert.throws(() => applyEvent(p, event("repair.episode_resolved", malformed, 15)), /resolution/);
   const resolved = applyEvent(p, event("repair.episode_resolved", canonical, 15));
   assert.deepEqual(resolved.repairEpisodes.get("episode-1").resolution, { runId: "product-run", evidenceId, supportingEvidenceRefs: [{ runId: "product-run", evidenceId }] });
+});
+
+test("repair resolution reducer rejects an incomplete consecutive stability replay", () => {
+  const p = active(), evidenceId = hash(200), canonical = { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], oldStatus: "reverifying", newStatus: "resolved", reason: "fresh passed reobservation", runId: "product-run", evidenceId, supportingEvidenceRefs: [{ runId: "product-run", evidenceId }] };
+  const condition = p.conditions.get("condition-1");
+  condition.definition.stability = { mode: "consecutive", count: 2, require_distinct_environment: true };
+  condition.status = "observing";
+  p.repairEpisodes.set("episode-1", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: [], ownedRunIds: ["product-run"], status: "reverifying", resolution: null }); p.findings.set("finding-1", { findingId: "finding-1", conditionId: "condition-1", status: "reverification" });
+  assert.throws(() => applyEvent(p, event("repair.episode_resolved", canonical, 15)), /resolution/);
+});
+
+test("repair resolution reducer rejects a released current support run", () => {
+  let p = active(); const evidenceId = hash(200), canonical = { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], oldStatus: "reverifying", newStatus: "resolved", reason: "fresh passed reobservation", runId: "product-run", evidenceId, supportingEvidenceRefs: [{ runId: "product-run", evidenceId }] };
+  p = applyEvent(p, event("condition.observation_released", { runId: "product-run", conditionId: "condition-1", releaseReceiptHash: hash(400) }, 15));
+  p.repairEpisodes.set("episode-1", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: [], ownedRunIds: ["product-run"], status: "reverifying", resolution: null }); p.findings.set("finding-1", { findingId: "finding-1", conditionId: "condition-1", status: "reverification" });
+  assert.throws(() => applyEvent(p, event("repair.episode_resolved", canonical, 16)), /resolution/);
+});
+
+test("repair resolution reducer accepts complete consecutive support with only earlier release", () => {
+  let p = active(); const firstEvidenceId = hash(200), currentEvidenceId = hash(201);
+  const condition = p.conditions.get("condition-1");
+  condition.definition.stability = { mode: "consecutive", count: 2, require_distinct_environment: true };
+  condition.status = "observing";
+  p = applyEvent(p, event("condition.observation_released", { runId: "product-run", conditionId: "condition-1", releaseReceiptHash: hash(400) }, 15));
+  p = applyAll(p, observationEvents(p, { runId: "current-run", evidenceId: currentEvidenceId, cycle: 2, start: 16, environment: { ref: "local", fingerprint: "environment-2" } }));
+  const canonical = { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], oldStatus: "reverifying", newStatus: "resolved", reason: "fresh passed reobservation", runId: "current-run", evidenceId: currentEvidenceId, supportingEvidenceRefs: [{ runId: "product-run", evidenceId: firstEvidenceId }, { runId: "current-run", evidenceId: currentEvidenceId }] };
+  p.repairEpisodes.set("episode-1", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: [], ownedRunIds: ["product-run", "current-run"], status: "reverifying", resolution: null }); p.findings.set("finding-1", { findingId: "finding-1", conditionId: "condition-1", status: "reverification" });
+  assert.equal(p.conditions.get("condition-1").status, "satisfied");
+  assert.equal(applyEvent(p, event("repair.episode_resolved", canonical, 21)).repairEpisodes.get("episode-1").status, "resolved");
 });
 
 test("amendment enters suspended through its durable runtime event", () => {
