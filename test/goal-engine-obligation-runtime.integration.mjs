@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, chmodSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { execFileSync } from "node:child_process";
@@ -12,11 +12,16 @@ import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function host(cwd) { return { registries: runtimeRegistries, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; } }; }
-function observationHost(cwd) {
+function observationHost(cwd, { code = "PASS", receiptRoot = join(cwd, ".state/goal-engine"), receiptPath = receiptRoot, allocation = "normal", artifactMode = 0o600, artifactSymlink = false, holdProcess = false, holdTerminal = false } = {}) {
   const registry = createObservationAdapterRegistry([{ ref: "oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 50, maxOutputBytes: 100, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } }]);
-  const receipt = { id: "managed-1", stateRoot: join(cwd, ".state/goal-engine"), receiptPath: join(cwd, "managed-1"), workspacePath: null, cleanupDebt: false };
-  return { registries: runtimeRegistries, adapterRegistry: registry, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, environments: [{ ref: "local", fingerprint: "local-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "sample-1", available: true }], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; }, prepareManagedValidation() { return { ...receipt, phase: "lease_allocated", terminal: null, recorded: null }; }, inspectManagedValidation() { return { ...receipt, phase: "lease_allocated", terminal: null, recorded: null }; }, async startManagedValidation(_receipt, { onProcessBound }) { await onProcessBound({ processIdentityHash: createHash("sha256").update("process").digest("hex") }); return { ...receipt, phase: "recorded", terminal: { status: "passed" } }; }, async recoverManagedValidation() { return { ...receipt, phase: "recorded", terminal: { status: "passed" } }; }, releaseManagedValidation() { return { released: true }; }, artifactRefForRun() { const path = join(cwd, ".state", "cycle0-artifact.json"); writeFileSync(path, JSON.stringify({ code: "PASS" }), { mode: 0o600 }); return { id: "cycle0-artifact", path }; } };
+  const calls = { prepare: 0, start: 0, recover: 0, release: 0, artifact: 0 }; const state = new Map();
+  const receipt = input => { const id = allocation === "mismatch" ? `managed-${calls.prepare}` : `managed-${createHash("sha256").update(`${input.ownerKind}:${input.ownerId}:${input.integratedHead}`).digest("hex").slice(0, 16)}`; const prior = state.get(id) || { phase: "lease_allocated", terminal: null }; return { id, stateRoot: receiptRoot, receiptPath: join(receiptPath, `${id}.json`), ownerKind: input.ownerKind, ownerId: input.ownerId, phase: prior.phase, terminal: prior.terminal, recorded: null, cleanupDebt: false }; };
+  const terminal = { status: "passed", code: 0 }; const managed = value => ({ ...value, phase: state.get(value.id)?.phase || value.phase, terminal: state.get(value.id)?.terminal || null });
+  return { registries: runtimeRegistries, adapterRegistry: registry, calls, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, environments: [{ ref: "local", fingerprint: "local-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "sample-1", available: true }], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; }, prepareManagedValidation(input) { calls.prepare++; return receipt(input); }, inspectManagedValidation(value) { return managed(value); }, async startManagedValidation(value, { onProcessBound }) { calls.start++; state.set(value.id, { phase: "process_bound", terminal: null }); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); if (holdProcess) throw Error("interrupt after durable process"); state.set(value.id, { phase: "recorded", terminal }); if (holdTerminal) throw Error("interrupt after durable managed terminal"); return managed(value); }, async recoverManagedValidation(value) { calls.recover++; return managed(value); }, releaseManagedValidation(value) { calls.release++; state.set(value.id, { phase: "released", terminal }); return { id: value.id, released: true }; }, artifactRefForRun() { calls.artifact++; const path = join(cwd, ".state", "cycle0-artifact.json"), target = join(cwd, ".state", "cycle0-artifact-target.json"); writeFileSync(artifactSymlink ? target : path, JSON.stringify({ code }), { mode: artifactMode }); chmodSync(artifactSymlink ? target : path, artifactMode); if (artifactSymlink) symlinkSync(target, path); return { id: "cycle0-artifact", path }; } };
 }
+function observationEvents(cwd) { return readFileSync(join(cwd, ".state/goal-engine/goals/harden-runtime/events.jsonl"), "utf8").trim().split("\n").map(JSON.parse).map(event => event.type); }
+async function approveCalibration(api, cwd, init = runtimeInit()) { await invoke(api, "goal_init", init); await invoke(api, "goal_status", {}); api.handlers.get("input")({ source: "interactive", text: "approve", entryId: "cycle0-approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {}); }
+async function statusUntil(api, phase, limit = 8) { for (let i = 0; i < limit; i++) { await invoke(api, "goal_status", {}); const projection = loadProjection(join(api.cwd, ".state/goal-engine"), "harden-runtime"); if ([...projection.observationRuns.values()].some(run => run.phase === phase)) return projection; } throw Error(`phase not reached: ${phase}`); }
 function pi(cwd, entries = [], { sessionId = "owner", appendEntry } = {}) { const tools = [], handlers = new Map(), manager = { getSessionId: () => sessionId, getSessionFile: () => join(cwd, `session-${sessionId}`), getLeafId: () => "leaf", getEntries: () => entries }; const api = { tools, entries, handlers, sessionManager: manager, registerTool: tool => tools.push(tool), on: (name, handler) => handlers.set(name, handler) }; api.appendEntry = (customType, data) => { if (appendEntry) return appendEntry(customType, data, entries); entries.push({ type: "custom", customType, data }); }; return api; }
 function repo() { const cwd = mkdtempSync(join(tmpdir(), "r10a1-")); git(cwd, "init", "-b", "main"); git(cwd, "config", "user.email", "test@example.com"); git(cwd, "config", "user.name", "Test"); writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n"); git(cwd, "add", ".gitignore"); git(cwd, "commit", "-m", "init"); return cwd; }
 function runtimeEntries(api, suffix) { return api.entries.filter((entry) => entry.customType?.endsWith(suffix)); }
@@ -135,6 +140,63 @@ test("calibrating runtime without Host observation wiring fails closed without o
   assert.equal(status.status, "RUNTIME_OBSERVATION_HOST_UNAVAILABLE");
   const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
   assert.equal(projection.observationRuns.size, 0);
+});
+
+test("Cycle0 JSONL authority sequence is single-step and exactly once", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd);
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd);
+  const afterApproval = observationEvents(cwd).filter(name => name === "condition.observation_requested"); await invoke(api, "goal_status", {}); assert.equal(observationEvents(cwd).filter(name => name === "condition.observation_requested").length, afterApproval.length + 1); // request only
+  for (let i = 0; i < 4; i++) await invoke(api, "goal_status", {});
+  const names = observationEvents(cwd).filter(name => name.startsWith("condition.observation") || name === "goal.runtime_activated");
+  assert.deepEqual(names, ["condition.observation_requested", "condition.observation_lease_allocated", "condition.observation_process_bound", "condition.observation_terminal", "condition.observation_recorded", "condition.observation_released", "goal.runtime_activated"]);
+  for (const name of names) assert.equal(names.filter(value => value === name).length, 1);
+  assert.equal(durable.calls.start, 1); assert.equal(durable.calls.release, 1);
+});
+
+test("Cycle0 Conditions run in definition order and never overlap", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const second = structuredClone(runtimeInit().execution.conditions[0]); second.id = "condition-2";
+  const durable = observationHost(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd, runtimeInit({ execution: { ...runtimeInit().execution, conditions: [runtimeInit().execution.conditions[0], second] } }));
+  await statusUntil(api, "recorded"); let projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); assert.equal([...projection.observationRuns.values()].filter(run => run.conditionId === "condition-2").length, 0);
+  await invoke(api, "goal_status", {}); await invoke(api, "goal_status", {}); await statusUntil(api, "released"); await invoke(api, "goal_status", {});
+  projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); assert.deepEqual([...projection.observationRuns.values()].map(run => run.conditionId), ["condition-1", "condition-2"]);
+});
+
+test("Cycle0 reload retains allocation identity through each durable phase", async () => {
+  for (const phase of ["requested", "process_bound", "terminal", "recorded", "released"]) {
+    const cwd = repo(), first = pi(cwd); first.cwd = cwd; const durable = observationHost(cwd, phase === "process_bound" ? { holdProcess: true } : phase === "terminal" ? { holdTerminal: true } : {});
+    createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(first, cwd); await statusUntil(first, phase === "terminal" ? "process_bound" : phase);
+    const before = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); const run = [...before.observationRuns.values()][0], allocationId = run.allocationId;
+    const reloaded = pi(cwd, first.entries); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: durable }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager }); await invoke(reloaded, "goal_status", {});
+    const after = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); assert.equal(phase === "requested" ? Boolean([...after.observationRuns.values()][0].allocationId) : [...after.observationRuns.values()][0].allocationId === allocationId, true, phase);
+    assert.equal(new Set(observationEvents(cwd).filter(name => name === "condition.observation_requested")).size, 1, phase);
+  }
+});
+
+test("Cycle0 rejects allocation and receipt-root identity mismatch without mutation", async () => {
+  for (const options of [{ allocation: "mismatch" }, { receiptRoot: "/tmp/outside-goal-root" }]) {
+    const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, options); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd); await invoke(api, "goal_status", {}); const before = observationEvents(cwd); const status = JSON.parse(await invoke(api, "goal_status", {}));
+    assert.equal(status.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.deepEqual(observationEvents(cwd), before); assert.equal(durable.calls.start, 0);
+  }
+});
+
+test("Cycle0 HEAD drift blocks inherited run and artifact safety rejects unsafe files", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd); await invoke(api, "goal_status", {}); writeFileSync(join(cwd, "drift"), "x"); git(cwd, "add", "drift"); git(cwd, "commit", "-m", "drift"); const before = observationEvents(cwd); const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.deepEqual(observationEvents(cwd), before);
+  const bad = repo(), badApi = pi(bad); badApi.cwd = bad; const unsafe = observationHost(bad, { artifactMode: 0o644 }); createGoalEngineExtension(badApi, { goalStateEnv: {}, runtimeHost: unsafe }); await approveCalibration(badApi, bad); await statusUntil(badApi, "terminal"); const prior = observationEvents(bad); const unsafeStatus = JSON.parse(await invoke(badApi, "goal_status", {})); assert.equal(unsafeStatus.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.equal(observationEvents(bad).filter(name => name === "condition.observation_recorded").length, prior.filter(name => name === "condition.observation_recorded").length); assert.equal(JSON.stringify(unsafeStatus).includes("cycle0-artifact"), false);
+});
+
+test("Cycle0 verdict matrix activates only PASS and FAIL", async () => {
+  for (const [code, active] of [["PASS", true], ["FAIL", true], ["UNKNOWN", false], ["INFRA", false]]) {
+    const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { code }) }); await approveCalibration(api, cwd); for (let i = 0; i < 5; i++) await invoke(api, "goal_status", {});
+    const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); assert.equal(projection.runtimeState === "active", active, code); assert.equal(projection.findings.size, 0, code); assert.deepEqual(projection.conditions.get("condition-1").supportingEvidenceIds, [], code);
+  }
+});
+
+test("artifact symlink rejects recording without exposing its path", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { artifactSymlink: true }) }); await approveCalibration(api, cwd); await statusUntil(api, "terminal"); const before = observationEvents(cwd); const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.equal(observationEvents(cwd).filter(name => name === "condition.observation_recorded").length, before.filter(name => name === "condition.observation_recorded").length); assert.equal(JSON.stringify(status).includes("cycle0-artifact"), false);
+});
+
+test("runtime Host cannot override Extension-owned Store authority", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let poisoned = 0; const durable = observationHost(cwd); Object.assign(durable, { loadProjection() { poisoned++; }, persistEvent() { poisoned++; }, originRoot: "/evil", stateRoot: "/evil", integratedHead: "evil" }); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd); await invoke(api, "goal_status", {}); assert.equal(poisoned, 0); assert.equal(observationEvents(cwd).includes("condition.observation_requested"), true);
 });
 
 test("runtime status checkpoints are exact, monotonic, and fingerprint-stable without semantic progress", async () => {
