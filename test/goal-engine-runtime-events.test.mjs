@@ -59,6 +59,9 @@ test("activation requires the latest decidable Cycle0 and never supports Conditi
   assert.deepEqual(p.conditions.get("condition-1").supportingEvidenceIds, []); assert.equal(p.conditions.get("condition-1").status, "inactive");
   assert.throws(() => applyEvent(p, event("finding.recorded", { findingId: "cycle0-finding", conditionId: "condition-1", runId: "cycle0-pass", evidenceId: hash(101), fingerprint: hash(102) }, 9)), /finding requires/);
   p = applyEvent(p, event("goal.runtime_activated", {}, 9)); assert.equal(p.runtimeState, "active");
+  let latestPassed = calibrating(); latestPassed = applyAll(latestPassed, observationEvents(latestPassed, { runId: "inconclusive-earlier", evidenceId: hash(105), cycle: 0, verdict: { kind: "inconclusive", reason: "unknown" }, start: 4 }));
+  latestPassed = applyAll(latestPassed, observationEvents(latestPassed, { runId: "passed-latest", evidenceId: hash(106), cycle: 0, start: 9 }));
+  assert.deepEqual(latestPassed.conditions.get("condition-1").supportingEvidenceIds, []); assert.equal(applyEvent(latestPassed, event("goal.runtime_activated", {}, 14)).runtimeState, "active");
   for (const [name, verdict] of [["inconclusive", { kind: "inconclusive", reason: "unknown" }], ["infra", { kind: "infrastructure_error", reason: "offline" }]]) {
     let candidate = calibrating(); candidate = applyAll(candidate, observationEvents(candidate, { runId: `${name}-pass`, evidenceId: hash(110), cycle: 0, start: 4 }));
     candidate = applyAll(candidate, observationEvents(candidate, { runId: `${name}-latest`, evidenceId: hash(120), cycle: 0, verdict, start: 9 }));
@@ -142,7 +145,9 @@ test("runtime store replay persists repair challenge after complete calibration,
     const challenge = createRepairChallenge({ projection: p, episodeId: "episode-1", action: "reject", sessionId: "session-1", requestedAt: 20, expiresAt: 30, subjectHash: rejectSubjectHash(p, p.repairEpisodes.get("episode-1")) });
     p = appendEvent(root, event(challenge.events[0].type, challenge.events[0].data, 17), p.version); const decision = recordRepairUserDecision({ projection: p, challengeId: challenge.challengeId, sessionId: "session-1", userEntryId: "entry-1", approved: true, source: "interactive", recordedAt: 21 });
     p = appendEvent(root, event(decision.events[0].type, decision.events[0].data, 18), p.version); p = loadProjection(root, "runtime-goal"); const capability = issueRepairCapability({ projection: p, challengeId: challenge.challengeId, now: 22 }); const plan = repairEpisodeTransition({ projection: p, episodeId: "episode-1", event: { type: "repair.reject", capability, consumedAt: 23 } });
-    for (const [index, entry] of plan.events.entries()) p = appendEvent(root, event(entry.type, entry.data, 19 + index), p.version);
-    const replayed = loadProjection(root, "runtime-goal"); assert.equal(replayed.repairEpisodes.get("episode-1").status, "resolved"); assert.deepEqual(replayed.evidenceHistory.map((row) => row.evidenceId), [hash(100), hash(200)]); assert.equal(replayed.conditions.get("condition-1").supportingEvidenceIds.length, 0);
+    const versionBeforeExpired = p.version, expired = { ...plan.events[0], data: { ...plan.events[0].data, consumedAt: 30 } };
+    assert.throws(() => appendEvent(root, event(expired.type, expired.data, 19), p.version), /consume/); assert.equal(loadProjection(root, "runtime-goal").version, versionBeforeExpired);
+    for (const [index, entry] of plan.events.entries()) p = appendEvent(root, event(entry.type, entry.data, 20 + index), p.version);
+    const replayed = loadProjection(root, "runtime-goal"), persisted = readFileSync(join(root, "goals/runtime-goal/events.jsonl"), "utf8"); assert.equal(replayed.repairEpisodes.get("episode-1").status, "resolved"); assert.equal(replayed.repairChallenges.get(challenge.challengeId).phase, "applied"); assert.equal(replayed.repairChallenges.get(challenge.challengeId).recordedAt, 21); assert.equal(replayed.repairChallenges.get(challenge.challengeId).consumedAt, 23); assert.equal(persisted.includes(capability.nonce), false); assert.deepEqual(replayed.evidenceHistory.map((row) => row.evidenceId), [hash(100), hash(200)]); assert.equal(replayed.conditions.get("condition-1").supportingEvidenceIds.length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
