@@ -22,7 +22,7 @@ export function deriveFindingFromFailedEvidence({ projection, runId, evidenceId 
   runtime(projection);
   if (!ID.test(runId || "") || !HASH.test(evidenceId || "")) fail("ledger references required");
   const { run, evidence } = ledger(projection, runId, evidenceId);
-  if (!run || run.phase !== "recorded" || run.evidenceId !== evidenceId || !evidence || evidence.conditionId !== run.conditionId
+  if (!run || run.cycle === 0 || run.phase !== "recorded" || run.evidenceId !== evidenceId || !evidence || evidence.conditionId !== run.conditionId
     || evidence.executionRevision !== projection.executionRevision || evidence.executionContractHash !== projection.executionContractHash
     || evidence.verdict?.kind !== "failed" || !HASH.test(evidence.verdict.findingFingerprint)) fail("current failed ledger evidence required");
   const conditionId = run.conditionId, fingerprint = evidence.verdict.findingFingerprint;

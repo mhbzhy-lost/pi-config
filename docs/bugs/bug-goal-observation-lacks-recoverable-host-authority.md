@@ -1,12 +1,10 @@
 # Observation 缺少可恢复的 Host 权威
 
-## 问题
-若调用者可以提交命令、环境、裁决或进程结果，或在持久化意图前启动观察，崩溃后就可能伪造状态结论、泄露配置并遗留无法归属的资源。
+## 根因
+partial Runner 把调用者的 `assertRequestDurable` 当作 authority，并在 managed terminal 后才补写 process-bound；因此业务动作并不受 Goal event durable ack 约束。它还以非 canonical JSON 计算 Condition hash，并把 verdict 字符串而非 R4 ledger 的 strict verdict/evidence summary 写入事件。
 
-## 复现
-1. 以调用者提供的 executable、args、env 或 verdict 发起观察。
-2. 在租约、进程、终态或记录边界重启服务。
-3. 观察到同一 Condition 可重复分配资源、未知进程被记录或释放，且 artifact 之外的输入能影响结论。
+## 影响
+崩溃可落在 request、lease、process、terminal、record、release 任一窗口；调用者可伪造持久化证明或影响结论。Cycle 0 还可能污染支持证据与 Finding，导致校准结果被误作产品满足。
 
-## 修复方案
-仅接受 Host 注册的 adapter 定义，并以 R3 durable receipt 为租约和进程权威。先生成需 append 的请求事件，再依序生成租约、进程、终态、记录和释放事件计划；Host 以 0600、no-follow artifact 重读和受控 classifier 派生 R5 evidence。任何身份无法证明或释放不明均保留 cleanup debt。
+## 修复
+Runner 只信 Host 私有 `loadProjection`/`persistEvent`，每个外部阶段 append 后读回验证。R3 process callback 先持久化 `condition.observation_process_bound` 并等待 ack，才允许业务 action。artifact 以 no-follow regular 0600/nlink=1 读取，Host classifier 的四个稳定 code 派生 canonical R5 evidence，Goal event 严格使用 R4 payload。Reducer 同步限制 calibrating=Cycle 0、active>=1；Cycle 0 仅保存可判定性 history，不能支持 Condition 或派生 Finding。

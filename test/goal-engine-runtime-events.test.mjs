@@ -67,7 +67,7 @@ test("runtime task mutations invalidate replayed ledger evidence while observati
   let p = observed(draft()); const evidenceMutation = p.mutationSequence;
   const world = { safe: true, repo: { root: "/repo", head: "a".repeat(40), trackedDirty: [], untracked: [], sequencer: null }, adapters: [{ ref: "oracle", version: "1" }], environments: [{ ref: "local", fingerprint: "environment-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "fixture-1", available: true }], resources: [], activeRuns: [] };
   assert.equal(evaluateConditionGraph({ projection: p, worldSnapshot: world }).conditions.get("condition-1").status, "fresh");
-  p = applyEvent(p, event("condition.observation_released", { runId: "run-1", conditionId: "condition-1" }, 7));
+  p = applyEvent(p, event("condition.observation_released", { runId: "run-1", conditionId: "condition-1", releaseReceiptHash: "a".repeat(64) }, 7));
   assert.equal(p.mutationSequence, evidenceMutation); assert.equal(evaluateConditionGraph({ projection: p, worldSnapshot: world }).conditions.get("condition-1").status, "fresh");
   p = applyEvent(p, event("task.dispatched", { taskId: "task-1", contractHash: "1".repeat(64), workspace: { attempt: 1, path: "/tmp/runtime-task", branch: "runtime-task", baseCommit: "a".repeat(40) } }, 8));
   assert.equal(p.mutationSequence, evidenceMutation + 1); assert.equal(p.taskMutationSequences.get("task-1"), p.mutationSequence);
