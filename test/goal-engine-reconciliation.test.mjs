@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildExecutionAmendmentProposal, reconcileExecutionChange } from "../scripts/lib/goal-engine/reconciliation.mjs";
+import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
+import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
+import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
 
 const hash = "a".repeat(64);
 const task = (status, extra = {}) => ({ status, conditionIds: ["condition-a"], writePaths: ["src/a.mjs"], budgetKeys: ["max_repairs"], ...extra });
@@ -107,8 +110,23 @@ test("accepted remove is kept and marks only applicability, while accepted chang
   const removed = buildExecutionAmendmentProposal({ projection: projection(), reason: "accepted remove", changes: { tasks: [change("accepted", "remove")] } });
   const removeResult = reconcileExecutionChange({ projection: projection(), proposal: removed, capability: capabilityFor(removed) });
   assert.equal(removeResult.actions.find((action) => action.entityId === "accepted").action, "keep");
-  assert.deepEqual(removeResult.applicabilityFacts, [{ taskId: "accepted", state: "not_applicable", revision: 5, reason: "task_remove" }]);
+  assert.deepEqual(removeResult.applicabilityFacts, [{ taskId: "accepted", state: "superseded", revision: 5, reason: "task_remove" }]);
   assert.deepEqual(removeResult.conditionFacts, []);
+
+  const fact = removeResult.applicabilityFacts[0];
+  let runtime = applyEvent(createProjection(), { schemaVersion: "goal-runtime.v1", eventId: "runtime-draft", goalId: "runtime-goal", occurredAt: "2026-08-13T00:00:01.000Z", type: "goal.runtime_drafted", data: { runtimeInit: normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries), executionContractHash: hashRuntimeExecutionContract(normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries)), readiness: "draft" } });
+  const runtimeTask = runtime.tasks.get("task-1");
+  const runtimeApplicability = runtime.taskApplicability.get("task-1");
+  runtime.tasks.delete("task-1");
+  runtime.taskApplicability.delete("task-1");
+  runtime.tasks.set("accepted", { ...runtimeTask, status: "accepted" });
+  runtime.taskApplicability.set("accepted", runtimeApplicability);
+  runtime.executionRevision = fact.revision;
+  const applicabilityEventData = (({ taskId, state, reason }) => ({ taskId, state, reason }))(fact);
+  assert.deepEqual(Object.keys(applicabilityEventData), ["taskId", "state", "reason"]);
+  runtime = applyEvent(runtime, { schemaVersion: "goal-runtime.v1", eventId: "runtime-applicability", goalId: "runtime-goal", occurredAt: "2026-08-13T00:00:02.000Z", type: "task.applicability_changed", data: applicabilityEventData });
+  assert.deepEqual(runtime.taskApplicability.get("accepted"), { revision: fact.revision, state: "superseded", reason: "task_remove" });
+  assert.equal(runtime.tasks.get("accepted").status, "accepted");
 
   const changed = buildExecutionAmendmentProposal({ projection: projection(), reason: "accepted change", changes: { tasks: [change("accepted", "change")] } });
   const changeResult = reconcileExecutionChange({ projection: projection(), proposal: changed, capability: capabilityFor(changed) });

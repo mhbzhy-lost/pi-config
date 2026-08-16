@@ -35,4 +35,4 @@ foundation 曾生成彼此不同的 suspensionId、在无 active offer 时伪造
 
 1. Task projection 自身的 `dispatched`、`running`、`settling`、`disposing` 状态，以及其中 workspace 或 executor binding 显示的 active，都是持久化的活动权威；空 inventory 不能覆盖它们。
 2. proposal 的 `add` 必须对应不存在的实体，`change` 和 `remove` 必须对应已有实体；Task 与 Condition 均须在生成 capability nonce 或事件前整体拒绝错配。
-3. accepted 历史不可回退。accepted remove 仅写入绑定新 revision 的 `not_applicable` applicability 事实；accepted change 的 Condition 复验事实只能引用真实 changed Condition 或依赖，绝不能把 Task ID 伪装成 Condition ID。
+3. accepted 历史不可回退。accepted remove 仅写入绑定新 revision 的 `superseded` applicability 事实；accepted change 的 Condition 复验事实只能引用真实 changed Condition 或依赖，绝不能把 Task ID 伪装成 Condition ID。

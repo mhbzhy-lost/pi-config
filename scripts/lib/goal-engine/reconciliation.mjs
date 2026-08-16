@@ -95,7 +95,7 @@ export function reconcileExecutionChange({ projection, proposal, capability, inv
     let action = "keep";
     if (task.status === "accepted") {
       if (impact.unknown || (impact.affected && activeDebt(entityId, task, inventories))) { action = "block_until_terminal"; attention.push({ entityId, reason: impact.unknown ? impact.reason : "owned_resource_not_terminal" }); }
-      else if (impact.remove) applicabilityFacts.push({ taskId: entityId, state: "not_applicable", revision: proposal.revision + 1, reason: impact.reason });
+      else if (impact.remove) applicabilityFacts.push({ taskId: entityId, state: "superseded", revision: proposal.revision + 1, reason: impact.reason });
       else if (impact.affected) {
         applicabilityFacts.push({ taskId: entityId, state: "reverify_required", revision: proposal.revision + 1, reason: impact.reason });
         conditionFacts.push(...conditionFactsFor(task, proposal.changes, "applicability_reverify_required", impact.reason));
