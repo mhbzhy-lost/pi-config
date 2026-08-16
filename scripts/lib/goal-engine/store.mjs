@@ -3,6 +3,7 @@ import { join, dirname, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { applyEvent, createProjection } from "./events.mjs";
+import { remediationSubjectHash, taskContractHash, validateRemediationMetadata } from "./task-definition.mjs";
 
 const REGISTRY_SCHEMA_VERSION = "goal-engine.registry.v1";
 const LOCK_TIMEOUT_MS = 1500;
@@ -15,6 +16,7 @@ const ownerIdentityFreshness = new Map();
 
 export function appendEventBatch(stateRoot, events, expectedVersion) {
   validateEventBatch(events);
+  assertRemediationMaterializationBatch(events);
   const lock = acquireWriterLock(stateRoot);
   const goalDir = join(stateRoot, "goals", events[0].goalId);
   const eventsPath = join(goalDir, "events.jsonl");
@@ -53,6 +55,7 @@ const MAX_SETTLEMENT_EVIDENCE_BYTES = 1_048_576;
 // holding its writer receipt; a failed append can therefore leave only an orphan.
 export function appendEventBatchWithSettlementEvidence(stateRoot, events, expectedVersion, artifact) {
   validateEventBatch(events);
+  assertRemediationMaterializationBatch(events);
   const artifactSnapshot = validateSettlementArtifact(artifact);
   const { sha256, bytes } = artifactSnapshot;
   const canonicalRoot = resolve(stateRoot);
@@ -173,6 +176,7 @@ function assertExistingSettlementArtifact(path, bytes, sha256) {
 }
 
 export function appendEvent(stateRoot, event, expectedVersion) {
+  assertRemediationMaterializationBatch([event]);
   const lock = acquireWriterLock(stateRoot);
   const goalDir = join(stateRoot, "goals", event.goalId);
   const eventsPath = join(goalDir, "events.jsonl");
@@ -395,6 +399,26 @@ function identityUnavailable() { return Object.assign(new Error("goal engine sto
 function writerLockLost() { return Object.assign(new Error("goal engine store writer lock was lost"), { code: "GOAL_ENGINE_STORE_LOCK_LOST" }); }
 function projectionConflict(expected, current) { return Object.assign(new Error(`projection version conflict: expected ${expected}, current ${current}`), { code: "PROJECTION_CONFLICT" }); }
 function batchDurableFailure(cause) { return Object.assign(new Error(`goal engine event batch may already be durable: ${cause.message}`, { cause }), { code: "GOAL_ENGINE_STORE_BATCH_DURABLE" }); }
+
+function assertRemediationMaterializationBatch(events) {
+  const index = events.findIndex((entry) => entry?.type === "goal.amended" && entry?.data?.hostInternalRemediation === true);
+  if (index < 0) return;
+  const prefix = index === 1 && events[0]?.type === "goal.action_consumed" ? 1 : 0;
+  if (index !== prefix) throw new Error("Host remediation materialization must be one canonical batch");
+  const amendment = events[index], addTasks = amendment.data?.addTasks;
+  if (!addTasks || typeof addTasks !== "object" || Array.isArray(addTasks) || Object.keys(addTasks).length !== 1) throw new Error("Host remediation batch requires exactly one added task");
+  const [taskId] = Object.keys(addTasks), taskDef = addTasks[taskId], metadata = taskDef?.metadata;
+  try { validateRemediationMetadata(metadata); } catch { throw new Error("Host remediation batch has invalid metadata"); }
+  if (metadata.goalId !== amendment.goalId || metadata.taskDefHash !== taskContractHash(taskDef) || metadata.subjectHash !== remediationSubjectHash({ goalId: amendment.goalId, executionRevision: metadata.executionRevision, episodeId: metadata.episodeId, conditionId: metadata.conditionId, findingIds: metadata.findingIds, task: taskDef })) throw new Error("Host remediation batch metadata binding mismatch");
+  const linkAt = (offset) => events[index + offset];
+  const linked = (entry, challengeId) => entry?.type === "repair.task_linked" && entry.data?.episodeId === metadata.episodeId && entry.data?.taskId === taskId && entry.data?.challengeId === challengeId;
+  if (events[index + 1]?.type === "repair.task_linked") {
+    if (events.length !== index + 2 || !linked(linkAt(1), null)) throw new Error("invalid autonomous remediation batch");
+    return;
+  }
+  const consume = events[index + 1];
+  if (events.length !== index + 3 || consume?.type !== "repair.capability_consumed" || consume.data?.action !== "authorize_task" || consume.data?.episodeId !== metadata.episodeId || consume.data?.subjectHash !== metadata.subjectHash || !consume.data?.challengeId || !linked(linkAt(2), consume.data.challengeId)) throw new Error("invalid user-approved remediation batch");
+}
 
 function validateEventBatch(events) {
   if (!Array.isArray(events) || events.length === 0) throw new TypeError("event batch must be a non-empty array");

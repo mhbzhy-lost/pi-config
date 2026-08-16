@@ -8,4 +8,4 @@
 
 ## 修复方案
 
-将 runtime init 按既有 PlannedTask criteria-only 公共合同完整规范化并校验 scope、deps 与 DAG；draft reducer 完整物化严格任务字段。仅允许 runtime 内 canonical `goal.amended` 的 Host remediation metadata，并保留它以供同批 consume/link 的绑定校验；transport 仍使用既有 dispatch 合同剥离 metadata。
+将 runtime init 按既有 PlannedTask criteria-only 公共合同完整规范化并校验 scope、deps 与 DAG；draft reducer 完整物化严格任务字段。仅允许 runtime 内 canonical `goal.amended` 的 Host remediation metadata，并保留它以供同批 consume/link 的绑定校验；store 边界拒绝拆分或重排的 remediation batch，transport 仍使用既有 dispatch 合同剥离 metadata。
