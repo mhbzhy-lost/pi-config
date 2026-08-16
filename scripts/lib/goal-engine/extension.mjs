@@ -6,6 +6,9 @@ import { isDeepStrictEqual } from "node:util";
 import { hashGoalMetadataProposal, recordHumanChoice, createRuntimeActivationChallenge } from "./human-decision.mjs";
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract, validateRuntimeReadiness } from "./obligation-contract.mjs";
 import { captureCurrentWorld } from "./current-world.mjs";
+import { requestObservation, startObservation, recoverObservation, recordObservation, releaseObservation } from "./observation-runner.mjs";
+import { hostObservationAdapter } from "./observation-adapters.mjs";
+import { prepareManagedValidation } from "./managed-validation.mjs";
 import { actionableFrontier, obligationProgressFingerprint } from "./obligation-policy.mjs";
 import { buildTransferChallenge, listCwdGoals, ownerSessionId, transferChallengeState, workspaceReleased } from "./session-transfer.mjs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
@@ -615,6 +618,93 @@ export function createGoalEngineExtension(pi, options = {}) {
   const validTimestamp = (value) => nonEmptyString(value) && !Number.isNaN(Date.parse(value));
   const runtimeProposalHash = ({ goalId, proposalId, executionContractHash, baseHead, sessionId }) => createHash("sha256")
     .update(JSON.stringify({ baseHead, executionContractHash, goalId, proposalId, sessionId })).digest("hex");
+  // Observation authority is deliberately assembled here, rather than exposed
+  // through tool parameters. Store and CurrentWorld remain Extension-owned.
+  const observationHostAvailable = () => runtimeHost?.adapterRegistry
+    && typeof runtimeHost.artifactRefForRun === "function";
+  const observationServices = (goalId, cwd, root, world) => ({
+    adapterRegistry: runtimeHost.adapterRegistry,
+    originRoot: cwd,
+    stateRoot: root,
+    integratedHead: world.repo?.head || world.head,
+    loadProjection: async () => loadProjectionFn(root, goalId),
+    persistEvent: async ({ type, data }) => {
+      const current = loadProjectionFn(root, goalId);
+      appendEventFn(root, makeEvent(type, data, goalId, "goal-runtime.v1"), current.version);
+    },
+    ...(typeof runtimeHost.prepareManagedValidation === "function" ? { prepareManagedValidation: runtimeHost.prepareManagedValidation } : {}),
+    ...(typeof runtimeHost.startManagedValidation === "function" ? { startManagedValidation: runtimeHost.startManagedValidation } : {}),
+    ...(typeof runtimeHost.inspectManagedValidation === "function" ? { inspectManagedValidation: runtimeHost.inspectManagedValidation } : {}),
+    ...(typeof runtimeHost.recoverManagedValidation === "function" ? { recoverManagedValidation: runtimeHost.recoverManagedValidation } : {}),
+    ...(typeof runtimeHost.releaseManagedValidation === "function" ? { releaseManagedValidation: runtimeHost.releaseManagedValidation } : {}),
+  });
+  const observationReceiptForRun = (projection, run, world) => {
+    const condition = projection.conditions.get(run.conditionId);
+    const adapter = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
+    return {
+      schema: "dispatch-ir.v1.observation-receipt", runId: run.runId, conditionId: run.conditionId,
+      cycle: run.cycle, goalId: projection.goalId, executionRevision: projection.executionRevision,
+      executionContractHash: projection.executionContractHash, conditionHash: condition.conditionHash,
+      worldSnapshotHash: "recovered-from-projection", resourceClaimsHash: "recovered-from-projection",
+      adapter: { ref: adapter.ref, version: adapter.version }, phase: run.phase,
+      managedReceipt: null, terminal: null, recorded: run.evidenceId ? { evidenceId: run.evidenceId } : null,
+      cleanupDebt: run.phase === "cleanup_debt",
+    };
+  };
+  const calibrationStep = async ({ projection, goalId, cwd, root, world }) => {
+    if (!observationHostAvailable()) return { attention: ["RUNTIME_OBSERVATION_HOST_UNAVAILABLE"] };
+    const services = observationServices(goalId, cwd, root, world);
+    let selected = null;
+    for (const [conditionId] of projection.conditions) {
+      const runs = [...projection.observationRuns.values()].filter((run) => run.conditionId === conditionId && run.cycle === 0);
+      const latest = runs.at(-1);
+      if (!latest || !["released"].includes(latest.phase)) { selected = { conditionId, run: latest }; break; }
+    }
+    if (!selected) {
+      const ready = [...projection.conditions.keys()].every((conditionId) => {
+        const run = [...projection.observationRuns.values()].filter((value) => value.conditionId === conditionId && value.cycle === 0).at(-1);
+        const evidence = run?.evidenceId && projection.evidenceHistory.find((value) => value.evidenceId === run.evidenceId);
+        return run && ["recorded", "released"].includes(run.phase) && ["passed", "failed"].includes(evidence?.verdict?.kind);
+      });
+      if (!ready) return { attention: ["RUNTIME_CALIBRATION_BLOCKED"] };
+      const current = loadProjectionFn(root, goalId);
+      appendEventFn(root, makeEvent("goal.runtime_activated", {}, goalId, "goal-runtime.v1"), current.version);
+      return { activated: true };
+    }
+    try {
+      if (!selected.run) {
+        const requested = requestObservation({ projection, conditionId: selected.conditionId, cycle: 0, worldSnapshot: world, services });
+        await services.persistEvent(requested.event);
+        return { step: "request" };
+      }
+      if (selected.run.phase === "cleanup_debt") return { attention: ["RUNTIME_CALIBRATION_CLEANUP_DEBT"] };
+      let receipt = observationReceiptForRun(projection, selected.run, world);
+      if (["requested", "lease_allocated", "process_bound"].includes(selected.run.phase)) {
+        const result = selected.run.phase === "requested"
+          ? await startObservation(receipt, services)
+          : await recoverObservation(receipt, services);
+        return result.status === "attention" || result.status === "blocked" ? { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] } : { step: "start_or_recover" };
+      }
+      if (selected.run.phase === "terminal") {
+        const recovered = await recoverObservation(receipt, services);
+        if (recovered.phase === "cleanup_debt" || recovered.status === "attention") return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] };
+        const artifactRef = await runtimeHost.artifactRefForRun({ goalId, runId: selected.run.runId, managedTerminal: recovered.runReceipt?.terminal || recovered.terminal });
+        const result = await recordObservation({ projection: loadProjectionFn(root, goalId), runReceipt: recovered.runReceipt || recovered, artifactRef, worldSnapshot: world, services });
+        return result.blocked ? { attention: ["RUNTIME_CALIBRATION_INDETERMINATE"] } : { step: "record" };
+      }
+      if (selected.run.phase === "recorded") {
+        // Projection deliberately stores no private terminal body. Recreate the
+        // deterministic managed receipt before handing release to the runner.
+        const condition = projection.conditions.get(selected.conditionId);
+        const adapter = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
+        const prepare = services.prepareManagedValidation || prepareManagedValidation;
+        receipt = { ...receipt, managedReceipt: prepare({ ownerKind: "goal-observation", ownerId: receipt.runId, originRoot: cwd, stateRoot: root, integratedHead: world.repo?.head || world.head, plan: adapter.validationPlan, resourceClaims: adapter.resourceClaims }) };
+        const result = await releaseObservation({ ...receipt, phase: "recorded", recorded: { evidenceId: selected.run.evidenceId } }, services);
+        return result.status === "attention" ? { attention: ["RUNTIME_CALIBRATION_CLEANUP_DEBT"] } : { step: "release" };
+      }
+      return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] };
+    } catch { return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] }; }
+  };
   const isRuntimeChallenge = (data) => {
     const fields = ["id", "kind", "choices", "requestedAt", "goalId", "contractHash", "baseHead", "sessionId", "proposalId", "executionContractHash", "proposalHash"];
     return exactPlainObject(data, fields) && data.kind === "runtime_activation_approval"
@@ -1029,10 +1119,17 @@ export function createGoalEngineExtension(pi, options = {}) {
             const capabilityDigest = createHash("sha256").update(Buffer.isBuffer(nonce) ? nonce : String(nonce)).digest("hex");
             try { projection = appendEventFn(root, makeEvent("goal.runtime_approval_recorded", { proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, userEntryId: record.decision.userEntryId, capabilityDigest }, goalId, "goal-runtime.v1"), projection.version); } catch (error) { const recovered = loadProjectionFn(root, goalId); if (recovered?.runtimeState !== "calibrating" || recovered?.runtimeApproval?.proposalHash !== record.challenge.proposalHash) throw error; projection = recovered; }
             persistMetadata("goal-engine-runtime-approval-consumed", { id: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, consumed: true });
+            // Approval consumption is this status call's sole business step.
+            return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, progressLedger: projection.progressLedger });
           } else if (record.decision) {
             persistMetadata("goal-engine-runtime-approval-stale", { id: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, stale: true });
             return JSON.stringify({ goalId, status: "RUNTIME_APPROVAL_STALE", attention: ["RUNTIME_APPROVAL_STALE"] });
           } else return JSON.stringify({ goalId, proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, session: sessionId, choices: record.challenge.choices });
+        }
+        if (projection.runtimeState === "calibrating") {
+          const outcome = await calibrationStep({ projection, goalId, cwd, root, world });
+          const current = loadProjectionFn(root, goalId);
+          return JSON.stringify({ goalId, runtimeState: current.runtimeState, readiness: current.readiness, ...(outcome.attention ? { status: outcome.attention[0], attention: outcome.attention } : {}), progressLedger: current.progressLedger });
         }
         const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions: {}, observationInventory: {} });
         return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });

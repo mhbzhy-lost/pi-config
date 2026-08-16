@@ -7,10 +7,16 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
+import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function host(cwd) { return { registries: runtimeRegistries, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; } }; }
+function observationHost(cwd) {
+  const registry = createObservationAdapterRegistry([{ ref: "oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 50, maxOutputBytes: 100, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } }]);
+  const receipt = { id: "managed-1", stateRoot: join(cwd, ".state/goal-engine"), receiptPath: join(cwd, "managed-1"), workspacePath: null, cleanupDebt: false };
+  return { registries: runtimeRegistries, adapterRegistry: registry, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, environments: [{ ref: "local", fingerprint: "local-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "sample-1", available: true }], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; }, prepareManagedValidation() { return { ...receipt, phase: "lease_allocated", terminal: null, recorded: null }; }, inspectManagedValidation() { return { ...receipt, phase: "lease_allocated", terminal: null, recorded: null }; }, async startManagedValidation(_receipt, { onProcessBound }) { await onProcessBound({ processIdentityHash: createHash("sha256").update("process").digest("hex") }); return { ...receipt, phase: "recorded", terminal: { status: "passed" } }; }, async recoverManagedValidation() { return { ...receipt, phase: "recorded", terminal: { status: "passed" } }; }, releaseManagedValidation() { return { released: true }; }, artifactRefForRun() { const path = join(cwd, ".state", "cycle0-artifact.json"); writeFileSync(path, JSON.stringify({ code: "PASS" }), { mode: 0o600 }); return { id: "cycle0-artifact", path }; } };
+}
 function pi(cwd, entries = [], { sessionId = "owner", appendEntry } = {}) { const tools = [], handlers = new Map(), manager = { getSessionId: () => sessionId, getSessionFile: () => join(cwd, `session-${sessionId}`), getLeafId: () => "leaf", getEntries: () => entries }; const api = { tools, entries, handlers, sessionManager: manager, registerTool: tool => tools.push(tool), on: (name, handler) => handlers.set(name, handler) }; api.appendEntry = (customType, data) => { if (appendEntry) return appendEntry(customType, data, entries); entries.push({ type: "custom", customType, data }); }; return api; }
 function repo() { const cwd = mkdtempSync(join(tmpdir(), "r10a1-")); git(cwd, "init", "-b", "main"); git(cwd, "config", "user.email", "test@example.com"); git(cwd, "config", "user.name", "Test"); writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n"); git(cwd, "add", ".gitignore"); git(cwd, "commit", "-m", "init"); return cwd; }
 function runtimeEntries(api, suffix) { return api.entries.filter((entry) => entry.customType?.endsWith(suffix)); }
@@ -102,6 +108,33 @@ test("malformed runtime decision, tombstone, and intent metadata cannot restore 
   const malformedIntent = structuredClone(first.entries.filter((entry) => entry.customType !== "goal-engine-runtime-approval-decision")); malformedIntent.push({ type: "custom", customType: "goal-engine-runtime-intent-pending", data: { goalId: "harden-runtime", sessionId: "owner", userEntryId: "intent-entry", source: "interactive", occurredAt: new Date().toISOString(), extra: "forged" } });
   const intentReload = pi(cwd, malformedIntent); intentReload.cwd = cwd; createGoalEngineExtension(intentReload, { goalStateEnv: {}, runtimeHost: host(cwd) }); intentReload.handlers.get("session_start")({}, { sessionManager: intentReload.sessionManager });
   assert.notEqual(JSON.parse(await invoke(intentReload, "goal_status", {})).status, "R10B_SUSPENSION_REQUIRED");
+});
+
+test("goal_status drives one-condition Cycle0 through request, terminal, record, release, and activation", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd) });
+  await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status", {});
+  api.handlers.get("input")({ source: "interactive", text: "approve", entryId: "approve-observation" }, { cwd, sessionManager: api.sessionManager });
+  await invoke(api, "goal_status", {}); // consume approval only
+  for (let i = 0; i < 5; i++) await invoke(api, "goal_status", {});
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(projection.runtimeState, "active");
+  assert.deepEqual([...projection.observationRuns.values()].map(run => run.phase), ["released"]);
+  assert.equal(projection.findings.size, 0);
+  assert.deepEqual(projection.conditions.get("condition-1").supportingEvidenceIds, []);
+});
+
+test("calibrating runtime without Host observation wiring fails closed without observation events", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) });
+  await invoke(api, "goal_init", runtimeInit());
+  await invoke(api, "goal_status", {});
+  api.handlers.get("input")({ source: "interactive", text: "approve", entryId: "approve-no-observation-host" }, { cwd, sessionManager: api.sessionManager });
+  await invoke(api, "goal_status", {}); // approval consumption is not a calibration step
+  const status = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(status.status, "RUNTIME_OBSERVATION_HOST_UNAVAILABLE");
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(projection.observationRuns.size, 0);
 });
 
 test("runtime status checkpoints are exact, monotonic, and fingerprint-stable without semantic progress", async () => {

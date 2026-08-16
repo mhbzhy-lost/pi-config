@@ -18,3 +18,11 @@
 Pi session custom entry 属于不可信恢复输入。此前恢复逻辑通过对象合并接受 challenge、decision、tombstone 与 intent 的未知字段和跨记录错配，伪造记录可能被重新解释为运行时审批权威。
 
 恢复时必须逐条按顺序仅接受原始持久 shape 的普通精确对象：challenge 重算提案哈希并绑定合同哈希、HEAD、目标与会话；decision 与其已恢复 challenge 逐字段绑定；tombstone 只接受关联 challenge 的 `{id}`；intent 只接受无原文的五字段门禁。重复、冲突或异常原型记录一律失效闭锁，且不得输出原始输入或 nonce。
+
+## Cycle 0 未接线
+
+### 复现
+审批消费后，runtime 进入 `calibrating`，但每次 `goal_status` 只返回 `RUNTIME_CALIBRATION_REQUIRED`，没有请求、恢复、记录或释放既有 Observation runner 的运行，重载后也没有可恢复的 managed supervisor 收据。
+
+### 修复方案
+仅由 Host 注入的 observation adapter、managed-validation 服务与终端 artifact 引用驱动 `goal_status`；Extension 用 Store 作为唯一 Goal 事件持久化权威，并按 Condition 声明顺序每次推进一个 Cycle 0 语义步骤。运行收据从 projection 和确定性 managed allocation 重建，缺少 Host 接线、身份冲突或不可判定终端一律闭锁为 attention，绝不接受调用方的 verdict、命令或 artifact。
