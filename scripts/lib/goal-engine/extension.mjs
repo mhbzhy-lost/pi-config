@@ -860,10 +860,13 @@ export function createGoalEngineExtension(pi, options = {}) {
     const intents = branch.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.type === "custom" && entry.customType === "goal-engine-runtime-approval-intent" && isRuntimeIntent(entry.data)
       && entry.data.challengeId === challenge.id && entry.data.goalId === challenge.goalId && entry.data.proposalId === challenge.proposalId && entry.data.contractHash === challenge.contractHash && entry.data.baseHead === challenge.baseHead && entry.data.sessionId === challenge.sessionId && entry.data.proposalHash === challenge.proposalHash);
     if (intents.length !== 1) return null;
-    const { entry: intent, index } = intents[0], message = branch[index + 1];
+    const { entry: intent, index } = intents[0];
+    const middle = branch[index + 1];
+    const message = middle?.type === "compaction" ? branch[index + 2] : middle;
     const content = message?.type === "message" && message.message?.role === "user" ? message.message.content : null;
     const text = typeof content === "string" ? content : Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : null;
-    if (!message || message.parentId !== intent.id || !nonEmptyString(message.id) || !validTimestamp(message.timestamp) || Date.parse(message.timestamp) <= Date.parse(challenge.requestedAt) || text !== intent.data.choice) return null;
+    const compacted = middle?.type === "compaction";
+    if (!nonEmptyString(intent.id) || !validTimestamp(intent.timestamp) || (compacted && (!nonEmptyString(middle.id) || !validTimestamp(middle.timestamp) || middle.parentId !== intent.id)) || (!compacted && message?.parentId !== intent.id) || !message || message.parentId !== (compacted ? middle.id : intent.id) || !nonEmptyString(message.id) || !validTimestamp(message.timestamp) || Date.parse(message.timestamp) <= Date.parse(challenge.requestedAt) || text !== intent.data.choice) return null;
     return { intent, message, choice: intent.data.choice };
   };
   const restoreMetadata = (ctx) => {
@@ -885,12 +888,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           if (!current?.challenge || current.invalid || !isRuntimeDecision(data, current.challenge) || current.decision || !pair || data.userEntryId !== pair.message.id || data.choice !== pair.choice || data.source !== pair.intent.data.source) {
             if (current) runtimeChallenges.set(id, { ...current, invalid: true });
           } else runtimeChallenges.set(id, { ...current, decision: data });
-        } else if (["goal-engine-runtime-approval-consumed", "goal-engine-runtime-approval-stale", "goal-engine-runtime-approval-rejected"].includes(entry.customType)) {
-          const terminal = entry.customType.slice("goal-engine-runtime-approval-".length);
-          if (!current?.challenge || current.invalid || !exactPlainObject(data, ["id"])) continue;
-          if (current.consumed || current.stale || current.rejected) runtimeChallenges.set(id, { ...current, invalid: true });
-          else runtimeChallenges.set(id, { ...current, [terminal]: true });
-        }
+        } // Runtime terminal receipts are audit-only; Goal Projection and re-proven decisions remain authoritative.
       }
       if (entry.customType?.startsWith("goal-engine-metadata-")) {
         if (!data?.id) continue;

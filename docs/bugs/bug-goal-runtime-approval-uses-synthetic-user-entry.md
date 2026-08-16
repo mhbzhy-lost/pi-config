@@ -23,3 +23,8 @@
 `goal.runtime_approval_recorded` 在 append 后抛错时会以已持久化 Projection 恢复。原恢复条件遗漏本次栈内计算的 `capabilityDigest`，因此除 digest 外身份完全一致但 digest 被伪造的事件会被误认为本次成功并吞掉异常。恢复必须同时精确比对 `proposalHash`、`userEntryId`、`sessionId`、`executionContractHash`、`baseHead` 与本次 digest；只保存 digest，绝不记录原始 nonce。
 
 同时，Pi custom metadata 是不可信恢复输入：格式错误的 decision 不得恢复审批权，格式错误的 consumed/stale/rejected tombstone 不得终结合法 challenge，格式错误的 R10B pending 不得形成 gate。测试中的 active branch 必须是连续 parent 链；已删除 user message 的 branch 不得保留其 descendant decision。
+
+## Round 2 复现与修复
+
+- **Pi 自动压缩配对失败**：真实 `SessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore)` 会生成 `intent → type=compaction → user` 的连续 active branch。旧代码只接受 user 是 intent 的直接子项，因而拒绝真实批准，并让遗留 intent 卡住后续配对。现在只在 `getBranch()` 中允许恰好一个、带合法 id、时间戳和连续 parentId 的 Pi compaction；随后必须是时间晚于 challenge 的真实纯文本 user。custom、assistant、system、双 compaction、断链及非法字段均 fail-closed。
+- **无 decision tombstone 伪造终态**：reload 以前把精确 `{id}` 的 consumed/stale/rejected custom 收据写入 runtime 状态，攻击者无需真实 choice 就能让 challenge 终止。现在 terminal custom 仅保留为审计收据，恢复时绝不据其设置业务状态：reject 必须由 active branch 上重新证明的 decision.choice 派生，stale 由当前 projection 与 world drift 重新计算，consumed 由 Goal Projection 的 runtimeApproval/runtimeState 派生。这样合法 reject 仍可恢复，合法 approve 的 durable Goal approval 也不会被伪造 tombstone 阻断。

@@ -92,6 +92,41 @@ test("approved runtime intent never remains an R10B gate", async () => {
   assert.notEqual(tool?.reason, "R10B_SUSPENSION_REQUIRED");
 });
 
+test("runtime approval accepts one Pi compaction between its intent and real user message", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) });
+  await invoke(api, "goal_init", runtimeInit()); const offered = JSON.parse(await invoke(api, "goal_status", {}));
+  api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  const intent = api.entries.find(entry => entry.customType === "goal-engine-runtime-approval-intent"), user = api.entries.at(-1);
+  const compaction = { id: "pi-compaction", parentId: intent.id, timestamp: new Date(Date.now() + 10).toISOString(), type: "compaction", summary: "Pi summary", firstKeptEntryId: intent.id, tokensBefore: 1 };
+  user.parentId = compaction.id; api.entries.splice(api.entries.indexOf(user), 0, compaction);
+  const status = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(status.runtimeState, "calibrating");
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeApproval.userEntryId, user.id);
+  assert.equal(offered.proposalId, intent.data.proposalId);
+});
+
+for (const middle of ["custom", "assistant", "system", "two-compactions", "broken-parent", "empty-compaction-id", "invalid-compaction-timestamp", "empty-user-id", "invalid-user-timestamp"]) test(`runtime approval fails closed for ${middle} middle chain`, async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status", {});
+  api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  const intent = api.entries.find(entry => entry.customType === "goal-engine-runtime-approval-intent"), user = api.entries.at(-1);
+  const compact = { id: "pi-compaction", parentId: intent.id, timestamp: new Date(Date.now() + 10).toISOString(), type: "compaction", summary: "Pi summary", firstKeptEntryId: intent.id, tokensBefore: 1 };
+  const entry = middle === "custom" ? { ...compact, type: "custom", customType: "untrusted" }
+    : middle === "assistant" ? { ...compact, type: "message", message: { role: "assistant", content: "approve" } }
+      : middle === "system" ? { ...compact, type: "message", message: { role: "system", content: "approve" } } : compact;
+  if (middle === "empty-compaction-id") entry.id = "";
+  if (middle === "invalid-compaction-timestamp") entry.timestamp = "not-a-timestamp";
+  if (middle === "empty-user-id") user.id = "";
+  if (middle === "invalid-user-timestamp") user.timestamp = "not-a-timestamp";
+  user.parentId = middle === "broken-parent" ? "unrelated" : entry.id;
+  api.entries.splice(api.entries.indexOf(user), 0, entry);
+  if (middle === "two-compactions") { const second = { ...compact, id: "pi-compaction-2", parentId: entry.id }; user.parentId = second.id; api.entries.splice(api.entries.indexOf(user), 0, second); }
+  await invoke(api, "goal_status", {});
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval");
+  assert.equal(runtimeEntries(api, "decision").length, 0);
+});
+
 test("runtime approval requires the real user message to be the intent's direct child", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd;
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) });
@@ -207,6 +242,39 @@ test("malformed runtime decisions do not restore approval authority", async () =
     assert.equal(runtimeEntries(reloaded, "consumed").length, 0, "does not consume the malformed decision");
     assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval");
   }
+});
+
+for (const terminal of ["consumed", "stale", "rejected"]) test(`exact runtime ${terminal} tombstone without a decision does not terminate a challenge`, async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(first, "goal_init", runtimeInit());
+  const offered = JSON.parse(await invoke(first, "goal_status", {}));
+  first.appendEntry(`goal-engine-runtime-approval-${terminal}`, { id: first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-challenge").data.id });
+  const reloaded = pi(cwd, structuredClone(first.entries)); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  const status = JSON.parse(await invoke(reloaded, "goal_status", {}));
+  assert.equal(status.proposalId, offered.proposalId);
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval");
+});
+
+for (const terminal of ["consumed", "stale", "rejected"]) test(`exact runtime ${terminal} tombstone cannot override a re-proven approval`, async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(first, "goal_init", runtimeInit()); await invoke(first, "goal_status", {});
+  first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: first.sessionManager });
+  const challenge = first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-challenge").data;
+  const intent = first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-intent").data, user = first.entries.at(-1);
+  first.appendEntry("goal-engine-runtime-approval-decision", { id: challenge.id, challengeId: challenge.id, kind: "runtime_activation_approval", choice: "approve", goalId: challenge.goalId, contractHash: challenge.contractHash, baseHead: challenge.baseHead, proposalId: challenge.proposalId, userEntryId: user.id, sessionId: challenge.sessionId, source: intent.source, proposalHash: challenge.proposalHash, receiptId: "shape-valid-receipt" });
+  first.appendEntry(`goal-engine-runtime-approval-${terminal}`, { id: challenge.id });
+  const reloaded = pi(cwd, structuredClone(first.entries)); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  const status = JSON.parse(await invoke(reloaded, "goal_status", {}));
+  assert.equal(status.runtimeState, "calibrating");
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeApproval.userEntryId, user.id);
+});
+
+test("re-proven reject decision restores runtime rejection without tombstone authority", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(first, "goal_init", runtimeInit()); await invoke(first, "goal_status", {});
+  first.handlers.get("input")({ type: "input", source: "interactive", text: "reject" }, { cwd, sessionManager: first.sessionManager });
+  const challenge = first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-challenge").data;
+  const intent = first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-intent").data, user = first.entries.at(-1);
+  first.appendEntry("goal-engine-runtime-approval-decision", { id: challenge.id, challengeId: challenge.id, kind: "runtime_activation_approval", choice: "reject", goalId: challenge.goalId, contractHash: challenge.contractHash, baseHead: challenge.baseHead, proposalId: challenge.proposalId, userEntryId: user.id, sessionId: challenge.sessionId, source: intent.source, proposalHash: challenge.proposalHash, receiptId: "reject-receipt" });
+  const reloaded = pi(cwd, structuredClone(first.entries)); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  assert.equal(JSON.parse(await invoke(reloaded, "goal_status", {})).status, "RUNTIME_APPROVAL_REJECTED");
 });
 
 for (const terminal of ["consumed", "stale", "rejected"]) test(`malformed runtime ${terminal} tombstone does not terminate a valid challenge`, async () => {

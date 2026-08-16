@@ -12,15 +12,20 @@ const piBinary = process.env.PI_REAL_BIN;
 const piPackage = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
 const piTypes = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts";
 
-test("installed Pi SessionManager advances the active branch from custom intent to real user entry", async () => {
+test("installed Pi SessionManager preserves custom → compaction → real user branch fields", async () => {
   const { SessionManager } = await import(piPackage);
   const manager = SessionManager.inMemory(repoRoot);
-  manager.appendCustomEntry("goal-engine-runtime-approval-intent", { protocol: "goal-engine-runtime-approval-intent.v1" });
+  const intentId = manager.appendCustomEntry("goal-engine-runtime-approval-intent", { protocol: "goal-engine-runtime-approval-intent.v1" });
+  const compactionId = manager.appendCompaction("Pi summary", intentId, 1);
   const userEntryId = manager.appendMessage({ role: "user", content: "approve", timestamp: Date.now() });
   const branch = manager.getBranch();
-  const user = branch.at(-1);
+  const [intent, compaction, user] = branch;
+  assert.equal(intentId, intent.id);
+  assert.equal(compactionId, compaction.id);
   assert.equal(userEntryId, user.id);
-  assert.equal(user.parentId, branch.at(-2).id);
+  assert.equal(compaction.type, "compaction");
+  assert.equal(compaction.parentId, intent.id);
+  assert.equal(user.parentId, compaction.id);
   assert.equal(user.message.role, "user");
   const declarations = await (await import("node:fs/promises")).readFile(piTypes, "utf8");
   const inputEvent = declarations.match(/interface InputEvent \{([\s\S]*?)\n\}/)?.[1];
