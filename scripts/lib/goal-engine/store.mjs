@@ -442,6 +442,10 @@ function rebuildProjection(eventsPath) {
   return projection;
 }
 
+export function projectionStateHash(projection) {
+  return createHash("sha256").update(JSON.stringify(serializeProjection(projection))).digest("hex");
+}
+
 function serializeProjection(p) {
   return {
     goalId: p.goalId, version: p.version, lifecycle: p.lifecycle, objective: p.objective,
@@ -452,6 +456,15 @@ function serializeProjection(p) {
     epoch: p.epoch, completionHistory: p.completionHistory, coordinationState: p.coordinationState,
     sessionBindings: p.sessionBindings, continuity: p.continuity, actionOffer: p.actionOffer,
     pendingHumanDecision: p.pendingHumanDecision, contractHistory: p.contractHistory,
+    runtimeGeneration: p.runtimeGeneration, initialShape: p.initialShape,
+    executionRevision: p.executionRevision, executionContractHash: p.executionContractHash,
+    readiness: p.readiness, runtimeState: p.runtimeState, writePolicy: p.writePolicy,
+    taskApplicability: Object.fromEntries(p.taskApplicability || []),
+    conditions: Object.fromEntries(p.conditions || []),
+    observationRuns: Object.fromEntries(p.observationRuns || []),
+    findings: Object.fromEntries(p.findings || []),
+    repairEpisodes: Object.fromEntries(p.repairEpisodes || []),
+    suspension: p.suspension, convergenceBudget: p.convergenceBudget, evidenceHistory: p.evidenceHistory || [],
   };
 }
 

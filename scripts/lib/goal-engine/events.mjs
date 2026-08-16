@@ -3,10 +3,13 @@ import { validateDAG } from "./graph.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.mjs";
 import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence } from "./settlement-evidence.mjs";
+import { generationCapabilities } from "./generation-capabilities.mjs";
+import { deriveInitialShape } from "./obligation-contract.mjs";
 
 const LEGACY_SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]);
 export const PLANNED_SCHEMA_VERSION = "planned.v1";
-const SCHEMA_VERSIONS = new Set([...LEGACY_SCHEMA_VERSIONS, PLANNED_SCHEMA_VERSION]);
+export const RUNTIME_SCHEMA_VERSION = "goal-runtime.v1";
+const SCHEMA_VERSIONS = new Set([...LEGACY_SCHEMA_VERSIONS, PLANNED_SCHEMA_VERSION, RUNTIME_SCHEMA_VERSION]);
 const SCHEMA_RANK = new Map([["goal-engine.event.v1", 1], ["goal-engine.event.v2", 2], ["goal-engine.event.v3", 3]]);
 
 export function schemaVersionForMutation(projection, legacyTargetVersion = "goal-engine.event.v3") {
@@ -55,6 +58,21 @@ export function createProjection() {
     pendingHumanDecision: null,
     contractHistory: [],
     ownershipRevision: 1,
+    runtimeGeneration: null,
+    initialShape: null,
+    executionRevision: null,
+    executionContractHash: null,
+    readiness: null,
+    runtimeState: null,
+    writePolicy: null,
+    taskApplicability: new Map(),
+    conditions: new Map(),
+    observationRuns: new Map(),
+    findings: new Map(),
+    repairEpisodes: new Map(),
+    suspension: null,
+    convergenceBudget: null,
+    evidenceHistory: [],
   };
 }
 
@@ -80,11 +98,31 @@ export function applyEvent(projection, event, { replay = false } = {}) {
   }
 
   const next = copyProjection(projection);
-  if (!next.eventSchemaVersion || SCHEMA_RANK.get(event.schemaVersion) > SCHEMA_RANK.get(next.eventSchemaVersion)) {
+  if (!next.eventSchemaVersion || (SCHEMA_RANK.has(event.schemaVersion) && SCHEMA_RANK.get(event.schemaVersion) > SCHEMA_RANK.get(next.eventSchemaVersion))) {
     next.eventSchemaVersion = event.schemaVersion;
   }
   switch (event.type) {
     case "goal.created": goalCreated(next, event, replay); break;
+    case "goal.runtime_drafted": runtimeDrafted(next, event); break;
+    case "goal.runtime_readiness_recorded": runtimeReadinessRecorded(next, event.data); break;
+    case "goal.runtime_approval_recorded": runtimeApprovalRecorded(next, event.data); break;
+    case "goal.runtime_activated": runtimeActivated(next); break;
+    case "goal.runtime_suspended": runtimeSuspended(next, event.data); break;
+    case "goal.runtime_resumed": runtimeResumed(next); break;
+    case "condition.observation_requested": observationRequested(next, event.data); break;
+    case "condition.observation_lease_allocated": observationTransition(next, event.data, "requested", "lease_allocated"); break;
+    case "condition.observation_process_bound": observationTransition(next, event.data, "lease_allocated", "process_bound"); break;
+    case "condition.observation_terminal": observationTransition(next, event.data, "process_bound", "terminal"); break;
+    case "condition.observation_recorded": observationRecorded(next, event.data); break;
+    case "condition.observation_released": observationTransition(next, event.data, "recorded", "released"); break;
+    case "condition.evidence_invalidated": evidenceInvalidated(next, event.data); break;
+    case "finding.recorded": findingRecorded(next, event.data); break;
+    case "finding.status_changed": findingStatusChanged(next, event.data); break;
+    case "repair.episode_opened": repairOpened(next, event.data); break;
+    case "repair.task_linked": repairTaskLinked(next, event.data); break;
+    case "repair.episode_cancel_requested": repairCancelRequested(next, event.data); break;
+    case "repair.episode_cancelled": repairCancelled(next, event.data); break;
+    case "task.applicability_changed": taskApplicabilityChanged(next, event.data); break;
     case "task.dispatched": taskDispatched(next, event.data, event.schemaVersion); break;
     case "task.executor_bound": taskExecutorBound(next, event.data, event.schemaVersion); break;
     case "task.settled": taskSettled(next, event.data, event.occurredAt, event.schemaVersion, replay); break;
@@ -127,18 +165,23 @@ function validateEnvelope(event) {
 }
 
 function validateGeneration(projection, event, replay) {
+  generationCapabilities(event.schemaVersion);
   if (!projection.eventSchemaVersion) {
-    if (event.schemaVersion !== PLANNED_SCHEMA_VERSION && !replay) throw new Error("legacy event generations are replay-only");
+    if (event.schemaVersion !== PLANNED_SCHEMA_VERSION && event.schemaVersion !== RUNTIME_SCHEMA_VERSION && !replay) throw new Error("legacy event generations are replay-only");
     return;
   }
-  if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION || event.schemaVersion === PLANNED_SCHEMA_VERSION) {
+  // Runtime is an independent persisted codec. Historical v1/v2/v3 retain their
+  // rank-based upgrade replay behaviour, while planned remains isolated.
+  if (projection.eventSchemaVersion === RUNTIME_SCHEMA_VERSION || event.schemaVersion === RUNTIME_SCHEMA_VERSION) {
+    if (event.schemaVersion !== projection.eventSchemaVersion) throw new Error(`mixed event generations are not allowed: ${projection.eventSchemaVersion} and ${event.schemaVersion}`);
+  } else if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION || event.schemaVersion === PLANNED_SCHEMA_VERSION) {
     if (event.schemaVersion !== projection.eventSchemaVersion) throw new Error(`mixed event generations are not allowed: ${projection.eventSchemaVersion} and ${event.schemaVersion}`);
   }
 }
 
 function validateGoalIdentity(projection, event) {
   if (projection.goalId === null) {
-    if (event.type !== "goal.created") throw new Error("goal.created must be first event");
+    if (event.type !== "goal.created" && event.type !== "goal.runtime_drafted") throw new Error("goal.created must be first");
     return;
   }
   if (event.goalId !== projection.goalId) throw new Error("goalId mismatch");
@@ -178,12 +221,67 @@ function copyProjection(p) {
     pendingHumanDecision: p.pendingHumanDecision ? structuredClone(p.pendingHumanDecision) : null,
     contractHistory: (p.contractHistory || []).map((entry) => structuredClone(entry)),
     ownershipRevision: p.ownershipRevision || 1,
+    runtimeGeneration: p.runtimeGeneration,
+    initialShape: p.initialShape,
+    executionRevision: p.executionRevision,
+    executionContractHash: p.executionContractHash,
+    readiness: p.readiness,
+    runtimeState: p.runtimeState,
+    writePolicy: p.writePolicy ? structuredClone(p.writePolicy) : null,
+    taskApplicability: new Map([...p.taskApplicability || []].map(([id, value]) => [id, structuredClone(value)])),
+    conditions: new Map([...p.conditions || []].map(([id, value]) => [id, structuredClone(value)])),
+    observationRuns: new Map([...p.observationRuns || []].map(([id, value]) => [id, structuredClone(value)])),
+    findings: new Map([...p.findings || []].map(([id, value]) => [id, structuredClone(value)])),
+    repairEpisodes: new Map([...p.repairEpisodes || []].map(([id, value]) => [id, structuredClone(value)])),
+    suspension: p.suspension ? structuredClone(p.suspension) : null,
+    convergenceBudget: p.convergenceBudget ? structuredClone(p.convergenceBudget) : null,
+    evidenceHistory: structuredClone(p.evidenceHistory || []),
   };
 }
 
+function runtimeOnly(p) {
+  if (!generationCapabilities(p.eventSchemaVersion).conditions) throw new Error("runtime event requires goal-runtime.v1");
+}
+function runtimeDrafted(p, event) {
+  if (p.goalId !== null) throw new Error("runtime draft must be first event");
+  const data = event.data;
+  if (!isPlainObject(data.runtimeInit) || typeof data.executionContractHash !== "string" || !/^[a-f0-9]{64}$/.test(data.executionContractHash)) throw new Error("invalid runtime draft");
+  const contract = data.runtimeInit;
+  if (contract.execution?.schema !== RUNTIME_SCHEMA_VERSION || !Array.isArray(contract.execution.tasks) || !Array.isArray(contract.execution.conditions)) throw new Error("invalid runtime contract");
+  p.goalId = event.goalId; p.eventSchemaVersion = RUNTIME_SCHEMA_VERSION; p.lifecycle = "active";
+  p.objective = contract.objective; p.scope = [...(contract.scope || [])]; p.nonGoals = [...(contract.non_goals || [])]; p.dod = [...(contract.dod || [])];
+  p.createdAt = event.occurredAt; p.coordinationState = "ready"; p.runtimeGeneration = RUNTIME_SCHEMA_VERSION;
+  p.initialShape = deriveInitialShape(contract); p.executionRevision = 1; p.executionContractHash = data.executionContractHash;
+  p.readiness = data.readiness === "draft" ? "draft" : "draft"; p.runtimeState = "draft";
+  p.writePolicy = { allowedPaths: [...contract.execution.write_policy.allowed_paths] };
+  p.convergenceBudget = structuredClone(contract.execution.budgets);
+  for (const definition of contract.execution.tasks) {
+    if (p.tasks.has(definition.id)) throw new Error(`duplicate runtime task: ${definition.id}`);
+    p.tasks.set(definition.id, { description: definition.description || definition.id, deps: [], writePaths: [...p.writePolicy.allowedPaths], acceptance: { criteria: definition.acceptance?.criteria || [] }, workflow: definition.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, executorBinding: null, lastExecutorProof: null, acceptanceVerification: null, settlement: null });
+    p.taskApplicability.set(definition.id, { revision: 1, state: "applicable", reason: null });
+  }
+  for (const definition of contract.execution.conditions) p.conditions.set(definition.id, { definition: structuredClone(definition), status: "inactive", supportingEvidenceIds: [], lastObservationRunId: null, invalidationReason: null });
+}
+function runtimeReadinessRecorded(p, data) { runtimeOnly(p); if (!new Set(["ready", "needs_clarification", "environment_blocked", "unsafe_to_run"]).has(data.readiness)) throw new Error("invalid runtime readiness"); p.readiness = data.readiness; if (data.readiness === "ready" && p.runtimeState === "draft") p.runtimeState = "awaiting_user_approval"; }
+function runtimeApprovalRecorded(p) { runtimeOnly(p); if (p.runtimeState !== "awaiting_user_approval") throw new Error("runtime approval is out of order"); p.runtimeState = "calibrating"; }
+function runtimeActivated(p) { runtimeOnly(p); if (p.runtimeState !== "calibrating") throw new Error("runtime activation is out of order"); p.runtimeState = "active"; }
+function runtimeSuspended(p, data) { runtimeOnly(p); if (!data.suspensionId || !data.reason) throw new Error("invalid runtime suspension"); p.suspension = structuredClone(data); p.runtimeState = "suspended"; }
+function runtimeResumed(p) { runtimeOnly(p); if (p.runtimeState !== "suspended") throw new Error("runtime is not suspended"); p.suspension = null; p.runtimeState = "active"; }
+function observationRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["runId", "conditionId", "cycle", "worldSnapshotHash", "resourceClaimsHash"], "observation request"); if (!p.conditions.has(data.conditionId) || p.observationRuns.has(data.runId) || !Number.isSafeInteger(data.cycle) || data.cycle < 0) throw new Error("invalid observation request"); const run = { runId: data.runId, conditionId: data.conditionId, cycle: data.cycle, phase: "requested", allocationId: null, leaseReceiptHash: null, processIdentityHash: null, terminalProofHash: null, evidenceId: null }; p.observationRuns.set(data.runId, run); const condition = p.conditions.get(data.conditionId); condition.status = "observing"; condition.lastObservationRunId = data.runId; }
+function observationTransition(p, data, from, to) { runtimeOnly(p); const run = p.observationRuns.get(data.runId); if (!run || run.conditionId !== data.conditionId || run.phase !== from) throw new Error("invalid observation phase"); if (to === "lease_allocated" && (typeof data.allocationId !== "string" || !data.allocationId)) throw new Error("invalid observation allocation"); if (to === "process_bound" && !data.processIdentityHash) throw new Error("invalid observation process identity"); if (to === "terminal" && !data.terminalProofHash) throw new Error("invalid observation terminal proof"); Object.assign(run, { phase: to, ...(to === "lease_allocated" ? { allocationId: data.allocationId, leaseReceiptHash: data.leaseReceiptHash || null } : {}), ...(to === "process_bound" ? { processIdentityHash: data.processIdentityHash } : {}), ...(to === "terminal" ? { terminalProofHash: data.terminalProofHash } : {}) }); }
+function observationRecorded(p, data) { runtimeOnly(p); const run = p.observationRuns.get(data.runId); if (!run || run.conditionId !== data.conditionId || run.phase !== "terminal" || !data.evidenceId) throw new Error("invalid observation record"); run.phase = "recorded"; run.evidenceId = data.evidenceId; const condition = p.conditions.get(run.conditionId); condition.supportingEvidenceIds.push(data.evidenceId); condition.status = data.verdict === "passed" ? "satisfied" : "blocked"; p.evidenceHistory.push({ runId: run.runId, evidenceId: data.evidenceId }); }
+function evidenceInvalidated(p, data) { runtimeOnly(p); const condition = p.conditions.get(data.conditionId); if (!condition) throw new Error("unknown condition"); condition.status = "stale"; condition.invalidationReason = data.reason || null; }
+function findingRecorded(p, data) { runtimeOnly(p); const run = p.observationRuns.get(data.runId); if (!run || run.phase !== "recorded" || run.evidenceId !== data.evidenceId || !p.conditions.has(data.conditionId) || data.conditionId !== run.conditionId || !data.findingId || !data.fingerprint || data.verdict !== "failed") throw new Error("finding requires failed observation"); if (p.findings.has(data.findingId)) throw new Error("duplicate finding"); p.findings.set(data.findingId, { findingId: data.findingId, conditionId: data.conditionId, observationRunId: data.runId, fingerprint: data.fingerprint, status: "open", episodeId: null }); }
+function findingStatusChanged(p, data) { runtimeOnly(p); const finding = p.findings.get(data.findingId); if (!finding || !new Set(["open", "repairing", "reverification", "resolved", "rejected_by_user"]).has(data.status)) throw new Error("invalid finding status"); finding.status = data.status; }
+function repairOpened(p, data) { runtimeOnly(p); if (!data.episodeId || !p.conditions.has(data.conditionId) || !Array.isArray(data.findingIds) || !data.findingIds.length || p.repairEpisodes.has(data.episodeId)) throw new Error("invalid repair episode"); for (const id of data.findingIds) { const finding = p.findings.get(id); if (!finding || finding.conditionId !== data.conditionId) throw new Error("invalid repair finding reference"); finding.episodeId = data.episodeId; finding.status = "repairing"; } p.repairEpisodes.set(data.episodeId, { episodeId: data.episodeId, conditionId: data.conditionId, findingIds: [...data.findingIds], remediationTaskIds: [], status: "active", cancellation: null }); }
+function repairTaskLinked(p, data) { runtimeOnly(p); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || !p.tasks.has(data.taskId)) throw new Error("invalid repair task reference"); if (!episode.remediationTaskIds.includes(data.taskId)) episode.remediationTaskIds.push(data.taskId); episode.status = "waiting_for_tasks"; }
+function repairCancelRequested(p, data) { runtimeOnly(p); const episode = p.repairEpisodes.get(data.episodeId); if (!episode) throw new Error("unknown repair episode"); episode.status = "cancel_pending"; episode.cancellation = structuredClone(data.cancellation || null); }
+function repairCancelled(p, data) { runtimeOnly(p); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || episode.status !== "cancel_pending" || !episode.cancellation) throw new Error("repair cancellation is out of order"); episode.status = "cancelled"; }
+function taskApplicabilityChanged(p, data) { runtimeOnly(p); const task = p.tasks.get(data.taskId); const current = p.taskApplicability.get(data.taskId); if (!task || !current || !["applicable", "superseded", "reverify_required"].includes(data.state)) throw new Error("invalid task applicability"); p.taskApplicability.set(data.taskId, { revision: p.executionRevision, state: data.state, reason: data.reason || null }); }
+
 function goalCreated(p, event, replay) {
   const { objective, scope, nonGoals, dod, tasks, taskDefs } = event.data;
-  if (event.schemaVersion === PLANNED_SCHEMA_VERSION) validateTaskDefinitions(tasks, taskDefs, { planned: true });
+  if (generationCapabilities(event.schemaVersion).taskContract === "criteria-only") validateTaskDefinitions(tasks, taskDefs, { planned: true });
   else if (event.schemaVersion !== "goal-engine.event.v1" && !replay) validateTaskDefinitions(tasks, taskDefs);
   if (!objective || typeof objective !== "string") throw new Error("objective is required");
   if (!Array.isArray(tasks) || tasks.length === 0) throw new Error("tasks must be non-empty");
@@ -205,14 +303,14 @@ function goalCreated(p, event, replay) {
     if (!def.description) throw new Error(`taskDef ${taskId} missing description`);
     if (!Array.isArray(def.writePaths) || def.writePaths.length === 0) throw new Error(`taskDef ${taskId} missing writePaths`);
     if (!def.acceptance || !Array.isArray(def.acceptance.criteria)
-      || (event.schemaVersion !== PLANNED_SCHEMA_VERSION && !Array.isArray(def.acceptance.commands))) {
-      throw new Error(`taskDef ${taskId} missing acceptance${event.schemaVersion === PLANNED_SCHEMA_VERSION ? " criteria" : " (criteria + commands)"}`);
+      || (generationCapabilities(event.schemaVersion).taskContract !== "criteria-only" && !Array.isArray(def.acceptance.commands))) {
+      throw new Error(`taskDef ${taskId} missing acceptance${generationCapabilities(event.schemaVersion).taskContract === "criteria-only" ? " criteria" : " (criteria + commands)"}`);
     }
     p.tasks.set(taskId, {
       description: def.description,
       deps: def.deps || [],
       writePaths: def.writePaths,
-      acceptance: event.schemaVersion === PLANNED_SCHEMA_VERSION
+      acceptance: generationCapabilities(event.schemaVersion).taskContract === "criteria-only"
         ? { criteria: structuredClone(def.acceptance.criteria) }
         : { criteria: def.acceptance.criteria, commands: def.acceptance.commands },
       workflow: def.workflow || "tdd",
@@ -222,12 +320,12 @@ function goalCreated(p, event, replay) {
       lastSettledOutcome: null,
       contractHash: null,
       workspace: null,
-      ...(event.schemaVersion === PLANNED_SCHEMA_VERSION ? { executorBinding: null, lastExecutorProof: null } : {}),
+      ...(generationCapabilities(event.schemaVersion).executorBinding === "strict" ? { executorBinding: null, lastExecutorProof: null } : {}),
       acceptanceVerification: null,
       settlement: null,
     });
   }
-  if (event.schemaVersion === PLANNED_SCHEMA_VERSION) assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
+  if (generationCapabilities(event.schemaVersion).taskContract === "criteria-only") assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
   else if (event.schemaVersion !== "goal-engine.event.v1" && !replay) assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL);
   if (event.schemaVersion !== "goal-engine.event.v1" && replay) validateDAG(p.tasks);
 }
@@ -251,7 +349,7 @@ function taskDispatched(p, data, schemaVersion) {
   task.status = "dispatched";
   task.attempts++;
   task.contractHash = contractHash;
-  if (schemaVersion === PLANNED_SCHEMA_VERSION) {
+  if (generationCapabilities(schemaVersion).executorBinding === "strict") {
     task.executorBinding = null;
     task.lastExecutorProof = null;
   }
@@ -259,7 +357,7 @@ function taskDispatched(p, data, schemaVersion) {
 
 function taskExecutorBound(p, data, schemaVersion) {
   requireActive(p);
-  if (schemaVersion !== PLANNED_SCHEMA_VERSION) throw new Error("executor binding requires planned.v1");
+  if (generationCapabilities(schemaVersion).executorBinding !== "strict") throw new Error("executor binding requires strict generation");
   requireExactFields(data, [
     "taskId", "attempt", "runId", "contractHash", "asyncDir",
     "workspacePath", "workspaceLeaseId", "headAtDispatch",
@@ -332,14 +430,18 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
   if (task.status !== "dispatched") throw new Error(`task is not dispatched: ${taskId} (${task.status})`);
   if (!["succeeded", "failed", "blocked"].includes(outcome)) throw new Error(`invalid outcome: ${outcome}`);
 
-  const plannedSucceeded = schemaVersion === PLANNED_SCHEMA_VERSION && outcome === "succeeded";
-  if (!plannedSucceeded) {
+  const capabilities = generationCapabilities(schemaVersion);
+  const strictBinding = capabilities.executorBinding === "strict";
+  if (capabilities.conditions && outcome === "succeeded" && !Object.hasOwn(data, "settlementEvidence")) throw new Error("runtime succeeded settlement requires dual-path evidence");
+  const dualPathSucceeded = generationCapabilities(schemaVersion).settlement === "dual-path" && outcome === "succeeded" && Object.hasOwn(data, "settlementEvidence");
+  if (!dualPathSucceeded) {
+    if (strictBinding && outcome === "succeeded" && (!evidence || !nextAction)) throw new Error("settlement evidence is required for strict succeeded settlement");
     validateEvidenceSource(evidenceSource, evidence);
     validateNextAction(nextAction);
     if (outcome === "succeeded") validateEvidence(evidence);
   }
-  const executorProof = plannedSucceeded ? validatedExecutorProof(task, data) : null;
-  const settlementEvidence = plannedSucceeded ? validatedPlannedSettlementEvidence(p.goalId, task, data, executorProof) : null;
+  const executorProof = strictBinding && (outcome === "succeeded" || data.evidenceSource !== undefined || capabilities.conditions) ? validatedExecutorProof(task, data) : null;
+  const settlementEvidence = dualPathSucceeded ? validatedPlannedSettlementEvidence(p.goalId, task, data, executorProof) : null;
 
   task.lastSettledOutcome = outcome;
   task.lastExecutorProof = executorProof;
@@ -364,7 +466,7 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
       }
     }
     task.status = "succeeded";
-    if (!plannedSucceeded) task.evidence.push({ ...evidence, source: evidenceSource || "self_produced", ts: occurredAt });
+    if (!dualPathSucceeded) task.evidence.push({ ...evidence, source: evidenceSource || "self_produced", ts: occurredAt });
   } else if (outcome === "failed") {
     task.settlement = null;
     task.status = "pending";

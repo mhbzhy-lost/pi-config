@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { compileTaskContract } from "./dispatch.mjs";
 import { splitDispatchEnvelope } from "./dispatch-ir.mjs";
-import { PLANNED_SCHEMA_VERSION } from "./events.mjs";
+import { generationCapabilities } from "./generation-capabilities.mjs";
 
 function fail(code, message) {
   throw Object.assign(new Error(`${code}: ${message}`), { code });
@@ -34,7 +34,7 @@ function selectedTaskId(projection, contract) {
 }
 
 export function prepareExecutorBindingTicket({ projection, contract, contractHash, controlCwd, workspaceLeaseIdForTask }) {
-  if (projection?.eventSchemaVersion !== PLANNED_SCHEMA_VERSION) return null;
+  if (!projection?.eventSchemaVersion || generationCapabilities(projection.eventSchemaVersion).executorBinding !== "strict") return null;
   const taskId = selectedTaskId(projection, contract);
   if (!taskId) return null;
   const task = projection.tasks.get(taskId);
@@ -75,7 +75,7 @@ export function assertExecutorBindingTicketCurrent(ticket, projection) {
   if (!ticket || ticket.version !== "goal-executor-binding-ticket.v1") fail("EXECUTOR_BINDING_MISMATCH", "binding ticket is invalid");
   const task = projection?.tasks?.get(ticket.taskId);
   const workspace = task?.workspace;
-  if (projection?.goalId !== ticket.goalId || projection?.eventSchemaVersion !== PLANNED_SCHEMA_VERSION
+  if (projection?.goalId !== ticket.goalId || !projection?.eventSchemaVersion || generationCapabilities(projection.eventSchemaVersion).executorBinding !== "strict"
       || task?.status !== "dispatched" || task.attempts !== ticket.attempt
       || task.contractHash !== ticket.contractHash || workspace?.phase !== "active"
       || workspace.path !== ticket.workspacePath || workspace.baseCommit !== ticket.headAtDispatch) {

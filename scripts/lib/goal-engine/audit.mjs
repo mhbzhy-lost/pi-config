@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadProjection } from "./store.mjs";
 import { classifyGoalEvidence } from "./evidence.mjs";
+import { generationCapabilities } from "./generation-capabilities.mjs";
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
@@ -46,6 +47,7 @@ export function auditGoal(goalId, stateRoot) {
     progress: { total: totalTasks, accepted: acceptedTasks },
     failed_attempts: failedAttempts,
     has_external_evidence: hasExternalReview,
+    protocol: generationCapabilities(projection.eventSchemaVersion),
     signals,
     verdict,
   };
