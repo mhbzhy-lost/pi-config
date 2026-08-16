@@ -1003,14 +1003,15 @@ test("planned.v1 production lifecycle keeps every writer record in one generatio
     action_token: status.action_token,
   });
   status = JSON.parse(await invoke(pi, "goal_status", { goal_id: goalId }));
-  await invoke(pi, "goal_accept", { task_id: "t1", action_token: status.action_token });
+  const accepted = JSON.parse(await invoke(pi, "goal_accept", { task_id: "t1", action_token: status.action_token }));
+  assert.equal(accepted.goal_complete, true);
 
   const events = readGoalEvents(cwd, goalId);
   assert.ok(events.some((event) => event.type === "goal.session_bound"));
   assert.ok(events.some((event) => event.type === "goal.continuity_checkpointed"));
   assert.ok(events.some((event) => event.type === "goal.action_offered"));
   assert.ok(events.some((event) => event.type === "task.workspace_disposition_started"));
-  assert.ok(events.some((event) => event.type === "goal.completed"));
+  assert.equal(events.filter((event) => event.type === "goal.completed").length, 1);
   assert.deepEqual(new Set(events.map((event) => event.schemaVersion)), new Set(["planned.v1"]));
 });
 

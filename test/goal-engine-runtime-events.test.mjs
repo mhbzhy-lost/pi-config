@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
+import { applyEvent, createProjection, schemaVersionForMutation } from "../scripts/lib/goal-engine/events.mjs";
 import { appendEvent, loadProjection, projectionStateHash } from "../scripts/lib/goal-engine/store.mjs";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -37,6 +37,13 @@ function active({ calibrationVerdict = { kind: "passed" }, productVerdict = { ki
 }
 function appendAll(root, p, entries) { for (const entry of entries) p = appendEvent(root, entry, p.version); return p; }
 function world() { return { safe: true, repo: { root: "/repo", head: "a".repeat(40), trackedDirty: [], untracked: [], sequencer: null }, adapters: [{ ref: "oracle", version: "1" }], environments: [{ ref: "local", fingerprint: "environment-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "fixture-1", available: true }], resources: [], activeRuns: [] }; }
+
+test("mutation schema preserves runtime generation while planned and legacy matrix remains stable", () => {
+  assert.equal(schemaVersionForMutation({ eventSchemaVersion: "goal-runtime.v1" }), "goal-runtime.v1");
+  assert.equal(schemaVersionForMutation({ eventSchemaVersion: "planned.v1" }), "planned.v1");
+  assert.equal(schemaVersionForMutation({ eventSchemaVersion: "goal-engine.event.v2" }, "goal-engine.event.v3"), "goal-engine.event.v3");
+  assert.equal(schemaVersionForMutation({ eventSchemaVersion: "goal-engine.event.v3" }, "goal-engine.event.v2"), "goal-engine.event.v3");
+});
 
 test("runtime checkpoint reducer rejects non-exact, non-monotonic, and dishonest progress records", () => {
   const p = active(); const fingerprint = hash(700);

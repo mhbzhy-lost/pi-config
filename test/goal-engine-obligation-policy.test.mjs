@@ -99,6 +99,17 @@ test("waiting remediation blocks without starving its pending Task dispatch", ()
   assert.equal(nextObligationAction(result)?.tool, "goal_dispatch"); assert(result.blocking.some((item) => item.code === "REPAIR_TASKS_PENDING")); assert(!result.actions.some((item) => item.tool === "repair_episode"));
 });
 
+test("runtime debts outrank selected repair actions", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.repairEpisodes.set("selected", { status: "active" });
+  projection.observationRuns.set("cleanup", { runId: "cleanup", conditionId: "c", phase: "cleanup_debt" });
+  projection.observationRuns.set("terminal", { runId: "terminal", conditionId: "c", phase: "terminal" });
+  assert.equal(nextObligationAction(frontier(projection)).kind, "resource-recovery");
+  projection.observationRuns.delete("cleanup");
+  assert.equal(nextObligationAction(frontier(projection)).kind, "observation-record");
+  projection.observationRuns.delete("terminal");
+  assert.equal(nextObligationAction(frontier(projection)).kind, "repair");
+});
+
 test("pending repair capability suppresses its repair action", () => {
   const projection = base(); projection.progressLedger = ledger(); projection.repairEpisodes.set("e", { status: "active" }); projection.repairChallenges.set("challenge", { episodeId: "e", phase: "approved" }); const result = frontier(projection);
   assert(result.attention.some(x => x.id === "e" && x.code === "PENDING_USER_CAPABILITY")); assert(!result.actions.some(x => x.kind === "repair" && x.id === "e"));

@@ -3,6 +3,9 @@ import test from "node:test";
 import { mkdtempSync, writeFileSync, readFileSync, chmodSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
+import { compileTaskContract } from "../scripts/lib/goal-engine/dispatch.mjs";
+import { splitDispatchEnvelope } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
+import { applyEvent } from "../scripts/lib/goal-engine/events.mjs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -410,6 +413,12 @@ test("active FAIL atomically records evidence, its unique Finding, and active Re
   assert.equal(materialized.machineAction, undefined); assert.equal(materialized.action_token, undefined);
   const afterMaterialization = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
   assert.equal(afterMaterialization.tasks.size, 1);
+  const [taskId, task] = [...afterMaterialization.tasks.entries()][0];
+  assert.equal(task.metadata.kind, "remediation"); assert.equal(task.metadata.episodeId, [...afterMaterialization.repairEpisodes.keys()][0]);
+  const compiled = compileTaskContract(afterMaterialization, taskId, cwd), transport = splitDispatchEnvelope(compiled);
+  assert.deepEqual(transport.contract.acceptance, { criteria: compiled.acceptance.criteria });
+  const wire = JSON.stringify(transport.contract);
+  for (const forbidden of ["metadata", "finding", "episode", "commands"]) assert.equal(wire.includes(forbidden), false, forbidden);
   const offer = JSON.parse(await invoke(api, "goal_status", {}));
   assert.equal(offer.machineAction?.tool, "goal_dispatch");
   for (const type of ["condition.observation_terminal", "condition.observation_recorded", "condition.observation_released"]) assert.equal(runEvents(cwd, run.runId, type).length, 1, type);
@@ -423,6 +432,45 @@ test("selected autonomous repair pre-append failure leaves its Episode active wi
   await assert.rejects(() => invoke(api, "goal_status", {}), /before repair write/);
   const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
   assert.equal(projection.tasks.size, 0); assert.equal([...projection.repairEpisodes.values()][0].status, "active");
+  assert.equal(observationEvents(cwd).filter(type => type === "goal.action_offered").length, 0);
+});
+
+test("durable autonomous materialization reloads one Task and offers dispatch only on the next status", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let threw = false;
+  const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] }); const condition = activeCondition(); condition.remediation.policy = "autonomous";
+  const options = { goalStateEnv: {}, runtimeHost: durable, appendEventBatch(root, events, version) {
+    const projection = appendEventBatch(root, events, version);
+    if (events.map(event => event.type).join(",") === "goal.amended,repair.task_linked" && !threw) { threw = true; throw Error("after durable materialization"); }
+    return projection;
+  } };
+  createGoalEngineExtension(api, options); await activateProduct(api, cwd, condition); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released");
+  const materialized = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(materialized.status, "R10A3_REPAIR_MATERIALIZED"); assert.equal(materialized.machineAction, undefined);
+  let projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(projection.tasks.size, 1); assert.equal([...projection.repairEpisodes.values()][0].remediationTaskIds.length, 1);
+  for (const type of ["goal.amended", "repair.task_linked"]) assert.equal(observationEvents(cwd).filter(value => value === type).length, 1, type);
+  const reloaded = pi(cwd, api.entries); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, options); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  const offer = JSON.parse(await invoke(reloaded, "goal_status", {})); projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(offer.machineAction?.tool, "goal_dispatch"); assert.equal(projection.tasks.size, 1);
+  for (const type of ["goal.amended", "repair.task_linked"]) assert.equal(observationEvents(cwd).filter(value => value === type).length, 1, type);
+});
+
+test("typed runtime goal_accept atomically recovers accepted remediation re-verification", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] }); const condition = activeCondition(); condition.remediation.policy = "autonomous";
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateProduct(api, cwd, condition); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released"); await invoke(api, "goal_status", {});
+  let fixture = structuredClone(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime")); const [taskId, task] = [...fixture.tasks.entries()][0];
+  task.status = "succeeded"; task.workspace = { attempt: 1, phase: "disposed", disposition: "integrated", released: true };
+  const events = []; let threw = false;
+  const store = {
+    listGoals: () => [fixture.goalId], listGoalIds: () => [fixture.goalId], loadProjection: (_root, goalId) => goalId === fixture.goalId ? fixture : null,
+    appendEvent(_root, entry, version) { assert.equal(version, fixture.version); fixture = applyEvent(fixture, entry); events.push(entry); return fixture; },
+    appendEventBatch(_root, entries, version) { assert.equal(version, fixture.version); for (const entry of entries) fixture = applyEvent(fixture, entry); events.push(...entries); if (!threw) { threw = true; throw Error("after durable accept"); } return fixture; },
+  };
+  const accepting = pi(cwd); accepting.cwd = cwd; createGoalEngineExtension(accepting, { goalStateEnv: {}, enforceActionTokens: false, store });
+  const accepted = JSON.parse(await invoke(accepting, "goal_accept", { goal_id: fixture.goalId, task_id: taskId, action_token: "schema-required" }));
+  assert.equal(accepted.goal_complete, false); assert.equal(fixture.lifecycle, "active"); assert.equal(fixture.tasks.get(taskId).status, "accepted");
+  const episode = [...fixture.repairEpisodes.values()][0]; assert.equal(episode.status, "reverifying"); assert.equal(fixture.findings.get(episode.findingIds[0]).status, "reverification");
+  assert.deepEqual(events.map(entry => entry.type), ["task.accepted", "repair.reverification_requested"]); assert.equal(events.some(entry => entry.type === "goal.completed"), false);
 });
 
 test("selected user-approved repair requires approval without creating a Task or action offer", async () => {
