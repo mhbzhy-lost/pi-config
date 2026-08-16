@@ -64,3 +64,41 @@ test("finalize needs a valid ledger and all settled facts", () => {
   const projection = base(); projection.tasks.set("t", { status: "accepted" }); projection.conditions.set("c", { ...condition("c", "satisfied"), freshness: "fresh", supportingEvidenceIds: ["a", "b"] });
   assert.equal(frontier(projection).completeCandidate, false); projection.progressLedger = ledger(); const result = frontier(projection); assert.equal(result.completeCandidate, true); assert.equal(nextObligationAction(result).kind, "finalize");
 });
+
+test("stale conditions restart at the next durable cycle", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.conditions.set("c", condition("c", "stale")); projection.observationRuns.set("old", { runId: "old", conditionId: "c", cycle: 2, phase: "released" });
+  const result = frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) });
+  assert.deepEqual(result.actions.find(x => x.kind === "condition")?.params, { condition_id: "c", cycle: 3 });
+});
+
+test("requested and lease observations start, while process binding wakes or recovers from inventory", () => {
+  for (const phase of ["requested", "lease_allocated"]) { const projection = base(); projection.progressLedger = ledger(); projection.observationRuns.set("r", { runId: "r", conditionId: "c", cycle: 2, phase }); const result = frontier(projection); assert.deepEqual(result.actions[0]?.params, { run_id: "r", condition_id: "c", cycle: 2 }); assert.equal(result.actions[0]?.kind, "observation-start"); }
+  const projection = base(); projection.progressLedger = ledger(); projection.observationRuns.set("r", { runId: "r", conditionId: "c", cycle: 2, phase: "process_bound" });
+  assert.equal(frontier(projection).actions[0]?.kind, "observation-recover");
+  const snapshot = world(); snapshot.activeRuns = [{ runId: "r", kind: "observation", state: "running" }]; assert(frontier(projection, snapshot).blocking.some(x => x.code === "OBSERVATION_FUTURE_WAKE"));
+});
+
+test("run conflicts suppress their terminal actions and active run identifiers do not affect fingerprints", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.observationRuns.set("r", { runId: "r", conditionId: "c", cycle: 1, phase: "terminal" }); const snapshot = world(); snapshot.activeRuns = [{ runId: "r", kind: "observation", state: "running" }];
+  const result = frontier(projection, snapshot); assert(!result.actions.some(x => x.kind === "observation-record")); assert(result.attention.some(x => x.code === "OBSERVATION_RUN_STATE_CONFLICT"));
+  const a = obligationProgressFingerprint({ projection, worldSnapshot: snapshot }); snapshot.activeRuns[0].runId = "other"; assert.equal(a, obligationProgressFingerprint({ projection, worldSnapshot: snapshot })); snapshot.activeRuns[0].state = "stopped"; assert.notEqual(a, obligationProgressFingerprint({ projection, worldSnapshot: snapshot }));
+});
+
+test("non-active runtime states do not offer product actions", () => {
+  for (const runtimeState of ["draft", "awaiting_user_approval", "calibrating", "suspended"]) { const projection = base(); projection.runtimeState = runtimeState; projection.progressLedger = ledger(); projection.conditions.set("c", condition("c")); projection.findings.set("f", { findingId: "f", status: "open" }); const result = frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) }); assert(!result.actions.some(x => ["condition", "repair-open", "repair"].includes(x.kind)), runtimeState); if (runtimeState === "calibrating") assert(result.blocking.some(x => x.code === "RUNTIME_CALIBRATION_REQUIRED")); }
+});
+
+test("suspended runtime retains terminal observation safety debt", () => {
+  const projection = base(); projection.runtimeState = "suspended"; projection.progressLedger = ledger(); projection.observationRuns.set("r", { runId: "r", conditionId: "c", cycle: 1, phase: "terminal" });
+  assert(frontier(projection).actions.some(x => x.kind === "observation-record"));
+});
+
+test("pending repair capability suppresses its repair action", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.repairEpisodes.set("e", { status: "active" }); projection.repairChallenges.set("challenge", { episodeId: "e", phase: "approved" }); const result = frontier(projection);
+  assert(result.attention.some(x => x.id === "e" && x.code === "PENDING_USER_CAPABILITY")); assert(!result.actions.some(x => x.kind === "repair" && x.id === "e"));
+});
+
+test("progress ledger permits repeated no-progress fingerprints until its threshold", () => {
+  const projection = base(); projection.progressLedger = [ledger()[0], { canonicalFingerprint: "a".repeat(64), advanced: false, sequence: 2 }, { canonicalFingerprint: "a".repeat(64), advanced: false, sequence: 3 }]; projection.convergenceBudget.max_no_progress = 2;
+  assert(frontier(projection).blocking.some(x => x.code === "NO_PROGRESS_BUDGET_EXHAUSTED")); projection.progressLedger[1].advanced = true; assert(frontier(projection).attention.some(x => x.code === "NO_PROGRESS_AUTHORITY_UNAVAILABLE"));
+});
