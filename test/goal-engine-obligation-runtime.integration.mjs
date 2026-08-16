@@ -12,14 +12,15 @@ import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function host(cwd) { return { registries: runtimeRegistries, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; } }; }
-function observationHost(cwd, { code = "PASS", receiptRoot = join(cwd, ".state/goal-engine"), receiptPath = join(receiptRoot, "managed-validations"), receiptId = null, workspacePath = null, allocation = "normal", prepareError = null, artifactMode = 0o600, artifactSymlink = false, holdBeforeProcess = false, holdProcess = false, holdTerminal = false } = {}) {
+function observationHost(cwd, { code = "PASS", codes = null, environments = null, holdAfterStart = 0, receiptRoot = join(cwd, ".state/goal-engine"), receiptPath = join(receiptRoot, "managed-validations"), receiptId = null, workspacePath = null, allocation = "normal", prepareError = null, artifactMode = 0o600, artifactSymlink = false, holdBeforeProcess = false, holdProcess = false, holdTerminal = false } = {}) {
   const registry = createObservationAdapterRegistry([{ ref: "oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 50, maxOutputBytes: 100, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } }]);
   const calls = { prepare: 0, start: 0, recover: 0, release: 0, artifact: 0 }; const state = new Map();
   const receipt = input => { const id = receiptId ?? (allocation === "mismatch" ? `managed-${calls.prepare}` : `managed-${createHash("sha256").update(`${input.ownerKind}:${input.ownerId}:${input.integratedHead}`).digest("hex").slice(0, 16)}`); const prior = state.get(id) || { phase: "lease_allocated", terminal: null }; return { id, stateRoot: receiptRoot, receiptPath: join(receiptPath, `${id}.json`), workspacePath, phase: prior.phase, terminal: prior.terminal, recorded: null, recordCount: 0, cleanupDebt: false }; };
-  const terminal = { status: "passed", code: 0 }; const managed = value => ({ ...value, phase: state.get(value.id)?.phase || value.phase, terminal: state.get(value.id)?.terminal || null });
-  return { registries: runtimeRegistries, adapterRegistry: registry, calls, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, environments: [{ ref: "local", fingerprint: "local-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "sample-1", available: true }], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; }, prepareManagedValidation(input) { calls.prepare++; if (prepareError) throw Error(prepareError); return receipt(input); }, inspectManagedValidation(value) { return managed(value); }, async startManagedValidation(value, { onProcessBound }) { calls.start++; if (holdBeforeProcess && calls.start > 1) throw Error("interrupt before durable process"); state.set(value.id, { phase: "process_bound", terminal: null }); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); if (holdProcess) throw Error("interrupt after durable process"); state.set(value.id, { phase: "recorded", terminal }); if (holdTerminal) throw Error("interrupt after durable managed terminal"); return managed(value); }, async recoverManagedValidation(value, { onProcessBound }) { calls.recover++; if ((state.get(value.id)?.phase || "lease_allocated") !== "lease_allocated") return managed(value); state.set(value.id, { phase: "process_bound", terminal: null }); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); state.set(value.id, { phase: "recorded", terminal }); return managed(value); }, releaseManagedValidation(value) { calls.release++; state.set(value.id, { phase: "released", terminal }); return { id: value.id, released: true }; }, artifactRefForRun() { calls.artifact++; const path = join(cwd, ".state", "cycle0-artifact.json"), target = join(cwd, ".state", "cycle0-artifact-target.json"); writeFileSync(artifactSymlink ? target : path, JSON.stringify({ code }), { mode: artifactMode }); chmodSync(artifactSymlink ? target : path, artifactMode); if (artifactSymlink) symlinkSync(target, path); return { id: "cycle0-artifact", path }; } };
+  const terminal = { status: "passed", code: 0 }; const forArtifact = values => Array.isArray(values) ? values[Math.min(Math.max(0, calls.artifact - 1), values.length - 1)] : values; const shouldHold = () => calls.start > holdAfterStart; const managed = value => ({ ...value, phase: state.get(value.id)?.phase || value.phase, terminal: state.get(value.id)?.terminal || null });
+  return { registries: runtimeRegistries, adapterRegistry: registry, calls, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, environments: [{ ref: "local", fingerprint: forArtifact(environments) || "local-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "sample-1", available: true }], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; }, prepareManagedValidation(input) { calls.prepare++; if (prepareError) throw Error(prepareError); return receipt(input); }, inspectManagedValidation(value) { return managed(value); }, async startManagedValidation(value, { onProcessBound }) { calls.start++; if (holdBeforeProcess && shouldHold(value) && calls.start > 1) throw Error("interrupt before durable process"); state.set(value.id, { phase: "process_bound", terminal: null }); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); if (holdProcess && shouldHold(value)) throw Error("interrupt after durable process"); state.set(value.id, { phase: "recorded", terminal }); if (holdTerminal && shouldHold(value)) throw Error("interrupt after durable managed terminal"); return managed(value); }, async recoverManagedValidation(value, { onProcessBound }) { calls.recover++; if ((state.get(value.id)?.phase || "lease_allocated") === "process_bound") { state.set(value.id, { phase: "recorded", terminal }); return managed(value); } if ((state.get(value.id)?.phase || "lease_allocated") !== "lease_allocated") return managed(value); state.set(value.id, { phase: "process_bound", terminal: null }); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); state.set(value.id, { phase: "recorded", terminal }); return managed(value); }, releaseManagedValidation(value) { calls.release++; state.set(value.id, { phase: "released", terminal }); return { id: value.id, released: true }; }, artifactRefForRun() { calls.artifact++; const path = join(cwd, ".state", "cycle0-artifact.json"), target = join(cwd, ".state", "cycle0-artifact-target.json"); writeFileSync(artifactSymlink ? target : path, JSON.stringify({ code: forArtifact(codes) || code }), { mode: artifactMode }); chmodSync(artifactSymlink ? target : path, artifactMode); if (artifactSymlink) symlinkSync(target, path); return { id: "cycle0-artifact", path }; } };
 }
-function observationEvents(cwd) { return readFileSync(join(cwd, ".state/goal-engine/goals/harden-runtime/events.jsonl"), "utf8").trim().split("\n").map(JSON.parse).map(event => event.type); }
+function observationEventRows(cwd) { return readFileSync(join(cwd, ".state/goal-engine/goals/harden-runtime/events.jsonl"), "utf8").trim().split("\n").map(JSON.parse); }
+function observationEvents(cwd) { return observationEventRows(cwd).map(event => event.type); }
 async function approveCalibration(api, cwd, init = runtimeInit()) { await invoke(api, "goal_init", init); await invoke(api, "goal_status", {}); api.handlers.get("input")({ source: "interactive", text: "approve", entryId: "cycle0-approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {}); }
 async function statusUntil(api, phase, limit = 8) { for (let i = 0; i < limit; i++) { await invoke(api, "goal_status", {}); const projection = loadProjection(join(api.cwd, ".state/goal-engine"), "harden-runtime"); if ([...projection.observationRuns.values()].some(run => run.phase === phase)) return projection; } throw Error(`phase not reached: ${phase}`); }
 function pi(cwd, entries = [], { sessionId = "owner", appendEntry } = {}) { const tools = [], handlers = new Map(), manager = { getSessionId: () => sessionId, getSessionFile: () => join(cwd, `session-${sessionId}`), getLeafId: () => "leaf", getEntries: () => entries }; const api = { tools, entries, handlers, sessionManager: manager, registerTool: tool => tools.push(tool), on: (name, handler) => handlers.set(name, handler) }; api.appendEntry = (customType, data) => { if (appendEntry) return appendEntry(customType, data, entries); entries.push({ type: "custom", customType, data }); }; return api; }
@@ -293,4 +294,91 @@ test("runtime Host cannot override Extension-owned Store authority", async () =>
 test("runtime status checkpoints are exact, monotonic, and fingerprint-stable without semantic progress", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) }); const initialized = JSON.parse(await invoke(api, "goal_init", runtimeInit())); await invoke(api, "goal_status", {}); await invoke(api, "goal_status", {});
   const ledger = loadProjection(join(cwd, ".state/goal-engine"), initialized.goalId).progressLedger; assert.deepEqual(ledger.map(({ sequence, advanced }) => ({ sequence, advanced })), [{ sequence: 1, advanced: true }, { sequence: 2, advanced: false }]); assert.equal(ledger[0].canonicalFingerprint, ledger[1].canonicalFingerprint);
+});
+
+function activeCondition(stability = { mode: "single", require_fresh_environment: true }) {
+  const condition = structuredClone(runtimeInit().execution.conditions[0]);
+  condition.depends_on = []; condition.invalidation.task_ids = []; condition.stability = stability;
+  return condition;
+}
+async function activateProduct(api, cwd, condition) {
+  await approveCalibration(api, cwd, runtimeInit({ execution: { ...runtimeInit().execution, tasks: [], conditions: [condition] } }));
+  await statusUntil(api, "released"); await invoke(api, "goal_status", {});
+}
+async function cycleUntil(api, cycle, phase, limit = 10) {
+  for (let i = 0; i < limit; i++) {
+    await invoke(api, "goal_status", {});
+    const projection = loadProjection(join(api.cwd, ".state/goal-engine"), "harden-runtime");
+    const run = [...projection.observationRuns.values()].find(value => value.cycle === cycle);
+    if (run?.phase === phase) return { projection, run };
+  }
+  throw Error(`cycle ${cycle} phase not reached: ${phase}`);
+}
+function runEvents(cwd, runId, type) { return observationEventRows(cwd).filter(event => event.type === type && event.data.runId === runId); }
+
+test("active reload matrix preserves each product run through requested, process-bound, terminal, and recorded", async () => {
+  for (const phase of ["requested", "process_bound", "terminal", "recorded"]) {
+    const cwd = repo(), first = pi(cwd); first.cwd = cwd;
+    const durable = observationHost(cwd, { holdAfterStart: 1, ...(phase === "process_bound" ? { holdProcess: true } : phase === "terminal" ? { holdTerminal: true } : {}) });
+    createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); await activateProduct(first, cwd, activeCondition());
+    if (phase === "requested") await cycleUntil(first, 1, "requested");
+    else if (phase === "process_bound") await cycleUntil(first, 1, "process_bound");
+    else if (phase === "terminal") await cycleUntil(first, 1, "terminal");
+    else await cycleUntil(first, 1, "recorded");
+    const before = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+    const prior = [...before.observationRuns.values()].find(run => run.cycle === 1), starts = durable.calls.start;
+    const reloaded = pi(cwd, first.entries); reloaded.cwd = cwd;
+    createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: durable }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+    await cycleUntil(reloaded, 1, "released");
+    const restored = [...loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").observationRuns.values()].find(run => run.cycle === 1);
+    assert.equal(restored.runId, prior.runId, phase); assert.equal(restored.allocationId, prior.allocationId || restored.allocationId, phase); assert.ok(durable.calls.start - starts <= 1, phase);
+    for (const type of ["condition.observation_terminal", "condition.observation_recorded", "condition.observation_released"]) assert.equal(runEvents(cwd, restored.runId, type).length, 1, `${phase}:${type}`);
+  }
+});
+
+test("active product verdicts record and release FAIL, UNKNOWN, and INFRA without findings", async () => {
+  for (const [code, status] of [["FAIL", "R10A3_REPAIR_REQUIRED"], ["UNKNOWN", "R10A3_OBSERVATION_BLOCKED"], ["INFRA", "R10A3_OBSERVATION_BLOCKED"]]) {
+    const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", code] });
+    createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateProduct(api, cwd, activeCondition());
+    await cycleUntil(api, 1, "terminal"); const result = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(result.status, status, code);
+    const { projection, run } = await cycleUntil(api, 1, "released"); const condition = projection.conditions.get("condition-1");
+    assert.equal(condition.status, "blocked", code); assert.deepEqual(condition.supportingEvidenceIds, [], code); assert.equal(projection.findings.size, 0, code);
+    for (const type of ["condition.observation_terminal", "condition.observation_recorded", "condition.observation_released"]) assert.equal(runEvents(cwd, run.runId, type).length, 1, `${code}:${type}`);
+  }
+});
+
+test("active consecutive stability requires two distinct product environments after Cycle0", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "PASS", "PASS"], environments: ["cycle0", "product-1", "product-2"] });
+  const stability = { mode: "consecutive", count: 2, require_distinct_environment: true };
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateProduct(api, cwd, activeCondition(stability));
+  let result = await cycleUntil(api, 1, "released"); assert.equal(result.projection.conditions.get("condition-1").status, "observing"); assert.equal(result.projection.conditions.get("condition-1").supportingEvidenceIds.length, 1);
+  result = await cycleUntil(api, 2, "released"); assert.equal(result.projection.conditions.get("condition-1").status, "satisfied"); assert.equal(result.projection.conditions.get("condition-1").supportingEvidenceIds.length, 2);
+  assert.deepEqual([...result.projection.tasks.values()], []);
+});
+
+test("active PASS then FAIL clears product support while retaining complete evidence and verdict history", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "PASS", "FAIL"], environments: ["cycle0", "product-1", "product-2"] });
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateProduct(api, cwd, activeCondition({ mode: "consecutive", count: 2, require_distinct_environment: true }));
+  let result = await cycleUntil(api, 1, "released"); assert.equal(result.projection.conditions.get("condition-1").supportingEvidenceIds.length, 1);
+  result = await cycleUntil(api, 2, "released");
+  assert.equal(result.projection.conditions.get("condition-1").status, "blocked"); assert.deepEqual(result.projection.conditions.get("condition-1").supportingEvidenceIds, []);
+  assert.deepEqual(result.projection.evidenceHistory.map(value => value.verdict.kind), ["passed", "passed", "failed"]);
+});
+
+test("active requested identity drift blocks HEAD, adapter, and claims changes before Host actions", async () => {
+  for (const drift of ["head", "adapter", "claims"]) {
+    const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd);
+    createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "requested");
+    const before = { ...durable.calls };
+    if (drift === "head") { writeFileSync(join(cwd, "drift"), drift); git(cwd, "add", "drift"); git(cwd, "commit", "-m", drift); }
+    else durable.adapterRegistry = createObservationAdapterRegistry([{ ref: "oracle", version: drift === "adapter" ? "2" : "1", deterministic: true, reset: "clean", resourceClaims: drift === "claims" ? [{ key: "fixture:changed", mode: "exclusive", capacity: 1, reset: "clean" }] : [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 50, maxOutputBytes: 100, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } }]);
+    const status = JSON.parse(await invoke(api, "goal_status", {})); const run = [...loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").observationRuns.values()].find(value => value.cycle === 1);
+    assert.equal(status.status, "R10A3_OBSERVATION_MANAGED_ATTENTION", drift); assert.equal(run.phase, "requested", drift);
+    for (const key of ["prepare", "start", "recover", "artifact"]) assert.equal(durable.calls[key], before[key], `${drift}:${key}`);
+  }
+});
+
+test("single active PASS release requires R11 finalization without action offer", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "PASS"] }) }); await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "released");
+  const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "R11_FINALIZATION_REQUIRED"); assert.equal(observationEvents(cwd).includes("goal.finalized"), false); assert.equal(observationEvents(cwd).includes("goal.action_offered"), false); assert.equal(status.action_token, undefined); assert.equal(status.machineAction, undefined);
 });
