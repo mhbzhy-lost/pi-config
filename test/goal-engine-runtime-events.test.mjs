@@ -141,10 +141,13 @@ test("Finding and Repair derive only from active product failed evidence", () =>
   p.conditions.get("condition-1").definition.remediation.policy = "autonomous";
   p = applyEvent(p, event("finding.recorded", { findingId: "finding-1", conditionId: "condition-1", runId: "product-run", evidenceId: hash(200), fingerprint: hash(300) }, 15));
   p = applyEvent(p, event("repair.episode_opened", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"] }, 16));
-  const plan = validateRemediationTask({ projection: p, episodeId: "episode-1", findingIds: ["finding-1"], taskDef: { description: "Repair condition", deps: [], writePaths: ["src/**"], acceptance: { criteria: [{ id: "repair", statement: "Condition is repaired", evidenceKinds: ["tests"] }] }, workflow: "tdd" } });
+  const plan = validateRemediationTask({ projection: p, episodeId: "episode-1", findingIds: ["finding-1"], taskDef: { description: "Repair condition", writePaths: ["src/**"], acceptance: { criteria: [{ id: "repair", statement: "Condition is repaired", evidenceKinds: ["tests"] }] }, workflow: "tdd" } });
+  assert.deepEqual(plan.taskDef.deps, []);
   assert.deepEqual(plan.events.map((entry) => entry.type), ["goal.amended", "repair.task_linked"]);
   p = applyAll(p, plan.events.map((entry, index) => event(entry.type, entry.data, 17 + index)));
   assert.equal(p.tasks.get(plan.taskId).metadata.kind, "remediation"); assert.equal(p.repairEpisodes.get("episode-1").status, "waiting_for_tasks");
+  assert.deepEqual(p.tasks.get(plan.taskId).metadata, plan.taskDef.metadata);
+  assert.equal(p.tasks.get(plan.taskId).metadata.taskDefHash, plan.taskDef.metadata.taskDefHash);
 });
 
 test("repair resolution reducer requires canonical owned evidence identity", () => {
@@ -242,6 +245,17 @@ test("authorize_task policy chain replays the exact reducer events without a non
   assert.equal(challenge.events[0].data.taskId, candidate.taskId); assert.equal(challenge.events[0].data.taskDefHash, candidate.taskDef.metadata.taskDefHash);
   assert.equal(challenge.events[0].data.subjectHash, candidate.taskDef.metadata.subjectHash); assert.equal(challenge.events[0].data.executionRevision, replayed.tasks.get(candidate.taskId).metadata.executionRevision);
   assert.equal(JSON.stringify([...plan.events, challenge.events[0]]).includes(capability.nonce), false);
+});
+
+test("user decision reducer rejects an entry hash reused by an alias across challenges", () => {
+  const { p, taskDef, challenge } = authorizedRepair();
+  const second = createRepairChallenge({ projection: p, episodeId: "episode-1", action: "authorize_task", sessionId: "alias-session", requestedAt: 22, expiresAt: 30, baseHead: "b".repeat(40), subjectHash: challenge.events[0].data.subjectHash, taskId: challenge.events[0].data.taskId, taskDefHash: challenge.events[0].data.taskDefHash, taskDef });
+  const withSecondChallenge = applyEvent(p, event(second.events[0].type, second.events[0].data, 19));
+  const unsigned = structuredClone(withSecondChallenge);
+  const original = unsigned.repairChallenges.get(challenge.challengeId);
+  original.phase = "created"; delete original.userEntryHash;
+  const aliasDecision = recordRepairUserDecision({ projection: unsigned, challengeId: second.challengeId, sessionId: "alias-session", userEntryId: "repair-entry-alias", userEntryHash: hash(501), branchBindingHash: hash(502), userEntryOccurredAt: 23, choice: "approve", approved: true, source: "interactive", recordedAt: 23 });
+  assert.throws(() => applyEvent(withSecondChallenge, event(aliasDecision.events[0].type, aliasDecision.events[0].data, 20)), /user decision/);
 });
 
 test("authorize_task reducer rejects every consumed and linked identity drift plus repeated nonce digests", () => {

@@ -13,3 +13,9 @@
 ## 审查发现
 
 候选实现仍遗漏 `challengeHash` 在 capability、consume 与 decision 中的完整绑定，且 capability 校验退化为宽松对象。challenge 误将 activation 初始 HEAD 当作当前世界 HEAD；其 ID 也没有从完整 canonical body 的 hash 派生。Store 未逐项比对 consume 与新增 remediation Task 的 taskId、taskDefHash、executionRevision、subjectHash，Reducer 独立回放也未核对 challenge 与 Task 的完整身份。
+
+## 本轮评审复现与方案
+
+1. 两个不同 challenge 可用不同 `userEntryId` 记录同一 `userEntryHash`，使同一真实用户输入重复授权。policy 入口与 Reducer 均改为同时检查 ID 和 hash，任一既有 challenge 的相同 hash 都拒绝。
+2. 调用者省略 `deps` 时，`goal.amended` Reducer 将任务归一为 `deps: []`，但候选 metadata 在省略字段上计算哈希，随后 `repair.task_linked` 重算失败。仅在 Repair candidate 边界、校验和哈希前补为显式空数组，保留调用者给出的 deps，避免改变共享任务合同哈希 ABI。
+3. Store 曾把 remediation amendment 固定在 batch 第 0 项，拒绝合法的 autonomous `goal.action_consumed → goal.amended → repair.task_linked`。恢复该单一前缀；user-approved 仍只接受无前缀的精确三事件链，前缀、双前缀和重排均在写入前拒绝。

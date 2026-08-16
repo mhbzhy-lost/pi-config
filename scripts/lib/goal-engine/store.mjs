@@ -410,7 +410,8 @@ function assertRemediationMaterializationBatch(events) {
   const index = events.findIndex((entry) => entry?.type === "goal.amended" && entry?.data?.hostInternalRemediation === true);
   const repairConsume = events.some((entry) => entry?.type === "repair.capability_consumed" && entry?.data?.action === "authorize_task");
   if (index < 0) { if (repairConsume) throw new Error("authorize_task capability consumption requires one canonical remediation batch"); return; }
-  if (index !== 0) throw new Error("Host remediation materialization must be one canonical batch");
+  const actionPrefix = events[0]?.type === "goal.action_consumed";
+  if (index !== (actionPrefix ? 1 : 0)) throw new Error("Host remediation materialization must be one canonical batch");
 
   const amendment = events[index], { data } = amendment;
   if (!exactObject(data, ["addTasks", "removeTasks", "updateTasks", "reason", "hostInternalRemediation"])
@@ -441,6 +442,7 @@ function assertRemediationMaterializationBatch(events) {
     return;
   }
 
+  if (actionPrefix) throw new Error("invalid user-approved remediation batch");
   const consume = events[index + 1];
   if (events.length !== index + 3 || consume?.type !== "repair.capability_consumed"
     || !exactObject(consume.data, ["nonceDigest", "consumedAt", "challengeId", "challengeHash", "episodeId", "action", "subjectHash", "sessionId", "userEntryId", "decisionId", "executionRevision", "executionContractHash", "baseHead", "taskId", "taskDefHash", "userEntryHash", "branchBindingHash"])

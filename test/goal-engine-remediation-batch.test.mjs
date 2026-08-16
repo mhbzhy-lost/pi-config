@@ -28,15 +28,19 @@ function assertNoWrite(events) {
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
-test("store accepts only canonical autonomous and user-approved remediation batches before reducer replay", () => {
-  for (const options of [{}, { approved: true }]) {
+test("store preflight accepts canonical autonomous batches with or without an action prefix and exact user-approved batches", () => {
+  for (const options of [{}, { actionPrefix: true }, { approved: true }]) {
     const root = mkdtempSync(join(tmpdir(), "goal-remediation-batch-"));
-    try { assert.throws(() => appendEventBatch(root, plan(options), 0), /goal.created must be first|batch/); }
+    try { assert.throws(() => appendEventBatch(root, plan(options), 0), /goal.created must be first/); }
     finally { rmSync(root, { recursive: true, force: true }); }
   }
 });
 
-test("store passes canonical remediation without optional deps to reducer validation", () => {
+test("store rejects an action-prefixed user-approved remediation batch before writing", () => {
+  assertNoWrite(plan({ approved: true, actionPrefix: true }));
+});
+
+test("store preflight preserves canonical remediation deps", () => {
   const projection = {
     goalId: "runtime-goal", executionRevision: 1,
     writePolicy: { allowedPaths: ["src/**"] },
@@ -48,7 +52,7 @@ test("store passes canonical remediation without optional deps to reducer valida
     projection, episodeId: "episode-1", findingIds: ["finding-1"],
     taskDef: { description: "Repair", writePaths: ["src/**"], acceptance: { criteria: [{ id: "repair", statement: "Repair passes", evidenceKinds: ["tests"] }] }, workflow: "tdd" },
   });
-  assert.equal(Object.hasOwn(plan.taskDef, "deps"), false);
+  assert.deepEqual(plan.taskDef.deps, []);
   const root = mkdtempSync(join(tmpdir(), "goal-remediation-batch-"));
   try { assert.throws(() => appendEventBatch(root, plan.events.map((entry, index) => event(entry.type, entry.data, index + 1)), 0), /goal.created must be first/); }
   finally { rmSync(root, { recursive: true, force: true }); }
@@ -66,6 +70,9 @@ test("store rejects split or standalone authorize_task consumption before any wr
 test("store rejects every malformed Host remediation batch before any goals write", () => {
   const cases = [
     ["reordered", () => { const [amendment, link] = plan(); return [link, amendment]; }],
+    ["unrelated prefix", () => [event("task.accepted", { taskId: "repair-task-1" }, 0), ...plan()]],
+    ["double action prefix", () => { const events = plan({ actionPrefix: true }); return [events[0], ...events]; }],
+    ["action prefix reordered", () => { const events = plan({ actionPrefix: true }); return [events[1], events[0], events[2]]; }],
     ["missing link", () => plan().slice(0, 1)],
     ["extra event", () => [...plan(), event("task.accepted", { taskId: "repair-task-1" }, 4)]],
     ["second amendment", () => [...plan(), clone(plan()[0])]],
