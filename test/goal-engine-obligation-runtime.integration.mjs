@@ -22,6 +22,13 @@ test("runtime init is draft-only, records readiness, and retains progress checkp
 });
 
 
+test("unconsumed runtime input creates a durable fail-closed gate", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "r10a1-")); git(cwd, "init", "-b", "main"); git(cwd, "config", "user.email", "test@example.com"); git(cwd, "config", "user.name", "Test"); writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n"); git(cwd, "add", ".gitignore"); git(cwd, "commit", "-m", "init");
+  const api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(api, "goal_init", runtimeInit());
+  api.handlers.get("input")({ source: "interactive", text: "new work", entryId: "entry-intent" }, { cwd, sessionManager: api.sessionManager });
+  assert.deepEqual(JSON.parse(await invoke(api, "goal_status", {})), { status: "R10B_SUSPENSION_REQUIRED" }); assert.equal(api.entries.some(entry => entry.customType === "goal-engine-runtime-intent-pending" && entry.data.userEntryId === "entry-intent" && !JSON.stringify(entry.data).includes("new work")), true);
+});
+
 test("runtime approval consumes only exact real input and restores challenge identity", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "r10a1-")); git(cwd, "init", "-b", "main"); git(cwd, "config", "user.email", "test@example.com"); git(cwd, "config", "user.name", "Test"); writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n"); git(cwd, "add", ".gitignore"); git(cwd, "commit", "-m", "init");
   const api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(api, "goal_init", runtimeInit());

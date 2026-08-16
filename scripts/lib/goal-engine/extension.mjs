@@ -320,6 +320,7 @@ function registerGoalTool(pi, definition) {
     ...(prepareArguments ? { prepareArguments } : {}),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const prepared = prepareArguments && prepareInExecute ? prepareArguments(params) : params;
+      if (definition.name !== "goal_status" && pi.__goalRuntimeIntentGate?.(ctx, prepared)) throw new Error("R10B_SUSPENSION_REQUIRED");
       return toolResult(await handler(prepared, ctx));
     },
   });
@@ -591,15 +592,23 @@ export function createGoalEngineExtension(pi, options = {}) {
   const orphanChallenges = new Map();
   const transferChallenges = new Map();
   const runtimeChallenges = new Map();
+  const runtimeIntentGates = new Map();
+  pi.__goalRuntimeIntentGate = (ctx) => {
+    let sessionId; try { sessionId = sessionIdentity(ctx); } catch { return false; }
+    return [...runtimeIntentGates.values()].some((gate) => gate.sessionId === sessionId);
+  };
   const persistMetadata = (type, data) => {
     if (typeof pi.appendEntry !== "function") throw new Error(`Cannot persist ${type}: pi.appendEntry is unavailable`);
     pi.appendEntry(type, data);
   };
   const restoreMetadata = (ctx) => {
-    metadataChallenges.clear(); orphanChallenges.clear(); transferChallenges.clear(); runtimeChallenges.clear();
+    metadataChallenges.clear(); orphanChallenges.clear(); transferChallenges.clear(); runtimeChallenges.clear(); runtimeIntentGates.clear();
     for (const entry of ctx.sessionManager?.getEntries?.() || []) {
       if (entry.type !== "custom") continue;
       const data = entry.data;
+      if (entry.customType === "goal-engine-runtime-intent-pending" && data?.goalId && data?.sessionId && data?.userEntryId) {
+        runtimeIntentGates.set(`${data.goalId}:${data.sessionId}`, data);
+      }
       if (entry.customType?.startsWith("goal-engine-runtime-approval-") && data?.id) {
         const current = runtimeChallenges.get(data.id) || {};
         runtimeChallenges.set(data.id, { ...current, ...(entry.customType.endsWith("challenge") ? { challenge: data } : {}), ...(entry.customType.endsWith("decision") ? { decision: { ...data, id: data.receiptId, challengeId: data.id } } : {}), ...(entry.customType.endsWith("consumed") ? { consumed: true } : {}) });
@@ -944,6 +953,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (!goalId) return "NO_ACTIVE_GOAL";
       let projection = loadProjectionFn(root, goalId);
       if (!projection) return "NO_ACTIVE_GOAL";
+      if (projection.eventSchemaVersion === "goal-runtime.v1" && runtimeIntentGates.has(`${goalId}:${sessionId}`)) return JSON.stringify({ status: "R10B_SUSPENSION_REQUIRED" });
       if (projection.eventSchemaVersion === "goal-runtime.v1") {
         if (!runtimeHost?.registries || typeof runtimeHost.captureCurrentWorld !== "function") return JSON.stringify({ goalId, status: "RUNTIME_READINESS_BLOCKER", attention: ["RUNTIME_HOST_AUTHORITY_UNAVAILABLE"] });
         let world;
@@ -2124,6 +2134,14 @@ export function createGoalEngineExtension(pi, options = {}) {
         return { action: "continue" };
       }
     } catch { /* input for another challenge or ambiguous input never creates a metadata receipt */ }
+    try {
+      const { cwd, root } = executionScopeFor(ctx); const sessionId = hookSessionId;
+      const projection = loadAllProjections(root).find((candidate) => candidate.eventSchemaVersion === "goal-runtime.v1" && candidate.lifecycle === "active" && ownedBySession(candidate, sessionId));
+      if (projection && !runtimeIntentGates.has(`${projection.goalId}:${sessionId}`)) {
+        const gate = { goalId: projection.goalId, sessionId, userEntryId: event.entryId || crypto.randomUUID(), source: event.source, occurredAt: event.occurredAt || new Date().toISOString() };
+        persistMetadata("goal-engine-runtime-intent-pending", gate); runtimeIntentGates.set(`${projection.goalId}:${sessionId}`, gate);
+      }
+    } catch { /* input remains fail-closed through normal runtime recovery if state cannot be read */ }
     return { action: "continue" };
   });
 
@@ -2141,6 +2159,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (recoveryLatch) return { message: { customType: "goal-engine-recovery", content: `Goal recovery latch is active for ${recoveryLatch.goalId}. Call goal_status before mutation.`, display: true } };
       if (projections.length === 0) return undefined;
       const sessionId = sessionIdentity(ctx);
+      if ([...runtimeIntentGates.values()].some((gate) => gate.sessionId === sessionId)) return { message: { customType: "goal-engine-recovery", content: "R10B_SUSPENSION_REQUIRED", display: true } };
       const selected = selectContinuityCandidate({ projections, cwd, paths: [], sessionId });
       if (selected.status === "ambiguous") {
         activateRecoveryLatch("ambiguous", `ambiguous candidates: ${selected.goalIds.join(", ")}`);
@@ -2188,6 +2207,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     }
     if (selected.status !== "selected") return recoveryLatch ? { block: true, reason: "Goal recovery is required: call goal_status before mutation" } : undefined;
     const projection = projections.find((candidate) => candidate.goalId === selected.goalId);
+    if (projection.eventSchemaVersion === "goal-runtime.v1" && runtimeIntentGates.has(`${projection.goalId}:${sessionIdentity(ctx)}`)) return { block: true, reason: "R10B_SUSPENSION_REQUIRED" };
     const hasDebt = Object.values(projection.continuity?.observations || {}).some((observation) => observation.status === "untriaged");
     if (recoveryLatch || hasDebt) {
       return { block: true, reason: `Goal ${projection.goalId} has unresolved continuity debt; call goal_status then goal_amend before this mutation` };
