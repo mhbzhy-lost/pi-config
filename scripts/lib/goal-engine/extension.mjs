@@ -684,13 +684,10 @@ export function createGoalEngineExtension(pi, options = {}) {
     }
     try {
       if (!selected.run) {
-        // Validate the Host-issued receipt before its request event becomes
-        // observation authority. validation-runtime is supervisor-private;
-        // public receipts are exclusively in managed-validations.
+        // A requested run is durable recovery authority before any managed
+        // allocation. Receipt validation and allocation occur on the next
+        // status through startObservation's Extension-owned prepare wrapper.
         const requested = requestObservation({ projection, conditionId: selected.conditionId, cycle: 0, worldSnapshot: world, services });
-        const condition = projection.conditions.get(selected.conditionId);
-        const adapter = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
-        services.prepareManagedValidation({ ownerKind: "goal-observation", ownerId: requested.runReceipt.runId, originRoot: cwd, stateRoot: root, integratedHead: head, plan: adapter.validationPlan, resourceClaims: adapter.resourceClaims });
         await services.persistEvent(requested.event);
         return { step: "request" };
       }

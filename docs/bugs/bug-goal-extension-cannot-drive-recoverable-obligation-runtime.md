@@ -19,6 +19,12 @@
 
 Extension 必须在任何 Observation 事件或启动之前，验证 id、绝对 stateRoot/receiptPath/workspacePath 和 canonical Goal root；public receiptPath 必须严格等于 `<stateRoot>/managed-validations/<id>.json`。不安全 id、相对路径、账本外路径或越界 workspace 一律 attention 且不得产生 Observation 业务事件。
 
+## 校准观察意图优先恢复边界
+
+Cycle0 首次校准曾在持久化 `condition.observation_requested` 前调用 `prepareManagedValidation`。该调用会创建 managed receipt、工作区和租约，不是无副作用的预检；若进程在两者之间崩溃，恢复投影没有 Goal 侧 run intent，却已经留下受管资源。
+
+修复必须固定为：首个 calibration status 仅生成并持久化唯一 requested intent；下一次 status 才经 Extension-owned prepare wrapper 验证 receipt root、path 与 id，并分配租约/启动进程。prepare 抛错或返回不安全 receipt 时保留同一 requested run，返回 attention，reload 不得创建第二个 run；这份 durable intent 是唯一恢复 authority。
+
 ## 审批元数据恢复加固
 
 Pi session custom entry 属于不可信恢复输入。此前恢复逻辑通过对象合并接受 challenge、decision、tombstone 与 intent 的未知字段和跨记录错配，伪造记录可能被重新解释为运行时审批权威。
