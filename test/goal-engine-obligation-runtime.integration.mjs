@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, writeFileSync, readFileSync, chmodSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
+import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -392,15 +392,53 @@ test("shared exclusive resource keeps the second requested run lease-free until 
   for (const run of runs.filter(run => run.conditionId === a.conditionId)) for (const type of ["condition.observation_terminal", "condition.observation_recorded", "condition.observation_released"]) assert.equal(runEvents(cwd, run.runId, type).length, 1, `${run.runId}:${type}`);
 });
 
-test("active product verdicts record and release FAIL, UNKNOWN, and INFRA without findings", async () => {
-  for (const [code, status] of [["FAIL", "R10A3_REPAIR_REQUIRED"], ["UNKNOWN", "R10A3_OBSERVATION_BLOCKED"], ["INFRA", "R10A3_OBSERVATION_BLOCKED"]]) {
+test("active FAIL atomically records evidence, its unique Finding, and active Repair Episode", async () => {
+  const cwd = repo(), api = pi(cwd), batches = []; api.cwd = cwd;
+  const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, appendEventBatch(root, events, version) { batches.push(events); return appendEventBatch(root, events, version); } });
+  await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal");
+  const result = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(result.status, "R10A3_REPAIR_REQUIRED");
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(projection.findings.size, 1); assert.equal(projection.repairEpisodes.size, 1);
+  assert.equal([...projection.repairEpisodes.values()][0].status, "active");
+  const batch = batches.find(events => events.map(event => event.type).join(",") === "condition.observation_recorded,finding.recorded,repair.episode_opened");
+  assert.ok(batch); assert.equal(batch.length, 3); assert.equal(new Set(batch.map(event => event.schemaVersion)).size, 1); assert.equal(batch[0].schemaVersion, "goal-runtime.v1");
+  const { run } = await cycleUntil(api, 1, "released");
+  for (const type of ["condition.observation_terminal", "condition.observation_recorded", "condition.observation_released"]) assert.equal(runEvents(cwd, run.runId, type).length, 1, type);
+});
+
+test("active UNKNOWN and INFRA record without Finding or Repair Episode", async () => {
+  for (const [code, status] of [["UNKNOWN", "R10A3_OBSERVATION_BLOCKED"], ["INFRA", "R10A3_OBSERVATION_BLOCKED"]]) {
     const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", code] });
     createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateProduct(api, cwd, activeCondition());
     await cycleUntil(api, 1, "terminal"); const result = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(result.status, status, code);
-    const { projection, run } = await cycleUntil(api, 1, "released"); const condition = projection.conditions.get("condition-1");
-    assert.equal(condition.status, "blocked", code); assert.deepEqual(condition.supportingEvidenceIds, [], code); assert.equal(projection.findings.size, 0, code);
+    const { projection, run } = await cycleUntil(api, 1, "released");
+    assert.equal(projection.findings.size, 0, code); assert.equal(projection.repairEpisodes.size, 0, code);
     for (const type of ["condition.observation_terminal", "condition.observation_recorded", "condition.observation_released"]) assert.equal(runEvents(cwd, run.runId, type).length, 1, `${code}:${type}`);
   }
+});
+
+test("failed observation batch pre-append throw leaves the terminal run without partial Goal state", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, appendEventBatch(_root, events) { if (events[0]?.type === "condition.observation_recorded") throw Error("before write"); return appendEventBatch(...arguments); } });
+  await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal");
+  const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "R10A3_OBSERVATION_MANAGED_ATTENTION");
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"), run = [...projection.observationRuns.values()].find(value => value.cycle === 1);
+  assert.equal(run.phase, "terminal"); assert.equal(projection.findings.size, 0); assert.equal(projection.repairEpisodes.size, 0); assert.equal(runEvents(cwd, run.runId, "condition.observation_recorded").length, 0);
+});
+
+test("durable failed observation batch throw reloads without duplicate evidence, Finding, or Episode", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let threw = false; const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });
+  const options = { goalStateEnv: {}, runtimeHost: durable, appendEventBatch(root, events, version) { const projection = appendEventBatch(root, events, version); if (events[0]?.type === "condition.observation_recorded" && !threw) { threw = true; throw Error("after write"); } return projection; } };
+  createGoalEngineExtension(api, options); await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal");
+  const first = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(first.status, "R10A3_OBSERVATION_MANAGED_ATTENTION");
+  const reloaded = pi(cwd, api.entries); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, options); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  await cycleUntil(reloaded, 1, "released");
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(projection.findings.size, 1); assert.equal(projection.repairEpisodes.size, 1);
+  const failedRun = [...projection.observationRuns.values()].find(run => run.cycle === 1);
+  assert.equal(runEvents(cwd, failedRun.runId, "condition.observation_recorded").length, 1);
+  for (const type of ["finding.recorded", "repair.episode_opened"]) assert.equal(observationEvents(cwd).filter(value => value === type).length, 1, type);
 });
 
 test("active consecutive stability requires two distinct product environments after Cycle0", async () => {

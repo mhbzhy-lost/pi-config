@@ -27,6 +27,7 @@ import {
 import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation, validateNextAction } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
 import { finalizeGoal } from "./finalization.mjs";
+import { deriveFindingFromFailedEvidence, openRepairEpisode } from "./repair-policy.mjs";
 import {
   assertExecutorBindingTicketCurrent,
   assertExecutorSettlementProof,
@@ -640,7 +641,26 @@ export function createGoalEngineExtension(pi, options = {}) {
     loadProjection: async () => loadProjectionFn(root, goalId),
     persistEvent: async ({ type, data }) => {
       const current = loadProjectionFn(root, goalId);
-      appendEventFn(root, makeEvent(type, data, goalId, "goal-runtime.v1"), current.version);
+      const recordEvent = makeEvent(type, data, goalId, "goal-runtime.v1");
+      // A failed product observation must not become durable without its repair
+      // ownership. Build the repair plan only from the event-sourced ledger,
+      // then commit the complete sequence through the Store batch boundary.
+      if (type === "condition.observation_recorded") {
+        const recorded = applyEvent(current, recordEvent);
+        const run = recorded.observationRuns.get(data.runId);
+        if (run?.cycle >= 1 && data.verdict?.kind === "failed") {
+          const findingPlan = deriveFindingFromFailedEvidence({ projection: recorded, runId: data.runId, evidenceId: data.evidenceId });
+          const findingEvents = findingPlan.events.map(({ type: eventType, data: eventData }) => makeEvent(eventType, eventData, goalId, "goal-runtime.v1"));
+          const withFinding = findingEvents.reduce((projection, event) => applyEvent(projection, event), recorded);
+          const episodePlan = findingPlan.finding.episodeId === null
+            ? openRepairEpisode({ projection: withFinding, findingIds: [findingPlan.finding.findingId] })
+            : { events: [] };
+          const episodeEvents = episodePlan.events.map(({ type: eventType, data: eventData }) => makeEvent(eventType, eventData, goalId, "goal-runtime.v1"));
+          appendEventBatchFn(root, [recordEvent, ...findingEvents, ...episodeEvents], current.version);
+          return;
+        }
+      }
+      appendEventFn(root, recordEvent, current.version);
     },
     prepareManagedValidation(input) { return canonicalManagedReceipt((runtimeHost.prepareManagedValidation || prepareManagedValidation)(input), root); },
     ...(typeof runtimeHost.startManagedValidation === "function" ? { startManagedValidation: runtimeHost.startManagedValidation } : {}),

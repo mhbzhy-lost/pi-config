@@ -45,6 +45,12 @@ active 分支没有像校准分支一样持有 Host-owned adapter registry、Cur
 
 R9 将 `requested` 与 `lease_allocated` 同时命名为 `observation_start`；active 分支此前只接受前者，导致进程在 durable allocation 后 reload 时永久 attention。`requested` 仍只能调用 `startObservation`，但 `lease_allocated` 必须先重建并校验同一 managed receipt，再调用 `recoverObservation`，使 runner 回放 process/terminal callbacks 而不生成第二个 supervisor。
 
+## Active FAIL 缺少原子修复归属
+
+当前产品 Cycle 1 的 FAIL 虽会记录 evidence 并返回 attention，却没有将 Finding、Repair Episode 与 `condition.observation_recorded` 放进同一个 Store batch。若记录后进程崩溃，failed 账本会没有修复归属；恢复也不能可靠地判定该失败是否已经拥有唯一的 Finding 与 Episode。
+
+修复要求由 Extension 持有记录持久化边界：先以 record event 构造中间 Projection，只从 failed ledger refs 派生 Finding 和 Episode，再将三类事件按顺序使用一次 CAS batch 追加。Cycle 0、PASS、UNKNOWN、INFRA 继续只记录 observation；预追加失败不得留下部分 Goal 状态，durable 后抛错则必须在 reload 后以已提交 batch 为准且不重复追加。
+
 ## Cycle 0 未接线
 
 ### 复现
