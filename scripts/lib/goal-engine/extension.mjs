@@ -28,7 +28,7 @@ import {
 import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation, validateNextAction } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
 import { finalizeGoal } from "./finalization.mjs";
-import { deriveFindingFromFailedEvidence, openRepairEpisode, validateRemediationTask, repairEpisodeTransition } from "./repair-policy.mjs";
+import { deriveFindingFromFailedEvidence, openRepairEpisode, validateRemediationTask, planRepairObservationLink, repairEpisodeTransition } from "./repair-policy.mjs";
 import {
   assertExecutorBindingTicketCurrent,
   assertExecutorSettlementProof,
@@ -660,8 +660,27 @@ export function createGoalEngineExtension(pi, options = {}) {
           appendEventBatchFn(root, [recordEvent, ...findingEvents, ...episodeEvents], current.version);
           return;
         }
+        const episode = [...recorded.repairEpisodes.values()].find(candidate => candidate?.status === "reverifying" && candidate.ownedRunIds?.includes(data.runId));
+        if (episode) {
+          const condition = recorded.conditions.get(episode.conditionId);
+          const adapter = condition && hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
+          const freshWorld = { ...world, adapters: adapter ? [{ ref: adapter.ref, version: adapter.version }] : [], repo: { ...world.repo, root: cwd, trackedDirty: [], untracked: [] } };
+          const resolution = repairEpisodeTransition({ projection: recorded, episodeId: episode.episodeId, event: { type, conditionId: run?.conditionId, runId: data.runId, evidenceId: data.evidenceId }, worldSnapshot: freshWorld });
+          const resolutionEvents = resolution.events.map(({ type: eventType, data: eventData }) => makeEvent(eventType, eventData, goalId, "goal-runtime.v1"));
+          if (resolutionEvents.length) {
+            try { appendEventBatchFn(root, [recordEvent, ...resolutionEvents], current.version); }
+            catch (cause) {
+              const recovered = loadProjectionFn(root, goalId);
+              if (recovered?.observationRuns.get(data.runId)?.phase !== "recorded" || recovered.repairEpisodes.get(episode.episodeId)?.status !== "resolved") throw cause;
+            }
+            return;
+          }
+        }
       }
-      appendEventFn(root, recordEvent, current.version);
+      try { appendEventFn(root, recordEvent, current.version); }
+      catch (cause) {
+        if (loadProjectionFn(root, goalId)?.observationRuns.get(data.runId)?.phase !== "recorded") throw cause;
+      }
     },
     prepareManagedValidation(input) { return canonicalManagedReceipt((runtimeHost.prepareManagedValidation || prepareManagedValidation)(input), root); },
     ...(typeof runtimeHost.startManagedValidation === "function" ? { startManagedValidation: runtimeHost.startManagedValidation } : {}),
@@ -1248,6 +1267,22 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (selected?.tool === "repair_episode") {
           const episode = projection.repairEpisodes.get(selected.params.episode_id);
           const condition = projection.conditions.get(episode?.conditionId)?.definition;
+          if (episode?.status === "reverifying") {
+            if (!observationHostAvailable() || !condition) return JSON.stringify({ goalId, runtimeState: projection.runtimeState, status: "R10A3_OBSERVATION_HOST_ATTENTION", attention: ["R10A3_OBSERVATION_HOST_ATTENTION"], progressLedger: projection.progressLedger });
+            const cycle = [...projection.observationRuns.values()].filter(run => run.conditionId === episode.conditionId && Number.isSafeInteger(run.cycle) && run.cycle >= 1).reduce((max, run) => Math.max(max, run.cycle), 0) + 1;
+            const services = observationServices(goalId, cwd, root, world);
+            const requested = requestObservation({ projection, conditionId: episode.conditionId, cycle, worldSnapshot: world, services });
+            const requestedProjection = applyEvent(projection, makeEvent(requested.event.type, requested.event.data, goalId, "goal-runtime.v1"));
+            const link = planRepairObservationLink({ projection: requestedProjection, episodeId: episode.episodeId, runId: requested.event.data.runId });
+            const events = [makeEvent(requested.event.type, requested.event.data, goalId, "goal-runtime.v1"), ...link.events.map(({ type, data }) => makeEvent(type, data, goalId, "goal-runtime.v1"))];
+            try { appendEventBatchFn(root, events, projection.version); }
+            catch (cause) {
+              const recovered = loadProjectionFn(root, goalId), runId = requested.event.data.runId;
+              if (recovered?.observationRuns.get(runId)?.phase !== "requested" || !recovered.repairEpisodes.get(episode.episodeId)?.ownedRunIds?.includes(runId)) throw cause;
+            }
+            const current = loadProjectionFn(root, goalId);
+            return JSON.stringify({ goalId, runtimeState: current.runtimeState, readiness: current.readiness, progressLedger: current.progressLedger });
+          }
           if (episode?.status === "active" && condition?.remediation?.policy === "user-approved") {
             return JSON.stringify({ goalId, runtimeState: projection.runtimeState, status: "R10A3_REPAIR_APPROVAL_REQUIRED", attention: ["R10A3_REPAIR_APPROVAL_REQUIRED"], progressLedger: projection.progressLedger });
           }
