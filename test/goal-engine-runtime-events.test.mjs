@@ -147,6 +147,15 @@ test("Finding and Repair derive only from active product failed evidence", () =>
   assert.equal(p.tasks.get(plan.taskId).metadata.kind, "remediation"); assert.equal(p.repairEpisodes.get("episode-1").status, "waiting_for_tasks");
 });
 
+test("repair resolution reducer requires canonical owned evidence identity", () => {
+  const p = active(), evidenceId = hash(200), canonical = { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], oldStatus: "reverifying", newStatus: "resolved", reason: "fresh passed reobservation", runId: "product-run", evidenceId, supportingEvidenceRefs: [{ runId: "product-run", evidenceId }] };
+  p.repairEpisodes.set("episode-1", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: [], ownedRunIds: ["product-run"], status: "reverifying", resolution: null }); p.findings.set("finding-1", { findingId: "finding-1", conditionId: "condition-1", status: "reverification" });
+  assert.throws(() => applyEvent(p, event("repair.episode_resolved", (({ runId, evidenceId: ignored, supportingEvidenceRefs, ...legacy }) => legacy)(canonical), 15)), /resolution/);
+  for (const malformed of [{ ...canonical, runId: "other" }, { ...canonical, evidenceId: hash(201) }, { ...canonical, supportingEvidenceRefs: [{ runId: "other", evidenceId }] }, { ...canonical, supportingEvidenceRefs: [] }]) assert.throws(() => applyEvent(p, event("repair.episode_resolved", malformed, 15)), /resolution/);
+  const resolved = applyEvent(p, event("repair.episode_resolved", canonical, 15));
+  assert.deepEqual(resolved.repairEpisodes.get("episode-1").resolution, { runId: "product-run", evidenceId, supportingEvidenceRefs: [{ runId: "product-run", evidenceId }] });
+});
+
 test("amendment enters suspended through its durable runtime event", () => {
   let p = active(); p = applyEvent(p, event("goal.runtime_suspended", { suspensionId: "s-1", reason: "amend execution" }, 15));
   assert.equal(p.runtimeState, "suspended");
