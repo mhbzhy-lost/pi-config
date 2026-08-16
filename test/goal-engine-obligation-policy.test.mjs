@@ -99,6 +99,21 @@ test("waiting remediation blocks without starving its pending Task dispatch", ()
   assert.equal(nextObligationAction(result)?.tool, "goal_dispatch"); assert(result.blocking.some((item) => item.code === "REPAIR_TASKS_PENDING")); assert(!result.actions.some((item) => item.tool === "repair_episode"));
 });
 
+test("reverifying Episode requests an owned run once and then yields to its lifecycle", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.conditions.set("c", condition("c"));
+  projection.repairEpisodes.set("episode", { episodeId: "episode", conditionId: "c", status: "reverifying", ownedRunIds: [] });
+  let result = frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) });
+  assert.equal(nextObligationAction(result)?.tool, "repair_episode");
+  projection.observationRuns.set("owned", { runId: "owned", conditionId: "c", cycle: 1, phase: "requested" });
+  projection.repairEpisodes.get("episode").ownedRunIds.push("owned");
+  result = frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) });
+  assert.equal(nextObligationAction(result)?.tool, "observation_start");
+  assert(result.blocking.some(item => item.code === "REPAIR_REVERIFICATION_PENDING" && item.id === "episode"));
+  projection.observationRuns.get("owned").phase = "released";
+  result = frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) });
+  assert.equal(nextObligationAction(result)?.tool, "repair_episode");
+});
+
 test("runtime debts outrank selected repair actions", () => {
   const projection = base(); projection.progressLedger = ledger(); projection.repairEpisodes.set("selected", { status: "active" });
   projection.observationRuns.set("cleanup", { runId: "cleanup", conditionId: "c", phase: "cleanup_debt" });

@@ -45,6 +45,14 @@ active 分支没有像校准分支一样持有 Host-owned adapter registry、Cur
 
 R9 将 `requested` 与 `lease_allocated` 同时命名为 `observation_start`；active 分支此前只接受前者，导致进程在 durable allocation 后 reload 时永久 attention。`requested` 仍只能调用 `startObservation`，但 `lease_allocated` 必须先重建并校验同一 managed receipt，再调用 `recoverObservation`，使 runner 回放 process/terminal callbacks 而不生成第二个 supervisor。
 
+## R10 Repair-owned 复验观察未接线
+
+### 复现
+最后 remediation Task 被接受后 Episode 已进入 `reverifying`，但 R9 仍持续以 priority 4 的 `repair_episode` 选中它，永久遮蔽该 Episode 下一次 requested Observation 的 priority 5 生命周期。Extension 也没有在 repair 被选中时请求 Observation 并用 `repair.observation_linked` 显式归属；随后 PASS 只记录 Observation，未同批解决 Episode/Finding。
+
+### 修复方案
+R9 仅在 reverifying Episode 没有 owned 且未完成的 run 时选择 `repair_episode`；已有 owned requested、lease、process、terminal 或 recorded run 时仅记录 `REPAIR_REVERIFICATION_PENDING` blocker，让既有 Observation 生命周期按原优先级推进。Extension 对这个唯一 repair 语义步骤从当前 world 请求下一 cycle Observation、对中间 projection 规划 link，并用一次 batch 原子提交 request/link。记录 linked run 时先 apply record，再只对显式 owned、fresh PASS 的 reverifying Episode 规划 resolve，单批提交 record/resolve；release 仍由既有 runner 单独闭合资源。所有 batch 的 append 后异常都 reload 验证既成事实，绝不重复请求、link、record 或 resolve。
+
 ## Active FAIL 缺少原子修复归属
 
 当前产品 Cycle 1 的 FAIL 虽会记录 evidence 并返回 attention，却没有将 Finding、Repair Episode 与 `condition.observation_recorded` 放进同一个 Store batch。若记录后进程崩溃，failed 账本会没有修复归属；恢复也不能可靠地判定该失败是否已经拥有唯一的 Finding 与 Episode。
