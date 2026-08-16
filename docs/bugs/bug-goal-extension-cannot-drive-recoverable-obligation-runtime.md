@@ -43,6 +43,8 @@ Cycle 0 完成并激活后，`goal_status` 仅计算 R9 frontier 并返回；即
 ### 根因与修复方案
 active 分支没有像校准分支一样持有 Host-owned adapter registry、CurrentWorld、Store 和 managed-validation 服务，且没有把 `actionableFrontier` 的唯一 `nextObligationAction` 接到 state-aware Observation 生命周期。修复时每个 status 先捕获 world、追加 checkpoint，再从 registry 构造精确 condition claims 后计算 R9 frontier；只执行被 R9 选中的一个 Observation 内部动作。请求先持久化 requested intent；后续 status 分别 start/recover、record、release。重建收据时复核 event-sourced HEAD、adapter version、claims、Condition hash 和 allocation；任何漂移或缺失 authority 都 attention 且不改变 Observation。Finding/Repair/finalize 保持未接线。
 
+R9 将 `requested` 与 `lease_allocated` 同时命名为 `observation_start`；active 分支此前只接受前者，导致进程在 durable allocation 后 reload 时永久 attention。`requested` 仍只能调用 `startObservation`，但 `lease_allocated` 必须先重建并校验同一 managed receipt，再调用 `recoverObservation`，使 runner 回放 process/terminal callbacks 而不生成第二个 supervisor。
+
 ## Cycle 0 未接线
 
 ### 复现

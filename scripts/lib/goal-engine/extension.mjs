@@ -765,9 +765,14 @@ export function createGoalEngineExtension(pi, options = {}) {
         receipt = { ...receipt, managedReceipt };
       };
       if (selected.tool === "observation_start") {
-        if (run.phase !== "requested") return { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] };
-        const result = await startObservation(receipt, services);
-        return result.status === "attention" || result.status === "blocked" ? { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] } : { step: "start" };
+        if (run.phase === "requested") {
+          const result = await startObservation(receipt, services);
+          return result.status === "attention" || result.status === "blocked" ? { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] } : { step: "start" };
+        }
+        if (run.phase !== "lease_allocated") return { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] };
+        prepare();
+        const result = await recoverObservation(receipt, services);
+        return result.status === "attention" || result.status === "blocked" || result.phase === "cleanup_debt" ? { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] } : { step: "recover" };
       }
       prepare();
       if (selected.tool === "observation_recover") {
