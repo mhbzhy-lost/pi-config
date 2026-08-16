@@ -9,6 +9,7 @@ import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
 import { evaluateConditionGraph } from "../scripts/lib/goal-engine/condition-validity.mjs";
 import { taskContractHash, remediationSubjectHash } from "../scripts/lib/goal-engine/task-definition.mjs";
+import { createRepairChallenge, issueRepairCapability, recordRepairUserDecision, repairEpisodeTransition, rejectSubjectHash } from "../scripts/lib/goal-engine/repair-policy.mjs";
 
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
 function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); return applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1)); }
@@ -84,6 +85,32 @@ test("runtime evidence ledger survives store replay and snapshot hashing", () =>
     assert.deepEqual(replayed.evidenceHistory, p.evidenceHistory); assert.deepEqual([...replayed.taskMutationSequences], [...p.taskMutationSequences]); assert.equal(projectionStateHash(replayed), projectionStateHash(p)); assert.equal(snapshot.evidenceHistory[0].terminalProofHash, "e".repeat(64)); assert.deepEqual(snapshot.taskMutationSequences, { "task-1": 0 });
     const world = { safe: true, repo: { root: "/repo", head: "a".repeat(40), trackedDirty: [], untracked: [], sequencer: null }, adapters: [{ ref: "oracle", version: "1" }], environments: [{ ref: "local", fingerprint: "environment-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "fixture-1", available: true }], resources: [], activeRuns: [] };
     assert.equal(evaluateConditionGraph({ projection: replayed, worldSnapshot: world }).conditions.get("condition-1").status, "fresh");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("runtime store replay persists only challenge bindings through approved reject consumption", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-runtime-repair-"));
+  try {
+    const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
+    const entries = [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1)];
+    let p = createProjection(); for (const entry of entries) p = appendEvent(root, entry, p.version);
+    for (const entry of [event("condition.observation_requested", { runId: "run-1", conditionId: "condition-1", cycle: 0, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2), event("condition.observation_lease_allocated", { runId: "run-1", conditionId: "condition-1", allocationId: "lease-1", leaseReceiptHash: "c".repeat(64) }, 3), event("condition.observation_process_bound", { runId: "run-1", conditionId: "condition-1", processIdentityHash: "d".repeat(64) }, 4), event("condition.observation_terminal", { runId: "run-1", conditionId: "condition-1", terminalProofHash: "e".repeat(64) }, 5)]) p = appendEvent(root, entry, p.version);
+    const { verdict, ...summary } = evidence(p, { kind: "failed", failureCode: "assertion", findingFingerprint: "f".repeat(64) });
+    p = appendEvent(root, event("condition.observation_recorded", { runId: "run-1", conditionId: "condition-1", evidenceId: "8".repeat(64), verdict, evidence: summary }, 6), p.version);
+    p = appendEvent(root, event("finding.recorded", { findingId: "finding-1", conditionId: "condition-1", runId: "run-1", evidenceId: "8".repeat(64), fingerprint: "f".repeat(64) }, 7), p.version);
+    p = appendEvent(root, event("repair.episode_opened", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"] }, 8), p.version);
+    const challenge = createRepairChallenge({ projection: p, episodeId: "episode-1", action: "reject", sessionId: "session-1", requestedAt: 10, expiresAt: 30, subjectHash: rejectSubjectHash(p, p.repairEpisodes.get("episode-1")) });
+    p = appendEvent(root, event(challenge.events[0].type, challenge.events[0].data, 9), p.version);
+    const decision = recordRepairUserDecision({ projection: p, challengeId: challenge.challengeId, sessionId: "session-1", userEntryId: "entry-1", approved: true, source: "interactive", recordedAt: 20 });
+    p = appendEvent(root, event(decision.events[0].type, decision.events[0].data, 10), p.version);
+    p = loadProjection(root, "runtime-goal"); const capability = issueRepairCapability({ projection: p, challengeId: challenge.challengeId, now: 21 });
+    const plan = repairEpisodeTransition({ projection: p, episodeId: "episode-1", event: { type: "repair.reject", capability, consumedAt: 22 } });
+    const versionBeforeExpired = p.version, expired = { ...plan.events[0], data: { ...plan.events[0].data, consumedAt: 30 } };
+    assert.throws(() => appendEvent(root, event(expired.type, expired.data, 11), p.version), /consume/);
+    assert.equal(loadProjection(root, "runtime-goal").version, versionBeforeExpired);
+    for (const [index, entry] of plan.events.entries()) p = appendEvent(root, event(entry.type, entry.data, 12 + index), p.version);
+    const replayed = loadProjection(root, "runtime-goal"), persisted = readFileSync(join(root, "goals/runtime-goal/events.jsonl"), "utf8");
+    assert.equal(replayed.repairEpisodes.get("episode-1").status, "resolved"); assert.equal(replayed.repairChallenges.get(challenge.challengeId).phase, "applied"); assert.equal(replayed.repairChallenges.get(challenge.challengeId).recordedAt, 20); assert.equal(replayed.repairChallenges.get(challenge.challengeId).consumedAt, 22); assert.equal(persisted.includes(capability.nonce), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
