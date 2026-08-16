@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { assertContractArray, assertContractString } from "./contract-limits.mjs";
 import { normalizeRepoRelativePosixPath } from "./repo-path.mjs";
+import { validateTaskDefinitions } from "./task-definition.mjs";
 
 const ID = /^[A-Za-z0-9._-]{1,160}$/;
 const READINESS = new Set(["draft", "ready", "needs_clarification", "environment_blocked", "unsafe_to_run"]);
@@ -32,8 +33,16 @@ function freeze(value) { if (!value || typeof value !== "object" || Object.isFro
 function canonicalize(value) { if (Array.isArray(value)) return value.map(canonicalize); if (!plain(value)) return value; return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])])); }
 
 function normalizeTask(value, index) {
-  object(value, `execution.tasks[${index}]`, ["id"]);
-  return { id: id(value.id, `execution.tasks[${index}].id`) };
+  object(value, `execution.tasks[${index}]`, ["id", "description", "deps", "writePaths", "acceptance", "workflow"]);
+  const normalized = {
+    id: id(value.id, `execution.tasks[${index}].id`),
+    description: string(value.description, `execution.tasks[${index}].description`),
+    ...(Object.hasOwn(value, "deps") ? { deps: array(value.deps, `execution.tasks[${index}].deps`).map((dep, item) => id(dep, `execution.tasks[${index}].deps[${item}]`)) } : {}),
+    writePaths: paths(value.writePaths, `execution.tasks[${index}].writePaths`),
+    acceptance: structuredClone(value.acceptance),
+    ...(Object.hasOwn(value, "workflow") ? { workflow: string(value.workflow, `execution.tasks[${index}].workflow`) } : {}),
+  };
+  return normalized;
 }
 function normalizeCondition(value, index, allowedPaths, registries) {
   object(value, `execution.conditions[${index}]`, ["id", "role", "enforcement", "statement", "observable", "expected", "depends_on", "oracle_ref", "environment_ref", "fixture_refs", "invalidation", "remediation", "stability"]);
@@ -70,6 +79,8 @@ export function normalizeRuntimeGoalInit(input, registries) {
   object(execution.write_policy, "execution.write_policy", ["allowed_paths"]);
   const allowed_paths = paths(execution.write_policy.allowed_paths, "execution.write_policy.allowed_paths");
   const tasks = array(execution.tasks ?? [], "execution.tasks").map(normalizeTask); if (new Set(tasks.map((task) => task.id)).size !== tasks.length) fail("task ids are duplicated");
+  try { validateTaskDefinitions(tasks.map((task) => task.id), Object.fromEntries(tasks.map(({ id: taskId, ...task }) => [taskId, task])), { requireNonEmpty: false, planned: true }); } catch (error) { fail(error.message); }
+  if (tasks.some((task) => task.writePaths.some((path) => !subset(path, allowed_paths)))) fail("task writePaths exceed write policy");
   const conditions = array(execution.conditions ?? [], "execution.conditions").map((condition, index) => normalizeCondition(condition, index, allowed_paths, registries));
   if (!tasks.length && !conditions.length) fail("tasks or conditions must be non-empty");
   if (new Set(conditions.map((condition) => condition.id)).size !== conditions.length) fail("condition ids are duplicated");

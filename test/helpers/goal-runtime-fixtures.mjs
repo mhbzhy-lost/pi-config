@@ -7,7 +7,10 @@ export const runtimeRegistries = Object.freeze({
 export function runtimeInit(overrides = {}) {
   const execution = {
     schema: "goal-runtime.v1",
-    tasks: [{ id: "task-1" }],
+    tasks: [{
+      id: "task-1", description: "Harden runtime task contract", deps: [], writePaths: ["src/**"],
+      acceptance: { criteria: [{ id: "contract", statement: "Runtime task contract compiles", evidenceKinds: ["tests"] }] }, workflow: "tdd",
+    }],
     conditions: [{
       id: "condition-1", role: "terminal", enforcement: "final",
       statement: "Tests pass", observable: "test suite", expected: "passing",

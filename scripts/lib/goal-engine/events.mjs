@@ -217,6 +217,7 @@ function copyTask(task) {
     deps: [...task.deps],
     writePaths: [...(task.writePaths || [])],
     acceptance: task.acceptance ? { ...task.acceptance, criteria: structuredClone(task.acceptance.criteria), ...(task.acceptance.commands ? { commands: [...task.acceptance.commands] } : {}) } : null,
+    ...(task.metadata ? { metadata: structuredClone(task.metadata) } : {}),
   };
 }
 
@@ -279,7 +280,7 @@ function runtimeDrafted(p, event) {
   p.convergenceBudget = structuredClone(contract.execution.budgets);
   for (const definition of contract.execution.tasks) {
     if (p.tasks.has(definition.id)) throw new Error(`duplicate runtime task: ${definition.id}`);
-    p.tasks.set(definition.id, { description: definition.description || definition.id, deps: [], writePaths: [...p.writePolicy.allowedPaths], acceptance: { criteria: definition.acceptance?.criteria || [] }, workflow: definition.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, executorBinding: null, lastExecutorProof: null, acceptanceVerification: null, settlement: null });
+    p.tasks.set(definition.id, { description: definition.description, deps: [...(definition.deps || [])], writePaths: [...definition.writePaths], acceptance: { criteria: structuredClone(definition.acceptance.criteria) }, workflow: definition.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, executorBinding: null, lastExecutorProof: null, acceptanceVerification: null, settlement: null });
     p.taskApplicability.set(definition.id, { revision: 1, state: "applicable", reason: null });
     p.taskMutationSequences.set(definition.id, 0);
   }
@@ -327,7 +328,7 @@ function evidenceInvalidated(p, data) { runtimeOnly(p); const condition = p.cond
 function findingRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["findingId", "conditionId", "runId", "evidenceId", "fingerprint"], "finding record"); const run = p.observationRuns.get(data.runId), evidence = p.evidenceHistory.find((entry) => entry.run.runId === data.runId && entry.evidenceId === data.evidenceId); if (!run || run.cycle === 0 || run.phase !== "recorded" || run.evidenceId !== data.evidenceId || !p.conditions.has(data.conditionId) || data.conditionId !== run.conditionId || !data.findingId || !hash(data.fingerprint) || evidence?.conditionId !== data.conditionId || evidence.executionRevision !== p.executionRevision || evidence.verdict?.kind !== "failed" || evidence.verdict.findingFingerprint !== data.fingerprint) throw new Error("finding requires current failed ledger evidence"); if (p.findings.has(data.findingId)) throw new Error("duplicate finding"); p.findings.set(data.findingId, { findingId: data.findingId, conditionId: data.conditionId, observationRunId: data.runId, executionRevision: p.executionRevision, fingerprint: data.fingerprint, status: "open", episodeId: null }); }
 function findingStatusChanged(p, data) { runtimeOnly(p); const finding = p.findings.get(data.findingId); if (!finding || !new Set(["open", "repairing", "reverification", "resolved", "rejected_by_user"]).has(data.status)) throw new Error("invalid finding status"); finding.status = data.status; }
 function repairOpened(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "conditionId", "findingIds"], "repair episode"); if (!data.episodeId || !p.conditions.has(data.conditionId) || !Array.isArray(data.findingIds) || !data.findingIds.length || new Set(data.findingIds).size !== data.findingIds.length || p.repairEpisodes.has(data.episodeId)) throw new Error("invalid repair episode"); for (const id of data.findingIds) { const finding = p.findings.get(id); if (!finding || finding.conditionId !== data.conditionId || finding.status !== "open" || finding.episodeId !== null || finding.executionRevision !== p.executionRevision) throw new Error("invalid repair finding reference"); finding.episodeId = data.episodeId; finding.status = "repairing"; } p.repairEpisodes.set(data.episodeId, { episodeId: data.episodeId, conditionId: data.conditionId, findingIds: [...data.findingIds], remediationTaskIds: [], ownedRunIds: [], status: "active", cancellation: null }); }
-function repairTaskLinked(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "taskId", "challengeId"], "repair task link"); const episode = p.repairEpisodes.get(data.episodeId), task = p.tasks.get(data.taskId); if (!episode || !task || episode.status !== "active") throw new Error("invalid repair task reference"); const meta = task.metadata; if (!meta || meta.kind !== "remediation" || meta.goalId !== p.goalId || meta.executionRevision !== p.executionRevision || meta.episodeId !== episode.episodeId || meta.conditionId !== episode.conditionId || meta.findingIds.length !== episode.findingIds.length || meta.findingIds.some((id) => !episode.findingIds.includes(id)) || meta.taskDefHash !== taskContractHash(task) || meta.subjectHash !== remediationSubjectHash({ goalId: p.goalId, executionRevision: p.executionRevision, episodeId: episode.episodeId, conditionId: episode.conditionId, findingIds: episode.findingIds, task })) throw new Error("repair task metadata binding mismatch"); const policy = p.conditions.get(episode.conditionId)?.definition?.remediation?.policy; if (policy === "autonomous") { if (data.challengeId !== null) throw new Error("autonomous repair must not use challenge"); } else if (policy === "user-approved") { const c = p.repairChallenges.get(data.challengeId); if (!c || c.executionRevision !== p.executionRevision || c.phase !== "consumed" || c.action !== "authorize_task" || c.episodeId !== episode.episodeId || c.subjectHash !== meta.subjectHash) throw new Error("repair task challenge binding mismatch"); c.phase = "applied"; } else throw new Error("unknown repair policy"); if (!episode.remediationTaskIds.includes(data.taskId)) episode.remediationTaskIds.push(data.taskId); episode.status = "waiting_for_tasks"; }
+function repairTaskLinked(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "taskId", "challengeId"], "repair task link"); const episode = p.repairEpisodes.get(data.episodeId), task = p.tasks.get(data.taskId); if (!episode || !task || episode.status !== "active") throw new Error("invalid repair task reference"); const meta = task.metadata; if (!meta || meta.kind !== "remediation" || meta.goalId !== p.goalId || meta.executionRevision !== p.executionRevision || meta.episodeId !== episode.episodeId || meta.conditionId !== episode.conditionId || meta.findingIds.length !== episode.findingIds.length || meta.findingIds.some((id) => !episode.findingIds.includes(id)) || meta.taskDefHash !== taskContractHash(task) || meta.subjectHash !== remediationSubjectHash({ goalId: p.goalId, executionRevision: p.executionRevision, episodeId: episode.episodeId, conditionId: episode.conditionId, findingIds: episode.findingIds, task })) throw new Error("repair task metadata binding mismatch"); const policy = p.conditions.get(episode.conditionId)?.definition?.remediation?.policy; if (policy === "autonomous") { if (data.challengeId !== null) throw new Error("autonomous repair must not use challenge"); } else if (policy === "user-approved") { const c = p.repairChallenges.get(data.challengeId); if (!c || c.executionRevision !== p.executionRevision || c.phase !== "consumed" || c.action !== "authorize_task" || c.episodeId !== episode.episodeId || c.subjectHash !== meta.subjectHash) throw new Error("repair task challenge binding mismatch"); c.phase = "applied"; } else throw new Error("unknown repair policy"); if (!episode.remediationTaskIds.includes(data.taskId)) episode.remediationTaskIds.push(data.taskId); episode.status = "waiting_for_tasks"; assertPendingTaskContractsCompile(p, DISPATCH_VALIDATION_SENTINEL); }
 function repairReverificationRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "conditionId", "findingIds", "remediationTaskIds", "oldStatus", "newStatus", "reason"], "repair reverification"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || episode.conditionId !== data.conditionId || episode.status !== data.oldStatus || data.newStatus !== "reverifying" || !Array.isArray(data.findingIds) || !Array.isArray(data.remediationTaskIds) || data.findingIds.length !== episode.findingIds.length || data.findingIds.some((id) => !episode.findingIds.includes(id)) || data.remediationTaskIds.length !== episode.remediationTaskIds.length || data.remediationTaskIds.some((id) => !episode.remediationTaskIds.includes(id)) || data.remediationTaskIds.some((id) => p.tasks.get(id)?.status !== "accepted") || !data.reason) throw new Error("invalid repair reverification"); episode.status = "reverifying"; for (const id of episode.findingIds) p.findings.get(id).status = "reverification"; }
 function repairResolved(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "conditionId", "findingIds", "oldStatus", "newStatus", "reason"], "repair resolution"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || episode.conditionId !== data.conditionId || episode.status !== data.oldStatus || episode.status !== "reverifying" || data.newStatus !== "resolved" || !data.reason || data.findingIds.length !== episode.findingIds.length || data.findingIds.some((id) => !episode.findingIds.includes(id))) throw new Error("invalid repair resolution"); episode.status = "resolved"; for (const id of episode.findingIds) p.findings.get(id).status = "resolved"; }
 function repairObservationLinked(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "conditionId", "runId"], "repair observation link"); const episode = p.repairEpisodes.get(data.episodeId), run = p.observationRuns.get(data.runId); if (!episode || episode.status !== "reverifying" || episode.conditionId !== data.conditionId || !run || run.conditionId !== data.conditionId || run.phase !== "requested" || episode.ownedRunIds.includes(data.runId) || [...p.repairEpisodes.values()].some((other) => other.episodeId !== episode.episodeId && other.ownedRunIds?.includes(data.runId))) throw new Error("invalid repair observation link"); episode.ownedRunIds.push(data.runId); }
@@ -766,7 +767,9 @@ function assertDepsAccepted(p, task) {
 
 function goalAmended(p, data, schemaVersion, replay) {
   requireActive(p);
-  const { addTasks, removeTasks, updateTasks, reason } = data;
+  const { addTasks, removeTasks, updateTasks, reason, hostInternalRemediation = false } = data;
+  if (hostInternalRemediation !== false && hostInternalRemediation !== true) throw new Error("invalid Host-internal remediation flag");
+  if (hostInternalRemediation && schemaVersion !== RUNTIME_SCHEMA_VERSION) throw new Error("Host-internal remediation requires runtime generation");
   if (!reason || typeof reason !== "string" || reason.trim().length < 10) {
     throw new Error("amendment reason must be at least 10 characters");
   }
@@ -807,9 +810,9 @@ function goalAmended(p, data, schemaVersion, replay) {
     if (!def.writePaths || !def.acceptance) throw new Error(`added task ${taskId} must have writePaths and acceptance`);
     candidate.set(taskId, {
       description: def.description, deps: def.deps || [], writePaths: def.writePaths, acceptance: def.acceptance,
-      workflow: def.workflow || "tdd", status: "pending", evidence: [], attempts: 0,
+      workflow: def.workflow || "tdd", ...(def.metadata ? { metadata: structuredClone(def.metadata) } : {}), status: "pending", evidence: [], attempts: 0,
       lastSettledOutcome: null, contractHash: null, workspace: null,
-      ...(schemaVersion === PLANNED_SCHEMA_VERSION ? { executorBinding: null, lastExecutorProof: null } : {}),
+      ...((schemaVersion === PLANNED_SCHEMA_VERSION || schemaVersion === RUNTIME_SCHEMA_VERSION) ? { executorBinding: null, lastExecutorProof: null } : {}),
       acceptanceVerification: null, settlement: null,
     });
   }
@@ -822,18 +825,33 @@ function goalAmended(p, data, schemaVersion, replay) {
     if (updates.acceptance) task.acceptance = updates.acceptance;
     if (updates.workflow !== undefined) task.workflow = updates.workflow;
   }
-  if (schemaVersion === PLANNED_SCHEMA_VERSION) {
-    validateTaskDefinitions([...candidate.keys()], Object.fromEntries(candidate), { planned: true });
+  if (schemaVersion === PLANNED_SCHEMA_VERSION || schemaVersion === RUNTIME_SCHEMA_VERSION) {
+    validateTaskDefinitions([...candidate.keys()], taskDefinitions(candidate), { planned: true, hostInternalRemediation });
+    if (schemaVersion === RUNTIME_SCHEMA_VERSION && [...candidate.values()].some((task) => task.writePaths.some((path) => !p.writePolicy.allowedPaths.some((allowed) => path === allowed || allowed.endsWith("/**") && path.startsWith(allowed.slice(0, -2)))))) throw new Error("runtime task writePaths exceed write policy");
   } else if (schemaVersion !== "goal-engine.event.v1" && !replay) {
-    validateTaskDefinitions([...candidate.keys()], Object.fromEntries(candidate));
+    validateTaskDefinitions([...candidate.keys()], taskDefinitions(candidate));
   } else {
     validateDAG(candidate);
   }
-  if ((schemaVersion === PLANNED_SCHEMA_VERSION) || (schemaVersion !== "goal-engine.event.v1" && !replay)) {
+  if (!hostInternalRemediation && ((schemaVersion === PLANNED_SCHEMA_VERSION || schemaVersion === RUNTIME_SCHEMA_VERSION) || (schemaVersion !== "goal-engine.event.v1" && !replay))) {
     const candidateProjection = { ...p, tasks: candidate };
     assertPendingTaskContractsCompile(candidateProjection, DISPATCH_VALIDATION_SENTINEL);
   }
   p.tasks = candidate;
+  if (schemaVersion === RUNTIME_SCHEMA_VERSION) {
+    for (const taskId of Object.keys(addTasks || {})) {
+      if (!p.taskApplicability.has(taskId)) p.taskApplicability.set(taskId, { revision: p.executionRevision, state: "applicable", reason: null });
+      if (!p.taskMutationSequences.has(taskId)) p.taskMutationSequences.set(taskId, 0);
+    }
+    recordRuntimeMutation(p, Object.keys(addTasks || {}));
+  }
+}
+
+function taskDefinitions(tasks) {
+  return Object.fromEntries([...tasks].map(([id, task]) => [id, {
+    description: task.description, ...(task.deps?.length ? { deps: task.deps } : {}), writePaths: task.writePaths,
+    acceptance: task.acceptance, workflow: task.workflow, ...(task.metadata ? { metadata: task.metadata } : {}),
+  }]));
 }
 
 function workspaceReleasedForRetry(task) {

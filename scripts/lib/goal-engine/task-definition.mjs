@@ -67,14 +67,18 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
   for (const id of tasks) {
     const def = taskDefs[id];
     if (!def || typeof def !== "object") throw new Error(`missing taskDef for ${id}`);
+    const allowedFields = hostInternalRemediation
+      ? ["description", "deps", "writePaths", "acceptance", "workflow", "metadata"]
+      : ["description", "deps", "writePaths", "acceptance", "workflow"];
+    if (Object.keys(def).some((key) => !allowedFields.includes(key))) throw new Error(`taskDef ${id} contains unknown field`);
     nonEmpty(def.description, `taskDef ${id} description`);
     if (Object.hasOwn(def, "metadata")) {
       if (!hostInternalRemediation) throw new Error(`taskDef ${id} metadata is Host-internal only`);
       validateRemediationMetadata(def.metadata, `taskDef ${id} metadata`);
     }
-    assertContractArray(def.deps, `taskDef ${id} deps`);
+    const taskDeps = def.deps === undefined ? [] : assertContractArray(def.deps, `taskDef ${id} deps`);
     const deps = new Set();
-    for (const dep of def.deps) {
+    for (const dep of taskDeps) {
       if (!ID.test(dep || "") || deps.has(dep)) throw new Error(`taskDef ${id} has invalid or duplicate dep: ${dep}`);
       deps.add(dep);
     }
@@ -91,7 +95,7 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
       def.acceptance.commands.forEach((value, index) => validateCommand(value, `taskDef ${id} acceptance.commands[${index}]`, cwd, realpathCwd));
     }
     if (!WORKFLOWS.has(def.workflow || "tdd")) throw new Error(`taskDef ${id} workflow is not supported`);
-    graph.set(id, { deps: def.deps });
+    graph.set(id, { deps: taskDeps });
   }
   validateDAG(graph);
 }

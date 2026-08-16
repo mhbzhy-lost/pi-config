@@ -8,8 +8,7 @@ import { join } from "node:path";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
 import { evaluateConditionGraph } from "../scripts/lib/goal-engine/condition-validity.mjs";
-import { taskContractHash, remediationSubjectHash } from "../scripts/lib/goal-engine/task-definition.mjs";
-import { createRepairChallenge, issueRepairCapability, recordRepairUserDecision, repairEpisodeTransition, rejectSubjectHash } from "../scripts/lib/goal-engine/repair-policy.mjs";
+import { createRepairChallenge, issueRepairCapability, recordRepairUserDecision, repairEpisodeTransition, rejectSubjectHash, validateRemediationTask } from "../scripts/lib/goal-engine/repair-policy.mjs";
 
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
 function hash(n) { return String(n).padStart(64, "0"); }
@@ -99,9 +98,10 @@ test("Finding and Repair derive only from active product failed evidence", () =>
   p.conditions.get("condition-1").definition.remediation.policy = "autonomous";
   p = applyEvent(p, event("finding.recorded", { findingId: "finding-1", conditionId: "condition-1", runId: "product-run", evidenceId: hash(200), fingerprint: hash(300) }, 15));
   p = applyEvent(p, event("repair.episode_opened", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"] }, 16));
-  p.tasks.get("task-1").status = "accepted"; const repairTask = p.tasks.get("task-1"); repairTask.metadata = { kind: "remediation", goalId: p.goalId, executionRevision: p.executionRevision, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], subjectHash: remediationSubjectHash({ goalId: p.goalId, executionRevision: p.executionRevision, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], task: repairTask }), taskDefHash: taskContractHash(repairTask) };
-  p = applyEvent(p, event("repair.task_linked", { episodeId: "episode-1", taskId: "task-1", challengeId: null }, 17));
-  assert.equal(p.repairEpisodes.get("episode-1").status, "waiting_for_tasks");
+  const plan = validateRemediationTask({ projection: p, episodeId: "episode-1", findingIds: ["finding-1"], taskDef: { description: "Repair condition", deps: [], writePaths: ["src/**"], acceptance: { criteria: [{ id: "repair", statement: "Condition is repaired", evidenceKinds: ["tests"] }] }, workflow: "tdd" } });
+  assert.deepEqual(plan.events.map((entry) => entry.type), ["goal.amended", "repair.task_linked"]);
+  p = applyAll(p, plan.events.map((entry, index) => event(entry.type, entry.data, 17 + index)));
+  assert.equal(p.tasks.get(plan.taskId).metadata.kind, "remediation"); assert.equal(p.repairEpisodes.get("episode-1").status, "waiting_for_tasks");
 });
 
 test("amendment enters suspended through its durable runtime event", () => {

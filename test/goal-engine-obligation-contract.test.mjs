@@ -29,6 +29,23 @@ test("rejects authority-bearing caller fields and invalid obligation contracts b
   assert.throws(() => normalizeRuntimeGoalInit(cases.at(-1), nondeterministic), /deterministic/);
 });
 
+test("runtime tasks preserve the full criteria-only PlannedTask contract and reject task escapes", () => {
+  const base = runtimeInit();
+  const full = normalizeRuntimeGoalInit(base, runtimeRegistries);
+  assert.deepEqual(full.execution.tasks[0], base.execution.tasks[0]);
+  const task = base.execution.tasks[0];
+  const cases = [
+    { ...task, description: undefined },
+    { ...task, acceptance: { criteria: task.acceptance.criteria, commands: ["node --test"] } },
+    { ...task, metadata: { kind: "remediation" } },
+    { ...task, writePaths: ["outside/**"] },
+    { ...task, deps: ["missing"] },
+  ];
+  for (const badTask of cases) assert.throws(() => normalizeRuntimeGoalInit(runtimeInit({ execution: { ...base.execution, tasks: [badTask] } }), runtimeRegistries));
+  const pair = [task, { ...task, id: "task-2", deps: ["task-1"] }];
+  assert.throws(() => normalizeRuntimeGoalInit(runtimeInit({ execution: { ...base.execution, tasks: [{ ...task, deps: ["task-2"] }, pair[1]] } }), runtimeRegistries), /cycle/);
+});
+
 test("rejects duplicate, unknown, cyclic condition references and hash is canonical but semantic", () => {
   const base = runtimeInit();
   const duplicate = { ...base, execution: { ...base.execution, conditions: [base.execution.conditions[0], { ...base.execution.conditions[0] }] } };
