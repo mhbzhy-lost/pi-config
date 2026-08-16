@@ -9,6 +9,21 @@ import { loadDesiredSkills } from "../scripts/lib/skill-whitelist.mjs";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const shellIntegration = join(repoRoot, "scripts", "pi-shell.zsh");
 const piBinary = process.env.PI_REAL_BIN;
+const piPackage = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
+const piTypes = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts";
+
+test("installed Pi SessionManager advances the active branch from custom intent to real user entry", async () => {
+  const { SessionManager } = await import(piPackage);
+  const manager = SessionManager.inMemory(repoRoot);
+  manager.appendCustomEntry("goal-engine-runtime-approval-intent", { protocol: "goal-engine-runtime-approval-intent.v1" });
+  const userEntryId = manager.appendMessage({ role: "user", content: "approve", timestamp: Date.now() });
+  const branch = manager.getBranch();
+  const user = branch.at(-1);
+  assert.equal(userEntryId, user.id);
+  assert.equal(user.parentId, branch.at(-2).id);
+  assert.equal(user.message.role, "user");
+  assert.match(await (await import("node:fs/promises")).readFile(piTypes, "utf8"), /interface InputEvent \{[\s\S]*?text: string;[\s\S]*?source: InputSource;[\s\S]*?streamingBehavior\?:[\s\S]*?\n\}/);
+});
 
 test("real Pi RPC loads required auto-discovered Skills without retired products", async () => {
   assert.ok(piBinary, "PI_REAL_BIN must point to an explicitly supported Pi runtime");
