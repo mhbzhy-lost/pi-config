@@ -102,11 +102,7 @@ export function requireRootBroker(pi: object, rootSessionId?: string): RootBroke
   return broker;
 }
 
-export function registerRootBrokerGoalOwnedRun(pi: object, binding: { goalId: string; taskId: string; attempt: number; runId: string; leaseId: string }, rootSessionId?: string): void {
-  requireRootBroker(pi, rootSessionId).registerGoalOwnedRun(binding);
-}
-
-export async function stopRootBrokerGoalOwnedRun(pi: object, binding: { goalId: string; taskId: string; attempt: number; runId: string; leaseId: string }, rootSessionId?: string) {
+export async function stopRootBrokerGoalOwnedRun(pi: object, binding: { runId: string; asyncDir: string; sessionId: string }, rootSessionId?: string) {
   return requireRootBroker(pi, rootSessionId).stopGoalOwnedRun(binding);
 }
 

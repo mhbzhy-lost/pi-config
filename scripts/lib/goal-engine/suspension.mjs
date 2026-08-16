@@ -4,6 +4,13 @@ const REASONS = new Set(["interactive_steer", "follow_up", "abort", "execution_a
 const BLOCKED = Object.freeze(["dispatch", "integrate", "finalize"]);
 const string = (value, name) => { if (typeof value !== "string" || !value) throw new Error(`${name} is required`); return value; };
 
+export function deriveOwnedExecutorStopRequest({ projection, taskId } = {}) {
+  if (!projection || projection.runtimeGeneration !== "goal-runtime.v1" || !Number.isSafeInteger(projection.executionRevision) || projection.executionRevision < 1 || typeof projection.executionContractHash !== "string" || !/^[a-f0-9]{64}$/.test(projection.executionContractHash) || typeof projection.goalId !== "string" || typeof projection.sessionId !== "string") throw new Error("durable runtime identity is invalid");
+  const task = projection.tasks?.get?.(taskId); const binding = task?.executorBinding;
+  if (!task || !["dispatched", "running", "settling"].includes(task.status) || !Number.isSafeInteger(task.attempts) || task.attempts < 1 || !binding || typeof binding.runId !== "string" || typeof binding.asyncDir !== "string" || !binding.asyncDir.startsWith("/") || typeof binding.workspaceLeaseId !== "string") throw new Error("durable executor binding is invalid");
+  return Object.freeze({ goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, asyncDir: binding.asyncDir, leaseId: binding.workspaceLeaseId, sessionId: projection.sessionId, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash });
+}
+
 export function suspensionGuard(projection, operation) {
   if (projection?.runtimeState === "suspended" || projection?.suspension) {
     if (BLOCKED.includes(operation)) throw new Error(`runtime is suspended: ${operation} is blocked`);
@@ -32,7 +39,7 @@ export async function requestOwnedRunStop(pi, request = {}) {
   const task = projection.tasks?.get?.(taskId); const binding = task?.executorBinding;
   if (!task || binding?.runId !== runId || task.attempts !== attempt || binding.workspaceLeaseId !== leaseId) throw new Error("owned stop identity mismatch");
   try {
-    const response = await pi.stopOwnedRun({ goalId: string(goalId, "goalId"), taskId: string(taskId, "taskId"), attempt, runId: string(runId, "runId"), leaseId: string(leaseId, "leaseId") });
+    const response = await pi.stopOwnedRun({ runId: string(runId, "runId"), asyncDir: binding.asyncDir, sessionId: projection.sessionId });
     if (response?.state !== "observed" || !response.proof) return Object.freeze({ terminal: false, attention: true, reason: "official_terminal_proof_missing" });
     return Object.freeze({ terminal: true, attention: false, proof: response.proof });
   } catch { return Object.freeze({ terminal: false, attention: true, reason: "owned_stop_unavailable" }); }

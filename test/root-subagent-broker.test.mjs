@@ -117,11 +117,10 @@ test("Root broker stops only an exact registered Goal-owned run and returns an o
   broker = new RootBrokerServer({ rootSessionId: "root-goal-owned", lifecycleSessionId: "root-goal-owned", captureProcessBirthIdentity: async () => "birth", writeGrant: async () => "/tmp/no-grant", terminalTimeoutMs: 100, upstream: { async ping() { return {}; }, async stop(request) { calls.push(request); broker.observeTerminal(observedProof(runId)); }, async dispose() {} } });
   t.after(() => broker.closeRootSession().catch(() => undefined));
   await broker.observeStarted(startedEvent("root-goal-owned", runId));
-  const binding = { goalId: "goal-1", taskId: "task-1", attempt: 1, runId, leaseId: "lease-1" }; broker.registerGoalOwnedRun(binding);
+  const binding = { runId, asyncDir: `/tmp/${runId}`, sessionId: "root-goal-owned" };
   const stopped = await broker.stopGoalOwnedRun(binding);
   assert.equal(stopped.state, "observed"); assert.deepEqual(calls, [{ runId, dir: `/tmp/${runId}` }]);
-  await assert.rejects(broker.stopGoalOwnedRun({ ...binding, leaseId: "other" }), /identity/);
-  assert.throws(() => broker.registerGoalOwnedRun({ ...binding, attempt: 2 }), /conflicts/);
+  await assert.rejects(broker.stopGoalOwnedRun({ ...binding, asyncDir: "/tmp/other" }), /identity/);
 });
 
 test("Root broker returns a stable attention code without upstream error leakage", async (t) => {
@@ -129,8 +128,7 @@ test("Root broker returns a stable attention code without upstream error leakage
   const broker = new RootBrokerServer({ rootSessionId: "root-stop-error", lifecycleSessionId: "root-stop-error", captureProcessBirthIdentity: async () => "birth", writeGrant: async () => "/tmp/no-grant", terminalTimeoutMs: 10, upstream: { async ping() { return {}; }, async stop() { throw new Error("private upstream failure"); }, async dispose() {} } });
   t.after(() => broker.closeRootSession().catch(() => undefined));
   await broker.observeStarted(startedEvent("root-stop-error", runId));
-  const binding = { goalId: "goal-1", taskId: "task-1", attempt: 1, runId, leaseId: "lease-1" };
-  broker.registerGoalOwnedRun(binding);
+  const binding = { runId, asyncDir: `/tmp/${runId}`, sessionId: "root-stop-error" };
   const result = await broker.stopGoalOwnedRun(binding);
   assert.deepEqual(result, { state: "attention", code: "OWNED_STOP_UNAVAILABLE" });
 });

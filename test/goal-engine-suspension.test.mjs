@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSuspensionPlan, requestOwnedRunStop, inspectSuspensionCompletion } from "../scripts/lib/goal-engine/suspension.mjs";
+import { buildSuspensionPlan, requestOwnedRunStop, inspectSuspensionCompletion, deriveOwnedExecutorStopRequest } from "../scripts/lib/goal-engine/suspension.mjs";
 
-const projection = () => ({ goalId: "goal-1", runtimeState: "active", executionRevision: 2, actionOffer: { id: "offer-1", active: true }, tasks: new Map([["task-1", { attempts: 3, executorBinding: { runId: "run-1", workspaceLeaseId: "lease-1" }, status: "dispatched" }]]) });
+const projection = () => ({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", executionContractHash: "a".repeat(64), sessionId: "session-1", runtimeState: "active", executionRevision: 2, actionOffer: { id: "offer-1", active: true }, tasks: new Map([["task-1", { attempts: 3, executorBinding: { runId: "run-1", asyncDir: "/tmp/run-1", workspaceLeaseId: "lease-1" }, status: "dispatched" }]]) });
 test("interactive intent changes durably suspend, revoke offers, and block stale operations", () => {
   for (const reason of ["interactive_steer", "follow_up", "abort", "execution_amendment"]) {
     const plan = buildSuspensionPlan({ projection: projection(), reason, affectedIds: { taskIds: ["task-1"], runIds: ["run-1"] }, inventories: { workspaces: [{ taskId: "task-1", runId: "run-1", affected: true }] } });
@@ -20,6 +20,13 @@ test("suspended guards quarantine affected success and permit only explicit unaf
   assert.equal(plan.workspaceStrategies[0].resultPolicy, "quarantine");
   assert.equal(plan.workspaceStrategies[1].resultPolicy, "keep");
   assert.throws(() => plan.guard("integrate"), /suspended/);
+});
+test("reload derives an exact owned stop request from durable executor binding", () => {
+  const reloaded = structuredClone({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", executionRevision: 2, executionContractHash: "a".repeat(64), sessionId: "session-1", tasks: [["task-1", { attempts: 3, status: "dispatched", executorBinding: { runId: "run-1", asyncDir: "/tmp/run-1", workspaceLeaseId: "lease-1" } }]] });
+  reloaded.tasks = new Map(reloaded.tasks);
+  const request = deriveOwnedExecutorStopRequest({ projection: reloaded, taskId: "task-1" });
+  assert.deepEqual(Object.keys(request).sort(), ["asyncDir", "attempt", "contractHash", "executionRevision", "goalId", "leaseId", "runId", "sessionId", "taskId"].sort());
+  assert.throws(() => deriveOwnedExecutorStopRequest({ projection: { ...reloaded, executionRevision: 0 }, taskId: "task-1" }), /identity/);
 });
 test("owned stop requires every immutable identity and official terminal proof", async () => {
   const calls = []; const pi = { stopOwnedRun: async (request) => { calls.push(request); return { state: "observed", proof: { id: "proof-1" } }; } };
