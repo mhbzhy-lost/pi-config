@@ -66,6 +66,7 @@ export function createProjection() {
     readiness: null,
     runtimeReadinessReasons: [],
     runtimeBaseHead: null,
+    runtimeApproval: null,
     runtimeState: null,
     progressLedger: [],
     writePolicy: null,
@@ -263,6 +264,7 @@ function copyProjection(p) {
     taskMutationSequences: new Map([...p.taskMutationSequences || []]),
     finalReview: p.finalReview ? structuredClone(p.finalReview) : null,
     runtimeReadinessReasons: [...(p.runtimeReadinessReasons || [])],
+    runtimeApproval: p.runtimeApproval ? structuredClone(p.runtimeApproval) : null,
     progressLedger: structuredClone(p.progressLedger || []),
   };
 }
@@ -292,7 +294,7 @@ function runtimeDrafted(p, event) {
   for (const definition of contract.execution.conditions) p.conditions.set(definition.id, { definition: structuredClone(definition), conditionHash: hashCanonical(definition), status: "inactive", supportingEvidenceIds: [], lastObservationRunId: null, invalidationReason: null });
 }
 function runtimeReadinessRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["readiness", "reasons"], "runtime readiness"); if (!new Set(["ready", "needs_clarification", "environment_blocked", "unsafe_to_run"]).has(data.readiness) || !Array.isArray(data.reasons) || data.reasons.some((reason) => typeof reason !== "string")) throw new Error("invalid runtime readiness"); p.readiness = data.readiness; p.runtimeReadinessReasons = [...data.reasons]; if (data.readiness === "ready" && p.runtimeState === "draft") p.runtimeState = "awaiting_user_approval"; }
-function runtimeApprovalRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "executionContractHash", "baseHead", "sessionId", "userEntryId", "capabilityDigest"], "runtime approval"); if (p.runtimeState !== "awaiting_user_approval" || data.executionContractHash !== p.executionContractHash || data.baseHead !== p.runtimeBaseHead || !hash(data.proposalHash) || !hash(data.capabilityDigest) || !data.proposalId || !data.sessionId || !data.userEntryId) throw new Error("runtime approval is out of order"); p.pendingHumanDecision = { ...structuredClone(data), phase: "consumed" }; p.runtimeState = "calibrating"; }
+function runtimeApprovalRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "executionContractHash", "baseHead", "sessionId", "userEntryId", "capabilityDigest"], "runtime approval"); const canonicalProposalHash = hashCanonical({ goalId: p.goalId, proposalId: data.proposalId, executionContractHash: data.executionContractHash, baseHead: data.baseHead, sessionId: data.sessionId }); if (p.runtimeState !== "awaiting_user_approval" || data.executionContractHash !== p.executionContractHash || data.baseHead !== p.runtimeBaseHead || data.proposalHash !== canonicalProposalHash || !hash(data.capabilityDigest) || !data.proposalId || !data.sessionId || !data.userEntryId) throw new Error("runtime approval is out of order"); p.runtimeApproval = { ...structuredClone(data), phase: "consumed" }; p.runtimeState = "calibrating"; }
 function runtimeActivated(p) { runtimeOnly(p); if (p.runtimeState !== "calibrating") throw new Error("runtime activation is out of order"); for (const [conditionId, condition] of p.conditions) { const candidates = p.evidenceHistory.filter((value) => { const run = p.observationRuns.get(value.run?.runId); return run?.conditionId === conditionId && run.cycle === 0 && ["recorded", "released"].includes(run.phase) && value.executionRevision === p.executionRevision; }); const evidence = candidates.sort((a, b) => b.sequence - a.sequence)[0]; if (!evidence || !["passed", "failed"].includes(evidence.verdict?.kind)) throw new Error("runtime activation requires decidable cycle zero calibration"); condition.status = "inactive"; condition.supportingEvidenceIds = []; } p.runtimeState = "active"; }
 function runtimeSuspended(p, data) { runtimeOnly(p); if (!data.suspensionId || !data.reason) throw new Error("invalid runtime suspension"); p.suspension = structuredClone(data); p.runtimeState = "suspended"; }
 function runtimeResumed(p) { runtimeOnly(p); if (p.runtimeState !== "suspended") throw new Error("runtime is not suspended"); p.suspension = null; p.runtimeState = "active"; }

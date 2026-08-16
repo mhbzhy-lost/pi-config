@@ -602,7 +602,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       const data = entry.data;
       if (entry.customType?.startsWith("goal-engine-runtime-approval-") && data?.id) {
         const current = runtimeChallenges.get(data.id) || {};
-        runtimeChallenges.set(data.id, { ...current, ...(entry.customType.endsWith("challenge") ? { challenge: data } : {}), ...(entry.customType.endsWith("decision") ? { decision: data } : {}), ...(entry.customType.endsWith("consumed") ? { consumed: true } : {}) });
+        runtimeChallenges.set(data.id, { ...current, ...(entry.customType.endsWith("challenge") ? { challenge: data } : {}), ...(entry.customType.endsWith("decision") ? { decision: { ...data, id: data.receiptId, challengeId: data.id } } : {}), ...(entry.customType.endsWith("consumed") ? { consumed: true } : {}) });
       }
       if (entry.customType?.startsWith("goal-engine-metadata-")) {
         if (!data?.id) continue;
@@ -954,12 +954,12 @@ export function createGoalEngineExtension(pi, options = {}) {
         projection = appendEventFn(root, makeEvent("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: !previous || previous.canonicalFingerprint !== fingerprint, sequence: (projection.progressLedger?.length || 0) + 1 }, goalId, "goal-runtime.v1"), projection.version);
         if (projection.runtimeState === "awaiting_user_approval") {
           let record = [...runtimeChallenges.values()].filter((item) => item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && !item.consumed).at(-1);
-          if (!record) { const challenge = createRuntimeActivationChallenge({ goalId, contractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, proposalId: crypto.randomUUID() }); persistMetadata("goal-engine-runtime-approval-challenge", challenge); record = { challenge }; runtimeChallenges.set(challenge.id, record); }
-          if (record.decision?.choice === "approve" && record.decision.contractHash === projection.executionContractHash && record.decision.baseHead === projection.runtimeBaseHead && world.repo.head === projection.runtimeBaseHead) {
+          if (!record) { const baseChallenge = createRuntimeActivationChallenge({ goalId, contractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, proposalId: crypto.randomUUID() }); const challenge = { ...baseChallenge, executionContractHash: projection.executionContractHash, proposalHash: stableHash({ goalId, proposalId: baseChallenge.proposalId, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId }) }; persistMetadata("goal-engine-runtime-approval-challenge", challenge); record = { challenge }; runtimeChallenges.set(challenge.id, record); }
+          if (record.decision?.choice === "approve" && record.decision.contractHash === projection.executionContractHash && record.decision.proposalHash === record.challenge.proposalHash && record.decision.baseHead === projection.runtimeBaseHead && world.repo.head === projection.runtimeBaseHead) {
             const capabilityDigest = createHash("sha256").update(crypto.randomUUID()).digest("hex");
-            projection = appendEventFn(root, makeEvent("goal.runtime_approval_recorded", { proposalId: record.challenge.proposalId, proposalHash: createHash("sha256").update(record.challenge.proposalId).digest("hex"), executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, userEntryId: record.decision.userEntryId, capabilityDigest }, goalId, "goal-runtime.v1"), projection.version);
+            try { projection = appendEventFn(root, makeEvent("goal.runtime_approval_recorded", { proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, userEntryId: record.decision.userEntryId, capabilityDigest }, goalId, "goal-runtime.v1"), projection.version); } catch (error) { const recovered = loadProjectionFn(root, goalId); if (recovered?.runtimeState !== "calibrating" || recovered?.runtimeApproval?.proposalHash !== record.challenge.proposalHash) throw error; projection = recovered; }
             persistMetadata("goal-engine-runtime-approval-consumed", { id: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, consumed: true });
-          } else return JSON.stringify({ goalId, proposalId: record.challenge.proposalId, proposalHash: createHash("sha256").update(record.challenge.proposalId).digest("hex"), executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, session: sessionId, choices: record.challenge.choices });
+          } else return JSON.stringify({ goalId, proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, session: sessionId, choices: record.challenge.choices });
         }
         const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions: {}, observationInventory: {} });
         return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
@@ -2077,6 +2077,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         const decision = { id: crypto.randomUUID(), ...receipt };
         persistMetadata("goal-engine-orphan-disposition-decision", { challenge_id: orphan.challenge.id, receipt_id: decision.id, choice: decision.choice, sessionId: decision.sessionId, source: decision.source, user_entry_id: decision.userEntryId });
         orphanChallenges.set(orphan.challenge.id, { ...orphan, decision });
+        return { action: "continue" };
       }
     } catch { /* input for another challenge or ambiguous input never creates an orphan receipt */ }
 
@@ -2089,6 +2090,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         persistMetadata("goal-engine-session-transfer-decision", { id: record.challenge.id, ...decision });
         transferChallenges.set(record.challenge.id, { ...record, decision, ...(decision.choice === "reject" ? { rejected: true } : {}) });
         if (decision.choice === "reject") persistMetadata("goal-engine-session-transfer-rejected", { challenge_id: record.challenge.id });
+        return { action: "continue" };
       }
     } catch { /* only the challenge target's exact real-user input is durable */ }
 
@@ -2097,8 +2099,9 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (record) {
         const occurredAt = new Date(Math.max(Date.now(), Date.parse(record.challenge.requestedAt) + 1)).toISOString();
         const choice = recordHumanChoice({ inputEvent: { role: "user", source: event.source, sessionId: hookSessionId, occurredAt, text: event.text, id: event.entryId || crypto.randomUUID() }, challenge: record.challenge, sessionId: hookSessionId });
-        const decision = { id: crypto.randomUUID(), ...choice };
-        persistMetadata("goal-engine-runtime-approval-decision", { id: record.challenge.id, ...decision }); runtimeChallenges.set(record.challenge.id, { ...record, decision });
+        const decision = { id: crypto.randomUUID(), ...choice, proposalHash: record.challenge.proposalHash };
+        persistMetadata("goal-engine-runtime-approval-decision", { ...decision, id: record.challenge.id, receiptId: decision.id, challengeId: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, decision });
+        return { action: "continue" };
       }
     } catch { /* only exact interactive/rpc challenge input can approve runtime */ }
 
@@ -2118,6 +2121,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           try { persistMetadata("goal-engine-metadata-rejected", { id: record.challenge.id }); } catch { /* durable decision receipt is terminal audit authority */ }
           metadataChallenges.set(record.challenge.id, { ...metadataChallenges.get(record.challenge.id), rejected: true });
         }
+        return { action: "continue" };
       }
     } catch { /* input for another challenge or ambiguous input never creates a metadata receipt */ }
     return { action: "continue" };
