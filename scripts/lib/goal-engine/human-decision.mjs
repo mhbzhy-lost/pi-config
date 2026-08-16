@@ -54,6 +54,10 @@ export function recordHumanChoice({ inputEvent, challenge, sessionId } = {}) {
     for (const field of ["goalId", "contractHash", "baseHead", "proposalId"]) requiredString(challenge[field], `challenge.${field}`);
     if (!/^[a-f0-9]{64}$/.test(challenge.contractHash)) fail("valid challenge.contractHash is required");
     if (!/^[a-f0-9]{40,64}$/.test(challenge.baseHead)) fail("valid challenge.baseHead is required");
+  } else if (kind === "execution_amendment_approval") {
+    for (const field of ["goalId", "executionRevision", "proposalId", "proposalHash"]) requiredString(String(challenge[field] ?? ""), `challenge.${field}`);
+    if (!Number.isSafeInteger(challenge.executionRevision) || challenge.executionRevision < 1) fail("challenge.executionRevision is invalid");
+    if (!/^[a-f0-9]{64}$/.test(challenge.proposalHash)) fail("valid challenge.proposalHash is required");
   } else if (kind === "session_transfer_approval") {
     if (!new Set(["批准", "approve", "拒绝", "reject"]).has(requiredString(inputEvent.text, "inputEvent.text").toLocaleLowerCase("en-US"))) fail("user input must exactly match one allowed choice");
   } else if (kind !== "orphan_disposition") {
@@ -67,6 +71,9 @@ export function recordHumanChoice({ inputEvent, challenge, sessionId } = {}) {
     ...(kind === "goal_metadata_approval" ? { proposalHash: challenge.proposalHash } : {}),
     ...(kind === "runtime_activation_approval" ? {
       goalId: challenge.goalId, contractHash: challenge.contractHash, baseHead: challenge.baseHead, proposalId: challenge.proposalId,
+    } : {}),
+    ...(kind === "execution_amendment_approval" ? {
+      goalId: challenge.goalId, executionRevision: challenge.executionRevision, proposalId: challenge.proposalId, proposalHash: challenge.proposalHash,
     } : {}),
     userEntryId: requiredString(inputEvent.id, "inputEvent.id"),
     sessionId: boundSessionId,
@@ -86,6 +93,21 @@ export function createRuntimeActivationChallenge({ goalId, contractHash, baseHea
     id: randomUUID(), kind: "runtime_activation_approval", choices: ["approve", "reject"], requestedAt: new Date().toISOString(),
     goalId: normalizedGoalId, contractHash: normalizedContractHash, baseHead: normalizedBaseHead, sessionId: normalizedSessionId, proposalId: normalizedProposalId,
   });
+}
+
+export function createExecutionAmendmentChallenge({ projection, proposal } = {}) {
+  if (!projection || !proposal) fail("projection and proposal are required");
+  const goalId = requiredString(projection.goalId, "projection.goalId"); const sessionId = requiredString(projection.sessionId, "projection.sessionId");
+  if (!Number.isSafeInteger(projection.executionRevision) || projection.executionRevision < 1) fail("projection.executionRevision is invalid");
+  if (proposal.goalId !== goalId || proposal.revision !== projection.executionRevision || proposal.sessionId !== sessionId || !/^[a-f0-9]{64}$/.test(proposal.proposalHash || "")) fail("proposal is not bound to projection");
+  return Object.freeze({ id: randomUUID(), kind: "execution_amendment_approval", choices: ["approve", "reject"], requestedAt: new Date().toISOString(), goalId, executionRevision: projection.executionRevision, proposalId: requiredString(proposal.proposalId, "proposal.proposalId"), proposalHash: proposal.proposalHash, sessionId });
+}
+
+export function issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce, consumedNonces = new Set() } = {}) {
+  if (!challenge || challenge.kind !== "execution_amendment_approval" || !decision || decision.choice !== "approve" || !REAL_USER_SOURCES.has(decision.source)) fail("interactive approved amendment decision is required");
+  if (!projection || !proposal || challenge.goalId !== projection.goalId || challenge.executionRevision !== projection.executionRevision || challenge.sessionId !== projection.sessionId || proposal.proposalId !== challenge.proposalId || proposal.proposalHash !== challenge.proposalHash || decision.goalId !== challenge.goalId || decision.executionRevision !== challenge.executionRevision || decision.proposalId !== challenge.proposalId || decision.proposalHash !== challenge.proposalHash || decision.sessionId !== challenge.sessionId) fail("amendment approval binding mismatch");
+  const normalizedNonce = requiredString(nonce, "nonce"); if (!(consumedNonces instanceof Set)) fail("consumedNonces must be a Set"); if (consumedNonces.has(normalizedNonce)) fail("capability already consumed"); consumedNonces.add(normalizedNonce);
+  return Object.freeze({ prefix: "goal-user-capability.v1", goalId: challenge.goalId, executionRevision: challenge.executionRevision, proposalId: challenge.proposalId, proposalHash: challenge.proposalHash, sessionId: challenge.sessionId, userEntryId: decision.userEntryId, nonce: normalizedNonce, singleUse: true });
 }
 
 export function hashGoalMetadataProposal({ objective, scope, nonGoals, dod } = {}) {

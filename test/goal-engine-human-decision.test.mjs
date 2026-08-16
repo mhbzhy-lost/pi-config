@@ -4,6 +4,8 @@ import {
   createRuntimeActivationChallenge,
   hashGoalMetadataProposal,
   recordHumanChoice,
+  createExecutionAmendmentChallenge,
+  issueUserExecutionCapability,
 } from "../scripts/lib/goal-engine/human-decision.mjs";
 
 function challenge(overrides = {}) {
@@ -76,6 +78,16 @@ test("runtime activation approval is bound to its post-challenge interactive or 
   assert.throws(() => recordHumanChoice({ inputEvent: inputEvent({ occurredAt: activation.requestedAt }), challenge: activation, sessionId: "session-1" }), /after/);
   assert.throws(() => recordHumanChoice({ inputEvent: inputEvent({ sessionId: "other" }), challenge: activation, sessionId: "session-1" }), /session/);
   assert.throws(() => recordHumanChoice({ inputEvent: inputEvent({ source: "extension" }), challenge: activation, sessionId: "session-1" }), /interactive|rpc/);
+});
+
+test("execution amendment capability is challenge-bound and single-use", () => {
+  const projection = { goalId: "goal-1", executionRevision: 2, sessionId: "session-1" };
+  const proposal = { proposalId: "proposal-1", proposalHash: "a".repeat(64), goalId: "goal-1", revision: 2, sessionId: "session-1" };
+  const challenge = createExecutionAmendmentChallenge({ projection, proposal });
+  const decision = recordHumanChoice({ inputEvent: inputEvent({ text: "approve", occurredAt: new Date(Date.parse(challenge.requestedAt) + 1).toISOString() }), challenge, sessionId: "session-1" });
+  const used = new Set(); const capability = issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce: "nonce-1", consumedNonces: used });
+  assert.equal(capability.prefix, "goal-user-capability.v1"); assert.throws(() => issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce: "nonce-1", consumedNonces: used }), /consumed/);
+  assert.throws(() => issueUserExecutionCapability({ challenge, decision: { ...decision, source: "extension" }, projection, proposal, nonce: "n2" }), /interactive|rpc/);
 });
 
 test("hashes normalized goal metadata deterministically and preserves semantic array order", () => {

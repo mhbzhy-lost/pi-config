@@ -32,6 +32,7 @@ type OwnedRun = {
   identityState: "verified" | "unavailable" | "conflict";
 };
 type StartedFacts = Pick<OwnedRun, "runId" | "role" | "asyncDir" | "sessionId" | "pid">;
+type GoalOwnedRun = { goalId: string; taskId: string; attempt: number; runId: string; leaseId: string };
 type FacadeRun = {
   runId: string;
   asyncDir: string;
@@ -96,6 +97,7 @@ export class RootBrokerServer {
   executorGrants = new Map<string, Promise<{ callerToken: string }>>();
   ownedRuns = new Map<string, OwnedRun>();
   facadeRuns = new Map<string, FacadeRun>();
+  goalOwnedRuns = new Map<string, GoalOwnedRun>();
   terminalProofs = new Map<string, any>();
   terminalConflicts = new Set<string>();
   forcePendingRuns = new Set<string>();
@@ -212,6 +214,28 @@ export class RootBrokerServer {
       throw new Error("Facade run identity conflicts");
     }
     this.facadeRuns.set(incoming.runId, existing ?? incoming);
+  }
+
+  registerGoalOwnedRun(value: any): void {
+    if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.goalId !== "string" || !value.goalId || typeof value.taskId !== "string" || !value.taskId || !Number.isSafeInteger(value.attempt) || value.attempt < 1 || typeof value.runId !== "string" || !value.runId || typeof value.leaseId !== "string" || !value.leaseId) throw new Error("Goal owned run identity is invalid");
+    const run = this.ownedRuns.get(value.runId);
+    if (!run || run.identityState !== "verified") throw new Error("Goal owned run is not verified");
+    const incoming: GoalOwnedRun = { goalId: value.goalId, taskId: value.taskId, attempt: value.attempt, runId: value.runId, leaseId: value.leaseId };
+    const existing = this.goalOwnedRuns.get(value.runId);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(incoming)) throw new Error("Goal owned run identity conflicts");
+    this.goalOwnedRuns.set(value.runId, existing ?? Object.freeze(incoming));
+  }
+
+  async stopGoalOwnedRun(value: any) {
+    const binding = this.goalOwnedRuns.get(value?.runId); const run = this.ownedRuns.get(value?.runId);
+    if (!binding || !run || JSON.stringify(binding) !== JSON.stringify(value) || run.identityState !== "verified" || this.terminalConflicts.has(run.runId)) throw new Error("Goal owned stop identity mismatch");
+    if (!this.terminalProofs.has(run.runId)) {
+      await Promise.resolve(this.upstream.stop({ runId: run.runId, dir: run.asyncDir }));
+      await this.observeOfficialProof(run, `missing official proof for owned run ${run.runId}`);
+    }
+    const proof = this.terminalProofs.get(run.runId);
+    if (!proof || this.terminalConflicts.has(run.runId)) throw new Error("Goal owned stop official proof is unavailable");
+    return frozen({ state: "observed", proof: structuredClone(proof) });
   }
 
   observeStarted(event: any): Promise<void> {
@@ -677,6 +701,7 @@ export class RootBrokerServer {
       this.grantPaths.clear();
       this.executorGrants.clear();
       this.ownedRuns.clear();
+      this.goalOwnedRuns.clear();
       this.terminalProofs.clear();
       this.terminalConflicts.clear();
       this.forcePendingRuns.clear();

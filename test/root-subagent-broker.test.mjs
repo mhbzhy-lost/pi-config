@@ -112,6 +112,18 @@ test("Root broker grants, serves, and drains one directly owned Executor", async
   client.dispose();
 });
 
+test("Root broker stops only an exact registered Goal-owned run and returns an official proof", async (t) => {
+  const runId = "executor-goal-owned"; let broker; const calls = [];
+  broker = new RootBrokerServer({ rootSessionId: "root-goal-owned", lifecycleSessionId: "root-goal-owned", captureProcessBirthIdentity: async () => "birth", writeGrant: async () => "/tmp/no-grant", terminalTimeoutMs: 100, upstream: { async ping() { return {}; }, async stop(request) { calls.push(request); broker.observeTerminal(observedProof(runId)); }, async dispose() {} } });
+  t.after(() => broker.closeRootSession().catch(() => undefined));
+  await broker.observeStarted(startedEvent("root-goal-owned", runId));
+  const binding = { goalId: "goal-1", taskId: "task-1", attempt: 1, runId, leaseId: "lease-1" }; broker.registerGoalOwnedRun(binding);
+  const stopped = await broker.stopGoalOwnedRun(binding);
+  assert.equal(stopped.state, "observed"); assert.deepEqual(calls, [{ runId, dir: `/tmp/${runId}` }]);
+  await assert.rejects(broker.stopGoalOwnedRun({ ...binding, leaseId: "other" }), /identity/);
+  assert.throws(() => broker.registerGoalOwnedRun({ ...binding, attempt: 2 }), /conflicts/);
+});
+
 test("Root broker exposes an immutable read-only ownership and successful terminal proof snapshot", async (t) => {
   const rootSessionId = "root-proof-snapshot";
   const runId = "executor-proof";
