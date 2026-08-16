@@ -455,22 +455,29 @@ test("durable autonomous materialization reloads one Task and offers dispatch on
   for (const type of ["goal.amended", "repair.task_linked"]) assert.equal(observationEvents(cwd).filter(value => value === type).length, 1, type);
 });
 
-test("typed runtime goal_accept atomically recovers accepted remediation re-verification", async () => {
+test("typed runtime goal_accept recovers a non-final remediation Task before atomically reverifying the final Task", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] }); const condition = activeCondition(); condition.remediation.policy = "autonomous";
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateProduct(api, cwd, condition); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released"); await invoke(api, "goal_status", {});
-  let fixture = structuredClone(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime")); const [taskId, task] = [...fixture.tasks.entries()][0];
+  let fixture = structuredClone(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime")); const [taskId, task] = [...fixture.tasks.entries()][0], secondTaskId = `${taskId}-second`;
+  const secondTask = structuredClone(task); secondTask.status = "pending"; secondTask.workspace = null; fixture.tasks.set(secondTaskId, secondTask);
+  const episode = [...fixture.repairEpisodes.values()][0]; episode.remediationTaskIds.push(secondTaskId);
   task.status = "succeeded"; task.workspace = { attempt: 1, phase: "disposed", disposition: "integrated", released: true };
-  const events = []; let threw = false;
+  const events = [], batches = []; let threw = false;
   const store = {
     listGoals: () => [fixture.goalId], listGoalIds: () => [fixture.goalId], loadProjection: (_root, goalId) => goalId === fixture.goalId ? fixture : null,
     appendEvent(_root, entry, version) { assert.equal(version, fixture.version); fixture = applyEvent(fixture, entry); events.push(entry); return fixture; },
-    appendEventBatch(_root, entries, version) { assert.equal(version, fixture.version); for (const entry of entries) fixture = applyEvent(fixture, entry); events.push(...entries); if (!threw) { threw = true; throw Error("after durable accept"); } return fixture; },
+    appendEventBatch(_root, entries, version) { assert.equal(version, fixture.version); for (const entry of entries) fixture = applyEvent(fixture, entry); events.push(...entries); batches.push(entries); if (!threw) { threw = true; throw Error("after durable accept"); } return fixture; },
   };
   const accepting = pi(cwd); accepting.cwd = cwd; createGoalEngineExtension(accepting, { goalStateEnv: {}, enforceActionTokens: false, store });
-  const accepted = JSON.parse(await invoke(accepting, "goal_accept", { goal_id: fixture.goalId, task_id: taskId, action_token: "schema-required" }));
-  assert.equal(accepted.goal_complete, false); assert.equal(fixture.lifecycle, "active"); assert.equal(fixture.tasks.get(taskId).status, "accepted");
-  const episode = [...fixture.repairEpisodes.values()][0]; assert.equal(episode.status, "reverifying"); assert.equal(fixture.findings.get(episode.findingIds[0]).status, "reverification");
-  assert.deepEqual(events.map(entry => entry.type), ["task.accepted", "repair.reverification_requested"]); assert.equal(events.some(entry => entry.type === "goal.completed"), false);
+  const firstAccepted = JSON.parse(await invoke(accepting, "goal_accept", { goal_id: fixture.goalId, task_id: taskId, action_token: "schema-required" }));
+  assert.equal(firstAccepted.goal_complete, false); assert.equal(fixture.tasks.get(taskId).status, "accepted"); assert.equal(episode.status, "waiting_for_tasks"); assert.equal(fixture.findings.get(episode.findingIds[0]).status, "repairing");
+  assert.deepEqual(events.map(entry => entry.type), ["task.accepted"]); assert.deepEqual(batches[0].map(entry => entry.type), ["task.accepted"]);
+
+  const finalTask = fixture.tasks.get(secondTaskId); finalTask.status = "succeeded"; finalTask.workspace = { attempt: 1, phase: "disposed", disposition: "integrated", released: true };
+  const finalAccepted = JSON.parse(await invoke(accepting, "goal_accept", { goal_id: fixture.goalId, task_id: secondTaskId, action_token: "schema-required" }));
+  assert.equal(finalAccepted.goal_complete, false); assert.equal(fixture.lifecycle, "active"); assert.equal(finalTask.status, "accepted");
+  assert.equal(episode.status, "reverifying"); assert.equal(fixture.findings.get(episode.findingIds[0]).status, "reverification");
+  assert.deepEqual(batches[1].map(entry => entry.type), ["task.accepted", "repair.reverification_requested"]); assert.equal(events.some(entry => entry.type === "goal.completed"), false);
 });
 
 test("selected user-approved repair requires approval without creating a Task or action offer", async () => {

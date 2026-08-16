@@ -61,6 +61,14 @@ Cycle 1 autonomous Condition 的产品观察为 FAIL 后，原子 Finding/Episod
 
 Extension 必须只根据已提交 Condition 的 id、statement、expected 和 remediation.allowed_paths 确定性构造 criteria-only TDD Task，并交给 `validateRemediationTask` 生成 Host-internal metadata 与同批 `goal.amended`/`repair.task_linked`。user-approved 本切片闭锁为 `R10A3_REPAIR_APPROVAL_REQUIRED`。R9 的 waiting episode 仅作 blocker，runtime status 将真实 `taskActionState` Map 传入 frontier，并对选中的 root Task action 签发一次性 offer。runtime generation 的 accept 仅追加 `task.accepted`；最后 owned task 使用同一 batch 追加 `repair.reverification_requested`，永不完成 Goal。
 
+## 非末修复任务 durable accept 恢复边界
+
+### 复现
+同一 waiting Episode 含两个 remediation Task 时，第一个 Task 的 `task.accepted` 已由 Store durable 写入后抛错。`goal_accept` 把所有仍 waiting 且包含当前 Task 的 Episode 列入 `reverifyingEpisodes`；durable 恢复即使本次 transition 为空，仍要求该 Episode 已是 `reverifying`，于是第一个 Task 已 accepted 却误报失败。
+
+### 修复方案
+按每个 Episode 的实际 transition plan 建立恢复证明：只有本次确实计划并追加 `repair.reverification_requested` 的 Episode 才要求 durable reload 后为 `reverifying`。transition 为空的非末 Task 仅证明自身已 accepted；最后 Task 仍须在同一 canonical batch 中同时证明 accepted 与 reverifying。
+
 ## Cycle 0 未接线
 
 ### 复现
