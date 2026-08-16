@@ -37,6 +37,14 @@ function active({ calibrationVerdict = { kind: "passed" }, productVerdict = { ki
 function appendAll(root, p, entries) { for (const entry of entries) p = appendEvent(root, entry, p.version); return p; }
 function world() { return { safe: true, repo: { root: "/repo", head: "a".repeat(40), trackedDirty: [], untracked: [], sequencer: null }, adapters: [{ ref: "oracle", version: "1" }], environments: [{ ref: "local", fingerprint: "environment-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "fixture-1", available: true }], resources: [], activeRuns: [] }; }
 
+test("runtime checkpoint reducer rejects non-exact, non-monotonic, and dishonest progress records", () => {
+  const p = active(); const fingerprint = hash(700);
+  const first = applyEvent(p, event("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: true, sequence: 1 }, 15));
+  assert.throws(() => applyEvent(first, event("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: true, sequence: 3 }, 16)), /checkpoint/i);
+  assert.throws(() => applyEvent(first, event("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: true, sequence: 2 }, 16)), /advanced/i);
+  assert.throws(() => applyEvent(first, event("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: false, sequence: 2, extra: true }, 16)), /exact|checkpoint/i);
+});
+
 test("runtime approval is canonically bound and remains separate from amendment decisions", () => {
   const p = applyEvent(draft(), event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 2)); const data = { proposalId: "proposal", executionContractHash: p.executionContractHash, baseHead: p.runtimeBaseHead, sessionId: "session", userEntryId: "entry", capabilityDigest: hash(2) };
   assert.throws(() => applyEvent(p, event("goal.runtime_approval_recorded", { ...data, proposalHash: hash(1) }, 3)), /approval|canonical/i);
