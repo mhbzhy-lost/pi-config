@@ -82,10 +82,11 @@ export function validateRemediationTask({ projection, episodeId, findingIds, tas
 }
 function amendmentEvent(taskId, taskDef) { return event("goal.amended", { addTasks: { [taskId]: taskDef }, removeTasks: [], updateTasks: {}, reason: "Materialize canonical remediation task", hostInternalRemediation: true }); }
 function consumeEvent(c, capability, consumedAt) { return event("repair.capability_consumed", { nonceDigest: createHash("sha256").update(capability.nonce).digest("hex"), consumedAt, ...publicBinding(c) }); }
-export function createRepairChallenge({ projection, episodeId, action, sessionId, requestedAt, expiresAt, subjectHash, taskId = null, taskDefHash = null } = {}) {
+export function createRepairChallenge({ projection, episodeId, action, sessionId, requestedAt, expiresAt, subjectHash, taskId = null, taskDefHash = null, taskDef } = {}) {
   runtime(projection); const episode = projection.repairEpisodes.get(episodeId), findingIds = [...(episode?.findingIds || [])].sort(); const baseHead = projection.runtimeBaseHead;
   if (!episode || !actionAllowed(episode, action) || !ID.test(sessionId || "") || !Number.isFinite(requestedAt) || !Number.isFinite(expiresAt) || expiresAt <= requestedAt || !HASH.test(subjectHash || "") || !HASH.test(projection.executionContractHash || "") || !/^[a-f0-9]{40}$/.test(baseHead || "")) fail("invalid repair challenge");
-  if (action === "reject" ? (subjectHash !== rejectSubjectHash(projection, episode) || taskId !== null || taskDefHash !== null) : (!ID.test(taskId || "") || !HASH.test(taskDefHash || ""))) fail("repair challenge binding mismatch");
+  const candidate = action === "authorize_task" ? buildRemediationTaskCandidate({ projection, episodeId, findingIds, taskDef }) : null;
+  if (action === "reject" ? (subjectHash !== rejectSubjectHash(projection, episode) || taskId !== null || taskDefHash !== null || taskDef !== undefined) : (taskId !== candidate.taskId || taskDefHash !== candidate.taskDef.metadata.taskDefHash || subjectHash !== candidate.taskDef.metadata.subjectHash)) fail("repair challenge binding mismatch");
   const challengeId = `repair-challenge-${digest({ episodeId, action, subjectHash, requestedAt }).slice(0, 32)}`;
   const data = { challengeId, goalId: projection.goalId, executionRevision: projection.executionRevision, executionContractHash: projection.executionContractHash, baseHead, episodeId, conditionId: episode.conditionId, findingIds, action, subjectHash, taskId, taskDefHash, sessionId, requestedAt, expiresAt };
   data.challengeHash = digest(data); return Object.freeze({ challengeId, events: Object.freeze([event("repair.challenge_created", data)]) });
