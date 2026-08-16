@@ -1623,7 +1623,9 @@ export function createGoalEngineExtension(pi, options = {}) {
 
       const respond = (current, verdict = null) => JSON.stringify({
         status: "accepted", task_id: params.task_id,
-        goal_complete: current.lifecycle === "completed" || goalProgress(current).accepted === goalProgress(current).total,
+        goal_complete: generationCapabilities(current.eventSchemaVersion).completion === "goal-finalize"
+          ? false
+          : current.lifecycle === "completed" || goalProgress(current).accepted === goalProgress(current).total,
         ...(verdict ? { completion_verdict: verdict } : {}), progress: goalProgress(current),
       });
       const reloadAfterFailure = (cause, committed) => {
