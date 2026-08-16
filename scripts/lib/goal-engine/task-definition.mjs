@@ -18,9 +18,11 @@ export function validateRepoRelativePath(value, label = "writePath") {
 // Repair metadata is persisted with the internal task definition, never transported.
 export function validateRemediationMetadata(metadata, label = "taskDef metadata") {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
-    || Object.keys(metadata).length !== 3
-    || !["kind", "findingIds", "episodeId"].every((key) => Object.hasOwn(metadata, key))
+    || Object.keys(metadata).length !== 8
+    || !["kind", "goalId", "executionRevision", "episodeId", "conditionId", "findingIds", "subjectHash", "taskDefHash"].every((key) => Object.hasOwn(metadata, key))
     || metadata.kind !== "remediation"
+    || !ID.test(metadata.goalId || "") || !Number.isSafeInteger(metadata.executionRevision) || !ID.test(metadata.conditionId || "")
+    || !/^[a-f0-9]{64}$/.test(metadata.subjectHash || "") || !/^[a-f0-9]{64}$/.test(metadata.taskDefHash || "")
     || !ID.test(metadata.episodeId || "")
     || !Array.isArray(metadata.findingIds) || !metadata.findingIds.length
     || metadata.findingIds.some((id) => !ID.test(id || ""))

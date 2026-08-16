@@ -48,52 +48,41 @@ export function openRepairEpisode({ projection, findingIds } = {}) {
   return Object.freeze({ episodeId, events: Object.freeze([event("repair.episode_opened", { episodeId, conditionId, findingIds: [...findingIds] })]) });
 }
 
-export function remediationSubjectHash(projection, episode, findingIds, taskDef) {
-  return digest({ goalId: projection.goalId, executionRevision: projection.executionRevision, episodeId: episode.episodeId, conditionId: episode.conditionId, findingIds: [...findingIds].sort(), taskDef: canonical(taskDef) });
-}
+export function remediationSubjectHash(projection, episode, findingIds, taskDef) { return digest({ goalId: projection.goalId, executionRevision: projection.executionRevision, episodeId: episode.episodeId, conditionId: episode.conditionId, findingIds: [...findingIds].sort(), taskDef: canonical(taskDef) }); }
 export function rejectSubjectHash(projection, episode) { return digest({ goalId: projection.goalId, executionRevision: projection.executionRevision, episodeId: episode.episodeId, conditionId: episode.conditionId, findingIds: [...episode.findingIds].sort() }); }
-
-export function validateRemediationTask({ projection, episodeId, findingIds, taskDef, capability } = {}) {
-  runtime(projection); if (!ID.test(episodeId || "")) fail("episode id required"); ids(findingIds, "findingIds");
-  const episode = projection.repairEpisodes.get(episodeId);
-  if (!episode || episode.status !== "active" || findingIds.length !== episode.findingIds.length || findingIds.some((id) => !episode.findingIds.includes(id))) fail("finding set must exactly match active episode");
-  const state = condition(projection, episode.conditionId), remediation = state.definition.remediation;
-  const taskId = `repair-task-${episodeId}-${episode.remediationTaskIds.length + 1}`;
-  if (!ID.test(taskId) || !taskDef || typeof taskDef !== "object" || Array.isArray(taskDef) || Object.hasOwn(taskDef, "metadata")) fail("caller may not set repair metadata");
-  validateTaskDefinitions([taskId], { [taskId]: taskDef });
-  if (taskDef.workflow !== "tdd") fail("remediation task must use tdd");
-  if (!Array.isArray(projection.writePolicy?.allowedPaths) || !Array.isArray(remediation.allowed_paths) || !taskDef.writePaths.every((path) => pathCovered(path, projection.writePolicy.allowedPaths) && pathCovered(path, remediation.allowed_paths))) fail("write paths are not a provable subset of repair scope");
-  const internal = { ...structuredClone(taskDef), metadata: { kind: "remediation", findingIds: [...findingIds], episodeId } };
-  validateRemediationMetadata(internal.metadata);
-  if (remediation.policy === "user-approved") validateCapability(capability, projection, episode, "authorize_task", remediationSubjectHash(projection, episode, findingIds, internal));
-  else if (remediation.policy !== "autonomous") fail("unknown remediation policy");
-  return Object.freeze({ taskId, taskDef: Object.freeze(internal), events: Object.freeze([event("repair.task_linked", { episodeId, taskId })]) });
-}
+const publicBinding = (c) => ({ challengeId: c.challengeId, episodeId: c.episodeId, action: c.action, subjectHash: c.subjectHash, sessionId: c.sessionId, userEntryId: c.userEntryId });
 function validateCapability(capability, p, episode, action, subjectHash) {
-  if (!exact(capability, ["prefix", "challengeId", "nonce", "singleUse", "action", "subjectHash"]) || capability.prefix !== "goal-repair-capability.v1" || capability.singleUse !== true || capability.action !== action || capability.subjectHash !== subjectHash || typeof capability.nonce !== "string" || !capability.nonce) fail("durable challenge-bound capability required");
-  const challenge = p.repairChallenges?.get(capability.challengeId);
-  if (!challenge || challenge.executionRevision !== p.executionRevision || challenge.episodeId !== episode.episodeId || challenge.action !== action || challenge.subjectHash !== subjectHash || challenge.phase !== "approved" || challenge.expiresAt <= Date.now() || challenge.nonceDigest !== createHash("sha256").update(capability.nonce).digest("hex")) fail("challenge capability is not valid");
+  if (!exact(capability, ["prefix", "goalId", "executionRevision", "challengeId", "episodeId", "action", "subjectHash", "sessionId", "userEntryId", "nonce", "singleUse"]) || capability.prefix !== "goal-repair-capability.v1" || capability.goalId !== p.goalId || capability.executionRevision !== p.executionRevision || capability.episodeId !== episode?.episodeId || capability.action !== action || capability.subjectHash !== subjectHash || capability.singleUse !== true || typeof capability.nonce !== "string" || !capability.nonce) fail("durable challenge-bound capability required");
+  const c = p.repairChallenges?.get(capability.challengeId);
+  if (!c || c.phase !== "approved" || c.expiresAt <= capability.now || Object.entries(publicBinding(c)).some(([key, value]) => capability[key] !== value)) fail("challenge capability is not valid");
+  return c;
 }
-
-// Plans only.  R10 appends the resulting capability-consumed/add/link batch atomically.
-export function createRepairChallenge({ projection, episodeId, action, sessionId, requestedAt, expiresAt, subjectHash, nonce = randomBytes(32).toString("hex") } = {}) {
-  runtime(projection); const episode = projection.repairEpisodes.get(episodeId);
-  if (!episode || !["authorize_task", "reject"].includes(action) || !ID.test(sessionId || "") || !Number.isFinite(requestedAt) || !Number.isFinite(expiresAt) || expiresAt <= requestedAt || !HASH.test(subjectHash || "")) fail("invalid repair challenge");
-  if (action === "reject" && subjectHash !== rejectSubjectHash(projection, episode)) fail("reject subject mismatch");
-  const challengeId = `repair-challenge-${digest({ episodeId, action, subjectHash, requestedAt }).slice(0, 32)}`;
-  return Object.freeze({ challengeId, capability: Object.freeze({ prefix: "goal-repair-capability.v1", challengeId, nonce, singleUse: true, action, subjectHash }), events: Object.freeze([event("repair.challenge_created", { challengeId, executionRevision: projection.executionRevision, episodeId, action, subjectHash, sessionId, requestedAt, expiresAt, nonceDigest: createHash("sha256").update(nonce).digest("hex") })]) });
-}
-export function recordRepairUserDecision({ projection, challengeId, sessionId, userEntryId, approved, source } = {}) {
+export function issueRepairCapability({ projection, challengeId, now } = {}) {
   runtime(projection); const c = projection.repairChallenges?.get(challengeId);
-  if (!c || c.phase !== "created" || c.sessionId !== sessionId || c.expiresAt <= Date.now() || !ID.test(userEntryId || "") || typeof approved !== "boolean" || !["interactive", "rpc"].includes(source)) fail("invalid real user decision");
-  return Object.freeze({ events: Object.freeze([event("repair.user_decision_recorded", { challengeId, sessionId, userEntryId, approved, source })]) });
+  if (!c || c.phase !== "approved" || !Number.isFinite(now) || now >= c.expiresAt) fail("approved unexpired challenge required");
+  return Object.freeze({ prefix: "goal-repair-capability.v1", goalId: projection.goalId, executionRevision: projection.executionRevision, ...publicBinding(c), nonce: randomBytes(32).toString("hex"), singleUse: true });
 }
-export function consumeRepairCapability({ projection, capability } = {}) {
-  runtime(projection); const c = projection.repairChallenges?.get(capability?.challengeId);
-  if (!c || !exact(capability, ["prefix", "challengeId", "nonce", "singleUse", "action", "subjectHash"])) fail("invalid capability");
-  const episode = projection.repairEpisodes.get(c.episodeId); validateCapability(capability, projection, episode, c.action, c.subjectHash);
-  return Object.freeze({ events: Object.freeze([event("repair.capability_consumed", { challengeId: c.challengeId, nonceDigest: c.nonceDigest })]) });
+export function validateRemediationTask({ projection, episodeId, findingIds, taskDef, capability } = {}) {
+  runtime(projection); if (!ID.test(episodeId || "")) fail("episode id required"); ids(findingIds, "findingIds"); const episode = projection.repairEpisodes.get(episodeId);
+  if (!episode || episode.status !== "active" || findingIds.length !== episode.findingIds.length || findingIds.some((id) => !episode.findingIds.includes(id))) fail("finding set must exactly match active episode");
+  const state = condition(projection, episode.conditionId), remediation = state.definition.remediation, taskId = `repair-task-${episodeId}-${episode.remediationTaskIds.length + 1}`;
+  if (!taskDef || typeof taskDef !== "object" || Array.isArray(taskDef) || Object.hasOwn(taskDef, "metadata")) fail("caller may not set repair metadata"); validateTaskDefinitions([taskId], { [taskId]: taskDef });
+  if (taskDef.workflow !== "tdd" || !Array.isArray(projection.writePolicy?.allowedPaths) || !Array.isArray(remediation.allowed_paths) || !taskDef.writePaths.every((path) => pathCovered(path, projection.writePolicy.allowedPaths) && pathCovered(path, remediation.allowed_paths))) fail("write paths are not a provable subset of repair scope");
+  const internal = { ...structuredClone(taskDef), metadata: { kind: "remediation", goalId: projection.goalId, executionRevision: projection.executionRevision, episodeId, conditionId: episode.conditionId, findingIds: [...findingIds].sort(), subjectHash: remediationSubjectHash(projection, episode, findingIds, taskDef), taskDefHash: digest(taskDef) } };
+  if (remediation.policy === "user-approved") { const c = validateCapability(capability, projection, episode, "authorize_task", internal.metadata.subjectHash); return Object.freeze({ taskId, taskDef: Object.freeze(internal), events: Object.freeze([consumeEvent(c, capability), event("repair.task_linked", { episodeId, taskId, challengeId: c.challengeId })]) }); }
+  if (remediation.policy !== "autonomous") fail("unknown remediation policy"); return Object.freeze({ taskId, taskDef: Object.freeze(internal), events: Object.freeze([event("repair.task_linked", { episodeId, taskId, challengeId: null })]) });
 }
+function consumeEvent(c, capability) { return event("repair.capability_consumed", { nonceDigest: createHash("sha256").update(capability.nonce).digest("hex"), ...publicBinding(c) }); }
+export function createRepairChallenge({ projection, episodeId, action, sessionId, requestedAt, expiresAt, subjectHash } = {}) {
+  runtime(projection); const episode = projection.repairEpisodes.get(episodeId); if (!episode || !["authorize_task", "reject"].includes(action) || !ID.test(sessionId || "") || !Number.isFinite(requestedAt) || !Number.isFinite(expiresAt) || expiresAt <= requestedAt || !HASH.test(subjectHash || "")) fail("invalid repair challenge");
+  if (action === "reject" && subjectHash !== rejectSubjectHash(projection, episode)) fail("reject subject mismatch"); const challengeId = `repair-challenge-${digest({ episodeId, action, subjectHash, requestedAt }).slice(0, 32)}`;
+  return Object.freeze({ challengeId, events: Object.freeze([event("repair.challenge_created", { challengeId, executionRevision: projection.executionRevision, episodeId, action, subjectHash, sessionId, requestedAt, expiresAt })]) });
+}
+export function recordRepairUserDecision({ projection, challengeId, sessionId, userEntryId, approved, source, recordedAt } = {}) {
+  runtime(projection); const c = projection.repairChallenges?.get(challengeId); if (!c || c.phase !== "created" || c.sessionId !== sessionId || !Number.isFinite(recordedAt) || recordedAt < c.requestedAt || recordedAt >= c.expiresAt || !ID.test(userEntryId || "") || typeof approved !== "boolean" || !["interactive", "rpc"].includes(source)) fail("invalid real user decision");
+  return Object.freeze({ events: Object.freeze([event("repair.user_decision_recorded", { challengeId, sessionId, userEntryId, approved, source, recordedAt })]) });
+}
+export function consumeRepairCapability({ projection, capability } = {}) { runtime(projection); const c = validateCapability(capability, projection, projection.repairEpisodes.get(capability?.episodeId), capability?.action, capability?.subjectHash); return Object.freeze({ events: Object.freeze([consumeEvent(c, capability)]) }); }
 
 export function repairEpisodeTransition({ projection, episodeId, event: input, worldSnapshot, gitRunner } = {}) {
   runtime(projection); const episode = projection.repairEpisodes.get(episodeId); if (!episode || !input || typeof input.type !== "string") fail("episode and event required");
@@ -104,21 +93,21 @@ export function repairEpisodeTransition({ projection, episodeId, event: input, w
   }
   if (input.type === "condition.observation_recorded") {
     if (episode.status !== "reverifying" || input.conditionId !== episode.conditionId || !ID.test(input.runId || "") || !HASH.test(input.evidenceId || "")) fail("reobservation ledger references required");
-    const { evidence } = ledger(projection, input.runId, input.evidenceId);
-    if (!evidence || evidence.conditionId !== episode.conditionId || evidence.verdict?.kind !== "passed") return Object.freeze({ events: Object.freeze([]) });
+    const { run, evidence } = ledger(projection, input.runId, input.evidenceId); const state = condition(projection, episode.conditionId);
+    if (!run || run.phase !== "recorded" || run.conditionId !== episode.conditionId || run.evidenceId !== input.evidenceId || state.supportingEvidenceIds?.at(-1) !== input.evidenceId || !evidence || evidence.conditionId !== episode.conditionId || evidence.verdict?.kind !== "passed") return Object.freeze({ events: Object.freeze([]) });
     const freshness = evaluateConditionGraph({ projection, worldSnapshot, gitRunner }).conditions.get(episode.conditionId);
     if (freshness?.status !== "fresh") return Object.freeze({ events: Object.freeze([]) });
     return Object.freeze({ events: Object.freeze([event("repair.episode_resolved", { episodeId, conditionId: episode.conditionId, findingIds: [...episode.findingIds], oldStatus: "reverifying", newStatus: "resolved", reason: "fresh passed reobservation" })]) });
   }
   if (input.type === "repair.reject") {
-    const subjectHash = rejectSubjectHash(projection, episode); validateCapability(input.capability, projection, episode, "reject", subjectHash);
-    return Object.freeze({ events: Object.freeze([event("repair.episode_rejected_by_user", { episodeId, conditionId: episode.conditionId, findingIds: [...episode.findingIds], reasonCode: "repair_rejected" })]) });
+    const subjectHash = rejectSubjectHash(projection, episode), c = validateCapability(input.capability, projection, episode, "reject", subjectHash);
+    return Object.freeze({ events: Object.freeze([consumeEvent(c, input.capability), event("repair.episode_rejected_by_user", { episodeId, conditionId: episode.conditionId, findingIds: [...episode.findingIds], challengeId: c.challengeId, reasonCode: "repair_rejected" })]) });
   }
   if (input.type === "cancel" || input.type === "cancelled") {
     if (input.type === "cancel" && !new Set(["active", "waiting_for_tasks", "reverifying", "blocked"]).has(episode.status)) fail("episode cannot be cancelled");
     if (input.type === "cancelled" && episode.status !== "cancel_pending") fail("episode must be cancel_pending");
     validateCancellation(input.cancellation, episode, projection);
-    return Object.freeze({ events: Object.freeze([event(input.type === "cancel" ? "repair.episode_cancel_requested" : "repair.episode_cancelled", input.type === "cancel" ? { episodeId, cancellation: structuredClone(input.cancellation) } : { episodeId })]) });
+    return Object.freeze({ events: Object.freeze([event(input.type === "cancel" ? "repair.episode_cancel_requested" : "repair.episode_cancelled", { episodeId, cancellation: structuredClone(input.cancellation) })]) });
   }
   fail("unsupported repair transition");
 }
@@ -127,6 +116,8 @@ function validateCancellation(c, episode, p) {
   if (!exact(c, CANCELLATION_KEYS) || !Array.isArray(c.ownedTaskIds) || !Array.isArray(c.ownedRunIds) || !["terminalProofRefs", "workspaceClosureProofRefs", "resourceClosureProofRefs"].every((k) => Array.isArray(c[k])) || typeof c.resourceDebt !== "boolean") fail("invalid cancellation proof");
   const exactIds = (actual, expected) => ids(actual, "owned ids") && actual.length === expected.length && actual.every((id) => expected.includes(id));
   if (!exactIds(c.ownedTaskIds, episode.remediationTaskIds) || new Set(c.ownedRunIds).size !== c.ownedRunIds.length) fail("closure ownership mismatch");
-  const refs = (list, owners, field) => list.length === owners.length && list.every((ref) => exact(ref, [field, "hash", "state"]) && owners.includes(ref[field]) && HASH.test(ref.hash) && ["closed", "terminal", "released"].includes(ref.state)) && new Set(list.map((r) => r[field])).size === owners.length;
-  if (!refs(c.terminalProofRefs, c.ownedRunIds, "runId") || !refs(c.resourceClosureProofRefs, c.ownedRunIds, "runId") || !refs(c.workspaceClosureProofRefs, c.ownedTaskIds, "taskId") || c.ownedTaskIds.some((id) => !["accepted", "failed", "cancelled", "rejected"].includes(p.tasks.get(id)?.status)) || c.ownedRunIds.some((id) => !["terminal", "recorded", "released"].includes(p.observationRuns.get(id)?.phase))) fail("incomplete cancellation closure proof");
+  const terminal = c.terminalProofRefs.length === c.ownedRunIds.length && c.terminalProofRefs.every((ref) => exact(ref, ["runId", "proofHash", "phase"]) && c.ownedRunIds.includes(ref.runId) && HASH.test(ref.proofHash) && p.observationRuns.get(ref.runId)?.phase === ref.phase && ["terminal", "recorded", "released"].includes(ref.phase)) && new Set(c.terminalProofRefs.map((ref) => ref.runId)).size === c.ownedRunIds.length;
+  const workspace = c.workspaceClosureProofRefs.length === c.ownedTaskIds.length && c.workspaceClosureProofRefs.every((ref) => exact(ref, ["taskId", "proofHash", "disposition", "released"]) && c.ownedTaskIds.includes(ref.taskId) && HASH.test(ref.proofHash) && typeof ref.released === "boolean" && (p.tasks.get(ref.taskId)?.workspace ? p.tasks.get(ref.taskId).workspace.disposition === ref.disposition && p.tasks.get(ref.taskId).workspace.released === ref.released : ref.disposition === "never_started" && ref.released === true)) && new Set(c.workspaceClosureProofRefs.map((ref) => ref.taskId)).size === c.ownedTaskIds.length;
+  const resource = c.resourceClosureProofRefs.length === c.ownedRunIds.length && c.resourceClosureProofRefs.every((ref) => exact(ref, ["runId", "proofHash", "state", "debt"]) && c.ownedRunIds.includes(ref.runId) && HASH.test(ref.proofHash) && typeof ref.debt === "boolean" && ["released", "quarantined"].includes(ref.state)) && new Set(c.resourceClosureProofRefs.map((ref) => ref.runId)).size === c.ownedRunIds.length;
+  if (!terminal || !workspace || !resource || c.resourceDebt !== c.resourceClosureProofRefs.some((ref) => ref.debt || ref.state === "quarantined") || c.ownedTaskIds.some((id) => !["accepted", "failed", "cancelled", "rejected"].includes(p.tasks.get(id)?.status))) fail("incomplete cancellation closure proof");
 }

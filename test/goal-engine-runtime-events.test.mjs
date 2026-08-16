@@ -12,7 +12,7 @@ import { evaluateConditionGraph } from "../scripts/lib/goal-engine/condition-val
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
 function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); return applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1)); }
 
-function evidence(p, verdict = { kind: "failed", failureCode: "assertion", findingFingerprint: "f".repeat(64) }) {
+function evidence(p, verdict = { kind: "passed" }) {
   return { executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, head: "a".repeat(40), adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: "environment-1" }, fixtures: [{ ref: "sample", fingerprint: "fixture-1" }], artifact: { id: "artifact-1", hash: "9".repeat(64) }, verdict };
 }
 function observed(p, verdict) {
@@ -34,10 +34,11 @@ test("runtime draft preserves contract state and observation identity", () => {
 });
 
 test("runtime FSM accepts only exact ordered observation, finding, repair, amendment and review events", () => {
-  let p = observed(draft());
+  let p = observed(draft(), { kind: "failed", failureCode: "assertion", findingFingerprint: "f".repeat(64) }); p.conditions.get("condition-1").definition.remediation.policy = "autonomous";
   p = applyEvent(p, event("finding.recorded", { findingId: "finding-1", conditionId: "condition-1", runId: "run-1", evidenceId: "8".repeat(64), fingerprint: "f".repeat(64) }, 7));
   p = applyEvent(p, event("repair.episode_opened", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"] }, 8));
-  p = applyEvent(p, event("repair.task_linked", { episodeId: "episode-1", taskId: "task-1" }, 9));
+  p.tasks.get("task-1").status = "accepted"; p.tasks.get("task-1").metadata = { kind: "remediation", goalId: p.goalId, executionRevision: p.executionRevision, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], subjectHash: "a".repeat(64), taskDefHash: "b".repeat(64) };
+  p = applyEvent(p, event("repair.task_linked", { episodeId: "episode-1", taskId: "task-1", challengeId: null }, 9));
   p = applyEvent(p, event("repair.reverification_requested", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: ["task-1"], oldStatus: "waiting_for_tasks", newStatus: "reverifying", reason: "accepted repair" }, 10));
   assert.equal(p.repairEpisodes.get("episode-1").status, "reverifying");
   p = applyEvent(p, event("repair.episode_resolved", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], oldStatus: "reverifying", newStatus: "resolved", reason: "fresh evidence" }, 11));

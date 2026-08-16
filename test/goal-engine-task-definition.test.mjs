@@ -3,7 +3,7 @@ import test from "node:test";
 import { validateRemediationMetadata, validateTaskDefinitions } from "../scripts/lib/goal-engine/task-definition.mjs";
 
 test("remediation metadata is exact internal provenance", () => {
-  const metadata = { kind: "remediation", findingIds: ["finding-1"], episodeId: "episode-1" };
+  const metadata = { kind: "remediation", goalId: "goal-1", executionRevision: 1, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], subjectHash: "a".repeat(64), taskDefHash: "b".repeat(64) };
   assert.doesNotThrow(() => validateRemediationMetadata(metadata));
   for (const value of [{ ...metadata, callerText: "bypass" }, { ...metadata, kind: "ordinary" }, { ...metadata, findingIds: [] }]) assert.throws(() => validateRemediationMetadata(value), /exact remediation/i);
   const def = { description: "修复", deps: [], writePaths: ["src/fix.mjs"], acceptance: { criteria: ["通过"], commands: ["node --test"] }, workflow: "tdd", metadata };
