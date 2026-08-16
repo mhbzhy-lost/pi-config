@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { normalizeConditionEvidence, deriveObservationVerdict, materializeConditionEvidence } from "../scripts/lib/goal-engine/condition-evidence.mjs";
+const hash = "a".repeat(64);
+const identity = { goalId: "g", conditionId: "c", executionRevision: 1, executionContractHash: hash, conditionHash: hash, head: "b".repeat(40), adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: "e" }, fixtures: [{ ref: "sample", fingerprint: "f" }], runId: "r", terminalProofHash: hash, artifact: { id: "artifact", hash } };
+const input = { ...identity, artifact: { id: "artifact", hash, classifier: { code: "PASS" } } };
+test("evidence exact-shape binds identity and Host derives verdict", () => { const evidence = normalizeConditionEvidence(input, identity); assert.equal(deriveObservationVerdict(evidence).kind, "passed"); assert.throws(() => normalizeConditionEvidence({ ...input, verdict: "passed" }, identity), /exactly|unknown/i); assert.throws(() => normalizeConditionEvidence({ ...input, finding: "text" }, identity), /exactly|unknown/i); });
+test("evidence materialization is 0600 CAS", () => { const stateRoot = mkdtempSync(`${tmpdir()}/evidence-`); const evidence = normalizeConditionEvidence(input, identity); const receipt = materializeConditionEvidence({ stateRoot, evidence }); assert.equal(statSync(receipt.path).mode & 0o777, 0o600); assert.equal(readFileSync(receipt.path, "utf8").includes("PASS"), true); assert.deepEqual(materializeConditionEvidence({ stateRoot, evidence }), receipt); });
