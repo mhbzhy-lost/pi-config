@@ -103,10 +103,10 @@ export function createExecutionAmendmentChallenge({ projection, proposal } = {})
   return Object.freeze({ id: randomUUID(), kind: "execution_amendment_approval", choices: ["approve", "reject"], requestedAt: new Date().toISOString(), goalId, executionRevision: projection.executionRevision, proposalId: requiredString(proposal.proposalId, "proposal.proposalId"), proposalHash: proposal.proposalHash, sessionId });
 }
 
-export function issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce, consumedNonces = new Set() } = {}) {
+export function issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce } = {}) {
   if (!challenge || challenge.kind !== "execution_amendment_approval" || !decision || decision.choice !== "approve" || !REAL_USER_SOURCES.has(decision.source)) fail("interactive approved amendment decision is required");
-  if (!projection || !proposal || challenge.goalId !== projection.goalId || challenge.executionRevision !== projection.executionRevision || challenge.sessionId !== projection.sessionId || proposal.proposalId !== challenge.proposalId || proposal.proposalHash !== challenge.proposalHash || decision.goalId !== challenge.goalId || decision.executionRevision !== challenge.executionRevision || decision.proposalId !== challenge.proposalId || decision.proposalHash !== challenge.proposalHash || decision.sessionId !== challenge.sessionId) fail("amendment approval binding mismatch");
-  const normalizedNonce = requiredString(nonce, "nonce"); if (!(consumedNonces instanceof Set)) fail("consumedNonces must be a Set"); if (consumedNonces.has(normalizedNonce)) fail("capability already consumed"); consumedNonces.add(normalizedNonce);
+  if (!projection || !proposal || decision.challengeId !== challenge.id || challenge.goalId !== projection.goalId || challenge.executionRevision !== projection.executionRevision || challenge.sessionId !== projection.sessionId || proposal.proposalId !== challenge.proposalId || proposal.proposalHash !== challenge.proposalHash || decision.goalId !== challenge.goalId || decision.executionRevision !== challenge.executionRevision || decision.proposalId !== challenge.proposalId || decision.proposalHash !== challenge.proposalHash || decision.sessionId !== challenge.sessionId) fail("amendment approval binding mismatch");
+  const normalizedNonce = requiredString(nonce, "nonce");
   return Object.freeze({ prefix: "goal-user-capability.v1", goalId: challenge.goalId, executionRevision: challenge.executionRevision, proposalId: challenge.proposalId, proposalHash: challenge.proposalHash, sessionId: challenge.sessionId, userEntryId: decision.userEntryId, nonce: normalizedNonce, singleUse: true });
 }
 

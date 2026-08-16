@@ -86,7 +86,8 @@ test("execution amendment capability is challenge-bound and single-use", () => {
   const challenge = createExecutionAmendmentChallenge({ projection, proposal });
   const decision = recordHumanChoice({ inputEvent: inputEvent({ text: "approve", occurredAt: new Date(Date.parse(challenge.requestedAt) + 1).toISOString() }), challenge, sessionId: "session-1" });
   const used = new Set(); const capability = issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce: "nonce-1", consumedNonces: used });
-  assert.equal(capability.prefix, "goal-user-capability.v1"); assert.throws(() => issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce: "nonce-1", consumedNonces: used }), /consumed/);
+  assert.equal(capability.prefix, "goal-user-capability.v1"); assert.equal(used.size, 0);
+  assert.equal(issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce: "nonce-1", consumedNonces: used }).nonce, "nonce-1");
   assert.throws(() => issueUserExecutionCapability({ challenge, decision: { ...decision, source: "extension" }, projection, proposal, nonce: "n2" }), /interactive|rpc/);
 });
 

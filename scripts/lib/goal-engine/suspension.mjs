@@ -4,15 +4,25 @@ const REASONS = new Set(["interactive_steer", "follow_up", "abort", "execution_a
 const BLOCKED = Object.freeze(["dispatch", "integrate", "finalize"]);
 const string = (value, name) => { if (typeof value !== "string" || !value) throw new Error(`${name} is required`); return value; };
 
+export function suspensionGuard(projection, operation) {
+  if (projection?.runtimeState === "suspended" || projection?.suspension) {
+    if (BLOCKED.includes(operation)) throw new Error(`runtime is suspended: ${operation} is blocked`);
+  }
+  return true;
+}
+
 export function buildSuspensionPlan({ projection, reason, affectedIds = {}, inventories = {} } = {}) {
   if (!projection?.goalId) throw new Error("runtime projection is required");
   if (!REASONS.has(reason)) throw new Error("invalid suspension reason");
   const taskIds = [...new Set(affectedIds.taskIds || [])]; const runIds = [...new Set(affectedIds.runIds || [])];
-  const strategies = (inventories.workspaces || []).map((workspace) => ({ taskId: workspace.taskId, runId: workspace.runId ?? null, action: workspace.affected ? "quarantine" : workspace.policy === "keep" ? "preserve" : "quarantine", execute: false }));
-  return Object.freeze({ suspensionId: randomUUID(), blocked: BLOCKED, workspaceStrategies: strategies, events: [
-    { type: "goal.runtime_suspended", data: { suspensionId: randomUUID(), reason, affectedTaskIds: taskIds, affectedRunIds: runIds, requestedAt: new Date().toISOString(), resourcesQuarantined: false } },
-    { type: "goal.action_offer_revoked", data: { offerId: projection.actionOffer?.id ?? null, reason: "runtime_suspended" } },
-  ] });
+  const suspensionId = randomUUID();
+  const workspaceStrategies = (inventories.workspaces || []).map((workspace) => {
+    const affected = workspace.affected === true || taskIds.includes(workspace.taskId) || runIds.includes(workspace.runId);
+    return Object.freeze({ taskId: workspace.taskId, runId: workspace.runId ?? null, action: affected ? "quarantine" : workspace.policy === "keep" ? "preserve" : "quarantine", resultPolicy: affected ? "quarantine" : workspace.policy === "keep" ? "keep" : "quarantine", execute: false });
+  });
+  const events = [{ type: "goal.runtime_suspended", data: { suspensionId, reason, affectedTaskIds: taskIds, affectedRunIds: runIds, requestedAt: new Date().toISOString(), resourcesQuarantined: false } }];
+  if (projection.actionOffer?.active === true && typeof projection.actionOffer.id === "string") events.push({ type: "goal.action_offer_revoked", data: { offerId: projection.actionOffer.id, reason: "runtime_suspended" } });
+  return Object.freeze({ suspensionId, blocked: BLOCKED, guard: (operation) => suspensionGuard({ runtimeState: "suspended" }, operation), workspaceStrategies, events: Object.freeze(events) });
 }
 
 export async function requestOwnedRunStop(pi, request = {}) {
@@ -25,12 +35,12 @@ export async function requestOwnedRunStop(pi, request = {}) {
     const response = await pi.stopOwnedRun({ goalId: string(goalId, "goalId"), taskId: string(taskId, "taskId"), attempt, runId: string(runId, "runId"), leaseId: string(leaseId, "leaseId") });
     if (response?.state !== "observed" || !response.proof) return Object.freeze({ terminal: false, attention: true, reason: "official_terminal_proof_missing" });
     return Object.freeze({ terminal: true, attention: false, proof: response.proof });
-  } catch (error) { return Object.freeze({ terminal: false, attention: true, reason: `stop_failed:${error.message}` }); }
+  } catch { return Object.freeze({ terminal: false, attention: true, reason: "owned_stop_unavailable" }); }
 }
 
-export function inspectSuspensionCompletion({ projection, stopProofs = [], workspaceInventories = [] } = {}) {
+export function inspectSuspensionCompletion({ projection, stopProofs = [], workspaceInventories = [], resourceProofs = [] } = {}) {
   const affected = projection?.tasks ? [...projection.tasks.entries()].filter(([, task]) => task.executorBinding).map(([taskId, task]) => ({ taskId, runId: task.executorBinding.runId })) : [];
   const missingProof = affected.some(({ runId }) => !stopProofs.some((proof) => proof.runId === runId && proof.state === "observed" && !proof.conflict));
-  const missingWorkspace = affected.some(({ taskId }) => !workspaceInventories.some((workspace) => workspace.taskId === taskId && ["preserve", "quarantine", "discard"].includes(workspace.action) && workspace.proof && workspace.resourcesReleased === true));
+  const missingWorkspace = affected.some(({ taskId }) => !workspaceInventories.some((workspace) => workspace.taskId === taskId && ["preserve", "quarantine", "discard"].includes(workspace.action) && workspace.proof && (workspace.action !== "preserve" ? workspace.resourcesReleased === true : resourceProofs.some((proof) => proof.taskId === taskId && proof.released === true))));
   return Object.freeze({ complete: !missingProof && !missingWorkspace, attention: missingProof || missingWorkspace, missingProof, missingWorkspace });
 }

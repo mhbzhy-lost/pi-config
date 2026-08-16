@@ -229,13 +229,17 @@ export class RootBrokerServer {
   async stopGoalOwnedRun(value: any) {
     const binding = this.goalOwnedRuns.get(value?.runId); const run = this.ownedRuns.get(value?.runId);
     if (!binding || !run || JSON.stringify(binding) !== JSON.stringify(value) || run.identityState !== "verified" || this.terminalConflicts.has(run.runId)) throw new Error("Goal owned stop identity mismatch");
-    if (!this.terminalProofs.has(run.runId)) {
-      await Promise.resolve(this.upstream.stop({ runId: run.runId, dir: run.asyncDir }));
-      await this.observeOfficialProof(run, `missing official proof for owned run ${run.runId}`);
+    try {
+      if (!this.terminalProofs.has(run.runId)) {
+        await Promise.resolve(this.upstream.stop({ runId: run.runId, dir: run.asyncDir }));
+        await this.observeOfficialProof(run, "missing official proof for owned run");
+      }
+      const proof = this.terminalProofs.get(run.runId);
+      if (!proof || this.terminalConflicts.has(run.runId)) return frozen({ state: "attention", code: "OWNED_STOP_PROOF_MISSING" });
+      return frozen({ state: "observed", proof: structuredClone(proof) });
+    } catch (error) {
+      return frozen({ state: "attention", code: error instanceof TerminalDeadlineError ? "OWNED_STOP_TIMEOUT" : "OWNED_STOP_UNAVAILABLE" });
     }
-    const proof = this.terminalProofs.get(run.runId);
-    if (!proof || this.terminalConflicts.has(run.runId)) throw new Error("Goal owned stop official proof is unavailable");
-    return frozen({ state: "observed", proof: structuredClone(proof) });
   }
 
   observeStarted(event: any): Promise<void> {

@@ -124,6 +124,17 @@ test("Root broker stops only an exact registered Goal-owned run and returns an o
   assert.throws(() => broker.registerGoalOwnedRun({ ...binding, attempt: 2 }), /conflicts/);
 });
 
+test("Root broker returns a stable attention code without upstream error leakage", async (t) => {
+  const runId = "executor-goal-stop-error";
+  const broker = new RootBrokerServer({ rootSessionId: "root-stop-error", lifecycleSessionId: "root-stop-error", captureProcessBirthIdentity: async () => "birth", writeGrant: async () => "/tmp/no-grant", terminalTimeoutMs: 10, upstream: { async ping() { return {}; }, async stop() { throw new Error("private upstream failure"); }, async dispose() {} } });
+  t.after(() => broker.closeRootSession().catch(() => undefined));
+  await broker.observeStarted(startedEvent("root-stop-error", runId));
+  const binding = { goalId: "goal-1", taskId: "task-1", attempt: 1, runId, leaseId: "lease-1" };
+  broker.registerGoalOwnedRun(binding);
+  const result = await broker.stopGoalOwnedRun(binding);
+  assert.deepEqual(result, { state: "attention", code: "OWNED_STOP_UNAVAILABLE" });
+});
+
 test("Root broker exposes an immutable read-only ownership and successful terminal proof snapshot", async (t) => {
   const rootSessionId = "root-proof-snapshot";
   const runId = "executor-proof";

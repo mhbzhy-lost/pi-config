@@ -7,8 +7,19 @@ test("interactive intent changes durably suspend, revoke offers, and block stale
   for (const reason of ["interactive_steer", "follow_up", "abort", "execution_amendment"]) {
     const plan = buildSuspensionPlan({ projection: projection(), reason, affectedIds: { taskIds: ["task-1"], runIds: ["run-1"] }, inventories: { workspaces: [{ taskId: "task-1", runId: "run-1", affected: true }] } });
     assert.equal(plan.events[0].type, "goal.runtime_suspended"); assert.equal(plan.events[1].type, "goal.action_offer_revoked");
+    assert.equal(plan.suspensionId, plan.events[0].data.suspensionId);
     assert.deepEqual(plan.blocked, ["dispatch", "integrate", "finalize"]); assert.equal(plan.workspaceStrategies[0].action, "quarantine");
   }
+});
+test("suspension does not fabricate a revoke fact without an active offer", () => {
+  const plan = buildSuspensionPlan({ projection: { ...projection(), actionOffer: null }, reason: "abort" });
+  assert.equal(plan.events.length, 1);
+});
+test("suspended guards quarantine affected success and permit only explicit unaffected keep", () => {
+  const plan = buildSuspensionPlan({ projection: projection(), reason: "abort", affectedIds: { taskIds: ["task-1"] }, inventories: { workspaces: [{ taskId: "task-1", affected: true }, { taskId: "task-2", policy: "keep" }] } });
+  assert.equal(plan.workspaceStrategies[0].resultPolicy, "quarantine");
+  assert.equal(plan.workspaceStrategies[1].resultPolicy, "keep");
+  assert.throws(() => plan.guard("integrate"), /suspended/);
 });
 test("owned stop requires every immutable identity and official terminal proof", async () => {
   const calls = []; const pi = { stopOwnedRun: async (request) => { calls.push(request); return { state: "observed", proof: { id: "proof-1" } }; } };
