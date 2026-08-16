@@ -120,6 +120,16 @@ test("reverifying Episode requests an owned run once and then yields to its life
   assert.equal(nextObligationAction(result)?.tool, "repair_episode");
 });
 
+test("R9 keeps owned reverification lifecycle phases ahead of repair and only released unresolved runs re-request", () => {
+  for (const phase of ["requested", "lease_allocated", "process_bound", "terminal", "recorded"]) {
+    const projection = base(); projection.progressLedger = ledger(); projection.conditions.set("c", condition("c")); projection.repairEpisodes.set("episode", { episodeId: "episode", conditionId: "c", status: "reverifying", ownedRunIds: ["owned"] }); projection.observationRuns.set("owned", { runId: "owned", conditionId: "c", cycle: 1, phase });
+    const action = nextObligationAction(frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) }));
+    assert.notEqual(action?.tool, "repair_episode", phase); assert.equal(action?.kind, phase === "terminal" ? "observation-record" : phase === "recorded" ? "observation-release" : phase === "process_bound" ? "observation-recover" : "observation-start", phase);
+  }
+  const projection = base(); projection.progressLedger = ledger(); projection.conditions.set("c", condition("c")); projection.repairEpisodes.set("episode", { episodeId: "episode", conditionId: "c", status: "reverifying", ownedRunIds: ["owned"] }); projection.observationRuns.set("owned", { runId: "owned", conditionId: "c", cycle: 1, phase: "released" });
+  assert.equal(nextObligationAction(frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) }))?.tool, "repair_episode");
+});
+
 test("runtime debts outrank selected repair actions", () => {
   const projection = base(); projection.progressLedger = ledger(); projection.repairEpisodes.set("selected", { status: "active" });
   projection.observationRuns.set("cleanup", { runId: "cleanup", conditionId: "c", phase: "cleanup_debt" });

@@ -338,6 +338,54 @@ async function firstProductProcessBound(api, limit = 10) {
 }
 function runEvents(cwd, runId, type) { return observationEventRows(cwd).filter(event => event.type === type && event.data.runId === runId); }
 
+function injectedStore(seed, failure = () => null) {
+  let current = structuredClone(seed); const batches = [], events = [];
+  const apply = (entries, version) => {
+    assert.equal(version, current.version); for (const entry of entries) current = applyEvent(current, entry);
+    events.push(...entries); batches.push(entries); return current;
+  };
+  return {
+    store: {
+      listGoals: () => [current.goalId], listGoalIds: () => [current.goalId], loadProjection: (_root, goalId) => goalId === current.goalId ? current : null,
+      appendEvent(_root, entry, version) { const mode = failure([entry]); if (mode === "pre") throw Error("injected pre-append failure"); const result = apply([entry], version); if (mode === "durable") throw Error("injected durable failure"); return result; },
+      appendEventBatch(_root, entries, version) { const mode = failure(entries); if (mode === "pre") throw Error("injected pre-append failure"); const result = apply(entries, version); if (mode === "durable") throw Error("injected durable failure"); return result; },
+    },
+    latest: () => current, batches, events,
+  };
+}
+
+async function makeReverifyingRuntimeFixture() {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL", "PASS"] });
+  const condition = activeCondition(); condition.remediation.policy = "autonomous";
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable });
+  await activateProduct(api, cwd, condition); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released"); await invoke(api, "goal_status", {});
+  const initial = structuredClone(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"));
+  const [taskId, task] = [...initial.tasks.entries()][0]; task.status = "succeeded"; task.workspace = { attempt: 1, phase: "disposed", disposition: "integrated", released: true };
+  const injected = injectedStore(initial); const accepting = pi(cwd); accepting.cwd = cwd;
+  createGoalEngineExtension(accepting, { goalStateEnv: {}, enforceActionTokens: false, store: injected.store });
+  await invoke(accepting, "goal_accept", { goal_id: initial.goalId, task_id: taskId, action_token: "schema-required" });
+  const projection = injected.latest(), episode = [...projection.repairEpisodes.values()][0];
+  assert.equal(episode.status, "reverifying"); assert.deepEqual(injected.batches.at(-1).map(event => event.type), ["task.accepted", "repair.reverification_requested"]);
+  return { cwd, durable, taskId, episodeId: episode.episodeId, injected };
+}
+
+test("Repair re-observation request/link pre-append failure leaves no run, while durable failure reloads one owned run", async () => {
+  { const fixture = await makeReverifyingRuntimeFixture(); const before = { prepare: fixture.durable.calls.prepare, start: fixture.durable.calls.start }; const injected = injectedStore(fixture.injected.latest(), entries => entries.map(event => event.type).join(",") === "condition.observation_requested,repair.observation_linked" ? "pre" : null); const api = pi(fixture.cwd); api.cwd = fixture.cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: fixture.durable, store: injected.store }); await assert.rejects(invoke(api, "goal_status", {}), /injected pre-append failure/); const projection = injected.latest(); assert.equal(projection.observationRuns.size, 2); assert.equal(projection.repairEpisodes.get(fixture.episodeId).ownedRunIds.length, 0); assert.equal(fixture.durable.calls.prepare - before.prepare, 0); assert.equal(fixture.durable.calls.start - before.start, 0); assert.equal(injected.events.filter(event => ["condition.observation_requested", "repair.observation_linked"].includes(event.type)).length, 0); }
+  { const fixture = await makeReverifyingRuntimeFixture(); const before = { prepare: fixture.durable.calls.prepare, start: fixture.durable.calls.start }; let threw = false; const injected = injectedStore(fixture.injected.latest(), entries => !threw && entries.map(event => event.type).join(",") === "condition.observation_requested,repair.observation_linked" ? (threw = true, "durable") : null); const api = pi(fixture.cwd); api.cwd = fixture.cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: fixture.durable, store: injected.store }); await invoke(api, "goal_status", {}); let projection = injected.latest(), episode = projection.repairEpisodes.get(fixture.episodeId); assert.equal(episode.ownedRunIds.length, 1); const runId = episode.ownedRunIds[0]; assert.equal(projection.observationRuns.get(runId).phase, "requested"); assert.equal(fixture.durable.calls.prepare - before.prepare, 0); assert.equal(fixture.durable.calls.start - before.start, 0); const reload = pi(fixture.cwd); reload.cwd = fixture.cwd; createGoalEngineExtension(reload, { goalStateEnv: {}, runtimeHost: fixture.durable, store: injected.store }); await invoke(reload, "goal_status", {}); projection = injected.latest(); assert.equal(projection.observationRuns.size, 3); assert.equal(projection.repairEpisodes.get(fixture.episodeId).ownedRunIds[0], runId); assert.equal(fixture.durable.calls.startsByRun.get(runId), 1); assert.equal(injected.events.filter(event => event.type === "condition.observation_requested").length, 1); assert.equal(injected.events.filter(event => event.type === "repair.observation_linked").length, 1); }
+});
+
+test("Repair re-observation record/resolve batches are atomic before and after durable failure", async () => {
+  for (const mode of ["pre", "durable"]) {
+    const fixture = await makeReverifyingRuntimeFixture(); let enabled = false, threw = false;
+    const injected = injectedStore(fixture.injected.latest(), entries => enabled && !threw && entries.map(event => event.type).join(",") === "condition.observation_recorded,repair.episode_resolved" ? (threw = true, mode) : null);
+    const api = pi(fixture.cwd); api.cwd = fixture.cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: fixture.durable, store: injected.store }); await invoke(api, "goal_status", {}); await invoke(api, "goal_status", {}); enabled = true; await invoke(api, "goal_status", {});
+    let projection = injected.latest(), episode = projection.repairEpisodes.get(fixture.episodeId), runId = episode.ownedRunIds[0];
+    if (mode === "pre") { assert.equal(projection.observationRuns.get(runId).phase, "terminal"); assert.equal(episode.status, "reverifying"); assert.equal(injected.events.filter(event => ["condition.observation_recorded", "repair.episode_resolved"].includes(event.type)).length, 0); enabled = false; await invoke(api, "goal_status", {}); projection = injected.latest(); episode = projection.repairEpisodes.get(fixture.episodeId); assert.equal(episode.status, "resolved"); }
+    else { assert.equal(projection.observationRuns.get(runId).phase, "recorded"); assert.equal(episode.status, "resolved"); const reload = pi(fixture.cwd); reload.cwd = fixture.cwd; createGoalEngineExtension(reload, { goalStateEnv: {}, runtimeHost: fixture.durable, store: injected.store }); await invoke(reload, "goal_status", {}); projection = injected.latest(); assert.equal(projection.observationRuns.get(runId).phase, "released"); }
+    assert.equal(injected.events.filter(event => event.type === "condition.observation_recorded").length, 1); assert.equal(injected.events.filter(event => event.type === "repair.episode_resolved").length, 1); assert.equal(injected.events.some(event => event.type === "goal.completed"), false); if (mode === "pre") { await invoke(api, "goal_status", {}); projection = injected.latest(); assert.equal(projection.observationRuns.get(runId).phase, "released"); }
+  }
+});
+
 test("active reload matrix preserves each product run through requested, process-bound, terminal, and recorded", async () => {
   for (const phase of ["requested", "process_bound", "terminal", "recorded"]) {
     const cwd = repo(), first = pi(cwd); first.cwd = cwd;
