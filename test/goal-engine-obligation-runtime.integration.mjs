@@ -384,6 +384,7 @@ test("Repair re-observation record/resolve batches are atomic before and after d
     else { assert.equal(projection.observationRuns.get(runId).phase, "recorded"); assert.equal(episode.status, "resolved"); const reload = pi(fixture.cwd); reload.cwd = fixture.cwd; createGoalEngineExtension(reload, { goalStateEnv: {}, runtimeHost: fixture.durable, store: injected.store }); await invoke(reload, "goal_status", {}); projection = injected.latest(); assert.equal(projection.observationRuns.get(runId).phase, "released"); }
     const recorded = injected.events.filter(event => event.type === "condition.observation_recorded");
     assert.equal(recorded.length, 1); assert.equal(projection.observationRuns.get(runId).evidenceId, recorded[0].data.evidenceId);
+    assert.deepEqual(projection.repairEpisodes.get(fixture.episodeId).resolution, { runId, evidenceId: recorded[0].data.evidenceId, supportingEvidenceRefs: [{ runId, evidenceId: recorded[0].data.evidenceId }] });
     assert.equal(injected.events.filter(event => event.type === "repair.episode_resolved").length, 1); assert.equal(injected.events.some(event => event.type === "goal.completed"), false); if (mode === "pre") { await invoke(api, "goal_status", {}); projection = injected.latest(); assert.equal(projection.observationRuns.get(runId).phase, "released"); assert.equal(projection.observationRuns.get(runId).evidenceId, recorded[0].data.evidenceId); }
   }
 });
@@ -609,6 +610,7 @@ test("Repair-owned consecutive stability releases each run and resolves only aft
   await invoke(api, "goal_status", {}); await invoke(api, "goal_status", {}); // terminal then record/resolve
   projection = fixture.injected.latest(); episode = projection.repairEpisodes.get(fixture.episodeId);
   assert.equal(episode.status, "resolved"); assert.equal(projection.observationRuns.get(secondRunId).phase, "recorded");
+  assert.deepEqual(episode.resolution, { runId: secondRunId, evidenceId: projection.observationRuns.get(secondRunId).evidenceId, supportingEvidenceRefs: [firstRunId, secondRunId].map(runId => ({ runId, evidenceId: projection.observationRuns.get(runId).evidenceId })) });
   await invoke(api, "goal_status", {}); // independently release second run
   projection = fixture.injected.latest();
   assert.deepEqual([firstRunId, secondRunId].map(runId => projection.observationRuns.get(runId).phase), ["released", "released"]);
