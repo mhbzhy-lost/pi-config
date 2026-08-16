@@ -67,9 +67,7 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
   for (const id of tasks) {
     const def = taskDefs[id];
     if (!def || typeof def !== "object") throw new Error(`missing taskDef for ${id}`);
-    const allowedFields = hostInternalRemediation
-      ? ["description", "deps", "writePaths", "acceptance", "workflow", "metadata"]
-      : ["description", "deps", "writePaths", "acceptance", "workflow"];
+    const allowedFields = ["description", "deps", "writePaths", "acceptance", "workflow", "metadata"];
     if (Object.keys(def).some((key) => !allowedFields.includes(key))) throw new Error(`taskDef ${id} contains unknown field`);
     nonEmpty(def.description, `taskDef ${id} description`);
     if (Object.hasOwn(def, "metadata")) {
