@@ -251,3 +251,7 @@ Manual Preview 不宣称无人值守自治；auto-continuation 必须在 M2 后�
 - `2026-08-07-convergent-goal-execution.md`：醒目“已取代”，不得派发 Task。
 - `2026-08-05-goal-finalization-gate.md`：醒目“已取代”，旧 v4/改变 Planned 完成语义假设废弃，不得派发 Task。
 - `2026-08-05-goal-idle-continuation-guard.md`：醒目“暂停执行”，待 Manual Preview 后按 obligation frontier 重写，不得派发 Task。
+
+## Repair 审批账本（R10A）
+
+Repair 的权威事件为 `repair.challenge_created`、`repair.user_decision_recorded`、`repair.capability_consumed` 和 `repair.task_linked`。challenge 固化 goal/revision/contract/base head、episode/condition/有序 finding、action/subject、task 身份、session、时间和 challengeHash；decision 固化 Pi entry 哈希、分支绑定、choice/approved parity 与 decisionId。`authorize_task` 只能以 `goal.amended → capability_consumed → task_linked` 单一批次物化；nonce 明文仅存在 S3 临时 capability，账本只保存 digest。S1 使用 `buildRemediationTaskCandidate` 重建稳定 candidate，S2 记录真实用户 entry，S3 消费 capability；三者均不得改变 exact-eight Goal ABI。

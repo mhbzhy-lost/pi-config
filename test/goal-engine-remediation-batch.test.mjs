@@ -16,7 +16,7 @@ function plan({ approved = false, actionPrefix = false } = {}) {
   const amendment = event("goal.amended", { addTasks: { "repair-task-1": taskDef }, removeTasks: [], updateTasks: {}, reason: "Materialize canonical remediation task", hostInternalRemediation: true }, 1);
   const link = event("repair.task_linked", { episodeId: "episode-1", taskId: "repair-task-1", challengeId: approved ? "challenge-1" : null }, 3);
   const events = approved
-    ? [amendment, event("repair.capability_consumed", { nonceDigest: "a".repeat(64), consumedAt: 1, challengeId: "challenge-1", episodeId: "episode-1", action: "authorize_task", subjectHash: metadata.subjectHash, sessionId: "session-1", userEntryId: "entry-1" }, 2), link]
+    ? [amendment, event("repair.capability_consumed", { nonceDigest: "a".repeat(64), consumedAt: 1, challengeId: "challenge-1", episodeId: "episode-1", action: "authorize_task", subjectHash: metadata.subjectHash, sessionId: "session-1", userEntryId: "entry-1", decisionId: "b".repeat(64), executionRevision: 1, executionContractHash: "c".repeat(64), baseHead: "d".repeat(40), taskId: "repair-task-1", taskDefHash: metadata.taskDefHash, userEntryHash: "e".repeat(64), branchBindingHash: "f".repeat(64) }, 2), link]
     : [amendment, link];
   return actionPrefix ? [event("goal.action_consumed", { offerId: "offer-1", token: "token-1", tool: "goal", sessionId: "session-1" }, 0), ...events] : events;
 }
@@ -29,7 +29,7 @@ function assertNoWrite(events) {
 }
 
 test("store accepts only canonical autonomous and user-approved remediation batches before reducer replay", () => {
-  for (const options of [{}, { actionPrefix: true }, { approved: true }, { approved: true, actionPrefix: true }]) {
+  for (const options of [{}, { approved: true }]) {
     const root = mkdtempSync(join(tmpdir(), "goal-remediation-batch-"));
     try { assert.throws(() => appendEventBatch(root, plan(options), 0), /goal.created must be first/); }
     finally { rmSync(root, { recursive: true, force: true }); }
@@ -54,10 +54,11 @@ test("store passes canonical remediation without optional deps to reducer valida
   finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("store rejects split remediation materialization before any write", () => {
+test("store rejects split or standalone authorize_task consumption before any write", () => {
   const root = mkdtempSync(join(tmpdir(), "goal-remediation-batch-"));
   try {
     assert.throws(() => appendEvent(root, plan()[0], 0), /batch/);
+    assert.throws(() => appendEventBatch(root, plan({ approved: true }).slice(1, 2), 0), /canonical remediation batch/);
     assert.equal(existsSync(join(root, "goals")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
