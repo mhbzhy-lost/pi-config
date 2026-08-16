@@ -64,7 +64,10 @@ export function createProjection() {
     executionRevision: null,
     executionContractHash: null,
     readiness: null,
+    runtimeReadinessReasons: [],
+    runtimeBaseHead: null,
     runtimeState: null,
+    progressLedger: [],
     writePolicy: null,
     taskApplicability: new Map(),
     conditions: new Map(),
@@ -259,6 +262,8 @@ function copyProjection(p) {
     mutationSequence: p.mutationSequence || 0,
     taskMutationSequences: new Map([...p.taskMutationSequences || []]),
     finalReview: p.finalReview ? structuredClone(p.finalReview) : null,
+    runtimeReadinessReasons: [...(p.runtimeReadinessReasons || [])],
+    progressLedger: structuredClone(p.progressLedger || []),
   };
 }
 
@@ -268,14 +273,14 @@ function runtimeOnly(p) {
 function runtimeDrafted(p, event) {
   if (p.goalId !== null) throw new Error("runtime draft must be first event");
   const data = event.data;
-  if (!isPlainObject(data.runtimeInit) || typeof data.executionContractHash !== "string" || !/^[a-f0-9]{64}$/.test(data.executionContractHash)) throw new Error("invalid runtime draft");
+  if (!isPlainObject(data.runtimeInit) || typeof data.executionContractHash !== "string" || !/^[a-f0-9]{64}$/.test(data.executionContractHash) || !/^[a-f0-9]{40}$/.test(data.baseHead || "")) throw new Error("invalid runtime draft");
   const contract = data.runtimeInit;
   if (contract.execution?.schema !== RUNTIME_SCHEMA_VERSION || !Array.isArray(contract.execution.tasks) || !Array.isArray(contract.execution.conditions)) throw new Error("invalid runtime contract");
   p.goalId = event.goalId; p.eventSchemaVersion = RUNTIME_SCHEMA_VERSION; p.lifecycle = "active";
   p.objective = contract.objective; p.scope = [...(contract.scope || [])]; p.nonGoals = [...(contract.non_goals || [])]; p.dod = [...(contract.dod || [])];
   p.createdAt = event.occurredAt; p.coordinationState = "ready"; p.runtimeGeneration = RUNTIME_SCHEMA_VERSION;
-  p.initialShape = deriveInitialShape(contract); p.executionRevision = 1; p.executionContractHash = data.executionContractHash;
-  p.readiness = data.readiness === "draft" ? "draft" : "draft"; p.runtimeState = "draft";
+  p.initialShape = deriveInitialShape(contract); p.executionRevision = 1; p.executionContractHash = data.executionContractHash; p.runtimeBaseHead = data.baseHead;
+  p.readiness = "draft"; p.runtimeState = "draft";
   p.writePolicy = { allowedPaths: [...contract.execution.write_policy.allowed_paths] };
   p.convergenceBudget = structuredClone(contract.execution.budgets);
   for (const definition of contract.execution.tasks) {
@@ -286,8 +291,8 @@ function runtimeDrafted(p, event) {
   }
   for (const definition of contract.execution.conditions) p.conditions.set(definition.id, { definition: structuredClone(definition), conditionHash: hashCanonical(definition), status: "inactive", supportingEvidenceIds: [], lastObservationRunId: null, invalidationReason: null });
 }
-function runtimeReadinessRecorded(p, data) { runtimeOnly(p); if (!new Set(["ready", "needs_clarification", "environment_blocked", "unsafe_to_run"]).has(data.readiness)) throw new Error("invalid runtime readiness"); p.readiness = data.readiness; if (data.readiness === "ready" && p.runtimeState === "draft") p.runtimeState = "awaiting_user_approval"; }
-function runtimeApprovalRecorded(p) { runtimeOnly(p); if (p.runtimeState !== "awaiting_user_approval") throw new Error("runtime approval is out of order"); p.runtimeState = "calibrating"; }
+function runtimeReadinessRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["readiness", "reasons"], "runtime readiness"); if (!new Set(["ready", "needs_clarification", "environment_blocked", "unsafe_to_run"]).has(data.readiness) || !Array.isArray(data.reasons) || data.reasons.some((reason) => typeof reason !== "string")) throw new Error("invalid runtime readiness"); p.readiness = data.readiness; p.runtimeReadinessReasons = [...data.reasons]; if (data.readiness === "ready" && p.runtimeState === "draft") p.runtimeState = "awaiting_user_approval"; }
+function runtimeApprovalRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "executionContractHash", "baseHead", "sessionId", "userEntryId", "capabilityDigest"], "runtime approval"); if (p.runtimeState !== "awaiting_user_approval" || data.executionContractHash !== p.executionContractHash || data.baseHead !== p.runtimeBaseHead || !hash(data.proposalHash) || !hash(data.capabilityDigest) || !data.proposalId || !data.sessionId || !data.userEntryId) throw new Error("runtime approval is out of order"); p.pendingHumanDecision = { ...structuredClone(data), phase: "consumed" }; p.runtimeState = "calibrating"; }
 function runtimeActivated(p) { runtimeOnly(p); if (p.runtimeState !== "calibrating") throw new Error("runtime activation is out of order"); for (const [conditionId, condition] of p.conditions) { const candidates = p.evidenceHistory.filter((value) => { const run = p.observationRuns.get(value.run?.runId); return run?.conditionId === conditionId && run.cycle === 0 && ["recorded", "released"].includes(run.phase) && value.executionRevision === p.executionRevision; }); const evidence = candidates.sort((a, b) => b.sequence - a.sequence)[0]; if (!evidence || !["passed", "failed"].includes(evidence.verdict?.kind)) throw new Error("runtime activation requires decidable cycle zero calibration"); condition.status = "inactive"; condition.supportingEvidenceIds = []; } p.runtimeState = "active"; }
 function runtimeSuspended(p, data) { runtimeOnly(p); if (!data.suspensionId || !data.reason) throw new Error("invalid runtime suspension"); p.suspension = structuredClone(data); p.runtimeState = "suspended"; }
 function runtimeResumed(p) { runtimeOnly(p); if (p.runtimeState !== "suspended") throw new Error("runtime is not suspended"); p.suspension = null; p.runtimeState = "active"; }
@@ -700,7 +705,7 @@ function requireV2(schemaVersion) {
 }
 
 function requireV3(schemaVersion, eventType) {
-  if (schemaVersion !== "goal-engine.event.v3" && schemaVersion !== PLANNED_SCHEMA_VERSION) {
+  if (schemaVersion !== "goal-engine.event.v3" && schemaVersion !== PLANNED_SCHEMA_VERSION && schemaVersion !== RUNTIME_SCHEMA_VERSION) {
     throw new Error(`${eventType} requires goal-engine.event.v3 or planned.v1`);
   }
 }
@@ -1114,6 +1119,12 @@ function goalCompleted(p, data, occurredAt, eventVersion) {
 
 function goalCheckpoint(p, data) {
   requireActive(p);
+  if (p.eventSchemaVersion === RUNTIME_SCHEMA_VERSION) {
+    requireExactFields(data, ["canonicalFingerprint", "advanced", "sequence"], "runtime checkpoint");
+    if (!hash(data.canonicalFingerprint) || typeof data.advanced !== "boolean" || !Number.isSafeInteger(data.sequence) || data.sequence !== p.progressLedger.length + 1) throw new Error("invalid runtime checkpoint");
+    const previous = p.progressLedger.at(-1); if (data.advanced !== (!previous || previous.canonicalFingerprint !== data.canonicalFingerprint)) throw new Error("runtime checkpoint advanced mismatch");
+    p.progressLedger.push(structuredClone(data)); p.checkpointCount++; return;
+  }
   const { nextAction } = data;
   validateNextAction(nextAction);
   p.checkpointCount++;

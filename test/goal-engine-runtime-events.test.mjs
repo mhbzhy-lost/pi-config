@@ -12,8 +12,8 @@ import { createRepairChallenge, issueRepairCapability, recordRepairUserDecision,
 
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
 function hash(n) { return String(n).padStart(64, "0"); }
-function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); return applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1)); }
-function calibrating() { let p = draft(); p = applyEvent(p, event("goal.runtime_readiness_recorded", { readiness: "ready" }, 2)); return applyEvent(p, event("goal.runtime_approval_recorded", {}, 3)); }
+function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); return applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), readiness: "draft" }, 1)); }
+function calibrating() { let p = draft(); p = applyEvent(p, event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 2)); return applyEvent(p, event("goal.runtime_approval_recorded", { proposalId: "proposal", proposalHash: hash(1), executionContractHash: p.executionContractHash, baseHead: p.runtimeBaseHead, sessionId: "session", userEntryId: "entry", capabilityDigest: hash(2) }, 3)); }
 function evidence(p, artifactId) { return { executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, head: "a".repeat(40), adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: "environment-1" }, fixtures: [{ ref: "sample", fingerprint: "fixture-1" }], artifact: { id: artifactId, hash: "9".repeat(64) } }; }
 function observationEvents(p, { runId, evidenceId, cycle, verdict = { kind: "passed" }, start }) {
   const data = { runId, conditionId: "condition-1" };
@@ -125,7 +125,7 @@ test("runtime evidence ledger survives store replay with calibration and product
   const root = mkdtempSync(join(tmpdir(), "goal-runtime-ledger-"));
   try {
     let p = createProjection(); const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
-    p = appendAll(root, p, [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1), event("goal.runtime_readiness_recorded", { readiness: "ready" }, 2), event("goal.runtime_approval_recorded", {}, 3)]);
+    p = appendAll(root, p, [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), readiness: "draft" }, 1), event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 2), event("goal.runtime_approval_recorded", { proposalId: "proposal", proposalHash: hash(1), executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), sessionId: "session", userEntryId: "entry", capabilityDigest: hash(2) }, 3)]);
     p = appendAll(root, p, observationEvents(p, { runId: "calibration-run", evidenceId: hash(100), cycle: 0, start: 4 })); p = appendEvent(root, event("goal.runtime_activated", {}, 9), p.version);
     p = appendAll(root, p, observationEvents(p, { runId: "product-run", evidenceId: hash(200), cycle: 1, start: 10 }));
     const replayed = loadProjection(root, "runtime-goal"), snapshot = JSON.parse(readFileSync(join(root, "goals/runtime-goal/projection.json"), "utf8"));
@@ -138,7 +138,7 @@ test("runtime store replay persists repair challenge after complete calibration,
   const root = mkdtempSync(join(tmpdir(), "goal-runtime-repair-"));
   try {
     let p = createProjection(); const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
-    p = appendAll(root, p, [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1), event("goal.runtime_readiness_recorded", { readiness: "ready" }, 2), event("goal.runtime_approval_recorded", {}, 3)]);
+    p = appendAll(root, p, [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), readiness: "draft" }, 1), event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 2), event("goal.runtime_approval_recorded", { proposalId: "proposal", proposalHash: hash(1), executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), sessionId: "session", userEntryId: "entry", capabilityDigest: hash(2) }, 3)]);
     p = appendAll(root, p, observationEvents(p, { runId: "calibration-run", evidenceId: hash(100), cycle: 0, start: 4 })); p = appendEvent(root, event("goal.runtime_activated", {}, 9), p.version);
     p = appendAll(root, p, observationEvents(p, { runId: "product-run", evidenceId: hash(200), cycle: 1, verdict: { kind: "failed", failureCode: "assertion", findingFingerprint: hash(300) }, start: 10 }));
     p = appendEvent(root, event("finding.recorded", { findingId: "finding-1", conditionId: "condition-1", runId: "product-run", evidenceId: hash(200), fingerprint: hash(300) }, 15), p.version); p = appendEvent(root, event("repair.episode_opened", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"] }, 16), p.version);
