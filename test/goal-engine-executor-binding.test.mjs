@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -12,6 +12,7 @@ import { appendEvent as appendGoalEvent, loadProjection } from "../scripts/lib/g
 import { createTypedSubagentExtension } from "../scripts/lib/subagent-dispatch/extension.ts";
 import { bindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
+import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 
 const GOAL_ID = "binding-goal";
@@ -475,6 +476,25 @@ function commitExecutorResult(workspacePath) {
   return git(workspacePath, "rev-parse", "HEAD");
 }
 
+function settlementEvidence(fixture, goalId, taskId) {
+  const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
+  const task = projection.tasks.get(taskId);
+  const head = git(task.workspace.path, "rev-parse", "HEAD");
+  const identity = { goalId, taskId, runId: task.executorBinding.runId, attempt: task.workspace.attempt, contractHash: task.contractHash, head };
+  const expectedCriteria = task.acceptance.criteria.map(({ id }) => id);
+  const criteria = expectedCriteria.map((id) => ({ id, status: "satisfied", evidence: [`sha256:${"1".repeat(64)}`] }));
+  const child = { identity, criteria, commandsRun: [], changedFiles: [task.writePaths[0]] };
+  const main = { identity, criteria: criteria.map((item) => ({ ...item, evidence: [`sha256:${"2".repeat(64)}`] })), commandsRun: [], changedFiles: [task.writePaths[0]] };
+  const sha256 = fingerprintSettlementEvidence(child, { expectedIdentity: identity, expectedCriteria, outcome: "succeeded" });
+  const directory = join(task.workspace.path, ".pi-subagents", "acceptance-evidence");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeFileSync(git(task.workspace.path, "rev-parse", "--git-path", "info/exclude"), ".pi-subagents/\n", { flag: "a" });
+  const artifact = join(directory, `${sha256}.yaml`);
+  writeFileSync(artifact, serializeSettlementEvidenceYaml(child, { expectedIdentity: identity, expectedCriteria, outcome: "succeeded" }), { mode: 0o600 });
+  chmodSync(artifact, 0o600);
+  return { subagent_evidence: { sha256, content: child }, main_verification: main };
+}
+
 function officialProof(runId, asyncDir) {
   return {
     schemaVersion: "root-broker.executor-proof.v1",
@@ -512,16 +532,19 @@ test("Planned goal_settle persists the exact successful Root Broker proof with t
     evidence_source: "self_produced",
     next_action: "集成当前提交并在主分支独立复核全部验收标准",
     action_token: status.action_token,
+    ...settlementEvidence(fixture, goalId, "task-one"),
   }));
 
   assert.equal(result.status, "succeeded");
   const task = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one");
-  assert.deepEqual(task.settlement, {
+  const { evidence, ...settlementIdentity } = task.settlement;
+  assert.deepEqual(settlementIdentity, {
     attempt: 1,
     executorHead: head,
     executorRunId: runId,
     terminalProofId: "f".repeat(64),
   });
+  assert.equal(evidence.schemaVersion, "goal-engine.settlement-evidence.v1");
 });
 
 test("real Goal Host settlement reads the bound proof from the Root Broker registry", async (t) => {
@@ -551,6 +574,7 @@ test("real Goal Host settlement reads the bound proof from the Root Broker regis
     goal_id: goalId, task_id: "task-one", outcome: "succeeded",
     evidence: { type: "diff", ref: head }, evidence_source: "self_produced",
     next_action: "集成当前提交并在主分支独立复核全部验收标准", action_token: status.action_token,
+    ...settlementEvidence(fixture, goalId, "task-one"),
   }));
 
   assert.equal(result.status, "succeeded");

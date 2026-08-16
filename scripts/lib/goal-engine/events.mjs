@@ -73,6 +73,7 @@ export function createProjection() {
     suspension: null,
     convergenceBudget: null,
     evidenceHistory: [],
+    finalReview: null,
   };
 }
 
@@ -120,9 +121,17 @@ export function applyEvent(projection, event, { replay = false } = {}) {
     case "finding.status_changed": findingStatusChanged(next, event.data); break;
     case "repair.episode_opened": repairOpened(next, event.data); break;
     case "repair.task_linked": repairTaskLinked(next, event.data); break;
+    case "repair.reverification_requested": repairReverificationRequested(next, event.data); break;
+    case "repair.episode_resolved": repairResolved(next, event.data); break;
     case "repair.episode_cancel_requested": repairCancelRequested(next, event.data); break;
     case "repair.episode_cancelled": repairCancelled(next, event.data); break;
     case "task.applicability_changed": taskApplicabilityChanged(next, event.data); break;
+    case "execution.amendment_proposed": amendmentProposed(next, event.data); break;
+    case "execution.amendment_approved": amendmentApproved(next, event.data); break;
+    case "execution.amendment_capability_consumed": amendmentCapabilityConsumed(next, event.data); break;
+    case "execution.amendment_applied": amendmentApplied(next, event.data); break;
+    case "goal.final_review_started": finalReviewStarted(next, event.data); break;
+    case "goal.final_review_recorded": finalReviewRecorded(next, event.data); break;
     case "task.dispatched": taskDispatched(next, event.data, event.schemaVersion); break;
     case "task.executor_bound": taskExecutorBound(next, event.data, event.schemaVersion); break;
     case "task.settled": taskSettled(next, event.data, event.occurredAt, event.schemaVersion, replay); break;
@@ -236,6 +245,7 @@ function copyProjection(p) {
     suspension: p.suspension ? structuredClone(p.suspension) : null,
     convergenceBudget: p.convergenceBudget ? structuredClone(p.convergenceBudget) : null,
     evidenceHistory: structuredClone(p.evidenceHistory || []),
+    finalReview: p.finalReview ? structuredClone(p.finalReview) : null,
   };
 }
 
@@ -274,10 +284,19 @@ function evidenceInvalidated(p, data) { runtimeOnly(p); const condition = p.cond
 function findingRecorded(p, data) { runtimeOnly(p); const run = p.observationRuns.get(data.runId); if (!run || run.phase !== "recorded" || run.evidenceId !== data.evidenceId || !p.conditions.has(data.conditionId) || data.conditionId !== run.conditionId || !data.findingId || !data.fingerprint || data.verdict !== "failed") throw new Error("finding requires failed observation"); if (p.findings.has(data.findingId)) throw new Error("duplicate finding"); p.findings.set(data.findingId, { findingId: data.findingId, conditionId: data.conditionId, observationRunId: data.runId, fingerprint: data.fingerprint, status: "open", episodeId: null }); }
 function findingStatusChanged(p, data) { runtimeOnly(p); const finding = p.findings.get(data.findingId); if (!finding || !new Set(["open", "repairing", "reverification", "resolved", "rejected_by_user"]).has(data.status)) throw new Error("invalid finding status"); finding.status = data.status; }
 function repairOpened(p, data) { runtimeOnly(p); if (!data.episodeId || !p.conditions.has(data.conditionId) || !Array.isArray(data.findingIds) || !data.findingIds.length || p.repairEpisodes.has(data.episodeId)) throw new Error("invalid repair episode"); for (const id of data.findingIds) { const finding = p.findings.get(id); if (!finding || finding.conditionId !== data.conditionId) throw new Error("invalid repair finding reference"); finding.episodeId = data.episodeId; finding.status = "repairing"; } p.repairEpisodes.set(data.episodeId, { episodeId: data.episodeId, conditionId: data.conditionId, findingIds: [...data.findingIds], remediationTaskIds: [], status: "active", cancellation: null }); }
-function repairTaskLinked(p, data) { runtimeOnly(p); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || !p.tasks.has(data.taskId)) throw new Error("invalid repair task reference"); if (!episode.remediationTaskIds.includes(data.taskId)) episode.remediationTaskIds.push(data.taskId); episode.status = "waiting_for_tasks"; }
-function repairCancelRequested(p, data) { runtimeOnly(p); const episode = p.repairEpisodes.get(data.episodeId); if (!episode) throw new Error("unknown repair episode"); episode.status = "cancel_pending"; episode.cancellation = structuredClone(data.cancellation || null); }
-function repairCancelled(p, data) { runtimeOnly(p); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || episode.status !== "cancel_pending" || !episode.cancellation) throw new Error("repair cancellation is out of order"); episode.status = "cancelled"; }
-function taskApplicabilityChanged(p, data) { runtimeOnly(p); const task = p.tasks.get(data.taskId); const current = p.taskApplicability.get(data.taskId); if (!task || !current || !["applicable", "superseded", "reverify_required"].includes(data.state)) throw new Error("invalid task applicability"); p.taskApplicability.set(data.taskId, { revision: p.executionRevision, state: data.state, reason: data.reason || null }); }
+function repairTaskLinked(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "taskId"], "repair task link"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || !p.tasks.has(data.taskId) || episode.status !== "active") throw new Error("invalid repair task reference"); if (!episode.remediationTaskIds.includes(data.taskId)) episode.remediationTaskIds.push(data.taskId); episode.status = "waiting_for_tasks"; }
+function repairReverificationRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "conditionId", "findingIds", "remediationTaskIds", "oldStatus", "newStatus", "reason"], "repair reverification"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || episode.conditionId !== data.conditionId || episode.status !== data.oldStatus || data.newStatus !== "reverifying" || !Array.isArray(data.findingIds) || !Array.isArray(data.remediationTaskIds) || !data.reason) throw new Error("invalid repair reverification"); episode.status = "reverifying"; for (const id of episode.findingIds) p.findings.get(id).status = "reverification"; }
+function repairResolved(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "conditionId", "findingIds", "oldStatus", "newStatus", "reason"], "repair resolution"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || episode.conditionId !== data.conditionId || episode.status !== data.oldStatus || episode.status !== "reverifying" || data.newStatus !== "resolved" || !data.reason) throw new Error("invalid repair resolution"); episode.status = "resolved"; for (const id of episode.findingIds) p.findings.get(id).status = "resolved"; }
+function repairCancelRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "cancellation"], "repair cancellation"); const episode = p.repairEpisodes.get(data.episodeId); const c = data.cancellation; if (!episode || !c || !Array.isArray(c.ownedTaskIds) || !Array.isArray(c.ownedRunIds) || !Array.isArray(c.terminalProofRefs) || !Array.isArray(c.workspaceClosureProofRefs) || !Array.isArray(c.resourceClosureProofRefs) || typeof c.resourceDebt !== "boolean") throw new Error("invalid repair cancellation"); episode.status = "cancel_pending"; episode.cancellation = structuredClone(c); }
+function repairCancelled(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId"], "repair cancelled"); const episode = p.repairEpisodes.get(data.episodeId); const c = episode?.cancellation; if (!episode || episode.status !== "cancel_pending" || !c || c.terminalProofRefs.length < c.ownedRunIds.length || c.workspaceClosureProofRefs.length < c.ownedTaskIds.length || c.resourceClosureProofRefs.length < c.ownedRunIds.length) throw new Error("repair cancellation is out of order"); episode.status = "cancelled"; }
+function taskApplicabilityChanged(p, data) { runtimeOnly(p); requireExactFields(data, ["taskId", "state", "reason"], "task applicability"); const task = p.tasks.get(data.taskId); const current = p.taskApplicability.get(data.taskId); if (!task || !current || !["applicable", "superseded", "reverify_required"].includes(data.state)) throw new Error("invalid task applicability"); p.taskApplicability.set(data.taskId, { revision: p.executionRevision, state: data.state, reason: data.reason || null }); }
+function amendmentProposed(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "changesHash", "oldRevision", "newRevision"], "amendment proposal"); if (p.runtimeState === "active") throw new Error("runtime must be suspended before amendment"); if (data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || !hash(data.proposalHash) || !hash(data.changesHash)) throw new Error("invalid amendment proposal"); p.pendingHumanDecision = { ...data, phase: "proposed" }; }
+function amendmentApproved(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "sessionId", "userEntryId"], "amendment approval"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "proposed" || pending.proposalId !== data.proposalId || pending.proposalHash !== data.proposalHash || !data.sessionId || !data.userEntryId) throw new Error("invalid amendment approval"); p.pendingHumanDecision = { ...pending, ...data, phase: "approved" }; }
+function amendmentCapabilityConsumed(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "nonceDigest"], "amendment capability"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "approved" || pending.proposalId !== data.proposalId || !hash(data.nonceDigest)) throw new Error("invalid amendment capability"); pending.phase = "consumed"; }
+function amendmentApplied(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "oldRevision", "newRevision", "contractHash", "reconciliation"], "amendment apply"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "consumed" || pending.proposalId !== data.proposalId || data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || !hash(data.contractHash) || !Array.isArray(data.reconciliation)) throw new Error("invalid amendment apply"); p.executionRevision = data.newRevision; p.executionContractHash = data.contractHash; p.pendingHumanDecision = null; }
+function finalReviewStarted(p, data) { runtimeOnly(p); requireExactFields(data, ["reviewId", "manifestHash", "stateHash", "worldHash"], "final review start"); if (!data.reviewId || !hash(data.manifestHash) || !hash(data.stateHash) || !hash(data.worldHash)) throw new Error("invalid final review start"); p.finalReview = { ...data, status: "started" }; }
+function finalReviewRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["reviewId", "resultHash", "severity"], "final review record"); if (!p.finalReview || p.finalReview.reviewId !== data.reviewId || !hash(data.resultHash) || !["none", "minor", "important", "critical"].includes(data.severity)) throw new Error("invalid final review record"); p.finalReview = { ...p.finalReview, ...data, status: "recorded" }; }
+function hash(value) { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
 
 function goalCreated(p, event, replay) {
   const { objective, scope, nonGoals, dod, tasks, taskDefs } = event.data;

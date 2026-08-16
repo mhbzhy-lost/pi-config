@@ -465,6 +465,7 @@ function serializeProjection(p) {
     findings: Object.fromEntries(p.findings || []),
     repairEpisodes: Object.fromEntries(p.repairEpisodes || []),
     suspension: p.suspension, convergenceBudget: p.convergenceBudget, evidenceHistory: p.evidenceHistory || [],
+    finalReview: p.finalReview || null,
   };
 }
 

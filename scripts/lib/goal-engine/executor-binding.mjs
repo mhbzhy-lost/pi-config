@@ -57,6 +57,8 @@ export function prepareExecutorBindingTicket({ projection, contract, contractHas
     workspacePath: workspace.path,
     workspaceLeaseId,
     headAtDispatch: workspace.baseCommit,
+    schemaVersion: projection.eventSchemaVersion,
+    executionRevision: generationCapabilities(projection.eventSchemaVersion).executionRevision ? projection.executionRevision : null,
   };
   const ticketId = digest(identity);
   return Object.freeze({
@@ -78,7 +80,9 @@ export function assertExecutorBindingTicketCurrent(ticket, projection) {
   if (projection?.goalId !== ticket.goalId || !projection?.eventSchemaVersion || generationCapabilities(projection.eventSchemaVersion).executorBinding !== "strict"
       || task?.status !== "dispatched" || task.attempts !== ticket.attempt
       || task.contractHash !== ticket.contractHash || workspace?.phase !== "active"
-      || workspace.path !== ticket.workspacePath || workspace.baseCommit !== ticket.headAtDispatch) {
+      || workspace.path !== ticket.workspacePath || workspace.baseCommit !== ticket.headAtDispatch
+      || ticket.schemaVersion !== projection.eventSchemaVersion
+      || ticket.executionRevision !== (generationCapabilities(projection.eventSchemaVersion).executionRevision ? projection.executionRevision : null)) {
     fail("EXECUTOR_BINDING_MISMATCH", "Goal dispatch ticket changed before executor binding");
   }
   return task;

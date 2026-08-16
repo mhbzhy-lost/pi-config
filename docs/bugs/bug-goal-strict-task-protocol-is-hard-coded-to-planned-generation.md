@@ -10,3 +10,6 @@
 
 ## 修复方案
 新增冻结的 generation capability matrix；所有 Task 合同、绑定、结算、完成和 revision 判断均从该矩阵取得能力。新增 runtime draft 事件投影与严格实体状态机，并以事件重放作为快照权威来源。
+
+## 回归夹具
+两个既有 `goal_settle` 集成夹具只传入旧式 `evidence`，却在 planned.v1 的既有双路径结算前置条件下缺少 `subagent_evidence`、`main_verification` 与工作区内 0600 canonical child artifact，因而在读取子证据时提前失败。夹具现通过同一 canonical serializer、指纹和独立主验证构造真实格式的证据，继续断言 Root Broker 的精确 terminal proof；生产错误顺序和结算格式不变。
