@@ -78,6 +78,11 @@ test("store rejects every malformed Host remediation batch before any goals writ
     ["commands are not criteria-only", () => { const events = plan(); events[0].data.addTasks["repair-task-1"].acceptance.commands = ["npm test"]; return events; }],
     ["extra metadata", () => { const events = plan(); events[0].data.addTasks["repair-task-1"].metadata.extra = true; return events; }],
     ["task drift", () => { const events = plan(); events[1].data.taskId = "other-task"; return events; }],
+    ["approved consume taskId drift", () => { const events = plan({ approved: true }); events[1].data.taskId = "other-task"; return events; }],
+    ["approved consume taskDefHash drift", () => { const events = plan({ approved: true }); events[1].data.taskDefHash = "1".repeat(64); return events; }],
+    ["approved consume executionRevision drift", () => { const events = plan({ approved: true }); events[1].data.executionRevision = 2; return events; }],
+    ["approved consume subject drift", () => { const events = plan({ approved: true }); events[1].data.subjectHash = "1".repeat(64); return events; }],
+    ["approved consume challengeHash drift", () => { const events = plan({ approved: true }); events[1].data.challengeHash = "1".repeat(64); return events; }],
     ["episode drift", () => { const events = plan({ approved: true }); events[1].data.episodeId = "other-episode"; return events; }],
     ["condition drift", () => { const events = plan(); events[0].data.addTasks["repair-task-1"].metadata.conditionId = "other-condition"; return events; }],
     ["finding drift", () => { const events = plan(); events[0].data.addTasks["repair-task-1"].metadata.findingIds = ["other-finding"]; return events; }],
@@ -91,4 +96,12 @@ test("store rejects every malformed Host remediation batch before any goals writ
     ["extra consume data", () => { const events = plan({ approved: true }); events[1].data.extra = true; return events; }],
   ];
   for (const [name, malformed] of cases) assertNoWrite(malformed(), name);
+});
+
+test("store preflight rejects approved consume identity drift before creating goals", () => {
+  for (const field of ["taskId", "taskDefHash", "executionRevision", "subjectHash", "challengeHash"]) {
+    const events = plan({ approved: true });
+    events[1].data[field] = field === "executionRevision" ? 2 : field === "taskId" ? "other-task" : "1".repeat(64);
+    assertNoWrite(events);
+  }
 });

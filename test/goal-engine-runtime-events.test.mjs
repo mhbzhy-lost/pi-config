@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
 import { evaluateConditionGraph } from "../scripts/lib/goal-engine/condition-validity.mjs";
-import { createRepairChallenge, issueRepairCapability, recordRepairUserDecision, repairEpisodeTransition, rejectSubjectHash, validateRemediationTask } from "../scripts/lib/goal-engine/repair-policy.mjs";
+import { buildRemediationTaskCandidate, createRepairChallenge, issueRepairCapability, recordRepairUserDecision, repairEpisodeTransition, rejectSubjectHash, validateRemediationTask } from "../scripts/lib/goal-engine/repair-policy.mjs";
 
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
 function hash(n) { return String(n).padStart(64, "0"); }
@@ -213,6 +213,63 @@ test("runtime evidence ledger survives store replay with calibration and product
     assert.deepEqual(replayed.evidenceHistory, p.evidenceHistory); assert.equal(projectionStateHash(replayed), projectionStateHash(p));
     assert.deepEqual(snapshot.evidenceHistory.map((row) => row.evidenceId), [hash(100), hash(200)]); assert.deepEqual(replayed.conditions.get("condition-1").supportingEvidenceIds, [hash(200)]);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+function authorizedRepair() {
+  let p = active({ productVerdict: { kind: "failed", failureCode: "assertion", findingFingerprint: hash(300) } });
+  p.conditions.get("condition-1").definition.remediation.policy = "user-approved";
+  p = applyEvent(p, event("finding.recorded", { findingId: "finding-1", conditionId: "condition-1", runId: "product-run", evidenceId: hash(200), fingerprint: hash(300) }, 15));
+  p = applyEvent(p, event("repair.episode_opened", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"] }, 16));
+  const taskDef = { description: "Repair condition", deps: [], writePaths: ["src/**"], acceptance: { criteria: [{ id: "repair", statement: "Condition is repaired", evidenceKinds: ["tests"] }] }, workflow: "tdd" };
+  const candidate = buildRemediationTaskCandidate({ projection: p, episodeId: "episode-1", findingIds: ["finding-1"], taskDef });
+  const challenge = createRepairChallenge({ projection: p, episodeId: "episode-1", action: "authorize_task", sessionId: "repair-session", requestedAt: 20, expiresAt: 30, baseHead: "b".repeat(40), subjectHash: candidate.taskDef.metadata.subjectHash, taskId: candidate.taskId, taskDefHash: candidate.taskDef.metadata.taskDefHash, taskDef });
+  p = applyEvent(p, event(challenge.events[0].type, challenge.events[0].data, 17));
+  const decision = recordRepairUserDecision({ projection: p, challengeId: challenge.challengeId, sessionId: "repair-session", userEntryId: "repair-entry", userEntryHash: hash(501), branchBindingHash: hash(502), userEntryOccurredAt: 21, choice: "approve", approved: true, source: "interactive", recordedAt: 21 });
+  p = applyEvent(p, event(decision.events[0].type, decision.events[0].data, 18));
+  const capability = issueRepairCapability({ projection: p, challengeId: challenge.challengeId, taskDef, now: 22 });
+  return { p, taskDef, candidate, challenge, capability };
+}
+
+test("authorize_task policy chain replays the exact reducer events without a nonce leak", () => {
+  const { p, taskDef, candidate, challenge, capability } = authorizedRepair();
+  assert.notEqual(challenge.events[0].data.baseHead, p.runtimeBaseHead, "explicit CurrentWorld baseHead is independent from runtimeBaseHead");
+  const plan = validateRemediationTask({ projection: p, episodeId: "episode-1", findingIds: ["finding-1"], taskDef, capability, consumedAt: 23 });
+  assert.deepEqual(plan.events.map(({ type }) => type), ["goal.amended", "repair.capability_consumed", "repair.task_linked"]);
+  let replayed = applyAll(p, plan.events.map((entry, index) => event(entry.type, entry.data, 19 + index)));
+  assert.equal([...replayed.tasks.values()].filter(({ metadata }) => metadata?.kind === "remediation").length, 1); assert.equal(replayed.repairEpisodes.get("episode-1").status, "waiting_for_tasks");
+  assert.equal(replayed.repairChallenges.get(challenge.challengeId).phase, "applied");
+  assert.deepEqual(replayed.tasks.get(candidate.taskId).metadata, candidate.taskDef.metadata);
+  assert.equal(challenge.events[0].data.taskId, candidate.taskId); assert.equal(challenge.events[0].data.taskDefHash, candidate.taskDef.metadata.taskDefHash);
+  assert.equal(challenge.events[0].data.subjectHash, candidate.taskDef.metadata.subjectHash); assert.equal(challenge.events[0].data.executionRevision, replayed.tasks.get(candidate.taskId).metadata.executionRevision);
+  assert.equal(JSON.stringify([...plan.events, challenge.events[0]]).includes(capability.nonce), false);
+});
+
+test("authorize_task reducer rejects every consumed and linked identity drift plus repeated nonce digests", () => {
+  const { p, taskDef, challenge, capability } = authorizedRepair();
+  assert.throws(() => issueRepairCapability({ projection: p, challengeId: challenge.challengeId, taskDef: { ...taskDef, description: "Wrong repair" }, now: 22 }), /candidate/);
+  const plan = validateRemediationTask({ projection: p, episodeId: "episode-1", findingIds: ["finding-1"], taskDef, capability, consumedAt: 23 });
+  const consume = plan.events[1].data;
+  for (const [field, value] of [["challengeHash", hash(999)], ["taskId", "other-task"], ["taskDefHash", hash(998)], ["executionRevision", 2], ["subjectHash", hash(997)], ["userEntryHash", hash(996)]]) assert.throws(() => applyEvent(p, event("repair.capability_consumed", { ...consume, [field]: value }, 19)), /capability/);
+  const amended = applyEvent(p, event(plan.events[0].type, plan.events[0].data, 19));
+  const consumed = applyEvent(amended, event(plan.events[1].type, consume, 20));
+  for (const data of [{ ...plan.events[2].data, taskId: "other-task" }, { ...plan.events[2].data, challengeId: "other-challenge" }]) assert.throws(() => applyEvent(consumed, event("repair.task_linked", data, 21)), /challenge|metadata|reference/);
+  assert.throws(() => applyEvent(consumed, event("repair.capability_consumed", consume, 21)), /capability/);
+  const second = createRepairChallenge({ projection: consumed, episodeId: "episode-1", action: "authorize_task", sessionId: "second-session", requestedAt: 24, expiresAt: 30, baseHead: "b".repeat(40), subjectHash: consume.subjectHash, taskId: consume.taskId, taskDefHash: consume.taskDefHash, taskDef });
+  let another = applyEvent(consumed, event(second.events[0].type, second.events[0].data, 21));
+  const decision = recordRepairUserDecision({ projection: another, challengeId: second.challengeId, sessionId: "second-session", userEntryId: "second-entry", userEntryHash: hash(503), branchBindingHash: hash(504), userEntryOccurredAt: 25, choice: "approve", approved: true, source: "interactive", recordedAt: 25 });
+  another = applyEvent(another, event(decision.events[0].type, decision.events[0].data, 22));
+  assert.throws(() => applyEvent(another, event("repair.capability_consumed", { ...consume, ...issueRepairCapability({ projection: another, challengeId: second.challengeId, taskDef, now: 26 }), nonceDigest: consume.nonceDigest, consumedAt: 26 }, 23)), /capability/);
+});
+
+test("authorize_task challenge identity hashes every public body field and reducer rejects mismatches", () => {
+  const { p, taskDef, candidate, challenge } = authorizedRepair();
+  const create = (overrides) => createRepairChallenge({ projection: p, episodeId: "episode-1", action: "authorize_task", sessionId: "repair-session", requestedAt: 20, expiresAt: 30, baseHead: "b".repeat(40), subjectHash: candidate.taskDef.metadata.subjectHash, taskId: candidate.taskId, taskDefHash: candidate.taskDef.metadata.taskDefHash, taskDef, ...overrides });
+  for (const changed of [{ sessionId: "other-session" }, { expiresAt: 29 }, { baseHead: "c".repeat(40) }, { taskDef: { ...taskDef, description: "Different repair" }, taskId: candidate.taskId, taskDefHash: candidate.taskDef.metadata.taskDefHash, subjectHash: candidate.taskDef.metadata.subjectHash }]) {
+    if (changed.taskDef) { const alternate = buildRemediationTaskCandidate({ projection: p, episodeId: "episode-1", findingIds: ["finding-1"], taskDef: changed.taskDef }); changed.taskId = alternate.taskId; changed.taskDefHash = alternate.taskDef.metadata.taskDefHash; changed.subjectHash = alternate.taskDef.metadata.subjectHash; }
+    const alternate = create(changed); assert.notEqual(alternate.events[0].data.challengeHash, challenge.events[0].data.challengeHash); assert.notEqual(alternate.challengeId, challenge.challengeId);
+  }
+  assert.throws(() => applyEvent(p, event("repair.challenge_created", { ...challenge.events[0].data, challengeHash: hash(999) }, 30)), /challenge/);
+  assert.throws(() => applyEvent(p, event("repair.challenge_created", { ...challenge.events[0].data, challengeId: "repair-challenge-bad" }, 30)), /challenge/);
 });
 
 test("runtime store replay persists repair challenge after complete calibration, activation, and product failure", () => {
