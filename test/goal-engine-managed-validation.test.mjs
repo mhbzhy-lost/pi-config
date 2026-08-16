@@ -111,7 +111,7 @@ test("recover converts a parent process-group mismatch to cleanup debt", async (
   const f = fixture(t); const prepared = prepareManagedValidation(input(f)); const stored = JSON.parse(readFileSync(prepared.receiptPath, "utf8"));
   const parentProcess = { pid: process.pid, pidBirthIdentity: "unprovable", processGroupId: process.pid + 1 }; parentProcess.processIdentityHash = createHash("sha256").update(JSON.stringify(parentProcess)).digest("hex");
   writeFileSync(prepared.receiptPath, JSON.stringify({ ...stored, phase: "process_bound", process: parentProcess, terminal: null, recorded: null }), { mode: 0o600 });
-  assert.equal((await recoverManagedValidation(prepared)).phase, "cleanup_debt");
+  await assert.rejects(recoverManagedValidation(prepared), /receipt is invalid/i);
 });
 
 test("recover leaves an unprovable process-bound receipt as cleanup debt without recording or releasing", async (t) => {
@@ -135,6 +135,7 @@ async function pollRegular(file, timeout = 5_000) {
   throw Error(`handshake timed out: ${file}`);
 }
 async function killChild(child) { if (child.exitCode !== null || child.signalCode !== null) return; const exited = new Promise((resolve) => child.once("exit", resolve)); child.kill("SIGKILL"); await exited; }
+async function groupIsEmpty(pgid, timeout = 2_000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { const members = execFileSync("ps", ["-axo", "pid=,pgid="], { encoding: "utf8" }).split("\n").filter((line) => line.trim().split(/\s+/)[1] === String(pgid)); if (members.length === 0) return true; await new Promise((resolve) => setTimeout(resolve, 20)); } return false; }
 function crashPlan(marker, started, finish) { return { ...plan(), actions: [{ id: "check", kind: "validation", executable: process.execPath, args: [crashAction, marker, started, finish] }] }; }
 async function crashScenario(t, mode, round) {
   const f = fixture(t), baseline = git(f.originRoot, "worktree", "list", "--porcelain");
@@ -149,10 +150,12 @@ async function crashScenario(t, mode, round) {
     if (mode !== "terminal_bound" && !existsSync(finish)) writeFileSync(finish, "finish", { mode: 0o600, flag: "wx" });
     const recovering = recoverManagedValidation(prepared, mode === "before_process_ack" ? { onProcessBound: async () => {} } : {});
     const recovered = await recovering;
-    assert.equal(recovered.phase, "recorded"); assert.equal(recovered.recordCount, 1); assert.equal(readFileSync(marker, "utf8"), "started");
+    assert.equal(recovered.phase, "recorded"); assert.equal(recovered.recordCount, 1); assert.equal(recovered.terminal.status, "passed"); assert.equal(readFileSync(marker, "utf8"), "started");
     assert.equal(releaseManagedValidation(recovered, { expectedHead: f.integratedHead }).phase, "released");
     assert.equal(readdirSync(join(f.stateRoot, "managed-validations")).filter((name) => JSON.parse(readFileSync(join(f.stateRoot, "managed-validations", name), "utf8")).phase !== "released").length, 0);
     assert.equal(readdirSync(join(f.stateRoot, "validation-leases")).filter((name) => name.endsWith(".json") && JSON.parse(readFileSync(join(f.stateRoot, "validation-leases", name), "utf8")).state !== "released").length, 0);
+    assert.equal(readdirSync(join(f.stateRoot, "validation-runtime")).length, 0);
+    assert.equal(readdirSync(join(f.stateRoot, "validation-worktrees")).length, 0);
     assert.equal(git(f.originRoot, "worktree", "list", "--porcelain"), baseline);
   } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child); }
 }
@@ -166,10 +169,27 @@ test("malformed durable status fails closed without authorizing an action", { ti
   const child = spawn(process.execPath, [crashHost, "before_process_ack", JSON.stringify(prepared), handshake], { stdio: "ignore" });
   try {
     await pollRegular(handshake); const parent = JSON.parse(readFileSync(prepared.receiptPath, "utf8"));
+    const supervisorPid = Number(JSON.parse(await pollRegular(handshake)).pid);
     writeFileSync(join(parent.workspaceLease.runtime?.path || JSON.parse(readFileSync(join(f.stateRoot, "validation-leases", `${parent.workspaceLease.id}.json`), "utf8")).runtime.path, "status"), "not-json", { mode: 0o600 });
     await killChild(child);
     const result = await recoverManagedValidation(prepared, { onProcessBound: async () => { throw Error("must not acknowledge malformed status"); } });
-    assert.equal(result.phase, "cleanup_debt"); assert.equal(existsSync(marker), false);
+    assert.equal(result.phase, "cleanup_debt"); assert.equal(await groupIsEmpty(supervisorPid), true); assert.equal(existsSync(marker), false);
     assert.throws(() => prepareManagedValidation(input(f, "malformed-next", [{ key: "malformed", mode: "exclusive", capacity: 1, reset: "clean" }])), /resource|lease|conflict/i);
   } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child); }
+});
+
+test("parent terminal, recorded hash, and phase authority reject corrupted receipts", async (t) => {
+  const cases = [
+    (record) => ({ ...record, terminal: { ...record.terminal, actualOutputBytes: 0 } }),
+    (record) => ({ ...record, recorded: { ...record.recorded, artifactHash: "0".repeat(64) } }),
+    (record) => ({ ...record, phase: "recorded", terminal: null }),
+    (record) => ({ ...record, phase: "terminal", recorded: record.recorded }),
+  ];
+  for (const corrupt of cases) {
+    const f = fixture(t); const completed = await startManagedValidation(prepareManagedValidation(input(f, `authority-${cases.indexOf(corrupt)}`)));
+    const record = JSON.parse(readFileSync(completed.receiptPath, "utf8"));
+    writeFileSync(completed.receiptPath, JSON.stringify(corrupt(record)), { mode: 0o600 });
+    assert.throws(() => inspectManagedValidation(completed), /receipt is invalid/i);
+    await assert.rejects(recoverManagedValidation(completed), /receipt is invalid/i);
+  }
 });

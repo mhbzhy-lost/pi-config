@@ -28,3 +28,7 @@ supervisor 本身已是 durable，但旧 Host 仍持有 stdout/stderr pipe、dea
 父收据的终态现先持久化，再将嵌套租约以终态哈希写回 `active`，最后写入 `recorded`；恢复遇到 `terminal` 会重复该顺序。内部 `onTerminalBound` 仅在父终态已落盘时触发，供 Host 崩溃测试建立边界，不向业务 action 传递权限。
 
 supervisor 的 status 采用固定 schema，stdout 与 stderr 共享单一字节预算，记录实际总字节数和截断标记；状态文件以 0600、文件及目录 fsync、原子 rename 发布。spawn 失败只保留固定 reason code，恢复在 deadline 后无 status 时保持 `timed_out`，不会改记为 `failed`。
+
+## 损坏 status 的已属进程清理
+
+曾有恢复路径在验证父 PID、嵌套 running lease、managed workspace、group 和 PID birth 前读取 status；损坏文件会提前进入 debt，遗留已经证明属于该 lease 的 detached supervisor。恢复现在先完成全部身份链验证才标记 owned；之后任何 status 读取失败都只对该已属 group 做一次 teardown，并保留 cleanup debt/claim。未知或替换身份仍绝不发送 kill。status 与父 terminal/recorded 也采用 exact shape、字节预算、哈希和 phase 校验，拒绝不合法 receipt 而不暴露 artifact 内容。
