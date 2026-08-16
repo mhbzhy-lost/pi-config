@@ -16,6 +16,7 @@ const SCHEMA_RANK = new Map([["goal-engine.event.v1", 1], ["goal-engine.event.v2
 export function schemaVersionForMutation(projection, legacyTargetVersion = "goal-engine.event.v3") {
   const current = projection?.eventSchemaVersion;
   if (!current || current === PLANNED_SCHEMA_VERSION) return PLANNED_SCHEMA_VERSION;
+  if (current === RUNTIME_SCHEMA_VERSION) return RUNTIME_SCHEMA_VERSION;
   if (!LEGACY_SCHEMA_VERSIONS.has(current)) throw new Error(`unknown event generation: ${current}`);
   if (!LEGACY_SCHEMA_VERSIONS.has(legacyTargetVersion)) throw new Error(`invalid legacy mutation generation: ${legacyTargetVersion}`);
   return SCHEMA_RANK.get(legacyTargetVersion) >= SCHEMA_RANK.get(current) ? legacyTargetVersion : current;

@@ -57,6 +57,8 @@ R9 将 `requested` 与 `lease_allocated` 同时命名为 `observation_start`；a
 Cycle 1 autonomous Condition 的产品观察为 FAIL 后，原子 Finding/Episode 虽已落盘，但 `active` Episode 没有由 Host 物化严格 remediation Task。即使已有 waiting Task，R9 仍以 priority 4 `repair_episode` 覆盖 pending Task；runtime status 又向 `actionableFrontier` 传空 `taskActions`，因此无法签发 root Task action offer。最后 runtime `goal_accept` 沿用了 accept-auto 分支，提前追加 `goal.completed`，且未把最后 owned Task 的验收推进到 `reverifying`。
 
 ### 根因与修复方案
+`schemaVersionForMutation`只认 planned/legacy，generic Task writer 的 `makeGoalEvent` 会拒绝 runtime。
+
 Extension 必须只根据已提交 Condition 的 id、statement、expected 和 remediation.allowed_paths 确定性构造 criteria-only TDD Task，并交给 `validateRemediationTask` 生成 Host-internal metadata 与同批 `goal.amended`/`repair.task_linked`。user-approved 本切片闭锁为 `R10A3_REPAIR_APPROVAL_REQUIRED`。R9 的 waiting episode 仅作 blocker，runtime status 将真实 `taskActionState` Map 传入 frontier，并对选中的 root Task action 签发一次性 offer。runtime generation 的 accept 仅追加 `task.accepted`；最后 owned task 使用同一 batch 追加 `repair.reverification_requested`，永不完成 Goal。
 
 ## Cycle 0 未接线

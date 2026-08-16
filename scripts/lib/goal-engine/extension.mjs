@@ -1258,7 +1258,7 @@ export function createGoalEngineExtension(pi, options = {}) {
               acceptance: { criteria: [{ id: condition.id, statement: `Condition ${condition.id} expected: ${condition.expected}`, evidenceKinds: ["tests"] }] }, workflow: "tdd",
             };
             const plan = validateRemediationTask({ projection, episodeId: episode.episodeId, findingIds: [...episode.findingIds], taskDef });
-            const events = plan.events.map(({ type, data }) => makeEvent(type, data, goalId, "goal-runtime.v1"));
+            const events = plan.events.map(({ type, data }) => makeGoalEvent(type, data, goalId, projection));
             try { appendEventBatchFn(root, events, projection.version); }
             catch (cause) {
               const recovered = loadProjectionFn(root, goalId);
@@ -1277,7 +1277,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (selected && ["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(selected.tool)) {
           const machineAction = { tool: selected.tool, params: { goal_id: goalId, ...selected.params } };
           const offer = issueActionOffer(projection, machineAction, sessionId);
-          appendEventFn(root, makeEvent("goal.action_offered", offer, goalId, "goal-runtime.v1"), projection.version);
+          appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId, projection), projection.version);
           return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, machineAction, action_token: offer.token, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
         }
         return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
@@ -1650,9 +1650,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (projection.lifecycle !== "active") throw new Error(`goal is not active: ${projection.lifecycle}`);
 
       if (task.status === "succeeded") {
-        const acceptEvent = projection.eventSchemaVersion === "goal-runtime.v1"
-          ? makeEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId, "goal-runtime.v1")
-          : makeGoalEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId, projection);
+        const acceptEvent = makeGoalEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId, projection);
         const afterAccept = applyEvent(projection, acceptEvent);
         const runtimeFinalize = generationCapabilities(projection.eventSchemaVersion).completion === "goal-finalize";
         const reverifyingEpisodes = runtimeFinalize
@@ -1661,7 +1659,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           : [];
         const transitions = reverifyingEpisodes
           .flatMap((episode) => repairEpisodeTransition({ projection: afterAccept, episodeId: episode.episodeId, event: { type: "task.accepted", taskId: params.task_id } }).events)
-          .map(({ type, data }) => makeEvent(type, data, goalId, "goal-runtime.v1"));
+          .map(({ type, data }) => makeGoalEvent(type, data, goalId, afterAccept));
         try {
           projection = runtimeFinalize
             ? appendEventBatchFn(root, [acceptEvent, ...transitions], projection.version)

@@ -43,6 +43,7 @@ test("mutation schema preserves runtime generation while planned and legacy matr
   assert.equal(schemaVersionForMutation({ eventSchemaVersion: "planned.v1" }), "planned.v1");
   assert.equal(schemaVersionForMutation({ eventSchemaVersion: "goal-engine.event.v2" }, "goal-engine.event.v3"), "goal-engine.event.v3");
   assert.equal(schemaVersionForMutation({ eventSchemaVersion: "goal-engine.event.v3" }, "goal-engine.event.v2"), "goal-engine.event.v3");
+  assert.throws(() => schemaVersionForMutation({ eventSchemaVersion: "unknown.v1" }), /unknown event generation/);
 });
 
 test("runtime checkpoint reducer rejects non-exact, non-monotonic, and dishonest progress records", () => {
