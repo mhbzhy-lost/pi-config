@@ -1653,12 +1653,16 @@ export function createGoalEngineExtension(pi, options = {}) {
         const acceptEvent = makeGoalEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId, projection);
         const afterAccept = applyEvent(projection, acceptEvent);
         const runtimeFinalize = generationCapabilities(projection.eventSchemaVersion).completion === "goal-finalize";
-        const reverifyingEpisodes = runtimeFinalize
+        const transitionPlans = runtimeFinalize
           ? [...afterAccept.repairEpisodes.values()]
             .filter((episode) => episode.status === "waiting_for_tasks" && episode.remediationTaskIds.includes(params.task_id))
+            .map((episode) => ({
+              episodeId: episode.episodeId,
+              events: repairEpisodeTransition({ projection: afterAccept, episodeId: episode.episodeId, event: { type: "task.accepted", taskId: params.task_id } }).events,
+            }))
           : [];
-        const transitions = reverifyingEpisodes
-          .flatMap((episode) => repairEpisodeTransition({ projection: afterAccept, episodeId: episode.episodeId, event: { type: "task.accepted", taskId: params.task_id } }).events)
+        const transitions = transitionPlans
+          .flatMap((plan) => plan.events)
           .map(({ type, data }) => makeGoalEvent(type, data, goalId, afterAccept));
         try {
           projection = runtimeFinalize
@@ -1668,7 +1672,8 @@ export function createGoalEngineExtension(pi, options = {}) {
               : appendEventFn(root, acceptEvent, projection.version);
         } catch (cause) {
           projection = reloadAfterFailure(cause, (recovered) => recovered.tasks.get(params.task_id)?.status === "accepted"
-            && reverifyingEpisodes.every((episode) => recovered.repairEpisodes.get(episode.episodeId)?.status === "reverifying"));
+            && transitionPlans.filter((plan) => plan.events.length > 0)
+              .every((plan) => recovered.repairEpisodes.get(plan.episodeId)?.status === "reverifying"));
         }
         task = projection.tasks.get(params.task_id);
       } else if (task.status !== "accepted") {

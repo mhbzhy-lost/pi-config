@@ -475,8 +475,8 @@ test("typed runtime goal_accept recovers a non-final remediation Task before ato
 
   const finalTask = fixture.tasks.get(secondTaskId); finalTask.status = "succeeded"; finalTask.workspace = { attempt: 1, phase: "disposed", disposition: "integrated", released: true };
   const finalAccepted = JSON.parse(await invoke(accepting, "goal_accept", { goal_id: fixture.goalId, task_id: secondTaskId, action_token: "schema-required" }));
-  assert.equal(finalAccepted.goal_complete, false); assert.equal(fixture.lifecycle, "active"); assert.equal(finalTask.status, "accepted");
-  assert.equal(episode.status, "reverifying"); assert.equal(fixture.findings.get(episode.findingIds[0]).status, "reverification");
+  assert.equal(finalAccepted.goal_complete, false); assert.equal(fixture.lifecycle, "active"); assert.equal(fixture.tasks.get(secondTaskId).status, "accepted");
+  assert.equal(fixture.repairEpisodes.get(episode.episodeId).status, "reverifying"); assert.equal(fixture.findings.get(episode.findingIds[0]).status, "reverification");
   assert.deepEqual(batches[1].map(entry => entry.type), ["task.accepted", "repair.reverification_requested"]); assert.equal(events.some(entry => entry.type === "goal.completed"), false);
 });
 
