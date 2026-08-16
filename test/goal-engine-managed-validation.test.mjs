@@ -172,6 +172,35 @@ test("real child Host SIGKILL recovery covers callback, running action, and term
   for (let round = 1; round <= 2; round++) for (const mode of ["before_process_ack", "action_running", "terminal_bound"]) await crashScenario(t, mode, round);
 });
 
+test("terminal recovery fails closed when nested runtime path escapes stateRoot", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t), marker = join(f.stateRoot, "escaped-terminal-marker"), started = join(f.stateRoot, "escaped-terminal-started"), finish = join(f.stateRoot, "escaped-terminal-finish"), handshake = join(f.stateRoot, "escaped-terminal-handshake");
+  const prepared = prepareManagedValidation(input(f, "escaped-terminal", [{ key: "escaped-terminal", mode: "exclusive", capacity: 1, reset: "clean" }], crashPlan(marker, started, finish)));
+  const child = spawn(process.execPath, [crashHost, "terminal_bound", JSON.stringify(prepared), handshake], { stdio: "ignore" });
+  try {
+    await pollRegular(started); writeFileSync(finish, "finish", { mode: 0o600, flag: "wx" }); await pollRegular(handshake); await killChild(child);
+    const parent = JSON.parse(readFileSync(prepared.receiptPath, "utf8")); const leasePath = join(f.stateRoot, "validation-leases", `${parent.workspaceLease.id}.json`); const lease = JSON.parse(readFileSync(leasePath, "utf8"));
+    const outside = join(f.originRoot, "escaped-terminal-runtime"), sentinel = join(outside, "sentinel"); mkdirSync(outside, { mode: 0o700 }); writeFileSync(sentinel, "keep", { mode: 0o600 });
+    writeFileSync(leasePath, JSON.stringify({ ...lease, runtime: { ...lease.runtime, path: outside } }), { mode: 0o600 });
+    const recovered = await recoverManagedValidation(prepared);
+    const durableLease = JSON.parse(readFileSync(leasePath, "utf8"));
+    assert.equal(recovered.phase, "cleanup_debt"); assert.equal(recovered.recorded, null); assert.equal(durableLease.state, "running"); assert.equal(existsSync(outside), true); assert.equal(existsSync(sentinel), true);
+  } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child); }
+});
+
+test("process-bound recovery tears down proven group but never touches escaped runtime", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t), marker = join(f.stateRoot, "escaped-process-marker"), started = join(f.stateRoot, "escaped-process-started"), finish = join(f.stateRoot, "escaped-process-finish"), handshake = join(f.stateRoot, "escaped-process-handshake");
+  const prepared = prepareManagedValidation(input(f, "escaped-process", [{ key: "escaped-process", mode: "exclusive", capacity: 1, reset: "clean" }], crashPlan(marker, started, finish)));
+  const child = spawn(process.execPath, [crashHost, "action_running", JSON.stringify(prepared), handshake], { stdio: "ignore" });
+  try {
+    await pollRegular(started); const parent = JSON.parse(readFileSync(prepared.receiptPath, "utf8")); const leasePath = join(f.stateRoot, "validation-leases", `${parent.workspaceLease.id}.json`); const lease = JSON.parse(readFileSync(leasePath, "utf8")); const supervisorPid = lease.runtime.pid;
+    const outside = join(f.originRoot, "escaped-process-runtime"), sentinel = join(outside, "sentinel"); mkdirSync(outside, { mode: 0o700 }); writeFileSync(sentinel, "keep", { mode: 0o600 }); writeFileSync(leasePath, JSON.stringify({ ...lease, runtime: { ...lease.runtime, path: outside } }), { mode: 0o600 });
+    await killChild(child);
+    const recovered = await recoverManagedValidation(prepared);
+    const durableLease = JSON.parse(readFileSync(leasePath, "utf8"));
+    assert.equal(recovered.phase, "cleanup_debt"); assert.equal(recovered.recorded, null); assert.equal(durableLease.state, "running"); assert.equal(await groupIsEmpty(supervisorPid), true); assert.equal(existsSync(outside), true); assert.equal(existsSync(sentinel), true); assert.equal(existsSync(marker), true);
+  } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child); }
+});
+
 test("malformed durable status fails closed without authorizing an action", { timeout: 15_000 }, async (t) => {
   const f = fixture(t), marker = join(f.stateRoot, "malformed-marker"), started = join(f.stateRoot, "malformed-started"), finish = join(f.stateRoot, "malformed-finish"), handshake = join(f.stateRoot, "malformed-handshake");
   const prepared = prepareManagedValidation(input(f, "malformed", [{ key: "malformed", mode: "exclusive", capacity: 1, reset: "clean" }], crashPlan(marker, started, finish)));

@@ -29,6 +29,10 @@ supervisor 本身已是 durable，但旧 Host 仍持有 stdout/stderr pipe、dea
 
 supervisor 的 status 采用固定 schema，stdout 与 stderr 共享单一字节预算，记录实际总字节数和截断标记；状态文件以 0600、文件及目录 fsync、原子 rename 发布。spawn 失败只保留固定 reason code，恢复在 deadline 后无 status 时保持 `timed_out`，不会改记为 `failed`。
 
+## runtime.path 越界处置
+
+持久化 nested lease 的 `runtime.path` 曾被 terminal/recovery 直接用于读取 status 或递归删除；复现时在真实 terminal 或已证明 PID/birth/group 的 process_bound crash 后将其改为 stateRoot 外含 sentinel 的普通目录，旧逻辑会越界访问或删除。现统一验证绝对路径、canonical stateRoot 下精确的 `validation-runtime` 父目录、lease id 加随机后缀、以及父目录和运行目录均为非 symlink 目录；所有读取和删除前复验，异常时保留 nested authority、父收据进入 `cleanup_debt`，已证明的进程组仍会被终止。
+
 ## 损坏 status 的已属进程清理
 
 曾有恢复路径在验证父 PID、嵌套 running lease、managed workspace、group 和 PID birth 前读取 status；损坏文件会提前进入 debt，遗留已经证明属于该 lease 的 detached supervisor。恢复现在先完成全部身份链验证才标记 owned；之后任何 status 读取失败都只对该已属 group 做一次 teardown，并保留 cleanup debt/claim。未知或替换身份仍绝不发送 kill。status 与父 terminal/recorded 也采用 exact shape、字节预算、哈希和 phase 校验，拒绝不合法 receipt 而不暴露 artifact 内容。
