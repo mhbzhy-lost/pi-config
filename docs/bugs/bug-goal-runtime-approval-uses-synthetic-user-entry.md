@@ -17,3 +17,9 @@
 - approval intent 是审批审计收据而非 R10B 门禁；若写入 `runtimeIntentGates` 并由 `before_agent_start`、`tool_call` 的任意 gate 判断，会在审批消费后永久阻断已进入 calibrating 的 Goal。
 - reload 可以从 `getEntries()` 恢复 runtime challenge/decision 收据，但 decision 只能在 active `getBranch()` 中重新证明：恰一个匹配 intent、其直接下一条且 `parentId` 绑定 intent 的真实 user message、纯文本精确 choice，以及 `userEntryId`、choice、source 一致。`getEntries()` 不能作为用户消息权威。
 - R10B pending 记录暂不含真实 `userEntryId`，因此继续按 `kind=pending` fail-closed；后续 R10B 切片必须绑定真实用户条目后再扩大协议。
+
+## Round 1 评审发现
+
+`goal.runtime_approval_recorded` 在 append 后抛错时会以已持久化 Projection 恢复。原恢复条件遗漏本次栈内计算的 `capabilityDigest`，因此除 digest 外身份完全一致但 digest 被伪造的事件会被误认为本次成功并吞掉异常。恢复必须同时精确比对 `proposalHash`、`userEntryId`、`sessionId`、`executionContractHash`、`baseHead` 与本次 digest；只保存 digest，绝不记录原始 nonce。
+
+同时，Pi custom metadata 是不可信恢复输入：格式错误的 decision 不得恢复审批权，格式错误的 consumed/stale/rejected tombstone 不得终结合法 challenge，格式错误的 R10B pending 不得形成 gate。测试中的 active branch 必须是连续 parent 链；已删除 user message 的 branch 不得保留其 descendant decision。

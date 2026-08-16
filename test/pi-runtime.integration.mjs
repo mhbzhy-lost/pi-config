@@ -22,7 +22,12 @@ test("installed Pi SessionManager advances the active branch from custom intent 
   assert.equal(userEntryId, user.id);
   assert.equal(user.parentId, branch.at(-2).id);
   assert.equal(user.message.role, "user");
-  assert.match(await (await import("node:fs/promises")).readFile(piTypes, "utf8"), /interface InputEvent \{[\s\S]*?text: string;[\s\S]*?source: InputSource;[\s\S]*?streamingBehavior\?:[\s\S]*?\n\}/);
+  const declarations = await (await import("node:fs/promises")).readFile(piTypes, "utf8");
+  const inputEvent = declarations.match(/interface InputEvent \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(inputEvent, "installed Pi must declare InputEvent");
+  assert.match(inputEvent, /text: string;/);
+  assert.match(inputEvent, /source: InputSource;/);
+  for (const forbidden of ["entryId", "sessionId", "occurredAt"]) assert.doesNotMatch(inputEvent, new RegExp(`\\b${forbidden}\\b`));
 });
 
 test("real Pi RPC loads required auto-discovered Skills without retired products", async () => {

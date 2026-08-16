@@ -113,7 +113,7 @@ test("reload never restores an entry decision without its active-branch approval
   const user = first.entries.at(-1);
   first.appendEntry("goal-engine-runtime-approval-decision", { id: challenge.id, challengeId: challenge.id, kind: "runtime_activation_approval", choice: "approve", goalId: challenge.goalId, contractHash: challenge.contractHash, baseHead: challenge.baseHead, proposalId: challenge.proposalId, userEntryId: user.id, sessionId: challenge.sessionId, source: intent.source, proposalHash: challenge.proposalHash, receiptId: "reload-receipt" });
   const entries = structuredClone(first.entries);
-  const activeBranch = entries.filter(entry => !(entry.type === "message" && entry.message?.role === "user"));
+  const activeBranch = entries.slice(0, entries.findIndex(entry => entry.type === "message" && entry.message?.role === "user"));
   const reloaded = pi(cwd, entries, { branchEntries: activeBranch }); reloaded.cwd = cwd;
   createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) });
   reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
@@ -122,12 +122,12 @@ test("reload never restores an entry decision without its active-branch approval
   assert.equal(runtimeEntries(reloaded, "consumed").length, 0, "reload does not accept the entry decision");
 });
 
-test("durable approval recovery rejects a projection with a forged approval identity", async () => {
+test("durable approval recovery rejects a projection with a forged capability digest", async () => {
   const cwd = repo(); let threw = false;
-  const options = { goalStateEnv: {}, runtimeHost: host(cwd), appendEvent(root, event, version) {
+  const options = { goalStateEnv: {}, runtimeHost: { ...host(cwd), nonceFactory: () => "expected-capability-nonce" }, appendEvent(root, event, version) {
     if (event.type !== "goal.runtime_approval_recorded" || threw) return appendEvent(root, event, version);
     threw = true;
-    appendEvent(root, { ...event, data: { ...event.data, userEntryId: "forged-user-entry" } }, version);
+    appendEvent(root, { ...event, data: { ...event.data, capabilityDigest: createHash("sha256").update("forged-capability-nonce").digest("hex") } }, version);
     throw new Error("after forged durable append");
   } };
   const api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, options);
@@ -191,13 +191,37 @@ test("restored runtime approval metadata is strict authority, not a permissive o
   assert.notEqual(status.proposalId, malformed.find((entry) => entry.customType === "goal-engine-runtime-approval-challenge").data.proposalId); assert.equal(runtimeEntries(restored, "challenge").length, 2);
 });
 
-test("malformed runtime approval intent cannot restore authority", async () => {
+test("malformed runtime decisions do not restore approval authority", async () => {
+  for (const mutate of [data => { data.extra = "forged"; }, data => { data.sessionId = "other"; }]) {
+    const cwd = repo(), first = pi(cwd); first.cwd = cwd; createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(first, "goal_init", runtimeInit()); await invoke(first, "goal_status", {});
+    first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: first.sessionManager });
+    const challenge = first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-challenge").data;
+    const intent = first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-intent").data;
+    const user = first.entries.at(-1);
+    first.appendEntry("goal-engine-runtime-approval-decision", { id: challenge.id, challengeId: challenge.id, kind: "runtime_activation_approval", choice: "approve", goalId: challenge.goalId, contractHash: challenge.contractHash, baseHead: challenge.baseHead, proposalId: challenge.proposalId, userEntryId: user.id, sessionId: challenge.sessionId, source: intent.source, proposalHash: challenge.proposalHash, receiptId: "malformed-receipt" });
+    const entries = structuredClone(first.entries); mutate(entries.at(-1).data);
+    const activeBranch = entries.slice(0, entries.findIndex(entry => entry.type === "message" && entry.message?.role === "user"));
+    const reloaded = pi(cwd, entries, { branchEntries: activeBranch }); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+    await invoke(reloaded, "goal_status", {});
+    assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval");
+  }
+});
+
+for (const terminal of ["consumed", "stale", "rejected"]) test(`malformed runtime ${terminal} tombstone does not terminate a valid challenge`, async () => {
   const cwd = repo(), first = pi(cwd); first.cwd = cwd; createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(first, "goal_init", runtimeInit());
-  const offered = JSON.parse(await invoke(first, "goal_status", {})); first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { sessionManager: first.sessionManager });
-  const malformed = structuredClone(first.entries); malformed.find((entry) => entry.customType === "goal-engine-runtime-approval-intent").data.extra = "forged";
-  const reloaded = pi(cwd, malformed); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  const offered = JSON.parse(await invoke(first, "goal_status", {}));
+  first.appendEntry(`goal-engine-runtime-approval-${terminal}`, { id: first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-challenge").data.id, extra: "forged" });
+  const reloaded = pi(cwd, structuredClone(first.entries)); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
   const status = JSON.parse(await invoke(reloaded, "goal_status", {}));
-  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval"); assert.equal(status.proposalId, offered.proposalId);
+  assert.equal(status.proposalId, offered.proposalId);
+});
+
+test("malformed runtime approval intent cannot restore the R10B gate", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(first, "goal_init", runtimeInit());
+  first.handlers.get("input")({ type: "input", source: "interactive", text: "new work" }, { cwd, sessionManager: first.sessionManager });
+  const malformed = structuredClone(first.entries); malformed.find((entry) => entry.customType === "goal-engine-runtime-intent-pending").data.extra = "forged";
+  const reloaded = pi(cwd, malformed); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  assert.notEqual(JSON.parse(await invoke(reloaded, "goal_status", {})).status, "R10B_SUSPENSION_REQUIRED");
 });
 
 test("goal_status drives one-condition Cycle0 through request, terminal, record, release, and activation", async () => {
