@@ -47,6 +47,13 @@ R9 将 `requested` 与 `lease_allocated` 同时命名为 `observation_start`；a
 
 ## R10 Repair-owned 复验观察未接线
 
+### R10A3 权威与崩溃矩阵缺口
+
+候选实现曾为使 Condition freshness 通过而构造 `freshWorld`，伪造 `repo.root`、清空 dirty 字段并只拼接 adapter；这绕过了 Host CurrentWorld 的唯一观察权威。与此同时，obligation policy 用任意 `reverifying` Episode 全局压制 accepted Task 的 `goal_accept`，掩盖了 runtime generation 不应 accept-auto 的 graph 语义缺口。request/link 与 record/resolve 的 pre-append、durable-then-throw、exact evidence、release、stability 和 unlinked 复验矩阵亦未完整固化。
+
+修复必须把未改写的完整 Host snapshot 直接交给 `repairEpisodeTransition`；缺失 root、dirty、adapter 等权威字段一律 fail closed。runtime accepted Task 在 graph 层无 `goal_accept`，planned/legacy 保持兼容；policy 不得以无关 Episode 改写 Task 动作。所有原子恢复均以最新 Projection 逐 event 重放并证明 run 的 exact `evidenceId` 与 Episode transition。
+
+
 ### 复现
 最后 remediation Task 被接受后 Episode 已进入 `reverifying`，但 R9 仍持续以 priority 4 的 `repair_episode` 选中它，永久遮蔽该 Episode 下一次 requested Observation 的 priority 5 生命周期。Extension 也没有在 repair 被选中时请求 Observation 并用 `repair.observation_linked` 显式归属；随后 PASS 只记录 Observation，未同批解决 Episode/Finding。
 

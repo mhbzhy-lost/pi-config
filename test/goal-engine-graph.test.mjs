@@ -329,19 +329,18 @@ test("pending task only advertises dispatch for a redispatchable workspace", () 
   assert.deepEqual(graph.runnableFrontier(redispatchable), ["task"]);
 });
 
-test("all accepted gives only the first Map task the final goal_accept action", () => {
-  const projection = projectionState({
+test("all accepted planned tasks retain accept-auto while runtime tasks have no ghost goal_accept", () => {
+  const planned = projectionState({
     first: taskState({ status: "accepted" }),
     second: taskState({ status: "accepted" }),
   });
-  assertActionCase(graph.taskActionState(projection, "first"), {
-    allowedActions: ["goal_accept"],
-    requiredNextAction: { tool: "goal_accept", params: { task_id: "first" } },
-    blockingReason: null,
+  assertActionCase(graph.taskActionState(planned, "first"), {
+    allowedActions: ["goal_accept"], requiredNextAction: { tool: "goal_accept", params: { task_id: "first" } }, blockingReason: null,
   });
-  assertActionCase(graph.taskActionState(projection, "second"), {
-    allowedActions: [], requiredNextAction: null, blockingReason: null,
-  });
+  assertActionCase(graph.taskActionState(planned, "second"), { allowedActions: [], requiredNextAction: null, blockingReason: null });
+  const runtime = { ...planned, eventSchemaVersion: "goal-runtime.v1", runtimeGeneration: "goal-runtime.v1" };
+  assertActionCase(graph.taskActionState(runtime, "first"), { allowedActions: [], requiredNextAction: null, blockingReason: null });
+  assertActionCase(graph.taskActionState(runtime, "second"), { allowedActions: [], requiredNextAction: null, blockingReason: null });
 });
 
 test("terminal goal lifecycle makes every task non-runnable", () => {

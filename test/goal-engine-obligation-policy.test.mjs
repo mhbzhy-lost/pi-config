@@ -99,6 +99,12 @@ test("waiting remediation blocks without starving its pending Task dispatch", ()
   assert.equal(nextObligationAction(result)?.tool, "goal_dispatch"); assert(result.blocking.some((item) => item.code === "REPAIR_TASKS_PENDING")); assert(!result.actions.some((item) => item.tool === "repair_episode"));
 });
 
+test("accepted planned Task action is not suppressed by an unrelated reverifying Episode", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.tasks.set("accepted", { status: "accepted" }); projection.repairEpisodes.set("episode", { episodeId: "episode", status: "reverifying", ownedRunIds: [] });
+  const result = frontier(projection, world(), new Map([["accepted", { requiredNextAction: { tool: "goal_accept", params: { task_id: "accepted" }, reason: "planned completion", priority: 1 } }]]));
+  assert.equal(result.actions.some(item => item.id === "accepted" && item.tool === "goal_accept"), true);
+});
+
 test("reverifying Episode requests an owned run once and then yields to its lifecycle", () => {
   const projection = base(); projection.progressLedger = ledger(); projection.conditions.set("c", condition("c"));
   projection.repairEpisodes.set("episode", { episodeId: "episode", conditionId: "c", status: "reverifying", ownedRunIds: [] });
