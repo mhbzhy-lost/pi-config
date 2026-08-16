@@ -258,7 +258,12 @@ test("authorize_task reducer rejects every consumed and linked identity drift pl
   let another = applyEvent(consumed, event(second.events[0].type, second.events[0].data, 21));
   const decision = recordRepairUserDecision({ projection: another, challengeId: second.challengeId, sessionId: "second-session", userEntryId: "second-entry", userEntryHash: hash(503), branchBindingHash: hash(504), userEntryOccurredAt: 25, choice: "approve", approved: true, source: "interactive", recordedAt: 25 });
   another = applyEvent(another, event(decision.events[0].type, decision.events[0].data, 22));
-  assert.throws(() => applyEvent(another, event("repair.capability_consumed", { ...consume, ...issueRepairCapability({ projection: another, challengeId: second.challengeId, taskDef, now: 26 }), nonceDigest: consume.nonceDigest, consumedAt: 26 }, 23)), /capability/);
+  const secondCapability = issueRepairCapability({ projection: another, challengeId: second.challengeId, taskDef, now: 26 });
+  const secondPlan = validateRemediationTask({ projection: another, episodeId: "episode-1", findingIds: ["finding-1"], taskDef, capability: secondCapability, consumedAt: 26 });
+  const secondConsume = secondPlan.events[1].data;
+  assert.deepEqual(Object.keys(secondConsume).sort(), ["nonceDigest", "consumedAt", "challengeId", "challengeHash", "episodeId", "action", "subjectHash", "sessionId", "userEntryId", "decisionId", "executionRevision", "executionContractHash", "baseHead", "taskId", "taskDefHash", "userEntryHash", "branchBindingHash"].sort());
+  assert.equal(applyEvent(another, event("repair.capability_consumed", secondConsume, 23)).repairChallenges.get(second.challengeId).phase, "consumed");
+  assert.throws(() => applyEvent(another, event("repair.capability_consumed", { ...secondConsume, nonceDigest: consume.nonceDigest }, 23)), /capability/);
 });
 
 test("authorize_task challenge identity hashes every public body field and reducer rejects mismatches", () => {
