@@ -1,3 +1,5 @@
+import { generationCapabilities } from "./generation-capabilities.mjs";
+
 export function validateDAG(tasks) {
   for (const [taskId, task] of tasks) {
     for (const dep of task.deps) {
@@ -104,6 +106,7 @@ export function taskActionState(projection, taskId) {
 
   if (projection.lifecycle !== "active") return noAction();
   if (task.status === "accepted") {
+    if (generationCapabilities(projection.eventSchemaVersion ?? projection.runtimeGeneration ?? "planned.v1").completion !== "accept-auto") return noAction();
     const allAccepted = [...projection.tasks.values()].every((candidate) => candidate.status === "accepted");
     const firstTaskId = projection.tasks.keys().next().value;
     return allAccepted && taskId === firstTaskId

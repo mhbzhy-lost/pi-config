@@ -662,10 +662,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         const episode = [...recorded.repairEpisodes.values()].find(candidate => candidate?.status === "reverifying" && candidate.ownedRunIds?.includes(data.runId));
         if (episode) {
-          const condition = recorded.conditions.get(episode.conditionId);
-          const adapter = condition && hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
-          const freshWorld = { ...world, adapters: adapter ? [{ ref: adapter.ref, version: adapter.version }] : [], repo: { ...world.repo, root: cwd, trackedDirty: [], untracked: [] } };
-          const resolution = repairEpisodeTransition({ projection: recorded, episodeId: episode.episodeId, event: { type, conditionId: run?.conditionId, runId: data.runId, evidenceId: data.evidenceId }, worldSnapshot: freshWorld });
+          const resolution = repairEpisodeTransition({ projection: recorded, episodeId: episode.episodeId, event: { type, conditionId: run?.conditionId, runId: data.runId, evidenceId: data.evidenceId }, worldSnapshot: world });
           const resolutionEvents = resolution.events.map(({ type: eventType, data: eventData }) => makeEvent(eventType, eventData, goalId, "goal-runtime.v1"));
           if (resolutionEvents.length) {
             try { appendEventBatchFn(root, [recordEvent, ...resolutionEvents], current.version); }

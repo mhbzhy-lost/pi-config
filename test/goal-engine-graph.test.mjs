@@ -4,11 +4,11 @@ import * as graph from "../scripts/lib/goal-engine/graph.mjs";
 import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
 
 function makeEvent(type, data, goalId = "dag-test") {
-  return { schemaVersion: "goal-engine.event.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
+  return { schemaVersion: "planned.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
 }
 
 function taskDef(description, deps = []) {
-  return { description, deps, writePaths: ["src/x.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "tdd" };
+  return { description, deps, writePaths: ["src/x.ts"], acceptance: { criteria: [{ id: "works", statement: "works", evidenceKinds: ["tests"] }] }, workflow: "tdd" };
 }
 
 function buildProjection(taskDefs) {
@@ -103,9 +103,7 @@ test("runnableFrontier returns tasks with all deps accepted", () => {
   let frontier = graph.runnableFrontier(p);
   assert.deepEqual(frontier.sort(), ["t1", "t3"]);
 
-  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
-  p = applyEvent(p, makeEvent("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "x" }, nextAction: "Accept t1 and then dispatch t2 for the implementation phase" }));
-  p = applyEvent(p, makeEvent("task.accepted", { taskId: "t1" }));
+  p.tasks.get("t1").status = "accepted";
 
   frontier = graph.runnableFrontier(p);
   assert.deepEqual(frontier.sort(), ["t2", "t3"]);
@@ -116,7 +114,7 @@ test("runnableFrontier excludes dispatched/succeeded/blocked tasks", () => {
     t1: taskDef("a"),
     t2: taskDef("b"),
   });
-  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
+  p.tasks.get("t1").status = "dispatched";
 
   const frontier = graph.runnableFrontier(p);
   assert.deepEqual(frontier, ["t2"]);
@@ -128,9 +126,7 @@ test("goalProgress returns counts", () => {
     t2: taskDef("b"),
     t3: taskDef("c"),
   });
-  p = applyEvent(p, makeEvent("task.dispatched", { taskId: "t1", contractHash: "h1" }));
-  p = applyEvent(p, makeEvent("task.settled", { taskId: "t1", outcome: "succeeded", evidence: { type: "file", path: "x" }, nextAction: "Accept t1 and then move to the remaining task in queue" }));
-  p = applyEvent(p, makeEvent("task.accepted", { taskId: "t1" }));
+  p.tasks.get("t1").status = "accepted";
 
   const progress = graph.goalProgress(p);
   assert.equal(progress.total, 3);
