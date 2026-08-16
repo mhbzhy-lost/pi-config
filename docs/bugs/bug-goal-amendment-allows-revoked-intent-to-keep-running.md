@@ -30,3 +30,9 @@
 ## 补充根因与边界
 
 foundation 曾生成彼此不同的 suspensionId、在无 active offer 时伪造撤销事实，并把 capability nonce 在签发阶段写入进程内 Set。这使重载后 ownership/消费权威丢失，且 apply 不能与消费原子化。修复将 suspensionId 复用于事件，只有 active offer 才输出撤销事件；签发不消费 nonce，协调结果返回同一批 consumed/applied 事件并依据 projection 的 nonce digest 拒绝重放。Root Broker 的 stop 失败只返回稳定 attention code，不透传上游错误。
+
+## 本轮补充发现
+
+1. Task projection 自身的 `dispatched`、`running`、`settling`、`disposing` 状态，以及其中 workspace 或 executor binding 显示的 active，都是持久化的活动权威；空 inventory 不能覆盖它们。
+2. proposal 的 `add` 必须对应不存在的实体，`change` 和 `remove` 必须对应已有实体；Task 与 Condition 均须在生成 capability nonce 或事件前整体拒绝错配。
+3. accepted 历史不可回退。accepted remove 仅写入绑定新 revision 的 `not_applicable` applicability 事实；accepted change 的 Condition 复验事实只能引用真实 changed Condition 或依赖，绝不能把 Task ID 伪装成 Condition ID。

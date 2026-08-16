@@ -42,9 +42,15 @@ function exactChanges(changes) {
   return canonical({ ...changes, tasks: changes.tasks?.slice().sort((a, b) => a.id.localeCompare(b.id)), conditions: changes.conditions?.slice().sort((a, b) => a.id.localeCompare(b.id)) });
 }
 function requireProjection(projection) { for (const key of ["goalId", "executionRevision", "executionContractHash", "baseHead", "sessionId"]) if (projection?.[key] === undefined || projection[key] === null) throw new Error(`projection.${key} is required`); }
+function validateEntityExistence(projection, changes) {
+  for (const [kind, entities] of [["task", projection.tasks], ["condition", projection.conditions]]) for (const entry of changes[`${kind}s`] || []) {
+    const exists = entities?.has?.(entry.id) === true;
+    if ((entry.intent === "add" && exists) || (entry.intent !== "add" && !exists)) throw new Error(`${kind} intent does not match projection existence`);
+  }
+}
 export function buildExecutionAmendmentProposal({ projection, changes, reason } = {}) {
   requireProjection(projection); if (typeof reason !== "string" || !reason.trim()) throw new Error("reason is required");
-  const normalized = exactChanges(changes); const proposalId = randomUUID(); const changesHash = hash(normalized);
+  const normalized = exactChanges(changes); validateEntityExistence(projection, normalized); const proposalId = randomUUID(); const changesHash = hash(normalized);
   const unsigned = { goalId: projection.goalId, revision: projection.executionRevision, baseHead: projection.baseHead, contractHash: projection.executionContractHash, changesHash, reason: reason.trim(), proposalId, sessionId: projection.sessionId };
   return Object.freeze({ ...unsigned, changes: normalized, proposalHash: hash(unsigned) });
 }
@@ -60,15 +66,25 @@ function taskImpact(task, changes, taskChange) {
   if (changes.budget) { const result = relation(task.budgetKeys, new Set(Object.keys(changes.budget))); if (result === null) return { unknown: true, reason: "budget_relation_unknown" }; if (result) return { affected: true, reason: "budget_changed" }; }
   return { affected: false };
 }
-function activeDebt(taskId, inventories) {
+function activeDebt(taskId, task, inventories) {
+  const projectionActive = ["dispatched", "running", "settling", "disposing"].includes(task.status)
+    || task.workspace?.state === "active" || task.workspace?.active === true
+    || task.executorBinding?.state === "active" || task.executorBinding?.active === true;
   const active = (inventories.activeRuns || []).some((item) => item.taskId === taskId && !["terminal", "released", "cancelled"].includes(item.state));
   const workspace = (inventories.workspaces || []).some((item) => item.taskId === taskId && !item.quarantined && !item.released);
   const resource = (inventories.resources || []).some((item) => item.taskId === taskId && !item.quarantined && !item.released);
-  return active || workspace || resource;
+  return projectionActive || active || workspace || resource;
+}
+function conditionFactsFor(task, changes, fact, reason) {
+  const conditionIds = new Set(task.conditionIds || []);
+  const changed = (changes.conditions || []).map((entry) => entry.id).filter((id) => conditionIds.has(id));
+  const ids = changed.length ? changed : conditionIds;
+  return [...ids].sort().map((conditionId) => ({ conditionId, fact, reason }));
 }
 export function reconcileExecutionChange({ projection, proposal, capability, inventories = {} } = {}) {
   requireProjection(projection);
   if (!proposal || proposal.goalId !== projection.goalId || proposal.revision !== projection.executionRevision || proposal.sessionId !== projection.sessionId || proposal.contractHash !== projection.executionContractHash) throw new Error("stale amendment proposal");
+  validateEntityExistence(projection, proposal.changes || {});
   if (!capability || capability.prefix !== "goal-user-capability.v1" || capability.singleUse !== true || capability.goalId !== proposal.goalId || capability.executionRevision !== proposal.revision || capability.proposalId !== proposal.proposalId || capability.proposalHash !== proposal.proposalHash || capability.sessionId !== proposal.sessionId || typeof capability.userEntryId !== "string" || !capability.userEntryId || typeof capability.nonce !== "string" || !capability.nonce) throw new Error("invalid amendment capability");
   const nonceDigest = hash(capability.nonce);
   if (projection.consumedCapabilityNonceDigests?.has?.(nonceDigest)) throw new Error("capability already consumed");
@@ -78,10 +94,15 @@ export function reconcileExecutionChange({ projection, proposal, capability, inv
     const impact = taskImpact(task, proposal.changes, taskChanges.get(entityId));
     let action = "keep";
     if (task.status === "accepted") {
-      if (impact.affected || impact.unknown) { applicabilityFacts.push({ taskId: entityId, state: "reverify_required", reason: impact.reason }); conditionFacts.push({ conditionId: entityId, fact: "applicability_reverify_required" }); }
-    } else if (impact.unknown || (impact.affected && activeDebt(entityId, inventories))) { action = "block_until_terminal"; attention.push({ entityId, reason: impact.unknown ? impact.reason : "owned_resource_not_terminal" }); }
+      if (impact.unknown || (impact.affected && activeDebt(entityId, task, inventories))) { action = "block_until_terminal"; attention.push({ entityId, reason: impact.unknown ? impact.reason : "owned_resource_not_terminal" }); }
+      else if (impact.remove) applicabilityFacts.push({ taskId: entityId, state: "not_applicable", revision: proposal.revision + 1, reason: impact.reason });
+      else if (impact.affected) {
+        applicabilityFacts.push({ taskId: entityId, state: "reverify_required", revision: proposal.revision + 1, reason: impact.reason });
+        conditionFacts.push(...conditionFactsFor(task, proposal.changes, "applicability_reverify_required", impact.reason));
+      }
+    } else if (impact.unknown || (impact.affected && activeDebt(entityId, task, inventories))) { action = "block_until_terminal"; attention.push({ entityId, reason: impact.unknown ? impact.reason : "owned_resource_not_terminal" }); }
     else if (impact.remove) action = "supersede";
-    else if (impact.affected) { action = "reverify"; conditionFacts.push({ conditionId: entityId, fact: "reverify_required", reason: impact.reason }); }
+    else if (impact.affected) { action = "reverify"; conditionFacts.push(...conditionFactsFor(task, proposal.changes, "reverify_required", impact.reason)); }
     actions.push({ entityId, action });
   }
   for (const entry of taskChanges.values()) if (!projection.tasks?.has(entry.id) && entry.intent === "add") actions.push({ entityId: entry.id, action: "add" });

@@ -8,6 +8,7 @@ const projection = () => ({
   goalId: "goal-1", executionRevision: 4, executionContractHash: hash,
   baseHead: "b".repeat(40), sessionId: "session-1",
   tasks: new Map([["accepted", task("accepted")], ["keep", task("pending")], ["remove", task("pending")], ["reverify", task("pending")]]),
+  conditions: new Map([["condition-a", { id: "condition-a" }], ["condition-b", { id: "condition-b" }]]),
 });
 const change = (id, intent, expected = intent === "remove" ? "removed" : { condition: "changed" }) => ({ id, intent, expected });
 const capabilityFor = (proposal) => ({ prefix: "goal-user-capability.v1", goalId: "goal-1", executionRevision: 4, proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, sessionId: "session-1", userEntryId: "entry-1", nonce: "n", singleUse: true });
@@ -74,6 +75,46 @@ test("only affected identity-bound active debt blocks and never consumes capabil
   assert.equal(blocked.applyAllowed, false);
   assert.deepEqual(blocked.events, []);
   assert.ok(blocked.attention.length > 0);
+});
+
+test("durable active Task state and active projection bindings block even with empty inventories", () => {
+  for (const extra of [
+    { status: "dispatched" }, { status: "running" }, { status: "settling" }, { status: "disposing" },
+    { workspace: { state: "active" } }, { executorBinding: { state: "active" } },
+  ]) {
+    const active = projection();
+    active.tasks.set("remove", task(extra.status || "pending", extra));
+    const proposal = buildExecutionAmendmentProposal({ projection: active, reason: "active projection", changes: { tasks: [change("remove", "remove")] } });
+    const result = reconcileExecutionChange({ projection: active, proposal, capability: capabilityFor(proposal), inventories: {} });
+    assert.equal(result.actions.find((action) => action.entityId === "remove").action, "block_until_terminal");
+    assert.equal(result.applyAllowed, false);
+    assert.deepEqual(result.events, []);
+  }
+});
+
+test("Task and Condition intents must match projection existence before reconciliation", () => {
+  for (const changes of [
+    { tasks: [change("keep", "add", { condition: "duplicate" })] },
+    { tasks: [change("missing-task", "change")] },
+    { tasks: [change("missing-task", "remove")] },
+    { conditions: [change("condition-a", "add", { statement: "duplicate" })] },
+    { conditions: [change("missing-condition", "change", { statement: "missing" })] },
+    { conditions: [change("missing-condition", "remove")] },
+  ]) assert.throws(() => buildExecutionAmendmentProposal({ projection: projection(), reason: "existence mismatch", changes }), /exist|intent|projection/);
+});
+
+test("accepted remove is kept and marks only applicability, while accepted change uses real Condition IDs", () => {
+  const removed = buildExecutionAmendmentProposal({ projection: projection(), reason: "accepted remove", changes: { tasks: [change("accepted", "remove")] } });
+  const removeResult = reconcileExecutionChange({ projection: projection(), proposal: removed, capability: capabilityFor(removed) });
+  assert.equal(removeResult.actions.find((action) => action.entityId === "accepted").action, "keep");
+  assert.deepEqual(removeResult.applicabilityFacts, [{ taskId: "accepted", state: "not_applicable", revision: 5, reason: "task_remove" }]);
+  assert.deepEqual(removeResult.conditionFacts, []);
+
+  const changed = buildExecutionAmendmentProposal({ projection: projection(), reason: "accepted change", changes: { tasks: [change("accepted", "change")] } });
+  const changeResult = reconcileExecutionChange({ projection: projection(), proposal: changed, capability: capabilityFor(changed) });
+  assert.ok(changeResult.conditionFacts.length > 0);
+  assert.ok(changeResult.conditionFacts.every((fact) => projection().conditions.has(fact.conditionId)));
+  assert.ok(changeResult.conditionFacts.every((fact) => fact.conditionId !== "accepted"));
 });
 
 test("canonical atomic batch rejects durable nonce replay only after no-block reconciliation", () => {
