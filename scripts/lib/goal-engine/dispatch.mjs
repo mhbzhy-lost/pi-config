@@ -1,4 +1,5 @@
 import { compileCodingDispatchIR } from "./dispatch-ir.mjs";
+import { validateRemediationMetadata } from "./task-definition.mjs";
 import { MAX_CONTRACT_ARRAY_ITEMS, MAX_CONTRACT_STRING_BYTES } from "./contract-limits.mjs";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -16,6 +17,7 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
   const task = projection.tasks.get(taskId);
   if (!task) throw new Error(`unknown task: ${taskId}`);
   if (task.status !== "pending") throw new Error(`task is not pending: ${taskId} (${task.status})`);
+  assertRemediationTaskBinding(projection, taskId, task);
   // Provenance belongs to the runtime ledger; dispatch-ir has no repair fields.
   const { metadata: _repairMetadata, ...transportTask } = task;
 
@@ -76,6 +78,16 @@ export function encodeCriterion(criterion) {
   const { id, statement, evidenceKinds } = criterion;
   // JSON is unambiguous and its fixed key order makes this transport stable.
   return JSON.stringify({ id, statement, evidenceKinds: [...evidenceKinds] });
+}
+
+function assertRemediationTaskBinding(projection, taskId, task) {
+  if (!Object.hasOwn(task, "metadata")) return;
+  validateRemediationMetadata(task.metadata);
+  const episode = projection.repairEpisodes?.get(task.metadata.episodeId);
+  if (!episode || !episode.remediationTaskIds?.includes(taskId)
+    || episode.findingIds.length !== task.metadata.findingIds.length
+    || task.metadata.findingIds.some((id) => !episode.findingIds.includes(id))
+    || !projection.conditions?.get(episode.conditionId)?.definition?.remediation) throw new Error("unbound remediation task contract");
 }
 
 function boundedOptional(items, limit = MAX_CONTRACT_ARRAY_ITEMS) {

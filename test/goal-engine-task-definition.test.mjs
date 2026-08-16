@@ -7,5 +7,6 @@ test("remediation metadata is exact internal provenance", () => {
   assert.doesNotThrow(() => validateRemediationMetadata(metadata));
   for (const value of [{ ...metadata, callerText: "bypass" }, { ...metadata, kind: "ordinary" }, { ...metadata, findingIds: [] }]) assert.throws(() => validateRemediationMetadata(value), /exact remediation/i);
   const def = { description: "修复", deps: [], writePaths: ["src/fix.mjs"], acceptance: { criteria: ["通过"], commands: ["node --test"] }, workflow: "tdd", metadata };
-  assert.doesNotThrow(() => validateTaskDefinitions(["repair-task-1"], { "repair-task-1": def }));
+  assert.throws(() => validateTaskDefinitions(["repair-task-1"], { "repair-task-1": def }), /Host-internal/);
+  assert.doesNotThrow(() => validateTaskDefinitions(["repair-task-1"], { "repair-task-1": def }, { hostInternalRemediation: true }));
 });

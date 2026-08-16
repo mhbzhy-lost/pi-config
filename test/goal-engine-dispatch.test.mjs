@@ -337,6 +337,8 @@ test("planned task definitions require exact structured criteria", () => {
 test("remediation metadata remains internal and is stripped from criteria-only transport", () => {
   const projection = buildProjection();
   projection.tasks.get("t1").metadata = { kind: "remediation", findingIds: ["finding-1"], episodeId: "episode-1" };
+  projection.repairEpisodes = new Map([["episode-1", { conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: ["t1"] }]]);
+  projection.conditions = new Map([["condition-1", { definition: { remediation: { policy: "autonomous" } } }]]);
   const contract = compileTaskContract(projection, "t1", "/workspace/project");
   assert.equal(JSON.stringify(contract).includes("remediation"), false);
   assert.equal(JSON.stringify(contract).includes("finding-1"), false);

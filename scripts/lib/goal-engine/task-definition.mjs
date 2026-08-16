@@ -37,7 +37,7 @@ function validateCommand(value, label, cwd, realpathCwd) {
   return command;
 }
 
-export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd, planned = false } = {}) {
+export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd, planned = false, hostInternalRemediation = false } = {}) {
   if (!Array.isArray(tasks) || (requireNonEmpty && tasks.length === 0)) throw new Error("tasks must be non-empty");
   if (tasks.length > MAX_CONTRACT_ARRAY_ITEMS) throw new Error(`tasks must contain at most ${MAX_CONTRACT_ARRAY_ITEMS} items`);
   if (!taskDefs || typeof taskDefs !== "object" || Array.isArray(taskDefs)) throw new Error("taskDefs is required");
@@ -53,7 +53,10 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
     const def = taskDefs[id];
     if (!def || typeof def !== "object") throw new Error(`missing taskDef for ${id}`);
     nonEmpty(def.description, `taskDef ${id} description`);
-    if (Object.hasOwn(def, "metadata")) validateRemediationMetadata(def.metadata, `taskDef ${id} metadata`);
+    if (Object.hasOwn(def, "metadata")) {
+      if (!hostInternalRemediation) throw new Error(`taskDef ${id} metadata is Host-internal only`);
+      validateRemediationMetadata(def.metadata, `taskDef ${id} metadata`);
+    }
     assertContractArray(def.deps, `taskDef ${id} deps`);
     const deps = new Set();
     for (const dep of def.deps) {
