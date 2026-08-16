@@ -157,6 +157,17 @@ test("Cycle0 persists one requested intent before managed allocation", async () 
   assert.equal(durable.calls.release, 1);
 });
 
+test("Cycle0 request identity rejects Host adapter version and claims drift before managed actions", async () => {
+  for (const [version, resourceClaims] of [["2", []], ["1", [{ key: "fixture:changed", mode: "exclusive", capacity: 1, reset: "clean" }]]]) {
+    const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd);
+    createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd); await invoke(api, "goal_status", {});
+    const before = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").observationRuns.values().next().value;
+    durable.adapterRegistry = createObservationAdapterRegistry([{ ref: "oracle", version, deterministic: true, reset: "clean", resourceClaims, artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 50, maxOutputBytes: 100, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } }]);
+    const status = JSON.parse(await invoke(api, "goal_status", {})); const after = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").observationRuns.values().next().value;
+    assert.equal(status.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.equal(durable.calls.prepare, 0); assert.equal(durable.calls.start, 0); assert.equal(after.phase, "requested"); assert.deepEqual(after.adapter, before.adapter);
+  }
+});
+
 test("Cycle0 Conditions run in definition order and never overlap", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd; const second = structuredClone(runtimeInit().execution.conditions[0]); second.id = "condition-2";
   const durable = observationHost(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd, runtimeInit({ execution: { ...runtimeInit().execution, conditions: [runtimeInit().execution.conditions[0], second] } }));
@@ -171,7 +182,8 @@ test("Cycle0 reload retains allocation identity through each durable phase", asy
     createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(first, cwd); await statusUntil(first, phase === "terminal" ? "process_bound" : phase);
     const before = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); const run = [...before.observationRuns.values()][0], allocationId = run.allocationId;
     const reloaded = pi(cwd, first.entries); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: durable }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager }); await invoke(reloaded, "goal_status", {});
-    const after = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); assert.equal(phase === "requested" ? Boolean([...after.observationRuns.values()][0].allocationId) : [...after.observationRuns.values()][0].allocationId === allocationId, true, phase);
+    const after = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"), restored = [...after.observationRuns.values()][0]; assert.equal(phase === "requested" ? Boolean(restored.allocationId) : restored.allocationId === allocationId, true, phase);
+    assert.deepEqual(Object.fromEntries(["head", "executionRevision", "executionContractHash", "conditionHash", "adapter", "worldSnapshotHash", "resourceClaimsHash"].map(key => [key, restored[key]])), Object.fromEntries(["head", "executionRevision", "executionContractHash", "conditionHash", "adapter", "worldSnapshotHash", "resourceClaimsHash"].map(key => [key, run[key]])), phase);
     assert.equal(new Set(observationEvents(cwd).filter(name => name === "condition.observation_requested")).size, 1, phase);
   }
 });

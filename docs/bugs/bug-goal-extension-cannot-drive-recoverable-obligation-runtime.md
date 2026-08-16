@@ -31,6 +31,10 @@ Pi session custom entry 属于不可信恢复输入。此前恢复逻辑通过�
 
 恢复时必须逐条按顺序仅接受原始持久 shape 的普通精确对象：challenge 重算提案哈希并绑定合同哈希、HEAD、目标与会话；decision 与其已恢复 challenge 逐字段绑定；tombstone 只接受关联 challenge 的 `{id}`；intent 只接受无原文的五字段门禁。重复、冲突或异常原型记录一律失效闭锁，且不得输出原始输入或 nonce。
 
+## Observation 请求身份漂移
+
+Observation 请求原先只持久化快照和资源 claims 摘要；reload 时用当前投影和 Host adapter 重建收据，因此同一 adapter ref 换了 version（或 claims）会被误当成原请求。现在 requested Goal event 精确保存 HEAD、执行 revision/contract、condition hash、`{ref,version}` 和 claims hash；replay projection 逐字段保存。恢复在任何 prepare/recover/start/artifact 前对 event-sourced 身份、当前 Condition、Host adapter version 和 canonical claims hash 逐项比对，漂移一律保持 requested 并进入 managed attention。完整 CurrentWorld hash 不作为 reload 闭锁条件，避免 `capturedAt` 等易变字段阻断合法恢复。
+
 ## Cycle 0 未接线
 
 ### 复现

@@ -19,8 +19,9 @@ function calibrating() { let p = draft(); p = applyEvent(p, event("goal.runtime_
 function evidence(p, artifactId) { return { executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, head: "a".repeat(40), adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: "environment-1" }, fixtures: [{ ref: "sample", fingerprint: "fixture-1" }], artifact: { id: artifactId, hash: "9".repeat(64) } }; }
 function observationEvents(p, { runId, evidenceId, cycle, verdict = { kind: "passed" }, start }) {
   const data = { runId, conditionId: "condition-1" };
+  const request = { ...data, cycle, head: "a".repeat(40), executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, adapter: { ref: "oracle", version: "1" }, worldSnapshotHash: hash(start), resourceClaimsHash: hash(start + 1) };
   return [
-    event("condition.observation_requested", { ...data, cycle, worldSnapshotHash: hash(start), resourceClaimsHash: hash(start + 1) }, start),
+    event("condition.observation_requested", request, start),
     event("condition.observation_lease_allocated", { ...data, allocationId: `lease-${runId}`, leaseReceiptHash: hash(start + 2) }, start + 1),
     event("condition.observation_process_bound", { ...data, processIdentityHash: hash(start + 3) }, start + 2),
     event("condition.observation_terminal", { ...data, terminalProofHash: hash(start + 4) }, start + 3),
@@ -62,13 +63,21 @@ test("runtime approval requires the event-sourced owner session", () => {
 test("runtime draft preserves contract state and observation identity", () => {
   const p = draft();
   assert.equal(p.runtimeState, "draft"); assert.equal(p.runtimeGeneration, "goal-runtime.v1"); assert.equal(p.conditions.get("condition-1").status, "inactive");
-  assert.throws(() => applyEvent(p, event("condition.observation_requested", { runId: "bad", conditionId: "condition-1", cycle: 0, worldSnapshotHash: hash(2), resourceClaimsHash: hash(3) }, 2)), /invalid observation request/);
+  assert.throws(() => applyEvent(p, event("condition.observation_requested", { runId: "bad", conditionId: "condition-1", cycle: 0, worldSnapshotHash: hash(2), resourceClaimsHash: hash(3) }, 2)), /observation request/);
   assert.throws(() => applyEvent(p, { ...event("goal.checkpoint", { nextAction: "a sufficiently concrete historical next action" }, 3), schemaVersion: "planned.v1" }), /mixed event generations/);
+});
+
+test("observation request identity is exact, event-sourced, and current", () => {
+  const p = calibrating();
+  const request = { runId: "identity-run", conditionId: "condition-1", cycle: 0, head: "a".repeat(40), executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, adapter: { ref: "oracle", version: "1" }, worldSnapshotHash: hash(400), resourceClaimsHash: hash(401) };
+  const applied = applyEvent(p, event("condition.observation_requested", request, 4));
+  assert.deepEqual(applied.observationRuns.get("identity-run").adapter, request.adapter);
+  for (const malformed of [{ ...request, extra: true }, { ...request, head: "bad" }, { ...request, executionRevision: 2 }, { ...request, executionContractHash: hash(402) }, { ...request, conditionHash: hash(403) }, { ...request, adapter: { ref: "wrong", version: "1" } }, { ...request, adapter: { ref: "oracle", version: "" } }]) assert.throws(() => applyEvent(p, event("condition.observation_requested", malformed, 5)), /observation/i);
 });
 
 test("observation transitions require phase-exact hashed authority", () => {
   let p = calibrating();
-  p = applyEvent(p, event("condition.observation_requested", { runId: "exact-run", conditionId: "condition-1", cycle: 0, worldSnapshotHash: hash(4), resourceClaimsHash: hash(5) }, 4));
+  p = applyEvent(p, event("condition.observation_requested", { runId: "exact-run", conditionId: "condition-1", cycle: 0, head: "a".repeat(40), executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, adapter: { ref: "oracle", version: "1" }, worldSnapshotHash: hash(4), resourceClaimsHash: hash(5) }, 4));
   const lease = { runId: "exact-run", conditionId: "condition-1", allocationId: "lease", leaseReceiptHash: hash(6) };
   assert.throws(() => applyEvent(p, event("condition.observation_lease_allocated", { ...lease, extra: true }, 5)), /exact|phase|observation/i);
   assert.throws(() => applyEvent(p, event("condition.observation_lease_allocated", { ...lease, leaseReceiptHash: "bad" }, 5)), /lease|proof|phase/i);

@@ -615,6 +615,8 @@ export function createGoalEngineExtension(pi, options = {}) {
     && Object.getOwnPropertyNames(value).length === fields.length
     && fields.every((field) => Object.hasOwn(value, field));
   const nonEmptyString = (value) => typeof value === "string" && value.trim() === value && value.length > 0;
+  const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
+  const canonicalHash = (value) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
   const validTimestamp = (value) => nonEmptyString(value) && !Number.isNaN(Date.parse(value));
   const runtimeProposalHash = ({ goalId, proposalId, executionContractHash, baseHead, sessionId }) => createHash("sha256")
     .update(JSON.stringify({ baseHead, executionContractHash, goalId, proposalId, sessionId })).digest("hex");
@@ -649,13 +651,13 @@ export function createGoalEngineExtension(pi, options = {}) {
   const observationReceiptForRun = (projection, run) => {
     const condition = projection.conditions.get(run.conditionId);
     const adapter = condition && hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
-    if (!condition || run.cycle !== 0 || !/^[a-f0-9]{64}$/.test(run.worldSnapshotHash || "") || !/^[a-f0-9]{64}$/.test(run.resourceClaimsHash || "") || !Number.isSafeInteger(projection.executionRevision) || !/^[a-f0-9]{64}$/.test(projection.executionContractHash || "") || !/^[a-f0-9]{64}$/.test(condition.conditionHash || "") || !adapter?.ref || !adapter?.version) throw Error("observation run identity conflict");
+    if (!condition || run.cycle !== 0 || !/^[a-f0-9]{40}$/.test(run.head || "") || !/^[a-f0-9]{64}$/.test(run.worldSnapshotHash || "") || !/^[a-f0-9]{64}$/.test(run.resourceClaimsHash || "") || !Number.isSafeInteger(run.executionRevision) || !/^[a-f0-9]{64}$/.test(run.executionContractHash || "") || !/^[a-f0-9]{64}$/.test(run.conditionHash || "") || !run.adapter || run.executionRevision !== projection.executionRevision || run.executionContractHash !== projection.executionContractHash || run.conditionHash !== condition.conditionHash || run.adapter.ref !== condition.definition.oracle_ref || run.adapter.ref !== adapter?.ref || run.adapter.version !== adapter?.version || canonicalHash(adapter?.resourceClaims) !== run.resourceClaimsHash) throw Error("observation run identity conflict");
     return {
       schema: "dispatch-ir.v1.observation-receipt", runId: run.runId, conditionId: run.conditionId,
-      cycle: run.cycle, goalId: projection.goalId, executionRevision: projection.executionRevision,
-      executionContractHash: projection.executionContractHash, conditionHash: condition.conditionHash,
+      cycle: run.cycle, goalId: projection.goalId, head: run.head, executionRevision: run.executionRevision,
+      executionContractHash: run.executionContractHash, conditionHash: run.conditionHash,
       worldSnapshotHash: run.worldSnapshotHash, resourceClaimsHash: run.resourceClaimsHash,
-      adapter: { ref: adapter.ref, version: adapter.version }, phase: run.phase,
+      adapter: { ref: run.adapter.ref, version: run.adapter.version }, phase: run.phase,
       managedReceipt: null, terminal: null, recorded: run.evidenceId ? { evidenceId: run.evidenceId } : null,
       cleanupDebt: run.phase === "cleanup_debt",
     };
