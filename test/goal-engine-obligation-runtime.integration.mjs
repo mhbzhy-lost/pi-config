@@ -354,9 +354,9 @@ function injectedStore(seed, failure = () => null) {
   };
 }
 
-async function makeReverifyingRuntimeFixture() {
-  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL", "PASS"] });
-  const condition = activeCondition(); condition.remediation.policy = "autonomous";
+async function makeReverifyingRuntimeFixture({ stability = { mode: "single", require_fresh_environment: true }, codes = ["PASS", "FAIL", "PASS"], environments = null } = {}) {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes, environments });
+  const condition = activeCondition(stability); condition.remediation.policy = "autonomous";
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable });
   await activateProduct(api, cwd, condition); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released"); await invoke(api, "goal_status", {});
   const initial = structuredClone(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"));
@@ -382,7 +382,9 @@ test("Repair re-observation record/resolve batches are atomic before and after d
     let projection = injected.latest(), episode = projection.repairEpisodes.get(fixture.episodeId), runId = episode.ownedRunIds[0];
     if (mode === "pre") { assert.equal(projection.observationRuns.get(runId).phase, "terminal"); assert.equal(episode.status, "reverifying"); assert.equal(injected.events.filter(event => ["condition.observation_recorded", "repair.episode_resolved"].includes(event.type)).length, 0); enabled = false; await invoke(api, "goal_status", {}); projection = injected.latest(); episode = projection.repairEpisodes.get(fixture.episodeId); assert.equal(episode.status, "resolved"); }
     else { assert.equal(projection.observationRuns.get(runId).phase, "recorded"); assert.equal(episode.status, "resolved"); const reload = pi(fixture.cwd); reload.cwd = fixture.cwd; createGoalEngineExtension(reload, { goalStateEnv: {}, runtimeHost: fixture.durable, store: injected.store }); await invoke(reload, "goal_status", {}); projection = injected.latest(); assert.equal(projection.observationRuns.get(runId).phase, "released"); }
-    assert.equal(injected.events.filter(event => event.type === "condition.observation_recorded").length, 1); assert.equal(injected.events.filter(event => event.type === "repair.episode_resolved").length, 1); assert.equal(injected.events.some(event => event.type === "goal.completed"), false); if (mode === "pre") { await invoke(api, "goal_status", {}); projection = injected.latest(); assert.equal(projection.observationRuns.get(runId).phase, "released"); }
+    const recorded = injected.events.filter(event => event.type === "condition.observation_recorded");
+    assert.equal(recorded.length, 1); assert.equal(projection.observationRuns.get(runId).evidenceId, recorded[0].data.evidenceId);
+    assert.equal(injected.events.filter(event => event.type === "repair.episode_resolved").length, 1); assert.equal(injected.events.some(event => event.type === "goal.completed"), false); if (mode === "pre") { await invoke(api, "goal_status", {}); projection = injected.latest(); assert.equal(projection.observationRuns.get(runId).phase, "released"); assert.equal(projection.observationRuns.get(runId).evidenceId, recorded[0].data.evidenceId); }
   }
 });
 
@@ -587,6 +589,33 @@ test("durable failed observation batch throw reloads without duplicate evidence,
   const failedRun = [...projection.observationRuns.values()].find(run => run.cycle === 1);
   assert.equal(runEvents(cwd, failedRun.runId, "condition.observation_recorded").length, 1);
   for (const type of ["finding.recorded", "repair.episode_opened"]) assert.equal(observationEvents(cwd).filter(value => value === type).length, 1, type);
+});
+
+test("Repair-owned consecutive stability releases each run and resolves only after distinct PASS evidence", async () => {
+  const fixture = await makeReverifyingRuntimeFixture({ stability: { mode: "consecutive", count: 2, require_distinct_environment: true }, codes: ["PASS", "FAIL", "PASS", "PASS"], environments: ["cycle0", "failed", "repair-1", "repair-2"] });
+  const api = pi(fixture.cwd); api.cwd = fixture.cwd;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: fixture.durable, store: fixture.injected.store });
+  await invoke(api, "goal_status", {}); // request/link first owned re-verification
+  let projection = fixture.injected.latest(), episode = projection.repairEpisodes.get(fixture.episodeId), [firstRunId] = episode.ownedRunIds;
+  assert.equal(projection.observationRuns.get(firstRunId).phase, "requested");
+  await invoke(api, "goal_status", {}); await invoke(api, "goal_status", {}); // terminal then record
+  projection = fixture.injected.latest(); episode = projection.repairEpisodes.get(fixture.episodeId);
+  assert.equal(projection.observationRuns.get(firstRunId).phase, "recorded"); assert.equal(episode.status, "reverifying");
+  await invoke(api, "goal_status", {}); // independently release first run
+  assert.equal(fixture.injected.latest().observationRuns.get(firstRunId).phase, "released");
+  await invoke(api, "goal_status", {}); // request/link second owned re-verification
+  projection = fixture.injected.latest(); episode = projection.repairEpisodes.get(fixture.episodeId); const secondRunId = episode.ownedRunIds[1];
+  assert.notEqual(secondRunId, firstRunId); assert.equal(projection.observationRuns.get(secondRunId).phase, "requested");
+  await invoke(api, "goal_status", {}); await invoke(api, "goal_status", {}); // terminal then record/resolve
+  projection = fixture.injected.latest(); episode = projection.repairEpisodes.get(fixture.episodeId);
+  assert.equal(episode.status, "resolved"); assert.equal(projection.observationRuns.get(secondRunId).phase, "recorded");
+  await invoke(api, "goal_status", {}); // independently release second run
+  projection = fixture.injected.latest();
+  assert.deepEqual([firstRunId, secondRunId].map(runId => projection.observationRuns.get(runId).phase), ["released", "released"]);
+  const recorded = fixture.injected.events.filter(event => event.type === "condition.observation_recorded" && [firstRunId, secondRunId].includes(event.data.runId));
+  assert.equal(recorded.length, 2); const evidence = recorded.map(event => projection.evidenceHistory.find(value => value.evidenceId === event.data.evidenceId)); assert.notEqual(evidence[0].environment.fingerprint, evidence[1].environment.fingerprint);
+  for (const runId of [firstRunId, secondRunId]) { assert.equal(fixture.injected.events.filter(event => event.type === "condition.observation_requested" && event.data.runId === runId).length, 1); assert.equal(fixture.injected.events.filter(event => event.type === "repair.observation_linked" && event.data.runId === runId).length, 1); }
+  assert.equal(fixture.injected.events.filter(event => event.type === "repair.episode_resolved").length, 1); assert.equal(fixture.injected.events.some(event => event.type === "goal.completed"), false);
 });
 
 test("active consecutive stability requires two distinct product environments after Cycle0", async () => {
