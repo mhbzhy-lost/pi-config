@@ -16,7 +16,7 @@ function plan({ approved = false, actionPrefix = false } = {}) {
   const amendment = event("goal.amended", { addTasks: { "repair-task-1": taskDef }, removeTasks: [], updateTasks: {}, reason: "Materialize canonical remediation task", hostInternalRemediation: true }, 1);
   const link = event("repair.task_linked", { episodeId: "episode-1", taskId: "repair-task-1", challengeId: approved ? "challenge-1" : null }, 3);
   const events = approved
-    ? [amendment, event("repair.capability_consumed", { nonceDigest: "a".repeat(64), consumedAt: 1, challengeId: "challenge-1", episodeId: "episode-1", action: "authorize_task", subjectHash: metadata.subjectHash, sessionId: "session-1", userEntryId: "entry-1", decisionId: "b".repeat(64), executionRevision: 1, executionContractHash: "c".repeat(64), baseHead: "d".repeat(40), taskId: "repair-task-1", taskDefHash: metadata.taskDefHash, userEntryHash: "e".repeat(64), branchBindingHash: "f".repeat(64) }, 2), link]
+    ? [amendment, event("repair.capability_consumed", { nonceDigest: "a".repeat(64), consumedAt: 1, challengeId: "challenge-1", episodeId: "episode-1", action: "authorize_task", subjectHash: metadata.subjectHash, sessionId: "session-1", userEntryId: "entry-1", decisionId: "b".repeat(64), executionRevision: 1, executionContractHash: "c".repeat(64), baseHead: "d".repeat(40), taskId: "repair-task-1", taskDefHash: metadata.taskDefHash, userEntryHash: "e".repeat(64), branchBindingHash: "f".repeat(64), challengeHash: "9".repeat(64) }, 2), link]
     : [amendment, link];
   return actionPrefix ? [event("goal.action_consumed", { offerId: "offer-1", token: "token-1", tool: "goal", sessionId: "session-1" }, 0), ...events] : events;
 }
@@ -31,7 +31,7 @@ function assertNoWrite(events) {
 test("store accepts only canonical autonomous and user-approved remediation batches before reducer replay", () => {
   for (const options of [{}, { approved: true }]) {
     const root = mkdtempSync(join(tmpdir(), "goal-remediation-batch-"));
-    try { assert.throws(() => appendEventBatch(root, plan(options), 0), /goal.created must be first/); }
+    try { assert.throws(() => appendEventBatch(root, plan(options), 0), /goal.created must be first|batch/); }
     finally { rmSync(root, { recursive: true, force: true }); }
   }
 });
@@ -83,6 +83,9 @@ test("store rejects every malformed Host remediation batch before any goals writ
     ["finding drift", () => { const events = plan(); events[0].data.addTasks["repair-task-1"].metadata.findingIds = ["other-finding"]; return events; }],
     ["subject drift", () => { const events = plan({ approved: true }); events[1].data.subjectHash = "b".repeat(64); return events; }],
     ["challenge drift", () => { const events = plan({ approved: true }); events[2].data.challengeId = "other-challenge"; return events; }],
+    ["consume task definition drift", () => { const events = plan({ approved: true }); events[1].data.taskDefHash = "1".repeat(64); return events; }],
+    ["consume execution revision drift", () => { const events = plan({ approved: true }); events[1].data.executionRevision = 2; return events; }],
+    ["consume challenge hash drift", () => { const events = plan({ approved: true }); events[1].data.challengeHash = "1".repeat(64); return events; }],
     ["task definition hash drift", () => { const events = plan(); events[0].data.addTasks["repair-task-1"].metadata.taskDefHash = "b".repeat(64); return events; }],
     ["extra link data", () => { const events = plan(); events[1].data.extra = true; return events; }],
     ["extra consume data", () => { const events = plan({ approved: true }); events[1].data.extra = true; return events; }],

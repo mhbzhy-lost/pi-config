@@ -443,9 +443,9 @@ function assertRemediationMaterializationBatch(events) {
 
   const consume = events[index + 1];
   if (events.length !== index + 3 || consume?.type !== "repair.capability_consumed"
-    || !exactObject(consume.data, ["nonceDigest", "consumedAt", "challengeId", "episodeId", "action", "subjectHash", "sessionId", "userEntryId", "decisionId", "executionRevision", "executionContractHash", "baseHead", "taskId", "taskDefHash", "userEntryHash", "branchBindingHash"])
-    || consume.data.action !== "authorize_task" || !consume.data.challengeId || consume.data.episodeId !== metadata.episodeId
-    || consume.data.subjectHash !== metadata.subjectHash || !linked(linkAt(2), consume.data.challengeId)) {
+    || !exactObject(consume.data, ["nonceDigest", "consumedAt", "challengeId", "challengeHash", "episodeId", "action", "subjectHash", "sessionId", "userEntryId", "decisionId", "executionRevision", "executionContractHash", "baseHead", "taskId", "taskDefHash", "userEntryHash", "branchBindingHash"])
+    || consume.data.action !== "authorize_task" || !consume.data.challengeId || !/^[a-f0-9]{64}$/.test(consume.data.challengeHash) || consume.data.episodeId !== metadata.episodeId
+    || consume.data.taskId !== taskId || consume.data.taskDefHash !== metadata.taskDefHash || consume.data.executionRevision !== metadata.executionRevision || consume.data.subjectHash !== metadata.subjectHash || !linked(linkAt(2), consume.data.challengeId)) {
     throw new Error("invalid user-approved remediation batch");
   }
 }
