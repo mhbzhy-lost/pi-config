@@ -94,6 +94,18 @@ test("callback rejection cleanup debt retains its resource claim", { timeout: 10
   assert.throws(() => prepareManagedValidation(input(f, "run-two", [{ key: "callback-debt", mode: "exclusive", capacity: 1, reset: "clean" }])), /resource|lease|conflict/i);
 });
 
+test("terminal barrier persists parent terminal before nested lease is returned active", async (t) => {
+  const f = fixture(t); const prepared = prepareManagedValidation(input(f)); let observed = false;
+  const completed = await startManagedValidation(prepared, { onTerminalBound: async () => {
+    const parent = JSON.parse(readFileSync(prepared.receiptPath, "utf8"));
+    const nested = JSON.parse(readFileSync(join(f.stateRoot, "validation-leases", `${parent.workspaceLease.id}.json`), "utf8"));
+    assert.equal(parent.phase, "terminal"); assert.equal(nested.state, "running");
+    observed = true;
+  } });
+  assert.equal(observed, true); assert.equal(completed.phase, "recorded");
+  releaseManagedValidation(completed, { expectedHead: f.integratedHead });
+});
+
 test("recover converts a parent process-group mismatch to cleanup debt", async (t) => {
   const f = fixture(t); const prepared = prepareManagedValidation(input(f)); const stored = JSON.parse(readFileSync(prepared.receiptPath, "utf8"));
   const parentProcess = { pid: process.pid, pidBirthIdentity: "unprovable", processGroupId: process.pid + 1 }; parentProcess.processIdentityHash = createHash("sha256").update(JSON.stringify(parentProcess)).digest("hex");

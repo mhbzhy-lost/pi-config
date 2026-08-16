@@ -22,3 +22,9 @@ supervisor 本身已是 durable，但旧 Host 仍持有 stdout/stderr pipe、dea
 复用既有 `runCleanValidation` supervisor，并在其已 spawn+ready、捕获 birth identity、验证 process group、nested lease runtime 持久化并读回后、写 `start` authorization 前插入私有一次性屏障。屏障先 fsync 父 record 的 exact `process={pid,pidBirthIdentity,processGroupId,processIdentityHash}` 并读回验证，再调用 Host `onProcessBound`；callback resolve 是 durable ack，之后才可创建授权和启动 action。requested/lease_allocated 的 process 均为 null。callback 或身份验证失败只终止本 run 可证明 owned 的 group，并将父 record 和 nested lease 置为 `cleanup_debt`；未知身份不 kill。
 
 恢复同时验证父 record 的 PID/birth/group/hash（且 group 必须等于 PID）、group probe 包含 PID，以及 nested validation lease 的 running runtime PID/birth 与 managed owner/workspace identity。任何未知或不匹配都只写 `cleanup_debt` 并保留 workspace/resource，完全匹配时 recovery 可用同一 supervisor 补 callback durable ack 后原子授权、等待 durable status 并形成 canonical terminal/recorded receipt；若 status 已 durable 且 group 为空，绝不对未知或已复用 PID 发 kill。所有未 `released` 的 record（包括 cleanup debt）持续持有 resource claim，直到 typed/managed release 或后续债务处置；不得因 callback reject 已证实 supervisor terminal 自动释放。资源释放继续使用 managed worktree 的 owner-CAS。
+
+## 本次收口
+
+父收据的终态现先持久化，再将嵌套租约以终态哈希写回 `active`，最后写入 `recorded`；恢复遇到 `terminal` 会重复该顺序。内部 `onTerminalBound` 仅在父终态已落盘时触发，供 Host 崩溃测试建立边界，不向业务 action 传递权限。
+
+supervisor 的 status 采用固定 schema，stdout 与 stderr 共享单一字节预算，记录实际总字节数和截断标记；状态文件以 0600、文件及目录 fsync、原子 rename 发布。spawn 失败只保留固定 reason code，恢复在 deadline 后无 status 时保持 `timed_out`，不会改记为 `failed`。
