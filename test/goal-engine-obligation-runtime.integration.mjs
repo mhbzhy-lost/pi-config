@@ -22,6 +22,14 @@ test("runtime init is draft-only, records readiness, and retains progress checkp
 });
 
 
+test("runtime init fails closed with a stable blocker before any append when HEAD is absent", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "r10a1-")); git(cwd, "init", "-b", "main"); git(cwd, "config", "user.email", "test@example.com"); git(cwd, "config", "user.name", "Test"); writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n"); git(cwd, "add", ".gitignore"); git(cwd, "commit", "-m", "init");
+  const api = pi(cwd); api.cwd = cwd;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: { registries: runtimeRegistries, captureCurrentWorld() { return { safe: false, repo: {}, resources: [], activeRuns: [] }; } } });
+  await assert.rejects(invoke(api, "goal_init", runtimeInit()), /RUNTIME_READINESS_BLOCKER/);
+  assert.equal(api.entries.length, 0);
+});
+
 test("unconsumed runtime input creates a durable fail-closed gate", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "r10a1-")); git(cwd, "init", "-b", "main"); git(cwd, "config", "user.email", "test@example.com"); git(cwd, "config", "user.name", "Test"); writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n"); git(cwd, "add", ".gitignore"); git(cwd, "commit", "-m", "init");
   const api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(api, "goal_init", runtimeInit());

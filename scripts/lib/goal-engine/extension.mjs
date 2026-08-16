@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { isAbsolute, join, resolve } from "node:path";
 import { realpathSync, openSync, closeSync, fstatSync, lstatSync, readFileSync, constants as fsConstants } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
@@ -540,6 +540,8 @@ export function createGoalEngineExtension(pi, options = {}) {
   const listGoalIdsFn = store.listGoalIds || listGoalIds;
   // Runtime authority is Host-owned: callers never supply registries, snapshots, or run facts.
   const runtimeHost = options.runtimeHost || null;
+  // Host-only entropy; callers cannot pass a capability nonce through tools.
+  const runtimeNonceFactory = typeof runtimeHost?.nonceFactory === "function" ? runtimeHost.nonceFactory : () => randomBytes(32);
   const goalStateEnv = options.goalStateEnv ?? process.env;
   const executionScopeFor = (ctx, { operation = "read", goalId } = {}) => {
     const legacyScope = executionScope(ctx);
@@ -593,9 +595,11 @@ export function createGoalEngineExtension(pi, options = {}) {
   const transferChallenges = new Map();
   const runtimeChallenges = new Map();
   const runtimeIntentGates = new Map();
-  pi.__goalRuntimeIntentGate = (ctx) => {
+  pi.__goalRuntimeIntentGate = (ctx, params = {}) => {
     let sessionId; try { sessionId = sessionIdentity(ctx); } catch { return false; }
-    return [...runtimeIntentGates.values()].some((gate) => gate.sessionId === sessionId);
+    // A pending intent is authority for exactly its owner and goal, never a
+    // same-session blanket lock over unrelated Goals.
+    return [...runtimeIntentGates.values()].some((gate) => gate.sessionId === sessionId && (!params.goal_id || gate.goalId === params.goal_id));
   };
   const persistMetadata = (type, data) => {
     if (typeof pi.appendEntry !== "function") throw new Error(`Cannot persist ${type}: pi.appendEntry is unavailable`);
@@ -611,7 +615,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
       if (entry.customType?.startsWith("goal-engine-runtime-approval-") && data?.id) {
         const current = runtimeChallenges.get(data.id) || {};
-        runtimeChallenges.set(data.id, { ...current, ...(entry.customType.endsWith("challenge") ? { challenge: data } : {}), ...(entry.customType.endsWith("decision") ? { decision: { ...data, id: data.receiptId, challengeId: data.id } } : {}), ...(entry.customType.endsWith("consumed") ? { consumed: true } : {}) });
+        runtimeChallenges.set(data.id, { ...current, ...(entry.customType.endsWith("challenge") ? { challenge: data } : {}), ...(entry.customType.endsWith("decision") ? { decision: { ...data, id: data.receiptId, challengeId: data.id } } : {}), ...(entry.customType.endsWith("consumed") ? { consumed: true } : {}), ...(entry.customType.endsWith("stale") ? { stale: true } : {}), ...(entry.customType.endsWith("rejected") ? { rejected: true } : {}) });
       }
       if (entry.customType?.startsWith("goal-engine-metadata-")) {
         if (!data?.id) continue;
@@ -867,7 +871,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         let contract, world, readiness;
         try { contract = normalizeRuntimeGoalInit(params, runtimeHost.registries); world = runtimeHost.captureCurrentWorld({ cwd }); readiness = validateRuntimeReadiness(contract, runtimeHost.registries); }
         catch (error) { throw initError("RUNTIME_READINESS_BLOCKER", error.message, "repair runtime registry authority and retry"); }
-        if (!world?.safe || !/^[a-f0-9]{40}$/.test(world?.repo?.head || "")) readiness = { readiness: "unsafe_to_run", reasons: ["CurrentWorld is unsafe"] };
+        // A safe=false snapshot may be persisted as a draft, but an absent or
+        // malformed canonical HEAD has no event authority and must fail before append.
+        if (!/^[a-f0-9]{40}$/.test(world?.repo?.head || "")) throw initError("RUNTIME_READINESS_BLOCKER", "CurrentWorld canonical repo.head is absent or invalid", "capture a canonical repository HEAD and retry runtime initialization");
+        if (!world.safe) readiness = { readiness: "unsafe_to_run", reasons: ["CurrentWorld is unsafe"] };
         const runtimeEvent = makeEvent("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: world.repo.head }, goalId, "goal-runtime.v1");
         const candidate = applyEvent(createProjection(), runtimeEvent);
         const binding = buildSessionBinding({ projection: candidate, sessionId, leafId: ctx.sessionManager?.getLeafId?.() || "goal-init" });
@@ -963,12 +970,22 @@ export function createGoalEngineExtension(pi, options = {}) {
         const previous = projection.progressLedger?.at(-1);
         projection = appendEventFn(root, makeEvent("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: !previous || previous.canonicalFingerprint !== fingerprint, sequence: (projection.progressLedger?.length || 0) + 1 }, goalId, "goal-runtime.v1"), projection.version);
         if (projection.runtimeState === "awaiting_user_approval") {
-          let record = [...runtimeChallenges.values()].filter((item) => item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && !item.consumed).at(-1);
+          const terminal = [...runtimeChallenges.values()].filter((item) => item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && (item.stale || item.rejected)).at(-1);
+          if (terminal) return JSON.stringify({ goalId, status: terminal.rejected ? "RUNTIME_APPROVAL_REJECTED" : "RUNTIME_APPROVAL_STALE", attention: [terminal.rejected ? "RUNTIME_APPROVAL_REJECTED" : "RUNTIME_APPROVAL_STALE"] });
+          let record = [...runtimeChallenges.values()].filter((item) => item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && !item.consumed && !item.stale && !item.rejected).at(-1);
           if (!record) { const baseChallenge = createRuntimeActivationChallenge({ goalId, contractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, proposalId: crypto.randomUUID() }); const challenge = { ...baseChallenge, executionContractHash: projection.executionContractHash, proposalHash: stableHash({ goalId, proposalId: baseChallenge.proposalId, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId }) }; persistMetadata("goal-engine-runtime-approval-challenge", challenge); record = { challenge }; runtimeChallenges.set(challenge.id, record); }
+          if (record.decision?.choice === "reject") {
+            persistMetadata("goal-engine-runtime-approval-rejected", { id: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, rejected: true });
+            return JSON.stringify({ goalId, status: "RUNTIME_APPROVAL_REJECTED", attention: ["RUNTIME_APPROVAL_REJECTED"] });
+          }
           if (record.decision?.choice === "approve" && record.decision.contractHash === projection.executionContractHash && record.decision.proposalHash === record.challenge.proposalHash && record.decision.baseHead === projection.runtimeBaseHead && world.repo.head === projection.runtimeBaseHead) {
-            const capabilityDigest = createHash("sha256").update(crypto.randomUUID()).digest("hex");
+            const nonce = runtimeNonceFactory();
+            const capabilityDigest = createHash("sha256").update(Buffer.isBuffer(nonce) ? nonce : String(nonce)).digest("hex");
             try { projection = appendEventFn(root, makeEvent("goal.runtime_approval_recorded", { proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, userEntryId: record.decision.userEntryId, capabilityDigest }, goalId, "goal-runtime.v1"), projection.version); } catch (error) { const recovered = loadProjectionFn(root, goalId); if (recovered?.runtimeState !== "calibrating" || recovered?.runtimeApproval?.proposalHash !== record.challenge.proposalHash) throw error; projection = recovered; }
             persistMetadata("goal-engine-runtime-approval-consumed", { id: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, consumed: true });
+          } else if (record.decision) {
+            persistMetadata("goal-engine-runtime-approval-stale", { id: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, stale: true });
+            return JSON.stringify({ goalId, status: "RUNTIME_APPROVAL_STALE", attention: ["RUNTIME_APPROVAL_STALE"] });
           } else return JSON.stringify({ goalId, proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, session: sessionId, choices: record.challenge.choices });
         }
         const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions: {}, observationInventory: {} });
@@ -2110,7 +2127,8 @@ export function createGoalEngineExtension(pi, options = {}) {
         const occurredAt = new Date(Math.max(Date.now(), Date.parse(record.challenge.requestedAt) + 1)).toISOString();
         const choice = recordHumanChoice({ inputEvent: { role: "user", source: event.source, sessionId: hookSessionId, occurredAt, text: event.text, id: event.entryId || crypto.randomUUID() }, challenge: record.challenge, sessionId: hookSessionId });
         const decision = { id: crypto.randomUUID(), ...choice, proposalHash: record.challenge.proposalHash };
-        persistMetadata("goal-engine-runtime-approval-decision", { ...decision, id: record.challenge.id, receiptId: decision.id, challengeId: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, decision });
+        persistMetadata("goal-engine-runtime-approval-decision", { ...decision, id: record.challenge.id, receiptId: decision.id, challengeId: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, decision, ...(decision.choice === "reject" ? { rejected: true } : {}) });
+        if (decision.choice === "reject") persistMetadata("goal-engine-runtime-approval-rejected", { id: record.challenge.id });
         return { action: "continue" };
       }
     } catch { /* only exact interactive/rpc challenge input can approve runtime */ }
@@ -2139,9 +2157,12 @@ export function createGoalEngineExtension(pi, options = {}) {
       const projection = loadAllProjections(root).find((candidate) => candidate.eventSchemaVersion === "goal-runtime.v1" && candidate.lifecycle === "active" && ownedBySession(candidate, sessionId));
       if (projection && !runtimeIntentGates.has(`${projection.goalId}:${sessionId}`)) {
         const gate = { goalId: projection.goalId, sessionId, userEntryId: event.entryId || crypto.randomUUID(), source: event.source, occurredAt: event.occurredAt || new Date().toISOString() };
-        persistMetadata("goal-engine-runtime-intent-pending", gate); runtimeIntentGates.set(`${projection.goalId}:${sessionId}`, gate);
+        // Set the in-memory latch first: metadata failure must never reopen business actions.
+        runtimeIntentGates.set(`${projection.goalId}:${sessionId}`, gate);
+        try { persistMetadata("goal-engine-runtime-intent-pending", gate); }
+        catch { recoveryLatch = { goalId: projection.goalId, sessionId, state: "active" }; }
       }
-    } catch { /* input remains fail-closed through normal runtime recovery if state cannot be read */ }
+    } catch { recoveryLatch = { goalId: "unknown", sessionId: hookSessionId, state: "active" }; }
     return { action: "continue" };
   });
 

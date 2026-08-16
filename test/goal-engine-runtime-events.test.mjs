@@ -14,7 +14,7 @@ import { createRepairChallenge, issueRepairCapability, recordRepairUserDecision,
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
 function hash(n) { return String(n).padStart(64, "0"); }
 function runtimeApprovalHash({ goalId = "runtime-goal", proposalId = "proposal", executionContractHash, baseHead = "a".repeat(40), sessionId = "session" }) { return createHash("sha256").update(JSON.stringify({ baseHead, executionContractHash, goalId, proposalId, sessionId })).digest("hex"); }
-function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); return applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), readiness: "draft" }, 1)); }
+function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); let p = applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), readiness: "draft" }, 1)); return applyEvent(p, event("goal.session_bound", { sessionId: "session", leafId: "leaf" }, 0)); }
 function calibrating() { let p = draft(); p = applyEvent(p, event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 2)); const approval = { proposalId: "proposal", executionContractHash: p.executionContractHash, baseHead: p.runtimeBaseHead, sessionId: "session" }; return applyEvent(p, event("goal.runtime_approval_recorded", { ...approval, proposalHash: runtimeApprovalHash(approval), userEntryId: "entry", capabilityDigest: hash(2) }, 3)); }
 function evidence(p, artifactId) { return { executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, head: "a".repeat(40), adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: "environment-1" }, fixtures: [{ ref: "sample", fingerprint: "fixture-1" }], artifact: { id: artifactId, hash: "9".repeat(64) } }; }
 function observationEvents(p, { runId, evidenceId, cycle, verdict = { kind: "passed" }, start }) {
@@ -42,6 +42,13 @@ test("runtime approval is canonically bound and remains separate from amendment 
   assert.throws(() => applyEvent(p, event("goal.runtime_approval_recorded", { ...data, proposalHash: hash(1) }, 3)), /approval|canonical/i);
   const calibrated = applyEvent(p, event("goal.runtime_approval_recorded", { ...data, proposalHash: runtimeApprovalHash(data) }, 3));
   assert.equal(calibrated.pendingHumanDecision, null); assert.equal(calibrated.runtimeApproval.proposalHash, runtimeApprovalHash(data)); assert.equal(calibrated.runtimeState, "calibrating");
+});
+
+test("runtime approval requires the event-sourced owner session", () => {
+  let p = draft();
+  p = applyEvent(p, event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 3));
+  const data = { proposalId: "proposal", executionContractHash: p.executionContractHash, baseHead: p.runtimeBaseHead, sessionId: "other", userEntryId: "entry", capabilityDigest: hash(2) };
+  assert.throws(() => applyEvent(p, event("goal.runtime_approval_recorded", { ...data, proposalHash: runtimeApprovalHash(data) }, 4)), /owner|approval/i);
 });
 
 test("runtime draft preserves contract state and observation identity", () => {
