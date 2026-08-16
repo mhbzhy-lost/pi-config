@@ -43,6 +43,16 @@ test("runtime draft preserves contract state and observation identity", () => {
   assert.throws(() => applyEvent(p, { ...event("goal.checkpoint", { nextAction: "a sufficiently concrete historical next action" }, 3), schemaVersion: "planned.v1" }), /mixed event generations/);
 });
 
+test("observation transitions require phase-exact hashed authority", () => {
+  let p = calibrating();
+  p = applyEvent(p, event("condition.observation_requested", { runId: "exact-run", conditionId: "condition-1", cycle: 0, worldSnapshotHash: hash(4), resourceClaimsHash: hash(5) }, 4));
+  const lease = { runId: "exact-run", conditionId: "condition-1", allocationId: "lease", leaseReceiptHash: hash(6) };
+  assert.throws(() => applyEvent(p, event("condition.observation_lease_allocated", { ...lease, extra: true }, 5)), /exact|phase|observation/i);
+  assert.throws(() => applyEvent(p, event("condition.observation_lease_allocated", { ...lease, leaseReceiptHash: "bad" }, 5)), /lease|proof|phase/i);
+  p = applyEvent(p, event("condition.observation_lease_allocated", lease, 5));
+  assert.throws(() => applyEvent(p, event("condition.observation_process_bound", { runId: "exact-run", conditionId: "condition-1", processIdentityHash: hash(7), allocationId: "lease" }, 6)), /exact|phase|observation/i);
+});
+
 test("activation requires the latest decidable Cycle0 and never supports Conditions or Findings", () => {
   let p = calibrating();
   p = applyAll(p, observationEvents(p, { runId: "cycle0-pass", evidenceId: hash(101), cycle: 0, start: 4 }));
@@ -64,6 +74,23 @@ test("product observations use Cycle1 evidence independently from Cycle0", () =>
   assert.equal(evaluateConditionGraph({ projection: p, worldSnapshot: world() }).conditions.get("condition-1").status, "fresh");
 });
 
+test("runtime reducer records canonical product evidence with derived authority", () => {
+  const p = active(); const row = p.evidenceHistory[1];
+  assert.deepEqual(Object.keys(row).sort(), ["adapter", "artifact", "conditionHash", "conditionId", "environment", "evidenceId", "executionContractHash", "executionRevision", "fixtures", "head", "mutationSequence", "run", "sequence", "terminalProofHash", "verdict"].sort());
+  assert.equal(row.sequence, 2); assert.equal(row.run.runId, "product-run"); assert.equal(row.run.state, "terminal");
+  const before = structuredClone(p); const malformed = event("condition.observation_recorded", { runId: "product-run", conditionId: "condition-1", evidenceId: hash(201), verdict: { kind: "passed" }, evidence: { ...evidence(p, "bad-artifact"), command: "leak" } }, 15);
+  assert.throws(() => applyEvent(p, malformed), /record|evidence|field/i); assert.deepEqual(p, before);
+});
+
+test("runtime task mutations invalidate product evidence while observation release does not", () => {
+  let p = active(); const evidenceMutation = p.mutationSequence;
+  assert.equal(evaluateConditionGraph({ projection: p, worldSnapshot: world() }).conditions.get("condition-1").status, "fresh");
+  p = applyEvent(p, event("condition.observation_released", { runId: "product-run", conditionId: "condition-1", releaseReceiptHash: hash(400) }, 15));
+  assert.equal(p.mutationSequence, evidenceMutation); assert.equal(evaluateConditionGraph({ projection: p, worldSnapshot: world() }).conditions.get("condition-1").status, "fresh");
+  p = applyEvent(p, event("task.dispatched", { taskId: "task-1", contractHash: hash(401), workspace: { attempt: 1, path: "/tmp/runtime-task", branch: "runtime-task", baseCommit: "a".repeat(40) } }, 16));
+  assert.equal(evaluateConditionGraph({ projection: p, worldSnapshot: world() }).conditions.get("condition-1").status, "stale");
+});
+
 test("Finding and Repair derive only from active product failed evidence", () => {
   let p = active({ productVerdict: { kind: "failed", failureCode: "assertion", findingFingerprint: hash(300) } });
   p.conditions.get("condition-1").definition.remediation.policy = "autonomous";
@@ -82,6 +109,13 @@ test("amendment enters suspended through its durable runtime event", () => {
   p = applyEvent(p, event("execution.amendment_capability_consumed", { proposalId: "p", nonceDigest: hash(3) }, 18));
   p = applyEvent(p, event("execution.amendment_applied", { proposalId: "p", oldRevision: 1, newRevision: 2, contractHash: hash(4), reconciliation: [] }, 19));
   assert.equal(p.executionRevision, 2);
+});
+
+test("runtime accept never completes and accepted tasks cannot regress", () => {
+  let p = active(); const task = p.tasks.get("task-1"); task.status = "succeeded"; task.workspace = { attempt: 1, phase: "disposed", disposition: "integrated", released: true };
+  p = applyEvent(p, event("task.accepted", { taskId: "task-1", workspaceAttempt: 1 }, 15));
+  assert.equal(p.lifecycle, "active"); assert.equal(p.tasks.get("task-1").status, "accepted");
+  assert.throws(() => applyEvent(p, event("task.dispatched", { taskId: "task-1", contractHash: hash(402), workspace: { attempt: 2, path: "/tmp/a", branch: "x", baseCommit: "a".repeat(40) } }, 16)), /not pending/);
 });
 
 test("runtime evidence ledger survives store replay with calibration and product histories", () => {
