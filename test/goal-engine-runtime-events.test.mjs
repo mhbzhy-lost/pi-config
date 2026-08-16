@@ -12,13 +12,13 @@ import { taskContractHash, remediationSubjectHash } from "../scripts/lib/goal-en
 import { createRepairChallenge, issueRepairCapability, recordRepairUserDecision, repairEpisodeTransition, rejectSubjectHash } from "../scripts/lib/goal-engine/repair-policy.mjs";
 
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
-function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); return applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1)); }
+function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); let p = applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1)); p = applyEvent(p, event("goal.runtime_readiness_recorded", { readiness: "ready" }, 50)); p = applyEvent(p, event("goal.runtime_approval_recorded", {}, 51)); p.runtimeState = "active"; return p; }
 
 function evidence(p, verdict = { kind: "passed" }) {
   return { executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("condition-1").conditionHash, head: "a".repeat(40), adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: "environment-1" }, fixtures: [{ ref: "sample", fingerprint: "fixture-1" }], artifact: { id: "artifact-1", hash: "9".repeat(64) }, verdict };
 }
 function observed(p, verdict) {
-  p = applyEvent(p, event("condition.observation_requested", { runId: "run-1", conditionId: "condition-1", cycle: 0, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2));
+  p = applyEvent(p, event("condition.observation_requested", { runId: "run-1", conditionId: "condition-1", cycle: 1, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2));
   p = applyEvent(p, event("condition.observation_lease_allocated", { runId: "run-1", conditionId: "condition-1", allocationId: "lease-1", leaseReceiptHash: "c".repeat(64) }, 3));
   p = applyEvent(p, event("condition.observation_process_bound", { runId: "run-1", conditionId: "condition-1", processIdentityHash: "d".repeat(64) }, 4));
   p = applyEvent(p, event("condition.observation_terminal", { runId: "run-1", conditionId: "condition-1", terminalProofHash: "e".repeat(64) }, 5));
@@ -29,10 +29,20 @@ function observed(p, verdict) {
 test("runtime draft preserves contract state and observation identity", () => {
   let p = draft();
   assert.equal(p.runtimeGeneration, "goal-runtime.v1"); assert.equal(p.initialShape, "hybrid"); assert.equal(p.conditions.get("condition-1").status, "inactive");
-  p = applyEvent(p, event("condition.observation_requested", { runId: "run-1", conditionId: "condition-1", cycle: 0, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2));
+  p = applyEvent(p, event("condition.observation_requested", { runId: "run-1", conditionId: "condition-1", cycle: 1, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2));
   assert.equal(p.observationRuns.get("run-1").allocationId, null); assert.equal(p.conditions.get("condition-1").lastObservationRunId, "run-1");
   assert.throws(() => applyEvent(p, event("finding.recorded", { findingId: "f-1", conditionId: "condition-1", runId: "run-1", evidenceId: "e-1", fingerprint: "f".repeat(64) }, 3)), /failed ledger|terminal/);
   assert.throws(() => applyEvent(p, { ...event("goal.checkpoint", { nextAction: "a sufficiently concrete historical next action" }, 3), schemaVersion: "planned.v1" }), /mixed event generations/);
+});
+
+test("observation transitions require phase-exact hashed authority", () => {
+  let p = draft();
+  p = applyEvent(p, event("condition.observation_requested", { runId: "exact-run", conditionId: "condition-1", cycle: 1, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2));
+  const lease = { runId: "exact-run", conditionId: "condition-1", allocationId: "lease", leaseReceiptHash: "c".repeat(64) };
+  assert.throws(() => applyEvent(p, event("condition.observation_lease_allocated", { ...lease, extra: true }, 3)), /exact|phase|observation/i);
+  assert.throws(() => applyEvent(p, event("condition.observation_lease_allocated", { ...lease, leaseReceiptHash: "bad" }, 3)), /lease|proof|phase/i);
+  p = applyEvent(p, event("condition.observation_lease_allocated", lease, 3));
+  assert.throws(() => applyEvent(p, event("condition.observation_process_bound", { runId: "exact-run", conditionId: "condition-1", processIdentityHash: "d".repeat(64), allocationId: "lease" }, 4)), /exact|phase|observation/i);
 });
 
 test("runtime FSM accepts only exact ordered observation, finding, repair, amendment and review events", () => {
@@ -45,6 +55,7 @@ test("runtime FSM accepts only exact ordered observation, finding, repair, amend
   assert.equal(p.repairEpisodes.get("episode-1").status, "reverifying");
   p = applyEvent(p, event("repair.episode_resolved", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], oldStatus: "reverifying", newStatus: "resolved", reason: "fresh evidence" }, 11));
   assert.equal(p.findings.get("finding-1").status, "resolved");
+  p.runtimeState = "suspended";
   p = applyEvent(p, event("execution.amendment_proposed", { proposalId: "p", proposalHash: "1".repeat(64), changesHash: "2".repeat(64), oldRevision: 1, newRevision: 2 }, 12));
   p = applyEvent(p, event("execution.amendment_approved", { proposalId: "p", proposalHash: "1".repeat(64), sessionId: "s", userEntryId: "u" }, 13));
   p = applyEvent(p, event("execution.amendment_capability_consumed", { proposalId: "p", nonceDigest: "3".repeat(64) }, 14));
@@ -78,7 +89,7 @@ test("runtime evidence ledger survives store replay and snapshot hashing", () =>
   const root = mkdtempSync(join(tmpdir(), "goal-runtime-ledger-"));
   try {
     const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
-    const events = [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1), event("condition.observation_requested", { runId: "run-1", conditionId: "condition-1", cycle: 0, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2), event("condition.observation_lease_allocated", { runId: "run-1", conditionId: "condition-1", allocationId: "lease-1", leaseReceiptHash: "c".repeat(64) }, 3), event("condition.observation_process_bound", { runId: "run-1", conditionId: "condition-1", processIdentityHash: "d".repeat(64) }, 4), event("condition.observation_terminal", { runId: "run-1", conditionId: "condition-1", terminalProofHash: "e".repeat(64) }, 5)];
+    const events = [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1), event("goal.runtime_readiness_recorded", { readiness: "ready" }, 50), event("goal.runtime_approval_recorded", {}, 51), event("condition.observation_requested", { runId: "run-1", conditionId: "condition-1", cycle: 1, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2), event("condition.observation_lease_allocated", { runId: "run-1", conditionId: "condition-1", allocationId: "lease-1", leaseReceiptHash: "c".repeat(64) }, 3), event("condition.observation_process_bound", { runId: "run-1", conditionId: "condition-1", processIdentityHash: "d".repeat(64) }, 4), event("condition.observation_terminal", { runId: "run-1", conditionId: "condition-1", terminalProofHash: "e".repeat(64) }, 5)];
     let p = createProjection(); for (const entry of events) { p = appendEvent(root, entry, p.version); }
     const { verdict, ...summary } = evidence(p); p = appendEvent(root, event("condition.observation_recorded", { runId: "run-1", conditionId: "condition-1", evidenceId: "8".repeat(64), verdict, evidence: summary }, 6), p.version);
     const replayed = loadProjection(root, "runtime-goal"), snapshot = JSON.parse(readFileSync(join(root, "goals/runtime-goal/projection.json"), "utf8"));
@@ -92,9 +103,9 @@ test("runtime store replay persists only challenge bindings through approved rej
   const root = mkdtempSync(join(tmpdir(), "goal-runtime-repair-"));
   try {
     const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
-    const entries = [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1)];
+    const entries = [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1), event("goal.runtime_readiness_recorded", { readiness: "ready" }, 50), event("goal.runtime_approval_recorded", {}, 51)];
     let p = createProjection(); for (const entry of entries) p = appendEvent(root, entry, p.version);
-    for (const entry of [event("condition.observation_requested", { runId: "run-1", conditionId: "condition-1", cycle: 0, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2), event("condition.observation_lease_allocated", { runId: "run-1", conditionId: "condition-1", allocationId: "lease-1", leaseReceiptHash: "c".repeat(64) }, 3), event("condition.observation_process_bound", { runId: "run-1", conditionId: "condition-1", processIdentityHash: "d".repeat(64) }, 4), event("condition.observation_terminal", { runId: "run-1", conditionId: "condition-1", terminalProofHash: "e".repeat(64) }, 5)]) p = appendEvent(root, entry, p.version);
+    for (const entry of [event("condition.observation_requested", { runId: "run-1", conditionId: "condition-1", cycle: 1, worldSnapshotHash: "a".repeat(64), resourceClaimsHash: "b".repeat(64) }, 2), event("condition.observation_lease_allocated", { runId: "run-1", conditionId: "condition-1", allocationId: "lease-1", leaseReceiptHash: "c".repeat(64) }, 3), event("condition.observation_process_bound", { runId: "run-1", conditionId: "condition-1", processIdentityHash: "d".repeat(64) }, 4), event("condition.observation_terminal", { runId: "run-1", conditionId: "condition-1", terminalProofHash: "e".repeat(64) }, 5)]) p = appendEvent(root, entry, p.version);
     const { verdict, ...summary } = evidence(p, { kind: "failed", failureCode: "assertion", findingFingerprint: "f".repeat(64) });
     p = appendEvent(root, event("condition.observation_recorded", { runId: "run-1", conditionId: "condition-1", evidenceId: "8".repeat(64), verdict, evidence: summary }, 6), p.version);
     p = appendEvent(root, event("finding.recorded", { findingId: "finding-1", conditionId: "condition-1", runId: "run-1", evidenceId: "8".repeat(64), fingerprint: "f".repeat(64) }, 7), p.version);
