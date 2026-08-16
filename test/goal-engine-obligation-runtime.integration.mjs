@@ -129,6 +129,25 @@ test("goal_status drives one-condition Cycle0 through request, terminal, record,
   assert.deepEqual(projection.conditions.get("condition-1").supportingEvidenceIds, []);
 });
 
+test("active status drives the R9-selected product observation and excludes Cycle0 evidence", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  const condition = structuredClone(runtimeInit().execution.conditions[0]); condition.depends_on = []; condition.invalidation.task_ids = [];
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd) });
+  await approveCalibration(api, cwd, runtimeInit({ execution: { ...runtimeInit().execution, tasks: [], conditions: [condition] } }));
+  for (let i = 0; i < 5; i++) await invoke(api, "goal_status", {});
+  let projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(projection.runtimeState, "active");
+  assert.deepEqual(projection.conditions.get("condition-1").supportingEvidenceIds, []);
+  for (let i = 0; i < 4; i++) await invoke(api, "goal_status", {});
+  projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  const runs = [...projection.observationRuns.values()];
+  assert.deepEqual(runs.map(run => run.cycle), [0, 1]);
+  assert.deepEqual(runs.map(run => run.phase), ["released", "released"]);
+  assert.equal(projection.conditions.get("condition-1").status, "satisfied");
+  assert.equal(projection.conditions.get("condition-1").supportingEvidenceIds.length, 1);
+  assert.equal(observationEvents(cwd).filter(name => name === "condition.observation_requested").length, 2);
+});
+
 test("calibrating runtime without Host observation wiring fails closed without observation events", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd;
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) });

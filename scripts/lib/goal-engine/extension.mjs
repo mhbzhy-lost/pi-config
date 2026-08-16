@@ -9,7 +9,7 @@ import { captureCurrentWorld } from "./current-world.mjs";
 import { requestObservation, startObservation, recoverObservation, recordObservation, releaseObservation } from "./observation-runner.mjs";
 import { hostObservationAdapter } from "./observation-adapters.mjs";
 import { prepareManagedValidation } from "./managed-validation.mjs";
-import { actionableFrontier, obligationProgressFingerprint } from "./obligation-policy.mjs";
+import { actionableFrontier, nextObligationAction, obligationProgressFingerprint } from "./obligation-policy.mjs";
 import { buildTransferChallenge, listCwdGoals, ownerSessionId, transferChallengeState, workspaceReleased } from "./session-transfer.mjs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
 import { appendEvent, appendEventBatch, appendEventBatchWithSettlementEvidence, loadProjection, listGoals, listGoalIds } from "./store.mjs";
@@ -651,7 +651,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   const observationReceiptForRun = (projection, run) => {
     const condition = projection.conditions.get(run.conditionId);
     const adapter = condition && hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
-    if (!condition || run.cycle !== 0 || !/^[a-f0-9]{40}$/.test(run.head || "") || !/^[a-f0-9]{64}$/.test(run.worldSnapshotHash || "") || !/^[a-f0-9]{64}$/.test(run.resourceClaimsHash || "") || !Number.isSafeInteger(run.executionRevision) || !/^[a-f0-9]{64}$/.test(run.executionContractHash || "") || !/^[a-f0-9]{64}$/.test(run.conditionHash || "") || !run.adapter || run.executionRevision !== projection.executionRevision || run.executionContractHash !== projection.executionContractHash || run.conditionHash !== condition.conditionHash || run.adapter.ref !== condition.definition.oracle_ref || run.adapter.ref !== adapter?.ref || run.adapter.version !== adapter?.version || canonicalHash(adapter?.resourceClaims) !== run.resourceClaimsHash) throw Error("observation run identity conflict");
+    if (!condition || !Number.isSafeInteger(run.cycle) || run.cycle < 0 || (projection.runtimeState === "calibrating" ? run.cycle !== 0 : projection.runtimeState === "active" && run.cycle < 1) || !/^[a-f0-9]{40}$/.test(run.head || "") || !/^[a-f0-9]{64}$/.test(run.worldSnapshotHash || "") || !/^[a-f0-9]{64}$/.test(run.resourceClaimsHash || "") || !Number.isSafeInteger(run.executionRevision) || !/^[a-f0-9]{64}$/.test(run.executionContractHash || "") || !/^[a-f0-9]{64}$/.test(run.conditionHash || "") || !run.adapter || run.executionRevision !== projection.executionRevision || run.executionContractHash !== projection.executionContractHash || run.conditionHash !== condition.conditionHash || run.adapter.ref !== condition.definition.oracle_ref || run.adapter.ref !== adapter?.ref || run.adapter.version !== adapter?.version || canonicalHash(adapter?.resourceClaims) !== run.resourceClaimsHash) throw Error("observation run identity conflict");
     return {
       schema: "dispatch-ir.v1.observation-receipt", runId: run.runId, conditionId: run.conditionId,
       cycle: run.cycle, goalId: projection.goalId, head: run.head, executionRevision: run.executionRevision,
@@ -733,6 +733,58 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
       return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] };
     } catch { return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] }; }
+  };
+  const activeObservationInventory = (projection) => {
+    const claims = {};
+    try {
+      for (const [conditionId, condition] of projection.conditions) {
+        claims[conditionId] = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref).resourceClaims;
+      }
+      return { claims };
+    } catch { return null; }
+  };
+  const activeObservationStep = async ({ projection, goalId, cwd, root, world, selected }) => {
+    if (!observationHostAvailable()) return { attention: ["RUNTIME_OBSERVATION_HOST_UNAVAILABLE"] };
+    const services = observationServices(goalId, cwd, root, world);
+    try {
+      if (selected.tool === "request_observation") {
+        const requested = requestObservation({ projection, conditionId: selected.params.condition_id, cycle: selected.params.cycle, worldSnapshot: world, services });
+        await services.persistEvent(requested.event);
+        return { step: "request" };
+      }
+      if (!new Set(["observation_start", "observation_recover", "record_observation", "release_observation"]).has(selected.tool)) return { attention: ["R10A3_OBSERVATION_ACTION_UNAVAILABLE"] };
+      const run = projection.observationRuns.get(selected.params.run_id);
+      if (!run) return { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] };
+      let receipt = observationReceiptForRun(projection, run);
+      if ((world.repo?.head || world.head) !== receipt.head) throw Error("observation HEAD drift");
+      const prepare = () => {
+        const condition = projection.conditions.get(run.conditionId);
+        const adapter = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
+        const managedReceipt = services.prepareManagedValidation({ ownerKind: "goal-observation", ownerId: receipt.runId, originRoot: cwd, stateRoot: root, integratedHead: world.repo?.head || world.head, plan: adapter.validationPlan, resourceClaims: adapter.resourceClaims });
+        if (run.allocationId && managedReceipt.id !== run.allocationId) throw Error("managed allocation identity conflict");
+        receipt = { ...receipt, managedReceipt };
+      };
+      if (selected.tool === "observation_start") {
+        if (run.phase !== "requested") return { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] };
+        const result = await startObservation(receipt, services);
+        return result.status === "attention" || result.status === "blocked" ? { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] } : { step: "start" };
+      }
+      prepare();
+      if (selected.tool === "observation_recover") {
+        const result = await recoverObservation(receipt, services);
+        return result.status === "attention" || result.status === "blocked" || result.phase === "cleanup_debt" ? { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] } : { step: "recover" };
+      }
+      if (selected.tool === "record_observation") {
+        const recovered = await recoverObservation(receipt, services);
+        if (recovered.phase === "cleanup_debt" || recovered.status === "attention") return { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] };
+        const artifactRef = await runtimeHost.artifactRefForRun({ goalId, runId: run.runId, managedTerminal: recovered.runReceipt?.terminal || recovered.terminal });
+        const result = await recordObservation({ projection: loadProjectionFn(root, goalId), runReceipt: recovered.runReceipt || recovered, artifactRef, worldSnapshot: world, services });
+        if (result.verdict?.kind === "failed") return { attention: ["R10A3_REPAIR_REQUIRED"] };
+        return result.blocked ? { attention: ["R10A3_OBSERVATION_BLOCKED"] } : { step: "record" };
+      }
+      const result = await releaseObservation({ ...receipt, phase: "recorded", recorded: { evidenceId: run.evidenceId } }, services);
+      return result.status === "attention" ? { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] } : { step: "release" };
+    } catch { return { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] }; }
   };
   const isRuntimeChallenge = (data) => {
     const fields = ["id", "kind", "choices", "requestedAt", "goalId", "contractHash", "baseHead", "sessionId", "proposalId", "executionContractHash", "proposalHash"];
@@ -1160,7 +1212,16 @@ export function createGoalEngineExtension(pi, options = {}) {
           const current = loadProjectionFn(root, goalId);
           return JSON.stringify({ goalId, runtimeState: current.runtimeState, readiness: current.readiness, ...(outcome.attention ? { status: outcome.attention[0], attention: outcome.attention } : {}), progressLedger: current.progressLedger });
         }
-        const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions: {}, observationInventory: {} });
+        const inventory = activeObservationInventory(projection);
+        if (!inventory) return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R10A3_OBSERVATION_HOST_ATTENTION", attention: ["R10A3_OBSERVATION_HOST_ATTENTION"], progressLedger: projection.progressLedger });
+        const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions: {}, observationInventory: inventory });
+        const selected = nextObligationAction(frontier);
+        if (selected && ["request_observation", "observation_start", "observation_recover", "record_observation", "release_observation"].includes(selected.tool)) {
+          const outcome = await activeObservationStep({ projection, goalId, cwd, root, world, selected });
+          const current = loadProjectionFn(root, goalId);
+          return JSON.stringify({ goalId, runtimeState: current.runtimeState, readiness: current.readiness, ...(outcome.attention ? { status: outcome.attention[0], attention: outcome.attention } : {}), blocking: frontier.blocking, progressLedger: current.progressLedger });
+        }
+        if (selected?.tool === "goal_finalize") return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R11_FINALIZATION_REQUIRED", blocking: frontier.blocking, attention: frontier.attention, progressLedger: projection.progressLedger });
         return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
       }
       if (!enforceActionTokens) return statusResponse(projection, cwd, root);

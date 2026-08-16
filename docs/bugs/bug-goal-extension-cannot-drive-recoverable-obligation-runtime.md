@@ -35,6 +35,14 @@ Pi session custom entry 属于不可信恢复输入。此前恢复逻辑通过�
 
 Observation 请求原先只持久化快照和资源 claims 摘要；reload 时用当前投影和 Host adapter 重建收据，因此同一 adapter ref 换了 version（或 claims）会被误当成原请求。现在 requested Goal event 精确保存 HEAD、执行 revision/contract、condition hash、`{ref,version}` 和 claims hash；replay projection 逐字段保存。恢复在任何 prepare/recover/start/artifact 前对 event-sourced 身份、当前 Condition、Host adapter version 和 canonical claims hash 逐项比对，漂移一律保持 requested 并进入 managed attention。完整 CurrentWorld hash 不作为 reload 闭锁条件，避免 `capturedAt` 等易变字段阻断合法恢复。
 
+## Active 产品 Observation 未接线
+
+### 复现
+Cycle 0 完成并激活后，`goal_status` 仅计算 R9 frontier 并返回；即使 frontier 已选择 `request_observation`、`observation_start`、`observation_recover`、`record_observation` 或 `release_observation`，Host 也不调用既有 runner。因此产品 cycle>=1 无法形成事件、证据或稳定性 streak。
+
+### 根因与修复方案
+active 分支没有像校准分支一样持有 Host-owned adapter registry、CurrentWorld、Store 和 managed-validation 服务，且没有把 `actionableFrontier` 的唯一 `nextObligationAction` 接到 state-aware Observation 生命周期。修复时每个 status 先捕获 world、追加 checkpoint，再从 registry 构造精确 condition claims 后计算 R9 frontier；只执行被 R9 选中的一个 Observation 内部动作。请求先持久化 requested intent；后续 status 分别 start/recover、record、release。重建收据时复核 event-sourced HEAD、adapter version、claims、Condition hash 和 allocation；任何漂移或缺失 authority 都 attention 且不改变 Observation。Finding/Repair/finalize 保持未接线。
+
 ## Cycle 0 未接线
 
 ### 复现
