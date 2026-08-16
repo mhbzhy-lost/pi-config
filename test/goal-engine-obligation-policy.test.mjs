@@ -93,6 +93,12 @@ test("suspended runtime retains terminal observation safety debt", () => {
   assert(frontier(projection).actions.some(x => x.kind === "observation-record"));
 });
 
+test("waiting remediation blocks without starving its pending Task dispatch", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.tasks.set("repair-task", { status: "pending" }); projection.repairEpisodes.set("episode", { status: "waiting_for_tasks", remediationTaskIds: ["repair-task"] });
+  const result = frontier(projection, world(), new Map([["repair-task", { requiredNextAction: { tool: "goal_dispatch", params: {}, reason: "runnable" } }]]));
+  assert.equal(nextObligationAction(result)?.tool, "goal_dispatch"); assert(result.blocking.some((item) => item.code === "REPAIR_TASKS_PENDING")); assert(!result.actions.some((item) => item.tool === "repair_episode"));
+});
+
 test("pending repair capability suppresses its repair action", () => {
   const projection = base(); projection.progressLedger = ledger(); projection.repairEpisodes.set("e", { status: "active" }); projection.repairChallenges.set("challenge", { episodeId: "e", phase: "approved" }); const result = frontier(projection);
   assert(result.attention.some(x => x.id === "e" && x.code === "PENDING_USER_CAPABILITY")); assert(!result.actions.some(x => x.kind === "repair" && x.id === "e"));

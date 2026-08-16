@@ -10,6 +10,7 @@ import { requestObservation, startObservation, recoverObservation, recordObserva
 import { hostObservationAdapter } from "./observation-adapters.mjs";
 import { prepareManagedValidation } from "./managed-validation.mjs";
 import { actionableFrontier, nextObligationAction, obligationProgressFingerprint } from "./obligation-policy.mjs";
+import { generationCapabilities } from "./generation-capabilities.mjs";
 import { buildTransferChallenge, listCwdGoals, ownerSessionId, transferChallengeState, workspaceReleased } from "./session-transfer.mjs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
 import { appendEvent, appendEventBatch, appendEventBatchWithSettlementEvidence, loadProjection, listGoals, listGoalIds } from "./store.mjs";
@@ -27,7 +28,7 @@ import {
 import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation, validateNextAction } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
 import { finalizeGoal } from "./finalization.mjs";
-import { deriveFindingFromFailedEvidence, openRepairEpisode } from "./repair-policy.mjs";
+import { deriveFindingFromFailedEvidence, openRepairEpisode, validateRemediationTask, repairEpisodeTransition } from "./repair-policy.mjs";
 import {
   assertExecutorBindingTicketCurrent,
   assertExecutorSettlementProof,
@@ -1239,7 +1240,35 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         const inventory = activeObservationInventory(projection);
         if (!inventory) return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R10A3_OBSERVATION_HOST_ATTENTION", attention: ["R10A3_OBSERVATION_HOST_ATTENTION"], progressLedger: projection.progressLedger });
-        const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions: {}, observationInventory: inventory });
+        // Materialization is Host-owned and deterministic: callers cannot supply
+        // remediation prose, criteria, paths, or provenance.
+        const activeEpisode = [...projection.repairEpisodes.values()].find((episode) => episode.status === "active");
+        // Release an already-recorded Observation before starting repair work;
+        // managed resource cleanup remains a higher-priority safety debt.
+        const hasObservationDebt = [...projection.observationRuns.values()].some((run) => ["terminal", "recorded"].includes(run.phase));
+        if (activeEpisode && !hasObservationDebt) {
+          const condition = projection.conditions.get(activeEpisode.conditionId)?.definition;
+          if (condition?.remediation?.policy === "user-approved") {
+            return JSON.stringify({ goalId, runtimeState: projection.runtimeState, status: "R10A3_REPAIR_APPROVAL_REQUIRED", attention: ["R10A3_REPAIR_APPROVAL_REQUIRED"], progressLedger: projection.progressLedger });
+          }
+          if (condition?.remediation?.policy === "autonomous") {
+            const taskDef = {
+              description: `Remediate condition ${condition.id}: ${condition.statement}`,
+              deps: [], writePaths: [...condition.remediation.allowed_paths],
+              acceptance: { criteria: [{ id: condition.id, statement: `Condition ${condition.id} expected: ${condition.expected}`, evidenceKinds: ["tests"] }] }, workflow: "tdd",
+            };
+            const plan = validateRemediationTask({ projection, episodeId: activeEpisode.episodeId, findingIds: [...activeEpisode.findingIds], taskDef });
+            const events = plan.events.map(({ type, data }) => makeGoalEvent(type, data, goalId, projection));
+            try { appendEventBatchFn(root, events, projection.version); }
+            catch (cause) {
+              const recovered = loadProjectionFn(root, goalId);
+              if (!recovered?.repairEpisodes.get(activeEpisode.episodeId)?.remediationTaskIds?.includes(plan.taskId)) throw cause;
+            }
+            projection = loadProjectionFn(root, goalId);
+          }
+        }
+        const taskActions = new Map([...projection.tasks.keys()].map((taskId) => [taskId, taskActionState(projection, taskId)]));
+        const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions, observationInventory: inventory });
         const selected = nextObligationAction(frontier);
         if (selected && ["request_observation", "observation_start", "observation_recover", "record_observation", "release_observation"].includes(selected.tool)) {
           const outcome = await activeObservationStep({ projection, goalId, cwd, root, world, selected });
@@ -1247,6 +1276,12 @@ export function createGoalEngineExtension(pi, options = {}) {
           return JSON.stringify({ goalId, runtimeState: current.runtimeState, readiness: current.readiness, ...(outcome.attention ? { status: outcome.attention[0], attention: outcome.attention } : {}), blocking: frontier.blocking, progressLedger: current.progressLedger });
         }
         if (selected?.tool === "goal_finalize") return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R11_FINALIZATION_REQUIRED", blocking: frontier.blocking, attention: frontier.attention, progressLedger: projection.progressLedger });
+        if (selected && ["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(selected.tool)) {
+          const machineAction = { tool: selected.tool, params: { goal_id: goalId, ...selected.params } };
+          const offer = issueActionOffer(projection, machineAction, sessionId);
+          appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId, projection), projection.version);
+          return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, machineAction, action_token: offer.token, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
+        }
         return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
       }
       if (!enforceActionTokens) return statusResponse(projection, cwd, root);
@@ -1618,9 +1653,18 @@ export function createGoalEngineExtension(pi, options = {}) {
         const acceptEvent = makeGoalEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId, projection);
         try {
           const afterAccept = applyEvent(projection, acceptEvent);
-          projection = goalProgress(afterAccept).accepted === goalProgress(afterAccept).total
-            ? appendEventBatchFn(root, [acceptEvent, makeGoalEvent("goal.completed", { verdict: completionVerdictFor(afterAccept) }, goalId, projection)], projection.version)
-            : appendEventFn(root, acceptEvent, projection.version);
+          const runtimeFinalize = generationCapabilities(projection.eventSchemaVersion).completion === "goal-finalize";
+          const transitions = runtimeFinalize
+            ? [...afterAccept.repairEpisodes.values()]
+              .filter((episode) => episode.status === "waiting_for_tasks" && episode.remediationTaskIds.includes(params.task_id))
+              .flatMap((episode) => repairEpisodeTransition({ projection: afterAccept, episodeId: episode.episodeId, event: { type: "task.accepted", taskId: params.task_id } }).events)
+              .map(({ type, data }) => makeGoalEvent(type, data, goalId, projection))
+            : [];
+          projection = runtimeFinalize
+            ? appendEventBatchFn(root, [acceptEvent, ...transitions], projection.version)
+            : goalProgress(afterAccept).accepted === goalProgress(afterAccept).total
+              ? appendEventBatchFn(root, [acceptEvent, makeGoalEvent("goal.completed", { verdict: completionVerdictFor(afterAccept) }, goalId, projection)], projection.version)
+              : appendEventFn(root, acceptEvent, projection.version);
         } catch (cause) {
           projection = reloadAfterFailure(cause, (recovered) => recovered.tasks.get(params.task_id)?.status === "accepted");
         }
@@ -1630,6 +1674,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
 
       const progress = goalProgress(projection);
+      if (generationCapabilities(projection.eventSchemaVersion).completion === "goal-finalize") return respond(projection);
       if (progress.accepted !== progress.total) return respond(projection);
       if (projection.lifecycle === "completed") return respond(projection, projection.completionVerdict);
       const verdict = completionVerdictFor(projection);
