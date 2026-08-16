@@ -863,17 +863,14 @@ export function createGoalEngineExtension(pi, options = {}) {
     const { entry: intent, index } = intents[0], message = branch[index + 1];
     const content = message?.type === "message" && message.message?.role === "user" ? message.message.content : null;
     const text = typeof content === "string" ? content : Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : null;
-    if (!message || !nonEmptyString(message.id) || !validTimestamp(message.timestamp) || Date.parse(message.timestamp) <= Date.parse(challenge.requestedAt) || text !== intent.data.choice) return null;
+    if (!message || message.parentId !== intent.id || !nonEmptyString(message.id) || !validTimestamp(message.timestamp) || Date.parse(message.timestamp) <= Date.parse(challenge.requestedAt) || text !== intent.data.choice) return null;
     return { intent, message, choice: intent.data.choice };
   };
   const restoreMetadata = (ctx) => {
     metadataChallenges.clear(); orphanChallenges.clear(); transferChallenges.clear(); runtimeChallenges.clear(); runtimeIntentGates.clear();
-    for (const entry of ctx.sessionManager?.getBranch?.() || []) {
+    for (const entry of ctx.sessionManager?.getEntries?.() || []) {
       if (entry.type !== "custom") continue;
       const data = entry.data;
-      if (entry.customType === "goal-engine-runtime-approval-intent" && isRuntimeIntent(data)) {
-        runtimeIntentGates.set(`${data.goalId}:${data.sessionId}`, { goalId: data.goalId, sessionId: data.sessionId, kind: "approval" });
-      }
       if (entry.customType === "goal-engine-runtime-intent-pending" && exactPlainObject(data, ["goalId", "sessionId", "source"]) && [data.goalId, data.sessionId].every(nonEmptyString) && ["interactive", "rpc"].includes(data.source)) runtimeIntentGates.set(`${data.goalId}:${data.sessionId}`, { ...data, kind: "pending" });
       if (entry.customType?.startsWith("goal-engine-runtime-approval-")) {
         const id = data?.id;
@@ -884,7 +881,8 @@ export function createGoalEngineExtension(pi, options = {}) {
           } else if (!current) runtimeChallenges.set(id, { challenge: data });
           else if (!current.invalid && !isDeepStrictEqual(current.challenge, data)) runtimeChallenges.set(id, { ...current, invalid: true });
         } else if (entry.customType === "goal-engine-runtime-approval-decision") {
-          if (!current?.challenge || current.invalid || !isRuntimeDecision(data, current.challenge) || current.decision) {
+          const pair = current?.challenge && runtimeApprovalPair(current.challenge, ctx);
+          if (!current?.challenge || current.invalid || !isRuntimeDecision(data, current.challenge) || current.decision || !pair || data.userEntryId !== pair.message.id || data.choice !== pair.choice || data.source !== pair.intent.data.source) {
             if (current) runtimeChallenges.set(id, { ...current, invalid: true });
           } else runtimeChallenges.set(id, { ...current, decision: data });
         } else if (["goal-engine-runtime-approval-consumed", "goal-engine-runtime-approval-stale", "goal-engine-runtime-approval-rejected"].includes(entry.customType)) {
@@ -1267,7 +1265,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           if (record.decision?.choice === "approve" && record.decision.contractHash === projection.executionContractHash && record.decision.proposalHash === record.challenge.proposalHash && record.decision.baseHead === projection.runtimeBaseHead && world.repo.head === projection.runtimeBaseHead) {
             const nonce = runtimeNonceFactory();
             const capabilityDigest = createHash("sha256").update(Buffer.isBuffer(nonce) ? nonce : String(nonce)).digest("hex");
-            try { projection = appendEventFn(root, makeEvent("goal.runtime_approval_recorded", { proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, userEntryId: record.decision.userEntryId, capabilityDigest }, goalId, "goal-runtime.v1"), projection.version); } catch (error) { const recovered = loadProjectionFn(root, goalId); if (recovered?.runtimeState !== "calibrating" || recovered?.runtimeApproval?.proposalHash !== record.challenge.proposalHash) throw error; projection = recovered; }
+            try { projection = appendEventFn(root, makeEvent("goal.runtime_approval_recorded", { proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, userEntryId: record.decision.userEntryId, capabilityDigest }, goalId, "goal-runtime.v1"), projection.version); } catch (error) { const recovered = loadProjectionFn(root, goalId), approval = recovered?.runtimeApproval; if (recovered?.runtimeState !== "calibrating" || approval?.proposalHash !== record.challenge.proposalHash || approval?.userEntryId !== record.decision.userEntryId || approval?.sessionId !== record.challenge.sessionId || approval?.executionContractHash !== record.challenge.executionContractHash || approval?.baseHead !== record.challenge.baseHead) throw error; projection = recovered; }
             persistMetadata("goal-engine-runtime-approval-consumed", { id: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, consumed: true });
             // Approval consumption is this status call's sole business step.
             return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, progressLedger: projection.progressLedger });
@@ -2496,7 +2494,6 @@ export function createGoalEngineExtension(pi, options = {}) {
         const challenge = record.challenge;
         const intent = { protocol: "goal-engine-runtime-approval-intent.v1", challengeId: challenge.id, goalId: challenge.goalId, proposalId: challenge.proposalId, contractHash: challenge.contractHash, baseHead: challenge.baseHead, sessionId: challenge.sessionId, choice: event.text, source: event.source, proposalHash: challenge.proposalHash };
         persistMetadata("goal-engine-runtime-approval-intent", intent);
-        runtimeIntentGates.set(`${challenge.goalId}:${challenge.sessionId}`, { goalId: challenge.goalId, sessionId: challenge.sessionId, kind: "approval" });
         return { action: "continue" };
       }
     } catch { /* Pi appends the real user message only after this hook returns */ }

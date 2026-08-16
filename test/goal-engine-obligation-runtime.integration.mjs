@@ -30,10 +30,10 @@ function observationEventRows(cwd) { return readFileSync(join(cwd, ".state/goal-
 function observationEvents(cwd) { return observationEventRows(cwd).map(event => event.type); }
 async function approveCalibration(api, cwd, init = runtimeInit()) { await invoke(api, "goal_init", init); await invoke(api, "goal_status", {}); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {}); }
 async function statusUntil(api, phase, limit = 8) { for (let i = 0; i < limit; i++) { await invoke(api, "goal_status", {}); const projection = loadProjection(join(api.cwd, ".state/goal-engine"), "harden-runtime"); if ([...projection.observationRuns.values()].some(run => run.phase === phase)) return projection; } throw Error(`phase not reached: ${phase}`); }
-function pi(cwd, entries = [], { sessionId = "owner", appendEntry } = {}) {
+function pi(cwd, entries = [], { sessionId = "owner", appendEntry, branchEntries } = {}) {
   const tools = [], listeners = new Map(); let leaf = entries.at(-1)?.id || null, sequence = entries.length;
   const append = entry => { const value = { id: `entry-${++sequence}`, parentId: leaf, timestamp: new Date(Date.now() + sequence).toISOString(), ...entry }; entries.push(value); leaf = value.id; return value; };
-  const manager = { getSessionId: () => sessionId, getSessionFile: () => join(cwd, `session-${sessionId}`), getLeafId: () => leaf, getBranch: () => [...entries], getEntries: () => entries };
+  const manager = { getSessionId: () => sessionId, getSessionFile: () => join(cwd, `session-${sessionId}`), getLeafId: () => leaf, getBranch: () => [...(branchEntries || entries)], getEntries: () => entries };
   const handlers = { get(name) { const handler = listeners.get(name); if (name !== "input" || !handler) return handler; return (event, ctx) => { const result = handler(event, ctx); append({ type: "message", message: { role: "user", content: event.images?.length ? [{ type: "text", text: event.text }, ...event.images] : event.text } }); return result; }; } };
   const api = { tools, entries, handlers, sessionManager: manager, registerTool: tool => tools.push(tool), on: (name, handler) => listeners.set(name, handler) };
   api.appendEntry = (customType, data) => { if (appendEntry) return appendEntry(customType, data, entries); append({ type: "custom", customType, data }); };
@@ -79,6 +79,61 @@ test("runtime approval pairs ABI-shaped input with the active branch's real user
   const challenge = api.entries.find(entry => entry.customType === "goal-engine-runtime-approval-challenge").data, decision = api.entries.find(entry => entry.customType === "goal-engine-runtime-approval-decision").data;
   assert.equal(decision.id, challenge.id); assert.ok(decision.receiptId); assert.equal(decision.proposalHash, pending.proposalHash); assert.equal(decision.userEntryId, user.id);
   assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeApproval.userEntryId, user.id);
+});
+
+test("approved runtime intent never remains an R10B gate", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) });
+  await approveCalibration(api, cwd);
+  const ctx = { cwd, sessionManager: api.sessionManager };
+  const before = api.handlers.get("before_agent_start")({}, ctx);
+  const tool = api.handlers.get("tool_call")({ toolName: "write", input: { path: join(cwd, "allowed.txt") } }, ctx);
+  assert.equal(JSON.stringify(before).includes("R10B_SUSPENSION_REQUIRED"), false);
+  assert.notEqual(tool?.reason, "R10B_SUSPENSION_REQUIRED");
+});
+
+test("runtime approval requires the real user message to be the intent's direct child", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) });
+  await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status", {});
+  api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  const user = api.entries.at(-1); user.parentId = "unrelated-entry";
+  await invoke(api, "goal_status", {});
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval");
+  assert.equal(runtimeEntries(api, "decision").length, 0);
+});
+
+test("reload never restores an entry decision without its active-branch approval pair", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd;
+  createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) });
+  await invoke(first, "goal_init", runtimeInit()); await invoke(first, "goal_status", {});
+  first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: first.sessionManager });
+  const challenge = first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-challenge").data;
+  const intent = first.entries.find(entry => entry.customType === "goal-engine-runtime-approval-intent").data;
+  const user = first.entries.at(-1);
+  first.appendEntry("goal-engine-runtime-approval-decision", { id: challenge.id, challengeId: challenge.id, kind: "runtime_activation_approval", choice: "approve", goalId: challenge.goalId, contractHash: challenge.contractHash, baseHead: challenge.baseHead, proposalId: challenge.proposalId, userEntryId: user.id, sessionId: challenge.sessionId, source: intent.source, proposalHash: challenge.proposalHash, receiptId: "reload-receipt" });
+  const entries = structuredClone(first.entries);
+  const activeBranch = entries.filter(entry => !(entry.type === "message" && entry.message?.role === "user"));
+  const reloaded = pi(cwd, entries, { branchEntries: activeBranch }); reloaded.cwd = cwd;
+  createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) });
+  reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  await invoke(reloaded, "goal_status", {});
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval");
+  assert.equal(runtimeEntries(reloaded, "consumed").length, 0, "reload does not accept the entry decision");
+});
+
+test("durable approval recovery rejects a projection with a forged approval identity", async () => {
+  const cwd = repo(); let threw = false;
+  const options = { goalStateEnv: {}, runtimeHost: host(cwd), appendEvent(root, event, version) {
+    if (event.type !== "goal.runtime_approval_recorded" || threw) return appendEvent(root, event, version);
+    threw = true;
+    appendEvent(root, { ...event, data: { ...event.data, userEntryId: "forged-user-entry" } }, version);
+    throw new Error("after forged durable append");
+  } };
+  const api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, options);
+  await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status", {});
+  api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  await assert.rejects(invoke(api, "goal_status", {}), /after forged durable append/);
 });
 
 test("runtime approval fails closed for duplicate intents and non-idle or image input", async () => {

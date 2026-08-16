@@ -11,3 +11,9 @@
 ## 修复方案
 
 输入钩子只追加与当前 challenge 身份精确绑定的 canonical approval intent；下一次 `goal_status` 仅通过 `sessionManager.getBranch()` 在 active branch 配对 intent 后唯一的真实纯文本 user message，并以该 message.id 写入 decision 和 Goal approval。intent/decision 仅作为 Pi 域收据，Goal event 与 Projection 是最终权威；orphan、transfer、metadata challenge 的共享 helper 迁移留作后续债务。
+
+## 本次补充发现
+
+- approval intent 是审批审计收据而非 R10B 门禁；若写入 `runtimeIntentGates` 并由 `before_agent_start`、`tool_call` 的任意 gate 判断，会在审批消费后永久阻断已进入 calibrating 的 Goal。
+- reload 可以从 `getEntries()` 恢复 runtime challenge/decision 收据，但 decision 只能在 active `getBranch()` 中重新证明：恰一个匹配 intent、其直接下一条且 `parentId` 绑定 intent 的真实 user message、纯文本精确 choice，以及 `userEntryId`、choice、source 一致。`getEntries()` 不能作为用户消息权威。
+- R10B pending 记录暂不含真实 `userEntryId`，因此继续按 `kind=pending` fail-closed；后续 R10B 切片必须绑定真实用户条目后再扩大协议。
