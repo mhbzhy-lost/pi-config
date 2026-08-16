@@ -200,9 +200,11 @@ test("malformed runtime decisions do not restore approval authority", async () =
     const user = first.entries.at(-1);
     first.appendEntry("goal-engine-runtime-approval-decision", { id: challenge.id, challengeId: challenge.id, kind: "runtime_activation_approval", choice: "approve", goalId: challenge.goalId, contractHash: challenge.contractHash, baseHead: challenge.baseHead, proposalId: challenge.proposalId, userEntryId: user.id, sessionId: challenge.sessionId, source: intent.source, proposalHash: challenge.proposalHash, receiptId: "malformed-receipt" });
     const entries = structuredClone(first.entries); mutate(entries.at(-1).data);
-    const activeBranch = entries.slice(0, entries.findIndex(entry => entry.type === "message" && entry.message?.role === "user"));
-    const reloaded = pi(cwd, entries, { branchEntries: activeBranch }); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
-    await invoke(reloaded, "goal_status", {});
+    const reloaded = pi(cwd, entries); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+    const status = JSON.parse(await invoke(reloaded, "goal_status", {}));
+    assert.notEqual(status.proposalId, challenge.proposalId, "invalidates the original challenge and issues a new one");
+    assert.equal(runtimeEntries(reloaded, "challenge").length, 2);
+    assert.equal(runtimeEntries(reloaded, "consumed").length, 0, "does not consume the malformed decision");
     assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval");
   }
 });
@@ -216,7 +218,7 @@ for (const terminal of ["consumed", "stale", "rejected"]) test(`malformed runtim
   assert.equal(status.proposalId, offered.proposalId);
 });
 
-test("malformed runtime approval intent cannot restore the R10B gate", async () => {
+test("malformed runtime pending metadata cannot restore the R10B gate", async () => {
   const cwd = repo(), first = pi(cwd); first.cwd = cwd; createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(first, "goal_init", runtimeInit());
   first.handlers.get("input")({ type: "input", source: "interactive", text: "new work" }, { cwd, sessionManager: first.sessionManager });
   const malformed = structuredClone(first.entries); malformed.find((entry) => entry.customType === "goal-engine-runtime-intent-pending").data.extra = "forged";
