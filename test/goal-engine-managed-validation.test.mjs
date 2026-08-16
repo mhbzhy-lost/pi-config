@@ -95,6 +95,17 @@ test("callback rejection cleanup debt retains its resource claim", { timeout: 10
   assert.throws(() => prepareManagedValidation(input(f, "run-two", [{ key: "callback-debt", mode: "exclusive", capacity: 1, reset: "clean" }])), /resource|lease|conflict/i);
 });
 
+test("owner-CAS release failure preserves recorded authority as replayable cleanup debt", async (t) => {
+  const f = fixture(t); const claim = [{ key: "release-debt", mode: "exclusive", capacity: 1, reset: "clean" }];
+  const completed = await startManagedValidation(prepareManagedValidation(input(f, "release-debt", claim)));
+  const before = inspectManagedValidation(completed);
+  assert.throws(() => releaseManagedValidation(completed, { expectedHead: "0".repeat(40) }), /identity|HEAD|release/i);
+  const debt = inspectManagedValidation(completed);
+  assert.equal(debt.phase, "cleanup_debt"); assert.deepEqual(debt.terminal, before.terminal); assert.deepEqual(debt.recorded, before.recorded);
+  assert.deepEqual(inspectManagedValidation(completed), debt);
+  assert.throws(() => prepareManagedValidation(input(f, "release-debt-next", claim)), /resource|lease|conflict/i);
+});
+
 test("terminal barrier persists parent terminal before nested lease is returned active", async (t) => {
   const f = fixture(t); const prepared = prepareManagedValidation(input(f)); let observed = false;
   const completed = await startManagedValidation(prepared, { onTerminalBound: async () => {
@@ -107,21 +118,19 @@ test("terminal barrier persists parent terminal before nested lease is returned 
   releaseManagedValidation(completed, { expectedHead: f.integratedHead });
 });
 
-test("recover converts a parent process-group mismatch to cleanup debt", async (t) => {
+test("recover converts a shape-valid parent process-group mismatch to cleanup debt", async (t) => {
   const f = fixture(t); const prepared = prepareManagedValidation(input(f)); const stored = JSON.parse(readFileSync(prepared.receiptPath, "utf8"));
-  const parentProcess = { pid: process.pid, pidBirthIdentity: "unprovable", processGroupId: process.pid + 1 }; parentProcess.processIdentityHash = createHash("sha256").update(JSON.stringify(parentProcess)).digest("hex");
+  const parentProcess = { pid: process.pid, pidBirthIdentity: "a".repeat(64), processGroupId: process.pid + 1 }; parentProcess.processIdentityHash = createHash("sha256").update(JSON.stringify(parentProcess)).digest("hex");
   writeFileSync(prepared.receiptPath, JSON.stringify({ ...stored, phase: "process_bound", process: parentProcess, terminal: null, recorded: null }), { mode: 0o600 });
-  await assert.rejects(recoverManagedValidation(prepared), /receipt is invalid/i);
+  assert.equal(inspectManagedValidation(prepared).phase, "process_bound");
+  assert.equal((await recoverManagedValidation(prepared)).phase, "cleanup_debt");
 });
 
-test("recover leaves an unprovable process-bound receipt as cleanup debt without recording or releasing", async (t) => {
+test("recover rejects a process-bound receipt missing its process prefix", async (t) => {
   const f = fixture(t); const prepared = prepareManagedValidation(input(f));
   const stored = JSON.parse(readFileSync(prepared.receiptPath, "utf8"));
   writeFileSync(prepared.receiptPath, JSON.stringify({ ...stored, phase: "process_bound", terminal: null, recorded: null }), { mode: 0o600 });
-  const recovered = await recoverManagedValidation(prepared);
-  assert.deepEqual({ phase: recovered.phase, debt: recovered.cleanupDebt, recorded: recovered.recorded }, { phase: "cleanup_debt", debt: true, recorded: null });
-  assert.throws(() => releaseManagedValidation(recovered, { expectedHead: f.integratedHead }), /debt|terminal|release/i);
-  assert.equal(existsSync(recovered.workspacePath), true);
+  await assert.rejects(recoverManagedValidation(prepared), /receipt is invalid/i);
 });
 
 const crashHost = fileURLToPath(new URL("./fixtures/goal-observation/managed-crash-host.mjs", import.meta.url));
@@ -175,6 +184,41 @@ test("malformed durable status fails closed without authorizing an action", { ti
     const result = await recoverManagedValidation(prepared, { onProcessBound: async () => { throw Error("must not acknowledge malformed status"); } });
     assert.equal(result.phase, "cleanup_debt"); assert.equal(await groupIsEmpty(supervisorPid), true); assert.equal(existsSync(marker), false);
     assert.throws(() => prepareManagedValidation(input(f, "malformed-next", [{ key: "malformed", mode: "exclusive", capacity: 1, reset: "clean" }])), /resource|lease|conflict/i);
+  } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child); }
+});
+
+test("cleanup debt accepts only durable receipt prefixes and terminal outcome semantics", async (t) => {
+  const f = fixture(t); const completed = await startManagedValidation(prepareManagedValidation(input(f)));
+  const record = JSON.parse(readFileSync(completed.receiptPath, "utf8"));
+  const validDebt = { ...record, phase: "cleanup_debt", cleanupDebt: true };
+  writeFileSync(completed.receiptPath, JSON.stringify(validDebt), { mode: 0o600 });
+  assert.equal(inspectManagedValidation(completed).phase, "cleanup_debt");
+  const invalid = [
+    { ...validDebt, terminal: null, recorded: record.recorded },
+    { ...validDebt, process: null, terminal: record.terminal, recorded: null },
+    { ...record, terminal: { ...record.terminal, status: "passed", code: 1 } },
+    { ...record, terminal: { ...record.terminal, status: "timed_out", code: 1 } },
+    { ...record, terminal: { ...record.terminal, status: "failed", code: 0, signal: null } },
+  ];
+  for (const corrupt of invalid) {
+    writeFileSync(completed.receiptPath, JSON.stringify(corrupt), { mode: 0o600 });
+    assert.throws(() => inspectManagedValidation(completed), /receipt is invalid/i);
+  }
+});
+
+test("malformed status published during recovery tears down the owned group into cleanup debt", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t), marker = join(f.stateRoot, "waiting-marker"), started = join(f.stateRoot, "waiting-started"), finish = join(f.stateRoot, "waiting-finish"), handshake = join(f.stateRoot, "waiting-handshake");
+  const prepared = prepareManagedValidation(input(f, "waiting-malformed", [{ key: "waiting-malformed", mode: "exclusive", capacity: 1, reset: "clean" }], crashPlan(marker, started, finish)));
+  const child = spawn(process.execPath, [crashHost, "action_running", JSON.stringify(prepared), handshake], { stdio: "ignore" });
+  try {
+    await pollRegular(started); // Durable action-start handshake: recovery must only observe this supervisor, never launch another action.
+    const parent = JSON.parse(readFileSync(prepared.receiptPath, "utf8")); const lease = JSON.parse(readFileSync(join(f.stateRoot, "validation-leases", `${parent.workspaceLease.id}.json`), "utf8"));
+    const supervisorPid = lease.runtime.pid; await killChild(child);
+    const recovering = recoverManagedValidation(prepared);
+    writeFileSync(join(lease.runtime.path, "status"), JSON.stringify({ schema: "dispatch-ir.v1.validation-status", status: "wrong-shape" }), { mode: 0o600 });
+    const result = await recovering;
+    assert.equal(result.phase, "cleanup_debt"); assert.equal(result.terminal, null); assert.equal(result.recorded, null);
+    assert.equal(await groupIsEmpty(supervisorPid), true); assert.equal(readFileSync(marker, "utf8"), "started");
   } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child); }
 });
 
