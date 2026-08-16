@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { createHash } from "node:crypto";
 import { validateDAG } from "./graph.mjs";
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.mjs";
@@ -73,6 +74,8 @@ export function createProjection() {
     suspension: null,
     convergenceBudget: null,
     evidenceHistory: [],
+    mutationSequence: 0,
+    taskMutationSequences: new Map(),
     finalReview: null,
   };
 }
@@ -245,6 +248,8 @@ function copyProjection(p) {
     suspension: p.suspension ? structuredClone(p.suspension) : null,
     convergenceBudget: p.convergenceBudget ? structuredClone(p.convergenceBudget) : null,
     evidenceHistory: structuredClone(p.evidenceHistory || []),
+    mutationSequence: p.mutationSequence || 0,
+    taskMutationSequences: new Map([...p.taskMutationSequences || []]),
     finalReview: p.finalReview ? structuredClone(p.finalReview) : null,
   };
 }
@@ -269,8 +274,9 @@ function runtimeDrafted(p, event) {
     if (p.tasks.has(definition.id)) throw new Error(`duplicate runtime task: ${definition.id}`);
     p.tasks.set(definition.id, { description: definition.description || definition.id, deps: [], writePaths: [...p.writePolicy.allowedPaths], acceptance: { criteria: definition.acceptance?.criteria || [] }, workflow: definition.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, executorBinding: null, lastExecutorProof: null, acceptanceVerification: null, settlement: null });
     p.taskApplicability.set(definition.id, { revision: 1, state: "applicable", reason: null });
+    p.taskMutationSequences.set(definition.id, 0);
   }
-  for (const definition of contract.execution.conditions) p.conditions.set(definition.id, { definition: structuredClone(definition), status: "inactive", supportingEvidenceIds: [], lastObservationRunId: null, invalidationReason: null });
+  for (const definition of contract.execution.conditions) p.conditions.set(definition.id, { definition: structuredClone(definition), conditionHash: hashCanonical(definition), status: "inactive", supportingEvidenceIds: [], lastObservationRunId: null, invalidationReason: null });
 }
 function runtimeReadinessRecorded(p, data) { runtimeOnly(p); if (!new Set(["ready", "needs_clarification", "environment_blocked", "unsafe_to_run"]).has(data.readiness)) throw new Error("invalid runtime readiness"); p.readiness = data.readiness; if (data.readiness === "ready" && p.runtimeState === "draft") p.runtimeState = "awaiting_user_approval"; }
 function runtimeApprovalRecorded(p) { runtimeOnly(p); if (p.runtimeState !== "awaiting_user_approval") throw new Error("runtime approval is out of order"); p.runtimeState = "calibrating"; }
@@ -279,9 +285,36 @@ function runtimeSuspended(p, data) { runtimeOnly(p); if (!data.suspensionId || !
 function runtimeResumed(p) { runtimeOnly(p); if (p.runtimeState !== "suspended") throw new Error("runtime is not suspended"); p.suspension = null; p.runtimeState = "active"; }
 function observationRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["runId", "conditionId", "cycle", "worldSnapshotHash", "resourceClaimsHash"], "observation request"); if (!p.conditions.has(data.conditionId) || p.observationRuns.has(data.runId) || !Number.isSafeInteger(data.cycle) || data.cycle < 0) throw new Error("invalid observation request"); const run = { runId: data.runId, conditionId: data.conditionId, cycle: data.cycle, phase: "requested", allocationId: null, leaseReceiptHash: null, processIdentityHash: null, terminalProofHash: null, evidenceId: null }; p.observationRuns.set(data.runId, run); const condition = p.conditions.get(data.conditionId); condition.status = "observing"; condition.lastObservationRunId = data.runId; }
 function observationTransition(p, data, from, to) { runtimeOnly(p); const run = p.observationRuns.get(data.runId); if (!run || run.conditionId !== data.conditionId || run.phase !== from) throw new Error("invalid observation phase"); if (to === "lease_allocated" && (typeof data.allocationId !== "string" || !data.allocationId)) throw new Error("invalid observation allocation"); if (to === "process_bound" && !data.processIdentityHash) throw new Error("invalid observation process identity"); if (to === "terminal" && !data.terminalProofHash) throw new Error("invalid observation terminal proof"); Object.assign(run, { phase: to, ...(to === "lease_allocated" ? { allocationId: data.allocationId, leaseReceiptHash: data.leaseReceiptHash || null } : {}), ...(to === "process_bound" ? { processIdentityHash: data.processIdentityHash } : {}), ...(to === "terminal" ? { terminalProofHash: data.terminalProofHash } : {}) }); }
-function observationRecorded(p, data) { runtimeOnly(p); const run = p.observationRuns.get(data.runId); if (!run || run.conditionId !== data.conditionId || run.phase !== "terminal" || !data.evidenceId) throw new Error("invalid observation record"); run.phase = "recorded"; run.evidenceId = data.evidenceId; const condition = p.conditions.get(run.conditionId); condition.supportingEvidenceIds.push(data.evidenceId); condition.status = data.verdict === "passed" ? "satisfied" : "blocked"; p.evidenceHistory.push({ runId: run.runId, evidenceId: data.evidenceId }); }
+function observationRecorded(p, data) {
+  runtimeOnly(p); requireExactFields(data, ["runId", "conditionId", "evidenceId", "verdict", "evidence"], "observation record");
+  const run = p.observationRuns.get(data.runId), condition = p.conditions.get(data.conditionId);
+  if (!run || !condition || run.conditionId !== data.conditionId || run.phase !== "terminal" || !hash(data.evidenceId)) throw new Error("invalid observation record");
+  const verdict = validateObservationVerdict(data.verdict), summary = validateEvidenceSummary(data.evidence, p, condition, run);
+  if (p.evidenceHistory.some((entry) => entry.evidenceId === data.evidenceId)) throw new Error("duplicate observation evidence");
+  run.phase = "recorded"; run.evidenceId = data.evidenceId;
+  condition.supportingEvidenceIds.push(data.evidenceId); condition.status = verdict.kind === "passed" ? "satisfied" : "blocked";
+  p.evidenceHistory.push({ ...summary, run: { runId: run.runId, state: "terminal" }, terminalProofHash: run.terminalProofHash, conditionId: run.conditionId, evidenceId: data.evidenceId, verdict, sequence: p.evidenceHistory.length + 1, mutationSequence: p.mutationSequence });
+}
+function validateObservationVerdict(value) {
+  if (!isPlainObject(value) || typeof value.kind !== "string") throw new Error("invalid observation verdict");
+  if (value.kind === "passed") requireExactFields(value, ["kind"], "passed verdict");
+  else if (value.kind === "failed") { requireExactFields(value, ["kind", "failureCode", "findingFingerprint"], "failed verdict"); if (typeof value.failureCode !== "string" || !value.failureCode || !hash(value.findingFingerprint)) throw new Error("invalid failed verdict"); }
+  else if (value.kind === "inconclusive") { requireExactFields(value, ["kind", "reason"], "inconclusive verdict"); if (typeof value.reason !== "string" || !value.reason) throw new Error("invalid inconclusive verdict"); }
+  else if (value.kind === "infrastructure_error") { requireExactFields(value, ["kind", "reason"], "infrastructure verdict"); if (typeof value.reason !== "string" || !value.reason) throw new Error("invalid infrastructure verdict"); }
+  else throw new Error("invalid observation verdict");
+  return structuredClone(value);
+}
+function validateEvidenceSummary(value, p, condition, run) {
+  requireExactFields(value, ["executionRevision", "executionContractHash", "conditionHash", "head", "adapter", "environment", "fixtures", "artifact"], "observation evidence");
+  if (value.executionRevision !== p.executionRevision || value.executionContractHash !== p.executionContractHash || value.conditionHash !== condition.conditionHash || !/^[a-f0-9]{40}$/.test(value.head)) throw new Error("observation evidence identity mismatch");
+  requireExactFields(value.adapter, ["ref", "version"], "observation adapter"); requireExactFields(value.environment, ["ref", "fingerprint"], "observation environment"); requireExactFields(value.artifact, ["id", "hash"], "observation artifact");
+  if (value.adapter.ref !== condition.definition.oracle_ref || value.environment.ref !== condition.definition.environment_ref || ![value.adapter.version, value.environment.fingerprint, value.artifact.id].every((x) => typeof x === "string" && x) || !hash(value.artifact.hash) || !Array.isArray(value.fixtures) || value.fixtures.length !== condition.definition.fixture_refs.length) throw new Error("observation evidence identity mismatch");
+  for (let i = 0; i < value.fixtures.length; i++) { const fixture = value.fixtures[i]; requireExactFields(fixture, ["ref", "fingerprint"], "observation fixture"); if (fixture.ref !== condition.definition.fixture_refs[i] || typeof fixture.fingerprint !== "string" || !fixture.fingerprint) throw new Error("observation evidence identity mismatch"); }
+  if (!hash(run.terminalProofHash)) throw new Error("observation terminal proof mismatch");
+  return structuredClone(value);
+}
 function evidenceInvalidated(p, data) { runtimeOnly(p); const condition = p.conditions.get(data.conditionId); if (!condition) throw new Error("unknown condition"); condition.status = "stale"; condition.invalidationReason = data.reason || null; }
-function findingRecorded(p, data) { runtimeOnly(p); const run = p.observationRuns.get(data.runId); if (!run || run.phase !== "recorded" || run.evidenceId !== data.evidenceId || !p.conditions.has(data.conditionId) || data.conditionId !== run.conditionId || !data.findingId || !data.fingerprint || data.verdict !== "failed") throw new Error("finding requires failed observation"); if (p.findings.has(data.findingId)) throw new Error("duplicate finding"); p.findings.set(data.findingId, { findingId: data.findingId, conditionId: data.conditionId, observationRunId: data.runId, fingerprint: data.fingerprint, status: "open", episodeId: null }); }
+function findingRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["findingId", "conditionId", "runId", "evidenceId", "fingerprint"], "finding record"); const run = p.observationRuns.get(data.runId), evidence = p.evidenceHistory.find((entry) => entry.run.runId === data.runId && entry.evidenceId === data.evidenceId); if (!run || run.phase !== "recorded" || run.evidenceId !== data.evidenceId || !p.conditions.has(data.conditionId) || data.conditionId !== run.conditionId || !data.findingId || !hash(data.fingerprint) || evidence?.conditionId !== data.conditionId || evidence.verdict?.kind !== "failed" || evidence.verdict.findingFingerprint !== data.fingerprint) throw new Error("finding requires failed ledger evidence"); if (p.findings.has(data.findingId)) throw new Error("duplicate finding"); p.findings.set(data.findingId, { findingId: data.findingId, conditionId: data.conditionId, observationRunId: data.runId, fingerprint: data.fingerprint, status: "open", episodeId: null }); }
 function findingStatusChanged(p, data) { runtimeOnly(p); const finding = p.findings.get(data.findingId); if (!finding || !new Set(["open", "repairing", "reverification", "resolved", "rejected_by_user"]).has(data.status)) throw new Error("invalid finding status"); finding.status = data.status; }
 function repairOpened(p, data) { runtimeOnly(p); if (!data.episodeId || !p.conditions.has(data.conditionId) || !Array.isArray(data.findingIds) || !data.findingIds.length || p.repairEpisodes.has(data.episodeId)) throw new Error("invalid repair episode"); for (const id of data.findingIds) { const finding = p.findings.get(id); if (!finding || finding.conditionId !== data.conditionId) throw new Error("invalid repair finding reference"); finding.episodeId = data.episodeId; finding.status = "repairing"; } p.repairEpisodes.set(data.episodeId, { episodeId: data.episodeId, conditionId: data.conditionId, findingIds: [...data.findingIds], remediationTaskIds: [], status: "active", cancellation: null }); }
 function repairTaskLinked(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "taskId"], "repair task link"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || !p.tasks.has(data.taskId) || episode.status !== "active") throw new Error("invalid repair task reference"); if (!episode.remediationTaskIds.includes(data.taskId)) episode.remediationTaskIds.push(data.taskId); episode.status = "waiting_for_tasks"; }
@@ -289,14 +322,17 @@ function repairReverificationRequested(p, data) { runtimeOnly(p); requireExactFi
 function repairResolved(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "conditionId", "findingIds", "oldStatus", "newStatus", "reason"], "repair resolution"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || episode.conditionId !== data.conditionId || episode.status !== data.oldStatus || episode.status !== "reverifying" || data.newStatus !== "resolved" || !data.reason) throw new Error("invalid repair resolution"); episode.status = "resolved"; for (const id of episode.findingIds) p.findings.get(id).status = "resolved"; }
 function repairCancelRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "cancellation"], "repair cancellation"); const episode = p.repairEpisodes.get(data.episodeId); const c = data.cancellation; if (!episode || !c || !Array.isArray(c.ownedTaskIds) || !Array.isArray(c.ownedRunIds) || !Array.isArray(c.terminalProofRefs) || !Array.isArray(c.workspaceClosureProofRefs) || !Array.isArray(c.resourceClosureProofRefs) || typeof c.resourceDebt !== "boolean") throw new Error("invalid repair cancellation"); episode.status = "cancel_pending"; episode.cancellation = structuredClone(c); }
 function repairCancelled(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId"], "repair cancelled"); const episode = p.repairEpisodes.get(data.episodeId); const c = episode?.cancellation; if (!episode || episode.status !== "cancel_pending" || !c || c.terminalProofRefs.length < c.ownedRunIds.length || c.workspaceClosureProofRefs.length < c.ownedTaskIds.length || c.resourceClosureProofRefs.length < c.ownedRunIds.length) throw new Error("repair cancellation is out of order"); episode.status = "cancelled"; }
-function taskApplicabilityChanged(p, data) { runtimeOnly(p); requireExactFields(data, ["taskId", "state", "reason"], "task applicability"); const task = p.tasks.get(data.taskId); const current = p.taskApplicability.get(data.taskId); if (!task || !current || !["applicable", "superseded", "reverify_required"].includes(data.state)) throw new Error("invalid task applicability"); p.taskApplicability.set(data.taskId, { revision: p.executionRevision, state: data.state, reason: data.reason || null }); }
+function taskApplicabilityChanged(p, data) { runtimeOnly(p); requireExactFields(data, ["taskId", "state", "reason"], "task applicability"); const task = p.tasks.get(data.taskId); const current = p.taskApplicability.get(data.taskId); if (!task || !current || !["applicable", "superseded", "reverify_required"].includes(data.state)) throw new Error("invalid task applicability"); p.taskApplicability.set(data.taskId, { revision: p.executionRevision, state: data.state, reason: data.reason || null }); recordRuntimeMutation(p, [data.taskId]); }
 function amendmentProposed(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "changesHash", "oldRevision", "newRevision"], "amendment proposal"); if (p.runtimeState === "active") throw new Error("runtime must be suspended before amendment"); if (data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || !hash(data.proposalHash) || !hash(data.changesHash)) throw new Error("invalid amendment proposal"); p.pendingHumanDecision = { ...data, phase: "proposed" }; }
 function amendmentApproved(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "sessionId", "userEntryId"], "amendment approval"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "proposed" || pending.proposalId !== data.proposalId || pending.proposalHash !== data.proposalHash || !data.sessionId || !data.userEntryId) throw new Error("invalid amendment approval"); p.pendingHumanDecision = { ...pending, ...data, phase: "approved" }; }
 function amendmentCapabilityConsumed(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "nonceDigest"], "amendment capability"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "approved" || pending.proposalId !== data.proposalId || !hash(data.nonceDigest)) throw new Error("invalid amendment capability"); pending.phase = "consumed"; }
-function amendmentApplied(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "oldRevision", "newRevision", "contractHash", "reconciliation"], "amendment apply"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "consumed" || pending.proposalId !== data.proposalId || data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || !hash(data.contractHash) || !Array.isArray(data.reconciliation)) throw new Error("invalid amendment apply"); p.executionRevision = data.newRevision; p.executionContractHash = data.contractHash; p.pendingHumanDecision = null; }
+function amendmentApplied(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "oldRevision", "newRevision", "contractHash", "reconciliation"], "amendment apply"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "consumed" || pending.proposalId !== data.proposalId || data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || !hash(data.contractHash) || !Array.isArray(data.reconciliation)) throw new Error("invalid amendment apply"); p.executionRevision = data.newRevision; p.executionContractHash = data.contractHash; p.pendingHumanDecision = null; recordRuntimeMutation(p, [...p.tasks.keys()]); }
 function finalReviewStarted(p, data) { runtimeOnly(p); requireExactFields(data, ["reviewId", "manifestHash", "stateHash", "worldHash"], "final review start"); if (!data.reviewId || !hash(data.manifestHash) || !hash(data.stateHash) || !hash(data.worldHash)) throw new Error("invalid final review start"); p.finalReview = { ...data, status: "started" }; }
 function finalReviewRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["reviewId", "resultHash", "severity"], "final review record"); if (!p.finalReview || p.finalReview.reviewId !== data.reviewId || !hash(data.resultHash) || !["none", "minor", "important", "critical"].includes(data.severity)) throw new Error("invalid final review record"); p.finalReview = { ...p.finalReview, ...data, status: "recorded" }; }
 function hash(value) { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
+function canonical(value) { return Array.isArray(value) ? value.map(canonical) : isPlainObject(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value; }
+function hashCanonical(value) { return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex"); }
+function recordRuntimeMutation(p, taskIds) { p.mutationSequence++; if (!Number.isSafeInteger(p.mutationSequence)) throw new Error("runtime mutation sequence overflow"); for (const taskId of taskIds) if (p.tasks.has(taskId)) p.taskMutationSequences.set(taskId, p.mutationSequence); }
 
 function goalCreated(p, event, replay) {
   const { objective, scope, nonGoals, dod, tasks, taskDefs } = event.data;
@@ -367,6 +403,7 @@ function taskDispatched(p, data, schemaVersion) {
   }
   task.status = "dispatched";
   task.attempts++;
+  if (generationCapabilities(schemaVersion).conditions) recordRuntimeMutation(p, [taskId]);
   task.contractHash = contractHash;
   if (generationCapabilities(schemaVersion).executorBinding === "strict") {
     task.executorBinding = null;
@@ -495,6 +532,7 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
     task.blockedReason = data.reason || null;
   }
   p.coordinationState = coordinationStateFor(p);
+  if (capabilities.conditions) recordRuntimeMutation(p, [taskId]);
 }
 
 function taskAccepted(p, data, schemaVersion) {
@@ -513,6 +551,7 @@ function taskAccepted(p, data, schemaVersion) {
     task.acceptanceVerification = "legacy_unverified";
   }
   task.status = "accepted";
+  if (generationCapabilities(schemaVersion).conditions) recordRuntimeMutation(p, [taskId]);
 }
 
 function workspaceDispositionStarted(p, data, schemaVersion, replay) {
