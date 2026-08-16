@@ -14,6 +14,19 @@
 
 先生成 durable suspend 与撤销 offer 的事件计划；仅向严格绑定 goal/task/attempt/run/lease 的 Root Broker facade 请求停止并等待 official terminal proof。受影响工作区只输出 preserve/quarantine/discard 策略，暂停期间阻断 dispatch、integrate、finalize，修订只可经 challenge 绑定的一次性用户 capability 协调。
 
+## 协调动作矩阵
+
+| 旧 Task / 变更 | 资源闭合 | 动作 | 附加事实 |
+|---|---|---|---|
+| 旧 projection 中不存在的新 Task | 不适用 | `add` | 无 |
+| 非 accepted Task 明确 `remove` | task/run/workspace/resource 均 terminal 且 quarantine/release | `supersede` | 无 |
+| 定义、依赖、Condition、write policy、budget 或适用性受影响的现有 Task | 同上且影响可证明 | `reverify` | 受影响 Condition 产生复验事实 |
+| 完全不受影响 | 同上 | `keep` | 无 |
+| 任一受影响 Task 的绑定 run/workspace/resource 未 terminal 或未 quarantine/release，或影响关系无法证明 | 不闭合/未知 | `block_until_terminal` | `applyAllowed=false`，只返回 attention/block plan |
+| accepted Task 的未来适用性改变 | 任意 | `keep` | 独立 `task_applicability_reverify_required` 与 Condition 复验事实；绝不回退或 supersede 历史 status |
+
+资源必须按 task/run/workspace/resource 身份绑定；无关 active 资源不阻塞无关 Task。只要任一受影响资源未闭合，整批不得消费 capability 或 append applied；闭合后才原子追加 consumed/applied。
+
 ## 补充根因与边界
 
 foundation 曾生成彼此不同的 suspensionId、在无 active offer 时伪造撤销事实，并把 capability nonce 在签发阶段写入进程内 Set。这使重载后 ownership/消费权威丢失，且 apply 不能与消费原子化。修复将 suspensionId 复用于事件，只有 active offer 才输出撤销事件；签发不消费 nonce，协调结果返回同一批 consumed/applied 事件并依据 projection 的 nonce digest 拒绝重放。Root Broker 的 stop 失败只返回稳定 attention code，不透传上游错误。
