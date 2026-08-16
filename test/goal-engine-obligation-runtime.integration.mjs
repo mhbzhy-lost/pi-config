@@ -395,8 +395,9 @@ test("shared exclusive resource keeps the second requested run lease-free until 
 test("active FAIL atomically records evidence, its unique Finding, and active Repair Episode", async () => {
   const cwd = repo(), api = pi(cwd), batches = []; api.cwd = cwd;
   const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });
+  const condition = activeCondition(); condition.remediation.policy = "autonomous";
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, appendEventBatch(root, events, version) { batches.push(events); return appendEventBatch(root, events, version); } });
-  await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal");
+  await activateProduct(api, cwd, condition); await cycleUntil(api, 1, "terminal");
   const result = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(result.status, "R10A3_REPAIR_REQUIRED");
   const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
   assert.equal(projection.findings.size, 1); assert.equal(projection.repairEpisodes.size, 1);
@@ -404,7 +405,37 @@ test("active FAIL atomically records evidence, its unique Finding, and active Re
   const batch = batches.find(events => events.map(event => event.type).join(",") === "condition.observation_recorded,finding.recorded,repair.episode_opened");
   assert.ok(batch); assert.equal(batch.length, 3); assert.equal(new Set(batch.map(event => event.schemaVersion)).size, 1); assert.equal(batch[0].schemaVersion, "goal-runtime.v1");
   const { run } = await cycleUntil(api, 1, "released");
+  const materialized = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(materialized.status, "R10A3_REPAIR_MATERIALIZED");
+  assert.equal(materialized.machineAction, undefined); assert.equal(materialized.action_token, undefined);
+  const afterMaterialization = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(afterMaterialization.tasks.size, 1);
+  const offer = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(offer.machineAction?.tool, "goal_dispatch");
   for (const type of ["condition.observation_terminal", "condition.observation_recorded", "condition.observation_released"]) assert.equal(runEvents(cwd, run.runId, type).length, 1, type);
+});
+
+test("selected autonomous repair pre-append failure leaves its Episode active with no Task", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] }); const condition = activeCondition(); condition.remediation.policy = "autonomous";
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, appendEventBatch(_root, events) { if (events[0]?.type === "goal.amended") throw Error("before repair write"); return appendEventBatch(...arguments); } });
+  await activateProduct(api, cwd, condition); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released");
+  await assert.rejects(() => invoke(api, "goal_status", {}), /before repair write/);
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(projection.tasks.size, 0); assert.equal([...projection.repairEpisodes.values()][0].status, "active");
+});
+
+test("selected user-approved repair requires approval without creating a Task or action offer", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable });
+  await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal");
+  assert.equal(JSON.parse(await invoke(api, "goal_status", {})).status, "R10A3_REPAIR_REQUIRED");
+  await cycleUntil(api, 1, "released");
+  const result = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(result.status, "R10A3_REPAIR_APPROVAL_REQUIRED");
+  assert.equal(result.machineAction, undefined); assert.equal(result.action_token, undefined);
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").tasks.size, 0);
 });
 
 test("active UNKNOWN and INFRA record without Finding or Repair Episode", async () => {

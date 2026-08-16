@@ -1240,36 +1240,34 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         const inventory = activeObservationInventory(projection);
         if (!inventory) return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R10A3_OBSERVATION_HOST_ATTENTION", attention: ["R10A3_OBSERVATION_HOST_ATTENTION"], progressLedger: projection.progressLedger });
-        // Materialization is Host-owned and deterministic: callers cannot supply
-        // remediation prose, criteria, paths, or provenance.
-        const activeEpisode = [...projection.repairEpisodes.values()].find((episode) => episode.status === "active");
-        // Release an already-recorded Observation before starting repair work;
-        // managed resource cleanup remains a higher-priority safety debt.
-        const hasObservationDebt = [...projection.observationRuns.values()].some((run) => ["terminal", "recorded"].includes(run.phase));
-        if (activeEpisode && !hasObservationDebt) {
-          const condition = projection.conditions.get(activeEpisode.conditionId)?.definition;
-          if (condition?.remediation?.policy === "user-approved") {
+        // R9 is the sole authority for this status call.  In particular, do not
+        // inspect or mutate an Episode until the frontier selected that Episode.
+        const taskActions = new Map([...projection.tasks.keys()].map((taskId) => [taskId, taskActionState(projection, taskId)]));
+        const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions, observationInventory: inventory });
+        const selected = nextObligationAction(frontier);
+        if (selected?.tool === "repair_episode") {
+          const episode = projection.repairEpisodes.get(selected.params.episode_id);
+          const condition = projection.conditions.get(episode?.conditionId)?.definition;
+          if (episode?.status === "active" && condition?.remediation?.policy === "user-approved") {
             return JSON.stringify({ goalId, runtimeState: projection.runtimeState, status: "R10A3_REPAIR_APPROVAL_REQUIRED", attention: ["R10A3_REPAIR_APPROVAL_REQUIRED"], progressLedger: projection.progressLedger });
           }
-          if (condition?.remediation?.policy === "autonomous") {
+          if (episode?.status === "active" && condition?.remediation?.policy === "autonomous") {
             const taskDef = {
               description: `Remediate condition ${condition.id}: ${condition.statement}`,
               deps: [], writePaths: [...condition.remediation.allowed_paths],
               acceptance: { criteria: [{ id: condition.id, statement: `Condition ${condition.id} expected: ${condition.expected}`, evidenceKinds: ["tests"] }] }, workflow: "tdd",
             };
-            const plan = validateRemediationTask({ projection, episodeId: activeEpisode.episodeId, findingIds: [...activeEpisode.findingIds], taskDef });
-            const events = plan.events.map(({ type, data }) => makeGoalEvent(type, data, goalId, projection));
+            const plan = validateRemediationTask({ projection, episodeId: episode.episodeId, findingIds: [...episode.findingIds], taskDef });
+            const events = plan.events.map(({ type, data }) => makeEvent(type, data, goalId, "goal-runtime.v1"));
             try { appendEventBatchFn(root, events, projection.version); }
             catch (cause) {
               const recovered = loadProjectionFn(root, goalId);
-              if (!recovered?.repairEpisodes.get(activeEpisode.episodeId)?.remediationTaskIds?.includes(plan.taskId)) throw cause;
+              if (!recovered?.repairEpisodes.get(episode.episodeId)?.remediationTaskIds?.includes(plan.taskId)) throw cause;
             }
-            projection = loadProjectionFn(root, goalId);
+            const current = loadProjectionFn(root, goalId);
+            return JSON.stringify({ goalId, runtimeState: current.runtimeState, status: "R10A3_REPAIR_MATERIALIZED" });
           }
         }
-        const taskActions = new Map([...projection.tasks.keys()].map((taskId) => [taskId, taskActionState(projection, taskId)]));
-        const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions, observationInventory: inventory });
-        const selected = nextObligationAction(frontier);
         if (selected && ["request_observation", "observation_start", "observation_recover", "record_observation", "release_observation"].includes(selected.tool)) {
           const outcome = await activeObservationStep({ projection, goalId, cwd, root, world, selected });
           const current = loadProjectionFn(root, goalId);
@@ -1279,7 +1277,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (selected && ["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(selected.tool)) {
           const machineAction = { tool: selected.tool, params: { goal_id: goalId, ...selected.params } };
           const offer = issueActionOffer(projection, machineAction, sessionId);
-          appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId, projection), projection.version);
+          appendEventFn(root, makeEvent("goal.action_offered", offer, goalId, "goal-runtime.v1"), projection.version);
           return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, machineAction, action_token: offer.token, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
         }
         return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
@@ -1652,23 +1650,27 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (projection.lifecycle !== "active") throw new Error(`goal is not active: ${projection.lifecycle}`);
 
       if (task.status === "succeeded") {
-        const acceptEvent = makeGoalEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId, projection);
+        const acceptEvent = projection.eventSchemaVersion === "goal-runtime.v1"
+          ? makeEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId, "goal-runtime.v1")
+          : makeGoalEvent("task.accepted", { taskId: params.task_id, workspaceAttempt: task.workspace?.attempt }, goalId, projection);
+        const afterAccept = applyEvent(projection, acceptEvent);
+        const runtimeFinalize = generationCapabilities(projection.eventSchemaVersion).completion === "goal-finalize";
+        const reverifyingEpisodes = runtimeFinalize
+          ? [...afterAccept.repairEpisodes.values()]
+            .filter((episode) => episode.status === "waiting_for_tasks" && episode.remediationTaskIds.includes(params.task_id))
+          : [];
+        const transitions = reverifyingEpisodes
+          .flatMap((episode) => repairEpisodeTransition({ projection: afterAccept, episodeId: episode.episodeId, event: { type: "task.accepted", taskId: params.task_id } }).events)
+          .map(({ type, data }) => makeEvent(type, data, goalId, "goal-runtime.v1"));
         try {
-          const afterAccept = applyEvent(projection, acceptEvent);
-          const runtimeFinalize = generationCapabilities(projection.eventSchemaVersion).completion === "goal-finalize";
-          const transitions = runtimeFinalize
-            ? [...afterAccept.repairEpisodes.values()]
-              .filter((episode) => episode.status === "waiting_for_tasks" && episode.remediationTaskIds.includes(params.task_id))
-              .flatMap((episode) => repairEpisodeTransition({ projection: afterAccept, episodeId: episode.episodeId, event: { type: "task.accepted", taskId: params.task_id } }).events)
-              .map(({ type, data }) => makeGoalEvent(type, data, goalId, projection))
-            : [];
           projection = runtimeFinalize
             ? appendEventBatchFn(root, [acceptEvent, ...transitions], projection.version)
             : goalProgress(afterAccept).accepted === goalProgress(afterAccept).total
               ? appendEventBatchFn(root, [acceptEvent, makeGoalEvent("goal.completed", { verdict: completionVerdictFor(afterAccept) }, goalId, projection)], projection.version)
               : appendEventFn(root, acceptEvent, projection.version);
         } catch (cause) {
-          projection = reloadAfterFailure(cause, (recovered) => recovered.tasks.get(params.task_id)?.status === "accepted");
+          projection = reloadAfterFailure(cause, (recovered) => recovered.tasks.get(params.task_id)?.status === "accepted"
+            && reverifyingEpisodes.every((episode) => recovered.repairEpisodes.get(episode.episodeId)?.status === "reverifying"));
         }
         task = projection.tasks.get(params.task_id);
       } else if (task.status !== "accepted") {
