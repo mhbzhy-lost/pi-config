@@ -28,3 +28,9 @@
 
 - **Pi 自动压缩配对失败**：真实 `SessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore)` 会生成 `intent → type=compaction → user` 的连续 active branch。旧代码只接受 user 是 intent 的直接子项，因而拒绝真实批准，并让遗留 intent 卡住后续配对。现在只在 `getBranch()` 中允许恰好一个、带合法 id、时间戳和连续 parentId 的 Pi compaction；随后必须是时间晚于 challenge 的真实纯文本 user。custom、assistant、system、双 compaction、断链及非法字段均 fail-closed。
 - **无 decision tombstone 伪造终态**：reload 以前把精确 `{id}` 的 consumed/stale/rejected custom 收据写入 runtime 状态，攻击者无需真实 choice 就能让 challenge 终止。现在 terminal custom 仅保留为审计收据，恢复时绝不据其设置业务状态：reject 必须由 active branch 上重新证明的 decision.choice 派生，stale 由当前 projection 与 world drift 重新计算，consumed 由 Goal Projection 的 runtimeApproval/runtimeState 派生。这样合法 reject 仍可恢复，合法 approve 的 durable Goal approval 也不会被伪造 tombstone 阻断。
+
+## R10A3 内部核对
+
+- 仅接受 Host/Pi 生成的 compaction：`fromHook !== true`；扩展 hook 条目一律拒绝。
+- `summary`、`firstKeptEntryId` 必须是非空字符串，`tokensBefore` 必须是安全的非负整数；不要求 `firstKeptEntryId === intent.id`，以兼容保留更早 entry 的真实自动压缩。
+- intent、compaction、user 的 `id`、时间戳和 parent 链都必须合法，且时间满足 `intent <= compaction <= user`（同毫秒允许）。仍只读取 `getBranch()`，且最多一条 compaction。

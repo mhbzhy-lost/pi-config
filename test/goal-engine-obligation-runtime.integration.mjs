@@ -98,7 +98,10 @@ test("runtime approval accepts one Pi compaction between its intent and real use
   await invoke(api, "goal_init", runtimeInit()); const offered = JSON.parse(await invoke(api, "goal_status", {}));
   api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
   const intent = api.entries.find(entry => entry.customType === "goal-engine-runtime-approval-intent"), user = api.entries.at(-1);
-  const compaction = { id: "pi-compaction", parentId: intent.id, timestamp: new Date(Date.now() + 10).toISOString(), type: "compaction", summary: "Pi summary", firstKeptEntryId: intent.id, tokensBefore: 1 };
+  const start = Date.now() + 1000;
+  intent.timestamp = new Date(start).toISOString();
+  user.timestamp = new Date(start + 2).toISOString();
+  const compaction = { id: "pi-compaction", parentId: intent.id, timestamp: new Date(start + 1).toISOString(), type: "compaction", summary: "Pi summary", firstKeptEntryId: "earlier-kept-entry", tokensBefore: 1 };
   user.parentId = compaction.id; api.entries.splice(api.entries.indexOf(user), 0, compaction);
   const status = JSON.parse(await invoke(api, "goal_status", {}));
   assert.equal(status.runtimeState, "calibrating");
@@ -106,17 +109,30 @@ test("runtime approval accepts one Pi compaction between its intent and real use
   assert.equal(offered.proposalId, intent.data.proposalId);
 });
 
-for (const middle of ["custom", "assistant", "system", "two-compactions", "broken-parent", "empty-compaction-id", "invalid-compaction-timestamp", "empty-user-id", "invalid-user-timestamp"]) test(`runtime approval fails closed for ${middle} middle chain`, async () => {
+for (const middle of ["custom", "assistant", "system", "two-compactions", "broken-parent", "empty-compaction-id", "invalid-compaction-timestamp", "empty-user-id", "invalid-user-timestamp", "hook-compaction", "empty-compaction-summary", "non-string-compaction-summary", "empty-first-kept-entry-id", "non-string-first-kept-entry-id", "negative-tokens-before", "unsafe-tokens-before", "non-integer-tokens-before", "compaction-before-intent", "compaction-after-user"]) test(`runtime approval fails closed for ${middle} middle chain`, async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd;
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status", {});
   api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
   const intent = api.entries.find(entry => entry.customType === "goal-engine-runtime-approval-intent"), user = api.entries.at(-1);
-  const compact = { id: "pi-compaction", parentId: intent.id, timestamp: new Date(Date.now() + 10).toISOString(), type: "compaction", summary: "Pi summary", firstKeptEntryId: intent.id, tokensBefore: 1 };
+  const start = Date.now() + 1000;
+  intent.timestamp = new Date(start).toISOString();
+  user.timestamp = new Date(start + 2).toISOString();
+  const compact = { id: "pi-compaction", parentId: intent.id, timestamp: new Date(start + 1).toISOString(), type: "compaction", summary: "Pi summary", firstKeptEntryId: "earlier-kept-entry", tokensBefore: 1 };
   const entry = middle === "custom" ? { ...compact, type: "custom", customType: "untrusted" }
     : middle === "assistant" ? { ...compact, type: "message", message: { role: "assistant", content: "approve" } }
       : middle === "system" ? { ...compact, type: "message", message: { role: "system", content: "approve" } } : compact;
   if (middle === "empty-compaction-id") entry.id = "";
   if (middle === "invalid-compaction-timestamp") entry.timestamp = "not-a-timestamp";
+  if (middle === "hook-compaction") entry.fromHook = true;
+  if (middle === "empty-compaction-summary") entry.summary = "";
+  if (middle === "non-string-compaction-summary") entry.summary = 1;
+  if (middle === "empty-first-kept-entry-id") entry.firstKeptEntryId = "";
+  if (middle === "non-string-first-kept-entry-id") entry.firstKeptEntryId = 1;
+  if (middle === "negative-tokens-before") entry.tokensBefore = -1;
+  if (middle === "unsafe-tokens-before") entry.tokensBefore = Number.MAX_SAFE_INTEGER + 1;
+  if (middle === "non-integer-tokens-before") entry.tokensBefore = 1.5;
+  if (middle === "compaction-before-intent") entry.timestamp = new Date(start - 1).toISOString();
+  if (middle === "compaction-after-user") entry.timestamp = new Date(start + 3).toISOString();
   if (middle === "empty-user-id") user.id = "";
   if (middle === "invalid-user-timestamp") user.timestamp = "not-a-timestamp";
   user.parentId = middle === "broken-parent" ? "unrelated" : entry.id;
