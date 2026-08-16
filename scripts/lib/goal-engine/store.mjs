@@ -3,7 +3,7 @@ import { join, dirname, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { applyEvent, createProjection } from "./events.mjs";
-import { remediationSubjectHash, taskContractHash, validateRemediationMetadata } from "./task-definition.mjs";
+import { remediationSubjectHash, taskContractHash, validateRemediationMetadata, validateTaskDefinitions } from "./task-definition.mjs";
 
 const REGISTRY_SCHEMA_VERSION = "goal-engine.registry.v1";
 const LOCK_TIMEOUT_MS = 1500;
@@ -400,24 +400,53 @@ function writerLockLost() { return Object.assign(new Error("goal engine store wr
 function projectionConflict(expected, current) { return Object.assign(new Error(`projection version conflict: expected ${expected}, current ${current}`), { code: "PROJECTION_CONFLICT" }); }
 function batchDurableFailure(cause) { return Object.assign(new Error(`goal engine event batch may already be durable: ${cause.message}`, { cause }), { code: "GOAL_ENGINE_STORE_BATCH_DURABLE" }); }
 
+function exactObject(value, keys) {
+  return value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+    && Object.getOwnPropertyNames(value).length === keys.length && Object.getOwnPropertySymbols(value).length === 0
+    && keys.every((key) => Object.hasOwn(value, key));
+}
+
 function assertRemediationMaterializationBatch(events) {
   const index = events.findIndex((entry) => entry?.type === "goal.amended" && entry?.data?.hostInternalRemediation === true);
   if (index < 0) return;
   const prefix = index === 1 && events[0]?.type === "goal.action_consumed" ? 1 : 0;
   if (index !== prefix) throw new Error("Host remediation materialization must be one canonical batch");
-  const amendment = events[index], addTasks = amendment.data?.addTasks;
-  if (!addTasks || typeof addTasks !== "object" || Array.isArray(addTasks) || Object.keys(addTasks).length !== 1) throw new Error("Host remediation batch requires exactly one added task");
-  const [taskId] = Object.keys(addTasks), taskDef = addTasks[taskId], metadata = taskDef?.metadata;
-  try { validateRemediationMetadata(metadata); } catch { throw new Error("Host remediation batch has invalid metadata"); }
-  if (metadata.goalId !== amendment.goalId || metadata.taskDefHash !== taskContractHash(taskDef) || metadata.subjectHash !== remediationSubjectHash({ goalId: amendment.goalId, executionRevision: metadata.executionRevision, episodeId: metadata.episodeId, conditionId: metadata.conditionId, findingIds: metadata.findingIds, task: taskDef })) throw new Error("Host remediation batch metadata binding mismatch");
+
+  const amendment = events[index], { data } = amendment;
+  if (!exactObject(data, ["addTasks", "removeTasks", "updateTasks", "reason", "hostInternalRemediation"])
+    || !exactObject(data.addTasks, Object.keys(data.addTasks || {})) || Object.keys(data.addTasks).length !== 1
+    || !Array.isArray(data.removeTasks) || data.removeTasks.length !== 0
+    || !exactObject(data.updateTasks, []) || data.reason !== "Materialize canonical remediation task" || data.hostInternalRemediation !== true) {
+    throw new Error("Host remediation batch has invalid amendment");
+  }
+  const [taskId] = Object.keys(data.addTasks), taskDef = data.addTasks[taskId], metadata = taskDef?.metadata;
+  if (!exactObject(taskDef, ["description", "deps", "writePaths", "acceptance", "workflow", "metadata"])) throw new Error("Host remediation batch has invalid task definition");
+  try {
+    if (!exactObject(metadata, ["kind", "goalId", "executionRevision", "episodeId", "conditionId", "findingIds", "subjectHash", "taskDefHash"])) throw new Error("invalid metadata shape");
+    validateTaskDefinitions([taskId], data.addTasks, { planned: true, hostInternalRemediation: true });
+    validateRemediationMetadata(metadata);
+  } catch { throw new Error("Host remediation batch has invalid metadata"); }
+  if (metadata.goalId !== amendment.goalId || metadata.taskDefHash !== taskContractHash(taskDef)
+    || metadata.subjectHash !== remediationSubjectHash({ goalId: amendment.goalId, executionRevision: metadata.executionRevision, episodeId: metadata.episodeId, conditionId: metadata.conditionId, findingIds: metadata.findingIds, task: taskDef })) {
+    throw new Error("Host remediation batch metadata binding mismatch");
+  }
+
   const linkAt = (offset) => events[index + offset];
-  const linked = (entry, challengeId) => entry?.type === "repair.task_linked" && entry.data?.episodeId === metadata.episodeId && entry.data?.taskId === taskId && entry.data?.challengeId === challengeId;
+  const linked = (entry, challengeId) => entry?.type === "repair.task_linked"
+    && exactObject(entry.data, ["episodeId", "taskId", "challengeId"])
+    && entry.data.episodeId === metadata.episodeId && entry.data.taskId === taskId && entry.data.challengeId === challengeId;
   if (events[index + 1]?.type === "repair.task_linked") {
     if (events.length !== index + 2 || !linked(linkAt(1), null)) throw new Error("invalid autonomous remediation batch");
     return;
   }
+
   const consume = events[index + 1];
-  if (events.length !== index + 3 || consume?.type !== "repair.capability_consumed" || consume.data?.action !== "authorize_task" || consume.data?.episodeId !== metadata.episodeId || consume.data?.subjectHash !== metadata.subjectHash || !consume.data?.challengeId || !linked(linkAt(2), consume.data.challengeId)) throw new Error("invalid user-approved remediation batch");
+  if (events.length !== index + 3 || consume?.type !== "repair.capability_consumed"
+    || !exactObject(consume.data, ["nonceDigest", "consumedAt", "challengeId", "episodeId", "action", "subjectHash", "sessionId", "userEntryId"])
+    || consume.data.action !== "authorize_task" || !consume.data.challengeId || consume.data.episodeId !== metadata.episodeId
+    || consume.data.subjectHash !== metadata.subjectHash || !linked(linkAt(2), consume.data.challengeId)) {
+    throw new Error("invalid user-approved remediation batch");
+  }
 }
 
 function validateEventBatch(events) {
