@@ -668,7 +668,7 @@ export function createGoalEngineExtension(pi, options = {}) {
             try { appendEventBatchFn(root, [recordEvent, ...resolutionEvents], current.version); }
             catch (cause) {
               const recovered = loadProjectionFn(root, goalId);
-              if (recovered?.observationRuns.get(data.runId)?.phase !== "recorded" || recovered.repairEpisodes.get(episode.episodeId)?.status !== "resolved") throw cause;
+              if (recovered?.observationRuns.get(data.runId)?.phase !== "recorded" || recovered.observationRuns.get(data.runId)?.evidenceId !== data.evidenceId || recovered.repairEpisodes.get(episode.episodeId)?.status !== "resolved") throw cause;
             }
             return;
           }
@@ -676,7 +676,8 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
       try { appendEventFn(root, recordEvent, current.version); }
       catch (cause) {
-        if (loadProjectionFn(root, goalId)?.observationRuns.get(data.runId)?.phase !== "recorded") throw cause;
+        const recovered = loadProjectionFn(root, goalId)?.observationRuns.get(data.runId);
+        if (recovered?.phase !== "recorded" || recovered.evidenceId !== data.evidenceId) throw cause;
       }
     },
     prepareManagedValidation(input) { return canonicalManagedReceipt((runtimeHost.prepareManagedValidation || prepareManagedValidation)(input), root); },
