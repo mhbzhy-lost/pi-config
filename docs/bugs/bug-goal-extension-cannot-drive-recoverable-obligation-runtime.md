@@ -13,6 +13,12 @@
 
 运行时审批事件曾仅校验调用方带入的会话字段，未对投影中的 owner session 复核；CurrentWorld 缺失 canonical HEAD 时也可能在组装草稿事件时触发非结构化异常。修复要求 reducer 重算提案哈希并绑定 event-sourced owner，且在任何追加前将缺失 HEAD 统一转换为 `RUNTIME_READINESS_BLOCKER`。意图门禁先在内存闭锁，再尽力写入 custom entry，持久化异常不得恢复业务动作。
 
+## 受管校准收据目录边界
+
+`validation-runtime` 是 detached supervisor 的私有运行目录，只能保存运行期握手和状态，不能作为父级收据账本。此前 Extension 对 Host 返回的 public receipt 错误要求该目录，导致真实 `managed-validation.mjs` 的 `<stateRoot>/managed-validations/<id>.json` 被拒绝，而测试替身也掩盖了此偏差。
+
+Extension 必须在任何 Observation 事件或启动之前，验证 id、绝对 stateRoot/receiptPath/workspacePath 和 canonical Goal root；public receiptPath 必须严格等于 `<stateRoot>/managed-validations/<id>.json`。不安全 id、相对路径、账本外路径或越界 workspace 一律 attention 且不得产生 Observation 业务事件。
+
 ## 审批元数据恢复加固
 
 Pi session custom entry 属于不可信恢复输入。此前恢复逻辑通过对象合并接受 challenge、decision、tombstone 与 intent 的未知字段和跨记录错配，伪造记录可能被重新解释为运行时审批权威。

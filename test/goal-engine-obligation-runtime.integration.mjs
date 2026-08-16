@@ -12,10 +12,10 @@ import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function host(cwd) { return { registries: runtimeRegistries, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; } }; }
-function observationHost(cwd, { code = "PASS", receiptRoot = join(cwd, ".state/goal-engine"), receiptPath = join(receiptRoot, "validation-runtime"), allocation = "normal", artifactMode = 0o600, artifactSymlink = false, holdProcess = false, holdTerminal = false } = {}) {
+function observationHost(cwd, { code = "PASS", receiptRoot = join(cwd, ".state/goal-engine"), receiptPath = join(receiptRoot, "managed-validations"), receiptId = null, workspacePath = null, allocation = "normal", artifactMode = 0o600, artifactSymlink = false, holdProcess = false, holdTerminal = false } = {}) {
   const registry = createObservationAdapterRegistry([{ ref: "oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 50, maxOutputBytes: 100, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } }]);
   const calls = { prepare: 0, start: 0, recover: 0, release: 0, artifact: 0 }; const state = new Map();
-  const receipt = input => { const id = allocation === "mismatch" ? `managed-${calls.prepare}` : `managed-${createHash("sha256").update(`${input.ownerKind}:${input.ownerId}:${input.integratedHead}`).digest("hex").slice(0, 16)}`; const prior = state.get(id) || { phase: "lease_allocated", terminal: null }; return { id, stateRoot: receiptRoot, receiptPath: join(receiptPath, `${id}.json`), workspacePath: null, phase: prior.phase, terminal: prior.terminal, recorded: null, recordCount: 0, cleanupDebt: false }; };
+  const receipt = input => { const id = receiptId ?? (allocation === "mismatch" ? `managed-${calls.prepare}` : `managed-${createHash("sha256").update(`${input.ownerKind}:${input.ownerId}:${input.integratedHead}`).digest("hex").slice(0, 16)}`); const prior = state.get(id) || { phase: "lease_allocated", terminal: null }; return { id, stateRoot: receiptRoot, receiptPath: join(receiptPath, `${id}.json`), workspacePath, phase: prior.phase, terminal: prior.terminal, recorded: null, recordCount: 0, cleanupDebt: false }; };
   const terminal = { status: "passed", code: 0 }; const managed = value => ({ ...value, phase: state.get(value.id)?.phase || value.phase, terminal: state.get(value.id)?.terminal || null });
   return { registries: runtimeRegistries, adapterRegistry: registry, calls, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, environments: [{ ref: "local", fingerprint: "local-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "sample-1", available: true }], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; }, prepareManagedValidation(input) { calls.prepare++; return receipt(input); }, inspectManagedValidation(value) { return managed(value); }, async startManagedValidation(value, { onProcessBound }) { calls.start++; state.set(value.id, { phase: "process_bound", terminal: null }); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); if (holdProcess) throw Error("interrupt after durable process"); state.set(value.id, { phase: "recorded", terminal }); if (holdTerminal) throw Error("interrupt after durable managed terminal"); return managed(value); }, async recoverManagedValidation(value) { calls.recover++; return managed(value); }, releaseManagedValidation(value) { calls.release++; state.set(value.id, { phase: "released", terminal }); return { id: value.id, released: true }; }, artifactRefForRun() { calls.artifact++; const path = join(cwd, ".state", "cycle0-artifact.json"), target = join(cwd, ".state", "cycle0-artifact-target.json"); writeFileSync(artifactSymlink ? target : path, JSON.stringify({ code }), { mode: artifactMode }); chmodSync(artifactSymlink ? target : path, artifactMode); if (artifactSymlink) symlinkSync(target, path); return { id: "cycle0-artifact", path }; } };
 }
@@ -180,6 +180,28 @@ test("Cycle0 rejects rebuilt allocation and receipt-root identity mismatch witho
 
   const outside = repo(), outsideApi = pi(outside); outsideApi.cwd = outside; const invalid = observationHost(outside, { receiptRoot: "/tmp/outside-goal-root" }); createGoalEngineExtension(outsideApi, { goalStateEnv: {}, runtimeHost: invalid }); await approveCalibration(outsideApi, outside); await invoke(outsideApi, "goal_status", {}); const outsideBefore = observationEvents(outside); const outsideStatus = JSON.parse(await invoke(outsideApi, "goal_status", {}));
   assert.equal(outsideStatus.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION"); assert.deepEqual(observationEvents(outside).filter(name => name !== "goal.checkpoint"), outsideBefore.filter(name => name !== "goal.checkpoint")); assert.equal(invalid.calls.start, 0);
+});
+
+test("Cycle0 rejects unsafe managed receipt identities before Observation events", async () => {
+  const cases = [
+    { name: "path traversal id", receiptId: "../escape" },
+    { name: "slash id", receiptId: "managed/receipt" },
+    { name: "whitespace id", receiptId: "managed receipt" },
+    { name: "NUL id", receiptId: "managed\0receipt" },
+    { name: "relative state root", receiptRoot: "relative-root" },
+    { name: "relative receipt path", receiptPath: "relative-receipts" },
+    { name: "outside receipt ledger", receiptPath: "/tmp/outside-managed-validations" },
+    { name: "relative workspace", workspacePath: "relative-workspace" },
+    { name: "outside workspace", workspacePath: "/tmp/outside-workspace" },
+  ];
+  for (const options of cases) {
+    const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, options);
+    createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveCalibration(api, cwd);
+    const before = observationEvents(cwd); const status = JSON.parse(await invoke(api, "goal_status", {}));
+    assert.equal(status.status, "RUNTIME_CALIBRATION_MANAGED_ATTENTION", options.name);
+    assert.deepEqual(observationEvents(cwd).filter(name => name.startsWith("condition.observation")), before.filter(name => name.startsWith("condition.observation")), options.name);
+    assert.equal(durable.calls.start, 0, options.name);
+  }
 });
 
 test("Cycle0 HEAD drift blocks inherited run and artifact safety rejects unsafe files", async () => {

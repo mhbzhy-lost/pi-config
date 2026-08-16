@@ -624,10 +624,10 @@ export function createGoalEngineExtension(pi, options = {}) {
     && typeof runtimeHost.artifactRefForRun === "function";
   const canonicalManagedReceipt = (value, root) => {
     const fields = ["id", "stateRoot", "receiptPath", "workspacePath", "phase", "terminal", "recorded", "recordCount", "cleanupDebt"];
-    if (!exactPlainObject(value, fields) || !nonEmptyString(value.id) || typeof value.stateRoot !== "string" || typeof value.receiptPath !== "string" || !(value.workspacePath === null || typeof value.workspacePath === "string")) throw Error("invalid managed public receipt");
+    if (!exactPlainObject(value, fields) || typeof value.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.id) || !isAbsolute(value.stateRoot) || !isAbsolute(value.receiptPath) || !(value.workspacePath === null || (typeof value.workspacePath === "string" && isAbsolute(value.workspacePath)))) throw Error("invalid managed public receipt");
     const stateRoot = resolve(value.stateRoot), expectedRoot = resolve(root);
-    const badWorkspace = value.workspacePath !== null && (!isAbsolute(value.workspacePath) || !resolve(value.workspacePath).startsWith(`${expectedRoot}/`));
-    if (stateRoot !== expectedRoot || resolve(value.receiptPath) !== resolve(expectedRoot, "validation-runtime", `${value.id}.json`) || badWorkspace) throw Error("managed receipt identity conflict");
+    const badWorkspace = value.workspacePath !== null && !resolve(value.workspacePath).startsWith(`${expectedRoot}/`);
+    if (stateRoot !== expectedRoot || value.receiptPath !== join(stateRoot, "managed-validations", `${value.id}.json`) || badWorkspace) throw Error("managed receipt identity conflict");
     return value;
   };
   const observationServices = (goalId, cwd, root, world) => ({
@@ -684,7 +684,13 @@ export function createGoalEngineExtension(pi, options = {}) {
     }
     try {
       if (!selected.run) {
+        // Validate the Host-issued receipt before its request event becomes
+        // observation authority. validation-runtime is supervisor-private;
+        // public receipts are exclusively in managed-validations.
         const requested = requestObservation({ projection, conditionId: selected.conditionId, cycle: 0, worldSnapshot: world, services });
+        const condition = projection.conditions.get(selected.conditionId);
+        const adapter = hostObservationAdapter(runtimeHost.adapterRegistry, condition.definition.oracle_ref);
+        services.prepareManagedValidation({ ownerKind: "goal-observation", ownerId: requested.runReceipt.runId, originRoot: cwd, stateRoot: root, integratedHead: head, plan: adapter.validationPlan, resourceClaims: adapter.resourceClaims });
         await services.persistEvent(requested.event);
         return { step: "request" };
       }
