@@ -3,7 +3,7 @@ import test from "node:test";
 import { compileCodingDispatchIR, renderDispatchPrompt, splitDispatchEnvelope } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
 import { compileTaskContract, assertPendingTaskContractsCompile } from "../scripts/lib/goal-engine/dispatch.mjs";
 import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
-import { validateRepoRelativePath, validateTaskDefinitions } from "../scripts/lib/goal-engine/task-definition.mjs";
+import { validateRepoRelativePath, validateTaskDefinitions, taskContractHash, remediationSubjectHash } from "../scripts/lib/goal-engine/task-definition.mjs";
 
 function makeEvent(type, data, goalId = "dispatch-test") {
   return { schemaVersion: "goal-engine.event.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
@@ -336,8 +336,8 @@ test("planned task definitions require exact structured criteria", () => {
 
 test("remediation metadata remains internal and is stripped from criteria-only transport", () => {
   const projection = buildProjection(); projection.executionRevision = 1;
-  projection.tasks.get("t1").metadata = { kind: "remediation", goalId: projection.goalId, executionRevision: projection.executionRevision, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], subjectHash: "a".repeat(64), taskDefHash: "b".repeat(64) };
-  projection.repairEpisodes = new Map([["episode-1", { conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: ["t1"] }]]);
+  const task = projection.tasks.get("t1"); task.metadata = { kind: "remediation", goalId: projection.goalId, executionRevision: projection.executionRevision, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], subjectHash: remediationSubjectHash({ goalId: projection.goalId, executionRevision: projection.executionRevision, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], task }), taskDefHash: taskContractHash(task) };
+  projection.repairEpisodes = new Map([["episode-1", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: ["t1"] }]]);
   projection.conditions = new Map([["condition-1", { definition: { remediation: { policy: "autonomous" } } }]]);
   const contract = compileTaskContract(projection, "t1", "/workspace/project");
   assert.equal(JSON.stringify(contract).includes("remediation"), false);

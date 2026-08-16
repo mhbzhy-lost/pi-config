@@ -1,5 +1,5 @@
 import { compileCodingDispatchIR } from "./dispatch-ir.mjs";
-import { validateRemediationMetadata } from "./task-definition.mjs";
+import { validateRemediationMetadata, taskContractHash, remediationSubjectHash } from "./task-definition.mjs";
 import { MAX_CONTRACT_ARRAY_ITEMS, MAX_CONTRACT_STRING_BYTES } from "./contract-limits.mjs";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -87,7 +87,9 @@ function assertRemediationTaskBinding(projection, taskId, task) {
   if (!episode || !episode.remediationTaskIds?.includes(taskId)
     || episode.findingIds.length !== task.metadata.findingIds.length
     || task.metadata.findingIds.some((id) => !episode.findingIds.includes(id))
-    || !projection.conditions?.get(episode.conditionId)?.definition?.remediation) throw new Error("unbound remediation task contract");
+    || !projection.conditions?.get(episode.conditionId)?.definition?.remediation
+    || task.metadata.taskDefHash !== taskContractHash(task)
+    || task.metadata.subjectHash !== remediationSubjectHash({ goalId: projection.goalId, executionRevision: projection.executionRevision, episodeId: episode.episodeId, conditionId: episode.conditionId, findingIds: episode.findingIds, task })) throw new Error("unbound remediation task contract");
 }
 
 function boundedOptional(items, limit = MAX_CONTRACT_ARRAY_ITEMS) {

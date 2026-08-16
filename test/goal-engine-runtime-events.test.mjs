@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
 import { evaluateConditionGraph } from "../scripts/lib/goal-engine/condition-validity.mjs";
+import { taskContractHash, remediationSubjectHash } from "../scripts/lib/goal-engine/task-definition.mjs";
 
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
 function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); return applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), readiness: "draft" }, 1)); }
@@ -37,7 +38,7 @@ test("runtime FSM accepts only exact ordered observation, finding, repair, amend
   let p = observed(draft(), { kind: "failed", failureCode: "assertion", findingFingerprint: "f".repeat(64) }); p.conditions.get("condition-1").definition.remediation.policy = "autonomous";
   p = applyEvent(p, event("finding.recorded", { findingId: "finding-1", conditionId: "condition-1", runId: "run-1", evidenceId: "8".repeat(64), fingerprint: "f".repeat(64) }, 7));
   p = applyEvent(p, event("repair.episode_opened", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"] }, 8));
-  p.tasks.get("task-1").status = "accepted"; p.tasks.get("task-1").metadata = { kind: "remediation", goalId: p.goalId, executionRevision: p.executionRevision, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], subjectHash: "a".repeat(64), taskDefHash: "b".repeat(64) };
+  p.tasks.get("task-1").status = "accepted"; const repairTask = p.tasks.get("task-1"); repairTask.metadata = { kind: "remediation", goalId: p.goalId, executionRevision: p.executionRevision, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], subjectHash: remediationSubjectHash({ goalId: p.goalId, executionRevision: p.executionRevision, episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], task: repairTask }), taskDefHash: taskContractHash(repairTask) };
   p = applyEvent(p, event("repair.task_linked", { episodeId: "episode-1", taskId: "task-1", challengeId: null }, 9));
   p = applyEvent(p, event("repair.reverification_requested", { episodeId: "episode-1", conditionId: "condition-1", findingIds: ["finding-1"], remediationTaskIds: ["task-1"], oldStatus: "waiting_for_tasks", newStatus: "reverifying", reason: "accepted repair" }, 10));
   assert.equal(p.repairEpisodes.get("episode-1").status, "reverifying");

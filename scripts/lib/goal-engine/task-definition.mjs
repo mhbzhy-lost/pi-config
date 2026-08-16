@@ -1,6 +1,7 @@
 import { validateDAG } from "./graph.mjs";
 import { normalizeRepoRelativePosixPath } from "./repo-path.mjs";
 import { MAX_CONTRACT_ARRAY_ITEMS, assertContractArray, assertContractString } from "./contract-limits.mjs";
+import { createHash } from "node:crypto";
 
 const ID = /^[A-Za-z0-9._-]{1,160}$/;
 const WORKFLOWS = new Set(["tdd", "existing-tests", "docs-only"]);
@@ -13,6 +14,18 @@ function nonEmpty(value, label) {
 
 export function validateRepoRelativePath(value, label = "writePath") {
   return normalizeRepoRelativePosixPath(nonEmpty(value, label), label);
+}
+
+// The immutable task contract is the sole provenance input at every repair boundary.
+const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
+export function canonicalTaskContract(task) {
+  if (!task || typeof task !== "object" || Array.isArray(task)) throw new Error("task contract required");
+  const { description, deps, writePaths, acceptance, workflow } = task;
+  return canonical({ description, deps, writePaths, acceptance, workflow });
+}
+export function taskContractHash(task) { return createHash("sha256").update(JSON.stringify(canonicalTaskContract(task))).digest("hex"); }
+export function remediationSubjectHash({ goalId, executionRevision, episodeId, conditionId, findingIds, task }) {
+  return createHash("sha256").update(JSON.stringify(canonical({ goalId, executionRevision, episodeId, conditionId, findingIds: [...findingIds].sort(), taskDef: canonicalTaskContract(task) }))).digest("hex");
 }
 
 // Repair metadata is persisted with the internal task definition, never transported.
