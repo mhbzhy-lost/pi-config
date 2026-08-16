@@ -605,17 +605,63 @@ export function createGoalEngineExtension(pi, options = {}) {
     if (typeof pi.appendEntry !== "function") throw new Error(`Cannot persist ${type}: pi.appendEntry is unavailable`);
     pi.appendEntry(type, data);
   };
+  // Pi custom entries are untrusted recovery input. Runtime authority is only
+  // reconstructed from the exact shapes emitted below, never by object merge.
+  const exactPlainObject = (value, fields) => value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype && Object.getOwnPropertySymbols(value).length === 0
+    && Object.getOwnPropertyNames(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
+  const nonEmptyString = (value) => typeof value === "string" && value.trim() === value && value.length > 0;
+  const validTimestamp = (value) => nonEmptyString(value) && !Number.isNaN(Date.parse(value));
+  const runtimeProposalHash = ({ goalId, proposalId, executionContractHash, baseHead, sessionId }) => createHash("sha256")
+    .update(JSON.stringify({ baseHead, executionContractHash, goalId, proposalId, sessionId })).digest("hex");
+  const isRuntimeChallenge = (data) => {
+    const fields = ["id", "kind", "choices", "requestedAt", "goalId", "contractHash", "baseHead", "sessionId", "proposalId", "executionContractHash", "proposalHash"];
+    return exactPlainObject(data, fields) && data.kind === "runtime_activation_approval"
+      && Array.isArray(data.choices) && data.choices.length === 2 && data.choices[0] === "approve" && data.choices[1] === "reject"
+      && [data.id, data.goalId, data.sessionId, data.proposalId].every(nonEmptyString)
+      && validTimestamp(data.requestedAt) && /^[a-f0-9]{64}$/.test(data.contractHash)
+      && /^[a-f0-9]{64}$/.test(data.executionContractHash) && /^[a-f0-9]{64}$/.test(data.proposalHash)
+      && /^[a-f0-9]{40}$/.test(data.baseHead) && data.executionContractHash === data.contractHash
+      && data.proposalHash === runtimeProposalHash(data);
+  };
+  const isRuntimeDecision = (data, challenge) => {
+    const fields = ["id", "challengeId", "kind", "choice", "goalId", "contractHash", "baseHead", "proposalId", "userEntryId", "sessionId", "source", "proposalHash", "receiptId"];
+    return exactPlainObject(data, fields) && data.id === challenge.id && data.challengeId === challenge.id
+      && data.kind === "runtime_activation_approval" && ["approve", "reject"].includes(data.choice)
+      && [data.userEntryId, data.receiptId].every(nonEmptyString) && ["interactive", "rpc"].includes(data.source)
+      && data.goalId === challenge.goalId && data.contractHash === challenge.contractHash && data.baseHead === challenge.baseHead
+      && data.sessionId === challenge.sessionId && data.proposalId === challenge.proposalId && data.proposalHash === challenge.proposalHash;
+  };
+  const isRuntimeIntent = (data) => exactPlainObject(data, ["goalId", "sessionId", "userEntryId", "source", "occurredAt"])
+    && [data.goalId, data.sessionId, data.userEntryId].every(nonEmptyString)
+    && ["interactive", "rpc"].includes(data.source) && validTimestamp(data.occurredAt);
   const restoreMetadata = (ctx) => {
     metadataChallenges.clear(); orphanChallenges.clear(); transferChallenges.clear(); runtimeChallenges.clear(); runtimeIntentGates.clear();
     for (const entry of ctx.sessionManager?.getEntries?.() || []) {
       if (entry.type !== "custom") continue;
       const data = entry.data;
-      if (entry.customType === "goal-engine-runtime-intent-pending" && data?.goalId && data?.sessionId && data?.userEntryId) {
-        runtimeIntentGates.set(`${data.goalId}:${data.sessionId}`, data);
+      if (entry.customType === "goal-engine-runtime-intent-pending" && isRuntimeIntent(data)) {
+        runtimeIntentGates.set(`${data.goalId}:${data.sessionId}`, { goalId: data.goalId, sessionId: data.sessionId, userEntryId: data.userEntryId, source: data.source, occurredAt: data.occurredAt });
       }
-      if (entry.customType?.startsWith("goal-engine-runtime-approval-") && data?.id) {
-        const current = runtimeChallenges.get(data.id) || {};
-        runtimeChallenges.set(data.id, { ...current, ...(entry.customType.endsWith("challenge") ? { challenge: data } : {}), ...(entry.customType.endsWith("decision") ? { decision: { ...data, id: data.receiptId, challengeId: data.id } } : {}), ...(entry.customType.endsWith("consumed") ? { consumed: true } : {}), ...(entry.customType.endsWith("stale") ? { stale: true } : {}), ...(entry.customType.endsWith("rejected") ? { rejected: true } : {}) });
+      if (entry.customType?.startsWith("goal-engine-runtime-approval-")) {
+        const id = data?.id;
+        const current = typeof id === "string" ? runtimeChallenges.get(id) : null;
+        if (entry.customType === "goal-engine-runtime-approval-challenge") {
+          if (!isRuntimeChallenge(data)) {
+            if (current) runtimeChallenges.set(id, { ...current, invalid: true });
+          } else if (!current) runtimeChallenges.set(id, { challenge: data });
+          else if (!current.invalid && !isDeepStrictEqual(current.challenge, data)) runtimeChallenges.set(id, { ...current, invalid: true });
+        } else if (entry.customType === "goal-engine-runtime-approval-decision") {
+          if (!current?.challenge || current.invalid || !isRuntimeDecision(data, current.challenge) || current.decision) {
+            if (current) runtimeChallenges.set(id, { ...current, invalid: true });
+          } else runtimeChallenges.set(id, { ...current, decision: data });
+        } else if (["goal-engine-runtime-approval-consumed", "goal-engine-runtime-approval-stale", "goal-engine-runtime-approval-rejected"].includes(entry.customType)) {
+          const terminal = entry.customType.slice("goal-engine-runtime-approval-".length);
+          if (!current?.challenge || current.invalid || !exactPlainObject(data, ["id"]) || current.consumed || current.stale || current.rejected) {
+            if (current) runtimeChallenges.set(id, { ...current, invalid: true });
+          } else runtimeChallenges.set(id, { ...current, [terminal]: true });
+        }
       }
       if (entry.customType?.startsWith("goal-engine-metadata-")) {
         if (!data?.id) continue;
@@ -970,9 +1016,9 @@ export function createGoalEngineExtension(pi, options = {}) {
         const previous = projection.progressLedger?.at(-1);
         projection = appendEventFn(root, makeEvent("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: !previous || previous.canonicalFingerprint !== fingerprint, sequence: (projection.progressLedger?.length || 0) + 1 }, goalId, "goal-runtime.v1"), projection.version);
         if (projection.runtimeState === "awaiting_user_approval") {
-          const terminal = [...runtimeChallenges.values()].filter((item) => item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && (item.stale || item.rejected)).at(-1);
+          const terminal = [...runtimeChallenges.values()].filter((item) => !item.invalid && item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && (item.stale || item.rejected)).at(-1);
           if (terminal) return JSON.stringify({ goalId, status: terminal.rejected ? "RUNTIME_APPROVAL_REJECTED" : "RUNTIME_APPROVAL_STALE", attention: [terminal.rejected ? "RUNTIME_APPROVAL_REJECTED" : "RUNTIME_APPROVAL_STALE"] });
-          let record = [...runtimeChallenges.values()].filter((item) => item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && !item.consumed && !item.stale && !item.rejected).at(-1);
+          let record = [...runtimeChallenges.values()].filter((item) => !item.invalid && item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && !item.consumed && !item.stale && !item.rejected).at(-1);
           if (!record) { const baseChallenge = createRuntimeActivationChallenge({ goalId, contractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, proposalId: crypto.randomUUID() }); const challenge = { ...baseChallenge, executionContractHash: projection.executionContractHash, proposalHash: stableHash({ goalId, proposalId: baseChallenge.proposalId, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId }) }; persistMetadata("goal-engine-runtime-approval-challenge", challenge); record = { challenge }; runtimeChallenges.set(challenge.id, record); }
           if (record.decision?.choice === "reject") {
             persistMetadata("goal-engine-runtime-approval-rejected", { id: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, rejected: true });
@@ -2122,7 +2168,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     } catch { /* only the challenge target's exact real-user input is durable */ }
 
     try {
-      const record = [...runtimeChallenges.values()].filter((candidate) => !candidate.decision && !candidate.consumed && candidate.challenge?.sessionId === hookSessionId).at(-1);
+      const record = [...runtimeChallenges.values()].filter((candidate) => !candidate.invalid && !candidate.decision && !candidate.consumed && candidate.challenge?.sessionId === hookSessionId).at(-1);
       if (record) {
         const occurredAt = new Date(Math.max(Date.now(), Date.parse(record.challenge.requestedAt) + 1)).toISOString();
         const choice = recordHumanChoice({ inputEvent: { role: "user", source: event.source, sessionId: hookSessionId, occurredAt, text: event.text, id: event.entryId || crypto.randomUUID() }, challenge: record.challenge, sessionId: hookSessionId });

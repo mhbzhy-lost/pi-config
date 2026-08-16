@@ -88,6 +88,22 @@ test("restored runtime approval metadata is strict authority, not a permissive o
   assert.notEqual(status.proposalId, malformed.find((entry) => entry.customType === "goal-engine-runtime-approval-challenge").data.proposalId); assert.equal(runtimeEntries(restored, "challenge").length, 2);
 });
 
+test("malformed runtime decision, tombstone, and intent metadata cannot restore authority", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(first, "goal_init", runtimeInit());
+  const offered = JSON.parse(await invoke(first, "goal_status", {})); first.handlers.get("input")({ source: "interactive", text: "approve", entryId: "decision-entry" }, { sessionManager: first.sessionManager });
+  const malformedDecision = structuredClone(first.entries); malformedDecision.find((entry) => entry.customType === "goal-engine-runtime-approval-decision").data.extra = "forged";
+  const decisionReload = pi(cwd, malformedDecision); decisionReload.cwd = cwd; createGoalEngineExtension(decisionReload, { goalStateEnv: {}, runtimeHost: host(cwd) }); decisionReload.handlers.get("session_start")({}, { sessionManager: decisionReload.sessionManager });
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval"); assert.notEqual(JSON.parse(await invoke(decisionReload, "goal_status", {})).proposalId, offered.proposalId);
+
+  const malformedTombstone = structuredClone(first.entries.filter((entry) => entry.customType !== "goal-engine-runtime-approval-decision")); malformedTombstone.push({ type: "custom", customType: "goal-engine-runtime-approval-consumed", data: { id: first.entries.find((entry) => entry.customType === "goal-engine-runtime-approval-challenge").data.id, extra: "forged" } });
+  const tombstoneReload = pi(cwd, malformedTombstone); tombstoneReload.cwd = cwd; createGoalEngineExtension(tombstoneReload, { goalStateEnv: {}, runtimeHost: host(cwd) }); tombstoneReload.handlers.get("session_start")({}, { sessionManager: tombstoneReload.sessionManager });
+  assert.notEqual(JSON.parse(await invoke(tombstoneReload, "goal_status", {})).proposalId, offered.proposalId);
+
+  const malformedIntent = structuredClone(first.entries.filter((entry) => entry.customType !== "goal-engine-runtime-approval-decision")); malformedIntent.push({ type: "custom", customType: "goal-engine-runtime-intent-pending", data: { goalId: "harden-runtime", sessionId: "owner", userEntryId: "intent-entry", source: "interactive", occurredAt: new Date().toISOString(), extra: "forged" } });
+  const intentReload = pi(cwd, malformedIntent); intentReload.cwd = cwd; createGoalEngineExtension(intentReload, { goalStateEnv: {}, runtimeHost: host(cwd) }); intentReload.handlers.get("session_start")({}, { sessionManager: intentReload.sessionManager });
+  assert.notEqual(JSON.parse(await invoke(intentReload, "goal_status", {})).status, "R10B_SUSPENSION_REQUIRED");
+});
+
 test("runtime status checkpoints are exact, monotonic, and fingerprint-stable without semantic progress", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) }); const initialized = JSON.parse(await invoke(api, "goal_init", runtimeInit())); await invoke(api, "goal_status", {}); await invoke(api, "goal_status", {});
   const ledger = loadProjection(join(cwd, ".state/goal-engine"), initialized.goalId).progressLedger; assert.deepEqual(ledger.map(({ sequence, advanced }) => ({ sequence, advanced })), [{ sequence: 1, advanced: true }, { sequence: 2, advanced: false }]); assert.equal(ledger[0].canonicalFingerprint, ledger[1].canonicalFingerprint);
