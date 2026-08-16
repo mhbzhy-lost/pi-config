@@ -12,12 +12,16 @@ import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function host(cwd) { return { registries: runtimeRegistries, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; } }; }
-function observationHost(cwd, { code = "PASS", codes = null, environments = null, holdAfterStart = 0, receiptRoot = join(cwd, ".state/goal-engine"), receiptPath = join(receiptRoot, "managed-validations"), receiptId = null, workspacePath = null, allocation = "normal", prepareError = null, artifactMode = 0o600, artifactSymlink = false, holdBeforeProcess = false, holdProcess = false, holdTerminal = false } = {}) {
-  const registry = createObservationAdapterRegistry([{ ref: "oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 50, maxOutputBytes: 100, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } }]);
-  const calls = { prepare: 0, start: 0, recover: 0, release: 0, artifact: 0 }; const state = new Map();
-  const receipt = input => { const id = receiptId ?? (allocation === "mismatch" ? `managed-${calls.prepare}` : `managed-${createHash("sha256").update(`${input.ownerKind}:${input.ownerId}:${input.integratedHead}`).digest("hex").slice(0, 16)}`); const prior = state.get(id) || { phase: "lease_allocated", terminal: null }; return { id, stateRoot: receiptRoot, receiptPath: join(receiptPath, `${id}.json`), workspacePath, phase: prior.phase, terminal: prior.terminal, recorded: null, recordCount: 0, cleanupDebt: false }; };
-  const terminal = { status: "passed", code: 0 }; const forArtifact = values => Array.isArray(values) ? values[Math.min(Math.max(0, calls.artifact - 1), values.length - 1)] : values; const shouldHold = () => calls.start > holdAfterStart; const managed = value => ({ ...value, phase: state.get(value.id)?.phase || value.phase, terminal: state.get(value.id)?.terminal || null });
-  return { registries: runtimeRegistries, adapterRegistry: registry, calls, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, environments: [{ ref: "local", fingerprint: forArtifact(environments) || "local-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "sample-1", available: true }], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; }, prepareManagedValidation(input) { calls.prepare++; if (prepareError) throw Error(prepareError); return receipt(input); }, inspectManagedValidation(value) { return managed(value); }, async startManagedValidation(value, { onProcessBound }) { calls.start++; if (holdBeforeProcess && shouldHold(value) && calls.start > 1) throw Error("interrupt before durable process"); state.set(value.id, { phase: "process_bound", terminal: null }); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); if (holdProcess && shouldHold(value)) throw Error("interrupt after durable process"); state.set(value.id, { phase: "recorded", terminal }); if (holdTerminal && shouldHold(value)) throw Error("interrupt after durable managed terminal"); return managed(value); }, async recoverManagedValidation(value, { onProcessBound }) { calls.recover++; if ((state.get(value.id)?.phase || "lease_allocated") === "process_bound") { state.set(value.id, { phase: "recorded", terminal }); return managed(value); } if ((state.get(value.id)?.phase || "lease_allocated") !== "lease_allocated") return managed(value); state.set(value.id, { phase: "process_bound", terminal: null }); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); state.set(value.id, { phase: "recorded", terminal }); return managed(value); }, releaseManagedValidation(value) { calls.release++; state.set(value.id, { phase: "released", terminal }); return { id: value.id, released: true }; }, artifactRefForRun() { calls.artifact++; const path = join(cwd, ".state", "cycle0-artifact.json"), target = join(cwd, ".state", "cycle0-artifact-target.json"); writeFileSync(artifactSymlink ? target : path, JSON.stringify({ code: forArtifact(codes) || code }), { mode: artifactMode }); chmodSync(artifactSymlink ? target : path, artifactMode); if (artifactSymlink) symlinkSync(target, path); return { id: "cycle0-artifact", path }; } };
+function observationHost(cwd, { code = "PASS", codes = null, environments = null, holdAfterStart = 0, receiptRoot = join(cwd, ".state/goal-engine"), receiptPath = join(receiptRoot, "managed-validations"), receiptId = null, workspacePath = null, allocation = "normal", prepareError = null, artifactMode = 0o600, artifactSymlink = false, holdBeforeProcess = false, holdProcess = false, holdTerminal = false, adapters = [{ ref: "oracle", resourceClaims: [] }] } = {}) {
+  const adapterRows = adapters.map(({ ref, resourceClaims = [] }) => ({ ref, version: "1", deterministic: true, reset: "clean", resourceClaims, artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 50, maxOutputBytes: 100, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } }));
+  const registry = createObservationAdapterRegistry(adapterRows), claims = new Map(adapterRows.map(adapter => [adapter.ref, adapter.resourceClaims]));
+  const calls = { prepare: 0, start: 0, recover: 0, release: 0, artifact: 0, startsByRun: new Map() }, state = new Map();
+  const receipt = input => { const id = receiptId ?? (allocation === "mismatch" ? `managed-${calls.prepare}` : `managed-${createHash("sha256").update(`${input.ownerKind}:${input.ownerId}:${input.integratedHead}`).digest("hex").slice(0, 16)}`); const prior = state.get(id) || { phase: "lease_allocated", terminal: null, ownerRunId: input.ownerId, resourceClaims: input.resourceClaims }; if (!state.has(id)) state.set(id, prior); return { id, stateRoot: receiptRoot, receiptPath: join(receiptPath, `${id}.json`), workspacePath, phase: prior.phase, terminal: prior.terminal, recorded: null, recordCount: 0, cleanupDebt: false }; };
+  const terminal = { status: "passed", code: 0 }, forArtifact = values => Array.isArray(values) ? values[Math.min(Math.max(0, calls.artifact - 1), values.length - 1)] : values, shouldHold = () => calls.start > holdAfterStart;
+  const managed = value => ({ ...value, phase: state.get(value.id)?.phase || value.phase, terminal: state.get(value.id)?.terminal || null });
+  const setPhase = (value, phase, terminalValue = null) => { const prior = state.get(value.id); state.set(value.id, { ...prior, phase, terminal: terminalValue }); };
+  const resources = () => [...new Map([...claims.values()].flat().map(claim => [claim.key, claim])).values()].map(claim => ({ key: claim.key, capacity: claim.capacity, holders: [...state.values()].filter(value => value.phase !== "released" && value.resourceClaims.some(other => other.key === claim.key)).map(value => value.ownerRunId).sort() }));
+  return { registries: { ...runtimeRegistries, adapters: Object.fromEntries(adapterRows.map(adapter => [adapter.ref, { deterministic: true }])) }, adapterRegistry: registry, calls, captureCurrentWorld() { return { safe: true, repo: { head: git(cwd, "rev-parse", "HEAD") }, environments: [{ ref: "local", fingerprint: forArtifact(environments) || "local-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "sample-1", available: true }], resources: resources(), activeRuns: [...state.values()].filter(value => value.phase === "process_bound").map(value => ({ runId: value.ownerRunId, kind: "observation", state: "running" })), capturedAt: new Date().toISOString() }; }, prepareManagedValidation(input) { calls.prepare++; if (prepareError) throw Error(prepareError); const conflict = [...state.values()].some(value => value.ownerRunId !== input.ownerId && value.phase !== "released" && value.resourceClaims.some(left => input.resourceClaims.some(right => left.key === right.key && (left.mode === "exclusive" || right.mode === "exclusive" || left.reset !== right.reset || left.capacity <= 1 || right.capacity <= 1)))); if (conflict) throw Error("Validation resource conflict"); return receipt(input); }, inspectManagedValidation(value) { return managed(value); }, async startManagedValidation(value, { onProcessBound }) { calls.start++; const ownerRunId = state.get(value.id).ownerRunId; calls.startsByRun.set(ownerRunId, (calls.startsByRun.get(ownerRunId) || 0) + 1); if (holdBeforeProcess && shouldHold() && calls.start > 1) throw Error("interrupt before durable process"); setPhase(value, "process_bound"); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); if (holdProcess && shouldHold()) throw Error("interrupt after durable process"); setPhase(value, "recorded", terminal); if (holdTerminal && shouldHold()) throw Error("interrupt after durable managed terminal"); return managed(value); }, async recoverManagedValidation(value, { onProcessBound }) { calls.recover++; if ((state.get(value.id)?.phase || "lease_allocated") === "process_bound") { setPhase(value, "recorded", terminal); return managed(value); } if ((state.get(value.id)?.phase || "lease_allocated") !== "lease_allocated") return managed(value); setPhase(value, "process_bound"); await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); setPhase(value, "recorded", terminal); return managed(value); }, releaseManagedValidation(value) { calls.release++; setPhase(value, "released", terminal); return { id: value.id, released: true }; }, completeManagedValidation(runId) { const entry = [...state.entries()].find(([, value]) => value.ownerRunId === runId); if (!entry || entry[1].phase !== "process_bound") throw Error("managed run is not process bound"); state.set(entry[0], { ...entry[1], phase: "recorded", terminal }); }, artifactRefForRun() { calls.artifact++; const path = join(cwd, ".state", "cycle0-artifact.json"), target = join(cwd, ".state", "cycle0-artifact-target.json"); writeFileSync(artifactSymlink ? target : path, JSON.stringify({ code: forArtifact(codes) || code }), { mode: artifactMode }); chmodSync(artifactSymlink ? target : path, artifactMode); if (artifactSymlink) symlinkSync(target, path); return { id: "cycle0-artifact", path }; } };
 }
 function observationEventRows(cwd) { return readFileSync(join(cwd, ".state/goal-engine/goals/harden-runtime/events.jsonl"), "utf8").trim().split("\n").map(JSON.parse); }
 function observationEvents(cwd) { return observationEventRows(cwd).map(event => event.type); }
@@ -305,6 +309,17 @@ async function activateProduct(api, cwd, condition) {
   await approveCalibration(api, cwd, runtimeInit({ execution: { ...runtimeInit().execution, tasks: [], conditions: [condition] } }));
   await statusUntil(api, "released"); await invoke(api, "goal_status", {});
 }
+function activeConditions(resourceB) {
+  const a = activeCondition(), b = activeCondition();
+  a.id = "condition-a"; a.oracle_ref = "oracle-a";
+  b.id = "condition-b"; b.oracle_ref = "oracle-b";
+  return { conditions: [a, b], adapters: [{ ref: "oracle-a", resourceClaims: [{ key: "resource-a", mode: "exclusive", capacity: 1, reset: "clean" }] }, { ref: "oracle-b", resourceClaims: [{ key: resourceB, mode: "exclusive", capacity: 1, reset: "clean" }] }] };
+}
+async function activateConditions(api, cwd, conditions) {
+  await approveCalibration(api, cwd, runtimeInit({ execution: { ...runtimeInit().execution, tasks: [], conditions } }));
+  for (let i = 0; i < 12; i++) { if (loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState === "active") return; await invoke(api, "goal_status", {}); }
+  throw Error("two-condition runtime did not activate");
+}
 async function cycleUntil(api, cycle, phase, limit = 10) {
   for (let i = 0; i < limit; i++) {
     await invoke(api, "goal_status", {});
@@ -313,6 +328,10 @@ async function cycleUntil(api, cycle, phase, limit = 10) {
     if (run?.phase === phase) return { projection, run };
   }
   throw Error(`cycle ${cycle} phase not reached: ${phase}`);
+}
+async function firstProductProcessBound(api, limit = 10) {
+  for (let i = 0; i < limit; i++) { await invoke(api, "goal_status", {}); const projection = loadProjection(join(api.cwd, ".state/goal-engine"), "harden-runtime"); const run = [...projection.observationRuns.values()].find(value => value.cycle === 1 && value.phase === "process_bound"); if (run) return { projection, run }; }
+  throw Error("product process_bound not reached");
 }
 function runEvents(cwd, runId, type) { return observationEventRows(cwd).filter(event => event.type === type && event.data.runId === runId); }
 
@@ -329,11 +348,48 @@ test("active reload matrix preserves each product run through requested, process
     const prior = [...before.observationRuns.values()].find(run => run.cycle === 1), starts = durable.calls.start;
     const reloaded = pi(cwd, first.entries); reloaded.cwd = cwd;
     createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: durable }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+    if (phase === "process_bound") durable.completeManagedValidation(prior.runId);
     await cycleUntil(reloaded, 1, "released");
     const restored = [...loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").observationRuns.values()].find(run => run.cycle === 1);
-    assert.equal(restored.runId, prior.runId, phase); assert.equal(restored.allocationId, prior.allocationId || restored.allocationId, phase); assert.ok(durable.calls.start - starts <= 1, phase);
+    assert.equal(restored.runId, prior.runId, phase); assert.equal(restored.allocationId, prior.allocationId || restored.allocationId, phase);
+    assert.equal(durable.calls.start - starts, phase === "requested" ? 1 : 0, phase);
     for (const type of ["condition.observation_terminal", "condition.observation_recorded", "condition.observation_released"]) assert.equal(runEvents(cwd, restored.runId, type).length, 1, `${phase}:${type}`);
   }
+});
+
+test("active future-wake starts an independently resourced requested Condition without another supervisor", async () => {
+  const cwd = repo(), api = pi(cwd), fixture = activeConditions("resource-b"); api.cwd = cwd;
+  const durable = observationHost(cwd, { adapters: fixture.adapters, holdAfterStart: 2, holdProcess: true });
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateConditions(api, cwd, fixture.conditions);
+  const { projection: activeProjection, run: a } = await firstProductProcessBound(api); let projection = activeProjection;
+  const b = [...projection.observationRuns.values()].find(run => run.cycle === 1 && run.runId !== a.runId);
+  assert.equal(b.phase, "requested"); assert.equal(durable.calls.startsByRun.get(a.runId), 1);
+  const status = JSON.parse(await invoke(api, "goal_status", {})); // R9 starts the other requested Condition despite A future-wake
+  projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(projection.observationRuns.get(b.runId).phase, "process_bound"); assert.equal(durable.calls.startsByRun.get(a.runId), 1); assert.equal(durable.calls.startsByRun.get(b.runId), 1);
+  assert.equal(status.blocking.some(item => item.id === a.runId && item.code === "OBSERVATION_FUTURE_WAKE"), true);
+  for (const run of [a, b]) assert.equal(runEvents(cwd, run.runId, "condition.observation_requested").length, 1);
+});
+
+test("shared exclusive resource keeps the second requested run lease-free until typed managed release", async () => {
+  const cwd = repo(), api = pi(cwd), fixture = activeConditions("resource-a"); api.cwd = cwd;
+  const durable = observationHost(cwd, { adapters: fixture.adapters, holdAfterStart: 2, holdProcess: true });
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateConditions(api, cwd, fixture.conditions);
+  const { projection: activeProjection, run: a } = await firstProductProcessBound(api); let projection = activeProjection;
+  const b = [...projection.observationRuns.values()].find(run => run.cycle === 1 && run.runId !== a.runId);
+  const blocked = JSON.parse(await invoke(api, "goal_status", {})); // B start reaches managed allocation conflict
+  projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(blocked.status, "R10A3_OBSERVATION_MANAGED_ATTENTION"); assert.equal(projection.observationRuns.get(b.runId).phase, "requested"); assert.equal(projection.observationRuns.get(b.runId).allocationId, null); assert.equal(durable.calls.startsByRun.get(b.runId) || 0, 0);
+  durable.completeManagedValidation(a.runId); // supervisor-owned completion only; no Goal event
+  await invoke(api, "goal_status", {}); await invoke(api, "goal_status", {}); await invoke(api, "goal_status", {}); // recover terminal, record, typed release
+  projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); assert.equal(projection.observationRuns.get(a.runId).phase, "released"); assert.equal(projection.observationRuns.get(b.runId).phase, "requested");
+  await invoke(api, "goal_status", {}); // releaseManagedValidation removed A's holder, so B may lease and start
+  projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(projection.observationRuns.get(b.runId).phase, "process_bound"); assert.equal(durable.calls.startsByRun.get(a.runId), 1); assert.equal(durable.calls.startsByRun.get(b.runId), 1);
+  const runs = [...projection.observationRuns.values()]; assert.equal(new Set(runs.map(run => run.runId)).size, runs.length); assert.equal(new Set(runs.map(run => run.allocationId).filter(Boolean)).size, runs.filter(run => run.allocationId).length);
+  for (const run of [a, b]) assert.equal(runEvents(cwd, run.runId, "condition.observation_requested").length, 1);
+  assert.equal(runEvents(cwd, b.runId, "condition.observation_lease_allocated").length, 1);
+  for (const run of runs.filter(run => run.conditionId === a.conditionId)) for (const type of ["condition.observation_terminal", "condition.observation_recorded", "condition.observation_released"]) assert.equal(runEvents(cwd, run.runId, type).length, 1, `${run.runId}:${type}`);
 });
 
 test("active product verdicts record and release FAIL, UNKNOWN, and INFRA without findings", async () => {
