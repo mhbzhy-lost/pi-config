@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 
@@ -121,4 +122,54 @@ test("recover leaves an unprovable process-bound receipt as cleanup debt without
   assert.deepEqual({ phase: recovered.phase, debt: recovered.cleanupDebt, recorded: recovered.recorded }, { phase: "cleanup_debt", debt: true, recorded: null });
   assert.throws(() => releaseManagedValidation(recovered, { expectedHead: f.integratedHead }), /debt|terminal|release/i);
   assert.equal(existsSync(recovered.workspacePath), true);
+});
+
+const crashHost = fileURLToPath(new URL("./fixtures/goal-observation/managed-crash-host.mjs", import.meta.url));
+const crashAction = fileURLToPath(new URL("./fixtures/goal-observation/managed-crash-action.mjs", import.meta.url));
+async function pollRegular(file, timeout = 5_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (existsSync(file)) { const stat = lstatSync(file); if (stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && (stat.mode & 0o777) === 0o600) return readFileSync(file, "utf8"); }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw Error(`handshake timed out: ${file}`);
+}
+async function killChild(child) { if (child.exitCode !== null || child.signalCode !== null) return; const exited = new Promise((resolve) => child.once("exit", resolve)); child.kill("SIGKILL"); await exited; }
+function crashPlan(marker, started, finish) { return { ...plan(), actions: [{ id: "check", kind: "validation", executable: process.execPath, args: [crashAction, marker, started, finish] }] }; }
+async function crashScenario(t, mode, round) {
+  const f = fixture(t), baseline = git(f.originRoot, "worktree", "list", "--porcelain");
+  const prefix = join(f.stateRoot, `${mode}-${round}`), marker = `${prefix}.marker`, started = `${prefix}.started`, finish = `${prefix}.finish`, handshake = `${prefix}.handshake`;
+  const prepared = prepareManagedValidation(input(f, `${mode}-${round}`, [{ key: `${mode}-${round}`, mode: "exclusive", capacity: 1, reset: "clean" }], crashPlan(marker, started, finish)));
+  const child = spawn(process.execPath, [crashHost, mode, JSON.stringify(prepared), handshake], { stdio: "ignore" });
+  try {
+    if (mode === "before_process_ack") await pollRegular(handshake);
+    else if (mode === "action_running") await pollRegular(started);
+    else { await pollRegular(started); writeFileSync(finish, "finish", { mode: 0o600, flag: "wx" }); await pollRegular(handshake); }
+    await killChild(child);
+    if (mode !== "terminal_bound" && !existsSync(finish)) writeFileSync(finish, "finish", { mode: 0o600, flag: "wx" });
+    const recovering = recoverManagedValidation(prepared, mode === "before_process_ack" ? { onProcessBound: async () => {} } : {});
+    const recovered = await recovering;
+    assert.equal(recovered.phase, "recorded"); assert.equal(recovered.recordCount, 1); assert.equal(readFileSync(marker, "utf8"), "started");
+    assert.equal(releaseManagedValidation(recovered, { expectedHead: f.integratedHead }).phase, "released");
+    assert.equal(readdirSync(join(f.stateRoot, "managed-validations")).filter((name) => JSON.parse(readFileSync(join(f.stateRoot, "managed-validations", name), "utf8")).phase !== "released").length, 0);
+    assert.equal(readdirSync(join(f.stateRoot, "validation-leases")).filter((name) => name.endsWith(".json") && JSON.parse(readFileSync(join(f.stateRoot, "validation-leases", name), "utf8")).state !== "released").length, 0);
+    assert.equal(git(f.originRoot, "worktree", "list", "--porcelain"), baseline);
+  } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child); }
+}
+test("real child Host SIGKILL recovery covers callback, running action, and terminal barriers twice", { timeout: 60_000 }, async (t) => {
+  for (let round = 1; round <= 2; round++) for (const mode of ["before_process_ack", "action_running", "terminal_bound"]) await crashScenario(t, mode, round);
+});
+
+test("malformed durable status fails closed without authorizing an action", { timeout: 15_000 }, async (t) => {
+  const f = fixture(t), marker = join(f.stateRoot, "malformed-marker"), started = join(f.stateRoot, "malformed-started"), finish = join(f.stateRoot, "malformed-finish"), handshake = join(f.stateRoot, "malformed-handshake");
+  const prepared = prepareManagedValidation(input(f, "malformed", [{ key: "malformed", mode: "exclusive", capacity: 1, reset: "clean" }], crashPlan(marker, started, finish)));
+  const child = spawn(process.execPath, [crashHost, "before_process_ack", JSON.stringify(prepared), handshake], { stdio: "ignore" });
+  try {
+    await pollRegular(handshake); const parent = JSON.parse(readFileSync(prepared.receiptPath, "utf8"));
+    writeFileSync(join(parent.workspaceLease.runtime?.path || JSON.parse(readFileSync(join(f.stateRoot, "validation-leases", `${parent.workspaceLease.id}.json`), "utf8")).runtime.path, "status"), "not-json", { mode: 0o600 });
+    await killChild(child);
+    const result = await recoverManagedValidation(prepared, { onProcessBound: async () => { throw Error("must not acknowledge malformed status"); } });
+    assert.equal(result.phase, "cleanup_debt"); assert.equal(existsSync(marker), false);
+    assert.throws(() => prepareManagedValidation(input(f, "malformed-next", [{ key: "malformed", mode: "exclusive", capacity: 1, reset: "clean" }])), /resource|lease|conflict/i);
+  } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child); }
 });
