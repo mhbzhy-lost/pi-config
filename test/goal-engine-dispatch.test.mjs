@@ -333,3 +333,13 @@ test("planned task definitions require exact structured criteria", () => {
     { criteria: [{ id: "proof", statement: "Prove it", evidenceKinds: ["tests"] }], commands: ["true"] },
   ]) assert.throws(() => validateTaskDefinitions(["t1"], { t1: { ...valid, acceptance } }, { planned: true }), /criteria|acceptance|duplicate|invalid/);
 });
+
+test("remediation metadata remains internal and is stripped from criteria-only transport", () => {
+  const projection = buildProjection();
+  projection.tasks.get("t1").metadata = { kind: "remediation", findingIds: ["finding-1"], episodeId: "episode-1" };
+  const contract = compileTaskContract(projection, "t1", "/workspace/project");
+  assert.equal(JSON.stringify(contract).includes("remediation"), false);
+  assert.equal(JSON.stringify(contract).includes("finding-1"), false);
+  assert.equal(contract.execution.worktree, true);
+  assert.deepEqual(contract.acceptance, { criteria: ["Handles expired tokens", "Rejects malformed tokens"] });
+});

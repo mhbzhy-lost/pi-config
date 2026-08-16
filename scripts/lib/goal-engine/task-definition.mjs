@@ -15,6 +15,19 @@ export function validateRepoRelativePath(value, label = "writePath") {
   return normalizeRepoRelativePosixPath(nonEmpty(value, label), label);
 }
 
+// Repair metadata is persisted with the internal task definition, never transported.
+export function validateRemediationMetadata(metadata, label = "taskDef metadata") {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
+    || Object.keys(metadata).length !== 3
+    || !["kind", "findingIds", "episodeId"].every((key) => Object.hasOwn(metadata, key))
+    || metadata.kind !== "remediation"
+    || !ID.test(metadata.episodeId || "")
+    || !Array.isArray(metadata.findingIds) || !metadata.findingIds.length
+    || metadata.findingIds.some((id) => !ID.test(id || ""))
+    || new Set(metadata.findingIds).size !== metadata.findingIds.length) throw new Error(`${label} must be exact remediation metadata`);
+  return metadata;
+}
+
 function validateCommand(value, label, cwd, realpathCwd) {
   const command = nonEmpty(value, label);
   // This deliberately is not a shell parser: except for an exact prose echo, fail closed
@@ -40,6 +53,7 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
     const def = taskDefs[id];
     if (!def || typeof def !== "object") throw new Error(`missing taskDef for ${id}`);
     nonEmpty(def.description, `taskDef ${id} description`);
+    if (Object.hasOwn(def, "metadata")) validateRemediationMetadata(def.metadata, `taskDef ${id} metadata`);
     assertContractArray(def.deps, `taskDef ${id} deps`);
     const deps = new Set();
     for (const dep of def.deps) {

@@ -16,6 +16,8 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
   const task = projection.tasks.get(taskId);
   if (!task) throw new Error(`unknown task: ${taskId}`);
   if (task.status !== "pending") throw new Error(`task is not pending: ${taskId} (${task.status})`);
+  // Provenance belongs to the runtime ledger; dispatch-ir has no repair fields.
+  const { metadata: _repairMetadata, ...transportTask } = task;
 
   const completed = buildCompletedContext(projection, taskId);
   const relevant = buildRelevantFiles(projection, taskId);
@@ -32,7 +34,7 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
 
   const relevantFiles = relevant.items;
 
-  const workflowMode = task.workflow || "tdd";
+  const workflowMode = transportTask.workflow || "tdd";
   const workflow = workflowMode === "docs-only"
     ? { mode: workflowMode, reason: "Documentation-only task produces a review or report artifact." }
     : workflowMode === "existing-tests"
@@ -42,27 +44,27 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
   const input = {
     version: "dispatch-ir.v1",
     taskId: `${projection.goalId}.${taskId}`,
-    title: `${taskId}: ${task.description.slice(0, 80)}`,
+    title: `${taskId}: ${transportTask.description.slice(0, 80)}`,
     agent: "executor",
     risk: "normal",
-    objective: task.description,
+    objective: transportTask.description,
     workflow,
     requirements: [
-      task.description,
+      transportTask.description,
       "Before reporting completed, create at least one clean commit containing only approved writePaths; if no commit is warranted, return NEEDS_CONTEXT instead of completed.",
-      ...task.acceptance.criteria.map(encodeCriterion),
+      ...transportTask.acceptance.criteria.map(encodeCriterion),
       ...projection.dod.map((d) => `Goal DoD: ${d}`),
     ],
     context: { knownFacts, decisions, relevantFiles },
     boundaries: {
-      writePaths: task.writePaths,
+      writePaths: transportTask.writePaths,
       excludedWork: projection.nonGoals,
       forbiddenActions: ["Do not modify files outside declared writePaths", "Do not amend goal contract or state files"],
     },
     // Legacy projection commands are retained for replay and Goal-level acceptance,
     // but the criteria-only Subagent transport must never receive them.
-    acceptance: { criteria: task.acceptance.criteria.map(encodeCriterion) },
-    execution: { cwd, timeoutMs },
+    acceptance: { criteria: transportTask.acceptance.criteria.map(encodeCriterion) },
+    execution: { cwd, timeoutMs, ...(task.metadata?.kind === "remediation" ? { worktree: true } : {}) },
   };
 
   return compileCodingDispatchIR(input, { cwd });
