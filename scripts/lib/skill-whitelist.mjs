@@ -1,31 +1,11 @@
-import { access, readFile, realpath } from "node:fs/promises";
+import { access, readFile, readdir, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join, resolve } from "node:path";
 
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-export function parseSkillList(content) {
-  const names = [];
-  const seen = new Set();
-
-  for (const rawLine of content.split(/\r?\n/u)) {
-    const name = rawLine.replace(/#.*$/u, "").trim();
-    if (!name) continue;
-    if (!SKILL_NAME_PATTERN.test(name)) {
-      throw new Error(`invalid skill name: ${name}`);
-    }
-    if (seen.has(name)) {
-      throw new Error(`duplicate skill: ${name}`);
-    }
-    seen.add(name);
-    names.push(name);
-  }
-
-  return names;
-}
-
 function frontmatterError(name, reason) {
-  return new Error(`invalid frontmatter for allowlisted skill: ${name}: ${reason}`);
+  return new Error(`invalid frontmatter for managed skill: ${name}: ${reason}`);
 }
 
 function lexSingleLineScalar(value) {
@@ -62,7 +42,6 @@ function isSupportedDescriptionScalar(description) {
 function validateSkillFrontmatter(name, content) {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u);
   if (!match) throw frontmatterError(name, "missing frontmatter");
-
   const fields = new Map();
   for (const line of match[1].split(/\r?\n/u)) {
     if (!line.trim()) continue;
@@ -72,66 +51,47 @@ function validateSkillFrontmatter(name, content) {
     if (key !== "name" && key !== "description") continue;
     if (fields.has(key)) throw frontmatterError(name, `duplicate ${key}`);
     const canonicalValue = key === "description" ? lexSingleLineScalar(value) : value;
-    if (key === "description" && canonicalValue && !isSupportedDescriptionScalar(canonicalValue)) {
-      throw frontmatterError(name, "unsupported string scalar");
-    }
+    if (key === "description" && canonicalValue && !isSupportedDescriptionScalar(canonicalValue)) throw frontmatterError(name, "unsupported string scalar");
     fields.set(key, canonicalValue);
   }
-
   if (!fields.has("name")) throw frontmatterError(name, "missing name");
-  if (fields.get("name") !== name) throw frontmatterError(name, "name does not match allowlisted skill");
+  if (fields.get("name") !== name) throw frontmatterError(name, "name does not match managed skill");
   if (!fields.has("description")) throw frontmatterError(name, "missing description");
   const description = fields.get("description");
-  if (!description || description === '""' || description === "''") {
-    throw frontmatterError(name, "empty description");
-  }
-}
-
-async function hasReadableSkill(directory) {
-  try {
-    await access(join(directory, "SKILL.md"), constants.R_OK);
-    return true;
-  } catch {
-    return false;
-  }
+  if (!description || description === '""' || description === "''") throw frontmatterError(name, "empty description");
 }
 
 export async function resolveSkillSource(repoRoot, name) {
-  const sources = [
-    join(repoRoot, "skill-overrides"),
-    join(repoRoot, "vendor", "superpowers", "skills"),
-  ];
-
-  for (const sourceRoot of sources) {
-    const candidate = join(sourceRoot, name);
-    if (!await hasReadableSkill(candidate)) continue;
-
-    const [realRoot, realCandidate] = await Promise.all([realpath(sourceRoot), realpath(candidate)]);
-    if (realCandidate !== resolve(realRoot, name)) {
-      throw new Error(`skill source escapes allowed root: ${name}`);
-    }
-    validateSkillFrontmatter(name, await readFile(join(realCandidate, "SKILL.md"), "utf8"));
-    return realCandidate;
+  if (!SKILL_NAME_PATTERN.test(name)) throw new Error(`invalid managed skill directory: ${name}`);
+  const sourceRoot = join(repoRoot, "skill-overrides");
+  const candidate = join(sourceRoot, name);
+  let realRoot;
+  let realCandidate;
+  let realSkill;
+  try {
+    [realRoot, realCandidate, realSkill] = await Promise.all([
+      realpath(sourceRoot), realpath(candidate), realpath(join(candidate, "SKILL.md")),
+    ]);
+    await access(realSkill, constants.R_OK);
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error(`missing SKILL.md for managed skill: ${name}`);
+    throw error;
   }
-
-  throw new Error(`missing SKILL.md for allowlisted skill: ${name}`);
+  if (realCandidate !== resolve(realRoot, name) || realSkill !== join(realCandidate, "SKILL.md")) {
+    throw new Error(`skill source escapes allowed root: ${name}`);
+  }
+  validateSkillFrontmatter(name, await readFile(realSkill, "utf8"));
+  return realCandidate;
 }
 
-export async function loadDesiredSkills(repoRoot, listPath, localListPath) {
-  const names = parseSkillList(await readFile(listPath, "utf8"));
-  if (localListPath) {
-    try {
-      const localNames = parseSkillList(await readFile(localListPath, "utf8"));
-      for (const name of localNames) {
-        if (!names.includes(name)) names.push(name);
-      }
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-  }
+export async function discoverManagedSkills(repoRoot) {
+  const sourceRoot = join(repoRoot, "skill-overrides");
+  const entries = await readdir(sourceRoot, { withFileTypes: true });
+  const names = entries
+    .filter((entry) => !entry.name.startsWith(".") && (entry.isDirectory() || entry.isSymbolicLink()))
+    .map((entry) => entry.name)
+    .sort((left, right) => left.localeCompare(right, "en"));
   const desired = new Map();
-  for (const name of names) {
-    desired.set(name, await resolveSkillSource(repoRoot, name));
-  }
+  for (const name of names) desired.set(name, await resolveSkillSource(repoRoot, name));
   return desired;
 }

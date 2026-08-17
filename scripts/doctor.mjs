@@ -7,29 +7,22 @@ import { constants } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
-import { loadDesiredSkills, parseSkillList } from "./lib/skill-whitelist.mjs";
+import { discoverManagedSkills } from "./lib/skill-whitelist.mjs";
 import { createGoalEngineExtension } from "./lib/goal-engine/extension.mjs";
 import { auditGoalContractIntegrity } from "./lib/goal-contract/authorization-audit.mjs";
 import { reconcileManagedWorktrees } from "./lib/worktree-lifecycle/inventory.mjs";
 
 const execFile = promisify(execFileCallback);
 
-const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1"];
+const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2"];
 const PI_SUBAGENTS_VERSION = "0.45.2";
 const TYPEBOX_VERSION = "1.1.38";
+const TASK_SCHEDULER_PACKAGES = {
+  "@amaster.ai/pi-task-scheduler": "0.1.9",
+  "@amaster.ai/pi-shared": "0.1.9",
+  croner: "10.0.1",
+};
 const BASIC_MEMORY_VERSION = "0.22.1";
-const EXPECTED_GLOBAL_SKILLS = [
-  "external-llm-review",
-  "git-commit-convention",
-  "test-driven-development",
-  "writing-skills",
-  "writing-plans",
-  "subagent-dispatch",
-  "using-goal-engine",
-  "exa-search",
-  "playwright",
-  "browser-auth-session",
-];
 const REQUIRED_PROFILES = {
   executor: { model: "codex-pool/gpt-5.6-terra", subagent: false, extensions: undefined },
 };
@@ -78,16 +71,23 @@ function packageSource(entry) {
   return typeof entry === "string" ? entry : entry?.source;
 }
 
-function hasDisabledSubagentResources(settings) {
-  const entry = settings?.packages?.find((candidate) => /^npm:pi-subagents(?:@|$)/.test(packageSource(candidate) ?? ""));
+function hasDisabledPackageResources(settings, source) {
+  const entry = settings?.packages?.find((candidate) => packageSource(candidate) === source);
   return Boolean(
     entry
     && typeof entry === "object"
-    && entry.source === `npm:pi-subagents@${PI_SUBAGENTS_VERSION}`
     && ["extensions", "skills", "prompts", "themes"].every(
       (resource) => Array.isArray(entry[resource]) && entry[resource].length === 0,
     ),
   );
+}
+
+function hasDisabledSubagentResources(settings) {
+  return hasDisabledPackageResources(settings, `npm:pi-subagents@${PI_SUBAGENTS_VERSION}`);
+}
+
+function hasDisabledTaskSchedulerResources(settings) {
+  return hasDisabledPackageResources(settings, "npm:@amaster.ai/pi-task-scheduler@0.1.9");
 }
 
 function parseFrontmatter(content) {
@@ -177,20 +177,16 @@ export function formatWorktreeLifecycleWarnings(report) {
 export async function inspectConfiguration(repoRoot, options = {}) {
   const issues = [];
   issues.push(...await inspectGoalContractIntegrity(repoRoot));
-  const listPath = join(repoRoot, "skill-overrides", "skills.list");
   let desired = new Map();
   try {
-    desired = await loadDesiredSkills(repoRoot, listPath, null);
+    desired = await discoverManagedSkills(repoRoot);
   } catch (error) {
     issues.push(error.message);
   }
-  const globalSkills = parseSkillList(await readFile(listPath, "utf8"));
 
-  if (JSON.stringify(globalSkills) !== JSON.stringify(EXPECTED_GLOBAL_SKILLS)) {
-    issues.push("unexpected Skill whitelist");
-  }
-
-  const globalSkillsDir = join(homedir(), ".agents", "skills");
+  const defaultGlobalSkillsDir = join(homedir(), ".agents", "skills");
+  const globalSkillsDir = options.globalSkillsDir ?? defaultGlobalSkillsDir;
+  const globalSkillsLabel = globalSkillsDir === defaultGlobalSkillsDir ? "~/.agents/skills" : globalSkillsDir;
   for (const [name, source] of desired) {
     try {
       await access(join(source, "SKILL.md"), constants.R_OK);
@@ -201,10 +197,10 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     try {
       const stats = await lstat(linkPath);
       if (!stats.isSymbolicLink()) {
-        issues.push(`~/.agents/skills/${name} exists but is not a symlink`);
+        issues.push(`${globalSkillsLabel}/${name} exists but is not a symlink`);
       }
     } catch {
-      issues.push(`~/.agents/skills/${name} is missing (run: node scripts/sync-skills.mjs)`);
+      issues.push(`${globalSkillsLabel}/${name} is missing (run: node scripts/sync-skills.mjs)`);
     }
   }
 
@@ -226,8 +222,12 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     if (!hasDisabledSubagentResources(settings)) {
       issues.push("pi-subagents package resources must all be disabled");
     }
+    if (!hasDisabledTaskSchedulerResources(settings)) {
+      issues.push("task scheduler package resources must all be disabled");
+    }
   } catch {
     issues.push("pi-subagents package resources must all be disabled");
+    issues.push("task scheduler package resources must all be disabled");
   }
 
   try {
@@ -351,6 +351,26 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     }
   } catch {
     issues.push(`missing Pi package: typebox@${TYPEBOX_VERSION}`);
+  }
+
+  const piNpmPackagePath = join(repoRoot, "pi", "npm", "package.json");
+  const piNpmRequire = createRequire(piNpmPackagePath);
+  for (const [name, version] of Object.entries(TASK_SCHEDULER_PACKAGES)) {
+    const packagePath = join(repoRoot, "pi", "npm", "node_modules", ...name.split("/"), "package.json");
+    try {
+      const metadata = JSON.parse(await readFile(packagePath, "utf8"));
+      if (metadata.version !== version) {
+        issues.push(`unexpected Pi package: ${name}@${metadata.version ?? "unknown"}; expected ${version}`);
+        continue;
+      }
+      try {
+        piNpmRequire.resolve(name);
+      } catch (error) {
+        issues.push(`Pi package entry is not resolvable: ${name}@${version}: ${error.message}`);
+      }
+    } catch {
+      issues.push(`missing Pi package: ${name}@${version}`);
+    }
   }
 
   const goalEngineFactory = options.goalEngineFactory ?? createGoalEngineExtension;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -10,6 +10,7 @@ import { createManagedWorktree } from "../scripts/lib/worktree-lifecycle/managed
 import { markDisposition } from "../scripts/lib/worktree-lifecycle/registry.mjs";
 const { inspectConfiguration, inspectGoalContractIntegrity } = doctor;
 import { canonicalJsonSha256 } from "../scripts/lib/goal-contract/authorization-audit.mjs";
+import { discoverManagedSkills } from "../scripts/lib/skill-whitelist.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -119,6 +120,20 @@ const isolatedSubagentPackage = {
   prompts: [],
   themes: [],
 };
+const isolatedTaskSchedulerPackage = {
+  source: "npm:@amaster.ai/pi-task-scheduler@0.1.9",
+  extensions: [],
+  skills: [],
+  prompts: [],
+  themes: [],
+};
+
+async function createMinimalManagedSkill(root, name) {
+  const directory = join(root, "skill-overrides", name);
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: fixture\n---\n`);
+  return directory;
+}
 
 function runDoctor() {
   return new Promise((resolve, reject) => {
@@ -148,7 +163,6 @@ test("inspectConfiguration rejects pi-subagents package resource autoload", asyn
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "skills.list"), "");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "pi", "settings.json"), JSON.stringify({ packages: ["npm:pi-subagents@0.45.2"] }));
@@ -157,6 +171,7 @@ test("inspectConfiguration rejects pi-subagents package resource autoload", asyn
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
     assert.ok(issues.includes("pi-subagents package resources must all be disabled"));
+    assert.ok(issues.includes("task scheduler package resources must all be disabled"));
     assert.ok(issues.includes("missing typed subagent runtime extension: pi/extensions/subagent-runtime.ts"));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -167,26 +182,25 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    for (const skill of ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "subagent-dispatch", "using-goal-engine", "exa-search", "playwright", "browser-auth-session", "goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7"]) {
-      await mkdir(join(root, "skill-overrides", skill), { recursive: true });
-      await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), `---\nname: ${skill}\ndescription: fixture\n---\n`);
+    const managedSkillNames = [...(await discoverManagedSkills(repoRoot)).keys()];
+    assert.ok(managedSkillNames.length > 0);
+    const globalSkillsDir = join(root, "global-skills");
+    await mkdir(globalSkillsDir, { recursive: true });
+    for (const name of managedSkillNames) {
+      const source = await createMinimalManagedSkill(root, name);
+      await symlink(source, join(globalSkillsDir, name));
     }
-    await writeFile(
-      join(root, "skill-overrides", "skills.list"),
-      "external-llm-review\ngit-commit-convention\ntest-driven-development\nwriting-skills\nwriting-plans\nsubagent-dispatch\nusing-goal-engine\nexa-search\nplaywright\nbrowser-auth-session\n",
-    );
-    await writeFile(
-      join(root, "skill-overrides", "skills.local.list"),
-      "goal-contract\nmac-mini-worker\nnormandy-cli\ntbctx7\n",
-    );
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "pi", "agents"), { recursive: true });
     await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension"), { recursive: true });
     await mkdir(join(root, "pi", "npm", "node_modules", "typebox", "build", "compile"), { recursive: true });
+    for (const name of ["@amaster.ai/pi-task-scheduler", "@amaster.ai/pi-shared", "croner"]) {
+      await mkdir(join(root, "pi", "npm", "node_modules", ...name.split("/")), { recursive: true });
+    }
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "pi", "settings.json"), JSON.stringify({
       theme: "light",
-      packages: [isolatedSubagentPackage],
+      packages: [isolatedSubagentPackage, isolatedTaskSchedulerPackage],
     }));
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
     await writeFile(join(root, "pi", "extensions", "subagent-runtime.ts"), "");
@@ -211,32 +225,42 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "rpc.ts"), 'const methods = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];\n');
     await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "package.json"), JSON.stringify({ version: "1.1.38", type: "module", exports: { "./compile": "./build/compile/index.mjs" } }));
     await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "build", "compile", "index.mjs"), "export {};\n");
+    for (const [name, version] of [["@amaster.ai/pi-task-scheduler", "0.1.9"], ["@amaster.ai/pi-shared", "0.1.9"], ["croner", "10.0.1"]]) {
+      const packageRoot = join(root, "pi", "npm", "node_modules", ...name.split("/"));
+      await writeFile(join(packageRoot, "package.json"), JSON.stringify({ name, version, main: "index.js" }));
+      await writeFile(join(packageRoot, "index.js"), "module.exports = {};\n");
+    }
 
-    assert.deepEqual(await inspectConfiguration(root, { readPiVersion: async () => "0.82.1", readBasicMemoryVersion: async () => "0.22.1" }), []);
+    assert.deepEqual(await inspectConfiguration(root, {
+      globalSkillsDir,
+      readPiVersion: async () => "0.82.1",
+      readBasicMemoryVersion: async () => "0.22.1",
+    }), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("inspectConfiguration accepts additional valid local skills", async () => {
+test("inspectConfiguration discovers additional managed skills and reports unsynced links", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
-    const globalSkills = ["external-llm-review", "git-commit-convention", "test-driven-development", "writing-skills", "writing-plans", "subagent-dispatch", "using-goal-engine", "exa-search", "playwright", "browser-auth-session"];
-    const localSkills = ["goal-contract", "mac-mini-worker", "normandy-cli", "tbctx7", "crash-analyzer-usage"];
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    for (const skill of [...globalSkills, ...localSkills]) {
-      await mkdir(join(root, "skill-overrides", skill), { recursive: true });
-      await writeFile(join(root, "skill-overrides", skill, "SKILL.md"), `---\nname: ${skill}\ndescription: fixture\n---\n`);
-    }
-    await writeFile(join(root, "skill-overrides", "skills.list"), `${globalSkills.join("\n")}\n`);
-    await writeFile(join(root, "skill-overrides", "skills.local.list"), `${localSkills.join("\n")}\n`);
+    await createMinimalManagedSkill(root, "managed-fixture");
+    await createMinimalManagedSkill(root, "additional-managed-fixture");
+    const globalSkillsDir = join(root, "global-skills");
+    const discoveredNames = [...(await discoverManagedSkills(root)).keys()];
 
     const issues = await inspectConfiguration(root, {
+      globalSkillsDir,
       readPiVersion: async () => "0.82.1",
       readBasicMemoryVersion: async () => "0.22.1",
     });
 
-    assert.equal(issues.includes("unexpected Skill whitelist"), false);
+    assert.deepEqual(discoveredNames, ["additional-managed-fixture", "managed-fixture"]);
+    assert.equal(issues.some((issue) => issue.includes("unexpected Skill whitelist")), false);
+    assert.equal(issues.some((issue) => issue.startsWith("invalid frontmatter for managed skill:")), false);
+    assert.ok(issues.includes(`${globalSkillsDir}/additional-managed-fixture is missing (run: node scripts/sync-skills.mjs)`));
+    assert.ok(issues.includes(`${globalSkillsDir}/managed-fixture is missing (run: node scripts/sync-skills.mjs)`));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -246,7 +270,6 @@ test("inspectConfiguration requires every Root broker readiness component", asyn
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "skills.list"), "");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "pi", "settings.json"), "{}");
@@ -269,7 +292,6 @@ test("inspectConfiguration reports missing pi-subagents package", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "skills.list"), "");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "pi", "settings.json"), "{}");
@@ -283,12 +305,11 @@ test("inspectConfiguration reports missing pi-subagents package", async () => {
   }
 });
 
-test("inspectConfiguration ignores the retired local Skill list", async () => {
+test("inspectConfiguration ignores an unrelated retired-list-shaped file", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides", "writing-plans"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "skills.list"), "writing-plans\n");
-    await writeFile(join(root, "skill-overrides", "skills.local.list"), "Bad_Name\n");
+    await writeFile(join(root, "skill-overrides", "retired-list-note.txt"), "Bad_Name\n");
     await writeFile(join(root, "skill-overrides", "writing-plans", "SKILL.md"), "---\nname: writing-plans\ndescription: fixture\n---\n");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
@@ -298,18 +319,16 @@ test("inspectConfiguration ignores the retired local Skill list", async () => {
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
     assert.equal(issues.some((issue) => issue.includes("Bad_Name")), false);
-    assert.ok(issues.includes("unexpected Skill whitelist"));
     assert.ok(issues.includes("missing Pi package: pi-subagents@0.45.2"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("inspectConfiguration reports malformed allowlisted Skill frontmatter and continues", async () => {
+test("inspectConfiguration reports malformed managed Skill frontmatter and continues", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides", "writing-plans"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "skills.list"), "writing-plans\n");
     await writeFile(join(root, "skill-overrides", "writing-plans", "SKILL.md"), "# malformed\n");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
@@ -318,8 +337,7 @@ test("inspectConfiguration reports malformed allowlisted Skill frontmatter and c
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
-    assert.ok(issues.includes("invalid frontmatter for allowlisted skill: writing-plans: missing frontmatter"));
-    assert.ok(issues.includes("unexpected Skill whitelist"));
+    assert.ok(issues.includes("invalid frontmatter for managed skill: writing-plans: missing frontmatter"));
     assert.ok(issues.includes("missing Pi package: pi-subagents@0.45.2"));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -330,7 +348,6 @@ test("inspectConfiguration reports boolean description frontmatter and continues
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides", "writing-plans"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "skills.list"), "writing-plans\n");
     await writeFile(join(root, "skill-overrides", "writing-plans", "SKILL.md"), "---\nname: writing-plans\ndescription: true\n---\n");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
@@ -339,8 +356,7 @@ test("inspectConfiguration reports boolean description frontmatter and continues
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
-    assert.ok(issues.includes("invalid frontmatter for allowlisted skill: writing-plans: unsupported string scalar"));
-    assert.ok(issues.includes("unexpected Skill whitelist"));
+    assert.ok(issues.includes("invalid frontmatter for managed skill: writing-plans: unsupported string scalar"));
     assert.ok(issues.includes("missing Pi package: pi-subagents@0.45.2"));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -349,11 +365,11 @@ test("inspectConfiguration reports boolean description frontmatter and continues
 
 test("inspectConfiguration reports the actual Pi executable version", async () => {
   const issues = await inspectConfiguration(repoRoot, { readPiVersion: async () => "0.80.9" });
-  assert.ok(issues.includes("unexpected Pi version: 0.80.9; supported 0.82.0, 0.82.1, 0.83.0, 0.84.1"));
+  assert.ok(issues.includes("unexpected Pi version: 0.80.9; supported 0.82.0, 0.82.1, 0.83.0, 0.84.1, 0.84.2"));
 });
 
 test("inspectConfiguration accepts every supported Pi version", async () => {
-  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1"]) {
+  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2"]) {
     const issues = await inspectConfiguration(repoRoot, { readPiVersion: async () => version });
     assert.equal(issues.some((issue) => issue.startsWith("unexpected Pi version:")), false);
   }
@@ -363,7 +379,6 @@ test("inspectConfiguration reports an unexpected pi-subagents version", async ()
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "skills.list"), "");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
@@ -383,7 +398,6 @@ test("inspectConfiguration reports a failed pi-subagents RPC probe", async () =>
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "skills.list"), "");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
@@ -404,7 +418,6 @@ test("inspectConfiguration reports generic runtime contract gaps without requiri
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
-    await writeFile(join(root, "skill-overrides", "skills.list"), "external-llm-review\n");
     await mkdir(join(root, "skill-overrides", "external-llm-review"), { recursive: true });
     await writeFile(join(root, "skill-overrides", "external-llm-review", "SKILL.md"), "---\nname: external-llm-review\ndescription: fixture\n---\n");
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
@@ -422,10 +435,9 @@ test("inspectConfiguration reports generic runtime contract gaps without requiri
     await writeFile(join(root, ".gitignore"), "/var/plan-runs/\n");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "unknown" });
-    assert.ok(issues.includes("unexpected Pi version: unknown; supported 0.82.0, 0.82.1, 0.83.0, 0.84.1"));
+    assert.ok(issues.includes("unexpected Pi version: unknown; supported 0.82.0, 0.82.1, 0.83.0, 0.84.1, 0.84.2"));
     assert.ok(issues.includes("unexpected executor extension isolation"));
     assert.equal(issues.some((issue) => /plan-runner|plan-capsule|Plan child/.test(issue)), false);
-    assert.ok(issues.includes("unexpected Skill whitelist"));
     assert.ok(issues.includes("runtime namespace is not ignored: /var/"));
     assert.ok(issues.includes("legacy Task 7 runtime still exists: scripts/lib/subagent-jobs.mjs"));
   } finally {

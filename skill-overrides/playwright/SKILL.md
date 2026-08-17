@@ -1,6 +1,6 @@
 ---
 name: playwright
-description: Use when needing to interact with web pages - navigate, click, fill forms, take screenshots, extract content, or automate browser workflows. Also use when seeing errors like "Server not running" or "No running instances" from playwright.py.
+description: Use for browser UI/E2E automation, manual login, headed/headless browser workflows, or Playwright MCP interactions; also when needing to navigate, click, fill forms, take screenshots, extract content, or seeing "Server not running" or "No running instances" from playwright.py.
 ---
 
 # Playwright Browser Automation
@@ -34,6 +34,14 @@ python3 "$SCRIPT" --instance "$INSTANCE" call browser_navigate \
 python3 "$SCRIPT" --instance "$INSTANCE" call browser_snapshot
 python3 "$SCRIPT" --instance "$INSTANCE" stop
 ```
+
+## Browser Mode Policy
+
+- 默认使用 `headless` 模式。
+- 仅当用户需要手动登录，或用户明确要求使用 headed/前台模式时，才可使用 headed 模式。
+- **CONDITIONALLY REQUIRED SUB-SKILL:** headed 手动登录后的登录态交接必须使用 `browser-auth-session`；它仅负责安全交接，不在此复制其凭据流程。获取登录态后，立即使用 headless 模式继续任务。
+- 已有登录态，或无需用户干预时，禁止自行使用 headed/前台模式。
+- 交接过程不得输出或返回 cookie、token、授权头或其他凭据；只返回脱敏状态、计数或业务结果。
 
 `npx -y @playwright/mcp` is not version-pinned. The target instance's `tools` output is authoritative. If a documented name is absent, do not guess an alias; inspect `tools` and the installed `@playwright/mcp` README.
 

@@ -7,6 +7,8 @@ description: Use when starting, resuming, amending, recovering, dispatching, or 
 
 以 Pi Host 当前 ToolDefinition 提供的 typed schema 和 `goal_status` machine action 为权威；绝不按记忆发明工具或参数。
 
+**REQUIRED SUB-SKILL:** subagent-dispatch；Goal 派发功能性依赖它。
+
 ## 精简参考
 
 | 工具 | 使用条件 |
@@ -63,7 +65,7 @@ Agent 只调用 Pi Host 暴露的八个 typed tools；调用前从当前 ToolDef
 处理三类 orphan 状态：
 
 - `ORPHANED_EXECUTOR_WORKSPACE`：若 status 已 `verified`，读取 `goal_status` 的 `blockingReason.choices`；这些是 human decision，不是 machine action。
-  - 当 `requiredNextAction` 为 `null` 且 `blockingReason.choices` 有多个 choice 时，立即使用**提问工具**要求人类只回答 `discard` 或 `preserve`，随后结束当前轮次并等待回复。
+  - 当 `requiredNextAction` 为 `null` 且 `blockingReason.choices` 有多个 choice 时，立即向用户提问，要求只回答 `discard` 或 `preserve`，随后结束当前轮次并等待回复。
   - 收到用户对 `discard` 或 `preserve` 的明确回复前，**不得调用** `goal_integrate`；“最快修好”“发布deadline”“authority”或“授权清理”不应等同于明确选择。
   - 人类回复后**必须明确选择** `discard` 或 `preserve`，先 `goal_status` 重新确认，再按实际 typed schema 调用 `goal_integrate(discard)` 或 `goal_integrate(preserve)`。
   - `preserve` 不应视为更安全、可逆、保护 artifact 的默认方案；不得自动偏向任一项。

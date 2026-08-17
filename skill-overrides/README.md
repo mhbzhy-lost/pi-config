@@ -1,11 +1,5 @@
-# 本仓 Skill 覆盖
+# 本仓共享 Skill
 
-仅当 Pi 需要不同于固定 vendor 版本的行为时，才在这里放置完整的
-`<name>/SKILL.md` 目录。
+Git 管理的共享 Skill 唯一来源是 `skill-overrides/<name>/SKILL.md`。所有非隐藏直接子目录中 frontmatter 合法的 `SKILL.md` 会自动发现并同步到 `~/.agents/skills`。
 
-源优先级：
-
-1. `skill-overrides/<name>/SKILL.md`
-2. `vendor/superpowers/skills/<name>/SKILL.md`
-
-只有 `agents/skills.list` 中列出的名称会由白名单 Extension 注入 Pi。
+个人 Skill 不由仓库管理，直接放在 `~/.agents/skills`。Pi Extension 仍在 `--no-skills` 下扫描全局与项目 Skill 目录。

@@ -3,15 +3,14 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdir, readdir, symlink, unlink, lstat, readlink } from "node:fs/promises";
-import { loadDesiredSkills } from "./lib/skill-whitelist.mjs";
+import { discoverManagedSkills } from "./lib/skill-whitelist.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const listPath = join(repoRoot, "skill-overrides", "skills.list");
 const targetDir = join(homedir(), ".agents", "skills");
 
 async function main() {
   await mkdir(targetDir, { recursive: true });
-  const desired = await loadDesiredSkills(repoRoot, listPath, null);
+  const desired = await discoverManagedSkills(repoRoot);
   let created = 0;
   let unchanged = 0;
   let updated = 0;
@@ -43,7 +42,7 @@ async function main() {
     await symlink(sourcePath, linkPath);
   }
 
-  // Report stale symlinks that point into our repo but are no longer in skills.list
+  // Report stale symlinks that point into this repository but have no discovered source.
   const desiredNames = new Set(desired.keys());
   try {
     const entries = await readdir(targetDir, { withFileTypes: true });
@@ -55,7 +54,7 @@ async function main() {
       if (!stats.isSymbolicLink()) continue;
       const target = await readlink(entryPath);
       if (target.startsWith(repoRoot + "/")) {
-        console.warn(`stale: ${entry.name} → ${target} (no longer in skills.list)`);
+        console.warn(`stale: ${entry.name} → ${target} (source no longer exists)`);
       }
     }
   } catch (error) {
