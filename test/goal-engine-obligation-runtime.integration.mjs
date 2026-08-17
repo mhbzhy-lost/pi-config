@@ -527,7 +527,7 @@ async function firstProductProcessBound(api, limit = 10) {
 function runEvents(cwd, runId, type) { return observationEventRows(cwd).filter(event => event.type === type && event.data.runId === runId); }
 
 function injectedStore(seed, failure = () => null) {
-  let current = structuredClone(seed); const batches = [], events = [];
+  let current = structuredClone(seed); const batches = [], events = []; let batchCalls = 0;
   const apply = (entries, version) => {
     assert.equal(version, current.version); for (const entry of entries) current = applyEvent(current, entry);
     events.push(...entries); batches.push(entries); return current;
@@ -536,9 +536,9 @@ function injectedStore(seed, failure = () => null) {
     store: {
       listGoals: () => [current.goalId], listGoalIds: () => [current.goalId], loadProjection: (_root, goalId) => goalId === current.goalId ? current : null,
       appendEvent(_root, entry, version) { const mode = failure([entry]); if (mode === "pre") throw Error("injected pre-append failure"); const result = apply([entry], version); if (mode === "durable") throw Error("injected durable failure"); return result; },
-      appendEventBatch(_root, entries, version) { const mode = failure(entries); if (mode === "pre") throw Error("injected pre-append failure"); const result = apply(entries, version); if (mode === "durable") throw Error("injected durable failure"); return result; },
+      appendEventBatch(_root, entries, version) { batchCalls++; const mode = failure(entries); if (mode === "pre") throw Error("injected pre-append failure"); const result = apply(entries, version); if (mode === "durable") throw Error("injected durable failure"); return result; },
     },
-    latest: () => current, batches, events,
+    latest: () => current, batches, events, get batchCalls() { return batchCalls; },
   };
 }
 
@@ -967,6 +967,25 @@ test("single active PASS release requires R11 finalization without action offer"
 });
 
 
+async function approvedRepairS3Fixture() {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd;
+  const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });
+  createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable });
+  const challenge = await prepareUserApprovedRepair(first, cwd);
+  first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: first.sessionManager });
+  assert.equal(JSON.parse(await invoke(first, "goal_status", {})).status, "R10A3_REPAIR_APPROVAL_RECORDED");
+  return { cwd, first, durable, challenge, injected: injectedStore(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime")) };
+}
+
+function assertClosedRepairS3(status, injected, issuerCalls) {
+  assert.equal(status.status, "R10A3_REPAIR_APPROVAL_DRIFT");
+  assert.deepEqual(status.attention, ["R10A3_REPAIR_APPROVAL_DRIFT"]);
+  assert.equal(issuerCalls(), 0);
+  assert.equal(injected.batchCalls, 0);
+  assert.equal(injected.events.filter(event => event.type !== "goal.checkpoint").length, 0);
+  assert.equal(injected.latest().tasks.size, 0);
+}
+
 test("Repair S3 pre-append failure preserves approved authority and retries one canonical batch", async () => {
   const cwd = repo(), first = pi(cwd); first.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });
   createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); const challenge = await prepareUserApprovedRepair(first, cwd);
@@ -1000,13 +1019,66 @@ test("Repair S3 rejects durable recovery when canonical Task metadata drifts", a
   const api = pi(cwd, first.entries); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store }); await assert.rejects(invoke(api, "goal_status", {}), /drifted durable S3/);
 });
 
-test("Repair S3 keeps a known raw nonce out of durable and public surfaces", async () => {
-  const cwd = repo(), api = pi(cwd), raw = "known-s3-raw-nonce"; api.cwd = cwd; let calls = 0; const durable = { ...observationHost(cwd, { codes: ["PASS", "FAIL"] }), issueRepairCapability(input) { calls++; return { ...issueRepairCapability(input), nonce: raw }; } };
-  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {}); const status = await invoke(api, "goal_status", {}); const visible = `${readFileSync(join(cwd, ".state/goal-engine/goals/harden-runtime/events.jsonl"), "utf8")}${JSON.stringify(api.entries)}${status}`;
-  assert.equal(visible.includes(raw), false); assert.equal(calls, 1);
+test("Repair S3 fails closed after S2 when the fixture repository HEAD drifts", async () => {
+  const fixture = await approvedRepairS3Fixture(); let issuerCalls = 0;
+  const durable = { ...fixture.durable, issueRepairCapability(input) { issuerCalls++; return issueRepairCapability(input); } };
+  writeFileSync(join(fixture.cwd, "s3-head-drift"), "drift"); git(fixture.cwd, "add", "s3-head-drift"); git(fixture.cwd, "commit", "-m", "s3-head-drift");
+  const api = pi(fixture.cwd, fixture.first.entries); api.cwd = fixture.cwd;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store: fixture.injected.store });
+  assertClosedRepairS3(JSON.parse(await invoke(api, "goal_status", {})), fixture.injected, () => issuerCalls);
 });
 
-test("Repair S3 reads its clock once and expires before issuing", async () => {
+test("Repair S3 fails closed for trusted reload-projection identity drift proxies", async () => {
+  // These proxies model a Host reload disagreement only; they never claim caller authority.
+  for (const [name, mutate] of [
+    ["execution revision", projection => { projection.executionRevision = "drifted-revision"; }],
+    ["execution contract", projection => { projection.executionContractHash = "drifted-contract"; }],
+    ["Episode status", projection => { [...projection.repairEpisodes.values()][0].status = "resolved"; }],
+    ["Condition statement", projection => { projection.conditions.get([...projection.repairChallenges.values()][0].conditionId).definition.statement = "drifted statement"; }],
+    ["Condition expected", projection => { projection.conditions.get([...projection.repairChallenges.values()][0].conditionId).definition.expected = "drifted expected"; }],
+    ["Condition remediation", projection => { projection.conditions.get([...projection.repairChallenges.values()][0].conditionId).definition.remediation.allowed_paths = ["src/**", "test/**"]; }],
+  ]) {
+    const fixture = await approvedRepairS3Fixture(); let issuerCalls = 0;
+    mutate(fixture.injected.latest());
+    const durable = { ...fixture.durable, issueRepairCapability(input) { issuerCalls++; return issueRepairCapability(input); } };
+    const api = pi(fixture.cwd, fixture.first.entries); api.cwd = fixture.cwd;
+    createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store: fixture.injected.store });
+    assertClosedRepairS3(JSON.parse(await invoke(api, "goal_status", {})), fixture.injected, () => issuerCalls);
+  }
+});
+
+test("Repair S3 treats mixed pending approvals as ambiguous without issuer or business events", async () => {
+  for (const [name, phases] of [["two approved", ["approved", "approved"]], ["approved plus consumed", ["approved", "consumed"]], ["single consumed", ["consumed"]]]) {
+    const fixture = await approvedRepairS3Fixture(), projection = fixture.injected.latest(); let issuerCalls = 0;
+    const challenge = [...projection.repairChallenges.values()][0];
+    challenge.phase = phases[0];
+    if (phases[1]) projection.repairChallenges.set(`${challenge.challengeId}-second`, { ...structuredClone(challenge), challengeId: `${challenge.challengeId}-second`, phase: phases[1] });
+    const durable = { ...fixture.durable, issueRepairCapability(input) { issuerCalls++; return issueRepairCapability(input); } };
+    const api = pi(fixture.cwd, fixture.first.entries); api.cwd = fixture.cwd;
+    createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store: fixture.injected.store });
+    const status = JSON.parse(await invoke(api, "goal_status", {}));
+    assert.equal(status.status, "R10A3_REPAIR_APPROVAL_ATTENTION", name); assert.deepEqual(status.attention, ["R10A3_REPAIR_APPROVAL_AMBIGUOUS"], name);
+    assert.equal(issuerCalls, 0, name); assert.equal(fixture.injected.batchCalls, 0, name); assert.equal(fixture.injected.events.filter(event => event.type !== "goal.checkpoint").length, 0, name);
+  }
+});
+
+test("Repair S3 keeps a known raw nonce out of durable, public, and caught-error surfaces", async () => {
+  const raw = "known-s3-raw-nonce", success = { cwd: repo() }, successApi = pi(success.cwd); successApi.cwd = success.cwd; let successCalls = 0;
+  const successHost = { ...observationHost(success.cwd, { codes: ["PASS", "FAIL"] }), issueRepairCapability(input) { successCalls++; return { ...issueRepairCapability(input), nonce: raw }; } };
+  createGoalEngineExtension(successApi, { goalStateEnv: {}, runtimeHost: successHost }); await prepareUserApprovedRepair(successApi, success.cwd); successApi.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd: success.cwd, sessionManager: successApi.sessionManager }); await invoke(successApi, "goal_status", {});
+  const publicStatus = await invoke(successApi, "goal_status", {}), jsonl = readFileSync(join(success.cwd, ".state/goal-engine/goals/harden-runtime/events.jsonl"), "utf8"), entries = JSON.stringify(successApi.entries);
+  assert.equal(jsonl.includes(raw), false); assert.equal(jsonl.includes("nonceDigest"), true); assert.equal(entries.includes(raw), false); assert.equal(publicStatus.includes(raw), false);
+  for (const publicSurface of [publicStatus, entries]) for (const forbidden of ["nonceDigest", "goal-repair-capability.v1", "metadata"]) assert.equal(publicSurface.includes(forbidden), false, forbidden);
+  assert.equal(successCalls, 1);
+
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let failedCalls = 0;
+  const durable = { ...observationHost(cwd, { codes: ["PASS", "FAIL"] }), issueRepairCapability(input) { failedCalls++; return { ...issueRepairCapability(input), nonce: raw }; } };
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, appendEventBatch(_root, events, version) { if (events.some(event => event.type === "repair.capability_consumed")) throw Error(`durable failure ${raw}`); return appendEventBatch(_root, events, version); } }); await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {});
+  let caught = ""; await assert.rejects(invoke(api, "goal_status", {}), error => (caught = error.message, true));
+  assert.equal(caught.includes(raw), false); assert.equal(failedCalls, 1);
+});
+
+test("Repair S3 successful materialization reads its clock once", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd; let clockCalls = 0, issuerCalls = 0; const durable = { ...observationHost(cwd, { codes: ["PASS", "FAIL"] }), clock: () => Date.now() + clockCalls++, issueRepairCapability(input) { issuerCalls++; return issueRepairCapability(input); } };
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {}); clockCalls = 0; assert.equal(JSON.parse(await invoke(api, "goal_status", {})).status, "R10A3_REPAIR_MATERIALIZED"); assert.equal(clockCalls, 1); assert.equal(issuerCalls, 1);
 });

@@ -47,6 +47,11 @@ R9 将 `requested` 与 `lease_allocated` 同时命名为 `observation_start`；a
 
 ## R10 Repair-owned 复验观察未接线
 
+### R10A3 S3 raw nonce 异常泄露
+
+覆盖回归以已批准 Repair challenge 注入含已知 raw nonce 的 capability，并让仅 S3 materialization batch 在持久化前抛出包含该 nonce 的异常；RED 显示 `goal_status` 原样传播了 `error.message`。raw nonce 不得出现在任何 public/caught-error surface。修复必须在 S3 恢复校验失败时返回不含 capability 原文的稳定错误，同时继续保留原始 cause 供内部诊断。
+
+
 ### R10A3 S3 capability materialization 恢复缺口
 
 此前 S3 在原子 batch durable 后只比较 phase、digest、Task id 与 Episode includes，`consumedAt` 或完整 Task contract/metadata 漂移仍会被错误恢复；同一 status 还会多次读取时钟。恢复必须重放本次三事件计划，并逐项比较完整 consume challenge、canonical Task 与 Episode link；S3 只读取一次时钟。残留 `consumed` capability 视为不可判定 pending authority，闭锁为 approval ambiguous，绝不落入 R9。

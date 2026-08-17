@@ -1357,7 +1357,10 @@ export function createGoalEngineExtension(pi, options = {}) {
             const recovered = loadProjectionFn(root, goalId);
             if (!isDeepStrictEqual(recovered?.repairChallenges.get(challenge.challengeId), expected.repairChallenges.get(challenge.challengeId))
               || !isDeepStrictEqual(recovered?.tasks.get(plan.taskId), expected.tasks.get(plan.taskId))
-              || !isDeepStrictEqual(recovered?.repairEpisodes.get(episode.episodeId), expected.repairEpisodes.get(episode.episodeId))) throw cause;
+              || !isDeepStrictEqual(recovered?.repairEpisodes.get(episode.episodeId), expected.repairEpisodes.get(episode.episodeId))) {
+              const nonce = Buffer.isBuffer(capability.nonce) ? capability.nonce.toString("utf8") : String(capability.nonce);
+              throw new Error(String(cause?.message || "R10A3_REPAIR_MATERIALIZATION_FAILED").split(nonce).join("[redacted]"));
+            }
           }
           return JSON.stringify({ goalId, status: "R10A3_REPAIR_MATERIALIZED" });
         }
