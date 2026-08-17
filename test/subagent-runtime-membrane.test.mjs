@@ -355,7 +355,9 @@ test("spawn rendering keeps the complete execute result while showing one statef
     ["Status: running"],
   );
   assert.deepEqual(statusState, { subagentSpawnSummary: "unchanged" });
-  assert.equal(renderers.renderSubagentCall({ action: "status" }, theme, { state: statusState }), undefined);
+  const statusCall = renderers.renderSubagentCall({ action: "status" }, theme, { state: statusState });
+  assert.ok(statusCall, "defined renderCall slots must return a Component");
+  assert.deepEqual(statusCall.render(120), []);
 });
 
 test("beforeDispose completes before RPC disposal in the single shutdown handler", async () => {

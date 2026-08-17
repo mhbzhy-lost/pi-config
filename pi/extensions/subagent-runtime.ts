@@ -43,9 +43,9 @@ function spawnStartingSummary(args: any): string | undefined {
 export function createSubagentToolRenderers() {
   const renderSubagentCall = (args: any, theme: any, context: any) => {
     const starting = spawnStartingSummary(args);
-    if (!starting) return undefined;
+    if (!starting) return new Text("", 0, 0);
     const summary = context?.state?.[SUBAGENT_SPAWN_SUMMARY_KEY] ?? starting;
-    return typeof summary === "string" ? new Text(theme.fg("dim", summary), 0, 0) : undefined;
+    return new Text(typeof summary === "string" ? theme.fg("dim", summary) : "", 0, 0);
   };
   const renderSubagentResult = (result: any, _options: any, theme: any, context: any) => {
     const args = context?.args;
