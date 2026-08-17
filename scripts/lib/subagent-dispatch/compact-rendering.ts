@@ -44,6 +44,15 @@ export function formatCompactSubagentNotification(message: unknown) {
   }).join("\n");
 }
 
+export function formatCompactSubagentSpawnSummary(result: unknown): string | undefined {
+  const value = record(result);
+  const details = record(value?.details);
+  const agent = typeof details?.agent === "string" ? details.agent.trim() : "";
+  const title = typeof details?.title === "string" ? details.title.trim() : "";
+  if (!agent || !title) return undefined;
+  return `* subagent ${value?.isError === true ? "failed" : "started"} ${agent}: ${title}`;
+}
+
 export function formatCompactSubagentToolResult(result: unknown, args: unknown) {
   const text = textContent(result);
   if (record(args)?.action !== "status") return text;

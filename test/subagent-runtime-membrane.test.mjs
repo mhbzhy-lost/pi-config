@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
+
+const { createJiti } = await import(piHostJitiUrl);
+const runtimeJiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
+const { createSubagentToolRenderers } = await runtimeJiti.import("../pi/extensions/subagent-runtime.ts");
 
 import { createHeadlessSubagentApi } from "../scripts/lib/subagent-dispatch/runtime-membrane.ts";
 import { createTitleRegistry } from "../scripts/lib/subagent-dispatch/title-registry.ts";
@@ -278,18 +283,79 @@ test("the headless membrane denies registration APIs by default and preserves ru
   assert.deepEqual(pi.eventListeners, [{ name: "subagents:rpc:v1:request", handler: eventHandler }]);
 });
 
-test("project subagent tool retains the injected display-only result renderer", () => {
+test("project subagent tool retains injected display-only call and result renderers", () => {
   const pi = createPi();
+  const renderSubagentCall = () => undefined;
   const renderSubagentResult = () => undefined;
 
   createTypedSubagentExtension(pi, {
     rpc: createRpc(),
     cleanupStore: {},
+    renderSubagentCall,
     renderSubagentResult,
   });
 
   assert.equal(pi.tools[0].name, "subagent");
+  assert.equal(pi.tools[0].renderCall, renderSubagentCall);
   assert.equal(pi.tools[0].renderResult, renderSubagentResult);
+});
+
+test("spawn rendering keeps the complete execute result while showing one stateful call line", async () => {
+  const pi = createPi();
+  const rpc = createRpc();
+  rpc.spawn = async (params) => {
+    rpc.calls.push({ method: "spawn", params });
+    pi.events.emit("subagent:async-started", {
+      id: "leaf-run-1", runId: "leaf-run-1", asyncDir: "/tmp/leaf-run-1",
+      sessionId: "/tmp/session.jsonl", agent: "executor", pid: 102,
+      workflowKey: "typed-dispatch-1", parentWorkflowRunId: "workflow-run-1",
+    });
+    return { text: "workflow spawned", details: { runId: "workflow-run-1", asyncDir: "/tmp/workflow-run-1" } };
+  };
+  const renderers = createSubagentToolRenderers();
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, randomUUID: () => "dispatch-1", ...renderers });
+  const result = await execute(pi.tools[0], codingContract());
+  const theme = { fg: (_color, text) => text };
+  const context = { args: codingContract(), state: {} };
+
+  assert.deepEqual(
+    renderers.renderSubagentCall(context.args, theme, context).render(120).map((line) => line.trimEnd()),
+    ["* subagent starting executor: Install the typed subagent runtime"],
+  );
+  assert.equal(
+    result.content[0].text,
+    "Started executor: Install the typed subagent runtime (leaf-run-1). Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.",
+  );
+  assert.equal(result.details.runId, "leaf-run-1");
+  assert.deepEqual(
+    renderers.renderSubagentResult(result, { expanded: false }, theme, context).render(120),
+    [],
+  );
+  assert.equal(context.state.subagentSpawnSummary, "* subagent started executor: Install the typed subagent runtime");
+  assert.deepEqual(
+    renderers.renderSubagentCall(context.args, theme, context).render(120).map((line) => line.trimEnd()),
+    ["* subagent started executor: Install the typed subagent runtime"],
+  );
+  assert.deepEqual(
+    renderers.renderSubagentResult(result, { expanded: true }, theme, context).render(120),
+    [],
+  );
+
+  const failed = { isError: true, details: { agent: "executor", title: "Install the typed subagent runtime" } };
+  assert.deepEqual(renderers.renderSubagentResult(failed, { expanded: false }, theme, context).render(120), []);
+  assert.equal(context.state.subagentSpawnSummary, "* subagent failed executor: Install the typed subagent runtime");
+
+  const statusState = { subagentSpawnSummary: "unchanged" };
+  assert.deepEqual(
+    renderers.renderSubagentResult(
+      { content: [{ type: "text", text: "State: running" }] },
+      { expanded: false }, theme,
+      { args: { action: "status" }, state: statusState },
+    ).render(120).map((line) => line.trimEnd()),
+    ["Status: running"],
+  );
+  assert.deepEqual(statusState, { subagentSpawnSummary: "unchanged" });
+  assert.equal(renderers.renderSubagentCall({ action: "status" }, theme, { state: statusState }), undefined);
 });
 
 test("beforeDispose completes before RPC disposal in the single shutdown handler", async () => {

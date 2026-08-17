@@ -657,6 +657,7 @@ export function createTypedSubagentExtension(
     randomUUID: createId = randomUUID,
     titleRegistry = getTitleRegistry(cleanupStore),
     extraDisposables = [],
+    renderSubagentCall,
     renderSubagentResult,
     prepareCodingSpawn = async () => {},
     resolveCodingSpawnIdentity,
@@ -734,6 +735,7 @@ export function createTypedSubagentExtension(
     label: "Subagent",
     description: TYPED_SUBAGENT_DESCRIPTION,
     parameters: TYPED_SUBAGENT_PARAMETERS,
+    ...(typeof renderSubagentCall === "function" ? { renderCall: renderSubagentCall } : {}),
     ...(typeof renderSubagentResult === "function" ? { renderResult: renderSubagentResult } : {}),
     async execute(toolCallId, input, _signal, _onUpdate, ctx) {
       try {

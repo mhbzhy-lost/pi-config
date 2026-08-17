@@ -5,22 +5,12 @@ import { tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { join } from "node:path";
 import test from "node:test";
-import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
-import {
-  getMarkdownTheme,
-  initTheme,
-  SessionManager,
-} from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
+import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
+
+const { jiti, codingAgent } = await loadPiTestRuntime(import.meta.url);
+const { getMarkdownTheme, initTheme, SessionManager } = codingAgent;
 
 initTheme("dark", false);
-
-const jiti = createJiti(import.meta.url, {
-  moduleCache: false,
-  alias: {
-    "@earendil-works/pi-coding-agent": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
-    "@earendil-works/pi-tui": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js",
-  },
-});
 const native = await jiti.import("../pi/extensions/lib/subagent-native-conversation.ts");
 
 function stripAnsi(value) {

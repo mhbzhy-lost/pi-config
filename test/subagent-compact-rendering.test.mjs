@@ -3,12 +3,47 @@ import test from "node:test";
 
 import {
   formatCompactSubagentNotification,
+  formatCompactSubagentSpawnSummary,
   formatCompactSubagentToolResult,
 } from "../scripts/lib/subagent-dispatch/compact-rendering.ts";
 
 function clone(value) {
   return structuredClone(value);
 }
+
+test("compact spawn summary uses structured identity without mutating the result", () => {
+  const result = {
+    content: [{
+      type: "text",
+      text: "Started executor: 迁移 Shell 到官方 fullscreen (run-123). Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.",
+    }],
+    details: {
+      runId: "run-123",
+      asyncDir: "/tmp/run-123",
+      agent: "executor",
+      title: "迁移 Shell 到官方 fullscreen",
+    },
+  };
+  const before = clone(result);
+
+  assert.equal(
+    formatCompactSubagentSpawnSummary(result),
+    "* subagent started executor: 迁移 Shell 到官方 fullscreen",
+  );
+  assert.deepEqual(result, before);
+});
+
+test("compact spawn summary supports generic failures and rejects missing structured identity", () => {
+  assert.equal(
+    formatCompactSubagentSpawnSummary({ isError: true, details: { agent: "reviewer", title: "审查兼容性报告" } }),
+    "* subagent failed reviewer: 审查兼容性报告",
+  );
+  for (const result of [
+    { content: [{ type: "text", text: "Started guessed: from content" }], details: { title: "Missing agent" } },
+    { details: { agent: "executor", title: "" } },
+    { details: { agent: "executor" } },
+  ]) assert.equal(formatCompactSubagentSpawnSummary(result), undefined);
+});
 
 test("compact notification shows only one title and completion state without mutating the message", () => {
   const message = {

@@ -24,6 +24,19 @@ test("keeps pi-subagents Pi-managed while disabling every upstream package resou
   });
 });
 
+test("disables every task scheduler package resource", async () => {
+  const settings = JSON.parse(await text("pi/settings.json"));
+  const entry = settings.packages.find((candidate) => candidate?.source === "npm:@amaster.ai/pi-task-scheduler@0.1.9");
+
+  assert.deepEqual(entry, {
+    source: "npm:@amaster.ai/pi-task-scheduler@0.1.9",
+    extensions: [],
+    skills: [],
+    prompts: [],
+    themes: [],
+  });
+});
+
 test("keeps delegate as the only enabled pi-subagents builtin agent", async () => {
   const settings = JSON.parse(await text("pi/settings.json"));
   const overrides = settings.subagents?.agentOverrides ?? {};
