@@ -99,7 +99,7 @@ test("pinned process-terminal event is declared and emitted by async execution",
 test("installed launch arguments keep project child agents outside fanout hierarchy", async () => {
   const jiti = createJiti(import.meta.url, { moduleCache: false });
   const piArgs = await jiti.import(join(repoRoot, "pi/npm/node_modules/pi-subagents/src/runs/shared/pi-args.ts"));
-  const agents = Object.fromEntries(await Promise.all(["executor", "spark"].map(async (name) => {
+  const agents = Object.fromEntries(await Promise.all(["executor"].map(async (name) => {
     const source = await readFile(join(repoRoot, "pi/agents", `${name}.md`), "utf8");
     const fields = Object.fromEntries(source.match(/^---\n([\s\S]*?)\n---/)[1].split("\n").map((line) => line.split(/:\s*/, 2)));
     return [name, fields];

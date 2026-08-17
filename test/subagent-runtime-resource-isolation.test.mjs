@@ -108,7 +108,8 @@ test("the model-facing description contains the project dispatch and push-notifi
   const { TYPED_SUBAGENT_DESCRIPTION } = await import("../scripts/lib/subagent-dispatch/extension.ts");
 
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /dispatch-ir\.v1/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /executor or spark/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /For executor, provide/);
+  assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /spark/);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /completion notifications are delivered automatically/i);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /do not use sleep, status polling, or supervisor pending/i);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /if none remains, end the turn/i);

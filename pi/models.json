@@ -15,6 +15,32 @@
       },
       "models": [
         {
+          "id": "qwen3.8-max",
+          "name": "Qwen 3.8 Max",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 32768
+        }
+      ]
+    },
+    "openai-idealab-dogfooding": {
+      "baseUrl": "https://idealab.alibaba-inc.com/api/openai/v1",
+      "api": "openai-completions",
+      "authHeader": true,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "maxTokensField": "max_tokens",
+        "thinkingFormat": "qwen",
+        "supportsStrictMode": false,
+        "supportsLongCacheRetention": false
+      },
+      "models": [
+        {
           "id": "Peach-07-17-DogFooding",
           "name": "Peach 07-17 DogFooding",
           "reasoning": true,
@@ -24,42 +50,6 @@
           ],
           "contextWindow": 990000,
           "maxTokens": 65535
-        }
-      ]
-    },
-    "anthropic-idealab": {
-      "baseUrl": "https://idealab.alibaba-inc.com/api/anthropic",
-      "api": "anthropic-messages",
-      "metadataUserId": "971585a1-2eda-4cb9-9797-059cf86918cc",
-      "headers": {
-        "user-agent": "claude-cli/2.1.156 (external, sdk-cli)"
-      },
-      "compat": {
-        "forceAdaptiveThinking": true
-      },
-      "models": [
-        {
-          "id": "claude-opus-4-6",
-          "name": "Claude Opus 4.6",
-          "reasoning": true,
-          "input": [
-            "text",
-            "image"
-          ],
-          "contextWindow": 1000000,
-          "maxTokens": 65536
-        },
-        {
-          "id": "claude-opus-4-6-200k",
-          "name": "Claude Opus 4.6 (200k)",
-          "actualModelId": "claude-opus-4-6",
-          "reasoning": true,
-          "input": [
-            "text",
-            "image"
-          ],
-          "contextWindow": 200000,
-          "maxTokens": 65536
         }
       ]
     },

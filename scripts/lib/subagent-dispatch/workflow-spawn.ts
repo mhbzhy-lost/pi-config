@@ -1,5 +1,7 @@
 const WORKFLOW_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const STARTED_EVENT = "subagent:async-started";
+const COMPLETE_EVENT = "subagent:async-complete";
+const DEFAULT_CHILD_START_TIMEOUT_MS = 120_000;
 
 export class WorkflowSpawnError extends Error {
   constructor(code, message) {
@@ -7,6 +9,16 @@ export class WorkflowSpawnError extends Error {
     this.name = "WorkflowSpawnError";
     this.code = code;
   }
+}
+
+export function childStartTimeoutMs(override, executionTimeoutMs) {
+  if (override !== undefined && (!Number.isSafeInteger(override) || override <= 0)) {
+    throw new TypeError("workflow child start timeout override must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(executionTimeoutMs) || executionTimeoutMs <= 0) {
+    throw new TypeError("workflow child start execution timeout must be a positive safe integer");
+  }
+  return override ?? Math.min(executionTimeoutMs, DEFAULT_CHILD_START_TIMEOUT_MS);
 }
 
 function nonempty(value) {
@@ -98,6 +110,21 @@ function childBinding(event) {
   return { runId: id, asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid, agent: event.agent };
 }
 
+function rootCompletion(event) {
+  const runId = event?.runId ?? event?.id;
+  if (typeof runId !== "string" || runId.length === 0) return undefined;
+  const state = typeof event?.state === "string" && event.state.trim() ? event.state.trim() : undefined;
+  const error = typeof event?.error === "string" && event.error.trim() ? event.error.trim() : undefined;
+  return { runId, state, error };
+}
+
+function rootFinishedError(completion) {
+  return new WorkflowSpawnError(
+    "WORKFLOW_CHILD_START_FAILED",
+    `workflow root ${completion.runId} ${completion.state ?? "completed"} before child start${completion.error ? `: ${completion.error}` : ""}`,
+  );
+}
+
 export function createWorkflowChildStartCollector(events, {
   workflowKey: expectedKey,
   agent: expectedAgent,
@@ -123,13 +150,17 @@ export function createWorkflowChildStartCollector(events, {
   let timer;
   let drainingBuffered = false;
   let unsubscribe = () => {};
+  let unsubscribeComplete = () => {};
 
   const stop = () => {
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
     const dispose = unsubscribe;
+    const disposeComplete = unsubscribeComplete;
     unsubscribe = () => {};
+    unsubscribeComplete = () => {};
     dispose();
+    disposeComplete();
   };
   const fail = (error) => {
     if (terminalError || candidate?.resolved) return;
@@ -168,6 +199,7 @@ export function createWorkflowChildStartCollector(events, {
     if (!drainingBuffered) succeed(binding);
   };
   const buffered = [];
+  const completed = [];
   unsubscribe = events.on(STARTED_EVENT, (event) => {
     if (!record(event)
       || event.sessionId !== expectedSessionId
@@ -178,6 +210,16 @@ export function createWorkflowChildStartCollector(events, {
       return;
     }
     accept(event);
+  }) ?? (() => {});
+  unsubscribeComplete = events.on(COMPLETE_EVENT, (event) => {
+    const completion = rootCompletion(event);
+    if (!completion || terminalError || candidate?.resolved) return;
+    if (!rootRunId) {
+      completed.push(completion);
+      return;
+    }
+    if (completion.runId !== rootRunId) return;
+    fail(rootFinishedError(completion));
   }) ?? (() => {});
 
   return Object.freeze({
@@ -195,6 +237,11 @@ export function createWorkflowChildStartCollector(events, {
       drainingBuffered = false;
       if (terminalError) return Promise.reject(terminalError);
       if (candidate && !candidate.resolved) succeed(candidate);
+      for (const completion of completed) {
+        if (completion.runId !== rootRunId || candidate?.resolved) continue;
+        fail(rootFinishedError(completion));
+      }
+      completed.length = 0;
       if (terminalError) return Promise.reject(terminalError);
       if (candidate?.resolved) return Promise.resolve({ runId: candidate.runId, asyncDir: candidate.asyncDir });
       return new Promise((resolve, reject) => {

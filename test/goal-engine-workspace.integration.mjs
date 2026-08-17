@@ -285,6 +285,19 @@ test("inspectExecutorWorkspace reports changed files and write path boundaries",
   assert.doesNotThrow(() => assertWorkspaceChangesWithinPaths(globInspection, ["src/**"]));
 });
 
+test("writePath ending with slash is a directory prefix", () => {
+  assert.doesNotThrow(() =>
+    workspace.assertWorkspaceChangesWithinPaths({ changedFiles: ["src/a.py"] }, ["src/"]),
+  );
+});
+
+test("bare writePath mismatch error hints directory syntax", () => {
+  assert.throws(
+    () => workspace.assertWorkspaceChangesWithinPaths({ changedFiles: ["src/a.py"] }, ["src"]),
+    /use "dir\/\*\*" or "dir\/" for a directory/,
+  );
+});
+
 test("writePaths requires both sides of rename and copy to be owned", () => {
   const origin = initRepo();
   const stateRoot = tmpStateRoot();

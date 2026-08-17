@@ -8,14 +8,14 @@ import { compileCodingDispatchIR, CodingDispatchContractError } from "./ir.ts";
 import { renderCodingDispatchPrompt } from "./prompt.ts";
 import { createTypedSubagentRpcClient } from "./rpc-client.ts";
 import { createHeadlessSubagentApi } from "./runtime-membrane.ts";
-import { buildWorkflowSpawn, createWorkflowChildStartCollector } from "./workflow-spawn.ts";
+import { buildWorkflowSpawn, createWorkflowChildStartCollector, childStartTimeoutMs } from "./workflow-spawn.ts";
 import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
 import { findGoalExecutorCoordinator } from "./root-broker-registry.ts";
 
 const CLEANUP_KEY = "__typedSubagentRuntimeCleanup";
 const SHUTDOWN_DEBT_KEY = "__typedSubagentRuntimeShutdownDebt";
-const CODING_AGENTS = new Set(["executor", "spark"]);
+const CODING_AGENTS = new Set(["executor"]);
 const CONTROL_ACTIONS = new Set(["status", "steer", "interrupt", "stop"]);
 const WORKSPACE_ORIGINS_KEY = "__typedSubagentWorkspaceOrigins";
 
@@ -25,6 +25,13 @@ const stringList = {
   maxItems: 32,
 };
 const pathList = { ...stringList, minItems: 0 };
+
+// The detailed branches guide model calls. Narrow fallbacks allow malformed
+// expected containers through to compileCodingDispatchIR(), which owns precise
+// coding-contract coercion and keypath diagnostics.
+const runtimeValidated = (schema, fallback) => ({ anyOf: [schema, fallback, { type: "string" }] });
+const looseObject = { type: "object", additionalProperties: true };
+const looseArray = { type: "array" };
 
 const CODING_SCHEMA = {
   type: "object",
@@ -47,11 +54,11 @@ const CODING_SCHEMA = {
     version: { const: "dispatch-ir.v1" },
     taskId: { type: "string", pattern: "^[A-Za-z0-9._-]{1,160}$" },
     title: { type: "string", minLength: 1, maxLength: 4096 },
-    agent: { enum: ["executor", "spark"] },
+    agent: { enum: ["executor"] },
     risk: { enum: ["low", "normal", "high"] },
     objective: { type: "string", minLength: 1, maxLength: 4096 },
-    requirements: { ...stringList, minItems: 1 },
-    workflow: {
+    requirements: runtimeValidated({ ...stringList, minItems: 1 }, looseArray),
+    workflow: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["mode"],
@@ -59,8 +66,8 @@ const CODING_SCHEMA = {
         mode: { enum: ["tdd", "existing-tests", "docs-only"] },
         reason: { type: "string", minLength: 1, maxLength: 4096 },
       },
-    },
-    context: {
+    }, looseObject),
+    context: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["knownFacts", "decisions", "relevantFiles"],
@@ -69,8 +76,8 @@ const CODING_SCHEMA = {
         decisions: stringList,
         relevantFiles: pathList,
       },
-    },
-    boundaries: {
+    }, looseObject),
+    boundaries: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["writePaths", "excludedWork", "forbiddenActions"],
@@ -79,16 +86,16 @@ const CODING_SCHEMA = {
         excludedWork: stringList,
         forbiddenActions: stringList,
       },
-    },
-    acceptance: {
+    }, looseObject),
+    acceptance: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["criteria"],
       properties: {
         criteria: { ...stringList, minItems: 1 },
       },
-    },
-    execution: {
+    }, looseObject),
+    execution: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["timeoutMs"],
@@ -97,7 +104,7 @@ const CODING_SCHEMA = {
         timeoutMs: { type: "integer", minimum: 1 },
         worktree: { type: "boolean" },
       },
-    },
+    }, looseObject),
   },
 };
 
@@ -110,7 +117,7 @@ const GENERIC_SCHEMA = {
       type: "string",
       minLength: 1,
       maxLength: 256,
-      not: { enum: ["executor", "spark"] },
+      not: { enum: ["executor"] },
     },
     title: { type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\r\\n\\u0000-\\u001F\\u007F-\\u009F]+$" },
     task: { type: "string", minLength: 1, maxLength: 65536 },
@@ -146,8 +153,9 @@ const WORKSPACE_STATUS_SCHEMA = {
   properties: { action: { const: "workspace_status" }, workspace_id: { type: "string", minLength: 1, maxLength: 4096 } },
 };
 const WORKSPACE_DISPOSITION_SCHEMA = {
-  type: "object", additionalProperties: false, required: ["action", "workspace_id", "disposition", "action_token"],
-  properties: { action: { const: "workspace_disposition" }, workspace_id: { type: "string", minLength: 1, maxLength: 4096 }, disposition: { enum: ["integrate", "preserve", "discard"] }, strategy: { enum: ["cherry-pick", "merge"] }, action_token: { type: "string", minLength: 1, maxLength: 4096 } },
+  type: "object", additionalProperties: false, required: ["action", "workspace_id", "disposition"],
+  properties: { action: { const: "workspace_disposition" }, workspace_id: { type: "string", minLength: 1, maxLength: 4096 }, disposition: { enum: ["integrate", "preserve", "discard", "release"] }, strategy: { enum: ["cherry-pick", "merge"] }, action_token: { type: "string", minLength: 1, maxLength: 4096 } },
+  allOf: [{ if: { properties: { disposition: { const: "release" } } }, then: {}, else: { required: ["action_token"] } }],
 };
 
 const CONTROL_SCHEMA = {
@@ -171,7 +179,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
 
 export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime.
 
-For executor or spark, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, and stop. Optional worktree:true creates an isolated managed workspace. workspace_status and workspace_disposition are local workspace actions.`;
+For executor, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, and stop. Optional worktree:true creates an isolated managed workspace. workspace_status and workspace_disposition are local workspace actions; use release to free a preserved workspace without an action token.`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 
@@ -183,13 +191,16 @@ function nonempty(value) {
   return typeof value === "string" && value.length > 0;
 }
 
-function failure(code, message, detail) {
+function failure(code, message, detail, keypath) {
+  const keypathSuffix = keypath === undefined || message.includes(`keypath=${keypath}`) ? "" : `; keypath=${keypath}`;
+  const text = `${code}: ${message}${keypathSuffix}`;
   return {
-    content: [{ type: "text", text: `${code}: ${message}` }],
+    content: [{ type: "text", text }],
     isError: true,
     details: {
       code,
       ...(detail !== undefined ? { detail } : {}),
+      ...(keypath !== undefined ? { keypath } : {}),
     },
   };
 }
@@ -317,7 +328,7 @@ async function spawnWorkflowLeaf(pi, rpc, {
 }
 
 function workspacePublic(value, proof) {
-  return { workspace_id: value.workspaceId, state: value.state, workspace_state: value.state, process_terminal: proof?.state ?? "unknown", ...(value.dispatchCwd ? { dispatch_cwd: value.dispatchCwd } : {}), ...(value.allowedDispositions ? { allowed_dispositions: value.allowedDispositions, ...(value.state === "active" && value.actionToken ? { action_token: value.actionToken } : {}) } : {}) };
+  return { workspace_id: value.workspaceId, state: value.state, workspace_state: value.state, process_terminal: proof?.state ?? "unknown", ...(value.dispatchCwd ? { dispatch_cwd: value.dispatchCwd } : {}), ...(value.allowedDispositions ? { allowed_dispositions: value.allowedDispositions, ...(value.actionToken ? { action_token: value.actionToken } : {}) } : {}), ...(value.integrateBlockedReasons ? { integrate_blocked_reasons: value.integrateBlockedReasons } : {}) };
 }
 function workspaceError(error, workspace) {
   if (workspace?.workspaceId) {
@@ -330,8 +341,24 @@ function defaultCanonicalOrigin({ requestedCwd }) {
   const cwd = realpathSync(requestedCwd);
   return realpathSync(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" }).trim());
 }
-async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, workspace) {
+function detectContinuationWorkspace({ cwd, originRoot }) {
+  const relativeCwd = path.relative(originRoot, cwd);
+  const segments = relativeCwd.split(path.sep);
+  if (relativeCwd === "" || relativeCwd.startsWith(`..${path.sep}`) || path.isAbsolute(relativeCwd)) return undefined;
+  if (segments[0] !== ".state" || segments[1] !== "subagent-dispatch" || segments[2] !== "worktrees" || !nonempty(segments[3])) return undefined;
+  return segments[3];
+}
+async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, workspace, workspaceController, resolveCanonicalOrigin) {
   const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
+  const continuationWorkspace = workspace ? undefined : await (async () => {
+    try {
+      const originRoot = await resolveCanonicalOrigin({ requestedCwd: ir.execution.cwd, ctx });
+      const workspaceId = detectContinuationWorkspace({ cwd: ir.execution.cwd, originRoot });
+      return workspaceId ? { originRoot, workspaceId } : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
   const prompt = renderCodingDispatchPrompt(ir);
   const capabilities = await rpc.ping();
   assertSpawnCapabilities(capabilities, ctx.cwd);
@@ -368,13 +395,18 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     workflowKey,
     agent: ir.agent,
     sessionId: lifecycleSessionIdentity(capabilities.session),
-    timeoutMs: workflowChildStartTimeoutMs ?? ir.execution.timeoutMs,
+    timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, ir.execution.timeoutMs),
     params: codingWorkflowSpawnParams(runtimeIr, runtimePrompt, workflowKey),
     identity,
     titleRegistry,
     onBinding: workspace?.onBinding,
   });
   if (workspace) workspace.controller.bindManagedSubagentWorkspaceRun({ originRoot: workspace.originRoot, workspaceId: workspace.workspaceId }, binding);
+  else if (continuationWorkspace) {
+    try { workspaceController.bindManagedSubagentWorkspaceRun(continuationWorkspace, binding); } catch {
+      // A missing or unreadable continuation ledger must not block the dispatched run.
+    }
+  }
   if (executionTicket) await goalCoordinator.bindSpawn(executionTicket, binding);
   titleRegistry.remember(binding.runId, ir.title);
   const handle = {
@@ -414,7 +446,7 @@ async function executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, work
     workflowKey,
     agent: input.agent,
     sessionId: lifecycleSessionIdentity(capabilities.session),
-    timeoutMs: input.timeoutMs ?? workflowChildStartTimeoutMs ?? 120_000,
+    timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, input.timeoutMs ?? 120_000),
     params: genericWorkflowSpawnParams(workspace ? { ...input, cwd: workspace.dispatchCwd } : input, ctx, workflowKey),
     titleRegistry,
     onBinding: workspace?.onBinding,
@@ -473,7 +505,9 @@ async function executeWorkspaceAction(input, ctx, controller, origins, inspectFa
   }
   const value = input.action === "workspace_status"
     ? controller.statusManagedSubagentWorkspace({ originRoot, workspaceId: input.workspace_id, terminalProof: proof })
-    : controller.disposeManagedSubagentWorkspace({ originRoot, workspaceId: input.workspace_id, disposition: input.disposition, strategy: input.strategy ?? "cherry-pick", actionToken: input.action_token, terminalProof: proof });
+    : input.disposition === "release"
+      ? controller.releaseManagedSubagentWorkspace({ originRoot, workspaceId: input.workspace_id })
+      : controller.disposeManagedSubagentWorkspace({ originRoot, workspaceId: input.workspace_id, disposition: input.disposition, strategy: input.strategy ?? "cherry-pick", actionToken: input.action_token, terminalProof: proof });
   const publicWorkspace = workspacePublic(value, proof);
   return { content: [{ type: "text", text: JSON.stringify(publicWorkspace) }], isError: false, details: publicWorkspace };
 }
@@ -703,21 +737,21 @@ export function createTypedSubagentExtension(
     ...(typeof renderSubagentResult === "function" ? { renderResult: renderSubagentResult } : {}),
     async execute(toolCallId, input, _signal, _onUpdate, ctx) {
       try {
-        if (!isRecord(input)) return failure("INVALID_DISPATCH", "subagent input must be an object");
+        if (!isRecord(input)) return failure("INVALID_DISPATCH", `subagent input must be an object; expected object; received ${input === null ? "null" : Array.isArray(input) ? "array" : typeof input}`, "$", "$");
         const origins = workspaceOrigins(cleanupStore);
         if (input.action === "workspace_status" || input.action === "workspace_disposition") return await executeWorkspaceAction(input, ctx, workspaceController, origins, inspectFacadeTerminalProof, resolveCanonicalOrigin);
         if (Object.hasOwn(input, "action")) return await executeControl(input, rpc);
         if (Object.hasOwn(input, "version")) {
           const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
           const workspace = ir.execution.worktree ? managedWorkspace({ input, ctx, toolCallId, kind: "coding", controller: workspaceController, origins, resolveRootSessionId, registerFacadeRun, contractHash: ir.hash, createId, resolveCanonicalOrigin }) : undefined;
-          try { return await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs, workspace); } catch (error) { throw workspaceError(error, workspace); }
+          try { return await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs, workspace, workspaceController, resolveCanonicalOrigin); } catch (error) { throw workspaceError(error, workspace); }
         }
         const workspace = input.worktree === true ? managedWorkspace({ input, ctx, toolCallId, kind: "generic", controller: workspaceController, origins, resolveRootSessionId, registerFacadeRun, createId, resolveCanonicalOrigin }) : undefined;
         try { return await executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs, workspace); } catch (error) { throw workspaceError(error, workspace); }
       } catch (error) {
         const code = error?.code
           ?? (error instanceof CodingDispatchContractError ? error.code : "SUBAGENT_RPC_FAILED");
-        return failure(code, error instanceof Error ? error.message : String(error), error?.detail);
+        return failure(code, error instanceof Error ? error.message : String(error), error?.detail, error?.keypath);
       }
     },
   };

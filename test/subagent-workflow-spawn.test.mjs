@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   WorkflowSpawnError,
   buildWorkflowSpawn,
+  childStartTimeoutMs,
   createWorkflowChildStartCollector,
 } from "../scripts/lib/subagent-dispatch/workflow-spawn.ts";
 
@@ -269,4 +270,119 @@ test("times out without a matching leaf event and releases its listener", async 
 
   await rejectsWithCode(collector.waitFor({ runId: "workflow-run-1" }), "WORKFLOW_CHILD_START_TIMEOUT");
   assert.equal(events.listenerCount("subagent:async-started"), 0);
+});
+
+test("fails fast with the workflow root error when the root fails before the leaf starts", async () => {
+  const events = createEvents();
+  const collector = createWorkflowChildStartCollector(events, {
+    workflowKey: "typed-request-1",
+    agent: "executor",
+    sessionId: "session-1",
+    timeoutMs: 5_000,
+  });
+  const pending = collector.waitFor({ runId: "workflow-run-1" });
+
+  events.emit("subagent:async-complete", { runId: "workflow-run-1", state: "failed", error: "Error: Run 'typed-request-1' failed: Unknown agent: reviewer" });
+
+  await assert.rejects(pending, (error) => {
+    assert.equal(error instanceof WorkflowSpawnError, true);
+    assert.equal(error.code, "WORKFLOW_CHILD_START_FAILED");
+    assert.match(error.message, /Unknown agent: reviewer/);
+    assert.match(error.message, /failed/);
+    return true;
+  });
+  assert.equal(events.listenerCount("subagent:async-started"), 0);
+  assert.equal(events.listenerCount("subagent:async-complete"), 0);
+});
+
+test("fails fast when a buffered root failure arrives before the workflow root reply", async () => {
+  const events = createEvents();
+  const collector = createWorkflowChildStartCollector(events, {
+    workflowKey: "typed-request-1",
+    agent: "executor",
+    sessionId: "session-1",
+    timeoutMs: 5_000,
+  });
+
+  events.emit("subagent:async-complete", { id: "workflow-run-1", state: "failed", error: "Unknown agent: reviewer" });
+
+  await assert.rejects(collector.waitFor({ runId: "workflow-run-1" }), (error) => {
+    assert.equal(error instanceof WorkflowSpawnError, true);
+    assert.equal(error.code, "WORKFLOW_CHILD_START_FAILED");
+    assert.match(error.message, /Unknown agent: reviewer/);
+    return true;
+  });
+  assert.equal(events.listenerCount("subagent:async-started"), 0);
+  assert.equal(events.listenerCount("subagent:async-complete"), 0);
+});
+
+test("fails fast when the workflow root completes successfully without a child start", async () => {
+  const events = createEvents();
+  const collector = createWorkflowChildStartCollector(events, {
+    workflowKey: "typed-request-1",
+    agent: "executor",
+    sessionId: "session-1",
+    timeoutMs: 5_000,
+  });
+  const pending = collector.waitFor({ runId: "workflow-run-1" });
+
+  events.emit("subagent:async-complete", { runId: "workflow-run-1", state: "complete", success: true });
+
+  await assert.rejects(pending, (error) => {
+    assert.equal(error instanceof WorkflowSpawnError, true);
+    assert.equal(error.code, "WORKFLOW_CHILD_START_FAILED");
+    assert.match(error.message, /complete/);
+    return true;
+  });
+  assert.equal(events.listenerCount("subagent:async-complete"), 0);
+});
+
+test("ignores completion events from other workflow roots", async () => {
+  const events = createEvents();
+  const collector = createWorkflowChildStartCollector(events, {
+    workflowKey: "typed-request-1",
+    agent: "executor",
+    sessionId: "session-1",
+    timeoutMs: 50,
+  });
+  const pending = collector.waitFor({ runId: "workflow-run-1" });
+
+  events.emit("subagent:async-complete", { runId: "other-workflow", state: "failed", error: "Unknown agent: researcher" });
+  events.emit("subagent:async-started", leafEvent());
+
+  assert.deepEqual(await pending, { runId: "leaf-run-1", asyncDir: "/tmp/leaf-run-1" });
+});
+
+test("ignores the workflow root completion after the leaf is already bound", async () => {
+  const events = createEvents();
+  const collector = createWorkflowChildStartCollector(events, {
+    workflowKey: "typed-request-1",
+    agent: "executor",
+    sessionId: "session-1",
+    timeoutMs: 50,
+  });
+  const pending = collector.waitFor({ runId: "workflow-run-1" });
+
+  events.emit("subagent:async-started", leafEvent());
+  assert.deepEqual(await pending, { runId: "leaf-run-1", asyncDir: "/tmp/leaf-run-1" });
+
+  events.emit("subagent:async-complete", { runId: "workflow-run-1", state: "complete", success: true });
+  assert.equal(events.listenerCount("subagent:async-started"), 0);
+  assert.equal(events.listenerCount("subagent:async-complete"), 0);
+});
+
+test("caps the child-start wait at the default ceiling when the execution timeout exceeds it", () => {
+  assert.equal(childStartTimeoutMs(undefined, 900_000), 120_000);
+});
+
+test("keeps short execution timeouts as the child-start wait", () => {
+  assert.equal(childStartTimeoutMs(undefined, 60_000), 60_000);
+});
+
+test("an explicit child-start timeout override wins over the ceiling", () => {
+  assert.equal(childStartTimeoutMs(300_000, 900_000), 300_000);
+});
+
+test("rejects a non-positive child-start timeout override", () => {
+  assert.throws(() => childStartTimeoutMs(0, 900_000), TypeError);
 });

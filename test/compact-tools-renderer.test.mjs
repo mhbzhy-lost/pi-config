@@ -86,6 +86,14 @@ function setup() {
   });
 }
 
+test("shared compact tool renderers use the self shell", () => {
+  const renderers = setup();
+
+  for (const name of ["read", "bash", "edit", "write", "find", "grep", "ls"]) {
+    assert.equal(renderers[name].renderShell, "self");
+  }
+});
+
 const styles = [];
 const theme = {
   bold(text) {

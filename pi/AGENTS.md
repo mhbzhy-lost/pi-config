@@ -7,7 +7,7 @@
 **绝对红线**：任何产生逻辑变更的 coding，动手前必须先加载 `test-driven-development` skill 并严格执行其流程。
 豁免：单行改动 / 纯文档变更 / 已有测试覆盖（必须显式声明豁免理由）。
 
-生产或 Skill 逻辑修改前，必须先建立 `docs/bugs/bug-*.md`，并观察对应测试为 RED。
+测试只允许验证逻辑行为（函数/脚本/校验器的输入输出、错误码、副作用）。禁止编写镜像配置或文档字面值的快照测试——例如「读 models.json 断言 provider 字段」「读 SKILL.md 断言包含某短语」「断言某文件存在/不存在」，避免把单一事实源（配置/代码）复制成双事实源。
 
 ## Subagent
 
@@ -23,17 +23,8 @@
 **绝对红线**：git管理的信息必须脱敏。
 对于进入会话记录之类的风险，在用户明确授权的情况下可临时豁免，但必须提示用户有泄露风险。
 
-## Worktree 生命周期
-
-禁止 raw `git worktree add/remove/prune/move/repair/lock/unlock`，不得猜测性 cleanup；只读 `git worktree list` 可用。创建、销毁、repair、lock 仅可经 typed Goal disposition 或 `node scripts/worktree-lifecycle.mjs ...` managed lifecycle CLI，且须 owner CAS 与明确授权。禁止 `--force` removal、raw branch cleanup；`/tmp`、TTL、clean 状态均不构成删除授权。
-
-## Bugfix
-
-遇到任何 bug/issue/incident 等非预期表现需要修复时，禁止直接修。
-必须先写 `docs/bugs/<日期>-<摘要>.md`：
-- 一句话 bug 描述
-- 复现流程
-- 修复方案
+**绝对红线**：如有敏感凭据泄露，绝对不要自动轮换，一个 secret 会影响哪些服务难以统计，贸然轮换可能导致服务大面积瘫痪。
+发现泄露应做记录，同时继续当前任务，在任务结束时向用户输出泄露报告并给出处理建议即可。
 
 ## Git Commit 规范
 
@@ -88,4 +79,3 @@ headed 模式获取登录态后，应将登录态共享给 headless 模式，并
 
 1. **Subagent-Driven**：主 agent 自行编排计划执行，任务间可审查。主 agent 读取计划的 `Deps` 字段构建 DAG；无依赖任务并行派发（后台模式），有依赖的等上游完成后再派发。
 2. **Inline Execution**：按 skill 原始流程在当前会话逐任务执行，适合简单计划或无需门禁的场景；忽略其引用的未纳入白名单的 sub-skill。
-3. **Goal Engine**：通过 `goal_init` 将计划转为持久化 task DAG，由主 agent 按 Goal Engine typed tools 的说明持续编排、恢复和验收；适合跨会话、24h+、需要独立 worktree 与证据门禁的长任务。

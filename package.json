@@ -9,6 +9,8 @@
     "test": "node --test \"test/**/*.test.mjs\"",
     "test:integration": "node --test test/pi-runtime.integration.mjs",
     "test:subagents": "node --test test/pi-subagents-runtime.integration.mjs",
+    "test:goal-engine": "node --test \"test/goal-engine-*.integration.mjs\" \"test/worktree-lifecycle-*.integration.mjs\"",
+    "test:subagent-workspace": "node --test \"test/subagent-*workspace*.integration.mjs\"",
     "setup:subagent-runtime": "node scripts/setup-subagent-runtime-deps.mjs",
     "doctor": "node scripts/doctor.mjs",
     "worktree": "node scripts/worktree-lifecycle.mjs",

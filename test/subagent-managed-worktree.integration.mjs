@@ -19,10 +19,10 @@ async function arena() {
   git(root, "add", "allowed.txt"); git(root, "commit", "-qm", "base");
   return root;
 }
-function input(root, id, kind = "coding") { return { originRoot: root, requestedCwd: root, workspaceId: id, kind, rootSessionId: "root", toolCallId: `call-${id}`, contractHash: "contract", ...(kind === "coding" ? { writePaths: ["allowed.txt"] } : {}) }; }
+function input(root, id, kind = "coding", writePaths = ["allowed.txt"]) { return { originRoot: root, requestedCwd: root, workspaceId: id, kind, rootSessionId: "root", toolCallId: `call-${id}`, contractHash: "contract", ...(kind === "coding" ? { writePaths } : {}) }; }
 function ledger(root, id) { return JSON.parse(execFileSync("cat", [join(root, ".state/subagent-dispatch/workspaces", `${id}.json`)], { encoding: "utf8" })); }
-function allocateAndBind(controller, root, id, kind = "coding") { const workspace = controller.allocateManagedSubagentWorkspace(input(root, id, kind)); controller.bindManagedSubagentWorkspaceRun({ originRoot: root, workspaceId: id }, { runId: `run-${id}`, asyncDir: join(root, `async-${id}`) }); return workspace; }
-async function commit(workspace, text = "changed\n") { await writeFile(join(workspace.dispatchCwd, "allowed.txt"), text); git(workspace.dispatchCwd, "add", "allowed.txt"); git(workspace.dispatchCwd, "commit", "-qm", "child change"); }
+function allocateAndBind(controller, root, id, kind = "coding", writePaths) { const workspace = controller.allocateManagedSubagentWorkspace(input(root, id, kind, writePaths)); controller.bindManagedSubagentWorkspaceRun({ originRoot: root, workspaceId: id }, { runId: `run-${id}`, asyncDir: join(root, `async-${id}`) }); return workspace; }
+async function commit(workspace, text = "changed\n", file = "allowed.txt") { await writeFile(join(workspace.dispatchCwd, file), text); git(workspace.dispatchCwd, "add", file); git(workspace.dispatchCwd, "commit", "-qm", "child change"); }
 
 test("managed coding real Git lifecycle allocates before child cwd, binds leaf, proves, integrates, and releases", async () => {
   const root = await arena(); const controller = createWorkspaceController();
@@ -58,6 +58,47 @@ test("generic cannot integrate; preserve retains dirty workspace; observed disca
     const discardStatus = controller.statusManagedSubagentWorkspace({ originRoot: root, workspaceId: "discard", terminalProof: observed("d") });
     controller.disposeManagedSubagentWorkspace({ originRoot: root, workspaceId: "discard", terminalProof: observed("d"), disposition: "discard", actionToken: discardStatus.actionToken });
     assert.equal(existsSync(discard.workspacePath), false); assert.equal(git(root, "show", "HEAD:allowed.txt"), "base");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("parallel coding worktrees integrate sequentially after origin advances and release both", async () => {
+  const root = await arena(); const controller = createWorkspaceController();
+  try {
+    const first = allocateAndBind(controller, root, "parallel-first", "coding", ["first.txt"]);
+    const second = allocateAndBind(controller, root, "parallel-second", "coding", ["second.txt"]);
+    await commit(first, "first change\n", "first.txt");
+    await commit(second, "second change\n", "second.txt");
+
+    const firstStatus = controller.statusManagedSubagentWorkspace({ originRoot: root, workspaceId: "parallel-first", terminalProof: observed("first") });
+    controller.disposeManagedSubagentWorkspace({ originRoot: root, workspaceId: "parallel-first", terminalProof: observed("first"), disposition: "integrate", actionToken: firstStatus.actionToken });
+    const secondStatus = controller.statusManagedSubagentWorkspace({ originRoot: root, workspaceId: "parallel-second", terminalProof: observed("second") });
+    controller.disposeManagedSubagentWorkspace({ originRoot: root, workspaceId: "parallel-second", terminalProof: observed("second"), disposition: "integrate", actionToken: secondStatus.actionToken });
+
+    assert.equal(git(root, "show", "HEAD:first.txt"), "first change");
+    assert.equal(git(root, "show", "HEAD:second.txt"), "second change");
+    assert.equal(ledger(root, "parallel-first").state, "released");
+    assert.equal(ledger(root, "parallel-second").state, "released");
+    assert.equal(existsSync(first.workspacePath), false);
+    assert.equal(existsSync(second.workspacePath), false);
+    assert.equal(git(root, "worktree", "list", "--porcelain").includes(first.workspacePath), false);
+    assert.equal(git(root, "worktree", "list", "--porcelain").includes(second.workspacePath), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("releaseManagedSubagentWorkspace releases a preserved coding worktree and manifest", async () => {
+  const root = await arena(); const controller = createWorkspaceController();
+  try {
+    const workspace = allocateAndBind(controller, root, "preserved-release");
+    await commit(workspace, "preserved change\n");
+    const status = controller.statusManagedSubagentWorkspace({ originRoot: root, workspaceId: "preserved-release", terminalProof: observed("preserve") });
+    controller.disposeManagedSubagentWorkspace({ originRoot: root, workspaceId: "preserved-release", terminalProof: observed("preserve"), disposition: "preserve", actionToken: status.actionToken });
+    assert.equal(ledger(root, "preserved-release").state, "preserved");
+
+    controller.releaseManagedSubagentWorkspace({ originRoot: root, workspaceId: "preserved-release" });
+    assert.equal(existsSync(workspace.workspacePath), false);
+    assert.equal(ledger(root, "preserved-release").state, "released");
+    const manifest = JSON.parse(await readFile(join(root, ".state", "worktree-lifecycle", "leases", "preserved-release.json"), "utf8"));
+    assert.equal(manifest.state, "released");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

@@ -31,8 +31,7 @@ const EXPECTED_GLOBAL_SKILLS = [
   "browser-auth-session",
 ];
 const REQUIRED_PROFILES = {
-  executor: { model: "openai-codex/gpt-5.6-terra", subagent: false, extensions: undefined },
-  spark: { model: "openai-codex/gpt-5.3-codex-spark", subagent: false, extensions: undefined },
+  executor: { model: "codex-pool/gpt-5.6-terra", subagent: false, extensions: undefined },
 };
 const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/spawn.mjs",

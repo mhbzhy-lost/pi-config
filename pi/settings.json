@@ -1,7 +1,7 @@
 {
   "lastChangelogVersion": "0.84.1",
   "theme": "light",
-  "defaultProvider": "openai-codex",
+  "defaultProvider": "codex-pool",
   "defaultModel": "gpt-5.6-sol",
   "hideThinkingBlock": true,
   "packages": [
@@ -39,17 +39,11 @@
       },
       "worker": {
         "disabled": true
-      },
-      "executor": {
-        "model": "deepseek/deepseek-v4-flash"
       }
     }
   },
-  "enabledModels": [
-    "openai-codex/gpt-5.6-sol",
-    "openai-codex/gpt-5.6-terra",
-    "openai-codex/gpt-5.3-codex-spark",
-    "deepseek/deepseek-v4-flash"
-  ],
-  "defaultThinkingLevel": "xhigh"
+  "defaultThinkingLevel": "xhigh",
+  "goalEngine": {
+    "enabled": false
+  }
 }

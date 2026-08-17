@@ -209,6 +209,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
 
   for (const name of TOOL_NAMES) {
     if (!renderers[name]) throw new Error(`Missing renderer for ${name}`);
+    renderers[name].renderShell = "self";
   }
   return renderers;
 }
