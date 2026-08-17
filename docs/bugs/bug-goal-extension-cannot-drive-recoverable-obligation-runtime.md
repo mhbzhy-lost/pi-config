@@ -95,6 +95,14 @@ Extension 必须只根据已提交 Condition 的 id、statement、expected 和 r
 ### 复现与修复
 R9 选中 `user-approved` 的 active Repair Episode 后，Extension 过去只返回 blocker，既没有 durable challenge，也没有把真实 Pi active branch 的 approve/reject 落入 canonical Repair ledger，更不会原子物化任务。修复将该流程拆成三个 status：先 append `repair.challenge_created`，再从唯一连续 branch intent/真实 user message append `repair.user_decision_recorded`，最后重证 HEAD/contract/candidate 后以 capability 生成唯一 `goal.amended`、`repair.capability_consumed`、`repair.task_linked` batch；nonce 从不持久化或输出。
 
+## R10 Repair S1/S2 审批恢复矩阵缺口
+
+### 复现
+Repair challenge 的 durable-then-throw 恢复只比较 `challengeHash` 和 `taskId`，未逐字段证明 Store 中的 challenge 与本次计划完全相同；S2 的真实 Pi 审批分支和审计失败边界亦缺少独立回归矩阵。
+
+### 修复方案
+challenge 与 decision 的 durable 恢复均以完整事件 data 的逐字段身份为准。Repair 审批只接受 `getBranch` 所给的唯一严格 active branch pair；Pi custom decision 仅作尽力审计，不能替代 Goal Projection。补齐 pre/durable/reload、歧义、strict compaction、拒绝和审计失败测试。
+
 ## Cycle 0 未接线
 
 ### 复现

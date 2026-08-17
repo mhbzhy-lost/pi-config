@@ -755,6 +755,103 @@ test("selected user-approved repair requires approval without creating a Task or
   assert.equal(JSON.parse(await invoke(api, "goal_status", {})).machineAction?.tool, "goal_dispatch");
 });
 
+async function prepareUserApprovedRepair(api, cwd) {
+  await activateProduct(api, cwd, activeCondition());
+  await cycleUntil(api, 1, "terminal");
+  await invoke(api, "goal_status", {});
+  await cycleUntil(api, 1, "released");
+  await invoke(api, "goal_status", {});
+  return [...loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.values()][0];
+}
+
+test("Repair S1 challenge pre-append failure leaves no challenge and retry creates one", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let failed = false;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }), appendEvent(root, event, version) {
+    if (event.type === "repair.challenge_created" && !failed) { failed = true; throw Error("before challenge append"); }
+    return appendEvent(root, event, version);
+  } });
+  await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released");
+  await assert.rejects(invoke(api, "goal_status", {}), /before challenge append/);
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.size, 0);
+  assert.equal(JSON.parse(await invoke(api, "goal_status", {})).status, "R10A3_REPAIR_APPROVAL_REQUIRED");
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.size, 1);
+});
+
+test("Repair S1 challenge durable recovery rejects altered event data", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let altered = false;
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }), appendEvent(root, event, version) {
+    if (event.type === "repair.challenge_created" && !altered) {
+      altered = true; appendEvent(root, { ...event, data: { ...event.data, expiresAt: event.data.expiresAt - 1 } }, version); throw Error("after altered challenge append");
+    }
+    return appendEvent(root, event, version);
+  } });
+  await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released");
+  await assert.rejects(invoke(api, "goal_status", {}), /invalid repair challenge/);
+});
+
+test("Repair S1 challenge durable recovery reloads one exact challenge", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let threw = false;
+  const options = { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }), appendEvent(root, event, version) {
+    const result = appendEvent(root, event, version); if (event.type === "repair.challenge_created" && !threw) { threw = true; throw Error("after challenge append"); } return result;
+  } };
+  createGoalEngineExtension(api, options); const challenge = await prepareUserApprovedRepair(api, cwd);
+  const reloaded = pi(cwd, api.entries); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, options); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  const result = JSON.parse(await invoke(reloaded, "goal_status", {}));
+  assert.equal(result.challenge.challengeId, challenge.challengeId); assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.size, 1);
+});
+
+test("Repair S2 durable decision recovery reloads the exact approved decision once", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let threw = false;
+  const options = { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }), appendEvent(root, event, version) {
+    const result = appendEvent(root, event, version); if (event.type === "repair.user_decision_recorded" && !threw) { threw = true; throw Error("after repair decision append"); } return result;
+  } };
+  createGoalEngineExtension(api, options); const challenge = await prepareUserApprovedRepair(api, cwd);
+  api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  assert.equal(JSON.parse(await invoke(api, "goal_status", {})).status, "R10A3_REPAIR_APPROVAL_RECORDED");
+  const rows = observationEventRows(cwd).filter(event => event.type === "repair.user_decision_recorded"); assert.equal(rows.length, 1);
+  const decision = rows[0].data, approved = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.get(challenge.challengeId);
+  assert.equal(approved.decisionId, decision.decisionId); assert.equal(approved.branchBindingHash, decision.branchBindingHash);
+  const reloaded = pi(cwd, api.entries); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, options); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.get(challenge.challengeId).decisionId, decision.decisionId);
+  assert.equal(observationEventRows(cwd).filter(event => event.type === "repair.user_decision_recorded").length, 1);
+});
+
+test("Repair S2 accepts one strict Pi compaction on the active branch", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }) });
+  const challenge = await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  const intent = api.entries.find(entry => entry.customType === "goal-engine-repair-approval-intent"), user = api.entries.at(-1), start = Date.now() + 1_000;
+  intent.timestamp = new Date(start).toISOString(); user.timestamp = new Date(start + 2).toISOString(); const compact = { id: "repair-strict-compact", parentId: intent.id, timestamp: new Date(start + 1).toISOString(), type: "compaction", summary: "Pi summary", firstKeptEntryId: "kept", tokensBefore: 1 };
+  user.parentId = compact.id; api.entries.splice(api.entries.indexOf(user), 0, compact);
+  assert.equal(JSON.parse(await invoke(api, "goal_status", {})).status, "R10A3_REPAIR_APPROVAL_RECORDED");
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.get(challenge.challengeId).phase, "approved");
+});
+
+test("Repair S2 rejects an off-branch approval message even when getEntries contains it", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }) });
+  const challenge = await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  const reloaded = pi(cwd, api.entries, { branchEntries: api.entries.slice(0, api.entries.findIndex(entry => entry.customType === "goal-engine-repair-approval-intent")) }); reloaded.cwd = cwd;
+  createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  assert.equal(JSON.parse(await invoke(reloaded, "goal_status", {})).status, "R10A3_REPAIR_APPROVAL_REQUIRED");
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.get(challenge.challengeId).phase, "created");
+});
+
+test("Repair S2 reject records only rejected phase without Task or nonce", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }) });
+  const challenge = await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "reject" }, { cwd, sessionManager: api.sessionManager });
+  const result = JSON.parse(await invoke(api, "goal_status", {})), projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(result.status, "R10A3_REPAIR_APPROVAL_REJECTED"); assert.equal(projection.repairChallenges.get(challenge.challengeId).phase, "rejected"); assert.equal(projection.tasks.size, 0); assert.equal(JSON.stringify(projection).includes("nonce"), false);
+  assert.equal(api.entries.some(entry => entry.customType === "goal-engine-repair-episode-rejected-by-user"), false);
+});
+
+test("Repair S2 audit receipt failure does not revoke the Goal decision", async () => {
+  const cwd = repo(), api = pi(cwd); let failAudit = true; api.cwd = cwd;
+  const append = api.appendEntry; api.appendEntry = (type, data) => { if (type === "goal-engine-repair-approval-decision" && failAudit) { failAudit = false; throw Error("audit unavailable"); } return append(type, data); };
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }) }); const challenge = await prepareUserApprovedRepair(api, cwd);
+  api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  assert.equal(JSON.parse(await invoke(api, "goal_status", {})).status, "R10A3_REPAIR_APPROVAL_RECORDED");
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.get(challenge.challengeId).phase, "approved");
+});
+
 test("Repair approval rejects malformed compaction on the active branch", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd;
   const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });

@@ -1395,7 +1395,7 @@ export function createGoalEngineExtension(pi, options = {}) {
             try { appendEventFn(root, event, projection.version); }
             catch (cause) {
               const recovered = loadProjectionFn(root, goalId)?.repairChallenges.get(challenge.challengeId);
-              if (!recovered || recovered.challengeHash !== challenge.events[0].data.challengeHash || recovered.taskId !== candidate.taskId) throw cause;
+              if (!matchesDurableData(recovered, challenge.events[0].data)) throw cause;
             }
             return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_REQUIRED", challenge: publicRepairChallenge(loadProjectionFn(root, goalId).repairChallenges.get(challenge.challengeId)) });
           }
