@@ -37,7 +37,7 @@ function spawnStartingSummary(args: any): string | undefined {
   if (!args || typeof args !== "object" || Object.hasOwn(args, "action")) return undefined;
   const agent = typeof args.agent === "string" ? args.agent.trim() : "";
   const title = typeof args.title === "string" ? args.title.trim() : "";
-  return agent && title ? `* subagent starting ${agent}: ${title}` : undefined;
+  return agent && title ? `subagent starting ${agent}: ${title}` : undefined;
 }
 
 export function createSubagentToolRenderers() {

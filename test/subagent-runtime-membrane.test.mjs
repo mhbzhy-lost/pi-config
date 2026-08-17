@@ -320,7 +320,7 @@ test("spawn rendering keeps the complete execute result while showing one statef
 
   assert.deepEqual(
     renderers.renderSubagentCall(context.args, theme, context).render(120).map((line) => line.trimEnd()),
-    ["* subagent starting executor: Install the typed subagent runtime"],
+    ["subagent starting executor: Install the typed subagent runtime"],
   );
   assert.equal(
     result.content[0].text,
