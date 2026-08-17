@@ -742,7 +742,17 @@ test("selected user-approved repair requires approval without creating a Task or
   const result = JSON.parse(await invoke(api, "goal_status", {}));
   assert.equal(result.status, "R10A3_REPAIR_APPROVAL_REQUIRED");
   assert.equal(result.machineAction, undefined); assert.equal(result.action_token, undefined);
-  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").tasks.size, 0);
+  let projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"), challenge = [...projection.repairChallenges.values()][0];
+  assert.equal(projection.tasks.size, 0); assert.equal(challenge.phase, "created"); assert.equal(result.challenge.challengeId, challenge.challengeId); assert.equal(JSON.stringify(result).includes("nonce"), false);
+  api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  assert.equal(api.entries.filter(entry => entry.customType === "goal-engine-repair-approval-intent").length, 1);
+  const recorded = JSON.parse(await invoke(api, "goal_status", {}));
+  projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); challenge = projection.repairChallenges.get(challenge.challengeId);
+  assert.equal(recorded.status, "R10A3_REPAIR_APPROVAL_RECORDED"); assert.equal(challenge.phase, "approved"); assert.equal(projection.tasks.size, 0);
+  const materialized = JSON.parse(await invoke(api, "goal_status", {}));
+  projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime");
+  assert.equal(materialized.status, "R10A3_REPAIR_MATERIALIZED"); assert.equal(projection.tasks.size, 1); assert.equal(projection.repairChallenges.get(challenge.challengeId).phase, "applied");
+  assert.equal(JSON.parse(await invoke(api, "goal_status", {})).machineAction?.tool, "goal_dispatch");
 });
 
 test("active UNKNOWN and INFRA record without Finding or Repair Episode", async () => {
