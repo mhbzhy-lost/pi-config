@@ -208,7 +208,7 @@ test("compileTaskContract includes mandatory clean commit requirement", () => {
     "Before reporting completed, create at least one clean commit containing only approved writePaths; if no commit is warranted, return NEEDS_CONTEXT instead of completed.",
   ));
   assert.deepEqual(contract.boundaries.writePaths, ["src/auth/token.ts", "test/auth/token.test.mjs"]);
-  assert.deepEqual(contract.acceptance.commands, ["node --test test/auth/token.test.mjs"]);
+  assert.equal(Object.hasOwn(contract.acceptance, "commands"), false);
   assert.equal(contract.workflow.mode, "tdd");
   assert.equal(Object.hasOwn(contract.workflow, "reason"), false);
   assert.equal(contract.execution.cwd, "/workspace/project");
@@ -296,6 +296,17 @@ test("completed optional context retains ordered facts/files and makes every omi
   assert.deepEqual(first.context, second.context);
 });
 
+
+test("legacy projection transport only carries criteria and excludes commands from its hash", () => {
+  const projection = buildProjection();
+  const legacyCommands = projection.tasks.get("t1").acceptance.commands;
+  const contract = compileTaskContract(projection, "t1", "/workspace/project");
+
+  assert.deepEqual(legacyCommands, ["node --test test/auth/token.test.mjs"]);
+  assert.deepEqual(contract.acceptance, { criteria: ["Handles expired tokens", "Rejects malformed tokens"] });
+  assert.equal(Object.hasOwn(contract.acceptance, "commands"), false);
+  assert.equal(JSON.stringify(contract).includes("commands"), false);
+});
 
 test("planned criteria transport is canonical and never carries commands", () => {
   const criterion = { id: "criterion-1", statement: "Ship the feature", evidenceKinds: ["tests", "changed-files"] };

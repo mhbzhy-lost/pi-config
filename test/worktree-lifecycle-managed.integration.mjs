@@ -14,9 +14,10 @@ const managed = await import(managedPath).catch(() => ({
   createManagedWorktree: missing("createManagedWorktree"),
   preserveManagedWorktree: missing("preserveManagedWorktree"),
   releaseManagedWorktree: missing("releaseManagedWorktree"),
+  reanchorManagedWorktree: missing("reanchorManagedWorktree"),
 }));
 const registry = await import(registryPath).catch(() => ({ markDisposition: missing("markDisposition") }));
-const { createManagedWorktree, preserveManagedWorktree, releaseManagedWorktree } = managed;
+const { createManagedWorktree, preserveManagedWorktree, releaseManagedWorktree, reanchorManagedWorktree } = managed;
 const { markDisposition } = registry;
 
 function git(cwd, ...args) {
@@ -102,8 +103,41 @@ function assertCode(code) {
   };
 }
 
-test("managed module exposes only the three frozen resource APIs", () => {
-  assert.deepEqual(Object.keys(managed).sort(), ["createManagedWorktree", "preserveManagedWorktree", "releaseManagedWorktree"]);
+test("managed module exposes the owner-CAS reanchor resource API", () => {
+  assert.deepEqual(Object.keys(managed).sort(), ["createManagedWorktree", "preserveManagedWorktree", "reanchorManagedWorktree", "releaseManagedWorktree"]);
+});
+
+test("reanchor preserves the checkpoint and restores a reclaimable managed worktree", (t) => {
+  const f = repoFixture(t);
+  const allocation = createManagedWorktree(createOptions(f));
+  git(allocation.path, "commit", "--allow-empty", "-m", "checkpoint");
+  const checkpoint = git(allocation.path, "rev-parse", "HEAD");
+  markReclaimable(f, allocation);
+  const result = reanchorManagedWorktree({ originRoot: f.root, id: allocation.id, ownerToken: allocation.ownerToken, expectedHead: checkpoint, targetHead: f.baseCommit });
+  assert.equal(result.headCommit, f.baseCommit);
+  assert.equal(git(f.root, "rev-parse", `refs/worktree-lifecycle/recovery/${allocation.id}/${checkpoint}`), checkpoint);
+  assert.equal(git(allocation.path, "rev-parse", "HEAD"), f.baseCommit);
+  assert.equal(manifest(f.root, allocation.id).headCommit, f.baseCommit);
+  assert.equal(releaseManagedWorktree({ originRoot: f.root, id: allocation.id, ownerToken: allocation.ownerToken }).state, "released");
+});
+
+test("reanchor rejects owner, stale head, non-ancestor and dirty state without moving refs", (t) => {
+  const f = repoFixture(t);
+  const allocation = createManagedWorktree(createOptions(f));
+  git(allocation.path, "commit", "--allow-empty", "-m", "checkpoint");
+  const checkpoint = git(allocation.path, "rev-parse", "HEAD");
+  markReclaimable(f, allocation);
+  writeFileSync(join(f.root, "other"), "x");
+  git(f.root, "add", "other"); git(f.root, "commit", "-m", "other");
+  const nonAncestor = git(f.root, "rev-parse", "HEAD");
+  for (const args of [
+    { ownerToken: "worktree-owner.v1:0000000000000000000000000000000000000000000000000000000000000000", expectedHead: checkpoint, targetHead: f.baseCommit, code: "WORKTREE_LIFECYCLE_OWNER_MISMATCH" },
+    { ownerToken: allocation.ownerToken, expectedHead: f.baseCommit, targetHead: f.baseCommit, code: "WORKTREE_LIFECYCLE_IDENTITY_MISMATCH" },
+    { ownerToken: allocation.ownerToken, expectedHead: checkpoint, targetHead: nonAncestor, code: "WORKTREE_LIFECYCLE_INVALID_INPUT" },
+  ]) assert.throws(() => reanchorManagedWorktree({ originRoot: f.root, id: allocation.id, ...args }), assertCode(args.code));
+  writeFileSync(join(allocation.path, "dirty"), "x");
+  assert.throws(() => reanchorManagedWorktree({ originRoot: f.root, id: allocation.id, ownerToken: allocation.ownerToken, expectedHead: checkpoint, targetHead: f.baseCommit }), assertCode("WORKTREE_LIFECYCLE_UNSAFE_RELEASE"));
+  assert.equal(git(allocation.path, "rev-parse", "HEAD"), checkpoint);
 });
 
 test("managed create accepts an explicit path while retaining its default path", (t) => {

@@ -59,9 +59,9 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
       excludedWork: projection.nonGoals,
       forbiddenActions: ["Do not modify files outside declared writePaths", "Do not amend goal contract or state files"],
     },
-    acceptance: task.acceptance.commands
-      ? { criteria: task.acceptance.criteria.map(encodeCriterion), commands: task.acceptance.commands }
-      : { criteria: task.acceptance.criteria.map(encodeCriterion) },
+    // Legacy projection commands are retained for replay and Goal-level acceptance,
+    // but the criteria-only Subagent transport must never receive them.
+    acceptance: { criteria: task.acceptance.criteria.map(encodeCriterion) },
     execution: { cwd, timeoutMs },
   };
 

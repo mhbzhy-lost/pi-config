@@ -1,12 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { isAbsolute, join, resolve } from "node:path";
-import { realpathSync } from "node:fs";
+import { realpathSync, openSync, closeSync, fstatSync, lstatSync, readFileSync, constants as fsConstants } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { hashGoalMetadataProposal, recordHumanChoice } from "./human-decision.mjs";
 import { buildTransferChallenge, listCwdGoals, ownerSessionId, transferChallengeState, workspaceReleased } from "./session-transfer.mjs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
-import { appendEvent, appendEventBatch, loadProjection, listGoals, listGoalIds } from "./store.mjs";
+import { appendEvent, appendEventBatch, appendEventBatchWithSettlementEvidence, loadProjection, listGoals, listGoalIds } from "./store.mjs";
+import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence, serializeSettlementEvidenceYaml } from "./settlement-evidence.mjs";
 import { compileTaskContract, assertPendingTaskContractsCompile } from "./dispatch.mjs";
 import { splitDispatchEnvelope } from "./dispatch-ir.mjs";
 import { issueActionOffer, verifyAndConsumeActionOffer } from "./action-offer.mjs";
@@ -17,7 +18,7 @@ import {
   formatRecoveryInjection,
   selectContinuityCandidate,
 } from "./continuity.mjs";
-import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation } from "./events.mjs";
+import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation, validateNextAction } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
 import {
   assertExecutorBindingTicketCurrent,
@@ -112,6 +113,24 @@ function preflightError(code, observed, remediation, requiredNextAction) {
     error.message = `${error.message}; requiredNextAction=${JSON.stringify(requiredNextAction)}`;
   }
   return error;
+}
+
+function readChildSettlementEvidence(task, supplied, identity, criteria) {
+  if (!supplied || typeof supplied !== "object" || Array.isArray(supplied) || Object.keys(supplied).sort().join(",") !== "content,sha256") throw new Error("subagent_evidence must contain exactly sha256 and content");
+  if (!/^[a-f0-9]{64}$/.test(supplied.sha256)) throw new Error("subagent_evidence sha256 is invalid");
+  if (task.executorBinding.workspacePath !== task.workspace.path) throw new Error("executor binding workspacePath mismatch");
+  const normalized = normalizeSettlementEvidence(supplied.content, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
+  if (fingerprintSettlementEvidence(normalized, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" }) !== supplied.sha256) throw new Error("subagent_evidence fingerprint mismatch");
+  const path = join(task.workspace.path, ".pi-subagents", "acceptance-evidence", `${supplied.sha256}.yaml`);
+  const before = lstatSync(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || (before.mode & 0o7777) !== 0o600) throw new Error("unsafe subagent evidence artifact");
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  let bytes, receipt;
+  try { receipt = fstatSync(fd); bytes = readFileSync(fd); } finally { closeSync(fd); }
+  const after = lstatSync(path);
+  if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1 || (after.mode & 0o7777) !== 0o600 || before.dev !== receipt.dev || before.ino !== receipt.ino || after.dev !== receipt.dev || after.ino !== receipt.ino || receipt.size !== bytes.length) throw new Error("subagent evidence identity replacement");
+  if (!bytes.equals(Buffer.from(serializeSettlementEvidenceYaml(normalized, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" })))) throw new Error("subagent evidence bytes mismatch");
+  return normalized;
 }
 
 function settlementIdentityError(code, observed, requiredNextAction, remediation = "return to the executor workspace, verify the settled attempt and commit identity, then retry goal_integrate") {
@@ -1073,6 +1092,8 @@ export function createGoalEngineExtension(pi, options = {}) {
           required: ["type"],
         },
         evidence_source: { type: "string", enum: ["self_produced", "pre_existing", "external"] },
+        subagent_evidence: { type: "object" },
+        main_verification: { type: "object" },
         next_action: { type: "string", description: "下一步具体动作（≥20字符，禁止模糊词）" },
         reason: { type: "string", description: "blocked 时的原因" },
         action_token: { type: "string" },
@@ -1095,6 +1116,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         reason: params.reason || null,
       };
       const task = projection.tasks.get(params.task_id);
+      if (params.outcome === "succeeded") validateNextAction(params.next_action);
       if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION && task) {
         let proof = null;
         try { proof = await inspectExecutorProofFn(task.executorBinding?.runId); } catch { /* mapped to a stable missing-proof boundary below */ }
@@ -1106,17 +1128,14 @@ export function createGoalEngineExtension(pi, options = {}) {
         settlementData.attempt = task?.workspace?.attempt ?? 1;
         settlementData.executorHead = "candidate-settlement-validation";
       }
-      let candidate;
-      try {
-        candidate = applyEvent(projection, makeGoalEvent("task.settled", settlementData, goalId, projection));
-      } catch (error) {
-        if (params.outcome === "succeeded" && task?.status === "dispatched" && /workspace is required/i.test(error.message)) {
-          throw workspaceMutationError(error, { tool: "goal_status", params: { goal_id: goalId } });
+      if (projection.eventSchemaVersion !== PLANNED_SCHEMA_VERSION) {
+        try { applyEvent(projection, makeGoalEvent("task.settled", settlementData, goalId, projection)); }
+        catch (error) {
+          if (params.outcome === "succeeded" && task?.status === "dispatched" && /workspace is required/i.test(error.message)) throw workspaceMutationError(error, { tool: "goal_status", params: { goal_id: goalId } });
+          throw error;
         }
-        throw error;
       }
       if (params.outcome === "succeeded") {
-        void candidate;
         if (!task) throw new Error(`unknown task: ${params.task_id}`);
         const retry = { tool: "goal_status", params: { goal_id: goalId } };
         const remediation = "return to the same Executor worktree, create an authorized commit and make it clean, then retry goal_settle";
@@ -1159,10 +1178,27 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         settlementData.attempt = lease.attempt;
         settlementData.executorHead = confirmedInspection.headCommit;
+        if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION) {
+          const identity = { goalId, taskId: params.task_id, runId: task.executorBinding.runId, attempt: lease.attempt, contractHash: task.contractHash, head: confirmedInspection.headCommit };
+          const criteria = task.acceptance.criteria.map((criterion) => criterion.id);
+          const subagent = readChildSettlementEvidence(task, params.subagent_evidence, identity, criteria);
+          const main = normalizeSettlementEvidence(params.main_verification, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
+          assertIndependentSettlementEvidence(subagent, main);
+          const subagentFingerprint = fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
+          const mainFingerprint = fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
+          const content = `${JSON.stringify({ main, mainSessionId: settlementData.executorProof.rootSessionId, schemaVersion: "goal-engine.settlement-evidence.v1", subagent }, null, 2)}\n`;
+          const sha256 = createHash("sha256").update(content).digest("hex");
+          settlementData.settlementEvidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${sha256}.yaml`, sha256, subagentFingerprint, mainFingerprint, subagent, main, mainSessionId: settlementData.executorProof.rootSessionId };
+          settlementData._artifact = { sha256, content };
+        }
       }
-      const settleEvent = makeGoalEvent("task.settled", settlementData, goalId, projection);
+      const { _artifact, ...eventData } = settlementData;
+      const plannedEventData = projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION && params.outcome === "succeeded"
+        ? (({ taskId, outcome, attempt, executorHead, executorProof, settlementEvidence }) => ({ taskId, outcome, attempt, executorHead, executorProof, settlementEvidence }))(eventData)
+        : eventData;
+      const settleEvent = makeGoalEvent("task.settled", plannedEventData, goalId, projection);
       const cpEvent = makeGoalEvent("goal.checkpoint", { nextAction: params.next_action }, goalId, projection);
-      projection = appendEventBatchFn(root, [settleEvent, cpEvent], projection.version);
+      projection = _artifact ? appendEventBatchWithSettlementEvidence(root, [settleEvent, cpEvent], projection.version, _artifact) : appendEventBatchFn(root, [settleEvent, cpEvent], projection.version);
 
       turnsSinceSettle = 0;
 
@@ -2095,16 +2131,6 @@ export function createGoalEngineExtension(pi, options = {}) {
       activateRecoveryLatch(projection.goalId, error);
       return { cancel: true };
     }
-  });
-
-  pi.on("session_compact", (_event, ctx) => {
-    const { cwd, root } = executionScopeFor(ctx);
-    const projections = loadAllProjections(root);
-    const selected = selectContinuityCandidate({ projections, cwd, paths: [], sessionId: sessionIdentity(ctx) });
-    if (selected.status !== "selected") return undefined;
-    const projection = projections.find((candidate) => candidate.goalId === selected.goalId);
-    pi.sendMessage?.({ customType: "goal-engine-recovery", content: formatRecoveryInjection(projection), display: true }, { deliverAs: "nextTurn" });
-    return undefined;
   });
 
   // --- tool_result hook: checkpoint reminder ---

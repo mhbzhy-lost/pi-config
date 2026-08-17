@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "no
 import { isAbsolute, join, resolve } from "node:path";
 
 import { parseWorktreePorcelain } from "./inventory.mjs";
-import { activateAllocation, beginAllocation, markDisposition } from "./registry.mjs";
+import { activateAllocation, beginAllocation, markDisposition, reanchorAllocation } from "./registry.mjs";
 
 const OWNER_TOKEN = /^worktree-owner\.v1:[a-f0-9]{64}$/;
 const MANIFEST_STATES = new Set(["allocating", "active", "reclaimable", "preserved", "cleanup-debt", "released"]);
@@ -245,6 +245,10 @@ export function createManagedWorktree({ originRoot, id, branch, baseCommit, owne
     }
     throw error;
   }
+}
+
+export function reanchorManagedWorktree({ originRoot, id, ownerToken, expectedHead, targetHead, fault, commandObserver } = {}) {
+  return reanchorAllocation({ originRoot, id, ownerToken, expectedHead, targetHead, fault, commandObserver });
 }
 
 export function preserveManagedWorktree({ originRoot, id, ownerToken, reason, commandObserver } = {}) {
