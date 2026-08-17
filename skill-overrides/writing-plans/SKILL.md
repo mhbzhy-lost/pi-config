@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: 当用户提及计划/规划、多步骤实施、DAG 或 Wave 时使用。
+description: 当任务包含多个协调步骤、跨模块依赖或关键不确定性，或 Agent 判断书面实施计划有助于安全执行时使用；无需用户显式提及计划、规划、DAG 或 Wave。
 ---
 
 # 编写实现计划
