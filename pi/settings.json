@@ -42,14 +42,6 @@
       }
     }
   },
-  "enabledModels": [
-    "codex-pool/gpt-5.6-sol",
-    "codex-pool/gpt-5.6-terra",
-    "anthropic-idealab/claude-opus-4-6",
-    "openai-idealab/Peach-07-17-DogFooding",
-    "deepseek/deepseek-v4-flash",
-    "deepseek/deepseek-v4-pro"
-  ],
   "defaultThinkingLevel": "xhigh",
   "goalEngine": {
     "enabled": false
