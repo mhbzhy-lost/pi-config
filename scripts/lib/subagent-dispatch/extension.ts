@@ -328,7 +328,10 @@ async function spawnWorkflowLeaf(pi, rpc, {
 }
 
 function workspacePublic(value, proof) {
-  return { workspace_id: value.workspaceId, state: value.state, workspace_state: value.state, process_terminal: proof?.state ?? "unknown", ...(value.dispatchCwd ? { dispatch_cwd: value.dispatchCwd } : {}), ...(value.allowedDispositions ? { allowed_dispositions: value.allowedDispositions, ...(value.actionToken ? { action_token: value.actionToken } : {}) } : {}), ...(value.integrateBlockedReasons ? { integrate_blocked_reasons: value.integrateBlockedReasons } : {}) };
+  const hasActionToken = value.state === "active"
+    && Array.isArray(value.allowedDispositions) && value.allowedDispositions.length > 0
+    && typeof value.actionToken === "string" && value.actionToken.length > 0;
+  return { workspace_id: value.workspaceId, state: value.state, workspace_state: value.state, process_terminal: proof?.state ?? "unknown", ...(value.dispatchCwd ? { dispatch_cwd: value.dispatchCwd } : {}), ...(value.allowedDispositions ? { allowed_dispositions: value.allowedDispositions } : {}), ...(hasActionToken ? { action_token: value.actionToken } : {}), ...(value.integrateBlockedReasons ? { integrate_blocked_reasons: value.integrateBlockedReasons } : {}) };
 }
 function workspaceError(error, workspace) {
   if (workspace?.workspaceId) {

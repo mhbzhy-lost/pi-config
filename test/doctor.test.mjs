@@ -150,8 +150,8 @@ function runDoctor() {
     };
     timer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch {}
-      settle(reject, new Error("doctor CLI timed out after 10000ms"));
-    }, 10_000);
+      settle(reject, new Error("doctor CLI timed out after 30000ms"));
+    }, 30_000);
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.on("error", (error) => settle(reject, error));

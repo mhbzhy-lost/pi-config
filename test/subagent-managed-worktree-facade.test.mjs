@@ -106,21 +106,21 @@ test("workspace status uses fresh local proof and exposes only snake_case public
   assert.equal(calls.filter(([name]) => name === "load").length, 2);
 });
 
-test("workspace status content exposes the active disposition capability without private fields", async () => {
-  const { host } = workspaceActions();
-  const result = await host.tools[0].execute("call", { action: "workspace_status", workspace_id: "ws-1" }, undefined, undefined, { cwd: "/repo" });
-  const content = JSON.parse(result.content[0].text);
+for (const { state, status, hasActionToken } of [
+  { state: "active", status: () => ({ workspaceId: "ws-1", state: "active", allowedDispositions: ["integrate", "discard"], actionToken: "public-token" }), hasActionToken: true },
+  { state: "inactive", status: () => ({ workspaceId: "ws-1", state: "inactive", allowedDispositions: ["preserve"], actionToken: "private-action-token" }), hasActionToken: false },
+]) {
+  test(`workspace status content and details expose action token only when ${state}`, async () => {
+    const { host } = workspaceActions({ status });
+    const result = await host.tools[0].execute("call", { action: "workspace_status", workspace_id: "ws-1" }, undefined, undefined, { cwd: "/repo" });
+    const content = JSON.parse(result.content[0].text);
 
-  assert.deepEqual(content, {
-    workspace_id: "ws-1",
-    state: "active",
-    workspace_state: "active",
-    process_terminal: "running",
-    allowed_dispositions: ["integrate", "discard"],
-    action_token: "public-token",
+    assert.deepEqual(content, result.details);
+    assert.equal(Object.hasOwn(content, "action_token"), hasActionToken);
+    assert.equal(Object.hasOwn(result.details, "action_token"), hasActionToken);
+    assert.doesNotMatch(result.content[0].text, /ownerToken|privateProof|private terminal proof/i);
   });
-  assert.doesNotMatch(result.content[0].text, /ownerToken|privateProof|private terminal proof/i);
-});
+}
 
 test("workspace disposition refreshes proof locally and rejects invalid strategy before every dependency", async () => {
   const { host, calls, client } = workspaceActions(); const tool = host.tools[0];
