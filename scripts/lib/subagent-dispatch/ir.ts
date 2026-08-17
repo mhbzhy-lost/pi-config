@@ -25,16 +25,62 @@ const TOP_LEVEL_KEYS = [
 ];
 
 export class CodingDispatchContractError extends Error {
-  constructor(code, message, detail = message) {
+  constructor(code, message, detail = message, keypath) {
     super(message);
     this.name = "CodingDispatchContractError";
     this.code = code;
     this.detail = String(detail);
+    if (keypath !== undefined) this.keypath = String(keypath);
   }
 }
 
-function fail(code, message, detail) {
-  throw new CodingDispatchContractError(code, message, detail);
+function fail(code, message, keypath) {
+  throw new CodingDispatchContractError(code, `${message}; keypath=${keypath}`, keypath, keypath);
+}
+
+function runtimeType(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function failTypeMismatch(location, expected, value) {
+  fail("INVALID_CONTRACT", `${location} must be a ${expected}; expected ${expected}; received ${runtimeType(value)}`, location);
+}
+
+/**
+ * Attempts to parse a string as JSON if it looks like a JSON object or array.
+ * Returns the parsed value if successful, otherwise returns the original value.
+ * This provides compatibility for models that output nested structures as
+ * JSON strings instead of actual objects (e.g., qwen3.8-max, gpt-5.6-sol).
+ */
+function coerceStringifiedJson(value, location) {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  // Only attempt to parse strings that look like JSON objects or arrays
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // If it looks like JSON but fails to parse, let validation report the error
+    fail("INVALID_CONTRACT", `${location} contains malformed JSON string`, location);
+  }
+}
+
+/**
+ * Fields that may be stringified JSON and need coercion before validation.
+ */
+const COERCIBLE_FIELDS = ["workflow", "requirements", "context", "boundaries", "acceptance", "execution"];
+
+function coerceContractFields(input) {
+  if (!isPlainObject(input)) return input;
+  const coerced = { ...input };
+  for (const field of COERCIBLE_FIELDS) {
+    if (Object.hasOwn(coerced, field)) {
+      coerced[field] = coerceStringifiedJson(coerced[field], field);
+    }
+  }
+  return coerced;
 }
 
 function isPlainObject(value) {
@@ -45,7 +91,7 @@ function isPlainObject(value) {
 
 function validateObject(value, location, allowedKeys, requiredKeys = allowedKeys) {
   if (!isPlainObject(value)) {
-    fail("INVALID_CONTRACT", `${location} must be an object`, location);
+    failTypeMismatch(location, "object", value);
   }
 
   const allowed = new Set(allowedKeys);
@@ -68,7 +114,7 @@ function stringByteLength(value) {
 
 function normalizeString(value, location, { maxBytes = MAX_STRING_BYTES } = {}) {
   if (typeof value !== "string") {
-    fail("INVALID_CONTRACT", `${location} must be a string`, location);
+    failTypeMismatch(location, "string", value);
   }
   const normalized = value.trim();
   if (!normalized) {
@@ -82,7 +128,7 @@ function normalizeString(value, location, { maxBytes = MAX_STRING_BYTES } = {}) 
 
 function normalizeStringArray(value, location, { minItems = 0, item = normalizeString } = {}) {
   if (!Array.isArray(value)) {
-    fail("INVALID_CONTRACT", `${location} must be an array`, location);
+    failTypeMismatch(location, "array", value);
   }
   if (value.length > MAX_ARRAY_ITEMS) {
     fail("INVALID_CONTRACT", `${location} must contain at most ${MAX_ARRAY_ITEMS} items`, location);
@@ -175,7 +221,7 @@ function normalizeAcceptance(value) {
 function normalizeExecution(value, baseCwd) {
   const execution = validateObject(value, "execution", ["timeoutMs", "cwd", "worktree"], ["timeoutMs"]);
   if (!Number.isSafeInteger(execution.timeoutMs) || execution.timeoutMs <= 0) {
-    fail("INVALID_CONTRACT", "execution.timeoutMs must be a positive safe integer", "execution.timeoutMs");
+    fail("INVALID_CONTRACT", `execution.timeoutMs must be a positive safe integer; expected positive safe integer; received ${runtimeType(execution.timeoutMs)}`, "execution.timeoutMs");
   }
 
   const root = normalizeString(baseCwd, "options.cwd");
@@ -195,7 +241,7 @@ function normalizeExecution(value, baseCwd) {
   };
   if (Object.hasOwn(execution, "worktree")) {
     if (typeof execution.worktree !== "boolean") {
-      fail("INVALID_CONTRACT", "execution.worktree must be a boolean", "execution.worktree");
+      failTypeMismatch("execution.worktree", "boolean", execution.worktree);
     }
     if (execution.worktree) normalized.worktree = true;
   }
@@ -223,7 +269,9 @@ function deepFreeze(value) {
 }
 
 export function compileCodingDispatchIR(input, { cwd } = {}) {
-  const source = validateObject(input, "contract", TOP_LEVEL_KEYS);
+  // Coerce stringified JSON fields before validation (model compatibility)
+  const coercedInput = coerceContractFields(input);
+  const source = validateObject(coercedInput, "$", TOP_LEVEL_KEYS);
   const version = normalizeString(source.version, "version");
   if (version !== CONTRACT_VERSION) {
     fail("UNSUPPORTED_VERSION", `unsupported coding dispatch contract version: ${version}`, "version");

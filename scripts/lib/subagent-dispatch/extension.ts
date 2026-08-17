@@ -26,6 +26,13 @@ const stringList = {
 };
 const pathList = { ...stringList, minItems: 0 };
 
+// The detailed branches guide model calls. Narrow fallbacks allow malformed
+// expected containers through to compileCodingDispatchIR(), which owns precise
+// coding-contract coercion and keypath diagnostics.
+const runtimeValidated = (schema, fallback) => ({ anyOf: [schema, fallback, { type: "string" }] });
+const looseObject = { type: "object", additionalProperties: true };
+const looseArray = { type: "array" };
+
 const CODING_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -50,8 +57,8 @@ const CODING_SCHEMA = {
     agent: { enum: ["executor"] },
     risk: { enum: ["low", "normal", "high"] },
     objective: { type: "string", minLength: 1, maxLength: 4096 },
-    requirements: { ...stringList, minItems: 1 },
-    workflow: {
+    requirements: runtimeValidated({ ...stringList, minItems: 1 }, looseArray),
+    workflow: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["mode"],
@@ -59,8 +66,8 @@ const CODING_SCHEMA = {
         mode: { enum: ["tdd", "existing-tests", "docs-only"] },
         reason: { type: "string", minLength: 1, maxLength: 4096 },
       },
-    },
-    context: {
+    }, looseObject),
+    context: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["knownFacts", "decisions", "relevantFiles"],
@@ -69,8 +76,8 @@ const CODING_SCHEMA = {
         decisions: stringList,
         relevantFiles: pathList,
       },
-    },
-    boundaries: {
+    }, looseObject),
+    boundaries: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["writePaths", "excludedWork", "forbiddenActions"],
@@ -79,16 +86,16 @@ const CODING_SCHEMA = {
         excludedWork: stringList,
         forbiddenActions: stringList,
       },
-    },
-    acceptance: {
+    }, looseObject),
+    acceptance: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["criteria"],
       properties: {
         criteria: { ...stringList, minItems: 1 },
       },
-    },
-    execution: {
+    }, looseObject),
+    execution: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["timeoutMs"],
@@ -97,7 +104,7 @@ const CODING_SCHEMA = {
         timeoutMs: { type: "integer", minimum: 1 },
         worktree: { type: "boolean" },
       },
-    },
+    }, looseObject),
   },
 };
 
@@ -184,13 +191,16 @@ function nonempty(value) {
   return typeof value === "string" && value.length > 0;
 }
 
-function failure(code, message, detail) {
+function failure(code, message, detail, keypath) {
+  const keypathSuffix = keypath === undefined || message.includes(`keypath=${keypath}`) ? "" : `; keypath=${keypath}`;
+  const text = `${code}: ${message}${keypathSuffix}`;
   return {
-    content: [{ type: "text", text: `${code}: ${message}` }],
+    content: [{ type: "text", text }],
     isError: true,
     details: {
       code,
       ...(detail !== undefined ? { detail } : {}),
+      ...(keypath !== undefined ? { keypath } : {}),
     },
   };
 }
@@ -727,7 +737,7 @@ export function createTypedSubagentExtension(
     ...(typeof renderSubagentResult === "function" ? { renderResult: renderSubagentResult } : {}),
     async execute(toolCallId, input, _signal, _onUpdate, ctx) {
       try {
-        if (!isRecord(input)) return failure("INVALID_DISPATCH", "subagent input must be an object");
+        if (!isRecord(input)) return failure("INVALID_DISPATCH", `subagent input must be an object; expected object; received ${input === null ? "null" : Array.isArray(input) ? "array" : typeof input}`, "$", "$");
         const origins = workspaceOrigins(cleanupStore);
         if (input.action === "workspace_status" || input.action === "workspace_disposition") return await executeWorkspaceAction(input, ctx, workspaceController, origins, inspectFacadeTerminalProof, resolveCanonicalOrigin);
         if (Object.hasOwn(input, "action")) return await executeControl(input, rpc);
@@ -741,7 +751,7 @@ export function createTypedSubagentExtension(
       } catch (error) {
         const code = error?.code
           ?? (error instanceof CodingDispatchContractError ? error.code : "SUBAGENT_RPC_FAILED");
-        return failure(code, error instanceof Error ? error.message : String(error), error?.detail);
+        return failure(code, error instanceof Error ? error.message : String(error), error?.detail, error?.keypath);
       }
     },
   };

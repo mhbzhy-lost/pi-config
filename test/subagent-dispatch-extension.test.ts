@@ -9,7 +9,7 @@ const contract = {
   objective: "Bind coding calls to durable identities.", workflow: { mode: "tdd" }, requirements: ["Preserve the exact contract."],
   context: { knownFacts: [], decisions: [], relevantFiles: ["test/subagent-dispatch-extension.test.ts"] },
   boundaries: { writePaths: ["test/subagent-dispatch-extension.test.ts"], excludedWork: [], forbiddenActions: [] },
-  acceptance: { criteria: ["Identity is trusted."], commands: ["node --test test/subagent-dispatch-extension.test.ts"] }, execution: { cwd: "/repo", timeoutMs: 1_000 },
+  acceptance: { criteria: ["Identity is trusted."] }, execution: { cwd: "/repo", timeoutMs: 1_000 },
 };
 
 function setup() {
