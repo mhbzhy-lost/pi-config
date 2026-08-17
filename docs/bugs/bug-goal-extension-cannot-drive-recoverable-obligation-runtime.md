@@ -66,6 +66,12 @@ R9 仅在 reverifying Episode 没有 owned 且未完成的 run 时选择 `repair
 
 修复要求由 Extension 持有记录持久化边界：先以 record event 构造中间 Projection，只从 failed ledger refs 派生 Finding 和 Episode，再将三类事件按顺序使用一次 CAS batch 追加。Cycle 0、PASS、UNKNOWN、INFRA 继续只记录 observation；预追加失败不得留下部分 Goal 状态，durable 后抛错则必须在 reload 后以已提交 batch 为准且不重复追加。
 
+## R10A3 Repair 审批崩溃与分支矩阵补充
+
+候选的 Repair 审批只覆盖了顺利 approve 路径。Repair 自己的 Pi compaction 校验没有复用 runtime 的严格约束，允许空摘要等畸形压缩链作为用户授权；同时 created 与 approved 并存时会优先消费 created。durable append 抛错恢复也只比对部分绑定字段，可能把另一份 decision 当作本次成功。
+
+修复要求将 Repair 与 runtime 共用严格的 approval compaction validator；created/approved 作为一个唯一 pending 集合处理；decision durable 恢复逐字段比较完整业务 data（含 decisionId、recordedAt、approved、source）。能力签发与消费使用同一次时钟读取，Pi custom decision 仅作为无 nonce 的审计收据，Projection 仍为唯一权威。
+
 ## R10A3 remediation Task 生命周期未接线
 
 ### 复现

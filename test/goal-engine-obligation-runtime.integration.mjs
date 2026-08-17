@@ -755,6 +755,21 @@ test("selected user-approved repair requires approval without creating a Task or
   assert.equal(JSON.parse(await invoke(api, "goal_status", {})).machineAction?.tool, "goal_dispatch");
 });
 
+test("Repair approval rejects malformed compaction on the active branch", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd;
+  const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable });
+  await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released");
+  await invoke(api, "goal_status", {});
+  api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  const intent = api.entries.find(entry => entry.customType === "goal-engine-repair-approval-intent"), user = api.entries.at(-1);
+  const compact = { id: "repair-bad-compact", type: "compaction", parentId: intent.id, timestamp: new Date(Date.parse(user.timestamp) - 1).toISOString(), summary: "", firstKeptEntryId: "kept", tokensBefore: 1 };
+  user.parentId = compact.id; api.entries.splice(api.entries.indexOf(user), 0, compact);
+  const result = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(result.status, "R10A3_REPAIR_APPROVAL_REQUIRED");
+  assert.equal([...loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.values()][0].phase, "created");
+});
+
 test("active UNKNOWN and INFRA record without Finding or Repair Episode", async () => {
   for (const [code, status] of [["UNKNOWN", "R10A3_OBSERVATION_BLOCKED"], ["INFRA", "R10A3_OBSERVATION_BLOCKED"]]) {
     const cwd = repo(), api = pi(cwd); api.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", code] });
