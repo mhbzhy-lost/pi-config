@@ -1317,9 +1317,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         const repairChallenges = [...projection.repairChallenges.values()].filter((challenge) => challenge.action === "authorize_task" && challenge.sessionId === sessionId);
         const created = repairChallenges.filter((challenge) => challenge.phase === "created");
         const approved = repairChallenges.filter((challenge) => challenge.phase === "approved");
-        // A pending approval is unique across phases.  Never choose created
-        // merely because it happens to be checked first.
-        if (created.length + approved.length > 1) return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_ATTENTION", attention: ["R10A3_REPAIR_APPROVAL_AMBIGUOUS"] });
+        // A consumed capability without its atomic link is a corrupt pending
+        // authority, not permission to resume R9.
+        const pending = repairChallenges.filter((challenge) => ["created", "approved", "consumed"].includes(challenge.phase));
+        if (pending.length && (pending.length !== 1 || pending[0]?.phase === "consumed")) return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_ATTENTION", attention: ["R10A3_REPAIR_APPROVAL_AMBIGUOUS"] });
         if (created.length === 1) {
           const challenge = created[0];
           if (repairNow() >= challenge.expiresAt) return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_EXPIRED", attention: ["R10A3_REPAIR_APPROVAL_EXPIRED"] });
@@ -1341,21 +1342,22 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         if (created.length > 1) return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_ATTENTION", attention: ["R10A3_REPAIR_APPROVAL_AMBIGUOUS"] });
         if (approved.length === 1) {
-          const challenge = approved[0], episode = projection.repairEpisodes.get(challenge.episodeId), condition = projection.conditions.get(challenge.conditionId)?.definition;
-          if (repairNow() >= challenge.expiresAt) return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_EXPIRED", attention: ["R10A3_REPAIR_APPROVAL_EXPIRED"] });
+          const challenge = approved[0], episode = projection.repairEpisodes.get(challenge.episodeId), condition = projection.conditions.get(challenge.conditionId)?.definition, now = repairNow();
+          if (now >= challenge.expiresAt) return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_EXPIRED", attention: ["R10A3_REPAIR_APPROVAL_EXPIRED"] });
           if (world.repo?.head !== challenge.baseHead || projection.executionRevision !== challenge.executionRevision || projection.executionContractHash !== challenge.executionContractHash || episode?.status !== "active" || !condition?.remediation) return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_DRIFT", attention: ["R10A3_REPAIR_APPROVAL_DRIFT"] });
           const taskDef = repairTaskDef(condition), candidate = buildRemediationTaskCandidate({ projection, episodeId: episode.episodeId, findingIds: [...episode.findingIds].sort(), taskDef });
           if (candidate.taskId !== challenge.taskId || candidate.taskDef.metadata.taskDefHash !== challenge.taskDefHash || candidate.taskDef.metadata.subjectHash !== challenge.subjectHash) return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_DRIFT", attention: ["R10A3_REPAIR_APPROVAL_DRIFT"] });
-          const now = repairNow();
           const issuer = typeof runtimeHost?.issueRepairCapability === "function" ? runtimeHost.issueRepairCapability : issueRepairCapability;
           const capability = issuer({ projection, challengeId: challenge.challengeId, taskDef, now });
           const plan = validateRemediationTask({ projection, episodeId: episode.episodeId, findingIds: [...episode.findingIds].sort(), taskDef, capability, consumedAt: now });
           const events = plan.events.map(({ type, data }) => makeEvent(type, data, goalId, "goal-runtime.v1"));
-          const digest = createHash("sha256").update(capability.nonce).digest("hex");
+          const expected = events.reduce((candidate, event) => applyEvent(candidate, event), projection);
           try { appendEventBatchFn(root, events, projection.version); }
           catch (cause) {
-            const recovered = loadProjectionFn(root, goalId), repaired = recovered?.repairChallenges.get(challenge.challengeId), task = recovered?.tasks.get(plan.taskId);
-            if (repaired?.phase !== "applied" || repaired.nonceDigest !== digest || !task || task.metadata?.episodeId !== episode.episodeId || !recovered.repairEpisodes.get(episode.episodeId)?.remediationTaskIds?.includes(plan.taskId)) throw cause;
+            const recovered = loadProjectionFn(root, goalId);
+            if (!isDeepStrictEqual(recovered?.repairChallenges.get(challenge.challengeId), expected.repairChallenges.get(challenge.challengeId))
+              || !isDeepStrictEqual(recovered?.tasks.get(plan.taskId), expected.tasks.get(plan.taskId))
+              || !isDeepStrictEqual(recovered?.repairEpisodes.get(episode.episodeId), expected.repairEpisodes.get(episode.episodeId))) throw cause;
           }
           return JSON.stringify({ goalId, status: "R10A3_REPAIR_MATERIALIZED" });
         }

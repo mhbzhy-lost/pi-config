@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
+import { issueRepairCapability } from "../scripts/lib/goal-engine/repair-policy.mjs";
 import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
@@ -963,4 +964,59 @@ test("active requested identity drift blocks HEAD, adapter, and claims changes b
 test("single active PASS release requires R11 finalization without action offer", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "PASS"] }) }); await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "released");
   const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "R11_FINALIZATION_REQUIRED"); assert.equal(observationEvents(cwd).includes("goal.finalized"), false); assert.equal(observationEvents(cwd).includes("goal.action_offered"), false); assert.equal(status.action_token, undefined); assert.equal(status.machineAction, undefined);
+});
+
+
+test("Repair S3 pre-append failure preserves approved authority and retries one canonical batch", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] });
+  createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); const challenge = await prepareUserApprovedRepair(first, cwd);
+  first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: first.sessionManager }); await invoke(first, "goal_status", {});
+  let failed = false; const injected = injectedStore(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"), entries => !failed && entries.map(event => event.type).join(",") === "goal.amended,repair.capability_consumed,repair.task_linked" ? (failed = true, "pre") : null);
+  const api = pi(cwd, first.entries); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store: injected.store });
+  await assert.rejects(invoke(api, "goal_status", {}), /injected pre-append failure/);
+  let projection = injected.latest(); assert.equal(projection.repairChallenges.get(challenge.challengeId).phase, "approved"); assert.equal(projection.tasks.size, 0); assert.equal(injected.events.filter(event => event.type !== "goal.checkpoint").length, 0);
+  const retried = JSON.parse(await invoke(api, "goal_status", {})); projection = injected.latest(); assert.equal(retried.status, "R10A3_REPAIR_MATERIALIZED"); assert.deepEqual(injected.batches.at(-1).map(event => event.type), ["goal.amended", "repair.capability_consumed", "repair.task_linked"]); assert.equal(projection.tasks.size, 1);
+});
+
+test("Repair S3 durable throw exactly recovers consume Task and Episode link before reload dispatch", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; let calls = 0; const durable = { ...observationHost(cwd, { codes: ["PASS", "FAIL"] }), issueRepairCapability(input) { calls++; return issueRepairCapability(input); } };
+  createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); const challenge = await prepareUserApprovedRepair(first, cwd); first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: first.sessionManager }); await invoke(first, "goal_status", {});
+  let thrown = false; const injected = injectedStore(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"), entries => !thrown && entries[1]?.type === "repair.capability_consumed" ? (thrown = true, "durable") : null);
+  const api = pi(cwd, first.entries); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store: injected.store });
+  assert.equal(JSON.parse(await invoke(api, "goal_status", {})).status, "R10A3_REPAIR_MATERIALIZED"); const recovered = injected.latest(), taskId = challenge.taskId;
+  assert.equal(recovered.repairChallenges.get(challenge.challengeId).phase, "applied"); assert.equal(recovered.tasks.get(taskId).metadata.episodeId, challenge.episodeId); assert.deepEqual(recovered.repairEpisodes.get(challenge.episodeId).remediationTaskIds, [taskId]); assert.equal(calls, 1);
+  const reload = pi(cwd, api.entries); reload.cwd = cwd; createGoalEngineExtension(reload, { goalStateEnv: {}, runtimeHost: durable, store: injected.store }); const offer = JSON.parse(await invoke(reload, "goal_status", {})); assert.equal(offer.machineAction?.tool, "goal_dispatch"); assert.equal(calls, 1); assert.equal(injected.events.filter(event => event.type === "repair.capability_consumed").length, 1);
+});
+
+test("Repair S3 rejects durable recovery when consumedAt differs despite the same nonce digest", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] }); createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); await prepareUserApprovedRepair(first, cwd); first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: first.sessionManager }); await invoke(first, "goal_status", {});
+  let current = structuredClone(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime")), done = false; const store = { listGoals: () => [current.goalId], listGoalIds: () => [current.goalId], loadProjection: () => current, appendEvent(_root, event, version) { assert.equal(version, current.version); current = applyEvent(current, event); return current; }, appendEventBatch(_root, events, version) { assert.equal(version, current.version); for (const event of events) current = applyEvent(current, event.type === "repair.capability_consumed" ? { ...event, data: { ...event.data, consumedAt: event.data.consumedAt + 1 } } : event); if (!done) { done = true; throw Error("altered durable S3"); } return current; } };
+  const api = pi(cwd, first.entries); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store }); await assert.rejects(invoke(api, "goal_status", {}), /altered durable S3/);
+});
+
+test("Repair S3 rejects durable recovery when canonical Task metadata drifts", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] }); createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); await prepareUserApprovedRepair(first, cwd); first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: first.sessionManager }); await invoke(first, "goal_status", {});
+  let current = structuredClone(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime")); const store = { listGoals: () => [current.goalId], listGoalIds: () => [current.goalId], loadProjection: () => current, appendEvent(_root, event, version) { assert.equal(version, current.version); current = applyEvent(current, event); return current; }, appendEventBatch(_root, events, version) { assert.equal(version, current.version); for (const event of events) current = applyEvent(current, event); const [task] = current.tasks.values(); task.metadata.identity = "drifted"; throw Error("drifted durable S3"); } };
+  const api = pi(cwd, first.entries); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store }); await assert.rejects(invoke(api, "goal_status", {}), /drifted durable S3/);
+});
+
+test("Repair S3 keeps a known raw nonce out of durable and public surfaces", async () => {
+  const cwd = repo(), api = pi(cwd), raw = "known-s3-raw-nonce"; api.cwd = cwd; let calls = 0; const durable = { ...observationHost(cwd, { codes: ["PASS", "FAIL"] }), issueRepairCapability(input) { calls++; return { ...issueRepairCapability(input), nonce: raw }; } };
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {}); const status = await invoke(api, "goal_status", {}); const visible = `${readFileSync(join(cwd, ".state/goal-engine/goals/harden-runtime/events.jsonl"), "utf8")}${JSON.stringify(api.entries)}${status}`;
+  assert.equal(visible.includes(raw), false); assert.equal(calls, 1);
+});
+
+test("Repair S3 reads its clock once and expires before issuing", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let clockCalls = 0, issuerCalls = 0; const durable = { ...observationHost(cwd, { codes: ["PASS", "FAIL"] }), clock: () => Date.now() + clockCalls++, issueRepairCapability(input) { issuerCalls++; return issueRepairCapability(input); } };
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {}); clockCalls = 0; assert.equal(JSON.parse(await invoke(api, "goal_status", {})).status, "R10A3_REPAIR_MATERIALIZED"); assert.equal(clockCalls, 1); assert.equal(issuerCalls, 1);
+});
+
+test("Repair S3 returns expired without issuer or batch", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let now = Date.now(), issuerCalls = 0, batches = 0; const durable = { ...observationHost(cwd, { codes: ["PASS", "FAIL"] }), clock: () => now, issueRepairCapability(input) { issuerCalls++; return issueRepairCapability(input); } };
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, appendEventBatch(...args) { batches++; return appendEventBatch(...args); } }); await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {}); const challenge = [...loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.values()][0]; now = challenge.expiresAt; batches = 0; assert.equal(JSON.parse(await invoke(api, "goal_status", {})).status, "R10A3_REPAIR_APPROVAL_EXPIRED"); assert.equal(issuerCalls, 0); assert.equal(batches, 0);
+});
+
+test("Repair S3 treats consumed pending authority as ambiguous and never falls through", async () => {
+  const cwd = repo(), first = pi(cwd); first.cwd = cwd; const durable = observationHost(cwd, { codes: ["PASS", "FAIL"] }); createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: durable }); const challenge = await prepareUserApprovedRepair(first, cwd); first.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: first.sessionManager }); await invoke(first, "goal_status", {});
+  const injected = injectedStore(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime")); injected.latest().repairChallenges.get(challenge.challengeId).phase = "consumed"; const api = pi(cwd, first.entries); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store: injected.store }); const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.attention?.[0], "R10A3_REPAIR_APPROVAL_AMBIGUOUS"); assert.equal(injected.events.filter(event => event.type !== "goal.checkpoint").length, 0);
 });

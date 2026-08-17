@@ -47,6 +47,10 @@ R9 将 `requested` 与 `lease_allocated` 同时命名为 `observation_start`；a
 
 ## R10 Repair-owned 复验观察未接线
 
+### R10A3 S3 capability materialization 恢复缺口
+
+此前 S3 在原子 batch durable 后只比较 phase、digest、Task id 与 Episode includes，`consumedAt` 或完整 Task contract/metadata 漂移仍会被错误恢复；同一 status 还会多次读取时钟。恢复必须重放本次三事件计划，并逐项比较完整 consume challenge、canonical Task 与 Episode link；S3 只读取一次时钟。残留 `consumed` capability 视为不可判定 pending authority，闭锁为 approval ambiguous，绝不落入 R9。
+
 ### R10A3 权威与崩溃矩阵缺口
 
 候选实现曾为使 Condition freshness 通过而构造 `freshWorld`，伪造 `repo.root`、清空 dirty 字段并只拼接 adapter；这绕过了 Host CurrentWorld 的唯一观察权威。与此同时，obligation policy 用任意 `reverifying` Episode 全局压制 accepted Task 的 `goal_accept`，掩盖了 runtime generation 不应 accept-auto 的 graph 语义缺口。request/link 与 record/resolve 的 pre-append、durable-then-throw、exact evidence、release、stability 和 unlinked 复验矩阵亦未完整固化。
