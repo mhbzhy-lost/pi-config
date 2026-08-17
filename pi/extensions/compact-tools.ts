@@ -189,15 +189,11 @@ export default function compactTools(pi: ExtensionAPI) {
     const rendering = renderers[name];
 
     pi.registerTool({
+      ...native,
       name,
-      label: native.label || name,
-      description: native.description,
-      promptSnippet: native.promptSnippet,
-      parameters: native.parameters,
-      prepareArguments: native.prepareArguments,
       renderShell: "self",
       async execute(toolCallId, params, signal, onUpdate, ctx) {
-        return nativeTools(ctx.cwd)[name].execute(toolCallId, params, signal, onUpdate);
+        return nativeTools(ctx.cwd)[name].execute(toolCallId, params, signal, onUpdate, ctx);
       },
       renderCall: rendering.renderCall,
       renderResult: rendering.renderResult,

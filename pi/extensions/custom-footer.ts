@@ -6,7 +6,7 @@ import { loadConfig } from "../npm/node_modules/pi-subagents/src/extension/confi
 import { browserTrustedRoots, readBrowserRunStatus, renderBrowserTranscript } from "./lib/pi-subagents-browser-adapter.ts";
 import { NativeChildConversationRenderer } from "./lib/subagent-native-conversation.ts";
 import { SubagentSessionBrowserState } from "./lib/subagent-session-browser.ts";
-import { ReadOnlyBrowserEditor, SubagentTranscriptViewport } from "./lib/subagent-session-viewport.ts";
+import { parseSgrWheelDirection, ReadOnlyBrowserEditor, SubagentTranscriptViewport } from "./lib/subagent-session-viewport.ts";
 import { layoutFooter } from "../../scripts/lib/custom-footer-layout.mjs";
 
 type SubagentStatusStore = { version: 1; children: unknown[] };
@@ -139,7 +139,7 @@ export function createBrowserInputController(options: {
   scrollEnd: () => void;
   toggleTools: () => void;
 }) {
-  return { handleTerminalInput(data: string) {
+  const handleInput = (data: string) => {
     if (matchesKey(data, Key.alt("o"))) {
       if (isKeyRepeat(data) || isKeyRelease(data)) return { consume: true };
       options.browser.snapshot().active ? options.exitBrowser() : options.enterBrowser();
@@ -158,7 +158,8 @@ export function createBrowserInputController(options: {
     if (matchesKey(data, Key.end)) { options.scrollEnd(); return { consume: true }; }
     if (matchesKey(data, "x")) { options.toggleTools(); return { consume: true }; }
     return { consume: true };
-  } };
+  };
+  return { handleTerminalInput: handleInput, handleOverlayInput: handleInput };
 }
 
 function formatChildContext(tokens: number | undefined, position: { start: number; end: number; total: number } | undefined, width: number): string {
@@ -204,7 +205,6 @@ export default function customFooter(pi: ExtensionAPI) {
   const persist = () => { persistent.children = browser.serialize().children; };
   let ctx: any;
   let invalidateFooter: (() => void) | undefined;
-  let unsubscribeInput: (() => void) | undefined;
   let eventUnsubscribes: (() => void)[] = [];
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let closeOverlay: (() => void) | undefined;
@@ -220,7 +220,7 @@ export default function customFooter(pi: ExtensionAPI) {
   let overlayTui: { requestRender(): void } | undefined;
   let toolsExpanded = false;
 
-  const refresh = () => { invalidateFooter?.(); viewport?.invalidate(); };
+  const refresh = () => { invalidateFooter?.(); viewport?.refresh(); };
   const invalidateNative = () => { nativeRenderer?.invalidate(); };
   const syncMarkdownTheme = () => {
     try {
@@ -302,8 +302,6 @@ export default function customFooter(pi: ExtensionAPI) {
     exitBrowser();
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
-    unsubscribeInput?.();
-    unsubscribeInput = undefined;
     eventUnsubscribes.forEach((unsubscribe) => unsubscribe());
     eventUnsubscribes = [];
     browser.clear({ preserveRuns: preserveRoster });
@@ -334,9 +332,24 @@ export default function customFooter(pi: ExtensionAPI) {
         if (token !== generation || owner !== ctx || epoch !== sessionEpoch || !browser.snapshot().active) { done(); return { render: () => [] }; }
         closeOverlay = () => done();
         overlayTui = tui;
-        viewport = new SubagentTranscriptViewport({ getTerminalRows: () => tui.terminal.rows, reservedBottomRows: 4, getLines: (width) => renderSelected(width, theme), requestRender: () => tui.requestRender() });
+        viewport = new SubagentTranscriptViewport({
+          getTerminalRows: () => tui.terminal.rows,
+          reservedBottomRows: 4,
+          getLines: (width) => renderSelected(width, theme),
+          requestRender: () => tui.requestRender(),
+          onInput: (data) => {
+            const wheel = parseSgrWheelDirection(data);
+            if (wheel !== undefined) viewport?.scrollLines(wheel);
+            else controller.handleOverlayInput(data);
+          },
+          onInvalidate: invalidateNative,
+        });
         return viewport;
-      }, { overlay: true, overlayOptions: { row: 0, col: 0, width: "100%", maxHeight: "100%", margin: { bottom: 4 }, nonCapturing: true } });
+      }, {
+        overlay: true,
+        overlayOptions: { row: 0, col: 0, width: "100%", maxHeight: "100%", margin: { bottom: 4 } },
+        onHandle: (handle) => handle.focus(),
+      });
       Promise.resolve(result).catch(rollback);
       persist();
       refresh();
@@ -354,6 +367,13 @@ export default function customFooter(pi: ExtensionAPI) {
     toggleTools() { toolsExpanded = !toolsExpanded; invalidateNative(); refresh(); },
   });
 
+  pi.registerShortcut(Key.alt("o"), {
+    description: "Open subagent browser",
+    handler: (shortcutCtx: any) => {
+      if (ctx && shortcutCtx?.sessionManager === ctx.sessionManager && !browser.snapshot().active) enterBrowser();
+    },
+  });
+
   pi.on("session_start", (event: any, nextCtx) => {
     // A reload may issue another start without a preceding shutdown.
     teardown(event?.reason === "reload");
@@ -368,7 +388,6 @@ export default function customFooter(pi: ExtensionAPI) {
     nativeRenderer = new NativeChildConversationRenderer();
     const owner = ctx;
     const epoch = sessionEpoch;
-    unsubscribeInput = ctx.ui.onTerminalInput((data: string) => controller.handleTerminalInput(data));
     eventUnsubscribes = [
       pi.events.on("subagent:async-started", (event: any) => { if (owner !== ctx || epoch !== sessionEpoch) return; browser.trackStarted(event); invalidateNative(); persist(); refresh(); }),
       pi.events.on("subagent:async-complete", (event: any) => { if (owner !== ctx || epoch !== sessionEpoch) return; browser.trackCompleted(event); persist(); reconcile(owner, epoch); }),

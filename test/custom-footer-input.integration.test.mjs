@@ -1,16 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 import { createTestTui } from "./helpers/pi-tui.mjs";
 
-const jiti = createJiti(import.meta.url, {
-  moduleCache: false,
-  alias: {
-    "@earendil-works/pi-coding-agent": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
-    "@earendil-works/pi-tui": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js",
-  },
-});
-const piTui = await jiti.import("@earendil-works/pi-tui");
+const { jiti, piTui } = await loadPiTestRuntime(import.meta.url);
 const { SubagentSessionBrowserState } = await jiti.import("../pi/extensions/lib/subagent-session-browser.ts");
 const { createBrowserInputController } = await jiti.import("../pi/extensions/custom-footer.ts");
 

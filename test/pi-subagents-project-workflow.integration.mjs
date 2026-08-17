@@ -206,7 +206,7 @@ function dispatchProbeSource() {
 }
 
 test("project typed dispatch binds the real 0.45.2 workflow leaf to the Root Broker", { skip: !piBinary }, async () => {
-  assert.ok(piBinary, "PI_REAL_BIN must identify the Pi 0.84.1 host used for this integration test");
+  assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
   const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
 

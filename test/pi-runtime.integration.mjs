@@ -4,13 +4,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
-import { loadDesiredSkills } from "../scripts/lib/skill-whitelist.mjs";
+import { discoverManagedSkills } from "../scripts/lib/skill-whitelist.mjs";
+import { resolvePiCodingAgentRoot } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const shellIntegration = join(repoRoot, "scripts", "pi-shell.zsh");
 const piBinary = process.env.PI_REAL_BIN;
-const piPackage = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
-const piTypes = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts";
+const piRoot = resolvePiCodingAgentRoot();
+const piPackage = join(piRoot, "dist", "index.js");
+const piTypes = join(piRoot, "dist", "core", "extensions", "types.d.ts");
 
 test("installed Pi SessionManager preserves custom → compaction → real user branch fields", async () => {
   const { SessionManager } = await import(piPackage);
@@ -36,12 +38,8 @@ test("installed Pi SessionManager preserves custom → compaction → real user 
 });
 
 test("real Pi RPC loads required auto-discovered Skills without retired products", async () => {
-  assert.ok(piBinary, "PI_REAL_BIN must point to an explicitly supported Pi runtime");
-  const controlledSkills = await loadDesiredSkills(
-    repoRoot,
-    join(repoRoot, "skill-overrides", "skills.list"),
-    null,
-  );
+  assert.ok(piBinary, "PI_REAL_BIN must point to an explicitly supported Pi host");
+  const controlledSkills = await discoverManagedSkills(repoRoot);
 
   const result = spawnSync(
     "zsh",

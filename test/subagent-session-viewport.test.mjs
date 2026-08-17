@@ -1,18 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 import { createTestTui } from "./helpers/pi-tui.mjs";
-const jiti = createJiti(import.meta.url, {
-  moduleCache: false,
-  alias: {
-    "@earendil-works/pi-coding-agent": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
-    "@earendil-works/pi-tui": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js",
-  },
-});
-const piTui = await jiti.import("@earendil-works/pi-tui");
+const { jiti, codingAgent, piTui } = await loadPiTestRuntime(import.meta.url);
 const { visibleWidth } = piTui;
-const { CustomEditor } = await jiti.import("@earendil-works/pi-coding-agent");
-const { ReadOnlyBrowserEditor, SubagentTranscriptViewport } = await jiti.import("../pi/extensions/lib/subagent-session-viewport.ts");
+const { CustomEditor } = codingAgent;
+const { ReadOnlyBrowserEditor, SubagentTranscriptViewport, parseSgrWheelDirection } = await jiti.import("../pi/extensions/lib/subagent-session-viewport.ts");
 
 const editorTheme = {
   borderColor: (text) => text,
@@ -164,29 +157,44 @@ test("viewport truncates and pads ANSI CJK and emoji transcript lines to the exa
 });
 
 
-test("viewport bounds scrolling as output changes and safely handles invalidation, disposal, and non-positive dimensions", () => {
-  let rows = 3;
-  let transcript = ["one", "two", "three", "four", "five"];
+test("viewport refresh preserves host cache while invalidate signals host cache invalidation", () => {
   let renders = 0;
+  let invalidations = 0;
+  const inputs = [];
   const viewport = new SubagentTranscriptViewport({
-    getTerminalRows: () => rows,
+    getTerminalRows: () => 3,
     reservedBottomRows: 2,
-    getLines: () => transcript,
+    getLines: () => ["one"],
     requestRender: () => { renders += 1; },
+    onInvalidate: () => { invalidations += 1; },
+    onInput: (data) => inputs.push(data),
   });
 
-  viewport.scrollPage(-1);
-  assert.deepEqual(viewport.render(4).map((line) => line.trimEnd()), ["four"]);
-  transcript = ["only"];
-  assert.deepEqual(viewport.render(4).map((line) => line.trimEnd()), ["only"]);
-
-  rows = 0;
-  assert.deepEqual(viewport.render(0), [""]);
+  viewport.refresh();
+  assert.equal(renders, 1);
+  assert.equal(invalidations, 0);
   viewport.invalidate();
   assert.equal(renders, 2);
+  assert.equal(invalidations, 1);
+  viewport.handleInput("x");
+  assert.deepEqual(inputs, ["x"]);
   viewport.dispose();
+  viewport.refresh();
   viewport.invalidate();
+  viewport.handleInput("j");
   assert.equal(renders, 2);
+  assert.equal(invalidations, 1);
+  assert.deepEqual(inputs, ["x"]);
+});
+
+test("viewport parses complete SGR wheel presses including modifier bits", () => {
+  assert.equal(parseSgrWheelDirection("\x1b[<64;10;5M"), -1);
+  assert.equal(parseSgrWheelDirection("\x1b[<65;10;5M"), 1);
+  assert.equal(parseSgrWheelDirection("\x1b[<80;10;5M"), -1);
+  assert.equal(parseSgrWheelDirection("\x1b[<81;10;5M"), 1);
+  assert.equal(parseSgrWheelDirection("\x1b[<64;10;5m"), undefined);
+  assert.equal(parseSgrWheelDirection("\x1b[<64;10;5Mx"), undefined);
+  assert.equal(parseSgrWheelDirection("x"), undefined);
 });
 
 test("viewport resets manual scrolling, requests renders, and ignores scroll mutators after disposal", () => {

@@ -14,7 +14,18 @@ type ViewportOptions = {
   reservedBottomRows: number;
   getLines: (width: number) => string[];
   requestRender: () => void;
+  onInput?: (data: string) => void;
+  onInvalidate?: () => void;
 };
+
+export function parseSgrWheelDirection(data: string): -1 | 1 | undefined {
+  const match = /^\x1b\[<(\d+);\d+;\d+M$/.exec(data);
+  if (!match) return undefined;
+  const button = Number(match[1]) & ~(4 | 8 | 16);
+  if (button === 64) return -1;
+  if (button === 65) return 1;
+  return undefined;
+}
 
 export class SubagentTranscriptViewport implements Component {
   private startIndex = 0;
@@ -89,8 +100,18 @@ export class SubagentTranscriptViewport implements Component {
     this.options.requestRender();
   }
 
-  invalidate(): void {
+  handleInput(data: string): void {
+    if (!this.disposed) this.options.onInput?.(data);
+  }
+
+  refresh(): void {
     if (!this.disposed) this.options.requestRender();
+  }
+
+  invalidate(): void {
+    if (this.disposed) return;
+    this.options.onInvalidate?.();
+    this.options.requestRender();
   }
 
   dispose(): void {

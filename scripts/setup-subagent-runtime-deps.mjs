@@ -16,14 +16,26 @@ export function buildSubagentRuntimeInstallCommand(piNpmDir) {
   };
 }
 
+export function buildTaskSchedulerInstallCommand(piNpmDir) {
+  return {
+    command: "npm",
+    args: [
+      "install", "--prefix", piNpmDir, "--save-exact",
+      "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1",
+    ],
+  };
+}
+
 export async function installSubagentRuntimeDependencies({
   piNpmDir = resolve(import.meta.dirname, "../pi/npm"),
   env = process.env,
   run = execFile,
 } = {}) {
   await run("npm", ["uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo"], { env });
-  const { command, args } = buildSubagentRuntimeInstallCommand(piNpmDir);
-  await run(command, args, { env });
+  const subagentInstall = buildSubagentRuntimeInstallCommand(piNpmDir);
+  await run(subagentInstall.command, subagentInstall.args, { env });
+  const schedulerInstall = buildTaskSchedulerInstallCommand(piNpmDir);
+  await run(schedulerInstall.command, schedulerInstall.args, { env });
   return { piNpmDir };
 }
 

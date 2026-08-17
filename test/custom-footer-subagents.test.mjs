@@ -3,16 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
-import { SessionManager, initTheme } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
+import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
-const jiti = createJiti(import.meta.url, {
-  moduleCache: false,
-  alias: {
-    "@earendil-works/pi-coding-agent": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
-    "@earendil-works/pi-tui": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js",
-  },
-});
+const { jiti, codingAgent } = await loadPiTestRuntime(import.meta.url);
+const { SessionManager, initTheme } = codingAgent;
 const customFooterModule = await jiti.import("../pi/extensions/custom-footer.ts");
 const { SubagentSessionBrowserState } = await jiti.import("../pi/extensions/lib/subagent-session-browser.ts");
 
@@ -251,20 +245,24 @@ function register(map, name, handler) {
 }
 
 function setup(reason) {
-  const handlers = new Map(); const events = new Map(); let footerFactory; let input;
-  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high" };
+  const handlers = new Map(); const events = new Map(); let footerFactory; let shortcut;
+  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", registerShortcut(_key, definition) { shortcut = definition; } };
   customFooterModule.default(pi);
   const ctx = {
     hasUI: true, cwd: `${process.env.HOME}/workspace`, model: { provider: "codex-pool", id: "gpt-5.6-sol", contextWindow: 272_000 },
     getContextUsage: () => ({ tokens: 207_000, contextWindow: 272_000, percent: 76.1 }), sessionManager: { getSessionFile: () => null },
     ui: {
-      onTerminalInput(handler) { input = handler; return () => { input = undefined; }; },
+      onTerminalInput() { throw new Error("browser must not install a global terminal input listener"); },
       setFooter(factory) { footerFactory = factory; }, getEditorComponent: () => undefined, setEditorComponent() {},
       custom() { return Promise.resolve(); },
     },
   };
   handlers.get("session_start")[0]({ reason }, ctx);
   const component = footerFactory({ requestRender() {} }, { fg: (_color, text) => text }, {});
+  const input = (data) => {
+    if (data === "\x1bo") shortcut?.handler(ctx);
+    return { consume: true };
+  };
   return { component, input: () => input, asyncStart: (event) => events.get("subagent:async-started")[0](event), complete: (event) => events.get("subagent:async-complete")[0](event), shutdown: (reason) => handlers.get("session_shutdown")[0]({ reason }, ctx), events };
 }
 
@@ -314,7 +312,7 @@ test("migrates a pre-v1 browser class cache into a plain roster", (t) => {
   t.after(() => { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; });
 
   const handlers = new Map();
-  customFooterModule.default({ on: (name, handler) => register(handlers, name, handler), events: { on() { return () => {}; } }, getThinkingLevel: () => "off" });
+  customFooterModule.default({ on: (name, handler) => register(handlers, name, handler), events: { on() { return () => {}; } }, getThinkingLevel: () => "off", registerShortcut() {} });
 
   assert.deepEqual(globalThis[key], { version: 1, children: oldState.snapshot().children });
   assert.equal("browser" in globalThis[key], false);
@@ -322,37 +320,54 @@ test("migrates a pre-v1 browser class cache into a plain roster", (t) => {
 
 function runtimeFixture(fixtureOptions = {}) {
   const handlers = new Map(); const events = new Map(); const timers = []; const cleared = []; const custom = []; const editorFactories = []; const notifications = [];
-  let input; let editor = function OriginalEditor() {}; let draft = "unsent draft"; let footerFactory; let renders = 0;
+  let shortcut; let editor = function OriginalEditor() {}; let draft = "unsent draft"; let footerFactory; let renders = 0;
   const originalSetInterval = globalThis.setInterval; const originalClearInterval = globalThis.clearInterval;
   globalThis.setInterval = (callback) => { const timer = { callback, unrefCalls: 0, unref() { this.unrefCalls += 1; } }; timers.push(timer); return timer; };
   globalThis.clearInterval = (timer) => { cleared.push(timer); };
-  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high" };
+  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", registerShortcut(_key, definition) { shortcut = definition; } };
   customFooterModule.default(pi);
   const ctx = {
     hasUI: true, cwd: "/repo", model: { id: "model" }, getContextUsage: () => ({ percent: 1, contextWindow: 100 }), sessionManager: { getSessionFile: () => null },
     ui: {
-      onTerminalInput(handler) { input = handler; return () => { input = undefined; }; }, setFooter(factory) { footerFactory = factory; },
+      onTerminalInput() { throw new Error("browser must not install a global terminal input listener"); }, setFooter(factory) { footerFactory = factory; },
       getEditorComponent: () => { if (fixtureOptions.throwAt === "getEditorComponent") throw new Error("get editor failed"); return editor; }, getEditorText: () => { if (fixtureOptions.throwAt === "getEditorText") throw new Error("get text failed"); return draft; }, setEditorComponent(factory) { if (fixtureOptions.throwAt === "setEditorComponent") throw new Error("set editor failed"); editor = factory; editorFactories.push(factory); }, setEditorText(text) { draft = text; },
-      custom(factory, overlayOptions) { if (fixtureOptions.throwAt === "custom") throw new Error("custom failed"); const call = { factory, options: overlayOptions, done: 0, component: undefined }; custom.push(call); call.component = factory({ terminal: { rows: 24 }, requestRender() { renders += 1; } }, { fg: (_c, value) => value, bold: (value) => value }, {}, () => { call.done += 1; }); return fixtureOptions.rejectCustom ? Promise.reject(new Error("overlay failed")) : Promise.resolve(); },
+      custom(factory, overlayOptions) { if (fixtureOptions.throwAt === "custom") throw new Error("custom failed"); const handle = { focusCalls: 0, focus() { this.focusCalls += 1; } }; const call = { factory, options: overlayOptions, handle, done: 0, component: undefined }; custom.push(call); call.component = factory({ terminal: { rows: 24 }, requestRender() { renders += 1; } }, { fg: (_c, value) => value, bold: (value) => value }, {}, () => { call.done += 1; }); overlayOptions.onHandle(handle); return fixtureOptions.rejectCustom ? Promise.reject(new Error("overlay failed")) : Promise.resolve(); },
       notify(message, level) { notifications.push({ message, level }); },
     },
   };
   handlers.get("session_start")[0]({}, ctx);
+  const input = (data) => {
+    if (data === "\x1bo") shortcut?.handler(ctx);
+    else custom.at(-1)?.component?.handleInput(data);
+    return { consume: true };
+  };
   return {
-    ctx, timers, cleared, custom, editorFactories, notifications, events, input: () => input, component: () => footerFactory?.({ requestRender() {} }, { fg: (_c, value) => value }, {}), renders: () => renders,
+    ctx, shortcut, timers, cleared, custom, editorFactories, notifications, events, input: () => input, component: () => footerFactory?.({ requestRender() {} }, { fg: (_c, value) => value }, {}), renders: () => renders,
     start: (next = ctx, reason) => handlers.get("session_start")[0]({ reason }, next), asyncStart: (event) => events.get("subagent:async-started")[0](event),
     shutdown: (reason = "quit") => handlers.get("session_shutdown")[0]({ reason }, ctx), poll: (index = timers.length - 1) => timers[index].callback(), restore() { globalThis.setInterval = originalSetInterval; globalThis.clearInterval = originalClearInterval; },
   };
 }
 
-test("extension fixture enters a 20-row noncapturing viewport then restores editor and draft", (t) => {
+test("Alt+O accepts a distinct shortcut context for the live session manager only", (t) => {
+  const subject = runtimeFixture(); t.after(() => { subject.shutdown(); subject.restore(); });
+  subject.asyncStart({ id: "shortcut-run", asyncDir: "/tmp/shortcut-run", cwd: "/repo", agent: "executor" });
+
+  subject.shortcut.handler({ sessionManager: subject.ctx.sessionManager });
+  assert.equal(subject.custom.length, 1);
+  subject.custom[0].component.handleInput("\x1b");
+  subject.shortcut.handler({ sessionManager: { getSessionFile: () => null } });
+  assert.equal(subject.custom.length, 1);
+});
+
+test("extension fixture focuses a capturing viewport then restores editor and draft", (t) => {
   const subject = runtimeFixture(); t.after(() => { subject.shutdown(); subject.restore(); });
   subject.asyncStart({ id: "fixture-run", asyncDir: "/tmp/fixture-run", cwd: "/repo", agent: "executor" });
   const original = subject.ctx.ui.getEditorComponent();
   assert.deepEqual(subject.input()("\x1bo"), { consume: true });
   assert.notEqual(subject.ctx.ui.getEditorComponent(), original);
   assert.equal(subject.custom.length, 1);
-  assert.deepEqual(subject.custom[0].options, { overlay: true, overlayOptions: { row: 0, col: 0, width: "100%", maxHeight: "100%", margin: { bottom: 4 }, nonCapturing: true } });
+  assert.deepEqual(subject.custom[0].options.overlayOptions, { row: 0, col: 0, width: "100%", maxHeight: "100%", margin: { bottom: 4 } });
+  assert.equal(subject.custom[0].handle.focusCalls, 1);
   assert.equal(subject.custom[0].component.render(40).length, 20);
   assert.match(subject.custom[0].component.render(40).join("\n"), /Waiting for child output/);
   assert.deepEqual(subject.input()("\x1b"), { consume: true });
@@ -400,7 +415,7 @@ test("a repeated session start exits the browser and replaces timer and input li
   assert.equal(subject.cleared.length, 1);
   assert.equal(subject.timers.length, 2);
   assert.equal(subject.timers[1].unrefCalls, 1);
-  assert.notEqual(subject.input(), firstInput);
+  assert.equal(subject.input(), firstInput);
   assert.equal(subject.ctx.ui.getEditorComponent(), original);
   assert.equal(subject.ctx.ui.getEditorText(), "unsent draft");
   assert.equal(subject.custom[0].done, 1);
@@ -420,7 +435,7 @@ test("a no-UI session start tears down the prior browser session and clears its 
   assert.equal(subject.ctx.ui.getEditorComponent(), original);
   assert.equal(subject.ctx.ui.getEditorText(), "unsent draft");
   assert.equal(subject.cleared.length, 1);
-  assert.equal(subject.input(), undefined);
+  assert.equal(typeof subject.input(), "function");
   assert.equal(subject.events.size, 0);
   assert.deepEqual(globalThis[Symbol.for("pi-config.custom-footer.subagents.v2")].children, []);
   const renders = subject.renders();
@@ -489,6 +504,33 @@ test("relative child sessionFile resolves against asyncDir and renders native tr
   assert.doesNotMatch(rendered, /Fleet fallback message/);
 });
 
+test("overlay invalidate refreshes cached native child ANSI after a theme change", (t) => {
+  const sessions = fs.mkdtempSync(path.join(os.tmpdir(), "footer-native-theme-sessions-"));
+  const asyncDir = fs.mkdtempSync(path.join(sessions, "footer-native-theme-async-"));
+  const parent = SessionManager.create("/repo", sessions);
+  const child = SessionManager.create("/repo", sessions);
+  child.appendMessage({ role: "assistant", content: [{ type: "text", text: "# themed native child" }], api: "test", provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 }, stopReason: "stop", timestamp: Date.now() });
+  const sessionFile = child.getSessionFile();
+  assert.ok(sessionFile);
+  initTheme("dark", false);
+  const subject = runtimeFixture();
+  subject.ctx.sessionManager.getSessionFile = () => parent.getSessionFile();
+  t.after(() => { subject.shutdown(); subject.restore(); initTheme("dark", false); fs.rmSync(sessions, { recursive: true, force: true }); });
+
+  subject.asyncStart({ id: "theme-run", asyncDir, cwd: "/repo", agent: "executor" });
+  fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({ state: "complete", steps: [{ agent: "executor", status: "completed", sessionFile: path.relative(asyncDir, sessionFile) }] }));
+  subject.poll();
+  subject.input()("\x1bo");
+  const dark = subject.custom[0].component.render(80).join("\n");
+  initTheme("light", false);
+  subject.custom[0].component.invalidate();
+  const light = subject.custom[0].component.render(80).join("\n");
+
+  assert.match(dark, /\x1b\[/);
+  assert.match(light, /\x1b\[/);
+  assert.notEqual(light, dark);
+});
+
 test("native session parse warning falls back once to valid Fleet output", (t) => {
   const sessions = fs.mkdtempSync(path.join(os.tmpdir(), "footer-native-warning-sessions-"));
   const asyncDir = fs.mkdtempSync(path.join(sessions, "footer-native-warning-async-"));
@@ -553,7 +595,7 @@ test("no-UI reload tears down browser resources while preserving the roster for 
   assert.equal(subject.custom[0].done, 1);
   assert.equal(subject.ctx.ui.getEditorComponent(), original);
   assert.equal(subject.cleared.length, 1);
-  assert.equal(subject.input(), undefined);
+  assert.equal(typeof subject.input(), "function");
   assert.equal(subject.events.size, 0);
   assert.match(globalThis[Symbol.for("pi-config.custom-footer.subagents.v2")].children[0].agent, /executor/);
 

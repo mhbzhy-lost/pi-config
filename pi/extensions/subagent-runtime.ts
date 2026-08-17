@@ -6,6 +6,7 @@ import registerSubagentNotify from "../npm/node_modules/pi-subagents/src/runs/ba
 import { resolveCurrentSessionId } from "../npm/node_modules/pi-subagents/src/shared/session-identity.ts";
 import {
   formatCompactSubagentNotification,
+  formatCompactSubagentSpawnSummary,
   formatCompactSubagentToolResult,
 } from "../../scripts/lib/subagent-dispatch/compact-rendering.ts";
 import { installHeadlessTypedSubagentRuntime } from "../../scripts/lib/subagent-dispatch/extension.ts";
@@ -30,6 +31,37 @@ function notificationColor(text: string): "error" | "warning" | "success" | "dim
   return "success";
 }
 
+const SUBAGENT_SPAWN_SUMMARY_KEY = "subagentSpawnSummary";
+
+function spawnStartingSummary(args: any): string | undefined {
+  if (!args || typeof args !== "object" || Object.hasOwn(args, "action")) return undefined;
+  const agent = typeof args.agent === "string" ? args.agent.trim() : "";
+  const title = typeof args.title === "string" ? args.title.trim() : "";
+  return agent && title ? `* subagent starting ${agent}: ${title}` : undefined;
+}
+
+export function createSubagentToolRenderers() {
+  const renderSubagentCall = (args: any, theme: any, context: any) => {
+    const starting = spawnStartingSummary(args);
+    if (!starting) return undefined;
+    const summary = context?.state?.[SUBAGENT_SPAWN_SUMMARY_KEY] ?? starting;
+    return typeof summary === "string" ? new Text(theme.fg("dim", summary), 0, 0) : undefined;
+  };
+  const renderSubagentResult = (result: any, _options: any, theme: any, context: any) => {
+    const args = context?.args;
+    const summary = args && !Object.hasOwn(args, "action")
+      ? formatCompactSubagentSpawnSummary(result)
+      : undefined;
+    if (summary) {
+      if (context?.state) context.state[SUBAGENT_SPAWN_SUMMARY_KEY] = summary;
+      return new Text("", 0, 0);
+    }
+    const text = formatCompactSubagentToolResult(result, args ?? {});
+    return new Text(theme.fg(result?.isError ? "error" : "dim", text), 0, 0);
+  };
+  return { renderSubagentCall, renderSubagentResult };
+}
+
 function evidenceCriterionIds(criteria: unknown): string[] {
   if (!Array.isArray(criteria) || !criteria.length) throw new Error("executor acceptance criteria are unavailable");
   const ids = criteria.map((criterion) => {
@@ -49,10 +81,7 @@ function evidenceCriterionIds(criteria: unknown): string[] {
 export default function subagentRuntime(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.PI_SUBAGENT_FANOUT_CHILD === "1") return;
   const completionBatch = loadConfig().completionBatch;
-  const renderSubagentResult = (result: any, _options: any, theme: any, context: any) => {
-    const text = formatCompactSubagentToolResult(result, context?.args ?? {});
-    return new Text(theme.fg(result?.isError ? "error" : "dim", text), 0, 0);
-  };
+  const { renderSubagentCall, renderSubagentResult } = createSubagentToolRenderers();
   let brokerStarted = false;
   let brokerReady = false;
   let previousBrokerMarker: string | undefined;
@@ -100,6 +129,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       brokerStarted = false;
       brokerReady = false;
     },
+    renderSubagentCall,
     renderSubagentResult,
     rpc,
     resolveRootSessionId: (sessionManager: any) => resolveRootSessionId(sessionManager),

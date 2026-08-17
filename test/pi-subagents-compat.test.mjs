@@ -43,7 +43,7 @@ function evaluate(report) {
 
 test("exports the stable RPC v1 method and supported Pi contracts", () => {
   assert.deepEqual(REQUIRED_METHODS, ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"]);
-  assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1", "0.83.0", "0.84.1"]);
+  assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2"]);
 });
 
 test("loads the public Pi API after asynchronously resolving the npm global root", async () => {
@@ -274,10 +274,10 @@ test("accepts the flat runtime compatibility report", () => {
 });
 
 test("rejects runtime versions outside the explicit support set", () => {
-  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1"]) {
+  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2"]) {
     assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }), { ok: true, failures: [] });
   }
-  for (const version of ["0.83.1", "0.84.0"]) {
+  for (const version of ["0.83.1", "0.84.0", "0.84.3"]) {
     assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }).failures, [`unsupported Pi version: ${version}`]);
   }
   assert.deepEqual(evaluate({ ...compatibleReport, version: "0.35.1" }).failures, ["unexpected pi-subagents version: 0.35.1"]);
@@ -412,6 +412,14 @@ test("uninstalls retired Todo before installing exact runtime dependencies", asy
     [
       "npm",
       ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "pi-subagents@0.45.2", "typebox@1.1.38"],
+      { env: { PATH: "/test/bin" } },
+    ],
+    [
+      "npm",
+      [
+        "install", "--prefix", "/tmp/pi/npm", "--save-exact",
+        "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1",
+      ],
       { env: { PATH: "/test/bin" } },
     ],
   ]);

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PI_VERSION="0.84.1"
+PI_VERSION="0.84.2"
 PI_PACKAGE="@earendil-works/pi-coding-agent@$PI_VERSION"
 PI_SUBAGENTS_VERSION="0.45.2"
 NPM_REGISTRY="https://registry.npmjs.org"
@@ -26,8 +26,6 @@ if [[ "$node_major" -lt 22 ]]; then
   printf 'Node.js 22 or newer is required; found %s\n' "$(node --version)" >&2
   exit 1
 fi
-
-git -C "$SCRIPT_DIR" submodule update --init --recursive
 
 pi_binary="${PI_REAL_BIN:-$(command -v pi || true)}"
 installed_version=""

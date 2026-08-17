@@ -71,7 +71,7 @@ test("shell integration preserves a custom Goal state directory", async () => {
   }
 });
 
-test("bare pi uses the alternate screen for an interactive launch", async () => {
+test("bare pi forwards without shell ANSI output", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-alt-default-"));
   try {
     const output = join(root, "args.txt");
@@ -89,14 +89,14 @@ test("bare pi uses the alternate screen for an interactive launch", async () => 
     );
 
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "\u001b[?1049h\u001b[2J\u001b[H\u001b[?1049l");
+    assert.equal(result.stdout, "");
     assert.equal(await readFile(output, "utf8"), "--no-skills\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("pi-inline bypasses alternate screen explicitly", async () => {
+test("pi-inline requests official regular TUI mode", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-inline-"));
   try {
     const output = join(root, "args.txt");
@@ -115,13 +115,13 @@ test("pi-inline bypasses alternate screen explicitly", async () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "");
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n--version\n");
+    assert.equal(await readFile(output, "utf8"), "--no-skills\n--tui-mode\nregular\n--version\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("pi-full runs pi in the alternate screen and restores the primary screen", async () => {
+test("pi-full requests official fullscreen TUI mode", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-full-"));
   try {
     const output = join(root, "args.txt");
@@ -140,9 +140,19 @@ test("pi-full runs pi in the alternate screen and restores the primary screen", 
 
     assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "\u001b[?1049h\u001b[2J\u001b[H\u001b[?1049l");
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n--version\n");
+    assert.equal(result.stdout, "");
+    assert.equal(await readFile(output, "utf8"), "--no-skills\n--tui-mode\nfullscreen\n--version\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("shell delegates TUI ownership to Pi official settings", async () => {
+  const shell = await readFile(join(repoRoot, "scripts", "pi-shell.zsh"), "utf8");
+  assert.doesNotMatch(shell, /1049|PI_ALT_SCREEN|_pi_config_alt_screen/);
+
+  const settings = JSON.parse(await readFile(join(repoRoot, "pi", "settings.json"), "utf8"));
+  assert.equal(settings.tuiMode, "fullscreen");
+  assert.equal(settings.fullscreenExitOutput, "resume-hint");
+  assert.equal(Object.hasOwn(settings, "defaultTools"), false);
 });

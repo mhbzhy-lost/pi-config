@@ -1,5 +1,7 @@
 {
-  "lastChangelogVersion": "0.84.1",
+  "lastChangelogVersion": "0.84.2",
+  "tuiMode": "fullscreen",
+  "fullscreenExitOutput": "resume-hint",
   "theme": "light",
   "defaultProvider": "codex-pool",
   "defaultModel": "gpt-5.6-sol",
@@ -12,7 +14,13 @@
       "prompts": [],
       "themes": []
     },
-    "../../.r2c/integrations/pi-adapter"
+    {
+      "source": "npm:@amaster.ai/pi-task-scheduler@0.1.9",
+      "extensions": [],
+      "skills": [],
+      "prompts": [],
+      "themes": []
+    }
   ],
   "subagents": {
     "agentOverrides": {

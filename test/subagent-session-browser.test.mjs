@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
-const jiti = createJiti(import.meta.url, { moduleCache: false });
+const { jiti } = await loadPiTestRuntime(import.meta.url);
 const { SubagentSessionBrowserState } = await jiti.import("../pi/extensions/lib/subagent-session-browser.ts");
 
 function startRun(state, id, agents = ["executor", "reviewer"]) {
