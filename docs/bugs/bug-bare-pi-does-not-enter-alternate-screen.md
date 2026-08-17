@@ -1,5 +1,7 @@
 # Bug: 默认 pi 未进入终端独占屏幕
 
+> **状态：由 Pi 0.84.2 官方 `tuiMode=fullscreen` 取代。** Zsh 不再发送 DECSET/DECRST 1049；`pi-inline` 与 `pi-full` 仅保留为官方 mode 别名。
+
 ## 现象
 
 用户运行 `pi` 后仍能看到启动前的 shell 历史；只有不易发现的 `pi-full` 命令会发送 alternate-screen 控制序列。
