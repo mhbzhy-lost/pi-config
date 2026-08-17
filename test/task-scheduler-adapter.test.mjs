@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, realpath, symlink, lstat, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, symlink, lstat, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerTaskSchedulerAdapter, repositoryDataDir } from "../scripts/lib/task-scheduler/adapter.mjs";
@@ -129,23 +129,35 @@ test("facade sendUserMessage fails closed when the host method is absent", () =>
   assert.throws(() => api.sendUserMessage("safe"), /sendUserMessage is required/);
 });
 
-test("data directory rejects every state ancestor and the hash leaf before writing", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "scheduler-membrane-"))); const repo = join(root, "repo"), other = join(root, "other"), state = join(root, "state"); await Promise.all([mkdir(repo), mkdir(other), mkdir(state)]);
-  const pi = makeHost(); registerTaskSchedulerAdapter(pi, { upstreamExtension: fakeUpstream, env: { XDG_STATE_HOME: state } });
-  const dataCtx = ctx(repo);
-  await pi.handlers.get("session_start")({}, dataCtx);
-  try {
-    const expected = repositoryDataDir(repo, { XDG_STATE_HOME: state }); assert.ok(expected.startsWith(await realpath(state)));
-  } finally { await pi.handlers.get("session_shutdown")({}, dataCtx); }
-  const linkedParent = join(root, "linked-parent"); await symlink(repo, linkedParent);
-  const nestedState = join(linkedParent, "nested-state");
-  assert.throws(() => repositoryDataDir(other, { XDG_STATE_HOME: nestedState }), /real directory/);
-  assert.deepEqual(await readdir(repo), [], "ancestor symlink rejection creates no repository state");
+test("data directory permits platform ancestor aliases but rejects state-home and scheduler descendants", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "scheduler-membrane-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = join(root, "repo"), other = join(root, "other"), privateRoot = join(root, "private"), aliasRoot = join(root, "var");
+  await Promise.all([mkdir(repo), mkdir(other), mkdir(privateRoot)]); await symlink(privateRoot, aliasRoot);
+  // Simulates /var -> /private/var: only an ancestor above state-home is a link.
+  const aliasedState = join(aliasRoot, "state"); await mkdir(join(privateRoot, "state"));
+  const expected = repositoryDataDir(repo, { XDG_STATE_HOME: aliasedState });
+  assert.ok(expected.startsWith(await realpath(aliasedState)));
+  assert.equal((await stat(expected)).mode & 0o777, 0o700);
+
+  const stateTarget = join(root, "state-target"); await mkdir(stateTarget);
+  const linkedState = join(root, "linked-state"); await symlink(stateTarget, linkedState);
+  assert.throws(() => repositoryDataDir(other, { XDG_STATE_HOME: linkedState }), /real directory/);
+
+  const parentState = join(root, "parent-state"); await mkdir(parentState);
+  await symlink(repo, join(parentState, "pi-task-scheduler"));
+  assert.throws(() => repositoryDataDir(other, { XDG_STATE_HOME: parentState }), /real directory/);
+  assert.deepEqual(await readdir(repo), [], "scheduler parent rejection creates no repository state");
+
   const leafState = join(root, "leaf-state"); await mkdir(join(leafState, "pi-task-scheduler"), { recursive: true });
   const expectedLeaf = join(leafState, "pi-task-scheduler", (await import("node:crypto")).createHash("sha256").update(await realpath(other)).digest("hex"));
   await symlink(repo, expectedLeaf);
   assert.throws(() => repositoryDataDir(other, { XDG_STATE_HOME: leafState }), /real directory/);
   assert.equal((await lstat(expectedLeaf)).isSymbolicLink(), true);
+
+  const repositoryAlias = join(root, "repository-alias"); await symlink(repo, repositoryAlias);
+  assert.throws(() => repositoryDataDir(repo, { XDG_STATE_HOME: join(repositoryAlias, "projected-state") }), /outside the repository/);
+  assert.deepEqual(await readdir(repo), [], "ancestor projection rejection writes nothing in the repository");
 });
 
 test("confirmation summaries remove visual controls and result details must be absent", async () => {

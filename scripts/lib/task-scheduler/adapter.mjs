@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import upstreamDefaultExtension from "../../../pi/npm/node_modules/@amaster.ai/pi-task-scheduler/dist/extension.js";
 
 const ALLOWED_TOOLS = new Set(["scheduler_list", "scheduler_get", "scheduler_create", "scheduler_delete"]);
@@ -16,36 +16,45 @@ const diagnostics = [];
 
 function diagnostic(message) { diagnostics.push(message); if (diagnostics.length > 25) diagnostics.shift(); }
 function outside(repo, candidate) { const r = relative(repo, candidate); return isAbsolute(r) || (r !== "" && r.startsWith("..")); }
-function checkDirectoryChain(path) {
-  const absolute = resolve(path);
-  let cursor = resolve("/");
-  for (const component of absolute.split("/").filter(Boolean)) {
-    cursor = resolve(cursor, component);
-    try {
-      const entry = lstatSync(cursor);
-      if (entry.isSymbolicLink() || !entry.isDirectory()) throw new Error("scheduler data directory parent must be a real directory");
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-  }
-}
-function checkLeaf(path) {
+function checkRealDirectory(path, message) {
   try {
     const entry = lstatSync(path);
-    if (entry.isSymbolicLink() || !entry.isDirectory()) throw new Error("scheduler data directory must be a real directory");
+    if (entry.isSymbolicLink() || !entry.isDirectory()) throw new Error(message);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
 }
+function checkStateHomeProjection(repo, stateHome) {
+  // Ancestors may be platform aliases (for example macOS /var), but before
+  // mkdir can follow one, its canonical target must already be outside repo.
+  for (let cursor = resolve(stateHome); ; cursor = dirname(cursor)) {
+    try {
+      const entry = lstatSync(cursor);
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) throw new Error("scheduler data directory parent must be a real directory");
+      if (!outside(repo, realpathSync(cursor))) throw new Error("scheduler data directory must be outside the repository");
+      return;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    if (cursor === dirname(cursor)) throw new Error("scheduler data directory parent must be a real directory");
+  }
+}
 export function repositoryDataDir(cwd, env = process.env) {
   const repo = realpathSync(cwd);
-  const stateHome = env.XDG_STATE_HOME || resolve(homedir(), ".local", "state");
-  const root = resolve(stateHome, "pi-task-scheduler", createHash("sha256").update(repo).digest("hex"));
+  const stateHome = resolve(env.XDG_STATE_HOME || resolve(homedir(), ".local", "state"));
+  const schedulerHome = resolve(stateHome, "pi-task-scheduler");
+  const root = resolve(schedulerHome, createHash("sha256").update(repo).digest("hex"));
   if (!outside(repo, root)) throw new Error("scheduler data directory must be outside the repository");
-  checkDirectoryChain(root);
+  checkRealDirectory(stateHome, "scheduler data directory parent must be a real directory");
+  checkStateHomeProjection(repo, stateHome);
+  mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+  checkRealDirectory(stateHome, "scheduler data directory parent must be a real directory");
+  checkRealDirectory(schedulerHome, "scheduler data directory parent must be a real directory");
+  mkdirSync(schedulerHome, { recursive: true, mode: 0o700 });
+  checkRealDirectory(schedulerHome, "scheduler data directory parent must be a real directory");
   // Check the lexical hash leaf immediately before mkdir: realpath alone would
   // otherwise follow a pre-existing leaf symlink.
-  checkLeaf(root);
+  checkRealDirectory(root, "scheduler data directory must be a real directory");
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const actual = realpathSync(root);
   const actualStateHome = realpathSync(stateHome);
