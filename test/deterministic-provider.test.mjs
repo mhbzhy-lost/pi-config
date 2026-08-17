@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 import {
   decideDeterministicTurn,
@@ -8,12 +8,7 @@ import {
   deterministicExecutorCommand,
 } from "./fixtures/deterministic-provider-state.mjs";
 
-const jiti = createJiti(import.meta.url, {
-  moduleCache: false,
-  alias: {
-    "@earendil-works/pi-ai": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js",
-  },
-});
+const { jiti } = await loadPiTestRuntime(import.meta.url);
 
 const user = (text) => ({ role: "user", content: [{ type: "text", text }] });
 const toolResult = (toolName, text = "ok", details = {}) => ({ role: "toolResult", toolName, content: [{ type: "text", text }], details, isError: false });

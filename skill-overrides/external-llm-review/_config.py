@@ -13,7 +13,7 @@ Public API:
 
     get_provider(name, providers_dir=?, env=os.environ) -> BaseProvider
         Constructs the appropriate provider instance based on the "provider"
-        field in the YAML (idealab-anthropic | idealab-openai | bailian).
+        field in the YAML (idealab-anthropic | idealab-openai | bailian | deepseek).
 
     DEFAULT_PROVIDERS_DIR: Path
         Resolved at import time to this skill's bundled ``providers/`` dir.
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,35 @@ def _interpolate(value: Any, env: dict[str, str], path: list[str]) -> Any:
     return value
 
 
+def _resolve_deepseek_pi_auth(env: dict[str, str]) -> None:
+    """Populate the per-load environment from Pi without exposing its output."""
+    command = [
+        env.get("PI_REAL_BIN") or "pi",
+        "auth",
+        "print-api-key",
+        "--provider",
+        "deepseek",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("DeepSeek Pi auth lookup timed out") from None
+    except OSError:
+        raise RuntimeError("DeepSeek Pi auth lookup could not execute") from None
+    if result.returncode != 0:
+        raise RuntimeError(f"DeepSeek Pi auth lookup failed (exit {result.returncode})")
+    key = result.stdout.strip()
+    if not key:
+        raise RuntimeError("DeepSeek Pi auth lookup returned an empty key")
+    env["DEEPSEEK_API_KEY"] = key
+
+
 def load_provider_config(
     name: str,
     *,
@@ -97,7 +127,9 @@ def load_provider_config(
         raw = yaml.safe_load(fh) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"Provider config {path} must contain a mapping at top level")
-    resolved_env = dict(os.environ) if env is None else env
+    resolved_env = dict(os.environ) if env is None else dict(env)
+    if name == "deepseek" and not resolved_env.get("DEEPSEEK_API_KEY"):
+        _resolve_deepseek_pi_auth(resolved_env)
     return _interpolate(raw, resolved_env, [])
 
 

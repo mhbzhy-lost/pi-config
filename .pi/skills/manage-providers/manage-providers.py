@@ -1,284 +1,294 @@
 #!/usr/bin/env python3
-"""
-Manage custom providers and models in pi's models.json and auth.json.
+"""Manage non-sensitive provider/model definitions and securely enter credentials."""
 
-Usage:
-  manage-providers.py list
-  manage-providers.py add-provider <name> --api <type> --base-url <url> [--auth-header] [--key <key>] [options...]
-  manage-providers.py remove-provider <name>
-  manage-providers.py add-model <provider> --id <id> --context <tokens> --max-tokens <tokens> [options...]
-  manage-providers.py remove-model <provider> <model-id>
-  manage-providers.py set-key <provider> <key>
-"""
-
+import getpass
 import json
-import sys
 import os
-from pathlib import Path
+import re
+import secrets
+import sys
+import time
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
+from contextlib import contextmanager
+from pathlib import Path
+
+SENSITIVE_HEADERS = {"authorization", "proxyauthorization", "cookie", "setcookie", "xapikey", "apikey"}
+
+
+class SafeArgumentParser(ArgumentParser):
+    """Do not echo rejected arguments: they may be mistakenly supplied credentials."""
+    def error(self, message):
+        self.exit(2, "Error: invalid command arguments.\n")
 
 
 def get_agent_dir():
     return Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent")
 
 
+def _json_text(value):
+    return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+
+
+def _atomic_write(path, text, mode=None):
+    """Write in the target directory, fsync, then atomically replace the target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if mode else 0o666)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(temp, mode)
+        os.replace(temp, path)
+        if mode is not None:
+            os.chmod(path, mode)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass  # A filesystem without directory fsync still received an atomic replace.
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+@contextmanager
+def _models_lock():
+    directory = get_agent_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = directory / ".models.json.lock"
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("models.json is busy; no changes were written")
+            time.sleep(0.05)
+    try:
+        os.write(fd, str(os.getpid()).encode())
+        yield
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(lock)
+        except FileNotFoundError:
+            pass
+
+
 def load_models_json():
     path = get_agent_dir() / "models.json"
-    if not path.exists():
-        return {"providers": {}}
-    return json.loads(path.read_text())
+    return json.loads(path.read_text()) if path.exists() else {"providers": {}}
+
+
+def _save_models_json(config):
+    _atomic_write(get_agent_dir() / "models.json", _json_text(config))
 
 
 def save_models_json(config):
-    path = get_agent_dir() / "models.json"
-    path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n")
+    with _models_lock():
+        _save_models_json(config)
 
 
 def load_auth_json():
     path = get_agent_dir() / "auth.json"
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text())
+    return json.loads(path.read_text()) if path.exists() else {}
 
 
 def save_auth_json(auth):
-    path = get_agent_dir() / "auth.json"
-    path.write_text(json.dumps(auth, indent=2, ensure_ascii=False) + "\n")
+    _atomic_write(get_agent_dir() / "auth.json", _json_text(auth), 0o600)
+
+
+def _update_models(change):
+    with _models_lock():
+        config = load_models_json()
+        change(config)
+        _save_models_json(config)
+
+
+def _sensitive_header(name):
+    return name.lower().replace("-", "").replace("_", "") in SENSITIVE_HEADERS
+
+
+def _sensitive_header_value(value):
+    """Reject credential-like header values before they reach models.json."""
+    value = value.strip()
+    if re.match(r"(?i)^(bearer|basic)\s+\S+", value):
+        return True
+    if re.match(r"(?i)^(?:sk|pk|rk|api[-_]?key|secret|token|key)[-_]", value):
+        return True
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{32,}", value))
 
 
 def cmd_list(args):
-    config = load_models_json()
-    auth = load_auth_json()
-    providers = config.get("providers", {})
-
+    providers = load_models_json().get("providers", {})
     if not providers:
         print("No custom providers configured.")
         return
-
     for name, provider in providers.items():
-        has_key = "✓" if name in auth else "✗"
-        api = provider.get("api", "?")
-        base_url = provider.get("baseUrl", "?")
-        models = provider.get("models", [])
-        print(f"\n[{name}] api={api} key={has_key}")
-        print(f"  baseUrl: {base_url}")
-        if provider.get("headers"):
-            for k, v in provider["headers"].items():
-                print(f"  header: {k}: {v}")
+        print(f"\n[{name}] api={provider.get('api', '?')}")
+        print(f"  baseUrl: {provider.get('baseUrl', '?')}")
+        for key in provider.get("headers", {}):
+            print(f"  header: {key}: [redacted]")
         if provider.get("metadataUserId"):
             print(f"  metadataUserId: {provider['metadataUserId']}")
-        if provider.get("compat"):
-            compat_keys = [k for k, v in provider["compat"].items() if v]
-            if compat_keys:
-                print(f"  compat: {', '.join(compat_keys)}")
-        for m in models:
-            actual = f" → {m['actualModelId']}" if m.get("actualModelId") else ""
-            ctx = m.get("contextWindow", "?")
-            max_t = m.get("maxTokens", "?")
-            reasoning = " reasoning" if m.get("reasoning") else ""
-            inputs = ",".join(m.get("input", ["text"]))
-            print(f"  • {m['id']}{actual} ({ctx} ctx, {max_t} out, {inputs}{reasoning})")
+        for model in provider.get("models", []):
+            actual = f" → {model['actualModelId']}" if model.get("actualModelId") else ""
+            print(f"  • {model['id']}{actual} ({model.get('contextWindow', '?')} ctx, {model.get('maxTokens', '?')} out)")
 
 
 def cmd_add_provider(args):
-    config = load_models_json()
-    providers = config.setdefault("providers", {})
+    headers = {}
+    for header in args.header or []:
+        key, separator, value = header.partition(":")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError("--header must use key:value")
+        if _sensitive_header(key):
+            raise ValueError("sensitive header must not be stored in models.json")
+        if _sensitive_header_value(value):
+            raise ValueError("sensitive header value must not be stored in models.json")
+        headers[key] = value.strip()
 
-    if args.name in providers:
-        print(f"Error: provider '{args.name}' already exists. Remove it first.", file=sys.stderr)
-        sys.exit(1)
-
-    provider = {
-        "baseUrl": args.base_url,
-        "api": args.api,
-    }
-
-    if args.auth_header:
-        provider["authHeader"] = True
-
-    if args.metadata_user_id:
-        provider["metadataUserId"] = args.metadata_user_id
-
-    if args.header:
-        headers = {}
-        for h in args.header:
-            k, _, v = h.partition(":")
-            headers[k.strip()] = v.strip()
+    def change(config):
+        providers = config.setdefault("providers", {})
+        if args.name in providers:
+            raise ValueError(f"provider '{args.name}' already exists. Remove it first.")
+        provider = {"baseUrl": args.base_url, "api": args.api, "models": []}
+        if args.auth_header:
+            provider["authHeader"] = True
+        if args.metadata_user_id:
+            provider["metadataUserId"] = args.metadata_user_id
         if headers:
             provider["headers"] = headers
-
-    if args.compat:
-        compat = {}
-        for c in args.compat:
-            k, _, v = c.partition("=")
-            if v.lower() in ("true", "1", "yes"):
-                compat[k] = True
-            elif v.lower() in ("false", "0", "no"):
-                compat[k] = False
-            else:
-                compat[k] = v
-        if compat:
-            provider["compat"] = compat
-
-    provider["models"] = []
-    providers[args.name] = provider
-    save_models_json(config)
-
-    if args.key:
-        auth = load_auth_json()
-        auth[args.name] = {"type": "api_key", "key": args.key}
-        save_auth_json(auth)
-
+        if args.compat:
+            provider["compat"] = {k: (v.lower() in ("true", "1", "yes") if v.lower() in ("true", "1", "yes", "false", "0", "no") else v)
+                                  for k, _, v in (item.partition("=") for item in args.compat)}
+        providers[args.name] = provider
+    _update_models(change)
     print(f"Added provider '{args.name}' (api={args.api})")
-    if args.key:
-        print(f"  API key configured in auth.json")
 
 
 def cmd_remove_provider(args):
+    if args.confirm != args.name:
+        raise ValueError("removal requires --confirm with the exact provider name")
+    # Validate before changing auth, then roll it back if models replacement fails.
     config = load_models_json()
-    providers = config.get("providers", {})
-
-    if args.name not in providers:
-        print(f"Error: provider '{args.name}' not found.", file=sys.stderr)
-        sys.exit(1)
-
-    del providers[args.name]
-    save_models_json(config)
-
+    if args.name not in config.get("providers", {}):
+        raise ValueError(f"provider '{args.name}' not found")
+    auth_path = get_agent_dir() / "auth.json"
+    old_auth_text = auth_path.read_text() if auth_path.exists() else None
     auth = load_auth_json()
-    if args.name in auth:
+    had_auth = args.name in auth
+    if had_auth:
         del auth[args.name]
         save_auth_json(auth)
-        print(f"Removed provider '{args.name}' (auth key also removed)")
-    else:
-        print(f"Removed provider '{args.name}'")
+    try:
+        def change(current):
+            del current["providers"][args.name]
+        _update_models(change)
+    except BaseException as error:
+        if had_auth and old_auth_text is not None:
+            _atomic_write(auth_path, old_auth_text, 0o600)
+        raise RuntimeError(f"provider removal failed; auth rollback {'completed' if had_auth else 'not needed'}: {error}") from error
+    print(f"Removed provider '{args.name}'" + (" (credential entry also removed)" if had_auth else ""))
 
 
 def cmd_add_model(args):
-    config = load_models_json()
-    providers = config.get("providers", {})
-
-    if args.provider not in providers:
-        print(f"Error: provider '{args.provider}' not found.", file=sys.stderr)
-        sys.exit(1)
-
-    provider = providers[args.provider]
-    models = provider.setdefault("models", [])
-
-    if any(m["id"] == args.id for m in models):
-        print(f"Error: model '{args.id}' already exists in provider '{args.provider}'.", file=sys.stderr)
-        sys.exit(1)
-
-    model = {
-        "id": args.id,
-        "name": args.name or args.id,
-    }
-
-    if args.actual_model_id:
-        model["actualModelId"] = args.actual_model_id
-
-    if args.reasoning:
-        model["reasoning"] = True
-
-    model["input"] = args.input.split(",") if args.input else ["text"]
-    model["contextWindow"] = args.context
-    model["maxTokens"] = args.max_tokens
-
-    models.append(model)
-    save_models_json(config)
+    def change(config):
+        providers = config.get("providers", {})
+        if args.provider not in providers:
+            raise ValueError(f"provider '{args.provider}' not found")
+        models = providers[args.provider].setdefault("models", [])
+        if any(model["id"] == args.id for model in models):
+            raise ValueError(f"model '{args.id}' already exists in provider '{args.provider}'")
+        model = {"id": args.id, "name": args.name or args.id, "input": args.input.split(","), "contextWindow": args.context, "maxTokens": args.max_tokens}
+        if args.actual_model_id: model["actualModelId"] = args.actual_model_id
+        if args.reasoning: model["reasoning"] = True
+        models.append(model)
+    _update_models(change)
     print(f"Added model '{args.id}' to provider '{args.provider}'")
 
 
 def cmd_remove_model(args):
-    config = load_models_json()
-    providers = config.get("providers", {})
+    if args.confirm != args.model_id:
+        raise ValueError("removal requires --confirm with the exact model id")
 
-    if args.provider not in providers:
-        print(f"Error: provider '{args.provider}' not found.", file=sys.stderr)
-        sys.exit(1)
-
-    provider = providers[args.provider]
-    models = provider.get("models", [])
-    original_len = len(models)
-    provider["models"] = [m for m in models if m["id"] != args.model_id]
-
-    if len(provider["models"]) == original_len:
-        print(f"Error: model '{args.model_id}' not found in provider '{args.provider}'.", file=sys.stderr)
-        sys.exit(1)
-
-    save_models_json(config)
+    def change(config):
+        providers = config.get("providers", {})
+        if args.provider not in providers:
+            raise ValueError(f"provider '{args.provider}' not found")
+        models = providers[args.provider].get("models", [])
+        remaining = [model for model in models if model["id"] != args.model_id]
+        if len(remaining) == len(models):
+            raise ValueError(f"model '{args.model_id}' not found in provider '{args.provider}'")
+        providers[args.provider]["models"] = remaining
+    _update_models(change)
     print(f"Removed model '{args.model_id}' from provider '{args.provider}'")
 
 
+def _read_key_from_tty():
+    try:
+        with open("/dev/tty", "r+", encoding="utf-8") as tty:
+            original_stdin = sys.stdin
+            try:
+                # getpass reads sys.stdin when a stream is supplied; bind both to /dev/tty.
+                sys.stdin = tty
+                key = getpass.getpass("API key (input hidden): ", stream=tty)
+            finally:
+                sys.stdin = original_stdin
+    except OSError as error:
+        raise RuntimeError("secure credential entry requires an interactive /dev/tty") from error
+    if not key:
+        raise ValueError("empty credential was not saved")
+    return key
+
+
 def cmd_set_key(args):
+    key = _read_key_from_tty()
     auth = load_auth_json()
-    auth[args.provider] = {"type": "api_key", "key": args.key}
+    auth[args.provider] = {"type": "api_key", "key": key}
     save_auth_json(auth)
-    print(f"Updated API key for provider '{args.provider}'")
+    print(f"Updated credential for provider '{args.provider}'")
 
 
 def main():
-    parser = ArgumentParser(
-        description="Manage pi custom providers and models",
-        formatter_class=RawDescriptionHelpFormatter,
-    )
+    parser = SafeArgumentParser(description="Manage non-sensitive pi provider and model definitions. Credentials require secure interactive entry.", formatter_class=RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command")
-
-    # list
-    sub.add_parser("list", help="List all custom providers and models")
-
-    # add-provider
-    ap = sub.add_parser("add-provider", help="Add a new provider")
-    ap.add_argument("name", help="Provider name (e.g. anthropic-idealab)")
-    ap.add_argument("--api", required=True, help="API type (anthropic-messages, openai-completions, etc.)")
-    ap.add_argument("--base-url", required=True, help="Base URL for the provider")
-    ap.add_argument("--auth-header", action="store_true", help="Use Authorization: Bearer header")
-    ap.add_argument("--key", help="API key (stored in auth.json)")
-    ap.add_argument("--header", action="append", help="Custom header (key:value), can repeat")
-    ap.add_argument("--metadata-user-id", help="Anthropic metadata.user_id to inject")
-    ap.add_argument("--compat", action="append", help="Compat option (key=value), can repeat")
-
-    # remove-provider
-    rp = sub.add_parser("remove-provider", help="Remove a provider and its auth")
-    rp.add_argument("name", help="Provider name to remove")
-
-    # add-model
-    am = sub.add_parser("add-model", help="Add a model to a provider")
-    am.add_argument("provider", help="Provider name")
-    am.add_argument("--id", required=True, help="Model ID")
-    am.add_argument("--name", help="Display name (defaults to id)")
-    am.add_argument("--actual-model-id", help="Actual model ID sent to API (for rewriting)")
-    am.add_argument("--context", type=int, required=True, help="Context window size in tokens")
-    am.add_argument("--max-tokens", type=int, required=True, help="Max output tokens")
-    am.add_argument("--reasoning", action="store_true", help="Enable reasoning/thinking")
-    am.add_argument("--input", default="text", help="Input types, comma-separated (default: text)")
-
-    # remove-model
-    rm = sub.add_parser("remove-model", help="Remove a model from a provider")
-    rm.add_argument("provider", help="Provider name")
-    rm.add_argument("model_id", help="Model ID to remove")
-
-    # set-key
-    sk = sub.add_parser("set-key", help="Set or update API key for a provider")
+    sub.add_parser("list", help="List non-sensitive custom provider and model definitions")
+    ap = sub.add_parser("add-provider", help="Add a non-sensitive provider definition")
+    ap.add_argument("name"); ap.add_argument("--api", required=True); ap.add_argument("--base-url", required=True)
+    ap.add_argument("--auth-header", action="store_true"); ap.add_argument("--header", action="append")
+    ap.add_argument("--metadata-user-id"); ap.add_argument("--compat", action="append")
+    rp = sub.add_parser("remove-provider", help="Remove a provider definition and credential entry")
+    rp.add_argument("name"); rp.add_argument("--confirm", required=True, help="Repeat the provider name to confirm deletion")
+    am = sub.add_parser("add-model", help="Add a model")
+    am.add_argument("provider"); am.add_argument("--id", required=True); am.add_argument("--name"); am.add_argument("--actual-model-id")
+    am.add_argument("--context", type=int, required=True); am.add_argument("--max-tokens", type=int, required=True); am.add_argument("--reasoning", action="store_true"); am.add_argument("--input", default="text")
+    rm = sub.add_parser("remove-model", help="Remove a model")
+    rm.add_argument("provider"); rm.add_argument("model_id")
+    rm.add_argument("--confirm", required=True, help="Repeat the model ID to confirm deletion")
+    sk = sub.add_parser("set-key", help="Securely enter a credential from /dev/tty")
     sk.add_argument("provider", help="Provider name")
-    sk.add_argument("key", help="API key")
-
     args = parser.parse_args()
-
     if not args.command:
-        parser.print_help()
-        sys.exit(1)
-
-    commands = {
-        "list": cmd_list,
-        "add-provider": cmd_add_provider,
-        "remove-provider": cmd_remove_provider,
-        "add-model": cmd_add_model,
-        "remove-model": cmd_remove_model,
-        "set-key": cmd_set_key,
-    }
-    commands[args.command](args)
+        parser.print_help(); return 1
+    try:
+        {"list": cmd_list, "add-provider": cmd_add_provider, "remove-provider": cmd_remove_provider, "add-model": cmd_add_model, "remove-model": cmd_remove_model, "set-key": cmd_set_key}[args.command](args)
+    except (ValueError, RuntimeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

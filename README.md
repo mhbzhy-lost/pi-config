@@ -1,7 +1,7 @@
 # pi-config
 
 Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全局配置根，
-仓库根用于维护脚本、测试、文档和 vendor。
+仓库根用于维护脚本、测试、文档和共享 Skill。
 
 ## 环境要求
 
@@ -13,11 +13,11 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 ## 安装 Pi
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.1
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.2
 pi --version
 ```
 
-本仓已验证 Pi `0.82.0`、`0.82.1`、`0.83.0` 和 `0.84.1`，初始化默认安装 `0.84.1`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
+本仓已验证 Pi `0.82.0`、`0.82.1`、`0.83.0`、`0.84.1` 和 `0.84.2`，初始化默认安装精确 `0.84.2`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
 
 ## 初始化
 
@@ -27,9 +27,8 @@ pi --version
 
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
-- 初始化 Git submodule。
-- 安装并固定 Pi `0.84.1`。
-- 在 `pi/npm` 顶层精确安装 `pi-subagents@0.37.2` 与 `typebox@1.1.38`。
+- 安装并固定 Pi `0.84.2`。
+- 在 `pi/npm` 顶层精确安装 `pi-subagents@0.45.2` 与 `typebox@1.1.38`。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
 
@@ -75,8 +74,21 @@ Shell 集成固定：
 - 默认 `PI_CODING_AGENT_SESSION_DIR=<repo>/var/sessions`
 - `--no-skills`，关闭 Pi 默认 Skill 发现
 
-`pi/extensions/skill-whitelist.ts` 随后通过 `resources_discover` 只注入
-`skill-overrides/skills.list` 中列出的 Skill。它不复制或创建软链接。
+`pi/extensions/skill-whitelist.ts` 随后通过 `resources_discover` 扫描全局与项目 Skill 目录；它不读取仓库 Skill 清单，也不复制或创建软链接。
+
+## Pi 0.84.2 TUI 与工具限制
+
+Pi 官方是 fullscreen 的唯一 owner；Shell 不发送 `DECSET/DECRST 1049`。`pi-inline` 和 `pi-full` 分别是官方 `--tui-mode regular` 与 `--tui-mode fullscreen` 的别名。
+
+Child browser 使用 focused overlay。`Ctrl+Shift+F` 保持官方语义，只搜索 parent primary transcript，不搜索 child transcript。compact renderer 是官方 tool definition 上的薄适配；它会注册同名 extension tools，因此不启用 `defaultTools`。需要严格工具集合时使用官方 `--tools`（或 `--exclude-tools`/`--no-tools`）。
+
+如需回滚到精确 `0.84.1`：
+
+```bash
+npm install -g --ignore-scripts --registry=https://registry.npmjs.org \
+  @earendil-works/pi-coding-agent@0.84.1
+pi --version
+```
 
 ## Basic Memory 本地持久存储
 
@@ -106,17 +118,6 @@ basic-memory doctor --local
 
 ## Skill 选择
 
-源解析顺序：
-
-1. `skill-overrides/<name>/SKILL.md`
-2. `vendor/superpowers/skills/<name>/SKILL.md`
-
+Git 管理的共享 Skill 唯一来源是 `skill-overrides/<name>/SKILL.md`；所有非隐藏直接子目录中的合法 Skill 会由 `scripts/sync-skills.mjs` 自动同步。个人 Skill 直接放在 `~/.agents/skills`，不由仓库清单管理。
 `~/.zshrc` 中的 `pi-config` 受控区块由 `init-pi.sh` 维护，不要手工复制或改写；否则 Pi
 会回到默认配置根并重新启用默认 Skill 发现。
-
-## 升级 Superpowers
-
-1. 在 `vendor/superpowers` 检出目标 tag 或 commit。
-2. 检查白名单中 Skill 的变化。
-3. 运行 `npm test` 和 `npm run doctor`。
-4. 人工确认后更新 submodule gitlink。

@@ -1,6 +1,6 @@
 ---
 name: external-llm-review
-description: Use when performing code review on a diff or changeset — after implementation, before merge, or on push. Covers cross-model external review requests and independent reviewer dispatch.
+description: Use after implementation and before merge to review a diff or changeset, or when the user or project requires an independent, external, or cross-model reviewer.
 ---
 
 # External LLM Cross-Model Code Review
@@ -22,7 +22,7 @@ description: Use when performing code review on a diff or changeset — after im
 
 判断方法：系统提示中形如 `model named claude-opus-4-6` 或 `model named Qwen3.7-Max-DogFooding`。取 model id 前缀匹配 `claude` / `qwen`（不区分大小写）。
 
-## 三个预置 Provider
+## 四个预置 Provider
 
 每个 provider 由两个文件组成：`providers/<name>.yaml`（非敏感配置，git-track） + `.env` 里的对应 secret 变量（gitignored）。
 
@@ -31,13 +31,13 @@ description: Use when performing code review on a diff or changeset — after im
 | `idealab-anthropic` | `providers/idealab-anthropic.yaml` | Idealab Anthropic gateway，Claude 系列模型（Opus/Sonnet） | `ANTHROPIC_API_KEY` |
 | `idealab-openai` | `providers/idealab-openai.yaml` | Idealab OpenAI-compatible gateway，Qwen 系列模型（`Qwen3.7-Max-DogFooding` 等） | `IDEALAB_OPENAI_API_KEY` |
 | `bailian` | `providers/bailian.yaml` | DashScope 百炼网关，Qwen 系列模型（`qwen3.7-max` 等，带 thinking 支持） | `BAILIAN_API_KEY` |
-| `deepseek` | `providers/deepseek.yaml` | DeepSeek OpenAI-compatible gateway（`deepseek-chat` / `deepseek-reasoner`） | `DEEPSEEK_API_KEY` |
+| `deepseek` | `providers/deepseek.yaml` | DeepSeek OpenAI-compatible gateway（`deepseek-chat` / `deepseek-reasoner`） | `DEEPSEEK_API_KEY`（可选，优先） |
 
 YAML 里用 `${VAR}` 占位符引用 `.env` 变量，运行时由 `_config.py` 插值。`.env` 只存 secret，base_url/model/max_tokens 等配置留在 YAML。
 
 ## 配置
 
-skill 位于 `${PI_CONFIG_HOME}/skill-overrides/external-llm-review/`。
+skill 位于 `${PI_CONFIG_HOME}/skill-overrides/external-llm-review/`。`PI_CONFIG_HOME` 是本项目自定义的配置仓库根变量，解析为 `~/pi-config`；它不是 Pi 官方变量。Pi 官方配置根变量是 `PI_CODING_AGENT_DIR`，解析为 `${PI_CONFIG_HOME}/pi`。加载 `scripts/pi-shell.zsh` 后，本文现有的 `${PI_CONFIG_HOME}` 命令路径可直接解析。
 
 ### .env（gitignored）
 
@@ -46,11 +46,11 @@ cp ${PI_CONFIG_HOME}/skill-overrides/external-llm-review/.env.example \
    ${PI_CONFIG_HOME}/skill-overrides/external-llm-review/.env
 ```
 
-然后填写每个 provider 对应的 API key。三个 provider 都配或任选其一均可，互不干扰。
+然后填写所需 provider 对应的 API key。四个 provider 可全配或任选其一，互不干扰。DeepSeek 优先使用非空的 `DEEPSEEK_API_KEY`（包括 `.env`）；该变量缺失时会复用当前 `PI_CODING_AGENT_DIR` 下已登录 Pi 的 DeepSeek auth。resolver 只调用官方 `pi auth print-api-key --provider deepseek`，不直接读取 `auth.json`，也不打印 key。
 
 ### Healthcheck
 
-首次使用或怀疑配置有问题时，用 healthcheck 脚本验证三个 provider 的可达性：
+首次使用或怀疑配置有问题时，用 healthcheck 脚本验证四个 provider 的可达性：
 
 ```bash
 cd ${PI_CONFIG_HOME}/skill-overrides/external-llm-review
@@ -244,7 +244,7 @@ uv run --no-project \
 
 ## 实现要点
 
-- 三个 provider 统一通过 `_config.py` 加载，返回一致的 `BaseProvider` 实例
+- 四个 provider 统一通过 `_config.py` 加载，返回一致的 `BaseProvider` 实例
 - 每个 provider 的 `send_chat(client, messages, spec)` 封装协议差异（Anthropic 走 `/v1/messages`，其余走 `/chat/completions`；Bailian 强制 streaming 规避 300s 非流式硬超时）
 - 统一 `asyncio.timeout` + `api_timeout_seconds` 硬超时
 - 依赖：`httpx` + `python-dotenv` + `pyyaml`

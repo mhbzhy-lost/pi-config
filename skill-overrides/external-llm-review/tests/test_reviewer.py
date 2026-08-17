@@ -1,5 +1,7 @@
 import unittest
 import sys
+import subprocess
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -1015,6 +1017,102 @@ class GetProviderDispatchTest(unittest.TestCase):
     def test_default_providers_dir_constant(self):
         from _config import DEFAULT_PROVIDERS_DIR
         self.assertEqual(DEFAULT_PROVIDERS_DIR.name, "providers")
+
+    def test_deepseek_uses_pi_auth_fallback_when_env_key_is_missing(self):
+        import _config
+        from _config import get_provider
+
+        self.write_provider(
+            "deepseek",
+            "provider: deepseek\n"
+            "base_url: https://api.deepseek.com/v1\n"
+            "api_key: ${DEEPSEEK_API_KEY}\n"
+            "model: deepseek-chat\n",
+        )
+        result = subprocess.CompletedProcess([], 0, stdout="fallback-test-key\n", stderr="")
+        with patch.object(_config.subprocess, "run", return_value=result) as run:
+            provider = get_provider("deepseek", providers_dir=self.providers_dir, env={})
+
+        self.assertEqual(provider.api_key, "fallback-test-key")
+        run.assert_called_once_with(
+            ["pi", "auth", "print-api-key", "--provider", "deepseek"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    def test_deepseek_explicit_env_key_skips_pi_auth_fallback(self):
+        import _config
+        from _config import get_provider
+
+        self.write_provider(
+            "deepseek",
+            "provider: deepseek\n"
+            "base_url: https://api.deepseek.com/v1\n"
+            "api_key: ${DEEPSEEK_API_KEY}\n"
+            "model: deepseek-chat\n",
+        )
+        with patch.object(_config.subprocess, "run") as run:
+            provider = get_provider(
+                "deepseek",
+                providers_dir=self.providers_dir,
+                env={"DEEPSEEK_API_KEY": "explicit-test-key"},
+            )
+
+        self.assertEqual(provider.api_key, "explicit-test-key")
+        run.assert_not_called()
+
+    def test_deepseek_pi_auth_failures_are_redacted(self):
+        import _config
+        from _config import get_provider
+
+        self.write_provider(
+            "deepseek",
+            "provider: deepseek\n"
+            "base_url: https://api.deepseek.com/v1\n"
+            "api_key: ${DEEPSEEK_API_KEY}\n"
+            "model: deepseek-chat\n",
+        )
+        failures = (
+            subprocess.CompletedProcess([], 7, stdout="stdout-secret", stderr="stderr-secret"),
+            subprocess.CompletedProcess([], 0, stdout="   ", stderr="stderr-secret"),
+            subprocess.TimeoutExpired(["pi"], 10, output="stdout-secret", stderr="stderr-secret"),
+            OSError("execution-secret"),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__), patch.object(
+                _config.subprocess, "run"
+            ) as run:
+                if isinstance(failure, subprocess.CompletedProcess):
+                    run.return_value = failure
+                else:
+                    run.side_effect = failure
+                with self.assertRaisesRegex(RuntimeError, "DEEPSEEK|deepseek|DeepSeek") as raised:
+                    get_provider("deepseek", providers_dir=self.providers_dir, env={})
+                run.assert_called_once()
+
+                message = str(raised.exception)
+                self.assertNotIn("stdout-secret", message)
+                self.assertNotIn("stderr-secret", message)
+                self.assertNotIn("execution-secret", message)
+
+    def test_non_deepseek_provider_does_not_use_pi_auth_fallback(self):
+        import _config
+        from _config import get_provider
+
+        self.write_provider(
+            "bailian",
+            "provider: bailian\n"
+            "base_url: https://dashscope.test\n"
+            "api_key: ${BAILIAN_API_KEY}\n"
+            "model: qwen3.7-max\n",
+        )
+        with patch.object(_config.subprocess, "run") as run:
+            with self.assertRaisesRegex(RuntimeError, "unresolved env var"):
+                get_provider("bailian", providers_dir=self.providers_dir, env={})
+
+        run.assert_not_called()
 
     def test_get_provider_returns_deepseek_as_openai_compatible(self):
         """DeepSeek uses standard OpenAI-compatible wire protocol, no special handling."""
