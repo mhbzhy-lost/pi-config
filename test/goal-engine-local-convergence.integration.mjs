@@ -33,7 +33,7 @@ function observationHost(cwd) {
     artifactRefForRun() { const path = join(cwd, ".state", "cycle-artifact.json"); writeFileSync(path, JSON.stringify({ code: "PASS" }), { mode: 0o600 }); chmodSync(path, 0o600); return { id: "cycle-artifact", path }; },
   };
 }
-function pi(cwd) { const tools = [], listeners = new Map(), entries = []; let leaf = null, sequence = 0; const append = entry => { const value = { id: `entry-${++sequence}`, parentId: leaf, timestamp: new Date(Date.now() + sequence).toISOString(), ...entry }; entries.push(value); leaf = value.id; return value; }; const sessionManager = { getSessionId: () => "owner", getSessionFile: () => join(cwd, "session-owner"), getLeafId: () => leaf, getBranch: () => entries, getEntries: () => entries }; return { cwd, tools, entries, sessionManager, appendEntry: (customType, data) => append({ type: "custom", customType, data }), registerTool: tool => tools.push(tool), on: (name, handler) => listeners.set(name, handler), handlers: { get(name) { const handler = listeners.get(name); return name === "input" ? (event, ctx) => { const result = handler(event, ctx); append({ type: "message", message: { role: "user", content: event.text } }); return result; } : handler; } } }; }
+function pi(cwd, entries = [], { sessionId = "owner" } = {}) { const tools = [], listeners = new Map(); let leaf = entries.at(-1)?.id || null, sequence = entries.length; const append = entry => { const value = { id: `entry-${++sequence}`, parentId: leaf, timestamp: new Date(Date.now() + sequence).toISOString(), ...entry }; entries.push(value); leaf = value.id; return value; }; const sessionManager = { getSessionId: () => sessionId, getSessionFile: () => join(cwd, `session-${sessionId}`), getLeafId: () => leaf, getBranch: () => entries, getEntries: () => entries }; return { cwd, tools, entries, sessionManager, appendEntry: (customType, data) => append({ type: "custom", customType, data }), registerTool: tool => tools.push(tool), on: (name, handler) => listeners.set(name, handler), handlers: { get(name) { const handler = listeners.get(name); return name === "input" ? (event, ctx) => { const result = handler(event, ctx); append({ type: "message", message: { role: "user", content: event.text } }); return result; } : handler; } } }; }
 async function invoke(api, name, input) { return (await api.tools.find(tool => tool.name === name).execute("call", input, undefined, undefined, { cwd: api.cwd, sessionManager: api.sessionManager })).details.value; }
 async function approveAndActivate(api, cwd, init) { await invoke(api, "goal_init", init); await invoke(api, "goal_status", {}); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager }); await invoke(api, "goal_status", {}); let last; for (let i = 0; i < 20; i++) { last = await invoke(api, "goal_status", {}); if (loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState === "active") return; } throw Error(`Cycle0 did not activate: ${last}`); }
 function hybridInit() { const base = runtimeInit(), backend = { ...base.execution.tasks[0], id: "backend-task", writePaths: ["src/backend/**"] }, frontend = { ...base.execution.tasks[0], id: "frontend-task", writePaths: ["src/frontend/**"] }; const condition = (id, depends_on, paths, task_ids) => ({ ...structuredClone(base.execution.conditions[0]), id, depends_on, invalidation: { paths, task_ids } }); return runtimeInit({ execution: { ...base.execution, tasks: [backend, frontend], conditions: [condition("backend-condition", [{ kind: "task", id: "backend-task" }], ["src/backend/**"], ["backend-task"]), condition("full-flow-condition", [{ kind: "condition", id: "backend-condition" }, { kind: "task", id: "frontend-task" }], ["src/backend/**", "src/frontend/**"], ["backend-task", "frontend-task"]) ] } }); }
@@ -112,6 +112,15 @@ async function satisfiedBackend() {
 }
 function backendOverlap(cwd) { mkdirSync(join(cwd, "src/backend"), { recursive: true }); writeFileSync(join(cwd, "src/backend", "overlap.mjs"), "export const overlap = true;\n"); git(cwd, "add", "src/backend/overlap.mjs"); git(cwd, "commit", "-m", "frontend overlap"); }
 function invalidations(cwd) { return readFileSync(join(cwd, ".state/goal-engine/goals/harden-runtime/events.jsonl"), "utf8").trim().split("\n").map(JSON.parse).filter(event => event.type === "condition.evidence_invalidated"); }
+function invalidationStore(mode) { let failed = false, invalidationAttempts = 0; return { get invalidationAttempts() { return invalidationAttempts; }, appendEvent(root, entry, version) { if (!failed && entry.type === "condition.evidence_invalidated") { invalidationAttempts++; failed = true; if (mode === "pre") throw Error("injected pre-invalidation append failure"); const projection = appendEvent(root, entry, version); throw Error("injected durable-invalidation append failure"); } return appendEvent(root, entry, version); }, loadProjection }; }
+function conditionDefinition(id, depends_on, paths) { const base = runtimeInit(); return { ...structuredClone(base.execution.conditions[0]), id, depends_on, invalidation: { paths, task_ids: [] } }; }
+async function satisfiedConditions(definitions) {
+  const cwd = repo(), api = pi(cwd), durable = observationHost(cwd), base = runtimeInit();
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveAndActivate(api, cwd, runtimeInit({ execution: { ...base.execution, tasks: [], conditions: definitions } }));
+  for (let i = 0; i < 30; i++) { await invoke(api, "goal_status", {}); const projection = loadProjection(runtimeRoot(cwd), "harden-runtime"); if (definitions.every(({ id }) => projection.conditions.get(id)?.status === "satisfied" && [...projection.observationRuns.values()].some(run => run.conditionId === id && run.cycle === 1 && run.phase === "released"))) return { cwd, api, durable }; }
+  throw Error(`conditions did not satisfy: ${definitions.map(({ id }) => id).join(",")}`);
+}
+function reloadWithInvalidationStore(fixture, mode) { const api = pi(fixture.cwd, structuredClone(fixture.api.entries)), store = invalidationStore(mode); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: fixture.durable, store }); api.handlers.get("session_start")({}, { cwd: fixture.cwd, sessionManager: api.sessionManager }); return { api, store }; }
 
 test("RED: backend overlap emits exactly one local-convergence invalidation without an action offer", async () => {
   const { cwd, api } = await satisfiedBackend(); backendOverlap(cwd);
@@ -121,14 +130,45 @@ test("RED: backend overlap emits exactly one local-convergence invalidation with
   assert.equal(status.machineAction, undefined); assert.equal(status.action_token, undefined);
 });
 
-test("RED: invalidation producer retries pre-append and recovers durable-then-throw without duplicate stale reason", async () => {
-  const { cwd, api } = await satisfiedBackend(); backendOverlap(cwd);
-  const first = JSON.parse(await invoke(api, "goal_status", {}));
-  assert.equal(first.status, "R10_LOCAL_CONVERGENCE_INVALIDATED", "missing condition.evidence_invalidated producer prevents retry/reload recovery coverage");
+test("RED: invalidation producer pre-append failure preserves satisfied evidence and retries one world-drift event", async () => {
+  const fixture = await satisfiedBackend(); backendOverlap(fixture.cwd); const { api } = reloadWithInvalidationStore(fixture, "pre");
+  await assert.rejects(invoke(api, "goal_status", {}), /injected pre-invalidation append failure/, "missing producer must reach the real Store pre-append wrapper");
+  assert.equal(loadProjection(runtimeRoot(fixture.cwd), "harden-runtime").conditions.get("backend-condition").status, "satisfied"); assert.equal(invalidations(fixture.cwd).length, 0);
+  const retry = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(retry.status, "R10_LOCAL_CONVERGENCE_INVALIDATED"); assert.equal(loadProjection(runtimeRoot(fixture.cwd), "harden-runtime").conditions.get("backend-condition").status, "stale");
+  assert.deepEqual(invalidations(fixture.cwd).map(row => row.data.reason), ["world-drift"]);
 });
 
-test("RED: simultaneous overlap invalidates satisfied Conditions by ID and cascades on the next status only", async () => {
-  const { cwd, api } = await satisfiedBackend(); backendOverlap(cwd);
-  const status = JSON.parse(await invoke(api, "goal_status", {}));
-  assert.equal(status.status, "R10_LOCAL_CONVERGENCE_INVALIDATED", "missing condition.evidence_invalidated producer prevents ordered cascade coverage");
+test("RED: invalidation producer durable acknowledgement loss recovers one world-drift event across owner reload", async () => {
+  const fixture = await satisfiedBackend(); backendOverlap(fixture.cwd); const { api, store } = reloadWithInvalidationStore(fixture, "durable");
+  const recovered = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(store.invalidationAttempts, 1, "missing producer must write condition.evidence_invalidated through the real Store wrapper");
+  assert.equal(recovered.status, "R10_LOCAL_CONVERGENCE_INVALIDATED"); assert.equal(loadProjection(runtimeRoot(fixture.cwd), "harden-runtime").conditions.get("backend-condition").status, "stale");
+  const reloaded = pi(fixture.cwd, structuredClone(api.entries)); createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: fixture.durable, store: invalidationStore("none") }); reloaded.handlers.get("session_start")({}, { cwd: fixture.cwd, sessionManager: reloaded.sessionManager });
+  const afterReload = JSON.parse(await invoke(reloaded, "goal_status", {})); assert.equal(afterReload.status, "R10_LOCAL_CONVERGENCE_INVALIDATED");
+  assert.deepEqual(invalidations(fixture.cwd).map(row => row.data.reason), ["world-drift"]);
+});
+
+test("RED: simultaneous overlap invalidates two satisfied Conditions by ID one status at a time", async () => {
+  const alpha = conditionDefinition("alpha-condition", [], ["src/shared/**"]), beta = conditionDefinition("beta-condition", [], ["src/shared/**"]), fixture = await satisfiedConditions([alpha, beta]);
+  mkdirSync(join(fixture.cwd, "src/shared"), { recursive: true }); writeFileSync(join(fixture.cwd, "src/shared", "overlap.mjs"), "export const overlap = true;\n"); git(fixture.cwd, "add", "src/shared/overlap.mjs"); git(fixture.cwd, "commit", "-m", "shared overlap");
+  JSON.parse(await invoke(fixture.api, "goal_status", {})); let projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime");
+  assert.equal(projection.conditions.get("alpha-condition").status, "stale"); assert.equal(projection.conditions.get("beta-condition").status, "satisfied");
+  JSON.parse(await invoke(fixture.api, "goal_status", {})); projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime"); assert.equal(projection.conditions.get("beta-condition").status, "stale");
+  assert.deepEqual(invalidations(fixture.cwd).map(row => row.data.conditionId), ["alpha-condition", "beta-condition"]);
+});
+
+test("RED: world-drift invalidates satisfied upstream before predecessor-stale downstream", async () => {
+  const upstream = conditionDefinition("upstream-condition", [], ["src/upstream/**"]), downstream = conditionDefinition("downstream-condition", [{ kind: "condition", id: "upstream-condition" }], ["src/downstream/**"]), fixture = await satisfiedConditions([upstream, downstream]);
+  mkdirSync(join(fixture.cwd, "src/upstream"), { recursive: true }); writeFileSync(join(fixture.cwd, "src/upstream", "overlap.mjs"), "export const overlap = true;\n"); git(fixture.cwd, "add", "src/upstream/overlap.mjs"); git(fixture.cwd, "commit", "-m", "upstream overlap");
+  await invoke(fixture.api, "goal_status", {}); let projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime"); assert.equal(projection.conditions.get("upstream-condition").status, "stale"); assert.equal(projection.conditions.get("downstream-condition").status, "satisfied");
+  await invoke(fixture.api, "goal_status", {}); projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime"); assert.equal(projection.conditions.get("downstream-condition").status, "stale");
+  assert.deepEqual(invalidations(fixture.cwd).map(row => [row.data.conditionId, row.data.reason]), [["upstream-condition", "world-drift"], ["downstream-condition", "predecessor-stale"]]);
+});
+
+test("RED: satisfied backend overlap never invents full-flow evidence before frontend acceptance and observation", async () => {
+  const fixture = await activeHybrid(); acceptCanonicalTask(fixture.cwd, fixture.goalId, "backend-task", "src/backend"); await settleBackendCycleOne(fixture); backendOverlap(fixture.cwd);
+  await invoke(fixture.api, "goal_status", {}); const projection = loadProjection(runtimeRoot(fixture.cwd), fixture.goalId), events = invalidations(fixture.cwd);
+  assert.deepEqual(events.map(row => row.data.conditionId), ["backend-condition"]); assert.equal(projection.conditions.get("full-flow-condition").status, "pending");
+  assert.equal(projection.evidenceHistory.some(row => row.conditionId === "full-flow-condition"), false); assert.equal([...projection.observationRuns.values()].some(run => run.conditionId === "full-flow-condition" && run.cycle === 1), false);
 });
