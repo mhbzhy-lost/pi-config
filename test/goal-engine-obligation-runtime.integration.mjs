@@ -1054,6 +1054,29 @@ test("Repair S3 rejects durable recovery when canonical Task metadata drifts", a
   const api = pi(cwd, first.entries); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable, store }); await assert.rejects(invoke(api, "goal_status", {}), /drifted durable S3/);
 });
 
+test("Repair S3 rejects durable recovery when full Projection auxiliary state drifts", async () => {
+  for (const [name, mutate] of [
+    ["task applicability", (projection, taskId) => projection.taskApplicability.set(taskId, { ...projection.taskApplicability.get(taskId), state: "superseded" })],
+    ["task mutation sequence", (projection, taskId) => projection.taskMutationSequences.set(taskId, projection.taskMutationSequences.get(taskId) + 1)],
+  ]) {
+    const fixture = await approvedRepairS3Fixture(), { challenge } = fixture; let current = structuredClone(fixture.injected.latest());
+    const store = {
+      listGoals: () => [current.goalId], listGoalIds: () => [current.goalId], loadProjection: () => current,
+      appendEvent(_root, event, version) { assert.equal(version, current.version); current = applyEvent(current, event); return current; },
+      appendEventBatch(_root, events, version) {
+        assert.equal(version, current.version); for (const event of events) current = applyEvent(current, event);
+        assert.equal(current.repairChallenges.get(challenge.challengeId).phase, "applied", name);
+        assert.equal(current.tasks.get(challenge.taskId).metadata.episodeId, challenge.episodeId, name);
+        assert.deepEqual(current.repairEpisodes.get(challenge.episodeId).remediationTaskIds, [challenge.taskId], name);
+        mutate(current, challenge.taskId); throw Error(`auxiliary ${name} drift`);
+      },
+    };
+    const api = pi(fixture.cwd, fixture.first.entries); api.cwd = fixture.cwd;
+    createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: fixture.durable, store });
+    await assert.rejects(invoke(api, "goal_status", {}), new RegExp(`auxiliary ${name} drift`));
+  }
+});
+
 test("Repair S3 fails closed after S2 when the fixture repository HEAD drifts", async () => {
   const fixture = await approvedRepairS3Fixture(); let issuerCalls = 0;
   const durable = { ...fixture.durable, issueRepairCapability(input) { issuerCalls++; return issueRepairCapability(input); } };
