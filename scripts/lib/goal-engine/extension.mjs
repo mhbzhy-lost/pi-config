@@ -38,6 +38,7 @@ import {
 } from "./executor-binding.mjs";
 import { bindGoalExecutorCoordinator, inspectRootBrokerExecutorProof } from "../subagent-dispatch/root-broker-registry.ts";
 import { validateTaskDefinitions } from "./task-definition.mjs";
+import { buildSuspensionPlan, deriveOwnedExecutorStopRequest, requestOwnedRunStop } from "./suspension.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.mjs";
 import {
   allocateExecutorWorkspace,
@@ -596,6 +597,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   let turnsSinceSettle = 0;
   let pendingInput = null;
   let recoveryLatch = null;
+  const abortSignals = new WeakSet();
   const metadataChallenges = new Map();
   const orphanChallenges = new Map();
   const transferChallenges = new Map();
@@ -1271,6 +1273,10 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (!goalId) return "NO_ACTIVE_GOAL";
       let projection = loadProjectionFn(root, goalId);
       if (!projection) return "NO_ACTIVE_GOAL";
+      if (projection.eventSchemaVersion === "goal-runtime.v1" && projection.runtimeState === "suspended") {
+        await retrySuspendedOwnedStop(ctx, projection);
+        projection = loadProjectionFn(root, goalId);
+      }
       if (projection.eventSchemaVersion === "goal-runtime.v1" && runtimeIntentGates.get(`${goalId}:${sessionId}`)?.kind === "pending") return JSON.stringify({ status: "R10B_SUSPENSION_REQUIRED" });
       if (projection.eventSchemaVersion === "goal-runtime.v1") {
         if (!runtimeHost?.registries || typeof runtimeHost.captureCurrentWorld !== "function") return JSON.stringify({ goalId, status: "RUNTIME_READINESS_BLOCKER", attention: ["RUNTIME_HOST_AUTHORITY_UNAVAILABLE"] });
@@ -2589,8 +2595,53 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   const loadAllProjections = (root) => listGoalIdsFn(root).map((goalId) => loadProjectionFn(root, goalId)).filter(Boolean);
 
-  pi.on("input", (event, ctx) => {
+  const ownedRuntimeProjection = (root, sessionId, state) => {
+    const candidates = loadAllProjections(root).filter((projection) => projection.eventSchemaVersion === "goal-runtime.v1"
+      && projection.lifecycle === "active" && projection.runtimeState === state && ownedBySession(projection, sessionId));
+    return candidates.length === 1 ? candidates[0] : null;
+  };
+  const ownedBoundTaskIds = (projection) => [...projection.tasks.entries()]
+    .filter(([, task]) => task.executorBinding && ["dispatched", "running", "settling"].includes(task.status))
+    .map(([taskId]) => taskId).sort();
+  const stopOwnedTasks = async (projection, taskIds) => {
+    for (const taskId of taskIds) {
+      const request = deriveOwnedExecutorStopRequest({ projection, taskId });
+      await requestOwnedRunStop({ stopOwnedRun: runtimeHost?.stopOwnedRun }, { projection, ...request });
+    }
+  };
+  const suspendOwnedRuntime = async (ctx, reason) => {
+    const { root } = executionScopeFor(ctx);
+    const sessionId = sessionIdentity(ctx);
+    const projection = ownedRuntimeProjection(root, sessionId, "active");
+    if (!projection) return false;
+    const taskIds = ownedBoundTaskIds(projection);
+    const runIds = taskIds.map((taskId) => projection.tasks.get(taskId).executorBinding.runId).sort();
+    const plan = buildSuspensionPlan({ projection, reason, affectedIds: { taskIds, runIds } });
+    const event = makeEvent(plan.events[0].type, plan.events[0].data, projection.goalId, "goal-runtime.v1");
+    const expected = applyEvent(projection, event);
+    let suspended;
+    try { suspended = appendEventFn(root, event, projection.version); }
+    catch (error) {
+      const recovered = loadProjectionFn(root, projection.goalId);
+      if (!isDeepStrictEqual(recovered, expected)) throw error;
+      suspended = recovered;
+    }
+    await stopOwnedTasks(suspended, taskIds);
+    return true;
+  };
+  const retrySuspendedOwnedStop = async (ctx, projection) => {
+    if (projection.runtimeState !== "suspended") return;
+    await stopOwnedTasks(projection, ownedBoundTaskIds(projection).filter((taskId) => projection.suspension?.affectedTaskIds?.includes(taskId)));
+  };
+
+  pi.on("input", async (event, ctx) => {
     if (event.source !== "interactive" && event.source !== "rpc") return { action: "continue" };
+    const suspensionReason = !event.images?.length && event.streamingBehavior === "steer" ? "interactive_steer"
+      : !event.images?.length && event.streamingBehavior === "followUp" ? "follow_up" : null;
+    if (suspensionReason) {
+      await suspendOwnedRuntime(ctx, suspensionReason);
+      return { action: "continue" };
+    }
     pendingInput = { text: event.text, source: event.source };
     let hookSessionId;
     try { hookSessionId = sessionIdentity(ctx); } catch { return { action: "continue" }; }
@@ -2673,6 +2724,15 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
     } catch { recoveryLatch = { goalId: "unknown", sessionId: hookSessionId, state: "active" }; }
     return { action: "continue" };
+  });
+
+  pi.on("agent_start", (_event, ctx) => {
+    const signal = ctx?.signal;
+    if (!signal || abortSignals.has(signal)) return;
+    abortSignals.add(signal);
+    signal.addEventListener("abort", () => {
+      void suspendOwnedRuntime(ctx, "abort").catch(() => {});
+    }, { once: true });
   });
 
   pi.on("session_start", (_event, ctx) => {
