@@ -7,115 +7,132 @@ import test from "node:test";
 import { applyEvent, createProjection, ownerSessionId } from "../scripts/lib/goal-engine/events.mjs";
 import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { hashRuntimeExecutionContract, normalizeRuntimeGoalInit } from "../scripts/lib/goal-engine/obligation-contract.mjs";
+import { suspensionClosureHash } from "../scripts/lib/goal-engine/suspension.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
-const sha = (value) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
+const sha = (value) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 const digest = (n) => String(n).padStart(64, "0");
 const baseHead = "a".repeat(40);
-function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `r10b-${n}`, goalId: "r10b-goal", occurredAt: `2026-08-14T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
+const event = (type, data, n) => ({ schemaVersion: "goal-runtime.v1", eventId: `r10b-amendment-${n}`, goalId: "r10b-goal", occurredAt: `2026-08-22T00:00:${String(n).padStart(2, "0")}.000Z`, type, data });
 
-function suspendedRuntime() {
-  const runtime = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
-  let projection = applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: runtime, executionContractHash: hashRuntimeExecutionContract(runtime), baseHead, readiness: "draft" }, 1));
-  projection = applyEvent(projection, event("goal.session_bound", { sessionId: "owner-session", leafId: "owner-leaf" }, 2));
-  return applyEvent(projection, event("goal.runtime_suspended", { suspensionId: "amendment-suspension", reason: "execution_amendment" }, 3));
+function sourceContract() {
+  const fixture = runtimeInit();
+  const task2 = { ...fixture.execution.tasks[0], id: "task-2", description: "Keep accepted unaffected work" };
+  return normalizeRuntimeGoalInit({
+    ...fixture, scope: ["runtime amendment"], non_goals: ["extension branch validation"], dod: ["replay canonical amendment ledger"],
+    execution: { ...fixture.execution, tasks: [fixture.execution.tasks[0], task2] },
+  }, runtimeRegistries);
 }
 
+function activeEntries() {
+  const runtime = sourceContract();
+  const approval = { proposalId: "runtime-proposal", executionContractHash: hashRuntimeExecutionContract(runtime), baseHead, sessionId: "owner-session" };
+  const proposalHash = sha({ ...approval, goalId: "r10b-goal" });
+  const common = { runId: "calibration-run", conditionId: "condition-1" };
+  const observation = { ...common, cycle: 0, head: baseHead, executionRevision: 1, executionContractHash: approval.executionContractHash, conditionHash: sha(runtime.execution.conditions[0]), adapter: { ref: "oracle", version: "1" }, worldSnapshotHash: digest(1), resourceClaimsHash: digest(2) };
+  return [
+    event("goal.runtime_drafted", { runtimeInit: runtime, executionContractHash: approval.executionContractHash, baseHead, readiness: "draft" }, 1),
+    event("goal.session_bound", { sessionId: "owner-session", leafId: "owner-leaf" }, 2),
+    event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 3),
+    event("goal.runtime_approval_recorded", { ...approval, proposalHash, userEntryId: "runtime-entry", capabilityDigest: digest(3) }, 4),
+    event("condition.observation_requested", observation, 5),
+    event("condition.observation_lease_allocated", { ...common, allocationId: "calibration-lease", leaseReceiptHash: digest(4) }, 6),
+    event("condition.observation_process_bound", { ...common, processIdentityHash: digest(5) }, 7),
+    event("condition.observation_terminal", { ...common, terminalProofHash: digest(6) }, 8),
+    event("condition.observation_recorded", { ...common, evidenceId: digest(7), verdict: { kind: "passed" }, evidence: { executionRevision: 1, executionContractHash: approval.executionContractHash, conditionHash: observation.conditionHash, head: baseHead, adapter: observation.adapter, environment: { ref: "local", fingerprint: "r10b-environment" }, fixtures: [{ ref: "sample", fingerprint: "r10b-fixture" }], artifact: { id: "calibration-artifact", hash: digest(8) } } }, 9),
+    event("goal.runtime_activated", {}, 10),
+  ];
+}
+
+function applyAll(entries) { return entries.reduce((projection, entry) => applyEvent(projection, entry), createProjection()); }
+function initialSuspension() { return { suspensionId: "amendment-suspension", reason: "execution_amendment", affectedTaskIds: ["task-1"], affectedRunIds: ["amendment-run"], requestedAt: "2026-08-22T00:00:11.000Z", resourcesQuarantined: false }; }
+function fullClosure() {
+  const initial = initialSuspension();
+  return { ...initial, resourcesQuarantined: true, terminalProofRefs: [{ runId: "amendment-run", proofHash: digest(9), state: "observed" }], workspaceClosureProofRefs: [{ taskId: "task-1", attempt: 0, proofHash: digest(10), state: "quarantined", disposition: "preserved" }], resourceClosureProofRefs: [{ ownerId: "amendment-run", proofHash: digest(11), state: "quarantined", debt: true }] };
+}
+function suspendedRuntime() { return applyAll([...activeEntries(), event("goal.runtime_suspended", initialSuspension(), 11), event("goal.runtime_suspended", fullClosure(), 12)]); }
+
 function proposalData(projection) {
-  const changes = { tasks: [{ id: "task-1", intent: "change", expected: { condition: "amended contract" } }] };
-  const targetExecutionContract = {
-    tasks: [...projection.tasks].map(([id, task]) => ({ id, description: task.description, deps: task.deps, writePaths: task.writePaths, acceptance: task.acceptance, workflow: task.workflow })),
-    conditions: [...projection.conditions].map(([id, condition]) => ({ id, ...condition.definition })),
-    writePolicy: projection.writePolicy,
-    budget: projection.convergenceBudget,
-    changes,
-  };
+  const source = sourceContract();
+  // The literal task change is normalized into the complete durable runtime contract.
+  const targetExecutionContract = normalizeRuntimeGoalInit({
+    ...source,
+    execution: { ...source.execution, tasks: [{ ...source.execution.tasks[0], description: "Harden amended runtime task contract" }, source.execution.tasks[1]] },
+  }, runtimeRegistries);
+  const changes = { update_tasks: [{ id: "task-1", description: "Harden amended runtime task contract" }] };
   const material = {
-    goalId: projection.goalId, proposalId: "proposal-r10b", changes, changesHash: sha(changes), targetExecutionContract,
-    targetContractHash: sha(targetExecutionContract), baseHead: projection.runtimeBaseHead, ownerSessionId: ownerSessionId(projection),
-    oldRevision: projection.executionRevision, newRevision: projection.executionRevision + 1,
+    goalId: projection.goalId, proposalId: "proposal-r10b", changes: canonical(changes), changesHash: sha(changes),
+    targetExecutionContract, targetContractHash: hashRuntimeExecutionContract(targetExecutionContract),
+    baseHead: projection.runtimeBaseHead, ownerSessionId: ownerSessionId(projection), oldRevision: projection.executionRevision, newRevision: projection.executionRevision + 1,
   };
   return { ...material, proposalHash: sha(material) };
 }
 
-// This is intentionally RED until amendment_proposed becomes the durable authority.
-test("R10B durable proposal replays its complete target contract from real runtime bindings", () => {
+function approvalData(proposal, projection) {
+  const approval = { proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, ownerSessionId: ownerSessionId(projection), userEntryId: "user-entry-r10b", userEntryHash: sha({ id: "user-entry-r10b", text: "approve amendment" }), branchBindingHash: sha({ ownerSessionId: ownerSessionId(projection), branch: "extension-lane" }), source: "interactive", recordedAt: "2026-08-22T00:01:00.000Z" };
+  return { ...approval, decisionId: sha(approval) };
+}
+
+// RED: the reducer must persist the normalized target contract rather than a projection-shaped surrogate.
+test("R10B durable amendment proposal reloads the normalized target runtime contract", () => {
   const projection = suspendedRuntime();
   const proposal = proposalData(projection);
+  assert.deepEqual(Object.keys(proposal.targetExecutionContract).sort(), ["dod", "execution", "non_goals", "objective", "scope"]);
+  assert.deepEqual(Object.keys(proposal.targetExecutionContract.execution).sort(), ["budgets", "conditions", "schema", "tasks", "write_policy"]);
+  assert.equal(proposal.targetContractHash, hashRuntimeExecutionContract(proposal.targetExecutionContract));
   const root = mkdtempSync(join(tmpdir(), "goal-r10b-proposal-"));
   try {
-    const entries = [
-      event("goal.runtime_drafted", { runtimeInit: normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries), executionContractHash: projection.executionContractHash, baseHead, readiness: "draft" }, 1),
-      event("goal.session_bound", { sessionId: "owner-session", leafId: "owner-leaf" }, 2),
-      event("goal.runtime_suspended", { suspensionId: "amendment-suspension", reason: "execution_amendment" }, 3),
-      event("execution.amendment_proposed", proposal, 4),
-    ];
-    const persisted = appendEventBatch(root, entries, 0);
+    const persisted = appendEventBatch(root, [...activeEntries(), event("goal.runtime_suspended", initialSuspension(), 11), event("goal.runtime_suspended", fullClosure(), 12), event("execution.amendment_proposed", proposal, 13)], 0);
     const replayed = loadProjection(root, "r10b-goal");
-    assert.deepEqual(replayed.pendingHumanDecision, { ...proposal, phase: "proposed" });
-    assert.equal(replayed.pendingHumanDecision.targetContractHash, sha(replayed.pendingHumanDecision.targetExecutionContract));
-    assert.equal(persisted.pendingHumanDecision.ownerSessionId, ownerSessionId(replayed));
+    assert.deepEqual(persisted.pendingHumanDecision, { ...proposal, phase: "proposed" });
+    assert.deepEqual(replayed.pendingHumanDecision.targetExecutionContract, proposal.targetExecutionContract);
+    assert.equal(replayed.pendingHumanDecision.targetContractHash, hashRuntimeExecutionContract(replayed.pendingHumanDecision.targetExecutionContract));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("R10B approval accepts only the event-sourced active-branch real-user intent", () => {
-  const projection = suspendedRuntime();
-  const proposal = proposalData(projection);
-  let pending = applyEvent(projection, event("execution.amendment_proposed", proposal, 4));
-  const approval = {
-    proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, ownerSessionId: ownerSessionId(pending),
-    userEntryId: "real-user-entry", source: "interactive", intentId: "pi-intent-r10b", branchBindingHash: digest(5),
-  };
-  pending = applyEvent(pending, event("execution.amendment_approved", approval, 5));
-  assert.equal(pending.pendingHumanDecision.phase, "approved");
-  for (const invalid of [
-    { ...approval, source: "extension" },
-    { ...approval, ownerSessionId: "off-branch-session" },
-    { ...approval, branchBindingHash: digest(6) },
-    { ...approval, userEntryId: "streamed-or-duplicate" },
-  ]) assert.throws(() => applyEvent(applyEvent(projection, event("execution.amendment_proposed", proposal, 40 + invalid.branchBindingHash.charCodeAt(0) % 10)), event("execution.amendment_approved", invalid, 50 + invalid.branchBindingHash.charCodeAt(0) % 10)), /approval|branch|user|intent/i);
+// RED: this ledger identity deliberately does not claim to validate the live Pi branch; that belongs to Extension tests.
+test("R10B durable amendment approval reducer records the complete decision identity", () => {
+  const projection = suspendedRuntime(), proposal = proposalData(projection);
+  const approval = approvalData(proposal, projection);
+  assert.deepEqual(Object.keys(approval).sort(), ["branchBindingHash", "decisionId", "ownerSessionId", "proposalHash", "proposalId", "recordedAt", "source", "userEntryHash", "userEntryId"]);
+  const { decisionId, ...approvalMaterial } = approval;
+  assert.equal(decisionId, sha(approvalMaterial));
+  const pending = applyEvent(projection, event("execution.amendment_proposed", proposal, 13));
+  const approved = applyEvent(pending, event("execution.amendment_approved", approval, 14));
+  assert.deepEqual(approved.pendingHumanDecision, { ...proposal, ...approval, phase: "approved" });
+  assert.throws(() => applyEvent(pending, event("execution.amendment_approved", { ...approval, userEntryHash: digest(12) }, 15)), /approval|decision|user/i);
 });
 
-test("R10B Store rejects a split consume before applicability, evidence invalidation, apply, and bound resume", () => {
+test("R10B Store accepts only the canonical consumed-to-resumed amendment batch", () => {
   const root = mkdtempSync(join(tmpdir(), "goal-r10b-batch-"));
   try {
-    const runtime = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
-    const proposed = { proposalId: "legacy-r10b", proposalHash: digest(1), changesHash: digest(2), oldRevision: 1, newRevision: 2 };
-    let projection = appendEventBatch(root, [
-      event("goal.runtime_drafted", { runtimeInit: runtime, executionContractHash: hashRuntimeExecutionContract(runtime), baseHead, readiness: "draft" }, 1),
-      event("goal.session_bound", { sessionId: "owner-session", leafId: "owner-leaf" }, 2),
-      event("goal.runtime_suspended", { suspensionId: "amendment-suspension", reason: "execution_amendment" }, 3),
-      event("execution.amendment_proposed", proposed, 4),
-      event("execution.amendment_approved", { proposalId: proposed.proposalId, proposalHash: proposed.proposalHash, sessionId: "owner-session", userEntryId: "real-user-entry" }, 5),
-    ], 0);
-    assert.throws(() => appendEvent(root, event("execution.amendment_capability_consumed", { proposalId: proposed.proposalId, nonceDigest: digest(3) }, 6), projection.version), /canonical amendment batch|atomic|consume/i);
-
-    const canonicalTypes = ["execution.amendment_capability_consumed", "task.applicability_changed", "condition.evidence_invalidated", "execution.amendment_applied", "goal.runtime_resumed"];
-    const resume = { suspensionId: "amendment-suspension", closureHash: digest(9) };
-    assert.throws(() => appendEventBatch(root, canonicalTypes.map((type, index) => event(type, index === 0 ? { proposalId: proposed.proposalId, nonceDigest: digest(4) } : type === "task.applicability_changed" ? { taskId: "task-1", state: "reverify_required", reason: "task_change" } : type === "condition.evidence_invalidated" ? { conditionId: "condition-1", reason: "task_change" } : type === "execution.amendment_applied" ? { proposalId: proposed.proposalId, oldRevision: 1, newRevision: 2, contractHash: digest(8), reconciliation: [] } : resume, 10 + index)), projection.version), /proposal|batch|applicability|resume/i);
+    const projection = appendEventBatch(root, [...activeEntries(), event("goal.runtime_suspended", initialSuspension(), 11), event("goal.runtime_suspended", fullClosure(), 12)], 0);
+    const proposal = proposalData(projection), approval = approvalData(proposal, projection);
+    const prepared = appendEventBatch(root, [event("execution.amendment_proposed", proposal, 13), event("execution.amendment_approved", approval, 14)], projection.version);
+    assert.throws(() => appendEvent(root, event("execution.amendment_capability_consumed", { proposalId: proposal.proposalId, nonceDigest: digest(13) }, 15), prepared.version), /canonical amendment batch|atomic|consume/i);
+    const batch = [
+      event("execution.amendment_capability_consumed", { proposalId: proposal.proposalId, nonceDigest: digest(14) }, 15),
+      event("task.applicability_changed", { taskId: "task-1", revision: proposal.newRevision, state: "reverify_required", reason: "task_change" }, 16),
+      event("task.applicability_changed", { taskId: "task-2", revision: proposal.newRevision, state: "applicable", reason: "unaffected" }, 17),
+      event("condition.evidence_invalidated", { conditionId: "condition-1", revision: proposal.newRevision, priorEvidenceIds: [digest(7)], reason: "task_change" }, 18),
+      event("execution.amendment_applied", { proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, oldRevision: proposal.oldRevision, newRevision: proposal.newRevision, targetContractHash: proposal.targetContractHash, reconciliation: [] }, 19),
+      event("goal.runtime_resumed", { suspensionId: initialSuspension().suspensionId, closureHash: suspensionClosureHash(fullClosure()) }, 20),
+    ];
+    const applied = appendEventBatch(root, batch, prepared.version);
+    assert.equal(applied.executionRevision, proposal.newRevision);
+    assert.deepEqual(applied.taskApplicability.get("task-2"), { revision: proposal.newRevision, state: "applicable", reason: "unaffected" });
+    assert.equal(applied.conditions.get("condition-1").status, "stale");
+    assert.deepEqual(applied.conditions.get("condition-1").supportingEvidenceIds, []);
+    assert.equal(applied.evidenceHistory.length, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("R10B canonical batch advances every applicability revision and invalidates prior support exactly once", () => {
-  const proposed = { proposalId: "revision-r10b", proposalHash: digest(11), changesHash: digest(12), oldRevision: 1, newRevision: 2 };
-  let projection = applyEvent(suspendedRuntime(), event("execution.amendment_proposed", proposed, 64));
-  projection = applyEvent(projection, event("execution.amendment_approved", { proposalId: proposed.proposalId, proposalHash: proposed.proposalHash, sessionId: "owner-session", userEntryId: "real-user-entry" }, 65));
-  for (const [type, data, n] of [
-    ["execution.amendment_capability_consumed", { proposalId: proposed.proposalId, nonceDigest: digest(13) }, 66],
-    ["task.applicability_changed", { taskId: "task-1", state: "reverify_required", reason: "task_change" }, 67],
-    ["condition.evidence_invalidated", { conditionId: "condition-1", reason: "task_change" }, 68],
-    ["execution.amendment_applied", { proposalId: proposed.proposalId, oldRevision: 1, newRevision: 2, contractHash: digest(14), reconciliation: [] }, 69],
-    ["goal.runtime_resumed", { suspensionId: "amendment-suspension", closureHash: digest(15) }, 70],
-  ]) projection = applyEvent(projection, event(type, data, n));
-  assert.equal(projection.executionRevision, 2);
-  assert.deepEqual(projection.taskApplicability.get("task-1"), { revision: 2, state: "reverify_required", reason: "task_change" });
-  assert.equal(projection.conditions.get("condition-1").status, "stale");
-  assert.deepEqual(projection.conditions.get("condition-1").supportingEvidenceIds, []);
-});
-
-test("R10B runtime resume cannot clear a suspension without its matching closure proof", () => {
-  const projection = suspendedRuntime();
-  assert.throws(() => applyEvent(projection, event("goal.runtime_resumed", {}, 4)), /suspension|closure|resume/i);
-  assert.throws(() => applyEvent(projection, event("goal.runtime_resumed", { suspensionId: "other", closureHash: digest(7) }, 5)), /suspension|closure|resume/i);
+test("R10B amendment reducer rejects wrong target, closure, revision, split, disorder, and replay apply", () => {
+  const projection = suspendedRuntime(), proposal = proposalData(projection);
+  let pending = applyEvent(projection, event("execution.amendment_proposed", proposal, 13));
+  pending = applyEvent(pending, event("execution.amendment_approved", approvalData(proposal, pending), 14));
+  assert.throws(() => applyEvent(pending, event("execution.amendment_applied", { proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, oldRevision: proposal.oldRevision, newRevision: proposal.newRevision, targetContractHash: proposal.targetContractHash, reconciliation: [] }, 15)), /consume|amendment/i);
+  assert.throws(() => applyEvent(pending, event("goal.runtime_resumed", { suspensionId: initialSuspension().suspensionId, closureHash: digest(15) }, 16)), /closure|resume/i);
+  assert.throws(() => applyEvent(pending, event("execution.amendment_capability_consumed", { proposalId: "other-proposal", nonceDigest: digest(16) }, 17)), /proposal|capability/i);
 });
