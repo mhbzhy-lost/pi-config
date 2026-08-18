@@ -88,9 +88,12 @@ test("non-active runtime states do not offer product actions", () => {
   for (const runtimeState of ["draft", "awaiting_user_approval", "calibrating", "suspended"]) { const projection = base(); projection.runtimeState = runtimeState; projection.progressLedger = ledger(); projection.conditions.set("c", condition("c")); projection.findings.set("f", { findingId: "f", status: "open" }); const result = frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) }); assert(!result.actions.some(x => ["condition", "repair-open", "repair"].includes(x.kind)), runtimeState); if (runtimeState === "calibrating") assert(result.blocking.some(x => x.code === "RUNTIME_CALIBRATION_REQUIRED")); }
 });
 
-test("suspended runtime retains terminal observation safety debt", () => {
-  const projection = base(); projection.runtimeState = "suspended"; projection.progressLedger = ledger(); projection.observationRuns.set("r", { runId: "r", conditionId: "c", cycle: 1, phase: "terminal" });
-  assert(frontier(projection).actions.some(x => x.kind === "observation-record"));
+test("suspended runtime retains terminal observation safety debt and offers exact-eight resume amendment", () => {
+  const projection = base(); projection.runtimeState = "suspended"; projection.suspension = { suspensionId: "s", reason: "host_pause" }; projection.progressLedger = ledger(); projection.observationRuns.set("r", { runId: "r", conditionId: "c", cycle: 1, phase: "terminal" });
+  const actions = frontier(projection).actions;
+  assert(actions.some(x => x.kind === "observation-record"));
+  assert(actions.some(x => x.tool === "goal_amend" && x.params.operation === "resume_runtime"));
+  assert.equal(actions.some(x => x.tool === "goal_resume"), false);
 });
 
 test("waiting remediation blocks without starving its pending Task dispatch", () => {

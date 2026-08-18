@@ -89,7 +89,7 @@ export function actionableFrontier(input = {}) {
   if (world.safe !== true) note(blocking, "world", "snapshot", "WORLD_SNAPSHOT_UNSAFE");
   if (projection.pendingHumanDecision) note(blocking, "decision", "pending", "PENDING_HUMAN_DECISION");
   const suspension = projection.suspension;
-  if (projection.runtimeState === "suspended" || suspension) action(actions, "suspension-recovery", suspension?.suspensionId ?? "runtime", 1, "goal_resume", {}, "Suspension requires reconciliation");
+  if (projection.runtimeState === "suspended" || suspension) action(actions, "suspension-recovery", suspension?.suspensionId ?? "runtime", 1, "goal_amend", { operation: "resume_runtime" }, "Suspension requires reconciliation");
   const activeWorldRuns = Array.isArray(world.activeRuns) ? world.activeRuns : null, conflictedRuns = new Set();
   if (!activeWorldRuns) note(attention, "world", "active-runs", "ACTIVE_RUN_AUTHORITY_UNAVAILABLE");
   else {
@@ -133,7 +133,8 @@ export function actionableFrontier(input = {}) {
   if (runtimeState === "calibrating") note(blocking, "runtime", runtimeState, "RUNTIME_CALIBRATION_REQUIRED");
   const globalGate = blocking.some(item => ["WORLD_SNAPSHOT_UNSAFE", "OBSERVATION_BUDGET_EXHAUSTED", "REPAIR_BUDGET_EXHAUSTED", "ELAPSED_BUDGET_EXHAUSTED", "NO_PROGRESS_BUDGET_EXHAUSTED", "PENDING_HUMAN_DECISION", "RUNTIME_LIFECYCLE_INACTIVE", "RUNTIME_READINESS_REQUIRED", "RUNTIME_CALIBRATION_REQUIRED"].includes(item.code)) || attention.some(item => ["NO_PROGRESS_AUTHORITY_UNAVAILABLE", "OBSERVATION_RUN_STATE_CONFLICT", "ACTIVE_RUN_AUTHORITY_UNAVAILABLE"].includes(item.code));
   const debtAction = item => ["suspension-recovery", "resource-recovery", "observation-record", "observation-release"].includes(item.kind) || (item.kind === "task" && ["goal_settle", "goal_integrate", "goal_accept"].includes(item.tool));
-  const permitted = runtimeState === "suspended" || suspension ? actions.filter(debtAction) : globalGate ? actions.filter(debtAction) : runtimeState === "active" && projection.lifecycle === "active" ? actions : [];
+  const suspensionDebtAction = item => ["suspension-recovery", "resource-recovery", "observation-record", "observation-release"].includes(item.kind) || (item.kind === "task" && (item.tool === "goal_settle" || (item.tool === "goal_integrate" && ["discard", "preserve"].includes(item.params.action))));
+  const permitted = runtimeState === "suspended" || suspension ? actions.filter(suspensionDebtAction) : globalGate ? actions.filter(debtAction) : runtimeState === "active" && projection.lifecycle === "active" ? actions : [];
   const tasksDone = collection(projection.tasks ?? {}, "tasks").every(([id, task]) => { const app = taskApplicability(projection, id); return app === "superseded" || (app === "applicable" && task?.status === "accepted"); });
   const conditionsDone = collection(projection.conditions ?? {}, "conditions").every(([, state]) => state?.status === "satisfied" && state.freshness !== "stale" && dependencyReady(state, projection, [], "complete"));
   const complete = tasksDone && conditionsDone && !permitted.length && !blocking.length && !attention.length && !suspension;

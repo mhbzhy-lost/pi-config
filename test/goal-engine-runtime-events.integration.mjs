@@ -189,7 +189,7 @@ test("repair resolution reducer accepts complete consecutive support with only e
 });
 
 test("amendment enters suspended through its durable runtime event", () => {
-  let p = active(); p = applyEvent(p, event("goal.runtime_suspended", { suspensionId: "s-1", reason: "amend execution" }, 15));
+  let p = active(); p = applyEvent(p, event("goal.runtime_suspended", { suspensionId: "s-1", reason: "execution_amendment", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-20T00:00:15.000Z", resourcesQuarantined: false }, 15));
   assert.equal(p.runtimeState, "suspended");
   p = applyEvent(p, event("execution.amendment_proposed", { proposalId: "p", proposalHash: hash(1), changesHash: hash(2), oldRevision: 1, newRevision: 2 }, 16));
   p = applyEvent(p, event("execution.amendment_approved", { proposalId: "p", proposalHash: hash(1), sessionId: "s", userEntryId: "u" }, 17));
