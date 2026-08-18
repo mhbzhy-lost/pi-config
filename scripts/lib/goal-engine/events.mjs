@@ -5,7 +5,7 @@ import { validateTaskDefinitions, taskContractHash, remediationSubjectHash } fro
 import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.mjs";
 import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence } from "./settlement-evidence.mjs";
 import { generationCapabilities } from "./generation-capabilities.mjs";
-import { deriveInitialShape } from "./obligation-contract.mjs";
+import { deriveInitialShape, hashRuntimeExecutionContract, normalizeRuntimeGoalInit } from "./obligation-contract.mjs";
 
 const LEGACY_SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]);
 export const PLANNED_SCHEMA_VERSION = "planned.v1";
@@ -411,8 +411,32 @@ function validCancellation(p, episode, c) { const keys = ["ownedTaskIds", "owned
 function repairCancelRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "cancellation"], "repair cancellation"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || !["active", "waiting_for_tasks", "reverifying", "blocked"].includes(episode.status) || !validCancellation(p, episode, data.cancellation)) throw new Error("invalid repair cancellation"); episode.status = "cancel_pending"; episode.cancellation = structuredClone(data.cancellation); }
 function repairCancelled(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "cancellation"], "repair cancelled"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || episode.status !== "cancel_pending" || JSON.stringify(canonical(data.cancellation)) !== JSON.stringify(canonical(episode.cancellation)) || !validCancellation(p, episode, data.cancellation)) throw new Error("repair cancellation is out of order"); episode.status = "cancelled"; }
 function taskApplicabilityChanged(p, data) { runtimeOnly(p); requireExactFields(data, ["taskId", "state", "reason"], "task applicability"); const task = p.tasks.get(data.taskId); const current = p.taskApplicability.get(data.taskId); if (!task || !current || !["applicable", "superseded", "reverify_required"].includes(data.state)) throw new Error("invalid task applicability"); p.taskApplicability.set(data.taskId, { revision: p.executionRevision, state: data.state, reason: data.reason || null }); recordRuntimeMutation(p, [data.taskId]); }
-function amendmentProposed(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "changesHash", "oldRevision", "newRevision"], "amendment proposal"); if (p.runtimeState === "active") throw new Error("runtime must be suspended before amendment"); if (data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || !hash(data.proposalHash) || !hash(data.changesHash)) throw new Error("invalid amendment proposal"); p.pendingHumanDecision = { ...data, phase: "proposed" }; }
-function amendmentApproved(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "sessionId", "userEntryId"], "amendment approval"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "proposed" || pending.proposalId !== data.proposalId || pending.proposalHash !== data.proposalHash || !data.sessionId || !data.userEntryId) throw new Error("invalid amendment approval"); p.pendingHumanDecision = { ...pending, ...data, phase: "approved" }; }
+function proposalRuntimeRegistries(contract) {
+  return {
+    adapters: Object.fromEntries((contract?.execution?.conditions || []).map((condition) => [condition.oracle_ref, { deterministic: true }])),
+    environments: Object.fromEntries((contract?.execution?.conditions || []).map((condition) => [condition.environment_ref, { available: true }])),
+    fixtures: Object.fromEntries((contract?.execution?.conditions || []).flatMap((condition) => condition.fixture_refs.map((ref) => [ref, { available: true }]))),
+  };
+}
+function canonicalIso(value) { return typeof value === "string" && Number.isFinite(new Date(value).getTime()) && new Date(value).toISOString() === value; }
+function amendmentProposed(p, data) {
+  runtimeOnly(p);
+  const fields = ["proposalId", "proposalHash", "changes", "changesHash", "targetExecutionContract", "targetContractHash", "baseHead", "ownerSessionId", "oldRevision", "newRevision", "goalId"];
+  requireExactFields(data, fields, "amendment proposal");
+  let normalizedTarget;
+  try { normalizedTarget = normalizeRuntimeGoalInit(data.targetExecutionContract, proposalRuntimeRegistries(data.targetExecutionContract)); } catch { throw new Error("invalid amendment target runtime contract"); }
+  const { proposalHash, ...material } = data;
+  if (p.runtimeState !== "suspended" || data.goalId !== p.goalId || data.ownerSessionId !== ownerSessionId(p) || data.baseHead !== p.runtimeBaseHead || data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || !data.proposalId || !isPlainObject(data.changes) || !hash(data.proposalHash) || !hash(data.changesHash) || !hash(data.targetContractHash) || data.changesHash !== hashCanonical(data.changes) || data.targetContractHash !== hashRuntimeExecutionContract(data.targetExecutionContract) || !sameCanonical(data.targetExecutionContract, normalizedTarget) || data.proposalHash !== hashCanonical(material)) throw new Error("invalid amendment proposal");
+  p.pendingHumanDecision = { ...structuredClone(data), phase: "proposed" };
+}
+function amendmentApproved(p, data) {
+  runtimeOnly(p);
+  const fields = ["proposalId", "proposalHash", "ownerSessionId", "userEntryId", "userEntryHash", "branchBindingHash", "source", "recordedAt", "decisionId"];
+  requireExactFields(data, fields, "amendment approval");
+  const pending = p.pendingHumanDecision, { decisionId, ...material } = data;
+  if (!pending || pending.phase !== "proposed" || pending.proposalId !== data.proposalId || pending.proposalHash !== data.proposalHash || pending.ownerSessionId !== data.ownerSessionId || data.ownerSessionId !== ownerSessionId(p) || !data.userEntryId || !hash(data.userEntryHash) || !hash(data.branchBindingHash) || !hash(data.decisionId) || !["interactive", "rpc"].includes(data.source) || !canonicalIso(data.recordedAt) || data.decisionId !== hashCanonical(material)) throw new Error("invalid amendment approval");
+  p.pendingHumanDecision = { ...pending, ...structuredClone(data), phase: "approved" };
+}
 function amendmentCapabilityConsumed(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "nonceDigest"], "amendment capability"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "approved" || pending.proposalId !== data.proposalId || !hash(data.nonceDigest)) throw new Error("invalid amendment capability"); pending.phase = "consumed"; }
 function amendmentApplied(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "oldRevision", "newRevision", "contractHash", "reconciliation"], "amendment apply"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "consumed" || pending.proposalId !== data.proposalId || data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || !hash(data.contractHash) || !Array.isArray(data.reconciliation)) throw new Error("invalid amendment apply"); p.executionRevision = data.newRevision; p.executionContractHash = data.contractHash; p.pendingHumanDecision = null; recordRuntimeMutation(p, [...p.tasks.keys()]); }
 function finalReviewStarted(p, data) { runtimeOnly(p); requireExactFields(data, ["reviewId", "manifestHash", "stateHash", "worldHash"], "final review start"); if (!data.reviewId || !hash(data.manifestHash) || !hash(data.stateHash) || !hash(data.worldHash)) throw new Error("invalid final review start"); p.finalReview = { ...data, status: "started" }; }

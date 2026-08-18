@@ -13,6 +13,8 @@ import { buildRemediationTaskCandidate, createRepairChallenge, issueRepairCapabi
 
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
 function hash(n) { return String(n).padStart(64, "0"); }
+function canonical(value) { return Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value; }
+function canonicalHash(value) { return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex"); }
 function runtimeApprovalHash({ goalId = "runtime-goal", proposalId = "proposal", executionContractHash, baseHead = "a".repeat(40), sessionId = "session" }) { return createHash("sha256").update(JSON.stringify({ baseHead, executionContractHash, goalId, proposalId, sessionId })).digest("hex"); }
 function draft() { const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); let p = applyEvent(createProjection(), event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), readiness: "draft" }, 1)); return applyEvent(p, event("goal.session_bound", { sessionId: "session", leafId: "leaf" }, 0)); }
 function calibrating() { let p = draft(); p = applyEvent(p, event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 2)); const approval = { proposalId: "proposal", executionContractHash: p.executionContractHash, baseHead: p.runtimeBaseHead, sessionId: "session" }; return applyEvent(p, event("goal.runtime_approval_recorded", { ...approval, proposalHash: runtimeApprovalHash(approval), userEntryId: "entry", capabilityDigest: hash(2) }, 3)); }
@@ -191,8 +193,12 @@ test("repair resolution reducer accepts complete consecutive support with only e
 test("amendment enters suspended through its durable runtime event", () => {
   let p = active(); p = applyEvent(p, event("goal.runtime_suspended", { suspensionId: "s-1", reason: "execution_amendment", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-20T00:00:15.000Z", resourcesQuarantined: false }, 15));
   assert.equal(p.runtimeState, "suspended");
-  p = applyEvent(p, event("execution.amendment_proposed", { proposalId: "p", proposalHash: hash(1), changesHash: hash(2), oldRevision: 1, newRevision: 2 }, 16));
-  p = applyEvent(p, event("execution.amendment_approved", { proposalId: "p", proposalHash: hash(1), sessionId: "s", userEntryId: "u" }, 17));
+  const targetExecutionContract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
+  const proposalMaterial = { proposalId: "p", changes: { update_tasks: [{ id: "task-1", description: "amended" }] }, changesHash: canonicalHash({ update_tasks: [{ id: "task-1", description: "amended" }] }), targetExecutionContract, targetContractHash: hashRuntimeExecutionContract(targetExecutionContract), baseHead: p.runtimeBaseHead, ownerSessionId: "session", oldRevision: 1, newRevision: 2, goalId: p.goalId };
+  const proposal = { ...proposalMaterial, proposalHash: canonicalHash(proposalMaterial) };
+  p = applyEvent(p, event("execution.amendment_proposed", proposal, 16));
+  const approvalMaterial = { proposalId: "p", proposalHash: proposal.proposalHash, ownerSessionId: "session", userEntryId: "u", userEntryHash: hash(5), branchBindingHash: hash(6), source: "interactive", recordedAt: "2026-08-20T00:00:17.000Z" };
+  p = applyEvent(p, event("execution.amendment_approved", { ...approvalMaterial, decisionId: canonicalHash(approvalMaterial) }, 17));
   p = applyEvent(p, event("execution.amendment_capability_consumed", { proposalId: "p", nonceDigest: hash(3) }, 18));
   p = applyEvent(p, event("execution.amendment_applied", { proposalId: "p", oldRevision: 1, newRevision: 2, contractHash: hash(4), reconciliation: [] }, 19));
   assert.equal(p.executionRevision, 2);
