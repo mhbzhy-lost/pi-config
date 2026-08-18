@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSuspensionPlan, requestOwnedRunStop, inspectSuspensionCompletion, deriveOwnedExecutorStopRequest } from "../scripts/lib/goal-engine/suspension.mjs";
 
-const projection = () => ({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", executionContractHash: "a".repeat(64), runtimeBaseHead: "b".repeat(40), sessionBindings: [{ sessionId: "session-1", state: "watching" }], runtimeState: "active", executionRevision: 2, actionOffer: { id: "offer-1", active: true }, tasks: new Map([["task-1", { attempts: 3, executorBinding: { runId: "run-1", asyncDir: "/tmp/run-1", workspaceLeaseId: "lease-1" }, status: "dispatched" }]]) });
-test("interactive intent changes durably suspend, revoke offers, and block stale operations", () => {
+const projection = () => ({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", executionContractHash: "a".repeat(64), runtimeBaseHead: "b".repeat(40), sessionBindings: [{ sessionId: "session-1", state: "watching" }], runtimeState: "active", executionRevision: 2, actionOffer: { id: "offer-1", consumed: false }, tasks: new Map([["task-1", { attempts: 3, executorBinding: { runId: "run-1", asyncDir: "/tmp/run-1", workspaceLeaseId: "lease-1" }, status: "dispatched" }]]) });
+test("interactive intent changes durably suspend and block stale operations", () => {
   for (const reason of ["interactive_steer", "follow_up", "abort", "execution_amendment"]) {
     const plan = buildSuspensionPlan({ projection: projection(), reason, affectedIds: { taskIds: ["task-1"], runIds: ["run-1"] }, inventories: { workspaces: [{ taskId: "task-1", runId: "run-1", affected: true }] } });
-    assert.equal(plan.events[0].type, "goal.runtime_suspended"); assert.equal(plan.events[1].type, "goal.action_offer_revoked");
+    assert.deepEqual(plan.events.map(({ type }) => type), ["goal.runtime_suspended"]);
     assert.equal(plan.suspensionId, plan.events[0].data.suspensionId);
     assert.deepEqual(plan.blocked, ["dispatch", "integrate", "finalize"]); assert.equal(plan.workspaceStrategies[0].action, "quarantine");
   }
@@ -37,7 +37,8 @@ test("owned stop requires every immutable identity and official terminal proof",
   assert.equal(noProof.attention, true); assert.equal(noProof.terminal, false);
 });
 test("completion retains attention for missing proof, unknown identity, or cleanup debt", () => {
-  assert.equal(inspectSuspensionCompletion({ projection: projection(), stopProofs: [], workspaceInventories: [] }).complete, false);
-  const complete = inspectSuspensionCompletion({ projection: projection(), stopProofs: [{ runId: "run-1", state: "observed" }], workspaceInventories: [{ taskId: "task-1", action: "quarantine", proof: "workspace-proof", resourcesReleased: true }] });
+  const suspended = { ...projection(), suspension: { affectedTaskIds: ["task-1"], affectedRunIds: ["run-1"] } };
+  assert.equal(inspectSuspensionCompletion({ projection: suspended, stopProofs: [], workspaceInventories: [] }).complete, false);
+  const complete = inspectSuspensionCompletion({ projection: suspended, stopProofs: [{ runId: "run-1", proofHash: "a".repeat(64), state: "observed" }], workspaceInventories: [{ taskId: "task-1", attempt: 3, proofHash: "b".repeat(64), state: "quarantined", disposition: "preserved" }], resourceProofs: [{ ownerId: "run-1", proofHash: "c".repeat(64), state: "quarantined", debt: true }] });
   assert.equal(complete.complete, true);
 });

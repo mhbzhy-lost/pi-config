@@ -30,14 +30,13 @@ export function suspensionGuard(projection, operation) {
 export function buildSuspensionPlan({ projection, reason, affectedIds = {}, inventories = {} } = {}) {
   if (!projection?.goalId) throw new Error("runtime projection is required");
   if (!REASONS.has(reason)) throw new Error("invalid suspension reason");
-  const taskIds = [...new Set(affectedIds.taskIds || [])]; const runIds = [...new Set(affectedIds.runIds || [])];
+  const taskIds = [...new Set(affectedIds.taskIds || [])].sort(); const runIds = [...new Set(affectedIds.runIds || [])].sort();
   const suspensionId = randomUUID();
   const workspaceStrategies = (inventories.workspaces || []).map((workspace) => {
     const affected = workspace.affected === true || taskIds.includes(workspace.taskId) || runIds.includes(workspace.runId);
     return Object.freeze({ taskId: workspace.taskId, runId: workspace.runId ?? null, action: affected ? "quarantine" : workspace.policy === "keep" ? "preserve" : "quarantine", resultPolicy: affected ? "quarantine" : workspace.policy === "keep" ? "keep" : "quarantine", execute: false });
   });
   const events = [{ type: "goal.runtime_suspended", data: { suspensionId, reason, affectedTaskIds: taskIds, affectedRunIds: runIds, requestedAt: new Date().toISOString(), resourcesQuarantined: false } }];
-  if (projection.actionOffer?.active === true && typeof projection.actionOffer.id === "string") events.push({ type: "goal.action_offer_revoked", data: { offerId: projection.actionOffer.id, reason: "runtime_suspended" } });
   return Object.freeze({ suspensionId, blocked: BLOCKED, guard: (operation) => suspensionGuard({ runtimeState: "suspended" }, operation), workspaceStrategies, events: Object.freeze(events) });
 }
 
@@ -54,8 +53,24 @@ export async function requestOwnedRunStop(pi, request = {}) {
 }
 
 export function inspectSuspensionCompletion({ projection, stopProofs = [], workspaceInventories = [], resourceProofs = [] } = {}) {
-  const affected = projection?.tasks ? [...projection.tasks.entries()].filter(([, task]) => task.executorBinding).map(([taskId, task]) => ({ taskId, runId: task.executorBinding.runId })) : [];
-  const missingProof = affected.some(({ runId }) => !stopProofs.some((proof) => proof.runId === runId && proof.state === "observed" && !proof.conflict));
-  const missingWorkspace = affected.some(({ taskId }) => !workspaceInventories.some((workspace) => workspace.taskId === taskId && ["preserve", "quarantine", "discard"].includes(workspace.action) && workspace.proof && (workspace.action !== "preserve" ? workspace.resourcesReleased === true : resourceProofs.some((proof) => proof.taskId === taskId && proof.released === true))));
-  return Object.freeze({ complete: !missingProof && !missingWorkspace, attention: missingProof || missingWorkspace, missingProof, missingWorkspace });
+  const suspension = projection?.suspension;
+  const taskIds = Array.isArray(suspension?.affectedTaskIds) ? suspension.affectedTaskIds : [];
+  const runIds = Array.isArray(suspension?.affectedRunIds) ? suspension.affectedRunIds : [];
+  const hash = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+  const missingProof = runIds.some((runId) => {
+    const matches = stopProofs.filter((proof) => proof?.runId === runId);
+    return matches.length !== 1 || !exact(matches[0], ["runId", "proofHash", "state"]) || !hash(matches[0].proofHash) || matches[0].state !== "observed";
+  });
+  const missingWorkspace = taskIds.some((taskId) => {
+    const matches = workspaceInventories.filter((proof) => proof?.taskId === taskId);
+    const attempt = projection?.tasks?.get?.(taskId)?.attempts;
+    return matches.length !== 1 || !exact(matches[0], ["taskId", "attempt", "proofHash", "state", "disposition"]) || !Number.isSafeInteger(attempt) || matches[0].attempt !== attempt || !hash(matches[0].proofHash) || matches[0].state !== "quarantined" || matches[0].disposition !== "preserved";
+  });
+  const missingResource = runIds.some((runId) => {
+    const matches = resourceProofs.filter((proof) => proof?.ownerId === runId);
+    return matches.length !== 1 || !exact(matches[0], ["ownerId", "proofHash", "state", "debt"]) || !hash(matches[0].proofHash) || matches[0].state !== "quarantined" || matches[0].debt !== true;
+  });
+  const attention = missingProof || missingWorkspace || missingResource;
+  return Object.freeze({ complete: !attention, attention, missingProof, missingWorkspace, missingResource });
 }

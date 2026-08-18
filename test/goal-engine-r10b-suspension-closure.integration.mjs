@@ -16,8 +16,8 @@ function active() {
   const projection = createProjection();
   Object.assign(projection, { goalId: "goal-suspension", eventSchemaVersion: "goal-runtime.v1", runtimeGeneration: "goal-runtime.v1", lifecycle: "active", runtimeState: "active", actionOffer: { id: "offer-1", active: true } });
   projection.tasks = new Map([
-    ["task-a", { attempts: 2, executorBinding: { runId: "run-a" } }],
-    ["task-unrelated", { attempts: 1, executorBinding: { runId: "run-unrelated" } }],
+    ["task-a", { attempts: 2, executorBinding: { runId: "run-a" }, evidence: [], deps: [] }],
+    ["task-unrelated", { attempts: 1, executorBinding: { runId: "run-unrelated" }, evidence: [], deps: [] }],
   ]);
   return projection;
 }
@@ -62,6 +62,14 @@ test("completion inspection uses only ledger affected identities and returns att
 
   for (const proof of [{ ...terminal, runId: "run-other" }, { ...terminal, conflict: true }, { ...terminal, proofHash: "not-a-hash" }]) {
     const inspected = inspectSuspensionCompletion({ projection, stopProofs: [proof], workspaceInventories: [workspace], resourceProofs: [resource] });
+    assert.equal(inspected.complete, false);
+    assert.equal(inspected.attention, true);
+  }
+  for (const input of [
+    { workspaceInventories: [{ ...workspace, attempt: 1 }] },
+    { resourceProofs: [{ ...resource, ownerId: "run-other" }] },
+  ]) {
+    const inspected = inspectSuspensionCompletion({ projection, stopProofs: [terminal], workspaceInventories: input.workspaceInventories || [workspace], resourceProofs: input.resourceProofs || [resource] });
     assert.equal(inspected.complete, false);
     assert.equal(inspected.attention, true);
   }
