@@ -1,0 +1,66 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import test from "node:test";
+import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
+import { buildSuspensionPlan, inspectSuspensionCompletion } from "../scripts/lib/goal-engine/suspension.mjs";
+
+const hash = (char) => char.repeat(64);
+const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
+const closureHash = (closure) => createHash("sha256").update(JSON.stringify(canonical(closure))).digest("hex");
+
+function event(type, data, number) {
+  return { schemaVersion: "goal-runtime.v1", eventId: `suspension-${number}`, goalId: "goal-suspension", occurredAt: `2026-08-21T00:00:${String(number).padStart(2, "0")}.000Z`, type, data };
+}
+
+function active() {
+  const projection = createProjection();
+  Object.assign(projection, { goalId: "goal-suspension", eventSchemaVersion: "goal-runtime.v1", runtimeGeneration: "goal-runtime.v1", lifecycle: "active", runtimeState: "active", actionOffer: { id: "offer-1", active: true } });
+  projection.tasks = new Map([
+    ["task-a", { attempts: 2, executorBinding: { runId: "run-a" } }],
+    ["task-unrelated", { attempts: 1, executorBinding: { runId: "run-unrelated" } }],
+  ]);
+  return projection;
+}
+
+const initial = { suspensionId: "suspension-1", reason: "abort", affectedTaskIds: ["task-a"], affectedRunIds: ["run-a"], requestedAt: "2026-08-21T00:00:01.000Z", resourcesQuarantined: false };
+const terminal = { runId: "run-a", proofHash: hash("a"), state: "observed" };
+const workspace = { taskId: "task-a", attempt: 2, proofHash: hash("b"), state: "quarantined", disposition: "preserved" };
+const resource = { ownerId: "run-a", proofHash: hash("c"), state: "quarantined", debt: true };
+
+test("suspension plan emits one sorted initial ledger event and reducer accepts only monotonic typed closure proof additions", () => {
+  const plan = buildSuspensionPlan({ projection: active(), reason: "abort", affectedIds: { taskIds: ["task-a"], runIds: ["run-a"] } });
+  assert.deepEqual(plan.events, [{ type: "goal.runtime_suspended", data: plan.events[0].data }]);
+  assert.deepEqual(Object.keys(plan.events[0].data).sort(), ["affectedRunIds", "affectedTaskIds", "reason", "requestedAt", "resourcesQuarantined", "suspensionId"]);
+
+  let projection = applyEvent(active(), event("goal.runtime_suspended", initial, 1));
+  assert.throws(() => applyEvent(active(), event("goal.runtime_suspended", { ...initial, terminalProofRefs: [terminal] }, 2)), /suspension/i, "initial suspension must not carry closure proof refs");
+
+  const partial = { ...initial, terminalProofRefs: [terminal], workspaceClosureProofRefs: [], resourceClosureProofRefs: [] };
+  projection = applyEvent(projection, event("goal.runtime_suspended", partial, 2));
+  assert.deepEqual(projection.suspension, partial);
+  assert.throws(() => applyEvent(projection, event("goal.runtime_suspended", { ...partial, terminalProofRefs: [] }, 3)), /suspension|closure/i, "closure proof refs cannot be removed or replaced");
+
+  const full = { ...initial, resourcesQuarantined: true, terminalProofRefs: [terminal], workspaceClosureProofRefs: [workspace], resourceClosureProofRefs: [resource] };
+  projection = applyEvent(projection, event("goal.runtime_suspended", full, 3));
+  assert.deepEqual(projection.suspension, full);
+  assert.throws(() => applyEvent(projection, event("goal.runtime_suspended", { ...full, workspaceClosureProofRefs: [{ ...workspace, disposition: "discarded", state: "released" }] }, 4)), /suspension|closure/i, "a preserve receipt remains a quarantined preserved closure proof");
+
+  const resumed = applyEvent(projection, event("goal.runtime_resumed", { suspensionId: initial.suspensionId, closureHash: closureHash(full) }, 4));
+  assert.equal(resumed.runtimeState, "active");
+  assert.equal(resumed.suspension, null);
+  assert.throws(() => applyEvent(projection, event("goal.runtime_resumed", { suspensionId: initial.suspensionId, closureHash: hash("d") }, 5)), /resume|closure|suspension/i);
+  assert.throws(() => applyEvent(projection, event("goal.runtime_resumed", {}, 6)), /resume|closure|suspension/i);
+});
+
+test("completion inspection uses only ledger affected identities and returns attention for missing, conflicting, or wrong closure proof identity", () => {
+  const projection = { ...active(), runtimeState: "suspended", suspension: initial };
+  const completion = inspectSuspensionCompletion({ projection, stopProofs: [terminal], workspaceInventories: [workspace], resourceProofs: [resource] });
+  assert.equal(completion.complete, true, "an unrelated executor binding cannot block this suspension closure");
+  assert.equal(completion.attention, false);
+
+  for (const proof of [{ ...terminal, runId: "run-other" }, { ...terminal, conflict: true }, { ...terminal, proofHash: "not-a-hash" }]) {
+    const inspected = inspectSuspensionCompletion({ projection, stopProofs: [proof], workspaceInventories: [workspace], resourceProofs: [resource] });
+    assert.equal(inspected.complete, false);
+    assert.equal(inspected.attention, true);
+  }
+});
