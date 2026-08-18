@@ -135,4 +135,6 @@ test("R10B amendment reducer rejects wrong target, closure, revision, split, dis
   assert.throws(() => applyEvent(pending, event("execution.amendment_applied", { proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, oldRevision: proposal.oldRevision, newRevision: proposal.newRevision, targetContractHash: proposal.targetContractHash, reconciliation: [] }, 15)), /consume|amendment/i);
   assert.throws(() => applyEvent(pending, event("goal.runtime_resumed", { suspensionId: initialSuspension().suspensionId, closureHash: digest(15) }, 16)), /closure|resume/i);
   assert.throws(() => applyEvent(pending, event("execution.amendment_capability_consumed", { proposalId: "other-proposal", nonceDigest: digest(16) }, 17)), /proposal|capability/i);
+  // RED for the next lane: consume is not valid as an isolated reducer mutation.
+  assert.throws(() => applyEvent(pending, event("execution.amendment_capability_consumed", { proposalId: proposal.proposalId, nonceDigest: digest(17) }, 18)), /canonical amendment batch|atomic|consume/i);
 });
