@@ -107,8 +107,8 @@ async function satisfiedBackend() {
   const cwd = repo(), api = pi(cwd), durable = observationHost(cwd);
   const base = runtimeInit(), backend = { ...structuredClone(base.execution.conditions[0]), id: "backend-condition", depends_on: [], invalidation: { paths: ["src/backend/**"], task_ids: [] } };
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await approveAndActivate(api, cwd, runtimeInit({ execution: { ...base.execution, tasks: [], conditions: [backend] } }));
-  for (let i = 0; i < 12; i++) { await invoke(api, "goal_status", {}); const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); if (projection.conditions.get("backend-condition")?.status === "satisfied") return { cwd, api, durable, projection }; }
-  throw Error("backend product evidence did not satisfy");
+  for (let i = 0; i < 12; i++) { await invoke(api, "goal_status", {}); const projection = loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime"); if (projection.conditions.get("backend-condition")?.status === "satisfied" && [...projection.observationRuns.values()].some(run => run.conditionId === "backend-condition" && run.cycle === 1 && run.phase === "released")) return { cwd, api, durable, projection }; }
+  throw Error("backend product evidence did not satisfy and release");
 }
 function backendOverlap(cwd) { mkdirSync(join(cwd, "src/backend"), { recursive: true }); writeFileSync(join(cwd, "src/backend", "overlap.mjs"), "export const overlap = true;\n"); git(cwd, "add", "src/backend/overlap.mjs"); git(cwd, "commit", "-m", "frontend overlap"); }
 function invalidations(cwd) { return readFileSync(join(cwd, ".state/goal-engine/goals/harden-runtime/events.jsonl"), "utf8").trim().split("\n").map(JSON.parse).filter(event => event.type === "condition.evidence_invalidated"); }

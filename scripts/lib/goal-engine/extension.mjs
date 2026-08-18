@@ -1379,7 +1379,9 @@ export function createGoalEngineExtension(pi, options = {}) {
           // the causal cascade.
           const conditionGraph = evaluateConditionGraph({ projection, worldSnapshot: world });
           const staleCandidates = [...projection.conditions.entries()]
-            .filter(([conditionId, condition]) => condition.status === "satisfied" && conditionGraph.conditions.get(conditionId)?.status === "stale")
+            .filter(([conditionId, condition]) => condition.status === "satisfied"
+              && conditionGraph.conditions.get(conditionId)?.status === "stale"
+              && ![...projection.observationRuns.values()].some((run) => run.conditionId === conditionId && run.cycle >= 1 && run.phase !== "released"))
             .map(([conditionId, condition]) => ({ conditionId, condition, reason: conditionGraph.conditions.get(conditionId).reason }));
           const selectedInvalidation = staleCandidates
             .filter(({ condition }) => !condition.definition.depends_on?.some((edge) => edge.kind === "condition"

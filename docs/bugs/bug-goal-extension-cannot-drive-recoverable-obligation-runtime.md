@@ -146,6 +146,16 @@ challenge 与 decision 的 durable 恢复均以完整事件 data 的逐字段身
 
 本轮 GREEN 首次触达 hybrid fixture 的另一处不可达预期：尚未有 product Observation 的 full-flow Condition 在既有 Cycle0 reducer 中是 `inactive`，不是 `pending`。测试据此校正，同时继续断言它没有 invalidation、Cycle>=1 的 product evidence/verdict 或 Cycle>=1 run；不得为了该断言新增状态转移。
 
+## 本地失效抢占 Observation release
+
+### 复现
+
+已满足的 active Condition 在同一 Cycle>=1 Observation 已进入 `terminal`、`recorded` 或其他未释放生命周期时发生真实 Git overlap，`goal_status` 会在 R9 处理 `release_observation` 前追加 `condition.evidence_invalidated`。这既使已记录 run 停在未释放状态，也会把连续稳定性 Condition 提前变为 `stale`。
+
+### 修复方案
+
+本地收敛 producer 的 stale candidate 必须排除同 Condition 存在任一 `cycle >= 1` 且 phase 不是 `released` 的 Observation run。requested、lease_allocated、process_bound、terminal、recorded 与 cleanup debt 均让本 status 留给 R9 resource/record/release；Cycle0 和已 released 历史不构成门禁。所有相关 run released 后，下一次 status 仍可对真实 Git overlap 生成原有的 canonical invalidation，保持 suspended guard、因果前驱、同层 ID 排序与 durable recovery 语义。
+
 ## Cycle 0 未接线
 
 ### 复现
