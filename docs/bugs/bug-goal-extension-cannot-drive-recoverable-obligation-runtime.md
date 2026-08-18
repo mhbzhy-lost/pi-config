@@ -45,6 +45,14 @@ active 分支没有像校准分支一样持有 Host-owned adapter registry、Cur
 
 R9 将 `requested` 与 `lease_allocated` 同时命名为 `observation_start`；active 分支此前只接受前者，导致进程在 durable allocation 后 reload 时永久 attention。`requested` 仍只能调用 `startObservation`，但 `lease_allocated` 必须先重建并校验同一 managed receipt，再调用 `recoverObservation`，使 runner 回放 process/terminal callbacks 而不生成第二个 supervisor。
 
+## 本地收敛在挂起态抢占 R9 恢复
+
+### 复现
+已满足的 Condition 在真实 Git overlap 后，若 canonical `goal.runtime_suspended` 已把运行时置为 `suspended`，`goal_status` 仍会在 R9 suspension recovery 前运行本地失效生产者并追加 `condition.evidence_invalidated`。
+
+### 修复方案
+本地收敛的 Condition 图评估、stale candidate 选择和 invalidation 追加仅可在 `runtimeState === "active"` 且不存在 suspension 时执行。其他运行态必须完全交由既有 R9 debt/recovery 优先级处理，不改变 R9。
+
 ## R10 Repair-owned 复验观察未接线
 
 ### R10A3 S3 raw nonce 异常泄露

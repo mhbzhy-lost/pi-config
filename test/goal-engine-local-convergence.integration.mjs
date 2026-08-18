@@ -130,6 +130,25 @@ test("backend overlap emits exactly one local-convergence invalidation without a
   assert.equal(status.machineAction, undefined); assert.equal(status.action_token, undefined);
 });
 
+test("suspended backend overlap preserves satisfied evidence for R9 recovery", async () => {
+  const { cwd, api } = await satisfiedBackend();
+  appendRuntime(cwd, "harden-runtime", "goal.runtime_suspended", {
+    suspensionId: "r10-local-convergence-suspension",
+    reason: "host_pause",
+    affectedTaskIds: [],
+    affectedRunIds: [],
+    requestedAt: new Date().toISOString(),
+    resourcesQuarantined: false,
+  });
+  backendOverlap(cwd);
+  const status = JSON.parse(await invoke(api, "goal_status", {}));
+  const projection = loadProjection(runtimeRoot(cwd), "harden-runtime");
+  assert.equal(projection.runtimeState, "suspended");
+  assert.equal(projection.conditions.get("backend-condition").status, "satisfied");
+  assert.equal(invalidations(cwd).length, 0);
+  assert.notEqual(status.status, "R10_LOCAL_CONVERGENCE_INVALIDATED");
+});
+
 test("invalidation producer pre-append failure preserves satisfied evidence and retries one world-drift event", async () => {
   const fixture = await satisfiedBackend(); backendOverlap(fixture.cwd); const { api } = reloadWithInvalidationStore(fixture, "pre");
   await assert.rejects(invoke(api, "goal_status", {}), /injected pre-invalidation append failure/, "missing producer must reach the real Store pre-append wrapper");
@@ -158,8 +177,24 @@ test("simultaneous overlap invalidates two satisfied Conditions by ID one status
   assert.deepEqual(invalidations(fixture.cwd).map(row => row.data.conditionId), ["alpha-condition", "beta-condition"]);
 });
 
+test("world-drift invalidates a three-layer DAG one causal Condition per status", async () => {
+  const upstream = conditionDefinition("upstream-condition", [], ["src/upstream/**"]);
+  const middle = conditionDefinition("middle-condition", [{ kind: "condition", id: "upstream-condition" }], ["src/middle/**"]);
+  const downstream = conditionDefinition("downstream-condition", [{ kind: "condition", id: "middle-condition" }], ["src/downstream/**"]);
+  const fixture = await satisfiedConditions([upstream, middle, downstream]);
+  mkdirSync(join(fixture.cwd, "src/upstream"), { recursive: true }); writeFileSync(join(fixture.cwd, "src/upstream", "overlap.mjs"), "export const overlap = true;\n"); git(fixture.cwd, "add", "src/upstream/overlap.mjs"); git(fixture.cwd, "commit", "-m", "upstream overlap");
+  await invoke(fixture.api, "goal_status", {}); let projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime");
+  assert.equal(projection.conditions.get("upstream-condition").status, "stale"); assert.equal(projection.conditions.get("middle-condition").status, "satisfied"); assert.equal(projection.conditions.get("downstream-condition").status, "satisfied");
+  await invoke(fixture.api, "goal_status", {}); projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime");
+  assert.equal(projection.conditions.get("middle-condition").status, "stale"); assert.equal(projection.conditions.get("downstream-condition").status, "satisfied");
+  await invoke(fixture.api, "goal_status", {}); projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime"); assert.equal(projection.conditions.get("downstream-condition").status, "stale");
+  assert.deepEqual(invalidations(fixture.cwd).map(row => [row.data.conditionId, row.data.reason]), [["upstream-condition", "world-drift"], ["middle-condition", "predecessor-stale"], ["downstream-condition", "predecessor-stale"]]);
+});
+
 test("world-drift invalidates satisfied upstream before predecessor-stale downstream", async () => {
-  const upstream = conditionDefinition("upstream-condition", [], ["src/upstream/**"]), downstream = conditionDefinition("downstream-condition", [{ kind: "condition", id: "upstream-condition" }], ["src/downstream/**"]), fixture = await satisfiedConditions([upstream, downstream]);
+  const upstream = conditionDefinition("upstream-condition", [], ["src/upstream/**"]);
+  const downstream = conditionDefinition("downstream-condition", [{ kind: "condition", id: "upstream-condition" }], ["src/downstream/**"]);
+  const fixture = await satisfiedConditions([upstream, downstream]);
   mkdirSync(join(fixture.cwd, "src/upstream"), { recursive: true }); writeFileSync(join(fixture.cwd, "src/upstream", "overlap.mjs"), "export const overlap = true;\n"); git(fixture.cwd, "add", "src/upstream/overlap.mjs"); git(fixture.cwd, "commit", "-m", "upstream overlap");
   await invoke(fixture.api, "goal_status", {}); let projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime"); assert.equal(projection.conditions.get("upstream-condition").status, "stale"); assert.equal(projection.conditions.get("downstream-condition").status, "satisfied");
   await invoke(fixture.api, "goal_status", {}); projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime"); assert.equal(projection.conditions.get("downstream-condition").status, "stale");
