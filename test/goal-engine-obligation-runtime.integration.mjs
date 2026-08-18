@@ -817,6 +817,41 @@ test("Repair S2 durable decision recovery reloads the exact approved decision on
   assert.equal(observationEventRows(cwd).filter(event => event.type === "repair.user_decision_recorded").length, 1);
 });
 
+test("Repair S1 durable recovery rethrows when the recovered challenge has an unexpected Projection field", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let corrupt = false, threw = false;
+  const store = { loadProjection(...args) { const projection = loadProjection(...args); if (!corrupt) return projection; const recovered = structuredClone(projection); recovered.repairChallenges.values().next().value.unexpectedProjectionField = true; return recovered; } };
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }), store, appendEvent(root, event, version) {
+    const result = appendEvent(root, event, version); if (event.type === "repair.challenge_created" && !threw) { threw = true; corrupt = true; throw Error("after durable challenge append"); } return result;
+  } });
+  await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released");
+  await assert.rejects(invoke(api, "goal_status", {}), /after durable challenge append/);
+  corrupt = false; assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.size, 1);
+});
+
+test("Repair S2 durable recovery rethrows when a non-decision challenge Projection field drifts", async () => {
+  const cwd = repo(), api = pi(cwd); api.cwd = cwd; let corrupt = false, threw = false;
+  const store = { loadProjection(...args) { const projection = loadProjection(...args); if (!corrupt) return projection; const recovered = structuredClone(projection); recovered.repairChallenges.values().next().value.expiresAt++; return recovered; } };
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }), store, appendEvent(root, event, version) {
+    const result = appendEvent(root, event, version); if (event.type === "repair.user_decision_recorded" && !threw) { threw = true; corrupt = true; throw Error("after durable decision append"); } return result;
+  } });
+  await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });
+  await assert.rejects(invoke(api, "goal_status", {}), /after durable decision append/);
+  corrupt = false; assert.equal([...loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.values()][0].phase, "approved");
+});
+
+test("Repair fails closed for invalid Host clocks before S1, S2, and S3 authority", async () => {
+  { const cwd = repo(), api = pi(cwd), durable = observationHost(cwd, { codes: ["PASS", "FAIL"] }); api.cwd = cwd; durable.clock = () => NaN; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await activateProduct(api, cwd, activeCondition()); await cycleUntil(api, 1, "terminal"); await invoke(api, "goal_status", {}); await cycleUntil(api, 1, "released"); const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "R10A3_REPAIR_APPROVAL_CLOCK_INVALID"); assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.size, 0); }
+  { const cwd = repo(), api = pi(cwd), durable = observationHost(cwd, { codes: ["PASS", "FAIL"] }); api.cwd = cwd; durable.clock = () => 1_000_000; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: durable }); await prepareUserApprovedRepair(api, cwd); durable.clock = () => Infinity; api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager }); const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "R10A3_REPAIR_APPROVAL_CLOCK_INVALID"); assert.equal([...loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").repairChallenges.values()][0].phase, "created"); }
+  { const fixture = await approvedRepairS3Fixture(); let issuerCalls = 0; fixture.durable.clock = () => "invalid"; fixture.durable.issueRepairCapability = input => { issuerCalls++; return issueRepairCapability(input); }; const injected = injectedStore(fixture.injected.latest()); const api = pi(fixture.cwd, fixture.first.entries); api.cwd = fixture.cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: fixture.durable, store: injected.store }); const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "R10A3_REPAIR_APPROVAL_CLOCK_INVALID"); assert.equal(issuerCalls, 0); assert.equal(injected.batchCalls, 0); assert.equal(injected.latest().tasks.size, 0); }
+});
+
+test("Repair S3 clock rollback closes as DRIFT before capability issuance and reads once", async () => {
+  const fixture = await approvedRepairS3Fixture(); const challenge = fixture.injected.latest().repairChallenges.get(fixture.challenge.challengeId); let calls = 0, issuerCalls = 0;
+  fixture.durable.clock = () => { calls++; return challenge.recordedAt - 1; }; fixture.durable.issueRepairCapability = input => { issuerCalls++; return issueRepairCapability(input); };
+  const injected = injectedStore(fixture.injected.latest()), api = pi(fixture.cwd, fixture.first.entries); api.cwd = fixture.cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: fixture.durable, store: injected.store });
+  const status = JSON.parse(await invoke(api, "goal_status", {})); assert.equal(status.status, "R10A3_REPAIR_APPROVAL_DRIFT"); assert.equal(issuerCalls, 0); assert.equal(injected.batchCalls, 0); assert.equal(injected.latest().tasks.size, 0); assert.equal(calls, 1);
+});
+
 test("Repair S2 accepts one strict Pi compaction on the active branch", async () => {
   const cwd = repo(), api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: observationHost(cwd, { codes: ["PASS", "FAIL"] }) });
   const challenge = await prepareUserApprovedRepair(api, cwd); api.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, { cwd, sessionManager: api.sessionManager });

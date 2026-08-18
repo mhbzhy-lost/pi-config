@@ -104,6 +104,12 @@ Extension 必须只根据已提交 Condition 的 id、statement、expected 和 r
 ### 复现与修复
 R9 选中 `user-approved` 的 active Repair Episode 后，Extension 过去只返回 blocker，既没有 durable challenge，也没有把真实 Pi active branch 的 approve/reject 落入 canonical Repair ledger，更不会原子物化任务。修复将该流程拆成三个 status：先 append `repair.challenge_created`，再从唯一连续 branch intent/真实 user message append `repair.user_decision_recorded`，最后重证 HEAD/contract/candidate 后以 capability 生成唯一 `goal.amended`、`repair.capability_consumed`、`repair.task_linked` batch；nonce 从不持久化或输出。
 
+## R10A3 Repair 投影精确恢复与 Host 时钟闭锁
+
+S1/S2 在 Store durable 写入后抛错时，曾只比较 event data 的子集；可信 Store proxy 若令恢复 challenge 增加字段，或令非 decision 投影字段漂移，Extension 会把非本次预期投影误判为成功。恢复必须先对本次 event 应用 reducer 得出 expected Projection，再用深度严格相等比较完整 challenge Projection。
+
+Repair Host 提供 `clock`/`now` 但返回 NaN、Infinity 或非 number 时，不得回退 ambient `Date.now()`；S1、S2、S3 均返回稳定 attention，且不创建 challenge/decision/batch/capability。仅 Host 未提供两个时钟函数时才可使用 `Date.now()`。S3 同一 status 只读取一次时钟；若该值早于 challenge 的 `recordedAt`，在签发 capability 前以 DRIFT 闭锁，且不推进任何 authority。
+
 ## R10 Repair S1/S2 审批恢复矩阵缺口
 
 ### 复现

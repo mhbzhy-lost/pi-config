@@ -19,3 +19,7 @@
 1. 两个不同 challenge 可用不同 `userEntryId` 记录同一 `userEntryHash`，使同一真实用户输入重复授权。policy 入口与 Reducer 均改为同时检查 ID 和 hash，任一既有 challenge 的相同 hash 都拒绝。
 2. 调用者省略 `deps` 时，`goal.amended` Reducer 将任务归一为 `deps: []`，但候选 metadata 在省略字段上计算哈希，随后 `repair.task_linked` 重算失败。仅在 Repair candidate 边界、校验和哈希前补为显式空数组，保留调用者给出的 deps，避免改变共享任务合同哈希 ABI。
 3. Store 曾把 remediation amendment 固定在 batch 第 0 项，拒绝合法的 autonomous `goal.action_consumed → goal.amended → repair.task_linked`。恢复该单一前缀；user-approved 仍只接受无前缀的精确三事件链，前缀、双前缀和重排均在写入前拒绝。
+
+## Repair 恢复与时钟边界
+
+S1/S2 的 durable-then-throw 证明必须比较 reducer 重放得到的完整 challenge Projection，不能只匹配 event data；否则可信恢复读取中的额外字段或非 decision 字段漂移可使授权链误恢复。Host 显式提供但无效的时钟值必须闭锁，不能使用 ambient 时间掩盖故障。S3 若时钟回拨至用户决定记录前，必须在 capability 签发前报告 DRIFT。
