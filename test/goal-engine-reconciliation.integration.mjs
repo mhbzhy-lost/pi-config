@@ -114,7 +114,7 @@ test("accepted remove is kept and marks only applicability, while accepted chang
   assert.deepEqual(removeResult.conditionFacts, []);
 
   const fact = removeResult.applicabilityFacts[0];
-  let runtime = applyEvent(createProjection(), { schemaVersion: "goal-runtime.v1", eventId: "runtime-draft", goalId: "runtime-goal", occurredAt: "2026-08-13T00:00:01.000Z", type: "goal.runtime_drafted", data: { runtimeInit: normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries), executionContractHash: hashRuntimeExecutionContract(normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries)), readiness: "draft" } });
+  let runtime = applyEvent(createProjection(), { schemaVersion: "goal-runtime.v1", eventId: "runtime-draft", goalId: "runtime-goal", occurredAt: "2026-08-13T00:00:01.000Z", type: "goal.runtime_drafted", data: { baseHead: "b".repeat(40), runtimeInit: normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries), executionContractHash: hashRuntimeExecutionContract(normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries)), readiness: "draft" } });
   const runtimeTask = runtime.tasks.get("task-1");
   const runtimeApplicability = runtime.taskApplicability.get("task-1");
   runtime.tasks.delete("task-1");
