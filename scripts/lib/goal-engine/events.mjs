@@ -118,7 +118,7 @@ export function applyEvent(projection, event, { replay = false } = {}) {
     case "goal.runtime_approval_recorded": runtimeApprovalRecorded(next, event.data); break;
     case "goal.runtime_activated": runtimeActivated(next); break;
     case "goal.runtime_suspended": runtimeSuspended(next, event.data); break;
-    case "goal.runtime_resumed": runtimeResumed(next); break;
+    case "goal.runtime_resumed": runtimeResumed(next, event.data); break;
     case "condition.observation_requested": observationRequested(next, event.data); break;
     case "condition.observation_lease_allocated": observationTransition(next, event.data, "requested", "lease_allocated"); break;
     case "condition.observation_process_bound": observationTransition(next, event.data, "lease_allocated", "process_bound"); break;
@@ -297,15 +297,55 @@ function runtimeDrafted(p, event) {
 function runtimeReadinessRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["readiness", "reasons"], "runtime readiness"); if (!new Set(["ready", "needs_clarification", "environment_blocked", "unsafe_to_run"]).has(data.readiness) || !Array.isArray(data.reasons) || data.reasons.some((reason) => typeof reason !== "string")) throw new Error("invalid runtime readiness"); p.readiness = data.readiness; p.runtimeReadinessReasons = [...data.reasons]; if (data.readiness === "ready" && p.runtimeState === "draft") p.runtimeState = "awaiting_user_approval"; }
 function runtimeApprovalRecorded(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "executionContractHash", "baseHead", "sessionId", "userEntryId", "capabilityDigest"], "runtime approval"); const canonicalProposalHash = hashCanonical({ goalId: p.goalId, proposalId: data.proposalId, executionContractHash: data.executionContractHash, baseHead: data.baseHead, sessionId: data.sessionId }); const ownerSessionId = [...p.sessionBindings].reverse().find((binding) => binding.state !== "transferred")?.sessionId; if (p.runtimeState !== "awaiting_user_approval" || (p.sessionBindings.length > 0 && data.sessionId !== ownerSessionId) || data.executionContractHash !== p.executionContractHash || data.baseHead !== p.runtimeBaseHead || data.proposalHash !== canonicalProposalHash || !hash(data.capabilityDigest) || !data.proposalId || !data.sessionId || !data.userEntryId) throw new Error("runtime approval is out of order or not owned by the event-sourced session"); p.runtimeApproval = { ...structuredClone(data), phase: "consumed" }; p.runtimeState = "calibrating"; }
 function runtimeActivated(p) { runtimeOnly(p); if (p.runtimeState !== "calibrating") throw new Error("runtime activation is out of order"); for (const [conditionId, condition] of p.conditions) { const candidates = p.evidenceHistory.filter((value) => { const run = p.observationRuns.get(value.run?.runId); return run?.conditionId === conditionId && run.cycle === 0 && ["recorded", "released"].includes(run.phase) && value.executionRevision === p.executionRevision; }); const evidence = candidates.sort((a, b) => b.sequence - a.sequence)[0]; if (!evidence || !["passed", "failed"].includes(evidence.verdict?.kind)) throw new Error("runtime activation requires decidable cycle zero calibration"); condition.status = "inactive"; condition.supportingEvidenceIds = []; } p.runtimeState = "active"; }
+const SUSPENSION_INITIAL_FIELDS = ["suspensionId", "reason", "affectedTaskIds", "affectedRunIds", "requestedAt", "resourcesQuarantined"];
+const SUSPENSION_CLOSURE_FIELDS = [...SUSPENSION_INITIAL_FIELDS, "terminalProofRefs", "workspaceClosureProofRefs", "resourceClosureProofRefs"];
+const suspensionIdsAreCanonical = (ids) => Array.isArray(ids) && ids.every((id) => typeof id === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(id)) && new Set(ids).size === ids.length && ids.every((id, index) => index === 0 || ids[index - 1] < id);
+const canonicalRefs = (refs, id) => Array.isArray(refs) && refs.every((ref, index) => index === 0 || refs[index - 1][id] < ref[id]);
+const sameCanonical = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+
+function validInitialSuspension(data) {
+  const requestedAt = new Date(data.requestedAt);
+  return typeof data.suspensionId === "string" && !!data.suspensionId
+    && new Set(["interactive_steer", "follow_up", "abort", "execution_amendment", "host_pause"]).has(data.reason)
+    && suspensionIdsAreCanonical(data.affectedTaskIds) && suspensionIdsAreCanonical(data.affectedRunIds)
+    && typeof data.requestedAt === "string" && Number.isFinite(requestedAt.getTime()) && requestedAt.toISOString() === data.requestedAt;
+}
+function isFullSuspensionClosure(data) {
+  return data.terminalProofRefs.length === data.affectedRunIds.length
+    && data.workspaceClosureProofRefs.length === data.affectedTaskIds.length
+    && data.resourceClosureProofRefs.length === data.affectedRunIds.length;
+}
+function validSuspensionClosure(p, previous, data) {
+  if (!SUSPENSION_INITIAL_FIELDS.filter((field) => field !== "resourcesQuarantined").every((field) => sameCanonical(data[field], previous[field])) || typeof data.resourcesQuarantined !== "boolean" || (previous.resourcesQuarantined && !data.resourcesQuarantined)) return false;
+  const validRefs = (refs, ids, id, fields, check) => canonicalRefs(refs, id) && refs.every((ref) => isPlainObject(ref) && Object.keys(ref).length === fields.length && fields.every((field) => Object.hasOwn(ref, field)) && ids.includes(ref[id]) && check(ref)) && new Set(refs.map((ref) => ref[id])).size === refs.length;
+  const terminal = validRefs(data.terminalProofRefs, data.affectedRunIds, "runId", ["runId", "proofHash", "state"], (ref) => hash(ref.proofHash) && ref.state === "observed");
+  const workspace = validRefs(data.workspaceClosureProofRefs, data.affectedTaskIds, "taskId", ["taskId", "attempt", "proofHash", "state", "disposition"], (ref) => Number.isSafeInteger(ref.attempt) && ref.attempt === p.tasks.get(ref.taskId)?.attempts && hash(ref.proofHash) && ((ref.state === "quarantined" && ref.disposition === "preserved") || (ref.state === "released" && ref.disposition === "discarded")));
+  const resource = validRefs(data.resourceClosureProofRefs, data.affectedRunIds, "ownerId", ["ownerId", "proofHash", "state", "debt"], (ref) => hash(ref.proofHash) && ((ref.state === "quarantined" && ref.debt === true) || (ref.state === "released" && ref.debt === false)));
+  const monotonic = (refs, oldRefs, id) => oldRefs.every((old) => refs.some((ref) => ref[id] === old[id] && sameCanonical(ref, old))) && refs.length >= oldRefs.length;
+  return terminal && workspace && resource
+    && monotonic(data.terminalProofRefs, previous.terminalProofRefs || [], "runId")
+    && monotonic(data.workspaceClosureProofRefs, previous.workspaceClosureProofRefs || [], "taskId")
+    && monotonic(data.resourceClosureProofRefs, previous.resourceClosureProofRefs || [], "ownerId")
+    && (data.terminalProofRefs.length + data.workspaceClosureProofRefs.length + data.resourceClosureProofRefs.length > (previous.terminalProofRefs?.length || 0) + (previous.workspaceClosureProofRefs?.length || 0) + (previous.resourceClosureProofRefs?.length || 0) || (!Object.hasOwn(previous, "terminalProofRefs") && isFullSuspensionClosure(data)))
+    && (!data.resourcesQuarantined || isFullSuspensionClosure(data));
+}
 function runtimeSuspended(p, data) {
   runtimeOnly(p);
-  requireExactFields(data, ["suspensionId", "reason", "affectedTaskIds", "affectedRunIds", "requestedAt", "resourcesQuarantined"], "runtime suspension");
-  const idsAreCanonical = (ids) => Array.isArray(ids) && ids.every((id) => typeof id === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(id)) && new Set(ids).size === ids.length && ids.every((id, index) => index === 0 || ids[index - 1] < id);
-  const requestedAt = new Date(data.requestedAt);
-  if (p.runtimeState !== "active" || typeof data.suspensionId !== "string" || !data.suspensionId || !new Set(["interactive_steer", "follow_up", "abort", "execution_amendment", "host_pause"]).has(data.reason) || !idsAreCanonical(data.affectedTaskIds) || !idsAreCanonical(data.affectedRunIds) || typeof data.requestedAt !== "string" || !Number.isFinite(requestedAt.getTime()) || requestedAt.toISOString() !== data.requestedAt || data.resourcesQuarantined !== false) throw new Error("invalid runtime suspension");
-  p.suspension = structuredClone(data); p.runtimeState = "suspended"; p.actionOffer = null;
+  if (p.runtimeState === "active") {
+    requireExactFields(data, SUSPENSION_INITIAL_FIELDS, "runtime suspension");
+    if (!validInitialSuspension(data) || data.resourcesQuarantined !== false) throw new Error("invalid runtime suspension");
+    p.suspension = structuredClone(data); p.runtimeState = "suspended"; p.actionOffer = null;
+    return;
+  }
+  requireExactFields(data, SUSPENSION_CLOSURE_FIELDS, "runtime suspension closure");
+  if (p.runtimeState !== "suspended" || !p.suspension || !validSuspensionClosure(p, p.suspension, data)) throw new Error("invalid runtime suspension closure");
+  p.suspension = structuredClone(data);
 }
-function runtimeResumed(p) { runtimeOnly(p); if (p.runtimeState !== "suspended") throw new Error("runtime is not suspended"); p.suspension = null; p.runtimeState = "active"; }
+function runtimeResumed(p, data) {
+  runtimeOnly(p); requireExactFields(data, ["suspensionId", "closureHash"], "runtime resume");
+  if (p.runtimeState !== "suspended" || !p.suspension || !isFullSuspensionClosure(p.suspension) || data.suspensionId !== p.suspension.suspensionId || data.closureHash !== suspensionClosureHash(p.suspension)) throw new Error("invalid runtime resume closure");
+  p.suspension = null; p.runtimeState = "active";
+}
 function observationRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["runId", "conditionId", "cycle", "head", "executionRevision", "executionContractHash", "conditionHash", "adapter", "worldSnapshotHash", "resourceClaimsHash"], "observation request"); const condition = p.conditions.get(data.conditionId); if (!condition || p.observationRuns.has(data.runId) || typeof data.runId !== "string" || !data.runId || !Number.isSafeInteger(data.cycle) || data.cycle < 0 || !/^[a-f0-9]{40}$/.test(data.head) || data.executionRevision !== p.executionRevision || data.executionContractHash !== p.executionContractHash || data.conditionHash !== condition.conditionHash || !hash(data.worldSnapshotHash) || !hash(data.resourceClaimsHash) || (p.runtimeState === "calibrating" ? data.cycle !== 0 || data.head !== p.runtimeBaseHead : p.runtimeState === "active" ? data.cycle < 1 : true)) throw new Error("invalid observation request"); requireExactFields(data.adapter, ["ref", "version"], "observation adapter"); if (data.adapter.ref !== condition.definition.oracle_ref || typeof data.adapter.version !== "string" || !data.adapter.version) throw new Error("invalid observation request"); const run = { runId: data.runId, conditionId: data.conditionId, cycle: data.cycle, head: data.head, executionRevision: data.executionRevision, executionContractHash: data.executionContractHash, conditionHash: data.conditionHash, adapter: structuredClone(data.adapter), worldSnapshotHash: data.worldSnapshotHash, resourceClaimsHash: data.resourceClaimsHash, phase: "requested", allocationId: null, leaseReceiptHash: null, processIdentityHash: null, terminalProofHash: null, evidenceId: null, releaseReceiptHash: null }; p.observationRuns.set(data.runId, run); condition.status = "observing"; condition.lastObservationRunId = data.runId; }
 function observationTransition(p, data, from, to) { runtimeOnly(p); const fields = to === "lease_allocated" ? ["runId", "conditionId", "allocationId", "leaseReceiptHash"] : to === "process_bound" ? ["runId", "conditionId", "processIdentityHash"] : to === "terminal" ? ["runId", "conditionId", "terminalProofHash"] : ["runId", "conditionId", "releaseReceiptHash"]; requireExactFields(data, fields, "observation transition"); const run = p.observationRuns.get(data.runId); if (!run || run.conditionId !== data.conditionId || run.phase !== from) throw new Error("invalid observation phase"); if (to === "lease_allocated" && (typeof data.allocationId !== "string" || !data.allocationId || !hash(data.leaseReceiptHash))) throw new Error("invalid observation lease proof"); if (to === "process_bound" && !hash(data.processIdentityHash)) throw new Error("invalid observation process identity"); if (to === "terminal" && !hash(data.terminalProofHash)) throw new Error("invalid observation terminal proof"); if (to === "released" && !hash(data.releaseReceiptHash)) throw new Error("invalid observation release proof"); Object.assign(run, { phase: to, ...(to === "lease_allocated" ? { allocationId: data.allocationId, leaseReceiptHash: data.leaseReceiptHash } : {}), ...(to === "process_bound" ? { processIdentityHash: data.processIdentityHash } : {}), ...(to === "terminal" ? { terminalProofHash: data.terminalProofHash } : {}), ...(to === "released" ? { releaseReceiptHash: data.releaseReceiptHash } : {}) }); }
 function observationRecorded(p, data) {
@@ -380,6 +420,7 @@ function finalReviewRecorded(p, data) { runtimeOnly(p); requireExactFields(data,
 function hash(value) { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
 function canonical(value) { return Array.isArray(value) ? value.map(canonical) : isPlainObject(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value; }
 function hashCanonical(value) { return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex"); }
+export function suspensionClosureHash(closure) { return hashCanonical(closure); }
 function recordRuntimeMutation(p, taskIds) { p.mutationSequence++; if (!Number.isSafeInteger(p.mutationSequence)) throw new Error("runtime mutation sequence overflow"); for (const taskId of taskIds) if (p.tasks.has(taskId)) p.taskMutationSequences.set(taskId, p.mutationSequence); }
 
 function goalCreated(p, event, replay) {

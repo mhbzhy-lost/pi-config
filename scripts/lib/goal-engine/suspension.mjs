@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { ownerSessionId } from "./events.mjs";
+import { ownerSessionId, suspensionClosureHash } from "./events.mjs";
+
+export { suspensionClosureHash };
 
 const REASONS = new Set(["interactive_steer", "follow_up", "abort", "execution_amendment", "host_pause"]);
 const BLOCKED = Object.freeze(["dispatch", "integrate", "finalize"]);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyEvent, createProjection, schemaVersionForMutation } from "../scripts/lib/goal-engine/events.mjs";
+import { applyEvent, createProjection, schemaVersionForMutation, suspensionClosureHash } from "../scripts/lib/goal-engine/events.mjs";
 import { appendEvent, loadProjection, projectionStateHash } from "../scripts/lib/goal-engine/store.mjs";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -196,6 +196,25 @@ test("amendment enters suspended through its durable runtime event", () => {
   p = applyEvent(p, event("execution.amendment_capability_consumed", { proposalId: "p", nonceDigest: hash(3) }, 18));
   p = applyEvent(p, event("execution.amendment_applied", { proposalId: "p", oldRevision: 1, newRevision: 2, contractHash: hash(4), reconciliation: [] }, 19));
   assert.equal(p.executionRevision, 2);
+});
+
+test("runtime suspension closure and hash-bound resume have identical pre-append and replay semantics", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-runtime-suspension-"));
+  try {
+    const contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
+    let p = createProjection();
+    p = appendAll(root, p, [event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40) }, 1), event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 2), event("goal.runtime_approval_recorded", { proposalId: "proposal", proposalHash: runtimeApprovalHash({ executionContractHash: hashRuntimeExecutionContract(contract) }), executionContractHash: hashRuntimeExecutionContract(contract), baseHead: "a".repeat(40), sessionId: "session", userEntryId: "entry", capabilityDigest: hash(2) }, 3)]);
+    p = appendAll(root, p, observationEvents(p, { runId: "calibration-run", evidenceId: hash(100), cycle: 0, start: 4 }));
+    p = appendEvent(root, event("goal.runtime_activated", {}, 9), p.version);
+    const initial = { suspensionId: "store-suspension", reason: "host_pause", affectedTaskIds: ["task-1"], affectedRunIds: ["run-1"], requestedAt: "2026-08-20T00:00:10.000Z", resourcesQuarantined: false };
+    const closure = { ...initial, resourcesQuarantined: true, terminalProofRefs: [{ runId: "run-1", proofHash: hash(11), state: "observed" }], workspaceClosureProofRefs: [{ taskId: "task-1", attempt: 0, proofHash: hash(12), state: "quarantined", disposition: "preserved" }], resourceClosureProofRefs: [{ ownerId: "run-1", proofHash: hash(13), state: "quarantined", debt: true }] };
+    p = appendEvent(root, event("goal.runtime_suspended", initial, 10), p.version);
+    p = appendEvent(root, event("goal.runtime_suspended", closure, 11), p.version);
+    const resume = event("goal.runtime_resumed", { suspensionId: initial.suspensionId, closureHash: suspensionClosureHash(closure) }, 12);
+    assert.equal(applyEvent(p, resume).runtimeState, "active", "pre-append reducer accepts the exact closure hash");
+    p = appendEvent(root, resume, p.version);
+    assert.equal(loadProjection(root, "runtime-goal").runtimeState, "active", "durable replay accepts the same event without a legacy fallback");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("runtime accept never completes and accepted tasks cannot regress", () => {

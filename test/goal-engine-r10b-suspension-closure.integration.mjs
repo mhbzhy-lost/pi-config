@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
-import { buildSuspensionPlan, inspectSuspensionCompletion } from "../scripts/lib/goal-engine/suspension.mjs";
+import { buildSuspensionPlan, inspectSuspensionCompletion, suspensionClosureHash } from "../scripts/lib/goal-engine/suspension.mjs";
 
 const hash = (char) => char.repeat(64);
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
@@ -47,11 +47,27 @@ test("suspension plan emits one sorted initial ledger event and reducer accepts 
   assert.deepEqual(projection.suspension, full);
   assert.throws(() => applyEvent(projection, event("goal.runtime_suspended", { ...full, workspaceClosureProofRefs: [{ ...workspace, disposition: "discarded", state: "released" }] }, 4)), /suspension|closure/i, "a preserve receipt remains a quarantined preserved closure proof");
 
-  const resumed = applyEvent(projection, event("goal.runtime_resumed", { suspensionId: initial.suspensionId, closureHash: closureHash(full) }, 4));
+  assert.equal(suspensionClosureHash(full), closureHash(full));
+  const resumed = applyEvent(projection, event("goal.runtime_resumed", { suspensionId: initial.suspensionId, closureHash: suspensionClosureHash(full) }, 4));
   assert.equal(resumed.runtimeState, "active");
   assert.equal(resumed.suspension, null);
   assert.throws(() => applyEvent(projection, event("goal.runtime_resumed", { suspensionId: initial.suspensionId, closureHash: hash("d") }, 5)), /resume|closure|suspension/i);
   assert.throws(() => applyEvent(projection, event("goal.runtime_resumed", {}, 6)), /resume|closure|suspension/i);
+});
+
+test("closure updates permit the released/discarded and debt-free literal while rejecting integrated, cross-identity, and debt mismatches", () => {
+  const releasedWorkspace = { ...workspace, state: "released", disposition: "discarded" };
+  const releasedResource = { ...resource, state: "released", debt: false };
+  const full = { ...initial, terminalProofRefs: [terminal], workspaceClosureProofRefs: [releasedWorkspace], resourceClosureProofRefs: [releasedResource] };
+  let projection = applyEvent(active(), event("goal.runtime_suspended", initial, 1));
+  projection = applyEvent(projection, event("goal.runtime_suspended", full, 2));
+  assert.deepEqual(projection.suspension, full);
+  for (const invalid of [
+    { ...full, workspaceClosureProofRefs: [{ ...releasedWorkspace, disposition: "integrated" }] },
+    { ...full, workspaceClosureProofRefs: [{ ...releasedWorkspace, taskId: "task-unrelated" }] },
+    { ...full, resourceClosureProofRefs: [{ ...releasedResource, ownerId: "run-unrelated" }] },
+    { ...full, resourceClosureProofRefs: [{ ...releasedResource, debt: true }] },
+  ]) assert.throws(() => applyEvent(applyEvent(active(), event("goal.runtime_suspended", initial, 3)), event("goal.runtime_suspended", invalid, 4)), /suspension|closure/i);
 });
 
 test("completion inspection uses only ledger affected identities and returns attention for missing, conflicting, or wrong closure proof identity", () => {
