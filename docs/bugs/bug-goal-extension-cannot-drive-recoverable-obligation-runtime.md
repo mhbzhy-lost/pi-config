@@ -120,6 +120,16 @@ Repair challenge 的 durable-then-throw 恢复只比较 `challengeHash` 和 `tas
 ### 修复方案
 challenge 与 decision 的 durable 恢复均以完整事件 data 的逐字段身份为准。Repair 审批只接受 `getBranch` 所给的唯一严格 active branch pair；Pi custom decision 仅作尽力审计，不能替代 Goal Projection。补齐 pre/durable/reload、歧义、strict compaction、拒绝和审计失败测试。
 
+## R10 本地收敛失效生产者未接线
+
+### 复现
+
+`test/goal-engine-local-convergence.integration.mjs` 使用与 obligation runtime 相同的真实 approval、Pi active-branch、Cycle0 managed validation 和 active Observation Host。hybrid 合同同时声明 backend/frontend Task、backend Condition 依赖 backend Task、full-flow Condition 依赖 backend Condition 与 frontend Task。Cycle0 与 activation 为 GREEN；但已满足 backend 的 evidence HEAD 后续出现 `src/backend/**` Git overlap 时，`goal_status` 不会追加 `condition.evidence_invalidated`，也不会返回 `R10_LOCAL_CONVERGENCE_INVALIDATED`。
+
+### 根因与期望修复
+
+虽然 reducer 和 `evaluateConditionGraph` 已能表示 stale，Extension active status 没有导入图评估或把 stale 转成 canonical invalidation producer。生产实现必须仅通过 Store 追加 `condition.evidence_invalidated`，按 Condition ID 每次 status 一个，且在 pre-append、durable-then-throw、reload 情况使用 event-sourced 投影证明幂等恢复。失效 status 不得签发 machine action/token；下游只在独立后续 status 因 predecessor stale 级联。未满足的 Condition 只能阻断，绝不得伪造 evidence 或 invalidation。
+
 ## Cycle 0 未接线
 
 ### 复现
