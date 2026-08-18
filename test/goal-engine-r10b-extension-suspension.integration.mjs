@@ -40,7 +40,7 @@ function pi(cwd, entries = []) {
   };
 }
 
-function runtimeHost(cwd, stopCalls) {
+function runtimeHost(cwd, stopCalls, stopResult = { state: "observed", proof: { id: "host-proof" } }) {
   const adapter = { ref: "oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 50, maxOutputBytes: 100, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } };
   let phase = "lease_allocated";
   const receipt = { id: "managed-cycle0", stateRoot: rootFor(cwd), receiptPath: join(rootFor(cwd), "managed-validations/managed-cycle0.json"), workspacePath: null, phase, terminal: null, recorded: null, recordCount: 0, cleanupDebt: false };
@@ -51,13 +51,14 @@ function runtimeHost(cwd, stopCalls) {
     async startManagedValidation(value, { onProcessBound }) { phase = "process_bound"; await onProcessBound({ processIdentityHash: createHash("sha256").update(value.id).digest("hex") }); phase = "recorded"; return { ...value, phase, terminal: { status: "passed", code: 0 } }; },
     async recoverManagedValidation(value) { return { ...value, phase, terminal: { status: "passed", code: 0 } }; }, releaseManagedValidation(value) { return { id: value.id, released: true }; },
     artifactRefForRun() { const path = join(cwd, ".state/cycle0-artifact.json"); writeFileSync(path, JSON.stringify({ code: "PASS" }), { mode: 0o600 }); return { id: "cycle0-artifact", path }; },
-    async stopOwnedRun(request) { const reloaded = projectionFor(cwd); stopCalls.push({ request, runtimeState: reloaded.runtimeState, actionOffer: reloaded.actionOffer }); return { state: "observed", proof: { id: "host-proof" } }; },
+    async stopOwnedRun(request) { const reloaded = projectionFor(cwd); stopCalls.push({ request, runtimeState: reloaded.runtimeState, actionOffer: reloaded.actionOffer }); return typeof stopResult === "function" ? stopResult(request) : stopResult; },
   };
 }
 
 async function invoke(api, name, input) { return (await api.tools.find(tool => tool.name === name).execute("call", input, undefined, undefined, { cwd: api.cwd, sessionManager: api.sessionManager })).details.value; }
-async function readyDispatch() {
-  const cwd = repo(), stops = [], api = pi(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: runtimeHost(cwd, stops) });
+async function readyDispatch({ appendEventInjection, stopResult } = {}) {
+  const cwd = repo(), stops = [], api = pi(cwd);
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: runtimeHost(cwd, stops, stopResult), ...(appendEventInjection ? { appendEvent: appendEventInjection } : {}) });
   await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status", {});
   await api.handlers.get("input")({ type: "input", text: "approve", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
   for (let i = 0; i < 10 && projectionFor(cwd).runtimeState !== "active"; i++) await invoke(api, "goal_status", {});
@@ -93,11 +94,54 @@ test("abort listener suspends durably before stop without waiting for agent_end"
   assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(stops.length, 1); assert.equal(stops[0].runtimeState, "suspended");
 });
 
-test("invalid input, durable append failure, identity mismatch, and reload never authorize an unsafe stop", async () => {
+test("image-only, invalid streaming, and extension input protect active runtime across reload", async () => {
   const { cwd, api, stops } = await readyDispatch();
-  for (const event of [{ type: "input", text: "image", source: "interactive", images: [{ type: "image", data: "x", mimeType: "image/png" }] }, { type: "input", text: "stream", source: "interactive", streamingBehavior: "streaming" }, { type: "input", text: "other", source: "extension", streamingBehavior: "steer" }]) await api.handlers.get("input")(event, { cwd, sessionManager: api.sessionManager });
+  for (const input of [{ type: "input", text: "image", source: "interactive", images: [{ type: "image", data: "x", mimeType: "image/png" }] }, { type: "input", text: "stream", source: "interactive", streamingBehavior: "streaming" }, { type: "input", text: "other", source: "extension", streamingBehavior: "steer" }]) await api.handlers.get("input")(input, { cwd, sessionManager: api.sessionManager });
+  const reloaded = pi(cwd, structuredClone(api.entries));
+  createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: runtimeHost(cwd, stops) });
+  reloaded.handlers.get("session_start")({}, { cwd, sessionManager: reloaded.sessionManager });
+  const status = await invoke(reloaded, "goal_status", {}), events = readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8");
   assert.equal(stops.length, 0); assert.equal(projectionFor(cwd).runtimeState, "active");
-  // The implementation must additionally retain this durable suspension across a fresh Extension and stop exactly once only after a complete re-derived identity; current pending-gate metadata is deliberately insufficient.
-  const reloaded = pi(cwd, structuredClone(api.entries)); createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: runtimeHost(cwd, stops) }); reloaded.handlers.get("session_start")({}, { cwd, sessionManager: reloaded.sessionManager });
-  assert.equal(projectionFor(cwd).runtimeState, "suspended", "reload must recover pending durable suspension, not custom intent metadata"); assert.equal(stops.length, 1);
+  for (const raw of ["image", "stream", "other"]) for (const value of [events, JSON.stringify(projectionFor(cwd).suspension), JSON.stringify(status), JSON.stringify(stops)]) assert.doesNotMatch(value, new RegExp(raw));
+  assert.equal(projectionFor(cwd).runtimeState, "active");
+});
+
+function suspensionEventFor(cwd, task, reason = "interactive_steer") {
+  return event("harden-runtime", "goal.runtime_suspended", { suspensionId: crypto.randomUUID(), reason, affectedTaskIds: ["task-1"], affectedRunIds: [task.executorBinding.runId], requestedAt: new Date().toISOString(), resourcesQuarantined: false });
+}
+function suspensionEventCount(cwd) { return (readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8").match(/"type":"goal.runtime_suspended"/g) || []).length; }
+
+test("pre-append suspension failure rejects input without stop or projection mutation", async () => {
+  let armed = false;
+  const appendEventInjection = (root, next, version) => {
+    if (armed && next.type === "goal.runtime_suspended") throw new Error("pre-suspension-write-failure");
+    return appendEvent(root, next, version);
+  };
+  const { cwd, api, stops } = await readyDispatch({ appendEventInjection }); armed = true;
+  await assert.rejects(api.handlers.get("input")({ type: "input", text: "private steer", source: "interactive", streamingBehavior: "steer" }, { cwd, sessionManager: api.sessionManager }), /pre-suspension-write-failure/);
+  assert.equal(stops.length, 0); assert.equal(projectionFor(cwd).runtimeState, "active"); assert.ok(projectionFor(cwd).actionOffer); assert.equal(suspensionEventCount(cwd), 0);
+});
+
+test("durable suspension append ambiguity recovers Store state before one owned stop", async () => {
+  let armed = false;
+  const appendEventInjection = (root, next, version) => {
+    const result = appendEvent(root, next, version);
+    if (armed && next.type === "goal.runtime_suspended") throw new Error("durable-suspension-append-ambiguity");
+    return result;
+  };
+  const { cwd, api, stops } = await readyDispatch({ appendEventInjection }); armed = true;
+  await api.handlers.get("input")({ type: "input", text: "private steer", source: "interactive", streamingBehavior: "steer" }, { cwd, sessionManager: api.sessionManager });
+  assert.equal(stops.length, 1); assert.equal(stops[0].runtimeState, "suspended"); assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(projectionFor(cwd).actionOffer, null); assert.equal(suspensionEventCount(cwd), 1);
+});
+
+test("attention stop reload re-derives durable Goal suspension and retries without a second event", async () => {
+  const attention = { state: "attention" };
+  const { cwd, api, stops, task } = await readyDispatch({ stopResult: attention });
+  appendRuntime(cwd, "goal.runtime_suspended", suspensionEventFor(cwd, task).data);
+  assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(projectionFor(cwd).actionOffer, null); assert.equal(stops.length, 0);
+  const reloaded = pi(cwd, structuredClone(api.entries));
+  createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: runtimeHost(cwd, stops, attention) });
+  reloaded.handlers.get("session_start")({}, { cwd, sessionManager: reloaded.sessionManager });
+  await invoke(reloaded, "goal_status", {});
+  assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(stops.length, 1); assert.equal(suspensionEventCount(cwd), 1);
 });
