@@ -28,8 +28,10 @@ const workspace = { taskId: "task-a", attempt: 2, proofHash: hash("b"), state: "
 const resource = { ownerId: "run-a", proofHash: hash("c"), state: "quarantined", debt: true };
 
 test("suspension plan emits one sorted initial ledger event and reducer accepts only monotonic typed closure proof additions", () => {
-  const plan = buildSuspensionPlan({ projection: active(), reason: "abort", affectedIds: { taskIds: ["task-a"], runIds: ["run-a"] } });
-  assert.deepEqual(plan.events, [{ type: "goal.runtime_suspended", data: plan.events[0].data }]);
+  const plan = buildSuspensionPlan({ projection: active(), reason: "abort", affectedIds: { taskIds: ["task-z", "task-a"], runIds: ["run-z", "run-a"] } });
+  assert.deepEqual(plan.events.map(({ type }) => type), ["goal.runtime_suspended"]);
+  assert.deepEqual(plan.events[0].data.affectedTaskIds, ["task-a", "task-z"]);
+  assert.deepEqual(plan.events[0].data.affectedRunIds, ["run-a", "run-z"]);
   assert.deepEqual(Object.keys(plan.events[0].data).sort(), ["affectedRunIds", "affectedTaskIds", "reason", "requestedAt", "resourcesQuarantined", "suspensionId"]);
 
   let projection = applyEvent(active(), event("goal.runtime_suspended", initial, 1));
