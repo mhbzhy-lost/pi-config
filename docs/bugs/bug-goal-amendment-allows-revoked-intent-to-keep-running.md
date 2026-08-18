@@ -36,3 +36,11 @@ foundation 曾生成彼此不同的 suspensionId、在无 active offer 时伪造
 1. Task projection 自身的 `dispatched`、`running`、`settling`、`disposing` 状态，以及其中 workspace 或 executor binding 显示的 active，都是持久化的活动权威；空 inventory 不能覆盖它们。
 2. proposal 的 `add` 必须对应不存在的实体，`change` 和 `remove` 必须对应已有实体；Task 与 Condition 均须在生成 capability nonce 或事件前整体拒绝错配。
 3. accepted 历史不可回退。accepted remove 仅写入绑定新 revision 的 `superseded` applicability 事实；accepted change 的 Condition 复验事实只能引用真实 changed Condition 或依赖，绝不能把 Task ID 伪装成 Condition ID。
+
+## R10B 暂停账本补充
+
+`goal.runtime_suspended` 是固定 runtime 事件表中唯一的暂停事实，不得追加不存在的 `goal.action_offer_revoked`。首次由 active 进入 suspended 时，Reducer 必须在同一 transition 清空未消费、且绑定当前 projectionVersion 的 action offer；事件日志中既有 offer 与随后 suspend 共同构成可审计的撤销链，旧 token 不再可消费。
+
+初始 `SuspensionState` 只能包含 `suspensionId`、`reason`、`affectedTaskIds`、`affectedRunIds`、`requestedAt`、`resourcesQuarantined:false`：reason 必须来自既有枚举，ID 必须排序且唯一，时间必须是 ISO 格式，且只允许 active→suspended。proof 单调更新与恢复 payload 不属于本 lane。
+
+暂停 frontier 只能留下结算、observation record/release 以及 workspace preserve/discard 的安全债务；不得放行 dispatch、integrate、accept、finalize。恢复不得制造第九个 `goal_resume`，而必须经 exact-eight 的 `goal_amend { operation: "resume_runtime" }` 表达。
