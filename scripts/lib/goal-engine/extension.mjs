@@ -10,6 +10,7 @@ import { requestObservation, startObservation, recoverObservation, recordObserva
 import { hostObservationAdapter } from "./observation-adapters.mjs";
 import { prepareManagedValidation } from "./managed-validation.mjs";
 import { actionableFrontier, nextObligationAction, obligationProgressFingerprint } from "./obligation-policy.mjs";
+import { evaluateConditionGraph } from "./condition-validity.mjs";
 import { generationCapabilities } from "./generation-capabilities.mjs";
 import { buildTransferChallenge, listCwdGoals, ownerSessionId, transferChallengeState, workspaceReleased } from "./session-transfer.mjs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
@@ -1369,6 +1370,32 @@ export function createGoalEngineExtension(pi, options = {}) {
           return JSON.stringify({ goalId, status: "R10A3_REPAIR_MATERIALIZED" });
         }
         if (approved.length > 1) return JSON.stringify({ goalId, status: "R10A3_REPAIR_APPROVAL_ATTENTION", attention: ["R10A3_REPAIR_APPROVAL_AMBIGUOUS"] });
+        // Local convergence is a Host-derived semantic step before R9.  Keep
+        // dependent stale conditions for a later status so their durable
+        // predecessor fact, rather than an incidental ID order, establishes
+        // the causal cascade.
+        const conditionGraph = evaluateConditionGraph({ projection, worldSnapshot: world });
+        const staleCandidates = [...projection.conditions.entries()]
+          .filter(([conditionId, condition]) => condition.status === "satisfied" && conditionGraph.conditions.get(conditionId)?.status === "stale")
+          .map(([conditionId, condition]) => ({ conditionId, condition, reason: conditionGraph.conditions.get(conditionId).reason }));
+        const selectedInvalidation = staleCandidates
+          .filter(({ condition }) => !condition.definition.depends_on?.some((edge) => edge.kind === "condition"
+            && projection.conditions.get(edge.id)?.status === "satisfied"
+            && conditionGraph.conditions.get(edge.id)?.status === "stale"))
+          .sort((left, right) => left.conditionId.localeCompare(right.conditionId))[0];
+        if (selectedInvalidation) {
+          const event = makeEvent("condition.evidence_invalidated", {
+            conditionId: selectedInvalidation.conditionId,
+            reason: selectedInvalidation.reason,
+          }, goalId, "goal-runtime.v1");
+          const expected = applyEvent(projection, event);
+          try { appendEventFn(root, event, projection.version); }
+          catch (cause) {
+            const recovered = loadProjectionFn(root, goalId);
+            if (!isDeepStrictEqual(recovered, expected)) throw cause;
+          }
+          return JSON.stringify({ goalId, status: "R10_LOCAL_CONVERGENCE_INVALIDATED" });
+        }
         const inventory = activeObservationInventory(projection);
         if (!inventory) return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R10A3_OBSERVATION_HOST_ATTENTION", attention: ["R10A3_OBSERVATION_HOST_ATTENTION"], progressLedger: projection.progressLedger });
         // R9 is the sole authority for this status call.  In particular, do not

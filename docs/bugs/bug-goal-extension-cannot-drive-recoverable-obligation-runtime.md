@@ -130,6 +130,14 @@ challenge 与 decision 的 durable 恢复均以完整事件 data 的逐字段身
 
 虽然 reducer 和 `evaluateConditionGraph` 已能表示 stale，Extension active status 没有导入图评估或把 stale 转成 canonical invalidation producer。生产实现必须仅通过 Store 追加 `condition.evidence_invalidated`，按 Condition ID 每次 status 一个，且在 pre-append、durable-then-throw、reload 情况使用 event-sourced 投影证明幂等恢复。失效 status 不得签发 machine action/token；下游只在独立后续 status 因 predecessor stale 级联。未满足的 Condition 只能阻断，绝不得伪造 evidence 或 invalidation。
 
+### 因果顺序与崩溃恢复
+
+每个 active status 先由当前 Projection 与 Host CurrentWorld/Git 计算完整 Condition 图，只把已满足且本轮推导为 stale 的 Condition 作为候选。若候选依赖仍为 Projection satisfied、且同轮也 stale 的前驱，则本轮必须等待；先持久化前驱，下一 status 才能以 `predecessor-stale` 失效下游。同层独立候选才按 Condition ID 排序，且一次只追加一个数据严格为 `{conditionId, reason}` 的 canonical event。
+
+追加前失败必须原样抛出，不能改变 Condition。若 Store 已持久化后才抛错，Extension 以本次 event reducer 得到完整 expected Projection，并与 reload Projection 深度比较；完全一致时确认本次失效并返回 invalidated，绝不重写 event。随后 reload 的下一 status 必须正常回到 R9 生命周期，不得伪造第二个 invalidated status 或重复失效事件。
+
+本轮 GREEN 首次触达 hybrid fixture 的另一处不可达预期：尚未有 product Observation 的 full-flow Condition 在既有 Cycle0 reducer 中是 `inactive`，不是 `pending`。测试据此校正，同时继续断言它没有 invalidation、Cycle>=1 的 product evidence/verdict 或 Cycle>=1 run；不得为了该断言新增状态转移。
+
 ## Cycle 0 未接线
 
 ### 复现

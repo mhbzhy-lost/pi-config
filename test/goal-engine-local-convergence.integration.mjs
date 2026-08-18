@@ -122,7 +122,7 @@ async function satisfiedConditions(definitions) {
 }
 function reloadWithInvalidationStore(fixture, mode) { const api = pi(fixture.cwd, structuredClone(fixture.api.entries)), store = invalidationStore(mode); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: fixture.durable, store }); api.handlers.get("session_start")({}, { cwd: fixture.cwd, sessionManager: api.sessionManager }); return { api, store }; }
 
-test("RED: backend overlap emits exactly one local-convergence invalidation without an action offer", async () => {
+test("backend overlap emits exactly one local-convergence invalidation without an action offer", async () => {
   const { cwd, api } = await satisfiedBackend(); backendOverlap(cwd);
   const status = JSON.parse(await invoke(api, "goal_status", {}));
   assert.equal(invalidations(cwd).length, 1, "Extension must produce the canonical condition.evidence_invalidated event");
@@ -130,7 +130,7 @@ test("RED: backend overlap emits exactly one local-convergence invalidation with
   assert.equal(status.machineAction, undefined); assert.equal(status.action_token, undefined);
 });
 
-test("RED: invalidation producer pre-append failure preserves satisfied evidence and retries one world-drift event", async () => {
+test("invalidation producer pre-append failure preserves satisfied evidence and retries one world-drift event", async () => {
   const fixture = await satisfiedBackend(); backendOverlap(fixture.cwd); const { api } = reloadWithInvalidationStore(fixture, "pre");
   await assert.rejects(invoke(api, "goal_status", {}), /injected pre-invalidation append failure/, "missing producer must reach the real Store pre-append wrapper");
   assert.equal(loadProjection(runtimeRoot(fixture.cwd), "harden-runtime").conditions.get("backend-condition").status, "satisfied"); assert.equal(invalidations(fixture.cwd).length, 0);
@@ -139,17 +139,17 @@ test("RED: invalidation producer pre-append failure preserves satisfied evidence
   assert.deepEqual(invalidations(fixture.cwd).map(row => row.data.reason), ["world-drift"]);
 });
 
-test("RED: invalidation producer durable acknowledgement loss recovers one world-drift event across owner reload", async () => {
+test("invalidation producer durable acknowledgement loss recovers one world-drift event across owner reload", async () => {
   const fixture = await satisfiedBackend(); backendOverlap(fixture.cwd); const { api, store } = reloadWithInvalidationStore(fixture, "durable");
   const recovered = JSON.parse(await invoke(api, "goal_status", {}));
   assert.equal(store.invalidationAttempts, 1, "missing producer must write condition.evidence_invalidated through the real Store wrapper");
   assert.equal(recovered.status, "R10_LOCAL_CONVERGENCE_INVALIDATED"); assert.equal(loadProjection(runtimeRoot(fixture.cwd), "harden-runtime").conditions.get("backend-condition").status, "stale");
   const reloaded = pi(fixture.cwd, structuredClone(api.entries)); createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: fixture.durable, store: invalidationStore("none") }); reloaded.handlers.get("session_start")({}, { cwd: fixture.cwd, sessionManager: reloaded.sessionManager });
-  const afterReload = JSON.parse(await invoke(reloaded, "goal_status", {})); assert.equal(afterReload.status, "R10_LOCAL_CONVERGENCE_INVALIDATED");
+  const afterReload = JSON.parse(await invoke(reloaded, "goal_status", {})); assert.notEqual(afterReload.status, "R10_LOCAL_CONVERGENCE_INVALIDATED"); assert.ok(Object.hasOwn(afterReload, "blocking"), "reload must continue with ordinary R9 evaluation");
   assert.deepEqual(invalidations(fixture.cwd).map(row => row.data.reason), ["world-drift"]);
 });
 
-test("RED: simultaneous overlap invalidates two satisfied Conditions by ID one status at a time", async () => {
+test("simultaneous overlap invalidates two satisfied Conditions by ID one status at a time", async () => {
   const alpha = conditionDefinition("alpha-condition", [], ["src/shared/**"]), beta = conditionDefinition("beta-condition", [], ["src/shared/**"]), fixture = await satisfiedConditions([alpha, beta]);
   mkdirSync(join(fixture.cwd, "src/shared"), { recursive: true }); writeFileSync(join(fixture.cwd, "src/shared", "overlap.mjs"), "export const overlap = true;\n"); git(fixture.cwd, "add", "src/shared/overlap.mjs"); git(fixture.cwd, "commit", "-m", "shared overlap");
   JSON.parse(await invoke(fixture.api, "goal_status", {})); let projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime");
@@ -158,7 +158,7 @@ test("RED: simultaneous overlap invalidates two satisfied Conditions by ID one s
   assert.deepEqual(invalidations(fixture.cwd).map(row => row.data.conditionId), ["alpha-condition", "beta-condition"]);
 });
 
-test("RED: world-drift invalidates satisfied upstream before predecessor-stale downstream", async () => {
+test("world-drift invalidates satisfied upstream before predecessor-stale downstream", async () => {
   const upstream = conditionDefinition("upstream-condition", [], ["src/upstream/**"]), downstream = conditionDefinition("downstream-condition", [{ kind: "condition", id: "upstream-condition" }], ["src/downstream/**"]), fixture = await satisfiedConditions([upstream, downstream]);
   mkdirSync(join(fixture.cwd, "src/upstream"), { recursive: true }); writeFileSync(join(fixture.cwd, "src/upstream", "overlap.mjs"), "export const overlap = true;\n"); git(fixture.cwd, "add", "src/upstream/overlap.mjs"); git(fixture.cwd, "commit", "-m", "upstream overlap");
   await invoke(fixture.api, "goal_status", {}); let projection = loadProjection(runtimeRoot(fixture.cwd), "harden-runtime"); assert.equal(projection.conditions.get("upstream-condition").status, "stale"); assert.equal(projection.conditions.get("downstream-condition").status, "satisfied");
@@ -166,9 +166,9 @@ test("RED: world-drift invalidates satisfied upstream before predecessor-stale d
   assert.deepEqual(invalidations(fixture.cwd).map(row => [row.data.conditionId, row.data.reason]), [["upstream-condition", "world-drift"], ["downstream-condition", "predecessor-stale"]]);
 });
 
-test("RED: satisfied backend overlap never invents full-flow evidence before frontend acceptance and observation", async () => {
+test("satisfied backend overlap never invents full-flow evidence before frontend acceptance and observation", async () => {
   const fixture = await activeHybrid(); acceptCanonicalTask(fixture.cwd, fixture.goalId, "backend-task", "src/backend"); await settleBackendCycleOne(fixture); backendOverlap(fixture.cwd);
   await invoke(fixture.api, "goal_status", {}); const projection = loadProjection(runtimeRoot(fixture.cwd), fixture.goalId), events = invalidations(fixture.cwd);
-  assert.deepEqual(events.map(row => row.data.conditionId), ["backend-condition"]); assert.equal(projection.conditions.get("full-flow-condition").status, "pending");
-  assert.equal(projection.evidenceHistory.some(row => row.conditionId === "full-flow-condition"), false); assert.equal([...projection.observationRuns.values()].some(run => run.conditionId === "full-flow-condition" && run.cycle === 1), false);
+  assert.deepEqual(events.map(row => row.data.conditionId), ["backend-condition"]); assert.equal(projection.conditions.get("full-flow-condition").status, "inactive");
+  assert.equal(projection.evidenceHistory.some(row => row.conditionId === "full-flow-condition" && projection.observationRuns.get(row.run.runId)?.cycle >= 1), false); assert.deepEqual([...projection.observationRuns.values()].filter(run => run.conditionId === "full-flow-condition" && run.cycle === 1), []);
 });
