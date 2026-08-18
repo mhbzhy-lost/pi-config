@@ -106,9 +106,6 @@ test("image-only, invalid streaming, and extension input protect active runtime 
   assert.equal(projectionFor(cwd).runtimeState, "active");
 });
 
-function suspensionEventFor(cwd, task, reason = "interactive_steer") {
-  return event("harden-runtime", "goal.runtime_suspended", { suspensionId: crypto.randomUUID(), reason, affectedTaskIds: ["task-1"], affectedRunIds: [task.executorBinding.runId], requestedAt: new Date().toISOString(), resourcesQuarantined: false });
-}
 function suspensionEventCount(cwd) { return (readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8").match(/"type":"goal.runtime_suspended"/g) || []).length; }
 
 test("pre-append suspension failure rejects input without stop or projection mutation", async () => {
@@ -136,12 +133,12 @@ test("durable suspension append ambiguity recovers Store state before one owned 
 
 test("attention stop reload re-derives durable Goal suspension and retries without a second event", async () => {
   const attention = { state: "attention" };
-  const { cwd, api, stops, task } = await readyDispatch({ stopResult: attention });
-  appendRuntime(cwd, "goal.runtime_suspended", suspensionEventFor(cwd, task).data);
-  assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(projectionFor(cwd).actionOffer, null); assert.equal(stops.length, 0);
+  const { cwd, api, stops } = await readyDispatch({ stopResult: attention });
+  await api.handlers.get("input")({ type: "input", text: "private steer", source: "interactive", streamingBehavior: "steer" }, { cwd, sessionManager: api.sessionManager });
+  assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(projectionFor(cwd).actionOffer, null); assert.equal(stops.length, 1); assert.equal(suspensionEventCount(cwd), 1);
   const reloaded = pi(cwd, structuredClone(api.entries));
   createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: runtimeHost(cwd, stops, attention) });
   reloaded.handlers.get("session_start")({}, { cwd, sessionManager: reloaded.sessionManager });
   await invoke(reloaded, "goal_status", {});
-  assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(stops.length, 1); assert.equal(suspensionEventCount(cwd), 1);
+  assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(stops.length, 2); assert.equal(suspensionEventCount(cwd), 1);
 });
