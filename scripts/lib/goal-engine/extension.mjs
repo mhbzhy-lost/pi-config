@@ -26,7 +26,7 @@ import {
   formatRecoveryInjection,
   selectContinuityCandidate,
 } from "./continuity.mjs";
-import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation, validateNextAction } from "./events.mjs";
+import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation, suspensionClosureHash, validateNextAction } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
 import { finalizeGoal } from "./finalization.mjs";
 import { deriveFindingFromFailedEvidence, openRepairEpisode, buildRemediationTaskCandidate, createRepairChallenge, recordRepairUserDecision, issueRepairCapability, validateRemediationTask, planRepairObservationLink, repairEpisodeTransition } from "./repair-policy.mjs";
@@ -551,6 +551,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   const runtimeHost = options.runtimeHost || null;
   // Host-only entropy; callers cannot pass a capability nonce through tools.
   const runtimeNonceFactory = typeof runtimeHost?.nonceFactory === "function" ? runtimeHost.nonceFactory : () => randomBytes(32);
+  const amendmentNonceFactory = typeof runtimeHost?.amendmentNonceFactory === "function" ? runtimeHost.amendmentNonceFactory : runtimeNonceFactory;
   const goalStateEnv = options.goalStateEnv ?? process.env;
   const executionScopeFor = (ctx, { operation = "read", goalId } = {}) => {
     const legacyScope = executionScope(ctx);
@@ -1355,7 +1356,41 @@ export function createGoalEngineExtension(pi, options = {}) {
           try { persistMetadata("goal-engine-execution-amendment-decision", { proposalId: amendment.proposalId, decisionId: event.data.decisionId, choice: pair.choice, approved: pair.choice === "approve", source: pair.intent.data.source, userEntryId: pair.message.id, ownerSessionId: amendment.ownerSessionId }); } catch { /* Projection is authoritative. */ }
           return JSON.stringify({ goalId, status: "R10B_AMENDMENT_DECISION_RECORDED" });
         }
-        if (amendment?.phase === "approved") return JSON.stringify({ goalId, status: "R10B_AMENDMENT_APPLY_REQUIRED", proposalId: amendment.proposalId });
+        if (amendment?.phase === "approved") {
+          const closure = projection.suspension;
+          let normalizedTarget;
+          const closed = closure?.resourcesQuarantined
+            && closure.terminalProofRefs?.length === closure.affectedRunIds?.length
+            && closure.workspaceClosureProofRefs?.length === closure.affectedTaskIds?.length
+            && closure.resourceClosureProofRefs?.length === closure.affectedRunIds?.length;
+          try { normalizedTarget = normalizeRuntimeGoalInit(amendment.targetExecutionContract, runtimeHost.registries); } catch { normalizedTarget = null; }
+          const drift = amendment.ownerSessionId !== sessionId || !ownedBySession(projection, sessionId)
+            || amendment.oldRevision !== projection.executionRevision
+            || amendment.executionContractHash !== undefined && amendment.executionContractHash !== projection.executionContractHash
+            || amendment.targetContractHash !== hashRuntimeExecutionContract(amendment.targetExecutionContract)
+            || !normalizedTarget || !isDeepStrictEqual(normalizedTarget, amendment.targetExecutionContract)
+            || !world.repo || world.repo.head !== amendment.baseHead || world.repo.trackedDirty?.length || world.repo.untracked?.length || world.repo.sequencer
+            || projection.runtimeState !== "suspended" || !closed || suspensionClosureHash(closure) !== suspensionClosureHash(projection.suspension)
+            || amendment.phase !== "approved";
+          if (drift) return JSON.stringify({ goalId, status: "R10B_AMENDMENT_DRIFT", attention: ["R10B_AMENDMENT_DRIFT"] });
+          const nonce = amendmentNonceFactory();
+          const nonceDigest = canonicalHash({ schema: "goal-user-capability.v1", goalId, proposalId: amendment.proposalId, proposalHash: amendment.proposalHash, ownerSessionId: amendment.ownerSessionId, oldRevision: amendment.oldRevision, newRevision: amendment.newRevision, executionContractHash: projection.executionContractHash, targetContractHash: amendment.targetContractHash, baseHead: amendment.baseHead, closureHash: suspensionClosureHash(closure), nonce: Buffer.isBuffer(nonce) ? nonce.toString("base64") : String(nonce) });
+          const source = new Set(amendment.sourceTaskIds), target = new Set(amendment.targetExecutionContract.execution.tasks.map((task) => task.id));
+          const taskIds = [...new Set([...source, ...target])].sort();
+          const facts = taskIds.map((taskId) => ({ taskId, revision: amendment.newRevision, state: !source.has(taskId) ? "applicable" : !target.has(taskId) ? "superseded" : "reverify_required", reason: "execution_amendment" }));
+          const reconciliation = facts.map(({ taskId, state }) => ({ taskId, action: !source.has(taskId) ? "add" : !target.has(taskId) ? "supersede" : state === "reverify_required" ? "reverify" : "keep" }));
+          const events = [
+            makeEvent("execution.amendment_capability_consumed", { proposalId: amendment.proposalId, nonceDigest }, goalId, "goal-runtime.v1"),
+            ...facts.map((data) => makeEvent("task.applicability_changed", data, goalId, "goal-runtime.v1")),
+            ...[...projection.conditions.keys()].sort().map((conditionId) => makeEvent("condition.evidence_invalidated", { conditionId, revision: amendment.newRevision, priorEvidenceIds: projection.conditions.get(conditionId).supportingEvidenceIds, reason: "execution_amendment" }, goalId, "goal-runtime.v1")),
+            makeEvent("execution.amendment_applied", { proposalId: amendment.proposalId, proposalHash: amendment.proposalHash, oldRevision: amendment.oldRevision, newRevision: amendment.newRevision, targetContractHash: amendment.targetContractHash, reconciliation }, goalId, "goal-runtime.v1"),
+            makeEvent("goal.runtime_resumed", { suspensionId: closure.suspensionId, closureHash: suspensionClosureHash(closure) }, goalId, "goal-runtime.v1"),
+          ];
+          const expected = events.reduce((candidate, event) => applyEvent(candidate, event), projection);
+          try { projection = appendEventBatchFn(root, events, projection.version); }
+          catch (cause) { const recovered = loadProjectionFn(root, goalId); if (!isDeepStrictEqual(recovered, expected)) throw cause; projection = recovered; }
+          return JSON.stringify({ goalId, status: "R10B_AMENDMENT_APPLIED", proposalId: amendment.proposalId });
+        }
         if (amendment?.phase === "rejected") return JSON.stringify({ goalId, status: "R10B_AMENDMENT_REJECTED", proposalId: amendment.proposalId });
         // Repair approval continuation deliberately precedes R9: created and
         // approved challenges are no longer selected by obligation policy.
@@ -1995,7 +2030,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         const closure = projection.suspension;
         if (projection.eventSchemaVersion !== "goal-runtime.v1" || projection.runtimeState !== "suspended" || !closure?.resourcesQuarantined
           || closure.terminalProofRefs?.length !== closure.affectedRunIds?.length || closure.workspaceClosureProofRefs?.length !== closure.affectedTaskIds?.length
-          || closure.resourceClosureProofRefs?.length !== closure.affectedRunIds?.length || projection.pendingHumanDecision) throw new Error("execution amendment requires a fully closed suspended runtime without a pending proposal");
+          || closure.resourceClosureProofRefs?.length !== closure.affectedRunIds?.length || (projection.pendingHumanDecision && projection.pendingHumanDecision.phase !== "rejected")) throw new Error("execution amendment requires a fully closed suspended runtime without a pending proposal");
+        let proposalWorld;
+        try { proposalWorld = runtimeHost.captureCurrentWorld({ cwd }); } catch { proposalWorld = null; }
+        if (!proposalWorld?.safe || !proposalWorld.repo || !/^[a-f0-9]{40}$/.test(proposalWorld.repo.head || "") || proposalWorld.repo.trackedDirty?.length || proposalWorld.repo.untracked?.length || proposalWorld.repo.sequencer) throw new Error("execution amendment proposal requires a safe clean Host CurrentWorld");
         const updates = params.changes?.update_tasks;
         if (!Array.isArray(updates) || updates.length === 0 || new Set(updates.map((entry) => entry.id)).size !== updates.length) throw new Error("execution amendment update_tasks must be non-empty and unique");
         const source = {
@@ -2011,7 +2049,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         let target;
         try { target = normalizeRuntimeGoalInit(source, runtimeHost?.registries); } catch (error) { throw new Error(`invalid execution amendment: ${error.message}`); }
         const changes = { update_tasks: structuredClone(updates) };
-        const material = { goalId, proposalId: `execution-amendment-${crypto.randomUUID()}`, changes, changesHash: canonicalHash(changes), targetExecutionContract: target, targetContractHash: hashRuntimeExecutionContract(target), baseHead: projection.runtimeBaseHead, ownerSessionId: currentSessionId, oldRevision: projection.executionRevision, newRevision: projection.executionRevision + 1 };
+        const material = { goalId, proposalId: `execution-amendment-${crypto.randomUUID()}`, changes, changesHash: canonicalHash(changes), targetExecutionContract: target, targetContractHash: hashRuntimeExecutionContract(target), baseHead: proposalWorld.repo.head, ownerSessionId: currentSessionId, oldRevision: projection.executionRevision, newRevision: projection.executionRevision + 1 };
         const event = makeEvent("execution.amendment_proposed", { ...material, proposalHash: canonicalHash(material) }, goalId, "goal-runtime.v1");
         const updated = appendEventFn(root, event, projection.version);
         return JSON.stringify({ goalId, status: "R10B_AMENDMENT_PROPOSED", proposalId: material.proposalId });

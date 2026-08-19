@@ -782,17 +782,17 @@ test("historical safe ignored state dispatch remains available", async () => {
   ]);
 });
 
-test("goal_amend exposes a strict discriminated nine-operation schema", () => {
+test("goal_amend exposes a strict discriminated ten-operation schema", () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);
   const schema = pi.tools.find((tool) => tool.name === "goal_amend").parameters;
   assert.equal(schema.type, "object");
-  assert.equal(schema.anyOf.length, 9);
+  assert.equal(schema.anyOf.length, 10);
   for (const branch of schema.anyOf) {
     assert.equal(branch.additionalProperties, false);
     assert.ok(branch.properties.operation.const);
     assert.ok(Object.hasOwn(branch.properties, "goal_id"), "goal_id remains optional in every branch");
-    assert.equal(branch.required.includes("goal_id"), ["propose_transfer_session", "transfer_session"].includes(branch.properties.operation.const));
+    assert.equal(branch.required.includes("goal_id"), ["propose_transfer_session", "transfer_session", "propose_execution_change"].includes(branch.properties.operation.const));
   }
   const branch = (operation) => schema.anyOf.find((candidate) => candidate.properties.operation.const === operation);
   const propose = branch("propose_update_goal");
@@ -802,6 +802,11 @@ test("goal_amend exposes a strict discriminated nine-operation schema", () => {
   const detach = branch("detach_session");
   const proposeTransfer = branch("propose_transfer_session");
   const transfer = branch("transfer_session");
+  const executionChange = branch("propose_execution_change");
+  assert.deepEqual(executionChange.required.sort(), ["changes", "goal_id", "operation", "reason"].sort());
+  assert.deepEqual(Object.keys(executionChange.properties.changes.properties), ["update_tasks"]);
+  assert.equal(executionChange.properties.changes.additionalProperties, false);
+  assert.deepEqual(executionChange.properties.changes.properties.update_tasks.items.required, ["id"]);
   assert.deepEqual(propose.required.sort(), ["changes", "operation", "reason"].sort());
   assert.equal(Object.hasOwn(propose.properties, "action_token"), false);
   assert.deepEqual(Object.keys(update.properties).sort(), ["action_token", "challenge_id", "goal_id", "operation"]);

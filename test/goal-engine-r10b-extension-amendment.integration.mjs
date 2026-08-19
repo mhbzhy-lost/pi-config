@@ -111,7 +111,7 @@ test("R10B proposal validation rejects invalid task changes before append", asyn
 });
 
 // RED: Store-seeded approval is deliberately independent of the still-missing goal_amend schema.
-test("R10B approve records the exact active-branch decision before exposing apply-required", async () => {
+test("R10B approve records the exact active-branch decision before Host applies", async () => {
   const { cwd, api, proposal } = await decideSeeded("approve");
   const intent = amendmentEntries(api, "intent")[0]; assert.ok(intent, "hook writes one audit intent before Pi appends the real user message");
   assert.equal(amendmentEntries(api, "decision").length, 0);
@@ -119,7 +119,7 @@ test("R10B approve records the exact active-branch decision before exposing appl
   const decision = amendmentEntries(api, "decision")[0]?.data, user = api.entries.findLast((entry) => entry.type === "message" && entry.message?.role === "user");
   assert.deepEqual({ choice: decision?.choice, approved: decision?.approved, proposalId: decision?.proposalId, userEntryId: decision?.userEntryId }, { choice: "approve", approved: true, proposalId: proposal.proposalId, userEntryId: user.id });
   assert.equal(projectionFor(cwd).pendingHumanDecision.phase, "approved");
-  assert.match(await invoke(api, "goal_status", {}), /R10B_AMENDMENT_APPLY_REQUIRED/);
+  assert.match(await invoke(api, "goal_status", {}), /R10B_AMENDMENT_APPLIED/);
 });
 
 test("R10B reject is durable rejected/reproposal-required and never signs, resumes, or applies", async () => {
@@ -169,5 +169,5 @@ test("R10B retries pre-append failure, recovers one durable decision, and reload
   await assert.rejects(invoke(api, "goal_status", {}), /before decision append/); assert.equal(projectionFor(cwd).pendingHumanDecision.phase, "proposed"); assert.equal(approvalEvents(), 0);
   assert.match(await invoke(api, "goal_status", {}), /R10B_AMENDMENT_DECISION_RECORDED/); assert.equal(projectionFor(cwd).pendingHumanDecision.phase, "approved"); assert.equal(approvalEvents(), 1); assert.equal(amendmentEntries(api, "decision").length, 1);
   const reload = pi(cwd, structuredClone(api.entries), { branch: api.sessionManager.getBranch() }); createGoalEngineExtension(reload, { goalStateEnv: {}, runtimeHost: host(cwd) }); reload.handlers.get("session_start")({}, { sessionManager: reload.sessionManager }); await invoke(reload, "goal_status", {});
-  assert.equal(projectionFor(cwd).pendingHumanDecision.phase, "approved"); assert.equal(approvalEvents(), 1); assert.equal(amendmentEntries(reload, "decision").length, 1);
+  assert.equal(projectionFor(cwd).pendingHumanDecision, null); assert.equal(projectionFor(cwd).runtimeState, "active"); assert.equal(approvalEvents(), 1); assert.equal(amendmentEntries(reload, "decision").length, 1);
 });

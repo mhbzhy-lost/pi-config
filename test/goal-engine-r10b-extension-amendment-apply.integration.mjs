@@ -73,6 +73,7 @@ async function approved({ sessionId = "owner", entries, extension = {}, choice =
   await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status");
   await api.handlers.get("input")({ type: "input", text: "approve", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
   for (let i = 0; i < 10 && projectionFor(cwd).runtimeState !== "active"; i++) await invoke(api, "goal_status");
+  nonces.length = 0; // Activation's capability is not the amendment capability under test.
   if (accepted) acceptCanonicalTask(cwd, "harden-runtime", "task-1", "src");
   await api.handlers.get("input")({ type: "input", text: "amend privately", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
   await invoke(api, "goal_amend", { goal_id: "harden-runtime", operation: "propose_execution_change", reason: "amend task", changes: { update_tasks: [{ id: "task-1", description: "Amended target task" }] } });
