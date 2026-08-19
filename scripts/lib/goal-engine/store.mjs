@@ -29,6 +29,7 @@ export function appendEventBatch(stateRoot, events, expectedVersion) {
 
   try {
     let next = replayAndCheckVersion(stateRoot, eventsPath, expectedVersion, lock.token);
+    assertCanonicalAmendmentBatch(events, next, false);
     for (const event of events) next = applyEvent(next, event);
     const registry = prepareRegistryUpdate(stateRoot, events.at(-1), next, lock.token);
 
@@ -69,6 +70,7 @@ export function appendEventBatchWithSettlementEvidence(stateRoot, events, expect
   let registryTmp = null, durable = false;
   try {
     let next = replayAndCheckVersion(canonicalRoot, eventsPath, expectedVersion, lock.token);
+    assertCanonicalAmendmentBatch(events, next, false);
     for (const event of events) next = applyEvent(next, event);
     assertSettlementEvidenceBinding(events, sha256);
     const registry = prepareRegistryUpdate(canonicalRoot, events.at(-1), next, lock.token);
@@ -187,6 +189,7 @@ export function appendEvent(stateRoot, event, expectedVersion) {
 
   try {
     const current = replayAndCheckVersion(stateRoot, eventsPath, expectedVersion, lock.token);
+    assertCanonicalAmendmentBatch([event], current, true);
     const next = applyEvent(current, event);
     const registry = prepareRegistryUpdate(stateRoot, event, next, lock.token);
 
@@ -452,6 +455,31 @@ function assertRemediationMaterializationBatch(events) {
   }
 }
 
+function assertCanonicalAmendmentBatch(events, projection, standalone) {
+  const amendmentTypes = new Set(["execution.amendment_capability_consumed", "task.applicability_changed", "condition.evidence_invalidated", "execution.amendment_applied"]);
+  const hasAmendment = events.some((event) => amendmentTypes.has(event?.type));
+  if (!hasAmendment) return;
+  if (standalone || events[0]?.type !== "execution.amendment_capability_consumed") throw new Error("canonical amendment batch is atomic");
+  const pending = projection.pendingHumanDecision;
+  if (!pending || pending.phase !== "approved") throw new Error("canonical amendment batch requires approved proposal");
+  const targetTaskIds = (pending.targetExecutionContract?.execution?.tasks || []).map((task) => task.id);
+  const taskIds = [...new Set([...projection.tasks.keys(), ...targetTaskIds])].sort();
+  const conditionIds = [...projection.conditions.keys()].sort();
+  const expectedLength = 1 + taskIds.length + conditionIds.length + 2;
+  if (events.length !== expectedLength || events.at(-1)?.type !== "goal.runtime_resumed") throw new Error("invalid canonical amendment batch");
+  const consume = events[0]?.data;
+  if (consume?.proposalId !== pending.proposalId || !/^[a-f0-9]{64}$/.test(consume?.nonceDigest || "") || projection.consumedAmendmentNonceDigests?.has(consume.nonceDigest)) throw new Error("invalid amendment nonce replay");
+  for (let i = 0; i < taskIds.length; i++) { const data = events[i + 1]; if (data?.type !== "task.applicability_changed" || data.data?.taskId !== taskIds[i] || data.data?.revision !== pending.newRevision) throw new Error("invalid amendment applicability facts"); }
+  for (let i = 0; i < conditionIds.length; i++) { const data = events[1 + taskIds.length + i]; const condition = projection.conditions.get(conditionIds[i]); if (data?.type !== "condition.evidence_invalidated" || data.data?.conditionId !== conditionIds[i] || data.data?.revision !== pending.newRevision || JSON.stringify(data.data?.priorEvidenceIds) !== JSON.stringify(condition.supportingEvidenceIds)) throw new Error("invalid amendment invalidation facts"); }
+  const applied = events.at(-2)?.data;
+  if (events.at(-2)?.type !== "execution.amendment_applied" || applied?.proposalId !== pending.proposalId || applied?.proposalHash !== pending.proposalHash || applied?.oldRevision !== pending.oldRevision || applied?.newRevision !== pending.newRevision || applied?.targetContractHash !== pending.targetContractHash) throw new Error("invalid amendment apply identity");
+  const reconciliation = applied.reconciliation;
+  const actionFor = (taskId, state) => !projection.tasks.has(taskId) ? "add" : state === "reverify_required" ? "reverify" : state === "superseded" ? "supersede" : "keep";
+  if (!Array.isArray(reconciliation) || reconciliation.length !== taskIds.length || reconciliation.some((row, i) => row?.taskId !== taskIds[i] || row.action !== actionFor(taskIds[i], events[i + 1].data.state))) throw new Error("invalid amendment reconciliation");
+  const resumed = events.at(-1)?.data;
+  if (resumed?.suspensionId !== projection.suspension?.suspensionId) throw new Error("invalid amendment resume");
+}
+
 function validateEventBatch(events) {
   if (!Array.isArray(events) || events.length === 0) throw new TypeError("event batch must be a non-empty array");
   const goalId = events[0]?.goalId;
@@ -524,6 +552,7 @@ function serializeProjection(p) {
     suspension: p.suspension, convergenceBudget: p.convergenceBudget, evidenceHistory: p.evidenceHistory || [],
     ...(p.runtimeGeneration ? { mutationSequence: p.mutationSequence, taskMutationSequences: Object.fromEntries(p.taskMutationSequences || []) } : {}),
     finalReview: p.finalReview || null,
+    consumedAmendmentNonceDigests: [...(p.consumedAmendmentNonceDigests || [])].sort(),
   };
 }
 

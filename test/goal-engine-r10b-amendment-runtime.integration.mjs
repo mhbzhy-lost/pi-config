@@ -140,8 +140,13 @@ test("R10B Store applies the canonical amendment batch with product support and 
     assert.deepEqual(applied.taskApplicability.get("task-2"), { revision: proposal.newRevision, state: "applicable", reason: "unaffected" });
     assert.deepEqual(applied.conditions.get("condition-1").supportingEvidenceIds, []);
     assert.equal(applied.evidenceHistory.length, 2);
-    assert.deepEqual(applied.tasks.get("task-1").definition, proposal.targetExecutionContract.execution.tasks[0]);
-    assert.equal(applied.tasks.get("task-1").description, proposal.targetExecutionContract.execution.tasks[0].description);
+    // The old definition-mirror fixture was unreachable: runtime Tasks store these fields directly.
+    const targetTask = proposal.targetExecutionContract.execution.tasks[0], appliedTask = applied.tasks.get("task-1");
+    assert.equal(appliedTask.description, targetTask.description);
+    assert.deepEqual(appliedTask.deps, targetTask.deps);
+    assert.deepEqual(appliedTask.writePaths, targetTask.writePaths);
+    assert.deepEqual(appliedTask.acceptance, { criteria: targetTask.acceptance.criteria });
+    assert.equal(appliedTask.workflow, targetTask.workflow);
     assert.equal(applied.tasks.get("task-2").description, sourceContract().execution.tasks[1].description);
     assert.deepEqual(batch[4].data.reconciliation, [{ taskId: "task-1", action: "reverify" }, { taskId: "task-2", action: "keep" }]);
   } finally { rmSync(root, { recursive: true, force: true }); }
