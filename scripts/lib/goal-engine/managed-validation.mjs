@@ -2,7 +2,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants, existsSync, realpathSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, rmSync, readdirSync, lstatSync, chmodSync, openSync, closeSync, fstatSync, fsyncSync, linkSync } from "node:fs";
 import path from "node:path";
-import { createManagedWorktree, releaseManagedWorktree } from "../worktree-lifecycle/managed-worktree.mjs";
+import { createManagedWorktree, preserveManagedWorktree, releaseManagedWorktree } from "../worktree-lifecycle/managed-worktree.mjs";
 import { markDisposition } from "../worktree-lifecycle/registry.mjs";
 import { captureProcessBirthIdentity } from "../subagent-dispatch/process-birth-identity.ts";
 
@@ -68,6 +68,9 @@ const managedHash = (value) => createHash("sha256").update(JSON.stringify(value)
 const managedExact = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && keys.length === Object.keys(value).length && keys.every((key) => Object.hasOwn(value, key));
 function directory(root) { const value = path.join(root, "managed-validations"); if (existsSync(value)) { const stat = lstatSync(value); if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error("Managed validation receipt directory is invalid"); } else mkdirSync(value, { recursive: true, mode: 0o700 }); return value; }
 function file(root, receiptId) { return path.join(directory(root), `${receiptId}.json`); }
+function closureFile(root, receiptId) { return path.join(directory(root), `${receiptId}.closure.json`); }
+function readClosureFile(root, receiptId) { try { const target = closureFile(root, receiptId); regular(target); const value = JSON.parse(readFileSync(target, "utf8")); return managedExact(value, ["terminalProofHash", "resourceProofHash"]) && /^[a-f0-9]{64}$/.test(value.terminalProofHash) && /^[a-f0-9]{64}$/.test(value.resourceProofHash) ? value : null; } catch { return null; } }
+function writeClosureFile(root, receiptId, value) { const target = closureFile(root, receiptId), dir = directory(root), text = JSON.stringify(value), temporary = `${target}.${process.pid}.${Date.now()}`; writeFileSync(temporary, text, { mode: 0o600, flag: "wx" }); chmodSync(temporary, 0o600); try { linkSync(temporary, target); } catch (error) { if (error?.code !== "EEXIST") throw error; regular(target); if (readFileSync(target, "utf8") !== text) throw Error("Managed validation closure conflict"); } finally { try { unlinkSync(temporary); } catch {} } syncDirectory(dir); }
 function write(record) { const target = file(record.stateRoot, record.id), dir = directory(record.stateRoot); const temporary = `${target}.${process.pid}.${Date.now()}`; writeFileSync(temporary, JSON.stringify(record), { mode: 0o600, flag: "wx" }); chmodSync(temporary, 0o600); syncFile(temporary); renameSync(temporary, target); chmodSync(target, 0o600); syncFile(target); syncDirectory(dir); return receipt(record); }
 const TERMINAL_KEYS = ["status", "code", "signal", "output", "outputBytes", "truncated", "terminal", "pid", "pidBirthIdentity", "processGroupTerminalProof", "workspaceClean"];
 const RECORDED_KEYS = ["artifactHash", "recordedAt"];
@@ -182,6 +185,9 @@ export async function stopOwnedManagedValidation(request, services = {}) {
     services = {
       readReceipt: () => read({ id: request.allocationId, stateRoot: request.stateRoot }),
       recover: async (_request, record) => recoverManagedValidation(receipt(record)),
+      preserveManagedWorktree: ({ originRoot, id, ownerToken, reason }) => preserveManagedWorktree({ originRoot, id, ownerToken, reason }),
+      markValidationLeaseDebt: (workspaceLease) => { const lease = readLease(workspaceLease.stateRoot, workspaceLease.id); if (lease.state !== "cleanup-debt") writeLease({ ...lease, state: "cleanup-debt" }); },
+      writeRecord: (value) => { const { closure, ...next } = value; const durable = read(receipt(next)); if (durable.id !== next.id || durable.process?.processIdentityHash !== request.processIdentityHash) throw Error("Managed stop identity changed"); const saved = write({ ...durable, phase: "cleanup_debt", terminal: next.terminal, cleanupDebt: true }); writeClosureFile(next.stateRoot, next.id, closure); return saved; },
       preserveWorkspace: async (_request, record, terminal) => {
         const current = read(receipt(record));
         if (current.process?.processIdentityHash !== request.processIdentityHash || !current.terminal || managedHash(current.terminal) !== managedHash(terminal)) throw Error("Managed stop identity changed");
@@ -189,12 +195,7 @@ export async function stopOwnedManagedValidation(request, services = {}) {
         return { proofHash: managedHash({ receiptId: debt.id, terminal: debt.terminal, disposition: "preserved" }) };
       },
       preserveResource: async (_request, record, terminal, workspace) => ({ proofHash: managedHash({ receiptId: record.id, terminal, workspaceProofHash: workspace.proofHash, debt: true }) }),
-      readClosure: () => {
-        const record = read({ id: request.allocationId, stateRoot: request.stateRoot });
-        if (record.phase !== "cleanup_debt" || !record.terminal || record.process?.processIdentityHash !== request.processIdentityHash) return null;
-        const workspaceProofHash = managedHash({ receiptId: record.id, terminal: record.terminal, disposition: "preserved" });
-        return { terminalProofHash: managedHash(record.terminal), resourceProofHash: managedHash({ receiptId: record.id, terminal: record.terminal, workspaceProofHash, debt: true }) };
-      },
+      readClosure: () => readClosureFile(request.stateRoot, request.allocationId),
       writeClosure: async () => {},
     };
   }
@@ -202,6 +203,17 @@ export async function stopOwnedManagedValidation(request, services = {}) {
   if (!receipt?.process || receipt.process.processIdentityHash !== request.processIdentityHash) return unknown;
   const existing = typeof services.readClosure === "function" ? await services.readClosure(request) : null;
   if (existing?.terminalProofHash && existing?.resourceProofHash) return { state: "observed", terminalProofHash: existing.terminalProofHash, resourceProofHash: existing.resourceProofHash, resourceState: "quarantined", debt: true };
+  if (typeof services.preserveManagedWorktree === "function" && typeof services.markValidationLeaseDebt === "function" && typeof services.writeRecord === "function" && typeof services.recover === "function") {
+    const recovered = await services.recover(request, receipt);
+    const terminal = recovered?.terminal || recovered;
+    if (!terminal?.terminal || !receipt.workspaceLease) return unknown;
+    const workspace = await services.preserveManagedWorktree({ originRoot: receipt.workspaceLease.originRoot, id: receipt.workspaceLease.id, ownerToken: receipt.workspaceLease.ownerToken, reason: "Goal quarantine after owned validation stop" });
+    if (!workspace || workspace.ownerKind !== "goal-validation" || workspace.ownerId !== workspace.id || workspace.ownerToken !== receipt.workspaceLease.ownerToken || workspace.originRoot !== receipt.workspaceLease.originRoot || workspace.state !== "preserved" || workspace.disposition?.state !== "preserved" || workspace.disposition?.reason !== "Goal quarantine after owned validation stop") return unknown;
+    await services.markValidationLeaseDebt(receipt.workspaceLease);
+    await services.writeRecord({ ...receipt, phase: "cleanup_debt", terminal, cleanupDebt: true, closure: { terminalProofHash: managedHash(terminal), resourceProofHash: managedHash({ receiptId: receipt.id, terminal, workspaceReceipt: workspace, debt: true }) } });
+    const closure = { terminalProofHash: managedHash(terminal), resourceProofHash: managedHash({ receiptId: receipt.id, terminal, workspaceReceipt: workspace, debt: true }) };
+    return { state: "observed", ...closure, resourceState: "quarantined", debt: true };
+  }
   if (typeof services.recover !== "function" || typeof services.preserveWorkspace !== "function" || typeof services.preserveResource !== "function") return unknown;
   const recovered = await services.recover(request, receipt);
   const terminal = recovered?.terminal || recovered;
