@@ -37,18 +37,21 @@ test("R11 uses a deep-frozen complete authoritative manifest", () => {
   assert.equal(manifest.complete, true); assert.equal(Object.isFrozen(manifest), true);
   assert.equal(manifest.schemaVersion, "goal-runtime.v1.finalization-manifest.v1");
 });
-test("stable host API accepts only manifest approval reviewStore and provider", async () => {
+test("stable host API accepts exactly manifest approval reviewStore and provider", async () => {
   const seen = [];
   const result = await run({ manifest: completeManifest(), approval, reviewStore: store(), provider: async input => { seen.push(input); return { severity: "none", reportRef: `sha256:${h("a")}` }; } });
   assert.equal(result.status, "recorded");
   assert.deepEqual(Object.keys(seen[0]).sort(), ["idempotencyKey", "reviewId", "writerLockHeld"]);
   assert.equal(seen[0].writerLockHeld, false);
 });
-test("caller supplied reviewId is rejected", async () => {
-  await assert.rejects(run({ manifest: completeManifest(), approval, reviewStore: store(), provider: provider(), reviewId: "attacker" }));
-});
-test("caller supplied identity is rejected", async () => {
-  await assert.rejects(run({ manifest: completeManifest(), approval, reviewStore: store(), provider: provider(), identity: { goalId: "attacker" } }));
+for (const extra of [
+  { appendEvent: async () => {} },
+  { reviewId: "attacker" },
+  { identity: { goalId: "attacker" } },
+]) test(`stable host API rejects unsupported ${Object.keys(extra)[0]} without invoking provider`, async () => {
+  let calls = 0;
+  await assert.rejects(run({ manifest: completeManifest(), approval, reviewStore: store(), provider: async () => { calls++; return { severity: "none", reportRef: `sha256:${h("b")}` }; }, ...extra }));
+  assert.equal(calls, 0);
 });
 for (const bad of [
   { entryId: "x", sessionId: "s" }, { entryId: "x", sessionId: "s", source: "system" },
@@ -87,11 +90,6 @@ test("provider gets no manifest or approval payload", async () => {
     return { severity: "none", reportRef: `sha256:${h("4")}` };
   } });
 });
-for (const output of [undefined, null, {}, { severity: "unknown" }, { severity: "bogus", reportRef: `sha256:${h("5")}` }, { severity: "none", reportRef: "file:///tmp/report" }]) test(`fail closed malformed provider output ${JSON.stringify(output)}`, async () => {
+for (const output of [undefined, null, {}, { severity: "unknown" }, { severity: "bogus", reportRef: `sha256:${h("5")}` }, { severity: "none", reportRef: "sha256:short" }, { severity: "none", reportRef: "file:///tmp/report" }]) test(`fail closed malformed provider output ${JSON.stringify(output)}`, async () => {
   await assert.rejects(run({ manifest: completeManifest(), approval, reviewStore: store(), provider: async () => output }));
-});
-test("review success does not append goal.completed", async () => {
-  const events = [];
-  await run({ manifest: completeManifest(), approval, reviewStore: store(), provider: provider(), appendEvent: event => events.push(event) });
-  assert.deepEqual(events, []);
 });
