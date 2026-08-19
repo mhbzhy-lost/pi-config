@@ -102,7 +102,7 @@ test("production Host canary persists runtime draft and readiness through the re
     registries: runtimeRegistries, adapterRegistry: Object.freeze({ oracle: Object.freeze({ deterministic: true }) }),
   });
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost });
-  const result = JSON.parse(await tools.find(tool => tool.name === "goal_init").execute("call", runtimeInit(), undefined, undefined, { cwd, sessionManager }));
+  const result = JSON.parse((await tools.find(tool => tool.name === "goal_init").execute("call", runtimeInit(), undefined, undefined, { cwd, sessionManager })).details.value);
   assert.deepEqual(calls.map(call => call.cwd), [cwd]); assert.equal(result.runtimeState, "awaiting_user_approval");
   const projection = loadProjection(join(cwd, ".state/goal-engine"), result.goalId);
   assert.equal(projection.runtimeState, "awaiting_user_approval"); assert.equal(projection.readiness.readiness, "ready");
