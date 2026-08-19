@@ -73,7 +73,7 @@
           "compat": {
             "supportsToolSearch": true
           },
-          "contextWindow": 272000,
+          "contextWindow": 1000000,
           "maxTokens": 128000
         },
         {
