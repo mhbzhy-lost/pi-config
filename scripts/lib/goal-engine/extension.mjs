@@ -37,8 +37,9 @@ import {
   prepareExecutorBindingTicket,
 } from "./executor-binding.mjs";
 import { bindGoalExecutorCoordinator, inspectRootBrokerExecutorProof } from "../subagent-dispatch/root-broker-registry.ts";
+import { parseProcessTerminal } from "../subagent-dispatch/root-broker-protocol.ts";
 import { validateTaskDefinitions } from "./task-definition.mjs";
-import { buildSuspensionPlan, deriveOwnedExecutorStopRequest, requestOwnedRunStop } from "./suspension.mjs";
+import { buildSuspensionPlan, deriveOwnedExecutorStopRequest } from "./suspension.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.mjs";
 import {
   allocateExecutorWorkspace,
@@ -2702,47 +2703,86 @@ export function createGoalEngineExtension(pi, options = {}) {
   const ownedBoundTaskIds = (projection) => [...projection.tasks.entries()]
     .filter(([, task]) => task.executorBinding && ["dispatched", "running", "settling"].includes(task.status))
     .map(([taskId]) => taskId).sort();
-  const stopOwnedTasks = async (projection, taskIds) => {
-    for (const taskId of taskIds) {
-      const request = deriveOwnedExecutorStopRequest({ projection, taskId });
-      await requestOwnedRunStop({ stopOwnedRun: runtimeHost?.stopOwnedRun }, { projection, ...request });
-    }
+  const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+  const hash = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  const ownedProof = (response, runId) => {
+    if (!exact(response, ["state", "proof"]) || response.state !== "observed" || !response.proof || response.proof.runId !== runId) return null;
+    const { runId: proofRunId, ...terminal } = response.proof;
+    try { parseProcessTerminal(terminal); } catch { return null; }
+    return { runId: proofRunId, proofHash: canonicalHash(response.proof), state: "observed" };
   };
-  const suspendOwnedRuntime = async (ctx, reason) => {
-    const { root } = executionScopeFor(ctx);
-    const sessionId = sessionIdentity(ctx);
-    const projection = ownedRuntimeProjection(root, sessionId, "active");
-    if (!projection) return false;
-    const taskIds = ownedBoundTaskIds(projection);
-    const runIds = taskIds.map((taskId) => projection.tasks.get(taskId).executorBinding.runId).sort();
-    const plan = buildSuspensionPlan({ projection, reason, affectedIds: { taskIds, runIds } });
-    const event = makeEvent(plan.events[0].type, plan.events[0].data, projection.goalId, "goal-runtime.v1");
+  const appendSuspensionClosure = (root, projection, closure) => {
+    const event = makeEvent("goal.runtime_suspended", closure, projection.goalId, "goal-runtime.v1");
     const expected = applyEvent(projection, event);
-    let suspended;
-    try { suspended = appendEventFn(root, event, projection.version); }
+    try { return appendEventFn(root, event, projection.version); }
     catch (error) {
       const recovered = loadProjectionFn(root, projection.goalId);
       if (!isDeepStrictEqual(recovered, expected)) throw error;
-      suspended = recovered;
+      return recovered;
     }
-    if (taskIds.length === 0 && runIds.length === 0) {
-      const closure = { ...suspended.suspension, resourcesQuarantined: true, terminalProofRefs: [], workspaceClosureProofRefs: [], resourceClosureProofRefs: [] };
-      const closureEvent = makeEvent("goal.runtime_suspended", closure, projection.goalId, "goal-runtime.v1");
-      const expectedClosure = applyEvent(suspended, closureEvent);
-      try { suspended = appendEventFn(root, closureEvent, suspended.version); }
-      catch (error) {
-        const recovered = loadProjectionFn(root, projection.goalId);
-        if (!isDeepStrictEqual(recovered, expectedClosure)) throw error;
-        suspended = recovered;
+
+  };
+  const closeSuspendedRuntime = async (ctx, initial) => {
+    const { root } = executionScopeFor(ctx);
+    let projection = initial;
+    if (projection.runtimeState !== "suspended" || projection.suspension?.resourcesQuarantined) return;
+    const suspension = projection.suspension;
+    const terminalRefs = [...(suspension.terminalProofRefs || [])];
+    const workspaceRefs = [...(suspension.workspaceClosureProofRefs || [])];
+    const resourceRefs = [...(suspension.resourceClosureProofRefs || [])];
+    const has = (refs, key, value) => refs.some((ref) => ref[key] === value);
+    for (const taskId of suspension.affectedTaskIds) {
+      const task = projection.tasks.get(taskId), binding = task?.executorBinding;
+      if (!task || !binding) continue;
+      if (!has(terminalRefs, "runId", binding.runId)) {
+        projection = loadProjectionFn(root, projection.goalId);
+        const request = deriveOwnedExecutorStopRequest({ projection, taskId });
+        let response;
+        try { response = await runtimeHost?.stopOwnedRun?.({ runId: request.runId, asyncDir: request.asyncDir, sessionId: request.sessionId }); } catch { response = null; }
+        const proof = ownedProof(response, binding.runId);
+        if (!proof) continue;
+        terminalRefs.push(proof);
+      }
+      if (!has(workspaceRefs, "taskId", taskId)) {
+        projection = loadProjectionFn(root, projection.goalId);
+        const request = { goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, leaseId: binding.workspaceLeaseId, workspacePath: task.workspace.path, headAtDispatch: binding.headAtDispatch, baseHead: projection.runtimeBaseHead, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
+        let response; try { response = await runtimeHost?.quarantineWorkspace?.(request); } catch { response = null; }
+        if (exact(response, ["taskId", "attempt", "proofHash", "state", "disposition"]) && response.taskId === taskId && response.attempt === task.attempts && hash(response.proofHash) && response.state === "quarantined" && response.disposition === "preserved") workspaceRefs.push(response);
+      }
+      if (!has(resourceRefs, "ownerId", binding.runId)) {
+        projection = loadProjectionFn(root, projection.goalId);
+        const request = { goalId: projection.goalId, ownerKind: "executor", ownerId: binding.runId, taskId, attempt: task.attempts, leaseId: binding.workspaceLeaseId, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
+        let response; try { response = await runtimeHost?.quarantineResource?.(request); } catch { response = null; }
+        if (exact(response, ["ownerId", "proofHash", "state", "debt"]) && response.ownerId === binding.runId && hash(response.proofHash) && response.state === "quarantined" && response.debt === true) resourceRefs.push(response);
       }
     }
-    await stopOwnedTasks(suspended, taskIds);
-    return true;
+    for (const run of projection.observationRuns.values()) {
+      if (!suspension.affectedRunIds.includes(run.runId) || has(terminalRefs, "runId", run.runId) || !["process_bound"].includes(run.phase) || !hash(run.processIdentityHash)) continue;
+      projection = loadProjectionFn(root, projection.goalId);
+      const request = { goalId: projection.goalId, runId: run.runId, conditionId: run.conditionId, allocationId: run.allocationId, processIdentityHash: run.processIdentityHash, executionRevision: projection.executionRevision, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead };
+      let response; try { response = await runtimeHost?.stopManagedValidation?.(request); } catch { response = null; }
+      if (exact(response, ["state", "terminalProofHash", "resourceProofHash", "resourceState", "debt"]) && response.state === "observed" && hash(response.terminalProofHash) && hash(response.resourceProofHash) && response.resourceState === "quarantined" && response.debt === true) {
+        terminalRefs.push({ runId: run.runId, proofHash: response.terminalProofHash, state: "observed" });
+        resourceRefs.push({ ownerId: run.runId, proofHash: response.resourceProofHash, state: "quarantined", debt: true });
+      }
+    }
+    const closure = { ...suspension, terminalProofRefs: terminalRefs.sort((a, b) => a.runId.localeCompare(b.runId)), workspaceClosureProofRefs: workspaceRefs.sort((a, b) => a.taskId.localeCompare(b.taskId)), resourceClosureProofRefs: resourceRefs.sort((a, b) => a.ownerId.localeCompare(b.ownerId)) };
+    const complete = closure.terminalProofRefs.length === closure.affectedRunIds.length && closure.workspaceClosureProofRefs.length === closure.affectedTaskIds.length && closure.resourceClosureProofRefs.length === closure.affectedRunIds.length;
+    if (terminalRefs.length !== (suspension.terminalProofRefs || []).length || workspaceRefs.length !== (suspension.workspaceClosureProofRefs || []).length || resourceRefs.length !== (suspension.resourceClosureProofRefs || []).length) appendSuspensionClosure(root, projection, { ...closure, resourcesQuarantined: complete });
   };
-  const retrySuspendedOwnedStop = async (ctx, projection) => {
-    if (projection.runtimeState !== "suspended") return;
-    await stopOwnedTasks(projection, ownedBoundTaskIds(projection).filter((taskId) => projection.suspension?.affectedTaskIds?.includes(taskId)));
+  const suspendOwnedRuntime = async (ctx, reason) => {
+    const { root } = executionScopeFor(ctx); const sessionId = sessionIdentity(ctx);
+    const projection = ownedRuntimeProjection(root, sessionId, "active"); if (!projection) return false;
+    const taskIds = ownedBoundTaskIds(projection);
+    const observationRuns = [...projection.observationRuns.values()].filter((run) => !["terminal", "recorded", "released"].includes(run.phase));
+    const runIds = [...taskIds.map((taskId) => projection.tasks.get(taskId).executorBinding.runId), ...observationRuns.map((run) => run.runId)].sort();
+    const plan = buildSuspensionPlan({ projection, reason, affectedIds: { taskIds, runIds } });
+    const event = makeEvent(plan.events[0].type, plan.events[0].data, projection.goalId, "goal-runtime.v1");
+    const expected = applyEvent(projection, event); let suspended;
+    try { suspended = appendEventFn(root, event, projection.version); } catch (error) { const recovered = loadProjectionFn(root, projection.goalId); if (!isDeepStrictEqual(recovered, expected)) throw error; suspended = recovered; }
+    await closeSuspendedRuntime(ctx, suspended); return true;
   };
+  const retrySuspendedOwnedStop = async (ctx, projection) => { await closeSuspendedRuntime(ctx, projection); };
 
   pi.on("input", async (event, ctx) => {
     if (event.source !== "interactive" && event.source !== "rpc") return { action: "continue" };
