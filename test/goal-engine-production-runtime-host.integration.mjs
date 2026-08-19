@@ -95,7 +95,7 @@ test("stopOwnedRun accepts only absolute asyncDir and exact Root Broker input", 
 test("quarantineWorkspace preserves the inspected durable lease with canonical proof", async () => {
   const request = workspaceRequest(), inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true };
   const ownerToken = "owner-token", seen = [];
-  const lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: BASE_HEAD, ownerToken };
+  const lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: DISPATCH_HEAD, ownerToken };
   const h = await host({
     loadExecutorWorkspaceLease(input) { seen.push(["load", input]); return lease; },
     inspectExecutorWorkspace(input) { seen.push(["inspect", input]); return inspection; },
@@ -156,7 +156,7 @@ test("stopManagedValidation mismatch or unavailable returns attention without ps
 
 test("artifactRefForRun creates a content-addressed secure regular artifact", async () => {
   const root = mkdtempSync(join(tmpdir(), "goal-artifact-")), output = "terminal output";
-  const request = { stateRoot: root, goalId: "goal", runId: "run", managedTerminal: { status: "exited", code: 0, signal: null, output } };
+  const request = { stateRoot: root, goalId: "goal", runId: "run", managedTerminal: { status: "passed", code: 0, signal: null, output, outputBytes: Buffer.byteLength(output), truncated: false, terminal: true, pid: 17, pidBirthIdentity: "a".repeat(64), processGroupTerminalProof: "b".repeat(64), workspaceClean: true } };
   const h = await host({}), result = await h.artifactRefForRun(request), content = readFileSync(result.path);
   const artifactDir = join(root, "artifacts");
   exact(["id", "path"], result); assert.equal(result.id, hash(Buffer.from(output))); assert.equal(content.equals(Buffer.from(output)), true);
@@ -165,7 +165,7 @@ test("artifactRefForRun creates a content-addressed secure regular artifact", as
 });
 
 test("artifactRefForRun rejects unsafe target entries and noncanonical caller fields", async () => {
-  const root = mkdtempSync(join(tmpdir(), "goal-artifact-unsafe-")), output = "terminal output", request = { stateRoot: root, goalId: "goal", runId: "run", managedTerminal: { status: "exited", code: 0, signal: null, output } };
+  const root = mkdtempSync(join(tmpdir(), "goal-artifact-unsafe-")), output = "terminal output", request = { stateRoot: root, goalId: "goal", runId: "run", managedTerminal: { status: "passed", code: 0, signal: null, output, outputBytes: Buffer.byteLength(output), truncated: false, terminal: true, pid: 17, pidBirthIdentity: "a".repeat(64), processGroupTerminalProof: "b".repeat(64), workspaceClean: true } };
   const artifactDir = join(root, "artifacts"); mkdirSync(artifactDir, { recursive: true }); chmodSync(artifactDir, 0o700);
   const target = join(artifactDir, hash(Buffer.from(output)));
   for (const unsafe of [() => symlinkSync("/tmp", target), () => { writeFileSync(join(root, "source"), "x", { mode: 0o600 }); linkSync(join(root, "source"), target); }]) {
