@@ -13,10 +13,10 @@ const canonical = value => Array.isArray(value) ? value.map(canonical) : value &
 const sha = value => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 const freeze = value => { if (value && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value); } return value; };
 
-function evidence(head = baseHead, criterion = "criterion-1") {
+function evidence(head = baseHead, criterion = "criterion-1", immutableRefs = [{ criterion: "d", output: "e" }, { criterion: "a", output: "f" }]) {
   const identity = { goalId: "goal-hardening", taskId: "task-1", runId: "executor-1", attempt: 1, contractHash: h("a"), head };
-  const make = letter => normalizeSettlementEvidence({ identity, criteria: [{ id: criterion, status: "satisfied", evidence: [ref(letter)] }], commandsRun: [{ command: "node --test", result: "passed", outputRef: ref(letter === "d" ? "e" : "f") }], changedFiles: ["src/goal.mjs"] }, { expectedIdentity: identity, expectedCriteria: [criterion], outcome: "succeeded" });
-  const subagent = make("d"), main = make("a");
+  const make = refs => normalizeSettlementEvidence({ identity, criteria: [{ id: criterion, status: "satisfied", evidence: [ref(refs.criterion)] }], commandsRun: [{ command: "node --test", result: "passed", outputRef: ref(refs.output) }], changedFiles: ["src/goal.mjs"] }, { expectedIdentity: identity, expectedCriteria: [criterion], outcome: "succeeded" });
+  const subagent = make(immutableRefs[0]), main = make(immutableRefs[1]);
   return { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${h("9")}.yaml`, sha256: h("9"), subagentFingerprint: fingerprintSettlementEvidence(subagent), mainFingerprint: fingerprintSettlementEvidence(main), subagent, main, mainSessionId: "root-1" };
 }
 
@@ -50,7 +50,7 @@ test("RED5 permits only resolved or rejected_by_user findings and blocks unknown
 // Canonical task criteria, not evidence-controlled criteria, are the authority.
 test("RED6 build blocks dual evidence rewritten from criterion-1 to criterion-2", () => { const input = fixture(); input.projection.tasks.get("task-1").settlement.evidence = evidence(baseHead, "criterion-2"); assert.ok(manifest(input).blockers.some(item => item.code === "TASK_DUAL_EVIDENCE_INVALID")); });
 test("RED6 validator rejects recomputed dual-evidence criteria forgery against task authority", () => {
-  const out = structuredClone(manifest(fixture())), task = out.tasks[0], forged = evidence(baseHead, "criterion-2");
+  const out = structuredClone(manifest(fixture())), task = out.tasks[0], forged = evidence(baseHead, "criterion-2", [{ criterion: "8", output: "6" }, { criterion: "7", output: "5" }]);
   // This is the canonical authority that a manifest task summary must retain.
   task.acceptanceCriteria = ["criterion-1"];
   task.settlement.subagentFingerprint = forged.subagentFingerprint; task.settlement.mainFingerprint = forged.mainFingerprint;
