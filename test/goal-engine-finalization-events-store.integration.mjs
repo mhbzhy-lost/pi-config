@@ -14,14 +14,13 @@ const hex = (n) => n.toString(16).padStart(64, "0");
 const event = (type, data, n, goalId = "finalization-goal") => ({ schemaVersion: "goal-runtime.v1", eventId: `${goalId}-${n}`, goalId, occurredAt: `2026-08-30T00:00:${String(n).padStart(2, "0")}.000Z`, type, data });
 function zeroTaskRuntime() { return { objective: "Finalization event contract", execution: { schema: "goal-runtime.v1", tasks: [], conditions: [{ id: "final-condition", role: "terminal", enforcement: "final", statement: "Finalization fixture passes", observable: "fixture", expected: "passing", depends_on: [], oracle_ref: "oracle", environment_ref: "local", fixture_refs: ["sample"], invalidation: { paths: [], task_ids: [] }, remediation: { policy: "user-approved", allowed_paths: ["test/**"], max_attempts: 0 }, stability: { mode: "single", require_fresh_environment: true } }], write_policy: { allowed_paths: ["test/**"] }, budgets: { max_observations: 2, max_repairs: 0, max_elapsed_minutes: 1, max_no_progress: 1 } } }; }
 function approvalHash(value) { return createHash("sha256").update(JSON.stringify({ baseHead: value.baseHead, executionContractHash: value.executionContractHash, goalId: "finalization-goal", proposalId: value.proposalId, sessionId: value.sessionId })).digest("hex"); }
-function approvalFor(p) { return { proposalId: "proposal", proposalHash: p.runtimeApproval.proposalHash, executionContractHash: p.executionContractHash, baseHead: head, sessionId: "owner", userEntryId: "user-entry", capabilityDigest: hex(2) }; }
-function observation(p, cycle, n) { const common = { runId: `run-${cycle}`, conditionId: "final-condition" }, evidence = { executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("final-condition").conditionHash, head, adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: `environment-${cycle}` }, fixtures: [{ ref: "sample", fingerprint: "fixture" }], artifact: { id: `artifact-${cycle}`, hash: hex(n + 5) } }; return [event("condition.observation_requested", { ...common, cycle, head, executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("final-condition").conditionHash, adapter: { ref: "oracle", version: "1" }, worldSnapshotHash: hex(n), resourceClaimsHash: hex(n + 1) }, n), event("condition.observation_lease_allocated", { ...common, allocationId: `lease-${cycle}`, leaseReceiptHash: hex(n + 2) }, n + 1), event("condition.observation_process_bound", { ...common, processIdentityHash: hex(n + 3) }, n + 2), event("condition.observation_terminal", { ...common, terminalProofHash: hex(n + 4) }, n + 3), event("condition.observation_recorded", { ...common, evidenceId: hex(n + 6), verdict: { kind: "passed" }, evidence }, n + 4)]; }
-function activeEvents() { const contract = normalizeRuntimeGoalInit(zeroTaskRuntime(), runtimeRegistries), records = []; let p = createProjection(); const apply = (row) => { records.push(row); p = applyEvent(p, row); }; apply(event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: head, readiness: "draft" }, 1)); apply(event("goal.session_bound", { sessionId: "owner", leafId: "leaf" }, 2)); apply(event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 3)); const approval = { proposalId: "proposal", executionContractHash: p.executionContractHash, baseHead: head, sessionId: "owner" }; apply(event("goal.runtime_approval_recorded", { ...approval, proposalHash: approvalHash(approval), userEntryId: "user-entry", capabilityDigest: hex(2) }, 4)); for (const row of observation(p, 0, 5)) apply(row); apply(event("goal.runtime_activated", {}, 10)); for (const row of observation(p, 1, 11)) apply(row); return { projection: p, records }; }
+function observation(p, cycle, n) { const common = { runId: `run-${cycle}`, conditionId: "final-condition" }, evidence = { executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("final-condition").conditionHash, head, adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: `environment-${cycle}` }, fixtures: [{ ref: "sample", fingerprint: "fixture" }], artifact: { id: `artifact-${cycle}`, hash: hex(n + 5) } }; return [event("condition.observation_requested", { ...common, cycle, head, executionRevision: p.executionRevision, executionContractHash: p.executionContractHash, conditionHash: p.conditions.get("final-condition").conditionHash, adapter: { ref: "oracle", version: "1" }, worldSnapshotHash: hex(n), resourceClaimsHash: hex(n + 1) }, n), event("condition.observation_lease_allocated", { ...common, allocationId: `lease-${cycle}`, leaseReceiptHash: hex(n + 2) }, n + 1), event("condition.observation_process_bound", { ...common, processIdentityHash: hex(n + 3) }, n + 2), event("condition.observation_terminal", { ...common, terminalProofHash: hex(n + 4) }, n + 3), event("condition.observation_recorded", { ...common, evidenceId: hex(n + 6), verdict: { kind: "passed" }, evidence }, n + 4), event("condition.observation_released", { ...common, releaseReceiptHash: hex(n + 7) }, n + 5)]; }
+function activeEvents() { const contract = normalizeRuntimeGoalInit(zeroTaskRuntime(), runtimeRegistries), records = []; let p = createProjection(); const apply = (row) => { records.push(row); p = applyEvent(p, row); }; apply(event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: head, readiness: "draft" }, 1)); apply(event("goal.session_bound", { sessionId: "owner", leafId: "leaf" }, 2)); apply(event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 3)); const approval = { proposalId: "proposal", executionContractHash: p.executionContractHash, baseHead: head, sessionId: "owner" }; apply(event("goal.runtime_approval_recorded", { ...approval, proposalHash: approvalHash(approval), userEntryId: "user-entry", capabilityDigest: hex(2) }, 4)); for (const row of observation(p, 0, 5)) apply(row); apply(event("goal.runtime_activated", {}, 11)); for (const row of observation(p, 1, 12)) apply(row); return { projection: p, records }; }
 function active() { return activeEvents().projection; }
 function storedActive() { const root = mkdtempSync(join(tmpdir(), "goal-finalization-events-")); let p = createProjection(); for (const row of activeEvents().records) p = appendEvent(root, row, p.version); return { root, projection: p }; }
-function started(p, n = 16, overrides = {}) { return event("goal.final_review_started", { reviewId: "review-1", manifestHash: hex(101), stateHash: hex(102), worldHash: hex(103), head, approval: approvalFor(p), ...overrides }, n); }
-function recorded(p, severity = "none", n = 17, overrides = {}) { return event("goal.final_review_recorded", { reviewId: "review-1", resultHash: hex(104), severity, status: ["none", "minor"].includes(severity) ? "recorded" : "changes_required", ...overrides }, n); }
-function completed(n = 18, overrides = {}) { return event("goal.completed", { verdict: "COMPLETE", reviewId: "review-1", manifestHash: hex(101), stateHash: hex(102), worldHash: hex(103), head, resultHash: hex(104), ...overrides }, n); }
+function started(p, n = 18, overrides = {}) { return event("goal.final_review_started", { reviewId: "review-1", manifestHash: hex(101), stateHash: hex(102), worldHash: hex(103), head, approval: { entryId: "final-review-user", sessionId: "owner", source: "user" }, ...overrides }, n); }
+function recorded(p, severity = "none", n = 19, overrides = {}) { return event("goal.final_review_recorded", { reviewId: "review-1", resultHash: hex(104), severity, status: ["none", "minor"].includes(severity) ? "recorded" : "changes_required", ...overrides }, n); }
+function completed(n = 20, overrides = {}) { return event("goal.completed", { verdict: "COMPLETE", reviewId: "review-1", manifestHash: hex(101), stateHash: hex(102), worldHash: hex(103), head, resultHash: hex(104), ...overrides }, n); }
 function files(root) { const goal = join(root, "goals", "finalization-goal"); return ["events.jsonl", "projection.json"].map((name) => readFileSync(join(goal, name), "utf8")); }
 
 function withStarted() { const p = active(); return applyEvent(p, started(p)); }
@@ -34,23 +33,33 @@ test("runtime final review start persists the complete exact identity", () => {
 
 test("runtime final review start rejects duplicate review identity", () => {
   const p = withStarted();
-  assert.throws(() => applyEvent(p, started(p, 17)), /final review start|duplicate/i);
+  assert.throws(() => applyEvent(p, started(p, 19)), /final review start|duplicate/i);
 });
 test("runtime final review start rejects conflicting review identity", () => {
   const p = withStarted();
-  assert.throws(() => applyEvent(p, started(p, 17, { reviewId: "review-2" })), /final review start|duplicate/i);
+  assert.throws(() => applyEvent(p, started(p, 20, { reviewId: "review-2" })), /final review start|duplicate/i);
 });
 for (const [name, overrides] of [
-  ["missing approval", { approval: undefined }], ["drifting head", { head: "b".repeat(40) }],
+  ["missing approval", { approval: undefined }], ["extra approval field", { approval: { entryId: "final-review-user", sessionId: "owner", source: "user", extra: true } }],
+  ["approval source not user", { approval: { entryId: "final-review-user", sessionId: "owner", source: "system" } }],
+  ["approval session mismatch", { approval: { entryId: "final-review-user", sessionId: "other", source: "user" } }], ["drifting head", { head: "b".repeat(40) }],
   ["non-hash manifest", { manifestHash: "bad" }], ["non-hash state", { stateHash: "bad" }],
   ["non-hash world", { worldHash: "bad" }], ["raw provider text", { providerText: "do not persist" }],
 ]) test(`runtime final review start rejects ${name}`, () => {
-  const p = active(); assert.throws(() => applyEvent(p, started(p, 16, overrides)), /final review start|invalid/i);
+  const p = active(); assert.throws(() => applyEvent(p, started(p, 21, overrides)), /final review start|invalid/i);
 });
 
 test("runtime final review start rejects suspended runtime", () => {
-  let p = active(); p = applyEvent(p, event("goal.runtime_suspended", { suspensionId: "s", reason: "host_pause", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-30T00:00:16.000Z", resourcesQuarantined: false }, 16));
-  assert.throws(() => applyEvent(p, started(p, 17)), /active|final review/i);
+  let p = active(); p = applyEvent(p, event("goal.runtime_suspended", { suspensionId: "s", reason: "interactive_steer", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-30T00:00:18.000Z", resourcesQuarantined: false }, 18));
+  assert.throws(() => applyEvent(p, started(p, 22)), /active|final review/i);
+});
+test("runtime final review start rejects pending human decision", () => {
+  const p = active(); p.pendingHumanDecision = { phase: "proposed" };
+  assert.throws(() => applyEvent(p, started(p, 23)), /active|final review|decision/i);
+});
+test("runtime final review start rejects non-active lifecycle", () => {
+  const p = active(); p.lifecycle = "blocked";
+  assert.throws(() => applyEvent(p, started(p, 24)), /active|final review/i);
 });
 
 for (const severity of ["none", "minor", "important", "critical"]) test(`runtime records ${severity} with its canonical status`, () => {
