@@ -36,7 +36,10 @@ export function createProductionGoalRuntimeHost(pi, options = {}) {
   const registries = options.registries || Object.freeze({}); const adapterRegistry = options.adapterRegistry || Object.freeze({});
   const host = {
     registries, adapterRegistry,
-    captureCurrentWorld: async (repoRoot) => (options.facade?.captureCurrentWorld || captureCurrentWorld)({ repoRoot, adapterRegistry, environmentRegistry: options.environmentRegistry || Object.freeze({}), fixtureRegistry: options.fixtureRegistry || Object.freeze({}), resourceRegistry: typeof options.resourceRegistry === "function" ? options.resourceRegistry() : (options.resourceRegistry || Object.freeze({})), runInventory: typeof options.runInventory === "function" ? options.runInventory() : (options.runInventory || []) }),
+    captureCurrentWorld: (input) => {
+      if (!exact(input, ["cwd"]) || typeof input.cwd !== "string" || !input.cwd || !isAbsolute(input.cwd)) throw Error("Invalid CurrentWorld request");
+      return (facade.captureCurrentWorld || captureCurrentWorld)({ repoRoot: input.cwd, adapterRegistry, environmentRegistry: options.environmentRegistry || Object.freeze({}), fixtureRegistry: options.fixtureRegistry || Object.freeze({}), resourceRegistry: typeof options.resourceRegistry === "function" ? options.resourceRegistry() : (options.resourceRegistry || Object.freeze({})), runInventory: typeof options.runInventory === "function" ? options.runInventory() : (options.runInventory || []) });
+    },
     artifactRefForRun: async (input) => artifact(input),
     prepareManagedValidation: facade.prepareManagedValidation, startManagedValidation: facade.startManagedValidation, recoverManagedValidation: facade.recoverManagedValidation, inspectManagedValidation: facade.inspectManagedValidation, releaseManagedValidation: facade.releaseManagedValidation,
     stopOwnedRun: async (binding) => { if (!exact(binding, ["runId", "asyncDir", "sessionId"]) || !binding.runId || !binding.sessionId || !isAbsolute(binding.asyncDir)) throw Error("Invalid Root Broker binding"); return (options.stopRootBrokerGoalOwnedRun || stopRootBrokerGoalOwnedRun)(pi, binding); },
