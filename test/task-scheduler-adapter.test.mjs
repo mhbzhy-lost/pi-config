@@ -23,6 +23,26 @@ let sessionNumber = 0;
 const ctx = (cwd, confirm = async () => true) => { const sessionId = `unique-session-${++sessionNumber}`; return { cwd, hasUI: true, sessionManager: { getSessionId: () => sessionId }, ui: { confirm, setStatus() {} } }; };
 const call = (tool, parameters, context) => tool.execute("id", parameters, new AbortController().signal, () => {}, context);
 
+test("scheduler tool descriptions explicitly say when each tool is used", () => {
+  const pi = makeHost();
+  registerTaskSchedulerAdapter(pi, { upstreamExtension(api) {
+    api.registerTool({ name: "scheduler_create", description: "Create a scheduled task. Use when the user requests a future, repeated, or timer task.", execute() {} });
+    api.registerTool({ name: "scheduler_list", description: "List scheduled tasks.", execute() {} });
+    api.registerTool({ name: "scheduler_get", description: "Get a scheduled task.", execute() {} });
+    api.registerTool({ name: "scheduler_delete", description: "Delete a scheduled task.", execute() {} });
+  } });
+  for (const [name, usage, upstreamDescription] of [
+    ["scheduler_create", "Use when the user requests a future, repeated, or timer scheduled prompt or task.", "Create a scheduled task. Use when the user requests a future, repeated, or timer task."],
+    ["scheduler_list", "Use when inspecting what scheduled prompts or tasks exist.", "List scheduled tasks."],
+    ["scheduler_get", "Use when retrieving the details, history, or schedule of a known scheduled task ID.", "Get a scheduled task."],
+    ["scheduler_delete", "Use when removing or canceling a scheduled prompt or task by ID.", "Delete a scheduled task."],
+  ]) {
+    const description = pi.tools.get(name).description;
+    assert.ok(description.startsWith(usage), `${name} guidance must come first`);
+    assert.ok(description.includes(upstreamDescription), `${name} must preserve its upstream description`);
+  }
+});
+
 test("explicit frozen facade has no reflection or unknown-event bypass", async () => {
   const root = await mkdtemp(join(tmpdir(), "scheduler-membrane-")); await mkdir(join(root, "repo"));
   const pi = makeHost(); registerTaskSchedulerAdapter(pi, { upstreamExtension: fakeUpstream, env: { XDG_STATE_HOME: join(root, "state") } });
