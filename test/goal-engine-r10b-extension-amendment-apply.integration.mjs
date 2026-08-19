@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
+import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
+import { fingerprintSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
@@ -14,6 +15,29 @@ const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" 
 const rootFor = cwd => join(cwd, ".state/goal-engine");
 const projectionFor = cwd => loadProjection(rootFor(cwd), "harden-runtime");
 const eventCount = (cwd, type) => (readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8").match(new RegExp(`"type":"${type}"`, "g")) || []).length;
+const hash = value => createHash("sha256").update(value).digest("hex");
+const event = (goalId, type, data) => ({ schemaVersion: "goal-runtime.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data });
+function appendRuntime(cwd, goalId, type, data) { const root = rootFor(cwd), projection = loadProjection(root, goalId); return appendEvent(root, event(goalId, type, data), projection.version); }
+
+// Drive the actual Store reducer and Git disposition protocol instead of
+// substituting a Task status or mutating the projection fixture.
+function acceptCanonicalTask(cwd, goalId, taskId, directory) {
+  const before = projectionFor(cwd), task = before.tasks.get(taskId), baseCommit = git(cwd, "rev-parse", "HEAD"), workspace = mkdtempSync(join(tmpdir(), `r10-${taskId}-`));
+  git(cwd, "clone", "-q", cwd, workspace); git(workspace, "config", "user.email", "test@example.com"); git(workspace, "config", "user.name", "Test");
+  mkdirSync(join(workspace, directory), { recursive: true }); const changed = join(directory, "result.mjs"); writeFileSync(join(workspace, changed), `export const ${taskId.replace(/-/g, "_")} = true;\n`);
+  git(workspace, "add", changed); git(workspace, "commit", "-m", `test: ${taskId} result`); const executorHead = git(workspace, "rev-parse", "HEAD"), contractHash = hash(`r10-contract:${goalId}:${taskId}`), attempt = task.attempts + 1, runId = `r10-${taskId}-run-${attempt}`, lease = hash(`r10-lease:${taskId}:${attempt}`);
+  const workspaceData = { attempt, path: workspace, branch: `ge/${goalId}/${taskId}/${attempt}`, baseCommit, originRef: "refs/heads/main" };
+  appendRuntime(cwd, goalId, "task.dispatched", { taskId, contractHash, workspace: workspaceData });
+  appendRuntime(cwd, goalId, "task.executor_bound", { taskId, attempt, runId, contractHash, asyncDir: join(workspace, ".async"), workspacePath: workspace, workspaceLeaseId: lease, headAtDispatch: baseCommit });
+  const identity = { goalId, taskId, runId, attempt, contractHash, head: executorHead }, expectedCriteria = task.acceptance.criteria.map(({ id }) => id), criteria = expectedCriteria.map(id => ({ id, status: "satisfied", evidence: [`sha256:${hash(`${taskId}:${id}:child`)}`] })), options = { expectedIdentity: identity, expectedCriteria, outcome: "succeeded" }, subagent = { identity, criteria, commandsRun: [{ command: "node --test", result: "passed", outputRef: `sha256:${hash(`${taskId}:child:command`)}` }], changedFiles: [changed] }, main = { identity, criteria: criteria.map(row => ({ ...row, evidence: [`sha256:${hash(`${taskId}:${row.id}:main`)}`] })), commandsRun: [{ command: "node --test", result: "passed", outputRef: `sha256:${hash(`${taskId}:main:command`)}` }], changedFiles: [changed] }, sha256 = hash(`${taskId}:${executorHead}:evidence`);
+  appendRuntime(cwd, goalId, "task.settled", { taskId, outcome: "succeeded", attempt, executorHead, executorProof: { runId, proofId: hash(`${runId}:proof`), rootSessionId: "owner", observedAt: Date.now(), outcome: "succeeded" }, settlementEvidence: { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${sha256}.yaml`, sha256, subagentFingerprint: fingerprintSettlementEvidence(subagent, options), mainFingerprint: fingerprintSettlementEvidence(main, options), subagent, main, mainSessionId: "owner" } });
+  git(cwd, "fetch", "-q", workspace, executorHead); git(cwd, "cherry-pick", "FETCH_HEAD"); const originHead = git(cwd, "rev-parse", "HEAD");
+  appendRuntime(cwd, goalId, "task.workspace_disposition_started", { taskId, attempt, requestedAction: "integrate", strategy: "cherry-pick", executorHead, originHeadBefore: baseCommit, originRef: "refs/heads/main" });
+  appendRuntime(cwd, goalId, "task.workspace_disposition_applied", { taskId, attempt, action: "integrate", strategy: "cherry-pick", executorHead, originHead });
+  appendRuntime(cwd, goalId, "task.workspace_disposed", { taskId, attempt, action: "integrate", released: true });
+  appendRuntime(cwd, goalId, "task.accepted", { taskId, workspaceAttempt: attempt });
+  assert.equal(git(workspace, "rev-parse", "HEAD"), executorHead); assert.equal(git(cwd, "merge-base", "--is-ancestor", baseCommit, originHead), "");
+}
 
 function repo() {
   const cwd = mkdtempSync(join(tmpdir(), "r10b-apply-"));
@@ -43,12 +67,13 @@ function host(cwd, { nonceCalls, world = () => ({}) } = {}) {
   };
 }
 async function invoke(api, name, input = {}) { return (await api.tools.find(tool => tool.name === name).execute("call", input, undefined, undefined, { cwd: api.cwd, sessionManager: api.sessionManager })).details.value; }
-async function approved({ sessionId = "owner", entries, extension = {}, choice = "approve" } = {}) {
+async function approved({ sessionId = "owner", entries, extension = {}, choice = "approve", accepted = false } = {}) {
   const cwd = repo(), api = pi(cwd, entries, sessionId), nonces = [];
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd, { nonceCalls: nonces, ...extension }), ...extension });
   await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status");
   await api.handlers.get("input")({ type: "input", text: "approve", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
   for (let i = 0; i < 10 && projectionFor(cwd).runtimeState !== "active"; i++) await invoke(api, "goal_status");
+  if (accepted) acceptCanonicalTask(cwd, "harden-runtime", "task-1", "src");
   await api.handlers.get("input")({ type: "input", text: "amend privately", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
   await invoke(api, "goal_amend", { goal_id: "harden-runtime", operation: "propose_execution_change", reason: "amend task", changes: { update_tasks: [{ id: "task-1", description: "Amended target task" }] } });
   await api.handlers.get("input")({ type: "input", text: choice, source: "interactive" }, { cwd, sessionManager: api.sessionManager });
@@ -73,9 +98,10 @@ test("R10B keeps raw Host nonce out of all public ledgers and repeats no batch",
 });
 
 test("R10B pre-append failure leaves approved suspension retryable", async () => {
-  let armed = false; const { cwd, api } = await approved({ extension: { appendEventBatch(root, batch, version) { if (armed) throw Error("pre-append"); return appendEventBatch(root, batch, version); } } }); armed = true;
+  let armed = false, failed = false; const { cwd, api } = await approved({ extension: { appendEventBatch(root, batch, version) { if (armed && !failed && batch.some(entry => entry.type === "execution.amendment_applied")) { failed = true; armed = false; throw Error("pre-append"); } return appendEventBatch(root, batch, version); } } }); armed = true;
   await assert.rejects(invoke(api, "goal_status"), /pre-append/); const pending = projectionFor(cwd);
-  assert.equal(pending.pendingHumanDecision.phase, "approved"); assert.equal(pending.runtimeState, "suspended"); await invoke(api, "goal_status"); assert.equal(projectionFor(cwd).runtimeState, "active");
+  assert.equal(pending.pendingHumanDecision.phase, "approved"); assert.equal(pending.runtimeState, "suspended"); const revision = pending.executionRevision;
+  await invoke(api, "goal_status"); assert.equal(failed, true); assert.equal(projectionFor(cwd).runtimeState, "active"); assert.equal(projectionFor(cwd).executionRevision, revision + 1);
 });
 
 test("R10B durable-then-throw batch recovers exactly once across reload", async () => {
@@ -99,6 +125,6 @@ test("R10B cross-session status cannot apply and rejection permits a fresh propo
 });
 
 test("R10B accepted task history remains accepted while amendment requires reverification", async () => {
-  const { cwd, api } = await approved(); const before = projectionFor(cwd).tasks.get("task-1"); assert.equal(before.status, "accepted", "fixture must establish accepted Task through canonical events");
+  const { cwd, api } = await approved({ accepted: true }); const before = projectionFor(cwd).tasks.get("task-1"); assert.equal(before.status, "accepted", "fixture must establish accepted Task through canonical events");
   await invoke(api, "goal_status"); const task = projectionFor(cwd).tasks.get("task-1"); assert.equal(task.status, "accepted"); assert.equal(projectionFor(cwd).taskApplicability.get("task-1").state, "reverify_required");
 });
