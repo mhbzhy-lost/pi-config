@@ -27,7 +27,7 @@ export function normalizeProductionRuntimeHostOptions(value) {
 function configuredRegistries(options) {
   if (!Object.hasOwn(options, "adapters")) return null;
   const config = normalizeProductionRuntimeHostOptions(Object.fromEntries(hostKeys.map((key) => [key, options[key]])));
-  return { config, registries: Object.freeze({ adapters: Object.freeze(Object.fromEntries(config.adapters.map(({ ref, version, deterministic }) => [ref, Object.freeze({ version, deterministic })]))), environments: Object.freeze(structuredClone(config.environments)), fixtures: Object.freeze(structuredClone(config.fixtures)) }), adapterRegistry: createObservationAdapterRegistry(config.adapters) };
+  return { config, registries: Object.freeze({ adapters: Object.freeze(Object.fromEntries(config.adapters.map(({ ref, deterministic }) => [ref, Object.freeze({ deterministic })]))), environments: Object.freeze(structuredClone(config.environments)), fixtures: Object.freeze(structuredClone(config.fixtures)) }), adapterRegistry: createObservationAdapterRegistry(config.adapters) };
 }
 function safeFile(file) { const stat = lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) throw Error("artifact identity is invalid"); return stat; }
 function sameNode(left, right) { return left.dev === right.dev && left.ino === right.ino; }
