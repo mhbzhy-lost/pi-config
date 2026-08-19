@@ -200,7 +200,8 @@ test("amendment enters suspended through its durable runtime event", () => {
   const approvalMaterial = { proposalId: "p", proposalHash: proposal.proposalHash, ownerSessionId: "session", userEntryId: "u", userEntryHash: hash(5), branchBindingHash: hash(6), source: "interactive", recordedAt: "2026-08-20T00:00:17.000Z" };
   p = applyEvent(p, event("execution.amendment_approved", { ...approvalMaterial, decisionId: canonicalHash(approvalMaterial) }, 17));
   p = applyEvent(p, event("execution.amendment_capability_consumed", { proposalId: "p", nonceDigest: hash(3) }, 18));
-  p = applyEvent(p, event("execution.amendment_applied", { proposalId: "p", proposalHash: proposal.proposalHash, oldRevision: 1, newRevision: 2, targetContractHash: proposal.targetContractHash, reconciliation: [{ taskId: "task-1", action: "keep" }] }, 19));
+  p = applyEvent(p, event("task.applicability_changed", { taskId: "task-1", revision: 2, state: "applicable", reason: "unaffected" }, 19));
+  p = applyEvent(p, event("execution.amendment_applied", { proposalId: "p", proposalHash: proposal.proposalHash, oldRevision: 1, newRevision: 2, targetContractHash: proposal.targetContractHash, reconciliation: [{ taskId: "task-1", action: "keep" }] }, 20));
   assert.equal(p.executionRevision, 2);
 });
 

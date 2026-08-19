@@ -466,7 +466,9 @@ function assertCanonicalAmendmentBatch(events, projection, standalone) {
   const pending = projection.pendingHumanDecision;
   if (!pending || pending.phase !== "approved") throw new Error("canonical amendment batch requires approved proposal");
   const targetTaskIds = (pending.targetExecutionContract?.execution?.tasks || []).map((task) => task.id);
-  const taskIds = [...new Set([...projection.tasks.keys(), ...targetTaskIds])].sort();
+  const sourceTaskIds = pending.sourceTaskIds;
+  if (!Array.isArray(sourceTaskIds) || JSON.stringify(sourceTaskIds) !== JSON.stringify([...sourceTaskIds].sort()) || sourceTaskIds.some((id) => !projection.tasks.has(id))) throw new Error("invalid amendment source tasks");
+  const taskIds = [...new Set([...sourceTaskIds, ...targetTaskIds])].sort();
   const conditionIds = [...projection.conditions.keys()].sort();
   const expectedLength = 1 + taskIds.length + conditionIds.length + 2;
   if (events.length !== expectedLength || events.at(-1)?.type !== "goal.runtime_resumed") throw new Error("invalid canonical amendment batch");
@@ -477,8 +479,9 @@ function assertCanonicalAmendmentBatch(events, projection, standalone) {
   const applied = events.at(-2)?.data;
   if (events.at(-2)?.type !== "execution.amendment_applied" || applied?.proposalId !== pending.proposalId || applied?.proposalHash !== pending.proposalHash || applied?.oldRevision !== pending.oldRevision || applied?.newRevision !== pending.newRevision || applied?.targetContractHash !== pending.targetContractHash) throw new Error("invalid amendment apply identity");
   const reconciliation = applied.reconciliation;
-  const actionFor = (taskId, state) => !projection.tasks.has(taskId) ? "add" : state === "reverify_required" ? "reverify" : state === "superseded" ? "supersede" : "keep";
-  if (!Array.isArray(reconciliation) || reconciliation.length !== taskIds.length || reconciliation.some((row, i) => row?.taskId !== taskIds[i] || row.action !== actionFor(taskIds[i], events[i + 1].data.state))) throw new Error("invalid amendment reconciliation");
+  const targetTaskSet = new Set(targetTaskIds);
+  const actionFor = (taskId, state) => !sourceTaskIds.includes(taskId) && targetTaskSet.has(taskId) ? state === "applicable" ? "add" : null : sourceTaskIds.includes(taskId) && !targetTaskSet.has(taskId) ? state === "superseded" ? "supersede" : null : state === "applicable" ? "keep" : state === "reverify_required" ? "reverify" : null;
+  if (!Array.isArray(reconciliation) || reconciliation.length !== taskIds.length || reconciliation.some((row, i) => row?.taskId !== taskIds[i] || row.action !== actionFor(taskIds[i], events[i + 1].data.state) || (targetTaskSet.has(taskIds[i]) && events[i + 1].data.state === "superseded"))) throw new Error("invalid amendment reconciliation");
   const resumed = events.at(-1)?.data;
   if (resumed?.suspensionId !== projection.suspension?.suspensionId) throw new Error("invalid amendment resume");
 }

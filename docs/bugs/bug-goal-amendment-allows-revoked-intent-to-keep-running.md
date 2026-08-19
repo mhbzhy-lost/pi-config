@@ -41,6 +41,10 @@ foundation 曾生成彼此不同的 suspensionId、在无 active offer 时伪造
 
 `task.applicability_changed` 与 `condition.evidence_invalidated` 同时承载普通本地收敛和 amendment 事实。Store 若只按共享 type 进入 amendment preflight，会拒绝本应可单独追加的两字段 invalidation 与三字段 applicability，阻断本地 world-drift 收敛。判别必须以 payload 为准：消费或 applied 事件始终是 amendment；共享事件只有携带 amendment 专属的 `revision` 或 `priorEvidenceIds` 才进入 canonical batch 校验。专属字段即使与其余 payload 不匹配也不得降级，仍由 preflight/reducer fail closed。
 
+## R10B Reducer replay 补充
+
+Store 的 canonical batch 预检不能作为日志重载的唯一防线：伪造的 `execution.amendment_applied` 可以绕过 Store 直接进入 Reducer。proposal 因而在 pending decision 中持久化排序后的 source task/condition ID（不进入 event payload 或 proposalHash）；Reducer 按 source∪target、每项的新 revision applicability 与 action 矩阵重新校验 reconciliation，任何缺项、旧 revision、target superseded 或不匹配动作均在 mutation 前拒绝。
+
 ## R10B 暂停账本补充
 
 `goal.runtime_suspended` 是固定 runtime 事件表中唯一的暂停事实，不得追加不存在的 `goal.action_offer_revoked`。首次由 active 进入 suspended 时，Reducer 必须在同一 transition 清空未消费、且绑定当前 projectionVersion 的 action offer；事件日志中既有 offer 与随后 suspend 共同构成可审计的撤销链，旧 token 不再可消费。

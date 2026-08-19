@@ -90,8 +90,12 @@ test("R10B durable amendment proposal reloads the normalized target runtime cont
   try {
     const persisted = appendEventBatch(root, [...activeEntries(), event("goal.runtime_suspended", initialSuspension(), 16), event("goal.runtime_suspended", fullClosure(), 17), event("execution.amendment_proposed", proposal, 18)], 0);
     const replayed = loadProjection(root, "r10b-goal");
-    assert.deepEqual(persisted.pendingHumanDecision, { ...proposal, phase: "proposed" });
+    assert.deepEqual(persisted.pendingHumanDecision, { ...proposal, sourceTaskIds: ["task-1", "task-2"], sourceConditionIds: ["condition-1"], phase: "proposed" });
     assert.deepEqual(replayed.pendingHumanDecision.targetExecutionContract, proposal.targetExecutionContract);
+    assert.deepEqual(replayed.pendingHumanDecision.sourceTaskIds, ["task-1", "task-2"]);
+    assert.deepEqual(replayed.pendingHumanDecision.sourceConditionIds, ["condition-1"]);
+    assert.equal(Object.hasOwn(proposal, "sourceTaskIds"), false);
+    assert.equal(Object.hasOwn(proposal, "sourceConditionIds"), false);
     assert.equal(replayed.pendingHumanDecision.targetContractHash, hashRuntimeExecutionContract(replayed.pendingHumanDecision.targetExecutionContract));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -105,7 +109,7 @@ test("R10B durable amendment approval reducer records the complete decision iden
   assert.equal(decisionId, sha(approvalMaterial));
   const pending = applyEvent(projection, event("execution.amendment_proposed", proposal, 18));
   const approved = applyEvent(pending, event("execution.amendment_approved", approval, 19));
-  assert.deepEqual(approved.pendingHumanDecision, { ...proposal, ...approval, phase: "approved" });
+  assert.deepEqual(approved.pendingHumanDecision, { ...proposal, sourceTaskIds: ["task-1", "task-2"], sourceConditionIds: ["condition-1"], ...approval, phase: "approved" });
   assert.throws(() => applyEvent(pending, event("execution.amendment_approved", { ...approval, userEntryHash: digest(12) }, 26)), /approval|decision|user/i);
 });
 
@@ -196,4 +200,28 @@ test("R10B amendment reducer replays capability consumption without changing oth
   const consumed = applyEvent(pending, event("execution.amendment_capability_consumed", { proposalId: proposal.proposalId, nonceDigest: digest(19) }, 20));
   assert.equal(consumed.pendingHumanDecision.phase, "consumed");
   assert.deepEqual({ revision: consumed.executionRevision, contract: consumed.executionContractHash, applicability: [...consumed.taskApplicability], evidence: consumed.evidenceHistory, suspension: consumed.suspension }, before);
+});
+
+test("R10B amendment reducer rejects forged reconciliation against replayed applicability facts", () => {
+  const proposal = proposalData(suspendedRuntime());
+  const consumed = () => {
+    let projection = applyEvent(suspendedRuntime(), event("execution.amendment_proposed", proposal, 18));
+    projection = applyEvent(projection, event("execution.amendment_approved", approvalData(proposal, projection), 19));
+    return applyEvent(projection, event("execution.amendment_capability_consumed", { proposalId: proposal.proposalId, nonceDigest: digest(20) }, 20));
+  };
+  const applyFacts = (projection, taskFacts) => {
+    for (const [index, data] of taskFacts.entries()) projection = applyEvent(projection, event("task.applicability_changed", data, 21 + index));
+    return applyEvent(projection, event("condition.evidence_invalidated", { conditionId: "condition-1", revision: proposal.newRevision, priorEvidenceIds: [digest(14)], reason: "task_change" }, 23));
+  };
+  const applied = (reconciliation) => event("execution.amendment_applied", { proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, oldRevision: proposal.oldRevision, newRevision: proposal.newRevision, targetContractHash: proposal.targetContractHash, reconciliation }, 24);
+  const cases = [
+    ["target task marked superseded", applyFacts(consumed(), [{ taskId: "task-1", revision: proposal.newRevision, state: "superseded", reason: "forged" }, { taskId: "task-2", revision: proposal.newRevision, state: "applicable", reason: "unaffected" }]), [{ taskId: "task-1", action: "keep" }, { taskId: "task-2", action: "keep" }]],
+    ["missing reconciliation task", applyFacts(consumed(), [{ taskId: "task-1", revision: proposal.newRevision, state: "reverify_required", reason: "task_change" }, { taskId: "task-2", revision: proposal.newRevision, state: "applicable", reason: "unaffected" }]), [{ taskId: "task-1", action: "reverify" }]],
+    ["task applicability left at old revision", applyFacts(consumed(), [{ taskId: "task-1", revision: proposal.newRevision, state: "reverify_required", reason: "task_change" }]), [{ taskId: "task-1", action: "reverify" }, { taskId: "task-2", action: "keep" }]],
+  ];
+  for (const [name, projection, reconciliation] of cases) {
+    const before = structuredClone(projection);
+    assert.throws(() => applyEvent(projection, applied(reconciliation)), /amendment|reconciliation|applicability/i, name);
+    assert.deepEqual(projection, before, `${name} leaves the projection unchanged`);
+  }
 });
