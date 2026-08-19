@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { CodingDispatchContractError } from "./errors.ts";
+import { normalizeModelTier } from "./model-tier.ts";
+
+export { CodingDispatchContractError } from "./errors.ts";
 
 const CONTRACT_VERSION = "dispatch-ir.v1";
 const MAX_ARRAY_ITEMS = 32;
@@ -14,6 +18,7 @@ const TOP_LEVEL_KEYS = [
   "taskId",
   "title",
   "agent",
+  "modelTier",
   "risk",
   "objective",
   "workflow",
@@ -23,16 +28,7 @@ const TOP_LEVEL_KEYS = [
   "acceptance",
   "execution",
 ];
-
-export class CodingDispatchContractError extends Error {
-  constructor(code, message, detail = message, keypath) {
-    super(message);
-    this.name = "CodingDispatchContractError";
-    this.code = code;
-    this.detail = String(detail);
-    if (keypath !== undefined) this.keypath = String(keypath);
-  }
-}
+const REQUIRED_TOP_LEVEL_KEYS = TOP_LEVEL_KEYS.filter((key) => key !== "modelTier");
 
 function fail(code, message, keypath) {
   throw new CodingDispatchContractError(code, `${message}; keypath=${keypath}`, keypath, keypath);
@@ -271,7 +267,7 @@ function deepFreeze(value) {
 export function compileCodingDispatchIR(input, { cwd } = {}) {
   // Coerce stringified JSON fields before validation (model compatibility)
   const coercedInput = coerceContractFields(input);
-  const source = validateObject(coercedInput, "$", TOP_LEVEL_KEYS);
+  const source = validateObject(coercedInput, "$", TOP_LEVEL_KEYS, REQUIRED_TOP_LEVEL_KEYS);
   const version = normalizeString(source.version, "version");
   if (version !== CONTRACT_VERSION) {
     fail("UNSUPPORTED_VERSION", `unsupported coding dispatch contract version: ${version}`, "version");
@@ -300,6 +296,7 @@ export function compileCodingDispatchIR(input, { cwd } = {}) {
     taskId,
     title: normalizeString(source.title, "title"),
     agent,
+    modelTier: normalizeModelTier(source.modelTier),
     risk,
     objective: normalizeString(source.objective, "objective"),
     requirements,

@@ -94,6 +94,28 @@ test("compiles a normalized, hashed, deeply frozen dispatch-ir.v1 contract", () 
   assertDeepFrozen(ir);
 });
 
+test("defaults missing modelTier to luna", () => {
+  const ir = compileCodingDispatchIR(contract(), { cwd: "/repo" });
+  assert.equal(ir.modelTier, "luna");
+});
+
+test("accepts explicit terra modelTier and includes it in the child prompt", () => {
+  const ir = compileCodingDispatchIR(contract({ modelTier: "terra" }), { cwd: "/repo" });
+  assert.equal(ir.modelTier, "terra");
+  assert.match(renderCodingDispatchPrompt(ir), /Requested model tier: `terra`/);
+});
+
+test("rejects unsupported modelTier values", () => {
+  assert.throws(
+    () => compileCodingDispatchIR(contract({ modelTier: "sol" }), { cwd: "/repo" }),
+    (error) => {
+      assert.equal(error.code, "INVALID_CONTRACT");
+      assert.equal(error.detail, "modelTier");
+      return true;
+    },
+  );
+});
+
 test("renders the complete child prompt in a fixed section order", () => {
   const ir = compileCodingDispatchIR(contract(), { cwd: "/repo" });
   const prompt = renderCodingDispatchPrompt(ir);
@@ -216,10 +238,12 @@ test("keeps canonical hashes stable across object key order and sensitive to sem
   const reversed = compileCodingDispatchIR(reverseObjectKeys(input), { cwd: "/repo" });
   const reordered = compileCodingDispatchIR(contract({ requirements: [...input.requirements].reverse() }), { cwd: "/repo" });
   const differentCwd = compileCodingDispatchIR(input, { cwd: "/other-repo" });
+  const terra = compileCodingDispatchIR(contract({ modelTier: "terra" }), { cwd: "/repo" });
 
   assert.equal(ordered.hash, reversed.hash);
   assert.notEqual(ordered.hash, reordered.hash);
   assert.notEqual(ordered.hash, differentCwd.hash);
+  assert.notEqual(ordered.hash, terra.hash);
 });
 
 test("normalizes execution.worktree false away while retaining true in the hash and prompt", () => {
@@ -228,7 +252,7 @@ test("normalizes execution.worktree false away while retaining true in the hash 
   const managed = compileCodingDispatchIR(contract({ execution: { worktree: true } }), { cwd: "/repo" });
 
   assert.deepEqual(disabled.execution, omitted.execution);
-  assert.equal(omitted.hash, "0277a443fe03e26083044165b30043ecb005e00a4423f8c6cef1fcb4c55ab729");
+  assert.equal(omitted.hash, "4fb6b2ebdc931d2bb1a468a6a88695a7678341dc5f318f727381bae4ed6df765");
   assert.equal(disabled.hash, omitted.hash);
   assert.deepEqual(managed.execution, { cwd: "/repo", timeoutMs: 900_000, worktree: true });
   assert.notEqual(managed.hash, omitted.hash);

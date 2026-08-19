@@ -6,6 +6,10 @@ const PROVIDER_PROMPT_MAP = {
     pattern: /^(?:Qwen.*|Peach-07-17-DogFooding)$/i,
     file: "SYSTEM.qwen.md",
   },
+  "openai-idealab-dogfooding": {
+    pattern: /^Peach-07-17-DogFooding$/i,
+    file: "SYSTEM.qwen.md",
+  },
   "anthropic-idealab": { pattern: /claude/i, file: "SYSTEM.anthropic.md" },
 };
 

@@ -6,6 +6,7 @@ import { createWorkspaceController } from "./workspace-controller.mjs";
 
 import { compileCodingDispatchIR, CodingDispatchContractError } from "./ir.ts";
 import { renderCodingDispatchPrompt } from "./prompt.ts";
+import { executorModelForTier } from "./model-tier.ts";
 import { createTypedSubagentRpcClient } from "./rpc-client.ts";
 import { createHeadlessSubagentApi } from "./runtime-membrane.ts";
 import { buildWorkflowSpawn, createWorkflowChildStartCollector, childStartTimeoutMs } from "./workflow-spawn.ts";
@@ -55,6 +56,7 @@ const CODING_SCHEMA = {
     taskId: { type: "string", pattern: "^[A-Za-z0-9._-]{1,160}$" },
     title: { type: "string", minLength: 1, maxLength: 4096 },
     agent: { enum: ["executor"] },
+    modelTier: { enum: ["luna", "terra"] },
     risk: { enum: ["low", "normal", "high"] },
     objective: { type: "string", minLength: 1, maxLength: 4096 },
     requirements: runtimeValidated({ ...stringList, minItems: 1 }, looseArray),
@@ -179,7 +181,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
 
 export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime.
 
-For executor, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, and stop. Optional worktree:true creates an isolated managed workspace. workspace_status and workspace_disposition are local workspace actions; use release to free a preserved workspace without an action token.`;
+For executor, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. Coding contracts may include modelTier:"luna" or modelTier:"terra"; omit modelTier for the default requested Luna tier. modelTier selects the requested primary Luna or Terra model; configured executor fallbackModels may be attempted for retryable provider, auth, quota, rate-limit, or network failures, and run/status/artifact actual-model metadata is authoritative. Do not use generic dispatch for coding work just to choose a model. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, and stop. Optional worktree:true creates an isolated managed workspace. workspace_status and workspace_disposition are local workspace actions; use release to free a preserved workspace without an action token.`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 
@@ -274,7 +276,7 @@ function codingWorkflowSpawnParams(ir, prompt, workflowKey) {
     cwd: ir.execution.cwd,
     context: "fresh",
     timeoutMs: ir.execution.timeoutMs,
-    child: { output: false },
+    child: { output: false, model: executorModelForTier(ir.modelTier) },
     acceptance: {
       criteria: ir.acceptance.criteria,
       evidence: CODING_ACCEPTANCE_EVIDENCE,

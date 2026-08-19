@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { normalizeRepoRelativePosixPath } from "./repo-path.mjs";
 import { MAX_CONTRACT_ARRAY_ITEMS, MAX_CONTRACT_STRING_BYTES } from "./contract-limits.mjs";
+import { normalizeModelTier } from "../subagent-dispatch/model-tier.ts";
 
 const CONTRACT_VERSION = "dispatch-ir.v1";
 const TASK_ID_PATTERN = /^[A-Za-z0-9._-]{1,160}$/;
@@ -10,9 +11,10 @@ const RISKS = new Set(["low", "normal", "high"]);
 const WORKFLOW_MODES = new Set(["tdd", "existing-tests", "docs-only"]);
 
 const TOP_LEVEL_KEYS = [
-  "version", "taskId", "title", "agent", "risk", "objective",
+  "version", "taskId", "title", "agent", "modelTier", "risk", "objective",
   "workflow", "requirements", "context", "boundaries", "acceptance", "execution",
 ];
+const REQUIRED_TOP_LEVEL_KEYS = TOP_LEVEL_KEYS.filter((key) => key !== "modelTier");
 
 function fail(message) {
   throw new Error(message);
@@ -130,7 +132,7 @@ function deepFreeze(value) {
 }
 
 export function compileCodingDispatchIR(input, { cwd } = {}) {
-  const source = validateObject(input, "contract", TOP_LEVEL_KEYS);
+  const source = validateObject(input, "contract", TOP_LEVEL_KEYS, REQUIRED_TOP_LEVEL_KEYS);
   const version = normalizeString(source.version, "version");
   if (version !== CONTRACT_VERSION) fail(`unsupported coding dispatch contract version: ${version}`);
 
@@ -151,6 +153,7 @@ export function compileCodingDispatchIR(input, { cwd } = {}) {
     taskId,
     title: normalizeString(source.title, "title"),
     agent,
+    modelTier: normalizeModelTier(source.modelTier),
     risk,
     objective: normalizeString(source.objective, "objective"),
     requirements,
@@ -183,6 +186,7 @@ export function renderDispatchPrompt(ir) {
     `- Task ID: ${JSON.stringify(ir.taskId)}`,
     `- Title: ${JSON.stringify(ir.title)}`,
     `- Agent: \`${ir.agent}\``,
+    `- Requested model tier: \`${ir.modelTier}\``,
     `- Risk: \`${ir.risk}\``,
     `- Working directory: ${JSON.stringify(ir.execution.cwd)}`,
     `- Timeout: \`${ir.execution.timeoutMs}ms\``,

@@ -108,6 +108,41 @@ test("replaces system prompt for the configured Peach compatibility model", asyn
   assert.match(result.systemPrompt, /Stop Rules/);
 });
 
+test("replaces system prompt for dogfooding Peach compatibility model", async () => {
+  const pi = createMockPi();
+  createModelSystemPromptExtension(pi);
+
+  const handler = pi.handlers.get("before_agent_start");
+  const ctx = {
+    model: { provider: "openai-idealab-dogfooding", id: "Peach-07-17-DogFooding" },
+  };
+
+  const result = await handler(
+    { systemPrompt: "generic prompt", systemPromptOptions: {} },
+    ctx,
+  );
+
+  assert.ok(result);
+  assert.match(result.systemPrompt, /Stop Rules/);
+});
+
+test("keeps OpenAI Codex GPT family on the generic Pi system prompt", async () => {
+  const pi = createMockPi();
+  createModelSystemPromptExtension(pi);
+
+  const handler = pi.handlers.get("before_agent_start");
+  const ctx = {
+    model: { provider: "openai-codex", id: "gpt-5.6-terra" },
+  };
+
+  const result = await handler(
+    { systemPrompt: "generic prompt", systemPromptOptions: {} },
+    ctx,
+  );
+
+  assert.equal(result, undefined);
+});
+
 test("handles missing model context gracefully", async () => {
   const pi = createMockPi();
   createModelSystemPromptExtension(pi);
