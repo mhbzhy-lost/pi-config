@@ -27,12 +27,13 @@ function fixture({ worldHash = h("f") } = {}) {
     acceptance: { criteria: [{ id: "criterion-1" }] }, acceptanceVerification: "integrated",
     executorBinding: { attempt: 1, runId: "executor-r11", contractHash: h("a"), asyncDir: "/tmp/r11", workspacePath: "/tmp/workspace-r11", workspaceLeaseId: h("d"), headAtDispatch: head },
     lastExecutorProof: { runId: "executor-r11", proofId: h("e"), rootSessionId: "root-r11", observedAt: 1, outcome: "succeeded" },
-    settlement: { attempt: 1, executorHead: head, executorRunId: "executor-r11", terminalProofId: h("e"), evidence: settlementEvidence, proofHash: h("f") },
-    workspace: { attempt: 1, phase: "disposed", disposition: "integrated", released: true },
+    // `task.settlement` is the event projection shape: it has no synthetic proofHash.
+    settlement: { attempt: 1, executorHead: head, executorRunId: "executor-r11", terminalProofId: h("e"), evidence: settlementEvidence },
+    workspace: { attempt: 1, phase: "disposed", disposition: "integrated", released: true, executorHead: head, originHead: head },
   };
   const definition = { id: "condition-1", depends_on: [], oracle_ref: "adapter-r11", environment_ref: "environment-r11", fixture_refs: ["fixture-r11"], invalidation: { paths: ["src/**"], task_ids: ["task-1"] }, stability: { mode: "single", require_fresh_environment: true } };
   const evidence = { evidenceId: "evidence-r11", conditionId: "condition-1", executionRevision: 7, executionContractHash: h("a"), conditionHash: h("c"), head, adapter: { ref: "adapter-r11", version: "1" }, environment: { ref: "environment-r11", fingerprint: "environment-fingerprint-r11" }, fixtures: [{ ref: "fixture-r11", fingerprint: "fixture-fingerprint-r11" }], artifact: { id: "artifact-r11", hash: h("b") }, run: { runId: "observation-r11", state: "terminal" }, terminalProofHash: h("a"), verdict: { kind: "passed" }, sequence: 1, mutationSequence: 0 };
-  const projection = { goalId: "goal-r11", executionRevision: 7, executionContractHash: h("a"), tasks: new Map([["task-1", task]]), taskApplicability: new Map([["task-1", { state: "applicable" }]]), conditions: new Map([["condition-1", { definition, conditionHash: h("c"), status: "satisfied", supportingEvidenceIds: ["evidence-r11"] }]]), evidenceHistory: [evidence], observationRuns: new Map([["observation-r11", { runId: "observation-r11", conditionId: "condition-1", phase: "released" }]]), findings: new Map(), repairEpisodes: new Map(), taskMutationSequences: new Map([["task-1", 0]]), mutationSequence: 0 };
+  const projection = { goalId: "goal-r11", executionRevision: 7, executionContractHash: h("a"), tasks: new Map([["task-1", task]]), taskApplicability: new Map([["task-1", { state: "applicable" }]]), conditions: new Map([["condition-1", { definition, conditionHash: h("c"), status: "satisfied", supportingEvidenceIds: ["evidence-r11"] }]]), evidenceHistory: [evidence], observationRuns: new Map([["observation-r11", { runId: "observation-r11", conditionId: "condition-1", phase: "released", allocationId: "allocation-r11", leaseReceiptHash: h("1"), processIdentityHash: h("2"), terminalProofHash: h("a"), evidenceId: "evidence-r11", releaseReceiptHash: h("3") }]]), findings: new Map(), repairEpisodes: new Map(), taskMutationSequences: new Map([["task-1", 0]]), mutationSequence: 0 };
   const worldSnapshot = { safe: true, ...(worldHash ? { worldHash } : {}), repo: { root: "/repo/r11", head, branch: "main", trackedDirty: [], untracked: [], unmerged: [], sequencer: null }, adapters: [{ ref: "adapter-r11", version: "1" }], environments: [{ ref: "environment-r11", fingerprint: "environment-fingerprint-r11", available: true }], fixtures: [{ ref: "fixture-r11", fingerprint: "fixture-fingerprint-r11", available: true }], resources: [{ key: "validation/r11", holders: [], capacity: 1 }], activeRuns: [], capturedAt: "2026-08-19T00:00:00.000Z" };
   const conditionValidity = evaluateConditionGraph({ projection, worldSnapshot, gitRunner: () => { throw new Error("git must not run when heads match"); } }).conditions;
   return { projection, worldSnapshot, conditionValidity, resourceInventory: worldSnapshot.resources };
@@ -93,7 +94,7 @@ for (const [name, mutate] of [
   ["evidence revision is old", ({ projection }) => projection.evidenceHistory[0].executionRevision = 6],
   ["evidence contract is old", ({ projection }) => projection.evidenceHistory[0].executionContractHash = h("d")],
   ["evidence condition hash is old", ({ projection }) => projection.evidenceHistory[0].conditionHash = h("d")],
-  ["failed condition verdict", ({ projection }) => projection.evidenceHistory[0].verdict = { kind: "failed" }],
+  ["failed condition verdict", ({ projection }) => projection.evidenceHistory[0].verdict = { kind: "failed", failureCode: "assertion_failed", findingFingerprint: h("d") }],
   ["artifact is invalid", ({ projection }) => projection.evidenceHistory[0].artifact = { id: "", hash: h("b") }],
 ]) test(`condition gate: ${name}`, () => expectBlock(mutate, "CONDITION_STALE"));
 
@@ -148,6 +149,101 @@ test("semantic task, condition, debt, resource, head, and support order changes 
     ({ worldSnapshot }) => worldSnapshot.resources[0].capacity = 2,
     ({ worldSnapshot }) => worldSnapshot.repo.head = "c".repeat(40),
   ]) { const input = fixture(); mutate(input); assert.notEqual(manifest(input).obligationStateHash, base); }
+});
+
+test("manifest uses only event-projected task, settlement, workspace, and condition references", () => {
+  const input = fixture(), out = manifest(input), task = out.tasks[0], condition = out.conditions[0];
+  assert.equal(Object.hasOwn(task, "settlementProofHash"), false);
+  assert.deepEqual(task.executorProof, { runId: "executor-r11", proofId: h("e") });
+  assert.deepEqual(task.settlement, {
+    attempt: 1, executorHead: head, executorRunId: "executor-r11", terminalProofId: h("e"),
+    subagentFingerprint: input.projection.tasks.get("task-1").settlement.evidence.subagentFingerprint,
+    mainFingerprint: input.projection.tasks.get("task-1").settlement.evidence.mainFingerprint,
+  });
+  assert.deepEqual(task.workspaceProof, { attempt: 1, phase: "disposed", disposition: "integrated", released: true, executorHead: head, originHead: head });
+  assert.deepEqual(condition.supportingEvidenceRefs, [{ evidenceId: "evidence-r11", terminalProofHash: h("a"), artifact: { id: "artifact-r11", hash: h("b") } }]);
+  const p = input.projection; p.conditions.get("condition-1").supportingEvidenceIds = ["evidence-r11", "evidence-r12"];
+  p.evidenceHistory.push({ ...p.evidenceHistory[0], evidenceId: "evidence-r12", artifact: { id: "artifact-r12", hash: h("d") }, terminalProofHash: h("e"), sequence: 2 });
+  assert.deepEqual(manifest(input).conditions[0].supportingEvidenceRefs.map(ref => ref.evidenceId), ["evidence-r11", "evidence-r12"]);
+});
+
+test("settlement hash derives from canonical settlement identity and dual evidence, never a projection field", () => {
+  const base = manifest(fixture());
+  for (const mutate of [
+    ({ projection }) => projection.tasks.get("task-1").settlement.executorRunId = "executor-r12",
+    ({ projection }) => projection.tasks.get("task-1").settlement.evidence.mainFingerprint = h("d"),
+    ({ projection }) => projection.tasks.get("task-1").settlement.terminalProofId = h("d"),
+  ]) { const input = fixture(); mutate(input); assert.notEqual(manifest(input).tasks[0].settlementHash, base.tasks[0].settlementHash); }
+});
+
+for (const [name, mutate, code] of [
+  ["active repair episode", ({ projection }) => projection.repairEpisodes.set("episode", { status: "active" }), "ACTIVE_REPAIR_EPISODE"],
+  ["blocked repair episode", ({ projection }) => projection.repairEpisodes.set("episode", { status: "blocked" }), "ACTIVE_REPAIR_EPISODE"],
+  ["cancel pending repair episode", ({ projection }) => projection.repairEpisodes.set("episode", { status: "cancel_pending" }), "ACTIVE_REPAIR_EPISODE"],
+  ["cancelled repair episode without resource debt", ({ projection }) => projection.repairEpisodes.set("episode", { status: "cancelled" }), "CANCELLED_REPAIR_UNCLOSED"],
+  ["requested observation", ({ projection }) => projection.observationRuns.get("observation-r11").phase = "requested", "OBSERVATION_NOT_RELEASED"],
+  ["process-bound observation", ({ projection }) => projection.observationRuns.get("observation-r11").phase = "process_bound", "OBSERVATION_NOT_RELEASED"],
+  ["terminal observation", ({ projection }) => projection.observationRuns.get("observation-r11").phase = "terminal", "OBSERVATION_NOT_RELEASED"],
+  ["recorded observation", ({ projection }) => projection.observationRuns.get("observation-r11").phase = "recorded", "OBSERVATION_NOT_RELEASED"],
+  ["untriaged discovery", ({ projection }) => projection.discovery = { untriaged: true }, "UNTRIAGED_DISCOVERY"],
+  ["preserved workspace with release debt", ({ projection }) => { const w = projection.tasks.get("task-1").workspace; w.disposition = "preserved"; w.released = false; }, "TASK_WORKSPACE_UNCLOSED"],
+]) test(`complete debt gate: ${name}`, () => expectBlock(mutate, code));
+
+for (const field of ["terminalProofHash", "releaseReceiptHash"]) test(`released observation requires ${field}`, () => {
+  expectBlock(({ projection }) => projection.observationRuns.get("observation-r11")[field] = null, "OBSERVATION_PROOF_MISSING");
+});
+
+for (const [name, mutate] of [
+  ["resource inventory missing", input => input.resourceInventory = undefined],
+  ["resource inventory null", input => input.resourceInventory = null],
+  ["resource inventory non-array", input => input.resourceInventory = {}],
+  ["duplicate resource key", input => input.resourceInventory = [...input.worldSnapshot.resources, { key: "validation/r11", holders: [], capacity: 1 }]],
+  ["holders non-array", input => input.resourceInventory = [{ key: "validation/r11", holders: "executor-r11", capacity: 1 }]],
+  ["holders non-string", input => input.resourceInventory = [{ key: "validation/r11", holders: [1], capacity: 1 }]],
+  ["holders empty string", input => input.resourceInventory = [{ key: "validation/r11", holders: [""], capacity: 1 }]],
+  ["capacity negative", input => input.resourceInventory = [{ key: "validation/r11", holders: [], capacity: -1 }]],
+  ["capacity fractional", input => input.resourceInventory = [{ key: "validation/r11", holders: [], capacity: 1.5 }]],
+]) test(`resource inventory rejects ${name}`, () => {
+  const input = fixture(); mutate(input); assert.ok(manifest(input).blockers.some(item => item.code === "RESOURCE_INVENTORY_INVALID"));
+});
+
+test("resource inventory is authoritative and must match world resources", () => {
+  const input = fixture(); input.resourceInventory = [{ key: "validation/r11", holders: [], capacity: 2 }];
+  assert.ok(manifest(input).blockers.some(item => item.code === "RESOURCE_AUTHORITY_MISMATCH"));
+});
+
+test("support order affects obligation hash while caller world hash and capturedAt do not", () => {
+  const left = fixture(), reversed = fixture();
+  for (const input of [left, reversed]) {
+    const p = input.projection; p.conditions.get("condition-1").definition.stability = { mode: "consecutive", count: 2, require_distinct_environment: true };
+    p.conditions.get("condition-1").supportingEvidenceIds = ["evidence-r11", "evidence-r12"];
+    p.evidenceHistory.push({ ...p.evidenceHistory[0], evidenceId: "evidence-r12", sequence: 2, environment: { ref: "environment-r11", fingerprint: "environment-fingerprint-r12" } });
+  }
+  reversed.projection.conditions.get("condition-1").supportingEvidenceIds.reverse();
+  assert.notEqual(manifest(left).obligationStateHash, manifest(reversed).obligationStateHash);
+  const callerHash = fixture(), captured = fixture(); callerHash.worldSnapshot.worldHash = h("0"); captured.worldSnapshot.capturedAt = "2099-01-01T00:00:00.000Z";
+  assert.equal(manifest(fixture()).worldHash, manifest(callerHash).worldHash);
+  assert.equal(manifest(fixture()).obligationStateHash, manifest(callerHash).obligationStateHash);
+  assert.equal(manifest(fixture()).obligationStateHash, manifest(captured).obligationStateHash);
+});
+
+test("validator rejects cloned or partially unfrozen manifests and all non-JSON-safe values without throwing", () => {
+  const out = manifest(fixture()), cloned = structuredClone(out), nested = structuredClone(out);
+  Object.freeze(cloned);
+  const nestedTask = { ...nested.tasks[0] }; nested.tasks = [nestedTask];
+  Object.freeze(nested.tasks); Object.freeze(nested.conditions); Object.freeze(nested.debts); Object.freeze(nested.blockers); Object.freeze(nested);
+  assert.equal(validateObligationFinalizationManifest(cloned), false);
+  assert.equal(validateObligationFinalizationManifest(nested), false);
+  for (const value of [undefined, () => {}, 1n, NaN, new Map([["x", 1]])]) {
+    const bad = { ...out, worldHash: value };
+    assert.doesNotThrow(() => validateObligationFinalizationManifest(bad));
+    assert.equal(validateObligationFinalizationManifest(bad), false);
+  }
+});
+
+test("validator rejects complete/blocker mismatch even with a recomputed manifest hash", () => {
+  const out = structuredClone(manifest(fixture())); out.complete = false;
+  assert.equal(validateObligationFinalizationManifest(out), false);
 });
 
 test("validator rejects extra or missing top-level keys, stale hashes, non-JSON values, and unfrozen nested data", () => {
