@@ -8,6 +8,9 @@ import test from "node:test";
 import { createGoalEngineEntry } from "../pi/extensions/goal-engine.ts";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
+const DISPATCH_HEAD = "1111111111111111111111111111111111111111";
+const BASE_HEAD = "2222222222222222222222222222222222222222";
+const EXECUTOR_HEAD = "3333333333333333333333333333333333333333";
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
 const canonicalHash = (value) => hash(JSON.stringify(canonical(value)));
 
@@ -24,7 +27,7 @@ async function host(options = {}) {
 }
 function exact(keys, value) { assert.deepEqual(Object.keys(value).sort(), [...keys].sort()); }
 function workspaceRequest(overrides = {}) {
-  return { stateRoot: "/state", goalId: "goal", taskId: "task", attempt: 1, runId: "run", leaseId: hash("owner-token"), workspacePath: "/workspace", headAtDispatch: "dispatch-head", baseHead: "base-head", executionRevision: 1, contractHash: hash("contract"), sessionId: "session", ...overrides };
+  return { stateRoot: "/state", goalId: "goal", taskId: "task", attempt: 1, runId: "run", leaseId: hash("owner-token"), workspacePath: "/workspace", headAtDispatch: DISPATCH_HEAD, baseHead: BASE_HEAD, executionRevision: 1, contractHash: hash("contract"), sessionId: "session", ...overrides };
 }
 
 // The production entry contract is intentionally RED until the real Host is wired.
@@ -67,11 +70,11 @@ test("production Host exposes the complete frozen capability boundary", async ()
 test("captureCurrentWorld evaluates resource and run suppliers for every typed facade call", async () => {
   const seen = []; let resourceVersion = 0, runVersion = 0;
   const facade = { captureCurrentWorld(input) { seen.push(input); return { safe: true, repo: {}, adapters: [], environments: [], fixtures: [], resources: [], activeRuns: [] }; } };
-  const h = await host({ facade, adapterRegistry: "adapters", environmentRegistry: "environments", fixtureRegistry: "fixtures", resourceRegistry: () => ({ version: ++resourceVersion }), runInventory: () => ({ version: ++runVersion }) });
+  const h = await host({ facade, adapterRegistry: "adapters", environmentRegistry: "environments", fixtureRegistry: "fixtures", resourceRegistry: () => ({ [`resource-${++resourceVersion}`]: { capacity: 1, holders: [] } }), runInventory: () => [{ runId: `run-${++runVersion}`, kind: "managed-validation", state: "running" }] });
   await h.captureCurrentWorld("/canonical/one"); await h.captureCurrentWorld("/canonical/two");
   assert.deepEqual(seen, [
-    { repoRoot: "/canonical/one", adapterRegistry: "adapters", environmentRegistry: "environments", fixtureRegistry: "fixtures", resourceRegistry: { version: 1 }, runInventory: { version: 1 } },
-    { repoRoot: "/canonical/two", adapterRegistry: "adapters", environmentRegistry: "environments", fixtureRegistry: "fixtures", resourceRegistry: { version: 2 }, runInventory: { version: 2 } },
+    { repoRoot: "/canonical/one", adapterRegistry: "adapters", environmentRegistry: "environments", fixtureRegistry: "fixtures", resourceRegistry: { "resource-1": { capacity: 1, holders: [] } }, runInventory: [{ runId: "run-1", kind: "managed-validation", state: "running" }] },
+    { repoRoot: "/canonical/two", adapterRegistry: "adapters", environmentRegistry: "environments", fixtureRegistry: "fixtures", resourceRegistry: { "resource-2": { capacity: 1, holders: [] } }, runInventory: [{ runId: "run-2", kind: "managed-validation", state: "running" }] },
   ]);
   assert.notDeepEqual(seen[0].runInventory, seen[1].runInventory);
 });
@@ -90,9 +93,9 @@ test("stopOwnedRun accepts only absolute asyncDir and exact Root Broker input", 
 });
 
 test("quarantineWorkspace preserves the inspected durable lease with canonical proof", async () => {
-  const request = workspaceRequest(), inspection = { headCommit: "executor-head", path: "/workspace", clean: true };
+  const request = workspaceRequest(), inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true };
   const ownerToken = "owner-token", seen = [];
-  const lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: "base-head", ownerToken };
+  const lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: BASE_HEAD, ownerToken };
   const h = await host({
     loadExecutorWorkspaceLease(input) { seen.push(["load", input]); return lease; },
     inspectExecutorWorkspace(input) { seen.push(["inspect", input]); return inspection; },
@@ -111,10 +114,11 @@ test("quarantineWorkspace preserves the inspected durable lease with canonical p
 test("quarantineWorkspace rejects lease, inspection, and caller identity drift before release", async () => {
   const request = workspaceRequest();
   for (const [name, lease, inspection, drift] of [
-    ["path", { path: "/other", baseCommit: "base-head", ownerToken: "owner-token" }, { path: "/workspace", headCommit: "executor-head", clean: true }, {}],
-    ["baseCommit", { path: "/workspace", baseCommit: "other-base", ownerToken: "owner-token" }, { path: "/workspace", headCommit: "executor-head", clean: true }, {}],
-    ["ownerToken", { path: "/workspace", baseCommit: "base-head", ownerToken: "other-owner" }, { path: "/workspace", headCommit: "executor-head", clean: true }, {}],
-    ["head", { path: "/workspace", baseCommit: "base-head", ownerToken: "owner-token" }, { path: "/workspace", headCommit: "other-head", clean: true }, {}],
+    ["path", { path: "/other", baseCommit: BASE_HEAD, ownerToken: "owner-token" }, { path: "/workspace", headCommit: EXECUTOR_HEAD, clean: true }, {}],
+    ["baseCommit", { path: "/workspace", baseCommit: "4444444444444444444444444444444444444444", ownerToken: "owner-token" }, { path: "/workspace", headCommit: EXECUTOR_HEAD, clean: true }, {}],
+    ["ownerToken", { path: "/workspace", baseCommit: BASE_HEAD, ownerToken: "other-owner" }, { path: "/workspace", headCommit: EXECUTOR_HEAD, clean: true }, {}],
+    ["head-missing", { path: "/workspace", baseCommit: BASE_HEAD, ownerToken: "owner-token" }, { path: "/workspace", clean: true }, {}],
+    ["head-invalid", { path: "/workspace", baseCommit: BASE_HEAD, ownerToken: "owner-token" }, { path: "/workspace", headCommit: "not-a-sha", clean: true }, {}],
   ]) {
     let releases = 0;
     const h = await host({ loadExecutorWorkspaceLease() { return { ...lease, goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state" }; }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { releases++; } });
@@ -125,8 +129,8 @@ test("quarantineWorkspace rejects lease, inspection, and caller identity drift b
 
 test("quarantineResource proves preservation through the owning Goal workspace lease", async () => {
   const request = { stateRoot: "/state", goalId: "goal", ownerKind: "executor", ownerId: "run", taskId: "task", attempt: 1, leaseId: hash("owner-token"), executionRevision: 1, contractHash: hash("contract"), sessionId: "session" };
-  const lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: "base-head", ownerToken: "owner-token" };
-  const inspection = { headCommit: "executor-head", path: "/workspace", clean: true }, calls = [];
+  const lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: BASE_HEAD, ownerToken: "owner-token" };
+  const inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true }, calls = [];
   const h = await host({ loadExecutorWorkspaceLease(value) { calls.push(["load", value]); return lease; }, inspectExecutorWorkspace(value) { calls.push(["inspect", value]); return inspection; }, releaseExecutorWorkspace(value, options) { calls.push(["release", value, options]); return { released: false, preserved: true, disposition: "preserved" }; } });
   const result = await h.quarantineResource(request);
   exact(["ownerId", "proofHash", "state", "debt"], result); assert.deepEqual(result, { ownerId: "run", proofHash: canonicalHash({ request, lease, inspection, disposition: "preserved" }), state: "quarantined", debt: true });
@@ -134,7 +138,7 @@ test("quarantineResource proves preservation through the owning Goal workspace l
 });
 
 test("stopManagedValidation delegates only typed owned stop and returns observed closure", async () => {
-  const request = { stateRoot: "/state", goalId: "goal", runId: "run", conditionId: "condition", allocationId: "allocation", processIdentityHash: hash("process"), executionRevision: 1, executionContractHash: hash("contract"), baseHead: "base-head" };
+  const request = { stateRoot: "/state", goalId: "goal", runId: "run", conditionId: "condition", allocationId: "allocation", processIdentityHash: hash("process"), executionRevision: 1, executionContractHash: hash("contract"), baseHead: BASE_HEAD };
   const calls = [];
   const h = await host({ facade: { stopOwnedManagedValidation(value) { calls.push(value); return { state: "observed", terminalProofHash: hash("terminal"), resourceProofHash: hash("resource"), resourceState: "quarantined", debt: true }; } } });
   assert.deepEqual(await h.stopManagedValidation(request), { state: "observed", terminalProofHash: hash("terminal"), resourceProofHash: hash("resource"), resourceState: "quarantined", debt: true });
@@ -142,7 +146,7 @@ test("stopManagedValidation delegates only typed owned stop and returns observed
 });
 
 test("stopManagedValidation mismatch or unavailable returns attention without pseudo recovery", async () => {
-  const request = { stateRoot: "/state", goalId: "goal", runId: "run", conditionId: "condition", allocationId: "allocation", processIdentityHash: hash("process"), executionRevision: 1, executionContractHash: hash("contract"), baseHead: "base-head" };
+  const request = { stateRoot: "/state", goalId: "goal", runId: "run", conditionId: "condition", allocationId: "allocation", processIdentityHash: hash("process"), executionRevision: 1, executionContractHash: hash("contract"), baseHead: BASE_HEAD };
   for (const facade of [{ stopOwnedManagedValidation() { throw Error("mismatch"); } }, {}]) {
     let pseudoCalls = 0;
     const h = await host({ facade: { ...facade, inspectManagedValidation() { pseudoCalls++; }, recoverManagedValidation() { pseudoCalls++; }, releaseManagedValidation() { pseudoCalls++; } } });
@@ -151,17 +155,19 @@ test("stopManagedValidation mismatch or unavailable returns attention without ps
 });
 
 test("artifactRefForRun creates a content-addressed secure regular artifact", async () => {
-  const root = mkdtempSync(join(tmpdir(), "goal-artifact-")), request = { stateRoot: root, goalId: "goal", runId: "run", managedTerminal: { output: "terminal output" } };
+  const root = mkdtempSync(join(tmpdir(), "goal-artifact-")), output = "terminal output";
+  const request = { stateRoot: root, goalId: "goal", runId: "run", managedTerminal: { status: "exited", code: 0, signal: null, output } };
   const h = await host({}), result = await h.artifactRefForRun(request), content = readFileSync(result.path);
-  exact(["id", "path"], result); assert.equal(result.id, hash(content)); assert.equal(content.equals(Buffer.from(JSON.stringify(request.managedTerminal))), true);
-  assert.equal(resolve(result.path).startsWith(`${resolve(root)}/`), true); assert.equal(lstatSync(result.path).isFile(), true); assert.equal(lstatSync(result.path).isSymbolicLink(), false); assert.equal(lstatSync(result.path).nlink, 1); assert.equal(lstatSync(result.path).mode & 0o777, 0o600); assert.equal(lstatSync(resolve(root)).mode & 0o777, 0o700);
+  const artifactDir = join(root, "artifacts");
+  exact(["id", "path"], result); assert.equal(result.id, hash(Buffer.from(output))); assert.equal(content.equals(Buffer.from(output)), true);
+  assert.equal(resolve(result.path).startsWith(`${resolve(artifactDir)}/`), true); assert.equal(lstatSync(result.path).isFile(), true); assert.equal(lstatSync(result.path).isSymbolicLink(), false); assert.equal(lstatSync(result.path).nlink, 1); assert.equal(lstatSync(result.path).mode & 0o777, 0o600); assert.equal(lstatSync(artifactDir).mode & 0o777, 0o700);
   assert.deepEqual(await h.artifactRefForRun(request), result);
 });
 
 test("artifactRefForRun rejects unsafe target entries and noncanonical caller fields", async () => {
-  const root = mkdtempSync(join(tmpdir(), "goal-artifact-unsafe-")), request = { stateRoot: root, goalId: "goal", runId: "run", managedTerminal: { output: "terminal output" } };
+  const root = mkdtempSync(join(tmpdir(), "goal-artifact-unsafe-")), output = "terminal output", request = { stateRoot: root, goalId: "goal", runId: "run", managedTerminal: { status: "exited", code: 0, signal: null, output } };
   const artifactDir = join(root, "artifacts"); mkdirSync(artifactDir, { recursive: true }); chmodSync(artifactDir, 0o700);
-  const target = join(artifactDir, hash(Buffer.from(JSON.stringify(request.managedTerminal))));
+  const target = join(artifactDir, hash(Buffer.from(output)));
   for (const unsafe of [() => symlinkSync("/tmp", target), () => { writeFileSync(join(root, "source"), "x", { mode: 0o600 }); linkSync(join(root, "source"), target); }]) {
     unsafe(); const h = await host({}); await assert.rejects(() => h.artifactRefForRun(request)); rmSync(target);
   }
