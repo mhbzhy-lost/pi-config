@@ -2768,7 +2768,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     }
     const closure = { ...suspension, terminalProofRefs: terminalRefs.sort((a, b) => a.runId.localeCompare(b.runId)), workspaceClosureProofRefs: workspaceRefs.sort((a, b) => a.taskId.localeCompare(b.taskId)), resourceClosureProofRefs: resourceRefs.sort((a, b) => a.ownerId.localeCompare(b.ownerId)) };
     const complete = closure.terminalProofRefs.length === closure.affectedRunIds.length && closure.workspaceClosureProofRefs.length === closure.affectedTaskIds.length && closure.resourceClosureProofRefs.length === closure.affectedRunIds.length;
-    if (terminalRefs.length !== (suspension.terminalProofRefs || []).length || workspaceRefs.length !== (suspension.workspaceClosureProofRefs || []).length || resourceRefs.length !== (suspension.resourceClosureProofRefs || []).length) appendSuspensionClosure(root, projection, { ...closure, resourcesQuarantined: complete });
+    if (complete && (!suspension.resourcesQuarantined || terminalRefs.length !== (suspension.terminalProofRefs || []).length || workspaceRefs.length !== (suspension.workspaceClosureProofRefs || []).length || resourceRefs.length !== (suspension.resourceClosureProofRefs || []).length)) appendSuspensionClosure(root, projection, { ...closure, resourcesQuarantined: complete });
   };
   const suspendOwnedRuntime = async (ctx, reason) => {
     const { root } = executionScopeFor(ctx); const sessionId = sessionIdentity(ctx);
