@@ -111,11 +111,13 @@ test("loader returns Store-owned projection and detects Map mutation during mani
   const stateRoot = fixture();
   try {
     const first = load(stateRoot), before = snapshot(stateRoot), originalHash = first.projectionStateHash;
-    first.projection.tasks.set("mutated-after-load", { id: "mutated-after-load" });
+    try { first.projection.tasks.set("mutated-after-load", { id: "mutated-after-load" }); } catch { /* immutable Store-owned Map is also acceptable */ }
     const second = load(stateRoot);
     assert.equal(second.projectionStateHash, originalHash, "a projection Map mutation must not alter the durable Store");
     assert.deepEqual(snapshot(stateRoot), before);
-    assert.throws(() => buildObligationFinalizationManifest({ projection: first.projection, storeProjection: second, worldSnapshot: world(), conditionValidity: new Map(), resourceInventory: [] }), /store|projection|identity|mismatch|mutation|hash/i);
+    const mutated = structuredClone(second.projection);
+    mutated.tasks.set("mutated-after-load", { id: "mutated-after-load" });
+    assert.throws(() => buildObligationFinalizationManifest({ projection: mutated, storeProjection: second, worldSnapshot: world(), conditionValidity: new Map(), resourceInventory: [] }), /store|projection|identity|mismatch|mutation|hash/i);
   } finally { rmSync(stateRoot, { recursive: true, force: true }); }
 });
 
