@@ -211,6 +211,64 @@ export function loadProjection(stateRoot, goalId) {
   return rebuildProjection(eventsPath);
 }
 
+// Finalization consumes an independently replayed, checked Store snapshot.  It
+// deliberately does not repair a partial publication: callers must fail closed
+// rather than turn a validation read into a Store mutation.
+export function loadFinalizationProjection(stateRoot, goalId) {
+  if (typeof stateRoot !== "string" || !stateRoot || typeof goalId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(goalId) || goalId === "." || goalId === "..") throw new TypeError("unsafe finalization projection path");
+  const root = resolve(stateRoot);
+  const lock = acquireWriterLock(root);
+  try {
+    const goalDir = join(root, "goals", goalId);
+    const eventsPath = join(goalDir, "events.jsonl"), projectionPath = join(goalDir, "projection.json"), registryPath = join(root, "registry.json");
+    const events = readFinalizationFile(eventsPath), snapshot = readFinalizationFile(projectionPath), registryBytes = readFinalizationFile(registryPath);
+    const replay = replayFinalizationEvents(events, goalId);
+    let persisted, registry;
+    try { persisted = JSON.parse(snapshot.toString("utf8")); registry = JSON.parse(registryBytes.toString("utf8")); }
+    catch { throw new TypeError("invalid finalization projection store JSON"); }
+    if (JSON.stringify(persisted) !== JSON.stringify(serializeProjection(replay))) throw new TypeError("finalization projection snapshot mismatch");
+    validateRegistry(registry);
+    const entry = registry.goals[goalId];
+    if (!entry || entry.lifecycle !== replay.lifecycle || entry.objective !== replay.objective || entry.updatedAt !== replay.updatedAt) throw new TypeError("finalization registry projection mismatch");
+    // Recheck file receipts after all parsing, so a replacement racing the read
+    // cannot be silently accepted.
+    for (const path of [eventsPath, projectionPath, registryPath]) assertFinalizationFile(path);
+    const projection = freezeProjection(replay);
+    return Object.freeze({ goalId, version: projection.version, projection, projectionStateHash: projectionStateHash(projection) });
+  } finally { releaseWriterLock(root, lock.token); }
+}
+
+function assertFinalizationFile(path) {
+  const stat = lstatSafe(path);
+  if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o7777) !== 0o600) throw new TypeError("unsafe finalization projection store file");
+  return stat;
+}
+function readFinalizationFile(path) {
+  const before = assertFinalizationFile(path), content = readFileSync(path);
+  const after = assertFinalizationFile(path);
+  if (before.dev !== after.dev || before.ino !== after.ino) throw new TypeError("finalization projection store file replaced");
+  return content;
+}
+function replayFinalizationEvents(content, goalId) {
+  let projection = createProjection();
+  const text = content.toString("utf8");
+  if (!text.trim()) throw new TypeError("invalid finalization projection events");
+  for (const line of text.trim().split("\n")) {
+    let event; try { event = JSON.parse(line); } catch { throw new TypeError("invalid finalization projection events"); }
+    if (event?.goalId !== goalId) throw new TypeError("finalization projection goal mismatch");
+    projection = applyEvent(projection, event, { replay: true });
+  }
+  if (projection.goalId !== goalId) throw new TypeError("finalization projection goal mismatch");
+  return projection;
+}
+function freezeProjection(value, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  if (value instanceof Map) for (const [key, child] of value) { freezeProjection(key, seen); freezeProjection(child, seen); }
+  else for (const child of Object.values(value)) freezeProjection(child, seen);
+  return Object.freeze(value);
+}
+
 export function listGoals(stateRoot) {
   const registryPath = join(stateRoot, "registry.json");
   if (!existsSync(registryPath)) return [];

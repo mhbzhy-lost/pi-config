@@ -37,7 +37,7 @@ function assertResult(value, intent) {
 }
 function expectedIntent(manifest, approval) {
   if (!validateObligationFinalizationManifest(manifest) || manifest.complete !== true) fail("manifest");
-  const base = { goalId: manifest.goalId, manifestHash: manifest.manifestHash, stateHash: manifest.obligationStateHash, worldHash: manifest.worldHash, head: manifest.head, approval: approvalOf(approval) };
+  const base = { goalId: manifest.goalId, manifestHash: manifest.manifestHash, stateHash: manifest.stateHash, worldHash: manifest.worldHash, head: manifest.head, approval: approvalOf(approval) };
   const reviewId = reviewIdFor(base);
   return { reviewId, idempotencyKey: reviewId, ...base };
 }

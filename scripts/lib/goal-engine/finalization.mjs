@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence } from "./settlement-evidence.mjs";
+import { projectionStateHash } from "./store.mjs";
 
 const UNSUPPORTED_GENERATIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3", "planned.v1"]);
 const MANIFEST_KEYS = ["schemaVersion", "goalId", "revision", "contractHash", "head", "worldHash", "stateHash", "obligationStateHash", "tasks", "conditions", "debts", "blockers", "complete", "manifestHash"];
@@ -98,15 +99,39 @@ function deriveBlockers({ goalId, revision, contractHash, head: manifestHead, wo
 
 export function buildObligationFinalizationManifest({ projection, worldSnapshot, conditionValidity, resourceInventory } = {}) {
   if (!isObject(projection) || !isObject(worldSnapshot)) throw new Error("projection and worldSnapshot are required");
-  const resource = inventory(resourceInventory, worldSnapshot), tasks = rows(projection.tasks).map(([id, task]) => taskManifest(projection.goalId, id, task, get(projection.taskApplicability, id)?.state ?? "applicable")), conditions = rows(projection.conditions).map(([id, condition]) => conditionManifest(id, condition, get(conditionValidity, id), projection)), debt = debts(projection, worldSnapshot, resource.rows, resource.valid);
-  const base = { schemaVersion: "goal-runtime.v1.finalization-manifest.v1", goalId: projection.goalId ?? null, revision: projection.executionRevision ?? projection.revision ?? null, contractHash: projection.executionContractHash ?? projection.contractHash ?? null, head: worldSnapshot.repo?.head ?? null, worldHash: sha(currentWorld(worldSnapshot)), tasks, conditions, debts: debt };
-  const stateHash = sha({ goalId: base.goalId, revision: base.revision, contractHash: base.contractHash, tasks, conditions, debts: debt });
+  const store = arguments[0]?.storeProjection;
+  const authority = store ? assertStoreProjection(store, projection) : null;
+  const source = authority?.projection ?? projection;
+  const resource = inventory(resourceInventory, worldSnapshot), tasks = rows(source.tasks).map(([id, task]) => taskManifest(source.goalId, id, task, get(source.taskApplicability, id)?.state ?? "applicable")), conditions = rows(source.conditions).map(([id, condition]) => conditionManifest(id, condition, get(conditionValidity, id), source)), debt = { ...debts(source, worldSnapshot, resource.rows, resource.valid), ...(authority ? { storeAuthority: true } : {}) };
+  const base = { schemaVersion: "goal-runtime.v1.finalization-manifest.v1", goalId: source.goalId ?? null, revision: source.executionRevision ?? source.revision ?? null, contractHash: source.executionContractHash ?? source.contractHash ?? null, head: worldSnapshot.repo?.head ?? null, worldHash: sha(currentWorld(worldSnapshot)), tasks, conditions, debts: debt };
+  const stateHash = authority?.projectionStateHash ?? sha({ goalId: base.goalId, revision: base.revision, contractHash: base.contractHash, tasks, conditions, debts: debt });
   const obligationStateHash = sha({ stateHash, head: base.head, worldHash: base.worldHash });
   const blockers = deriveBlockers({ ...base, stateHash, obligationStateHash }); blockers.sort((a, b) => `${a.code}:${a.id ?? ""}`.localeCompare(`${b.code}:${b.id ?? ""}`));
   const manifest = { ...base, stateHash, obligationStateHash, blockers, complete: blockers.length === 0, manifestHash: null }; manifest.manifestHash = sha(manifest); return freeze(manifest);
 }
+function exactStoreEnvelope(value) {
+  const keys = ["goalId", "version", "projection", "projectionStateHash"];
+  return isObject(value) && Object.isFrozen(value) && Object.getOwnPropertySymbols(value).length === 0 && Object.keys(value).sort().join("\0") === keys.sort().join("\0") && keys.every(key => Object.hasOwn(value, key));
+}
+function assertStoreProjection(store, caller) {
+  if (!exactStoreEnvelope(store) || !Object.isFrozen(store.projection) || typeof store.goalId !== "string" || !store.goalId || !Number.isSafeInteger(store.version) || !hash(store.projectionStateHash) || store.projection.goalId !== store.goalId || store.projection.version !== store.version) throw new Error("invalid Store projection envelope");
+  const storeSerialized = canonicalProjection(store.projection);
+  if (projectionStateHash(store.projection) !== store.projectionStateHash) throw new Error("Store projection hash mismatch");
+  if (!same(canonicalProjection(caller), storeSerialized)) throw new Error("caller projection Store authority mismatch");
+  return store;
+}
+// This is the Store's serialized state subset.  `stateHash` is intentionally
+// absent: it is caller pseudo-state, never durable authority.
+function canonicalProjection(projection) {
+  const map = value => value instanceof Map ? Object.fromEntries(value) : value;
+  const keys = ["goalId", "version", "lifecycle", "objective", "scope", "nonGoals", "dod", "tasks", "checkpointCount", "completionVerdict", "blockedReason", "nextAction", "createdAt", "updatedAt", "eventSchemaVersion", "epoch", "completionHistory", "coordinationState", "sessionBindings", "continuity", "actionOffer", "pendingHumanDecision", "contractHistory", "runtimeGeneration", "initialShape", "executionRevision", "executionContractHash", "readiness", "runtimeState", "writePolicy", "taskApplicability", "conditions", "observationRuns", "findings", "repairEpisodes", "repairChallenges", "suspension", "convergenceBudget", "evidenceHistory", "finalReview", "consumedAmendmentNonceDigests"];
+  const result = Object.fromEntries(keys.map(key => [key, map(projection[key]) ]));
+  if (projection.runtimeGeneration) { result.mutationSequence = projection.mutationSequence; result.taskMutationSequences = map(projection.taskMutationSequences || new Map()); }
+  result.consumedAmendmentNonceDigests = [...(projection.consumedAmendmentNonceDigests || [])].sort();
+  return result;
+}
 function jsonSafe(value) { return value === null || ["string", "boolean"].includes(typeof value) || typeof value === "number" && Number.isFinite(value) || Array.isArray(value) && value.every(jsonSafe) || isObject(value) && Object.getPrototypeOf(value) === Object.prototype && Object.values(value).every(jsonSafe); }
 function frozen(value) { return !!value && typeof value === "object" && Object.isFrozen(value) && Object.values(value).every(child => typeof child !== "object" || child === null || frozen(child)); }
-export function validateObligationFinalizationManifest(manifest) { try { if (!isObject(manifest) || Object.keys(manifest).sort().join("\0") !== [...MANIFEST_KEYS].sort().join("\0") || !frozen(manifest) || !jsonSafe(manifest) || manifest.schemaVersion !== "goal-runtime.v1.finalization-manifest.v1" || typeof manifest.goalId !== "string" || !manifest.goalId || !Number.isSafeInteger(manifest.revision) || !hash(manifest.contractHash) || !head(manifest.head) || !hash(manifest.worldHash) || !Array.isArray(manifest.tasks) || !Array.isArray(manifest.conditions) || !isObject(manifest.debts) || !Array.isArray(manifest.blockers) || !hash(manifest.manifestHash) || !hash(manifest.stateHash) || !hash(manifest.obligationStateHash)) return false; const stateHash = sha({ goalId: manifest.goalId, revision: manifest.revision, contractHash: manifest.contractHash, tasks: manifest.tasks, conditions: manifest.conditions, debts: manifest.debts }); if (stateHash !== manifest.stateHash || sha({ stateHash, head: manifest.head, worldHash: manifest.worldHash }) !== manifest.obligationStateHash) return false; const blockers = deriveBlockers(manifest); if (!same(blockers, manifest.blockers) || manifest.complete !== (blockers.length === 0)) return false; return manifest.manifestHash === sha({ ...manifest, manifestHash: null }); } catch { return false; } }
+export function validateObligationFinalizationManifest(manifest) { try { if (!isObject(manifest) || Object.keys(manifest).sort().join("\0") !== [...MANIFEST_KEYS].sort().join("\0") || !frozen(manifest) || !jsonSafe(manifest) || manifest.schemaVersion !== "goal-runtime.v1.finalization-manifest.v1" || typeof manifest.goalId !== "string" || !manifest.goalId || !Number.isSafeInteger(manifest.revision) || !hash(manifest.contractHash) || !head(manifest.head) || !hash(manifest.worldHash) || !Array.isArray(manifest.tasks) || !Array.isArray(manifest.conditions) || !isObject(manifest.debts) || !Array.isArray(manifest.blockers) || !hash(manifest.manifestHash) || !hash(manifest.stateHash) || !hash(manifest.obligationStateHash)) return false; const semanticStateHash = sha({ goalId: manifest.goalId, revision: manifest.revision, contractHash: manifest.contractHash, tasks: manifest.tasks, conditions: manifest.conditions, debts: manifest.debts }); if (manifest.debts.storeAuthority === true ? manifest.stateHash === semanticStateHash : manifest.stateHash !== semanticStateHash) return false; const stateHash = manifest.stateHash; if (sha({ stateHash, head: manifest.head, worldHash: manifest.worldHash }) !== manifest.obligationStateHash) return false; const blockers = deriveBlockers(manifest); if (!same(blockers, manifest.blockers) || manifest.complete !== (blockers.length === 0)) return false; return manifest.manifestHash === sha({ ...manifest, manifestHash: null }); } catch { return false; } }
 export function finalizationUnsupportedError(eventSchemaVersion) { const error = new Error(`FINALIZATION_UNSUPPORTED_GENERATION: ${eventSchemaVersion ?? "unknown"}`); error.code = "FINALIZATION_UNSUPPORTED_GENERATION"; return error; }
 export function finalizeGoal(projection, _options = {}) { throw finalizationUnsupportedError(projection?.eventSchemaVersion); }
