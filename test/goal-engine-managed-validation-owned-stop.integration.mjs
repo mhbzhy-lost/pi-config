@@ -51,6 +51,19 @@ test("stopOwnedManagedValidation preserves the exact managed worktree receipt th
   assert.deepEqual(calls.map((value) => Array.isArray(value) ? value[0] : value), ["recover", "preserve", "debt", "record"]);
 });
 
+test("stopOwnedManagedValidation rejects a typed preserved workspace whose id differs from the receipt lease", async () => {
+  const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`;
+  const workspaceReceipt = { id: "other-lease", ownerKind: "goal-validation", ownerId: "other-lease", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } };
+  const record = { id: "managed-receipt", process, workspaceLease: { ...workspaceReceipt, id: "validation-lease" }, terminal: null };
+  let writes = 0;
+  const result = await stopOwnedManagedValidation(request, {
+    readReceipt() { return record; }, async recover() { return { terminal }; }, async preserveManagedWorktree() { return workspaceReceipt; },
+    async markValidationLeaseDebt() {}, async writeRecord() { writes++; }, readClosure() { return null; },
+  });
+  assert.deepEqual(result, { state: "attention", code: "OWNED_STOP_IDENTITY_UNKNOWN" });
+  assert.equal(writes, 0);
+});
+
 test("stopOwnedManagedValidation durable typed preservation retries from closure without another recovery", async () => {
   const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`, workspaceReceipt = { id: "validation-lease", ownerKind: "goal-validation", ownerId: "validation-lease", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } }, record = { id: "managed-receipt", process, workspaceLease: workspaceReceipt, terminal: null };
   let closure = null, recoveries = 0, preserves = 0, debts = 0, records = 0;
@@ -64,4 +77,17 @@ test("stopOwnedManagedValidation durable typed preservation retries from closure
   await assert.rejects(() => stopOwnedManagedValidation(request, services), /durable typed record then throw/);
   const result = await stopOwnedManagedValidation(request, services);
   assert.equal(result.state, "observed"); assert.equal(recoveries, 1); assert.equal(preserves, 1); assert.equal(debts, 1); assert.equal(records, 1);
+});
+
+test("stopOwnedManagedValidation fills a missing closure from durable terminal preservation without recovery or preservation", async () => {
+  const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`, workspaceReceipt = { id: "validation-lease", ownerKind: "goal-validation", ownerId: "validation-lease", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } };
+  const record = { id: "managed-receipt", phase: "cleanup_debt", cleanupDebt: true, process, workspaceLease: workspaceReceipt, terminal };
+  let recoveries = 0, preserves = 0, writes = 0, closure = null;
+  const services = {
+    readReceipt() { return record; }, readClosure() { return closure; },
+    async recover() { recoveries++; }, async preserveManagedWorktree() { preserves++; }, async markValidationLeaseDebt() {}, async writeRecord() {},
+    async writeClosure(value) { writes++; closure = value; },
+  };
+  const result = await stopOwnedManagedValidation(request, services);
+  assert.equal(result.state, "observed"); assert.equal(recoveries, 0); assert.equal(preserves, 0); assert.equal(writes, 1);
 });

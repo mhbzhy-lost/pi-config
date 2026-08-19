@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -49,11 +49,21 @@ test("artifactRefForRun rejects symlinked artifact directories and target links"
   await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: root, goalId: "goal", runId: "run", managedTerminal: terminal })));
 });
 
+// RED: directory validation must precede any chmod, otherwise chmod follows this link.
+test("artifactRefForRun rejects a symlinked artifact directory without changing its external mode", async () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-artifact-chmod-link-")), outside = mkdtempSync(join(tmpdir(), "goal-artifact-chmod-outside-"));
+  chmodSync(outside, 0o755); symlinkSync(outside, join(root, "artifacts"));
+  await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: root, goalId: "goal", runId: "run", managedTerminal: terminal })));
+  assert.equal(requireMode(outside), 0o755);
+});
+
 test("quarantineWorkspace binds the lease baseCommit to headAtDispatch, not runtime baseHead", async () => {
   let releases = 0;
   const value = await (await host({ loadExecutorWorkspaceLease() { return lease(DISPATCH_HEAD); }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { releases++; return { preserved: true, disposition: "preserved" }; } })).quarantineWorkspace(workspaceRequest());
   assert.equal(value.disposition, "preserved"); assert.equal(releases, 1);
 });
+
+function requireMode(value) { return lstatSync(value).mode & 0o777; }
 
 test("quarantineWorkspace rejects non-40hex headAtDispatch before touching a lease", async () => {
   let loads = 0;
