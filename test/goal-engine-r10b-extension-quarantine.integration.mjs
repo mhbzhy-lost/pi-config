@@ -87,8 +87,8 @@ test("steer durably closes an executor in stop-proof, preserved-workspace, resou
   const p = projectionFor(f.cwd), proof = officialProof(f.runId);
   assert.deepEqual(f.calls.map(({ name }) => name), ["stop", "workspace", "resource"]);
   assert.deepEqual(f.calls[0].request, { runId: f.runId, asyncDir: join(tmpdir(), "executor-async"), sessionId: f.api.sessionId });
-  assert.deepEqual(f.calls[1].request, { goalId: p.goalId, taskId: "task-1", attempt: f.attempt, runId: f.runId, leaseId: f.leaseId, workspacePath: f.workspacePath, headAtDispatch: f.head, baseHead: f.head, executionRevision: 1, contractHash: p.executionContractHash, sessionId: f.api.sessionId });
-  assert.deepEqual(f.calls[2].request, { goalId: p.goalId, ownerKind: "executor", ownerId: f.runId, taskId: "task-1", attempt: f.attempt, leaseId: f.leaseId, executionRevision: 1, contractHash: p.executionContractHash, sessionId: f.api.sessionId });
+  assert.deepEqual(f.calls[1].request, { stateRoot: rootFor(f.cwd), goalId: p.goalId, taskId: "task-1", attempt: f.attempt, runId: f.runId, leaseId: f.leaseId, workspacePath: f.workspacePath, headAtDispatch: f.head, baseHead: f.head, executionRevision: 1, contractHash: p.executionContractHash, sessionId: f.api.sessionId });
+  assert.deepEqual(f.calls[2].request, { stateRoot: rootFor(f.cwd), goalId: p.goalId, ownerKind: "executor", ownerId: f.runId, taskId: "task-1", attempt: f.attempt, leaseId: f.leaseId, executionRevision: 1, contractHash: p.executionContractHash, sessionId: f.api.sessionId });
   assert.equal(p.suspension.resourcesQuarantined, true);
   assert.deepEqual(p.suspension.terminalProofRefs, [{ runId: f.runId, proofHash: canonicalHash(proof), state: "observed" }]);
   assert.deepEqual(p.suspension.workspaceClosureProofRefs, [{ taskId: "task-1", attempt: f.attempt, proofHash: hash("workspace"), state: "quarantined", disposition: "preserved" }]);
@@ -123,7 +123,7 @@ test("steer includes a process-bound managed Observation and stops it through th
   await steer(f.api); const suspended = projectionFor(f.cwd);
   assert.deepEqual(suspended.suspension.affectedRunIds, [f.runId, observationRunId].sort());
   assert.deepEqual(f.calls.map(({ name }) => name), ["stop", "workspace", "resource", "managed-stop"]);
-  assert.deepEqual(f.calls.at(-1).request, { goalId: suspended.goalId, runId: observationRunId, conditionId: "condition-1", allocationId, processIdentityHash: hash("process"), executionRevision: 1, executionContractHash: suspended.executionContractHash, baseHead: f.head });
+  assert.deepEqual(f.calls.at(-1).request, { stateRoot: rootFor(f.cwd), goalId: suspended.goalId, runId: observationRunId, conditionId: "condition-1", allocationId, processIdentityHash: hash("process"), executionRevision: 1, executionContractHash: suspended.executionContractHash, baseHead: f.head });
 });
 
 test("lease-only managed Observation is retained for attention and is never killed", { concurrency: false }, async () => {
