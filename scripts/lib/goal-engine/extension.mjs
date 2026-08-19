@@ -489,7 +489,7 @@ function statusResponse(projection, cwd, root, { machineAction = null, actionTok
 
 function validateSchema(schema, value, path = "goal_amend") {
   if (schema.anyOf) {
-    if (!schema.anyOf.some((branch) => { try { validateSchema(branch, value, path); return true; } catch { return false; } })) throw new Error(`${path} schema invalid operation or challenge shape`);
+    if (!schema.anyOf.some((branch) => { try { validateSchema(branch, value, path); return true; } catch { return false; } })) throw new Error(`${path} schema invalid operation or unknown field shape`);
     return;
   }
   if (schema.type === "object") {
@@ -523,6 +523,7 @@ const acceptanceSchema = { type: "object", properties: { criteria: { type: "arra
 const taskSchema = { type: "object", properties: { id: string, description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, required: ["id", "description", "writePaths", "acceptance"], additionalProperties: false };
 const resolutionSchema = { type: "object", properties: { id: string, disposition: { type: "string", enum: ["tasked", "out_of_scope", "duplicate", "new_goal"] }, task_id: string, reason: string }, required: ["id", "disposition", "reason"], additionalProperties: false };
 const updateTaskSchema = { type: "object", properties: { description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, additionalProperties: false };
+const executionChangeTaskSchema = { type: "object", properties: { id: string, description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, required: ["id"], additionalProperties: false };
 const goalAmendSchema = { type: "object", anyOf: [
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "patch_active" }, reason: string, action_token: string, add_tasks: { type: "array", items: taskSchema }, remove_tasks: { type: "array", items: string }, update_tasks: { type: "object", additionalProperties: updateTaskSchema } }, required: ["operation", "reason", "action_token"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "resolve_blocked" }, reason: string, action_token: string, blocked_resolution: { type: "string", enum: ["retry", "supersede"] }, blocked_task_id: string, replacement_task_id: string, add_tasks: { type: "array", items: taskSchema }, remove_tasks: { type: "array", items: string }, update_tasks: { type: "object", additionalProperties: updateTaskSchema } }, required: ["operation", "reason", "action_token", "blocked_resolution", "blocked_task_id"], additionalProperties: false },
@@ -533,6 +534,7 @@ const goalAmendSchema = { type: "object", anyOf: [
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "update_goal" }, challenge_id: string, action_token: string }, required: ["operation", "challenge_id", "action_token"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "propose_transfer_session" }, reason: string }, required: ["goal_id", "operation", "reason"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "transfer_session" }, challenge_id: string, reason: string, action_token: string }, required: ["goal_id", "operation", "challenge_id", "reason", "action_token"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "propose_execution_change" }, reason: string, changes: { type: "object", properties: { update_tasks: { type: "array", items: executionChangeTaskSchema } }, required: ["update_tasks"], additionalProperties: false } }, required: ["goal_id", "operation", "reason", "changes"], additionalProperties: false },
 ] };
 
 export function createGoalEngineExtension(pi, options = {}) {
@@ -884,6 +886,21 @@ export function createGoalEngineExtension(pi, options = {}) {
     const compacted = middle?.type === "compaction";
     if (!nonEmptyString(intent.id) || !validTimestamp(intent.timestamp) || !strictApprovalCompaction(intent, middle, message) || (!compacted && message?.parentId !== intent.id) || !message || message.parentId !== (compacted ? middle.id : intent.id) || !nonEmptyString(message.id) || !validTimestamp(message.timestamp) || Date.parse(message.timestamp) <= Date.parse(challenge.requestedAt) || text !== intent.data.choice) return null;
     return { intent, message, choice: intent.data.choice };
+  };
+  const isAmendmentIntent = (data, proposal) => exactPlainObject(data, ["protocol", "proposalId", "proposalHash", "goalId", "ownerSessionId", "choice", "source"])
+    && data.protocol === "goal-engine-execution-amendment-intent.v1" && ["approve", "reject"].includes(data.choice)
+    && ["interactive", "rpc"].includes(data.source) && data.proposalId === proposal.proposalId && data.proposalHash === proposal.proposalHash
+    && data.goalId === proposal.goalId && data.ownerSessionId === proposal.ownerSessionId;
+  const amendmentApprovalPair = (proposal, ctx) => {
+    const branch = ctx.sessionManager?.getBranch?.();
+    if (!Array.isArray(branch)) return null;
+    const intents = branch.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry?.type === "custom" && entry.customType === "goal-engine-execution-amendment-intent" && isAmendmentIntent(entry.data, proposal));
+    if (intents.length !== 1) return null;
+    const { entry: intent, index } = intents[0], middle = branch[index + 1], compacted = middle?.type === "compaction", message = compacted ? branch[index + 2] : middle;
+    const content = message?.message?.content, text = typeof content === "string" ? content : Array.isArray(content) && content.length === 1 && content[0]?.type === "text" ? content[0].text : null;
+    if (!nonEmptyString(intent.id) || !validTimestamp(intent.timestamp) || !message || message.type !== "message" || message.message?.role !== "user" || message.images?.length || message.streamingBehavior !== undefined || !nonEmptyString(message.id) || !validTimestamp(message.timestamp) || text !== intent.data.choice || Date.parse(message.timestamp) <= Date.parse(intent.timestamp) || !strictApprovalCompaction(intent, middle, message) || message.parentId !== (compacted ? middle.id : intent.id)) return null;
+    const identity = (entry) => ({ id: entry.id, parentId: entry.parentId ?? null, timestamp: entry.timestamp, message: entry.message });
+    return { intent, message, choice: intent.data.choice, userEntryHash: canonicalHash(identity(message)), branchBindingHash: canonicalHash({ proposalHash: proposal.proposalHash, intent: identity(intent), compaction: compacted ? { id: middle.id, parentId: middle.parentId, timestamp: middle.timestamp, summary: middle.summary, firstKeptEntryId: middle.firstKeptEntryId, tokensBefore: middle.tokensBefore } : null, user: identity(message), choice: intent.data.choice, source: intent.data.source, sessionId: proposal.ownerSessionId }) };
   };
   const isRepairIntent = (data, challenge) => {
     const fields = ["protocol", "challengeId", "challengeHash", "goalId", "executionRevision", "executionContractHash", "baseHead", "episodeId", "conditionId", "findingIds", "subjectHash", "taskId", "taskDefHash", "sessionId", "choice", "source"];
@@ -1321,6 +1338,25 @@ export function createGoalEngineExtension(pi, options = {}) {
           const current = loadProjectionFn(root, goalId);
           return JSON.stringify({ goalId, runtimeState: current.runtimeState, readiness: current.readiness, ...(outcome.attention ? { status: outcome.attention[0], attention: outcome.attention } : {}), progressLedger: current.progressLedger });
         }
+        const amendment = projection.pendingHumanDecision;
+        if (amendment?.phase === "proposed") {
+          const pair = amendment.ownerSessionId === sessionId ? amendmentApprovalPair(amendment, ctx) : null;
+          if (!pair) return JSON.stringify({ goalId, status: "R10B_AMENDMENT_APPROVAL_REQUIRED", proposalId: amendment.proposalId, choices: ["approve", "reject"] });
+          const recordedAt = new Date().toISOString();
+          const material = { proposalId: amendment.proposalId, proposalHash: amendment.proposalHash, ownerSessionId: amendment.ownerSessionId, userEntryId: pair.message.id, userEntryHash: pair.userEntryHash, branchBindingHash: pair.branchBindingHash, choice: pair.choice, approved: pair.choice === "approve", source: pair.intent.data.source, recordedAt };
+          const event = makeEvent("execution.amendment_approved", { ...material, decisionId: canonicalHash(material) }, goalId, "goal-runtime.v1");
+          const expected = applyEvent(projection, event);
+          try { projection = appendEventFn(root, event, projection.version); }
+          catch (cause) {
+            const recovered = loadProjectionFn(root, goalId);
+            if (!isDeepStrictEqual(recovered, expected)) throw cause;
+            projection = recovered;
+          }
+          try { persistMetadata("goal-engine-execution-amendment-decision", { proposalId: amendment.proposalId, decisionId: event.data.decisionId, choice: pair.choice, approved: pair.choice === "approve", source: pair.intent.data.source, userEntryId: pair.message.id, ownerSessionId: amendment.ownerSessionId }); } catch { /* Projection is authoritative. */ }
+          return JSON.stringify({ goalId, status: "R10B_AMENDMENT_DECISION_RECORDED" });
+        }
+        if (amendment?.phase === "approved") return JSON.stringify({ goalId, status: "R10B_AMENDMENT_APPLY_REQUIRED", proposalId: amendment.proposalId });
+        if (amendment?.phase === "rejected") return JSON.stringify({ goalId, status: "R10B_AMENDMENT_REJECTED", proposalId: amendment.proposalId });
         // Repair approval continuation deliberately precedes R9: created and
         // approved challenges are no longer selected by obligation policy.
         const repairChallenges = [...projection.repairChallenges.values()].filter((challenge) => challenge.action === "authorize_task" && challenge.sessionId === sessionId);
@@ -1955,6 +1991,31 @@ export function createGoalEngineExtension(pi, options = {}) {
         return JSON.stringify({ status: "METADATA_PROPOSAL_PENDING", challenge_id: challenge.id, reason: challenge.reason, base_metadata: publicMetadata(baseMetadata), target_metadata: publicMetadata(targetMetadata), proposal_hash: challenge.proposalHash, choices: challenge.choices });
       }
       const currentSessionId = sessionIdentity(ctx);
+      if (params.operation === "propose_execution_change") {
+        const closure = projection.suspension;
+        if (projection.eventSchemaVersion !== "goal-runtime.v1" || projection.runtimeState !== "suspended" || !closure?.resourcesQuarantined
+          || closure.terminalProofRefs?.length !== closure.affectedRunIds?.length || closure.workspaceClosureProofRefs?.length !== closure.affectedTaskIds?.length
+          || closure.resourceClosureProofRefs?.length !== closure.affectedRunIds?.length || projection.pendingHumanDecision) throw new Error("execution amendment requires a fully closed suspended runtime without a pending proposal");
+        const updates = params.changes?.update_tasks;
+        if (!Array.isArray(updates) || updates.length === 0 || new Set(updates.map((entry) => entry.id)).size !== updates.length) throw new Error("execution amendment update_tasks must be non-empty and unique");
+        const source = {
+          objective: projection.objective, scope: projection.scope, non_goals: projection.nonGoals, dod: projection.dod,
+          execution: { schema: "goal-runtime.v1", tasks: [...projection.tasks].map(([id, task]) => ({ id, description: task.description, deps: task.deps, writePaths: task.writePaths, acceptance: task.acceptance, workflow: task.workflow })), conditions: [...projection.conditions.values()].map((condition) => condition.definition), write_policy: { allowed_paths: projection.writePolicy.allowedPaths }, budgets: projection.convergenceBudget },
+        };
+        for (const update of updates) {
+          const index = source.execution.tasks.findIndex((task) => task.id === update.id);
+          if (index < 0) throw new Error("unknown task in execution amendment");
+          const { id, ...change } = update;
+          source.execution.tasks[index] = { ...source.execution.tasks[index], ...change };
+        }
+        let target;
+        try { target = normalizeRuntimeGoalInit(source, runtimeHost?.registries); } catch (error) { throw new Error(`invalid execution amendment: ${error.message}`); }
+        const changes = { update_tasks: structuredClone(updates) };
+        const material = { goalId, proposalId: `execution-amendment-${crypto.randomUUID()}`, changes, changesHash: canonicalHash(changes), targetExecutionContract: target, targetContractHash: hashRuntimeExecutionContract(target), baseHead: projection.runtimeBaseHead, ownerSessionId: currentSessionId, oldRevision: projection.executionRevision, newRevision: projection.executionRevision + 1 };
+        const event = makeEvent("execution.amendment_proposed", { ...material, proposalHash: canonicalHash(material) }, goalId, "goal-runtime.v1");
+        const updated = appendEventFn(root, event, projection.version);
+        return JSON.stringify({ goalId, status: "R10B_AMENDMENT_PROPOSED", proposalId: material.proposalId });
+      }
       const metadataBeforeConsume = params.operation === "update_goal" ? metadataState(projection, currentSessionId) : null;
       if (params.operation === "transfer_session") {
         const record = transferChallenges.get(params.challenge_id);
@@ -2626,6 +2687,17 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (!isDeepStrictEqual(recovered, expected)) throw error;
       suspended = recovered;
     }
+    if (taskIds.length === 0 && runIds.length === 0) {
+      const closure = { ...suspended.suspension, resourcesQuarantined: true, terminalProofRefs: [], workspaceClosureProofRefs: [], resourceClosureProofRefs: [] };
+      const closureEvent = makeEvent("goal.runtime_suspended", closure, projection.goalId, "goal-runtime.v1");
+      const expectedClosure = applyEvent(suspended, closureEvent);
+      try { suspended = appendEventFn(root, closureEvent, suspended.version); }
+      catch (error) {
+        const recovered = loadProjectionFn(root, projection.goalId);
+        if (!isDeepStrictEqual(recovered, expectedClosure)) throw error;
+        suspended = recovered;
+      }
+    }
     await stopOwnedTasks(suspended, taskIds);
     return true;
   };
@@ -2641,6 +2713,16 @@ export function createGoalEngineExtension(pi, options = {}) {
     if (suspensionReason) {
       await suspendOwnedRuntime(ctx, suspensionReason);
       return { action: "continue" };
+    }
+    if (!event.images?.length && event.streamingBehavior === undefined) {
+      let repairApprovalPending = false, activeOwner = false;
+      try {
+        const { root } = executionScopeFor(ctx), sessionId = sessionIdentity(ctx);
+        const owned = loadAllProjections(root).filter((projection) => projection.eventSchemaVersion === "goal-runtime.v1" && projection.runtimeState === "active" && ownedBySession(projection, sessionId));
+        activeOwner = owned.length === 1;
+        repairApprovalPending = owned.some((projection) => [...projection.repairChallenges.values()].some((challenge) => challenge.phase === "created" && challenge.action === "authorize_task" && challenge.sessionId === sessionId));
+      } catch { /* normal suspension remains the safe fallback */ }
+      if (activeOwner && !repairApprovalPending && await suspendOwnedRuntime(ctx, "execution_amendment")) return { action: "continue" };
     }
     pendingInput = { text: event.text, source: event.source };
     let hookSessionId;
@@ -2670,6 +2752,16 @@ export function createGoalEngineExtension(pi, options = {}) {
         return { action: "continue" };
       }
     } catch { /* only the challenge target's exact real-user input is durable */ }
+
+    try {
+      const { root } = executionScopeFor(ctx);
+      const amendments = loadAllProjections(root).filter((projection) => projection.eventSchemaVersion === "goal-runtime.v1" && projection.lifecycle === "active" && projection.runtimeState === "suspended" && ownedBySession(projection, hookSessionId) && projection.pendingHumanDecision?.phase === "proposed");
+      if (amendments.length === 1 && event.streamingBehavior === undefined && !event.images?.length && ["approve", "reject"].includes(event.text)) {
+        const proposal = amendments[0].pendingHumanDecision;
+        persistMetadata("goal-engine-execution-amendment-intent", { protocol: "goal-engine-execution-amendment-intent.v1", proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, goalId: proposal.goalId, ownerSessionId: proposal.ownerSessionId, choice: event.text, source: event.source });
+        return { action: "continue" };
+      }
+    } catch { /* only a unique suspended owner proposal can receive an amendment intent */ }
 
     try {
       const { root } = executionScopeFor(ctx);

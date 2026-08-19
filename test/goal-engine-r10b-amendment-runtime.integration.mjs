@@ -75,7 +75,7 @@ function proposalData(projection) {
 }
 
 function approvalData(proposal, projection) {
-  const approval = { proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, ownerSessionId: ownerSessionId(projection), userEntryId: "user-entry-r10b", userEntryHash: sha({ id: "user-entry-r10b", text: "approve amendment" }), branchBindingHash: sha({ ownerSessionId: ownerSessionId(projection), branch: "extension-lane" }), source: "interactive", recordedAt: "2026-08-22T00:01:00.000Z" };
+  const approval = { proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, ownerSessionId: ownerSessionId(projection), userEntryId: "user-entry-r10b", userEntryHash: sha({ id: "user-entry-r10b", text: "approve amendment" }), branchBindingHash: sha({ ownerSessionId: ownerSessionId(projection), branch: "extension-lane" }), choice: "approve", approved: true, source: "interactive", recordedAt: "2026-08-22T00:01:00.000Z" };
   return { ...approval, decisionId: sha(approval) };
 }
 
@@ -104,7 +104,7 @@ test("R10B durable amendment proposal reloads the normalized target runtime cont
 test("R10B durable amendment approval reducer records the complete decision identity", () => {
   const projection = suspendedRuntime(), proposal = proposalData(projection);
   const approval = approvalData(proposal, projection);
-  assert.deepEqual(Object.keys(approval).sort(), ["branchBindingHash", "decisionId", "ownerSessionId", "proposalHash", "proposalId", "recordedAt", "source", "userEntryHash", "userEntryId"]);
+  assert.deepEqual(Object.keys(approval).sort(), ["approved", "branchBindingHash", "choice", "decisionId", "ownerSessionId", "proposalHash", "proposalId", "recordedAt", "source", "userEntryHash", "userEntryId"]);
   const { decisionId, ...approvalMaterial } = approval;
   assert.equal(decisionId, sha(approvalMaterial));
   const pending = applyEvent(projection, event("execution.amendment_proposed", proposal, 18));

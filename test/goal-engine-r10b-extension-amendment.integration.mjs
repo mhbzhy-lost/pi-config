@@ -116,7 +116,7 @@ test("R10B approve records the exact active-branch decision before exposing appl
   const intent = amendmentEntries(api, "intent")[0]; assert.ok(intent, "hook writes one audit intent before Pi appends the real user message");
   assert.equal(amendmentEntries(api, "decision").length, 0);
   await invoke(api, "goal_status", {});
-  const decision = amendmentEntries(api, "decision")[0]?.data, user = api.entries.at(-1);
+  const decision = amendmentEntries(api, "decision")[0]?.data, user = api.entries.findLast((entry) => entry.type === "message" && entry.message?.role === "user");
   assert.deepEqual({ choice: decision?.choice, approved: decision?.approved, proposalId: decision?.proposalId, userEntryId: decision?.userEntryId }, { choice: "approve", approved: true, proposalId: proposal.proposalId, userEntryId: user.id });
   assert.equal(projectionFor(cwd).pendingHumanDecision.phase, "approved");
   assert.match(await invoke(api, "goal_status", {}), /R10B_AMENDMENT_APPLY_REQUIRED/);
