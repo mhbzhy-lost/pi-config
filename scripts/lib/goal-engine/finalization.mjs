@@ -115,20 +115,9 @@ function exactStoreEnvelope(value) {
 }
 function assertStoreProjection(store, caller) {
   if (!exactStoreEnvelope(store) || !Object.isFrozen(store.projection) || typeof store.goalId !== "string" || !store.goalId || !Number.isSafeInteger(store.version) || !hash(store.projectionStateHash) || store.projection.goalId !== store.goalId || store.projection.version !== store.version) throw new Error("invalid Store projection envelope");
-  const storeSerialized = canonicalProjection(store.projection);
   if (projectionStateHash(store.projection) !== store.projectionStateHash) throw new Error("Store projection hash mismatch");
-  if (!same(canonicalProjection(caller), storeSerialized)) throw new Error("caller projection Store authority mismatch");
+  if (projectionStateHash(caller) !== store.projectionStateHash) throw new Error("caller projection Store authority mismatch");
   return store;
-}
-// This is the Store's serialized state subset.  `stateHash` is intentionally
-// absent: it is caller pseudo-state, never durable authority.
-function canonicalProjection(projection) {
-  const map = value => value instanceof Map ? Object.fromEntries(value) : value;
-  const keys = ["goalId", "version", "lifecycle", "objective", "scope", "nonGoals", "dod", "tasks", "checkpointCount", "completionVerdict", "blockedReason", "nextAction", "createdAt", "updatedAt", "eventSchemaVersion", "epoch", "completionHistory", "coordinationState", "sessionBindings", "continuity", "actionOffer", "pendingHumanDecision", "contractHistory", "runtimeGeneration", "initialShape", "executionRevision", "executionContractHash", "readiness", "runtimeState", "writePolicy", "taskApplicability", "conditions", "observationRuns", "findings", "repairEpisodes", "repairChallenges", "suspension", "convergenceBudget", "evidenceHistory", "finalReview", "consumedAmendmentNonceDigests"];
-  const result = Object.fromEntries(keys.map(key => [key, map(projection[key]) ]));
-  if (projection.runtimeGeneration) { result.mutationSequence = projection.mutationSequence; result.taskMutationSequences = map(projection.taskMutationSequences || new Map()); }
-  result.consumedAmendmentNonceDigests = [...(projection.consumedAmendmentNonceDigests || [])].sort();
-  return result;
 }
 function jsonSafe(value) { return value === null || ["string", "boolean"].includes(typeof value) || typeof value === "number" && Number.isFinite(value) || Array.isArray(value) && value.every(jsonSafe) || isObject(value) && Object.getPrototypeOf(value) === Object.prototype && Object.values(value).every(jsonSafe); }
 function frozen(value) { return !!value && typeof value === "object" && Object.isFrozen(value) && Object.values(value).every(child => typeof child !== "object" || child === null || frozen(child)); }
