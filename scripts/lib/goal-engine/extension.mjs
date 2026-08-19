@@ -1379,8 +1379,8 @@ export function createGoalEngineExtension(pi, options = {}) {
           const nonceDigest = canonicalHash({ schema: "goal-user-capability.v1", goalId, proposalId: amendment.proposalId, proposalHash: amendment.proposalHash, ownerSessionId: amendment.ownerSessionId, oldRevision: amendment.oldRevision, newRevision: amendment.newRevision, executionContractHash: projection.executionContractHash, targetContractHash: amendment.targetContractHash, baseHead: amendment.baseHead, closureHash: suspensionClosureHash(closure), nonce: Buffer.isBuffer(nonce) ? nonce.toString("base64") : String(nonce) });
           const source = new Set(amendment.sourceTaskIds), target = new Set(amendment.targetExecutionContract.execution.tasks.map((task) => task.id));
           const taskIds = [...new Set([...source, ...target])].sort();
-          const facts = taskIds.map((taskId) => ({ taskId, revision: amendment.newRevision, state: !source.has(taskId) ? "applicable" : !target.has(taskId) ? "superseded" : "reverify_required", reason: "execution_amendment" }));
-          const reconciliation = facts.map(({ taskId, state }) => ({ taskId, action: !source.has(taskId) ? "add" : !target.has(taskId) ? "supersede" : state === "reverify_required" ? "reverify" : "keep" }));
+          const facts = taskIds.map((taskId) => ({ taskId, revision: amendment.newRevision, state: !source.has(taskId) ? "applicable" : !target.has(taskId) ? "superseded" : "applicable", reason: "execution_amendment" }));
+          const reconciliation = facts.map(({ taskId }) => ({ taskId, action: !source.has(taskId) ? "add" : !target.has(taskId) ? "supersede" : "keep" }));
           const events = [
             makeEvent("execution.amendment_capability_consumed", { proposalId: amendment.proposalId, nonceDigest }, goalId, "goal-runtime.v1"),
             ...facts.map((data) => makeEvent("task.applicability_changed", data, goalId, "goal-runtime.v1")),
@@ -2081,6 +2081,13 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         let target;
         try { target = normalizeRuntimeGoalInit(source, runtimeHost?.registries); } catch (error) { throw new Error(`invalid execution amendment: ${error.message}`); }
+        for (const update of updates) {
+          const task = projection.tasks.get(update.id);
+          const targetTask = target.execution.tasks.find((entry) => entry.id === update.id);
+          if (task?.status === "accepted" && canonicalHash(task.acceptance) !== canonicalHash(targetTask?.acceptance)) {
+            throw new Error("accepted Task acceptance cannot change in an execution amendment");
+          }
+        }
         const changes = { update_tasks: structuredClone(updates) };
         const material = { goalId, proposalId: `execution-amendment-${crypto.randomUUID()}`, changes, changesHash: canonicalHash(changes), targetExecutionContract: target, targetContractHash: hashRuntimeExecutionContract(target), baseHead: proposalWorld.repo.head, ownerSessionId: currentSessionId, oldRevision: projection.executionRevision, newRevision: projection.executionRevision + 1 };
         const event = makeEvent("execution.amendment_proposed", { ...material, proposalHash: canonicalHash(material) }, goalId, "goal-runtime.v1");
