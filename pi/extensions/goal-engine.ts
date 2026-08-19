@@ -37,6 +37,22 @@ type GoalEngineModule = {
   createGoalEngineExtension: (pi: ExtensionAPI, options?: { runtimeHost?: unknown }) => unknown;
 };
 
+type GoalEngineConfiguration = { runtimeHost?: Record<string, unknown> };
+function goalEngineConfiguration(settingsPath: string): GoalEngineConfiguration | null {
+  if (!existsSync(settingsPath)) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { return null; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const value = (parsed as Record<string, unknown>).goalEngine;
+  if (value === true) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const goal = value as Record<string, unknown>;
+  if (goal.enabled !== true || Object.keys(goal).some((key) => key !== "enabled" && key !== "runtimeHost")) return null;
+  if (!Object.hasOwn(goal, "runtimeHost")) return {};
+  if (!goal.runtimeHost || typeof goal.runtimeHost !== "object" || Array.isArray(goal.runtimeHost)) return null;
+  return { runtimeHost: goal.runtimeHost as Record<string, unknown> };
+}
+
 export async function createGoalEngineEntry(
   pi: ExtensionAPI,
   {
@@ -49,12 +65,19 @@ export async function createGoalEngineEntry(
     runtimeHostFactory?: (pi: ExtensionAPI, options: object) => unknown;
   } = {},
 ): Promise<void> {
-  if (!isGoalEngineEnabled(settingsPath)) return;
-  const runtimeHost = runtimeHostFactory
-    ? runtimeHostFactory(pi, {})
-    : (await import("../../scripts/lib/goal-engine/production-runtime-host.mjs")).createProductionGoalRuntimeHost(pi, {});
+  const configuration = goalEngineConfiguration(settingsPath);
+  if (!configuration) return;
+  let runtimeHost: unknown;
+  if (configuration.runtimeHost) {
+    const production = await import("../../scripts/lib/goal-engine/production-runtime-host.mjs");
+    let options: Record<string, unknown>;
+    try { options = production.normalizeProductionRuntimeHostOptions(configuration.runtimeHost); } catch { return; }
+    runtimeHost = runtimeHostFactory ? runtimeHostFactory(pi, options) : production.createProductionGoalRuntimeHost(pi, options);
+  } else if (runtimeHostFactory) {
+    runtimeHost = runtimeHostFactory(pi, {});
+  }
   const { createGoalEngineExtension } = await load();
-  createGoalEngineExtension(pi, { runtimeHost });
+  createGoalEngineExtension(pi, runtimeHost ? { runtimeHost } : {});
 }
 
 export default function goalEngine(pi: ExtensionAPI): Promise<void> {

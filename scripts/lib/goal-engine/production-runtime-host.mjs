@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { captureCurrentWorld } from "./current-world.mjs";
+import { createObservationAdapterRegistry } from "./observation-adapters.mjs";
 import { prepareManagedValidation, startManagedValidation, recoverManagedValidation, inspectManagedValidation, releaseManagedValidation, stopOwnedManagedValidation } from "./managed-validation.mjs";
 import { loadExecutorWorkspaceLease, inspectExecutorWorkspace, releaseExecutorWorkspace } from "./workspace.mjs";
 import { stopRootBrokerGoalOwnedRun } from "../subagent-dispatch/root-broker-registry.ts";
@@ -13,6 +14,21 @@ const hash = (value) => sha(JSON.stringify(canonical(value)));
 const fullSha = (value) => typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
 const hash64 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const attention = Object.freeze({ state: "attention", code: "OWNED_STOP_IDENTITY_UNKNOWN" });
+const hostKeys = ["adapters", "environments", "fixtures", "resources"];
+const safeRef = (value) => typeof value === "string" && !!value && !value.includes("\0") && !value.startsWith("/") && !value.split("/").some((part) => !part || part === "." || part === "..") && !/^[A-Za-z]:/.test(value);
+const registryRow = (value) => exact(value, ["fingerprint", "available"]) && typeof value.fingerprint === "string" && !!value.fingerprint && typeof value.available === "boolean";
+const resourceRow = (value) => exact(value, ["capacity", "holders"]) && Number.isSafeInteger(value.capacity) && value.capacity >= 0 && Array.isArray(value.holders) && value.holders.every((holder) => typeof holder === "string" && !!holder) && new Set(value.holders).size === value.holders.length;
+const validationPlan = (plan) => exact(plan, ["schema", "limits", "actions"]) && plan.schema === "dispatch-ir.v1.validation-plan" && exact(plan.limits, ["timeoutMs", "maxOutputBytes", "terminationGraceMs", "maxConcurrentWorkspaces"]) && Number.isInteger(plan.limits.timeoutMs) && plan.limits.timeoutMs >= 50 && plan.limits.timeoutMs <= 1800000 && Number.isInteger(plan.limits.maxOutputBytes) && plan.limits.maxOutputBytes >= 1 && plan.limits.maxOutputBytes <= 1000000 && Number.isInteger(plan.limits.terminationGraceMs) && plan.limits.terminationGraceMs >= 50 && plan.limits.terminationGraceMs <= 5000 && Number.isInteger(plan.limits.maxConcurrentWorkspaces) && plan.limits.maxConcurrentWorkspaces >= 1 && plan.limits.maxConcurrentWorkspaces <= 4 && Array.isArray(plan.actions) && plan.actions.length >= 1 && plan.actions.length <= 16 && plan.actions.every((action) => exact(action, ["id", "kind", "executable", "args"]) && typeof action.id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(action.id) && ["setup", "validation"].includes(action.kind) && typeof action.executable === "string" && isAbsolute(action.executable) && Array.isArray(action.args) && action.args.every((arg) => typeof arg === "string" && !arg.includes("\0") && Buffer.byteLength(arg) <= 8192)) && new Set(plan.actions.map((action) => action.id)).size === plan.actions.length && plan.actions.some((action) => action.kind === "validation");
+export function normalizeProductionRuntimeHostOptions(value) {
+  if (!exact(value, hostKeys) || !Array.isArray(value.adapters) || !value.adapters.every((adapter) => safeRef(adapter?.ref) && validationPlan(adapter?.validationPlan)) || !value.environments || typeof value.environments !== "object" || Array.isArray(value.environments) || !value.fixtures || typeof value.fixtures !== "object" || Array.isArray(value.fixtures) || !value.resources || typeof value.resources !== "object" || Array.isArray(value.resources) || Object.entries(value.environments).some(([ref, row]) => !safeRef(ref) || !registryRow(row)) || Object.entries(value.fixtures).some(([ref, row]) => !safeRef(ref) || !registryRow(row)) || Object.entries(value.resources).some(([key, row]) => !safeRef(key) || !resourceRow(row))) throw Error("Invalid production runtime Host settings");
+  createObservationAdapterRegistry(value.adapters);
+  return structuredClone(value);
+}
+function configuredRegistries(options) {
+  if (!Object.hasOwn(options, "adapters")) return null;
+  const config = normalizeProductionRuntimeHostOptions(Object.fromEntries(hostKeys.map((key) => [key, options[key]])));
+  return { config, registries: Object.freeze({ adapters: Object.freeze(Object.fromEntries(config.adapters.map(({ ref, version, deterministic }) => [ref, Object.freeze({ version, deterministic })]))), environments: Object.freeze(structuredClone(config.environments)), fixtures: Object.freeze(structuredClone(config.fixtures)) }), adapterRegistry: createObservationAdapterRegistry(config.adapters) };
+}
 function safeFile(file) { const stat = lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) throw Error("artifact identity is invalid"); return stat; }
 function sameNode(left, right) { return left.dev === right.dev && left.ino === right.ino; }
 function readSafe(file) { const before = safeFile(file); const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); try { const held = fstatSync(fd); const bytes = readFileSync(fd); const after = safeFile(file); if (!sameNode(before, held) || !sameNode(held, after) || held.size !== after.size) throw Error("artifact identity changed during read"); return bytes; } finally { closeSync(fd); } }
@@ -33,12 +49,15 @@ function preserveWorkspace(request, services) { if (!workspaceRequest(request)) 
 export function createProductionGoalRuntimeHost(pi, options = {}) {
   const facade = options.facade || { prepareManagedValidation, startManagedValidation, recoverManagedValidation, inspectManagedValidation, releaseManagedValidation, stopOwnedManagedValidation };
   const services = { loadExecutorWorkspaceLease: options.loadExecutorWorkspaceLease || loadExecutorWorkspaceLease, inspectExecutorWorkspace: options.inspectExecutorWorkspace || inspectExecutorWorkspace, releaseExecutorWorkspace: options.releaseExecutorWorkspace || releaseExecutorWorkspace };
-  const registries = options.registries || Object.freeze({}); const adapterRegistry = options.adapterRegistry || Object.freeze({});
+  const configured = configuredRegistries(options);
+  const registries = configured?.registries || options.registries || Object.freeze({}); const adapterRegistry = configured?.adapterRegistry || options.adapterRegistry || Object.freeze({});
+  const environmentRegistry = configured?.config.environments || options.environmentRegistry || Object.freeze({}); const fixtureRegistry = configured?.config.fixtures || options.fixtureRegistry || Object.freeze({});
+  const configuredResources = configured?.config.resources;
   const host = {
     registries, adapterRegistry,
     captureCurrentWorld: (input) => {
       if (!exact(input, ["cwd"]) || typeof input.cwd !== "string" || !input.cwd || !isAbsolute(input.cwd)) throw Error("Invalid CurrentWorld request");
-      return (facade.captureCurrentWorld || captureCurrentWorld)({ repoRoot: input.cwd, adapterRegistry, environmentRegistry: options.environmentRegistry || Object.freeze({}), fixtureRegistry: options.fixtureRegistry || Object.freeze({}), resourceRegistry: typeof options.resourceRegistry === "function" ? options.resourceRegistry() : (options.resourceRegistry || Object.freeze({})), runInventory: typeof options.runInventory === "function" ? options.runInventory() : (options.runInventory || []) });
+      return (facade.captureCurrentWorld || captureCurrentWorld)({ repoRoot: input.cwd, adapterRegistry, environmentRegistry: structuredClone(environmentRegistry), fixtureRegistry: structuredClone(fixtureRegistry), resourceRegistry: structuredClone(typeof options.resourceRegistry === "function" ? options.resourceRegistry() : (configuredResources || options.resourceRegistry || Object.freeze({}))), runInventory: typeof options.runInventory === "function" ? options.runInventory() : (options.runInventory || []) });
     },
     artifactRefForRun: async (input) => artifact(input),
     prepareManagedValidation: facade.prepareManagedValidation, startManagedValidation: facade.startManagedValidation, recoverManagedValidation: facade.recoverManagedValidation, inspectManagedValidation: facade.inspectManagedValidation, releaseManagedValidation: facade.releaseManagedValidation,
