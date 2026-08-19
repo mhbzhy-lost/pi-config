@@ -105,7 +105,7 @@ test("production Host canary persists runtime draft and readiness through the re
   const result = JSON.parse((await tools.find(tool => tool.name === "goal_init").execute("call", runtimeInit(), undefined, undefined, { cwd, sessionManager })).details.value);
   assert.deepEqual(calls.map(call => call.repoRoot), [cwd]); assert.deepEqual(calls[0], { repoRoot: cwd, adapterRegistry: runtimeHost.adapterRegistry, environmentRegistry: {}, fixtureRegistry: {}, resourceRegistry: {}, runInventory: [] }); assert.equal(result.runtimeState, "awaiting_user_approval");
   const projection = loadProjection(join(cwd, ".state/goal-engine"), result.goalId);
-  assert.equal(projection.runtimeState, "awaiting_user_approval"); assert.equal(projection.readiness.readiness, "ready");
+  assert.equal(projection.runtimeState, "awaiting_user_approval"); assert.equal(projection.readiness, "ready");
 });
 
 test("stopOwnedRun accepts only absolute asyncDir and exact Root Broker input", async () => {
