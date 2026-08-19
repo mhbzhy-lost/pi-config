@@ -36,7 +36,7 @@ test("stopOwnedManagedValidation recovers exact owner then durably preserves onc
 // high-level preserveWorkspace/preserveResource test doubles.
 test("stopOwnedManagedValidation preserves the exact managed worktree receipt through typed authorities", async () => {
   const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`;
-  const workspaceReceipt = { id: "validation-lease", ownerKind: "goal-validation", ownerId: "run", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } };
+  const workspaceReceipt = { id: "validation-lease", ownerKind: "goal-validation", ownerId: "validation-lease", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } };
   const record = { id: "managed-receipt", process, workspaceLease: workspaceReceipt, terminal: null };
   const calls = [];
   const result = await stopOwnedManagedValidation(request, {
@@ -52,7 +52,7 @@ test("stopOwnedManagedValidation preserves the exact managed worktree receipt th
 });
 
 test("stopOwnedManagedValidation durable typed preservation retries from closure without another recovery", async () => {
-  const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`, workspaceReceipt = { id: "validation-lease", ownerKind: "goal-validation", ownerId: "run", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } }, record = { id: "managed-receipt", process, workspaceLease: workspaceReceipt, terminal: null };
+  const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`, workspaceReceipt = { id: "validation-lease", ownerKind: "goal-validation", ownerId: "validation-lease", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } }, record = { id: "managed-receipt", process, workspaceLease: workspaceReceipt, terminal: null };
   let closure = null, recoveries = 0, preserves = 0, debts = 0, records = 0;
   const services = {
     readReceipt() { return record; }, readClosure() { return closure; },
