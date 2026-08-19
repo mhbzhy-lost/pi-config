@@ -31,3 +31,36 @@ test("stopOwnedManagedValidation recovers exact owner then durably preserves onc
   assert.deepEqual(result, { state: "observed", terminalProofHash: hash(terminal), resourceProofHash: hash("resource"), resourceState: "quarantined", debt: true });
   assert.equal(kills, 1);
 });
+
+// RED: production must use the typed managed-worktree authority, never the retired
+// high-level preserveWorkspace/preserveResource test doubles.
+test("stopOwnedManagedValidation preserves the exact managed worktree receipt through typed authorities", async () => {
+  const workspaceLease = { originRoot: "/origin", id: "validation-lease", ownerToken: "owner-token" };
+  const record = { id: "managed-receipt", process, workspaceLease, terminal: null };
+  const calls = [];
+  const result = await stopOwnedManagedValidation(request, {
+    readReceipt() { return record; },
+    async recover() { calls.push("recover"); return { terminal }; },
+    async preserveManagedWorktree(binding) { calls.push(["preserve", binding]); assert.deepEqual(binding, workspaceLease); return { state: "preserved", disposition: "preserved", receipt: { id: workspaceLease.id, state: "preserved", disposition: "preserved" } }; },
+    async markValidationLeaseDebt(value) { calls.push(["debt", value]); return { ...value, state: "cleanup-debt" }; },
+    async writeRecord(value) { calls.push(["record", value]); return { ...value, phase: "cleanup_debt", cleanupDebt: true, terminal }; },
+    readClosure() { return null; },
+  });
+  assert.deepEqual(result, { state: "observed", terminalProofHash: hash(terminal), resourceProofHash: hash({ receiptId: record.id, terminal, workspaceReceipt: { id: workspaceLease.id, state: "preserved", disposition: "preserved" }, debt: true }), resourceState: "quarantined", debt: true });
+  assert.deepEqual(calls.map((value) => Array.isArray(value) ? value[0] : value), ["recover", "preserve", "debt", "record"]);
+});
+
+test("stopOwnedManagedValidation durable typed preservation retries from closure without another recovery", async () => {
+  const workspaceLease = { originRoot: "/origin", id: "validation-lease", ownerToken: "owner-token" }, record = { id: "managed-receipt", process, workspaceLease, terminal: null };
+  let closure = null, recoveries = 0, preserves = 0, debts = 0, records = 0;
+  const services = {
+    readReceipt() { return record; }, readClosure() { return closure; },
+    async recover() { recoveries++; return { terminal }; },
+    async preserveManagedWorktree() { preserves++; return { state: "preserved", disposition: "preserved", receipt: { id: workspaceLease.id, state: "preserved", disposition: "preserved" } }; },
+    async markValidationLeaseDebt() { debts++; },
+    async writeRecord() { records++; closure = { terminalProofHash: hash(terminal), resourceProofHash: hash({ receiptId: record.id, terminal, workspaceReceipt: { id: workspaceLease.id, state: "preserved", disposition: "preserved" }, debt: true }) }; throw Error("durable typed record then throw"); },
+  };
+  await assert.rejects(() => stopOwnedManagedValidation(request, services), /durable typed record then throw/);
+  const result = await stopOwnedManagedValidation(request, services);
+  assert.equal(result.state, "observed"); assert.equal(recoveries, 1); assert.equal(preserves, 1); assert.equal(debts, 1); assert.equal(records, 1);
+});
