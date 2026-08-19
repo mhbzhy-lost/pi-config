@@ -8,7 +8,7 @@ const execFileAsync = promisify(execFile);
 const NON_CODE_EXTS = new Set([".md", ".json", ".txt", ".yml", ".yaml", ".toml", ".csv", ".lock", ".gitignore"]);
 const MAX_EXEMPT_LINES = 10;
 const NEGATIVE_RE = /^(none\.?|_?\(?none\)?_?|n\/?a|no\s+(\w+\s+)?issues(\s+found)?|nothing\s+to\s+report|✅|无)/i;
-const PROVIDER_CHAIN = ["idealab-anthropic", "bailian", "idealab-openai"];
+const PROVIDER_CHAIN = ["idealab-anthropic", "idealab-openai"];
 const DEFAULT_TIMEOUT_MS = 540_000;
 
 export function parseSections(text) {

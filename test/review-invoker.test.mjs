@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseSections, shouldExempt, buildDenyReason } from "../scripts/lib/review-invoker.mjs";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseSections, shouldExempt, buildDenyReason, runReview } from "../scripts/lib/review-invoker.mjs";
 
 test("parseSections 检测 Critical 段落有内容", () => {
   const text = "### Critical\n\n1. SQL injection in user input\n\n### Minor\n\nNone.";
@@ -63,4 +66,48 @@ test("buildDenyReason 包含 review 输出和综合判断框架", () => {
   assert.match(reason, /Review file count: 3/);
   assert.match(reason, /综合判断/);
   assert.match(reason, /### Critical\n\n1\. Bug/);
+});
+
+test("runReview 按 Anthropic 后 Idealab OpenAI 的顺序 fallback", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "review-invoker-"));
+  const logPath = join(dir, "providers.log");
+  const uvPath = join(dir, "uv");
+  await writeFile(uvPath, `#!/bin/sh
+printf '%s\\n' "$@" >> "${logPath}"
+provider=
+for arg in "$@"; do
+  if [ "$previous" = "--provider" ]; then provider="$arg"; fi
+  previous="$arg"
+done
+if [ "$provider" = "idealab-openai" ]; then
+  printf 'review output\\n'
+  exit 0
+fi
+exit 1
+`);
+  await chmod(uvPath, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${dir}:${previousPath}`;
+  try {
+    const result = await runReview({
+      cwd: dir,
+      baseRef: "origin/main",
+      round: 1,
+      reviewerPy: "/reviewer.py",
+      envFile: "/ignored.env",
+      timeoutMs: 10_000,
+    });
+    const providers = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter((arg, index, args) => args[index - 1] === "--provider");
+    assert.deepEqual(providers, [
+      "idealab-anthropic",
+      "idealab-openai",
+    ]);
+    assert.equal(result.provider, "idealab-openai");
+  } finally {
+    process.env.PATH = previousPath;
+    await rm(dir, { recursive: true, force: true });
+  }
 });

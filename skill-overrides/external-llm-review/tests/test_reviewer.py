@@ -79,20 +79,32 @@ class ReviewerProtocolAndBackendTest(unittest.TestCase):
         args = Namespace(provider="idealab-anthropic")
         self.assertEqual(reviewer.resolve_provider(args, env={}), "idealab-anthropic")
 
-        args = Namespace(provider="bailian")
-        self.assertEqual(reviewer.resolve_provider(args, env={}), "bailian")
-
         args = Namespace(provider="idealab-openai")
         self.assertEqual(reviewer.resolve_provider(args, env={}), "idealab-openai")
 
-        args = Namespace(provider="deepseek")
-        self.assertEqual(reviewer.resolve_provider(args, env={}), "deepseek")
+    def test_review_provider_rejects_retired_providers_from_args_and_env(self):
+        for provider in ("bailian", "deepseek"):
+            with self.subTest(provider=provider):
+                with self.assertRaisesRegex(ValueError, "idealab-openai"):
+                    reviewer.resolve_provider(Namespace(provider=provider), env={})
+                with self.assertRaisesRegex(ValueError, "idealab-openai"):
+                    reviewer.resolve_provider(
+                        Namespace(provider=None),
+                        env={"EXTERNAL_LLM_REVIEW_PROVIDER": provider},
+                    )
+
+    def test_arg_parser_rejects_retired_providers(self):
+        parser = reviewer.build_arg_parser()
+        for provider in ("bailian", "deepseek"):
+            with self.subTest(provider=provider):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["base", "head", "--provider", provider])
 
     def test_review_provider_reads_env(self):
         args = Namespace(provider=None)
         self.assertEqual(
-            reviewer.resolve_provider(args, env={"EXTERNAL_LLM_REVIEW_PROVIDER": "bailian"}),
-            "bailian"
+            reviewer.resolve_provider(args, env={"EXTERNAL_LLM_REVIEW_PROVIDER": "idealab-openai"}),
+            "idealab-openai"
         )
 
     def test_review_provider_rejects_unknown_values(self):
@@ -391,18 +403,43 @@ class ReviewerProtocolAndBackendTest(unittest.TestCase):
                     allowed_roots=[Path(root)],
                 )
 
-    def test_describe_api_exception_includes_response_body(self):
+    def test_describe_api_exception_includes_only_safe_diagnostics(self):
         class Response:
             status_code = 400
-            text = '{"error":"bad request"}'
+            text = '{"error":"raw response body"}'
+            headers = {"x-request-id": "header-request-id"}
 
         class ApiError(Exception):
             response = Response()
+            code = "invalid_request"
+            type = "request_error"
+            param = "model"
+            request_id = "req-123.abc"
 
-        detail = reviewer.describe_api_exception(ApiError("request failed"))
+        detail = reviewer.describe_api_exception(ApiError("raw exception message"))
 
+        self.assertIn("ApiError", detail)
         self.assertIn("status_code=400", detail)
-        self.assertIn("bad request", detail)
+        self.assertIn("code=invalid_request", detail)
+        self.assertIn("type=request_error", detail)
+        self.assertIn("param=model", detail)
+        self.assertIn("request_id=req-123.abc", detail)
+        self.assertNotIn("raw exception message", detail)
+        self.assertNotIn("raw response body", detail)
+        self.assertNotIn("header-request-id", detail)
+
+    def test_describe_api_exception_omits_unsafe_fields_and_status(self):
+        class Response:
+            status_code = "500"
+
+        class ApiError(Exception):
+            response = Response()
+            code = "unsafe value"
+            request_id = "req/unsafe"
+
+        detail = reviewer.describe_api_exception(ApiError("sensitive"))
+
+        self.assertEqual(detail, "ApiError")
 
     def test_run_review_rejects_legacy_api_format_env(self):
         import asyncio
@@ -425,159 +462,6 @@ class ReviewerProtocolAndBackendTest(unittest.TestCase):
         self.assertIn("no longer read", stderr.getvalue())
 
 
-class BailianProviderTest(unittest.TestCase):
-    def test_payload_includes_streaming_and_thinking_defaults(self):
-        from _provider import BailianProvider
-        provider = BailianProvider(
-            base_url="https://example.test",
-            api_key="sk-test",
-            model="test-model",
-            max_tokens=100,
-        )
-        payload = provider.build_payload(
-            messages=[{"role": "user", "content": "hi"}],
-            spec={"temperature": 0.2},
-        )
-        self.assertEqual(payload["model"], "test-model")
-        self.assertTrue(payload["stream"])
-        self.assertEqual(payload["stream_options"], {"include_usage": True})
-        self.assertFalse(payload["enable_thinking"])
-        self.assertEqual(payload["max_tokens"], 100)
-        self.assertNotIn("thinking_budget", payload)
-
-    def test_payload_includes_thinking_budget_when_set(self):
-        from _provider import BailianProvider
-        provider = BailianProvider(
-            base_url="https://example.test",
-            api_key="sk-test",
-            model="test-model",
-            enable_thinking=True,
-            thinking_budget=4096,
-        )
-        payload = provider.build_payload(
-            messages=[{"role": "user", "content": "hi"}],
-            spec={},
-        )
-        self.assertEqual(payload["thinking_budget"], 4096)
-        self.assertTrue(payload["enable_thinking"])
-
-    def test_stream_response_returns_content(self):
-        from _provider import BailianProvider
-        provider = BailianProvider(
-            base_url="x", api_key="k", model="m"
-        )
-
-        async def gen():
-            yield {"choices": [{"delta": {"content": "Hello "}, "index": 0}]}
-            yield {"choices": [{"delta": {"content": "world"}, "index": 0}]}
-            yield {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]}
-
-        async def run():
-            return await provider.extract_stream_content(gen())
-
-        result = asyncio.run(run())
-        self.assertEqual(result, "Hello world")
-
-    def test_stream_response_falls_back_to_reasoning_content(self):
-        from _provider import BailianProvider
-        provider = BailianProvider(
-            base_url="x", api_key="k", model="m"
-        )
-
-        async def gen():
-            yield {"choices": [{"delta": {"reasoning_content": "thinking..."}}]}
-            yield {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]}
-
-        async def run():
-            return await provider.extract_stream_content(gen())
-
-        result = asyncio.run(run())
-        self.assertEqual(result, "thinking...")
-
-    def test_stream_response_raises_on_empty_content(self):
-        from _provider import BailianProvider
-        provider = BailianProvider(
-            base_url="x", api_key="k", model="m"
-        )
-
-        async def gen():
-            yield {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]}
-
-        async def run():
-            return await provider.extract_stream_content(gen())
-
-        with self.assertRaisesRegex(RuntimeError, "empty content"):
-            asyncio.run(run())
-
-    def test_stream_response_tolerates_non_dict_chunks(self):
-        from _provider import BailianProvider
-        provider = BailianProvider(
-            base_url="x", api_key="k", model="m"
-        )
-
-        async def gen():
-            yield {"choices": [{"delta": {"content": "good"}, "index": 0}]}
-            yield "not a dict"
-            yield {"choices": [{"delta": {"content": " also"}, "finish_reason": "stop", "index": 0}]}
-
-        async def run():
-            return await provider.extract_stream_content(gen())
-
-        result = asyncio.run(run())
-        self.assertEqual(result, "good also")
-
-    def test_stream_error_response_body_readable(self):
-        """BUG: streaming send must aread() before raise on 4xx so caller sees body."""
-        from _provider import BailianProvider
-
-        provider = BailianProvider(
-            base_url="https://api.example.com", api_key="bad-key", model="m"
-        )
-
-        async def run():
-            class FakeStreamResponse:
-                status_code = 401
-                _content = b'{"error": "InvalidApiKey"}'
-                _read_called = False
-                _raised = False
-
-                async def aread(self):
-                    self._read_called = True
-                    return self._content
-
-                @property
-                def text(self):
-                    return self._content.decode()
-
-                def raise_for_status(self):
-                    self._raised = True
-                    raise RuntimeError("401 Unauthorized")
-
-                def aiter_lines(self):
-                    async def gen():
-                        return
-                    return gen()
-
-                async def __aenter__(self):
-                    return self
-
-                async def __aexit__(self, *a):
-                    pass
-
-            fake = FakeStreamResponse()
-
-            class FakeClient:
-                def stream(self, method, url, **kw):
-                    return fake
-
-            with self.assertRaises(RuntimeError):
-                await provider.send_chat(FakeClient(), [{"role": "user", "content": "hi"}], {})
-
-            self.assertTrue(fake._read_called, "aread() must be called before raise")
-            self.assertTrue(fake._raised, "raise_for_status must have been called")
-            self.assertEqual(fake.text, '{"error": "InvalidApiKey"}')
-
-        asyncio.run(run())
 
 
 class IdealabAnthropicProviderTest(unittest.TestCase):
@@ -602,6 +486,23 @@ class IdealabAnthropicProviderTest(unittest.TestCase):
         self.assertEqual(len(payload["messages"]), 1)
         self.assertEqual(payload["messages"][0]["role"], "user")
 
+    def test_payload_uses_spec_max_tokens_and_omits_non_positive_values(self):
+        from _provider import IdealabAnthropicProvider
+        provider = IdealabAnthropicProvider(
+            base_url="https://anthropic.example.test",
+            api_key="test-key",
+            model="claude-opus-4-6",
+            max_tokens=16000,
+        )
+        messages = [{"role": "user", "content": "Review this code."}]
+
+        self.assertEqual(
+            provider.build_payload(messages, {"max_tokens": 2000})["max_tokens"],
+            2000,
+        )
+        self.assertNotIn("max_tokens", provider.build_payload(messages, {"max_tokens": 0}))
+        self.assertEqual(provider.build_payload(messages, {})["max_tokens"], 16000)
+
     def test_extract_content_returns_text_block(self):
         from _provider import IdealabAnthropicProvider
         provider = IdealabAnthropicProvider(
@@ -621,6 +522,30 @@ class IdealabAnthropicProviderTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "idealab-anthropic response has no content"):
             provider.extract_content({})
+
+    def test_extract_content_rejects_empty_text_without_echoing_response(self):
+        from _provider import IdealabAnthropicProvider
+        provider = IdealabAnthropicProvider(
+            base_url="https://x", api_key="k", model="m"
+        )
+        response = {"content": [{"type": "text", "text": ""}]}
+
+        with self.assertRaisesRegex(RuntimeError, "empty text") as raised:
+            provider.extract_content(response)
+
+        self.assertNotIn("content", str(raised.exception))
+
+    def test_extract_content_rejects_malformed_blocks_without_echoing_response(self):
+        from _provider import IdealabAnthropicProvider
+        provider = IdealabAnthropicProvider(
+            base_url="https://x", api_key="k", model="m"
+        )
+        response = {"content": [{"type": "tool_use", "input": "sensitive block"}]}
+
+        with self.assertRaisesRegex(RuntimeError, "no text block") as raised:
+            provider.extract_content(response)
+
+        self.assertNotIn("sensitive block", str(raised.exception))
 
     def test_headers_include_claude_user_agent(self):
         from _provider import IdealabAnthropicProvider
@@ -652,7 +577,25 @@ class IdealabOpenAIProviderTest(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], 8000)
         # Both system and user messages are preserved (not extracted out)
         self.assertEqual(len(payload["messages"]), 2)
-        self.assertNotIn("stream", payload)
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["stream_options"], {"include_usage": True})
+
+    def test_payload_uses_spec_max_tokens_and_omits_non_positive_values(self):
+        from _provider import IdealabOpenAIProvider
+        provider = IdealabOpenAIProvider(
+            base_url="https://openai.example.test",
+            api_key="test-key",
+            model="qwen3.8-max",
+            max_tokens=8000,
+        )
+        messages = [{"role": "user", "content": "Review this code."}]
+
+        self.assertEqual(
+            provider.build_payload(messages, {"max_tokens": 2000})["max_tokens"],
+            2000,
+        )
+        self.assertNotIn("max_tokens", provider.build_payload(messages, {"max_tokens": -1}))
+        self.assertEqual(provider.build_payload(messages, {})["max_tokens"], 8000)
 
     def test_extract_content_returns_message_content(self):
         from _provider import IdealabOpenAIProvider
@@ -673,6 +616,171 @@ class IdealabOpenAIProviderTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "idealab-openai response returned empty content"):
             provider.extract_content(response)
 
+    def test_extract_content_falls_back_to_reasoning_content(self):
+        from _provider import IdealabOpenAIProvider
+        provider = IdealabOpenAIProvider(
+            base_url="https://x", api_key="k", model="m"
+        )
+        response = {
+            "choices": [{"message": {"content": "", "reasoning_content": "review"}}]
+        }
+        self.assertEqual(provider.extract_content(response), "review")
+
+    def test_extract_content_prefers_content_over_reasoning_content(self):
+        from _provider import IdealabOpenAIProvider
+        provider = IdealabOpenAIProvider(
+            base_url="https://x", api_key="k", model="m"
+        )
+        response = {
+            "choices": [
+                {"message": {"content": "final review", "reasoning_content": "thinking"}}
+            ]
+        }
+
+        self.assertEqual(provider.extract_content(response), "final review")
+
+    def test_send_chat_streams_and_falls_back_to_reasoning_content(self):
+        from unittest.mock import MagicMock
+        from _provider import IdealabOpenAIProvider
+        provider = IdealabOpenAIProvider(
+            base_url="https://openai.test", api_key="sk-oa", model="qwen3.8-max"
+        )
+        mock_client = MagicMock()
+
+        async def sse_lines():
+            yield 'data: {"choices":[{"delta":{"reasoning_content":"review"}}]}'
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+            yield "data: [DONE]"
+
+        class MockStreamResponse:
+            status_code = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+            def aiter_lines(self):
+                return sse_lines()
+
+        mock_client.stream.return_value = MockStreamResponse()
+
+        async def run():
+            return await provider.send_chat(
+                mock_client,
+                messages=[{"role": "user", "content": "Review"}],
+                spec={},
+            )
+
+        self.assertEqual(asyncio.run(run()), "review")
+        _, _, kwargs = mock_client.stream.mock_calls[0]
+        self.assertTrue(kwargs["json"]["stream"])
+        self.assertEqual(kwargs["json"]["stream_options"], {"include_usage": True})
+        self.assertNotIn("enable_thinking", kwargs["json"])
+
+    def test_send_chat_streams_prefers_content_over_reasoning_content(self):
+        from unittest.mock import MagicMock
+        from _provider import IdealabOpenAIProvider
+        provider = IdealabOpenAIProvider(
+            base_url="https://openai.test", api_key="sk-oa", model="qwen3.8-max"
+        )
+        mock_client = MagicMock()
+
+        async def sse_lines():
+            yield 'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}'
+            yield 'data: {"choices":[{"delta":{"content":"final "}}]}'
+            yield 'data: {"choices":[{"delta":{"content":"review"}}]}'
+            yield "data: [DONE]"
+
+        class MockStreamResponse:
+            status_code = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+            def aiter_lines(self):
+                return sse_lines()
+
+        mock_client.stream.return_value = MockStreamResponse()
+
+        async def run():
+            return await provider.send_chat(
+                mock_client,
+                messages=[{"role": "user", "content": "Review"}],
+                spec={},
+            )
+
+        self.assertEqual(asyncio.run(run()), "final review")
+
+    def test_stream_ignores_usage_only_and_empty_choices(self):
+        from _provider import IdealabOpenAIProvider
+        provider = IdealabOpenAIProvider(
+            base_url="https://openai.test", api_key="test-key", model="qwen3.8-max"
+        )
+
+        async def chunks():
+            yield {"choices": [], "usage": {"completion_tokens": 4}}
+            yield {"usage": {"completion_tokens": 5}}
+            yield {"choices": [{"delta": {"content": "review"}}]}
+
+        self.assertEqual(asyncio.run(provider.extract_stream_content(chunks())), "review")
+
+    def test_sse_error_event_reports_only_whitelisted_diagnostics(self):
+        from _provider import IdealabOpenAIProvider
+        provider = IdealabOpenAIProvider(
+            base_url="https://openai.test", api_key="test-key", model="qwen3.8-max"
+        )
+
+        async def lines():
+            yield (
+                'data: {"error":{"code":"invalid_request","type":"request_error",'
+                '"param":"model","message":"sensitive-message",'
+                '"credential":"sensitive-value"}}'
+            )
+
+        async def run():
+            async for _ in provider._parse_sse(lines()):
+                pass
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "code=invalid_request type=request_error param=model",
+        ) as raised:
+            asyncio.run(run())
+
+        message = str(raised.exception)
+        self.assertNotIn("sensitive-message", message)
+        self.assertNotIn("sensitive-value", message)
+
+    def test_sse_error_event_omits_unstable_diagnostic_values(self):
+        from _provider import IdealabOpenAIProvider
+        provider = IdealabOpenAIProvider(
+            base_url="https://openai.test", api_key="test-key", model="qwen3.8-max"
+        )
+
+        async def lines():
+            yield 'data: {"error":{"code":"unsafe value","message":"sensitive-message"}}'
+
+        async def run():
+            async for _ in provider._parse_sse(lines()):
+                pass
+
+        with self.assertRaisesRegex(RuntimeError, "stream error event") as raised:
+            asyncio.run(run())
+
+        self.assertNotIn("unsafe value", str(raised.exception))
+        self.assertNotIn("sensitive-message", str(raised.exception))
+
     def test_headers_use_bearer_token(self):
         from _provider import IdealabOpenAIProvider
         provider = IdealabOpenAIProvider(
@@ -683,20 +791,11 @@ class IdealabOpenAIProviderTest(unittest.TestCase):
 
 
 class BuildProviderFactoryTest(unittest.TestCase):
-    def test_build_provider_returns_bailian_when_endpoint_is_bailian(self):
-        from _provider import build_provider, BailianProvider
-        provider = build_provider(
-            base_url="https://example.bailian.com",
-            api_key="sk",
-            model="qwen3.7-max",
-            max_tokens=1000,
-        )
-        self.assertIsInstance(provider, BailianProvider)
 
     def test_build_provider_returns_idealab_anthropic_when_endpoint_is_idealab_anthropic(self):
         from _provider import build_provider, IdealabAnthropicProvider
         provider = build_provider(
-            base_url="https://idealab.alibaba-inc.com/anthropic",
+            base_url="https://idealab.alibaba-inc.com/api/anthropic",
             api_key="sk",
             model="claude-opus-4-6",
             max_tokens=1000,
@@ -706,12 +805,54 @@ class BuildProviderFactoryTest(unittest.TestCase):
     def test_build_provider_returns_idealab_openai_when_endpoint_is_idealab_openai(self):
         from _provider import build_provider, IdealabOpenAIProvider
         provider = build_provider(
-            base_url="https://idealab.alibaba-inc.com/openai",
+            base_url="https://idealab.alibaba-inc.com/api/openai/v1",
             api_key="sk",
-            model="gpt-4o",
+            model="qwen3.8-max",
             max_tokens=1000,
         )
         self.assertIsInstance(provider, IdealabOpenAIProvider)
+
+    def test_build_provider_rejects_unknown_or_generic_endpoint_without_echoing_url(self):
+        from _provider import build_provider
+        for base_url in (
+            "https://api.openai.com/v1",
+            "https://idealab.alibaba-inc.com/unknown",
+        ):
+            with self.subTest(base_url=base_url):
+                with self.assertRaisesRegex(ValueError, "unsupported provider endpoint") as raised:
+                    build_provider(base_url=base_url, api_key="sk", model="model")
+                self.assertNotIn(base_url, str(raised.exception))
+
+    def test_build_provider_rejects_noncanonical_approved_endpoint_variants(self):
+        from _provider import build_provider
+
+        for base_url in (
+            "http://idealab.alibaba-inc.com/api/anthropic",
+            "ftp://idealab.alibaba-inc.com/api/anthropic",
+            "idealab.alibaba-inc.com/api/anthropic",
+            "//idealab.alibaba-inc.com/api/anthropic",
+            "https://idealab.alibaba-inc.com:443/api/anthropic",
+            "https://idealab.alibaba-inc.com:444/api/anthropic",
+            "https://idealab.alibaba-inc.com:/api/anthropic",
+            "https://idealab.alibaba-inc.com:invalid/api/anthropic",
+            "https://user@idealab.alibaba-inc.com/api/anthropic",
+            "https://user:password@idealab.alibaba-inc.com/api/anthropic",
+            "https://idealab.alibaba-inc.com/api/anthropic?debug=true",
+            "https://idealab.alibaba-inc.com/api/anthropic?",
+            "https://idealab.alibaba-inc.com/api/anthropic#fragment",
+            "https://idealab.alibaba-inc.com/api/anthropic#",
+            "HTTPS://idealab.alibaba-inc.com/api/anthropic",
+            "https://IDEALAB.ALIBABA-INC.COM/api/anthropic",
+            "https://idealab.alibaba-inc.com/api/anthropic/",
+        ):
+            with self.subTest(base_url=base_url):
+                with self.assertRaisesRegex(ValueError, "unsupported provider endpoint") as raised:
+                    build_provider(base_url=base_url, api_key="sk", model="model")
+                self.assertNotIn(base_url, str(raised.exception))
+                self.assertNotIn("user", str(raised.exception))
+                self.assertNotIn("password", str(raised.exception))
+                self.assertNotIn("debug", str(raised.exception))
+                self.assertNotIn("fragment", str(raised.exception))
 
 
 class ProviderSendChatTest(unittest.TestCase):
@@ -743,79 +884,7 @@ class ProviderSendChatTest(unittest.TestCase):
         self.assertEqual(result, "Review result from Anthropic")
         mock_client.post.assert_called_once()
 
-    def test_idealab_openai_send_chat_extracts_choice_content(self):
-        from unittest.mock import AsyncMock, MagicMock
-        from _provider import IdealabOpenAIProvider
-        provider = IdealabOpenAIProvider(
-            base_url="https://openai.test",
-            api_key="sk-oa",
-            model="gpt-4o",
-            max_tokens=8000,
-        )
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "choices": [{"message": {"content": "GPT review output"}}]
-        }
-        mock_client.post.return_value = mock_response
 
-        async def run():
-            return await provider.send_chat(
-                mock_client,
-                messages=[{"role": "user", "content": "Hi"}],
-                spec={},
-            )
-
-        result = asyncio.run(run())
-        self.assertEqual(result, "GPT review output")
-
-    def test_bailian_send_chat_uses_streaming_endpoint(self):
-        from unittest.mock import ANY, MagicMock
-        from _provider import BailianProvider
-        provider = BailianProvider(
-            base_url="https://bailian.test",
-            api_key="sk-bai",
-            model="qwen3.7-max",
-            max_tokens=4000,
-        )
-        mock_client = MagicMock()
-
-        async def mock_sse_lines():
-            yield 'data: {"choices":[{"delta":{"content":"Hello "}}]}'
-            yield 'data: {"choices":[{"delta":{"content":"world"},"finish_reason":"stop"}]}'
-            yield 'data: [DONE]'
-
-        class MockStreamResponse:
-            status_code = 200
-
-            async def __aenter__(self):
-                return self
-            async def __aexit__(self, *args):
-                pass
-            def raise_for_status(self):
-                pass
-            def aiter_lines(self):
-                return mock_sse_lines()
-
-        mock_client.stream.return_value = MockStreamResponse()
-
-        async def run():
-            return await provider.send_chat(
-                mock_client,
-                messages=[{"role": "user", "content": "Review"}],
-                spec={},
-            )
-
-        result = asyncio.run(run())
-        self.assertEqual(result, "Hello world")
-        mock_client.stream.assert_called_once_with(
-            "POST",
-            "https://bailian.test/chat/completions",
-            json=ANY,
-            headers=ANY,
-            timeout=120.0,
-        )
 
 
 from unittest.mock import ANY, AsyncMock, MagicMock
@@ -868,41 +937,7 @@ class ProviderConfigLoaderTest(unittest.TestCase):
                 env={},
             )
 
-    def test_load_provider_yaml_raises_on_unresolved_env_var(self):
-        from _config import load_provider_config
-        self.write_provider(
-            "bailian",
-            "provider: bailian\n"
-            "base_url: https://dashscope.test\n"
-            "api_key: ${BAILIAN_API_KEY}\n"
-            "model: qwen3.7-max\n",
-        )
-        with self.assertRaisesRegex(RuntimeError, "unresolved env var"):
-            load_provider_config(
-                "bailian",
-                providers_dir=self.providers_dir,
-                env={},
-            )
 
-    def test_load_provider_yaml_includes_provider_specific_fields(self):
-        from _config import load_provider_config
-        self.write_provider(
-            "bailian",
-            "provider: bailian\n"
-            "base_url: https://dashscope.test\n"
-            "api_key: ${BAILIAN_API_KEY}\n"
-            "model: qwen3.7-max\n"
-            "max_tokens: 4000\n"
-            "enable_thinking: true\n"
-            "thinking_budget: 2048\n",
-        )
-        cfg = load_provider_config(
-            "bailian",
-            providers_dir=self.providers_dir,
-            env={"BAILIAN_API_KEY": "sk-b"},
-        )
-        self.assertTrue(cfg.get("enable_thinking"))
-        self.assertEqual(cfg.get("thinking_budget"), 2048)
 
     def test_load_provider_yaml_accepts_literal_non_secret_values(self):
         from _config import load_provider_config
@@ -943,7 +978,7 @@ class GetProviderDispatchTest(unittest.TestCase):
         self.write_provider(
             "idealab-anthropic",
             "provider: idealab-anthropic\n"
-            "base_url: https://idealab.test/anthropic\n"
+            "base_url: https://idealab.alibaba-inc.com/api/anthropic\n"
             "api_key: ${ANT_API}\n"
             "model: claude-opus-4-6\n"
             "max_tokens: 16000\n",
@@ -963,9 +998,9 @@ class GetProviderDispatchTest(unittest.TestCase):
         self.write_provider(
             "idealab-openai",
             "provider: idealab-openai\n"
-            "base_url: https://idealab.test/openai\n"
+            "base_url: https://idealab.alibaba-inc.com/api/openai/v1\n"
             "api_key: ${OA_API}\n"
-            "model: gpt-4o\n"
+            "model: qwen3.8-max\n"
             "max_tokens: 8000\n",
         )
         provider = get_provider(
@@ -976,27 +1011,70 @@ class GetProviderDispatchTest(unittest.TestCase):
         self.assertIsInstance(provider, IdealabOpenAIProvider)
         self.assertEqual(provider.api_key, "sk-oa")
 
-    def test_get_provider_returns_bailian_with_thinking_fields(self):
+    def test_get_provider_rejects_approved_endpoint_with_unapproved_model_without_echoing_values(self):
         from _config import get_provider
-        from _provider import BailianProvider
+
+        cases = (
+            (
+                "idealab-anthropic",
+                "https://idealab.alibaba-inc.com/api/anthropic",
+                "gpt-4o",
+            ),
+            (
+                "idealab-openai",
+                "https://idealab.alibaba-inc.com/api/openai/v1",
+                "gpt-4o",
+            ),
+        )
+        for name, base_url, model in cases:
+            with self.subTest(name=name, model=model):
+                self.write_provider(
+                    name,
+                    f"provider: {name}\n"
+                    f"base_url: {base_url}\n"
+                    "api_key: test-key\n"
+                    f"model: {model}\n",
+                )
+                with self.assertRaisesRegex(ValueError, "unsupported provider endpoint") as raised:
+                    get_provider(name, providers_dir=self.providers_dir, env={})
+                self.assertNotIn(base_url, str(raised.exception))
+                self.assertNotIn(model, str(raised.exception))
+
+    def test_get_provider_rejects_unapproved_openai_or_unknown_endpoint_without_echoing_url(self):
+        from _config import get_provider
+
+        for base_url in (
+            "https://api.openai.com/v1",
+            "https://idealab.alibaba-inc.com/api/unknown",
+        ):
+            with self.subTest(base_url=base_url):
+                self.write_provider(
+                    "idealab-openai",
+                    "provider: idealab-openai\n"
+                    f"base_url: {base_url}\n"
+                    "api_key: test-key\n"
+                    "model: qwen3.8-max\n",
+                )
+                with self.assertRaisesRegex(ValueError, "unsupported provider endpoint") as raised:
+                    get_provider("idealab-openai", providers_dir=self.providers_dir, env={})
+                self.assertNotIn(base_url, str(raised.exception))
+
+    def test_get_provider_rejects_kind_endpoint_mismatch_without_echoing_url(self):
+        from _config import get_provider
+
+        base_url = "https://idealab.alibaba-inc.com/api/anthropic"
         self.write_provider(
-            "bailian",
-            "provider: bailian\n"
-            "base_url: https://dashscope.test\n"
-            "api_key: ${BAIL_API}\n"
-            "model: qwen3.7-max\n"
-            "max_tokens: 4000\n"
-            "enable_thinking: true\n"
-            "thinking_budget: 2048\n",
+            "idealab-openai",
+            "provider: idealab-openai\n"
+            f"base_url: {base_url}\n"
+            "api_key: test-key\n"
+            "model: claude-opus-4-6\n",
         )
-        provider = get_provider(
-            "bailian",
-            providers_dir=self.providers_dir,
-            env={"BAIL_API": "sk-b"},
-        )
-        self.assertIsInstance(provider, BailianProvider)
-        self.assertTrue(provider.enable_thinking)
-        self.assertEqual(provider.thinking_budget, 2048)
+
+        with self.assertRaisesRegex(ValueError, "provider kind mismatch") as raised:
+            get_provider("idealab-openai", providers_dir=self.providers_dir, env={})
+        self.assertNotIn(base_url, str(raised.exception))
+
 
     def test_get_provider_raises_on_unknown_provider_type(self):
         from _config import get_provider
@@ -1014,128 +1092,131 @@ class GetProviderDispatchTest(unittest.TestCase):
                 env={},
             )
 
-    def test_default_providers_dir_constant(self):
-        from _config import DEFAULT_PROVIDERS_DIR
-        self.assertEqual(DEFAULT_PROVIDERS_DIR.name, "providers")
+    def test_get_provider_raises_when_provider_field_is_missing(self):
+        from _config import get_provider
+        self.write_provider(
+            "missing-provider",
+            "base_url: https://x.test\n"
+            "api_key: test-key\n"
+            "model: test-model\n",
+        )
+        with self.assertRaisesRegex(ValueError, "missing required 'provider' field"):
+            get_provider(
+                "missing-provider",
+                providers_dir=self.providers_dir,
+                env={},
+            )
 
-    def test_deepseek_uses_pi_auth_fallback_when_env_key_is_missing(self):
+    def test_idealab_openai_prefers_pi_auth_key(self):
         import _config
         from _config import get_provider
-
         self.write_provider(
-            "deepseek",
-            "provider: deepseek\n"
-            "base_url: https://api.deepseek.com/v1\n"
-            "api_key: ${DEEPSEEK_API_KEY}\n"
-            "model: deepseek-chat\n",
+            "idealab-openai",
+            "provider: idealab-openai\n"
+            "base_url: https://idealab.alibaba-inc.com/api/openai/v1\n"
+            "api_key: ${IDEALAB_OPENAI_API_KEY}\n"
+            "model: qwen3.8-max\n",
         )
-        result = subprocess.CompletedProcess([], 0, stdout="fallback-test-key\n", stderr="")
+        result = subprocess.CompletedProcess([], 0, stdout="pi-auth-key\n", stderr="")
         with patch.object(_config.subprocess, "run", return_value=result) as run:
-            provider = get_provider("deepseek", providers_dir=self.providers_dir, env={})
+            provider = get_provider(
+                "idealab-openai",
+                providers_dir=self.providers_dir,
+                env={"IDEALAB_OPENAI_API_KEY": "env-fallback-key"},
+            )
 
-        self.assertEqual(provider.api_key, "fallback-test-key")
+        self.assertEqual(provider.api_key, "pi-auth-key")
         run.assert_called_once_with(
-            ["pi", "auth", "print-api-key", "--provider", "deepseek"],
+            ["pi", "auth", "print-api-key", "--provider", "openai-idealab"],
             capture_output=True,
             text=True,
             timeout=10,
             check=False,
         )
 
-    def test_deepseek_explicit_env_key_skips_pi_auth_fallback(self):
+    def test_idealab_openai_uses_env_key_when_pi_auth_is_unavailable(self):
         import _config
         from _config import get_provider
-
         self.write_provider(
-            "deepseek",
-            "provider: deepseek\n"
-            "base_url: https://api.deepseek.com/v1\n"
-            "api_key: ${DEEPSEEK_API_KEY}\n"
-            "model: deepseek-chat\n",
+            "idealab-openai",
+            "provider: idealab-openai\n"
+            "base_url: https://idealab.alibaba-inc.com/api/openai/v1\n"
+            "api_key: ${IDEALAB_OPENAI_API_KEY}\n"
+            "model: qwen3.8-max\n",
         )
-        with patch.object(_config.subprocess, "run") as run:
+        result = subprocess.CompletedProcess([], 1, stdout="", stderr="unavailable")
+        with patch.object(_config.subprocess, "run", return_value=result):
             provider = get_provider(
-                "deepseek",
+                "idealab-openai",
                 providers_dir=self.providers_dir,
-                env={"DEEPSEEK_API_KEY": "explicit-test-key"},
+                env={"IDEALAB_OPENAI_API_KEY": "env-fallback-key"},
             )
 
-        self.assertEqual(provider.api_key, "explicit-test-key")
-        run.assert_not_called()
+        self.assertEqual(provider.api_key, "env-fallback-key")
 
-    def test_deepseek_pi_auth_failures_are_redacted(self):
+    def test_idealab_openai_pi_auth_failures_use_fallback(self):
         import _config
         from _config import get_provider
-
         self.write_provider(
-            "deepseek",
-            "provider: deepseek\n"
-            "base_url: https://api.deepseek.com/v1\n"
-            "api_key: ${DEEPSEEK_API_KEY}\n"
-            "model: deepseek-chat\n",
+            "idealab-openai",
+            "provider: idealab-openai\n"
+            "base_url: https://idealab.alibaba-inc.com/api/openai/v1\n"
+            "api_key: ${IDEALAB_OPENAI_API_KEY}\n"
+            "model: qwen3.8-max\n",
         )
         failures = (
-            subprocess.CompletedProcess([], 7, stdout="stdout-secret", stderr="stderr-secret"),
-            subprocess.CompletedProcess([], 0, stdout="   ", stderr="stderr-secret"),
-            subprocess.TimeoutExpired(["pi"], 10, output="stdout-secret", stderr="stderr-secret"),
-            OSError("execution-secret"),
+            ("nonzero-exit", subprocess.CompletedProcess([], 7, stdout="", stderr="hidden")),
+            ("empty-output", subprocess.CompletedProcess([], 0, stdout="   ", stderr="hidden")),
+            ("timeout", subprocess.TimeoutExpired(["pi"], 10, output="hidden", stderr="hidden")),
+            ("could-not-execute", OSError("hidden")),
         )
-        for failure in failures:
-            with self.subTest(failure=type(failure).__name__), patch.object(
-                _config.subprocess, "run"
-            ) as run:
+        for reason, failure in failures:
+            with self.subTest(reason=reason), patch.object(_config.subprocess, "run") as run:
                 if isinstance(failure, subprocess.CompletedProcess):
                     run.return_value = failure
                 else:
                     run.side_effect = failure
-                with self.assertRaisesRegex(RuntimeError, "DEEPSEEK|deepseek|DeepSeek") as raised:
-                    get_provider("deepseek", providers_dir=self.providers_dir, env={})
-                run.assert_called_once()
+                provider = get_provider(
+                    "idealab-openai",
+                    providers_dir=self.providers_dir,
+                    env={"IDEALAB_OPENAI_API_KEY": "env-fallback-key"},
+                )
 
-                message = str(raised.exception)
-                self.assertNotIn("stdout-secret", message)
-                self.assertNotIn("stderr-secret", message)
-                self.assertNotIn("execution-secret", message)
+            self.assertEqual(provider.api_key, "env-fallback-key")
 
-    def test_non_deepseek_provider_does_not_use_pi_auth_fallback(self):
+    def test_idealab_openai_missing_auth_reports_sanitized_failure_reason(self):
         import _config
         from _config import get_provider
-
         self.write_provider(
-            "bailian",
-            "provider: bailian\n"
-            "base_url: https://dashscope.test\n"
-            "api_key: ${BAILIAN_API_KEY}\n"
-            "model: qwen3.7-max\n",
+            "idealab-openai",
+            "provider: idealab-openai\n"
+            "base_url: https://idealab.alibaba-inc.com/api/openai/v1\n"
+            "api_key: ${IDEALAB_OPENAI_API_KEY}\n"
+            "model: qwen3.8-max\n",
         )
-        with patch.object(_config.subprocess, "run") as run:
-            with self.assertRaisesRegex(RuntimeError, "unresolved env var"):
-                get_provider("bailian", providers_dir=self.providers_dir, env={})
+        failures = (
+            ("nonzero-exit", subprocess.CompletedProcess([], 7, stdout="hidden", stderr="hidden")),
+            ("empty-output", subprocess.CompletedProcess([], 0, stdout="   ", stderr="hidden")),
+            ("timeout", subprocess.TimeoutExpired(["pi"], 10, output="hidden", stderr="hidden")),
+            ("could-not-execute", OSError("hidden")),
+        )
+        for reason, failure in failures:
+            with self.subTest(reason=reason), patch.object(_config.subprocess, "run") as run:
+                if isinstance(failure, subprocess.CompletedProcess):
+                    run.return_value = failure
+                else:
+                    run.side_effect = failure
+                with self.assertRaisesRegex(RuntimeError, reason) as raised:
+                    get_provider("idealab-openai", providers_dir=self.providers_dir, env={})
 
-        run.assert_not_called()
+            message = str(raised.exception)
+            self.assertIn("IDEALAB_OPENAI_API_KEY", message)
+            self.assertNotIn("hidden", message)
 
-    def test_get_provider_returns_deepseek_as_openai_compatible(self):
-        """DeepSeek uses standard OpenAI-compatible wire protocol, no special handling."""
-        from _config import get_provider
-        from _provider import IdealabOpenAIProvider
-        self.write_provider(
-            "deepseek",
-            "provider: deepseek\n"
-            "base_url: https://api.deepseek.com/v1\n"
-            "api_key: ${DEEPSEEK_API_KEY}\n"
-            "model: deepseek-chat\n"
-            "max_tokens: 16000\n",
-        )
-        provider = get_provider(
-            "deepseek",
-            providers_dir=self.providers_dir,
-            env={"DEEPSEEK_API_KEY": "sk-ds"},
-        )
-        self.assertIsInstance(provider, IdealabOpenAIProvider)
-        self.assertEqual(provider.api_key, "sk-ds")
-        self.assertEqual(provider.model, "deepseek-chat")
-        self.assertEqual(provider.base_url, "https://api.deepseek.com/v1")
-        self.assertEqual(provider.max_tokens, 16000)
+    def test_default_providers_dir_constant(self):
+        from _config import DEFAULT_PROVIDERS_DIR
+        self.assertEqual(DEFAULT_PROVIDERS_DIR.name, "providers")
+
 
 
 if __name__ == "__main__":
