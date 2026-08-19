@@ -48,9 +48,6 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
     taskId: `${projection.goalId}.${taskId}`,
     title: `${taskId}: ${transportTask.description.slice(0, 80)}`,
     agent: "executor",
-    // Goal has already bounded the task and its implementation direction; use Luna.
-    // This is dispatch intent, not a task-definition field.
-    modelTier: "luna",
     risk: "normal",
     objective: transportTask.description,
     workflow,

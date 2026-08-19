@@ -23,7 +23,7 @@ export function renderCodingDispatchPrompt(ir) {
     `- Task ID: ${scalar(ir.taskId)}`,
     `- Title: ${scalar(ir.title)}`,
     `- Agent: \`${ir.agent}\``,
-    `- Requested model tier: \`${ir.modelTier}\``,
+    ...(ir.modelTier === undefined ? [] : [`- Requested model tier override: \`${ir.modelTier}\``]),
     `- Risk: \`${ir.risk}\``,
     `- Working directory: ${scalar(ir.execution.cwd)}`,
     `- Timeout: \`${ir.execution.timeoutMs}ms\``,

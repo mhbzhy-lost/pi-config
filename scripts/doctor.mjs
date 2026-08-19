@@ -11,6 +11,7 @@ import { discoverManagedSkills } from "./lib/skill-whitelist.mjs";
 import { createGoalEngineExtension } from "./lib/goal-engine/extension.mjs";
 import { auditGoalContractIntegrity } from "./lib/goal-contract/authorization-audit.mjs";
 import { reconcileManagedWorktrees } from "./lib/worktree-lifecycle/inventory.mjs";
+import { verifyOrderedModelsRuntimePatch } from "./lib/subagent-dispatch/ordered-models-runtime-patch.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -24,7 +25,7 @@ const TASK_SCHEDULER_PACKAGES = {
 };
 const BASIC_MEMORY_VERSION = "0.22.1";
 const REQUIRED_PROFILES = {
-  executor: { model: "codex-pool/gpt-5.6-terra", subagent: false, extensions: undefined },
+  executor: { orderedModels: true, subagent: false, extensions: undefined },
 };
 const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/spawn.mjs",
@@ -93,7 +94,25 @@ function hasDisabledTaskSchedulerResources(settings) {
 function parseFrontmatter(content) {
   const match = content?.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return null;
-  return Object.fromEntries(match[1].split("\n").map((line) => line.split(/:\s+/, 2)));
+  const result = {};
+  let currentKey;
+  for (const line of match[1].split("\n")) {
+    const field = line.match(/^([\w-]+):(?:\s+(.*))?$/);
+    if (field) {
+      currentKey = field[1];
+      result[currentKey] = field[2] ?? "";
+      continue;
+    }
+    if (currentKey && /^\s+/.test(line)) {
+      result[currentKey] += `${result[currentKey] ? "\n" : ""}${line.trim()}`;
+    }
+  }
+  return result;
+}
+
+function parseOrderedModels(value) {
+  if (typeof value !== "string") return [];
+  return value.split("\n").map((line) => line.trim().replace(/^-\s+/, "")).filter(Boolean);
 }
 
 async function readInstalledBasicMemoryVersion() {
@@ -260,7 +279,11 @@ export async function inspectConfiguration(repoRoot, options = {}) {
       issues.push(`missing required agent profile: ${name}`);
       continue;
     }
-    if (profile.model !== expected.model) issues.push(`unexpected ${name} model: ${profile.model ?? "unknown"}; expected ${expected.model}`);
+    if (expected.orderedModels) {
+      const models = parseOrderedModels(profile.models);
+      if (models.length === 0 || new Set(models).size !== models.length) issues.push(`invalid ${name} ordered models`);
+      if (Object.hasOwn(profile, "model") || Object.hasOwn(profile, "fallbackModels")) issues.push(`legacy ${name} model routing fields are forbidden`);
+    }
     const tools = new Set((profile.tools ?? "").split(",").map((tool) => tool.trim()).filter(Boolean));
     if (tools.has("subagent") !== expected.subagent) issues.push(`unexpected ${name} subagent capability`);
     for (const tool of expected.requiredTools ?? []) {
@@ -330,6 +353,11 @@ export async function inspectConfiguration(repoRoot, options = {}) {
             issues.push(`pi-subagents RPC v1 method missing: ${method}`);
           }
         }
+      }
+      try {
+        await verifyOrderedModelsRuntimePatch(packageRoot);
+      } catch (error) {
+        issues.push(`pi-subagents ordered models patch is unavailable: ${error.message}`);
       }
     }
   } catch {

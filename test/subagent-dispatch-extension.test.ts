@@ -45,20 +45,19 @@ function workflowLeaf(params: any) {
   return JSON.parse(match[1]);
 }
 
-test("coding spawn defaults executor child model to Luna", async () => {
+test("coding spawn leaves executor model selection to ordered agent metadata", async () => {
   const { pi, rpc, calls, tools } = setup();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
-  await tools[0].execute("tier-luna", contract, undefined, undefined, { cwd: "/repo" });
+  await tools[0].execute("ordered-models", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(workflowLeaf(calls[0]?.params).agent, "executor");
-  assert.equal(workflowLeaf(calls[0]?.params).model, "openai-codex/gpt-5.6-luna");
+  assert.equal(Object.hasOwn(workflowLeaf(calls[0]?.params), "model"), false);
 });
 
-test("coding spawn maps terra modelTier to Terra child model", async () => {
+test("coding spawn lets explicit modelTier override the ordered metadata primary", async () => {
   const { pi, rpc, calls, tools } = setup();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
-  await tools[0].execute("tier-terra", { ...contract, modelTier: "terra" }, undefined, undefined, { cwd: "/repo" });
-  assert.equal(workflowLeaf(calls[0]?.params).agent, "executor");
-  assert.equal(workflowLeaf(calls[0]?.params).model, "openai-codex/gpt-5.6-terra");
+  await tools[0].execute("tier-luna", { ...contract, modelTier: "luna" }, undefined, undefined, { cwd: "/repo" });
+  assert.equal(workflowLeaf(calls[0]?.params).model, "codex-pool/gpt-5.6-luna");
 });
 
 test("coding spawn resolves durable metadata exactly once", async () => {

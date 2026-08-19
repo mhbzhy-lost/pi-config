@@ -401,6 +401,7 @@ test("uninstalls retired Todo before installing exact runtime dependencies", asy
     piNpmDir: "/tmp/pi/npm",
     env: { PATH: "/test/bin" },
     run: async (...args) => calls.push(args),
+    patchSubagentRuntime: async () => {},
   });
 
   assert.deepEqual(calls, [
