@@ -29,6 +29,7 @@ export function appendEventBatch(stateRoot, events, expectedVersion) {
 
   try {
     let next = replayAndCheckVersion(stateRoot, eventsPath, expectedVersion, lock.token);
+    assertCanonicalFinalizationBatch(events, next, false);
     assertCanonicalAmendmentBatch(events, next, false);
     for (const event of events) next = applyEvent(next, event);
     const registry = prepareRegistryUpdate(stateRoot, events.at(-1), next, lock.token);
@@ -70,6 +71,7 @@ export function appendEventBatchWithSettlementEvidence(stateRoot, events, expect
   let registryTmp = null, durable = false;
   try {
     let next = replayAndCheckVersion(canonicalRoot, eventsPath, expectedVersion, lock.token);
+    assertCanonicalFinalizationBatch(events, next, false);
     assertCanonicalAmendmentBatch(events, next, false);
     for (const event of events) next = applyEvent(next, event);
     assertSettlementEvidenceBinding(events, sha256);
@@ -189,6 +191,7 @@ export function appendEvent(stateRoot, event, expectedVersion) {
 
   try {
     const current = replayAndCheckVersion(stateRoot, eventsPath, expectedVersion, lock.token);
+    assertCanonicalFinalizationBatch([event], current, true);
     assertCanonicalAmendmentBatch([event], current, true);
     const next = applyEvent(current, event);
     const registry = prepareRegistryUpdate(stateRoot, event, next, lock.token);
@@ -521,6 +524,28 @@ function assertRemediationMaterializationBatch(events) {
     || consume.data.taskId !== taskId || consume.data.taskDefHash !== metadata.taskDefHash || consume.data.executionRevision !== metadata.executionRevision || consume.data.subjectHash !== metadata.subjectHash || !linked(linkAt(2), consume.data.challengeId)) {
     throw new Error("invalid user-approved remediation batch");
   }
+}
+
+function assertCanonicalFinalizationBatch(events, projection, standalone) {
+  const finalEvents = events.filter((event) => ["goal.final_review_started", "goal.final_review_recorded"].includes(event?.type)
+    || (event?.type === "goal.completed" && event.schemaVersion === "goal-runtime.v1"));
+  if (!finalEvents.length) return;
+  if (projection.eventSchemaVersion !== "goal-runtime.v1" || finalEvents.some((event) => event.schemaVersion !== "goal-runtime.v1")) throw new Error("final review requires runtime events");
+  const hasRecord = finalEvents.some((event) => event.type === "goal.final_review_recorded");
+  const hasCompletion = finalEvents.some((event) => event.type === "goal.completed");
+  if (!hasRecord && !hasCompletion) return;
+  if (standalone || events.length === 1) {
+    const record = events[0];
+    if (record?.type !== "goal.final_review_recorded" || !["important", "critical"].includes(record.data?.severity) || record.data?.status !== "changes_required") throw new Error("final review pass records and completion must be atomic");
+    return;
+  }
+  if (events.length !== 2 || events[0]?.type !== "goal.final_review_recorded" || events[1]?.type !== "goal.completed") throw new Error("final review pass records and completion must be one atomic batch");
+  const [record, completion] = events;
+  const started = projection.finalReview;
+  if (!started || started.status !== "started" || !["none", "minor"].includes(record.data?.severity) || record.data?.status !== "recorded"
+    || record.data.reviewId !== started.reviewId || completion.data?.verdict !== "COMPLETE"
+    || completion.data.reviewId !== started.reviewId || completion.data.manifestHash !== started.manifestHash || completion.data.stateHash !== started.stateHash
+    || completion.data.worldHash !== started.worldHash || completion.data.head !== started.head || completion.data.resultHash !== record.data.resultHash) throw new Error("final review complete identity mismatch");
 }
 
 function assertCanonicalAmendmentBatch(events, projection, standalone) {
