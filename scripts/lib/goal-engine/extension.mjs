@@ -536,6 +536,7 @@ const goalAmendSchema = { type: "object", anyOf: [
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "propose_transfer_session" }, reason: string }, required: ["goal_id", "operation", "reason"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "transfer_session" }, challenge_id: string, reason: string, action_token: string }, required: ["goal_id", "operation", "challenge_id", "reason", "action_token"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "propose_execution_change" }, reason: string, changes: { type: "object", properties: { update_tasks: { type: "array", items: executionChangeTaskSchema } }, required: ["update_tasks"], additionalProperties: false } }, required: ["goal_id", "operation", "reason", "changes"], additionalProperties: false },
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "resume_runtime" }, action_token: string }, required: ["operation", "action_token"], additionalProperties: false },
 ] };
 
 export function createGoalEngineExtension(pi, options = {}) {
@@ -1541,7 +1542,12 @@ export function createGoalEngineExtension(pi, options = {}) {
           return JSON.stringify({ goalId, runtimeState: current.runtimeState, readiness: current.readiness, ...(outcome.attention ? { status: outcome.attention[0], attention: outcome.attention } : {}), blocking: frontier.blocking, progressLedger: current.progressLedger });
         }
         if (selected?.tool === "goal_finalize") return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R11_FINALIZATION_REQUIRED", blocking: frontier.blocking, attention: frontier.attention, progressLedger: projection.progressLedger });
-        if (selected && ["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(selected.tool)) {
+        const fullSuspensionClosure = projection.suspension?.resourcesQuarantined
+          && projection.suspension.terminalProofRefs?.length === projection.suspension.affectedRunIds?.length
+          && projection.suspension.workspaceClosureProofRefs?.length === projection.suspension.affectedTaskIds?.length
+          && projection.suspension.resourceClosureProofRefs?.length === projection.suspension.affectedRunIds?.length;
+        if (selected && ["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(selected.tool)
+          && !(selected.tool === "goal_amend" && selected.params.operation === "resume_runtime" && (!fullSuspensionClosure || projection.pendingHumanDecision))) {
           const machineAction = { tool: selected.tool, params: { goal_id: goalId, ...selected.params } };
           const offer = issueActionOffer(projection, machineAction, sessionId);
           appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId, projection), projection.version);
@@ -2027,6 +2033,32 @@ export function createGoalEngineExtension(pi, options = {}) {
         return JSON.stringify({ status: "METADATA_PROPOSAL_PENDING", challenge_id: challenge.id, reason: challenge.reason, base_metadata: publicMetadata(baseMetadata), target_metadata: publicMetadata(targetMetadata), proposal_hash: challenge.proposalHash, choices: challenge.choices });
       }
       const currentSessionId = sessionIdentity(ctx);
+      if (params.operation === "resume_runtime") {
+        const closure = projection.suspension;
+        const closed = closure?.resourcesQuarantined
+          && closure.terminalProofRefs?.length === closure.affectedRunIds?.length
+          && closure.workspaceClosureProofRefs?.length === closure.affectedTaskIds?.length
+          && closure.resourceClosureProofRefs?.length === closure.affectedRunIds?.length;
+        if (projection.eventSchemaVersion !== "goal-runtime.v1" || projection.runtimeState !== "suspended" || !closed || projection.pendingHumanDecision) {
+          throw new Error("resume_runtime requires a fully closed suspended runtime without a pending decision");
+        }
+        const offer = projection.actionOffer;
+        if (!offer) throw new Error("goal_status must issue an action offer before goal_amend");
+        const boundParams = { goal_id: goalId, operation: "resume_runtime" };
+        const consumed = verifyAndConsumeActionOffer(projection, { token: params.action_token, tool: "goal_amend", params: boundParams, sessionId: currentSessionId });
+        const events = [
+          makeGoalEvent("goal.action_consumed", consumed, goalId, projection),
+          makeEvent("goal.runtime_resumed", { suspensionId: closure.suspensionId, closureHash: suspensionClosureHash(closure) }, goalId, "goal-runtime.v1"),
+        ];
+        const expected = events.reduce((candidate, next) => applyEvent(candidate, next), projection);
+        try { projection = appendEventBatchFn(root, events, projection.version); }
+        catch (cause) {
+          const recovered = loadProjectionFn(root, goalId);
+          if (!isDeepStrictEqual(recovered, expected)) throw cause;
+          projection = recovered;
+        }
+        return JSON.stringify({ goalId, status: "RUNTIME_RESUMED" });
+      }
       if (params.operation === "propose_execution_change") {
         const closure = projection.suspension;
         if (projection.eventSchemaVersion !== "goal-runtime.v1" || projection.runtimeState !== "suspended" || !closure?.resourcesQuarantined
