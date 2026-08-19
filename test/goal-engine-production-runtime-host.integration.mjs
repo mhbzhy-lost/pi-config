@@ -3,9 +3,13 @@ import { createHash } from "node:crypto";
 import { chmodSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 
 import { createGoalEngineEntry } from "../pi/extensions/goal-engine.ts";
+import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
+import { loadProjection } from "../scripts/lib/goal-engine/store.mjs";
+import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const DISPATCH_HEAD = "1111111111111111111111111111111111111111";
@@ -67,22 +71,41 @@ test("production Host exposes the complete frozen capability boundary", async ()
   for (const forbidden of ["projection", "git", "processProof", "nonce"]) assert.equal(forbidden in h, false);
 });
 
-test("captureCurrentWorld evaluates resource and run suppliers for every typed facade call", async () => {
+test("captureCurrentWorld synchronously accepts exact cwd input and refreshes Host-owned suppliers", async () => {
   const seen = []; let resourceVersion = 0, runVersion = 0;
   const facade = { captureCurrentWorld(input) { seen.push(input); return { safe: true, repo: {}, adapters: [], environments: [], fixtures: [], resources: [], activeRuns: [] }; } };
   const h = await host({ facade, adapterRegistry: "adapters", environmentRegistry: "environments", fixtureRegistry: "fixtures", resourceRegistry: () => ({ [`resource-${++resourceVersion}`]: { capacity: 1, holders: [] } }), runInventory: () => [{ runId: `run-${++runVersion}`, kind: "managed-validation", state: "running" }] });
-  await h.captureCurrentWorld("/canonical/one"); await h.captureCurrentWorld("/canonical/two");
+  const first = h.captureCurrentWorld({ cwd: "/canonical/one" }), second = h.captureCurrentWorld({ cwd: "/canonical/two" });
+  assert.equal(typeof first?.then, "undefined"); assert.equal(typeof second?.then, "undefined");
   assert.deepEqual(seen, [
     { repoRoot: "/canonical/one", adapterRegistry: "adapters", environmentRegistry: "environments", fixtureRegistry: "fixtures", resourceRegistry: { "resource-1": { capacity: 1, holders: [] } }, runInventory: [{ runId: "run-1", kind: "managed-validation", state: "running" }] },
     { repoRoot: "/canonical/two", adapterRegistry: "adapters", environmentRegistry: "environments", fixtureRegistry: "fixtures", resourceRegistry: { "resource-2": { capacity: 1, holders: [] } }, runInventory: [{ runId: "run-2", kind: "managed-validation", state: "running" }] },
   ]);
   assert.notDeepEqual(seen[0].runInventory, seen[1].runInventory);
+  for (const bad of ["/canonical/string", { cwd: "/canonical/extra", extra: true }, {}, { cwd: "relative" }, { cwd: "" }]) assert.throws(() => h.captureCurrentWorld(bad));
 });
 
 test("captureCurrentWorld preserves an unsafe typed result", async () => {
   const unsafe = { safe: false, reason: "unsafe" };
   const h = await host({ facade: { captureCurrentWorld() { return unsafe; } } });
-  assert.strictEqual(await h.captureCurrentWorld("/repo"), unsafe);
+  assert.strictEqual(h.captureCurrentWorld({ cwd: "/repo" }), unsafe);
+});
+
+test("production Host canary persists runtime draft and readiness through the real Extension", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "goal-engine-production-canary-"));
+  execFileSync("git", ["init", "-b", "main"], { cwd }); execFileSync("git", ["config", "user.email", "test@example.com"], { cwd }); execFileSync("git", ["config", "user.name", "Test"], { cwd });
+  writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n"); execFileSync("git", ["add", ".gitignore"], { cwd }); execFileSync("git", ["commit", "-m", "init"], { cwd });
+  const calls = [], tools = [], sessionManager = { getSessionId: () => "canary", getSessionFile: () => join(cwd, "session"), getLeafId: () => "leaf", getBranch: () => [], getEntries: () => [] };
+  const api = { registerTool: tool => tools.push(tool), on() {}, appendEntry() {}, sessionManager };
+  const runtimeHost = await host({
+    facade: { captureCurrentWorld(input) { calls.push(input); return { safe: true, repo: { root: cwd, head: execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim(), trackedDirty: [], untracked: [], sequencer: null }, adapters: [], environments: [], fixtures: [], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; } },
+    registries: runtimeRegistries, adapterRegistry: Object.freeze({ oracle: Object.freeze({ deterministic: true }) }),
+  });
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost });
+  const result = JSON.parse(await tools.find(tool => tool.name === "goal_init").execute("call", runtimeInit(), undefined, undefined, { cwd, sessionManager }));
+  assert.deepEqual(calls.map(call => call.cwd), [cwd]); assert.equal(result.runtimeState, "awaiting_user_approval");
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), result.goalId);
+  assert.equal(projection.runtimeState, "awaiting_user_approval"); assert.equal(projection.readiness.readiness, "ready");
 });
 
 test("stopOwnedRun accepts only absolute asyncDir and exact Root Broker input", async () => {
