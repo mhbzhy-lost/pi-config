@@ -396,6 +396,16 @@ export function releaseWriterLock(stateRoot, token) {
   }
 }
 
+// Shared async boundary for state-root transactions.  The underlying lock keeps
+// its owner receipt and CAS-protected release protocol; callers only supply the
+// critical section and must not retain the receipt themselves.
+export async function withGoalStateWriterLock(stateRoot, operation) {
+  if (typeof operation !== "function") throw new TypeError("goal state writer lock operation must be a function");
+  const lock = acquireWriterLock(stateRoot);
+  try { return await operation(); }
+  finally { releaseWriterLock(stateRoot, lock.token); }
+}
+
 function sleep(milliseconds) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds); }
 function lockTimeout() { return Object.assign(new Error("goal engine store writer lock timed out"), { code: "GOAL_ENGINE_STORE_LOCK_TIMEOUT" }); }
 function identityUnavailable() { return Object.assign(new Error("goal engine store process birth identity unavailable"), { code: "GOAL_ENGINE_STORE_LOCK_IDENTITY_UNAVAILABLE" }); }

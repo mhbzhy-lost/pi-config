@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { validateObligationFinalizationManifest } from "./finalization.mjs";
+import { withGoalStateWriterLock } from "./store.mjs";
 
 const INTENT_KEYS = ["approval", "goalId", "head", "idempotencyKey", "manifestHash", "reviewId", "stateHash", "worldHash"];
 const RESULT_KEYS = [...INTENT_KEYS, "reportRef", "residual", "resultHash", "severity", "status"];
@@ -45,9 +46,16 @@ function assertStore(store) {
 }
 async function serialized(key, fn) {
   const prior = locks.get(key) ?? Promise.resolve(); let release;
-  const current = new Promise(resolve => { release = resolve; }); locks.set(key, prior.then(() => current));
+  const tail = new Promise(resolve => { release = resolve; });
+  locks.set(key, tail);
   await prior;
-  try { return await fn(); } finally { release(); if (locks.get(key) === current) locks.delete(key); }
+  try { return await fn(); }
+  finally { release(); if (locks.get(key) === tail) locks.delete(key); }
+}
+async function withStateWriterLock(stateRoot, fn) {
+  // The local queue prevents the synchronous cross-process acquisition from
+  // blocking this process while its current async writer is awaiting I/O.
+  return serialized(stateRoot, () => withGoalStateWriterLock(stateRoot, fn));
 }
 
 export async function runRecoverableFinalReview(input) {
@@ -107,14 +115,28 @@ async function replaceRecord(path, record, reviews) {
 export function createFinalReviewFileStore({ stateRoot } = {}) {
   async function pathFor(reviewId) { if (!validReviewId(reviewId)) fail("reviewId"); return { reviews: await safeRoot(stateRoot), path: join(stateRoot, "final-reviews", `${reviewId}.json`) }; }
   return Object.freeze({
-    async inspect(reviewId) { const { path } = await pathFor(reviewId); return readRecord(path, reviewId); },
+    async inspect(reviewId) {
+      return withStateWriterLock(stateRoot, async () => { const { path } = await pathFor(reviewId); return readRecord(path, reviewId); });
+    },
     async persistIntent(value) {
-      const intent = assertIntent(value), { path, reviews } = await pathFor(intent.reviewId);
-      return serialized(path, async () => { const record = await readRecord(path, intent.reviewId); if (record.intent) { if (!same(record.intent, intent)) fail("intent conflict"); return; } await writeNew(path, { intent, result: null }, reviews); });
+      const intent = assertIntent(value);
+      return withStateWriterLock(stateRoot, async () => {
+        const { path, reviews } = await pathFor(intent.reviewId);
+        const record = await readRecord(path, intent.reviewId);
+        if (record.intent) { if (!same(record.intent, intent)) fail("intent conflict"); return; }
+        await writeNew(path, { intent, result: null }, reviews);
+      });
     },
     async persistResult(value) {
-      const reviewId = value?.reviewId, { path, reviews } = await pathFor(reviewId);
-      return serialized(path, async () => { const record = await readRecord(path, reviewId); if (!record.intent) fail("missing intent"); const result = assertResult(value, record.intent); if (record.result) { if (!same(record.result, result)) fail("result conflict"); return; } await replaceRecord(path, { intent: record.intent, result }, reviews); });
+      const reviewId = value?.reviewId;
+      return withStateWriterLock(stateRoot, async () => {
+        const { path, reviews } = await pathFor(reviewId);
+        const record = await readRecord(path, reviewId);
+        if (!record.intent) fail("missing intent");
+        const result = assertResult(value, record.intent);
+        if (record.result) { if (!same(record.result, result)) fail("result conflict"); return; }
+        await replaceRecord(path, { intent: record.intent, result }, reviews);
+      });
     },
   });
 }
