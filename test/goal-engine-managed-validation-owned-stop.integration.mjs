@@ -44,7 +44,7 @@ test("stopOwnedManagedValidation preserves the exact managed worktree receipt th
     async recover() { calls.push("recover"); return { terminal }; },
     async preserveManagedWorktree(binding) { calls.push(["preserve", binding]); assert.deepEqual(binding, { originRoot: workspaceReceipt.originRoot, id: workspaceReceipt.id, ownerToken: workspaceReceipt.ownerToken, reason: "Goal quarantine after owned validation stop" }); return workspaceReceipt; },
     async markValidationLeaseDebt(value) { calls.push(["debt", value]); return { ...value, state: "cleanup-debt" }; },
-    async writeRecord(value) { calls.push(["record", value]); return { ...value, phase: "cleanup_debt", cleanupDebt: true, terminal }; },
+    async writeRecord(value) { calls.push(["record", value]); assert.equal(value.workspaceLease, workspaceReceipt); return { ...value, phase: "cleanup_debt", cleanupDebt: true, terminal }; },
     readClosure() { return null; },
   });
   assert.deepEqual(result, { state: "observed", terminalProofHash: hash(terminal), resourceProofHash: hash({ receiptId: record.id, terminal, workspaceReceipt, debt: true }), resourceState: "quarantined", debt: true });

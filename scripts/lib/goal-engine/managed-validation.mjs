@@ -188,7 +188,7 @@ export async function stopOwnedManagedValidation(request, services = {}) {
       recover: async (_request, record) => recoverManagedValidation(receipt(record)),
       preserveManagedWorktree: ({ originRoot, id, ownerToken, reason }) => preserveManagedWorktree({ originRoot, id, ownerToken, reason }),
       markValidationLeaseDebt: (workspaceLease) => { const lease = readLease(workspaceLease.stateRoot, workspaceLease.id); if (lease.state !== "cleanup-debt") writeLease({ ...lease, state: "cleanup-debt" }); },
-      writeRecord: (value) => { const { closure, ...next } = value; const durable = read(receipt(next)); if (durable.id !== next.id || durable.process?.processIdentityHash !== request.processIdentityHash) throw Error("Managed stop identity changed"); const saved = write({ ...durable, phase: "cleanup_debt", terminal: next.terminal, cleanupDebt: true }); writeClosureFile(next.stateRoot, next.id, closure); return saved; },
+      writeRecord: (value) => { const { closure, ...next } = value; const durable = read(receipt(next)); if (durable.id !== next.id || durable.process?.processIdentityHash !== request.processIdentityHash) throw Error("Managed stop identity changed"); const saved = write({ ...durable, workspaceLease: next.workspaceLease, phase: "cleanup_debt", terminal: next.terminal, cleanupDebt: true }); writeClosureFile(next.stateRoot, next.id, closure); return saved; },
       preserveWorkspace: async (_request, record, terminal) => {
         const current = read(receipt(record));
         if (current.process?.processIdentityHash !== request.processIdentityHash || !current.terminal || managedHash(current.terminal) !== managedHash(terminal)) throw Error("Managed stop identity changed");
