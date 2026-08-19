@@ -34,13 +34,11 @@ function workspaceRequest(overrides = {}) {
   return { stateRoot: "/state", goalId: "goal", taskId: "task", attempt: 1, runId: "run", leaseId: hash("owner-token"), workspacePath: "/workspace", headAtDispatch: DISPATCH_HEAD, baseHead: BASE_HEAD, executionRevision: 1, contractHash: hash("contract"), sessionId: "session", ...overrides };
 }
 
-// The production entry contract is intentionally RED until the real Host is wired.
-test("enabled entry default factory constructs Host and passes production options", async () => {
+test("enabled entry without runtimeHost keeps task-only extension loadable without empty runtime authority", async () => {
   const calls = [];
   await createGoalEngineEntry(pi(), { settingsPath: enabledSettings(), async load() { return { createGoalEngineExtension(target, options) { calls.push({ target, options }); } }; } });
   assert.equal(calls.length, 1);
-  assert.ok(calls[0].options.runtimeHost);
-  assert.equal(calls[0].options.runtimeHostOptions?.settingsPath, undefined);
+  assert.deepEqual(calls[0].options, {});
 });
 
 test("enabled entry factory receives target and options", async () => {
