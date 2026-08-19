@@ -43,6 +43,7 @@ test("stable host API accepts exactly manifest approval reviewStore and provider
   assert.equal(result.status, "recorded");
   assert.deepEqual(Object.keys(seen[0]).sort(), ["idempotencyKey", "reviewId", "writerLockHeld"]);
   assert.equal(seen[0].writerLockHeld, false);
+  assert.equal(seen[0].idempotencyKey, seen[0].reviewId);
 });
 for (const extra of [
   { appendEvent: async () => {} },

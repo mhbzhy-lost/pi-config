@@ -36,7 +36,7 @@ test("same identity reload has stable reviewId and idempotency key", async () =>
   const reviewStore = crashStore(), seen = [];
   const input = { manifest: manifest(), approval, reviewStore, provider: async value => { seen.push(value); return { severity: "none", reportRef: `sha256:${h("2")}` }; } };
   await run(input); await run(input);
-  assert.equal(seen.length, 1); assert.equal(reviewStore.record.intent.reviewId, seen[0].reviewId); assert.equal(reviewStore.record.intent.idempotencyKey, seen[0].idempotencyKey);
+  assert.equal(seen.length, 1); assert.equal(reviewStore.record.intent.reviewId, seen[0].reviewId); assert.equal(reviewStore.record.intent.idempotencyKey, seen[0].idempotencyKey); assert.equal(seen[0].idempotencyKey, seen[0].reviewId);
 });
 for (const [name, drift] of [
   ["goalId", intent => ({ ...intent, goalId: "other-goal" })],
@@ -83,7 +83,7 @@ test("exact durable changes_required is idempotent with provider zero", async ()
 // complete, host-derived identity fields; old approvalEntryId-only fixtures are forbidden.
 async function withRoot(fn) { const root = await mkdtemp(join(tmpdir(), "r11-review-")); try { await fn(root); } finally { await rm(root, { recursive: true, force: true }); } }
 function canonicalIntent(overrides = {}) {
-  return { reviewId: "review-safe", idempotencyKey: h("1"), goalId: "goal-recovery", manifestHash: h("2"), stateHash: h("3"), worldHash: h("4"), head: "b".repeat(40), approval: structuredClone(approval), ...overrides };
+  return { reviewId: "review-safe", idempotencyKey: "review-safe", goalId: "goal-recovery", manifestHash: h("2"), stateHash: h("3"), worldHash: h("4"), head: "b".repeat(40), approval: structuredClone(approval), ...overrides };
 }
 function fileStore(stateRoot) {
   assert.equal(typeof finalReview.createFinalReviewFileStore, "function", "file review-store factory is a frozen public API");
@@ -132,6 +132,7 @@ test("file store rejects insecure record permissions and identity or result conf
   await run({ manifest: manifest(), approval, reviewStore, provider: async input => { reviewId = input.reviewId; return { severity: "none", reportRef: `sha256:${h("8")}` }; } });
   const record = await reviewStore.inspect(reviewId);
   await assert.rejects(reviewStore.persistIntent({ ...record.intent, goalId: "other" }));
+  await assert.rejects(reviewStore.persistIntent({ ...record.intent, idempotencyKey: "drifted-key" }));
   await assert.rejects(reviewStore.persistResult({ ...record.result, status: "changes_required" }));
   await chmod(join(stateRoot, "final-reviews", `${reviewId}.json`), 0o644); await assert.rejects(reviewStore.inspect(reviewId));
 }));
