@@ -15,6 +15,7 @@ const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" 
 const rootFor = cwd => join(cwd, ".state/goal-engine");
 const projectionFor = cwd => loadProjection(rootFor(cwd), "harden-runtime");
 const eventCount = (cwd, type) => (readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8").match(new RegExp(`"type":"${type}"`, "g")) || []).length;
+const eventTotal = cwd => readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8").trim().split("\n").length;
 const hash = value => createHash("sha256").update(value).digest("hex");
 const event = (goalId, type, data) => ({ schemaVersion: "goal-runtime.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data });
 function appendRuntime(cwd, goalId, type, data) { const root = rootFor(cwd), projection = loadProjection(root, goalId); return appendEvent(root, event(goalId, type, data), projection.version); }
@@ -67,7 +68,7 @@ function host(cwd, { nonceCalls, world = () => ({}) } = {}) {
   };
 }
 async function invoke(api, name, input = {}) { return (await api.tools.find(tool => tool.name === name).execute("call", input, undefined, undefined, { cwd: api.cwd, sessionManager: api.sessionManager })).details.value; }
-async function approved({ sessionId = "owner", entries, extension = {}, choice = "approve", accepted = false } = {}) {
+async function approved({ sessionId = "owner", entries, extension = {}, choice = "approve", accepted = false, updates = [{ id: "task-1", description: "Amended target task" }], decide = true, expectProposalError = null } = {}) {
   const cwd = repo(), api = pi(cwd, entries, sessionId), nonces = [];
   createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd, { nonceCalls: nonces, ...extension }), ...extension });
   await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status");
@@ -76,10 +77,18 @@ async function approved({ sessionId = "owner", entries, extension = {}, choice =
   nonces.length = 0; // Activation's capability is not the amendment capability under test.
   if (accepted) acceptCanonicalTask(cwd, "harden-runtime", "task-1", "src");
   await api.handlers.get("input")({ type: "input", text: "amend privately", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
-  await invoke(api, "goal_amend", { goal_id: "harden-runtime", operation: "propose_execution_change", reason: "amend task", changes: { update_tasks: [{ id: "task-1", description: "Amended target task" }] } });
-  await api.handlers.get("input")({ type: "input", text: choice, source: "interactive" }, { cwd, sessionManager: api.sessionManager });
-  await invoke(api, "goal_status");
-  assert.equal(projectionFor(cwd).pendingHumanDecision.phase, choice === "approve" ? "approved" : "rejected");
+  const beforeProposalEvents = eventTotal(cwd);
+  if (expectProposalError) {
+    await assert.rejects(invoke(api, "goal_amend", { goal_id: "harden-runtime", operation: "propose_execution_change", reason: "amend task", changes: { update_tasks: updates } }), expectProposalError);
+    assert.equal(projectionFor(cwd).pendingHumanDecision, null); assert.equal(eventTotal(cwd), beforeProposalEvents);
+    return { cwd, api, nonces };
+  }
+  await invoke(api, "goal_amend", { goal_id: "harden-runtime", operation: "propose_execution_change", reason: "amend task", changes: { update_tasks: updates } });
+  if (decide) {
+    await api.handlers.get("input")({ type: "input", text: choice, source: "interactive" }, { cwd, sessionManager: api.sessionManager });
+    await invoke(api, "goal_status");
+    assert.equal(projectionFor(cwd).pendingHumanDecision.phase, choice === "approve" ? "approved" : "rejected");
+  }
   return { cwd, api, nonces };
 }
 
@@ -88,7 +97,7 @@ test("R10B happy path applies approved amendment through the canonical Store bat
   const { cwd, api, nonces } = await approved(); const before = projectionFor(cwd);
   const result = await invoke(api, "goal_status"); const after = projectionFor(cwd);
   assert.match(result, /AMENDMENT_APPLIED/); assert.equal(after.runtimeState, "active"); assert.equal(after.executionRevision, before.executionRevision + 1);
-  assert.equal(after.tasks.get("task-1").description, "Amended target task"); assert.equal(after.taskApplicability.get("task-1").state, "reverify_required");
+  assert.equal(after.tasks.get("task-1").description, "Amended target task"); assert.equal(after.taskApplicability.get("task-1").state, "applicable");
   assert.equal(nonces.length, 1); assert.equal(eventCount(cwd, "execution.amendment_applied"), 1);
 });
 
@@ -125,7 +134,35 @@ test("R10B cross-session status cannot apply and rejection permits a fresh propo
   const fresh = projectionFor(rejected.cwd).pendingHumanDecision; assert.equal(fresh.phase, "proposed"); assert.notEqual(fresh.proposalId, oldProposalId);
 });
 
-test("R10B accepted task history remains accepted while amendment requires reverification", async () => {
-  const { cwd, api } = await approved({ accepted: true }); const before = projectionFor(cwd).tasks.get("task-1"); assert.equal(before.status, "accepted", "fixture must establish accepted Task through canonical events");
-  await invoke(api, "goal_status"); const task = projectionFor(cwd).tasks.get("task-1"); assert.equal(task.status, "accepted"); assert.equal(projectionFor(cwd).taskApplicability.get("task-1").state, "reverify_required");
+test("R10B accepted task history remains accepted and applicable after supported updates", async () => {
+  for (const update of [
+    { id: "task-1", description: "Updated accepted description" },
+    { id: "task-1", deps: [] },
+    { id: "task-1", writePaths: ["src/**"] },
+    { id: "task-1", workflow: "existing-tests" },
+  ]) {
+    const { cwd, api } = await approved({ accepted: true, updates: [update] }); const before = projectionFor(cwd).tasks.get("task-1"); assert.equal(before.status, "accepted", "fixture must establish accepted Task through canonical events");
+    await invoke(api, "goal_status"); const task = projectionFor(cwd).tasks.get("task-1"); assert.equal(task.status, "accepted"); assert.equal(projectionFor(cwd).taskApplicability.get("task-1").state, "applicable");
+    assert.match(readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8"), /"action":"keep"/);
+  }
+});
+
+test("R10B supported pending updates keep applicability and leave dispatch available", async () => {
+  for (const update of [
+    { id: "task-1", description: "Updated description" },
+    { id: "task-1", deps: [] },
+    { id: "task-1", writePaths: ["src/**"] },
+    { id: "task-1", workflow: "existing-tests" },
+  ]) {
+    const { cwd, api } = await approved({ updates: [update] });
+    await invoke(api, "goal_status");
+    const task = projectionFor(cwd).tasks.get("task-1");
+    assert.equal(task.status, "pending"); assert.equal(projectionFor(cwd).taskApplicability.get("task-1").state, "applicable");
+    assert.match(readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8"), /"action":"keep"/);
+    assert.match(await invoke(api, "goal_status"), /goal_dispatch/);
+  }
+});
+
+test("R10B rejects accepted Task acceptance changes before proposal append", async () => {
+  await approved({ accepted: true, updates: [{ id: "task-1", acceptance: { criteria: [{ id: "contract", statement: "Unverified replacement criterion", evidenceKinds: ["tests"] }] } }], expectProposalError: /accepted Task acceptance/i });
 });

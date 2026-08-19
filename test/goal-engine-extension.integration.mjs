@@ -782,12 +782,15 @@ test("historical safe ignored state dispatch remains available", async () => {
   ]);
 });
 
-test("goal_amend exposes a strict discriminated ten-operation schema", () => {
+test("goal_amend exposes a strict discriminated eleven-operation schema", () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);
   const schema = pi.tools.find((tool) => tool.name === "goal_amend").parameters;
   assert.equal(schema.type, "object");
-  assert.equal(schema.anyOf.length, 10);
+  assert.equal(schema.anyOf.length, 11);
+  assert.deepEqual(schema.anyOf.map((candidate) => candidate.properties.operation.const).sort(), [
+    "detach_session", "patch_active", "propose_execution_change", "propose_transfer_session", "propose_update_goal", "reopen_completed", "resolve_blocked", "resume_runtime", "transfer_session", "triage", "update_goal",
+  ].sort());
   for (const branch of schema.anyOf) {
     assert.equal(branch.additionalProperties, false);
     assert.ok(branch.properties.operation.const);
@@ -803,6 +806,8 @@ test("goal_amend exposes a strict discriminated ten-operation schema", () => {
   const proposeTransfer = branch("propose_transfer_session");
   const transfer = branch("transfer_session");
   const executionChange = branch("propose_execution_change");
+  const resume = branch("resume_runtime");
+  assert.deepEqual(resume.required.sort(), ["action_token", "operation"].sort());
   assert.deepEqual(executionChange.required.sort(), ["changes", "goal_id", "operation", "reason"].sort());
   assert.deepEqual(Object.keys(executionChange.properties.changes.properties), ["update_tasks"]);
   assert.equal(executionChange.properties.changes.additionalProperties, false);

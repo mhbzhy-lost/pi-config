@@ -121,10 +121,10 @@ function preparedStore(root) {
 function canonicalBatch(proposal) {
   return [
     event("execution.amendment_capability_consumed", { proposalId: proposal.proposalId, nonceDigest: digest(16) }, 20),
-    event("task.applicability_changed", { taskId: "task-1", revision: proposal.newRevision, state: "reverify_required", reason: "task_change" }, 21),
+    event("task.applicability_changed", { taskId: "task-1", revision: proposal.newRevision, state: "applicable", reason: "execution_amendment" }, 21),
     event("task.applicability_changed", { taskId: "task-2", revision: proposal.newRevision, state: "applicable", reason: "unaffected" }, 22),
     event("condition.evidence_invalidated", { conditionId: "condition-1", revision: proposal.newRevision, priorEvidenceIds: [digest(14)], reason: "task_change" }, 23),
-    event("execution.amendment_applied", { proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, oldRevision: proposal.oldRevision, newRevision: proposal.newRevision, targetContractHash: proposal.targetContractHash, reconciliation: [{ taskId: "task-1", action: "reverify" }, { taskId: "task-2", action: "keep" }] }, 24),
+    event("execution.amendment_applied", { proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, oldRevision: proposal.oldRevision, newRevision: proposal.newRevision, targetContractHash: proposal.targetContractHash, reconciliation: [{ taskId: "task-1", action: "keep" }, { taskId: "task-2", action: "keep" }] }, 24),
     event("goal.runtime_resumed", { suspensionId: initialSuspension().suspensionId, closureHash: suspensionClosureHash(fullClosure()) }, 25),
   ];
 }
@@ -140,7 +140,7 @@ test("R10B Store applies the canonical amendment batch with product support and 
     const applied = appendEventBatch(root, batch, prepared.version);
     assert.equal(applied.executionRevision, proposal.newRevision);
     assert.equal(applied.executionContractHash, proposal.targetContractHash);
-    assert.deepEqual(applied.taskApplicability.get("task-1"), { revision: proposal.newRevision, state: "reverify_required", reason: "task_change" });
+    assert.deepEqual(applied.taskApplicability.get("task-1"), { revision: proposal.newRevision, state: "applicable", reason: "execution_amendment" });
     assert.deepEqual(applied.taskApplicability.get("task-2"), { revision: proposal.newRevision, state: "applicable", reason: "unaffected" });
     assert.deepEqual(applied.conditions.get("condition-1").supportingEvidenceIds, []);
     assert.equal(applied.evidenceHistory.length, 2);
@@ -152,7 +152,7 @@ test("R10B Store applies the canonical amendment batch with product support and 
     assert.deepEqual(appliedTask.acceptance, { criteria: targetTask.acceptance.criteria });
     assert.equal(appliedTask.workflow, targetTask.workflow);
     assert.equal(applied.tasks.get("task-2").description, sourceContract().execution.tasks[1].description);
-    assert.deepEqual(batch[4].data.reconciliation, [{ taskId: "task-1", action: "reverify" }, { taskId: "task-2", action: "keep" }]);
+    assert.deepEqual(batch[4].data.reconciliation, [{ taskId: "task-1", action: "keep" }, { taskId: "task-2", action: "keep" }]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
