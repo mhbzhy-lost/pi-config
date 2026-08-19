@@ -80,6 +80,13 @@ test("provider cannot control host identity status or resultHash", async () => {
   const result = [...reviewStore.results.values()][0];
   assert.equal(result.goalId, "goal-r11"); assert.notEqual(result.resultHash, "attacker");
 });
+test("final review binds expected intent stateHash directly to manifest Store stateHash", async () => {
+  const manifest = completeManifest(), reviewStore = store();
+  await run({ manifest, approval, reviewStore, provider: provider() });
+  const intent = [...reviewStore.intents.values()][0];
+  assert.equal(intent.stateHash, manifest.stateHash);
+  assert.notEqual(manifest.stateHash, manifest.obligationStateHash, "fixture distinguishes Store state from obligation binding");
+});
 test("provider raw text is not made durable", async () => {
   const reviewStore = store();
   await run({ manifest: completeManifest(), approval, reviewStore, provider: async () => ({ severity: "none", reportRef: `sha256:${h("3")}`, summary: "secret", prompt: "secret", response: "secret" }) });
