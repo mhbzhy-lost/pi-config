@@ -27,7 +27,7 @@ export function normalizeProductionRuntimeHostOptions(value) {
 function configuredRegistries(options) {
   if (!Object.hasOwn(options, "adapters")) return null;
   const config = normalizeProductionRuntimeHostOptions(Object.fromEntries(hostKeys.map((key) => [key, options[key]])));
-  return { config, registries: Object.freeze({ adapters: Object.freeze(Object.fromEntries(config.adapters.map(({ ref, deterministic }) => [ref, Object.freeze({ deterministic })]))), environments: Object.freeze(structuredClone(config.environments)), fixtures: Object.freeze(structuredClone(config.fixtures)) }), adapterRegistry: createObservationAdapterRegistry(config.adapters) };
+  return { config, registries: Object.freeze({ adapters: Object.freeze(Object.fromEntries(config.adapters.map(({ ref, deterministic }) => [ref, Object.freeze({ deterministic })]))), environments: Object.freeze(structuredClone(config.environments)), fixtures: Object.freeze(structuredClone(config.fixtures)) }), adapterRegistry: createObservationAdapterRegistry(config.adapters), worldAdapterRegistry: Object.freeze(Object.fromEntries(config.adapters.map(({ ref, version }) => [ref, Object.freeze({ version })]))) };
 }
 function safeFile(file) { const stat = lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) throw Error("artifact identity is invalid"); return stat; }
 function sameNode(left, right) { return left.dev === right.dev && left.ino === right.ino; }
@@ -57,7 +57,7 @@ export function createProductionGoalRuntimeHost(pi, options = {}) {
     registries, adapterRegistry,
     captureCurrentWorld: (input) => {
       if (!exact(input, ["cwd"]) || typeof input.cwd !== "string" || !input.cwd || !isAbsolute(input.cwd)) throw Error("Invalid CurrentWorld request");
-      return (facade.captureCurrentWorld || captureCurrentWorld)({ repoRoot: input.cwd, adapterRegistry, environmentRegistry: structuredClone(environmentRegistry), fixtureRegistry: structuredClone(fixtureRegistry), resourceRegistry: structuredClone(typeof options.resourceRegistry === "function" ? options.resourceRegistry() : (configuredResources || options.resourceRegistry || Object.freeze({}))), runInventory: typeof options.runInventory === "function" ? options.runInventory() : (options.runInventory || []) });
+      return (facade.captureCurrentWorld || captureCurrentWorld)({ repoRoot: input.cwd, adapterRegistry: configured?.worldAdapterRegistry || adapterRegistry, environmentRegistry: structuredClone(environmentRegistry), fixtureRegistry: structuredClone(fixtureRegistry), resourceRegistry: structuredClone(typeof options.resourceRegistry === "function" ? options.resourceRegistry() : (configuredResources || options.resourceRegistry || Object.freeze({}))), runInventory: typeof options.runInventory === "function" ? options.runInventory() : (options.runInventory || []) });
     },
     artifactRefForRun: async (input) => artifact(input),
     prepareManagedValidation: facade.prepareManagedValidation, startManagedValidation: facade.startManagedValidation, recoverManagedValidation: facade.recoverManagedValidation, inspectManagedValidation: facade.inspectManagedValidation, releaseManagedValidation: facade.releaseManagedValidation,
