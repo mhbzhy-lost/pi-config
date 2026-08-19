@@ -37,6 +37,10 @@ foundation 曾生成彼此不同的 suspensionId、在无 active offer 时伪造
 2. proposal 的 `add` 必须对应不存在的实体，`change` 和 `remove` 必须对应已有实体；Task 与 Condition 均须在生成 capability nonce 或事件前整体拒绝错配。
 3. accepted 历史不可回退。accepted remove 仅写入绑定新 revision 的 `superseded` applicability 事实；accepted change 的 Condition 复验事实只能引用真实 changed Condition 或依赖，绝不能把 Task ID 伪装成 Condition ID。
 
+## Store amendment 事件判别补充
+
+`task.applicability_changed` 与 `condition.evidence_invalidated` 同时承载普通本地收敛和 amendment 事实。Store 若只按共享 type 进入 amendment preflight，会拒绝本应可单独追加的两字段 invalidation 与三字段 applicability，阻断本地 world-drift 收敛。判别必须以 payload 为准：消费或 applied 事件始终是 amendment；共享事件只有携带 amendment 专属的 `revision` 或 `priorEvidenceIds` 才进入 canonical batch 校验。专属字段即使与其余 payload 不匹配也不得降级，仍由 preflight/reducer fail closed。
+
 ## R10B 暂停账本补充
 
 `goal.runtime_suspended` 是固定 runtime 事件表中唯一的暂停事实，不得追加不存在的 `goal.action_offer_revoked`。首次由 active 进入 suspended 时，Reducer 必须在同一 transition 清空未消费、且绑定当前 projectionVersion 的 action offer；事件日志中既有 offer 与随后 suspend 共同构成可审计的撤销链，旧 token 不再可消费。

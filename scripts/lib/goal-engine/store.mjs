@@ -456,8 +456,11 @@ function assertRemediationMaterializationBatch(events) {
 }
 
 function assertCanonicalAmendmentBatch(events, projection, standalone) {
-  const amendmentTypes = new Set(["execution.amendment_capability_consumed", "task.applicability_changed", "condition.evidence_invalidated", "execution.amendment_applied"]);
-  const hasAmendment = events.some((event) => amendmentTypes.has(event?.type));
+  const hasAmendment = events.some((event) => event?.type === "execution.amendment_capability_consumed"
+    || event?.type === "execution.amendment_applied"
+    || (["task.applicability_changed", "condition.evidence_invalidated"].includes(event?.type)
+      && event?.data && typeof event.data === "object"
+      && (Object.hasOwn(event.data, "revision") || Object.hasOwn(event.data, "priorEvidenceIds"))));
   if (!hasAmendment) return;
   if (standalone || events[0]?.type !== "execution.amendment_capability_consumed") throw new Error("canonical amendment batch is atomic");
   const pending = projection.pendingHumanDecision;

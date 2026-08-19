@@ -152,9 +152,29 @@ test("R10B Store applies the canonical amendment batch with product support and 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("R10B Store appends ordinary two-field evidence invalidation without amendment preflight", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-r10b-ordinary-invalidation-"));
+  try {
+    const active = appendEventBatch(root, activeEntries(), 0);
+    const appended = appendEvent(root, event("condition.evidence_invalidated", { conditionId: "condition-1", reason: "world_drift" }, 26), active.version);
+    assert.equal(appended.conditions.get("condition-1").status, "stale");
+    assert.equal(appended.conditions.get("condition-1").invalidationReason, "world_drift");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("R10B Store appends ordinary three-field task applicability without amendment preflight", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-r10b-ordinary-applicability-"));
+  try {
+    const active = appendEventBatch(root, activeEntries(), 0);
+    const appended = appendEvent(root, event("task.applicability_changed", { taskId: "task-1", state: "reverify_required", reason: "world_drift" }, 26), active.version);
+    assert.deepEqual(appended.taskApplicability.get("task-1"), { revision: 1, state: "reverify_required", reason: "world_drift" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("R10B Store rejects every split, unordered, incomplete, or mismatched canonical amendment before writing", () => {
   const cases = [
     ["standalone consume", ({ proposal, prepared }) => [prepared.version, [canonicalBatch(proposal)[0]]]],
+    ["standalone malformed amendment applicability", ({ proposal, prepared }) => [prepared.version, [{ ...canonicalBatch(proposal)[1], data: { taskId: "task-1", revision: proposal.newRevision, state: "reverify_required" } }]]],
     ["out of order", ({ proposal, prepared }) => [prepared.version, [canonicalBatch(proposal)[1], canonicalBatch(proposal)[0], ...canonicalBatch(proposal).slice(2)]]],
     ["missing task applicability", ({ proposal, prepared }) => [prepared.version, canonicalBatch(proposal).filter((entry) => entry.data.taskId !== "task-2")]],
     ["wrong prior evidence", ({ proposal, prepared }) => [prepared.version, canonicalBatch(proposal).map((entry) => entry.type === "condition.evidence_invalidated" ? { ...entry, data: { ...entry.data, priorEvidenceIds: [digest(7)] } } : entry)]],
