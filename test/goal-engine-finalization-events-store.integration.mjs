@@ -71,7 +71,7 @@ for (const severity of ["none", "minor", "important", "critical"]) test(`runtime
   assert.deepEqual(Object.keys(next.finalReview).sort(), ["approval", "head", "manifestHash", "resultHash", "reviewId", "severity", "stateHash", "status", "worldHash"].sort());
 });
 for (const [name, overrides] of [["wrong status", { status: "recorded" }], ["wrong review", { reviewId: "other" }], ["raw report", { report: "provider response" }], ["extra field", { extra: true }]]) test(`runtime record rejects ${name}`, () => {
-  const p = withStarted(); assert.throws(() => applyEvent(p, recorded(p, "important", 17, overrides)), /final review record|invalid/i);
+  const p = withStarted(); assert.throws(() => applyEvent(p, recorded(p, "important", 19, overrides)), /final review record|invalid/i);
 });
 
 test("changes_required is a standalone durable runtime record", () => {
@@ -146,9 +146,9 @@ test("completion batch is CAS protected after a Goal version change", () => {
   const { root, projection } = storedActive();
   try {
     const began = appendEvent(root, started(projection), projection.version);
-    const changed = appendEvent(root, event("goal.checkpoint", { canonicalFingerprint: hex(250), advanced: true, sequence: 1 }, 17), began.version);
+    const changed = appendEvent(root, event("goal.checkpoint", { canonicalFingerprint: hex(250), advanced: true, sequence: 1 }, 19), began.version);
     const before = files(root);
-    assert.throws(() => appendEventBatch(root, [recorded(changed), completed(18)], began.version), /version conflict/i);
+    assert.throws(() => appendEventBatch(root, [recorded(changed, "none", 20), completed(21)], began.version), /version conflict/i);
     assert.deepEqual(files(root), before);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -158,7 +158,7 @@ test("repeated canonical completion batch is rejected without duplicate history"
   try {
     const began = appendEvent(root, started(projection), projection.version);
     const completedProjection = appendEventBatch(root, [recorded(began), completed()], began.version), before = files(root);
-    assert.throws(() => appendEventBatch(root, [recorded(completedProjection, "none", 19), completed(20)], completedProjection.version), /terminal|duplicate|final/i);
+    assert.throws(() => appendEventBatch(root, [recorded(completedProjection, "none", 21), completed(22)], completedProjection.version), /terminal|duplicate|final/i);
     assert.deepEqual(files(root), before);
     assert.equal(loadProjection(root, "finalization-goal").completionHistory.length, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
