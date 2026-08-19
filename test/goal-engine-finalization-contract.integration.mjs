@@ -135,7 +135,7 @@ for (const [name, mutate, code] of [
   ["head missing", ({ worldSnapshot }) => worldSnapshot.repo.head = null, "UNKNOWN_WORLD"],
   ["executor run remains active", ({ worldSnapshot }) => worldSnapshot.activeRuns = [{ runId: "executor-r11", kind: "executor", state: "running" }], "ACTIVE_RUN_DEBT"],
   ["resource holder remains", ({ worldSnapshot }) => worldSnapshot.resources[0].holders = ["executor-r11"], "RESOURCE_HOLDERS_ACTIVE"],
-  ["resource capacity is invalid", ({ worldSnapshot }) => worldSnapshot.resources[0].capacity = 0, "RESOURCE_INVENTORY_INVALID"],
+  ["resource capacity is invalid", ({ worldSnapshot }) => worldSnapshot.resources[0].capacity = -1, "RESOURCE_INVENTORY_INVALID"],
 ]) test(`world/resource gate: ${name}`, () => expectBlock(mutate, code));
 
 test("obligation state hash ignores caller stateHash and volatile metadata", () => {

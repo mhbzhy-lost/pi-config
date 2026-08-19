@@ -13,9 +13,9 @@ const canonical = value => Array.isArray(value) ? value.map(canonical) : value &
 const sha = value => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 const freeze = value => { if (value && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value); } return value; };
 
-function evidence(head = baseHead) {
+function evidence(head = baseHead, criterion = "criterion-1") {
   const identity = { goalId: "goal-hardening", taskId: "task-1", runId: "executor-1", attempt: 1, contractHash: h("a"), head };
-  const make = letter => normalizeSettlementEvidence({ identity, criteria: [{ id: "criterion-1", status: "satisfied", evidence: [ref(letter)] }], commandsRun: [{ command: "node --test", result: "passed", outputRef: ref(letter === "d" ? "e" : "f") }], changedFiles: ["src/goal.mjs"] }, { expectedIdentity: identity, expectedCriteria: ["criterion-1"], outcome: "succeeded" });
+  const make = letter => normalizeSettlementEvidence({ identity, criteria: [{ id: criterion, status: "satisfied", evidence: [ref(letter)] }], commandsRun: [{ command: "node --test", result: "passed", outputRef: ref(letter === "d" ? "e" : "f") }], changedFiles: ["src/goal.mjs"] }, { expectedIdentity: identity, expectedCriteria: [criterion], outcome: "succeeded" });
   const subagent = make("d"), main = make("a");
   return { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${h("9")}.yaml`, sha256: h("9"), subagentFingerprint: fingerprintSettlementEvidence(subagent), mainFingerprint: fingerprintSettlementEvidence(main), subagent, main, mainSessionId: "root-1" };
 }
@@ -46,6 +46,21 @@ test("RED3 rejects settlement and workspace executor-head, attempt, and run drif
 
 test("RED4 permits an idle zero-capacity Current World resource", () => { const input = fixture(); input.worldSnapshot.resources[0].capacity = 0; input.resourceInventory[0].capacity = 0; assert.equal(manifest(input).complete, true); });
 test("RED5 permits only resolved or rejected_by_user findings and blocks unknown closed states", () => { const actual = ["resolved", "rejected_by_user", "closed", "accepted"].map(status => { const input = fixture(); input.projection.findings.set("finding", { status }); return manifest(input).complete; }); assert.deepEqual(actual, [true, true, false, false]); });
+
+// Canonical task criteria, not evidence-controlled criteria, are the authority.
+test("RED6 build blocks dual evidence rewritten from criterion-1 to criterion-2", () => { const input = fixture(); input.projection.tasks.get("task-1").settlement.evidence = evidence(baseHead, "criterion-2"); assert.ok(manifest(input).blockers.some(item => item.code === "TASK_DUAL_EVIDENCE_INVALID")); });
+test("RED6 validator rejects recomputed dual-evidence criteria forgery against task authority", () => {
+  const out = structuredClone(manifest(fixture())), task = out.tasks[0], forged = evidence(baseHead, "criterion-2");
+  // This is the canonical authority that a manifest task summary must retain.
+  task.acceptanceCriteria = ["criterion-1"];
+  task.settlement.subagentFingerprint = forged.subagentFingerprint; task.settlement.mainFingerprint = forged.mainFingerprint;
+  task.settlementEvidence = { ...forged, valid: true };
+  task.settlementHash = sha(task.settlement);
+  out.stateHash = sha({ goalId: out.goalId, revision: out.revision, contractHash: out.contractHash, tasks: out.tasks, conditions: out.conditions, debts: out.debts });
+  out.obligationStateHash = sha({ stateHash: out.stateHash, head: out.head, worldHash: out.worldHash });
+  out.manifestHash = sha({ ...out, manifestHash: null });
+  assert.equal(validateObligationFinalizationManifest(freeze(out)), false);
+});
 
 // RED6: a caller who can see every manifest field must not forge semantic validity by hashing it again.
 test("RED6 validator rejects every semantic field tampered with a recomputed manifest hash", () => { const actual = ["goalId", "revision", "contractHash", "head", "worldHash", "stateHash", "obligationStateHash", "tasks", "conditions", "debts", "blockers"].map(field => { const out = structuredClone(manifest(fixture())); if (field === "tasks") out.tasks[0].status = "pending"; else if (field === "conditions") out.conditions[0].status = "stale"; else if (field === "debts") out.debts.resources[0].capacity = 2; else if (field === "blockers") out.blockers = [{ code: "forged" }]; else out[field] = field === "revision" ? 8 : h("0"); out.manifestHash = sha({ ...out, manifestHash: null }); return validateObligationFinalizationManifest(freeze(out)); }); assert.deepEqual(actual, Array(11).fill(false)); });
