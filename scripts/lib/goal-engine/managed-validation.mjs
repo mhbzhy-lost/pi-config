@@ -69,8 +69,9 @@ const managedExact = (value, keys) => value && typeof value === "object" && !Arr
 function directory(root) { const value = path.join(root, "managed-validations"); if (existsSync(value)) { const stat = lstatSync(value); if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error("Managed validation receipt directory is invalid"); } else mkdirSync(value, { recursive: true, mode: 0o700 }); return value; }
 function file(root, receiptId) { return path.join(directory(root), `${receiptId}.json`); }
 function closureFile(root, receiptId) { return path.join(directory(root), `${receiptId}.closure.json`); }
-function readClosureFile(root, receiptId) { try { const target = closureFile(root, receiptId); regular(target); const value = JSON.parse(readFileSync(target, "utf8")); return managedExact(value, ["terminalProofHash", "resourceProofHash"]) && /^[a-f0-9]{64}$/.test(value.terminalProofHash) && /^[a-f0-9]{64}$/.test(value.resourceProofHash) ? value : null; } catch { return null; } }
-function writeClosureFile(root, receiptId, value) { const target = closureFile(root, receiptId), dir = directory(root), text = JSON.stringify(value), temporary = `${target}.${process.pid}.${Date.now()}`; writeFileSync(temporary, text, { mode: 0o600, flag: "wx" }); chmodSync(temporary, 0o600); try { linkSync(temporary, target); } catch (error) { if (error?.code !== "EEXIST") throw error; regular(target); if (readFileSync(target, "utf8") !== text) throw Error("Managed validation closure conflict"); } finally { try { unlinkSync(temporary); } catch {} } syncDirectory(dir); }
+function validClosure(value, request) { return managedExact(value, ["receiptId", "runId", "processIdentityHash", "terminalProofHash", "resourceProofHash"]) && value.receiptId === request.allocationId && value.runId === request.runId && value.processIdentityHash === request.processIdentityHash && /^[a-f0-9]{64}$/.test(value.terminalProofHash) && /^[a-f0-9]{64}$/.test(value.resourceProofHash); }
+function readClosureFile(root, receiptId, request) { try { const target = closureFile(root, receiptId), before = lstatSync(target); if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || (before.mode & 0o777) !== 0o600) return null; const fd = openSync(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); let bytes; try { const held = fstatSync(fd); if (!sameNode(before, held) || held.nlink !== 1 || (held.mode & 0o777) !== 0o600) return null; bytes = readFileSync(fd); const after = lstatSync(target); if (!sameNode(before, after) || !sameNode(held, after) || after.nlink !== 1) return null; } finally { closeSync(fd); } const value = JSON.parse(bytes.toString("utf8")); return validClosure(value, request) ? value : null; } catch { return null; } }
+function writeClosureFile(root, receiptId, value) { const target = closureFile(root, receiptId), dir = directory(root), text = JSON.stringify(value), temporary = `${target}.${process.pid}.${Date.now()}.${randomBytes(8).toString("hex")}`; writeFileSync(temporary, text, { mode: 0o600, flag: "wx" }); try { regular(temporary); if (lstatSync(temporary).nlink !== 1) throw Error("Managed validation closure identity is invalid"); syncFile(temporary); try { linkSync(temporary, target); syncDirectory(dir); } catch (error) { if (error?.code !== "EEXIST") throw error; const existing = readClosureFile(root, receiptId, { allocationId: value.receiptId, runId: value.runId, processIdentityHash: value.processIdentityHash }); if (!existing || JSON.stringify(existing) !== text) throw Error("Managed validation closure conflict"); } } finally { try { unlinkSync(temporary); } catch {} } }
 function write(record) { const target = file(record.stateRoot, record.id), dir = directory(record.stateRoot); const temporary = `${target}.${process.pid}.${Date.now()}`; writeFileSync(temporary, JSON.stringify(record), { mode: 0o600, flag: "wx" }); chmodSync(temporary, 0o600); syncFile(temporary); renameSync(temporary, target); chmodSync(target, 0o600); syncFile(target); syncDirectory(dir); return receipt(record); }
 const TERMINAL_KEYS = ["status", "code", "signal", "output", "outputBytes", "truncated", "terminal", "pid", "pidBirthIdentity", "processGroupTerminalProof", "workspaceClean"];
 const RECORDED_KEYS = ["artifactHash", "recordedAt"];
@@ -195,7 +196,7 @@ export async function stopOwnedManagedValidation(request, services = {}) {
         return { proofHash: managedHash({ receiptId: debt.id, terminal: debt.terminal, disposition: "preserved" }) };
       },
       preserveResource: async (_request, record, terminal, workspace) => ({ proofHash: managedHash({ receiptId: record.id, terminal, workspaceProofHash: workspace.proofHash, debt: true }) }),
-      readClosure: () => readClosureFile(request.stateRoot, request.allocationId),
+      readClosure: () => readClosureFile(request.stateRoot, request.allocationId, request),
       writeClosure: async () => {},
     };
   }
@@ -203,16 +204,22 @@ export async function stopOwnedManagedValidation(request, services = {}) {
   if (!receipt?.process || receipt.process.processIdentityHash !== request.processIdentityHash) return unknown;
   const existing = typeof services.readClosure === "function" ? await services.readClosure(request) : null;
   if (existing?.terminalProofHash && existing?.resourceProofHash) return { state: "observed", terminalProofHash: existing.terminalProofHash, resourceProofHash: existing.resourceProofHash, resourceState: "quarantined", debt: true };
+  if (receipt.phase === "cleanup_debt" && receipt.cleanupDebt === true && receipt.terminal?.terminal && receipt.workspaceLease?.state === "preserved" && receipt.workspaceLease.id === receipt.workspaceLease.ownerId) {
+    const closure = { receiptId: receipt.id, runId: request.runId, processIdentityHash: request.processIdentityHash, terminalProofHash: managedHash(receipt.terminal), resourceProofHash: managedHash({ receiptId: receipt.id, terminal: receipt.terminal, workspaceReceipt: receipt.workspaceLease, debt: true }) };
+    if (typeof services.writeClosure !== "function") return unknown;
+    await services.writeClosure(closure, request, receipt);
+    return { state: "observed", terminalProofHash: closure.terminalProofHash, resourceProofHash: closure.resourceProofHash, resourceState: "quarantined", debt: true };
+  }
   if (typeof services.preserveManagedWorktree === "function" && typeof services.markValidationLeaseDebt === "function" && typeof services.writeRecord === "function" && typeof services.recover === "function") {
     const recovered = await services.recover(request, receipt);
     const terminal = recovered?.terminal || recovered;
     if (!terminal?.terminal || !receipt.workspaceLease) return unknown;
     const workspace = await services.preserveManagedWorktree({ originRoot: receipt.workspaceLease.originRoot, id: receipt.workspaceLease.id, ownerToken: receipt.workspaceLease.ownerToken, reason: "Goal quarantine after owned validation stop" });
-    if (!workspace || workspace.ownerKind !== "goal-validation" || workspace.ownerId !== workspace.id || workspace.ownerToken !== receipt.workspaceLease.ownerToken || workspace.originRoot !== receipt.workspaceLease.originRoot || workspace.state !== "preserved" || workspace.disposition?.state !== "preserved" || workspace.disposition?.reason !== "Goal quarantine after owned validation stop") return unknown;
+    if (!workspace || workspace.id !== receipt.workspaceLease.id || workspace.ownerKind !== "goal-validation" || workspace.ownerId !== workspace.id || workspace.ownerToken !== receipt.workspaceLease.ownerToken || workspace.originRoot !== receipt.workspaceLease.originRoot || workspace.state !== "preserved" || workspace.disposition?.state !== "preserved" || workspace.disposition?.reason !== "Goal quarantine after owned validation stop") return unknown;
     await services.markValidationLeaseDebt(receipt.workspaceLease);
-    await services.writeRecord({ ...receipt, phase: "cleanup_debt", terminal, cleanupDebt: true, closure: { terminalProofHash: managedHash(terminal), resourceProofHash: managedHash({ receiptId: receipt.id, terminal, workspaceReceipt: workspace, debt: true }) } });
-    const closure = { terminalProofHash: managedHash(terminal), resourceProofHash: managedHash({ receiptId: receipt.id, terminal, workspaceReceipt: workspace, debt: true }) };
-    return { state: "observed", ...closure, resourceState: "quarantined", debt: true };
+    const closure = { receiptId: receipt.id, runId: request.runId, processIdentityHash: request.processIdentityHash, terminalProofHash: managedHash(terminal), resourceProofHash: managedHash({ receiptId: receipt.id, terminal, workspaceReceipt: workspace, debt: true }) };
+    await services.writeRecord({ ...receipt, workspaceLease: workspace, phase: "cleanup_debt", terminal, cleanupDebt: true, closure });
+    return { state: "observed", terminalProofHash: closure.terminalProofHash, resourceProofHash: closure.resourceProofHash, resourceState: "quarantined", debt: true };
   }
   if (typeof services.recover !== "function" || typeof services.preserveWorkspace !== "function" || typeof services.preserveResource !== "function") return unknown;
   const recovered = await services.recover(request, receipt);
@@ -221,8 +228,8 @@ export async function stopOwnedManagedValidation(request, services = {}) {
   const workspace = await services.preserveWorkspace(request, receipt, terminal);
   const resource = await services.preserveResource(request, receipt, terminal, workspace);
   if (!workspace?.proofHash || !resource?.proofHash) return unknown;
-  const closure = { terminalProofHash: managedHash(terminal), resourceProofHash: resource.proofHash };
+  const closure = { receiptId: receipt.id, runId: request.runId, processIdentityHash: request.processIdentityHash, terminalProofHash: managedHash(terminal), resourceProofHash: resource.proofHash };
   if (typeof services.writeClosure !== "function") return unknown;
   await services.writeClosure(closure, request, receipt);
-  return { state: "observed", ...closure, resourceState: "quarantined", debt: true };
+  return { state: "observed", terminalProofHash: closure.terminalProofHash, resourceProofHash: closure.resourceProofHash, resourceState: "quarantined", debt: true };
 }

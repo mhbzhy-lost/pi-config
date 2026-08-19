@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants as fsConstants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, chmodSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { captureCurrentWorld } from "./current-world.mjs";
 import { prepareManagedValidation, startManagedValidation, recoverManagedValidation, inspectManagedValidation, releaseManagedValidation, stopOwnedManagedValidation } from "./managed-validation.mjs";
@@ -14,14 +14,17 @@ const fullSha = (value) => typeof value === "string" && /^[a-f0-9]{40}$/.test(va
 const hash64 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const attention = Object.freeze({ state: "attention", code: "OWNED_STOP_IDENTITY_UNKNOWN" });
 function safeFile(file) { const stat = lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) throw Error("artifact identity is invalid"); return stat; }
+function sameNode(left, right) { return left.dev === right.dev && left.ino === right.ino; }
+function readSafe(file) { const before = safeFile(file); const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); try { const held = fstatSync(fd); const bytes = readFileSync(fd); const after = safeFile(file); if (!sameNode(before, held) || !sameNode(held, after) || held.size !== after.size) throw Error("artifact identity changed during read"); return bytes; } finally { closeSync(fd); } }
+function sync(file) { const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); try { fsyncSync(fd); } finally { closeSync(fd); } }
 function validTerminal(value) { return exact(value, ["status", "code", "signal", "output", "outputBytes", "truncated", "terminal", "pid", "pidBirthIdentity", "processGroupTerminalProof", "workspaceClean"]) && ["passed", "failed", "timed_out"].includes(value.status) && (value.code === null || Number.isSafeInteger(value.code)) && (value.signal === null || typeof value.signal === "string") && typeof value.output === "string" && Number.isSafeInteger(value.outputBytes) && value.outputBytes === Buffer.byteLength(value.output, "utf8") && typeof value.truncated === "boolean" && value.terminal === true && Number.isSafeInteger(value.pid) && value.pid > 0 && hash64(value.pidBirthIdentity) && hash64(value.processGroupTerminalProof) && value.workspaceClean === true; }
 function artifact(input) {
   if (!exact(input, ["stateRoot", "goalId", "runId", "managedTerminal"]) || !isAbsolute(input.stateRoot) || !input.goalId || !input.runId || !validTerminal(input.managedTerminal)) throw Error("Invalid artifact request");
-  const root = resolve(input.stateRoot); if (!existsSync(root)) throw Error("artifact state root is unavailable"); const rootStat = lstatSync(root); if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw Error("artifact state root is invalid");
-  const dir = join(root, "artifacts"); try { mkdirSync(dir, { mode: 0o700 }); } catch (error) { if (error?.code !== "EEXIST") throw error; } chmodSync(dir, 0o700); const dirStat = lstatSync(dir); if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || (dirStat.mode & 0o777) !== 0o700) throw Error("artifact directory is invalid");
-  const bytes = Buffer.from(input.managedTerminal.output, "utf8"), id = sha(bytes), target = join(dir, id); if (existsSync(target)) { safeFile(target); if (!readFileSync(target).equals(bytes)) throw Error("artifact collision"); return { id, path: target }; }
+  const root = resolve(input.stateRoot); if (!existsSync(root)) throw Error("artifact state root is unavailable"); const rootStat = lstatSync(root); if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || (rootStat.mode & 0o777) !== 0o700) throw Error("artifact state root is invalid");
+  const dir = join(root, "artifacts"); try { mkdirSync(dir, { mode: 0o700 }); } catch (error) { if (error?.code !== "EEXIST") throw error; } const dirStat = lstatSync(dir); if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || (dirStat.mode & 0o777) !== 0o700) throw Error("artifact directory is invalid");
+  const bytes = Buffer.from(input.managedTerminal.output, "utf8"), id = sha(bytes), target = join(dir, id); if (existsSync(target)) { if (!readSafe(target).equals(bytes)) throw Error("artifact collision"); return { id, path: target }; }
   const temporary = join(dir, `.${id}.${process.pid}.${Date.now()}`); let fd;
-  try { fd = openSync(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600); writeFileSync(fd, bytes); closeSync(fd); fd = undefined; chmodSync(temporary, 0o600); safeFile(temporary); try { linkSync(temporary, target); unlinkSync(temporary); } catch (error) { if (error?.code !== "EEXIST") throw error; safeFile(target); if (!readFileSync(target).equals(bytes)) throw Error("artifact collision"); } safeFile(target); }
+  try { fd = openSync(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600); writeFileSync(fd, bytes); fsyncSync(fd); closeSync(fd); fd = undefined; safeFile(temporary); try { linkSync(temporary, target); sync(dir); unlinkSync(temporary); } catch (error) { if (error?.code !== "EEXIST") throw error; if (!readSafe(target).equals(bytes)) throw Error("artifact collision"); } safeFile(target); }
   catch (error) { if (fd !== undefined) closeSync(fd); try { unlinkSync(temporary); } catch {} throw error; }
   try { unlinkSync(temporary); } catch {} return { id, path: target };
 }
