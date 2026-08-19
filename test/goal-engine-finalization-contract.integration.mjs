@@ -29,7 +29,12 @@ function fixture({ worldHash = h("f") } = {}) {
     lastExecutorProof: { runId: "executor-r11", proofId: h("e"), rootSessionId: "root-r11", observedAt: 1, outcome: "succeeded" },
     // `task.settlement` is the event projection shape: it has no synthetic proofHash.
     settlement: { attempt: 1, executorHead: head, executorRunId: "executor-r11", terminalProofId: h("e"), evidence: settlementEvidence },
-    workspace: { attempt: 1, phase: "disposed", disposition: "integrated", released: true, executorHead: head, originHead: head },
+    workspace: {
+      attempt: 1, path: "/tmp/workspace-r11", branch: "ge/goal-r11/task-1/1", baseCommit: head,
+      originRef: "refs/heads/main", requestedAction: "integrate", strategy: "merge", executorHead: head,
+      originHeadBefore: head, legacyOriginRef: false, originHead: head,
+      phase: "disposed", disposition: "integrated", released: true,
+    },
   };
   const definition = { id: "condition-1", depends_on: [], oracle_ref: "adapter-r11", environment_ref: "environment-r11", fixture_refs: ["fixture-r11"], invalidation: { paths: ["src/**"], task_ids: ["task-1"] }, stability: { mode: "single", require_fresh_environment: true } };
   const evidence = { evidenceId: "evidence-r11", conditionId: "condition-1", executionRevision: 7, executionContractHash: h("a"), conditionHash: h("c"), head, adapter: { ref: "adapter-r11", version: "1" }, environment: { ref: "environment-r11", fingerprint: "environment-fingerprint-r11" }, fixtures: [{ ref: "fixture-r11", fingerprint: "fixture-fingerprint-r11" }], artifact: { id: "artifact-r11", hash: h("b") }, run: { runId: "observation-r11", state: "terminal" }, terminalProofHash: h("a"), verdict: { kind: "passed" }, sequence: 1, mutationSequence: 0 };
@@ -160,7 +165,14 @@ test("manifest uses only event-projected task, settlement, workspace, and condit
     subagentFingerprint: input.projection.tasks.get("task-1").settlement.evidence.subagentFingerprint,
     mainFingerprint: input.projection.tasks.get("task-1").settlement.evidence.mainFingerprint,
   });
-  assert.deepEqual(task.workspaceProof, { attempt: 1, phase: "disposed", disposition: "integrated", released: true, executorHead: head, originHead: head });
+  const workspace = input.projection.tasks.get("task-1").workspace;
+  assert.deepEqual(task.workspaceProof, {
+    attempt: workspace.attempt, path: workspace.path, branch: workspace.branch, baseCommit: workspace.baseCommit,
+    originRef: workspace.originRef, requestedAction: workspace.requestedAction, strategy: workspace.strategy,
+    executorHead: workspace.executorHead, originHeadBefore: workspace.originHeadBefore,
+    legacyOriginRef: workspace.legacyOriginRef, originHead: workspace.originHead,
+    phase: workspace.phase, disposition: workspace.disposition, released: workspace.released,
+  });
   assert.deepEqual(condition.supportingEvidenceRefs, [{ evidenceId: "evidence-r11", terminalProofHash: h("a"), artifact: { id: "artifact-r11", hash: h("b") } }]);
   const p = input.projection; p.conditions.get("condition-1").supportingEvidenceIds = ["evidence-r11", "evidence-r12"];
   p.evidenceHistory.push({ ...p.evidenceHistory[0], evidenceId: "evidence-r12", artifact: { id: "artifact-r12", hash: h("d") }, terminalProofHash: h("e"), sequence: 2 });
@@ -176,11 +188,17 @@ test("settlement hash derives from canonical settlement identity and dual eviden
   ]) { const input = fixture(); mutate(input); assert.notEqual(manifest(input).tasks[0].settlementHash, base.tasks[0].settlementHash); }
 });
 
+test("cancelled repair episode without resource debt has no blocker", () => {
+  const input = fixture();
+  input.projection.repairEpisodes.set("episode", { status: "cancelled", cancellation: { resourceDebt: false } });
+  assert.equal(manifest(input).blockers.some(item => item.code === "CANCELLED_RESOURCE_DEBT"), false);
+  assert.equal(manifest(input).blockers.some(item => item.code === "ACTIVE_REPAIR_EPISODE"), false);
+});
+
 for (const [name, mutate, code] of [
   ["active repair episode", ({ projection }) => projection.repairEpisodes.set("episode", { status: "active" }), "ACTIVE_REPAIR_EPISODE"],
   ["blocked repair episode", ({ projection }) => projection.repairEpisodes.set("episode", { status: "blocked" }), "ACTIVE_REPAIR_EPISODE"],
   ["cancel pending repair episode", ({ projection }) => projection.repairEpisodes.set("episode", { status: "cancel_pending" }), "ACTIVE_REPAIR_EPISODE"],
-  ["cancelled repair episode without resource debt", ({ projection }) => projection.repairEpisodes.set("episode", { status: "cancelled" }), "CANCELLED_REPAIR_UNCLOSED"],
   ["requested observation", ({ projection }) => projection.observationRuns.get("observation-r11").phase = "requested", "OBSERVATION_NOT_RELEASED"],
   ["process-bound observation", ({ projection }) => projection.observationRuns.get("observation-r11").phase = "process_bound", "OBSERVATION_NOT_RELEASED"],
   ["terminal observation", ({ projection }) => projection.observationRuns.get("observation-r11").phase = "terminal", "OBSERVATION_NOT_RELEASED"],
