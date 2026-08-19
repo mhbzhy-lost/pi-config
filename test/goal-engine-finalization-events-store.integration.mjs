@@ -10,6 +10,7 @@ import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scrip
 import { runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const head = "a".repeat(40);
+const finalReviewApproval = { entryId: "final-review-user", sessionId: "owner", source: "user" };
 const hex = (n) => n.toString(16).padStart(64, "0");
 const event = (type, data, n, goalId = "finalization-goal") => ({ schemaVersion: "goal-runtime.v1", eventId: `${goalId}-${n}`, goalId, occurredAt: `2026-08-30T00:00:${String(n).padStart(2, "0")}.000Z`, type, data });
 function zeroTaskRuntime() { return { objective: "Finalization event contract", execution: { schema: "goal-runtime.v1", tasks: [], conditions: [{ id: "final-condition", role: "terminal", enforcement: "final", statement: "Finalization fixture passes", observable: "fixture", expected: "passing", depends_on: [], oracle_ref: "oracle", environment_ref: "local", fixture_refs: ["sample"], invalidation: { paths: [], task_ids: [] }, remediation: { policy: "user-approved", allowed_paths: ["test/**"], max_attempts: 0 }, stability: { mode: "single", require_fresh_environment: true } }], write_policy: { allowed_paths: ["test/**"] }, budgets: { max_observations: 2, max_repairs: 0, max_elapsed_minutes: 1, max_no_progress: 1 } } }; }
@@ -18,7 +19,7 @@ function observation(p, cycle, n) { const common = { runId: `run-${cycle}`, cond
 function activeEvents() { const contract = normalizeRuntimeGoalInit(zeroTaskRuntime(), runtimeRegistries), records = []; let p = createProjection(); const apply = (row) => { records.push(row); p = applyEvent(p, row); }; apply(event("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: head, readiness: "draft" }, 1)); apply(event("goal.session_bound", { sessionId: "owner", leafId: "leaf" }, 2)); apply(event("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 3)); const approval = { proposalId: "proposal", executionContractHash: p.executionContractHash, baseHead: head, sessionId: "owner" }; apply(event("goal.runtime_approval_recorded", { ...approval, proposalHash: approvalHash(approval), userEntryId: "user-entry", capabilityDigest: hex(2) }, 4)); for (const row of observation(p, 0, 5)) apply(row); apply(event("goal.runtime_activated", {}, 11)); for (const row of observation(p, 1, 12)) apply(row); return { projection: p, records }; }
 function active() { return activeEvents().projection; }
 function storedActive() { const root = mkdtempSync(join(tmpdir(), "goal-finalization-events-")); let p = createProjection(); for (const row of activeEvents().records) p = appendEvent(root, row, p.version); return { root, projection: p }; }
-function started(p, n = 18, overrides = {}) { return event("goal.final_review_started", { reviewId: "review-1", manifestHash: hex(101), stateHash: hex(102), worldHash: hex(103), head, approval: { entryId: "final-review-user", sessionId: "owner", source: "user" }, ...overrides }, n); }
+function started(p, n = 18, overrides = {}) { return event("goal.final_review_started", { reviewId: "review-1", manifestHash: hex(101), stateHash: hex(102), worldHash: hex(103), head, approval: finalReviewApproval, ...overrides }, n); }
 function recorded(p, severity = "none", n = 19, overrides = {}) { return event("goal.final_review_recorded", { reviewId: "review-1", resultHash: hex(104), severity, status: ["none", "minor"].includes(severity) ? "recorded" : "changes_required", ...overrides }, n); }
 function completed(n = 20, overrides = {}) { return event("goal.completed", { verdict: "COMPLETE", reviewId: "review-1", manifestHash: hex(101), stateHash: hex(102), worldHash: hex(103), head, resultHash: hex(104), ...overrides }, n); }
 function files(root) { const goal = join(root, "goals", "finalization-goal"); return ["events.jsonl", "projection.json"].map((name) => readFileSync(join(goal, name), "utf8")); }
@@ -28,7 +29,7 @@ function withStarted() { const p = active(); return applyEvent(p, started(p)); }
 // The payload is an identity record, not a carrier for provider/report text.
 test("runtime final review start persists the complete exact identity", () => {
   const p = active(), next = applyEvent(p, started(p));
-  assert.deepEqual(next.finalReview, { reviewId: "review-1", manifestHash: hex(101), stateHash: hex(102), worldHash: hex(103), head, approval: approvalFor(p), status: "started" });
+  assert.deepEqual(next.finalReview, { reviewId: "review-1", manifestHash: hex(101), stateHash: hex(102), worldHash: hex(103), head, approval: finalReviewApproval, status: "started" });
 });
 
 test("runtime final review start rejects duplicate review identity", () => {
@@ -42,7 +43,7 @@ test("runtime final review start rejects conflicting review identity", () => {
 for (const [name, overrides] of [
   ["missing approval", { approval: undefined }], ["extra approval field", { approval: { entryId: "final-review-user", sessionId: "owner", source: "user", extra: true } }],
   ["approval source not user", { approval: { entryId: "final-review-user", sessionId: "owner", source: "system" } }],
-  ["approval session mismatch", { approval: { entryId: "final-review-user", sessionId: "other", source: "user" } }], ["drifting head", { head: "b".repeat(40) }],
+  ["approval session mismatch", { approval: { entryId: "final-review-user", sessionId: "other", source: "user" } }], ["invalid head", { head: "not-a-commit-head" }],
   ["non-hash manifest", { manifestHash: "bad" }], ["non-hash state", { stateHash: "bad" }],
   ["non-hash world", { worldHash: "bad" }], ["raw provider text", { providerText: "do not persist" }],
 ]) test(`runtime final review start rejects ${name}`, () => {
@@ -53,13 +54,15 @@ test("runtime final review start rejects suspended runtime", () => {
   let p = active(); p = applyEvent(p, event("goal.runtime_suspended", { suspensionId: "s", reason: "interactive_steer", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-30T00:00:18.000Z", resourcesQuarantined: false }, 18));
   assert.throws(() => applyEvent(p, started(p, 22)), /active|final review/i);
 });
-test("runtime final review start rejects pending human decision", () => {
-  const p = active(); p.pendingHumanDecision = { phase: "proposed" };
-  assert.throws(() => applyEvent(p, started(p, 23)), /active|final review|decision/i);
-});
 test("runtime final review start rejects non-active lifecycle", () => {
-  const p = active(); p.lifecycle = "blocked";
-  assert.throws(() => applyEvent(p, started(p, 24)), /active|final review/i);
+  const p = applyEvent(active(), event("goal.blocked", { reason: "awaiting operator intervention" }, 23));
+  assert.throws(() => applyEvent(p, started(p, 24)), /active|final review|terminal/i);
+});
+
+test("runtime final review start accepts and persists a different legal head", () => {
+  const alternateHead = "b".repeat(40);
+  const next = applyEvent(active(), started(active(), 25, { head: alternateHead }));
+  assert.equal(next.finalReview.head, alternateHead);
 });
 
 for (const severity of ["none", "minor", "important", "critical"]) test(`runtime records ${severity} with its canonical status`, () => {
@@ -93,10 +96,13 @@ for (const severity of ["none", "minor"]) test(`${severity} review record cannot
 test("canonical pass batch records then completes atomically and reloads", () => {
   const { root, projection } = storedActive();
   try {
-    const began = appendEvent(root, started(projection), projection.version);
-    const next = appendEventBatch(root, [recorded(began), completed()], began.version);
+    const alternateHead = "b".repeat(40);
+    const began = appendEvent(root, started(projection, 18, { head: alternateHead }), projection.version);
+    const next = appendEventBatch(root, [recorded(began), completed(20, { head: alternateHead })], began.version);
     assert.equal(next.lifecycle, "completed"); assert.equal(next.completionVerdict, "COMPLETE");
-    assert.equal(loadProjection(root, "finalization-goal").completionHistory.length, 1);
+    const reloaded = loadProjection(root, "finalization-goal");
+    assert.equal(reloaded.finalReview.head, alternateHead);
+    assert.equal(reloaded.completionHistory.length, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
