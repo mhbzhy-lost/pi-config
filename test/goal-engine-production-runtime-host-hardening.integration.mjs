@@ -34,20 +34,19 @@ test("artifactRefForRun accepts exactly the real managed 11-field terminal and m
 test("artifactRefForRun rejects a symlink stateRoot before writing through it", async () => {
   const parent = mkdtempSync(join(tmpdir(), "goal-artifact-root-link-"));
   const backing = join(parent, "backing"), linked = join(parent, "linked"); mkdirSync(backing); symlinkSync(backing, linked);
-  const legacyTerminal = { status: terminal.status, code: terminal.code, signal: terminal.signal, output: terminal.output };
-  await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: linked, goalId: "goal", runId: "run", managedTerminal: legacyTerminal })));
+  await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: linked, goalId: "goal", runId: "run", managedTerminal: terminal })));
   assert.equal(existsSync(join(backing, "artifacts", hash(terminal.output))), false);
 });
 
 test("artifactRefForRun rejects symlinked artifact directories and target links", async () => {
-  const root = mkdtempSync(join(tmpdir(), "goal-artifact-linked-target-")), outside = mkdtempSync(join(tmpdir(), "goal-artifact-outside-")), legacyTerminal = { status: terminal.status, code: terminal.code, signal: terminal.signal, output: terminal.output }, target = join(root, "artifacts", hash(terminal.output));
+  const root = mkdtempSync(join(tmpdir(), "goal-artifact-linked-target-")), outside = mkdtempSync(join(tmpdir(), "goal-artifact-outside-")), target = join(root, "artifacts", hash(terminal.output));
   symlinkSync(outside, join(root, "artifacts"));
-  await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: root, goalId: "goal", runId: "run", managedTerminal: legacyTerminal })));
+  await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: root, goalId: "goal", runId: "run", managedTerminal: terminal })));
   rmSync(join(root, "artifacts")); mkdirSync(join(root, "artifacts")); chmodSync(join(root, "artifacts"), 0o700);
   symlinkSync(join(outside, "target"), target);
-  await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: root, goalId: "goal", runId: "run", managedTerminal: legacyTerminal })));
+  await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: root, goalId: "goal", runId: "run", managedTerminal: terminal })));
   rmSync(target); writeFileSync(join(root, "source"), terminal.output, { mode: 0o600 }); linkSync(join(root, "source"), target);
-  await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: root, goalId: "goal", runId: "run", managedTerminal: legacyTerminal })));
+  await assert.rejects(() => host().then((value) => value.artifactRefForRun({ stateRoot: root, goalId: "goal", runId: "run", managedTerminal: terminal })));
 });
 
 test("quarantineWorkspace binds the lease baseCommit to headAtDispatch, not runtime baseHead", async () => {
