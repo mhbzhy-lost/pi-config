@@ -169,3 +169,48 @@ export function releaseManagedValidation(receiptValue, { expectedHead } = {}) {
   try { releaseValidationWorkspace(record.workspaceLease, { expectedHead }); return write({ ...record, phase: "released" }); }
   catch (error) { write({ ...record, phase: "cleanup_debt", cleanupDebt: true }); throw error; }
 }
+
+// This small boundary is deliberately injectable: recovery/teardown is only
+// reachable after the durable receipt proves the exact process identity.
+export async function stopOwnedManagedValidation(request, services = {}) {
+  const unknown = Object.freeze({ state: "attention", code: "OWNED_STOP_IDENTITY_UNKNOWN" });
+  const fields = ["stateRoot", "goalId", "runId", "conditionId", "allocationId", "processIdentityHash", "executionRevision", "executionContractHash", "baseHead"];
+  if (!managedExact(request, fields)) return unknown;
+  // The production path stays inside this module so it can read the exact
+  // durable receipt; injected services are solely the test seam.
+  if (typeof services.readReceipt !== "function") {
+    services = {
+      readReceipt: () => read({ id: request.allocationId, stateRoot: request.stateRoot }),
+      recover: async (_request, record) => recoverManagedValidation(receipt(record)),
+      preserveWorkspace: async (_request, record, terminal) => {
+        const current = read(receipt(record));
+        if (current.process?.processIdentityHash !== request.processIdentityHash || !current.terminal || managedHash(current.terminal) !== managedHash(terminal)) throw Error("Managed stop identity changed");
+        const debt = current.phase === "cleanup_debt" ? current : write({ ...current, phase: "cleanup_debt", cleanupDebt: true });
+        return { proofHash: managedHash({ receiptId: debt.id, terminal: debt.terminal, disposition: "preserved" }) };
+      },
+      preserveResource: async (_request, record, terminal, workspace) => ({ proofHash: managedHash({ receiptId: record.id, terminal, workspaceProofHash: workspace.proofHash, debt: true }) }),
+      readClosure: () => {
+        const record = read({ id: request.allocationId, stateRoot: request.stateRoot });
+        if (record.phase !== "cleanup_debt" || !record.terminal || record.process?.processIdentityHash !== request.processIdentityHash) return null;
+        const workspaceProofHash = managedHash({ receiptId: record.id, terminal: record.terminal, disposition: "preserved" });
+        return { terminalProofHash: managedHash(record.terminal), resourceProofHash: managedHash({ receiptId: record.id, terminal: record.terminal, workspaceProofHash, debt: true }) };
+      },
+      writeClosure: async () => {},
+    };
+  }
+  let receipt; try { receipt = await services.readReceipt(request); } catch { return unknown; }
+  if (!receipt?.process || receipt.process.processIdentityHash !== request.processIdentityHash) return unknown;
+  const existing = typeof services.readClosure === "function" ? await services.readClosure(request) : null;
+  if (existing?.terminalProofHash && existing?.resourceProofHash) return { state: "observed", terminalProofHash: existing.terminalProofHash, resourceProofHash: existing.resourceProofHash, resourceState: "quarantined", debt: true };
+  if (typeof services.recover !== "function" || typeof services.preserveWorkspace !== "function" || typeof services.preserveResource !== "function") return unknown;
+  const recovered = await services.recover(request, receipt);
+  const terminal = recovered?.terminal || recovered;
+  if (!terminal?.terminal) return unknown;
+  const workspace = await services.preserveWorkspace(request, receipt, terminal);
+  const resource = await services.preserveResource(request, receipt, terminal, workspace);
+  if (!workspace?.proofHash || !resource?.proofHash) return unknown;
+  const closure = { terminalProofHash: managedHash(terminal), resourceProofHash: resource.proofHash };
+  if (typeof services.writeClosure !== "function") return unknown;
+  await services.writeClosure(closure, request, receipt);
+  return { state: "observed", ...closure, resourceState: "quarantined", debt: true };
+}

@@ -34,7 +34,7 @@ export function isGoalEngineEnabled(settingsPath = goalEngineSettingsPath()): bo
 }
 
 type GoalEngineModule = {
-  createGoalEngineExtension: (pi: ExtensionAPI) => unknown;
+  createGoalEngineExtension: (pi: ExtensionAPI, options?: { runtimeHost?: unknown }) => unknown;
 };
 
 export async function createGoalEngineEntry(
@@ -42,15 +42,19 @@ export async function createGoalEngineEntry(
   {
     settingsPath = goalEngineSettingsPath(),
     load = (): Promise<GoalEngineModule> => import("../../scripts/lib/goal-engine/extension.mjs"),
+    runtimeHostFactory,
   }: {
     settingsPath?: string;
     load?: () => Promise<GoalEngineModule>;
+    runtimeHostFactory?: (pi: ExtensionAPI, options: object) => unknown;
   } = {},
 ): Promise<void> {
   if (!isGoalEngineEnabled(settingsPath)) return;
+  const runtimeHost = runtimeHostFactory
+    ? runtimeHostFactory(pi, {})
+    : (await import("../../scripts/lib/goal-engine/production-runtime-host.mjs")).createProductionGoalRuntimeHost(pi, {});
   const { createGoalEngineExtension } = await load();
-  // The lazily loaded factory owns the frozen Root Goal exact-eight ABI, including goal_finalize.
-  createGoalEngineExtension(pi);
+  createGoalEngineExtension(pi, { runtimeHost });
 }
 
 export default function goalEngine(pi: ExtensionAPI): Promise<void> {

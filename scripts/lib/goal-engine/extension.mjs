@@ -2745,13 +2745,13 @@ export function createGoalEngineExtension(pi, options = {}) {
       }
       if (!has(workspaceRefs, "taskId", taskId)) {
         projection = loadProjectionFn(root, projection.goalId);
-        const request = { goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, leaseId: binding.workspaceLeaseId, workspacePath: task.workspace.path, headAtDispatch: binding.headAtDispatch, baseHead: projection.runtimeBaseHead, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
+        const request = { stateRoot: root, goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, leaseId: binding.workspaceLeaseId, workspacePath: task.workspace.path, headAtDispatch: binding.headAtDispatch, baseHead: projection.runtimeBaseHead, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
         let response; try { response = await runtimeHost?.quarantineWorkspace?.(request); } catch { response = null; }
         if (exact(response, ["taskId", "attempt", "proofHash", "state", "disposition"]) && response.taskId === taskId && response.attempt === task.attempts && hash(response.proofHash) && response.state === "quarantined" && response.disposition === "preserved") workspaceRefs.push(response);
       }
       if (!has(resourceRefs, "ownerId", binding.runId)) {
         projection = loadProjectionFn(root, projection.goalId);
-        const request = { goalId: projection.goalId, ownerKind: "executor", ownerId: binding.runId, taskId, attempt: task.attempts, leaseId: binding.workspaceLeaseId, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
+        const request = { stateRoot: root, goalId: projection.goalId, ownerKind: "executor", ownerId: binding.runId, taskId, attempt: task.attempts, leaseId: binding.workspaceLeaseId, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
         let response; try { response = await runtimeHost?.quarantineResource?.(request); } catch { response = null; }
         if (exact(response, ["ownerId", "proofHash", "state", "debt"]) && response.ownerId === binding.runId && hash(response.proofHash) && response.state === "quarantined" && response.debt === true) resourceRefs.push(response);
       }
@@ -2759,7 +2759,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     for (const run of projection.observationRuns.values()) {
       if (!suspension.affectedRunIds.includes(run.runId) || has(terminalRefs, "runId", run.runId) || !["process_bound"].includes(run.phase) || !hash(run.processIdentityHash)) continue;
       projection = loadProjectionFn(root, projection.goalId);
-      const request = { goalId: projection.goalId, runId: run.runId, conditionId: run.conditionId, allocationId: run.allocationId, processIdentityHash: run.processIdentityHash, executionRevision: projection.executionRevision, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead };
+      const request = { stateRoot: root, goalId: projection.goalId, runId: run.runId, conditionId: run.conditionId, allocationId: run.allocationId, processIdentityHash: run.processIdentityHash, executionRevision: projection.executionRevision, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead };
       let response; try { response = await runtimeHost?.stopManagedValidation?.(request); } catch { response = null; }
       if (exact(response, ["state", "terminalProofHash", "resourceProofHash", "resourceState", "debt"]) && response.state === "observed" && hash(response.terminalProofHash) && hash(response.resourceProofHash) && response.resourceState === "quarantined" && response.debt === true) {
         terminalRefs.push({ runId: run.runId, proofHash: response.terminalProofHash, state: "observed" });
