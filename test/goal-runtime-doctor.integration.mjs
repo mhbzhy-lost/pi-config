@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtemp, stat, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { inspectGoalRuntimeBoundaries } from "../scripts/doctor.mjs";
+import { inspectConfiguration, inspectGoalRuntimeBoundaries } from "../scripts/doctor.mjs";
 
 const validRuntimeFactory = () => ({
   generationCapabilities(schema) {
@@ -39,4 +42,19 @@ test("Doctor runtime boundary probe reports forged generation behavior", () => {
 
 test("Doctor runtime boundary probe accepts complete injected behavior without state", () => {
   assert.deepEqual(inspectGoalRuntimeBoundaries({ goalRuntimeBoundaryFactory: validRuntimeFactory }), []);
+});
+
+test("Doctor leaves a temporary repository without Goal Engine state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "goal-runtime-doctor-"));
+  const statePath = join(root, ".state", "goal-engine");
+  try {
+    await assert.rejects(stat(statePath), { code: "ENOENT" });
+    await inspectConfiguration(root, {
+      readPiVersion: async () => "0.82.1",
+      readBasicMemoryVersion: async () => "0.22.1",
+    });
+    await assert.rejects(stat(statePath), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
