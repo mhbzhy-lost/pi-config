@@ -99,9 +99,13 @@ test("reject 不签发 offer，后续 status 可产生新的终审 intent", asyn
 test("approval chain 的非分支、非用户和非法 compaction 均不签 offer 或写 Goal final event", async t => {
   for (const mutation of ["off-branch", "assistant", "extension", "image", "streaming", "duplicate-intent", "broken-parent", "bad-compaction", "double-compaction"]) await t.test(mutation, async () => {
     const fixture = setup(); await requestFinalReview(fixture);
-    const intent = fixture.api.appendEntry("goal-engine-final-review-approval-intent", { protocol: "goal-engine-final-review-approval-intent.v1", goalId: fixture.goalId, manifestHash: "1".repeat(64), stateHash: "2".repeat(64), worldHash: "3".repeat(64), head: head(fixture.cwd), sessionId: "owner", choices: ["approve", "reject"] });
+    const [intent] = finalIntent(fixture.api);
+    assert.equal(finalIntent(fixture.api).length, 1);
+    assert.equal(intent.parentId, fixture.api.entries.at(-2)?.id);
+    assert.deepEqual(Object.keys(intent.data).sort(), intentKeys);
+    assert.equal(intent.data.protocol, "goal-engine-final-review-approval-intent.v1"); assert.equal(intent.data.goalId, fixture.goalId); assert.equal(intent.data.head, head(fixture.cwd)); assert.equal(intent.data.sessionId, "owner");
     if (mutation === "off-branch") fixture.api.sessionManager.getBranch = () => [];
-    else if (mutation === "duplicate-intent") fixture.api.appendEntry(intent.customType, structuredClone(intent.data));
+    else if (mutation === "duplicate-intent") { const duplicate = fixture.api.appendEntry(intent.customType, structuredClone(intent.data)); assert.equal(finalIntent(fixture.api).length, 2); assert.equal(duplicate.parentId, intent.id); assert.deepEqual(duplicate.data, intent.data); }
     else if (mutation === "extension") await fixture.api.handlers.get("input")({ type: "input", source: "extension", text: "approve" }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager });
     else { const user = fixture.api.appendMessage("approve", mutation === "image" ? { images: [{ type: "image" }] } : mutation === "streaming" ? { streamingBehavior: "steer" } : {}); if (mutation === "assistant") user.message.role = "assistant"; if (mutation === "broken-parent") user.parentId = "broken"; if (mutation.includes("compaction")) { const compact = { id: "compact", parentId: intent.id, timestamp: user.timestamp, type: "compaction", summary: mutation === "bad-compaction" ? "" : "ok", firstKeptEntryId: intent.id, tokensBefore: 1 }; user.parentId = compact.id; fixture.api.entries.splice(-1, 0, compact); if (mutation === "double-compaction") { const second = { ...compact, id: "compact-2", parentId: compact.id }; user.parentId = second.id; fixture.api.entries.splice(-1, 0, second); } } }
     const status = await requestFinalReview(fixture);
