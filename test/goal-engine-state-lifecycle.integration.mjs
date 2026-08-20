@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent, listGoalIds } from "../scripts/lib/goal-engine/store.mjs";
-import { inspectGoalState, resetGoalState } from "../scripts/lib/goal-engine/state-lifecycle.mjs";
+import { __setStateLifecycleTestHooks, inspectGoalState, resetGoalState } from "../scripts/lib/goal-engine/state-lifecycle.mjs";
 
 function repo() { const root = mkdtempSync(join(tmpdir(), "goal-state-lifecycle-")); execFileSync("git", ["init", "--quiet", root]); return root; }
 function state(root) { return join(root, ".state", "goal-engine"); }
@@ -63,6 +63,44 @@ test("inspect rejects symlinks hardlinks unsafe modes and unknown entries", () =
     const root = repo(); const stateRoot = createReleasedPlannedGoal(root); mutation(root);
     assert.throws(() => inspectGoalState({ stateRoot }), /unsafe|unknown|state/i);
   }
+});
+
+test("inspect reads the original registry fd across a valid path swap", () => {
+  const root = repo(); const stateRoot = createReleasedPlannedGoal(root); const registryPath = join(stateRoot, "registry.json");
+  const baseline = inspectGoalState({ stateRoot }); const displaced = join(stateRoot, ".registry-original");
+  const replacement = '{\n  "schema_version": "goal-engine.registry.v1",\n  "active_goal_ids": ["released-goal"],\n  "goals": {"released-goal": {}}\n}\n';
+  __setStateLifecycleTestHooks({
+    beforeSecureFileRead(path) {
+      if (path !== registryPath) return;
+      renameSync(path, displaced);
+      writeFileSync(path, replacement, { mode: 0o600 });
+    },
+    beforeSecureFileFinalStat(path) {
+      if (path !== registryPath) return;
+      rmSync(path);
+      renameSync(displaced, path);
+    },
+  });
+  try {
+    assert.deepEqual(inspectGoalState({ stateRoot }), baseline);
+  } finally {
+    __setStateLifecycleTestHooks(null);
+    if (lstatSync(displaced, { throwIfNoEntry: false })) { rmSync(registryPath); renameSync(displaced, registryPath); }
+  }
+});
+
+test("reset restores the exact inspectable state when retired cleanup fails", () => {
+  const root = repo(); const stateRoot = createReleasedPlannedGoal(root); const before = inspectGoalState({ stateRoot });
+  const ledgerBefore = readFileSync(join(stateRoot, "goals", "released-goal", "events.jsonl"));
+  const registryBefore = readFileSync(join(stateRoot, "registry.json"));
+  __setStateLifecycleTestHooks({ beforeRetiredGoalsCleanup() { throw new Error("injected retired cleanup failure"); } });
+  try {
+    assert.throws(() => resetGoalState(resetInput(stateRoot)), /reset stopped/i);
+  } finally { __setStateLifecycleTestHooks(null); }
+  assert.deepEqual(inspectGoalState({ stateRoot }), before);
+  assert.deepEqual(readFileSync(join(stateRoot, "goals", "released-goal", "events.jsonl")), ledgerBefore);
+  assert.deepEqual(readFileSync(join(stateRoot, "registry.json")), registryBefore);
+  assert.deepEqual(readdirSync(stateRoot).filter((name) => name.startsWith(".goals-reset-") || name.startsWith(".registry-reset-")), []);
 });
 
 test("reset serializes with the Store writer lock", async () => {

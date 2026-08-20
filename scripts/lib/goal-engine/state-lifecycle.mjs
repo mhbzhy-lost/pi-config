@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, relative, sep } from "node:path";
 import { applyEvent, createProjection } from "./events.mjs";
 import { acquireWriterLock, releaseWriterLock } from "./store.mjs";
@@ -8,6 +8,17 @@ const SCHEMA = "goal-state-lifecycle.v1";
 const REGISTRY_SCHEMA = "goal-engine.registry.v1";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const INTERNAL_LOCKS = new Set([".writer.lock", ".writer.recovery.guard"]);
+const TEST_HOOK_NAMES = new Set(["beforeSecureFileRead", "beforeSecureFileFinalStat", "beforeRetiredGoalsCleanup"]);
+let testHooks = null;
+
+// Test-only observers/faults; hooks cannot replace filesystem operations or return content.
+export function __setStateLifecycleTestHooks(hooks) {
+  if (hooks === null) { testHooks = null; return; }
+  if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)
+    || Object.keys(hooks).some((name) => !TEST_HOOK_NAMES.has(name))
+    || Object.values(hooks).some((hook) => typeof hook !== "function")) throw failure("invalid test hooks");
+  testHooks = hooks;
+}
 
 function failure(message) { return Object.assign(new Error(`GOAL_STATE_LIFECYCLE_UNSAFE: ${message}`), { code: "GOAL_STATE_LIFECYCLE_UNSAFE" }); }
 function safeAuthorizationId(value) {
@@ -19,12 +30,25 @@ function secureDirectory(path, label) {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw failure(`unsafe ${label} directory`);
 }
 function secureFile(path, label) {
-  const before = lstatSync(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || (before.mode & 0o7777) !== 0o600) throw failure(`unsafe ${label} file`);
-  const content = readFileSync(path);
-  const after = lstatSync(path);
-  if (before.dev !== after.dev || before.ino !== after.ino || after.nlink !== 1 || (after.mode & 0o7777) !== 0o600) throw failure(`replaced ${label} file`);
-  return { content, mode: before.mode & 0o7777 };
+  let fd;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.nlink !== 1 || (before.mode & 0o7777) !== 0o600) throw failure(`unsafe ${label} file`);
+    testHooks?.beforeSecureFileRead?.(path, label);
+    const content = readFileSync(fd);
+    const after = fstatSync(fd);
+    testHooks?.beforeSecureFileFinalStat?.(path, label);
+    const final = lstatSync(path);
+    if (after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 1 || (after.mode & 0o7777) !== 0o600
+      || !final.isFile() || final.isSymbolicLink() || final.dev !== before.dev || final.ino !== before.ino || final.nlink !== 1 || (final.mode & 0o7777) !== 0o600) throw failure(`replaced ${label} file`);
+    return { content, mode: before.mode & 0o7777 };
+  } catch (error) {
+    if (error?.code === "GOAL_STATE_LIFECYCLE_UNSAFE") throw error;
+    throw failure(`unsafe ${label} file`);
+  } finally {
+    if (fd != null) closeSync(fd);
+  }
 }
 function assertDescendant(root, path) {
   const rel = relative(root, path);
@@ -95,16 +119,31 @@ export function resetGoalState({ stateRoot, expectedStateHash, authorizationId }
     const inspected = inspectUnlocked(root);
     if (inspected.stateHash !== expectedStateHash) throw failure("state hash compare-and-swap mismatch");
     const retiredGoals = join(root, `.goals-reset-${randomUUID()}`);
+    const tmp = join(root, `.registry-reset-${randomUUID()}.tmp`);
+    const registryBefore = secureFile(join(root, "registry.json"), "registry");
+    let goalsRenamed = false;
     try {
       renameSync(join(root, "goals"), retiredGoals);
+      goalsRenamed = true;
       mkdirSync(join(root, "goals"), { mode: 0o700 });
       mkdirSync(join(root, "worktrees"), { recursive: true, mode: 0o700 });
       if (readdirSync(join(root, "worktrees")).length) throw failure("worktrees directory changed during reset");
-      const tmp = join(root, `.registry-reset-${randomUUID()}.tmp`);
       writeFileSync(tmp, `${JSON.stringify({ schema_version: REGISTRY_SCHEMA, active_goal_ids: [], goals: {} }, null, 2)}\n`, { flag: "wx", mode: 0o600 }); chmodSync(tmp, 0o600); renameSync(tmp, join(root, "registry.json"));
+      testHooks?.beforeRetiredGoalsCleanup?.(retiredGoals);
       rmSync(retiredGoals, { recursive: true, force: true });
     } catch (error) {
-      throw failure(`reset stopped without completing safely: ${error.message}`);
+      if (!goalsRenamed) throw failure("reset stopped without completing safely");
+      try {
+        rmSync(tmp, { force: true });
+        if (lstatSync(join(root, "goals"), { throwIfNoEntry: false })) rmSync(join(root, "goals"), { recursive: true, force: true });
+        if (lstatSync(retiredGoals, { throwIfNoEntry: false })) renameSync(retiredGoals, join(root, "goals"));
+        writeFileSync(tmp, registryBefore.content, { flag: "wx", mode: registryBefore.mode }); chmodSync(tmp, registryBefore.mode); renameSync(tmp, join(root, "registry.json"));
+        const restored = inspectUnlocked(root);
+        if (restored.stateHash !== inspected.stateHash || JSON.stringify(restored.goalIds) !== JSON.stringify(inspected.goalIds)) throw new Error("rollback verification failed");
+      } catch {
+        throw failure("RECOVERY_REQUIRED");
+      }
+      throw failure("reset stopped without completing safely");
     }
     return { schema: SCHEMA, beforeStateHash: inspected.stateHash, authorizationId, clearedGoalIds: inspected.goalIds, empty: true };
   });
