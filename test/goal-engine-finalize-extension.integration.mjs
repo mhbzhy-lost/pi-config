@@ -115,7 +115,7 @@ test("缺失 finalReviewProvider 明确阻塞且不写终审自定义或 durable
 
 test("合法 single compaction 的 approve 只签一个绑定最新 user entry 的 offer", async () => {
   const fixture = setup(); await requestFinalReview(fixture); const [intent] = finalIntent(fixture.api);
-  const user = fixture.api.appendMessage("approve"), compact = { id: "compact", parentId: intent.id, timestamp: user.timestamp, type: "compaction", summary: "keep approval", firstKeptEntryId: intent.id, tokensBefore: 1 };
+  const user = fixture.api.appendMessage("approve"); user.timestamp = "2027-01-15T08:00:00.003Z"; const compact = { id: "compact", parentId: intent.id, timestamp: "2027-01-15T08:00:00.002Z", type: "compaction", summary: "keep approval", firstKeptEntryId: intent.id, tokensBefore: 1 };
   user.parentId = compact.id; fixture.api.entries.splice(-1, 0, compact);
   const status = await requestFinalReview(fixture);
   assert.equal(status.machineAction.params.approval_entry_id, user.id); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 1); assert.equal(finalIntent(fixture.api).length, 1); assert.equal(fixture.calls.provider, 0);
@@ -132,7 +132,7 @@ test("approval chain 的非分支、非用户和非法 compaction 均不签 offe
     if (mutation === "off-branch") fixture.api.ctx.sessionManager.getBranch = () => [];
     else if (mutation === "duplicate-intent") { const duplicate = fixture.api.appendEntry(intent.customType, structuredClone(intent.data)); assert.equal(finalIntent(fixture.api).length, 2); assert.equal(duplicate.parentId, intent.id); assert.deepEqual(duplicate.data, intent.data); }
     else if (mutation === "extension") await fixture.api.handlers.get("input")({ type: "input", source: "extension", text: "approve" }, { cwd: fixture.cwd, sessionManager: fixture.api.ctx.sessionManager });
-    else { const user = fixture.api.appendMessage("approve", mutation === "image" ? { images: [{ type: "image" }] } : mutation === "streaming" ? { streamingBehavior: "steer" } : {}); if (mutation === "assistant") user.message.role = "assistant"; if (mutation === "broken-parent") user.parentId = "broken"; if (mutation.includes("compaction")) { const compact = { id: "compact", parentId: intent.id, timestamp: user.timestamp, type: "compaction", summary: mutation === "bad-compaction" ? "" : "ok", firstKeptEntryId: intent.id, tokensBefore: 1 }; user.parentId = compact.id; fixture.api.entries.splice(-1, 0, compact); if (mutation === "double-compaction") { const second = { ...compact, id: "compact-2", parentId: compact.id }; user.parentId = second.id; fixture.api.entries.splice(-1, 0, second); } } }
+    else { const user = fixture.api.appendMessage("approve", mutation === "image" ? { images: [{ type: "image" }] } : mutation === "streaming" ? { streamingBehavior: "steer" } : {}); if (mutation === "assistant") user.message.role = "assistant"; if (mutation === "broken-parent") user.parentId = "broken"; if (mutation.includes("compaction")) { user.timestamp = "2027-01-15T08:00:00.004Z"; const compact = { id: "compact", parentId: intent.id, timestamp: "2027-01-15T08:00:00.002Z", type: "compaction", summary: mutation === "bad-compaction" ? "" : "ok", firstKeptEntryId: intent.id, tokensBefore: 1 }; user.parentId = compact.id; fixture.api.entries.splice(-1, 0, compact); if (mutation === "double-compaction") { const second = { ...compact, id: "compact-2", parentId: compact.id, timestamp: "2027-01-15T08:00:00.003Z" }; user.parentId = second.id; fixture.api.entries.splice(-1, 0, second); } } }
     const status = await requestFinalReview(fixture);
     assert.equal(status.action_token, undefined); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0);
   });
@@ -185,7 +185,7 @@ test("appendEventBatch durable completion 后 throw 时同一调用 reload compl
 
 test("provider 执行中的 resource/environment CAS 漂移只记录 stale，不 complete", async t => {
   for (const kind of ["resource", "environment"]) await t.test(kind, async () => {
-    const world = {}, fixture = setup({ world, provider: () => { if (kind === "resource") world.resources = [{ id: "exclusive-fixture", holder: "other" }]; else world.environment = "fixture-environment-2"; return { severity: "none", reportRef: `sha256:${"f".repeat(64)}` }; } });
+    const world = {}, fixture = setup({ world, provider: () => { if (kind === "resource") world.resources = [{ key: "exclusive-fixture", holders: ["other"], capacity: 1 }]; else world.environment = "fixture-environment-2"; return { severity: "none", reportRef: `sha256:${"f".repeat(64)}` }; } });
     await requestFinalReview(fixture); const offer = await approve(fixture); await invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token });
     assert.equal(fixture.calls.provider, 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_recorded"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal(loadProjection(fixture.root, fixture.goalId).finalReview.status, "stale"); assert.equal((await requestFinalReview(fixture)).status, "APPROVAL_REQUIRED");
   });
