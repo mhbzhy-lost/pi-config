@@ -18,8 +18,9 @@ const rootFor = cwd => join(cwd, ".state/goal-engine");
 const event = (goalId, type, data, n) => ({ schemaVersion: "goal-runtime.v1", eventId: `${goalId}-${n}`, goalId, occurredAt: `2026-09-01T00:00:${String(n).padStart(2, "0")}.000Z`, type, data });
 const intentKeys = ["choices", "goalId", "head", "manifestHash", "protocol", "sessionId", "stateHash", "worldHash"];
 
-function runtimeInit() {
-  return { objective: "Finalize converged runtime", execution: { schema: "goal-runtime.v1", tasks: [], conditions: [{ id: "final-condition", role: "terminal", enforcement: "final", statement: "Final fixture passes", observable: "fixture", expected: "passing", depends_on: [], oracle_ref: "oracle", environment_ref: "local", fixture_refs: ["sample"], invalidation: { paths: [], task_ids: [] }, remediation: { policy: "user-approved", allowed_paths: ["test/**"], max_attempts: 0 }, stability: { mode: "single", require_fresh_environment: true } }], write_policy: { allowed_paths: ["test/**"] }, budgets: { max_observations: 1, max_repairs: 0, max_elapsed_minutes: 1, max_no_progress: 1 } } };
+function runtimeInit(overrides = {}) {
+  const execution = { schema: "goal-runtime.v1", tasks: [], conditions: [{ id: "final-condition", role: "terminal", enforcement: "final", statement: "Final fixture passes", observable: "fixture", expected: "passing", depends_on: [], oracle_ref: "oracle", environment_ref: "local", fixture_refs: ["sample"], invalidation: { paths: [], task_ids: [] }, remediation: { policy: "user-approved", allowed_paths: ["test/**"], max_attempts: 0 }, stability: { mode: "single", require_fresh_environment: true } }], write_policy: { allowed_paths: ["test/**"] }, budgets: { max_observations: 1, max_repairs: 0, max_elapsed_minutes: 1, max_no_progress: 1 } };
+  return { objective: "Finalize converged runtime", ...overrides, execution: { ...execution, ...overrides.execution } };
 }
 function repo() {
   const cwd = mkdtempSync(join(tmpdir(), "goal-finalize-extension-"));
@@ -31,19 +32,19 @@ function pi(cwd, entries = [], sessionId = "owner") {
   const tools = [], listeners = new Map(); let sequence = entries.length, leaf = entries.at(-1)?.id ?? null;
   const append = row => { const entry = { id: `entry-${++sequence}`, parentId: leaf, timestamp: new Date(1_800_000_000_000 + sequence).toISOString(), ...row }; entries.push(entry); leaf = entry.id; return entry; };
   const sessionManager = { getSessionId: () => sessionId, getSessionFile: () => join(cwd, `session-${sessionId}`), getLeafId: () => leaf, getEntries: () => entries, getBranch: () => entries };
-  return { cwd, tools, entries, sessionManager, registerTool: tool => tools.push(tool), on: (name, handler) => listeners.set(name, handler), appendEntry: (customType, data) => append({ type: "custom", customType, data }), appendMessage: (text, extra = {}) => append({ type: "message", message: { role: "user", content: text }, ...extra }), handlers: { get(name) { const handler = listeners.get(name); if (name !== "input" || !handler) return handler; return async (input, ctx) => { const result = await handler(input, ctx); if (["interactive", "rpc"].includes(input.source)) append({ type: "message", message: { role: "user", content: input.text }, ...(input.images !== undefined ? { images: input.images } : {}), ...(input.streamingBehavior !== undefined ? { streamingBehavior: input.streamingBehavior } : {}) }); return result; }; } } };
+  return { cwd, tools, entries, ctx: { cwd, sessionManager }, registerTool: tool => tools.push(tool), on: (name, handler) => listeners.set(name, handler), appendEntry: (customType, data) => append({ type: "custom", customType, data }), appendMessage: (text, extra = {}) => append({ type: "message", message: { role: "user", content: text }, ...extra }), handlers: { get(name) { const handler = listeners.get(name); if (name !== "input" || !handler) return handler; return async (input, ctx) => { const result = await handler(input, ctx); if (["interactive", "rpc"].includes(input.source)) append({ type: "message", message: { role: "user", content: input.text }, ...(input.images !== undefined ? { images: input.images } : {}), ...(input.streamingBehavior !== undefined ? { streamingBehavior: input.streamingBehavior } : {}) }); return result; }; } } };
 }
-function host(cwd, calls) {
+function host(cwd, calls, world = {}) {
   const adapter = { ref: "oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 1, maxOutputBytes: 1, terminationGraceMs: 1, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } };
-  return { registries: runtimeRegistries, captureCurrentWorld() { calls.world++; return { safe: true, repo: { root: cwd, head: head(cwd), trackedDirty: [], untracked: [], unmerged: [], sequencer: null }, adapters: [{ ref: "oracle", version: "1" }], environments: [{ ref: "local", fingerprint: "fixture-environment-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "fixture", available: true }], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }; }, adapterRegistry: createObservationAdapterRegistry([adapter]), prepareManagedValidation() { calls.managed++; throw Error("finalization must not start managed validation"); }, artifactRefForRun() { throw Error("finalization must not request an observation artifact"); }, startManagedValidation() { calls.start++; throw Error("finalization must not start an observation"); }, recoverManagedValidation() { calls.recover++; throw Error("finalization must not recover an observation"); }, releaseManagedValidation() { calls.release++; throw Error("finalization must not release an observation"); } };
+  return { registries: runtimeRegistries, captureCurrentWorld() { calls.world++; return { safe: true, repo: { root: cwd, head: head(cwd), trackedDirty: world.dirty ? ["test/dirty"] : [], untracked: [], unmerged: [], sequencer: null }, adapters: [{ ref: "oracle", version: "1" }], environments: [{ ref: "local", fingerprint: world.environment ?? "fixture-environment-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "fixture", available: true }], resources: world.resources ?? [], activeRuns: [], capturedAt: new Date().toISOString() }; }, adapterRegistry: createObservationAdapterRegistry([adapter]), prepareManagedValidation() { calls.managed++; throw Error("finalization must not start managed validation"); }, artifactRefForRun() { throw Error("finalization must not request an observation artifact"); }, startManagedValidation() { calls.start++; throw Error("finalization must not start an observation"); }, recoverManagedValidation() { calls.recover++; throw Error("finalization must not recover an observation"); }, releaseManagedValidation() { calls.release++; throw Error("finalization must not release an observation"); } };
 }
-function converged(cwd, api, { append = appendEvent } = {}) {
-  const goalId = "finalize-converged", root = rootFor(cwd), contract = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries); let projection;
+function converged(cwd, api, { append = appendEvent, runtime } = {}) {
+  const goalId = "finalize-converged", root = rootFor(cwd), contract = normalizeRuntimeGoalInit(runtimeInit(runtime), runtimeRegistries); let projection;
   const write = (type, data, n) => { projection = append(root, event(goalId, type, data, n), projection?.version ?? 0); };
   write("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: head(cwd), readiness: "draft" }, 1);
-  write("goal.session_bound", { sessionId: api.sessionManager.getSessionId(), leafId: "fixture-leaf" }, 2);
+  write("goal.session_bound", { sessionId: api.ctx.sessionManager.getSessionId(), leafId: "fixture-leaf" }, 2);
   write("goal.runtime_readiness_recorded", { readiness: "ready", reasons: [] }, 3);
-  const approval = { proposalId: "fixture-activation", executionContractHash: projection.executionContractHash, baseHead: head(cwd), sessionId: api.sessionManager.getSessionId() };
+  const approval = { proposalId: "fixture-activation", executionContractHash: projection.executionContractHash, baseHead: head(cwd), sessionId: api.ctx.sessionManager.getSessionId() };
   const proposalHash = hash(JSON.stringify({ baseHead: approval.baseHead, executionContractHash: approval.executionContractHash, goalId, proposalId: approval.proposalId, sessionId: approval.sessionId }));
   write("goal.runtime_approval_recorded", { ...approval, proposalHash, userEntryId: "activation-user", capabilityDigest: "a".repeat(64) }, 4);
   const recordCycle = (cycle, prefix, n) => { const condition = projection.conditions.get("final-condition"), common = { runId: `${prefix}-run`, conditionId: "final-condition", cycle, head: head(cwd), executionRevision: projection.executionRevision, executionContractHash: projection.executionContractHash, conditionHash: condition.conditionHash, adapter: { ref: "oracle", version: "1" }, worldSnapshotHash: "1".repeat(64), resourceClaimsHash: "2".repeat(64) };
@@ -53,23 +54,23 @@ function converged(cwd, api, { append = appendEvent } = {}) {
   recordCycle(0, "calibration", 5); write("goal.runtime_activated", {}, 11); recordCycle(1, "final", 12);
   return { goalId, root };
 }
-async function invoke(api, name, input = {}) { return (await api.tools.find(tool => tool.name === name).execute("call", input, undefined, undefined, { cwd: api.cwd, sessionManager: api.sessionManager })).details.value; }
+async function invoke(api, name, input = {}) { return (await api.tools.find(tool => tool.name === name).execute("call", input, undefined, undefined, { cwd: api.cwd, sessionManager: api.ctx.sessionManager })).details.value; }
 function events(cwd, goalId) { return readFileSync(join(rootFor(cwd), "goals", goalId, "events.jsonl"), "utf8").trim().split("\n").map(JSON.parse); }
 function count(cwd, goalId, type) { return events(cwd, goalId).filter(row => row.type === type).length; }
 function finalIntent(api) { return api.entries.filter(row => row.customType === "goal-engine-final-review-approval-intent"); }
-function setup(options = {}) { const cwd = repo(), calls = { world: 0, adapter: 0, managed: 0, start: 0, recover: 0, release: 0, provider: 0 };  const api = pi(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd, calls), finalReviewProvider: async input => { calls.provider++; return options.provider?.(input) ?? { severity: "none", reportRef: `sha256:${"b".repeat(64)}` }; }, ...(options.append ? { appendEvent: options.append } : {}), ...(options.appendBatch ? { appendEventBatch: options.appendBatch } : {}), ...options.extension }); const fixture = converged(cwd, api, options); return { cwd, api, calls, ...fixture }; }
+function setup(options = {}) { const cwd = repo(), calls = { world: 0, adapter: 0, managed: 0, start: 0, recover: 0, release: 0, provider: 0 };  const api = pi(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd, calls, options.world), finalReviewProvider: async input => { calls.provider++; return options.provider?.(input) ?? { severity: "none", reportRef: `sha256:${"b".repeat(64)}` }; }, ...(options.append ? { appendEvent: options.append } : {}), ...(options.appendBatch ? { appendEventBatch: options.appendBatch } : {}), ...options.extension }); const fixture = converged(cwd, api, options); return { cwd, api, calls, ...fixture }; }
 async function requestFinalReview(fixture) { return JSON.parse(await invoke(fixture.api, "goal_status", { goal_id: fixture.goalId })); }
-async function approve(fixture, text = "approve") { await fixture.api.handlers.get("input")({ type: "input", source: "interactive", text }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager }); return requestFinalReview(fixture); }
+async function approve(fixture, text = "approve") { await fixture.api.handlers.get("input")({ type: "input", source: "interactive", text }, { cwd: fixture.cwd, sessionManager: fixture.api.ctx.sessionManager }); return requestFinalReview(fixture); }
 
 // A real Store-backed runtime ledger is converged before every case; no test supplies a projection.
 test("fake Pi input wrapper 只为 interactive/rpc 追加 user message 并保留 images/streamingBehavior 字段", async () => {
   const fixture = setup();
-  await fixture.api.handlers.get("input")({ type: "input", source: "interactive", text: "hello", images: [{ type: "image" }], streamingBehavior: "steer" }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager });
+  await fixture.api.handlers.get("input")({ type: "input", source: "interactive", text: "hello", images: [{ type: "image" }], streamingBehavior: "steer" }, { cwd: fixture.cwd, sessionManager: fixture.api.ctx.sessionManager });
   const message = fixture.api.entries.at(-1);
   assert.equal(message.type, "message"); assert.deepEqual(message.message, { role: "user", content: "hello" });
   assert.deepEqual(message.images, [{ type: "image" }]); assert.equal(message.streamingBehavior, "steer");
   const before = fixture.api.entries.length;
-  await fixture.api.handlers.get("input")({ type: "input", source: "extension", text: "ignored" }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager });
+  await fixture.api.handlers.get("input")({ type: "input", source: "extension", text: "ignored" }, { cwd: fixture.cwd, sessionManager: fixture.api.ctx.sessionManager });
   assert.equal(fixture.api.entries.length, before);
 });
 
@@ -94,6 +95,30 @@ test("reject 不签发 offer，后续 status 可产生新的终审 intent", asyn
   const fixture = setup(); await requestFinalReview(fixture); const rejected = await approve(fixture, "reject");
   assert.equal(rejected.action_token, undefined); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 0);
   const fresh = await requestFinalReview(fixture); assert.equal(fresh.status, "APPROVAL_REQUIRED"); assert.equal(finalIntent(fixture.api).length, 2);
+  const accepted = await approve(fixture); assert.equal(accepted.machineAction.tool, "goal_finalize"); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 1);
+});
+
+test("未完成的 runnable runtime task 保持 R9 goal_dispatch，不创建终审 intent", async () => {
+  const task = { id: "pending-task", description: "Keep R9 authoritative", deps: [], writePaths: ["test/**"], acceptance: { criteria: [{ id: "pending", statement: "must dispatch", evidenceKinds: ["tests"] }] }, workflow: "tdd" };
+  const fixture = setup({ runtime: { execution: { ...runtimeInit().execution, tasks: [task] } } });
+  const status = await requestFinalReview(fixture);
+  assert.deepEqual(status.machineAction, { tool: "goal_dispatch", params: { goal_id: fixture.goalId, task_id: "pending-task" } });
+  assert.equal(status.status, undefined); assert.equal(finalIntent(fixture.api).length, 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 1); assert.equal(fixture.calls.provider, 0);
+});
+
+test("缺失 finalReviewProvider 明确阻塞且不写终审自定义或 durable event", async () => {
+  const fixture = setup({ extension: { finalReviewProvider: undefined } });
+  const status = await requestFinalReview(fixture);
+  assert.ok(["R11_FINALIZATION_REQUIRED", "PROVIDER_UNAVAILABLE"].includes(status.status));
+  assert.equal(finalIntent(fixture.api).length, 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal(fixture.calls.provider, 0);
+});
+
+test("合法 single compaction 的 approve 只签一个绑定最新 user entry 的 offer", async () => {
+  const fixture = setup(); await requestFinalReview(fixture); const [intent] = finalIntent(fixture.api);
+  const user = fixture.api.appendMessage("approve"), compact = { id: "compact", parentId: intent.id, timestamp: user.timestamp, type: "compaction", summary: "keep approval", firstKeptEntryId: intent.id, tokensBefore: 1 };
+  user.parentId = compact.id; fixture.api.entries.splice(-1, 0, compact);
+  const status = await requestFinalReview(fixture);
+  assert.equal(status.machineAction.params.approval_entry_id, user.id); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 1); assert.equal(finalIntent(fixture.api).length, 1); assert.equal(fixture.calls.provider, 0);
 });
 
 test("approval chain 的非分支、非用户和非法 compaction 均不签 offer 或写 Goal final event", async t => {
@@ -104,9 +129,9 @@ test("approval chain 的非分支、非用户和非法 compaction 均不签 offe
     assert.equal(intent.parentId, fixture.api.entries.at(-2)?.id ?? null);
     assert.deepEqual(Object.keys(intent.data).sort(), intentKeys);
     assert.equal(intent.data.protocol, "goal-engine-final-review-approval-intent.v1"); assert.equal(intent.data.goalId, fixture.goalId); assert.equal(intent.data.head, head(fixture.cwd)); assert.equal(intent.data.sessionId, "owner");
-    if (mutation === "off-branch") fixture.api.sessionManager.getBranch = () => [];
+    if (mutation === "off-branch") fixture.api.ctx.sessionManager.getBranch = () => [];
     else if (mutation === "duplicate-intent") { const duplicate = fixture.api.appendEntry(intent.customType, structuredClone(intent.data)); assert.equal(finalIntent(fixture.api).length, 2); assert.equal(duplicate.parentId, intent.id); assert.deepEqual(duplicate.data, intent.data); }
-    else if (mutation === "extension") await fixture.api.handlers.get("input")({ type: "input", source: "extension", text: "approve" }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager });
+    else if (mutation === "extension") await fixture.api.handlers.get("input")({ type: "input", source: "extension", text: "approve" }, { cwd: fixture.cwd, sessionManager: fixture.api.ctx.sessionManager });
     else { const user = fixture.api.appendMessage("approve", mutation === "image" ? { images: [{ type: "image" }] } : mutation === "streaming" ? { streamingBehavior: "steer" } : {}); if (mutation === "assistant") user.message.role = "assistant"; if (mutation === "broken-parent") user.parentId = "broken"; if (mutation.includes("compaction")) { const compact = { id: "compact", parentId: intent.id, timestamp: user.timestamp, type: "compaction", summary: mutation === "bad-compaction" ? "" : "ok", firstKeptEntryId: intent.id, tokensBefore: 1 }; user.parentId = compact.id; fixture.api.entries.splice(-1, 0, compact); if (mutation === "double-compaction") { const second = { ...compact, id: "compact-2", parentId: compact.id }; user.parentId = second.id; fixture.api.entries.splice(-1, 0, second); } } }
     const status = await requestFinalReview(fixture);
     assert.equal(status.action_token, undefined); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0);
@@ -158,8 +183,12 @@ test("appendEventBatch durable completion 后 throw 时同一调用 reload compl
   assert.equal(fixture.calls.provider, 1); assert.equal(result.status, "completed"); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 1); assert.equal(loadProjection(fixture.root, fixture.goalId).completionHistory.length, 1);
 });
 
-test("started 后 Goal version 或 world/head/resource 漂移只记录 stale，不 complete，并要求 fresh approval", async () => {
-  const fixture = setup({ provider: () => { git(fixture.cwd, "commit", "--allow-empty", "-m", "test: 漂移终审世界"); return { severity: "none", reportRef: `sha256:${"f".repeat(64)}` }; } }); await requestFinalReview(fixture); const offer = await approve(fixture); await invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token }); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_recorded"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal((await requestFinalReview(fixture)).status, "APPROVAL_REQUIRED");
+test("provider 执行中的 resource/environment CAS 漂移只记录 stale，不 complete", async t => {
+  for (const kind of ["resource", "environment"]) await t.test(kind, async () => {
+    const world = {}, fixture = setup({ world, provider: () => { if (kind === "resource") world.resources = [{ id: "exclusive-fixture", holder: "other" }]; else world.environment = "fixture-environment-2"; return { severity: "none", reportRef: `sha256:${"f".repeat(64)}` }; } });
+    await requestFinalReview(fixture); const offer = await approve(fixture); await invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token });
+    assert.equal(fixture.calls.provider, 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_recorded"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal(loadProjection(fixture.root, fixture.goalId).finalReview.status, "stale"); assert.equal((await requestFinalReview(fixture)).status, "APPROVAL_REQUIRED");
+  });
 });
 
 test("goal_finalize 只 captureCurrentWorld 和 ledger，不调用 observation adapter、managed 或业务 Oracle", async () => {
