@@ -1351,9 +1351,6 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (projection.finalReview?.status === "started" && projection.actionOffer?.tool === "goal_finalize" && projection.actionOffer.consumed === true) {
           return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction: { tool: "goal_finalize", params: projection.actionOffer.params }, action_token: projection.actionOffer.token });
         }
-        // A stale durable review can only be replaced by a fresh status cycle;
-        // never reuse its approval or result as completion authority.
-        if (projection.finalReview?.status === "stale") return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction: null });
         const pendingFinalIntent = ctx.sessionManager?.getBranch?.()?.some((entry) => exactFinalIntent(entry, goalId, sessionId));
         if (!pendingFinalIntent && projection.finalReview?.status !== "started") {
           const fingerprint = obligationProgressFingerprint({ projection, worldSnapshot: world });
@@ -1541,19 +1538,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         // inspect or mutate an Episode until the frontier selected that Episode.
         const taskActions = new Map([...projection.tasks.keys()].map((taskId) => [taskId, taskActionState(projection, taskId)]));
         const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions, observationInventory: inventory });
-        let selected = nextObligationAction(frontier);
-        // Task action state is the R9 authority even if an unrelated runtime
-        // inventory is unavailable to the obligation-policy frontier.
-        if (!selected) {
-          const task = [...projection.tasks.entries()].map(([taskId]) => ({ taskId, action: taskActionState(projection, taskId).requiredNextAction }))
-            .find(({ action }) => action && ["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(action.tool));
-          if (task) selected = { tool: task.action.tool, params: { task_id: task.taskId, ...task.action.params } };
-          else {
-            const finalStore = loadFinalizationProjection(root, goalId);
-            const finalCandidate = buildObligationFinalizationManifest({ projection: finalStore.projection, storeProjection: finalStore, worldSnapshot: world, conditionValidity: evaluateConditionGraph({ projection: finalStore.projection, worldSnapshot: world }).conditions, resourceInventory: world.resources });
-            if (finalCandidate.complete) selected = { tool: "goal_finalize", params: {} };
-          }
-        }
+        const selected = nextObligationAction(frontier);
         if (selected?.tool === "repair_episode") {
           const episode = projection.repairEpisodes.get(selected.params.episode_id);
           const condition = projection.conditions.get(episode?.conditionId)?.definition;
@@ -2067,7 +2052,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       additionalProperties: false,
     },
     async handler(params, ctx) {
-      const { root } = executionScopeFor(ctx, { operation: "read", goalId: params.goal_id });
+      const { cwd, root } = executionScopeFor(ctx, { operation: "read", goalId: params.goal_id });
       const goalId = resolveGoalId(params.goal_id, root, ctx);
       let projection = goalId ? loadProjectionFn(root, goalId) : null;
       if (!projection || projection.eventSchemaVersion !== "goal-runtime.v1") return finalizeGoal(projection);
@@ -2082,14 +2067,14 @@ export function createGoalEngineExtension(pi, options = {}) {
         projection = appendEventFn(root, makeGoalEvent("goal.action_consumed", receipt, goalId, projection), projection.version);
         consumed = true;
       } else if (params.action_token !== offer.token) throw new Error("invalid finalization token");
-      const world = runtimeHost?.captureCurrentWorld?.({ cwd: ctx.cwd });
+      const world = runtimeHost?.captureCurrentWorld?.({ cwd });
       if (!world?.safe) throw new Error("FINALIZATION_WORLD_UNAVAILABLE");
       const baseVersion = offer.projectionVersion - 1;
       const base = loadFinalizationProjection(root, goalId, { version: baseVersion });
       const manifest = buildObligationFinalizationManifest({ projection: base.projection, storeProjection: base, worldSnapshot: world, conditionValidity: evaluateConditionGraph({ projection: base.projection, worldSnapshot: world }).conditions, resourceInventory: world.resources });
       const approval = { entryId: params.approval_entry_id, sessionId, source: "user" };
       let review = projection.finalReview;
-      if (!review) {
+      if (!review || ["stale", "changes_required"].includes(review.status)) {
         const pair = finalApprovalPair(goalId, sessionId, manifest, ctx);
         if (!pair || pair.choice !== "approve" || pair.message.id !== params.approval_entry_id || !manifest.complete) throw new Error("invalid final review approval");
         const reviewId = `review-${canonicalHash({ goalId, manifestHash: manifest.manifestHash, stateHash: manifest.stateHash, worldHash: manifest.worldHash, head: manifest.head, approval })}`;
@@ -2100,7 +2085,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       const result = await runRecoverableFinalReview({ manifest, approval, provider: finalReviewProvider, reviewStore });
       if (result.status === "failed") throw Object.assign(new Error("FINAL_REVIEW_PROVIDER_FAILED"), { code: "FINAL_REVIEW_PROVIDER_FAILED" });
       const current = loadProjectionFn(root, goalId);
-      const freshWorld = runtimeHost?.captureCurrentWorld?.({ cwd: ctx.cwd });
+      const freshWorld = runtimeHost?.captureCurrentWorld?.({ cwd });
       let freshManifest = null;
       if (freshWorld?.safe) {
         const freshBase = loadFinalizationProjection(root, goalId, { version: baseVersion });
