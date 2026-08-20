@@ -279,7 +279,7 @@ function sequencerOperation(path, commandObserver) {
 function activeWorkspaceUsers(worktreePath) {
   // NUL fields avoid locale/whitespace parsing ambiguity.  lsof uses status 1
   // for "no matches", but never treat output accompanying it as clear.
-  const probe = spawnSync("lsof", ["-n", "-Fpc0", "+D", worktreePath], {
+  const probe = spawnSync("lsof", ["-w", "-n", "-Fpc0", "+D", worktreePath], {
     encoding: "buffer", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000, maxBuffer: 1024 * 1024,
   });
   if (probe.error || probe.signal || (probe.status !== 0 && probe.status !== 1) || probe.stderr.length) {
@@ -295,7 +295,7 @@ function activeWorkspaceUsers(worktreePath) {
 function activeDeletedResourceUsers(worktreePath) {
   // This is intentionally global: after removal, +D cannot inspect a vanished
   // directory, while +L1 finds files which remain open after unlinking.
-  const probe = spawnSync("lsof", ["-n", "-Fpcfn0", "+L1"], {
+  const probe = spawnSync("lsof", ["-w", "-n", "-Fpcfn0", "+L1"], {
     encoding: "buffer", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000, maxBuffer: 1024 * 1024,
   });
   if (probe.error || probe.signal || (probe.status !== 0 && probe.status !== 1) || probe.stderr.length) {
