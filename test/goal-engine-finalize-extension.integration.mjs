@@ -19,7 +19,7 @@ const event = (goalId, type, data, n) => ({ schemaVersion: "goal-runtime.v1", ev
 const intentKeys = ["choices", "goalId", "head", "manifestHash", "protocol", "sessionId", "stateHash", "worldHash"];
 
 function runtimeInit(overrides = {}) {
-  const execution = { schema: "goal-runtime.v1", tasks: [], conditions: [{ id: "final-condition", role: "terminal", enforcement: "final", statement: "Final fixture passes", observable: "fixture", expected: "passing", depends_on: [], oracle_ref: "oracle", environment_ref: "local", fixture_refs: ["sample"], invalidation: { paths: [], task_ids: [] }, remediation: { policy: "user-approved", allowed_paths: ["test/**"], max_attempts: 0 }, stability: { mode: "single", require_fresh_environment: true } }], write_policy: { allowed_paths: ["test/**"] }, budgets: { max_observations: 1, max_repairs: 0, max_elapsed_minutes: 1, max_no_progress: 1 } };
+  const execution = { schema: "goal-runtime.v1", tasks: [], conditions: [{ id: "final-condition", role: "terminal", enforcement: "final", statement: "Final fixture passes", observable: "fixture", expected: "passing", depends_on: [], oracle_ref: "oracle", environment_ref: "local", fixture_refs: ["sample"], invalidation: { paths: [], task_ids: [] }, remediation: { policy: "user-approved", allowed_paths: ["test/**"], max_attempts: 0 }, stability: { mode: "single", require_fresh_environment: true } }], write_policy: { allowed_paths: ["test/**"] }, budgets: { max_observations: 2, max_repairs: 0, max_elapsed_minutes: 1, max_no_progress: 1 } };
   return { objective: "Finalize converged runtime", ...overrides, execution: { ...execution, ...overrides.execution } };
 }
 function repo() {
