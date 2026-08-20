@@ -11,9 +11,11 @@
 
 候选修复的 Critical 是 Observation artifact request 漏传 `stateRoot`：bug 记录在 `docs/bugs/bug-goal-observation-artifact-request-omits-state-root.md`，`8f1e72a` 已修复，并由 `7ed4af9` 的真实 canary 覆盖。R12 不进行独立外审或过度建设裁决；该项留给 R13 的只读统一复审，不能把本记录当成外审结论。
 
-## 实际命令与统计
+## 两阶段实际命令与统计
 
-以下命令均在本工作树实际执行；长输出保存在 `/tmp/r12-*.log`。
+以下第一阶段命令均在 R12 isolated worktree 实际执行；其环境阻塞记录保留，随后在 fresh `main` 完成复验。长输出保存在 `/tmp/r12-*.log`。
+
+### R12 isolated worktree 原始记录
 
 | 命令 | 结果 | 统计/说明 |
 |---|---|---|
@@ -27,6 +29,21 @@
 | `node --test test/goal-engine-*.test.mjs test/goal-engine-*.integration.mjs` | GREEN | Goal full suite 1090/1090 pass。 |
 | `npm test` | 环境阻塞 | 在时限内完成，527：513 pass、14 fail；失败集中于缺失的本地 Pi/subagent/task-scheduler 依赖及其相关测试，非 timeout。 |
 
+### 随后 fresh `main` 复验
+
+main 的受管依赖已消除上述 worktree 环境阻塞，以下为实际复验结果，全部 GREEN：
+
+| 命令 | 结果 | 统计/说明 |
+|---|---|---|
+| `node --test test/doctor.test.mjs test/goal-runtime-doctor.integration.mjs` | GREEN | 35/35 pass。 |
+| `node scripts/doctor.mjs` | GREEN | rc 0；保留 Doctor 报告的 preserved/identity-mismatch workspace warnings。 |
+| `PI_REAL_BIN=$(command -v pi) node --test test/pi-runtime.integration.mjs` | GREEN | 2/2 pass。 |
+| `npm test` | GREEN | 634/634 pass。 |
+| `node --test test/goal-engine-*.test.mjs test/goal-engine-*.integration.mjs` | GREEN | Goal full suite 1215/1215 pass。 |
+| `node --test test/goal-runtime-real-canary.integration.mjs` | GREEN | real canary 1/1 pass。 |
+
+validation timeout fixture `d10f672` 仅将超时预算由 100 调整为 1000，断言不变。
+
 ## Skill 与退役测试
 
 Skill 候选压力 GREEN 的既有证据使用候选绝对路径加载：`/Users/mhbzhy/pi-config/.state/subagent-dispatch/worktrees/c16ea28f-4a3c-40f8-be72-4391ffeb8f71/skill-overrides/using-goal-engine/SKILL.md`；允许 approved runtime finalize。三个无 Skill 基线均正确。该候选压力执行不是本工作树本次重新运行的命令，故不把它计入上表实际统计。未创建或复活退役的 `using-goal-engine-skill.test.mjs`、`migration-contract.test.mjs`。
@@ -37,4 +54,4 @@ Skill 候选压力 GREEN 的既有证据使用候选绝对路径加载：`/Users
 
 ## 残余风险
 
-本工作树缺少 Doctor/Pi runtime 所需的本地 package，故 Doctor CLI、其一条 CLI readiness 测试、Pi runtime integration 与全量 `npm test` 不能 GREEN；必须补齐受管依赖后在 R13 重跑。R13 还应执行其规定的只读外审；R12 未进行外审。
+Doctor 报告 preserved/identity-mismatch workspace warnings，需由 R13 进行只读核验并作 typed 处置。R12 未进行外审；除上述 workspace warnings 外，不再声称存在依赖缺失。
