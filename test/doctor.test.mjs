@@ -477,6 +477,11 @@ test("Goal Engine tool ABI default factory does not report ABI issues", async ()
   );
 });
 
+test("Doctor runtime boundary probe adds no issue or Goal state", async () => {
+  const issues = await inspectConfigurationWithValidatedVersions(repoRoot);
+  assert.equal(issues.some((issue) => issue.startsWith("GOAL_RUNTIME_")), false);
+});
+
 test("Goal Engine tool ABI validator rejects missing execute", async () => {
   const fixture = createGoalEngineFactoryFixture({
     missingExecute: "goal_dispatch",
