@@ -83,3 +83,56 @@ GREEN 后由 fresh Host typed 收尾。外源复审仍 pending。
   `npm run test:goal-engine` 的 R13 新证据；R12 旧证据不能替代。
 - 外源只读复审尚未开始；Manual Preview 保持人工 `goal_status` typed action 推进，
   auto-continuation 仍须在 R13 后另立 fresh Host typed 计划。
+
+## R13 重跑与最终门禁结论（NO-GO，2026-08-20）
+
+首次 R13 因 harness omission（未显式提供受支持的 `PI_REAL_BIN`，并受 child
+环境影响）按失败即停止，保留该次 NO-GO 历史。随后纳入 fixture 修复
+`c7f7885`（候选提交 `2b1fdfc`）并完成重跑；本节只记录只读验证证据，未改变
+R13 计划、代码、测试、Skill 或配置。
+
+### 重跑 GREEN 证据
+
+- 39 个 harness 文件、500/500 tests GREEN；`npm test` 634/634 GREEN。
+- Goal full suite 1215/1215 GREEN；Doctor/Generation/Canary/Pi 组合 41/41
+  GREEN；`node scripts/doctor.mjs` rc 0。
+- Root exact-eight 完整且顺序为：`goal_init`、`goal_status`、`goal_dispatch`、
+  `goal_settle`、`goal_integrate`、`goal_accept`、`goal_amend`、`goal_finalize`。
+  退役的 `using-goal-engine-skill.test.mjs` 与 `migration-contract.test.mjs`
+  均 absent；`pi/settings.json` 无 diff。
+- Attempt5 recovery object 与 recovery ref `b623cf7` 均存在；R0 workspace
+  只读证据存在。未创建或复活退役测试。
+
+### 资源审计与只读边界
+
+Worktree audit rc 0，但仍有 28 项 cleanup-debt、53 项 released。Doctor stderr
+分类保留为：109 preserved、27 unmanaged、27 identity mismatch、5 dirty、2
+sequencer、1 owner-active、1 cleanup-debt。R13 未执行 repair、release 或
+discard；这些 durable worktree/process/resource debt 仍未满足门禁。
+
+### DeepSeek Round1 外审 triage
+
+最终 exhaustive review 范围为 `0eaad6d..c7f7885`，diff 120000（truncated），
+返回 12 项。逐项以 HEAD、测试及协议证据核对后均不成立，且不得声称 reviewer
+给出 Ready：
+
+1. lock scopes/provider outside：现有锁范围与 provider 边界正确；
+2. offer +1：实现符合 offer 语义；
+3. condition definition：定义完整；
+4. status 布尔值：取值正确且有 critical 测试；
+5. 重复 pending/strict compaction：属于有意设计；
+6. unknown stop：保持 suspended，符合 fail-safe；
+7. amendment：使用 current-world baseHead CAS；
+8. concurrent event：stale 行为是有意设计；
+9. serialized queue：序列化队列正确；
+10. doctor draft 缺 obligation：按预期拒绝；
+11. metadata intent 失败：必须 fail closed；
+12. 其余关联项均为上述边界的重复归并，无独立代码 blocker。
+
+### 最终结论
+
+代码与行为验收为 **GREEN**，外审无采纳的代码 blocker；但 R13 总体仍为
+**NO-GO**，原因是 durable worktree/process/resource debt 未满足门禁。只有在
+用户明确授权后，才能进入 managed lifecycle 或 typed disposition；unknown
+terminal 仍只能 preserve。production 仍为 **Manual Preview**：不 cutover、
+不 push、不收尾 frozen planned-goal。
