@@ -587,7 +587,7 @@ export function reanchorAllocation({ originRoot, id, ownerToken: token, expected
       const checked = inspectWorktree(current, commandObserver);
       const status = runGit(current.path, ["status", "--porcelain=v1", "-z"], commandObserver);
       const sequencer = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"].find((marker) => existsSync(runGit(current.path, ["rev-parse", "--git-path", marker], commandObserver)));
-      const probe = spawnSync("lsof", ["-n", "-Fpc0", "+D", current.path], { encoding: "buffer", stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
+      const probe = spawnSync("lsof", ["-n", "-w", "-Fpc0", "+D", current.path], { encoding: "buffer", stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
       if (probe.error || probe.signal || (probe.status !== 0 && probe.status !== 1) || probe.stderr.length) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree process inventory is unavailable");
       if (probe.stdout.toString("utf8").split("\0").some((x) => /^p\d+$/.test(x))) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree has active cwd/process");
       if (status || sequencer || checked.registration.locked) throw failure("WORKTREE_LIFECYCLE_UNSAFE_RELEASE", "managed worktree must be clean, unlocked, and free of sequencers");
