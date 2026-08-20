@@ -55,3 +55,31 @@ Skill 候选压力 GREEN 的既有证据使用候选绝对路径加载：`/Users
 ## 残余风险
 
 Doctor 报告 preserved/identity-mismatch workspace warnings，需由 R13 进行只读核验并作 typed 处置。R12 未进行外审；除上述 workspace warnings 外，不再声称存在依赖缺失。
+
+## R13 内部只读验收（NO-GO，2026-08-13）
+
+本轮在受管依赖可用的 `main`（开始时 `b58e7e9`）执行；长输出仅写入
+`/tmp/r13-verification/`，未修改生产、测试、Skill、配置或 `.state`。按 R13
+失败即停止规则，第二项行为测试失败后不再运行 Doctor、worktree audit、Pi、全量
+或外源复审命令；因此本轮结论为 **NO-GO**，不得作为 R13 完成或 production
+cutover 依据。
+
+| 命令 | 结果 | 真实统计/原因 |
+|---|---|---|
+| `node --test test/goal-engine-*.integration.mjs test/goal-runtime-*.integration.mjs` | GREEN | 1095/1095 pass，0 fail，209.720 s。覆盖 exact-eight、planned accept-auto、runtime finalize 与 Manual Preview 的现有集成断言。 |
+| `node --test $(find test -maxdepth 1 -type f \( -name '*subagent*.test.mjs' -o -name '*subagent*.integration.mjs' -o -name 'root-subagent-broker*.test.mjs' -o -name 'root-subagent-broker*.integration.mjs' -o -name 'worktree-lifecycle-*.test.mjs' -o -name 'worktree-lifecycle-*.integration.mjs' \) -print \| sort -u)` | RED | 39 个实际存在的 glob 文件，500 tests：494 pass、5 fail，61.277 s。首个失败为 `test/pi-subagents-045-workflow.integration.mjs`，断言 `PI_REAL_BIN` 必须指向受支持 Pi host，但本次命令未显式提供该变量；后续 4 个失败同属真实 Pi host/顶层 child 环境（其中 `PI_SUBAGENT_CHILD` 使 top-level runtime 拒绝启动）。R13 禁止修复或重跑掩盖该失败。 |
+
+只读审计补记：开始前主工作区 clean，`pi/settings.json` 无 diff，暂存区为空；
+`.state` 没有未跟踪条目（仓库已有的 8 个已跟踪状态路径未变）；Attempt5 recovery
+ref `b623cf7` 存在。`git worktree list` 显示 main 及 preserved managed worktrees，
+未作 repair/release/discard/clean。planned-goal 仍按冻结债务保留，须在 R13 真正
+GREEN 后由 fresh Host typed 收尾。外源复审仍 pending。
+
+### R13 残余风险与恢复入口
+
+- 必须由对应前序验收阶段以显式 `PI_REAL_BIN=$(command -v pi)`、且非 child 的顶层
+  环境定位并修复/确认这 5 个失败，然后从 R13 重跑全部规定命令。
+- 本轮因停止规则未产生 Doctor、worktree audit、Pi、canary、`npm test`、
+  `npm run test:goal-engine` 的 R13 新证据；R12 旧证据不能替代。
+- 外源只读复审尚未开始；Manual Preview 保持人工 `goal_status` typed action 推进，
+  auto-continuation 仍须在 R13 后另立 fresh Host typed 计划。
