@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
+import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
 import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
 import { runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
@@ -101,7 +101,7 @@ test("approval chain 的非分支、非用户和非法 compaction 均不签 offe
     const fixture = setup(); await requestFinalReview(fixture);
     const [intent] = finalIntent(fixture.api);
     assert.equal(finalIntent(fixture.api).length, 1);
-    assert.equal(intent.parentId, fixture.api.entries.at(-2)?.id);
+    assert.equal(intent.parentId, fixture.api.entries.at(-2)?.id ?? null);
     assert.deepEqual(Object.keys(intent.data).sort(), intentKeys);
     assert.equal(intent.data.protocol, "goal-engine-final-review-approval-intent.v1"); assert.equal(intent.data.goalId, fixture.goalId); assert.equal(intent.data.head, head(fixture.cwd)); assert.equal(intent.data.sessionId, "owner");
     if (mutation === "off-branch") fixture.api.sessionManager.getBranch = () => [];
