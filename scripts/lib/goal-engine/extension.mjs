@@ -821,7 +821,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         receipt = { ...receipt, managedReceipt: prepared };
         const recovered = await recoverObservation(receipt, services);
         if (recovered.phase === "cleanup_debt" || recovered.status === "attention") return { attention: ["RUNTIME_CALIBRATION_MANAGED_ATTENTION"] };
-        const artifactRef = await runtimeHost.artifactRefForRun({ goalId, runId: selected.run.runId, managedTerminal: recovered.runReceipt?.terminal || recovered.terminal });
+        const artifactRef = await runtimeHost.artifactRefForRun({ stateRoot: root, goalId, runId: selected.run.runId, managedTerminal: recovered.runReceipt?.terminal || recovered.terminal });
         const result = await recordObservation({ projection: loadProjectionFn(root, goalId), runReceipt: recovered.runReceipt || recovered, artifactRef, worldSnapshot: world, services });
         return result.blocked ? { attention: ["RUNTIME_CALIBRATION_INDETERMINATE"] } : { step: "record" };
       }
@@ -887,7 +887,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (selected.tool === "record_observation") {
         const recovered = await recoverObservation(receipt, services);
         if (recovered.phase === "cleanup_debt" || recovered.status === "attention") return { attention: ["R10A3_OBSERVATION_MANAGED_ATTENTION"] };
-        const artifactRef = await runtimeHost.artifactRefForRun({ goalId, runId: run.runId, managedTerminal: recovered.runReceipt?.terminal || recovered.terminal });
+        const artifactRef = await runtimeHost.artifactRefForRun({ stateRoot: root, goalId, runId: run.runId, managedTerminal: recovered.runReceipt?.terminal || recovered.terminal });
         const result = await recordObservation({ projection: loadProjectionFn(root, goalId), runReceipt: recovered.runReceipt || recovered, artifactRef, worldSnapshot: world, services });
         if (result.verdict?.kind === "failed") return { attention: ["R10A3_REPAIR_REQUIRED"] };
         return result.blocked ? { attention: ["R10A3_OBSERVATION_BLOCKED"] } : { step: "record" };
