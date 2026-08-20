@@ -638,19 +638,39 @@ export function createGoalEngineExtension(pi, options = {}) {
     && entry.data.choices.length === 2 && entry.data.choices[0] === "approve" && entry.data.choices[1] === "reject"
     && /^[a-f0-9]{64}$/.test(entry.data.manifestHash) && /^[a-f0-9]{64}$/.test(entry.data.stateHash)
     && /^[a-f0-9]{64}$/.test(entry.data.worldHash) && /^[a-f0-9]{40}$/.test(entry.data.head);
-  const finalApprovalPair = (goalId, sessionId, manifest) => {
-    const branch = pi.sessionManager?.getBranch?.();
+  const finalApprovalPair = (goalId, sessionId, manifest, ctx) => {
+    const branch = ctx?.sessionManager?.getBranch?.();
     if (!Array.isArray(branch)) return null;
-    const intents = branch.filter((entry) => exactFinalIntent(entry, goalId, sessionId) && entry.data.manifestHash === manifest.manifestHash && entry.data.stateHash === manifest.stateHash && entry.data.worldHash === manifest.worldHash && entry.data.head === manifest.head);
-    if (intents.length !== 1) return null;
-    const intent = intents[0], byId = new Map(branch.map((entry) => [entry.id, entry]));
-    const message = branch.at(-1);
-    if (!message || message.type !== "message" || !exactPlainObject(message.message, ["role", "content"]) || message.message.role !== "user" || !["approve", "reject"].includes(message.message.content) || message.images?.length || message.streamingBehavior !== undefined || !nonEmptyString(message.id) || !validTimestamp(message.timestamp)) return null;
-    if (message.parentId !== intent.id) {
+    const matches = branch.filter((entry) => exactFinalIntent(entry, goalId, sessionId)
+      && entry.data.manifestHash === manifest.manifestHash && entry.data.stateHash === manifest.stateHash
+      && entry.data.worldHash === manifest.worldHash && entry.data.head === manifest.head);
+    if (!matches.length) return null;
+    const byId = new Map(branch.map((entry) => [entry.id, entry]));
+    const validIntent = (intent) => nonEmptyString(intent.id) && validTimestamp(intent.timestamp);
+    const validMessage = (message) => exactPlainObject(message, ["id", "parentId", "timestamp", "type", "message"])
+      && message.type === "message" && exactPlainObject(message.message, ["role", "content"])
+      && message.message.role === "user" && ["approve", "reject"].includes(message.message.content)
+      && nonEmptyString(message.id) && validTimestamp(message.timestamp);
+    const pairFor = (intent) => {
+      const child = branch.find((entry) => entry.parentId === intent.id);
+      if (!child) return { kind: "pending" };
+      const message = child.type === "compaction" ? branch.find((entry) => entry.parentId === child.id) : child;
+      if (!message || !validMessage(message) || Date.parse(message.timestamp) <= Date.parse(intent.timestamp)) return { kind: "invalid" };
+      if (message.parentId === intent.id) return { kind: "terminal", intent, message, choice: message.message.content };
       const compact = byId.get(message.parentId);
-      if (!compact || compact.parentId !== intent.id || !exactPlainObject(compact, ["id", "parentId", "timestamp", "type", "summary", "firstKeptEntryId", "tokensBefore"]) || compact.type !== "compaction" || !nonEmptyString(compact.summary) || compact.firstKeptEntryId !== intent.id || !Number.isSafeInteger(compact.tokensBefore) || compact.tokensBefore < 0) return null;
-    }
-    return { intent, message, choice: message.message.content };
+      if (!exactPlainObject(compact, ["id", "parentId", "timestamp", "type", "summary", "firstKeptEntryId", "tokensBefore"])
+        || compact.type !== "compaction" || compact.parentId !== intent.id || !nonEmptyString(compact.id)
+        || !validTimestamp(compact.timestamp) || !nonEmptyString(compact.summary) || compact.firstKeptEntryId !== intent.id
+        || !Number.isSafeInteger(compact.tokensBefore) || compact.tokensBefore < 0
+        || Date.parse(compact.timestamp) <= Date.parse(intent.timestamp) || Date.parse(message.timestamp) <= Date.parse(compact.timestamp)) return { kind: "invalid" };
+      return { kind: "terminal", intent, message, choice: message.message.content };
+    };
+    const classified = matches.map((intent) => validIntent(intent) ? pairFor(intent) : { kind: "invalid" });
+    const latest = classified.at(-1);
+    // An old matching request may only be retained when it has a complete,
+    // valid terminal decision.  This prevents ambiguous duplicate pendings.
+    if (!latest || latest.kind === "invalid" || classified.slice(0, -1).some((entry) => entry.kind !== "terminal")) return null;
+    return latest.kind === "terminal" ? latest : null;
   };
   const repairNow = () => {
     try {
@@ -1331,7 +1351,10 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (projection.finalReview?.status === "started" && projection.actionOffer?.tool === "goal_finalize" && projection.actionOffer.consumed === true) {
           return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction: { tool: "goal_finalize", params: projection.actionOffer.params }, action_token: projection.actionOffer.token });
         }
-        const pendingFinalIntent = pi.sessionManager?.getBranch?.()?.some((entry) => exactFinalIntent(entry, goalId, sessionId));
+        // A stale durable review can only be replaced by a fresh status cycle;
+        // never reuse its approval or result as completion authority.
+        if (projection.finalReview?.status === "stale") return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction: null });
+        const pendingFinalIntent = ctx.sessionManager?.getBranch?.()?.some((entry) => exactFinalIntent(entry, goalId, sessionId));
         if (!pendingFinalIntent && projection.finalReview?.status !== "started") {
           const fingerprint = obligationProgressFingerprint({ projection, worldSnapshot: world });
           const previous = projection.progressLedger?.at(-1);
@@ -1518,7 +1541,19 @@ export function createGoalEngineExtension(pi, options = {}) {
         // inspect or mutate an Episode until the frontier selected that Episode.
         const taskActions = new Map([...projection.tasks.keys()].map((taskId) => [taskId, taskActionState(projection, taskId)]));
         const frontier = actionableFrontier({ projection, worldSnapshot: world, taskActions, observationInventory: inventory });
-        const selected = nextObligationAction(frontier);
+        let selected = nextObligationAction(frontier);
+        // Task action state is the R9 authority even if an unrelated runtime
+        // inventory is unavailable to the obligation-policy frontier.
+        if (!selected) {
+          const task = [...projection.tasks.entries()].map(([taskId]) => ({ taskId, action: taskActionState(projection, taskId).requiredNextAction }))
+            .find(({ action }) => action && ["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(action.tool));
+          if (task) selected = { tool: task.action.tool, params: { task_id: task.taskId, ...task.action.params } };
+          else {
+            const finalStore = loadFinalizationProjection(root, goalId);
+            const finalCandidate = buildObligationFinalizationManifest({ projection: finalStore.projection, storeProjection: finalStore, worldSnapshot: world, conditionValidity: evaluateConditionGraph({ projection: finalStore.projection, worldSnapshot: world }).conditions, resourceInventory: world.resources });
+            if (finalCandidate.complete) selected = { tool: "goal_finalize", params: {} };
+          }
+        }
         if (selected?.tool === "repair_episode") {
           const episode = projection.repairEpisodes.get(selected.params.episode_id);
           const condition = projection.conditions.get(episode?.conditionId)?.definition;
@@ -1572,11 +1607,11 @@ export function createGoalEngineExtension(pi, options = {}) {
           const current = loadProjectionFn(root, goalId);
           return JSON.stringify({ goalId, runtimeState: current.runtimeState, readiness: current.readiness, ...(outcome.attention ? { status: outcome.attention[0], attention: outcome.attention } : {}), blocking: frontier.blocking, progressLedger: current.progressLedger });
         }
-        if (selected?.tool === "goal_finalize" || (projection.runtimeState === "active" && projection.finalReview?.status !== "started")) {
+        if (selected?.tool === "goal_finalize" || projection.finalReview?.status === "started") {
           const storeProjection = loadFinalizationProjection(root, goalId);
           const manifest = buildObligationFinalizationManifest({ projection: storeProjection.projection, storeProjection, worldSnapshot: world, conditionValidity: evaluateConditionGraph({ projection: storeProjection.projection, worldSnapshot: world }).conditions, resourceInventory: world.resources });
           if (!manifest.complete || typeof finalReviewProvider !== "function") return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R11_FINALIZATION_REQUIRED", blocking: frontier.blocking, attention: frontier.attention, progressLedger: projection.progressLedger });
-          const pair = finalApprovalPair(goalId, sessionId, manifest);
+          const pair = finalApprovalPair(goalId, sessionId, manifest, ctx);
           if (pair?.choice === "reject") { persistMetadata(finalIntentType, finalIntent(manifest, sessionId)); return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "APPROVAL_REQUIRED", machineAction: null }); }
           if (pair?.choice === "approve") {
             const machineAction = { tool: "goal_finalize", params: { goal_id: goalId, approval_entry_id: pair.message.id } };
@@ -1584,7 +1619,7 @@ export function createGoalEngineExtension(pi, options = {}) {
             projection = appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId, projection), projection.version);
             return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction, action_token: offer.token });
           }
-          const pending = pi.sessionManager?.getBranch?.()?.filter((entry) => exactFinalIntent(entry, goalId, sessionId) && entry.data.manifestHash === manifest.manifestHash && entry.data.stateHash === manifest.stateHash && entry.data.worldHash === manifest.worldHash && entry.data.head === manifest.head) || [];
+          const pending = ctx.sessionManager?.getBranch?.()?.filter((entry) => exactFinalIntent(entry, goalId, sessionId) && entry.data.manifestHash === manifest.manifestHash && entry.data.stateHash === manifest.stateHash && entry.data.worldHash === manifest.worldHash && entry.data.head === manifest.head) || [];
           if (!pending.length) persistMetadata(finalIntentType, finalIntent(manifest, sessionId));
           return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction: null });
         }
@@ -2055,7 +2090,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       const approval = { entryId: params.approval_entry_id, sessionId, source: "user" };
       let review = projection.finalReview;
       if (!review) {
-        const pair = finalApprovalPair(goalId, sessionId, manifest);
+        const pair = finalApprovalPair(goalId, sessionId, manifest, ctx);
         if (!pair || pair.choice !== "approve" || pair.message.id !== params.approval_entry_id || !manifest.complete) throw new Error("invalid final review approval");
         const reviewId = `review-${canonicalHash({ goalId, manifestHash: manifest.manifestHash, stateHash: manifest.stateHash, worldHash: manifest.worldHash, head: manifest.head, approval })}`;
         const started = makeEvent("goal.final_review_started", { reviewId, manifestHash: manifest.manifestHash, stateHash: manifest.stateHash, worldHash: manifest.worldHash, head: manifest.head, approval }, goalId, "goal-runtime.v1");
@@ -2066,7 +2101,18 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (result.status === "failed") throw Object.assign(new Error("FINAL_REVIEW_PROVIDER_FAILED"), { code: "FINAL_REVIEW_PROVIDER_FAILED" });
       const current = loadProjectionFn(root, goalId);
       const freshWorld = runtimeHost?.captureCurrentWorld?.({ cwd: ctx.cwd });
-      const stale = current.version !== projection.version || result.reviewId !== current.finalReview?.reviewId || manifest.manifestHash !== current.finalReview?.manifestHash || freshWorld?.repo?.head !== current.finalReview?.head;
+      let freshManifest = null;
+      if (freshWorld?.safe) {
+        const freshBase = loadFinalizationProjection(root, goalId, { version: baseVersion });
+        freshManifest = buildObligationFinalizationManifest({ projection: freshBase.projection, storeProjection: freshBase, worldSnapshot: freshWorld, conditionValidity: evaluateConditionGraph({ projection: freshBase.projection, worldSnapshot: freshWorld }).conditions, resourceInventory: freshWorld.resources });
+      }
+      const sameManifest = freshManifest?.complete === true
+        && ["manifestHash", "stateHash", "worldHash", "head"].every((field) => freshManifest[field] === manifest[field]);
+      const sameReview = result.reviewId === current.finalReview?.reviewId
+        && ["manifestHash", "stateHash", "worldHash", "head"].every((field) => current.finalReview?.[field] === manifest[field])
+        && current.finalReview?.approval?.entryId === approval.entryId
+        && current.finalReview?.approval?.sessionId === approval.sessionId;
+      const stale = current.version !== projection.version || !sameManifest || !sameReview;
       const recorded = makeEvent("goal.final_review_recorded", { reviewId: result.reviewId, resultHash: result.resultHash, severity: result.severity, status: stale && ["none", "minor"].includes(result.severity) ? "stale" : result.status }, goalId, "goal-runtime.v1");
       if (stale || ["important", "critical"].includes(result.severity)) { appendEventFn(root, recorded, current.version); return { status: stale ? "stale" : "changes_required" }; }
       const completed = makeEvent("goal.completed", { verdict: "COMPLETE", reviewId: result.reviewId, manifestHash: current.finalReview.manifestHash, stateHash: current.finalReview.stateHash, worldHash: current.finalReview.worldHash, head: current.finalReview.head, resultHash: result.resultHash }, goalId, "goal-runtime.v1");
@@ -2911,7 +2957,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       try {
         const { root } = executionScopeFor(ctx), sessionId = sessionIdentity(ctx);
         const owned = loadAllProjections(root).filter((projection) => projection.eventSchemaVersion === "goal-runtime.v1" && projection.runtimeState === "active" && ownedBySession(projection, sessionId));
-        if (owned.length === 1 && pi.sessionManager?.getBranch?.()?.some((entry) => exactFinalIntent(entry, owned[0].goalId, sessionId))) return { action: "continue" };
+        if (owned.length === 1 && ctx.sessionManager?.getBranch?.()?.some((entry) => exactFinalIntent(entry, owned[0].goalId, sessionId))) return { action: "continue" };
       } catch { /* Ordinary suspension remains fail-closed. */ }
     }
     const suspensionReason = !event.images?.length && event.streamingBehavior === "steer" ? "interactive_steer"
