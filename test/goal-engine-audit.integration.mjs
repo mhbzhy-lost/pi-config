@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendEvent } from "../scripts/lib/goal-engine/store.mjs";
 import { auditGoal } from "../scripts/lib/goal-engine/audit.mjs";
-import { mkdtempSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -25,6 +24,15 @@ function tmpRoot() {
   return mkdtempSync(join(tmpdir(), "ge-audit-"));
 }
 
+function writeReplayEvent(root, event) {
+  const goalDir = join(root, "goals", event.goalId);
+  const eventsPath = join(goalDir, "events.jsonl");
+  mkdirSync(goalDir, { recursive: true, mode: 0o700 });
+  chmodSync(goalDir, 0o700);
+  appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+  chmodSync(eventsPath, 0o600);
+}
+
 const TASK_DEF = {
   description: "Implement feature",
   deps: [],
@@ -36,24 +44,22 @@ const TASK_DEF = {
 test("auditGoal reports healthy for well-maintained goal (v2 integrated+released)", () => {
   const root = tmpRoot();
   const goalId = "healthy-goal";
-  let v = 0;
-
-  appendEvent(root, makeV2Event("goal.created", {
+  writeReplayEvent(root, makeV2Event("goal.created", {
     objective: "Build feature X",
     scope: ["src/"],
     nonGoals: [],
     dod: ["Tests pass"],
     tasks: ["t1"],
     taskDefs: { t1: TASK_DEF },
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.dispatched", {
+  writeReplayEvent(root, makeV2Event("task.dispatched", {
     taskId: "t1",
     contractHash: "sha256aaa",
     workspace: { attempt: 1, path: "/tmp/goal-engine/audit-healthy", branch: "task/healthy", baseCommit: "base-healthy" },
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.settled", {
+  writeReplayEvent(root, makeV2Event("task.settled", {
     taskId: "t1",
     outcome: "succeeded",
     evidence: { type: "external_review", ref: "independent-review-healthy" },
@@ -61,40 +67,40 @@ test("auditGoal reports healthy for well-maintained goal (v2 integrated+released
     attempt: 1,
     executorHead: "executor-head-healthy",
     nextAction: "Accept t1 and verify all acceptance criteria are satisfied",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("goal.checkpoint", {
+  writeReplayEvent(root, makeV2Event("goal.checkpoint", {
     nextAction: "Review evidence quality and confirm task acceptance is valid",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.workspace_disposition_started", {
+  writeReplayEvent(root, makeV2Event("task.workspace_disposition_started", {
     taskId: "t1",
     attempt: 1,
     requestedAction: "integrate",
     strategy: "merge",
     executorHead: "executor-head-healthy",
     originHeadBefore: "origin-head-before-healthy",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.workspace_disposition_applied", {
+  writeReplayEvent(root, makeV2Event("task.workspace_disposition_applied", {
     taskId: "t1",
     attempt: 1,
     action: "integrate",
     strategy: "merge",
     executorHead: "executor-head-healthy",
     originHead: "origin-head-after-healthy",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.workspace_disposed", {
+  writeReplayEvent(root, makeV2Event("task.workspace_disposed", {
     taskId: "t1",
     attempt: 1,
     action: "integrate",
     released: true,
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.accepted", { taskId: "t1", workspaceAttempt: 1 }, goalId), v++);
+  writeReplayEvent(root, makeV2Event("task.accepted", { taskId: "t1", workspaceAttempt: 1 }, goalId));
 
-  appendEvent(root, makeV2Event("goal.completed", { verdict: "COMPLETE" }, goalId), v++);
+  writeReplayEvent(root, makeV2Event("goal.completed", { verdict: "COMPLETE" }, goalId));
 
   const report = auditGoal(goalId, root);
   assert.equal(report.verdict, "HEALTHY");
@@ -111,27 +117,25 @@ test("auditGoal reports healthy for well-maintained goal (v2 integrated+released
 test("auditGoal detects high retry rate", () => {
   const root = tmpRoot();
   const goalId = "retry-goal";
-  let v = 0;
-
-  appendEvent(root, makeEvent("goal.created", {
+  writeReplayEvent(root, makeEvent("goal.created", {
     objective: "Flaky task",
     scope: [],
     nonGoals: [],
     dod: [],
     tasks: ["t1"],
     taskDefs: { t1: TASK_DEF },
-  }, goalId), v++);
+  }, goalId));
 
   for (let i = 0; i < 3; i++) {
-    appendEvent(root, makeEvent("task.dispatched", { taskId: "t1", contractHash: `hash-${i}` }, goalId), v++);
-    appendEvent(root, makeEvent("task.settled", {
+    writeReplayEvent(root, makeEvent("task.dispatched", { taskId: "t1", contractHash: `hash-${i}` }, goalId));
+    writeReplayEvent(root, makeEvent("task.settled", {
       taskId: "t1",
       outcome: "failed",
       nextAction: `Retry t1 attempt ${i + 2} with adjusted implementation strategy`,
-    }, goalId), v++);
-    appendEvent(root, makeEvent("goal.checkpoint", {
+    }, goalId));
+    writeReplayEvent(root, makeEvent("goal.checkpoint", {
       nextAction: `Diagnose failure cause and prepare attempt ${i + 2} for t1`,
-    }, goalId), v++);
+    }, goalId));
   }
 
   const report = auditGoal(goalId, root);
@@ -143,24 +147,22 @@ test("auditGoal detects high retry rate", () => {
 test("auditGoal detects all self-produced evidence (v2 integrated+released)", () => {
   const root = tmpRoot();
   const goalId = "self-produced-goal";
-  let v = 0;
-
-  appendEvent(root, makeV2Event("goal.created", {
+  writeReplayEvent(root, makeV2Event("goal.created", {
     objective: "Self-verified work",
     scope: [],
     nonGoals: [],
     dod: [],
     tasks: ["t1"],
     taskDefs: { t1: TASK_DEF },
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.dispatched", {
+  writeReplayEvent(root, makeV2Event("task.dispatched", {
     taskId: "t1",
     contractHash: "sha256bbb",
     workspace: { attempt: 1, path: "/tmp/goal-engine/self-produced", branch: "task/self-produced", baseCommit: "base-self-produced" },
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.settled", {
+  writeReplayEvent(root, makeV2Event("task.settled", {
     taskId: "t1",
     outcome: "succeeded",
     evidence: { type: "diff", ref: "git diff HEAD~1" },
@@ -168,40 +170,40 @@ test("auditGoal detects all self-produced evidence (v2 integrated+released)", ()
     attempt: 1,
     executorHead: "executor-head-self",
     nextAction: "Accept t1 and verify goal completion criteria are satisfied",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("goal.checkpoint", {
+  writeReplayEvent(root, makeV2Event("goal.checkpoint", {
     nextAction: "Review self-produced evidence and decide on task acceptance",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.workspace_disposition_started", {
+  writeReplayEvent(root, makeV2Event("task.workspace_disposition_started", {
     taskId: "t1",
     attempt: 1,
     requestedAction: "integrate",
     strategy: "merge",
     executorHead: "executor-head-self",
     originHeadBefore: "origin-head-before-self",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.workspace_disposition_applied", {
+  writeReplayEvent(root, makeV2Event("task.workspace_disposition_applied", {
     taskId: "t1",
     attempt: 1,
     action: "integrate",
     strategy: "merge",
     executorHead: "executor-head-self",
     originHead: "origin-head-after-self",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.workspace_disposed", {
+  writeReplayEvent(root, makeV2Event("task.workspace_disposed", {
     taskId: "t1",
     attempt: 1,
     action: "integrate",
     released: true,
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.accepted", { taskId: "t1", workspaceAttempt: 1 }, goalId), v++);
+  writeReplayEvent(root, makeV2Event("task.accepted", { taskId: "t1", workspaceAttempt: 1 }, goalId));
 
-  appendEvent(root, makeV2Event("goal.completed", { verdict: "DONE_WITHOUT_EXTERNAL_VERIFICATION" }, goalId), v++);
+  writeReplayEvent(root, makeV2Event("goal.completed", { verdict: "DONE_WITHOUT_EXTERNAL_VERIFICATION" }, goalId));
 
   const report = auditGoal(goalId, root);
   assert.ok(report.signals.includes("ALL_SELF_PRODUCED_EVIDENCE"));
@@ -212,30 +214,28 @@ test("auditGoal detects all self-produced evidence (v2 integrated+released)", ()
 test("auditGoal flags pre_existing evidence without external review in v1 history", () => {
   const root = tmpRoot();
   const goalId = "legacy-acceptance-goal";
-  let v = 0;
-
-  appendEvent(root, makeEvent("goal.created", {
+  writeReplayEvent(root, makeEvent("goal.created", {
     objective: "Legacy acceptance regression",
     scope: [],
     nonGoals: [],
     dod: [],
     tasks: ["t1"],
     taskDefs: { t1: TASK_DEF },
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeEvent("task.dispatched", { taskId: "t1", contractHash: "sha256-legacy" }, goalId), v++);
+  writeReplayEvent(root, makeEvent("task.dispatched", { taskId: "t1", contractHash: "sha256-legacy" }, goalId));
 
-  appendEvent(root, makeEvent("task.settled", {
+  writeReplayEvent(root, makeEvent("task.settled", {
     taskId: "t1",
     outcome: "succeeded",
     evidence: { type: "file", path: "src/legacy.ts" },
     evidenceSource: "pre_existing",
     nextAction: "Verify the completed change against acceptance criteria and release notes",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeEvent("task.accepted", { taskId: "t1" }, goalId), v++);
+  writeReplayEvent(root, makeEvent("task.accepted", { taskId: "t1" }, goalId));
 
-  appendEvent(root, makeEvent("goal.completed", { verdict: "COMPLETE" }, goalId), v++);
+  writeReplayEvent(root, makeEvent("goal.completed", { verdict: "COMPLETE" }, goalId));
 
   const report = auditGoal(goalId, root);
   assert.ok(report.signals.includes("LEGACY_UNVERIFIED_ACCEPTANCE"));
@@ -249,24 +249,22 @@ test("auditGoal flags pre_existing evidence without external review in v1 histor
 test("auditGoal detects incomplete workspace disposition while disposing", () => {
   const root = tmpRoot();
   const goalId = "disposing-workspace-goal";
-  let v = 0;
-
-  appendEvent(root, makeV2Event("goal.created", {
+  writeReplayEvent(root, makeV2Event("goal.created", {
     objective: "Disposing workspace check",
     scope: [],
     nonGoals: [],
     dod: [],
     tasks: ["t1"],
     taskDefs: { t1: TASK_DEF },
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.dispatched", {
+  writeReplayEvent(root, makeV2Event("task.dispatched", {
     taskId: "t1",
     contractHash: "sha256-disposing",
     workspace: { attempt: 1, path: "/tmp/goal-engine/disposing", branch: "task/disposing", baseCommit: "base-disposing" },
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.settled", {
+  writeReplayEvent(root, makeV2Event("task.settled", {
     taskId: "t1",
     outcome: "succeeded",
     evidence: { type: "file", path: "src/x.ts" },
@@ -274,16 +272,16 @@ test("auditGoal detects incomplete workspace disposition while disposing", () =>
     attempt: 1,
     executorHead: "executor-head-disposing",
     nextAction: "Verify the completed change against acceptance criteria and release notes",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.workspace_disposition_started", {
+  writeReplayEvent(root, makeV2Event("task.workspace_disposition_started", {
     taskId: "t1",
     attempt: 1,
     requestedAction: "discard",
     strategy: "merge",
     executorHead: "executor-head-disposing",
     originHeadBefore: "origin-head-before-disposing",
-  }, goalId), v++);
+  }, goalId));
 
   const report = auditGoal(goalId, root);
   assert.ok(report.signals.includes("INCOMPLETE_WORKSPACE_DISPOSITION"));
@@ -295,24 +293,22 @@ test("auditGoal detects incomplete workspace disposition while disposing", () =>
 test("auditGoal detects unreleased integrated workspace in applied phase", () => {
   const root = tmpRoot();
   const goalId = "applied-unreleased-workspace-goal";
-  let v = 0;
-
-  appendEvent(root, makeV2Event("goal.created", {
+  writeReplayEvent(root, makeV2Event("goal.created", {
     objective: "Unreleased integrated workspace check",
     scope: [],
     nonGoals: [],
     dod: [],
     tasks: ["t1"],
     taskDefs: { t1: TASK_DEF },
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.dispatched", {
+  writeReplayEvent(root, makeV2Event("task.dispatched", {
     taskId: "t1",
     contractHash: "sha256-applied",
     workspace: { attempt: 1, path: "/tmp/goal-engine/applied", branch: "task/applied", baseCommit: "base-applied" },
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.settled", {
+  writeReplayEvent(root, makeV2Event("task.settled", {
     taskId: "t1",
     outcome: "succeeded",
     evidence: { type: "file", path: "src/x.ts" },
@@ -320,25 +316,25 @@ test("auditGoal detects unreleased integrated workspace in applied phase", () =>
     attempt: 1,
     executorHead: "executor-head-applied",
     nextAction: "Verify the completed change against acceptance criteria and release notes",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.workspace_disposition_started", {
+  writeReplayEvent(root, makeV2Event("task.workspace_disposition_started", {
     taskId: "t1",
     attempt: 1,
     requestedAction: "integrate",
     strategy: "merge",
     executorHead: "executor-head-applied",
     originHeadBefore: "origin-head-before-applied",
-  }, goalId), v++);
+  }, goalId));
 
-  appendEvent(root, makeV2Event("task.workspace_disposition_applied", {
+  writeReplayEvent(root, makeV2Event("task.workspace_disposition_applied", {
     taskId: "t1",
     attempt: 1,
     action: "integrate",
     strategy: "merge",
     executorHead: "executor-head-applied",
     originHead: "origin-head-after-applied",
-  }, goalId), v++);
+  }, goalId));
 
   const report = auditGoal(goalId, root);
   assert.ok(report.signals.includes("INCOMPLETE_WORKSPACE_DISPOSITION"));
