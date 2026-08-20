@@ -121,6 +121,41 @@ test("reanchor preserves the checkpoint and restores a reclaimable managed workt
   assert.equal(releaseManagedWorktree({ originRoot: f.root, id: allocation.id, ownerToken: allocation.ownerToken }).state, "released");
 });
 
+test("reanchor suppresses lsof warnings only with -w while preserving the process fence", (t) => {
+  const f = repoFixture(t, "worktree-managed-reanchor-lsof-warning-");
+  const allocation = createManagedWorktree(createOptions(f));
+  git(allocation.path, "commit", "--allow-empty", "-m", "checkpoint");
+  const checkpoint = git(allocation.path, "rev-parse", "HEAD");
+  markReclaimable(f, allocation);
+  const arena = createTemporaryArenaSync("worktree-managed-reanchor-lsof-warning-");
+  t.after(() => arena.disposeSync());
+  const fakeBin = arena.mkdtempSync("bin-");
+  const callsPath = join(arena.path, "lsof-calls.json");
+  const fakeLsof = join(fakeBin, "lsof");
+  writeFileSync(fakeLsof, `#!${process.execPath}
+const fs = require("node:fs");
+const callsPath = ${JSON.stringify(callsPath)};
+const args = process.argv.slice(2);
+const calls = fs.existsSync(callsPath) ? JSON.parse(fs.readFileSync(callsPath, "utf8")) : [];
+calls.push(args);
+fs.writeFileSync(callsPath, JSON.stringify(calls));
+if (!args.includes("-w")) process.stderr.write("lsof: WARNING: can't stat() smb://TimeMachine/Backup\\n");
+`);
+  chmodSync(fakeLsof, 0o700);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${fakeBin}${process.platform === "win32" ? ";" : ":"}${originalPath ?? ""}`;
+  t.after(() => {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  });
+
+  const result = reanchorManagedWorktree({ originRoot: f.root, id: allocation.id, ownerToken: allocation.ownerToken, expectedHead: checkpoint, targetHead: f.baseCommit });
+  assert.equal(result.headCommit, f.baseCommit);
+  const calls = JSON.parse(readFileSync(callsPath, "utf8"));
+  assert.equal(calls.length, 2);
+  assert.equal(calls.every((args) => args.includes("-w")), true);
+});
+
 test("reanchor rejects owner, stale head, non-ancestor and dirty state without moving refs", (t) => {
   const f = repoFixture(t);
   const allocation = createManagedWorktree(createOptions(f));
