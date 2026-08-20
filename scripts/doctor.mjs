@@ -9,6 +9,17 @@ import { promisify } from "node:util";
 import { homedir } from "node:os";
 import { discoverManagedSkills } from "./lib/skill-whitelist.mjs";
 import { createGoalEngineExtension } from "./lib/goal-engine/extension.mjs";
+import { generationCapabilities } from "./lib/goal-engine/generation-capabilities.mjs";
+import { normalizeRuntimeGoalInit } from "./lib/goal-engine/obligation-contract.mjs";
+import { createRuntimeActivationChallenge } from "./lib/goal-engine/human-decision.mjs";
+import { prepareManagedValidation, startManagedValidation, inspectManagedValidation, recoverManagedValidation, releaseManagedValidation } from "./lib/goal-engine/managed-validation.mjs";
+import { captureCurrentWorld } from "./lib/goal-engine/current-world.mjs";
+import { evaluateConditionGraph } from "./lib/goal-engine/condition-validity.mjs";
+import { deriveFindingFromFailedEvidence, openRepairEpisode } from "./lib/goal-engine/repair-policy.mjs";
+import { buildSuspensionPlan, suspensionGuard } from "./lib/goal-engine/suspension.mjs";
+import { finalizeGoal, buildObligationFinalizationManifest } from "./lib/goal-engine/finalization.mjs";
+import { runRecoverableFinalReview } from "./lib/goal-engine/final-review.mjs";
+import { loadFinalizationProjection } from "./lib/goal-engine/store.mjs";
 import { auditGoalContractIntegrity } from "./lib/goal-contract/authorization-audit.mjs";
 import { reconcileManagedWorktrees } from "./lib/worktree-lifecycle/inventory.mjs";
 
@@ -58,6 +69,58 @@ const ROOT_BROKER_COMPONENTS = [
   "scripts/lib/subagent-dispatch/root-broker-registry.ts",
   "pi/child-extensions/root-session-owner.ts",
 ];
+
+const runtimeBoundaryIssue = (code, message) => `${code}: ${message}`;
+
+function defaultGoalRuntimeBoundaryFactory() {
+  return {
+    generationCapabilities,
+    normalizeRuntimeGoalInit,
+    createRuntimeActivationChallenge,
+    managedValidation: { prepareManagedValidation, startManagedValidation, inspectManagedValidation, recoverManagedValidation, releaseManagedValidation },
+    currentWorld: { captureCurrentWorld, evaluateConditionGraph },
+    repair: { deriveFindingFromFailedEvidence, openRepairEpisode },
+    suspension: { buildSuspensionPlan, suspensionGuard },
+    finalization: { finalizeGoal, buildObligationFinalizationManifest },
+    finalReview: { runRecoverableFinalReview },
+    store: { loadFinalizationProjection },
+  };
+}
+
+export function inspectGoalRuntimeBoundaries({ goalRuntimeBoundaryFactory = defaultGoalRuntimeBoundaryFactory } = {}) {
+  let runtime;
+  try { runtime = goalRuntimeBoundaryFactory(); } catch { return [runtimeBoundaryIssue("GOAL_RUNTIME_FACTORY", "runtime capability factory failed")]; }
+  const issues = [];
+  const missing = (code, owner, names) => {
+    for (const name of names) if (typeof owner?.[name] !== "function") issues.push(runtimeBoundaryIssue(code, `missing ${name}`));
+  };
+  try {
+    const planned = runtime.generationCapabilities("planned.v1");
+    const goalRuntime = runtime.generationCapabilities("goal-runtime.v1");
+    if (planned?.taskContract !== "criteria-only" || planned?.executorBinding !== "strict" || planned?.settlement !== "dual-path" || planned?.completion !== "accept-auto" || goalRuntime?.taskContract !== "criteria-only" || goalRuntime?.executorBinding !== "strict" || goalRuntime?.settlement !== "dual-path" || goalRuntime?.completion !== "goal-finalize" || goalRuntime?.conditions !== true || goalRuntime?.executionRevision !== true) throw new Error("forged");
+  } catch { issues.push(runtimeBoundaryIssue("GOAL_RUNTIME_GENERATION_CAPABILITIES", "planned.v1 must retain strict accept-auto and runtime must require goal-finalize")); }
+  const draft = { objective: "doctor probe", execution: { schema: "goal-runtime.v1", tasks: [], conditions: [], write_policy: { allowed_paths: [] }, budgets: { max_observations: 0, max_repairs: 0, max_elapsed_minutes: 0, max_no_progress: 0 } } };
+  try {
+    if (typeof runtime.normalizeRuntimeGoalInit !== "function") throw new Error("missing");
+    for (const rejected of [{ ...draft, profile: "caller" }, { ...draft, command: "unsafe" }, draft]) {
+      let rejectedInput = false;
+      try { runtime.normalizeRuntimeGoalInit(rejected, {}); } catch { rejectedInput = true; }
+      if (!rejectedInput) throw new Error("forged");
+    }
+  } catch { issues.push(runtimeBoundaryIssue("GOAL_RUNTIME_CONTRACT_AUTHORITY", "runtime contract must require an obligation and reject caller profile or command")); }
+  try {
+    if (runtime.createRuntimeActivationChallenge({ goalId: "doctor", contractHash: "0".repeat(64), baseHead: "0".repeat(40), sessionId: "doctor", proposalId: "doctor" })?.kind !== "runtime_activation_approval") throw new Error("forged");
+  } catch { issues.push(runtimeBoundaryIssue("GOAL_RUNTIME_DRAFT_APPROVAL", "missing runtime draft approval boundary")); }
+  missing("GOAL_RUNTIME_MANAGED_VALIDATION_RECOVERY", runtime.managedValidation, ["prepareManagedValidation", "startManagedValidation", "inspectManagedValidation", "recoverManagedValidation", "releaseManagedValidation"]);
+  missing("GOAL_RUNTIME_CURRENT_WORLD", runtime.currentWorld, ["captureCurrentWorld", "evaluateConditionGraph"]);
+  missing("GOAL_RUNTIME_FINDING_REPAIR_SUSPEND", runtime.repair, ["deriveFindingFromFailedEvidence", "openRepairEpisode"]);
+  missing("GOAL_RUNTIME_FINDING_REPAIR_SUSPEND", runtime.suspension, ["buildSuspensionPlan", "suspensionGuard"]);
+  try { runtime.finalization?.finalizeGoal({ eventSchemaVersion: "planned.v1" }); throw new Error("forged"); } catch (error) { if (!String(error?.message).includes("FINALIZATION_UNSUPPORTED_GENERATION")) issues.push(runtimeBoundaryIssue("GOAL_RUNTIME_FINALIZATION", "planned finalization must be rejected")); }
+  missing("GOAL_RUNTIME_FINALIZATION", runtime.finalization, ["buildObligationFinalizationManifest"]);
+  missing("GOAL_RUNTIME_FINALIZATION", runtime.finalReview, ["runRecoverableFinalReview"]);
+  missing("GOAL_RUNTIME_FINALIZATION", runtime.store, ["loadFinalizationProjection"]);
+  return issues;
+}
 
 async function readIfExists(path) {
   try {
@@ -177,6 +240,7 @@ export function formatWorktreeLifecycleWarnings(report) {
 export async function inspectConfiguration(repoRoot, options = {}) {
   const issues = [];
   issues.push(...await inspectGoalContractIntegrity(repoRoot));
+  issues.push(...inspectGoalRuntimeBoundaries({ goalRuntimeBoundaryFactory: options.goalRuntimeBoundaryFactory }));
   let desired = new Map();
   try {
     desired = await discoverManagedSkills(repoRoot);
