@@ -86,7 +86,7 @@ function providerSource(contract) {
     export default function (pi) {
       let ordinal = 0;
       let projectStep = 0;
-      pi.registerProvider("fake", {
+      const deterministicProvider = {
         baseUrl: "http://127.0.0.1:9", api: "fake", apiKey: "not-used",
         models: [{ id: "deterministic", name: "Deterministic", input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 256 }],
         streamSimple(model, context) {
@@ -139,6 +139,11 @@ ${JSON.stringify({
           stream.end();
           return stream;
         },
+      };
+      pi.registerProvider("fake", deterministicProvider);
+      pi.registerProvider("openai-codex", {
+        ...deterministicProvider,
+        models: [{ id: "gpt-5.6-luna", name: "Hermetic Luna", input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 256 }],
       });
     }
   `;
@@ -235,7 +240,7 @@ test("project typed dispatch binds the real 0.45.2 workflow leaf to the Root Bro
     await writeFile(join(projectRoot, ".pi", "agents", "executor.md"), `---
 name: executor
 description: deterministic typed workflow executor
-model: fake/deterministic
+model: openai-codex/gpt-5.6-luna
 tools: read
 extensions: ${provider}
 subagentOnlyExtensions: .pi-subagents/root-session-owner-entry.mjs
