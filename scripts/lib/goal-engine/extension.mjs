@@ -14,7 +14,7 @@ import { evaluateConditionGraph } from "./condition-validity.mjs";
 import { generationCapabilities } from "./generation-capabilities.mjs";
 import { buildTransferChallenge, listCwdGoals, ownerSessionId, transferChallengeState, workspaceReleased } from "./session-transfer.mjs";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.mjs";
-import { appendEvent, appendEventBatch, appendEventBatchWithSettlementEvidence, loadProjection, listGoals, listGoalIds } from "./store.mjs";
+import { appendEvent, appendEventBatch, appendEventBatchWithSettlementEvidence, loadProjection, loadFinalizationProjection, listGoals, listGoalIds } from "./store.mjs";
 import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence, serializeSettlementEvidenceYaml } from "./settlement-evidence.mjs";
 import { compileTaskContract, assertPendingTaskContractsCompile } from "./dispatch.mjs";
 import { splitDispatchEnvelope } from "./dispatch-ir.mjs";
@@ -28,7 +28,8 @@ import {
 } from "./continuity.mjs";
 import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION, schemaVersionForMutation, suspensionClosureHash, validateNextAction } from "./events.mjs";
 import { completionVerdictFor } from "./evidence.mjs";
-import { finalizeGoal } from "./finalization.mjs";
+import { finalizeGoal, buildObligationFinalizationManifest } from "./finalization.mjs";
+import { createFinalReviewFileStore, runRecoverableFinalReview } from "./final-review.mjs";
 import { deriveFindingFromFailedEvidence, openRepairEpisode, buildRemediationTaskCandidate, createRepairChallenge, recordRepairUserDecision, issueRepairCapability, validateRemediationTask, planRepairObservationLink, repairEpisodeTransition } from "./repair-policy.mjs";
 import {
   assertExecutorBindingTicketCurrent,
@@ -627,6 +628,30 @@ export function createGoalEngineExtension(pi, options = {}) {
   const nonEmptyString = (value) => typeof value === "string" && value.trim() === value && value.length > 0;
   const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
   const canonicalHash = (value) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+  const finalReviewProvider = options.finalReviewProvider;
+  const finalIntentType = "goal-engine-final-review-approval-intent";
+  const finalIntentFields = ["protocol", "goalId", "manifestHash", "stateHash", "worldHash", "head", "sessionId", "choices"];
+  const finalIntent = (manifest, sessionId) => ({ protocol: "goal-engine-final-review-approval-intent.v1", goalId: manifest.goalId, manifestHash: manifest.manifestHash, stateHash: manifest.stateHash, worldHash: manifest.worldHash, head: manifest.head, sessionId, choices: ["approve", "reject"] });
+  const exactFinalIntent = (entry, goalId, sessionId) => entry?.type === "custom" && entry.customType === finalIntentType
+    && exactPlainObject(entry.data, finalIntentFields) && entry.data.protocol === "goal-engine-final-review-approval-intent.v1"
+    && entry.data.goalId === goalId && entry.data.sessionId === sessionId && Array.isArray(entry.data.choices)
+    && entry.data.choices.length === 2 && entry.data.choices[0] === "approve" && entry.data.choices[1] === "reject"
+    && /^[a-f0-9]{64}$/.test(entry.data.manifestHash) && /^[a-f0-9]{64}$/.test(entry.data.stateHash)
+    && /^[a-f0-9]{64}$/.test(entry.data.worldHash) && /^[a-f0-9]{40}$/.test(entry.data.head);
+  const finalApprovalPair = (goalId, sessionId, manifest) => {
+    const branch = pi.sessionManager?.getBranch?.();
+    if (!Array.isArray(branch)) return null;
+    const intents = branch.filter((entry) => exactFinalIntent(entry, goalId, sessionId) && entry.data.manifestHash === manifest.manifestHash && entry.data.stateHash === manifest.stateHash && entry.data.worldHash === manifest.worldHash && entry.data.head === manifest.head);
+    if (intents.length !== 1) return null;
+    const intent = intents[0], byId = new Map(branch.map((entry) => [entry.id, entry]));
+    const message = branch.at(-1);
+    if (!message || message.type !== "message" || !exactPlainObject(message.message, ["role", "content"]) || message.message.role !== "user" || !["approve", "reject"].includes(message.message.content) || message.images?.length || message.streamingBehavior !== undefined || !nonEmptyString(message.id) || !validTimestamp(message.timestamp)) return null;
+    if (message.parentId !== intent.id) {
+      const compact = byId.get(message.parentId);
+      if (!compact || compact.parentId !== intent.id || !exactPlainObject(compact, ["id", "parentId", "timestamp", "type", "summary", "firstKeptEntryId", "tokensBefore"]) || compact.type !== "compaction" || !nonEmptyString(compact.summary) || compact.firstKeptEntryId !== intent.id || !Number.isSafeInteger(compact.tokensBefore) || compact.tokensBefore < 0) return null;
+    }
+    return { intent, message, choice: message.message.content };
+  };
   const repairNow = () => {
     try {
       const value = typeof runtimeHost?.clock === "function" ? runtimeHost.clock()
@@ -1303,9 +1328,15 @@ export function createGoalEngineExtension(pi, options = {}) {
         let world;
         try { world = runtimeHost.captureCurrentWorld({ cwd }); } catch { world = null; }
         if (!world?.safe) return JSON.stringify({ goalId, status: "RUNTIME_READINESS_BLOCKER", attention: ["WORLD_SNAPSHOT_UNSAFE"] });
-        const fingerprint = obligationProgressFingerprint({ projection, worldSnapshot: world });
-        const previous = projection.progressLedger?.at(-1);
-        projection = appendEventFn(root, makeEvent("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: !previous || previous.canonicalFingerprint !== fingerprint, sequence: (projection.progressLedger?.length || 0) + 1 }, goalId, "goal-runtime.v1"), projection.version);
+        if (projection.finalReview?.status === "started" && projection.actionOffer?.tool === "goal_finalize" && projection.actionOffer.consumed === true) {
+          return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction: { tool: "goal_finalize", params: projection.actionOffer.params }, action_token: projection.actionOffer.token });
+        }
+        const pendingFinalIntent = pi.sessionManager?.getBranch?.()?.some((entry) => exactFinalIntent(entry, goalId, sessionId));
+        if (!pendingFinalIntent && projection.finalReview?.status !== "started") {
+          const fingerprint = obligationProgressFingerprint({ projection, worldSnapshot: world });
+          const previous = projection.progressLedger?.at(-1);
+          projection = appendEventFn(root, makeEvent("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: !previous || previous.canonicalFingerprint !== fingerprint, sequence: (projection.progressLedger?.length || 0) + 1 }, goalId, "goal-runtime.v1"), projection.version);
+        }
         if (projection.runtimeState === "awaiting_user_approval") {
           const terminal = [...runtimeChallenges.values()].filter((item) => !item.invalid && item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && (item.stale || item.rejected)).at(-1);
           if (terminal) return JSON.stringify({ goalId, status: terminal.rejected ? "RUNTIME_APPROVAL_REJECTED" : "RUNTIME_APPROVAL_STALE", attention: [terminal.rejected ? "RUNTIME_APPROVAL_REJECTED" : "RUNTIME_APPROVAL_STALE"] });
@@ -1541,7 +1572,22 @@ export function createGoalEngineExtension(pi, options = {}) {
           const current = loadProjectionFn(root, goalId);
           return JSON.stringify({ goalId, runtimeState: current.runtimeState, readiness: current.readiness, ...(outcome.attention ? { status: outcome.attention[0], attention: outcome.attention } : {}), blocking: frontier.blocking, progressLedger: current.progressLedger });
         }
-        if (selected?.tool === "goal_finalize") return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R11_FINALIZATION_REQUIRED", blocking: frontier.blocking, attention: frontier.attention, progressLedger: projection.progressLedger });
+        if (selected?.tool === "goal_finalize" || (projection.runtimeState === "active" && projection.finalReview?.status !== "started")) {
+          const storeProjection = loadFinalizationProjection(root, goalId);
+          const manifest = buildObligationFinalizationManifest({ projection: storeProjection.projection, storeProjection, worldSnapshot: world, conditionValidity: evaluateConditionGraph({ projection: storeProjection.projection, worldSnapshot: world }).conditions, resourceInventory: world.resources });
+          if (!manifest.complete || typeof finalReviewProvider !== "function") return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R11_FINALIZATION_REQUIRED", blocking: frontier.blocking, attention: frontier.attention, progressLedger: projection.progressLedger });
+          const pair = finalApprovalPair(goalId, sessionId, manifest);
+          if (pair?.choice === "reject") { persistMetadata(finalIntentType, finalIntent(manifest, sessionId)); return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "APPROVAL_REQUIRED", machineAction: null }); }
+          if (pair?.choice === "approve") {
+            const machineAction = { tool: "goal_finalize", params: { goal_id: goalId, approval_entry_id: pair.message.id } };
+            const offer = issueActionOffer(projection, machineAction, sessionId);
+            projection = appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId, projection), projection.version);
+            return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction, action_token: offer.token });
+          }
+          const pending = pi.sessionManager?.getBranch?.()?.filter((entry) => exactFinalIntent(entry, goalId, sessionId) && entry.data.manifestHash === manifest.manifestHash && entry.data.stateHash === manifest.stateHash && entry.data.worldHash === manifest.worldHash && entry.data.head === manifest.head) || [];
+          if (!pending.length) persistMetadata(finalIntentType, finalIntent(manifest, sessionId));
+          return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction: null });
+        }
         const fullSuspensionClosure = projection.suspension?.resourcesQuarantined
           && projection.suspension.terminalProofRefs?.length === projection.suspension.affectedRunIds?.length
           && projection.suspension.workspaceClosureProofRefs?.length === projection.suspension.affectedTaskIds?.length
@@ -1988,8 +2034,44 @@ export function createGoalEngineExtension(pi, options = {}) {
     async handler(params, ctx) {
       const { root } = executionScopeFor(ctx, { operation: "read", goalId: params.goal_id });
       const goalId = resolveGoalId(params.goal_id, root, ctx);
-      const projection = goalId ? loadProjectionFn(root, goalId) : null;
-      return finalizeGoal(projection);
+      let projection = goalId ? loadProjectionFn(root, goalId) : null;
+      if (!projection || projection.eventSchemaVersion !== "goal-runtime.v1") return finalizeGoal(projection);
+      if (typeof finalReviewProvider !== "function") throw new Error("FINAL_REVIEW_PROVIDER_UNAVAILABLE");
+      if (!exactPlainObject(params, ["goal_id", "action_token", "approval_entry_id"])) throw new Error("invalid goal_finalize parameters");
+      const sessionId = sessionIdentity(ctx);
+      const offer = projection.actionOffer;
+      if (!offer || offer.tool !== "goal_finalize" || offer.sessionId !== sessionId || offer.params?.goal_id !== goalId || offer.params?.approval_entry_id !== params.approval_entry_id) throw new Error("invalid finalization offer");
+      let consumed = offer.consumed === true;
+      if (!consumed) {
+        const receipt = verifyAndConsumeActionOffer(projection, { token: params.action_token, tool: "goal_finalize", params: offer.params, sessionId });
+        projection = appendEventFn(root, makeGoalEvent("goal.action_consumed", receipt, goalId, projection), projection.version);
+        consumed = true;
+      } else if (params.action_token !== offer.token) throw new Error("invalid finalization token");
+      const world = runtimeHost?.captureCurrentWorld?.({ cwd: ctx.cwd });
+      if (!world?.safe) throw new Error("FINALIZATION_WORLD_UNAVAILABLE");
+      const baseVersion = offer.projectionVersion - 1;
+      const base = loadFinalizationProjection(root, goalId, { version: baseVersion });
+      const manifest = buildObligationFinalizationManifest({ projection: base.projection, storeProjection: base, worldSnapshot: world, conditionValidity: evaluateConditionGraph({ projection: base.projection, worldSnapshot: world }).conditions, resourceInventory: world.resources });
+      const approval = { entryId: params.approval_entry_id, sessionId, source: "user" };
+      let review = projection.finalReview;
+      if (!review) {
+        const pair = finalApprovalPair(goalId, sessionId, manifest);
+        if (!pair || pair.choice !== "approve" || pair.message.id !== params.approval_entry_id || !manifest.complete) throw new Error("invalid final review approval");
+        const reviewId = `review-${canonicalHash({ goalId, manifestHash: manifest.manifestHash, stateHash: manifest.stateHash, worldHash: manifest.worldHash, head: manifest.head, approval })}`;
+        const started = makeEvent("goal.final_review_started", { reviewId, manifestHash: manifest.manifestHash, stateHash: manifest.stateHash, worldHash: manifest.worldHash, head: manifest.head, approval }, goalId, "goal-runtime.v1");
+        projection = appendEventFn(root, started, projection.version); review = projection.finalReview;
+      }
+      const reviewStore = createFinalReviewFileStore({ stateRoot: root });
+      const result = await runRecoverableFinalReview({ manifest, approval, provider: finalReviewProvider, reviewStore });
+      if (result.status === "failed") throw Object.assign(new Error("FINAL_REVIEW_PROVIDER_FAILED"), { code: "FINAL_REVIEW_PROVIDER_FAILED" });
+      const current = loadProjectionFn(root, goalId);
+      const freshWorld = runtimeHost?.captureCurrentWorld?.({ cwd: ctx.cwd });
+      const stale = current.version !== projection.version || result.reviewId !== current.finalReview?.reviewId || manifest.manifestHash !== current.finalReview?.manifestHash || freshWorld?.repo?.head !== current.finalReview?.head;
+      const recorded = makeEvent("goal.final_review_recorded", { reviewId: result.reviewId, resultHash: result.resultHash, severity: result.severity, status: stale && ["none", "minor"].includes(result.severity) ? "stale" : result.status }, goalId, "goal-runtime.v1");
+      if (stale || ["important", "critical"].includes(result.severity)) { appendEventFn(root, recorded, current.version); return { status: stale ? "stale" : "changes_required" }; }
+      const completed = makeEvent("goal.completed", { verdict: "COMPLETE", reviewId: result.reviewId, manifestHash: current.finalReview.manifestHash, stateHash: current.finalReview.stateHash, worldHash: current.finalReview.worldHash, head: current.finalReview.head, resultHash: result.resultHash }, goalId, "goal-runtime.v1");
+      try { appendEventBatchFn(root, [recorded, completed], current.version); } catch (error) { const recovered = loadProjectionFn(root, goalId); if (recovered?.lifecycle !== "completed") throw error; }
+      return { status: "completed" };
     },
   });
 
@@ -2825,6 +2907,13 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   pi.on("input", async (event, ctx) => {
     if (event.source !== "interactive" && event.source !== "rpc") return { action: "continue" };
+    if (!event.images?.length && event.streamingBehavior === undefined && ["approve", "reject"].includes(event.text)) {
+      try {
+        const { root } = executionScopeFor(ctx), sessionId = sessionIdentity(ctx);
+        const owned = loadAllProjections(root).filter((projection) => projection.eventSchemaVersion === "goal-runtime.v1" && projection.runtimeState === "active" && ownedBySession(projection, sessionId));
+        if (owned.length === 1 && pi.sessionManager?.getBranch?.()?.some((entry) => exactFinalIntent(entry, owned[0].goalId, sessionId))) return { action: "continue" };
+      } catch { /* Ordinary suspension remains fail-closed. */ }
+    }
     const suspensionReason = !event.images?.length && event.streamingBehavior === "steer" ? "interactive_steer"
       : !event.images?.length && event.streamingBehavior === "followUp" ? "follow_up" : null;
     if (suspensionReason) {

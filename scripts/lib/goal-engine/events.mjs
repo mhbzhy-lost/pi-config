@@ -447,7 +447,8 @@ function finalReviewStarted(p, data) {
   const approval = data.approval;
   if (!isPlainObject(approval)) throw new Error("invalid final review start");
   requireExactFields(approval, ["entryId", "sessionId", "source"], "final review start");
-  if (p.lifecycle !== "active" || p.runtimeState !== "active" || p.suspension || p.finalReview
+  if (p.lifecycle !== "active" || p.runtimeState !== "active" || p.suspension
+    || (p.finalReview && (p.finalReview.status === "started" || p.finalReview.reviewId === data.reviewId))
     || typeof data.reviewId !== "string" || !data.reviewId || !hash(data.manifestHash) || !hash(data.stateHash) || !hash(data.worldHash) || !/^[a-f0-9]{40}$/.test(data.head || "")
     || typeof approval.entryId !== "string" || !approval.entryId || approval.source !== "user" || approval.sessionId !== ownerSessionId(p)) throw new Error("invalid final review start");
   p.finalReview = { ...structuredClone(data), status: "started" };
@@ -455,8 +456,8 @@ function finalReviewStarted(p, data) {
 function finalReviewRecorded(p, data) {
   runtimeOnly(p);
   requireExactFields(data, ["reviewId", "resultHash", "severity", "status"], "final review record");
-  const expectedStatus = ["none", "minor"].includes(data.severity) ? "recorded" : ["important", "critical"].includes(data.severity) ? "changes_required" : null;
-  if (!p.finalReview || p.finalReview.status !== "started" || p.finalReview.reviewId !== data.reviewId || !hash(data.resultHash) || !expectedStatus || data.status !== expectedStatus) throw new Error("invalid final review record");
+  const expectedStatus = ["none", "minor"].includes(data.severity) ? new Set(["recorded", "stale"]) : ["important", "critical"].includes(data.severity) ? new Set(["changes_required"]) : null;
+  if (!p.finalReview || p.finalReview.status !== "started" || p.finalReview.reviewId !== data.reviewId || !hash(data.resultHash) || !expectedStatus?.has(data.status)) throw new Error("invalid final review record");
   p.finalReview = { ...p.finalReview, ...structuredClone(data) };
 }
 function hash(value) { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }

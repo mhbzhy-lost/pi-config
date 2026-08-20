@@ -217,7 +217,7 @@ export function loadProjection(stateRoot, goalId) {
 // Finalization consumes an independently replayed, checked Store snapshot.  It
 // deliberately does not repair a partial publication: callers must fail closed
 // rather than turn a validation read into a Store mutation.
-export function loadFinalizationProjection(stateRoot, goalId) {
+export function loadFinalizationProjection(stateRoot, goalId, options = {}) {
   if (typeof stateRoot !== "string" || !stateRoot || typeof goalId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(goalId) || goalId === "." || goalId === "..") throw new TypeError("unsafe finalization projection path");
   const root = resolve(stateRoot);
   const lock = acquireWriterLock(root);
@@ -236,7 +236,13 @@ export function loadFinalizationProjection(stateRoot, goalId) {
     // Recheck file receipts after all parsing, so a replacement racing the read
     // cannot be silently accepted.
     for (const path of [eventsPath, projectionPath, registryPath]) assertFinalizationFile(path);
-    const projection = freezeProjection(replay);
+    let selected = replay;
+    if (Object.keys(options).length) {
+      if (!exactObject(options, ["version"]) || !Number.isSafeInteger(options.version) || options.version < 0 || options.version > replay.version) throw new TypeError("invalid finalization projection version");
+      selected = createProjection();
+      for (const event of events.toString("utf8").trim().split("\n").slice(0, options.version)) selected = applyEvent(selected, JSON.parse(event), { replay: true });
+    }
+    const projection = freezeProjection(selected);
     return Object.freeze({ goalId, version: projection.version, projection, projectionStateHash: projectionStateHash(projection) });
   } finally { releaseWriterLock(root, lock.token); }
 }
@@ -536,7 +542,7 @@ function assertCanonicalFinalizationBatch(events, projection, standalone) {
   if (!hasRecord && !hasCompletion) return;
   if (standalone || events.length === 1) {
     const record = events[0];
-    if (record?.type !== "goal.final_review_recorded" || !["important", "critical"].includes(record.data?.severity) || record.data?.status !== "changes_required") throw new Error("final review pass records and completion must be atomic");
+    if (record?.type !== "goal.final_review_recorded" || !((['important', 'critical'].includes(record.data?.severity) && record.data?.status === "changes_required") || (['none', 'minor'].includes(record.data?.severity) && record.data?.status === "stale"))) throw new Error("final review pass records and completion must be atomic");
     return;
   }
   if (events.length !== 2 || events[0]?.type !== "goal.final_review_recorded" || events[1]?.type !== "goal.completed") throw new Error("final review pass records and completion must be one atomic batch");
