@@ -3,7 +3,7 @@
   "tuiMode": "fullscreen",
   "fullscreenExitOutput": "resume-hint",
   "theme": "light",
-  "defaultProvider": "codex-pool",
+  "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-sol",
   "hideThinkingBlock": true,
   "packages": [
