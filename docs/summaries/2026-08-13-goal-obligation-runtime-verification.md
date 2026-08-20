@@ -136,3 +136,33 @@ discard；这些 durable worktree/process/resource debt 仍未满足门禁。
 用户明确授权后，才能进入 managed lifecycle 或 typed disposition；unknown
 terminal 仍只能 preserve。production 仍为 **Manual Preview**：不 cutover、
 不 push、不收尾 frozen planned-goal。
+
+## 受管清空、clean-start 重测与 reset 外审（最终验证摘要）
+
+### 受管 reset
+
+- feature：`e4ef449`。
+- 授权 CAS hash：`2c479333...`。
+- 受管清空已完成：`planned-goal` cleared；after hash：`b671115e...`。
+- active `goalIds=[]`，Goal worktrees 为空。
+- 本节仅记录验证摘要，不记录 ledger 正文。
+
+### clean-start 串行真实 GREEN
+
+clean-start 后串行重测全部为真实 GREEN：Goal full 最终 `1224/1224`，39 文件
+`500/500`，Doctor/Generation/Canary/Pi `41/41`，`npm` `634/634`，reset target
+`9/9`。Doctor/npm 并行运行的 30 秒 timeout 仅作为竞争证据；串行结果为权威结论。
+
+安全修复 `f9904cd` 包含 `fd` 的 `O_NOFOLLOW` identity 校验与 cleanup rollback。
+
+### reset diff 外审
+
+Round1 接受 TOCTOU 与 rollback 两项，其余反馈均证伪。Round2 返回项全部证伪，
+包括 fd inode 安全、非合作 worktree 修改应为 `RECOVERY_REQUIRED`、pending 无资源时
+允许清空，以及其他诊断/风格反馈。不运行第三轮，不声称 reviewer Ready。
+
+### 最终门禁与发布边界
+
+Goal active runtime 已从干净状态验收 **GREEN**；但全局 subagent/worktree 历史
+warnings 未清理，若 R13 门禁解释为全仓资源则仍为 **NO-GO**。production 继续
+**Manual Preview**，不 push。
