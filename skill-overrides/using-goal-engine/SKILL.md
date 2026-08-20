@@ -20,7 +20,7 @@ description: Use when starting, resuming, amending, recovering, dispatching, or 
 | `goal_integrate` | settle 后处置 workspace：`integrate`、`discard` 或 `preserve` |
 | `goal_accept` | succeeded、验收通过且已 integrate/released |
 | `goal_amend` | 人类改范围，或 blocked/preserved 需要改计划 |
-| `goal_finalize` | 已冻结的第八工具；当前所有 generation 均会拒绝，R11 前不得尝试 runtime 终局 |
+| `goal_finalize` | `planned.v1` 仍 `accept-auto` 且不得调用；仅 `goal-runtime.v1` 在 status 显示 `APPROVAL_REQUIRED`、真实 user approve 后由 status 签发 machineAction/token 时调用 |
 
 ## 初始化检查表
 
@@ -28,7 +28,7 @@ description: Use when starting, resuming, amending, recovering, dispatching, or 
 
 - [ ] 当前项目 Git repository/workspace 有有效 HEAD；能据此创建未来 Executor worktree（不是要求尚未创建的 Executor worktree 有 HEAD）。
 - [ ] `.state/goal-engine/` 被忽略且不受跟踪（不受 Git 跟踪）。
-- [ ] 每个 `writePaths` 都相对 Executor worktree；acceptance `commands` 也相对 Executor worktree，不硬编码 origin 的 `cd`。
+- [ ] 每个 `writePaths` 都相对 Executor worktree；任务只提交 criteria，Executor 执行 dispatch contract 中的 acceptance commands，不硬编码 origin 的 `cd`。
 - [ ] 为每项按下列规则选择 workflow，并给出依赖、验收标准和命令。
 
 已有 active goal 时不重新初始化来绕过修改；先 `goal_status`，必要时 `goal_amend`。
@@ -42,7 +42,7 @@ description: Use when starting, resuming, amending, recovering, dispatching, or 
 
 ## Typed-only 边界
 
-Agent 只调用 Pi Host 暴露的八个 typed tools；调用前从当前 ToolDefinition 读取类型 schema。不得臆造参数；包装层的 failed/timeout 文字不能替代 artifact、session 和 worktree 的实证。`goal_finalize({goal_id?, action_token, approval_entry_id})` 已冻结为第八工具，但 R1 中 `goal-engine.event.v1/v2/v3` 与 `planned.v1` 一律返回 `FINALIZATION_UNSUPPORTED_GENERATION`；不得把它用于 planned 自动完成、创建评审或声称 runtime 闭环可用。
+Agent 只调用 Pi Host 暴露的八个 typed tools；调用前从当前 ToolDefinition 读取类型 schema。不得臆造参数；包装层的 failed/timeout 文字不能替代 artifact、session 和 worktree 的实证。旧 `goal-engine.event.v1/v2/v3` 与 `planned.v1` 仍 unsupported；`goal-runtime.v1` 可用。`goal_finalize({goal_id?, action_token, approval_entry_id})` 仅可在 status 显示 `APPROVAL_REQUIRED`、真实 user approve 且随后 status 签发 machineAction/token 后调用。
 
 - shell/CLI 禁止调用 Goal Engine mutation；普通 Git precheck 不受此禁止影响。
 - 禁止 raw git worktree add/remove/prune/move/repair/lock/unlock；仅可按 typed Goal disposition 或 managed lifecycle CLI `node scripts/worktree-lifecycle.mjs ...`，并要求 owner CAS 与明确授权。不得 `--force` remove、raw branch cleanup；`/tmp`、TTL、clean 不构成删除授权。
@@ -54,9 +54,11 @@ Agent 只调用 Pi Host 暴露的八个 typed tools；调用前从当前 ToolDef
 
 每个协调轮次先 `goal_status`，严格执行返回的 machine action / requiredNextAction。每个 durable mutation 后重新 `goal_status`，随后只执行其 requiredNextAction。派发时使用 `subagent-dispatch`：将 `goal_dispatch` 返回的完整 `dispatch-ir.v1` contract 原样交给 subagent，不重写、不补造自由文本。
 
-成功路径：`status → dispatch → 原样 dispatch-ir.v1 → Executor acceptance commands 在其 worktree 运行并产出 artifact → status → settle → status → integrate → status → 当前项目 workspace（如需要）最终回归 → accept`。Executor acceptance 必须在 settle 前完成；`goal_integrate(integrate)` 释放 worktree 后，才可在当前项目 workspace 运行需要的最终回归。仅在 status 的 requiredNextAction 指向 `goal_accept`、任务 succeeded 且验收通过时 accept。
+成功路径：`status → dispatch → 原样 dispatch-ir.v1 → Executor 执行 contract acceptance commands 并产出 artifact → status → settle → status → integrate → status → 当前项目 workspace（如需要）最终回归 → accept`。Executor acceptance 必须在 settle 前完成；`goal_integrate(integrate)` 释放 worktree 后，才可在当前项目 workspace 运行需要的最终回归。仅在 status 的 requiredNextAction 指向 `goal_accept`、任务 succeeded 且验收通过时 accept。
 
 失败路径：包装层报告 failed/timeout 时，先核对 artifact、session 和 worktree，再 `goal_status` 并遵从 requiredNextAction；证据 ambiguous 时停止，不 rationalize 为失败或成功。证据 verified failed/blocked 时：`status → settle → status → goal_integrate(discard) → status → dispatch/amend`；每一步均以最新 requiredNextAction 为准。未 settle 不处置 workspace；只有人类明确要求保留现场才选择 preserve。普通 blocked 先 amend；preserved 按下方资源释放流程处理，不要 re-init。
+
+Manual Preview 无 auto-continuation；runtime 终审路径为 `status → approval intent → 等待 approve/reject → status → goal_finalize → status 确认`。遇 stale/changes/provider unavailable 继续 `goal_status`，不得宣告完成；`goal_finalize` 不运行 Oracle。
 
 ## 孤儿与冲突恢复
 
