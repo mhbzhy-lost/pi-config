@@ -100,7 +100,7 @@ test("reject 不签发 offer，后续 status 可产生新的终审 intent", asyn
 
 test("未完成的 runnable runtime task 保持 R9 goal_dispatch，不创建终审 intent", async () => {
   const task = { id: "pending-task", description: "Keep R9 authoritative", deps: [], writePaths: ["test/**"], acceptance: { criteria: [{ id: "pending", statement: "must dispatch", evidenceKinds: ["tests"] }] }, workflow: "tdd" };
-  const fixture = setup({ runtime: { execution: { ...runtimeInit().execution, tasks: [task] } } });
+  const fixture = setup({ runtime: { execution: { ...runtimeInit().execution, tasks: [task], budgets: { ...runtimeInit().execution.budgets, max_observations: 2 } } } });
   const status = await requestFinalReview(fixture);
   assert.deepEqual(status.machineAction, { tool: "goal_dispatch", params: { goal_id: fixture.goalId, task_id: "pending-task" } });
   assert.equal(status.status, undefined); assert.equal(finalIntent(fixture.api).length, 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 1); assert.equal(fixture.calls.provider, 0);
@@ -187,7 +187,13 @@ test("provider 执行中的 resource/environment CAS 漂移只记录 stale，不
   for (const kind of ["resource", "environment"]) await t.test(kind, async () => {
     const world = {}, fixture = setup({ world, provider: () => { if (kind === "resource") world.resources = [{ key: "exclusive-fixture", holders: ["other"], capacity: 1 }]; else world.environment = "fixture-environment-2"; return { severity: "none", reportRef: `sha256:${"f".repeat(64)}` }; } });
     await requestFinalReview(fixture); const offer = await approve(fixture); await invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token });
-    assert.equal(fixture.calls.provider, 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_recorded"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal(loadProjection(fixture.root, fixture.goalId).finalReview.status, "stale"); assert.equal((await requestFinalReview(fixture)).status, "APPROVAL_REQUIRED");
+    assert.equal(fixture.calls.provider, 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_recorded"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal(loadProjection(fixture.root, fixture.goalId).finalReview.status, "stale");
+    const intentsBeforeFreshStatus = finalIntent(fixture.api).length;
+    const fresh = await requestFinalReview(fixture);
+    assert.equal(fresh.status, "APPROVAL_REQUIRED"); assert.equal(finalIntent(fixture.api).length, intentsBeforeFreshStatus + 1);
+    const freshOffer = await approve(fixture);
+    assert.equal(freshOffer.machineAction.tool, "goal_finalize"); assert.equal(typeof freshOffer.action_token, "string");
+    assert.equal(freshOffer.machineAction.params.approval_entry_id, fixture.api.entries.at(-1).id);
   });
 });
 
