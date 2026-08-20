@@ -10,6 +10,10 @@
 
 生产代码、配置或 Skill 逻辑/行为变更首次修改前必须加载 `test-driven-development` skill；测试治理、流程和豁免只在相应 Skill 中维护。测试只验证行为，不为文档或配置字面值建立镜像断言。
 
+## Goal Runtime Manual Preview
+
+`goal-runtime.v1` 仅为 Manual Preview：只可由人工依据 `goal_status` 与其返回的 typed tool action 推进，不得 auto-continuation。既有 generation 语义保持不变；R13 完成前不得 production cutover。本节只定义操作边界，不复制运行时状态机。
+
 ## 敏感信息
 
 密钥、凭据和证书不得直接访问；可用临时脚本间接访问。Git 管理的信息必须脱敏。发现凭据泄露时不得自动轮换：记录影响并在任务结束时报告处理建议。
