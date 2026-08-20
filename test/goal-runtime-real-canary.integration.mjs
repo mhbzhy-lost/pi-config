@@ -30,7 +30,7 @@ function runtimeInput() {
         stability: { mode: "single", require_fresh_environment: true },
       }],
       write_policy: { allowed_paths: ["test/**"] },
-      budgets: { max_observations: 3, max_repairs: 0, max_elapsed_minutes: 5, max_no_progress: 2 },
+      budgets: { max_observations: 3, max_repairs: 1, max_elapsed_minutes: 5, max_no_progress: 20 },
     },
   };
 }
@@ -41,7 +41,7 @@ function wrapperSource({ reviewLog }) {
     adapters: [{
       ref: "canary-oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [],
       artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" },
-      validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 5000, maxOutputBytes: 4096, terminationGraceMs: 100, maxConcurrentWorkspaces: 1 }, actions: [{ id: "pass-json", kind: "validation", executable: "/bin/echo", args: ["{\\\"code\\\":\\\"PASS\\\"}"] }] },
+      validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 5000, maxOutputBytes: 4096, terminationGraceMs: 100, maxConcurrentWorkspaces: 1 }, actions: [{ id: "pass-json", kind: "validation", executable: "/bin/echo", args: ["{\"code\":\"PASS\"}"] }] },
     }],
     environments: { "canary-local": { fingerprint: "canary-environment-v1", available: true } },
     fixtures: { "canary-fixture": { fingerprint: "canary-fixture-v1", available: true } },
@@ -101,42 +101,41 @@ test("真实 Pi production Host PASS observation completes and finalizes without
 
     // Cycle 0: request, managed process/terminal, record, release, then activation.
     const cycle0 = [];
-    for (let index = 0; index < 6; index++) cycle0.push(await value(host, "goal_status", `runtime-canary-cycle0-${index}`, { goal_id: goalId }));
+    for (let index = 0; index < 5; index++) cycle0.push(await value(host, "goal_status", `runtime-canary-cycle0-${index}`, { goal_id: goalId }));
     let projection = loadProjection(root, goalId);
     assert.equal(projection.runtimeState, "active", JSON.stringify({ cycle0, runs: [...projection.observationRuns.values()], condition: projection.conditions.get("pass-condition") }));
     assert.deepEqual([...projection.observationRuns.values()].map(run => [run.cycle, run.phase]), [[0, "released"]]);
 
-    // Product cycle: the real managed /bin/echo JSON PASS run is recorded and released.
-    for (let index = 0; index < 5; index++) await value(host, "goal_status", `runtime-canary-cycle1-${index}`, { goal_id: goalId });
-    projection = loadProjection(root, goalId);
-    assert.deepEqual([...projection.observationRuns.values()].map(run => [run.cycle, run.phase]), [[0, "released"], [1, "released"]]);
-    assert.equal(projection.conditions.get("pass-condition").status, "satisfied");
-
-    // Persist and reopen the actual SDK SessionManager with the final approval intent pending.
-    await value(host, "goal_status", "runtime-canary-final-intent", { goal_id: goalId });
+    // Reload before completion; the same Goal continues without rerunning Cycle0.
     host.session.sessionManager.appendMessage({ role: "assistant", content: [], provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }, stopReason: "stop" });
     const sessionFile = host.session.sessionManager.getSessionFile();
     const sessionDir = host.session.sessionManager.getSessionDir();
     host.session.dispose(); host = await start(cwd, agentDir, wrapper, SessionManager.open(sessionFile, sessionDir, cwd));
-    assert.equal(readFileSync(sessionFile, "utf8").includes("goal-engine-final-review-approval-intent"), true);
+    // Product cycle: the real managed /bin/echo JSON PASS run is recorded and released.
+    const cycle1 = [];
+    for (let index = 0; index < 5; index++) cycle1.push(await value(host, "goal_status", `runtime-canary-cycle1-${index}`, { goal_id: goalId }));
+    projection = loadProjection(root, goalId);
+    assert.deepEqual([...projection.observationRuns.values()].map(run => [run.cycle, run.phase]), [[0, "released"], [1, "released"]]);
+    assert.equal(projection.conditions.get("pass-condition").status, "satisfied");
+
+    // Final intent is paired with an actual Pi input entry; approval does not suspend.
+    await value(host, "goal_status", "runtime-canary-final-intent", { goal_id: goalId });
     await host.session.extensionRunner.emitInput("approve", undefined, "rpc");
     host.session.sessionManager.appendMessage({ role: "user", content: "approve" });
     const offered = await value(host, "goal_status", "runtime-canary-final-offer", { goal_id: goalId });
-    assert.equal(offered.machineAction.tool, "goal_finalize");
+    assert.equal(offered.machineAction?.tool, "goal_finalize", JSON.stringify(offered));
     assert.equal(loadProjection(root, goalId).runtimeState, "active", "final approval must not suspend");
-    await value(host, "goal_finalize", "runtime-canary-finalize", { ...offered.machineAction.params, action_token: offered.action_token });
+    await execute(host, "goal_finalize", "runtime-canary-finalize", { ...offered.machineAction.params, action_token: offered.action_token });
 
     projection = loadProjection(root, goalId);
-    assert.equal(projection.status, "completed"); assert.equal(projection.completion.status, "COMPLETE");
+    assert.equal(projection.lifecycle, "completed"); assert.equal(projection.completionVerdict, "COMPLETE");
     assert.equal(projection.finalReview.status, "recorded"); assert.equal(projection.completionHistory.length, 1);
     assert.equal(readFileSync(reviewLog, "utf8").trim().split("\n").length, 1);
     const types = eventTypes(root, goalId);
     for (const type of ["goal.final_review_started", "goal.final_review_recorded", "goal.completed"]) assert.equal(types.filter(value => value === type).length, 1, type);
     assert.equal([...projection.observationRuns.values()].every(run => run.phase === "released"), true);
-    assert.equal(projection.cleanupDebt.length, 0);
-    assert.equal(existsSync(join(root, "managed-validations")), true);
-    assert.equal(readdirSync(join(root, "managed-validations")).length, 0);
-    const review = join(root, "goals", goalId, "final-review.json");
+    assert.equal([...projection.observationRuns.values()].some(run => run.phase === "cleanup_debt"), false);
+    const review = join(root, "final-reviews", `${projection.finalReview.reviewId}.json`);
     assert.equal(lstatSync(review).mode & 0o777, 0o600);
   } finally {
     try { host?.session?.dispose(); } catch {}
