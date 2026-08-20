@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { appendEvent, appendEventBatch, loadProjection, listGoals, acquireWriterLock, releaseWriterLock, acquireRecoveryGuard, releaseRecoveryGuard, updateRegistry } from "../scripts/lib/goal-engine/store.mjs";
 
 function event(type, data, goalId = "concurrent-goal") {
-  return { schemaVersion: "goal-engine.event.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
+  return { schemaVersion: "planned.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
 }
 
 function root() { return mkdtempSync(join(tmpdir(), "ge-concurrent-")); }
@@ -20,10 +20,12 @@ function readWriterOwner(stateRoot) { return JSON.parse(readFileSync(join(stateR
 function faultInjectedBatchStore(stateRoot, marker, fault) {
   const storePath = new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url);
   const eventsUrl = new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).href;
+  const taskDefinitionUrl = new URL("../scripts/lib/goal-engine/task-definition.mjs", import.meta.url).href;
   const source = readFileSync(storePath, "utf8");
   assert.equal(source.split(marker).length - 1, 1, "batch fault boundary must be unique");
   const path = join(stateRoot, `fault-store-${crypto.randomUUID()}.mjs`);
   writeFileSync(path, source.replace('from "./events.mjs"', `from ${JSON.stringify(eventsUrl)}`)
+    .replace('from "./task-definition.mjs"', `from ${JSON.stringify(taskDefinitionUrl)}`)
     .replace(marker, `    throw new Error(${JSON.stringify(fault)});`));
   return path;
 }
@@ -31,7 +33,7 @@ function faultInjectedBatchStore(stateRoot, marker, fault) {
 function createGoal(stateRoot, goalId = "concurrent-goal") {
   appendEvent(stateRoot, event("goal.created", {
     objective: "Exercise one writer", scope: [], nonGoals: [], dod: [], tasks: ["t1"],
-    taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: ["x"], commands: ["true"] }, workflow: "tdd" } },
+    taskDefs: { t1: { description: "work", deps: [], writePaths: ["a.ts"], acceptance: { criteria: [{ id: "criterion-1", statement: "x", evidenceKinds: ["tests"] }] }, workflow: "tdd" } },
   }, goalId), 0);
 }
 
@@ -239,6 +241,7 @@ if (process.argv[2] === "guard-owner") {
   test("mutation oracle kills every release-before-stage mutant", () => {
     const storePath = new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url);
     const eventsUrl = new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).href;
+    const taskDefinitionUrl = new URL("../scripts/lib/goal-engine/task-definition.mjs", import.meta.url).href;
     const source = readFileSync(storePath, "utf8");
     const jsonlCall = "    appendJsonlWithWriterReceipt(stateRoot, eventsPath, event, lock.token);";
     const projectionCall = "    publishProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, next, lock.token);";
@@ -257,7 +260,7 @@ if (process.argv[2] === "guard-owner") {
       const replacement = `    releaseWriterLock(stateRoot, lock.token);\n${boundaryCall}\n    console.log("stage-marker");`;
       const stateRoot = root(); createGoal(stateRoot);
       const mutantPath = join(stateRoot, `store-${name.replaceAll(" ", "-")}.mjs`);
-      let mutantSource = source.replace('from "./events.mjs"', `from ${JSON.stringify(eventsUrl)}`).replace(boundaryCall, replacement);
+      let mutantSource = source.replace('from "./events.mjs"', `from ${JSON.stringify(eventsUrl)}`).replace('from "./task-definition.mjs"', `from ${JSON.stringify(taskDefinitionUrl)}`).replace(boundaryCall, replacement);
       for (const skippedCall of skippedCalls) mutantSource = mutantSource.replace(skippedCall, "    void 0;");
       writeFileSync(mutantPath, mutantSource);
       const goalDir = join(stateRoot, "goals/concurrent-goal");

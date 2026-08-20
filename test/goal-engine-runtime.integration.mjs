@@ -21,6 +21,12 @@ const piRoot = join(globalModules, "@earendil-works/pi-coding-agent");
 const piModule = await import(pathToFileURL(join(piRoot, "dist/index.js")).href);
 const { createAgentSession, DefaultResourceLoader, SessionManager } = piModule;
 
+function goalEngineLoader(options) {
+  writeFileSync(join(options.agentDir, "settings.json"), JSON.stringify({ goalEngine: { enabled: true } }));
+  process.env.PI_CODING_AGENT_DIR = options.agentDir;
+  return new DefaultResourceLoader(options);
+}
+
 // Ordinary legacy fixtures must never inherit the invoking Pi process's production Goal root.
 const inheritedGoalStateDir = process.env.PI_CODING_GOAL_DIR;
 delete process.env.PI_CODING_GOAL_DIR;
@@ -44,7 +50,7 @@ test("real Pi host uses execution context cwd instead of process cwd", async () 
     execFileSync("git", ["add", "."], { cwd: projectCwd });
     execFileSync("git", ["commit", "-m", "test: initialize safe fixture"], { cwd: projectCwd });
     process.chdir(processCwd);
-    const loader = new DefaultResourceLoader({
+    const loader = goalEngineLoader({
       cwd: projectCwd, agentDir,
       additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")],
       noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
@@ -90,7 +96,7 @@ test("real Pi host isolates PI_CODING_GOAL_DIR by canonical project cwd", async 
     execFileSync("git", ["commit", "-m", "test: initialize global Goal fixture"], { cwd });
   };
   const startHost = async (cwd, agentDir, sessionManager = SessionManager.create(cwd, join(agentDir, "sessions"))) => {
-    const loader = new DefaultResourceLoader({
+    const loader = goalEngineLoader({
       cwd,
       agentDir,
       additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")],
@@ -165,7 +171,7 @@ test("real Pi host rejects goal_init outside Git without state", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-host-"));
   let result;
   try {
-    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
     const sessionManager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
     result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
@@ -196,7 +202,7 @@ test("real Pi host rejects historical unsafe dispatch through ToolDefinition.exe
     mkdirSync(join(root, "goals", goalId), { recursive: true });
     writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${JSON.stringify(event)}\n`);
     writeFileSync(join(root, "registry.json"), JSON.stringify({ schema_version: "goal-engine.registry.v1", active_goal_ids: [goalId], goals: { [goalId]: { lifecycle: "active", objective: event.data.objective, updatedAt: event.occurredAt } } }));
-    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
     const sessionManager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
     writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${JSON.stringify(event)}\n${JSON.stringify({ schemaVersion: "goal-engine.event.v3", eventId: "real-host-historical-session-bound", goalId, occurredAt: "2024-01-01T00:00:01.000Z", type: "goal.session_bound", data: { sessionId: sessionManager.getSessionId(), leafId: "historical-host" } })}\n`);
@@ -233,7 +239,7 @@ test("real Pi host validates and applies workflow amendments", async () => {
     writeFileSync(join(projectCwd, ".gitignore"), ".state/goal-engine/\n");
     execFileSync("git", ["add", "."], { cwd: projectCwd });
     execFileSync("git", ["commit", "-m", "test: initialize safe fixture"], { cwd: projectCwd });
-    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
     const sessionManager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
     result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
@@ -272,7 +278,7 @@ test("real Pi host compaction checkpoint reloads from durable session and Goal l
     writeFileSync(join(projectCwd, ".gitignore"), ".state/goal-engine/\n");
     execFileSync("git", ["add", "."], { cwd: projectCwd });
     execFileSync("git", ["commit", "-m", "test: initialize safe fixture"], { cwd: projectCwd });
-    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
     const manager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
     result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
@@ -299,7 +305,7 @@ test("real Pi host compaction checkpoint reloads from durable session and Goal l
     const reloadedManager = SessionManager.open(sessionFile, sessionDir, projectCwd);
     assert.notEqual(reloadedManager, firstManager);
     assert.equal(reloadedManager.getSessionId(), sessionId);
-    const reloadedLoader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    const reloadedLoader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await reloadedLoader.reload();
     result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: reloadedLoader, sessionManager: reloadedManager });
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
@@ -316,7 +322,7 @@ async function withMetadataHost(run) {
   const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-metadata-negative-host-"));
   let host;
   const makeHost = async (manager) => {
-    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
     host = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
     await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
@@ -470,7 +476,7 @@ test("real Pi host orphan human authorization survives reload and is non-replaya
   const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-orphan-host-"));
   let host;
   const makeHost = async (manager) => {
-    const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
     host = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
     await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
@@ -525,7 +531,7 @@ test("real Pi host metadata proposal approval lifecycle survives reload and is n
     execFileSync("git", ["add", "."], { cwd: projectCwd });
     execFileSync("git", ["commit", "-m", "test: initialize fixture"], { cwd: projectCwd });
     const makeSession = async (manager) => {
-      const loader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+      const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
       await loader.reload();
       const host = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
       await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
@@ -572,7 +578,7 @@ test("real Pi host executes goal_status through ToolDefinition.execute", async (
   const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-host-"));
   let result;
   try {
-    const loader = new DefaultResourceLoader({
+    const loader = goalEngineLoader({
       cwd: projectCwd,
       agentDir,
       additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")],

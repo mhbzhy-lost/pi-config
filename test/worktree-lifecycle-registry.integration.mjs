@@ -15,7 +15,7 @@ const registry = await import(modulePath).catch(() => ({
   activateAllocation: missing("activateAllocation"),
   markDisposition: missing("markDisposition"),
 }));
-const { beginAllocation, activateAllocation, markDisposition } = registry;
+const { beginAllocation, activateAllocation, markDisposition, reanchorAllocation } = registry;
 
 const MANIFEST_KEYS = [
   "schemaVersion", "id", "ownerKind", "ownerId", "ownerToken", "originRoot", "gitCommonDir",
@@ -77,8 +77,9 @@ function writeReplacementLock(lockPath, current) {
   return replacement;
 }
 
-test("registry module exposes only the three frozen owner transition APIs", () => {
-  assert.deepEqual(Object.keys(registry).sort(), ["activateAllocation", "beginAllocation", "markDisposition"]);
+test("registry module exposes only the four frozen owner transition APIs", () => {
+  assert.equal(typeof reanchorAllocation, "function");
+  assert.deepEqual(Object.keys(registry).sort(), ["activateAllocation", "beginAllocation", "markDisposition", "reanchorAllocation"]);
 });
 
 test("allocation intent is an exact 0600 manifest written before activation and transitions by owner-token CAS", (t) => {
