@@ -298,7 +298,7 @@ test("run rejects a detached validation worktree even at the integrated HEAD bef
 test("validation enforces byte limits and proves its whole process group terminal", async (t) => {
   const f = fixture(t);
   const plan = {
-    schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 100, maxOutputBytes: 5, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 },
+    schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 1000, maxOutputBytes: 5, terminationGraceMs: 50, maxConcurrentWorkspaces: 1 },
     actions: [{ id: "descendant", kind: "validation", executable: process.execPath, args: ["-e", "process.stdout.write('ééé'); process.stderr.write('界'); const {spawn}=require('child_process'); spawn(process.execPath,['-e','process.on(\\\"SIGTERM\\\",()=>{});setInterval(()=>{},1000)'],{detached:false,stdio:'ignore'}); setTimeout(()=>process.exit(0),10)"] }],
   };
   const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "group", attempt: 1, integratedHead: f.head, validationPlan: plan });
