@@ -84,6 +84,29 @@ test("changes_required is a standalone durable runtime record", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+for (const severity of ["none", "minor"]) test(`${severity} stale review record is standalone durable, remains active, and permits one new review`, () => {
+  const { root, projection } = storedActive();
+  try {
+    const began = appendEvent(root, started(projection), projection.version);
+    const stale = appendEvent(root, recorded(began, severity, 19, { status: "stale" }), began.version);
+    assert.equal(stale.lifecycle, "active"); assert.equal(stale.finalReview.status, "stale");
+    assert.throws(() => appendEvent(root, started(stale, 20), stale.version), /final review start|duplicate/i);
+    const next = appendEvent(root, started(stale, 20, { reviewId: "review-2" }), stale.version);
+    assert.equal(next.finalReview.reviewId, "review-2");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("changes_required keeps the Goal active and permits only a different next review", () => {
+  const { root, projection } = storedActive();
+  try {
+    const began = appendEvent(root, started(projection), projection.version);
+    const changed = appendEvent(root, recorded(began, "important"), began.version);
+    assert.equal(changed.lifecycle, "active"); assert.equal(changed.finalReview.status, "changes_required");
+    assert.throws(() => appendEvent(root, started(changed, 20), changed.version), /final review start|duplicate/i);
+    assert.equal(appendEvent(root, started(changed, 20, { reviewId: "review-2" }), changed.version).finalReview.reviewId, "review-2");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 for (const severity of ["none", "minor"]) test(`${severity} review record cannot be appended standalone`, () => {
   const { root, projection } = storedActive();
   try {

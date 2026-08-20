@@ -31,7 +31,7 @@ function pi(cwd, entries = [], sessionId = "owner") {
   const tools = [], listeners = new Map(); let sequence = entries.length, leaf = entries.at(-1)?.id ?? null;
   const append = row => { const entry = { id: `entry-${++sequence}`, parentId: leaf, timestamp: new Date(1_800_000_000_000 + sequence).toISOString(), ...row }; entries.push(entry); leaf = entry.id; return entry; };
   const sessionManager = { getSessionId: () => sessionId, getSessionFile: () => join(cwd, `session-${sessionId}`), getLeafId: () => leaf, getEntries: () => entries, getBranch: () => entries };
-  return { cwd, tools, entries, sessionManager, registerTool: tool => tools.push(tool), on: (name, handler) => listeners.set(name, handler), appendEntry: (customType, data) => append({ type: "custom", customType, data }), handlers: { get(name) { const handler = listeners.get(name); if (name !== "input" || !handler) return handler; return async (input, ctx) => { const result = await handler(input, ctx); append({ type: "message", message: { role: "user", content: input.text } }); return result; }; } } };
+  return { cwd, tools, entries, sessionManager, registerTool: tool => tools.push(tool), on: (name, handler) => listeners.set(name, handler), appendEntry: (customType, data) => append({ type: "custom", customType, data }), appendMessage: (text, extra = {}) => append({ type: "message", message: { role: "user", content: text }, ...extra }), handlers: { get(name) { const handler = listeners.get(name); if (name !== "input" || !handler) return handler; return async (input, ctx) => { const result = await handler(input, ctx); if (["interactive", "rpc"].includes(input.source)) append({ type: "message", message: { role: "user", content: input.text }, ...(input.images !== undefined ? { images: input.images } : {}), ...(input.streamingBehavior !== undefined ? { streamingBehavior: input.streamingBehavior } : {}) }); return result; }; } } };
 }
 function host(cwd, calls) {
   const adapter = { ref: "oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 1, maxOutputBytes: 1, terminationGraceMs: 1, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } };
@@ -57,11 +57,22 @@ async function invoke(api, name, input = {}) { return (await api.tools.find(tool
 function events(cwd, goalId) { return readFileSync(join(rootFor(cwd), "goals", goalId, "events.jsonl"), "utf8").trim().split("\n").map(JSON.parse); }
 function count(cwd, goalId, type) { return events(cwd, goalId).filter(row => row.type === type).length; }
 function finalIntent(api) { return api.entries.filter(row => row.customType === "goal-engine-final-review-approval-intent"); }
-function setup(options = {}) { const cwd = repo(), calls = { world: 0, adapter: 0, managed: 0, start: 0, recover: 0, release: 0, provider: 0 };  const api = pi(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd, calls), finalReviewProvider: async input => { calls.provider++; return options.provider?.(input) ?? { severity: "none", reportRef: `sha256:${"b".repeat(64)}` }; }, ...(options.append ? { appendEvent: options.append } : {}), ...options.extension }); const fixture = converged(cwd, api, options); return { cwd, api, calls, ...fixture }; }
+function setup(options = {}) { const cwd = repo(), calls = { world: 0, adapter: 0, managed: 0, start: 0, recover: 0, release: 0, provider: 0 };  const api = pi(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd, calls), finalReviewProvider: async input => { calls.provider++; return options.provider?.(input) ?? { severity: "none", reportRef: `sha256:${"b".repeat(64)}` }; }, ...(options.append ? { appendEvent: options.append } : {}), ...(options.appendBatch ? { appendEventBatch: options.appendBatch } : {}), ...options.extension }); const fixture = converged(cwd, api, options); return { cwd, api, calls, ...fixture }; }
 async function requestFinalReview(fixture) { return JSON.parse(await invoke(fixture.api, "goal_status", { goal_id: fixture.goalId })); }
 async function approve(fixture, text = "approve") { await fixture.api.handlers.get("input")({ type: "input", source: "interactive", text }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager }); return requestFinalReview(fixture); }
 
 // A real Store-backed runtime ledger is converged before every case; no test supplies a projection.
+test("fake Pi input wrapper 只为 interactive/rpc 追加 user message 并保留 images/streamingBehavior 字段", async () => {
+  const fixture = setup();
+  await fixture.api.handlers.get("input")({ type: "input", source: "interactive", text: "hello", images: [{ type: "image" }], streamingBehavior: "steer" }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager });
+  const message = fixture.api.entries.at(-1);
+  assert.equal(message.type, "message"); assert.deepEqual(message.message, { role: "user", content: "hello" });
+  assert.deepEqual(message.images, [{ type: "image" }]); assert.equal(message.streamingBehavior, "steer");
+  const before = fixture.api.entries.length;
+  await fixture.api.handlers.get("input")({ type: "input", source: "extension", text: "ignored" }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager });
+  assert.equal(fixture.api.entries.length, before);
+});
+
 test("首次 status 只追加精确的终审配对 intent，reload 保持唯一且不签 offer", async () => {
   const fixture = setup(), first = await requestFinalReview(fixture);
   assert.equal(first.status, "APPROVAL_REQUIRED"); assert.equal(first.action_token, undefined);
@@ -87,18 +98,28 @@ test("reject 不签发 offer，后续 status 可产生新的终审 intent", asyn
 
 test("approval chain 的非分支、非用户和非法 compaction 均不签 offer 或写 Goal final event", async t => {
   for (const mutation of ["off-branch", "assistant", "extension", "image", "streaming", "duplicate-intent", "broken-parent", "bad-compaction", "double-compaction"]) await t.test(mutation, async () => {
-    const fixture = setup(); await requestFinalReview(fixture); const intent = finalIntent(fixture.api)[0];
+    const fixture = setup(); await requestFinalReview(fixture);
+    const intent = fixture.api.appendEntry("goal-engine-final-review-approval-intent", { protocol: "goal-engine-final-review-approval-intent.v1", goalId: fixture.goalId, manifestHash: "1".repeat(64), stateHash: "2".repeat(64), worldHash: "3".repeat(64), head: head(fixture.cwd), sessionId: "owner", choices: ["approve", "reject"] });
     if (mutation === "off-branch") fixture.api.sessionManager.getBranch = () => [];
     else if (mutation === "duplicate-intent") fixture.api.appendEntry(intent.customType, structuredClone(intent.data));
-    else { await fixture.api.handlers.get("input")({ type: "input", source: mutation === "image" ? "interactive" : "extension", text: "approve", ...(mutation === "image" ? { images: [{ type: "image" }] } : {}), ...(mutation === "streaming" ? { streamingBehavior: "steer" } : {}) }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager }); const user = fixture.api.entries.at(-1); if (mutation === "assistant") user.message.role = "assistant"; if (mutation === "broken-parent") user.parentId = "broken"; if (mutation.includes("compaction")) { const compact = { id: "compact", parentId: intent.id, timestamp: user.timestamp, type: "compaction", summary: mutation === "bad-compaction" ? "" : "ok", firstKeptEntryId: "old", tokensBefore: 1 }; user.parentId = compact.id; fixture.api.entries.splice(-1, 0, compact); if (mutation === "double-compaction") { const second = { ...compact, id: "compact-2", parentId: compact.id }; user.parentId = second.id; fixture.api.entries.splice(-1, 0, second); } } }
-    const status = await requestFinalReview(fixture); assert.equal(status.action_token, undefined); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0);
+    else if (mutation === "extension") await fixture.api.handlers.get("input")({ type: "input", source: "extension", text: "approve" }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager });
+    else { const user = fixture.api.appendMessage("approve", mutation === "image" ? { images: [{ type: "image" }] } : mutation === "streaming" ? { streamingBehavior: "steer" } : {}); if (mutation === "assistant") user.message.role = "assistant"; if (mutation === "broken-parent") user.parentId = "broken"; if (mutation.includes("compaction")) { const compact = { id: "compact", parentId: intent.id, timestamp: user.timestamp, type: "compaction", summary: mutation === "bad-compaction" ? "" : "ok", firstKeptEntryId: intent.id, tokensBefore: 1 }; user.parentId = compact.id; fixture.api.entries.splice(-1, 0, compact); if (mutation === "double-compaction") { const second = { ...compact, id: "compact-2", parentId: compact.id }; user.parentId = second.id; fixture.api.entries.splice(-1, 0, second); } } }
+    const status = await requestFinalReview(fixture);
+    assert.equal(status.action_token, undefined); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0);
   });
 });
 
 test("错误 token、session、approval entry、extra、planned 与缺失 provider 均在 file/event/provider 前拒绝", async () => {
   const fixture = setup(); await requestFinalReview(fixture); const offered = await approve(fixture);
   for (const input of [{ ...offered.machineAction.params, action_token: "wrong" }, { ...offered.machineAction.params, action_token: offered.action_token, approval_entry_id: "wrong" }, { ...offered.machineAction.params, action_token: offered.action_token, extra: true }]) await assert.rejects(invoke(fixture.api, "goal_finalize", input));
-  assert.equal(fixture.calls.provider, 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0);
+  const wrongSession = pi(fixture.cwd, structuredClone(fixture.api.entries), "other"); createGoalEngineExtension(wrongSession, { goalStateEnv: {}, runtimeHost: host(fixture.cwd, fixture.calls) });
+  await assert.rejects(invoke(wrongSession, "goal_finalize", { ...offered.machineAction.params, action_token: offered.action_token }));
+  assert.equal(fixture.calls.provider, 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0);
+  const plannedCwd = repo(), planned = pi(plannedCwd), plannedCalls = { world: 0, adapter: 0, managed: 0, start: 0, recover: 0, release: 0, provider: 0 };
+  createGoalEngineExtension(planned, { goalStateEnv: {}, runtimeHost: host(plannedCwd, plannedCalls), finalReviewProvider: async () => { plannedCalls.provider++; return { severity: "none", reportRef: `sha256:${"a".repeat(64)}` }; } });
+  const plannedGoal = JSON.parse(await invoke(planned, "goal_init", { objective: "Real planned finalize rejection", tasks: [{ id: "planned-task", description: "real planned task", writePaths: ["test/**"], acceptance: { criteria: [{ id: "planned-criterion", statement: "planned remains a real goal", evidenceKinds: ["tests"] }] }, workflow: "tdd" }] })).goalId;
+  await assert.rejects(invoke(planned, "goal_finalize", { goal_id: plannedGoal, action_token: "planned-token", approval_entry_id: "planned-entry" }));
+  assert.equal(plannedCalls.provider, 0); assert.equal(count(plannedCwd, plannedGoal, "goal.final_review_started"), 0); assert.equal(count(plannedCwd, plannedGoal, "goal.completed"), 0);
   const noProvider = setup({ extension: { finalReviewProvider: undefined } }); await requestFinalReview(noProvider); const noProviderOffer = await approve(noProvider); await assert.rejects(invoke(noProvider.api, "goal_finalize", { ...noProviderOffer.machineAction.params, action_token: noProviderOffer.action_token })); assert.equal(count(noProvider.cwd, noProvider.goalId, "goal.final_review_started"), 0);
 });
 
@@ -107,16 +128,24 @@ test("none provider 在 unlocked durable started+intent 后原子 recorded/compl
   assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_consumed"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_recorded"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 1); assert.equal(loadProjection(fixture.root, fixture.goalId).completionHistory.length, 1); const before = fixture.calls.provider; await invoke(fixture.api, "goal_status", { goal_id: fixture.goalId }); assert.equal(fixture.calls.provider, before);
 });
 
-test("important 与 critical 只 changes_required，Goal 保持 active 且新的 approval 可开始下一 review", async () => {
-  const fixture = setup({ provider: () => ({ severity: "important", reportRef: `sha256:${"d".repeat(64)}` }) }); await requestFinalReview(fixture); const offer = await approve(fixture); await invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token }); assert.equal(loadProjection(fixture.root, fixture.goalId).lifecycle, "active"); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal((await requestFinalReview(fixture)).status, "APPROVAL_REQUIRED");
+test("important 与 critical 只 changes_required，Goal 保持 active 且新的 approval 可开始下一 review", async t => {
+  for (const severity of ["important", "critical"]) await t.test(severity, async () => {
+    const fixture = setup({ provider: () => ({ severity, reportRef: `sha256:${"d".repeat(64)}` }) }); await requestFinalReview(fixture); const offer = await approve(fixture); await invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token });
+    assert.equal(loadProjection(fixture.root, fixture.goalId).lifecycle, "active"); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal((await requestFinalReview(fixture)).status, "APPROVAL_REQUIRED");
+  });
 });
 
-test("provider throw 后 reload 用同一 review 和 idempotency key 恢复，不新 consume", async () => {
-  let fail = true, firstKey; const fixture = setup({ provider: input => { firstKey ??= input.idempotencyKey; if (fail) throw Error("timeout"); assert.equal(input.idempotencyKey, firstKey); return { severity: "none", reportRef: `sha256:${"e".repeat(64)}` }; } }); await requestFinalReview(fixture); const offer = await approve(fixture); await invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token }); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 1); fail = false; await invoke(fixture.api, "goal_status", { goal_id: fixture.goalId }); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_consumed"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 1);
+test("provider throw 后 reload/status 只给同一 recovery action，显式 retry 才完成", async () => {
+  let fail = true, firstKey; const fixture = setup({ provider: input => { firstKey ??= input.idempotencyKey; if (fail) throw Error("timeout"); assert.equal(input.idempotencyKey, firstKey); return { severity: "none", reportRef: `sha256:${"e".repeat(64)}` }; } }); await requestFinalReview(fixture); const offer = await approve(fixture);
+  await assert.rejects(invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token })); assert.equal(fixture.calls.provider, 1);
+  fail = false; const reloaded = pi(fixture.cwd, structuredClone(fixture.api.entries)); createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(fixture.cwd, fixture.calls), finalReviewProvider: async input => { fixture.calls.provider++; assert.equal(input.idempotencyKey, firstKey); return { severity: "none", reportRef: `sha256:${"e".repeat(64)}` }; } });
+  const recovery = await requestFinalReview({ ...fixture, api: reloaded }); assert.equal(recovery.machineAction.tool, "goal_finalize"); assert.equal(recovery.action_token, offer.action_token); assert.equal(fixture.calls.provider, 1);
+  await invoke(reloaded, "goal_finalize", { ...recovery.machineAction.params, action_token: recovery.action_token }); assert.equal(fixture.calls.provider, 2); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_consumed"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 1);
 });
 
-test("result 已 durable 而 Goal completion append throw 时 reload provider 为零并只完成一次", async () => {
-  let throwAfterCompletion = true; const fixture = setup({ append(root, row, version) { const value = appendEvent(root, row, version); if (row.type === "goal.completed" && throwAfterCompletion) { throwAfterCompletion = false; throw Error("after durable completion"); } return value; } }); await requestFinalReview(fixture); const offer = await approve(fixture); await assert.rejects(invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token })); const calls = fixture.calls.provider; await invoke(fixture.api, "goal_status", { goal_id: fixture.goalId }); assert.equal(fixture.calls.provider, calls); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 1);
+test("result 已 durable 而 Goal completion batch throw 时 reload recovery 不重跑 provider且只完成一次", async () => {
+  let throwAfterCompletion = true; const fixture = setup({ appendBatch(root, rows, version) { const value = appendEventBatch(root, rows, version); if (rows.some(row => row.type === "goal.completed") && throwAfterCompletion) { throwAfterCompletion = false; throw Error("after durable completion batch"); } return value; } }); await requestFinalReview(fixture); const offer = await approve(fixture); await assert.rejects(invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token })); const calls = fixture.calls.provider;
+  const reloaded = pi(fixture.cwd, structuredClone(fixture.api.entries)); createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(fixture.cwd, fixture.calls), finalReviewProvider: async () => { fixture.calls.provider++; throw Error("provider must not rerun"); } }); const recovery = await requestFinalReview({ ...fixture, api: reloaded }); assert.equal(recovery.machineAction.tool, "goal_finalize"); assert.equal(fixture.calls.provider, calls); await invoke(reloaded, "goal_finalize", { ...recovery.machineAction.params, action_token: recovery.action_token }); assert.equal(fixture.calls.provider, calls); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 1); assert.equal(loadProjection(fixture.root, fixture.goalId).completionHistory.length, 1);
 });
 
 test("started 后 Goal version 或 world/head/resource 漂移只记录 stale，不 complete，并要求 fresh approval", async () => {
