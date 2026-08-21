@@ -68,7 +68,8 @@ python3 ~/pi-config/skill-overrides/exa-search/exa.py fetch "https://docs.exampl
 ## Error Handling
 
 If the script fails:
-- Confirm `EXA_API_KEY` is exported in the process environment
+- Confirm that either the process environment has a non-empty `EXA_API_KEY`, or the gitignored `.env` beside the script contains a valid `EXA_API_KEY` assignment. The script reads that file automatically; do not source it or restart the shell, and never print the key.
 - Check internet connection
+- Verify each requested URL is valid and reachable
 - Verify Python3 is available
 - If Exa reports a rate limit, inspect the quota for the configured personal key
