@@ -114,6 +114,85 @@
           "contextWindow": 1050000
         }
       }
+    },
+    "qwen-home": {
+      "baseUrl": "http://desktop-7q5cslg.tail27f208.ts.net:8888/v1",
+      "api": "openai-completions",
+      "apiKey": "!security find-generic-password -ws 'pi-qwen-home-api'",
+      "authHeader": true,
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "supportsUsageInStreaming": true,
+        "maxTokensField": "max_tokens",
+        "thinkingFormat": "qwen-chat-template",
+        "supportsStrictMode": false
+      },
+      "models": [
+        {
+          "id": "qwen38-nvfp4",
+          "name": "Qwen3.8 27B (Home)",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 204800,
+          "maxTokens": 8192,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "thinkingLevelMap": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": "on",
+            "max": null
+          }
+        }
+      ]
+    },
+    "qwen-hangzhou": {
+      "baseUrl": "https://qwen-742618b7543d.121.40.187.130.sslip.io/v1",
+      "api": "openai-completions",
+      "authHeader": true,
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "supportsUsageInStreaming": true,
+        "maxTokensField": "max_tokens",
+        "thinkingFormat": "qwen-chat-template",
+        "supportsStrictMode": false
+      },
+      "models": [
+        {
+          "id": "qwen38-nvfp4",
+          "name": "Qwen3.8 27B (Hangzhou)",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 204800,
+          "maxTokens": 8192,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "thinkingLevelMap": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": "on",
+            "max": null
+          }
+        }
+      ]
     }
   }
 }
