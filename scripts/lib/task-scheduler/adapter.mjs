@@ -112,7 +112,35 @@ function boundedResult(result) {
   }
   return { content, details: undefined };
 }
-function wrapTool(definition) {
+const FOOTER_POLL_MS = 30_000;
+function taskFooterLabel(value) {
+  return String(value ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 48);
+}
+function schedulerFooterStatus(result) {
+  if (!result || !Array.isArray(result.content)) return undefined;
+  for (const item of result.content) {
+    if (item?.type !== "text" || typeof item.text !== "string") continue;
+    const text = item.text.startsWith(PERSISTED_HEADER) ? item.text.slice(PERSISTED_HEADER.length).trim() : item.text.trim();
+    if (!text || /^No scheduled tasks\.?$/i.test(text)) continue;
+    try {
+      const tasks = JSON.parse(text);
+      if (!Array.isArray(tasks)) continue;
+      const enabled = tasks.filter((task) => task && task.enabled === true);
+      if (!enabled.length) return undefined;
+      const labels = enabled.map((task) => {
+        const name = typeof task.name === "string" ? taskFooterLabel(task.name) : "";
+        if (name) return name;
+        const type = typeof task.type === "string" ? taskFooterLabel(task.type) : "";
+        const schedule = typeof task.schedule === "string" ? taskFooterLabel(task.schedule) : "";
+        return type && schedule ? `${type} ${schedule}` : "";
+      }).filter(Boolean);
+      if (!labels.length) return undefined;
+      return `⏱ ${labels[0]}${labels.length > 1 ? ` +${labels.length - 1}` : ""}`;
+    } catch { /* malformed upstream list is not a visible task */ }
+  }
+  return undefined;
+}
+function wrapTool(definition, hooks = {}) {
   if (!ALLOWED_TOOLS.has(definition?.name)) { diagnostic(`dropped tool: ${definition?.name || "unknown"}`); return undefined; }
   const description = [TOOL_USAGE[definition.name], definition.description].filter(Boolean).join(" ");
   if (definition.name === "scheduler_list" || definition.name === "scheduler_get") return { ...definition, description, execute: async (...args) => boundedResult(await definition.execute(...args)) };
@@ -122,25 +150,58 @@ function wrapTool(definition) {
       scanPersistent(params?.prompt);
       await confirm(ctx, "Create scheduled task", createSummary(params));
     } else await confirm(ctx, "Delete scheduled task", `Delete task: taskId=${clean(params?.taskId)}`);
-    return definition.execute(...args);
+    const result = await definition.execute(...args);
+    await hooks.refresh?.(args[4]);
+    return result;
   } };
 }
 
 /** A deliberately small in-process membrane around the exact upstream extension. */
-export function registerTaskSchedulerAdapter(pi, { upstreamExtension = upstreamDefaultExtension, env = process.env } = {}) {
+export function registerTaskSchedulerAdapter(pi, { upstreamExtension = upstreamDefaultExtension, env = process.env, clock = globalThis, pollMs = FOOTER_POLL_MS } = {}) {
   if (!pi || typeof pi.registerTool !== "function") throw new Error("Pi registerTool is required");
   let sessionCwd;
+  let sessionCtx;
+  let epoch = 0;
+  let timer;
+  let listing;
+  let refreshingEpoch;
+  const clearTimer = () => { if (timer !== undefined) { clock.clearInterval(timer); timer = undefined; } };
+  const publish = (owner, value) => { if (owner === sessionCtx && owner?.ui && typeof owner.ui.setStatus === "function") owner.ui.setStatus("pi-scheduler", value); };
+  const refresh = async (owner = sessionCtx, expected = epoch) => {
+    if (!owner || owner !== sessionCtx || expected !== epoch || !listing || refreshingEpoch === expected) return;
+    refreshingEpoch = expected;
+    try {
+      const result = await listing.execute("scheduler-list", {}, new AbortController().signal, () => {}, owner);
+      if (owner === sessionCtx && expected === epoch) publish(owner, schedulerFooterStatus(result));
+    } catch { if (owner === sessionCtx && expected === epoch) publish(owner, undefined); }
+    finally { if (refreshingEpoch === expected) refreshingEpoch = undefined; }
+  };
+  const beginPolling = (owner, expected) => {
+    clearTimer();
+    if (typeof clock.setInterval !== "function") return;
+    timer = clock.setInterval(() => { void refresh(owner, expected); }, pollMs);
+    timer?.unref?.();
+  };
+  const hooks = { refresh: (owner) => refresh(owner) };
   const facade = Object.create(null);
   Object.assign(facade, {
-    registerTool(definition) { const wrapped = wrapTool(definition); if (wrapped) return pi.registerTool.call(pi, wrapped); },
+    registerTool(definition) { const wrapped = wrapTool(definition, hooks); if (definition?.name === "scheduler_list") listing = definition; if (wrapped) return pi.registerTool.call(pi, wrapped); },
     registerCommand(name) { diagnostic(`dropped command: /${name || "unknown"}`); },
-    sendUserMessage(message, options = {}) { if (typeof pi.sendUserMessage !== "function") throw new Error("Pi sendUserMessage is required"); scanPersistent(message); return pi.sendUserMessage.call(pi, `${PERSISTED_HEADER}${message}`, { ...options, expandPromptTemplates: false }); },
+    sendUserMessage(message, options = {}) { if (typeof pi.sendUserMessage !== "function") throw new Error("Pi sendUserMessage is required"); scanPersistent(message); return pi.sendUserMessage.call(pi, `${PERSISTED_HEADER}${message}`, { deliverAs: "followUp", ...options, expandPromptTemplates: false }); },
     on(event, handler) {
       if (!ALLOWED_EVENTS.has(event) || typeof handler !== "function") { diagnostic(`dropped event: ${event || "unknown"}`); return; }
       return pi.on.call(pi, event, async (payload, ctx) => {
-        if (event !== "session_start") return handler(payload, ctx);
-        sessionCwd = realpathSync(ctx?.cwd);
-        try { return await handler(payload, ctx); } finally { sessionCwd = undefined; }
+        if (event === "session_shutdown") {
+        clearTimer(); epoch += 1; const owner = sessionCtx; publish(owner, undefined); sessionCtx = undefined; sessionCwd = undefined;
+        return handler(payload, ctx);
+      }
+      sessionCwd = realpathSync(ctx?.cwd); sessionCtx = ctx; epoch += 1; const expected = epoch;
+      clearTimer();
+      try {
+        const result = await handler(payload, ctx);
+        await refresh(ctx, expected); beginPolling(ctx, expected);
+        return result;
+      } finally { sessionCwd = undefined; }
       });
     },
   });

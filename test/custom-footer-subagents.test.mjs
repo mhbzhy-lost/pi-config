@@ -238,6 +238,33 @@ test("child footer preserves an exactly fitting position without an empty token 
   assert.match(component.render(10)[0], /^120-139\/4\x1b\[0m…\x1b\[0m$/);
 });
 
+test("footer displays only the adapter task summary on the third line without adding rows", () => {
+  const extensionStatuses = new Map([["pi-scheduler", "⏱ Daily backup"]]);
+  const snapshot = { active: false, selectedKey: undefined, selected: undefined, children: [], activeChildren: [], recentChildren: [] };
+  const component = customFooterModule.createFooterComponent({
+    getCwd: () => "/repo", getHome: () => "/home/test", getModel: () => ({ id: "main" }),
+    getContextUsage: () => ({ percent: 1, contextWindow: 100 }), getThinkingLevel: () => "off",
+    getSnapshot: () => snapshot, getViewportPosition: () => undefined,
+    getExtensionStatuses: () => extensionStatuses,
+    requestRender() {}, theme: { fg: (_color, text) => text },
+  });
+
+  const active = component.render(80);
+  assert.equal(active.length, 3);
+  assert.match(active[2], /^⏱ Daily backup\s+thinking: off$/);
+
+  extensionStatuses.set("pi-scheduler", "scheduler: idle");
+  assert.doesNotMatch(component.render(80)[2], /scheduler|⏱/);
+  extensionStatuses.set("pi-scheduler", "scheduler: active");
+  assert.doesNotMatch(component.render(80)[2], /scheduler|⏱/);
+  extensionStatuses.set("pi-scheduler", "⏱ Daily backup");
+  assert.match(component.render(80)[2], /^⏱ Daily backup\s+thinking: off$/);
+  extensionStatuses.set("pi-scheduler", "");
+  assert.doesNotMatch(component.render(80)[2], /scheduler/);
+  extensionStatuses.delete("pi-scheduler");
+  assert.doesNotMatch(component.render(80)[2], /scheduler/);
+});
+
 function register(map, name, handler) {
   const handlers = map.get(name) ?? [];
   handlers.push(handler); map.set(name, handlers);

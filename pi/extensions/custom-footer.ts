@@ -171,7 +171,7 @@ function formatChildContext(tokens: number | undefined, position: { start: numbe
   return `${truncateToWidth(tokenLabel, tokenWidth, "…")} · ${positionLabel}`;
 }
 
-export function createFooterComponent({ getCwd, getHome, getModel, getContextUsage, getThinkingLevel, getSnapshot, getViewportPosition, requestRender, theme }: any) {
+export function createFooterComponent({ getCwd, getHome, getModel, getContextUsage, getThinkingLevel, getSnapshot, getViewportPosition, getExtensionStatuses, requestRender, theme }: any) {
   return { dispose() {}, invalidate() { requestRender(); }, render(width: number) {
     const snapshot = getSnapshot();
     const child = snapshot.selected;
@@ -188,13 +188,15 @@ export function createFooterComponent({ getCwd, getHome, getModel, getContextUsa
     const model = child ? formatChildModel(child.model, child.thinking) : currentModel?.id ?? "no-model";
     const provider = !child && currentModel?.provider ? `(${currentModel.provider}) ` : "";
     const thinking = child?.thinking ?? getThinkingLevel?.() ?? "off";
+    const extensionStatuses = getExtensionStatuses?.();
+    const schedulerStatus = typeof extensionStatuses?.get("pi-scheduler") === "string" && extensionStatuses.get("pi-scheduler").startsWith("⏱ ") ? extensionStatuses.get("pi-scheduler") : "";
     const rightLabel = `${provider}${model}`;
     // In child mode the selected marker is navigation state, so it outranks a long model label.
     const childRightLabel = child ? truncateToWidth(rightLabel, Math.max(0, width - 2), "…") : rightLabel;
     return [
       layoutFooter({ width, left: displayedCwd, right: contextLabel, visibleWidth, truncateToWidth }),
       layoutFooter({ width, left: formatBrowserSelector(snapshot, Math.max(1, width - visibleWidth(childRightLabel) - 1)), right: childRightLabel, visibleWidth, truncateToWidth }),
-      layoutFooter({ width, left: "", right: `thinking: ${thinking}`, visibleWidth, truncateToWidth }),
+      layoutFooter({ width, left: schedulerStatus, right: `thinking: ${thinking}`, visibleWidth, truncateToWidth }),
     ].map((line) => theme.fg("dim", line));
   } };
 }
@@ -394,9 +396,9 @@ export default function customFooter(pi: ExtensionAPI) {
     ];
     pollTimer = setInterval(() => reconcile(owner, epoch), 500);
     (pollTimer as any)?.unref?.();
-    ctx.ui.setFooter((tui: any, theme: any) => {
+    ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
       syncMarkdownTheme();
-      const component = createFooterComponent({ getCwd: () => owner.cwd, getHome: () => process.env.HOME, getModel: () => owner.model, getContextUsage: () => owner.getContextUsage(), getThinkingLevel: () => pi.getThinkingLevel(), getSnapshot: () => browser.snapshot(), getViewportPosition: () => viewport?.position(), requestRender: () => tui.requestRender(), theme });
+      const component = createFooterComponent({ getCwd: () => owner.cwd, getHome: () => process.env.HOME, getModel: () => owner.model, getContextUsage: () => owner.getContextUsage(), getThinkingLevel: () => pi.getThinkingLevel(), getSnapshot: () => browser.snapshot(), getViewportPosition: () => viewport?.position(), getExtensionStatuses: () => footerData?.getExtensionStatuses?.(), requestRender: () => tui.requestRender(), theme });
       invalidateFooter = () => component.invalidate();
       return component;
     });
