@@ -3,8 +3,8 @@
   "tuiMode": "fullscreen",
   "fullscreenExitOutput": "resume-hint",
   "theme": "light",
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-sol",
+  "defaultProvider": "qwen-hangzhou",
+  "defaultModel": "qwen38-nvfp4",
   "hideThinkingBlock": true,
   "packages": [
     {
