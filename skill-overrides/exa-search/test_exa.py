@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import os
+import tempfile
 import unittest
 import urllib.error
 from contextlib import contextmanager
@@ -31,6 +32,77 @@ def _api_key(value: Optional[str]):
 
 
 class ExaAuthenticationTests(unittest.TestCase):
+    def test_dotenv_key_is_used_when_process_env_is_missing(self):
+        mod = _load_exa()
+        with tempfile.TemporaryDirectory() as directory:
+            dotenv = os.path.join(directory, ".env")
+            with open(dotenv, "w", encoding="utf-8") as stream:
+                stream.write("# local only\nexport EXA_API_KEY=dotenv-test-key\n")
+            with _api_key(None), patch.object(mod, "__file__", os.path.join(directory, "exa.py")):
+                self.assertEqual(mod._required_api_key(), "dotenv-test-key")
+                self.assertNotIn("EXA_API_KEY", os.environ)
+
+    def test_dotenv_supports_single_and_double_quotes(self):
+        mod = _load_exa()
+        fixtures = (
+            ('EXA_API_KEY="double-test-key"', "double-test-key"),
+            ("export EXA_API_KEY='single-test-key'", "single-test-key"),
+        )
+        for line, expected in fixtures:
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as directory:
+                with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+                    stream.write(line + "\n")
+                with _api_key(None), patch.object(
+                    mod, "__file__", os.path.join(directory, "exa.py")
+                ):
+                    self.assertEqual(mod._required_api_key(), expected)
+
+    def test_process_env_overrides_dotenv(self):
+        mod = _load_exa()
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+                stream.write('EXA_API_KEY="dotenv-test-key"\n')
+            with _api_key("process-test-key"), patch.object(
+                mod, "__file__", os.path.join(directory, "exa.py")
+            ):
+                self.assertEqual(mod._required_api_key(), "process-test-key")
+
+    def test_empty_process_env_and_dotenv_keep_existing_error(self):
+        mod = _load_exa()
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+                stream.write("EXA_API_KEY=   \n")
+            with _api_key("   "), patch.object(
+                mod, "__file__", os.path.join(directory, "exa.py")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "EXA_API_KEY"):
+                    mod._required_api_key()
+
+    def test_malformed_dotenv_target_is_rejected_without_leaking_value(self):
+        mod = _load_exa()
+        secret = "malformed-test-secret"
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+                stream.write(f"EXA_API_KEY=\"{secret}\nOTHER={secret}\n")
+            with _api_key(None), patch.object(
+                mod, "__file__", os.path.join(directory, "exa.py")
+            ):
+                with self.assertRaises(RuntimeError) as raised:
+                    mod._required_api_key()
+        self.assertIn("EXA_API_KEY", str(raised.exception))
+        self.assertNotIn(secret, str(raised.exception))
+
+    def test_dotenv_ignores_comments_and_unrelated_lines(self):
+        mod = _load_exa()
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+                stream.write("# EXA_API_KEY=wrong-test-key\nUNRELATED=value\n")
+            with _api_key(None), patch.object(
+                mod, "__file__", os.path.join(directory, "exa.py")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "EXA_API_KEY"):
+                    mod._required_api_key()
+
     def test_missing_api_key_fails_before_network_request(self):
         """An absent key must not fall back to a credential embedded in source."""
         mod = _load_exa()

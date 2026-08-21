@@ -56,11 +56,42 @@ def _safe_diagnostic(value: object, api_key: str, limit: int = 500) -> str:
     return _truncate_diagnostic(text, limit)
 
 
+def _local_dotenv_api_key() -> str:
+    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        with open(dotenv_path, encoding="utf-8") as dotenv:
+            for line in dotenv:
+                entry = line.strip()
+                if not entry or entry.startswith("#"):
+                    continue
+                match = re.match(r"(?:export\s+)?EXA_API_KEY\s*=\s*(.*)$", entry)
+                if not match:
+                    if re.match(r"(?:export\s+)?EXA_API_KEY\b", entry):
+                        raise RuntimeError("Invalid EXA_API_KEY entry in local .env")
+                    continue
+                value = match.group(1).strip()
+                if not value:
+                    return ""
+                if value[0] in ("'", '"'):
+                    quote = value[0]
+                    if len(value) < 2 or value[-1] != quote or value[1:-1].find(quote) >= 0:
+                        raise RuntimeError("Invalid EXA_API_KEY entry in local .env")
+                    value = value[1:-1]
+                return value.strip()
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        raise RuntimeError("Unable to read local .env") from None
+    return ""
+
+
 def _required_api_key() -> str:
     api_key = os.environ.get("EXA_API_KEY", "").strip()
     if not api_key:
+        api_key = _local_dotenv_api_key()
+    if not api_key:
         raise RuntimeError(
-            "EXA_API_KEY is required; set it in the environment before using exa-search"
+            "EXA_API_KEY is required; set it in the environment or local .env before using exa-search"
         )
     if len(api_key) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in api_key):
         raise RuntimeError(

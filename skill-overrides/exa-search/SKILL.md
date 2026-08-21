@@ -9,13 +9,7 @@ Search the web and fetch webpage content using Exa's semantic search API.
 
 ## Prerequisite
 
-Python 3.9 or newer is required. Set a personal Exa API key in the process environment:
-
-```bash
-export EXA_API_KEY="<your-exa-api-key>"
-```
-
-The script intentionally has no built-in or anonymous fallback. Never commit the key to this repository. `skill-overrides/exa-search/.env` is ignored for local secret management, but the script does not parse it; load it into bash/zsh first with `set -a; source skill-overrides/exa-search/.env; set +a`.
+Python 3.9 or newer is required. The script automatically loads `EXA_API_KEY` from the gitignored `.env` in its own directory when the process environment does not provide a non-empty value. A non-empty process environment value takes precedence. Users do not need to source the file or restart their shell. There is no anonymous fallback; never commit the key to this repository.
 
 ## When to Use
 
