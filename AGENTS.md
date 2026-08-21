@@ -11,3 +11,7 @@ Pi config root is `pi/` (not `~/.pi`). See `pi/AGENTS.md` for constraints.
 `enabledModels` 字段为 per-machine 配置（各机器可用模型不同），禁止提交其变更。
 `/scoped-models` 命令产生的 diff 应丢弃（interactive discard hunk 或 `git checkout -- pi/settings.json`）。
 其他字段（如 `defaultThinkingLevel`、`goalEngine`、`compaction` 等）有变更时正常提交。
+
+## `pi/models.json` 本机配置
+
+本机专用 provider/model 定义可通过 `git update-index --skip-worktree pi/models.json` 仅保留在本地，禁止提交。上游修改 `pi/models.json` 时，必须先执行 `git update-index --no-skip-worktree pi/models.json`，再进行同步；同步完成并恢复本机定义后，如仍需隐藏本地差异，再重新设置 `--skip-worktree`。
