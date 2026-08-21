@@ -18,6 +18,10 @@ def _load_exa():
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    descriptor, isolated_dotenv = tempfile.mkstemp()
+    os.close(descriptor)
+    os.unlink(isolated_dotenv)
+    mod.LOCAL_DOTENV_PATH = isolated_dotenv
     return mod
 
 
@@ -38,7 +42,7 @@ class ExaAuthenticationTests(unittest.TestCase):
             dotenv = os.path.join(directory, ".env")
             with open(dotenv, "w", encoding="utf-8") as stream:
                 stream.write("# local only\nexport EXA_API_KEY=dotenv-test-key\n")
-            with _api_key(None), patch.object(mod, "__file__", os.path.join(directory, "exa.py")):
+            with _api_key(None), patch.object(mod, "LOCAL_DOTENV_PATH", dotenv):
                 self.assertEqual(mod._required_api_key(), "dotenv-test-key")
                 self.assertNotIn("EXA_API_KEY", os.environ)
 
@@ -50,31 +54,28 @@ class ExaAuthenticationTests(unittest.TestCase):
         )
         for line, expected in fixtures:
             with self.subTest(line=line), tempfile.TemporaryDirectory() as directory:
-                with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+                dotenv = os.path.join(directory, ".env")
+                with open(dotenv, "w", encoding="utf-8") as stream:
                     stream.write(line + "\n")
-                with _api_key(None), patch.object(
-                    mod, "__file__", os.path.join(directory, "exa.py")
-                ):
+                with _api_key(None), patch.object(mod, "LOCAL_DOTENV_PATH", dotenv):
                     self.assertEqual(mod._required_api_key(), expected)
 
     def test_process_env_overrides_dotenv(self):
         mod = _load_exa()
         with tempfile.TemporaryDirectory() as directory:
-            with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+            dotenv = os.path.join(directory, ".env")
+            with open(dotenv, "w", encoding="utf-8") as stream:
                 stream.write('EXA_API_KEY="dotenv-test-key"\n')
-            with _api_key("process-test-key"), patch.object(
-                mod, "__file__", os.path.join(directory, "exa.py")
-            ):
+            with _api_key("process-test-key"), patch.object(mod, "LOCAL_DOTENV_PATH", dotenv):
                 self.assertEqual(mod._required_api_key(), "process-test-key")
 
     def test_empty_process_env_and_dotenv_keep_existing_error(self):
         mod = _load_exa()
         with tempfile.TemporaryDirectory() as directory:
-            with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+            dotenv = os.path.join(directory, ".env")
+            with open(dotenv, "w", encoding="utf-8") as stream:
                 stream.write("EXA_API_KEY=   \n")
-            with _api_key("   "), patch.object(
-                mod, "__file__", os.path.join(directory, "exa.py")
-            ):
+            with _api_key("   "), patch.object(mod, "LOCAL_DOTENV_PATH", dotenv):
                 with self.assertRaisesRegex(RuntimeError, "EXA_API_KEY"):
                     mod._required_api_key()
 
@@ -82,11 +83,10 @@ class ExaAuthenticationTests(unittest.TestCase):
         mod = _load_exa()
         secret = "malformed-test-secret"
         with tempfile.TemporaryDirectory() as directory:
-            with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+            dotenv = os.path.join(directory, ".env")
+            with open(dotenv, "w", encoding="utf-8") as stream:
                 stream.write(f"EXA_API_KEY=\"{secret}\nOTHER={secret}\n")
-            with _api_key(None), patch.object(
-                mod, "__file__", os.path.join(directory, "exa.py")
-            ):
+            with _api_key(None), patch.object(mod, "LOCAL_DOTENV_PATH", dotenv):
                 with self.assertRaises(RuntimeError) as raised:
                     mod._required_api_key()
         self.assertIn("EXA_API_KEY", str(raised.exception))
@@ -95,22 +95,29 @@ class ExaAuthenticationTests(unittest.TestCase):
     def test_dotenv_ignores_comments_and_unrelated_lines(self):
         mod = _load_exa()
         with tempfile.TemporaryDirectory() as directory:
-            with open(os.path.join(directory, ".env"), "w", encoding="utf-8") as stream:
+            dotenv = os.path.join(directory, ".env")
+            with open(dotenv, "w", encoding="utf-8") as stream:
                 stream.write("# EXA_API_KEY=wrong-test-key\nUNRELATED=value\n")
-            with _api_key(None), patch.object(
-                mod, "__file__", os.path.join(directory, "exa.py")
-            ):
+            with _api_key(None), patch.object(mod, "LOCAL_DOTENV_PATH", dotenv):
                 with self.assertRaisesRegex(RuntimeError, "EXA_API_KEY"):
                     mod._required_api_key()
 
-    def test_missing_api_key_fails_before_network_request(self):
-        """An absent key must not fall back to a credential embedded in source."""
+    def test_missing_api_key_ignores_dotenv_next_to_script(self):
+        """Normal tests use their isolated dotenv path, never a script sibling."""
         mod = _load_exa()
-
-        with _api_key(None), patch.object(mod.urllib.request, "urlopen") as urlopen:
-            with self.assertRaisesRegex(RuntimeError, "EXA_API_KEY"):
-                mod.mcp_call("tools/list", {})
-        urlopen.assert_not_called()
+        script_dotenv = os.path.join(os.path.dirname(mod.__file__), ".env")
+        created_fixture = not os.path.exists(script_dotenv)
+        if created_fixture:
+            with open(script_dotenv, "w", encoding="utf-8") as stream:
+                stream.write("EXA_API_KEY=script-sibling-test-key\n")
+        try:
+            with _api_key(None), patch.object(mod.urllib.request, "urlopen") as urlopen:
+                with self.assertRaisesRegex(RuntimeError, "EXA_API_KEY"):
+                    mod.mcp_call("tools/list", {})
+            urlopen.assert_not_called()
+        finally:
+            if created_fixture:
+                os.unlink(script_dotenv)
 
     def test_whitespace_api_key_fails_before_network_request(self):
         mod = _load_exa()

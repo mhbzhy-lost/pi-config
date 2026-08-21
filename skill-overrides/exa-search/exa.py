@@ -22,6 +22,7 @@ HEADERS = MappingProxyType({
     "Accept": "application/json, text/event-stream",
     "User-Agent": "exa-pi-skill/1.0",
 })
+LOCAL_DOTENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 
 def _truncate_diagnostic(text: str, limit: int) -> str:
@@ -57,9 +58,8 @@ def _safe_diagnostic(value: object, api_key: str, limit: int = 500) -> str:
 
 
 def _local_dotenv_api_key() -> str:
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     try:
-        with open(dotenv_path, encoding="utf-8") as dotenv:
+        with open(LOCAL_DOTENV_PATH, encoding="utf-8") as dotenv:
             for line in dotenv:
                 entry = line.strip()
                 if not entry or entry.startswith("#"):
