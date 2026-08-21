@@ -71,10 +71,11 @@ function progressAuthority(projection, blocking, attention) {
 function budgetFacts(projection, world, blocking, attention) {
   const budget = projection.convergenceBudget ?? projection.budgets ?? {};
   const runs = values(projection.observationRuns ?? {}, "observationRuns"), episodes = values(projection.repairEpisodes ?? {}, "repairEpisodes");
-  if (Number.isSafeInteger(budget.max_observations) && runs.filter(run => Number.isSafeInteger(run?.cycle) && run.cycle > 0).length >= budget.max_observations) note(blocking, "budget", "observations", "OBSERVATION_BUDGET_EXHAUSTED");
-  if (Number.isSafeInteger(budget.max_repairs) && episodes.length >= budget.max_repairs) note(blocking, "budget", "repairs", "REPAIR_BUDGET_EXHAUSTED");
+  const observationExhausted = Number.isSafeInteger(budget.max_observations) && runs.filter(run => Number.isSafeInteger(run?.cycle) && run.cycle > 0).length >= budget.max_observations;
+  const repairExhausted = Number.isSafeInteger(budget.max_repairs) && episodes.length >= budget.max_repairs;
   if (Number.isSafeInteger(budget.max_elapsed_minutes)) { const start = Date.parse(projection.createdAt), end = Date.parse(world.capturedAt); if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) note(attention, "budget", "elapsed", "ELAPSED_BUDGET_AUTHORITY_UNAVAILABLE"); else if (end - start >= budget.max_elapsed_minutes * 60000) note(blocking, "budget", "elapsed", "ELAPSED_BUDGET_EXHAUSTED"); }
   progressAuthority(projection, blocking, attention);
+  return { observationExhausted, repairExhausted };
 }
 function safeTaskAction(id, state) {
   const next = state?.requiredNextAction;
@@ -126,15 +127,20 @@ export function actionableFrontier(input = {}) {
     const hasActive = values(projection.observationRuns ?? {}, "observationRuns").some(run => run?.conditionId === id && ACTIVE_RUN_PHASES.has(run.phase)); if (hasActive) { note(blocking, "condition", id, "OBSERVATION_CYCLE_NOT_RELEASED"); continue; }
     if (!deps) continue; const claims = claimsFor(id, inventory); if (!claims) { note(attention, "condition", id, "RESOURCE_CLAIM_AUTHORITY_UNAVAILABLE"); continue; } if (resourceBlocked(claims, world.resources)) { note(blocking, "condition", id, "RESOURCE_CONFLICT"); continue; } const cycle = values(projection.observationRuns ?? {}, "observationRuns").filter(run => run?.conditionId === id && Number.isSafeInteger(run.cycle) && run.cycle >= 1).reduce((max, run) => Math.max(max, run.cycle), 0) + 1; action(actions, "condition", id, 5, "request_observation", { condition_id: id, cycle }, "Condition requires fresh observation");
   }
-  budgetFacts(projection, world, blocking, attention);
+  const { observationExhausted, repairExhausted } = budgetFacts(projection, world, blocking, attention);
+  const budgetPermitted = actions.filter(item => {
+    if (observationExhausted && item.tool === "request_observation") { note(blocking, "budget", item.id, "OBSERVATION_BUDGET_EXHAUSTED"); return false; }
+    if (repairExhausted && item.tool === "materialize_repair") { note(blocking, "budget", item.id, "REPAIR_BUDGET_EXHAUSTED"); return false; }
+    return true;
+  });
   const runtimeState = projection.runtimeState;
   if (projection.lifecycle !== "active") note(blocking, "runtime", "lifecycle", "RUNTIME_LIFECYCLE_INACTIVE");
   if (["draft", "awaiting_user_approval"].includes(runtimeState)) note(blocking, "runtime", runtimeState, "RUNTIME_READINESS_REQUIRED");
   if (runtimeState === "calibrating") note(blocking, "runtime", runtimeState, "RUNTIME_CALIBRATION_REQUIRED");
-  const globalGate = blocking.some(item => ["WORLD_SNAPSHOT_UNSAFE", "OBSERVATION_BUDGET_EXHAUSTED", "REPAIR_BUDGET_EXHAUSTED", "ELAPSED_BUDGET_EXHAUSTED", "NO_PROGRESS_BUDGET_EXHAUSTED", "PENDING_HUMAN_DECISION", "RUNTIME_LIFECYCLE_INACTIVE", "RUNTIME_READINESS_REQUIRED", "RUNTIME_CALIBRATION_REQUIRED"].includes(item.code)) || attention.some(item => ["NO_PROGRESS_AUTHORITY_UNAVAILABLE", "OBSERVATION_RUN_STATE_CONFLICT", "ACTIVE_RUN_AUTHORITY_UNAVAILABLE"].includes(item.code));
+  const globalGate = blocking.some(item => ["WORLD_SNAPSHOT_UNSAFE", "ELAPSED_BUDGET_EXHAUSTED", "NO_PROGRESS_BUDGET_EXHAUSTED", "PENDING_HUMAN_DECISION", "RUNTIME_LIFECYCLE_INACTIVE", "RUNTIME_READINESS_REQUIRED", "RUNTIME_CALIBRATION_REQUIRED"].includes(item.code)) || attention.some(item => ["NO_PROGRESS_AUTHORITY_UNAVAILABLE", "OBSERVATION_RUN_STATE_CONFLICT", "ACTIVE_RUN_AUTHORITY_UNAVAILABLE"].includes(item.code));
   const debtAction = item => ["suspension-recovery", "resource-recovery", "observation-record", "observation-release"].includes(item.kind) || (item.kind === "task" && ["goal_settle", "goal_integrate", "goal_accept"].includes(item.tool));
   const suspensionDebtAction = item => ["suspension-recovery", "resource-recovery", "observation-record", "observation-release"].includes(item.kind) || (item.kind === "task" && (item.tool === "goal_settle" || (item.tool === "goal_integrate" && ["discard", "preserve"].includes(item.params.action))));
-  const permitted = runtimeState === "suspended" || suspension ? actions.filter(suspensionDebtAction) : globalGate ? actions.filter(debtAction) : runtimeState === "active" && projection.lifecycle === "active" ? actions : [];
+  const permitted = runtimeState === "suspended" || suspension ? budgetPermitted.filter(suspensionDebtAction) : globalGate ? budgetPermitted.filter(debtAction) : runtimeState === "active" && projection.lifecycle === "active" ? budgetPermitted : [];
   const tasksDone = collection(projection.tasks ?? {}, "tasks").every(([id, task]) => { const app = taskApplicability(projection, id); return app === "superseded" || (app === "applicable" && task?.status === "accepted"); });
   const conditionsDone = collection(projection.conditions ?? {}, "conditions").every(([, state]) => state?.status === "satisfied" && state.freshness !== "stale" && dependencyReady(state, projection, [], "complete"));
   const complete = tasksDone && conditionsDone && !permitted.length && !blocking.length && !attention.length && !suspension;

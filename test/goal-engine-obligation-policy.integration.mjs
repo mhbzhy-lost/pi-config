@@ -54,10 +54,28 @@ test("fingerprint ignores random proof IDs but tracks semantic changes, and next
   assert.throws(() => nextObligationAction({ actions: [{ kind: "condition", id: "c", priority: 5, tool: "request_observation", params: {}, reason: "x", secret: "no" }] }));
 });
 
-test("priority order and zero budget boundary keep only terminal debt actions", () => {
+test("zero observation budget suppresses only a new cycle while terminal observation debt continues", () => {
   const projection = base(); projection.progressLedger = ledger(); projection.conditions.set("c", condition("c")); projection.observationRuns.set("r", { runId: "r", conditionId: "c", phase: "terminal" }); projection.convergenceBudget.max_observations = 0;
   const result = frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) });
   assert.deepEqual(result.actions.map(item => item.kind), ["observation-record"]); assert(result.blocking.some(item => item.code === "OBSERVATION_BUDGET_EXHAUSTED"));
+});
+
+test("zero observation and repair budgets do not block an unrelated pending Task dispatch", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.tasks.set("task", { status: "pending" }); projection.convergenceBudget.max_observations = 0; projection.convergenceBudget.max_repairs = 0;
+  const result = frontier(projection, world(), new Map([["task", { requiredNextAction: { tool: "goal_dispatch", params: {}, reason: "runnable" } }]]));
+  assert.equal(nextObligationAction(result)?.tool, "goal_dispatch"); assert(!result.blocking.some(item => ["OBSERVATION_BUDGET_EXHAUSTED", "REPAIR_BUDGET_EXHAUSTED"].includes(item.code)));
+});
+
+test("zero observation and repair budgets allow finalize after all obligations settle", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.tasks.set("task", { status: "accepted" }); projection.conditions.set("c", { ...condition("c", "satisfied"), freshness: "fresh" }); projection.convergenceBudget.max_observations = 0; projection.convergenceBudget.max_repairs = 0;
+  const result = frontier(projection);
+  assert.equal(result.completeCandidate, true); assert.equal(nextObligationAction(result)?.tool, "goal_finalize"); assert(!result.blocking.some(item => ["OBSERVATION_BUDGET_EXHAUSTED", "REPAIR_BUDGET_EXHAUSTED"].includes(item.code)));
+});
+
+test("zero repair budget suppresses materialization but keeps existing repair closure and reverification actionable", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.convergenceBudget.max_repairs = 0; projection.findings.set("open", { findingId: "open", status: "open" }); projection.repairEpisodes.set("closing", { status: "active" }); projection.repairEpisodes.set("reverifying", { status: "reverifying", ownedRunIds: [] });
+  const result = frontier(projection);
+  assert(!result.actions.some(item => item.tool === "materialize_repair")); assert(result.actions.some(item => item.id === "closing" && item.tool === "repair_episode")); assert(result.actions.some(item => item.id === "reverifying" && item.tool === "repair_episode")); assert(result.blocking.some(item => item.id === "open" && item.code === "REPAIR_BUDGET_EXHAUSTED"));
 });
 
 test("finalize needs a valid ledger and all settled facts", () => {
