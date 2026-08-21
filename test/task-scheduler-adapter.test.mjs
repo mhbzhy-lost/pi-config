@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, realpath, symlink, lstat, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, symlink, lstat, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+const execFileAsync = promisify(execFile);
 import { registerTaskSchedulerAdapter, repositoryDataDir } from "../scripts/lib/task-scheduler/adapter.mjs";
 
 // A local factory exercises the membrane directly, without creating scheduler state or timers.
@@ -253,11 +256,34 @@ test("facade sendUserMessage fails closed when the host method is absent", () =>
   assert.throws(() => api.sendUserMessage("safe"), /sendUserMessage is required/);
 });
 
+test("non-Git cwd permits state-home within cwd while real Git boundaries remain excluded", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "scheduler-repository-boundary-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const nonRepository = join(root, "home"), nonRepositoryState = join(nonRepository, "state");
+  await mkdir(nonRepository);
+  const nonRepositoryData = repositoryDataDir(nonRepository, { XDG_STATE_HOME: nonRepositoryState });
+  assert.equal((await stat(nonRepositoryData)).mode & 0o777, 0o700, "non-Git cwd may contain its state-home");
+
+  const repository = join(root, "repository");
+  await mkdir(repository);
+  await execFileAsync("git", ["init", "--quiet", repository]);
+  assert.throws(() => repositoryDataDir(repository, { XDG_STATE_HOME: join(repository, "state") }), /outside the repository/);
+  const repositoryData = repositoryDataDir(repository, { XDG_STATE_HOME: join(root, "external-state") });
+  const nestedCwd = join(repository, "src"); await mkdir(nestedCwd);
+  const nestedData = repositoryDataDir(nestedCwd, { XDG_STATE_HOME: join(root, "external-state") });
+  assert.equal(nestedData, repositoryData, "Git worktree descendants share the canonical repository identity");
+
+  const managedWorktree = join(root, "managed-worktree");
+  await mkdir(managedWorktree);
+  await writeFile(join(managedWorktree, ".git"), `gitdir: ${join(repository, ".git")}\n`);
+  assert.throws(() => repositoryDataDir(managedWorktree, { XDG_STATE_HOME: join(managedWorktree, "state") }), /outside the repository/);
+});
+
 test("data directory permits platform ancestor aliases but rejects state-home and scheduler descendants", async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "scheduler-membrane-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, "repo"), other = join(root, "other"), privateRoot = join(root, "private"), aliasRoot = join(root, "var");
-  await Promise.all([mkdir(repo), mkdir(other), mkdir(privateRoot)]); await symlink(privateRoot, aliasRoot);
+  await Promise.all([mkdir(repo), mkdir(other), mkdir(privateRoot)]); await execFileAsync("git", ["init", "--quiet", repo]); await symlink(privateRoot, aliasRoot);
   // Simulates /var -> /private/var: only an ancestor above state-home is a link.
   const aliasedState = join(aliasRoot, "state"); await mkdir(join(privateRoot, "state"));
   const expected = repositoryDataDir(repo, { XDG_STATE_HOME: aliasedState });
@@ -271,7 +297,7 @@ test("data directory permits platform ancestor aliases but rejects state-home an
   const parentState = join(root, "parent-state"); await mkdir(parentState);
   await symlink(repo, join(parentState, "pi-task-scheduler"));
   assert.throws(() => repositoryDataDir(other, { XDG_STATE_HOME: parentState }), /real directory/);
-  assert.deepEqual(await readdir(repo), [], "scheduler parent rejection creates no repository state");
+  assert.deepEqual(await readdir(repo), [".git"], "scheduler parent rejection creates no repository state");
 
   const leafState = join(root, "leaf-state"); await mkdir(join(leafState, "pi-task-scheduler"), { recursive: true });
   const expectedLeaf = join(leafState, "pi-task-scheduler", (await import("node:crypto")).createHash("sha256").update(await realpath(other)).digest("hex"));
@@ -281,7 +307,7 @@ test("data directory permits platform ancestor aliases but rejects state-home an
 
   const repositoryAlias = join(root, "repository-alias"); await symlink(repo, repositoryAlias);
   assert.throws(() => repositoryDataDir(repo, { XDG_STATE_HOME: join(repositoryAlias, "projected-state") }), /outside the repository/);
-  assert.deepEqual(await readdir(repo), [], "ancestor projection rejection writes nothing in the repository");
+  assert.deepEqual(await readdir(repo), [".git"], "ancestor projection rejection writes nothing in the repository");
 });
 
 test("confirmation summaries remove visual controls and result details must be absent", async () => {

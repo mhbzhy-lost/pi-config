@@ -30,6 +30,17 @@ function checkRealDirectory(path, message) {
     if (error?.code !== "ENOENT") throw error;
   }
 }
+function gitWorkspaceRoot(cwd) {
+  for (let cursor = realpathSync(cwd); ; cursor = dirname(cursor)) {
+    try {
+      const marker = lstatSync(resolve(cursor, ".git"));
+      if (marker.isDirectory() || marker.isFile()) return cursor;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    if (cursor === dirname(cursor)) return undefined;
+  }
+}
 function checkStateHomeProjection(repo, stateHome) {
   // Ancestors may be platform aliases (for example macOS /var), but before
   // mkdir can follow one, its canonical target must already be outside repo.
@@ -37,7 +48,7 @@ function checkStateHomeProjection(repo, stateHome) {
     try {
       const entry = lstatSync(cursor);
       if (!entry.isDirectory() && !entry.isSymbolicLink()) throw new Error("scheduler data directory parent must be a real directory");
-      if (!outside(repo, realpathSync(cursor))) throw new Error("scheduler data directory must be outside the repository");
+      if (repo && !outside(repo, realpathSync(cursor))) throw new Error("scheduler data directory must be outside the repository");
       return;
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
@@ -46,11 +57,13 @@ function checkStateHomeProjection(repo, stateHome) {
   }
 }
 export function repositoryDataDir(cwd, env = process.env) {
-  const repo = realpathSync(cwd);
+  const canonicalCwd = realpathSync(cwd);
+  const repo = gitWorkspaceRoot(canonicalCwd);
+  const identity = repo || canonicalCwd;
   const stateHome = resolve(env.XDG_STATE_HOME || resolve(homedir(), ".local", "state"));
   const schedulerHome = resolve(stateHome, "pi-task-scheduler");
-  const root = resolve(schedulerHome, createHash("sha256").update(repo).digest("hex"));
-  if (!outside(repo, root)) throw new Error("scheduler data directory must be outside the repository");
+  const root = resolve(schedulerHome, createHash("sha256").update(identity).digest("hex"));
+  if (repo && !outside(repo, root)) throw new Error("scheduler data directory must be outside the repository");
   checkRealDirectory(stateHome, "scheduler data directory parent must be a real directory");
   checkStateHomeProjection(repo, stateHome);
   mkdirSync(stateHome, { recursive: true, mode: 0o700 });
@@ -64,7 +77,7 @@ export function repositoryDataDir(cwd, env = process.env) {
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const actual = realpathSync(root);
   const actualStateHome = realpathSync(stateHome);
-  if (!outside(repo, actual) || outside(actualStateHome, actual) || lstatSync(actual).isSymbolicLink() || !statSync(actual).isDirectory()) throw new Error("scheduler data directory must be a real directory outside the repository");
+  if ((repo && !outside(repo, actual)) || outside(actualStateHome, actual) || lstatSync(actual).isSymbolicLink() || !statSync(actual).isDirectory()) throw new Error("scheduler data directory must be a real directory outside the repository");
   chmodSync(actual, 0o700);
   return actual;
 }
