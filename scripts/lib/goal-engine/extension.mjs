@@ -1343,15 +1343,9 @@ export function createGoalEngineExtension(pi, options = {}) {
         projection = loadProjectionFn(root, goalId);
       }
       const runtimeIntentGate = runtimeIntentGates.get(`${goalId}:${sessionId}`);
-      const fullyClosedSuspension = projection.suspension?.resourcesQuarantined
-        && projection.suspension.terminalProofRefs?.length === projection.suspension.affectedRunIds?.length
-        && projection.suspension.workspaceClosureProofRefs?.length === projection.suspension.affectedTaskIds?.length
-        && projection.suspension.resourceClosureProofRefs?.length === projection.suspension.affectedRunIds?.length;
-      // A persisted input gate protects active runtime authority. Once the
-      // owner has durably closed suspension, that same gate is a stale latch:
-      // status is the sole membrane exception that can reconcile it.
-      if (projection.eventSchemaVersion === "goal-runtime.v1" && runtimeIntentGate?.kind === "pending"
-        && projection.runtimeState === "suspended" && fullyClosedSuspension && ownedBySession(projection, sessionId)) {
+      // A persisted input gate protects active runtime authority. Once durable
+      // closure makes resume the sole frontier, it is a stale latch.
+      if (runtimeIntentGate?.kind === "pending" && fullyClosedSuspendedOwnerProjection(projection, sessionId)) {
         runtimeIntentGates.delete(`${goalId}:${sessionId}`);
       }
       if (projection.eventSchemaVersion === "goal-runtime.v1" && runtimeIntentGates.get(`${goalId}:${sessionId}`)?.kind === "pending") return JSON.stringify({ status: "R10B_SUSPENSION_REQUIRED" });
@@ -2858,6 +2852,20 @@ export function createGoalEngineExtension(pi, options = {}) {
   });
 
   const loadAllProjections = (root) => listGoalIdsFn(root).map((goalId) => loadProjectionFn(root, goalId)).filter(Boolean);
+  const fullyClosedSuspendedOwnerProjection = (projection, sessionId) => projection.eventSchemaVersion === "goal-runtime.v1"
+    && projection.runtimeState === "suspended" && ownedBySession(projection, sessionId)
+    && projection.suspension?.resourcesQuarantined
+    && projection.suspension.terminalProofRefs?.length === projection.suspension.affectedRunIds?.length
+    && projection.suspension.workspaceClosureProofRefs?.length === projection.suspension.affectedTaskIds?.length
+    && projection.suspension.resourceClosureProofRefs?.length === projection.suspension.affectedRunIds?.length;
+  const reconcileReloadedRuntimeIntentGates = (ctx) => {
+    try {
+      const { root } = executionScopeFor(ctx), sessionId = sessionIdentity(ctx);
+      for (const projection of loadAllProjections(root)) {
+        if (fullyClosedSuspendedOwnerProjection(projection, sessionId)) runtimeIntentGates.delete(`${projection.goalId}:${sessionId}`);
+      }
+    } catch { /* retain gates fail-closed when durable state cannot be read */ }
+  };
 
   const ownedRuntimeProjection = (root, sessionId, state) => {
     const candidates = loadAllProjections(root).filter((projection) => projection.eventSchemaVersion === "goal-runtime.v1"
@@ -3055,7 +3063,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     } catch { /* input for another challenge or ambiguous input never creates a metadata receipt */ }
     try {
       const { cwd, root } = executionScopeFor(ctx); const sessionId = hookSessionId;
-      const projection = loadAllProjections(root).find((candidate) => candidate.eventSchemaVersion === "goal-runtime.v1" && candidate.lifecycle === "active" && ownedBySession(candidate, sessionId));
+      const projection = loadAllProjections(root).find((candidate) => candidate.eventSchemaVersion === "goal-runtime.v1" && candidate.lifecycle === "active" && candidate.runtimeState !== "suspended" && ownedBySession(candidate, sessionId));
       if (projection && !runtimeIntentGates.has(`${projection.goalId}:${sessionId}`)) {
         const gate = { goalId: projection.goalId, sessionId, source: event.source };
         // Set the in-memory latch first: metadata failure must never reopen business actions.
@@ -3078,6 +3086,7 @@ export function createGoalEngineExtension(pi, options = {}) {
 
   pi.on("session_start", (_event, ctx) => {
     restoreMetadata(ctx);
+    reconcileReloadedRuntimeIntentGates(ctx);
     const entries = ctx.sessionManager?.getEntries?.() || [];
     const latch = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === "goal-engine-recovery-latch");
     recoveryLatch = latch?.data?.state === "active" ? latch.data : null;

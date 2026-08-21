@@ -30,12 +30,17 @@ test("fully closed suspended reload reconciles stale owner intent and reissues r
   const { cwd, api } = await suspended();
   const beforeReload = JSON.parse(await invoke(api, "goal_status"));
   assert.equal(beforeReload.machineAction?.params?.operation, "resume_runtime");
-  await api.handlers.get("input")({ type: "input", text: "ordinary owner input", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
+  // Simulate the exact durable pre-fix metadata restored from the old owner session.
+  api.appendEntry("goal-engine-runtime-intent-pending", { goalId: "harden-runtime", sessionId: "owner", source: "interactive" });
   assert.ok(api.entries.some(entry => entry.customType === "goal-engine-runtime-intent-pending"), "fixture must persist the owner intent gate");
 
   const reloaded = pi(cwd, structuredClone(api.entries));
   createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) });
   reloaded.handlers.get("session_start")({}, { cwd, sessionManager: reloaded.sessionManager });
+  const preStatus = reloaded.handlers.get("before_agent_start")({}, { cwd, sessionManager: reloaded.sessionManager });
+  assert.notEqual(preStatus?.message?.content, "R10B_SUSPENSION_REQUIRED", "session_start must reconcile the stale gate before pre-status R10B injection");
+  await reloaded.handlers.get("input")({ type: "input", text: "first ordinary owner input after reload", source: "interactive" }, { cwd, sessionManager: reloaded.sessionManager });
+  assert.equal(reloaded.__goalRuntimeIntentGate({ sessionManager: reloaded.sessionManager }, { goal_id: "harden-runtime" }), false, "a suspended runtime must not recreate the gate from the first ordinary input");
   const afterReload = JSON.parse(await invoke(reloaded, "goal_status"));
 
   assert.notEqual(afterReload.status, "R10B_SUSPENSION_REQUIRED");
