@@ -32,7 +32,6 @@ test("compileCodingDispatchIR validates and hashes", () => {
   assert.equal(ir.version, "dispatch-ir.v1");
   assert.equal(ir.taskId, "test-goal.t1");
   assert.equal(ir.agent, "executor");
-  assert.equal(ir.modelTier, "luna");
   assert.ok(/^[a-f0-9]{64}$/.test(ir.hash));
 });
 
@@ -65,7 +64,7 @@ test("splitDispatchEnvelope separates the hash from the exact subagent typed con
   assert.equal(Object.hasOwn(contract, "hash"), false);
   assert.equal(contractHash, ir.hash);
   assert.deepEqual(Object.keys(contract).sort(), [
-    "acceptance", "agent", "boundaries", "context", "execution", "modelTier", "objective",
+    "acceptance", "agent", "boundaries", "context", "execution", "objective",
     "requirements", "risk", "taskId", "title", "version", "workflow",
   ]);
   assert.equal(compileCodingDispatchIR(contract, { cwd: contract.execution.cwd }).hash, contractHash);
@@ -159,7 +158,7 @@ test("renderDispatchPrompt produces structured markdown", () => {
   const ir = compileCodingDispatchIR(validInput(), { cwd: "/workspace/project" });
   const prompt = renderDispatchPrompt(ir);
   assert.match(prompt, /# Coding Dispatch Contract/);
-  assert.match(prompt, /Requested model tier: `luna`/);
+  assert.doesNotMatch(prompt, /model tier/i);
   assert.match(prompt, /token validation/);
   assert.match(prompt, /src\/auth\/token\.ts/);
   assert.match(prompt, /node --test test\/token\.test\.mjs/);
@@ -203,7 +202,6 @@ test("compileTaskContract includes mandatory clean commit requirement", () => {
   assert.equal(contract.version, "dispatch-ir.v1");
   assert.equal(contract.taskId, "dispatch-test.t1");
   assert.equal(contract.agent, "executor");
-  assert.equal(contract.modelTier, "luna");
   assert.equal(contract.risk, "normal");
   assert.match(contract.objective, /token validation/i);
   assert.ok(contract.requirements.length >= 2);

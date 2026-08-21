@@ -1,206 +1,166 @@
 ---
 name: external-llm-review-provider
-description: "Use when adding a new provider to the external-llm-review skill, when the review command reports provider validation errors, or when _healthcheck.py shows [FAIL] for an existing provider."
+description: "Use when adding, upgrading, retiring, or diagnosing an external-llm-review provider."
 ---
 
-# 给 external-llm-review 增加 provider
+# 管理 external-llm-review provider
 
-skill 位置：`skill-overrides/external-llm-review/`
-本 skill（触发用）：`.pi/skills/external-llm-review-provider/SKILL.md`
+skill 位置：`skill-overrides/external-llm-review/`。本 skill 位于 `.pi/skills/external-llm-review-provider/SKILL.md`。
+
+当前已注册的 provider 只有：
+
+| Provider | 模型 | 协议 |
+| --- | --- | --- |
+| `idealab-anthropic` | `claude-opus-4-6` | Anthropic Messages API |
+| `idealab-openai` | `qwen3.8-max` | OpenAI-compatible streaming chat completions |
+
+新增 provider 必须按以下通用流程扩展当前白名单，不能把当前双 provider 限制误写成永久禁令。
 
 ## 决策树：要先建独立 Provider 类吗？
 
-| 新 vendor 的 wire protocol | 处理方式 | 例子 |
-|---|---|---|
-| 标准 OpenAI-compatible chat completions（`/chat/completions`，`messages` 数组，`choices[].message.content`）| **不需要**新类，直接注册到 `IdealabOpenAIProvider` | DeepSeek、OpenAI、大部分国产 |
-| 有非标准扩展：thinking/reasoning_content、强制 streaming、自定义 header、独立的 system 字段 | **需要**新类（继承 `BaseProvider`） | Bailian（`enable_thinking` + streaming）、Anthropic（独立 `system` 字段 + `x-api-key` header） |
+| 新 vendor 的 wire protocol | 处理方式 |
+| --- | --- |
+| wire protocol 和运行时行为与某现有类完全一致 | 可以复用该类。 |
+| 协议或行为有任一差异：reasoning 字段、强制 streaming、自定义 header、独立 `system` 字段、不同 endpoint 或错误语义 | 新建继承 `BaseProvider` 的类，并在类内封装协议差异。 |
 
-判断方法：翻 vendor 官方 API 文档，看是否要求任何超出标准 OpenAI 协议的特性。
+判断方法：先核对 vendor 官方 API 文档和现有类的请求、响应、流式及错误行为。`IdealabOpenAIProvider` 是 `qwen3.8-max` 的强制 streaming 专用类，不是通用 OpenAI-compatible provider 的默认复用类。
 
 ## 8 个触碰点（按顺序执行）
 
-### 1. `providers/<name>.yaml`（新建）
+核心实现触点是 `_provider.py` 和 fail-closed 的 `build_provider()` 工厂：工厂只能显式映射已批准 endpoint，未知、通用或其他 endpoint 必须拒绝，错误不得回显完整 URL。
+
+### 1. `providers/<name>.yaml`
 
 ```yaml
-provider: <name>                              # 必须等于 yaml 文件名（无扩展）
+provider: <name>
 base_url: https://api.<vendor>.com/v1
-api_key: ${<NAME>_API_KEY}                    # 占位符，引用 .env 变量
+api_key: ${<NAME>_API_KEY}
 model: <default-model-id>
 max_tokens: 16384
-# provider-specific 字段放最后，仅当需要新增 Provider 类时才用
-# enable_thinking: false
+# 仅在独立 Provider 类需要时添加 provider-specific 字段
 ```
 
-**规则**：
-- `base_url` 不带 path（OpenAI 路径 `/chat/completions`、Anthropic 路径 `/v1/messages` 由 Provider 类追加）
-- 敏感字段一律用 `${ENV_VAR}` 占位符，`_config.py` 会插值
-- 不要硬编码 API key 进 yaml
+`provider` 必须等于 YAML 文件名。`base_url` 不带 provider 类会追加的 path；敏感值只能使用 `${ENV_VAR}`，不得硬编码 API key。
 
-### 2. `_config.py`（修改）
+### 2. `_config.py`
+
+在 `_PROVIDER_CLS` 注册 `<name>`：仅当 wire protocol 和行为完全一致时才复用现有类；否则注册新类。不得把通用 OpenAI-compatible provider 默认注册为 `IdealabOpenAIProvider`。若 YAML 含 `provider`、`base_url`、`api_key`、`model`、`max_tokens` 之外的字段，在 `get_provider()` 中仅为对应类注入这些 kwargs。
+
+当前注册示例：
 
 ```python
-from _provider import (
-    BailianProvider,
-    BaseProvider,
-    IdealabAnthropicProvider,
-    IdealabOpenAIProvider,
-    # NewProvider,  # ← 仅当新增独立 Provider 类时
-)
-
 _PROVIDER_CLS: dict[str, type[BaseProvider]] = {
     "idealab-anthropic": IdealabAnthropicProvider,
-    "idealab-openai":    IdealabOpenAIProvider,
-    "bailian":           BailianProvider,
-    "deepseek":          IdealabOpenAIProvider,
-    "<name>":            IdealabOpenAIProvider,  # ← 标准 OpenAI-compatible 用这里
-    # "<name>":          NewProvider,            # ← 独立类用这里
+    "idealab-openai": IdealabOpenAIProvider,
+    # "<name>": ExistingProvider,  # 仅协议和行为完全一致时
+    # "<name>": NewProvider,       # 有任一差异时
 }
 ```
 
-**注意**：若新 provider 有 provider-specific 字段（yaml 里除 `provider` / `base_url` / `api_key` / `model` / `max_tokens` 外的字段），还要在 `get_provider()` 函数里为对应 class 添加 kwargs 注入分支（参考 Bailian 的 `enable_thinking` 处理）。
+当前 `idealab-openai` 的凭据解析由 `_config.py` 内部执行：优先以 `PI_REAL_BIN`，未设置时以 `pi`，通过 `capture_output` 调用 `auth print-api-key --provider openai-idealab`。仅当该调用超时、不可执行、非零退出或输出为空时，才回退到非空 `IDEALAB_OPENAI_API_KEY`。两者都不可用时，诊断必须是 `idealab-openai Pi auth lookup <timeout|could-not-execute|nonzero-exit|empty-output>; IDEALAB_OPENAI_API_KEY fallback unavailable`；不得包含 stdout、stderr、原始异常或凭据。不得直接读取 `auth.json`，代理和用户不得直接执行该命令。
 
-### 3. `reviewer.py`（修改 3 处）
+### 3. `reviewer.py`
 
-全部搜索旧白名单并逐一扩展，**不要漏任一**：
+搜索所有白名单并逐一扩展：`resolve_provider()`、`build_arg_parser()` 的 `--provider` choices、legacy 错误文案、头部 docstring 和主 Skill 的 CLI 示例。不得只改其中一个位置。
 
-```python
-# 位置 A：resolve_provider() 里的 tuple
-if provider not in ("idealab-anthropic", "idealab-openai", "bailian", "deepseek", "<name>"):
-    raise ValueError(
-        f"EXTERNAL_LLM_REVIEW_PROVIDER/--provider must be one of "
-        f"('idealab-anthropic', 'idealab-openai', 'bailian', 'deepseek', '<name>'), got {provider!r}"
-    )
+### 4. `_healthcheck.py`
 
-# 位置 B：build_arg_parser() 里 --provider choices
-parser.add_argument(
-    "--provider",
-    choices=("idealab-anthropic", "idealab-openai", "bailian", "deepseek", "<name>"),
-    ...
-)
+按注册顺序把 `<name>` 加到 `PROVIDERS`。遗漏不会直接报错，但 healthcheck 不会验证新 provider。
 
-# 位置 C：legacy error message 里的 one of 列表
-"... EXTERNAL_LLM_REVIEW_PROVIDER (one of: idealab-anthropic, idealab-openai, bailian, deepseek, <name>). ..."
-```
-
-以及头部 docstring 的 `--provider` 示例和 `SKILL.md` 正文中的 CLI 示例——搜 `--provider` 全部扩展。
-
-### 4. `_healthcheck.py`（修改 1 处）
-
-```python
-PROVIDERS = ["idealab-anthropic", "idealab-openai", "bailian", "deepseek", "<name>"]
-```
-
-漏加 healthcheck 不会报错但 `uv run _healthcheck.py` 不会验证新 provider。
-
-### 5. `.env.example`（追加 1 行）
+### 5. `.env.example`
 
 ```ini
-# <Vendor> <protocol-type> gateway (providers/<name>.yaml)
-# Get a key at <vendor-dashboard-url>
+# <Vendor> gateway (providers/<name>.yaml)
 <NAME>_API_KEY=
 ```
 
-**禁止**把真实 key 写进 `.env.example`（git-tracked）。
+只提交占位说明，绝不提交真实 key。
 
-### 6. `SKILL.md`（3 处扩展）
+### 6. 主 `SKILL.md`
 
-- "预置 Provider" 表格 → 新增一行并更新数量
-- "Provider 选择规则" 表格 → 在对应 agent 模型行追加新 provider
-- CLI 用法示例的 `--provider` 枚举 → 加新值
+更新当前 provider 表、provider 选择规则、CLI 枚举与必要的协议说明；当前表格中的运行时事实必须与 YAML、白名单和 push gate 一致。
 
 ### 7. TDD 测试（至少 2 个）
 
-在 `tests/test_reviewer.py`：
+先写两个测试：YAML 加载能构造正确 provider 类并插值测试 key；`resolve_provider()` 接受 `<name>`。先运行并确认 RED，再实现注册和协议代码，最后运行确认 GREEN。
 
-**测试 A：YAML 加载返回正确 provider 类**
+对 streaming provider，测试必须覆盖请求含 `stream: true` 与 `stream_options.include_usage: true`；SSE 同时有 content/reasoning 时最终取 content、content 为空时回退 reasoning；usage-only chunk；以及 error JSON 仅输出白名单字段的脱敏错误。
 
-```python
-def test_get_provider_returns_<name>(self):
-    from _config import get_provider
-    from _provider import IdealabOpenAIProvider  # 或新 class
-    self.write_provider(
-        "<name>",
-        "provider: <name>\n"
-        "base_url: https://api.<vendor>.com/v1\n"
-        "api_key: ${<NAME>_API_KEY}\n"
-        "model: <model>\n"
-        "max_tokens: 16384\n",
-    )
-    provider = get_provider(
-        "<name>",
-        providers_dir=self.providers_dir,
-        env={"<NAME>_API_KEY": "sk-test"},
-    )
-    self.assertIsInstance(provider, IdealabOpenAIProvider)
-    self.assertEqual(provider.api_key, "sk-test")
-    self.assertEqual(provider.model, "<model>")
-```
+标准非流式 OpenAI provider 必须单独测试 `/chat/completions`、Bearer header、`client.post`，且请求不含 `stream` 或 Qwen 扩展字段；测试 `message.content`、空/畸形响应和脱敏错误。不得默认复用 `IdealabOpenAIProvider`。
 
-**测试 B：resolve_provider 白名单接受**
+对 Pi auth，测试必须覆盖成功结果优先于环境变量、超时/不可执行/非零退出/空输出四类失败均回退到环境变量，以及双来源不可用时仅报告 `Pi auth lookup <reason>; IDEALAB_OPENAI_API_KEY fallback unavailable`，不包含原始输出。
 
-```python
-args = Namespace(provider="<name>")
-self.assertEqual(reviewer.resolve_provider(args, env={}), "<name>")
-```
-
-流程：
-1. 写测试 → 跑 → 看到 `ValueError: Unknown provider type '<name>'` 和 `resolve_provider` 返回错误 → **RED 通过**
-2. 改实现 → 跑 → 两个测试都 pass → **GREEN 通过**
+对 provider 退役，测试必须覆盖旧 provider 被 `resolve_provider()` 和 CLI choices 拒绝，以及 push gate 仅按现役 provider 的既定顺序尝试 fallback。
 
 ### 8. Healthcheck 验证
 
 ```bash
 cd skill-overrides/external-llm-review
 uv run --no-project --with httpx --with python-dotenv --with pyyaml python _healthcheck.py
-# 期望：[OK] <name>: OK
 ```
 
-失败常见原因见下方。
+仅在获授权访问真实 endpoint 时运行；期望新增项固定输出 `[OK] <name>: reachable`，不得回显模型原文。
+
+## Qwen 3.8 SSE 契约
+
+`idealab-openai` 使用 `qwen3.8-max`，必须 streaming，发送 `stream: true` 与 `stream_options.include_usage: true`。每个 SSE `data:` 负载是 JSON；`data: [DONE]` 结束流。分别聚合 `choices[].delta.content` 和 `choices[].delta.reasoning_content`，最终优先非空的 content，仅在其为空时回退 reasoning_content。usage-only chunk 和空 `choices` 可忽略。error JSON 必须转为仅含白名单字段的脱敏异常，不得暴露响应体、原始异常或凭据。不要发送无效的 `enable_thinking`；`max_tokens` 为网关兼容字段，不严格限制 reasoning。
+
+## 既有 Provider 升级或退役清单
+
+升级或退役必须逐项核对：
+
+- YAML；provider 类及 `_config.py` 注册；`reviewer.py` 的全部白名单、choices、帮助和错误文案。
+- `_healthcheck.py`；`.env.example`；主 `SKILL.md` 的 provider 表、选择规则和 CLI 枚举。
+- `scripts/lib/review-invoker.mjs` 的 push gate 顺序和 fallback；相关单元测试与 push gate 测试。
+- 全仓搜索旧 provider 标识，确认现役 YAML、类、注册、白名单、help、主文档和 gate 没有残留。明确标注的负向测试、迁移说明、历史计划和审计记录允许保留退役名称。
+
+本次 `bailian` 和 `deepseek` 为硬删除：必须从现役 YAML、类、注册、白名单、help、主文档和 gate 移除，不保留兼容别名、fallback 或退役后配置；明确标注的负向测试、迁移说明、历史计划和审计记录可以保留名称。
+
+是否把 provider 变更加入 push gate 必须作出显式决策，并在变更说明中记录加入或不加入及原因；不得由注册或 YAML 变更隐式推导。
 
 ## 全量回归
 
 ```bash
+cd skill-overrides/external-llm-review
 uv run --no-project --with httpx --with python-dotenv --with pyyaml \
-    python -m unittest discover -s tests -v
-# 期望：Ran N tests in ... OK（无失败）
+  python -m unittest discover -s tests -v
+
+cd <repo-root>
+node --test test/review-invoker.test.mjs
+npm test
 ```
 
 ## 常见失败
 
 | 现象 | 原因 | 处置 |
-|---|---|---|
-| `_healthcheck.py` 输出 `[FAIL] <name>: 401 invalid_api_key` | `.env` 里 key 没填或格式错 | 检查 `.env`（vendor dashboard 给的完整 key，不要复制截断） |
-| `[FAIL] <name>: 404 Not Found` | yaml 里 `base_url` 带多余 path | 通常 vendor 文档给的是完整 URL，但 Provider 类会追加 `/chat/completions`；yaml 里 `base_url` 只到 `/v1` |
-| `[FAIL] <name>: 400 invalid model` | yaml 里 model id vendor 不支持 | 翻 vendor 文档核对 model 名（拼写 + 版本后缀） |
-| `_PROVIDER_CLS` 注册后仍报 `Unknown provider type` | yaml 里的 `provider:` 字段和 yaml 文件名不一致 | yaml 文件名 `X.yaml` 与 yaml 内 `provider: X` 必须完全相同 |
-| reviewer.py 报错 `argument --provider: invalid choice` | 漏改了 build_arg_parser 的 choices tuple | 用 grep `choices=.*idealab` 定位第二处白名单 |
-| IDEALAB_ANTHROPIC 月度 400 IRC-001 | 配额耗尽 | 不影响新 provider；换 provider 跑 |
-| `unresolved env var(s)` 启动报错 | `.env` 未加载 / dotenv 找不到文件 | `load_dotenv(SKILL_DIR / ".env")` 应已自动加载，确认 `.env` 在 skill 目录 |
+| --- | --- | --- |
+| healthcheck 返回 `401` | 凭据缺失、失效或格式错误 | 检查授权来源，但不要打印 key。 |
+| healthcheck 返回 `404` | `base_url` 含多余 path，或 provider 类追加的 path 不匹配 | 对照 vendor 文档确认 URL 组成。 |
+| healthcheck 返回模型错误 | YAML 的 model ID 不受网关支持 | 核对模型拼写与版本。 |
+| 注册后仍报 `Unknown provider type` | YAML 的 `provider:` 与文件名或 `_PROVIDER_CLS` 不一致 | 三者保持完全一致。 |
+| `--provider` 是 invalid choice | 漏改 argparse choices | 搜索所有白名单位置。 |
+| `idealab-openai Pi auth lookup <timeout\|could-not-execute\|nonzero-exit\|empty-output>; IDEALAB_OPENAI_API_KEY fallback unavailable` | Pi auth 与环境变量 fallback 都不可用 | 确认授权配置；不要读取凭据文件、不要记录原始输出。 |
 
 ## 相关资料
 
-- Skill 本体（provider 架构）：`skill-overrides/external-llm-review/`
-- Provider 类抽象：`skill-overrides/external-llm-review/_provider.py`
+- Skill 本体：`skill-overrides/external-llm-review/`
+- Provider 抽象：`skill-overrides/external-llm-review/_provider.py`
 - YAML 加载与注册：`skill-overrides/external-llm-review/_config.py`
 - 行为测试：`skill-overrides/external-llm-review/tests/test_reviewer.py`
+- Push gate：`scripts/lib/review-invoker.mjs`
 
 ## Commit 模板
 
-```
+```text
 feat(external-llm-review): 增加 <vendor> provider（异源评审第 N 链路）
 
 <vendor> 提供 <protocol> API，<复用/新增> Provider 类：
-- _config.py: _PROVIDER_CLS 注册 <name> → <Class>
+- _config.py: _PROVIDER_CLS 注册 <name> -> <Class>
 - reviewer.py: resolve_provider / --provider choices / help 文案加入 <name>
 - _healthcheck.py: PROVIDERS 列表加入 <name>
 - providers/<name>.yaml: 新建（base_url=...）
 - .env.example: 追加 <NAME>_API_KEY 占位说明
 - SKILL.md: provider 表、选型表、CLI 示例均更新
 
-TDD: 先写 2 个新测试（YAML 加载返回 <Class> 类；白名单接受 <name>），
-RED 后实现 GREEN。N/N 通过。
-
-Agent 模型族选型补充：
-- <vendor> 系 agent → 用 <异源 provider>（异源对照）
-- <现有> 系 agent → 可选用 <vendor>（作为新异源选项）
+TDD: 先写 YAML 构造与白名单接受测试，确认 RED 后实现 GREEN。N/N 通过。
 ```

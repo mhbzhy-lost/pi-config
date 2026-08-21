@@ -212,10 +212,10 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     }
     await writeFile(join(root, "pi", "child-extensions", "root-session-owner.ts"), "");
     await writeFile(join(root, ".gitignore"), "/var/\n");
-    for (const [name, model, tools] of [
-      ["executor", "codex-pool/gpt-5.6-terra", "read"],
+    for (const [name, models, tools] of [
+      ["executor", ["provider/primary", "provider/fallback"], "read"],
     ]) {
-      await writeFile(join(root, "pi", "agents", `${name}.md`), `---\nmodel: ${model}\ntools: ${tools}\n---\n`);
+      await writeFile(join(root, "pi", "agents", `${name}.md`), `---\nmodels:\n${models.map((model) => `  - ${model}`).join("\n")}\ntools: ${tools}\n---\n`);
     }
     await writeFile(
       join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"),
@@ -223,6 +223,14 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     );
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "index.ts"), "");
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "rpc.ts"), 'const methods = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];\n');
+    await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents"), { recursive: true });
+    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents", "agents.ts"), "// pi-config patch: ordered-models.v2\n");
+    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents", "agent-serializer.ts"), "// pi-config patch: ordered-models.v2\n");
+    for (const relative of ["src/runs/shared/model-fallback.ts", "src/api/preflight.ts", "src/runs/background/async-execution.ts", "src/runs/foreground/execution.ts"]) {
+      const target = join(root, "pi", "npm", "node_modules", "pi-subagents", relative);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, "// pi-config patch: ordered-models.v2\n");
+    }
     await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "package.json"), JSON.stringify({ version: "1.1.38", type: "module", exports: { "./compile": "./build/compile/index.mjs" } }));
     await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "build", "compile", "index.mjs"), "export {};\n");
     for (const [name, version] of [["@amaster.ai/pi-task-scheduler", "0.1.9"], ["@amaster.ai/pi-shared", "0.1.9"], ["croner", "10.0.1"]]) {

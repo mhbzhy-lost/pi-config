@@ -118,18 +118,15 @@ test("schema only defers malformed values with the expected coding field contain
   }
 });
 
-test("schema accepts optional coding modelTier values", () => {
-  for (const modelTier of ["luna", "terra"]) {
+test("schema accepts supported coding modelTier overrides and rejects others", () => {
+  for (const value of ["terra", "luna"]) {
     const input = validCodingContract();
-    input.modelTier = modelTier;
-    assert.equal(validator.Check(input), true, `${modelTier} modelTier should pass schema validation`);
+    input.modelTier = value;
+    assert.equal(validator.Check(input), true);
   }
-});
-
-test("schema rejects unsupported coding modelTier values", () => {
-  const input = validCodingContract();
-  input.modelTier = "sol";
-  assert.equal(validator.Check(input), false, "unsupported modelTier should fail schema validation");
+  const invalid = validCodingContract();
+  invalid.modelTier = "sol";
+  assert.equal(validator.Check(invalid), false);
 });
 
 test("schema still rejects contract missing required fields", () => {

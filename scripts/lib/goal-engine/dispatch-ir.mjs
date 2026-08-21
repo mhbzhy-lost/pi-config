@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { normalizeRepoRelativePosixPath } from "./repo-path.mjs";
 import { MAX_CONTRACT_ARRAY_ITEMS, MAX_CONTRACT_STRING_BYTES } from "./contract-limits.mjs";
-import { normalizeModelTier } from "../subagent-dispatch/model-tier.ts";
+import { normalizeOptionalModelTier } from "../subagent-dispatch/model-tier.ts";
 
 const CONTRACT_VERSION = "dispatch-ir.v1";
 const TASK_ID_PATTERN = /^[A-Za-z0-9._-]{1,160}$/;
@@ -148,12 +148,13 @@ export function compileCodingDispatchIR(input, { cwd } = {}) {
   const requirements = normalizeStringArray(source.requirements, "requirements", { minItems: 1 });
   const boundaries = normalizeBoundaries(source.boundaries);
 
+  const modelTier = normalizeOptionalModelTier(source.modelTier);
   const canonical = {
     version,
     taskId,
     title: normalizeString(source.title, "title"),
     agent,
-    modelTier: normalizeModelTier(source.modelTier),
+    ...(modelTier === undefined ? {} : { modelTier }),
     risk,
     objective: normalizeString(source.objective, "objective"),
     requirements,
@@ -186,7 +187,7 @@ export function renderDispatchPrompt(ir) {
     `- Task ID: ${JSON.stringify(ir.taskId)}`,
     `- Title: ${JSON.stringify(ir.title)}`,
     `- Agent: \`${ir.agent}\``,
-    `- Requested model tier: \`${ir.modelTier}\``,
+    ...(ir.modelTier === undefined ? [] : [`- Requested model tier override: \`${ir.modelTier}\``]),
     `- Risk: \`${ir.risk}\``,
     `- Working directory: ${JSON.stringify(ir.execution.cwd)}`,
     `- Timeout: \`${ir.execution.timeoutMs}ms\``,

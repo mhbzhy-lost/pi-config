@@ -5,17 +5,14 @@
 """External LLM cross-model code reviewer.
 
 Two backends:
-  - api        OpenAI Chat Completions raw request via httpx (intended for DeepSeek)
-  - anthropic  Anthropic Messages API via httpx with claude-cli UA spoofing
-                 (intended for Idealab Anthropic gateway)
+  - idealab-anthropic  Anthropic Messages API via httpx with claude-cli UA spoofing
+  - idealab-openai     Idealab OpenAI-compatible Qwen streaming API
 
 Reads .env from this skill directory.
-For backend=api    set EXTERNAL_LLM_API_BASE / EXTERNAL_LLM_API_KEY / EXTERNAL_LLM_MODEL.
-For backend=anthropic set ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY / ANTHROPIC_MODEL.
 
 Usage:
     python reviewer.py <BASE_SHA> <HEAD_SHA> \
-        [--provider idealab-anthropic|idealab-openai|bailian|deepseek] [--worktree PATH] [--spec FILE]
+        [--provider idealab-anthropic|idealab-openai] [--worktree PATH] [--spec FILE]
         [--max-diff N] [--review-depth standard|exhaustive] [--review-round 1|2]
         [--max-issues N] [--max-output-tokens N] [--api-timeout-seconds N]
 
@@ -50,6 +47,9 @@ _SENSITIVE_BODY_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[^\s\"',}]+"),
     re.compile(r"(?i)(\"(?:api[_-]?key|token|access[_-]?token|secret)\"\s*:\s*\")[^\"]+(\")"),
 )
+_SAFE_API_DIAGNOSTIC = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_SAFE_EXCEPTION_TYPE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
 
 
 _REVIEW_SYSTEM_PROMPT = """你是一名资深代码评审者。被评审代码可能涉及多种语言、框架与外部依赖。
@@ -169,13 +169,14 @@ def build_review_user_prompt(
 def resolve_provider(args: argparse.Namespace, *, env: Mapping[str, str]) -> str:
     """Resolve which provider to use from args or env.
 
-    Returns provider name (e.g. 'idealab-anthropic', 'bailian').
+    Returns provider name (e.g. 'idealab-anthropic', 'idealab-openai').
     """
     provider = (getattr(args, "provider", None) or env.get("EXTERNAL_LLM_REVIEW_PROVIDER", "idealab-anthropic")).strip().lower()
-    if provider not in ("idealab-anthropic", "idealab-openai", "bailian", "deepseek"):
+    if provider not in ("idealab-anthropic", "idealab-openai"):
         raise ValueError(
-            f"EXTERNAL_LLM_REVIEW_PROVIDER/--provider must be one of "
-            f"('idealab-anthropic', 'idealab-openai', 'bailian', 'deepseek'), got {provider!r}"
+            "EXTERNAL_LLM_REVIEW_PROVIDER/--provider must be one of "
+            "('idealab-anthropic', 'idealab-openai'), got "
+            f"{provider!r}"
         )
     return provider
 
@@ -261,9 +262,6 @@ async def extract_openai_stream_content(chunks) -> dict:
     The final usage is only trusted when finish_reason is set, guarding
     against mid-stream usage fields that may be incomplete.
 
-    Bailian's non-streaming API has a 300s hard timeout, so streaming
-    is mandatory for long-running requests (e.g. large diff reviews).
-
     Accepts either an async or sync iterable of chunk dicts.
     """
     content_parts: list[str] = []
@@ -276,7 +274,7 @@ async def extract_openai_stream_content(chunks) -> dict:
         saw_any = True
         if not isinstance(chunk, dict):
             print(
-                f"[external-llm-review] WARN: dropping malformed SSE chunk: {chunk!r}",
+                "[external-llm-review] WARN: dropping malformed SSE chunk",
                 file=sys.stderr,
             )
             continue
@@ -345,9 +343,9 @@ async def parse_sse_lines(lines):
                 continue
             try:
                 yield json.loads(payload)
-            except json.JSONDecodeError as exc:
+            except json.JSONDecodeError:
                 print(
-                    f"[external-llm-review] WARN: skipping malformed SSE payload: {exc}; {payload[:80]!r}",
+                    "[external-llm-review] WARN: skipping malformed SSE payload",
                     file=sys.stderr,
                 )
         elif line.startswith("data:"):
@@ -431,20 +429,24 @@ def redact_sensitive_match(match: re.Match[str]) -> str:
 
 
 def describe_api_exception(exc: Exception) -> str:
-    parts = [str(exc)]
+    parts = [safe_exception_type_name(exc)]
     response = getattr(exc, "response", None)
     if response is not None:
         status_code = getattr(response, "status_code", None)
-        body = getattr(response, "text", None) or getattr(response, "content", None)
-        if status_code is not None:
+        if isinstance(status_code, int) and not isinstance(status_code, bool) and 100 <= status_code <= 599:
             parts.append(f"status_code={status_code}")
-        if body:
-            body_text = response_body_text(body)
-            parts.append(f"response_body={body_text[:500]}")
-    request_id = getattr(exc, "request_id", None)
-    if request_id:
-        parts.append(f"request_id={request_id}")
+    for field in ("code", "type", "param", "request_id"):
+        value = getattr(exc, field, None)
+        if isinstance(value, str) and _SAFE_API_DIAGNOSTIC.fullmatch(value):
+            parts.append(f"{field}={value}")
     return " ".join(parts)
+
+
+def safe_exception_type_name(exc: BaseException) -> str:
+    name = type(exc).__name__
+    if _SAFE_EXCEPTION_TYPE_NAME.fullmatch(name):
+        return name
+    return "UnknownError"
 
 
 
@@ -493,23 +495,38 @@ class _AttrDict:
         return cls({"choices": wrapped, "usage": usage})
 
 
+class SafeArgumentParser(argparse.ArgumentParser):
+    """An argument parser that does not expose untrusted parse diagnostics."""
+
+    def error(self, message: str) -> None:
+        del message
+        self.exit(2, "ERROR: invalid command line arguments\n")
+
+
 async def main() -> int:
-    parser = build_arg_parser()
-    args = parser.parse_args()
+    try:
+        parser = build_arg_parser()
+        args = parser.parse_args()
 
-    skill_dir = Path(__file__).resolve().parent
-    load_dotenv(skill_dir / ".env")
+        skill_dir = Path(__file__).resolve().parent
+        load_dotenv(skill_dir / ".env")
 
-    return await run_review(args=args, skill_dir=skill_dir)
+        return await run_review(args=args, skill_dir=skill_dir)
+    except Exception as exc:
+        print(
+            f"ERROR: unexpected failure: {safe_exception_type_name(exc)}",
+            file=sys.stderr,
+        )
+        return 1
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    parser = SafeArgumentParser()
     parser.add_argument("base_sha", help="git base commit (e.g. main, 76bddc5)")
     parser.add_argument("head_sha", help="git head commit (the changes to review)")
     parser.add_argument(
         "--provider",
-        choices=("idealab-anthropic", "idealab-openai", "bailian", "deepseek"),
+        choices=("idealab-anthropic", "idealab-openai"),
         default=None,
         help="provider to use (default: EXTERNAL_LLM_REVIEW_PROVIDER or idealab-anthropic)",
     )
@@ -564,9 +581,9 @@ async def run_review(*, args: argparse.Namespace, skill_dir: Path) -> int:
     legacy_format = os.environ.get("EXTERNAL_LLM_API_FORMAT", "").strip()
     if legacy_format and legacy_format.lower() != "chat":
         print(
-            f"ERROR: EXTERNAL_LLM_API_FORMAT={legacy_format!r} is no longer read by "
-            "reviewer.py. Provider selection is now done via --provider or "
-            "EXTERNAL_LLM_REVIEW_PROVIDER (one of: idealab-anthropic, idealab-openai, bailian, deepseek). "
+            "ERROR: EXTERNAL_LLM_API_FORMAT is no longer read by reviewer.py. "
+            "Provider selection is now done via --provider or "
+            "EXTERNAL_LLM_REVIEW_PROVIDER (one of: idealab-anthropic, idealab-openai). "
             "Please remove EXTERNAL_LLM_API_FORMAT from your .env file. "
             "See .env.example and providers/<name>.yaml.",
             file=sys.stderr,
@@ -584,8 +601,12 @@ async def run_review(*, args: argparse.Namespace, skill_dir: Path) -> int:
 
     try:
         provider_name = resolve_provider(args, env=os.environ)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    except ValueError:
+        print(
+            "ERROR: --provider/EXTERNAL_LLM_REVIEW_PROVIDER must be one of "
+            "('idealab-anthropic', 'idealab-openai')",
+            file=sys.stderr,
+        )
         return 1
 
     review_depth = (
@@ -595,7 +616,8 @@ async def run_review(*, args: argparse.Namespace, skill_dir: Path) -> int:
 
     if review_depth not in _REVIEW_DEPTHS:
         print(
-            f"ERROR: EXTERNAL_LLM_REVIEW_DEPTH/--review-depth must be one of {_REVIEW_DEPTHS}, got {review_depth!r}",
+            "ERROR: EXTERNAL_LLM_REVIEW_DEPTH/--review-depth must be one of "
+            f"{_REVIEW_DEPTHS}",
             file=sys.stderr,
         )
         return 1
@@ -606,8 +628,11 @@ async def run_review(*, args: argparse.Namespace, skill_dir: Path) -> int:
 
     try:
         provider = get_provider(provider_name)
-    except (FileNotFoundError, ValueError, RuntimeError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(
+            f"ERROR: provider configuration failed: {safe_exception_type_name(exc)}",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -616,8 +641,11 @@ async def run_review(*, args: argparse.Namespace, skill_dir: Path) -> int:
             build_git_diff_command(args.worktree, args.base_sha, args.head_sha),
             text=True,
         )
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: git diff failed: {e}", file=sys.stderr)
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"ERROR: git diff failed: {safe_exception_type_name(exc)}",
+            file=sys.stderr,
+        )
         return 2
 
     if not diff.strip():
@@ -639,8 +667,11 @@ async def run_review(*, args: argparse.Namespace, skill_dir: Path) -> int:
                 label="Spec / Requirements",
                 allowed_roots=allowed_context_roots,
             )
-        except (OSError, ValueError) as e:
-            print(f"WARN: could not read --spec {args.spec}: {e}", file=sys.stderr)
+        except (OSError, ValueError) as exc:
+            print(
+                f"WARN: could not read --spec: {safe_exception_type_name(exc)}",
+                file=sys.stderr,
+            )
 
     user_prompt = build_review_user_prompt(
         base_sha=args.base_sha,
@@ -673,15 +704,16 @@ async def run_review(*, args: argparse.Namespace, skill_dir: Path) -> int:
     )
 
     hard_timeout = args.api_timeout_seconds if args.api_timeout_seconds > 0 else None
+    request_timeout = hard_timeout or DEFAULT_REQUEST_TIMEOUT_SECONDS
     spec = {
         "temperature": 0.2,
         "max_tokens": args.max_output_tokens,
-        "timeout": args.api_timeout_seconds,
+        "timeout": request_timeout,
     }
 
     try:
         async with asyncio.timeout(hard_timeout):
-            async with httpx.AsyncClient(timeout=hard_timeout or 600.0) as client:
+            async with httpx.AsyncClient(timeout=request_timeout) as client:
                 content = await provider.send_chat(client, messages, spec)
     except TimeoutError:
         print(

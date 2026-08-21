@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { CodingDispatchContractError } from "./errors.ts";
-import { normalizeModelTier } from "./model-tier.ts";
+import { normalizeOptionalModelTier } from "./model-tier.ts";
 
 export { CodingDispatchContractError } from "./errors.ts";
 
@@ -291,12 +291,13 @@ export function compileCodingDispatchIR(input, { cwd } = {}) {
   const requirements = normalizeStringArray(source.requirements, "requirements", { minItems: 1 });
   const boundaries = normalizeBoundaries(source.boundaries);
 
+  const modelTier = normalizeOptionalModelTier(source.modelTier);
   const canonical = {
     version,
     taskId,
     title: normalizeString(source.title, "title"),
     agent,
-    modelTier: normalizeModelTier(source.modelTier),
+    ...(modelTier === undefined ? {} : { modelTier }),
     risk,
     objective: normalizeString(source.objective, "objective"),
     requirements,

@@ -14,6 +14,7 @@
       "prompts": [],
       "themes": []
     },
+    "../../.r2c/integrations/pi-adapter",
     {
       "source": "npm:@amaster.ai/pi-task-scheduler@0.1.9",
       "extensions": [],

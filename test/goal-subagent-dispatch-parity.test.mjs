@@ -21,7 +21,7 @@ function criteriaOnlyContract(overrides = {}) {
     },
     boundaries: {
       writePaths: ["scripts/lib/goal-engine/dispatch-ir.mjs"],
-      excludedWork: ["Do not add a Goal task modelTier field."],
+      excludedWork: ["Do not add model routing fields to the coding contract."],
       forbiddenActions: ["Do not alter typed runtime behavior."],
     },
     acceptance: { criteria: ["Goal and typed hashes agree."] },
@@ -30,17 +30,14 @@ function criteriaOnlyContract(overrides = {}) {
   };
 }
 
-for (const [name, modelTier] of [["omitted/default Luna", undefined], ["explicit Terra", "terra"]]) {
-  test(`Goal and typed dispatch IR stay canonical for ${name} criteria-only contracts`, () => {
-    const input = criteriaOnlyContract(modelTier === undefined ? {} : { modelTier });
-    const goal = compileGoalDispatchIR(input, { cwd: "/repo" });
-    const typed = compileTypedDispatchIR(input, { cwd: "/repo" });
+test("Goal and typed dispatch IR stay canonical for criteria-only contracts", () => {
+  const input = criteriaOnlyContract();
+  const goal = compileGoalDispatchIR(input, { cwd: "/repo" });
+  const typed = compileTypedDispatchIR(input, { cwd: "/repo" });
 
-    assert.deepEqual(splitDispatchEnvelope(goal).contract, (() => {
-      const { hash: _hash, ...transport } = typed;
-      return transport;
-    })());
-    assert.equal(goal.hash, typed.hash);
-    assert.equal(goal.modelTier, modelTier ?? "luna");
-  });
-}
+  assert.deepEqual(splitDispatchEnvelope(goal).contract, (() => {
+    const { hash: _hash, ...transport } = typed;
+    return transport;
+  })());
+  assert.equal(goal.hash, typed.hash);
+});
