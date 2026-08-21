@@ -1342,6 +1342,18 @@ export function createGoalEngineExtension(pi, options = {}) {
         await retrySuspendedOwnedStop(ctx, projection);
         projection = loadProjectionFn(root, goalId);
       }
+      const runtimeIntentGate = runtimeIntentGates.get(`${goalId}:${sessionId}`);
+      const fullyClosedSuspension = projection.suspension?.resourcesQuarantined
+        && projection.suspension.terminalProofRefs?.length === projection.suspension.affectedRunIds?.length
+        && projection.suspension.workspaceClosureProofRefs?.length === projection.suspension.affectedTaskIds?.length
+        && projection.suspension.resourceClosureProofRefs?.length === projection.suspension.affectedRunIds?.length;
+      // A persisted input gate protects active runtime authority. Once the
+      // owner has durably closed suspension, that same gate is a stale latch:
+      // status is the sole membrane exception that can reconcile it.
+      if (projection.eventSchemaVersion === "goal-runtime.v1" && runtimeIntentGate?.kind === "pending"
+        && projection.runtimeState === "suspended" && fullyClosedSuspension && ownedBySession(projection, sessionId)) {
+        runtimeIntentGates.delete(`${goalId}:${sessionId}`);
+      }
       if (projection.eventSchemaVersion === "goal-runtime.v1" && runtimeIntentGates.get(`${goalId}:${sessionId}`)?.kind === "pending") return JSON.stringify({ status: "R10B_SUSPENSION_REQUIRED" });
       if (projection.eventSchemaVersion === "goal-runtime.v1") {
         if (!runtimeHost?.registries || typeof runtimeHost.captureCurrentWorld !== "function") return JSON.stringify({ goalId, status: "RUNTIME_READINESS_BLOCKER", attention: ["RUNTIME_HOST_AUTHORITY_UNAVAILABLE"] });

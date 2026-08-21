@@ -26,6 +26,26 @@ async function suspended({ batch } = {}) { const cwd = repo(), api = pi(cwd); cr
 // Break caught: a frontier-issued resume_runtime offer was rejected by goal_amend, permanently stranding a fully closed runtime.
 test("full suspension closure issues and atomically consumes the exact resume offer", async () => { const { cwd, api, closure } = await suspended(); const status = JSON.parse(await invoke(api, "goal_status")); assert.deepEqual(status.machineAction, { tool: "goal_amend", params: { goal_id: "harden-runtime", operation: "resume_runtime" } }); assert.equal(typeof status.action_token, "string"); await invoke(api, "goal_amend", { goal_id: "harden-runtime", operation: "resume_runtime", action_token: status.action_token }); const projection = projectionFor(cwd); assert.equal(projection.runtimeState, "active"); assert.equal(projection.suspension, null); assert.equal(projection.actionOffer?.consumed, true); assert.equal(count(cwd, "goal.action_consumed"), 1); assert.equal(count(cwd, "goal.runtime_resumed"), 1); assert.equal(suspensionClosureHash(closure).length, 64); });
 
+test("fully closed suspended reload reconciles stale owner intent and reissues resume authority", async () => {
+  const { cwd, api } = await suspended();
+  const beforeReload = JSON.parse(await invoke(api, "goal_status"));
+  assert.equal(beforeReload.machineAction?.params?.operation, "resume_runtime");
+  await api.handlers.get("input")({ type: "input", text: "ordinary owner input", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
+  assert.ok(api.entries.some(entry => entry.customType === "goal-engine-runtime-intent-pending"), "fixture must persist the owner intent gate");
+
+  const reloaded = pi(cwd, structuredClone(api.entries));
+  createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) });
+  reloaded.handlers.get("session_start")({}, { cwd, sessionManager: reloaded.sessionManager });
+  const afterReload = JSON.parse(await invoke(reloaded, "goal_status"));
+
+  assert.notEqual(afterReload.status, "R10B_SUSPENSION_REQUIRED");
+  assert.deepEqual(afterReload.machineAction, { tool: "goal_amend", params: { goal_id: "harden-runtime", operation: "resume_runtime" } });
+  assert.equal(typeof afterReload.action_token, "string");
+  assert.notEqual(afterReload.action_token, beforeReload.action_token, "reload must issue fresh authority");
+  await invoke(reloaded, "goal_amend", { ...afterReload.machineAction.params, action_token: afterReload.action_token });
+  assert.equal(projectionFor(cwd).runtimeState, "active");
+});
+
 test("resume rejects malformed or stale authority without consuming its offer", async () => { const { cwd, api } = await suspended(); const status = JSON.parse(await invoke(api, "goal_status")); for (const input of [{ goal_id: "harden-runtime", operation: "resume_runtime", action_token: "wrong" }, { goal_id: "harden-runtime", operation: "resume_runtime", action_token: status.action_token, extra: true }]) await assert.rejects(invoke(api, "goal_amend", input)); assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(projectionFor(cwd).actionOffer.token, status.action_token); assert.equal(count(cwd, "goal.action_consumed"), 0); });
 
 test("resume batch is retryable before append and idempotent after durable throw", async () => { let mode = "off"; const { cwd, api } = await suspended({ batch(root, events, version) { if (mode === "pre") { mode = "retry"; throw Error("pre-append"); } const value = appendEventBatch(root, events, version); if (mode === "durable") throw Error("durable-then-throw"); return value; } }); let status = JSON.parse(await invoke(api, "goal_status")); mode = "pre"; await assert.rejects(invoke(api, "goal_amend", { ...status.machineAction.params, action_token: status.action_token }), /pre-append/); assert.equal(projectionFor(cwd).actionOffer.token, status.action_token); status = JSON.parse(await invoke(api, "goal_status")); mode = "durable"; await invoke(api, "goal_amend", { ...status.machineAction.params, action_token: status.action_token }); assert.equal(projectionFor(cwd).runtimeState, "active"); assert.equal(count(cwd, "goal.runtime_resumed"), 1); });
