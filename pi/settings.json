@@ -53,6 +53,6 @@
   },
   "defaultThinkingLevel": "xhigh",
   "goalEngine": {
-    "enabled": false
+    "enabled": true
   }
 }
