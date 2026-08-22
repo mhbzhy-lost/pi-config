@@ -195,7 +195,7 @@ function validateProjectionForDispatch(projection, cwd) {
   validateTaskDefinitions([...projection.tasks.keys()], taskDefsFromProjection(projection), {
     cwd,
     realpathCwd: realpathSync(cwd),
-    planned: projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION,
+    planned: generationCapabilities(projection.eventSchemaVersion).taskContract === "criteria-only",
   });
   assertPendingTaskContractsCompile(projection, cwd);
 }

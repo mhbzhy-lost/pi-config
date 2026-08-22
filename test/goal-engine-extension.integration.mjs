@@ -9,10 +9,11 @@ import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { createGoalEngineExtension as createGoalEngineExtensionFactory } from "../scripts/lib/goal-engine/extension.mjs";
 import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
-import { allocateExecutorWorkspace, inspectExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
+import { allocateExecutorWorkspace, inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope } from "../scripts/lib/goal-engine/state-scope.mjs";
 import { findGoalExecutorCoordinator } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
+import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const temporaryArena = createTemporaryArenaSync("goal-engine-extension-");
 test.after(() => temporaryArena.disposeSync());
@@ -954,6 +955,46 @@ test("goal_init writes strict planned.v1 records and rejects commands atomically
     (error) => error.code === "INVALID_TASK_CONTRACT" && /commands|unknown field|only criteria/i.test(error.message),
   );
   assert.deepEqual(readGoalEvents(invalidCwd, objectiveToGoalId("Reject Planned commands")), []);
+});
+
+test("goal_dispatch persists a criteria-only runtime task without leaking its managed workspace", async () => {
+  const cwd = tmpCwd();
+  const pi = createMockPi(cwd);
+  createGoalEngineExtension(pi, {
+    runtimeHost: {
+      registries: runtimeRegistries,
+      captureCurrentWorld() {
+        return {
+          safe: true,
+          repo: { root: cwd, head: git(cwd, "rev-parse", "HEAD"), trackedDirty: [], untracked: [], sequencer: null },
+          adapters: [], environments: [], fixtures: [], resources: [], activeRuns: [], capturedAt: new Date().toISOString(),
+        };
+      },
+    },
+  });
+
+  const initialized = JSON.parse(await invoke(pi, "goal_init", runtimeInit()));
+  const beforeDispatch = workspaceState(cwd, initialized.goalId, "task-1");
+  assert.equal(beforeDispatch.workspaceExists, false);
+  assert.equal(beforeDispatch.leaseExists, false);
+  let dispatched;
+  try {
+    dispatched = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "task-1" }));
+    assert.equal(dispatched.status, "dispatched");
+    assert.equal(Object.hasOwn(dispatched.contract.acceptance, "commands"), false);
+    assert.equal(JSON.stringify(dispatched.contract).includes("commands"), false);
+    assert.equal(existsSync(dispatched.workspace.path), true);
+    assert.ok(readGoalEvents(cwd, initialized.goalId).some((event) => event.type === "task.dispatched"));
+  } finally {
+    if (dispatched?.workspace) {
+      const root = join(cwd, ".state/goal-engine");
+      const lease = loadExecutorWorkspaceLease({ goalId: initialized.goalId, taskId: "task-1", attempt: dispatched.workspace.attempt, stateRoot: root });
+      releaseExecutorWorkspace(lease, { disposition: "failed-cleanup", expectedExecutorHead: lease.baseCommit });
+    }
+  }
+  const state = workspaceState(cwd, initialized.goalId, "task-1");
+  assert.equal(state.workspaceExists, false);
+  assert.equal(state.leaseExists, false);
 });
 
 test("planned.v1 production lifecycle keeps every writer record in one generation", async () => {
