@@ -17,7 +17,7 @@ import { findGoalExecutorCoordinator } from "./root-broker-registry.ts";
 const CLEANUP_KEY = "__typedSubagentRuntimeCleanup";
 const SHUTDOWN_DEBT_KEY = "__typedSubagentRuntimeShutdownDebt";
 const CODING_AGENTS = new Set(["executor"]);
-const CONTROL_ACTIONS = new Set(["status", "steer", "interrupt", "stop"]);
+const CONTROL_ACTIONS = new Set(["status", "steer", "interrupt", "resume", "stop"]);
 const WORKSPACE_ORIGINS_KEY = "__typedSubagentWorkspaceOrigins";
 
 const stringList = {
@@ -165,7 +165,7 @@ const CONTROL_SCHEMA = {
   additionalProperties: false,
   required: ["action"],
   properties: {
-    action: { enum: ["status", "steer", "interrupt", "stop"] },
+    action: { enum: ["status", "steer", "interrupt", "resume", "stop"] },
     id: { type: "string", minLength: 1, maxLength: 4096 },
     runId: { type: "string", minLength: 1, maxLength: 4096 },
     dir: { type: "string", minLength: 1, maxLength: 4096 },
@@ -181,7 +181,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
 
 export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime.
 
-For executor, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. Without modelTier, executor candidates come from the ordered models field in its agent definition: first is primary and later entries follow in order. An explicit modelTier:"terra" or modelTier:"luna" selects the matching codex-pool model as a higher-priority primary override; every model in that tier is attempted in declared order before the remaining candidates. Run/status/artifact actual-model metadata is authoritative. Do not use generic dispatch for coding work just to choose a model. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, and stop. Optional worktree:true creates an isolated managed workspace. workspace_status and workspace_disposition are local workspace actions; use release to free a preserved workspace without an action token.`;
+For executor, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. Without modelTier, executor candidates come from the ordered models field in its agent definition: first is primary and later entries follow in order. An explicit modelTier:"terra" or modelTier:"luna" selects the matching codex-pool model as a higher-priority primary override; every model in that tier is attempted in declared order before the remaining candidates. Run/status/artifact actual-model metadata is authoritative. Do not use generic dispatch for coding work just to choose a model. For any other agent, provide { agent, title, task } and optional execution fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, resume, and stop. interrupt pauses the current turn; then use resume with a new non-empty message to continue it with new instructions. A stopped subagent cannot be resumed. Optional worktree:true creates an isolated managed workspace. workspace_status and workspace_disposition are local workspace actions; use release to free a preserved workspace without an action token.`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 
@@ -520,6 +520,9 @@ async function executeWorkspaceAction(input, ctx, controller, origins, inspectFa
 async function executeControl(input, rpc) {
   if (!CONTROL_ACTIONS.has(input.action)) {
     return failure("UNSUPPORTED_ACTION", `unsupported subagent RPC action: ${String(input.action)}`);
+  }
+  if (input.action === "resume" && !nonempty(input.message)) {
+    return failure("INVALID_RESUME_MESSAGE", "resume requires a non-empty message", undefined, "$.message");
   }
   const { action, ...params } = input;
   return rpcResult(await rpc[action](params));

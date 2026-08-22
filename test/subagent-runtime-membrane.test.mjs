@@ -121,6 +121,7 @@ function createRpc(overrides = {}) {
     async status(params) { calls.push({ method: "status", params }); return { text: "status" }; },
     async steer(params) { calls.push({ method: "steer", params }); return { text: "steered" }; },
     async interrupt(params) { calls.push({ method: "interrupt", params }); return { text: "interrupted" }; },
+    async resume(params) { calls.push({ method: "resume", params }); return { text: "resumed" }; },
     async stop(params) { calls.push({ method: "stop", params }); return { text: "stopped" }; },
     dispose() { disposed += 1; },
     disposed: () => disposed,
@@ -931,7 +932,7 @@ test("requires a safe generic title before RPC", async () => {
   assert.deepEqual(rpc.calls, []);
 });
 
-test("maps only approved control actions to RPC", async () => {
+test("maps approved control actions to RPC and requires a resume instruction", async () => {
   const pi = createPi();
   const rpc = createRpc();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
@@ -941,6 +942,7 @@ test("maps only approved control actions to RPC", async () => {
     ["status", { action: "status", id: "run-1" }, { id: "run-1" }],
     ["steer", { action: "steer", runId: "run-1", message: "Continue." }, { runId: "run-1", message: "Continue." }],
     ["interrupt", { action: "interrupt", dir: "/tmp/run-1" }, { dir: "/tmp/run-1" }],
+    ["resume", { action: "resume", id: "run-1", runId: "run-1", dir: "/tmp/run-1", index: 2, message: "Continue with the new instruction." }, { id: "run-1", runId: "run-1", dir: "/tmp/run-1", index: 2, message: "Continue with the new instruction." }],
     ["stop", { action: "stop", id: "run-1" }, { id: "run-1" }],
   ]) {
     const result = await execute(tool, params);
@@ -948,9 +950,13 @@ test("maps only approved control actions to RPC", async () => {
     assert.deepEqual(rpc.calls.at(-1), { method: action, params: expected });
   }
 
-  const rejected = await execute(tool, { action: "resume", id: "run-1" });
-  assert.equal(rejected.isError, true);
-  assert.equal(rejected.details.code, "UNSUPPORTED_ACTION");
+  const callCount = rpc.calls.length;
+  for (const message of [undefined, ""]) {
+    const rejected = await execute(tool, { action: "resume", id: "run-1", ...(message === undefined ? {} : { message }) });
+    assert.equal(rejected.isError, true);
+    assert.equal(rejected.details.code, "INVALID_RESUME_MESSAGE");
+  }
+  assert.equal(rpc.calls.length, callCount, "invalid resume calls must not reach RPC");
 });
 
 test("workspace_status text exposes action token and blocked reasons", async () => {
