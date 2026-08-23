@@ -6,7 +6,11 @@
 
 ## 原因
 
-预算将 Goal 的墙钟年龄当作执行时长，暂停、等待用户和隔日再次活跃之间的间隔也被累计。
+预算将 Goal 的墙钟年龄当作执行时长，暂停、等待用户和隔日再次活跃之间的间隔也被累计。runtime 的 durable active 状态只表示最近一次 activation 后尚未收到 suspend，并不等于 agent 在整个墙钟区间持续执行；若最后一次 Goal event/activity 后没有 owned run，suspend 前的空闲尾段不能计入 active time。
+
+## 修复
+
+初始 suspension 没有 `affectedRunIds` 时，active interval 使用 projection 的 canonical `updatedAt` 关闭；携带 owned run 时才使用 suspension 的 `occurredAt` 关闭。时间倒退直接 fail closed，不以零进行 clamp；重复 closure 不会重复关闭 interval。
 
 ## 期望
 

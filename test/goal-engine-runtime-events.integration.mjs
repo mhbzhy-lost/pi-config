@@ -205,6 +205,24 @@ test("amendment enters suspended through its durable runtime event", () => {
   assert.equal(p.executionRevision, 2);
 });
 
+test("runtime suspension without owned runs excludes the idle tail while owned runs count through suspension", () => {
+  const timed = (type, data, id, occurredAt) => ({ schemaVersion: "goal-runtime.v1", eventId: id, goalId: "runtime-goal", occurredAt, type, data });
+  const idleSuspension = { suspensionId: "idle-tail", reason: "host_pause", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-14T00:00:00.000Z", resourcesQuarantined: false };
+  const ownedSuspension = { ...idleSuspension, suspensionId: "owned-run", affectedRunIds: ["product-run"] };
+  let p = active();
+  p = applyEvent(p, timed("goal.runtime_suspended", idleSuspension, "idle-tail-event", "2026-08-14T00:00:00.000Z"));
+  assert.equal(p.runtimeActiveElapsedMs, 5000, "without an owned run, suspension closes at the last Goal activity");
+  p = active();
+  p = applyEvent(p, timed("goal.runtime_suspended", ownedSuspension, "owned-run-event", "2026-08-14T00:00:00.000Z"));
+  assert.equal(p.runtimeActiveElapsedMs, 86391000, "an owned run keeps active time open through suspension");
+});
+
+test("runtime suspension rejects an occurredAt before activeSince instead of clamping", () => {
+  const timed = (type, data, id, occurredAt) => ({ schemaVersion: "goal-runtime.v1", eventId: id, goalId: "runtime-goal", occurredAt, type, data });
+  const suspension = { suspensionId: "backwards", reason: "host_pause", affectedTaskIds: [], affectedRunIds: ["product-run"], requestedAt: "2026-08-13T00:00:00.000Z", resourcesQuarantined: false };
+  assert.throws(() => applyEvent(active(), timed("goal.runtime_suspended", suspension, "backwards-event", "2026-08-12T23:59:59.000Z")), /invalid runtime active time/);
+});
+
 test("runtime active elapsed time accumulates intervals, excludes suspended gaps, and replays deterministically", () => {
   const timed = (type, data, id, occurredAt) => ({ schemaVersion: "goal-runtime.v1", eventId: id, goalId: "runtime-goal", occurredAt, type, data });
   const suspend = { suspensionId: "elapsed-suspension", reason: "host_pause", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-13T00:10:00.000Z", resourcesQuarantined: false };
@@ -213,23 +231,23 @@ test("runtime active elapsed time accumulates intervals, excludes suspended gaps
   assert.equal(p.runtimeActiveElapsedMs, 0);
   assert.equal(p.runtimeActiveSince, "2026-08-13T00:00:09.000Z");
   p = applyEvent(p, timed("goal.runtime_suspended", suspend, "elapsed-suspend-1", "2026-08-13T00:10:00.000Z"));
-  assert.equal(p.runtimeActiveElapsedMs, 591000);
+  assert.equal(p.runtimeActiveElapsedMs, 5000);
   assert.equal(p.runtimeActiveSince, null);
   p = applyEvent(p, timed("goal.runtime_suspended", closure, "elapsed-closure", "2026-08-14T00:10:00.000Z"));
-  assert.equal(p.runtimeActiveElapsedMs, 591000, "closure must not count the suspended day");
+  assert.equal(p.runtimeActiveElapsedMs, 5000, "closure must not count the suspended day");
   p = applyEvent(p, timed("goal.runtime_resumed", { suspensionId: suspend.suspensionId, closureHash: suspensionClosureHash(closure) }, "elapsed-resume", "2026-08-14T00:10:00.000Z"));
   assert.equal(p.runtimeActiveSince, "2026-08-14T00:10:00.000Z");
-  p = applyEvent(p, timed("goal.runtime_suspended", { ...suspend, suspensionId: "elapsed-suspension-2", requestedAt: "2026-08-14T00:15:00.000Z" }, "elapsed-suspend-2", "2026-08-14T00:15:00.000Z"));
-  assert.equal(p.runtimeActiveElapsedMs, 891000, "only the second five-minute active interval is added");
+  p = applyEvent(p, timed("goal.runtime_suspended", { ...suspend, suspensionId: "elapsed-suspension-2", affectedRunIds: ["product-run"], requestedAt: "2026-08-14T00:15:00.000Z" }, "elapsed-suspend-2", "2026-08-14T00:15:00.000Z"));
+  assert.equal(p.runtimeActiveElapsedMs, 305000, "only the second five-minute active interval is added");
 
   let replayed = active();
   for (const row of [
     timed("goal.runtime_suspended", suspend, "elapsed-replay-suspend-1", "2026-08-13T00:10:00.000Z"),
     timed("goal.runtime_suspended", closure, "elapsed-replay-closure", "2026-08-14T00:10:00.000Z"),
     timed("goal.runtime_resumed", { suspensionId: suspend.suspensionId, closureHash: suspensionClosureHash(closure) }, "elapsed-replay-resume", "2026-08-14T00:10:00.000Z"),
-    timed("goal.runtime_suspended", { ...suspend, suspensionId: "elapsed-suspension-2", requestedAt: "2026-08-14T00:15:00.000Z" }, "elapsed-replay-suspend-2", "2026-08-14T00:15:00.000Z"),
+    timed("goal.runtime_suspended", { ...suspend, suspensionId: "elapsed-suspension-2", affectedRunIds: ["product-run"], requestedAt: "2026-08-14T00:15:00.000Z" }, "elapsed-replay-suspend-2", "2026-08-14T00:15:00.000Z"),
   ]) replayed = applyEvent(replayed, row, { replay: true });
-  assert.equal(replayed.runtimeActiveElapsedMs, 891000);
+  assert.equal(replayed.runtimeActiveElapsedMs, 305000);
   assert.equal(replayed.runtimeActiveSince, null);
 });
 
