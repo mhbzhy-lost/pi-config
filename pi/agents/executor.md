@@ -2,6 +2,7 @@
 name: executor
 description: Deterministic coding executor with an ordered model fallback chain
 models:
+  - qwen-home/qwen38-nvfp4
   - codex-pool/gpt-5.6-terra
   - openai-codex/gpt-5.6-terra
   - codex-pool/gpt-5.6-luna
