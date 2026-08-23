@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -54,6 +54,16 @@ test("table-driven historical v1/v2/v3/planned replay is isolated and runtime fi
       assert.equal(projection.finalReview, null);
       assert.equal(schemaVersionForMutation(projection), schemaVersion === "planned.v1" ? "planned.v1" : "goal-engine.event.v3");
     }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("planned snapshots retain their existing serialization without runtime active-time fields", () => {
+  const root = mkdtempSync(join(tmpdir(), "goal-planned-serialization-"));
+  try {
+    appendEvent(root, legacyCreated("planned.v1", "planned-serialization"), 0);
+    const snapshot = JSON.parse(readFileSync(join(root, "goals", "planned-serialization", "projection.json"), "utf8"));
+    assert.equal(Object.hasOwn(snapshot, "runtimeActiveElapsedMs"), false);
+    assert.equal(Object.hasOwn(snapshot, "runtimeActiveSince"), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

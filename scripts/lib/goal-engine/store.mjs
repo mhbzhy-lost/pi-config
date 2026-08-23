@@ -648,6 +648,7 @@ function serializeProjection(p) {
     runtimeGeneration: p.runtimeGeneration, initialShape: p.initialShape,
     executionRevision: p.executionRevision, executionContractHash: p.executionContractHash,
     readiness: p.readiness, runtimeState: p.runtimeState, writePolicy: p.writePolicy,
+    ...(p.runtimeGeneration ? { runtimeActiveElapsedMs: p.runtimeActiveElapsedMs, runtimeActiveSince: p.runtimeActiveSince } : {}),
     taskApplicability: Object.fromEntries(p.taskApplicability || []),
     conditions: Object.fromEntries(p.conditions || []),
     observationRuns: Object.fromEntries(p.observationRuns || []),

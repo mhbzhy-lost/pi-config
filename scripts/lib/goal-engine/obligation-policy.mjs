@@ -73,7 +73,13 @@ function budgetFacts(projection, world, blocking, attention) {
   const runs = values(projection.observationRuns ?? {}, "observationRuns"), episodes = values(projection.repairEpisodes ?? {}, "repairEpisodes");
   const observationExhausted = Number.isSafeInteger(budget.max_observations) && runs.filter(run => Number.isSafeInteger(run?.cycle) && run.cycle > 0).length >= budget.max_observations;
   const repairExhausted = Number.isSafeInteger(budget.max_repairs) && episodes.length >= budget.max_repairs;
-  if (Number.isSafeInteger(budget.max_elapsed_minutes)) { const start = Date.parse(projection.createdAt), end = Date.parse(world.capturedAt); if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) note(attention, "budget", "elapsed", "ELAPSED_BUDGET_AUTHORITY_UNAVAILABLE"); else if (end - start >= budget.max_elapsed_minutes * 60000) note(blocking, "budget", "elapsed", "ELAPSED_BUDGET_EXHAUSTED"); }
+  if (Number.isSafeInteger(budget.max_elapsed_minutes) && projection.runtimeState === "active") {
+    const elapsed = projection.runtimeActiveElapsedMs, since = projection.runtimeActiveSince, end = Date.parse(world.capturedAt);
+    const canonical = value => typeof value === "string" && Number.isSafeInteger(Date.parse(value)) && new Date(Date.parse(value)).toISOString() === value;
+    const limit = budget.max_elapsed_minutes * 60000;
+    if (!Number.isSafeInteger(elapsed) || elapsed < 0 || !canonical(since) || !canonical(world.capturedAt) || !Number.isSafeInteger(end) || end < Date.parse(since) || !Number.isSafeInteger(limit) || !Number.isSafeInteger(elapsed + end - Date.parse(since))) note(attention, "budget", "elapsed", "ELAPSED_BUDGET_AUTHORITY_UNAVAILABLE");
+    else if (elapsed + end - Date.parse(since) >= limit) note(blocking, "budget", "elapsed", "ELAPSED_BUDGET_EXHAUSTED");
+  }
   progressAuthority(projection, blocking, attention);
   return { observationExhausted, repairExhausted };
 }

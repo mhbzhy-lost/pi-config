@@ -4,11 +4,28 @@ import { taskActionState } from "../scripts/lib/goal-engine/graph.mjs";
 import { actionableFrontier, nextObligationAction, obligationProgressFingerprint } from "../scripts/lib/goal-engine/obligation-policy.mjs";
 
 const condition = (id, status = "unsatisfied", depends_on = []) => ({ definition: { id, depends_on, stability: { mode: "consecutive", count: 2 } }, status });
-const base = () => ({ runtimeGeneration: "goal-runtime.v1", runtimeState: "active", lifecycle: "active", createdAt: "2026-01-01T00:00:00.000Z", tasks: new Map(), taskApplicability: new Map(), conditions: new Map(), observationRuns: new Map(), findings: new Map(), repairEpisodes: new Map(), repairChallenges: new Map(), convergenceBudget: { max_observations: 4, max_repairs: 2, max_elapsed_minutes: 30, max_no_progress: 2 } });
+const base = () => ({ runtimeGeneration: "goal-runtime.v1", runtimeState: "active", lifecycle: "active", createdAt: "2026-01-01T00:00:00.000Z", runtimeActiveElapsedMs: 0, runtimeActiveSince: "2026-01-01T00:00:00.000Z", tasks: new Map(), taskApplicability: new Map(), conditions: new Map(), observationRuns: new Map(), findings: new Map(), repairEpisodes: new Map(), repairChallenges: new Map(), convergenceBudget: { max_observations: 4, max_repairs: 2, max_elapsed_minutes: 30, max_no_progress: 2 } });
 const world = () => ({ safe: true, repo: { head: "a".repeat(40) }, resources: [], activeRuns: [], capturedAt: "2026-01-01T00:01:00.000Z" });
 const ledger = () => [{ canonicalFingerprint: "a".repeat(64), advanced: true, sequence: 1 }];
 
 function frontier(projection, snapshot = world(), taskActions = new Map(), observationInventory = { claims: new Map() }) { return actionableFrontier({ projection, worldSnapshot: snapshot, taskActions, observationInventory }); }
+
+test("elapsed budget counts only active execution intervals and fails closed without their authority", () => {
+  const suspended = base(); suspended.runtimeState = "suspended"; suspended.runtimeActiveElapsedMs = 29 * 60_000; suspended.runtimeActiveSince = null;
+  const tomorrow = world(); tomorrow.capturedAt = "2026-01-02T00:00:00.000Z";
+  let result = frontier(suspended, tomorrow);
+  assert.equal(result.blocking.some(item => item.code === "ELAPSED_BUDGET_EXHAUSTED"), false, "a suspended Goal must not consume its elapsed budget overnight");
+
+  const active = base(); active.runtimeActiveElapsedMs = 20 * 60_000; active.runtimeActiveSince = "2026-01-01T00:20:00.000Z";
+  const afterTenActiveMinutes = world(); afterTenActiveMinutes.capturedAt = "2026-01-01T00:30:00.000Z";
+  result = frontier(active, afterTenActiveMinutes);
+  assert(result.blocking.some(item => item.code === "ELAPSED_BUDGET_EXHAUSTED"), "separate active intervals must cumulatively exhaust the budget");
+
+  const missing = base(); delete missing.runtimeActiveElapsedMs; delete missing.runtimeActiveSince;
+  result = frontier(missing, tomorrow);
+  assert(result.attention.some(item => item.code === "ELAPSED_BUDGET_AUTHORITY_UNAVAILABLE"));
+  assert.equal(result.blocking.some(item => item.code === "ELAPSED_BUDGET_EXHAUSTED"), false, "missing runtime authority must not fall back to createdAt");
+});
 
 test("actual taskActionState active executor suppresses settle but not independent condition", () => {
   const projection = base(); projection.progressLedger = ledger(); projection.tasks.set("running", { status: "dispatched" }); projection.conditions.set("ready", condition("ready"));

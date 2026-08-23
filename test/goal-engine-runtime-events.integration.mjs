@@ -205,6 +205,34 @@ test("amendment enters suspended through its durable runtime event", () => {
   assert.equal(p.executionRevision, 2);
 });
 
+test("runtime active elapsed time accumulates intervals, excludes suspended gaps, and replays deterministically", () => {
+  const timed = (type, data, id, occurredAt) => ({ schemaVersion: "goal-runtime.v1", eventId: id, goalId: "runtime-goal", occurredAt, type, data });
+  const suspend = { suspensionId: "elapsed-suspension", reason: "host_pause", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-13T00:10:00.000Z", resourcesQuarantined: false };
+  const closure = { ...suspend, resourcesQuarantined: true, terminalProofRefs: [], workspaceClosureProofRefs: [], resourceClosureProofRefs: [] };
+  let p = active();
+  assert.equal(p.runtimeActiveElapsedMs, 0);
+  assert.equal(p.runtimeActiveSince, "2026-08-13T00:00:09.000Z");
+  p = applyEvent(p, timed("goal.runtime_suspended", suspend, "elapsed-suspend-1", "2026-08-13T00:10:00.000Z"));
+  assert.equal(p.runtimeActiveElapsedMs, 591000);
+  assert.equal(p.runtimeActiveSince, null);
+  p = applyEvent(p, timed("goal.runtime_suspended", closure, "elapsed-closure", "2026-08-14T00:10:00.000Z"));
+  assert.equal(p.runtimeActiveElapsedMs, 591000, "closure must not count the suspended day");
+  p = applyEvent(p, timed("goal.runtime_resumed", { suspensionId: suspend.suspensionId, closureHash: suspensionClosureHash(closure) }, "elapsed-resume", "2026-08-14T00:10:00.000Z"));
+  assert.equal(p.runtimeActiveSince, "2026-08-14T00:10:00.000Z");
+  p = applyEvent(p, timed("goal.runtime_suspended", { ...suspend, suspensionId: "elapsed-suspension-2", requestedAt: "2026-08-14T00:15:00.000Z" }, "elapsed-suspend-2", "2026-08-14T00:15:00.000Z"));
+  assert.equal(p.runtimeActiveElapsedMs, 891000, "only the second five-minute active interval is added");
+
+  let replayed = active();
+  for (const row of [
+    timed("goal.runtime_suspended", suspend, "elapsed-replay-suspend-1", "2026-08-13T00:10:00.000Z"),
+    timed("goal.runtime_suspended", closure, "elapsed-replay-closure", "2026-08-14T00:10:00.000Z"),
+    timed("goal.runtime_resumed", { suspensionId: suspend.suspensionId, closureHash: suspensionClosureHash(closure) }, "elapsed-replay-resume", "2026-08-14T00:10:00.000Z"),
+    timed("goal.runtime_suspended", { ...suspend, suspensionId: "elapsed-suspension-2", requestedAt: "2026-08-14T00:15:00.000Z" }, "elapsed-replay-suspend-2", "2026-08-14T00:15:00.000Z"),
+  ]) replayed = applyEvent(replayed, row, { replay: true });
+  assert.equal(replayed.runtimeActiveElapsedMs, 891000);
+  assert.equal(replayed.runtimeActiveSince, null);
+});
+
 test("runtime suspension closure and hash-bound resume have identical pre-append and replay semantics", () => {
   const root = mkdtempSync(join(tmpdir(), "goal-runtime-suspension-"));
   try {
@@ -240,6 +268,8 @@ test("runtime evidence ledger survives store replay with calibration and product
     p = appendAll(root, p, observationEvents(p, { runId: "product-run", evidenceId: hash(200), cycle: 1, start: 10 }));
     const replayed = loadProjection(root, "runtime-goal"), snapshot = JSON.parse(readFileSync(join(root, "goals/runtime-goal/projection.json"), "utf8"));
     assert.deepEqual(replayed.evidenceHistory, p.evidenceHistory); assert.equal(projectionStateHash(replayed), projectionStateHash(p));
+    assert.equal(snapshot.runtimeActiveElapsedMs, 0); assert.equal(snapshot.runtimeActiveSince, "2026-08-13T00:00:09.000Z");
+    assert.equal(replayed.runtimeActiveElapsedMs, 0); assert.equal(replayed.runtimeActiveSince, "2026-08-13T00:00:09.000Z");
     assert.deepEqual(snapshot.evidenceHistory.map((row) => row.evidenceId), [hash(100), hash(200)]); assert.deepEqual(replayed.conditions.get("condition-1").supportingEvidenceIds, [hash(200)]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
