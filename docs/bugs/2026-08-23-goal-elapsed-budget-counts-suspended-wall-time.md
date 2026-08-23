@@ -10,7 +10,9 @@
 
 ## 修复
 
-初始 suspension 没有 `affectedRunIds` 时，active interval 使用 projection 的 canonical `updatedAt` 关闭；携带 owned run 时才使用 suspension 的 `occurredAt` 关闭。时间倒退直接 fail closed，不以零进行 clamp；重复 closure 不会重复关闭 interval。
+初始 suspension 没有 `affectedRunIds` 时，以及 completion 默认关闭时，active interval 使用 projection 的 canonical `updatedAt` 关闭；携带 owned run 时才使用 suspension 的 `occurredAt` 关闭。任何关闭区间的时间倒退直接 fail closed，不以零进行 clamp；重复 closure 不会重复关闭 interval。
+
+终审 integration fixture 的 Goal 事件时间必须早于动态 Host 时间，且 ledger 的 `occurredAt` 保持单调。fixture 的未来时间不能决定 production 的容错策略；生产仍须拒绝非法负 interval，而不是以 clamp 兼容 fixture。
 
 ## 期望
 

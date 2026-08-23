@@ -223,6 +223,17 @@ test("runtime suspension rejects an occurredAt before activeSince instead of cla
   assert.throws(() => applyEvent(active(), timed("goal.runtime_suspended", suspension, "backwards-event", "2026-08-12T23:59:59.000Z")), /invalid runtime active time/);
 });
 
+test("runtime completion and no-run suspension reject effective ends before activeSince", () => {
+  const timed = (type, data, id, occurredAt) => ({ schemaVersion: "goal-runtime.v1", eventId: id, goalId: "runtime-goal", occurredAt, type, data });
+  const completion = active();
+  completion.runtimeActiveSince = "2026-08-13T00:00:15.000Z";
+  assert.throws(() => applyEvent(completion, timed("goal.completed", {}, "backwards-completion", "2026-08-13T00:00:16.000Z")), /invalid runtime active time/);
+  const p = active();
+  p.runtimeActiveSince = "2026-08-13T00:00:15.000Z";
+  const suspension = { suspensionId: "backwards-idle", reason: "host_pause", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-13T00:00:14.000Z", resourcesQuarantined: false };
+  assert.throws(() => applyEvent(p, timed("goal.runtime_suspended", suspension, "backwards-idle-event", "2026-08-13T00:00:16.000Z")), /invalid runtime active time/);
+});
+
 test("runtime active elapsed time accumulates intervals, excludes suspended gaps, and replays deterministically", () => {
   const timed = (type, data, id, occurredAt) => ({ schemaVersion: "goal-runtime.v1", eventId: id, goalId: "runtime-goal", occurredAt, type, data });
   const suspend = { suspensionId: "elapsed-suspension", reason: "host_pause", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-13T00:10:00.000Z", resourcesQuarantined: false };

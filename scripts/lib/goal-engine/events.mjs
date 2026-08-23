@@ -313,14 +313,13 @@ function openRuntimeActiveInterval(p, occurredAt) {
   if (!Number.isSafeInteger(p.runtimeActiveElapsedMs) || p.runtimeActiveElapsedMs < 0 || p.runtimeActiveSince !== null && p.runtimeActiveSince !== undefined) throw new Error("invalid runtime active time authority");
   p.runtimeActiveSince = occurredAt;
 }
-function closeRuntimeActiveInterval(p, occurredAt, affectedRunIds = null) {
-  const end = canonicalRuntimeTime(affectedRunIds === null || affectedRunIds.length > 0 ? occurredAt : p.updatedAt);
+function closeRuntimeActiveInterval(p, occurredAt, affectedRunIds = []) {
+  const end = canonicalRuntimeTime(affectedRunIds.length > 0 ? occurredAt : p.updatedAt);
   if (typeof p.runtimeActiveSince !== "string") { p.runtimeActiveSince = null; return; }
   if (!Number.isSafeInteger(p.runtimeActiveElapsedMs) || p.runtimeActiveElapsedMs < 0) throw new Error("invalid runtime active time authority");
   const start = canonicalRuntimeTime(p.runtimeActiveSince), interval = end - start;
-  if (!Number.isSafeInteger(interval) || !Number.isSafeInteger(p.runtimeActiveElapsedMs + Math.max(0, interval))) throw new Error("invalid runtime active time authority");
-  if (interval < 0 && affectedRunIds !== null && affectedRunIds.length > 0) throw new Error("invalid runtime active time authority");
-  p.runtimeActiveElapsedMs += Math.max(0, interval);
+  if (!Number.isSafeInteger(interval) || interval < 0 || !Number.isSafeInteger(p.runtimeActiveElapsedMs + interval)) throw new Error("invalid runtime active time authority");
+  p.runtimeActiveElapsedMs += interval;
   p.runtimeActiveSince = null;
 }
 function runtimeActivated(p, occurredAt) { runtimeOnly(p); if (p.runtimeState !== "calibrating") throw new Error("runtime activation is out of order"); for (const [conditionId, condition] of p.conditions) { const candidates = p.evidenceHistory.filter((value) => { const run = p.observationRuns.get(value.run?.runId); return run?.conditionId === conditionId && run.cycle === 0 && ["recorded", "released"].includes(run.phase) && value.executionRevision === p.executionRevision; }); const evidence = candidates.sort((a, b) => b.sequence - a.sequence)[0]; if (!evidence || !["passed", "failed"].includes(evidence.verdict?.kind)) throw new Error("runtime activation requires decidable cycle zero calibration"); condition.status = "inactive"; condition.supportingEvidenceIds = []; } p.runtimeState = "active"; openRuntimeActiveInterval(p, occurredAt); }

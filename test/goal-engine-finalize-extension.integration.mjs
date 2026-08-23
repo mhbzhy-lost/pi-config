@@ -15,7 +15,8 @@ const hash = value => createHash("sha256").update(value).digest("hex");
 const head = cwd => git(cwd, "rev-parse", "HEAD");
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const rootFor = cwd => join(cwd, ".state/goal-engine");
-const event = (goalId, type, data, n) => ({ schemaVersion: "goal-runtime.v1", eventId: `${goalId}-${n}`, goalId, occurredAt: `2026-09-01T00:00:${String(n).padStart(2, "0")}.000Z`, type, data });
+const fixtureEpoch = Date.now() - 30_000;
+const event = (goalId, type, data, n) => ({ schemaVersion: "goal-runtime.v1", eventId: `${goalId}-${n}`, goalId, occurredAt: new Date(fixtureEpoch + n * 1_000).toISOString(), type, data });
 const intentKeys = ["choices", "goalId", "head", "manifestHash", "protocol", "sessionId", "stateHash", "worldHash"];
 
 function runtimeInit(overrides = {}) {
@@ -35,8 +36,9 @@ function pi(cwd, entries = [], sessionId = "owner") {
   return { cwd, tools, entries, ctx: { cwd, sessionManager }, registerTool: tool => tools.push(tool), on: (name, handler) => listeners.set(name, handler), appendEntry: (customType, data) => append({ type: "custom", customType, data }), appendMessage: (text, extra = {}) => append({ type: "message", message: { role: "user", content: text }, ...extra }), handlers: { get(name) { const handler = listeners.get(name); if (name !== "input" || !handler) return handler; return async (input, ctx) => { const result = await handler(input, ctx); if (["interactive", "rpc"].includes(input.source)) append({ type: "message", message: { role: "user", content: input.text }, ...(input.images !== undefined ? { images: input.images } : {}), ...(input.streamingBehavior !== undefined ? { streamingBehavior: input.streamingBehavior } : {}) }); return result; }; } } };
 }
 function host(cwd, calls, world = {}) {
+  const capturedAt = new Date().toISOString();
   const adapter = { ref: "oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [], artifactClassifier: { pass: "PASS", fail: "FAIL", inconclusive: "UNKNOWN", infrastructure_error: "INFRA" }, validationPlan: { schema: "dispatch-ir.v1.validation-plan", limits: { timeoutMs: 1, maxOutputBytes: 1, terminationGraceMs: 1, maxConcurrentWorkspaces: 1 }, actions: [{ id: "check", kind: "validation", executable: "/usr/bin/true", args: [] }] } };
-  return { registries: runtimeRegistries, captureCurrentWorld() { calls.world++; return { safe: true, repo: { root: cwd, head: head(cwd), trackedDirty: world.dirty ? ["test/dirty"] : [], untracked: [], unmerged: [], sequencer: null }, adapters: [{ ref: "oracle", version: "1" }], environments: [{ ref: "local", fingerprint: world.environment ?? "fixture-environment-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "fixture", available: true }], resources: world.resources ?? [], activeRuns: [], capturedAt: "2026-09-01T00:00:59.000Z" }; }, adapterRegistry: createObservationAdapterRegistry([adapter]), prepareManagedValidation() { calls.managed++; throw Error("finalization must not start managed validation"); }, artifactRefForRun() { throw Error("finalization must not request an observation artifact"); }, startManagedValidation() { calls.start++; throw Error("finalization must not start an observation"); }, recoverManagedValidation() { calls.recover++; throw Error("finalization must not recover an observation"); }, releaseManagedValidation() { calls.release++; throw Error("finalization must not release an observation"); } };
+  return { registries: runtimeRegistries, captureCurrentWorld() { calls.world++; return { safe: true, repo: { root: cwd, head: head(cwd), trackedDirty: world.dirty ? ["test/dirty"] : [], untracked: [], unmerged: [], sequencer: null }, adapters: [{ ref: "oracle", version: "1" }], environments: [{ ref: "local", fingerprint: world.environment ?? "fixture-environment-1", available: true }], fixtures: [{ ref: "sample", fingerprint: "fixture", available: true }], resources: world.resources ?? [], activeRuns: [], capturedAt }; }, adapterRegistry: createObservationAdapterRegistry([adapter]), prepareManagedValidation() { calls.managed++; throw Error("finalization must not start managed validation"); }, artifactRefForRun() { throw Error("finalization must not request an observation artifact"); }, startManagedValidation() { calls.start++; throw Error("finalization must not start an observation"); }, recoverManagedValidation() { calls.recover++; throw Error("finalization must not recover an observation"); }, releaseManagedValidation() { calls.release++; throw Error("finalization must not release an observation"); } };
 }
 function converged(cwd, api, { append = appendEvent, runtime } = {}) {
   const goalId = "finalize-converged", root = rootFor(cwd), contract = normalizeRuntimeGoalInit(runtimeInit(runtime), runtimeRegistries); let projection;
@@ -75,7 +77,8 @@ test("fake Pi input wrapper 只为 interactive/rpc 追加 user message 并保留
 });
 
 test("首次 status 只追加精确的终审配对 intent，reload 保持唯一且不签 offer", async () => {
-  const fixture = setup(), first = await requestFinalReview(fixture);
+  const fixture = setup(), initialLedger = events(fixture.cwd, fixture.goalId), first = await requestFinalReview(fixture);
+  assert.ok(initialLedger.every((row, index) => index === 0 || row.occurredAt >= initialLedger[index - 1].occurredAt), "fixture ledger occurredAt remains monotonic");
   assert.equal(first.status, "APPROVAL_REQUIRED"); assert.equal(first.action_token, undefined);
   const [entry] = finalIntent(fixture.api); assert.ok(entry);
   assert.deepEqual(Object.keys(entry.data).sort(), intentKeys);
