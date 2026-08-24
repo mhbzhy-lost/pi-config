@@ -42,6 +42,7 @@ import { parseProcessTerminal } from "../subagent-dispatch/root-broker-protocol.
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import { buildSuspensionPlan, deriveOwnedExecutorStopRequest } from "./suspension.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.mjs";
+import { createGoalToolRenderers } from "./tool-renderer.mjs";
 import {
   allocateExecutorWorkspace,
   markExecutorWorkspaceCleanupDebt,
@@ -321,11 +322,15 @@ function toolResult(value) {
   };
 }
 
+const GOAL_TOOL_RENDERERS = createGoalToolRenderers();
+
 function registerGoalTool(pi, definition) {
   const { handler, prepareArguments, prepareInExecute = true, ...publicDefinition } = definition;
+  const renderer = GOAL_TOOL_RENDERERS[definition.name];
   if (typeof handler !== "function") throw new Error(`Goal tool ${definition.name} is missing its domain handler`);
   pi.registerTool({
     ...publicDefinition,
+    ...(renderer ? { renderCall: renderer.renderCall, renderResult: renderer.renderResult } : {}),
     ...(prepareArguments ? { prepareArguments } : {}),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const prepared = prepareArguments && prepareInExecute ? prepareArguments(params) : params;

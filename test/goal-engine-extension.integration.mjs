@@ -31,6 +31,22 @@ test("Root Goal ABI is exact-eight and goal_finalize rejects planned before side
   assert.equal(readFileSync(join(root, "goals", initialized.goalId, "events.jsonl"), "utf8"), before);
 });
 
+test("exact-eight Goal tools expose display-only bounded renderers", () => {
+  const pi = createMockPi(tmpCwd());
+  createGoalEngineExtension(pi);
+  const tools = Object.fromEntries(pi.tools.map((tool) => [tool.name, tool]));
+  assert.deepEqual(Object.keys(tools).sort(), ["goal_accept", "goal_amend", "goal_dispatch", "goal_finalize", "goal_init", "goal_integrate", "goal_settle", "goal_status"]);
+  assert.equal(tools.goal_init.renderCall({ objective: "hidden objective", execution: { schema: "goal-runtime.v1", tasks: [{}], conditions: [{}] } }).render(80)[0], "goal_init | runtime | tasks 1 | conditions 1");
+  assert.equal(tools.goal_status.renderCall({ list_cwd_goals: true }).render(80)[0], "goal_status | list");
+  assert.equal(tools.goal_dispatch.renderCall({ task_id: "t1", action_token: "hidden-token" }).render(80)[0], "goal_dispatch | task t1");
+  assert.equal(tools.goal_settle.renderCall({ task_id: "t1", outcome: "failed", next_action: "x", action_token: "hidden-token" }).render(80)[0], "goal_settle | task t1 | failed");
+  assert.equal(tools.goal_integrate.renderCall({ task_id: "t1", action: "discard", action_token: "hidden-token" }).render(80)[0], "goal_integrate | task t1 | discard");
+  assert.equal(tools.goal_accept.renderCall({ task_id: "t1", action_token: "hidden-token" }).render(80)[0], "goal_accept | task t1");
+  assert.equal(tools.goal_amend.renderCall({ operation: "patch_active", reason: "hidden objective", action_token: "hidden-token", add_tasks: [{}] }).render(80)[0], "goal_amend | patch_active | add 1 | remove 0 | update 0");
+  assert.equal(tools.goal_finalize.renderCall({ goal_id: "g1", action_token: "hidden-token", approval_entry_id: "approval" }).render(80)[0], "goal_finalize | goal g1");
+  assert.equal(tools.goal_status.renderResult({ details: { value: { status: "active", runnable: ["t1"] } } }, {}, null, { expanded: false }).render(80)[0], "goal_status | active | run 1");
+});
+
 test("external evidence classification matrix only promotes external_review from external", () => {
   const projectionFor = (evidence) => ({ tasks: new Map([["t1", { evidence }]]) });
   for (const evidence of [
