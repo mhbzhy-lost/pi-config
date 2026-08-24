@@ -14,6 +14,7 @@ import { bindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispat
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
+import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const GOAL_ID = "binding-goal";
 const CONTRACT_HASH = "a".repeat(64);
@@ -363,18 +364,19 @@ function integratedFixture(t) {
   const tools = [];
   const eventIdentity = createEventBus();
   const branch = [];
+  const handlers = new Map();
   const sessionManager = {
     getSessionId: () => "root-session-1",
     getSessionFile: () => join(cwd, "session.jsonl"),
     getLeafId: () => "leaf-1",
-    getEntries: () => [],
+    getEntries: () => branch,
     getBranch: () => branch,
   };
   const pi = {
     events: eventIdentity,
     registerTool(tool) { tools.push(tool); },
-    on() {},
-    appendEntry() {},
+    on(name, handler) { handlers.set(name, handler); },
+    appendEntry(customType, data) { branch.push({ id: `entry-${branch.length + 1}`, timestamp: new Date(Date.now() + branch.length + 1).toISOString(), type: "custom", customType, data }); },
   };
   const context = { cwd, sessionManager };
   const invoke = async (name, params) => {
@@ -383,7 +385,36 @@ function integratedFixture(t) {
     const result = await tool.execute(`call-${name}`, params, new AbortController().signal, undefined, context);
     return result.details.value;
   };
-  return { cwd, pi, tools, context, invoke, branch };
+  return { cwd, pi, tools, context, invoke, branch, handlers };
+}
+
+function runtimeHost(cwd) {
+  return {
+    registries: runtimeRegistries,
+    adapterRegistry: {},
+    artifactRefForRun() { throw new Error("runtime fixture has no observations"); },
+    captureCurrentWorld() {
+      return { safe: true, repo: { root: cwd, head: git(cwd, "rev-parse", "HEAD"), trackedDirty: [], untracked: [], sequencer: null }, adapters: [], environments: [], fixtures: [], resources: [], activeRuns: [], capturedAt: new Date().toISOString() };
+    },
+  };
+}
+
+async function initializeActiveRuntimeDispatch(fixture) {
+  createGoalEngineExtension(fixture.pi, { goalStateEnv: {}, runtimeHost: runtimeHost(fixture.cwd), inspectExecutorProof(runId) { return officialProof(runId, `/tmp/${runId}`); } });
+  const base = runtimeInit();
+  const init = runtimeInit({ execution: { ...base.execution, conditions: [], budgets: { ...base.execution.budgets, max_no_progress: 99 } } });
+  await fixture.invoke("goal_init", init);
+  await fixture.invoke("goal_status", {});
+  fixture.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, fixture.context);
+  const intent = fixture.branch.at(-1);
+  fixture.branch.push({ id: "runtime-approval", parentId: intent.id, timestamp: new Date(Date.now() + 1_000).toISOString(), type: "message", message: { role: "user", content: "approve" } });
+  await fixture.invoke("goal_status", {});
+  for (let i = 0; i < 3 && loadProjection(join(fixture.cwd, ".state/goal-engine"), "harden-runtime").runtimeState !== "active"; i++) await fixture.invoke("goal_status", {});
+  const status = JSON.parse(await fixture.invoke("goal_status", {}));
+  assert.ok(status.machineAction, JSON.stringify(status));
+  assert.equal(status.machineAction.tool, "goal_dispatch");
+  const dispatched = JSON.parse(await fixture.invoke("goal_dispatch", { goal_id: "harden-runtime", task_id: "task-1", action_token: status.action_token }));
+  return { goalId: "harden-runtime", dispatched };
 }
 
 const STRICT_CODING_CONTRACT = Object.freeze({
@@ -784,6 +815,23 @@ test("goal_status recovers one unbound official active-branch executor handle wi
   const task = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one");
   assert.equal(task.executorBinding.runId, runId);
   assert.equal(task.status, "dispatched", "recovery binds only; a later status may settle");
+});
+
+test("runtime goal_status recovers an unbound official executor handle before issuing another action", async (t) => {
+  const fixture = integratedFixture(t);
+  const runId = "run-runtime-recovered-1";
+  const asyncDir = "/tmp/run-runtime-recovered-1";
+  const { goalId, dispatched } = await initializeActiveRuntimeDispatch(fixture);
+  fixture.branch.push(
+    { id: "runtime-spawn", timestamp: new Date(Date.now() + 2_000).toISOString(), type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "runtime-spawn-call", name: "subagent", arguments: dispatched.contract }] } },
+    { id: "runtime-spawn-result", timestamp: new Date(Date.now() + 3_000).toISOString(), type: "message", message: { role: "toolResult", toolCallId: "runtime-spawn-call", toolName: "subagent", details: { version: "coding-dispatch-handle.v1", dispatchId: "goal-dispatch", taskId: dispatched.contract.taskId, agent: "executor", title: dispatched.contract.title, contractHash: dispatched.contract_hash, runId, asyncDir } } },
+  );
+  const status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
+  assert.equal(status.status, "RECOVERED_EXECUTOR_BINDING");
+  assert.equal(status.machineAction, null, "recovery is this status call's only action");
+  const task = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-1");
+  assert.equal(task.executorBinding.runId, runId);
+  assert.equal(task.status, "dispatched");
 });
 
 test("Goal dispatch followed by the exact coding spawn persists the returned runId and asyncDir", async (t) => {

@@ -1602,6 +1602,10 @@ export function createGoalEngineExtension(pi, options = {}) {
             return JSON.stringify({ goalId, status: "R10_LOCAL_CONVERGENCE_INVALIDATED" });
           }
         }
+        const recoveredBinding = projection.runtimeState === "active"
+          ? recoverUnboundExecutorBinding(projection, ctx, cwd, root)
+          : null;
+        if (recoveredBinding) return JSON.stringify({ ...JSON.parse(statusResponse(loadProjectionFn(root, goalId), cwd, root)), status: "RECOVERED_EXECUTOR_BINDING" });
         const inventory = activeObservationInventory(projection);
         if (!inventory) return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, status: "R10A3_OBSERVATION_HOST_ATTENTION", attention: ["R10A3_OBSERVATION_HOST_ATTENTION"], progressLedger: projection.progressLedger });
         // R9 is the sole authority for this status call.  In particular, do not
