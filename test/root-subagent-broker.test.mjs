@@ -298,7 +298,22 @@ test("Goal executor coordinator resolves a session alias across ExtensionAPI wra
   unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", { prepareSpawn() {}, bindSpawn() {} });
   assert.strictEqual(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), coordinator, "foreign shutdown cannot delete the alias");
   unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", coordinator);
+  assert.equal(findGoalExecutorCoordinator(goalPi), undefined, "correct shutdown clears the exact wrapper binding");
   assert.equal(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), undefined);
+});
+
+test("Goal executor coordinator session replacement does not resurrect the old generation", () => {
+  const events = {};
+  const goalPi = { events };
+  const replacementPi = { events };
+  const oldCoordinator = { prepareSpawn() {}, bindSpawn() {} };
+  const replacement = { prepareSpawn() {}, bindSpawn() {} };
+  bindGoalExecutorCoordinatorSession(goalPi, "root-goal-old", oldCoordinator);
+  bindGoalExecutorCoordinatorSession(replacementPi, "root-goal-new", replacement);
+  unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-old", oldCoordinator);
+  assert.strictEqual(findGoalExecutorCoordinator(goalPi), replacement);
+  assert.strictEqual(findGoalExecutorCoordinator({ events: {} }, "root-goal-new"), replacement);
+  assert.equal(findGoalExecutorCoordinator({ events: {} }, "root-goal-old"), undefined);
 });
 
 test("Root broker registry reload coexists with a legacy v1 WeakMap process slot", () => {

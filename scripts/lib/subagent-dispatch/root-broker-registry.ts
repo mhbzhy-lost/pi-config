@@ -115,8 +115,10 @@ export function findGoalExecutorCoordinator(pi: object, rootSessionId?: string):
 export function unbindGoalExecutorCoordinatorSession(pi: object, rootSessionId: string, coordinator?: GoalExecutorCoordinator): void {
   const identity = rootSessionIdentity(rootSessionId);
   const current = goalCoordinators.byRootSessionId.get(identity);
-  if (coordinator && current !== coordinator) return;
-  if (current) goalCoordinators.byRootSessionId.delete(identity);
+  if (!current || (coordinator && current !== coordinator)) return;
+  goalCoordinators.byRootSessionId.delete(identity);
+  const key = registryKey(pi);
+  if (goalCoordinators.exact.get(key) === current) goalCoordinators.exact.delete(key);
 }
 
 export function bindRootBroker(pi: object, broker: RootBrokerServer): void {
