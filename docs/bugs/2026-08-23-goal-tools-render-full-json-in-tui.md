@@ -1,17 +1,17 @@
-# Goal tools render full JSON in TUI
+# Goal 工具在 TUI 渲染完整 JSON
 
-## Symptom
+## 症状
 
-The fallback TUI renderer displayed full Goal tool calls and results, including large execution contracts, action tokens, approval data, objectives, criteria, and raw JSON.
+fallback TUI renderer 会展示完整的 Goal 工具调用和结果，包括很大的 execution 合同、action token、审批数据、objective、criteria 及原始 JSON。
 
-## Root cause
+## 根因
 
-Goal tool registration did not provide `renderCall` or `renderResult`. The fallback therefore rendered the public tool payload rather than a display-specific projection. The initial candidate renderer also treated planned and runtime init inputs alike and read result text without respecting the authoritative `details.value` boundary.
+Goal 工具注册没有提供 `renderCall` 或 `renderResult`，因此 fallback 会渲染公开工具 payload，而不是仅供展示的投影。初始候选 renderer 还把 planned 和 runtime init 输入混为一谈，并且没有遵守以权威 `details.value` 为先的结果读取边界。
 
-## Fix
+## 修复
 
-Register bounded display-only renderers for the eight public Goal tools. They derive ASCII one-line summaries from public call shapes and a safe result whitelist. Runtime init recognizes only `execution.schema=goal-runtime.v1` and counts its tasks and conditions; planned init counts top-level tasks. Result parsing prefers object or JSON-string `details.value`, falling back to text JSON only when that field is absent. No Goal execution, schema, content, details, or state behavior changes.
+为八个公开 Goal 工具注册有宽度上限的 display-only renderer。它们从公开调用形状和安全的结果白名单派生 ASCII 单行摘要。runtime init 仅在 `execution.schema=goal-runtime.v1` 时统计其 tasks 和 conditions；planned init 统计顶层 tasks。结果解析优先读取 object 或 JSON-string `details.value`，仅在该字段不存在时回退至 text JSON。不改变 Goal execution、schema、content、details 或 state 行为。
 
-## Regression coverage
+## 回归覆盖
 
-Renderer tests assert literal summaries for every public tool and every `goal_amend` operation, safe result parsing, partial and error states, width bounds, ASCII-only output, and redaction of sensitive/raw data. Extension integration verifies all eight registered tools use the renderer.
+renderer 测试为每个公开工具和每个 `goal_amend` operation 断言字面摘要，并覆盖安全结果解析、partial/error 状态、宽度限制、仅 ASCII 输出和敏感/raw 数据隐藏。extension 集成测试确认全部八个已注册工具均使用该 renderer。
