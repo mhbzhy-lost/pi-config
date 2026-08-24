@@ -1,7 +1,7 @@
 import type { RootBrokerServer } from "./root-broker-server.ts";
 
 const ROOT_BROKER_REGISTRY_KEY = Symbol.for("pi.root-subagent-broker-registry.v2");
-const GOAL_EXECUTOR_COORDINATOR_KEY = Symbol.for("pi.goal-executor-coordinator-registry.v1");
+const GOAL_EXECUTOR_COORDINATOR_KEY = Symbol.for("pi.goal-executor-coordinator-registry.v2");
 
 type GoalExecutorCoordinator = {
   prepareSpawn: (request: any) => Promise<any> | any;
@@ -65,17 +65,58 @@ function registryKey(pi: object): object {
 }
 
 const brokers = rootBrokerRegistry();
-const goalCoordinators = processWeakRegistry<GoalExecutorCoordinator>(GOAL_EXECUTOR_COORDINATOR_KEY, "Goal executor coordinator");
+type GoalExecutorCoordinatorRegistry = {
+  exact: WeakMap<object, GoalExecutorCoordinator>;
+  byRootSessionId: Map<string, GoalExecutorCoordinator>;
+};
 
-export function bindGoalExecutorCoordinator(pi: object, coordinator: GoalExecutorCoordinator): void {
+function goalExecutorCoordinatorRegistry(): GoalExecutorCoordinatorRegistry {
+  const descriptor = Object.getOwnPropertyDescriptor(process, GOAL_EXECUTOR_COORDINATOR_KEY);
+  if (!descriptor) {
+    const registry: GoalExecutorCoordinatorRegistry = { exact: new WeakMap<object, GoalExecutorCoordinator>(), byRootSessionId: new Map<string, GoalExecutorCoordinator>() };
+    Object.defineProperty(process, GOAL_EXECUTOR_COORDINATOR_KEY, { value: registry, enumerable: false, configurable: false, writable: false });
+    return registry;
+  }
+  const registry = descriptor.value;
+  if (!registry || typeof registry !== "object" || !(registry.exact instanceof WeakMap) || !(registry.byRootSessionId instanceof Map)) {
+    throw new Error("Goal executor coordinator registry slot is invalid");
+  }
+  return registry as GoalExecutorCoordinatorRegistry;
+}
+
+const goalCoordinators = goalExecutorCoordinatorRegistry();
+
+function assertGoalExecutorCoordinator(coordinator: GoalExecutorCoordinator): void {
   if (!coordinator || typeof coordinator.prepareSpawn !== "function" || typeof coordinator.bindSpawn !== "function") {
     throw new TypeError("Goal executor coordinator is invalid");
   }
-  goalCoordinators.set(registryKey(pi), coordinator);
 }
 
-export function findGoalExecutorCoordinator(pi: object): GoalExecutorCoordinator | undefined {
-  return goalCoordinators.get(registryKey(pi));
+export function bindGoalExecutorCoordinator(pi: object, coordinator: GoalExecutorCoordinator): void {
+  assertGoalExecutorCoordinator(coordinator);
+  goalCoordinators.exact.set(registryKey(pi), coordinator);
+}
+
+export function bindGoalExecutorCoordinatorSession(pi: object, rootSessionId: string, coordinator: GoalExecutorCoordinator): void {
+  assertGoalExecutorCoordinator(coordinator);
+  const identity = rootSessionIdentity(rootSessionId);
+  goalCoordinators.exact.set(registryKey(pi), coordinator);
+  // A reload replaces the ExtensionAPI facade for the same live root session.
+  // Shutdown compare-and-delete prevents the old generation from removing this alias.
+  goalCoordinators.byRootSessionId.set(identity, coordinator);
+}
+
+export function findGoalExecutorCoordinator(pi: object, rootSessionId?: string): GoalExecutorCoordinator | undefined {
+  const exact = goalCoordinators.exact.get(registryKey(pi));
+  if (exact) return exact;
+  return rootSessionId === undefined ? undefined : goalCoordinators.byRootSessionId.get(rootSessionIdentity(rootSessionId));
+}
+
+export function unbindGoalExecutorCoordinatorSession(pi: object, rootSessionId: string, coordinator?: GoalExecutorCoordinator): void {
+  const identity = rootSessionIdentity(rootSessionId);
+  const current = goalCoordinators.byRootSessionId.get(identity);
+  if (coordinator && current !== coordinator) return;
+  if (current) goalCoordinators.byRootSessionId.delete(identity);
 }
 
 export function bindRootBroker(pi: object, broker: RootBrokerServer): void {

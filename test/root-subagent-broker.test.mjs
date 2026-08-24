@@ -8,7 +8,7 @@ import test from "node:test";
 import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { createBrokerFrameDecoder, createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
-import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker, bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, findGoalExecutorCoordinator, unbindGoalExecutorCoordinatorSession } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 import * as rootBrokerRegistry from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 
 class EventBus {
@@ -283,6 +283,22 @@ test("Root broker registry exposes only the bound broker's read-only executor pr
     unbindRootBroker(pi, broker);
   }
   assert.throws(() => rootBrokerRegistry.inspectRootBrokerExecutorProof(pi, "run-1"), /unavailable/);
+});
+
+test("Goal executor coordinator resolves a session alias across ExtensionAPI wrappers and CAS-unbinds", () => {
+  const goalPi = { events: {} };
+  const subagentPi = { events: {} };
+  const foreignPi = { events: {} };
+  const coordinator = { prepareSpawn() {}, bindSpawn() {} };
+  bindGoalExecutorCoordinator(goalPi, coordinator);
+  bindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", coordinator);
+  assert.strictEqual(findGoalExecutorCoordinator(goalPi), coordinator, "same-wrapper lookup remains preferred");
+  assert.strictEqual(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), coordinator);
+  assert.equal(findGoalExecutorCoordinator(foreignPi, "root-other-session"), undefined);
+  unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", { prepareSpawn() {}, bindSpawn() {} });
+  assert.strictEqual(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), coordinator, "foreign shutdown cannot delete the alias");
+  unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", coordinator);
+  assert.equal(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), undefined);
 });
 
 test("Root broker registry reload coexists with a legacy v1 WeakMap process slot", () => {

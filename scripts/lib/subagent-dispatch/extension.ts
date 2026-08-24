@@ -353,7 +353,7 @@ function detectContinuationWorkspace({ cwd, originRoot }) {
   if (segments[0] !== ".state" || segments[1] !== "subagent-dispatch" || segments[2] !== "worktrees" || !nonempty(segments[3])) return undefined;
   return segments[3];
 }
-async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, workspace, workspaceController, resolveCanonicalOrigin) {
+async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, workspace, workspaceController, resolveCanonicalOrigin, resolveRootSessionId) {
   const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
   const continuationWorkspace = workspace ? undefined : await (async () => {
     try {
@@ -367,7 +367,8 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   const prompt = renderCodingDispatchPrompt(ir);
   const capabilities = await rpc.ping();
   assertSpawnCapabilities(capabilities, ctx.cwd);
-  const goalCoordinator = configuredGoalCoordinator ?? findGoalExecutorCoordinator(pi);
+  const rootSessionId = typeof resolveRootSessionId === "function" ? resolveRootSessionId(ctx.sessionManager) : undefined;
+  const goalCoordinator = configuredGoalCoordinator ?? findGoalExecutorCoordinator(pi, rootSessionId);
   const bindingRequest = { toolCallId, contract: input, contractHash: ir.hash, ctx };
   const preflightTicket = await goalCoordinator?.prepareSpawn(bindingRequest);
   if (workspace?.requested && preflightTicket) { const error = new Error("managed workspace dispatch is unavailable for Goal-bound coding runs"); error.code = "WORKSPACE_GOAL_BOUND_FORBIDDEN"; throw error; }
@@ -754,7 +755,7 @@ export function createTypedSubagentExtension(
         if (Object.hasOwn(input, "version")) {
           const ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
           const workspace = ir.execution.worktree ? managedWorkspace({ input, ctx, toolCallId, kind: "coding", controller: workspaceController, origins, resolveRootSessionId, registerFacadeRun, contractHash: ir.hash, createId, resolveCanonicalOrigin }) : undefined;
-          try { return await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs, workspace, workspaceController, resolveCanonicalOrigin); } catch (error) { throw workspaceError(error, workspace); }
+          try { return await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs, workspace, workspaceController, resolveCanonicalOrigin, resolveRootSessionId); } catch (error) { throw workspaceError(error, workspace); }
         }
         const workspace = input.worktree === true ? managedWorkspace({ input, ctx, toolCallId, kind: "generic", controller: workspaceController, origins, resolveRootSessionId, registerFacadeRun, createId, resolveCanonicalOrigin }) : undefined;
         try { return await executeGeneric(pi, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs, workspace); } catch (error) { throw workspaceError(error, workspace); }

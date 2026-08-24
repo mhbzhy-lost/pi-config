@@ -17,7 +17,7 @@ import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispa
 import { appendEvent, appendEventBatch, appendEventBatchWithSettlementEvidence, loadProjection, loadFinalizationProjection, listGoals, listGoalIds } from "./store.mjs";
 import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence, serializeSettlementEvidenceYaml } from "./settlement-evidence.mjs";
 import { compileTaskContract, assertPendingTaskContractsCompile } from "./dispatch.mjs";
-import { splitDispatchEnvelope } from "./dispatch-ir.mjs";
+import { compileCodingDispatchIR, splitDispatchEnvelope } from "./dispatch-ir.mjs";
 import { issueActionOffer, verifyAndConsumeActionOffer } from "./action-offer.mjs";
 import {
   buildContinuityCheckpoint,
@@ -37,7 +37,8 @@ import {
   executorBoundEventData,
   prepareExecutorBindingTicket,
 } from "./executor-binding.mjs";
-import { bindGoalExecutorCoordinator, inspectRootBrokerExecutorProof } from "../subagent-dispatch/root-broker-registry.ts";
+import { bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, unbindGoalExecutorCoordinatorSession, inspectRootBrokerExecutorProof } from "../subagent-dispatch/root-broker-registry.ts";
+import { resolveRootSessionId } from "../subagent-dispatch/root-broker-protocol.ts";
 import { parseProcessTerminal } from "../subagent-dispatch/root-broker-protocol.ts";
 import { validateTaskDefinitions } from "./task-definition.mjs";
 import { buildSuspensionPlan, deriveOwnedExecutorStopRequest } from "./suspension.mjs";
@@ -600,7 +601,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     return makeEvent(type, data, goalId, schemaVersionForMutation(projection, legacyEventSchemaVersion));
   };
   const inspectExecutorWorkspaceFn = options.inspectExecutorWorkspace || inspectExecutorWorkspace;
-  const inspectExecutorProofFn = options.inspectExecutorProof || ((runId) => inspectRootBrokerExecutorProof(pi, runId));
+  const inspectExecutorProofFn = options.inspectExecutorProof || ((runId, rootSessionId) => inspectRootBrokerExecutorProof(pi, runId, rootSessionId));
   const beforePreservedWorkspaceCleanupBarrier = options.beforePreservedWorkspaceCleanupBarrier;
   const inspectOrphanedExecutorWorkspaceBarrier = options.inspectOrphanedExecutorWorkspaceBarrier;
   const betweenOrphanInventoriesBarrier = options.betweenOrphanInventoriesBarrier;
@@ -1073,7 +1074,65 @@ export function createGoalEngineExtension(pi, options = {}) {
       return projection.tasks.get(ticket.taskId).executorBinding;
     },
   };
+  const recoverUnboundExecutorBinding = (projection, ctx, cwd, root) => {
+    const branch = ctx?.sessionManager?.getBranch?.();
+    let rootSessionId;
+    try { rootSessionId = resolveRootSessionId(ctx?.sessionManager); } catch { return null; }
+    if (!Array.isArray(branch) || !rootSessionId) return null;
+    const dispatchedAt = new Map();
+    try {
+      for (const line of readFileSync(join(root, "goals", projection.goalId, "events.jsonl"), "utf8").trim().split("\n")) {
+        const event = JSON.parse(line);
+        if (event?.type === "task.dispatched" && typeof event?.data?.taskId === "string" && typeof event.occurredAt === "string") dispatchedAt.set(event.data.taskId, Date.parse(event.occurredAt));
+      }
+    } catch { return null; }
+    const candidates = [];
+    for (const [taskId, task] of projection.tasks) {
+      if (task.status !== "dispatched" || task.executorBinding || !Number.isFinite(dispatchedAt.get(taskId))) continue;
+      const calls = branch.map((entry, index) => ({ entry, index })).filter(({ entry }) => {
+        const content = entry?.type === "message" && entry.message?.role === "assistant" ? entry.message.content : null;
+        const calls = Array.isArray(content) ? content.filter((part) => part?.type === "toolCall" && part.name === "subagent") : [];
+        return calls.length === 1 && typeof calls[0].id === "string" && calls[0].id && calls[0].arguments && Date.parse(entry.timestamp) > dispatchedAt.get(taskId);
+      });
+      for (const { entry, index } of calls) {
+        const call = entry.message.content.find((part) => part?.type === "toolCall" && part.name === "subagent");
+        let ticket;
+        try {
+          const compiled = compileCodingDispatchIR(call.arguments, { cwd });
+          ticket = prepareExecutorBindingTicket({ projection, contract: call.arguments, contractHash: compiled.hash, controlCwd: cwd, workspaceLeaseIdForTask(candidateTaskId) { return workspaceLeaseId(resolveLease(projection.tasks.get(candidateTaskId), projection.goalId, candidateTaskId, cwd, root)); } });
+        } catch { continue; }
+        if (!ticket || ticket.taskId !== taskId) continue;
+        const results = branch.filter((result) => result?.type === "message" && result.message?.role === "toolResult" && result.message.toolName === "subagent" && result.message.toolCallId === call.id);
+        if (results.length !== 1) continue;
+        const handle = results[0].message.details;
+        if (!exactPlainObject(handle, ["version", "dispatchId", "taskId", "agent", "title", "contractHash", "runId", "asyncDir"])
+          || handle.version !== "coding-dispatch-handle.v1" || handle.agent !== "executor" || handle.taskId !== call.arguments.taskId
+          || handle.contractHash !== ticket.contractHash || handle.runId === undefined || handle.asyncDir === undefined) continue;
+        candidates.push({ ticket, binding: { runId: handle.runId, asyncDir: handle.asyncDir } });
+      }
+    }
+    if (candidates.length !== 1) return null;
+    const candidate = candidates[0];
+    try {
+      const data = executorBoundEventData(candidate.ticket, candidate.binding);
+      const proof = inspectExecutorProofFn(data.runId, rootSessionId);
+      const verified = assertExecutorSettlementProof({ task: { executorBinding: { ...data, taskId: undefined } }, proof });
+      if (verified.rootSessionId !== rootSessionId || proof.ownership.sessionId !== rootSessionId) return null;
+      return executorCoordinator.bindSpawn(candidate.ticket, candidate.binding);
+    } catch { return null; }
+  };
   bindGoalExecutorCoordinator(pi, executorCoordinator);
+  // ExtensionAPI wrappers are recreated independently.  Alias only the durable
+  // root session identity; shutdown uses compare-and-delete so an old wrapper
+  // cannot remove a replacement generation's coordinator.
+  pi.on?.("session_start", (_event, ctx) => {
+    const rootSessionId = resolveRootSessionId(ctx?.sessionManager);
+    bindGoalExecutorCoordinatorSession(pi, rootSessionId, executorCoordinator);
+  });
+  pi.on?.("session_shutdown", (_event, ctx) => {
+    const rootSessionId = resolveRootSessionId(ctx?.sessionManager);
+    unbindGoalExecutorCoordinatorSession(pi, rootSessionId, executorCoordinator);
+  });
   const orphanRecord = (goalId, taskId, attempt, sessionId, inventory) => {
     const hash = stableHash(inventory);
     const records = [...orphanChallenges.values()].filter((r) => r.challenge?.goalId === goalId && r.challenge?.taskId === taskId && r.challenge?.attempt === attempt && r.challenge?.sessionId === sessionId);
@@ -1633,6 +1692,8 @@ export function createGoalEngineExtension(pi, options = {}) {
         return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
       }
       if (!enforceActionTokens) return statusResponse(projection, cwd, root);
+      const recoveredBinding = recoverUnboundExecutorBinding(projection, ctx, cwd, root);
+      if (recoveredBinding) return JSON.stringify({ ...JSON.parse(statusResponse(loadProjectionFn(root, goalId), cwd, root)), status: "RECOVERED_EXECUTOR_BINDING" });
       if (projection.sessionBindings?.some((binding) => binding.sessionId === sessionId && binding.state === "detached")) {
         return statusResponse(projection, cwd, root);
       }

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createTypedSubagentExtension } from "../scripts/lib/subagent-dispatch/extension.ts";
 import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
+import { bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, unbindGoalExecutorCoordinatorSession } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 
 const contract = {
   version: "dispatch-ir.v1", taskId: "identity-ledger", title: "Bind durable spawn identity", agent: "executor", risk: "normal",
@@ -44,6 +45,26 @@ function workflowLeaf(params: any) {
   assert.ok(match?.[1]);
   return JSON.parse(match[1]);
 }
+
+test("coding spawn binds the Goal coordinator through a same-root different-ExtensionAPI wrapper before returning", async () => {
+  const { pi, rpc, tools } = setup();
+  const goalPi = { events: {} };
+  const bindings: any[] = [];
+  const coordinator = {
+    prepareSpawn() { return { ticketId: "goal-ticket", spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" } }; },
+    bindSpawn(ticket: any, binding: any) { bindings.push({ ticket, binding }); },
+  };
+  bindGoalExecutorCoordinator(goalPi, coordinator);
+  bindGoalExecutorCoordinatorSession(goalPi, "root-shared", coordinator);
+  try {
+    createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveRootSessionId() { return "root-shared"; } });
+    const result = await tools[0].execute("goal-wrapper-bridge", contract, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+    assert.equal(result.isError, false, result.content[0]?.text);
+    assert.deepEqual(bindings, [{ ticket: { ticketId: "goal-ticket", spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" } }, binding: { runId: "leaf-1", asyncDir: "/tmp/leaf-1" } }]);
+  } finally {
+    unbindGoalExecutorCoordinatorSession(goalPi, "root-shared", coordinator);
+  }
+});
 
 test("coding spawn leaves executor model selection to ordered agent metadata", async () => {
   const { pi, rpc, calls, tools } = setup();

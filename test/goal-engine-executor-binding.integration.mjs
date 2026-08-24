@@ -362,12 +362,13 @@ function integratedFixture(t) {
 
   const tools = [];
   const eventIdentity = createEventBus();
+  const branch = [];
   const sessionManager = {
     getSessionId: () => "root-session-1",
     getSessionFile: () => join(cwd, "session.jsonl"),
     getLeafId: () => "leaf-1",
     getEntries: () => [],
-    getBranch: () => [],
+    getBranch: () => branch,
   };
   const pi = {
     events: eventIdentity,
@@ -382,7 +383,7 @@ function integratedFixture(t) {
     const result = await tool.execute(`call-${name}`, params, new AbortController().signal, undefined, context);
     return result.details.value;
   };
-  return { cwd, pi, tools, context, invoke };
+  return { cwd, pi, tools, context, invoke, branch };
 }
 
 const STRICT_CODING_CONTRACT = Object.freeze({
@@ -760,6 +761,29 @@ test("non-Goal coding runs and generic reviewers remain spawnable without claimi
   assert.equal(calls[1].options, undefined);
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
   assert.equal(projection.tasks.get("task-one").executorBinding, null);
+});
+
+test("goal_status recovers one unbound official active-branch executor handle without settling", async (t) => {
+  const fixture = integratedFixture(t);
+  const runId = "run-recovered-1";
+  const asyncDir = "/tmp/run-recovered-1";
+  const { goalId, dispatched } = await initializeIntegratedDispatch(fixture, "Recover unbound active branch", {
+    inspectExecutorProof(observedRunId, rootSessionId) {
+      assert.equal(observedRunId, runId);
+      assert.equal(rootSessionId, "root-session-1");
+      return officialProof(runId, asyncDir);
+    },
+  });
+  const timestamp = new Date(Date.now() + 1_000).toISOString();
+  fixture.branch.push(
+    { id: "assistant-spawn", timestamp, type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "spawn-call", name: "subagent", arguments: dispatched.contract }] } },
+    { id: "result-spawn", timestamp: new Date(Date.now() + 2_000).toISOString(), type: "message", message: { role: "toolResult", toolCallId: "spawn-call", toolName: "subagent", details: { version: "coding-dispatch-handle.v1", dispatchId: "goal-dispatch", taskId: dispatched.contract.taskId, agent: "executor", title: dispatched.contract.title, contractHash: dispatched.contract_hash, runId, asyncDir } } },
+  );
+  const status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
+  assert.equal(status.status, "RECOVERED_EXECUTOR_BINDING");
+  const task = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one");
+  assert.equal(task.executorBinding.runId, runId);
+  assert.equal(task.status, "dispatched", "recovery binds only; a later status may settle");
 });
 
 test("Goal dispatch followed by the exact coding spawn persists the returned runId and asyncDir", async (t) => {
