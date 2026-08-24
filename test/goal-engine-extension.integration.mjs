@@ -868,6 +868,17 @@ test("goal_amend exposes a strict discriminated eleven-operation schema", () => 
   assert.equal(updateAcceptance.additionalProperties, false);
   assert.deepEqual(updateAcceptance.required, ["criteria"]);
   assert.equal(Object.hasOwn(updateAcceptance.properties, "commands"), false);
+
+  const initTask = pi.tools.find((tool) => tool.name === "goal_init").parameters.properties.tasks.items;
+  for (const plannedCriteria of [task.properties.acceptance.properties.criteria, updateAcceptance.properties.criteria, initTask.properties.acceptance.properties.criteria]) {
+    assert.deepEqual(plannedCriteria.items.required.sort(), ["evidenceKinds", "id", "statement"]);
+    assert.equal(plannedCriteria.items.additionalProperties, false);
+    assert.equal(Object.hasOwn(plannedCriteria.items.properties, "evaluator"), false);
+    assert.equal(Object.hasOwn(plannedCriteria.items.properties, "predicate"), false);
+  }
+  const runtimeCriteria = executionChange.properties.changes.properties.update_tasks.items.properties.acceptance.properties.criteria.items;
+  assert.equal(runtimeCriteria.anyOf.length, 3);
+  assert.deepEqual(runtimeCriteria.anyOf[2].required.sort(), ["evaluator", "evidenceKinds", "id", "predicate", "statement"]);
 });
 
 test("goal_amend prepareArguments fail-closed validates strict operation shapes", () => {

@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
 import { validateDAG } from "./graph.mjs";
-import { validateTaskDefinitions, taskContractHash, remediationSubjectHash } from "./task-definition.mjs";
+import { executorCriteria, validateTaskDefinitions, taskContractHash, remediationSubjectHash } from "./task-definition.mjs";
 import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.mjs";
 import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence } from "./settlement-evidence.mjs";
 import { generationCapabilities } from "./generation-capabilities.mjs";
@@ -626,7 +626,7 @@ function validatedPlannedSettlementEvidence(goalId, task, data, executorProof) {
   if (typeof evidence.mainSessionId !== "string" || !evidence.mainSessionId.trim()) throw new Error("settlement evidence mainSessionId is required");
   if (evidence.mainSessionId !== executorProof.rootSessionId) throw new Error("settlement evidence mainSessionId does not match official proof");
   const identity = { goalId, taskId: data.taskId, runId: task.executorBinding.runId, attempt: data.attempt, contractHash: task.contractHash, head: data.executorHead };
-  const criteria = task.acceptance.criteria.map((criterion) => criterion.id);
+  const criteria = executorCriteria(task.acceptance.criteria).map((criterion) => criterion.id);
   const subagent = normalizeSettlementEvidence(evidence.subagent, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
   const main = normalizeSettlementEvidence(evidence.main, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
   if (fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" }) !== evidence.subagentFingerprint
@@ -965,7 +965,7 @@ function goalAmended(p, data, schemaVersion, replay) {
     if (updates.workflow !== undefined) task.workflow = updates.workflow;
   }
   if (schemaVersion === PLANNED_SCHEMA_VERSION || schemaVersion === RUNTIME_SCHEMA_VERSION) {
-    validateTaskDefinitions([...candidate.keys()], taskDefinitions(candidate), { planned: true, hostInternalRemediation });
+    validateTaskDefinitions([...candidate.keys()], taskDefinitions(candidate), { planned: schemaVersion === PLANNED_SCHEMA_VERSION, runtimeAcceptance: schemaVersion === RUNTIME_SCHEMA_VERSION, hostInternalRemediation });
     if (schemaVersion === RUNTIME_SCHEMA_VERSION && [...candidate.values()].some((task) => task.writePaths.some((path) => !p.writePolicy.allowedPaths.some((allowed) => path === allowed || allowed.endsWith("/**") && path.startsWith(allowed.slice(0, -2)))))) throw new Error("runtime task writePaths exceed write policy");
   } else if (schemaVersion !== "goal-engine.event.v1" && !replay) {
     validateTaskDefinitions([...candidate.keys()], taskDefinitions(candidate));

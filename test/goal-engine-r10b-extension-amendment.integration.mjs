@@ -10,6 +10,7 @@ import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/go
 import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
 import { hashRuntimeExecutionContract, normalizeRuntimeGoalInit } from "../scripts/lib/goal-engine/obligation-contract.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
+import { buildObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const rootFor = (cwd) => join(cwd, ".state/goal-engine");
@@ -39,9 +40,9 @@ function host(cwd) {
 }
 
 async function invoke(api, name, input) { return (await api.tools.find((tool) => tool.name === name).execute("call", input, undefined, undefined, { cwd: api.cwd, sessionManager: api.sessionManager })).details.value; }
-async function activeRuntime() {
+async function activeRuntime(init = runtimeInit()) {
   const cwd = repo(), api = pi(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) });
-  await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status", {});
+  await invoke(api, "goal_init", init); await invoke(api, "goal_status", {});
   await api.handlers.get("input")({ type: "input", text: "approve", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
   for (let n = 0; n < 10 && projectionFor(cwd).runtimeState !== "active"; n++) await invoke(api, "goal_status", {});
   assert.equal(projectionFor(cwd).runtimeState, "active", "fixture reaches real Cycle0 activation");
@@ -49,12 +50,15 @@ async function activeRuntime() {
 }
 function events(cwd) { return readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8"); }
 function seedEvent(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `extension-seed-${n}`, goalId: "harden-runtime", occurredAt: `2026-08-23T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
-async function pendingProposalFixture() {
-  const { cwd, api } = await activeRuntime(), root = rootFor(cwd), active = projectionFor(cwd);
+async function pendingProposalFixture({ removeTask = false, coordinatorCriterion = false } = {}) {
+  const init = runtimeInit();
+  if (coordinatorCriterion) init.execution.tasks[0].acceptance.criteria.push({ id: "bound", statement: "Executor is bound", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "executor-bound" });
+  const { cwd, api } = await activeRuntime(init), root = rootFor(cwd), active = projectionFor(cwd);
   const initial = { suspensionId: "extension-amendment", reason: "execution_amendment", affectedTaskIds: [], affectedRunIds: [], requestedAt: "2026-08-23T00:00:16.000Z", resourcesQuarantined: false };
   const closure = { ...initial, resourcesQuarantined: true, terminalProofRefs: [], workspaceClosureProofRefs: [], resourceClosureProofRefs: [] };
   const source = normalizeRuntimeGoalInit(runtimeInit(), runtimeRegistries);
-  const target = normalizeRuntimeGoalInit({ ...source, execution: { ...source.execution, tasks: [{ ...source.execution.tasks[0], description: "Store seeded extension proposal" }] } }, runtimeRegistries);
+  const retainedCondition = { ...source.execution.conditions[0], depends_on: [], invalidation: { ...source.execution.conditions[0].invalidation, task_ids: [] } };
+  const target = normalizeRuntimeGoalInit({ ...source, execution: { ...source.execution, tasks: removeTask ? [] : [{ ...source.execution.tasks[0], description: "Store seeded extension proposal" }], conditions: removeTask ? [retainedCondition] : source.execution.conditions } }, runtimeRegistries);
   const changes = { update_tasks: [{ id: "task-1", description: "Store seeded extension proposal" }] };
   const material = { goalId: "harden-runtime", proposalId: "extension-proposal", changes, changesHash: sha(changes), targetExecutionContract: target, targetContractHash: hashRuntimeExecutionContract(target), baseHead: active.runtimeBaseHead, ownerSessionId: "owner", oldRevision: active.executionRevision, newRevision: active.executionRevision + 1 };
   const proposal = { ...material, proposalHash: sha(material) };
@@ -64,40 +68,63 @@ async function pendingProposalFixture() {
 }
 function amendmentEntries(api, suffix) { return api.entries.filter((entry) => entry.customType === `goal-engine-execution-amendment-${suffix}`); }
 async function decideSeeded(choice, options = {}) {
-  const fixture = await pendingProposalFixture();
+  const fixture = await pendingProposalFixture(options);
   if (options.branch) fixture.api.sessionManager.getBranch = () => options.branch;
   await fixture.api.handlers.get("input")({ type: "input", text: choice, source: options.source || "interactive", ...(options.images ? { images: options.images } : {}), ...(options.streamingBehavior ? { streamingBehavior: options.streamingBehavior } : {}) }, { cwd: fixture.cwd, sessionManager: fixture.api.sessionManager });
   return fixture;
 }
 
-// RED: ordinary human input must become a durable execution-amendment boundary, not an in-memory custom gate.
-test("R10B idle interactive and rpc input suspend the active owner without storing the raw amendment", async () => {
+test("R10B Store-approved removal supersedes a coordinator-gated Task so stale predicates cannot block finalization", async () => {
+  const controlFixture = await pendingProposalFixture({ coordinatorCriterion: true });
+  let control = projectionFor(controlFixture.cwd);
+  let controlManifest = buildObligationFinalizationManifest({ projection: control, worldSnapshot: host(controlFixture.cwd).captureCurrentWorld(), conditionValidity: new Map(), resourceInventory: [] });
+  assert.ok(controlManifest.blockers.some((blocker) => blocker.code === "TASK_COORDINATOR_PREDICATE_UNSATISFIED"), "applicable coordinator-gated Task remains a finalization blocker");
+  control = appendEvent(rootFor(controlFixture.cwd), seedEvent("task.applicability_changed", { taskId: "task-1", state: "reverify_required", reason: "control_reverify" }, 90), control.version);
+  controlManifest = buildObligationFinalizationManifest({ projection: control, worldSnapshot: host(controlFixture.cwd).captureCurrentWorld(), conditionValidity: new Map(), resourceInventory: [] });
+  assert.ok(controlManifest.blockers.some((blocker) => blocker.code === "TASK_COORDINATOR_PREDICATE_UNSATISFIED"), "reverify coordinator-gated Task remains a finalization blocker");
+  assert.ok(controlManifest.blockers.some((blocker) => blocker.code === "TASK_REVERIFY_REQUIRED"), "reverify state remains independently visible to finalization");
+
+  const { cwd, api } = await decideSeeded("approve", { removeTask: true, coordinatorCriterion: true });
+  for (let i = 0; i < 4 && projectionFor(cwd).runtimeState !== "active"; i++) await invoke(api, "goal_status", {});
+  const projection = projectionFor(cwd);
+  assert.equal(projection.taskApplicability.get("task-1").state, "superseded", "canonical Store amendment emits task.applicability_changed(superseded)");
+  const manifest = buildObligationFinalizationManifest({
+    projection,
+    worldSnapshot: host(cwd).captureCurrentWorld(),
+    conditionValidity: new Map(),
+    resourceInventory: [],
+  });
+  assert.equal(manifest.blockers.some((blocker) => blocker.code === "TASK_COORDINATOR_PREDICATE_UNSATISFIED"), false);
+
+});
+
+// RED: ordinary public input is not typed amendment authority.
+test("R10B idle interactive and rpc input leave the active owner unchanged without storing an amendment", async () => {
   for (const source of ["interactive", "rpc"]) {
-    const { cwd, api } = await activeRuntime(); const raw = `amend ${source} private wording`;
+    const { cwd, api } = await activeRuntime(); const raw = `amend ${source} private wording`, before = events(cwd);
     await api.handlers.get("input")({ type: "input", text: raw, source }, { cwd, sessionManager: api.sessionManager });
     const projection = projectionFor(cwd);
-    assert.equal(projection.runtimeState, "suspended");
-    assert.equal(projection.suspension.reason, "execution_amendment");
-    assert.deepEqual(projection.suspension.affectedTaskIds, []);
-    assert.equal(projection.suspension.resourcesQuarantined, true, "no owned resource still receives the full empty closure update");
-    assert.doesNotMatch(events(cwd), new RegExp(raw));
+    assert.equal(projection.runtimeState, "active");
+    assert.equal(projection.suspension, null);
+    assert.equal(projection.pendingHumanDecision, null);
+    assert.equal(events(cwd), before, "idle input creates no runtime ledger mutation");
   }
 });
 
-// RED: target contracts, hashes, revision, session and proposal IDs are Host-derived and cannot be caller authority.
-test("R10B goal_amend exposes only strict Host-derived propose_execution_change", async () => {
+// RED: target contracts, hashes, revision, session and proposal IDs are Host-derived and typed amendment first closes active runtime.
+test("R10B typed goal_amend durably suspends, closes, then exposes strict Host-derived propose_execution_change", async () => {
   const { cwd, api } = await activeRuntime();
-  await api.handlers.get("input")({ type: "input", text: "change task", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
   const valid = { goal_id: "harden-runtime", operation: "propose_execution_change", reason: "update acceptance", changes: { update_tasks: [{ id: "task-1", description: "Amended by Host" }] } };
   await invoke(api, "goal_amend", valid);
-  const pending = projectionFor(cwd).pendingHumanDecision;
+  const projection = projectionFor(cwd), pending = projection.pendingHumanDecision;
+  assert.equal(projection.runtimeState, "suspended"); assert.equal(projection.suspension.reason, "execution_amendment");
+  assert.equal(projection.suspension.resourcesQuarantined, true, "proposal follows complete owned closure");
+  assert.equal(projection.actionOffer, null, "suspension revokes any action offer before proposal");
   assert.equal(pending.phase, "proposed"); assert.equal(pending.targetExecutionContract.execution.tasks[0].description, "Amended by Host");
   for (const extra of [{ targetContractHash: sha("forged") }, { proposalId: "forged" }, { sessionId: "other" }, { revision: 9 }]) await assert.rejects(invoke(api, "goal_amend", { ...valid, ...extra }));
 });
 
-test("R10B proposal validation rejects invalid task changes before append", async () => {
-  const { cwd, api } = await activeRuntime(); await api.handlers.get("input")({ type: "input", text: "change task", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
-  const before = events(cwd);
+test("R10B proposal validation rejects invalid task changes without creating a proposal", async () => {
   const base = { goal_id: "harden-runtime", operation: "propose_execution_change", reason: "strict validation" };
   for (const changes of [
     { update_tasks: [{ id: "missing", description: "no" }] },
@@ -106,8 +133,15 @@ test("R10B proposal validation rejects invalid task changes before append", asyn
     { update_tasks: [{ id: "task-1", writePaths: ["../outside"] }] },
     { update_tasks: [{ id: "task-1", adapter: { ref: "unknown", version: "1" } }] },
     { update_tasks: [{ id: "task-1", environment_ref: "missing" }] },
-  ]) await assert.rejects(invoke(api, "goal_amend", { ...base, changes }), /unknown task|unknown field|cycle|path|adapter|environment|fixture/i);
-  assert.equal(events(cwd), before, "invalid source changes append neither proposal nor partial amendment");
+  ]) {
+    const { cwd, api } = await activeRuntime();
+    await assert.rejects(invoke(api, "goal_amend", { ...base, changes }), /unknown task|unknown field|cycle|path|adapter|environment|fixture/i);
+    const projection = projectionFor(cwd);
+    assert.equal(projection.runtimeState, "active", "semantic rejection precedes durable suspension");
+    assert.equal(projection.suspension, null);
+    assert.equal(projection.pendingHumanDecision, null);
+    assert.doesNotMatch(events(cwd), /goal\.runtime_suspended|execution\.amendment_proposed/);
+  }
 });
 
 // RED: Store-seeded approval is deliberately independent of the still-missing goal_amend schema.

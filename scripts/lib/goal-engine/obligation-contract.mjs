@@ -79,7 +79,7 @@ export function normalizeRuntimeGoalInit(input, registries) {
   object(execution.write_policy, "execution.write_policy", ["allowed_paths"]);
   const allowed_paths = paths(execution.write_policy.allowed_paths, "execution.write_policy.allowed_paths");
   const tasks = array(execution.tasks ?? [], "execution.tasks").map(normalizeTask); if (new Set(tasks.map((task) => task.id)).size !== tasks.length) fail("task ids are duplicated");
-  try { validateTaskDefinitions(tasks.map((task) => task.id), Object.fromEntries(tasks.map(({ id: taskId, ...task }) => [taskId, task])), { requireNonEmpty: false, planned: true }); } catch (error) { fail(error.message); }
+  try { validateTaskDefinitions(tasks.map((task) => task.id), Object.fromEntries(tasks.map(({ id: taskId, ...task }) => [taskId, task])), { requireNonEmpty: false, runtimeAcceptance: true }); } catch (error) { fail(error.message); }
   if (tasks.some((task) => task.writePaths.some((path) => !subset(path, allowed_paths)))) fail("task writePaths exceed write policy");
   const conditions = array(execution.conditions ?? [], "execution.conditions").map((condition, index) => normalizeCondition(condition, index, allowed_paths, registries));
   if (!tasks.length && !conditions.length) fail("tasks or conditions must be non-empty");

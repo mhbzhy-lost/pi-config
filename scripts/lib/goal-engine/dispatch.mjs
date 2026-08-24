@@ -1,5 +1,5 @@
 import { compileCodingDispatchIR } from "./dispatch-ir.mjs";
-import { validateRemediationMetadata, taskContractHash, remediationSubjectHash } from "./task-definition.mjs";
+import { executorCriteria, validateRemediationMetadata, taskContractHash, remediationSubjectHash } from "./task-definition.mjs";
 import { MAX_CONTRACT_ARRAY_ITEMS, MAX_CONTRACT_STRING_BYTES } from "./contract-limits.mjs";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -43,6 +43,9 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
       ? { mode: workflowMode, reason: "Task uses the Goal contract's existing acceptance test suite without inventing new tests." }
       : { mode: workflowMode };
 
+  // Coordinator predicates are authoritative lifecycle facts, not executable
+  // acceptance work. Keep the dispatch-ir ABI criteria-only and executor-only.
+  const criteria = executorCriteria(transportTask.acceptance.criteria);
   const input = {
     version: "dispatch-ir.v1",
     taskId: `${projection.goalId}.${taskId}`,
@@ -54,7 +57,7 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
     requirements: [
       transportTask.description,
       "Before reporting completed, create at least one clean commit containing only approved writePaths; if no commit is warranted, return NEEDS_CONTEXT instead of completed.",
-      ...transportTask.acceptance.criteria.map(encodeCriterion),
+      ...criteria.map(encodeCriterion),
       ...projection.dod.map((d) => `Goal DoD: ${d}`),
     ],
     context: { knownFacts, decisions, relevantFiles },
@@ -65,7 +68,7 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
     },
     // Legacy projection commands are retained for replay and Goal-level acceptance,
     // but the criteria-only Subagent transport must never receive them.
-    acceptance: { criteria: transportTask.acceptance.criteria.map(encodeCriterion) },
+    acceptance: { criteria: criteria.map(encodeCriterion) },
     execution: { cwd, timeoutMs, ...(task.metadata?.kind === "remediation" ? { worktree: true } : {}) },
   };
 

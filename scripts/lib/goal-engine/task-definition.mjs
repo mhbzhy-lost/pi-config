@@ -7,6 +7,12 @@ const ID = /^[A-Za-z0-9._-]{1,160}$/;
 const WORKFLOWS = new Set(["tdd", "existing-tests", "docs-only"]);
 const CRITERION_ID = /^[A-Za-z0-9._-]{1,160}$/;
 const EVIDENCE_KINDS = new Set(["changed-files", "tests", "command", "manual-review"]);
+const COORDINATOR_PREDICATES = new Set(["executor-bound", "executor-terminal-proof", "workspace-integrated-released", "task-accepted"]);
+
+// The historical three-field form is intentionally executor-owned for replay.
+export function criterionEvaluator(criterion) { return criterion?.evaluator ?? "executor"; }
+export function executorCriteria(criteria) { return criteria.filter((criterion) => criterionEvaluator(criterion) === "executor"); }
+export function coordinatorCriteria(criteria) { return criteria.filter((criterion) => criterionEvaluator(criterion) === "coordinator"); }
 
 function nonEmpty(value, label) {
   return assertContractString(value, label);
@@ -52,7 +58,7 @@ function validateCommand(value, label, cwd, realpathCwd) {
   return command;
 }
 
-export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd, planned = false, hostInternalRemediation = false } = {}) {
+export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd, planned = false, runtimeAcceptance = false, hostInternalRemediation = false } = {}) {
   if (!Array.isArray(tasks) || (requireNonEmpty && tasks.length === 0)) throw new Error("tasks must be non-empty");
   if (tasks.length > MAX_CONTRACT_ARRAY_ITEMS) throw new Error(`tasks must contain at most ${MAX_CONTRACT_ARRAY_ITEMS} items`);
   if (!taskDefs || typeof taskDefs !== "object" || Array.isArray(taskDefs)) throw new Error("taskDefs is required");
@@ -84,7 +90,8 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
     if (!def.writePaths.length) throw new Error(`taskDef ${id} missing writePaths`);
     def.writePaths.forEach((path, index) => validateRepoRelativePath(path, `taskDef ${id} writePaths[${index}]`));
     if (!def.acceptance || typeof def.acceptance !== "object" || Array.isArray(def.acceptance)) throw new Error(`taskDef ${id} requires acceptance`);
-    if (planned) validatePlannedAcceptance(def.acceptance, id);
+    if (runtimeAcceptance) validateRuntimeAcceptance(def.acceptance, id);
+    else if (planned) validatePlannedAcceptance(def.acceptance, id);
     else {
       assertContractArray(def.acceptance.criteria, `taskDef ${id} acceptance.criteria`);
       assertContractArray(def.acceptance.commands, `taskDef ${id} acceptance.commands`);
@@ -98,14 +105,25 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
   validateDAG(graph);
 }
 
-function validatePlannedAcceptance(acceptance, taskId) {
+function validateCriterionFields(criterion, index, taskId, { runtime = false } = {}) {
+  if (!criterion || typeof criterion !== "object" || Array.isArray(criterion)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] is invalid`);
+  const keys = Object.keys(criterion).sort();
+  const expectedKeys = !runtime ? ["evidenceKinds", "id", "statement"]
+    : criterion.evaluator === "coordinator" ? ["evaluator", "evidenceKinds", "id", "predicate", "statement"]
+      : criterion.evaluator === "executor" ? ["evaluator", "evidenceKinds", "id", "statement"]
+        : ["evidenceKinds", "id", "statement"];
+  if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] must contain exactly ${expectedKeys.join(", ")}`);
+  if (runtime && criterion.evaluator === "coordinator" && !COORDINATOR_PREDICATES.has(criterion.predicate)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] has invalid coordinator predicate`);
+  if (runtime && Object.hasOwn(criterion, "evaluator") && !["executor", "coordinator"].includes(criterion.evaluator)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] has invalid evaluator shape`);
+}
+
+function validateStructuredAcceptance(acceptance, taskId, { runtime = false } = {}) {
   if (Object.keys(acceptance).length !== 1 || !Object.hasOwn(acceptance, "criteria")) throw new Error(`taskDef ${taskId} planned acceptance must contain only criteria`);
   assertContractArray(acceptance.criteria, `taskDef ${taskId} acceptance.criteria`);
   if (!acceptance.criteria.length) throw new Error(`taskDef ${taskId} acceptance.criteria must be non-empty`);
   const ids = new Set();
   acceptance.criteria.forEach((criterion, index) => {
-    if (!criterion || typeof criterion !== "object" || Array.isArray(criterion) || Object.keys(criterion).length !== 3
-      || !["id", "statement", "evidenceKinds"].every((key) => Object.hasOwn(criterion, key))) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] must contain exactly id, statement, evidenceKinds`);
+    validateCriterionFields(criterion, index, taskId, { runtime });
     if (!CRITERION_ID.test(criterion.id || "") || ids.has(criterion.id)) throw new Error(`taskDef ${taskId} acceptance.criteria has invalid or duplicate id: ${criterion.id}`);
     ids.add(criterion.id);
     nonEmpty(criterion.statement, `taskDef ${taskId} acceptance.criteria[${index}].statement`);
@@ -113,3 +131,6 @@ function validatePlannedAcceptance(acceptance, taskId) {
     if (!criterion.evidenceKinds.length || criterion.evidenceKinds.some((kind) => !EVIDENCE_KINDS.has(kind))) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}].evidenceKinds is invalid`);
   });
 }
+
+function validatePlannedAcceptance(acceptance, taskId) { validateStructuredAcceptance(acceptance, taskId); }
+export function validateRuntimeAcceptance(acceptance, taskId) { validateStructuredAcceptance(acceptance, taskId, { runtime: true }); }

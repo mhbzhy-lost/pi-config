@@ -40,7 +40,7 @@ import {
 import { bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, unbindGoalExecutorCoordinatorSession, inspectRootBrokerExecutorProof } from "../subagent-dispatch/root-broker-registry.ts";
 import { resolveRootSessionId } from "../subagent-dispatch/root-broker-protocol.ts";
 import { parseProcessTerminal } from "../subagent-dispatch/root-broker-protocol.ts";
-import { validateTaskDefinitions } from "./task-definition.mjs";
+import { executorCriteria, validateTaskDefinitions } from "./task-definition.mjs";
 import { buildSuspensionPlan, deriveOwnedExecutorStopRequest } from "./suspension.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.mjs";
 import { createGoalToolRenderers } from "./tool-renderer.mjs";
@@ -198,6 +198,7 @@ function validateProjectionForDispatch(projection, cwd) {
     cwd,
     realpathCwd: realpathSync(cwd),
     planned: generationCapabilities(projection.eventSchemaVersion).taskContract === "criteria-only",
+    runtimeAcceptance: projection.eventSchemaVersion === "goal-runtime.v1",
   });
   assertPendingTaskContractsCompile(projection, cwd);
 }
@@ -517,21 +518,18 @@ function validateSchema(schema, value, path = "goal_amend") {
 }
 
 const string = { type: "string" };
-const criterionSchema = {
-  type: "object",
-  properties: {
-    id: string,
-    statement: string,
-    evidenceKinds: { type: "array", items: { type: "string", enum: ["changed-files", "tests", "command", "manual-review"] } },
-  },
-  required: ["id", "statement", "evidenceKinds"],
-  additionalProperties: false,
-};
-const acceptanceSchema = { type: "object", properties: { criteria: { type: "array", items: criterionSchema } }, required: ["criteria"], additionalProperties: false };
-const taskSchema = { type: "object", properties: { id: string, description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, required: ["id", "description", "writePaths", "acceptance"], additionalProperties: false };
+const plannedCriterionSchema = { type: "object", properties: { id: string, statement: string, evidenceKinds: { type: "array", items: { type: "string", enum: ["changed-files", "tests", "command", "manual-review"] } } }, required: ["id", "statement", "evidenceKinds"], additionalProperties: false };
+const runtimeCriterionSchema = { anyOf: [
+  plannedCriterionSchema,
+  { type: "object", properties: { id: string, statement: string, evidenceKinds: { type: "array", items: { type: "string", enum: ["changed-files", "tests", "command", "manual-review"] } }, evaluator: { type: "string", const: "executor" } }, required: ["id", "statement", "evidenceKinds", "evaluator"], additionalProperties: false },
+  { type: "object", properties: { id: string, statement: string, evidenceKinds: { type: "array", items: { type: "string", enum: ["changed-files", "tests", "command", "manual-review"] } }, evaluator: { type: "string", const: "coordinator" }, predicate: { type: "string", enum: ["executor-bound", "executor-terminal-proof", "workspace-integrated-released", "task-accepted"] } }, required: ["id", "statement", "evidenceKinds", "evaluator", "predicate"], additionalProperties: false },
+] };
+const plannedAcceptanceSchema = { type: "object", properties: { criteria: { type: "array", items: plannedCriterionSchema } }, required: ["criteria"], additionalProperties: false };
+const runtimeAcceptanceSchema = { type: "object", properties: { criteria: { type: "array", items: runtimeCriterionSchema } }, required: ["criteria"], additionalProperties: false };
+const taskSchema = { type: "object", properties: { id: string, description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: plannedAcceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, required: ["id", "description", "writePaths", "acceptance"], additionalProperties: false };
 const resolutionSchema = { type: "object", properties: { id: string, disposition: { type: "string", enum: ["tasked", "out_of_scope", "duplicate", "new_goal"] }, task_id: string, reason: string }, required: ["id", "disposition", "reason"], additionalProperties: false };
-const updateTaskSchema = { type: "object", properties: { description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, additionalProperties: false };
-const executionChangeTaskSchema = { type: "object", properties: { id: string, description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: acceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, required: ["id"], additionalProperties: false };
+const updateTaskSchema = { type: "object", properties: { description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: plannedAcceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, additionalProperties: false };
+const executionChangeTaskSchema = { type: "object", properties: { id: string, description: string, deps: { type: "array", items: string }, writePaths: { type: "array", items: string }, acceptance: runtimeAcceptanceSchema, workflow: { type: "string", enum: ["tdd", "existing-tests", "docs-only"] } }, required: ["id"], additionalProperties: false };
 const goalAmendSchema = { type: "object", anyOf: [
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "patch_active" }, reason: string, action_token: string, add_tasks: { type: "array", items: taskSchema }, remove_tasks: { type: "array", items: string }, update_tasks: { type: "object", additionalProperties: updateTaskSchema } }, required: ["operation", "reason", "action_token"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "resolve_blocked" }, reason: string, action_token: string, blocked_resolution: { type: "string", enum: ["retry", "supersede"] }, blocked_task_id: string, replacement_task_id: string, add_tasks: { type: "array", items: taskSchema }, remove_tasks: { type: "array", items: string }, update_tasks: { type: "object", additionalProperties: updateTaskSchema } }, required: ["operation", "reason", "action_token", "blocked_resolution", "blocked_task_id"], additionalProperties: false },
@@ -634,6 +632,29 @@ export function createGoalEngineExtension(pi, options = {}) {
   const nonEmptyString = (value) => typeof value === "string" && value.trim() === value && value.length > 0;
   const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
   const canonicalHash = (value) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+  // This deliberately performs no I/O: an invalid amendment must not pause a
+  // runtime or close any owned resource merely to discover it is invalid.
+  const validateExecutionAmendmentTarget = (projection, updates) => {
+    if (!Array.isArray(updates) || updates.length === 0 || new Set(updates.map((entry) => entry.id)).size !== updates.length) throw new Error("execution amendment update_tasks must be non-empty and unique");
+    const source = {
+      objective: projection.objective, scope: projection.scope, non_goals: projection.nonGoals, dod: projection.dod,
+      execution: { schema: "goal-runtime.v1", tasks: [...projection.tasks].map(([id, task]) => ({ id, description: task.description, deps: task.deps, writePaths: task.writePaths, acceptance: task.acceptance, workflow: task.workflow })), conditions: [...projection.conditions.values()].map((condition) => condition.definition), write_policy: { allowed_paths: projection.writePolicy.allowedPaths }, budgets: projection.convergenceBudget },
+    };
+    for (const update of updates) {
+      const index = source.execution.tasks.findIndex((task) => task.id === update.id);
+      if (index < 0) throw new Error("unknown task in execution amendment");
+      const { id, ...change } = update;
+      source.execution.tasks[index] = { ...source.execution.tasks[index], ...change };
+    }
+    let target;
+    try { target = normalizeRuntimeGoalInit(source, runtimeHost?.registries); } catch (error) { throw new Error(`invalid execution amendment: ${error.message}`); }
+    for (const update of updates) {
+      const task = projection.tasks.get(update.id);
+      const targetTask = target.execution.tasks.find((entry) => entry.id === update.id);
+      if (task?.status === "accepted" && canonicalHash(task.acceptance) !== canonicalHash(targetTask?.acceptance)) throw new Error("accepted Task acceptance cannot change in an execution amendment");
+    }
+    return target;
+  };
   const finalReviewProvider = options.finalReviewProvider;
   const finalIntentType = "goal-engine-final-review-approval-intent";
   const finalIntentFields = ["protocol", "goalId", "manifestHash", "stateHash", "worldHash", "head", "sessionId", "choices"];
@@ -1913,7 +1934,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       };
       const task = projection.tasks.get(params.task_id);
       if (params.outcome === "succeeded") validateNextAction(params.next_action);
-      if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION && task) {
+      if (generationCapabilities(projection.eventSchemaVersion).executorBinding === "strict" && task) {
         let proof = null;
         try { proof = await inspectExecutorProofFn(task.executorBinding?.runId); } catch { /* mapped to a stable missing-proof boundary below */ }
         settlementData.executorProof = assertExecutorSettlementProof({ task, proof });
@@ -1924,7 +1945,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         settlementData.attempt = task?.workspace?.attempt ?? 1;
         settlementData.executorHead = "candidate-settlement-validation";
       }
-      if (projection.eventSchemaVersion !== PLANNED_SCHEMA_VERSION) {
+      if (generationCapabilities(projection.eventSchemaVersion).settlement !== "dual-path") {
         try { applyEvent(projection, makeGoalEvent("task.settled", settlementData, goalId, projection)); }
         catch (error) {
           if (params.outcome === "succeeded" && task?.status === "dispatched" && /workspace is required/i.test(error.message)) throw workspaceMutationError(error, { tool: "goal_status", params: { goal_id: goalId } });
@@ -1974,9 +1995,9 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         settlementData.attempt = lease.attempt;
         settlementData.executorHead = confirmedInspection.headCommit;
-        if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION) {
+        if (generationCapabilities(projection.eventSchemaVersion).settlement === "dual-path") {
           const identity = { goalId, taskId: params.task_id, runId: task.executorBinding.runId, attempt: lease.attempt, contractHash: task.contractHash, head: confirmedInspection.headCommit };
-          const criteria = task.acceptance.criteria.map((criterion) => criterion.id);
+          const criteria = executorCriteria(task.acceptance.criteria).map((criterion) => criterion.id);
           const subagent = readChildSettlementEvidence(task, params.subagent_evidence, identity, criteria);
           const main = normalizeSettlementEvidence(params.main_verification, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
           assertIndependentSettlementEvidence(subagent, main);
@@ -1989,12 +2010,14 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
       }
       const { _artifact, ...eventData } = settlementData;
-      const plannedEventData = projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION && params.outcome === "succeeded"
+      const dualPathEventData = generationCapabilities(projection.eventSchemaVersion).settlement === "dual-path" && params.outcome === "succeeded"
         ? (({ taskId, outcome, attempt, executorHead, executorProof, settlementEvidence }) => ({ taskId, outcome, attempt, executorHead, executorProof, settlementEvidence }))(eventData)
         : eventData;
-      const settleEvent = makeGoalEvent("task.settled", plannedEventData, goalId, projection);
-      const cpEvent = makeGoalEvent("goal.checkpoint", { nextAction: params.next_action }, goalId, projection);
-      projection = _artifact ? appendEventBatchWithSettlementEvidence(root, [settleEvent, cpEvent], projection.version, _artifact) : appendEventBatchFn(root, [settleEvent, cpEvent], projection.version);
+      const settleEvent = makeGoalEvent("task.settled", dualPathEventData, goalId, projection);
+      const settlementEvents = generationCapabilities(projection.eventSchemaVersion).conditions
+        ? [settleEvent]
+        : [settleEvent, makeGoalEvent("goal.checkpoint", { nextAction: params.next_action }, goalId, projection)];
+      projection = _artifact ? appendEventBatchWithSettlementEvidence(root, settlementEvents, projection.version, _artifact) : appendEventBatchFn(root, settlementEvents, projection.version);
 
       turnsSinceSettle = 0;
 
@@ -2249,38 +2272,31 @@ export function createGoalEngineExtension(pi, options = {}) {
         return JSON.stringify({ goalId, status: "RUNTIME_RESUMED" });
       }
       if (params.operation === "propose_execution_change") {
+        const updates = params.changes?.update_tasks;
+        // Validate against the authoritative active projection before suspension:
+        // this path is pure, so rejection has zero ledger and resource effects.
+        const initialTarget = validateExecutionAmendmentTarget(projection, updates);
+        const initialFacts = { revision: projection.executionRevision, contractHash: projection.executionContractHash, accepted: [...projection.tasks].filter(([, task]) => task.status === "accepted").map(([id, task]) => [id, canonicalHash(task.acceptance)]) };
+        if (projection.eventSchemaVersion === "goal-runtime.v1" && projection.runtimeState === "active") {
+          // A valid typed amendment still durably suspends and closes ownership
+          // before proposal append. Reload and revalidate below prevents TOCTOU.
+          if (!await suspendOwnedRuntime(ctx, "execution_amendment")) throw new Error("execution amendment requires a unique active owned runtime");
+          projection = loadProjectionFn(root, goalId);
+        }
         const closure = projection.suspension;
         if (projection.eventSchemaVersion !== "goal-runtime.v1" || projection.runtimeState !== "suspended" || !closure?.resourcesQuarantined
           || closure.terminalProofRefs?.length !== closure.affectedRunIds?.length || closure.workspaceClosureProofRefs?.length !== closure.affectedTaskIds?.length
           || closure.resourceClosureProofRefs?.length !== closure.affectedRunIds?.length || (projection.pendingHumanDecision && projection.pendingHumanDecision.phase !== "rejected")) throw new Error("execution amendment requires a fully closed suspended runtime without a pending proposal");
+        const target = validateExecutionAmendmentTarget(projection, updates);
+        const currentFacts = { revision: projection.executionRevision, contractHash: projection.executionContractHash, accepted: [...projection.tasks].filter(([, task]) => task.status === "accepted").map(([id, task]) => [id, canonicalHash(task.acceptance)]) };
+        if (!isDeepStrictEqual(currentFacts, initialFacts) || hashRuntimeExecutionContract(target) !== hashRuntimeExecutionContract(initialTarget)) throw new Error("execution amendment source changed during suspension");
         let proposalWorld;
         try { proposalWorld = runtimeHost.captureCurrentWorld({ cwd }); } catch { proposalWorld = null; }
         if (!proposalWorld?.safe || !proposalWorld.repo || !/^[a-f0-9]{40}$/.test(proposalWorld.repo.head || "") || proposalWorld.repo.trackedDirty?.length || proposalWorld.repo.untracked?.length || proposalWorld.repo.sequencer) throw new Error("execution amendment proposal requires a safe clean Host CurrentWorld");
-        const updates = params.changes?.update_tasks;
-        if (!Array.isArray(updates) || updates.length === 0 || new Set(updates.map((entry) => entry.id)).size !== updates.length) throw new Error("execution amendment update_tasks must be non-empty and unique");
-        const source = {
-          objective: projection.objective, scope: projection.scope, non_goals: projection.nonGoals, dod: projection.dod,
-          execution: { schema: "goal-runtime.v1", tasks: [...projection.tasks].map(([id, task]) => ({ id, description: task.description, deps: task.deps, writePaths: task.writePaths, acceptance: task.acceptance, workflow: task.workflow })), conditions: [...projection.conditions.values()].map((condition) => condition.definition), write_policy: { allowed_paths: projection.writePolicy.allowedPaths }, budgets: projection.convergenceBudget },
-        };
-        for (const update of updates) {
-          const index = source.execution.tasks.findIndex((task) => task.id === update.id);
-          if (index < 0) throw new Error("unknown task in execution amendment");
-          const { id, ...change } = update;
-          source.execution.tasks[index] = { ...source.execution.tasks[index], ...change };
-        }
-        let target;
-        try { target = normalizeRuntimeGoalInit(source, runtimeHost?.registries); } catch (error) { throw new Error(`invalid execution amendment: ${error.message}`); }
-        for (const update of updates) {
-          const task = projection.tasks.get(update.id);
-          const targetTask = target.execution.tasks.find((entry) => entry.id === update.id);
-          if (task?.status === "accepted" && canonicalHash(task.acceptance) !== canonicalHash(targetTask?.acceptance)) {
-            throw new Error("accepted Task acceptance cannot change in an execution amendment");
-          }
-        }
         const changes = { update_tasks: structuredClone(updates) };
         const material = { goalId, proposalId: `execution-amendment-${crypto.randomUUID()}`, changes, changesHash: canonicalHash(changes), targetExecutionContract: target, targetContractHash: hashRuntimeExecutionContract(target), baseHead: proposalWorld.repo.head, ownerSessionId: currentSessionId, oldRevision: projection.executionRevision, newRevision: projection.executionRevision + 1 };
         const event = makeEvent("execution.amendment_proposed", { ...material, proposalHash: canonicalHash(material) }, goalId, "goal-runtime.v1");
-        const updated = appendEventFn(root, event, projection.version);
+        appendEventFn(root, event, projection.version);
         return JSON.stringify({ goalId, status: "R10B_AMENDMENT_PROPOSED", proposalId: material.proposalId });
       }
       const metadataBeforeConsume = params.operation === "update_goal" ? metadataState(projection, currentSessionId) : null;
@@ -3041,16 +3057,6 @@ export function createGoalEngineExtension(pi, options = {}) {
       await suspendOwnedRuntime(ctx, suspensionReason);
       return { action: "continue" };
     }
-    if (!event.images?.length && event.streamingBehavior === undefined) {
-      let repairApprovalPending = false, activeOwner = false;
-      try {
-        const { root } = executionScopeFor(ctx), sessionId = sessionIdentity(ctx);
-        const owned = loadAllProjections(root).filter((projection) => projection.eventSchemaVersion === "goal-runtime.v1" && projection.runtimeState === "active" && ownedBySession(projection, sessionId));
-        activeOwner = owned.length === 1;
-        repairApprovalPending = owned.some((projection) => [...projection.repairChallenges.values()].some((challenge) => challenge.phase === "created" && challenge.action === "authorize_task" && challenge.sessionId === sessionId));
-      } catch { /* normal suspension remains the safe fallback */ }
-      if (activeOwner && !repairApprovalPending && await suspendOwnedRuntime(ctx, "execution_amendment")) return { action: "continue" };
-    }
     pendingInput = { text: event.text, source: event.source };
     let hookSessionId;
     try { hookSessionId = sessionIdentity(ctx); } catch { return { action: "continue" }; }
@@ -3131,17 +3137,8 @@ export function createGoalEngineExtension(pi, options = {}) {
         return { action: "continue" };
       }
     } catch { /* input for another challenge or ambiguous input never creates a metadata receipt */ }
-    try {
-      const { cwd, root } = executionScopeFor(ctx); const sessionId = hookSessionId;
-      const projection = loadAllProjections(root).find((candidate) => candidate.eventSchemaVersion === "goal-runtime.v1" && candidate.lifecycle === "active" && candidate.runtimeState !== "suspended" && ownedBySession(candidate, sessionId));
-      if (projection && !runtimeIntentGates.has(`${projection.goalId}:${sessionId}`)) {
-        const gate = { goalId: projection.goalId, sessionId, source: event.source };
-        // Set the in-memory latch first: metadata failure must never reopen business actions.
-        runtimeIntentGates.set(`${projection.goalId}:${sessionId}`, { ...gate, kind: "pending" });
-        try { persistMetadata("goal-engine-runtime-intent-pending", gate); }
-        catch { recoveryLatch = { goalId: projection.goalId, sessionId, state: "active" }; }
-      }
-    } catch { recoveryLatch = { goalId: "unknown", sessionId: hookSessionId, state: "active" }; }
+    // An untyped public input is neither amendment authority nor a reason to
+    // install an in-memory mutation gate. Typed Goal operations own that path.
     return { action: "continue" };
   });
 

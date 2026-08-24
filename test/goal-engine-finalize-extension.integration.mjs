@@ -152,7 +152,10 @@ test("错误 token、session、approval entry、extra、planned 与缺失 provid
   const plannedGoal = JSON.parse(await invoke(planned, "goal_init", { objective: "Real planned finalize rejection", tasks: [{ id: "planned-task", description: "real planned task", writePaths: ["test/**"], acceptance: { criteria: [{ id: "planned-criterion", statement: "planned remains a real goal", evidenceKinds: ["tests"] }] }, workflow: "tdd" }] })).goalId;
   await assert.rejects(invoke(planned, "goal_finalize", { goal_id: plannedGoal, action_token: "planned-token", approval_entry_id: "planned-entry" }));
   assert.equal(plannedCalls.provider, 0); assert.equal(count(plannedCwd, plannedGoal, "goal.final_review_started"), 0); assert.equal(count(plannedCwd, plannedGoal, "goal.completed"), 0);
-  const noProvider = setup({ extension: { finalReviewProvider: undefined } }); await requestFinalReview(noProvider); const noProviderOffer = await approve(noProvider); await assert.rejects(invoke(noProvider.api, "goal_finalize", { ...noProviderOffer.machineAction.params, action_token: noProviderOffer.action_token })); assert.equal(count(noProvider.cwd, noProvider.goalId, "goal.final_review_started"), 0);
+  const noProvider = setup({ extension: { finalReviewProvider: undefined } }); const unavailable = await requestFinalReview(noProvider);
+  assert.equal(unavailable.status, "R11_FINALIZATION_REQUIRED"); assert.equal(unavailable.machineAction, undefined); assert.equal(unavailable.action_token, undefined);
+  await assert.rejects(invoke(noProvider.api, "goal_finalize", { goal_id: noProvider.goalId, approval_entry_id: "dummy-approval-entry", action_token: "dummy-action-token" }), /FINAL_REVIEW_PROVIDER_UNAVAILABLE/);
+  assert.equal(finalIntent(noProvider.api).length, 0); assert.equal(count(noProvider.cwd, noProvider.goalId, "goal.action_offered"), 0); assert.equal(count(noProvider.cwd, noProvider.goalId, "goal.final_review_started"), 0); assert.equal(count(noProvider.cwd, noProvider.goalId, "goal.completed"), 0); assert.equal(noProvider.calls.provider, 0);
 });
 
 test("none provider 在 unlocked durable started+intent 后原子 recorded/completed，reload 不重复调用", async () => {

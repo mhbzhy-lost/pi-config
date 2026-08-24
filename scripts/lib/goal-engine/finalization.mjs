@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence } from "./settlement-evidence.mjs";
 import { projectionStateHash } from "./store.mjs";
+import { coordinatorCriteria, executorCriteria } from "./task-definition.mjs";
 
 const UNSUPPORTED_GENERATIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3", "planned.v1"]);
 const MANIFEST_KEYS = ["schemaVersion", "goalId", "revision", "contractHash", "head", "worldHash", "stateHash", "obligationStateHash", "tasks", "conditions", "debts", "blockers", "complete", "manifestHash"];
@@ -26,7 +27,7 @@ function inventory(value, world) {
 function acceptanceCriteria(task) {
   const criteria = task?.acceptance?.criteria;
   if (!Array.isArray(criteria)) return null;
-  const ids = criteria.map(item => item?.id);
+  const ids = executorCriteria(criteria).map(item => item?.id);
   return ids.every(id => typeof id === "string" && id.trim().length > 0) && new Set(ids).size === ids.length ? ids : null;
 }
 function evidenceSummary(task, settlement, proof) {
@@ -42,10 +43,19 @@ function evidenceSummary(task, settlement, proof) {
     return { schemaVersion: evidence.schemaVersion, path: evidence.path, sha256: evidence.sha256, subagentFingerprint: evidence.subagentFingerprint, mainFingerprint: evidence.mainFingerprint, mainSessionId: evidence.mainSessionId, subagent, main, valid: true };
   } catch { return { schemaVersion: evidence?.schemaVersion ?? null, path: evidence?.path ?? null, sha256: evidence?.sha256 ?? null, subagentFingerprint: evidence?.subagentFingerprint ?? null, mainFingerprint: evidence?.mainFingerprint ?? null, mainSessionId: evidence?.mainSessionId ?? null, subagent: evidence?.subagent ?? null, main: evidence?.main ?? null, valid: false }; }
 }
+function coordinatorPredicateSatisfied(task, predicate) {
+  const binding = task?.executorBinding, proof = task?.lastExecutorProof, workspace = task?.workspace;
+  if (predicate === "executor-bound") return !!binding && binding.attempt === task?.attempts && binding.contractHash === task?.contractHash;
+  if (predicate === "executor-terminal-proof") return !!binding && !!proof && proof.runId === binding.runId && proof.outcome === "succeeded";
+  if (predicate === "workspace-integrated-released") return workspace?.phase === "disposed" && workspace.disposition === "integrated" && workspace.released === true;
+  if (predicate === "task-accepted") return task?.status === "accepted";
+  return false;
+}
 function taskManifest(goalId, id, task, applicability) {
   const binding = task?.executorBinding, proof = task?.lastExecutorProof, settlement = task?.settlement, workspace = task?.workspace;
   const criteria = acceptanceCriteria(task);
-  const out = { id, applicability, status: task?.status ?? null, attempts: task?.attempts ?? null, contractHash: task?.contractHash ?? null, acceptanceCriteria: criteria ?? [], acceptanceVerification: task?.acceptanceVerification ?? null };
+  const coordinator = Array.isArray(task?.acceptance?.criteria) ? coordinatorCriteria(task.acceptance.criteria).map(({ id: criterionId, predicate }) => ({ id: criterionId, predicate, satisfied: coordinatorPredicateSatisfied(task, predicate) })) : [];
+  const out = { id, applicability, status: task?.status ?? null, attempts: task?.attempts ?? null, contractHash: task?.contractHash ?? null, acceptanceCriteria: criteria ?? [], coordinatorCriteria: coordinator, acceptanceVerification: task?.acceptanceVerification ?? null };
   if (applicability === "superseded") return out;
   out.binding = binding ? { attempt: binding.attempt, runId: binding.runId, contractHash: binding.contractHash, asyncDir: binding.asyncDir, workspacePath: binding.workspacePath, workspaceLeaseId: binding.workspaceLeaseId, headAtDispatch: binding.headAtDispatch } : null;
   out.executorProof = proof ? { runId: proof.runId, proofId: proof.proofId } : null;
@@ -77,7 +87,7 @@ function deriveBlockers({ goalId, revision, contractHash, head: manifestHead, wo
   if (debt?.resourceInventoryValid !== true || !Array.isArray(debt?.resources) || debt.resources.some(row => !isObject(row) || typeof row.key !== "string" || !row.key || !Array.isArray(row.holders) || row.holders.some(holder => typeof holder !== "string" || !holder) || !Number.isSafeInteger(row.capacity) || row.capacity < 0)) add(blockers, "RESOURCE_INVENTORY_INVALID");
   else { if (!same(debt.resources, world?.resources ?? [])) add(blockers, "RESOURCE_AUTHORITY_MISMATCH"); if (debt.resources.some(row => row.holders.length)) add(blockers, "RESOURCE_HOLDERS_ACTIVE"); }
   if (!Array.isArray(debt?.activeRuns) || debt.activeRuns.length) add(blockers, "ACTIVE_RUN_DEBT");
-  for (const task of Array.isArray(tasks) ? tasks : []) { const id = task?.id; const criteria = task?.acceptanceCriteria; if (!Array.isArray(criteria) || criteria.some(item => typeof item !== "string" || item.trim().length === 0) || new Set(criteria).size !== criteria.length) add(blockers, "TASK_DUAL_EVIDENCE_INVALID", id); if (task?.applicability === "reverify_required") add(blockers, "TASK_REVERIFY_REQUIRED", id); if (task?.applicability !== "superseded" && task?.status !== "accepted") add(blockers, "TASK_NOT_ACCEPTED", id); if (task?.applicability === "superseded") continue; const b = task?.binding, p = task?.executorProofIdentity, s = task?.settlement, w = task?.workspaceProof;
+  for (const task of Array.isArray(tasks) ? tasks : []) { const id = task?.id; if (task?.applicability === "superseded") continue; const criteria = task?.acceptanceCriteria; if (!Array.isArray(criteria) || criteria.some(item => typeof item !== "string" || item.trim().length === 0) || new Set(criteria).size !== criteria.length) add(blockers, "TASK_DUAL_EVIDENCE_INVALID", id); if (!Array.isArray(task?.coordinatorCriteria) || task.coordinatorCriteria.some(criterion => !criterion || typeof criterion.id !== "string" || typeof criterion.predicate !== "string" || typeof criterion.satisfied !== "boolean")) add(blockers, "TASK_COORDINATOR_CRITERIA_INVALID", id); else for (const criterion of task.coordinatorCriteria) if (!criterion.satisfied) add(blockers, "TASK_COORDINATOR_PREDICATE_UNSATISFIED", `${id}:${criterion.id}`); if (task?.applicability === "reverify_required") add(blockers, "TASK_REVERIFY_REQUIRED", id); if (task?.status !== "accepted") add(blockers, "TASK_NOT_ACCEPTED", id); const b = task?.binding, p = task?.executorProofIdentity, s = task?.settlement, w = task?.workspaceProof;
     if (!b) add(blockers, "TASK_EXECUTOR_BINDING_MISSING", id); if (!p) add(blockers, "TASK_EXECUTOR_PROOF_MISSING", id); if (!s) add(blockers, "TASK_SETTLEMENT_MISSING", id); if (!b || !p || !s) continue;
     if (!Number.isSafeInteger(task.attempts) || task.attempts < 1 || b.attempt !== task.attempts || b.contractHash !== task.contractHash || typeof b.runId !== "string" || !b.runId || b.runId !== p.runId || typeof b.asyncDir !== "string" || !b.asyncDir.startsWith("/") || typeof b.workspacePath !== "string" || !b.workspacePath.startsWith("/") || !hash(b.workspaceLeaseId) || !head(b.headAtDispatch)) add(blockers, "TASK_EXECUTOR_BINDING_DRIFT", id);
     if (p.runId !== b.runId || p.proofId !== s.terminalProofId || p.outcome !== "succeeded" || !hash(p.proofId) || typeof p.rootSessionId !== "string" || !p.rootSessionId || !Number.isFinite(p.observedAt)) add(blockers, "TASK_EXECUTOR_PROOF_DRIFT", id);

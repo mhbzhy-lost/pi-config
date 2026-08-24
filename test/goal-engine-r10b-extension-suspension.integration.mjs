@@ -94,6 +94,18 @@ test("abort listener suspends durably before stop without waiting for agent_end"
   assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(stops.length, 1); assert.equal(stops[0].runtimeState, "suspended");
 });
 
+test("idle interactive and rpc input preserve active runtime and its action offer", async () => {
+  for (const source of ["interactive", "rpc"]) {
+    const { cwd, api, stops } = await readyDispatch(), before = projectionFor(cwd).actionOffer;
+    await api.handlers.get("input")({ type: "input", text: `ordinary ${source}`, source }, { cwd, sessionManager: api.sessionManager });
+    const projection = projectionFor(cwd);
+    assert.equal(projection.runtimeState, "active"); assert.deepEqual(projection.actionOffer, before);
+    assert.equal(projection.pendingHumanDecision, null); assert.equal(stops.length, 0);
+    assert.equal(api.__goalRuntimeIntentGate({ sessionManager: api.sessionManager }, { goal_id: projection.goalId }), false);
+    assert.equal(api.entries.some((entry) => entry.customType === "goal-engine-runtime-intent-pending"), false);
+  }
+});
+
 test("image-only, invalid streaming, and extension input protect active runtime across reload", async () => {
   const { cwd, api, stops } = await readyDispatch();
   for (const input of [{ type: "input", text: "image", source: "interactive", images: [{ type: "image", data: "x", mimeType: "image/png" }] }, { type: "input", text: "stream", source: "interactive", streamingBehavior: "streaming" }, { type: "input", text: "other", source: "extension", streamingBehavior: "steer" }]) await api.handlers.get("input")(input, { cwd, sessionManager: api.sessionManager });

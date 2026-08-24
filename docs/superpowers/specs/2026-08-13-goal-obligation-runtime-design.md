@@ -56,6 +56,12 @@ type RuntimeGoalInit = {
 
 旧顶层 `{ objective, tasks }` 仅创建 `planned.v1`。顶层 `tasks` 与 `execution` 同时出现时必须在 append 前拒绝。调用者不得提交 `profile` 或 `initialShape`；`initialShape` 只从规范化内容派生：仅 tasks 为 `planned`，仅 conditions 为 `convergent`，两者均有为 `hybrid`。
 
+### Task criterion evaluator 边界
+
+`goal-runtime.v1` 的历史三字段 criterion `{ id, statement, evidenceKinds }` 保持 **executor** 语义，既不迁移也不重释。新合同可显式写 `evaluator: "executor"`，语义相同；或写 `evaluator: "coordinator"` 与严格的 `predicate`。协调器 predicate 仅允许 `executor-bound`、`executor-terminal-proof`、`workspace-integrated-released`、`task-accepted`；未知值或多余字段必须在 fresh typed contract 入口拒绝，绝不可从 id、statement 或 evidenceKinds 猜测。
+
+仅 executor criteria 可进入 `compileTaskContract`、`dispatch-ir.v1`、child requirements、以及 settlement 的双路径 evidence expected criteria。coordinator criteria 保留在权威 task projection，并由 finalization manifest 基于 binding、terminal proof、workspace 和 task status 机械求值。`task-accepted` 是 accept 后/finalization 事实，不能成为 `goal_accept` 的自引用前置门禁。
+
 ## 3. Obligation、Condition 与实体状态机
 
 ```ts

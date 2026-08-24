@@ -62,11 +62,16 @@ test("runtime init fails closed with a stable blocker before any append when HEA
   assert.equal(api.entries.length, 0);
 });
 
-test("unconsumed runtime input creates a durable fail-closed gate", async () => {
+test("ordinary idle input neither pauses the runtime nor creates an intent gate", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "r10a1-")); git(cwd, "init", "-b", "main"); git(cwd, "config", "user.email", "test@example.com"); git(cwd, "config", "user.name", "Test"); writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n"); git(cwd, "add", ".gitignore"); git(cwd, "commit", "-m", "init");
   const api = pi(cwd); api.cwd = cwd; createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(api, "goal_init", runtimeInit());
+  const offered = JSON.parse(await invoke(api, "goal_status", {}));
   api.handlers.get("input")({ type: "input", source: "interactive", text: "new work" }, { cwd, sessionManager: api.sessionManager });
-  assert.deepEqual(JSON.parse(await invoke(api, "goal_status", {})), { status: "R10B_SUSPENSION_REQUIRED" }); assert.equal(api.entries.some(entry => entry.customType === "goal-engine-runtime-intent-pending" && !JSON.stringify(entry.data).includes("new work")), true);
+  const status = JSON.parse(await invoke(api, "goal_status", {}));
+  assert.equal(status.status, undefined, "ordinary idle input leaves the pending approval offer intact");
+  assert.equal(status.proposalId, offered.proposalId, "idle input creates no runtime ledger mutation");
+  assert.equal(loadProjection(join(cwd, ".state/goal-engine"), "harden-runtime").runtimeState, "awaiting_user_approval", "idle input does not pause");
+  assert.equal(api.entries.some(entry => entry.customType === "goal-engine-runtime-intent-pending"), false, "idle input creates no intent gate");
 });
 
 test("runtime approval pairs ABI-shaped input with the active branch's real user entry", async () => {
@@ -303,11 +308,11 @@ for (const terminal of ["consumed", "stale", "rejected"]) test(`malformed runtim
   assert.equal(status.proposalId, offered.proposalId);
 });
 
-test("malformed runtime pending metadata cannot restore the R10B gate", async () => {
+test("ordinary idle input stores no pending metadata that could restore an R10B gate", async () => {
   const cwd = repo(), first = pi(cwd); first.cwd = cwd; createGoalEngineExtension(first, { goalStateEnv: {}, runtimeHost: host(cwd) }); await invoke(first, "goal_init", runtimeInit());
   first.handlers.get("input")({ type: "input", source: "interactive", text: "new work" }, { cwd, sessionManager: first.sessionManager });
-  const malformed = structuredClone(first.entries); malformed.find((entry) => entry.customType === "goal-engine-runtime-intent-pending").data.extra = "forged";
-  const reloaded = pi(cwd, malformed); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
+  assert.equal(first.entries.find((entry) => entry.customType === "goal-engine-runtime-intent-pending"), undefined, "idle input persists no gate metadata");
+  const reloaded = pi(cwd, structuredClone(first.entries)); reloaded.cwd = cwd; createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(cwd) }); reloaded.handlers.get("session_start")({}, { sessionManager: reloaded.sessionManager });
   assert.notEqual(JSON.parse(await invoke(reloaded, "goal_status", {})).status, "R10B_SUSPENSION_REQUIRED");
 });
 

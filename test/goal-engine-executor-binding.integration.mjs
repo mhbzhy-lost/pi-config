@@ -15,6 +15,7 @@ import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-s
 import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
+import { buildObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
 
 const GOAL_ID = "binding-goal";
 const CONTRACT_HASH = "a".repeat(64);
@@ -388,10 +389,13 @@ function integratedFixture(t) {
   return { cwd, pi, tools, context, invoke, branch, handlers };
 }
 
-function runtimeHost(cwd) {
+function runtimeHost(cwd, calls = null) {
   return {
     registries: runtimeRegistries,
     adapterRegistry: {},
+    async stopOwnedRun() { if (calls) calls.stopOwnedRun++; return null; },
+    async quarantineWorkspace() { if (calls) calls.quarantineWorkspace++; return null; },
+    async quarantineResource() { if (calls) calls.quarantineResource++; return null; },
     artifactRefForRun() { throw new Error("runtime fixture has no observations"); },
     captureCurrentWorld() {
       return { safe: true, repo: { root: cwd, head: git(cwd, "rev-parse", "HEAD"), trackedDirty: [], untracked: [], sequencer: null }, adapters: [], environments: [], fixtures: [], resources: [], activeRuns: [], capturedAt: new Date().toISOString() };
@@ -399,10 +403,17 @@ function runtimeHost(cwd) {
   };
 }
 
-async function initializeActiveRuntimeDispatch(fixture) {
-  createGoalEngineExtension(fixture.pi, { goalStateEnv: {}, runtimeHost: runtimeHost(fixture.cwd), inspectExecutorProof(runId) { return officialProof(runId, `/tmp/${runId}`); } });
+async function initializeActiveRuntimeDispatch(fixture, { coordinatorCriteria = false, runtimeCalls = null } = {}) {
+  createGoalEngineExtension(fixture.pi, { goalStateEnv: {}, runtimeHost: runtimeHost(fixture.cwd, runtimeCalls), inspectExecutorProof(runId) { return officialProof(runId, `/tmp/${runId}`); } });
   const base = runtimeInit();
-  const init = runtimeInit({ execution: { ...base.execution, conditions: [], budgets: { ...base.execution.budgets, max_no_progress: 99 } } });
+  const task = structuredClone(base.execution.tasks[0]);
+  if (coordinatorCriteria) task.acceptance.criteria.push(
+    { id: "executor-bound", statement: "The official executor is bound", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "executor-bound" },
+    { id: "terminal-proof", statement: "The official executor terminal proof exists", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "executor-terminal-proof" },
+    { id: "workspace-released", statement: "The workspace is integrated and released", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "workspace-integrated-released" },
+    { id: "task-accepted", statement: "The task is accepted", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "task-accepted" },
+  );
+  const init = runtimeInit({ execution: { ...base.execution, tasks: [task], conditions: [], budgets: { ...base.execution.budgets, max_no_progress: 99 } } });
   await fixture.invoke("goal_init", init);
   await fixture.invoke("goal_status", {});
   fixture.handlers.get("input")({ type: "input", source: "interactive", text: "approve" }, fixture.context);
@@ -513,7 +524,7 @@ function settlementEvidence(fixture, goalId, taskId) {
   const task = projection.tasks.get(taskId);
   const head = git(task.workspace.path, "rev-parse", "HEAD");
   const identity = { goalId, taskId, runId: task.executorBinding.runId, attempt: task.workspace.attempt, contractHash: task.contractHash, head };
-  const expectedCriteria = task.acceptance.criteria.map(({ id }) => id);
+  const expectedCriteria = task.acceptance.criteria.filter(({ evaluator }) => evaluator !== "coordinator").map(({ id }) => id);
   const criteria = expectedCriteria.map((id) => ({ id, status: "satisfied", evidence: [`sha256:${"1".repeat(64)}`] }));
   const child = { identity, criteria, commandsRun: [], changedFiles: [task.writePaths[0]] };
   const main = { identity, criteria: criteria.map((item) => ({ ...item, evidence: [`sha256:${"2".repeat(64)}`] })), commandsRun: [], changedFiles: [task.writePaths[0]] };
@@ -832,6 +843,72 @@ test("runtime goal_status recovers an unbound official executor handle before is
   const task = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-1");
   assert.equal(task.executorBinding.runId, runId);
   assert.equal(task.status, "dispatched");
+});
+
+test("public runtime dispatch→binding→settle→integrate→accept rejects accepted acceptance amendment before suspension", async (t) => {
+  const fixture = integratedFixture(t), runtimeCalls = { stopOwnedRun: 0, quarantineWorkspace: 0, quarantineResource: 0 };
+  const runId = "run-runtime-settlement";
+  const asyncDir = "/tmp/run-runtime-settlement";
+  const { goalId, dispatched } = await initializeActiveRuntimeDispatch(fixture, { coordinatorCriteria: true, runtimeCalls });
+  await bindIntegratedRun(fixture, dispatched, { runId, asyncDir });
+  const resultHead = commitExecutorResult(dispatched.workspace.path);
+  let status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
+
+  const result = JSON.parse(await fixture.invoke("goal_settle", {
+    goal_id: goalId, task_id: "task-1", outcome: "succeeded",
+    evidence: { type: "diff", ref: resultHead }, evidence_source: "self_produced",
+    next_action: "集成当前提交并在主分支独立复核全部验收标准", action_token: status.action_token,
+    ...settlementEvidence(fixture, goalId, "task-1"),
+  }));
+  assert.equal(result.status, "succeeded");
+  let projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
+  let task = projection.tasks.get("task-1");
+  assert.deepEqual(task.settlement.evidence.subagent.criteria.map(({ id }) => id), ["contract"], "dual evidence covers only the executor-owned criterion");
+  assert.deepEqual(task.acceptance.criteria.map(({ id }) => id), ["contract", "executor-bound", "terminal-proof", "workspace-released", "task-accepted"]);
+
+  status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
+  await fixture.invoke("goal_integrate", { goal_id: goalId, task_id: "task-1", action: "integrate", action_token: status.action_token });
+  status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
+  const accepted = JSON.parse(await fixture.invoke("goal_accept", { goal_id: goalId, task_id: "task-1", action_token: status.action_token }));
+  assert.equal(accepted.status, "accepted");
+
+  projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
+  task = projection.tasks.get("task-1");
+  assert.equal(task.status, "accepted");
+  assert.equal(task.workspace.released, true, "typed integration releases the real workspace");
+
+  // Public RED/GREEN boundary: this accepted task was reached exclusively via
+  // typed runtime tools above, not a Store fixture. An immutable acceptance
+  // amendment must reject without touching ledger bytes or owned resources.
+  const ledgerPath = join(fixture.cwd, ".state/goal-engine/goals", goalId, "events.jsonl");
+  const ledgerBefore = readFileSync(ledgerPath);
+  const versionBefore = projection.version;
+  await assert.rejects(
+    fixture.invoke("goal_amend", { goal_id: goalId, operation: "propose_execution_change", reason: "replace accepted acceptance", changes: { update_tasks: [{ id: "task-1", acceptance: { criteria: [{ id: "replacement", statement: "must not replace accepted contract", evidenceKinds: ["tests"] }] } }] } }),
+    /accepted Task acceptance/i,
+  );
+  projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
+  assert.deepEqual(readFileSync(ledgerPath), ledgerBefore, "rejection preserves exact ledger bytes");
+  assert.equal(projection.version, versionBefore);
+  assert.equal(projection.runtimeState, "active"); assert.equal(projection.suspension, null); assert.equal(projection.pendingHumanDecision, null);
+  const ledger = readFileSync(ledgerPath, "utf8");
+  assert.equal((ledger.match(/"type":"goal.runtime_suspended"/g) || []).length, 0);
+  assert.equal((ledger.match(/"type":"execution.amendment_proposed"/g) || []).length, 0);
+  assert.deepEqual(runtimeCalls, { stopOwnedRun: 0, quarantineWorkspace: 0, quarantineResource: 0 });
+
+  const manifest = buildObligationFinalizationManifest({
+    projection,
+    worldSnapshot: runtimeHost(fixture.cwd).captureCurrentWorld(),
+    conditionValidity: new Map(),
+    resourceInventory: [],
+  });
+  assert.deepEqual(manifest.tasks[0].coordinatorCriteria, [
+    { id: "executor-bound", predicate: "executor-bound", satisfied: true },
+    { id: "terminal-proof", predicate: "executor-terminal-proof", satisfied: true },
+    { id: "workspace-released", predicate: "workspace-integrated-released", satisfied: true },
+    { id: "task-accepted", predicate: "task-accepted", satisfied: true },
+  ], "finalization mechanically retains all coordinator lifecycle predicates");
+  assert.equal(manifest.blockers.some(({ code }) => code === "TASK_COORDINATOR_PREDICATE_UNSATISFIED"), false);
 });
 
 test("Goal dispatch followed by the exact coding spawn persists the returned runId and asyncDir", async (t) => {
