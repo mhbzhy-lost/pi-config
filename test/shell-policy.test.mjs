@@ -155,18 +155,32 @@ test("finds plan TODOs only in the caller repository", async () => {
 });
 
 test("recognizes git commands reached through cd and git -C", () => {
-  assertBlocked('cd /tmp/repo && git commit -m "fix: 修复问题"', "GIT_CWD_FORBIDDEN", /cd/);
-  assertBlocked('git -C /tmp/repo commit -m "fix: 修复问题"', "GIT_C_FORBIDDEN", /git -C/);
+  assertBlocked('cd /tmp/repo && git commit -m "fix: 修复问题"', "GIT_CWD_OUT_OF_WORKSPACE", /工作区外/);
+  assertBlocked('git -C /tmp/repo commit -m "fix: 修复问题"', "GIT_C_OUT_OF_WORKSPACE", /工作区内/);
 });
 
-test("blocks cd followed by git regardless of git subcommand validity", () => {
-  assertBlocked('cd /tmp && git status', "GIT_CWD_FORBIDDEN", /cd/);
-  assertBlocked('cd /tmp && git commit -m "feat: 添加提交校验"', "GIT_CWD_FORBIDDEN", /cd/);
+test("blocks cd followed by git outside the workspace regardless of git subcommand validity", () => {
+  assertBlocked('cd /tmp && git status', "GIT_CWD_OUT_OF_WORKSPACE", /工作区外/);
+  assertBlocked('cd /tmp && git commit -m "feat: 添加提交校验"', "GIT_CWD_OUT_OF_WORKSPACE", /工作区外/);
 });
 
-test("blocks git -C regardless of commit message validity", () => {
-  assertBlocked('git -C /tmp status', "GIT_C_FORBIDDEN", /git -C/);
-  assertBlocked('git -C /tmp commit -m "feat: 添加提交校验"', "GIT_C_FORBIDDEN", /git -C/);
+test("blocks git -C outside the workspace regardless of commit message validity", () => {
+  assertBlocked('git -C /tmp status', "GIT_C_OUT_OF_WORKSPACE", /工作区内/);
+  assertBlocked('git -C /tmp commit -m "feat: 添加提交校验"', "GIT_C_OUT_OF_WORKSPACE", /工作区内/);
+});
+
+test("allows cd plus git and git -C when the effective git directory stays inside the workspace", () => {
+  assert.equal(policy("cd ../scripts && git status"), undefined);
+  assert.equal(policy(`cd ${join(workspaceRoot, "scripts")} && git status`), undefined);
+  assert.equal(policy("git -C ../scripts status"), undefined);
+  assert.equal(policy(`git -C ${join(workspaceRoot, "scripts")} status`), undefined);
+  assert.equal(policy('git -C ../scripts commit -m "feat: 添加提交校验"'), undefined);
+});
+
+test("fails closed for git -C targets that are missing, flag-like, or shell-expanded", () => {
+  assertBlocked("git -C -c status", "GIT_C_OUT_OF_WORKSPACE", /工作区内/);
+  assertBlocked("git -C $HOME/status", "GIT_C_OUT_OF_WORKSPACE", /工作区内/);
+  assertBlocked("git -C ../../..", "GIT_C_OUT_OF_WORKSPACE", /工作区内/);
 });
 
 test("blocks Git repository and worktree overrides that bypass workspace deletion boundaries", () => {
@@ -190,7 +204,7 @@ test("blocks Git repository and worktree overrides that bypass workspace deletio
 test("commit skip only bypasses commit validation", () => {
   assert.equal(policy('GIT_COMMIT_HOOK_SKIP=1 git commit -m "bad: english"'), undefined);
   assertBlocked('GIT_COMMIT_HOOK_SKIP=1 rm -rf /Users/shared', "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
-  assertBlocked('GIT_COMMIT_HOOK_SKIP=1 cd /tmp && git status', "GIT_CWD_FORBIDDEN", /cd/);
+  assertBlocked('GIT_COMMIT_HOOK_SKIP=1 cd /tmp && git status', "GIT_CWD_OUT_OF_WORKSPACE", /工作区外/);
 });
 
 test("allows symlinks whose canonical target remains in a temporary root", async () => {
@@ -311,8 +325,8 @@ test("blocks git -C with destructive subcommand", () => {
   assertBlocked("git -C /some/path reset --hard", "GIT_DESTRUCTIVE", /不可逆 Git/);
   assertBlocked("git -C /worktree clean -fd", "GIT_DESTRUCTIVE", /不可逆 Git/);
   assertBlocked("git --git-dir /x -C /y reset --hard HEAD~5", "GIT_DESTRUCTIVE", /不可逆 Git/);
-  // Non-destructive git -C still blocked by GIT_C_FORBIDDEN
-  assertBlocked("git -C /some/path status", "GIT_C_FORBIDDEN", /git -C/);
+  // Non-destructive git -C outside the workspace still blocked by containment rule
+  assertBlocked("git -C /some/path status", "GIT_C_OUT_OF_WORKSPACE", /工作区内/);
 });
 
 test("blocks dangerous commands with multi-flag sh -c variants", () => {

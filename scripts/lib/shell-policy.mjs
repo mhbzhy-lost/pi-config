@@ -375,11 +375,17 @@ export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }) {
     if (gitContextViolation) return gitContextViolation;
     const wrapperViolation = checkShellWrapper(tokens, commandCwd, workspaceRoot);
     if (wrapperViolation) return wrapperViolation;
-    if (cd && commands.some((command) => command.tokens[0] === "git")) {
-      return violation("GIT_CWD_FORBIDDEN", "禁止通过 cd 切换 Git 工作目录");
+    if (tokens[0] === "git" && commands.some(({ tokens: segmentTokens, cwd: effectiveCwd }) => segmentTokens[0] === "git" && !isWithin(effectiveCwd, workspaceRoot))) {
+      return violation("GIT_CWD_OUT_OF_WORKSPACE", "禁止在工作区外执行 Git 操作");
     }
-    if (tokens[0] === "git" && tokens.includes("-C")) {
-      return violation("GIT_C_FORBIDDEN", "禁止使用 git -C 切换工作目录");
+    if (tokens[0] === "git") {
+      const cIndex = tokens.indexOf("-C");
+      if (cIndex !== -1) {
+        const target = tokens[cIndex + 1];
+        if (!target || target.startsWith("-") || hasExpansion(target) || !isWithin(resolve(commandCwd, target), workspaceRoot)) {
+          return violation("GIT_C_OUT_OF_WORKSPACE", "git -C 目标必须位于工作区内");
+        }
+      }
     }
     const commitViolation = skipCommitValidation ? undefined : validateCommit(tokens);
     if (commitViolation) return commitViolation;
