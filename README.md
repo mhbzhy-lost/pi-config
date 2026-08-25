@@ -13,11 +13,11 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 ## 安装 Pi
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.2
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.3
 pi --version
 ```
 
-本仓已验证 Pi `0.82.0`、`0.82.1`、`0.83.0`、`0.84.1` 和 `0.84.2`，初始化默认安装精确 `0.84.2`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
+本仓已验证 Pi `0.82.0`、`0.82.1`、`0.83.0`、`0.84.1`、`0.84.2` 和 `0.84.3`，初始化默认安装精确 `0.84.3`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
 
 ## 初始化
 
@@ -27,7 +27,7 @@ pi --version
 
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
-- 安装并固定 Pi `0.84.2`。
+- 安装并固定 Pi `0.84.3`。
 - 在 `pi/npm` 顶层精确安装 `pi-subagents@0.45.2` 与 `typebox@1.1.38`。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
@@ -68,6 +68,9 @@ pi --model openai-idealab/Peach-07-17-DogFooding --thinking high
 `--thinking off` 则发送 `enable_thinking: false`。配置直接访问 Idealab，不经过本地
 cache proxy。
 
+模型、Thinking 和 provider fallback 的选择默认只作用于当前 session；只有显式保存时，
+才会更新全局默认值。
+
 Shell 集成固定：
 
 - `PI_CODING_AGENT_DIR=<repo>/pi`
@@ -76,17 +79,19 @@ Shell 集成固定：
 
 `pi/extensions/skill-whitelist.ts` 随后通过 `resources_discover` 扫描全局与项目 Skill 目录；它不读取仓库 Skill 清单，也不复制或创建软链接。
 
-## Pi 0.84.2 TUI 与工具限制
+## Pi 0.84.3 TUI 与工具限制
 
 Pi 官方是 fullscreen 的唯一 owner；Shell 不发送 `DECSET/DECRST 1049`。`pi-inline` 和 `pi-full` 分别是官方 `--tui-mode regular` 与 `--tui-mode fullscreen` 的别名。
 
 Child browser 使用 focused overlay。`Ctrl+Shift+F` 保持官方语义，只搜索 parent primary transcript，不搜索 child transcript。compact renderer 是官方 tool definition 上的薄适配；它会注册同名 extension tools，因此不启用 `defaultTools`。需要严格工具集合时使用官方 `--tools`（或 `--exclude-tools`/`--no-tools`）。
 
-如需回滚到精确 `0.84.1`：
+PowerShell 当前不启用，属于非目标；未来启用前必须覆盖 Security Gates 与 Goal mutation gate。
+
+如需回滚到精确 `0.84.2`：
 
 ```bash
 npm install -g --ignore-scripts --registry=https://registry.npmjs.org \
-  @earendil-works/pi-coding-agent@0.84.1
+  @earendil-works/pi-coding-agent@0.84.2
 pi --version
 ```
 

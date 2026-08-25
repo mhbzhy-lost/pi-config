@@ -8,6 +8,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
+import { resolvePiCodingAgentRoot } from "./helpers/pi-runtime.mjs";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -16,8 +17,7 @@ test.after(() => temporaryArena.disposeSync());
 async function mkdtemp(prefix) { return temporaryArena.mkdtempSync(basename(prefix)); }
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const globalModules = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
-const piRoot = join(globalModules, "@earendil-works/pi-coding-agent");
+const piRoot = resolvePiCodingAgentRoot();
 const piModule = await import(pathToFileURL(join(piRoot, "dist/index.js")).href);
 const { createAgentSession, DefaultResourceLoader, SessionManager } = piModule;
 

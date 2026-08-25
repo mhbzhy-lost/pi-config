@@ -12,7 +12,7 @@ const {
   DefaultResourceLoader,
   SessionManager,
 } = await import(piHostModuleUrl);
-const { createSubagentsRpcClient, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } = compat;
+const { createSubagentsRpcClient, REQUIRED_METHODS } = compat;
 const repoRoot = process.cwd();
 const compatibleReport = {
   piVersion: "0.84.1",
@@ -41,9 +41,8 @@ function evaluate(report) {
   return compat.evaluatePlanHarnessCompatibility(report);
 }
 
-test("exports the stable RPC v1 method and supported Pi contracts", () => {
+test("exports the stable RPC v1 methods", () => {
   assert.deepEqual(REQUIRED_METHODS, ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"]);
-  assert.deepEqual(SUPPORTED_PI_VERSIONS, ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2"]);
 });
 
 test("loads the public Pi API after asynchronously resolving the npm global root", async () => {
@@ -273,11 +272,11 @@ test("accepts the flat runtime compatibility report", () => {
   assert.deepEqual(evaluate(compatibleReport), { ok: true, failures: [] });
 });
 
-test("rejects runtime versions outside the explicit support set", () => {
-  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2"]) {
+test("accepts approved runtime versions and rejects unapproved patch releases", () => {
+  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3"]) {
     assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }), { ok: true, failures: [] });
   }
-  for (const version of ["0.83.1", "0.84.0", "0.84.3"]) {
+  for (const version of ["0.83.1", "0.84.0", "0.84.4"]) {
     assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }).failures, [`unsupported Pi version: ${version}`]);
   }
   assert.deepEqual(evaluate({ ...compatibleReport, version: "0.35.1" }).failures, ["unexpected pi-subagents version: 0.35.1"]);

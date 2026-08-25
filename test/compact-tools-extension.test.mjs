@@ -28,7 +28,7 @@ function registerCompactTools(factory) {
   return registered;
 }
 
-test("real 0.84.2 compact overrides retain every native non-renderer field", () => {
+test("compact overrides retain every native non-renderer field", () => {
   const registered = registerCompactTools(compactTools);
 
   assert.deepEqual(registered.map((tool) => tool.name), names);
