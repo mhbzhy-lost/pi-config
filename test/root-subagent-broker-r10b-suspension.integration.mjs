@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,6 +17,15 @@ const baseHead = "a".repeat(40);
 const contractHash = "b".repeat(64);
 const leaseId = "c".repeat(64);
 const hash = (n) => String(n).padStart(64, "0");
+const authority = (overrides = {}) => ({ goalId, taskId: "task-1", attempt: 1, runId: "r10b-executor", asyncDir: "/tmp/r10b-executor", workspacePath: "/tmp/r10b-workspace", leaseId, sessionId: ownerSessionId, baseHead, headAtDispatch: baseHead, executionRevision: 1, contractHash, agent: "executor", ...overrides });
+
+function writeRecoveryArtifacts(authority, terminal) {
+  const runtimeTerminal = { ...terminal, sessionId: authority.sessionId, asyncDir: authority.asyncDir, agent: "executor" };
+  const sidecar = { version: "root-broker.goal-binding-authority.v1", ticketId: "d".repeat(64), ...authority };
+  for (const [name, value] of [["root-broker.goal-binding-authority.v1.json", sidecar], ["status.json", { runId: authority.runId, sessionId: authority.sessionId, asyncDir: authority.asyncDir, agent: "executor", state: "failed", processTerminal: runtimeTerminal }], ["process-terminal.json", runtimeTerminal]]) {
+    const file = join(authority.asyncDir, name); writeFileSync(file, JSON.stringify(value), { mode: 0o600 }); chmodSync(file, 0o600);
+  }
+}
 
 function event(type, data, number) {
   return { schemaVersion: "goal-runtime.v1", eventId: `r10b-${number}`, goalId, occurredAt: `2026-08-13T00:00:${String(number).padStart(2, "0")}.000Z`, type, data };
@@ -60,11 +69,14 @@ test("RED: reload derives Root Broker request from event-sourced owner session a
       attempt: 1,
       runId: "r10b-executor",
       asyncDir: "/tmp/r10b-executor",
+      workspacePath: "/tmp/r10b-workspace",
       leaseId,
       sessionId: ownerSessionId,
       baseHead,
+      headAtDispatch: baseHead,
       executionRevision: 1,
       contractHash: projection.executionContractHash,
+      agent: "executor",
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -90,9 +102,9 @@ test("GREEN protection: Root Broker stops only the exact registered owned identi
   });
   t.after(() => broker.closeRootSession().catch(() => undefined));
   await broker.observeStarted({ runId: "r10b-executor", id: "r10b-executor", agent: "executor", pid: 43210, asyncDir: "/tmp/r10b-executor", sessionId: ownerSessionId });
-  const exact = { runId: "r10b-executor", asyncDir: "/tmp/r10b-executor", sessionId: ownerSessionId };
+  const exact = authority({ contractHash, executionRevision: 1 });
   for (const wrong of [{ ...exact, runId: "other-run" }, { ...exact, asyncDir: "/tmp/other" }, { ...exact, sessionId: "other-session" }]) {
-    await assert.rejects(broker.stopGoalOwnedRun(wrong), /identity/);
+    assert.equal((await broker.stopGoalOwnedRun(wrong)).state, "attention");
     assert.equal(calls.length, 0);
   }
   assert.equal((await broker.stopGoalOwnedRun(exact)).state, "observed");
@@ -101,10 +113,58 @@ test("GREEN protection: Root Broker stops only the exact registered owned identi
   assert.equal(broker.inspectExecutorProof("r10b-executor").terminal.outcome, "succeeded");
 });
 
+test("RED: fresh Broker recovers an exact failed Executor terminal artifact without an owned-run memory entry", async (t) => {
+  const asyncDir = mkdtempSync(join(tmpdir(), "r10b-restart-terminal-"));
+  const runId = "r10b-restart-failed";
+  const sessionId = "r10b-restart-session";
+  const terminal = { version: 1, runId, runnerProcessInstanceId: "r10b-restart-runner", state: "observed", observedAt: 1_700_000_000_000, instances: [{ processInstanceId: "r10b-restart-runner", kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 1, signal: null }] };
+  const recoveredAuthority = authority({ runId, asyncDir, sessionId, contractHash, executionRevision: 1 });
+  writeRecoveryArtifacts(recoveredAuthority, terminal);
+  const stopped = [];
+  const upstream = { async ping() { return {}; }, async stop(request) { stopped.push(request); }, async dispose() {} };
+  const brokerA = new RootBrokerServer({ rootSessionId: sessionId, lifecycleSessionId: sessionId, captureProcessBirthIdentity: async () => "restart-birth", writeGrant: async () => "/tmp/r10b-no-grant", upstream });
+  await brokerA.observeStarted({ runId, id: runId, agent: "executor", pid: 43212, asyncDir, sessionId });
+  brokerA.observeTerminal(terminal);
+  await brokerA.closeRootSession();
+  const broker = new RootBrokerServer({ rootSessionId: sessionId, lifecycleSessionId: sessionId, writeGrant: async () => "/tmp/r10b-no-grant", upstream });
+  t.after(async () => { await broker.closeRootSession().catch(() => undefined); rmSync(asyncDir, { recursive: true, force: true }); });
+  assert.equal(broker.ownedRuns.has(runId), false, "fresh Broker has no old owned run");
+  const recovered = await broker.stopGoalOwnedRun(recoveredAuthority);
+  assert.equal(recovered.state, "observed");
+  assert.equal(recovered.proof.runId, runId);
+  assert.equal(recovered.proof.instances[0].exitCode, 1, "failed is still a terminal observation");
+  assert.deepEqual(stopped, [], "terminal recovery never stops a process");
+});
+
+test("GREEN protection: terminal recovery fails closed for identity, nonterminal, conflict, and missing-artifact drift", async (t) => {
+  const asyncDir = mkdtempSync(join(tmpdir(), "r10b-recovery-matrix-"));
+  const runId = "r10b-recovery-matrix";
+  const sessionId = "r10b-recovery-session";
+  const terminal = { version: 1, runId, runnerProcessInstanceId: "matrix-runner", state: "observed", observedAt: 1_700_000_000_000, instances: [{ processInstanceId: "matrix-runner", kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 1, signal: null }] };
+  const stopped = [];
+  const broker = new RootBrokerServer({ rootSessionId: sessionId, lifecycleSessionId: sessionId, writeGrant: async () => "/tmp/r10b-no-grant", upstream: { async ping() { return {}; }, async stop(request) { stopped.push(request); }, async dispose() {} } });
+  t.after(async () => { await broker.closeRootSession().catch(() => undefined); rmSync(asyncDir, { recursive: true, force: true }); });
+  for (const [label, status, sidecar] of [
+    ["active", { ...authority({ runId, asyncDir, sessionId }), state: "running", steps: [{ agent: "executor" }], processTerminal: { ...terminal, sessionId, asyncDir, agent: "executor" } }, { ...terminal, sessionId, asyncDir, agent: "executor" }],
+    ["session", { ...authority({ runId, asyncDir, sessionId }), sessionId: "foreign", state: "failed", steps: [{ agent: "executor" }], processTerminal: { ...terminal, sessionId, asyncDir, agent: "executor" } }, { ...terminal, sessionId, asyncDir, agent: "executor" }],
+    ["agent", { runId, sessionId, asyncDir, agent: "reviewer", state: "failed", processTerminal: { ...terminal, sessionId, asyncDir, agent: "executor" } }, { ...terminal, sessionId, asyncDir, agent: "executor" }],
+    ["conflict", { ...authority({ runId, asyncDir, sessionId }), state: "failed", steps: [{ agent: "executor" }], processTerminal: { ...terminal, sessionId, asyncDir, agent: "executor", observedAt: terminal.observedAt + 1 } }, { ...terminal, sessionId, asyncDir, agent: "executor" }],
+    ["terminal-identity-missing", { ...authority({ runId, asyncDir, sessionId }), state: "failed", steps: [{ agent: "executor" }], processTerminal: terminal }, terminal],
+    ["missing", { ...authority({ runId, asyncDir, sessionId }), state: "failed", steps: [{ agent: "executor" }] }, undefined],
+  ]) {
+    writeFileSync(join(asyncDir, "root-broker.goal-binding-authority.v1.json"), JSON.stringify({ version: "root-broker.goal-binding-authority.v1", ticketId: "d".repeat(64), ...authority({ runId, asyncDir, sessionId }) }), { mode: 0o600 }); chmodSync(join(asyncDir, "root-broker.goal-binding-authority.v1.json"), 0o600);
+    writeFileSync(join(asyncDir, "status.json"), JSON.stringify(status), { mode: 0o600 }); chmodSync(join(asyncDir, "status.json"), 0o600);
+    if (sidecar) { writeFileSync(join(asyncDir, "process-terminal.json"), JSON.stringify(sidecar), { mode: 0o600 }); chmodSync(join(asyncDir, "process-terminal.json"), 0o600); } else rmSync(join(asyncDir, "process-terminal.json"), { force: true });
+    assert.deepEqual(await broker.stopGoalOwnedRun(authority({ runId, asyncDir, sessionId })), { state: "attention", code: "OWNED_STOP_RECOVERY_UNAVAILABLE" }, label);
+    assert.equal(broker.ownedRuns.size, 0, `${label} did not register an owner`);
+  }
+  assert.deepEqual(stopped, []);
+});
+
 test("GREEN protection: missing official proof returns attention without terminal fabrication", async (t) => {
   const broker = new RootBrokerServer({ rootSessionId: "r10b-proof-missing", lifecycleSessionId: "r10b-proof-missing", captureProcessBirthIdentity: async () => "r10b-birth", writeGrant: async () => "/tmp/r10b-no-grant", terminalTimeoutMs: 5, artifactPollIntervalMs: 1, upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} } });
   t.after(() => broker.closeRootSession().catch(() => undefined));
   await broker.observeStarted({ runId: "r10b-missing", id: "r10b-missing", agent: "executor", pid: 43211, asyncDir: "/tmp/r10b-missing", sessionId: "r10b-proof-missing" });
-  assert.deepEqual(await broker.stopGoalOwnedRun({ runId: "r10b-missing", asyncDir: "/tmp/r10b-missing", sessionId: "r10b-proof-missing" }), { state: "attention", code: "OWNED_STOP_TIMEOUT" });
+  assert.deepEqual(await broker.stopGoalOwnedRun(authority({ runId: "r10b-missing", asyncDir: "/tmp/r10b-missing", sessionId: "r10b-proof-missing" })), { state: "attention", code: "OWNED_STOP_TIMEOUT" });
   assert.equal(broker.inspectExecutorProof("r10b-missing").terminal, null);
 });

@@ -82,7 +82,14 @@ for (const [streamingBehavior, reason] of [["steer", "interactive_steer"], ["fol
   const projection = projectionFor(cwd), events = readFileSync(join(rootFor(cwd), "goals/harden-runtime/events.jsonl"), "utf8");
   assert.equal(projection.runtimeState, "suspended"); assert.equal(projection.actionOffer, null);
   assert.equal(stops.length, 1); assert.equal(stops[0].runtimeState, "suspended"); assert.equal(stops[0].actionOffer, null);
-  assert.deepEqual(stops[0].request, { runId: task.executorBinding.runId, asyncDir: task.executorBinding.asyncDir, sessionId: "owner" });
+  assert.deepEqual(stops[0].request, {
+    goalId: projection.goalId, taskId: "task-1", attempt: task.attempts,
+    runId: task.executorBinding.runId, asyncDir: task.executorBinding.asyncDir,
+    workspacePath: task.executorBinding.workspacePath, leaseId: task.executorBinding.workspaceLeaseId,
+    sessionId: "owner", baseHead: projection.runtimeBaseHead,
+    headAtDispatch: task.executorBinding.headAtDispatch, executionRevision: projection.executionRevision,
+    contractHash: projection.executionContractHash, agent: "executor",
+  });
   assert.match(events, /"type":"goal.runtime_suspended"/); assert.doesNotMatch(events, new RegExp(raw));
   for (const value of [JSON.stringify(projection.suspension), JSON.stringify(stops[0].request), JSON.stringify(await invoke(api, "goal_status", {}))]) assert.doesNotMatch(value, new RegExp(raw));
 });

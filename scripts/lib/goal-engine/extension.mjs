@@ -37,11 +37,11 @@ import {
   executorBoundEventData,
   prepareExecutorBindingTicket,
 } from "./executor-binding.mjs";
-import { bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, unbindGoalExecutorCoordinatorSession, inspectRootBrokerExecutorProof } from "../subagent-dispatch/root-broker-registry.ts";
+import { bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, unbindGoalExecutorCoordinatorSession, inspectRootBrokerExecutorProof, persistGoalExecutorBindingAuthority } from "../subagent-dispatch/root-broker-registry.ts";
 import { resolveRootSessionId } from "../subagent-dispatch/root-broker-protocol.ts";
 import { parseProcessTerminal } from "../subagent-dispatch/root-broker-protocol.ts";
 import { executorCriteria, validateTaskDefinitions } from "./task-definition.mjs";
-import { buildSuspensionPlan, deriveOwnedExecutorStopRequest } from "./suspension.mjs";
+import { buildSuspensionPlan, deriveOwnedExecutorStopRequest, suspensionClosureStatus } from "./suspension.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.mjs";
 import { createGoalToolRenderers } from "./tool-renderer.mjs";
 import {
@@ -600,6 +600,9 @@ export function createGoalEngineExtension(pi, options = {}) {
   };
   const inspectExecutorWorkspaceFn = options.inspectExecutorWorkspace || inspectExecutorWorkspace;
   const inspectExecutorProofFn = options.inspectExecutorProof || ((runId, rootSessionId) => inspectRootBrokerExecutorProof(pi, runId, rootSessionId));
+  // Lightweight Pi doubles deliberately opt in. Production bindings must have
+  // the Root Broker because it is the sole durable sidecar writer.
+  const allowMissingRootBrokerForTests = options.allowMissingRootBrokerForTests === true;
   const beforePreservedWorkspaceCleanupBarrier = options.beforePreservedWorkspaceCleanupBarrier;
   const inspectOrphanedExecutorWorkspaceBarrier = options.inspectOrphanedExecutorWorkspaceBarrier;
   const betweenOrphanInventoriesBarrier = options.betweenOrphanInventoriesBarrier;
@@ -1053,6 +1056,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           contract,
           contractHash,
           controlCwd: cwd,
+          rootSessionId: resolveRootSessionId(ctx?.sessionManager),
           workspaceLeaseIdForTask(taskId) {
             const task = projection.tasks.get(taskId);
             const lease = resolveLease(task, goalId, taskId, cwd, root);
@@ -1079,20 +1083,36 @@ export function createGoalEngineExtension(pi, options = {}) {
       const data = executorBoundEventData(ticket, binding);
       if (task.executorBinding) {
         const expected = { ...data }; delete expected.taskId;
-        if (isDeepStrictEqual(task.executorBinding, expected)) return task.executorBinding;
-        throw preflightError("EXECUTOR_BINDING_MISMATCH", "attempt already has a different executor binding", "do not replace the bound run; inspect goal_status");
+        if (!isDeepStrictEqual(task.executorBinding, expected)) throw preflightError("EXECUTOR_BINDING_MISMATCH", "attempt already has a different executor binding", "do not replace the bound run; inspect goal_status");
+      } else {
+        const event = makeGoalEvent("task.executor_bound", data, ticket.goalId, projection);
+        try {
+          projection = appendEventFn(root, event, projection.version);
+        } catch (error) {
+          const recovered = loadProjectionFn(root, ticket.goalId);
+          const observed = recovered.tasks.get(ticket.taskId)?.executorBinding;
+          const expected = { ...data }; delete expected.taskId;
+          if (!isDeepStrictEqual(observed, expected)) throw error;
+          projection = recovered;
+        }
       }
-      const event = makeGoalEvent("task.executor_bound", data, ticket.goalId, projection);
-      try {
-        projection = appendEventFn(root, event, projection.version);
-      } catch (error) {
-        const recovered = loadProjectionFn(root, ticket.goalId);
-        const observed = recovered.tasks.get(ticket.taskId)?.executorBinding;
-        const expected = { ...data }; delete expected.taskId;
-        if (isDeepStrictEqual(observed, expected)) return observed;
-        throw error;
+      const persisted = projection.tasks.get(ticket.taskId).executorBinding;
+      // Only the coordinator reaches this internal Broker facade, and only after
+      // task.executor_bound has durably appended.
+      if (typeof ticket.rootSessionId === "string" && ticket.rootSessionId && Number.isSafeInteger(ticket.executionRevision) && ticket.executionRevision > 0) {
+        try { persistGoalExecutorBindingAuthority(pi, {
+          version: "root-broker.goal-binding-authority.v1",
+          ticketId: ticket.ticketId,
+          goalId: ticket.goalId, taskId: ticket.taskId, attempt: ticket.attempt,
+          runId: data.runId, asyncDir: data.asyncDir, workspacePath: ticket.workspacePath,
+          leaseId: ticket.workspaceLeaseId, sessionId: ticket.rootSessionId,
+          baseHead: ticket.headAtDispatch, headAtDispatch: ticket.headAtDispatch,
+          executionRevision: ticket.executionRevision, contractHash: ticket.contractHash, agent: "executor",
+        }, ticket.rootSessionId); } catch (error) {
+          if (!allowMissingRootBrokerForTests || !String(error?.message).includes("Root subagent broker is unavailable")) throw error;
+        }
       }
-      return projection.tasks.get(ticket.taskId).executorBinding;
+      return persisted;
     },
   };
   const recoverUnboundExecutorBinding = (projection, ctx, cwd, root) => {
@@ -1503,10 +1523,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (amendment?.phase === "approved") {
           const closure = projection.suspension;
           let normalizedTarget;
-          const closed = closure?.resourcesQuarantined
-            && closure.terminalProofRefs?.length === closure.affectedRunIds?.length
-            && closure.workspaceClosureProofRefs?.length === closure.affectedTaskIds?.length
-            && closure.resourceClosureProofRefs?.length === closure.affectedRunIds?.length;
+          const closed = suspensionClosureStatus(projection).complete;
           try { normalizedTarget = normalizeRuntimeGoalInit(amendment.targetExecutionContract, runtimeHost.registries); } catch { normalizedTarget = null; }
           const drift = amendment.ownerSessionId !== sessionId || !ownedBySession(projection, sessionId)
             || amendment.oldRevision !== projection.executionRevision
@@ -1703,12 +1720,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           if (!pending.length) persistMetadata(finalIntentType, finalIntent(manifest, sessionId));
           return JSON.stringify({ goalId, status: "APPROVAL_REQUIRED", machineAction: null });
         }
-        const fullSuspensionClosure = projection.suspension?.resourcesQuarantined
-          && projection.suspension.terminalProofRefs?.length === projection.suspension.affectedRunIds?.length
-          && projection.suspension.workspaceClosureProofRefs?.length === projection.suspension.affectedTaskIds?.length
-          && projection.suspension.resourceClosureProofRefs?.length === projection.suspension.affectedRunIds?.length;
-        if (selected && ["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(selected.tool)
-          && !(selected.tool === "goal_amend" && selected.params.operation === "resume_runtime" && (!fullSuspensionClosure || projection.pendingHumanDecision))) {
+        if (selected && ["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(selected.tool)) {
           const machineAction = { tool: selected.tool, params: { goal_id: goalId, ...selected.params } };
           const offer = issueActionOffer(projection, machineAction, sessionId);
           appendEventFn(root, makeGoalEvent("goal.action_offered", offer, goalId, projection), projection.version);
@@ -2247,10 +2259,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       const currentSessionId = sessionIdentity(ctx);
       if (params.operation === "resume_runtime") {
         const closure = projection.suspension;
-        const closed = closure?.resourcesQuarantined
-          && closure.terminalProofRefs?.length === closure.affectedRunIds?.length
-          && closure.workspaceClosureProofRefs?.length === closure.affectedTaskIds?.length
-          && closure.resourceClosureProofRefs?.length === closure.affectedRunIds?.length;
+        const closed = suspensionClosureStatus(projection).complete;
         if (projection.eventSchemaVersion !== "goal-runtime.v1" || projection.runtimeState !== "suspended" || !closed || projection.pendingHumanDecision) {
           throw new Error("resume_runtime requires a fully closed suspended runtime without a pending decision");
         }
@@ -2283,10 +2292,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           if (!await suspendOwnedRuntime(ctx, "execution_amendment")) throw new Error("execution amendment requires a unique active owned runtime");
           projection = loadProjectionFn(root, goalId);
         }
-        const closure = projection.suspension;
-        if (projection.eventSchemaVersion !== "goal-runtime.v1" || projection.runtimeState !== "suspended" || !closure?.resourcesQuarantined
-          || closure.terminalProofRefs?.length !== closure.affectedRunIds?.length || closure.workspaceClosureProofRefs?.length !== closure.affectedTaskIds?.length
-          || closure.resourceClosureProofRefs?.length !== closure.affectedRunIds?.length || (projection.pendingHumanDecision && projection.pendingHumanDecision.phase !== "rejected")) throw new Error("execution amendment requires a fully closed suspended runtime without a pending proposal");
+        if (projection.eventSchemaVersion !== "goal-runtime.v1" || projection.runtimeState !== "suspended" || !suspensionClosureStatus(projection).complete || (projection.pendingHumanDecision && projection.pendingHumanDecision.phase !== "rejected")) throw new Error("execution amendment requires a fully closed suspended runtime without a pending proposal");
         const target = validateExecutionAmendmentTarget(projection, updates);
         const currentFacts = { revision: projection.executionRevision, contractHash: projection.executionContractHash, accepted: [...projection.tasks].filter(([, task]) => task.status === "accepted").map(([id, task]) => [id, canonicalHash(task.acceptance)]) };
         if (!isDeepStrictEqual(currentFacts, initialFacts) || hashRuntimeExecutionContract(target) !== hashRuntimeExecutionContract(initialTarget)) throw new Error("execution amendment source changed during suspension");
@@ -2940,10 +2946,7 @@ export function createGoalEngineExtension(pi, options = {}) {
   const loadAllProjections = (root) => listGoalIdsFn(root).map((goalId) => loadProjectionFn(root, goalId)).filter(Boolean);
   const fullyClosedSuspendedOwnerProjection = (projection, sessionId) => projection.eventSchemaVersion === "goal-runtime.v1"
     && projection.runtimeState === "suspended" && ownedBySession(projection, sessionId)
-    && projection.suspension?.resourcesQuarantined
-    && projection.suspension.terminalProofRefs?.length === projection.suspension.affectedRunIds?.length
-    && projection.suspension.workspaceClosureProofRefs?.length === projection.suspension.affectedTaskIds?.length
-    && projection.suspension.resourceClosureProofRefs?.length === projection.suspension.affectedRunIds?.length;
+    && suspensionClosureStatus(projection).complete;
   const reconcileReloadedRuntimeIntentGates = (ctx) => {
     try {
       const { root } = executionScopeFor(ctx), sessionId = sessionIdentity(ctx);
@@ -2984,49 +2987,69 @@ export function createGoalEngineExtension(pi, options = {}) {
     const { root } = executionScopeFor(ctx);
     let projection = initial;
     if (projection.runtimeState !== "suspended" || projection.suspension?.resourcesQuarantined) return;
-    const suspension = projection.suspension;
-    const terminalRefs = [...(suspension.terminalProofRefs || [])];
-    const workspaceRefs = [...(suspension.workspaceClosureProofRefs || [])];
-    const resourceRefs = [...(suspension.resourceClosureProofRefs || [])];
-    const has = (refs, key, value) => refs.some((ref) => ref[key] === value);
-    for (const taskId of suspension.affectedTaskIds) {
-      const task = projection.tasks.get(taskId), binding = task?.executorBinding;
-      if (!task || !binding) continue;
-      if (!has(terminalRefs, "runId", binding.runId)) {
-        projection = loadProjectionFn(root, projection.goalId);
-        const request = deriveOwnedExecutorStopRequest({ projection, taskId });
-        let response;
-        try { response = await runtimeHost?.stopOwnedRun?.({ runId: request.runId, asyncDir: request.asyncDir, sessionId: request.sessionId }); } catch { response = null; }
-        const proof = ownedProof(response, binding.runId);
-        if (!proof) continue;
-        terminalRefs.push(proof);
-      }
-      if (!has(workspaceRefs, "taskId", taskId)) {
-        projection = loadProjectionFn(root, projection.goalId);
-        const request = { stateRoot: root, goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, leaseId: binding.workspaceLeaseId, workspacePath: task.workspace.path, headAtDispatch: binding.headAtDispatch, baseHead: projection.runtimeBaseHead, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
-        let response; try { response = await runtimeHost?.quarantineWorkspace?.(request); } catch { response = null; }
-        if (exact(response, ["taskId", "attempt", "proofHash", "state", "disposition"]) && response.taskId === taskId && response.attempt === task.attempts && hash(response.proofHash) && response.state === "quarantined" && response.disposition === "preserved") workspaceRefs.push(response);
-      }
-      if (!has(resourceRefs, "ownerId", binding.runId)) {
-        projection = loadProjectionFn(root, projection.goalId);
-        const request = { stateRoot: root, goalId: projection.goalId, ownerKind: "executor", ownerId: binding.runId, taskId, attempt: task.attempts, leaseId: binding.workspaceLeaseId, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
-        let response; try { response = await runtimeHost?.quarantineResource?.(request); } catch { response = null; }
-        if (exact(response, ["ownerId", "proofHash", "state", "debt"]) && response.ownerId === binding.runId && hash(response.proofHash) && response.state === "quarantined" && response.debt === true) resourceRefs.push(response);
-      }
-    }
-    for (const run of projection.observationRuns.values()) {
-      if (!suspension.affectedRunIds.includes(run.runId) || has(terminalRefs, "runId", run.runId) || !["process_bound"].includes(run.phase) || !hash(run.processIdentityHash)) continue;
+    const initialClosure = suspensionClosureStatus(projection);
+    if (!initialClosure.missingTerminalRunIds.length && !initialClosure.missingWorkspaceTaskIds.length && !initialClosure.missingResourceOwnerIds.length) {
+      appendSuspensionClosure(root, projection, {
+        ...structuredClone(projection.suspension),
+        resourcesQuarantined: true,
+        terminalProofRefs: [],
+        workspaceClosureProofRefs: [],
+        resourceClosureProofRefs: [],
+      });
       projection = loadProjectionFn(root, projection.goalId);
+      return;
+    }
+    const has = (refs, key, value) => refs.some((ref) => ref[key] === value);
+    const appendPartial = (field, ref) => {
+      projection = loadProjectionFn(root, projection.goalId);
+      const closure = { ...structuredClone(projection.suspension), terminalProofRefs: [...(projection.suspension.terminalProofRefs || [])], workspaceClosureProofRefs: [...(projection.suspension.workspaceClosureProofRefs || [])], resourceClosureProofRefs: [...(projection.suspension.resourceClosureProofRefs || [])] };
+      if (has(closure[field] || [],  field === "workspaceClosureProofRefs" ? "taskId" : field === "resourceClosureProofRefs" ? "ownerId" : "runId", field === "workspaceClosureProofRefs" ? ref.taskId : field === "resourceClosureProofRefs" ? ref.ownerId : ref.runId)) return;
+      closure[field] = [...(closure[field] || []), ref].sort((a, b) => String(a.runId || a.taskId || a.ownerId).localeCompare(String(b.runId || b.taskId || b.ownerId)));
+      const status = suspensionClosureStatus({ ...projection, suspension: closure });
+      closure.resourcesQuarantined = status.missingTerminalRunIds.length === 0 && status.missingWorkspaceTaskIds.length === 0 && status.missingResourceOwnerIds.length === 0;
+      appendSuspensionClosure(root, projection, closure);
+      projection = loadProjectionFn(root, projection.goalId);
+    };
+    // Terminal facts are always persisted before a workspace can be preserved.
+    for (const taskId of projection.suspension.affectedTaskIds) {
+      projection = loadProjectionFn(root, projection.goalId);
+      const task = projection.tasks.get(taskId), binding = task?.executorBinding;
+      if (!task || !binding || has(projection.suspension.terminalProofRefs || [], "runId", binding.runId)) continue;
+      let response; try { const request = deriveOwnedExecutorStopRequest({ projection, taskId }); response = await runtimeHost?.stopOwnedRun?.(request); } catch { response = null; }
+      const proof = ownedProof(response, binding.runId); if (proof) appendPartial("terminalProofRefs", proof);
+    }
+    // Managed observations have no workspace receipt. Their typed stop facade
+    // supplies the inseparable terminal/resource receipts, which are persisted
+    // before executor workspace preservation is considered.
+    for (const run of projection.observationRuns.values()) {
+      projection = loadProjectionFn(root, projection.goalId);
+      if (!projection.suspension.affectedRunIds.includes(run.runId) || has(projection.suspension.terminalProofRefs || [], "runId", run.runId) || run.phase !== "process_bound" || !hash(run.processIdentityHash)) continue;
       const request = { stateRoot: root, goalId: projection.goalId, runId: run.runId, conditionId: run.conditionId, allocationId: run.allocationId, processIdentityHash: run.processIdentityHash, executionRevision: projection.executionRevision, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead };
       let response; try { response = await runtimeHost?.stopManagedValidation?.(request); } catch { response = null; }
       if (exact(response, ["state", "terminalProofHash", "resourceProofHash", "resourceState", "debt"]) && response.state === "observed" && hash(response.terminalProofHash) && hash(response.resourceProofHash) && response.resourceState === "quarantined" && response.debt === true) {
-        terminalRefs.push({ runId: run.runId, proofHash: response.terminalProofHash, state: "observed" });
-        resourceRefs.push({ ownerId: run.runId, proofHash: response.resourceProofHash, state: "quarantined", debt: true });
+        appendPartial("terminalProofRefs", { runId: run.runId, proofHash: response.terminalProofHash, state: "observed" });
+        appendPartial("resourceClosureProofRefs", { ownerId: run.runId, proofHash: response.resourceProofHash, state: "quarantined", debt: true });
       }
     }
-    const closure = { ...suspension, terminalProofRefs: terminalRefs.sort((a, b) => a.runId.localeCompare(b.runId)), workspaceClosureProofRefs: workspaceRefs.sort((a, b) => a.taskId.localeCompare(b.taskId)), resourceClosureProofRefs: resourceRefs.sort((a, b) => a.ownerId.localeCompare(b.ownerId)) };
-    const complete = closure.terminalProofRefs.length === closure.affectedRunIds.length && closure.workspaceClosureProofRefs.length === closure.affectedTaskIds.length && closure.resourceClosureProofRefs.length === closure.affectedRunIds.length;
-    if (complete && (!suspension.resourcesQuarantined || terminalRefs.length !== (suspension.terminalProofRefs || []).length || workspaceRefs.length !== (suspension.workspaceClosureProofRefs || []).length || resourceRefs.length !== (suspension.resourceClosureProofRefs || []).length)) appendSuspensionClosure(root, projection, { ...closure, resourcesQuarantined: complete });
+    if (suspensionClosureStatus(projection).missingTerminalRunIds.length) return;
+    // A durable terminal closure authorizes workspace preservation, never vice versa.
+    for (const taskId of projection.suspension.affectedTaskIds) {
+      projection = loadProjectionFn(root, projection.goalId);
+      const task = projection.tasks.get(taskId), binding = task?.executorBinding;
+      if (!task || !binding || has(projection.suspension.workspaceClosureProofRefs || [], "taskId", taskId)) continue;
+      const request = { stateRoot: root, goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, leaseId: binding.workspaceLeaseId, workspacePath: task.workspace.path, headAtDispatch: binding.headAtDispatch, baseHead: projection.runtimeBaseHead, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
+      let response; try { response = await runtimeHost?.quarantineWorkspace?.(request); } catch { response = null; }
+      if (exact(response, ["taskId", "attempt", "proofHash", "state", "disposition"]) && response.taskId === taskId && response.attempt === task.attempts && hash(response.proofHash) && response.state === "quarantined" && response.disposition === "preserved") appendPartial("workspaceClosureProofRefs", response);
+    }
+    if (suspensionClosureStatus(projection).missingWorkspaceTaskIds.length) return;
+    for (const taskId of projection.suspension.affectedTaskIds) {
+      projection = loadProjectionFn(root, projection.goalId);
+      const task = projection.tasks.get(taskId), binding = task?.executorBinding;
+      if (!task || !binding || has(projection.suspension.resourceClosureProofRefs || [], "ownerId", binding.runId)) continue;
+      const request = { stateRoot: root, goalId: projection.goalId, ownerKind: "executor", ownerId: binding.runId, taskId, attempt: task.attempts, leaseId: binding.workspaceLeaseId, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx) };
+      let response; try { response = await runtimeHost?.quarantineResource?.(request); } catch { response = null; }
+      if (exact(response, ["ownerId", "proofHash", "state", "debt"]) && response.ownerId === binding.runId && hash(response.proofHash) && response.state === "quarantined" && response.debt === true) appendPartial("resourceClosureProofRefs", response);
+    }
   };
   const suspendOwnedRuntime = async (ctx, reason) => {
     const { root } = executionScopeFor(ctx); const sessionId = sessionIdentity(ctx);

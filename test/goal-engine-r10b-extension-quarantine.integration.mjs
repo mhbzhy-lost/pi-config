@@ -61,8 +61,8 @@ function host(cwd, calls, { stop = "observed", managed = "observed" } = {}) {
 }
 
 async function invoke(api, name, input) { return (await api.tools.find((tool) => tool.name === name).execute("call", input, undefined, undefined, { cwd: api.cwd, sessionManager: api.sessionManager })).details.value; }
-async function ready(options) {
-  const cwd = repo(), calls = [], api = pi(cwd), runtimeHost = host(cwd, calls, options); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost });
+async function ready({ hostOptions, extensionOptions } = {}) {
+  const cwd = repo(), calls = [], api = pi(cwd), runtimeHost = host(cwd, calls, hostOptions); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost, ...extensionOptions });
   await invoke(api, "goal_init", runtimeInit()); await invoke(api, "goal_status", {}); await api.handlers.get("input")({ type: "input", text: "approve", source: "interactive" }, { cwd, sessionManager: api.sessionManager });
   for (let i = 0; i < 10 && projectionFor(cwd).runtimeState !== "active"; i++) await invoke(api, "goal_status", {});
   assert.equal(projectionFor(cwd).runtimeState, "active");
@@ -74,9 +74,9 @@ async function ready(options) {
 }
 
 async function steer(api) { await api.handlers.get("input")({ type: "input", text: "private steer", source: "interactive", streamingBehavior: "steer" }, { cwd: api.cwd, sessionManager: api.sessionManager }); }
-async function reload(f) {
+async function reload(f, { freshHost = false } = {}) {
   const api = pi(f.cwd, structuredClone(f.api.entries));
-  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: f.runtimeHost });
+  createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: freshHost ? host(f.cwd, f.calls) : f.runtimeHost });
   await api.handlers.get("session_start")({}, { cwd: api.cwd, sessionManager: api.sessionManager });
   await invoke(api, "goal_status", {});
   return api;
@@ -86,7 +86,7 @@ test("steer durably closes an executor in stop-proof, preserved-workspace, resou
   const f = await ready(); await steer(f.api);
   const p = projectionFor(f.cwd), proof = officialProof(f.runId);
   assert.deepEqual(f.calls.map(({ name }) => name), ["stop", "workspace", "resource"]);
-  assert.deepEqual(f.calls[0].request, { runId: f.runId, asyncDir: join(tmpdir(), "executor-async"), sessionId: f.api.sessionId });
+  assert.deepEqual(f.calls[0].request, { goalId: p.goalId, taskId: "task-1", attempt: f.attempt, runId: f.runId, asyncDir: join(tmpdir(), "executor-async"), workspacePath: f.workspacePath, leaseId: f.leaseId, sessionId: f.api.sessionId, baseHead: f.head, headAtDispatch: f.head, executionRevision: 1, contractHash: p.executionContractHash, agent: "executor" });
   assert.deepEqual(f.calls[1].request, { stateRoot: rootFor(f.cwd), goalId: p.goalId, taskId: "task-1", attempt: f.attempt, runId: f.runId, leaseId: f.leaseId, workspacePath: f.workspacePath, headAtDispatch: f.head, baseHead: f.head, executionRevision: 1, contractHash: p.executionContractHash, sessionId: f.api.sessionId });
   assert.deepEqual(f.calls[2].request, { stateRoot: rootFor(f.cwd), goalId: p.goalId, ownerKind: "executor", ownerId: f.runId, taskId: "task-1", attempt: f.attempt, leaseId: f.leaseId, executionRevision: 1, contractHash: p.executionContractHash, sessionId: f.api.sessionId });
   assert.equal(p.suspension.resourcesQuarantined, true);
@@ -94,6 +94,34 @@ test("steer durably closes an executor in stop-proof, preserved-workspace, resou
   assert.deepEqual(p.suspension.workspaceClosureProofRefs, [{ taskId: "task-1", attempt: f.attempt, proofHash: hash("workspace"), state: "quarantined", disposition: "preserved" }]);
   assert.deepEqual(p.suspension.resourceClosureProofRefs, [{ ownerId: f.runId, proofHash: hash("resource"), state: "quarantined", debt: true }]);
   await reload(f); assert.equal(f.calls.length, 3, "fresh Host reload must not duplicate closed facades");
+});
+
+test("closure crash matrix persists each stage before retrying its next side effect", { concurrency: false }, async () => {
+  for (const stage of ["terminal", "workspace", "resource"]) for (const mode of ["pre", "durable"]) {
+    let injected = false;
+    const f = await ready({ extensionOptions: { appendEvent(root, event, version) {
+      const closure = event.type === "goal.runtime_suspended" && event.data;
+      const isStage = closure && (stage === "terminal" ? closure.terminalProofRefs?.length === 1 && !closure.workspaceClosureProofRefs?.length : stage === "workspace" ? closure.workspaceClosureProofRefs?.length === 1 && !closure.resourceClosureProofRefs?.length : closure.resourceClosureProofRefs?.length === 1);
+      if (!injected && isStage) {
+        injected = true;
+        if (mode === "pre") throw Error(`${stage}-pre-append`);
+        const result = appendEvent(root, event, version); throw Error(`${stage}-durable-then-throw`);
+      }
+      return appendEvent(root, event, version);
+    } } });
+    if (mode === "pre") await assert.rejects(steer(f.api), new RegExp(`${stage}-pre-append`)); else await steer(f.api);
+    const afterFailure = projectionFor(f.cwd);
+    const refs = [afterFailure.suspension.terminalProofRefs?.length || 0, afterFailure.suspension.workspaceClosureProofRefs?.length || 0, afterFailure.suspension.resourceClosureProofRefs?.length || 0];
+    const index = ["terminal", "workspace", "resource"].indexOf(stage);
+    assert.equal(refs[index], mode === "durable" ? 1 : 0, `${stage}/${mode} durable projection`);
+    await reload(f, { freshHost: true });
+    const closed = projectionFor(f.cwd);
+    const stageFacade = { terminal: "stop", workspace: "workspace", resource: "resource" }[stage];
+    const expectedCalls = ["stop", "workspace", "resource"].flatMap((name) => mode === "pre" && name === stageFacade ? [name, name] : [name]);
+    assert.deepEqual(f.calls.map(({ name }) => name), expectedCalls, `${stage}/${mode} retries only the side effect whose ref was not durable`);
+    assert.deepEqual([closed.suspension.terminalProofRefs.length, closed.suspension.workspaceClosureProofRefs.length, closed.suspension.resourceClosureProofRefs.length], [1, 1, 1]);
+    assert.equal(closed.suspension.resourcesQuarantined, true);
+  }
 });
 
 test("wrong or malformed observed proof leaves the executor suspended for attention", { concurrency: false }, async () => {
@@ -122,8 +150,8 @@ test("steer includes a process-bound managed Observation and stops it through th
   runtimeEvent(f.cwd, "condition.observation_process_bound", { runId: observationRunId, conditionId: "condition-1", processIdentityHash: hash("process") });
   await steer(f.api); const suspended = projectionFor(f.cwd);
   assert.deepEqual(suspended.suspension.affectedRunIds, [f.runId, observationRunId].sort());
-  assert.deepEqual(f.calls.map(({ name }) => name), ["stop", "workspace", "resource", "managed-stop"]);
-  assert.deepEqual(f.calls.at(-1).request, { stateRoot: rootFor(f.cwd), goalId: suspended.goalId, runId: observationRunId, conditionId: "condition-1", allocationId, processIdentityHash: hash("process"), executionRevision: 1, executionContractHash: suspended.executionContractHash, baseHead: f.head });
+  assert.deepEqual(f.calls.map(({ name }) => name), ["stop", "managed-stop", "workspace", "resource"]);
+  assert.deepEqual(f.calls.find(({ name }) => name === "managed-stop").request, { stateRoot: rootFor(f.cwd), goalId: suspended.goalId, runId: observationRunId, conditionId: "condition-1", allocationId, processIdentityHash: hash("process"), executionRevision: 1, executionContractHash: suspended.executionContractHash, baseHead: f.head });
 });
 
 test("lease-only managed Observation is retained for attention and is never killed", { concurrency: false }, async () => {

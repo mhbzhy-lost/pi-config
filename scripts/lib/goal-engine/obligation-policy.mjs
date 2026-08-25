@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { suspensionClosureStatus } from "./suspension.mjs";
 
 const ACTION_FIELDS = ["kind", "id", "priority", "tool", "params", "reason"];
 const ACTIVE_RUN_PHASES = new Set(["requested", "lease_allocated", "process_bound"]);
@@ -96,7 +97,15 @@ export function actionableFrontier(input = {}) {
   if (world.safe !== true) note(blocking, "world", "snapshot", "WORLD_SNAPSHOT_UNSAFE");
   if (projection.pendingHumanDecision) note(blocking, "decision", "pending", "PENDING_HUMAN_DECISION");
   const suspension = projection.suspension;
-  if (projection.runtimeState === "suspended" || suspension) action(actions, "suspension-recovery", suspension?.suspensionId ?? "runtime", 1, "goal_amend", { operation: "resume_runtime" }, "Suspension requires reconciliation");
+  const suspensionClosure = suspension ? suspensionClosureStatus(projection) : null;
+  if (projection.runtimeState === "suspended" || suspension) {
+    if (suspensionClosure?.complete && !projection.pendingHumanDecision) action(actions, "suspension-recovery", suspension?.suspensionId ?? "runtime", 1, "goal_amend", { operation: "resume_runtime" }, "Suspension closure is complete");
+    else {
+      if (suspensionClosure?.missingTerminalRunIds.length) note(blocking, "suspension", "terminal", "SUSPENSION_TERMINAL_PROOF_PENDING");
+      if (suspensionClosure?.missingWorkspaceTaskIds.length) note(blocking, "suspension", "workspace", "SUSPENSION_WORKSPACE_CLOSURE_PENDING");
+      if (suspensionClosure?.missingResourceOwnerIds.length) note(blocking, "suspension", "resource", "SUSPENSION_RESOURCE_CLOSURE_PENDING");
+    }
+  }
   const activeWorldRuns = Array.isArray(world.activeRuns) ? world.activeRuns : null, conflictedRuns = new Set();
   if (!activeWorldRuns) note(attention, "world", "active-runs", "ACTIVE_RUN_AUTHORITY_UNAVAILABLE");
   else {

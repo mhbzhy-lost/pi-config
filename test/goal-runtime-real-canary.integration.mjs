@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
+import { bindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { createProductionGoalRuntimeHost } from "../scripts/lib/goal-engine/production-runtime-host.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -142,5 +145,44 @@ test("真实 Pi production Host PASS observation completes and finalizes without
     if (inheritedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = inheritedAgentDir;
     if (inheritedGoalDir === undefined) delete process.env.PI_CODING_GOAL_DIR; else process.env.PI_CODING_GOAL_DIR = inheritedGoalDir;
     rmSync(agentDir, { recursive: true, force: true }); rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("真实 production Host 在 Root Broker restart 后恢复 exact failed terminal proof", async () => {
+  const asyncDir = mkdtempSync(join(tmpdir(), "goal-runtime-real-restart-"));
+  const runId = "real-canary-failed-executor";
+  const sessionId = "real-canary-root-session";
+  const terminal = {
+    version: 1, runId, runnerProcessInstanceId: "real-canary-runner", state: "observed", observedAt: 1_700_000_000_000,
+    instances: [{ processInstanceId: "real-canary-runner", kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 1, signal: null }],
+  };
+  const upstream = { async ping() { return {}; }, async stop() { throw Error("terminal recovery must not stop a process"); }, async dispose() {} };
+  const pi = { events: {} };
+  const brokerA = new RootBrokerServer({ rootSessionId: sessionId, lifecycleSessionId: sessionId, captureProcessBirthIdentity: async () => "real-canary-birth", writeGrant: async () => "/tmp/real-canary-grant", upstream });
+  try {
+    const authority = { goalId: "real-canary-goal", taskId: "real-canary-task", attempt: 1, runId, asyncDir, workspacePath: "/tmp/real-canary-workspace", leaseId: "c".repeat(64), sessionId, baseHead: "a".repeat(40), headAtDispatch: "a".repeat(40), executionRevision: 1, contractHash: "b".repeat(64), agent: "executor" };
+    const terminalWithIdentity = { ...terminal, sessionId, asyncDir, agent: "executor" };
+    writeFileSync(join(asyncDir, "status.json"), JSON.stringify({ ...authority, state: "failed", steps: [{ agent: "executor" }], processTerminal: terminalWithIdentity }));
+    writeFileSync(join(asyncDir, "process-terminal.json"), JSON.stringify(terminalWithIdentity));
+    await brokerA.observeStarted({ runId, id: runId, agent: "executor", pid: 43123, asyncDir, sessionId });
+    brokerA.observeTerminal(terminal);
+    await brokerA.closeRootSession();
+
+    const brokerB = new RootBrokerServer({ rootSessionId: sessionId, lifecycleSessionId: sessionId, writeGrant: async () => "/tmp/real-canary-grant", upstream });
+    try {
+      bindRootBroker(pi, brokerB);
+      const host = createProductionGoalRuntimeHost(pi);
+      const recovered = await host.stopOwnedRun(authority);
+      assert.equal(brokerB.ownedRuns.has(runId), false, "restart recovery must not use old Broker memory");
+      assert.equal(recovered.state, "observed");
+      assert.equal(recovered.proof.runId, runId);
+      assert.equal(recovered.proof.instances[0].exitCode, 1, "failed proof remains failed terminal evidence");
+    } finally {
+      unbindRootBroker(pi, brokerB);
+      await brokerB.closeRootSession();
+    }
+  } finally {
+    await brokerA.closeRootSession().catch(() => undefined);
+    rmSync(asyncDir, { recursive: true, force: true });
   }
 });

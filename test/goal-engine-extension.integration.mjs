@@ -1001,7 +1001,9 @@ test("goal_init writes strict planned.v1 records and rejects commands atomically
 test("goal_dispatch persists a criteria-only runtime task without leaking its managed workspace", async () => {
   const cwd = tmpCwd();
   const pi = createMockPi(cwd);
+  // This unit double intentionally does not install the production Root Broker.
   createGoalEngineExtension(pi, {
+    allowMissingRootBrokerForTests: true,
     runtimeHost: {
       registries: runtimeRegistries,
       captureCurrentWorld() {

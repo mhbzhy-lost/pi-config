@@ -212,12 +212,23 @@ export function loadExecutorWorkspaceLease({ goalId, taskId, attempt, stateRoot 
     throw new Error(`Executor workspace lease is invalid: ${goalId}/${taskId}/${attempt}`);
   }
 
+  let canonicalWorkspacePath;
+  try {
+    // The managed lifecycle persists a canonical worktree path. Compare the
+    // lookup path at the same filesystem identity boundary.
+    canonicalWorkspacePath = realpathSync(workspacePath);
+  } catch (error) {
+    // Preserve the physical-workspace error contract while retaining the
+    // realpath failure as its cause; a missing/unresolvable path is never an
+    // accepted alias.
+    throw new Error(`Executor workspace is missing: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
   const expected = {
     goalId,
     taskId,
     attempt,
     stateRoot: path.resolve(stateRoot),
-    path: workspacePath,
+    path: canonicalWorkspacePath,
   };
   for (const [field, value] of Object.entries(expected)) {
     if (lease?.[field] !== value) {
@@ -794,6 +805,30 @@ function assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean) 
   }
 }
 
+function canonical(value) {
+  return Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
+}
+
+function preservationReceipt(lease, receipt, expectedExecutorHead) {
+  // This intentionally contains a CAS of the owner capability, never the
+  // capability itself.  The hash is derived from the persisted manifest
+  // receipt so it remains verifiable after a Host restart.
+  const material = {
+    ownerCas: createHash("sha256").update(lease.ownerToken).digest("hex"),
+    workspacePath: path.resolve(lease.path),
+    executorHead: expectedExecutorHead,
+    disposition: "preserved",
+    manifest: {
+      id: receipt.id, originRoot: receipt.originRoot, path: receipt.path,
+      branchRef: receipt.branchRef, baseCommit: receipt.baseCommit,
+      headCommit: receipt.headCommit, state: receipt.state,
+      disposition: receipt.disposition,
+    },
+  };
+  return { ...material, receiptHash: createHash("sha256").update(JSON.stringify(canonical(material))).digest("hex") };
+}
+
 function assertManagedReceiptFence(lease, id, receipt, expectedExecutorHead) {
   const expected = {
     id,
@@ -831,7 +866,7 @@ export function releaseExecutorWorkspace(lease, { disposition, expectedExecutorH
     if (disposition === "preserved") {
       const receipt = preserveManagedWorktree({ originRoot: lease.originRoot, id, ownerToken: lease.ownerToken, reason: "goal workspace preserved" });
       assertManagedReceiptFence(lease, id, receipt, expectedExecutorHead);
-      return { released: false, preserved: true, disposition };
+      return { released: false, preserved: true, disposition, preservationReceipt: preservationReceipt(lease, receipt, expectedExecutorHead) };
     }
     if (requireClean !== undefined || beforeDestructiveCleanupFn !== undefined) {
       const fencedLease = assertPreservedCleanupFence(lease, expectedExecutorHead, requireClean);

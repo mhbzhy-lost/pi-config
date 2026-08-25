@@ -10,12 +10,15 @@ import { assertExecutorSettlementProof } from "../scripts/lib/goal-engine/execut
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
 import { appendEvent as appendGoalEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
 import { createTypedSubagentExtension } from "../scripts/lib/subagent-dispatch/extension.ts";
-import { bindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { bindRootBroker, stopRootBrokerGoalOwnedRun, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
 import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 import { buildObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
+import { createProductionGoalRuntimeHost } from "../scripts/lib/goal-engine/production-runtime-host.mjs";
+import { deriveOwnedExecutorStopRequest } from "../scripts/lib/goal-engine/suspension.mjs";
+import { inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
 
 const GOAL_ID = "binding-goal";
 const CONTRACT_HASH = "a".repeat(64);
@@ -404,7 +407,9 @@ function runtimeHost(cwd, calls = null) {
 }
 
 async function initializeActiveRuntimeDispatch(fixture, { coordinatorCriteria = false, runtimeCalls = null } = {}) {
-  createGoalEngineExtension(fixture.pi, { goalStateEnv: {}, runtimeHost: runtimeHost(fixture.cwd, runtimeCalls), inspectExecutorProof(runId) { return officialProof(runId, `/tmp/${runId}`); } });
+  // This lightweight Host deliberately has no Root Broker; production tests
+  // bind one and therefore exercise the default fail-closed behavior.
+  createGoalEngineExtension(fixture.pi, { allowMissingRootBrokerForTests: true, goalStateEnv: {}, runtimeHost: runtimeHost(fixture.cwd, runtimeCalls), inspectExecutorProof(runId) { return officialProof(runId, `/tmp/${runId}`); } });
   const base = runtimeInit();
   const task = structuredClone(base.execution.tasks[0]);
   if (coordinatorCriteria) task.acceptance.criteria.push(
@@ -949,4 +954,86 @@ test("Goal dispatch followed by the exact coding spawn persists the returned run
   assert.deepEqual(projection.tasks.get("task-one").executorBinding, expectedBinding);
   const status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
   assert.deepEqual(status.tasks["task-one"].executorBinding, expectedBinding);
+});
+
+test("lower-level fixture: fresh Broker recovery reads a hand-authored failed terminal artifact", async (t) => {
+  const fixture = integratedFixture(t);
+  const asyncDir = join(fixture.cwd, ".executor-failed-terminal");
+  const runId = "run-public-failed-recovery";
+  const { goalId, dispatched } = await initializeActiveRuntimeDispatch(fixture);
+
+  // This fixture covers only recovery parsing. Real runtime artifact ownership
+  // is covered by the top-level RPC canary rather than this hand-authored data.
+  await bindIntegratedRun(fixture, dispatched, { runId, asyncDir });
+  let projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
+  const authority = deriveOwnedExecutorStopRequest({ projection, taskId: "task-1" });
+  assert.equal(projection.tasks.get("task-1").executorBinding.runId, runId);
+  const terminal = {
+    version: 1, runId, sessionId: authority.sessionId, asyncDir, agent: "executor",
+    runnerProcessInstanceId: `${runId}-runner`, state: "observed", observedAt: 1_700_000_000_000,
+    instances: [{ processInstanceId: `${runId}-runner`, kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 1, signal: null }],
+  };
+  mkdirSync(asyncDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(asyncDir, "status.json"), JSON.stringify({ ...authority, state: "failed", steps: [{ agent: "executor" }], processTerminal: terminal }), { mode: 0o600 });
+  writeFileSync(join(asyncDir, "process-terminal.json"), JSON.stringify(terminal), { mode: 0o600 });
+
+  // Broker A observed the official failed terminal, then its in-memory owner
+  // state is discarded. Broker B below is deliberately fresh.
+  const upstreamStops = [];
+  const brokerA = new RootBrokerServer({
+    rootSessionId: authority.sessionId, lifecycleSessionId: authority.sessionId,
+    captureProcessBirthIdentity: async () => "public-recovery-birth",
+    writeGrant: async () => join(asyncDir, "grant"),
+    upstream: { async ping() { return {}; }, async stop(request) { upstreamStops.push(request); }, async dispose() {} },
+  });
+  await brokerA.observeStarted({ runId, id: runId, agent: "executor", pid: 43210, asyncDir, sessionId: authority.sessionId });
+  brokerA.observeTerminal(terminal);
+  assert.equal(brokerA.inspectExecutorProof(runId).terminal.outcome, "failed");
+  await brokerA.closeRootSession();
+
+  // Public followUp creates the durable suspension while the initial fixture
+  // Host intentionally cannot close it. This proves the later closure is not
+  // a hand-written suspension projection.
+  await fixture.handlers.get("input")({ type: "input", source: "interactive", text: "follow up", streamingBehavior: "followUp" }, fixture.context);
+  projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
+  assert.equal(projection.runtimeState, "suspended");
+  assert.equal(projection.suspension.resourcesQuarantined, false);
+
+  const brokerB = new RootBrokerServer({
+    rootSessionId: authority.sessionId, lifecycleSessionId: authority.sessionId,
+    writeGrant: async () => join(asyncDir, "grant-fresh"),
+    upstream: { async ping() { return {}; }, async stop(request) { upstreamStops.push(request); }, async dispose() {} },
+  });
+  bindRootBroker(fixture.pi, brokerB);
+  t.after(async () => { unbindRootBroker(fixture.pi, brokerB); await brokerB.closeRootSession(); });
+  const seenAuthorities = [];
+  let quarantineFailure = null;
+  const freshHost = createProductionGoalRuntimeHost(fixture.pi, {
+    registries: runtimeRegistries,
+    adapterRegistry: {},
+    loadExecutorWorkspaceLease,
+    inspectExecutorWorkspace,
+    releaseExecutorWorkspace(...args) { try { return releaseExecutorWorkspace(...args); } catch (error) { quarantineFailure = error; throw error; } },
+    stopRootBrokerGoalOwnedRun(pi, binding) {
+      seenAuthorities.push(binding);
+      return stopRootBrokerGoalOwnedRun(pi, binding);
+    },
+  });
+  const quarantineCalls = [];
+  const observedFreshHost = { ...freshHost, captureCurrentWorld: runtimeHost(fixture.cwd).captureCurrentWorld, quarantineWorkspace: async (request) => { try { const result = await freshHost.quarantineWorkspace(request); quarantineCalls.push({ request, result }); return result; } catch (error) { quarantineCalls.push({ request, error: error.message }); throw error; } } };
+  // Reconstructing the Extension keeps the same Store and durable root session.
+  createGoalEngineExtension(fixture.pi, { goalStateEnv: {}, runtimeHost: observedFreshHost });
+  const freshStatusTool = fixture.tools.filter((tool) => tool.name === "goal_status").at(-1);
+  const statusResult = await freshStatusTool.execute("fresh-recovery-status", { goal_id: goalId }, new AbortController().signal, undefined, fixture.context);
+  projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
+  const resumeResult = await freshStatusTool.execute("fresh-recovery-resume-offer", { goal_id: goalId }, new AbortController().signal, undefined, fixture.context);
+  const status = JSON.parse(resumeResult.details.value);
+
+  assert.ok(seenAuthorities.length >= 1, "fresh status invokes Store-derived authority");
+  assert.ok(seenAuthorities.every((value) => JSON.stringify(value) === JSON.stringify(authority)), "Extension forwards complete Store-derived authority unchanged");
+  assert.equal(brokerB.ownedRuns.has(runId), false, "fresh recovery must not recreate an owner");
+  assert.deepEqual(upstreamStops, [], "failed terminal recovery never stops a process");
+  assert.equal(projection.suspension.resourcesQuarantined, false, `${JSON.stringify(projection.suspension)}; quarantine=${quarantineFailure?.message}; calls=${JSON.stringify(quarantineCalls)}`);
+  assert.deepEqual(projection.suspension.terminalProofRefs ?? [], [], "a hand-authored runtime artifact without a durable sidecar remains attention");
+  assert.notEqual(status.machineAction?.params?.operation, "resume_runtime", JSON.stringify(status));
 });

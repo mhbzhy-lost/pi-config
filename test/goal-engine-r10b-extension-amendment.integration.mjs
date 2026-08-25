@@ -112,12 +112,15 @@ test("R10B idle interactive and rpc input leave the active owner unchanged witho
 });
 
 // RED: target contracts, hashes, revision, session and proposal IDs are Host-derived and typed amendment first closes active runtime.
-test("R10B typed goal_amend durably suspends, closes, then exposes strict Host-derived propose_execution_change", async () => {
+test("R10B zero-affected execution amendment durably persists an exact empty full closure before proposing", async () => {
   const { cwd, api } = await activeRuntime();
   const valid = { goal_id: "harden-runtime", operation: "propose_execution_change", reason: "update acceptance", changes: { update_tasks: [{ id: "task-1", description: "Amended by Host" }] } };
   await invoke(api, "goal_amend", valid);
   const projection = projectionFor(cwd), pending = projection.pendingHumanDecision;
+  const suspensions = events(cwd).trim().split("\n").map(JSON.parse).filter(({ type }) => type === "goal.runtime_suspended");
   assert.equal(projection.runtimeState, "suspended"); assert.equal(projection.suspension.reason, "execution_amendment");
+  assert.equal(suspensions.length, 2, "initial suspension is followed by one durable closure");
+  assert.deepEqual(suspensions[1].data, { ...suspensions[0].data, resourcesQuarantined: true, terminalProofRefs: [], workspaceClosureProofRefs: [], resourceClosureProofRefs: [] }, "zero affected resources use an exact empty full closure, not fabricated proof");
   assert.equal(projection.suspension.resourcesQuarantined, true, "proposal follows complete owned closure");
   assert.equal(projection.actionOffer, null, "suspension revokes any action offer before proposal");
   assert.equal(pending.phase, "proposed"); assert.equal(pending.targetExecutionContract.execution.tasks[0].description, "Amended by Host");

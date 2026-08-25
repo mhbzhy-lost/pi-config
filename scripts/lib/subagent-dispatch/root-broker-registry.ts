@@ -145,8 +145,13 @@ export function requireRootBroker(pi: object, rootSessionId?: string): RootBroke
   return broker;
 }
 
-export async function stopRootBrokerGoalOwnedRun(pi: object, binding: { runId: string; asyncDir: string; sessionId: string }, rootSessionId?: string) {
+export async function stopRootBrokerGoalOwnedRun(pi: object, binding: { goalId: string; taskId: string; attempt: number; runId: string; asyncDir: string; workspacePath: string; leaseId: string; sessionId: string; baseHead: string; headAtDispatch: string; executionRevision: number; contractHash: string; agent: "executor" }, rootSessionId?: string) {
   return requireRootBroker(pi, rootSessionId).stopGoalOwnedRun(binding);
+}
+
+// This is intentionally an internal coordinator facade, not a dispatch tool.
+export function persistGoalExecutorBindingAuthority(pi: object, authority: any, rootSessionId?: string): void {
+  requireRootBroker(pi, rootSessionId).persistGoalBindingAuthority(authority);
 }
 
 export function inspectRootBrokerExecutorProof(pi: object, runId: string, rootSessionId?: string) {

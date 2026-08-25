@@ -75,8 +75,8 @@ for (const [name, projection] of [["draft", drafted()], ["awaiting approval", aw
   assert.throws(() => applyEvent(projection, runtimeEvent("goal.runtime_suspended", suspensionData(), 9)), /suspension|active/i);
 });
 
-// Break caught: suspended policy currently leaks business actions and invents a ninth goal_resume tool.
-test("suspended frontier retains only settlement, observation/workspace safety debt, and exact-eight resume amendment", () => {
+// Initial suspension closure data is a test-only incomplete projection (AGENTS category 2), so it must not preserve the old resume behavior.
+test("suspended frontier exposes incomplete closure blockers and only resumes after full closure", () => {
   let projection = active();
   projection = applyAll(projection, observationEvents(projection, { runId: "terminal-run", evidenceId: "f".repeat(64), cycle: 1, start: 11 }));
   projection = applyAll(projection, observationEvents(projection, { runId: "recorded-run", evidenceId: "1".repeat(64), cycle: 2, start: 15, recorded: true }));
@@ -91,7 +91,6 @@ test("suspended frontier retains only settlement, observation/workspace safety d
   ]);
   const frontier = actionableFrontier({ projection, worldSnapshot: world(), taskActions, observationInventory: { claims: new Map() } });
   assert.deepEqual(frontier.actions.map(({ tool, params }) => [tool, params]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))), [
-    ["goal_amend", { operation: "resume_runtime" }],
     ["goal_integrate", { action: "discard", task_id: "discard" }],
     ["goal_integrate", { action: "preserve", task_id: "preserve" }],
     ["goal_settle", { task_id: "task-1" }],
@@ -100,5 +99,17 @@ test("suspended frontier retains only settlement, observation/workspace safety d
     ["release_observation", { run_id: "recorded-run" }],
   ].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
   assert.equal(frontier.actions.some(({ tool, params }) => tool === "goal_integrate" && params.action === "integrate"), false);
-  assert.equal(frontier.actions.some(({ tool }) => ["goal_accept", "goal_dispatch", "goal_finalize", "goal_resume"].includes(tool)), false);
+  assert.equal(frontier.actions.some(({ tool }) => ["goal_accept", "goal_dispatch", "goal_finalize", "goal_resume", "goal_amend"].includes(tool)), false);
+  assert.deepEqual(frontier.blocking.map(item => item.code).filter(code => code.startsWith("SUSPENSION_")).sort(), ["SUSPENSION_RESOURCE_CLOSURE_PENDING", "SUSPENSION_TERMINAL_PROOF_PENDING", "SUSPENSION_WORKSPACE_CLOSURE_PENDING"]);
+
+  const closure = {
+    ...suspensionData(),
+    resourcesQuarantined: true,
+    terminalProofRefs: [{ runId: "run-1", proofHash: "a".repeat(64), state: "observed" }],
+    workspaceClosureProofRefs: [{ taskId: "task-1", attempt: projection.tasks.get("task-1").attempts, proofHash: "b".repeat(64), state: "quarantined", disposition: "preserved" }],
+    resourceClosureProofRefs: [{ ownerId: "run-1", proofHash: "c".repeat(64), state: "quarantined", debt: true }],
+  };
+  projection = applyEvent(projection, runtimeEvent("goal.runtime_suspended", closure, 21));
+  const complete = actionableFrontier({ projection, worldSnapshot: world(), taskActions, observationInventory: { claims: new Map() } });
+  assert.equal(complete.actions.filter(({ tool, params }) => tool === "goal_amend" && params.operation === "resume_runtime").length, 1);
 });

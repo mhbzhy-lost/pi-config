@@ -20,6 +20,11 @@ function workspaceRequest(overrides = {}) {
 }
 function lease(baseCommit = DISPATCH_HEAD) { return { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit, ownerToken: "owner-token" }; }
 const inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true };
+const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
+function durableReceipt(value, observed = inspection) {
+  const material = { ownerCas: hash(value.ownerToken), workspacePath: value.path, executorHead: observed.headCommit, disposition: "preserved", manifest: { id: "managed", state: "preserved" } };
+  return { ...material, receiptHash: hash(JSON.stringify(canonical(material))) };
+}
 
 // RED: artifact input is the durable TERMINAL_KEYS result, not a lossy four-field projection.
 test("artifactRefForRun accepts exactly the real managed 11-field terminal and materializes only output", async () => {
@@ -59,7 +64,7 @@ test("artifactRefForRun rejects a symlinked artifact directory without changing 
 
 test("quarantineWorkspace binds the lease baseCommit to headAtDispatch, not runtime baseHead", async () => {
   let releases = 0;
-  const value = await (await host({ loadExecutorWorkspaceLease() { return lease(DISPATCH_HEAD); }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { releases++; return { preserved: true, disposition: "preserved" }; } })).quarantineWorkspace(workspaceRequest());
+  const value = await (await host({ loadExecutorWorkspaceLease() { return lease(DISPATCH_HEAD); }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { releases++; return { preserved: true, disposition: "preserved", preservationReceipt: durableReceipt(lease(DISPATCH_HEAD)) }; } })).quarantineWorkspace(workspaceRequest());
   assert.equal(value.disposition, "preserved"); assert.equal(releases, 1);
 });
 

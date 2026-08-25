@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, Socket } from "node:net";
 import { readFile as nodeReadFile, rm } from "node:fs/promises";
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync, constants as fsConstants } from "node:fs";
 import path from "node:path";
 
 import { captureProcessBirthIdentity } from "./process-birth-identity.ts";
@@ -32,6 +33,25 @@ type OwnedRun = {
   identityState: "verified" | "unavailable" | "conflict";
 };
 type StartedFacts = Pick<OwnedRun, "runId" | "role" | "asyncDir" | "sessionId" | "pid">;
+type GoalOwnedAuthority = {
+  goalId: string; taskId: string; attempt: number; runId: string; asyncDir: string;
+  workspacePath: string; leaseId: string; sessionId: string; baseHead: string;
+  headAtDispatch: string; executionRevision: number; contractHash: string; agent: "executor";
+};
+type GoalBindingSidecar = GoalOwnedAuthority & { version: "root-broker.goal-binding-authority.v1"; ticketId: string };
+const GOAL_BINDING_SIDECAR = "root-broker.goal-binding-authority.v1.json";
+const goalOwnedAuthorityKeys = ["goalId", "taskId", "attempt", "runId", "asyncDir", "workspacePath", "leaseId", "sessionId", "baseHead", "headAtDispatch", "executionRevision", "contractHash", "agent"];
+function exactKeys(value: any, keys: string[]) { return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)); }
+function authorityFields(value: any) { return Object.fromEntries(goalOwnedAuthorityKeys.map((key) => [key, value?.[key]])); }
+function validGoalOwnedAuthority(value: any): value is GoalOwnedAuthority {
+  return exactKeys(value, goalOwnedAuthorityKeys)
+    && typeof value.goalId === "string" && !!value.goalId && typeof value.taskId === "string" && !!value.taskId
+    && Number.isSafeInteger(value.attempt) && value.attempt > 0 && typeof value.runId === "string" && !!value.runId
+    && typeof value.asyncDir === "string" && path.isAbsolute(value.asyncDir) && typeof value.workspacePath === "string" && path.isAbsolute(value.workspacePath)
+    && typeof value.leaseId === "string" && /^[a-f0-9]{64}$/.test(value.leaseId) && typeof value.sessionId === "string" && !!value.sessionId
+    && typeof value.baseHead === "string" && /^[a-f0-9]{40}$/.test(value.baseHead) && typeof value.headAtDispatch === "string" && /^[a-f0-9]{40}$/.test(value.headAtDispatch)
+    && Number.isSafeInteger(value.executionRevision) && value.executionRevision > 0 && typeof value.contractHash === "string" && /^[a-f0-9]{64}$/.test(value.contractHash) && value.agent === "executor";
+}
 type FacadeRun = {
   runId: string;
   asyncDir: string;
@@ -214,10 +234,66 @@ export class RootBrokerServer {
     this.facadeRuns.set(incoming.runId, existing ?? incoming);
   }
 
+  persistGoalBindingAuthority(value: GoalBindingSidecar): void {
+    if (!exactKeys(value, [...goalOwnedAuthorityKeys, "version", "ticketId"]) || !validGoalOwnedAuthority(authorityFields(value)) || value.version !== "root-broker.goal-binding-authority.v1" || !/^[a-f0-9]{64}$/.test(value.ticketId)) throw new Error("Goal binding sidecar is invalid");
+    if (value.sessionId !== this.lifecycleSessionId) throw new Error("Goal binding sidecar session is invalid");
+    const directory = value.asyncDir;
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const directoryStat = lstatSync(directory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new Error("Goal binding sidecar directory is unsafe");
+    const file = path.join(directory, GOAL_BINDING_SIDECAR);
+    const bytes = Buffer.from(JSON.stringify(value));
+    try {
+      const fd = openSync(file, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+      try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+      const dirFd = openSync(directory, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+    } catch (error: any) {
+      if (error?.code !== "EEXIST") throw error;
+      const stat = lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) throw new Error("Goal binding sidecar is unsafe");
+      if (!readFileSync(file).equals(bytes)) throw new Error("Goal binding sidecar conflicts");
+    }
+  }
+
+  async recoverExactTerminalProof(binding: GoalOwnedAuthority) {
+    // A fresh Broker has no process-birth identity. It trusts the coordinator-only
+    // bind attestation, never fields that the runtime cannot produce in status.
+    const readSafeJson = async (file: string) => {
+      const stat = lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) throw new Error("recovery artifact is unsafe");
+      return JSON.parse(await this.readFile(file, "utf8"));
+    };
+    try {
+      const authority = await readSafeJson(path.join(binding.asyncDir, GOAL_BINDING_SIDECAR)) as GoalBindingSidecar;
+      if (!exactKeys(authority, [...goalOwnedAuthorityKeys, "version", "ticketId"]) || !validGoalOwnedAuthority(authorityFields(authority)) || authority.version !== "root-broker.goal-binding-authority.v1" || !/^[a-f0-9]{64}$/.test(authority.ticketId)
+        || goalOwnedAuthorityKeys.some((key) => authority[key as keyof GoalOwnedAuthority] !== binding[key as keyof GoalOwnedAuthority])) throw new Error("binding authority is invalid");
+      const status = await readSafeJson(path.join(binding.asyncDir, "status.json"));
+      if (!status || typeof status !== "object" || Array.isArray(status) || status.runId !== binding.runId
+        || status.sessionId !== binding.sessionId || status.asyncDir !== binding.asyncDir || status.agent !== binding.agent
+        || !["complete", "failed", "stopped", "rejected"].includes(status.state)) throw new Error("runtime status is invalid");
+      const runtimeTerminal = await readSafeJson(path.join(binding.asyncDir, "process-terminal.json"));
+      const terminal = (value: any) => {
+        if (!value || typeof value !== "object" || Array.isArray(value) || value.runId !== binding.runId) throw new Error("official terminal runId mismatch");
+        for (const key of ["sessionId", "asyncDir", "agent"]) if (value[key] !== binding[key as "sessionId" | "asyncDir" | "agent"]) throw new Error(`official terminal ${key} mismatch`);
+        const { runId: _runId, sessionId: _sessionId, asyncDir: _asyncDir, agent: _agent, pid: _pid, ...proof } = value;
+        parseProcessTerminal(proof);
+        if (proof.state !== "observed") throw new Error("official terminal is non-observed");
+        return frozen(structuredClone({ runId: binding.runId, ...proof }));
+      };
+      const recovered = terminal(runtimeTerminal);
+      if (status.processTerminal && JSON.stringify(terminal(status.processTerminal)) !== JSON.stringify(recovered)) throw new Error("runtime terminal conflicts");
+      return frozen({ state: "observed", proof: structuredClone(recovered) });
+    } catch {
+      return frozen({ state: "attention", code: "OWNED_STOP_RECOVERY_UNAVAILABLE" });
+    }
+  }
+
   async stopGoalOwnedRun(value: any) {
-    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== "asyncDir,runId,sessionId" || typeof value.runId !== "string" || typeof value.asyncDir !== "string" || typeof value.sessionId !== "string") throw new Error("Goal owned stop identity mismatch");
+    if (!validGoalOwnedAuthority(value)) throw new Error("Goal owned stop identity mismatch");
     const run = this.ownedRuns.get(value.runId);
-    if (!run || run.identityState !== "verified" || run.asyncDir !== value.asyncDir || run.sessionId !== value.sessionId || this.terminalConflicts.has(run.runId)) throw new Error("Goal owned stop identity mismatch");
+    if (!run) return this.recoverExactTerminalProof(value);
+    if (run.identityState !== "verified" || run.asyncDir !== value.asyncDir || run.sessionId !== value.sessionId || this.terminalConflicts.has(run.runId)) return frozen({ state: "attention", code: "OWNED_STOP_IDENTITY_UNKNOWN" });
     try {
       if (!this.terminalProofs.has(run.runId)) {
         await Promise.resolve(this.upstream.stop({ runId: run.runId, dir: run.asyncDir }));

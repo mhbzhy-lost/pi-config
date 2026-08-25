@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { taskActionState } from "../scripts/lib/goal-engine/graph.mjs";
 import { actionableFrontier, nextObligationAction, obligationProgressFingerprint } from "../scripts/lib/goal-engine/obligation-policy.mjs";
+import { suspensionClosureStatus } from "../scripts/lib/goal-engine/suspension.mjs";
 
 const condition = (id, status = "unsatisfied", depends_on = []) => ({ definition: { id, depends_on, stability: { mode: "consecutive", count: 2 } }, status });
 const base = () => ({ runtimeGeneration: "goal-runtime.v1", runtimeState: "active", lifecycle: "active", createdAt: "2026-01-01T00:00:00.000Z", runtimeActiveElapsedMs: 0, runtimeActiveSince: "2026-01-01T00:00:00.000Z", tasks: new Map(), taskApplicability: new Map(), conditions: new Map(), observationRuns: new Map(), findings: new Map(), repairEpisodes: new Map(), repairChallenges: new Map(), convergenceBudget: { max_observations: 4, max_repairs: 2, max_elapsed_minutes: 30, max_no_progress: 2 } });
@@ -123,11 +124,21 @@ test("non-active runtime states do not offer product actions", () => {
   for (const runtimeState of ["draft", "awaiting_user_approval", "calibrating", "suspended"]) { const projection = base(); projection.runtimeState = runtimeState; projection.progressLedger = ledger(); projection.conditions.set("c", condition("c")); projection.findings.set("f", { findingId: "f", status: "open" }); const result = frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) }); assert(!result.actions.some(x => ["condition", "repair-open", "repair"].includes(x.kind)), runtimeState); if (runtimeState === "calibrating") assert(result.blocking.some(x => x.code === "RUNTIME_CALIBRATION_REQUIRED")); }
 });
 
-test("suspended runtime retains terminal observation safety debt and offers exact-eight resume amendment", () => {
-  const projection = base(); projection.runtimeState = "suspended"; projection.suspension = { suspensionId: "s", reason: "host_pause" }; projection.progressLedger = ledger(); projection.observationRuns.set("r", { runId: "r", conditionId: "c", cycle: 1, phase: "terminal" });
+test("incomplete suspension closure blocks resume with canonical missing IDs", () => {
+  const projection = base(); projection.runtimeState = "suspended"; projection.suspension = { suspensionId: "s", reason: "host_pause", resourcesQuarantined: false, affectedTaskIds: ["task-b", "task-a", "task-a"], affectedRunIds: ["run-b", "run-a", "run-a"], terminalProofRefs: [], workspaceClosureProofRefs: [], resourceClosureProofRefs: [] }; projection.progressLedger = ledger();
+  const closure = suspensionClosureStatus(projection), result = frontier(projection);
+  assert.deepEqual(closure, { complete: false, missingTerminalRunIds: ["run-a", "run-b"], missingWorkspaceTaskIds: ["task-a", "task-b"], missingResourceOwnerIds: ["run-a", "run-b"] });
+  assert.equal(Object.isFrozen(closure), true);
+  assert.equal(Object.isFrozen(closure.missingTerminalRunIds), true);
+  assert.equal(result.actions.some(x => x.params.operation === "resume_runtime"), false);
+  assert.deepEqual(result.blocking.map(x => x.code).filter(code => code.startsWith("SUSPENSION_")).sort(), ["SUSPENSION_RESOURCE_CLOSURE_PENDING", "SUSPENSION_TERMINAL_PROOF_PENDING", "SUSPENSION_WORKSPACE_CLOSURE_PENDING"]);
+});
+
+test("full suspension closure retains terminal safety debt and issues one exact-eight resume amendment", () => {
+  const projection = base(); projection.runtimeState = "suspended"; projection.suspension = { suspensionId: "s", reason: "host_pause", resourcesQuarantined: true, affectedTaskIds: [], affectedRunIds: [], terminalProofRefs: [], workspaceClosureProofRefs: [], resourceClosureProofRefs: [] }; projection.progressLedger = ledger(); projection.observationRuns.set("r", { runId: "r", conditionId: "c", cycle: 1, phase: "terminal" });
   const actions = frontier(projection).actions;
   assert(actions.some(x => x.kind === "observation-record"));
-  assert(actions.some(x => x.tool === "goal_amend" && x.params.operation === "resume_runtime"));
+  assert.equal(actions.filter(x => x.tool === "goal_amend" && x.params.operation === "resume_runtime").length, 1);
   assert.equal(actions.some(x => x.tool === "goal_resume"), false);
 });
 

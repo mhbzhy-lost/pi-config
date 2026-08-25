@@ -33,7 +33,7 @@ function selectedTaskId(projection, contract) {
   return byTaskId ?? byWorkspace ?? null;
 }
 
-export function prepareExecutorBindingTicket({ projection, contract, contractHash, controlCwd, workspaceLeaseIdForTask }) {
+export function prepareExecutorBindingTicket({ projection, contract, contractHash, controlCwd, rootSessionId, workspaceLeaseIdForTask }) {
   if (!projection?.eventSchemaVersion || generationCapabilities(projection.eventSchemaVersion).executorBinding !== "strict") return null;
   const taskId = selectedTaskId(projection, contract);
   if (!taskId) return null;
@@ -65,6 +65,7 @@ export function prepareExecutorBindingTicket({ projection, contract, contractHas
     version: "goal-executor-binding-ticket.v1",
     ticketId,
     controlCwd,
+    rootSessionId,
     ...identity,
     spawnIdentity: Object.freeze({
       requestId: `goal-executor-${ticketId.slice(0, 48)}`,
