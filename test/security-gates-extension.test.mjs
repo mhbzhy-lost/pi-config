@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { createSecurityGatesExtension } from "../scripts/lib/security-gates-extension.mjs";
@@ -29,21 +29,41 @@ test("tool_call blocks bash commands using event input and context cwd", async (
   assert.match(result.reason, /workspace 外 rm/);
 });
 
-test("tool_call ignores forged bash input directories and uses only context cwd", async () => {
+test("tool_call uses a valid declared bash cwd as the shell-policy context", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "bash-gate-workspace-"));
+  const declaredCwd = resolve(root, "packages", "app");
+  await mkdir(resolve(root, "docs", "plans"), { recursive: true });
+  await writeFile(resolve(root, "docs", "plans", "pending.md"), "TODO: root only\n");
+  await mkdir(declaredCwd, { recursive: true });
+  const handlers = setup({ workspaceBypass: async () => true });
+
+  try {
+    const rootResult = await handlers.get("tool_call")(
+      { toolName: "bash", input: { command: "git push" } },
+      { cwd: root },
+    );
+    const declaredResult = await handlers.get("tool_call")(
+      { toolName: "bash", input: { command: "git push", cwd: "packages/app" } },
+      { cwd: root },
+    );
+
+    assert.equal(rootResult.block, true);
+    assert.match(rootResult.reason, /TODO/);
+    assert.equal(declaredResult, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("tool_call blocks an invalid declared bash cwd", async () => {
   const handlers = setup();
   const result = await handlers.get("tool_call")(
-    {
-      toolName: "bash",
-      input: {
-        command: "rm -rf outside",
-        workdir: "/Users/shared",
-        cwd: "/Users/shared",
-      },
-    },
+    { toolName: "bash", input: { command: "pwd", cwd: "/Users/shared" } },
     { cwd: workspace },
   );
 
-  assert.equal(result, undefined);
+  assert.equal(result.block, true);
+  assert.match(result.reason, /cwd|工作区|安全门禁/i);
 });
 
 test("tool_call fails closed when bash context cwd is unavailable", async () => {
