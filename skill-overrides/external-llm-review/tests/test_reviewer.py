@@ -59,6 +59,11 @@ class ReviewerProtocolAndBackendTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["base", "head", "--review-round", "3"])
 
+    def test_parser_defaults_api_timeout_to_600_seconds(self):
+        args = reviewer.build_arg_parser().parse_args(["base", "head"])
+
+        self.assertEqual(args.api_timeout_seconds, 600)
+
     def test_build_git_diff_command_supports_worktree_head(self):
         self.assertEqual(
             reviewer.build_git_diff_command("/repo", "abc123", "WORKTREE"),

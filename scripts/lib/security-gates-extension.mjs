@@ -3,6 +3,7 @@ import { createPushReviewState } from "./push-review-state.mjs";
 import {
   gatherDiffInfo as defaultGatherDiffInfo,
   runReview as defaultRunReview,
+  workspaceReviewBypass as defaultWorkspaceReviewBypass,
   parseSections,
   buildDenyReason,
 } from "./review-invoker.mjs";
@@ -27,6 +28,7 @@ function appendReminder(content, reminder) {
 export function createSecurityGatesExtension(pi, {
   gatherDiffInfo = defaultGatherDiffInfo,
   runReview = defaultRunReview,
+  workspaceBypass = defaultWorkspaceReviewBypass,
   reviewerPy,
   envFile,
   configRoot = join(import.meta.dirname, "..", ".."),
@@ -48,6 +50,7 @@ export function createSecurityGatesExtension(pi, {
     if (violation) return { block: true, reason: violation.reason };
 
     if (!isRealGitPush(event.input.command)) return undefined;
+    if (await workspaceBypass({ cwd })) return undefined;
 
     const diffInfo = await gatherDiffInfo({ cwd });
     if (diffInfo.exempt) return undefined;

@@ -53,7 +53,7 @@ uv run --no-project \
     [--review-round 1|2] \
     [--max-issues 25] \
     [--max-output-tokens 32768] \
-    [--api-timeout-seconds 180]
+    [--api-timeout-seconds 600]
 ```
 
 **参数：**
@@ -67,7 +67,7 @@ uv run --no-project \
 - `--review-round`：当前 diff 的评审轮次，只允许 `1` 或 `2`，默认 `1`。
 - `--max-issues`：单轮最多报告的问题数，默认 `25`；同类问题归并为模式级 issue。
 - `--max-output-tokens`：模型输出 token 上限，默认 `32768`。
-- `--api-timeout-seconds`：provider API 调用外层硬超时，默认 `180`；设为 `<=0` 时使用底层默认超时。
+- `--api-timeout-seconds`：provider API 调用外层硬超时，默认 `600`；设为 `<=0` 时使用底层默认超时。exhaustive review 可能需要数分钟，调用方外层 timeout 应高于 API hard timeout。
 
 stdout 输出 review markdown（Strengths / Critical / Important / Minor / Checklist Coverage / Assessment），stderr 是诊断信息。
 
@@ -83,6 +83,8 @@ uv run --no-project \
 ## Fallback（仅限 Push Gate）
 
 Push gate（`scripts/lib/review-invoker.mjs`）按 `idealab-anthropic -> idealab-openai` 依次尝试。超时、配置错误或请求异常都会尝试下一个；全部失败时 fail-open，不阻断 push。直接调用 `reviewer.py` 不走 fallback，单 provider 失败即非零退出。
+
+工作区根目录可放置 `.push-gate.json`，内容为 `{ "bypassReview": true }` 时仅跳过异源评审，其他安全门禁仍会执行。`bypassReview` 必须是严格布尔值 `true`；文件缺失、读取失败、JSON 非法或结构不符时均按 fail-closed 继续评审。该文件可随仓库分发，因此只应在自己信任的 workspace 中使用。
 
 ## 轮次上限与穷举机制
 

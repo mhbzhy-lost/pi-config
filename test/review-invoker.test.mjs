@@ -3,7 +3,7 @@ import test from "node:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSections, shouldExempt, buildDenyReason, runReview } from "../scripts/lib/review-invoker.mjs";
+import { parseSections, shouldExempt, buildDenyReason, runReview, workspaceReviewBypass } from "../scripts/lib/review-invoker.mjs";
 
 test("parseSections 检测 Critical 段落有内容", () => {
   const text = "### Critical\n\n1. SQL injection in user input\n\n### Minor\n\nNone.";
@@ -68,6 +68,33 @@ test("buildDenyReason 包含 review 输出和综合判断框架", () => {
   assert.match(reason, /### Critical\n\n1\. Bug/);
 });
 
+test("workspaceReviewBypass 仅接受 .push-gate.json 中严格布尔 true", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "review-invoker-"));
+  try {
+    assert.equal(await workspaceReviewBypass({ cwd: dir }), false, "文件缺失不绕过");
+
+    await writeFile(join(dir, ".push-gate.json"), "{");
+    assert.equal(await workspaceReviewBypass({ cwd: dir }), false, "非法 JSON 不绕过");
+
+    await writeFile(join(dir, ".push-gate.json"), JSON.stringify({ bypassReview: false }));
+    assert.equal(await workspaceReviewBypass({ cwd: dir }), false, "false 不绕过");
+
+    await writeFile(join(dir, ".push-gate.json"), JSON.stringify({ bypassReview: "true" }));
+    assert.equal(await workspaceReviewBypass({ cwd: dir }), false, "字符串 true 不绕过");
+
+    await writeFile(join(dir, ".push-gate.json"), JSON.stringify({ bypassReview: 1 }));
+    assert.equal(await workspaceReviewBypass({ cwd: dir }), false, "数字 1 不绕过");
+
+    await writeFile(join(dir, ".push-gate.json"), JSON.stringify([true]));
+    assert.equal(await workspaceReviewBypass({ cwd: dir }), false, "非对象结构不绕过");
+
+    await writeFile(join(dir, ".push-gate.json"), JSON.stringify({ bypassReview: true }));
+    assert.equal(await workspaceReviewBypass({ cwd: dir }), true, "严格布尔 true 绕过");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("runReview 按 Anthropic 后 Idealab OpenAI 的顺序 fallback", async () => {
   const dir = await mkdtemp(join(tmpdir(), "review-invoker-"));
   const logPath = join(dir, "providers.log");
@@ -105,6 +132,9 @@ exit 1
       "idealab-anthropic",
       "idealab-openai",
     ]);
+    const argv = (await readFile(logPath, "utf8")).trim().split("\n");
+    assert.equal(argv.filter((arg) => arg === "--api-timeout-seconds").length, 2);
+    assert.equal(argv.filter((arg) => arg === "600").length, 2);
     assert.equal(result.provider, "idealab-openai");
   } finally {
     process.env.PATH = previousPath;

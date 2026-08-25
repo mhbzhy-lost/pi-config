@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { createSecurityGatesExtension } from "../scripts/lib/security-gates-extension.mjs";
 
@@ -74,6 +76,30 @@ test("git push --dry-run and EXTERNAL_REVIEW_SKIP bypass review", async () => {
   assert.equal(dryRun, undefined);
   assert.equal(skipped, undefined);
   assert.equal(reviewCalled, false);
+});
+
+test("workspace 声明 bypassReview 时 git push 不收集 diff 或运行 review", async () => {
+  const dir = await mkdtemp(resolve(tmpdir(), "push-gate-workspace-"));
+  let gatherCalled = false;
+  let reviewCalled = false;
+  const handlers = setup({
+    gatherDiffInfo: async () => { gatherCalled = true; throw new Error("不应收集 diff"); },
+    runReview: async () => { reviewCalled = true; throw new Error("不应运行 review"); },
+  });
+  await writeFile(resolve(dir, ".push-gate.json"), JSON.stringify({ bypassReview: true }));
+
+  try {
+    const result = await handlers.get("tool_call")(
+      { toolName: "bash", input: { command: "git push origin main" } },
+      { cwd: dir },
+    );
+
+    assert.equal(result, undefined);
+    assert.equal(gatherCalled, false);
+    assert.equal(reviewCalled, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("git push 触发 review，有 Critical 时 deny", async () => {
