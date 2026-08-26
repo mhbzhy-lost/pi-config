@@ -27,6 +27,7 @@ function appendReminder(content, reminder) {
 }
 
 export function createSecurityGatesExtension(pi, {
+  shellPolicy = checkShellPolicy,
   gatherDiffInfo = defaultGatherDiffInfo,
   runReview = defaultRunReview,
   workspaceBypass = defaultWorkspaceReviewBypass,
@@ -55,7 +56,7 @@ export function createSecurityGatesExtension(pi, {
       }
     }
 
-    const violation = checkShellPolicy({ command: event.input.command, cwd, workspaceRoot: cwd, env: process.env });
+    const violation = shellPolicy({ command: event.input.command, cwd, workspaceRoot, env: process.env });
     if (violation) return { block: true, reason: violation.reason };
 
     if (!isRealGitPush(event.input.command)) return undefined;
