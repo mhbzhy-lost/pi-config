@@ -36,6 +36,9 @@ IDLE_TIMEOUT_DEFAULT = 1800.0
 STOP_TIMEOUT = 5.0
 SOCKET_PATH_BUDGET = 100
 SAFE_NAME_RE = re.compile(r"[a-z0-9-]{1,32}\Z")
+STARTUP_ERROR_REASONS = {
+    "profile-in-use", "unsafe-profile-directory", "invalid-profile-name",
+}
 
 _instance_name: str | None = None
 _instance_explicit = False
@@ -64,6 +67,24 @@ def last_activity_file() -> Path:
 
 def startup_error_file() -> Path:
     return state_dir() / "startup.error"
+
+
+def publish_startup_error(reason: str) -> None:
+    """Publish a fixed startup error without exposing partial contents."""
+    safe_reason = reason if reason in STARTUP_ERROR_REASONS else "daemon-start-failed"
+    ensure_state_dir()
+    fd, temporary = tempfile.mkstemp(prefix=".startup.error-", dir=state_dir())
+    try:
+        with os.fdopen(fd, "w") as error_file:
+            error_file.write(safe_reason)
+            error_file.flush()
+            os.fsync(error_file.fileno())
+        os.replace(temporary, startup_error_file())
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
 
 
 def idle_timeout_from_env() -> float:
@@ -139,10 +160,11 @@ def acquire_profile_lock(profile: Path):
     try:
         fd = os.open(profile / ".pi-playwright.lock", flags, 0o600)
         lock = os.fdopen(fd, "r+")
-        info = os.fstat(lock.fileno())
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        try:
+            validate_profile_lock(lock.fileno(), profile)
+        except ValueError:
             lock.close()
-            raise ValueError("unsafe-profile-directory")
+            raise
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return lock
     except BlockingIOError as exc:
@@ -150,6 +172,39 @@ def acquire_profile_lock(profile: Path):
     except ValueError:
         raise
     except OSError as exc:
+        raise ValueError("unsafe-profile-directory") from exc
+
+
+def validate_profile_lock(fd: int, profile: Path) -> None:
+    """Verify an open lock descriptor is exactly the profile's lock file."""
+    try:
+        descriptor_info = os.fstat(fd)
+        path_info = (profile / ".pi-playwright.lock").lstat()
+    except OSError as exc:
+        raise ValueError("unsafe-profile-directory") from exc
+    if (not stat.S_ISREG(descriptor_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or stat.S_IMODE(descriptor_info.st_mode) != 0o600
+            or not stat.S_ISREG(path_info.st_mode)
+            or path_info.st_uid != os.getuid()
+            or stat.S_IMODE(path_info.st_mode) != 0o600
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)):
+        raise ValueError("unsafe-profile-directory")
+
+
+def inherited_profile_lock(profile: Path, fd: int):
+    """Adopt the parent-held lock without releasing or reacquiring it."""
+    try:
+        validate_profile_lock(fd, profile)
+        return os.fdopen(fd, "r+")
+    except (OSError, ValueError) as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        if isinstance(exc, ValueError):
+            raise
         raise ValueError("unsafe-profile-directory") from exc
 
 
@@ -233,15 +288,17 @@ def do_start(headless: bool = False, profile_name: str | None = None):
     if reaped:
         print(f"Reaped idle instances: {', '.join(reaped)}")
 
-    if profile is not None:
-        lock = acquire_profile_lock(profile)
-        lock.close()
+    profile_lock = acquire_profile_lock(profile) if profile is not None else None
 
     ensure_state_dir()
 
     if is_running():
+        if profile_lock is not None:
+            profile_lock.close()
         print(f"Already running (instance={_instance_name})")
         return
+
+    startup_error_file().unlink(missing_ok=True)
 
     cmd = [sys.executable, __file__, "_daemon", "--instance", _instance_name]
     if headless:
@@ -249,14 +306,22 @@ def do_start(headless: bool = False, profile_name: str | None = None):
     if profile_name:
         cmd.extend(["--profile", profile_name])
 
+    if profile_lock is not None:
+        cmd.extend(["--profile-lock-fd", str(profile_lock.fileno())])
     log = open(log_file(), "a")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=log,
-        stderr=log,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            pass_fds=(profile_lock.fileno(),) if profile_lock is not None else (),
+        )
+    finally:
+        log.close()
+        if profile_lock is not None:
+            profile_lock.close()
     pid_file().write_text(str(proc.pid))
 
     for _ in range(50):
@@ -445,7 +510,7 @@ def do_tools():
 
 
 def run_daemon(headless: bool, idle_timeout: float = IDLE_TIMEOUT_DEFAULT,
-               profile_name: str | None = None):
+               profile_name: str | None = None, profile_lock_fd: int | None = None):
     """Daemon: manages MCP subprocess and proxies via Unix socket with threads.
 
     Exits on its own when no client connects for idle_timeout seconds and no
@@ -457,7 +522,13 @@ def run_daemon(headless: bool, idle_timeout: float = IDLE_TIMEOUT_DEFAULT,
     socket_path().unlink(missing_ok=True)
 
     profile = prepare_profile(profile_name) if profile_name else None
-    profile_lock = acquire_profile_lock(profile) if profile is not None else None
+    if profile is None and profile_lock_fd is not None:
+        raise ValueError("unsafe-profile-directory")
+    profile_lock = (
+        inherited_profile_lock(profile, profile_lock_fd)
+        if profile_lock_fd is not None else
+        acquire_profile_lock(profile) if profile is not None else None
+    )
 
     injected = os.environ.get("PI_PLAYWRIGHT_MCP_CMD")
     if injected:
@@ -676,12 +747,18 @@ def main():
                 idle_timeout = float(argv[argv.index("--idle-timeout") + 1])
             except (IndexError, ValueError):
                 pass
+        profile_lock_fd = None
+        if "--profile-lock-fd" in argv:
+            try:
+                profile_lock_fd = int(argv[argv.index("--profile-lock-fd") + 1])
+            except (IndexError, ValueError):
+                fail("unsafe-profile-directory")
         try:
-            run_daemon(headless, idle_timeout, _profile_name)
-        except ValueError as exc:
-            ensure_state_dir()
-            startup_error_file().write_text(str(exc))
-            fail(str(exc))
+            run_daemon(headless, idle_timeout, _profile_name, profile_lock_fd)
+        except (ValueError, OSError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "daemon-start-failed"
+            publish_startup_error(reason)
+            fail(reason if reason in STARTUP_ERROR_REASONS else "daemon-start-failed")
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)

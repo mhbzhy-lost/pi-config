@@ -134,7 +134,7 @@ os.execlp("sleep", "sleep", "1000")
 def cleanup_instance(name: str) -> None:
     d = instance_dir(name)
     if d.exists():
-        for f in ["daemon.pid", "server.sock", "mcp.pid", "last_activity", "daemon.log"]:
+        for f in ["daemon.pid", "server.sock", "mcp.pid", "last_activity", "daemon.log", "startup.error"]:
             (d / f).unlink(missing_ok=True)
         try:
             d.rmdir()
@@ -555,6 +555,62 @@ class PersistentProfileTests(unittest.TestCase):
         self.assertEqual(result.stderr.decode().strip(), "error: profile-in-use")
         self.assertNotIn(str(self.home), result.stderr.decode())
 
+    def test_daemon_uses_parent_held_lock_descriptor_without_reacquiring(self):
+        """The daemon must retain the parent lock's open file description."""
+        name = f"handoff-{uuid.uuid4().hex[:8]}"
+        instance = f"h-{uuid.uuid4().hex[:8]}"
+        self.instances.append(instance)
+        root = self.home / ".pi" / "playwright-profiles"
+        root.mkdir(parents=True, mode=0o700)
+        root.chmod(0o700)
+        profile = root / name
+        profile.mkdir(mode=0o700)
+        lock = WRAPPER.acquire_profile_lock(profile)
+        try:
+            daemon = subprocess.Popen(
+                [sys.executable, str(PLAYWRIGHT_PY), "_daemon", "--instance", instance,
+                 "--profile", name, "--idle-timeout", "10", "--profile-lock-fd",
+                 str(lock.fileno())],
+                env=isolated_env(self.home), stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+                pass_fds=(lock.fileno(),),
+            )
+            self.daemon = daemon
+            wait_for_socket(instance)
+            self.assertIsNone(daemon.poll())
+        finally:
+            lock.close()
+            if hasattr(self, "daemon"):
+                stop_daemon(self.daemon.pid)
+                self.daemon.wait(timeout=5)
+
+    def test_concurrent_starts_leave_only_winner_state_and_one_mcp(self):
+        name = f"concurrent-{uuid.uuid4().hex[:8]}"
+        first = f"c1-{uuid.uuid4().hex[:8]}"
+        second = f"c2-{uuid.uuid4().hex[:8]}"
+        marker = self.home / "mcp-argv.json"
+        self.instances.extend([first, second])
+        commands = [
+            [sys.executable, str(PLAYWRIGHT_PY), "start", "--instance", instance,
+             "--profile", name]
+            for instance in (first, second)
+        ]
+        procs = [subprocess.Popen(cmd, env=isolated_env(self.home, marker),
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                 for cmd in commands]
+        results = [proc.communicate(timeout=30) for proc in procs]
+
+        successful = [instance for instance, proc in zip((first, second), procs)
+                      if proc.returncode == 0]
+        failed = [(instance, stderr) for instance, (_, stderr) in zip((first, second), results)
+                  if instance not in successful]
+        self.assertEqual(len(successful), 1)
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0][1].decode().strip(), "error: profile-in-use")
+        self.assertTrue((instance_dir(successful[0]) / "daemon.pid").exists())
+        self.assertFalse(instance_dir(failed[0][0]).exists())
+        self.assertTrue(marker.exists(), "only the winning daemon may launch MCP")
+
 
 class StopAllLifecycleTests(unittest.TestCase):
     def test_stopall_waits_for_slow_daemon_before_clearing_state(self):
@@ -654,6 +710,26 @@ class InstanceValidationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stderr.decode().strip(), "error: invalid-instance")
         self.assertFalse(instance_dir(name).exists())
+
+    def test_socket_path_budget_rejects_a_safe_name_when_base_path_is_too_long(self):
+        with mock.patch.object(WRAPPER, "BASE_STATE_DIR", Path("/tmp") / ("x" * 90)):
+            with self.assertRaisesRegex(ValueError, "^invalid-instance$"):
+                WRAPPER.validate_instance("safe-name")
+
+
+class StartupErrorTests(unittest.TestCase):
+    def test_startup_error_is_written_to_temp_file_then_atomically_replaced(self):
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root)
+            with mock.patch.object(WRAPPER, "state_dir", return_value=state), \
+                    mock.patch.object(WRAPPER.os, "replace", wraps=os.replace) as replace:
+                WRAPPER.publish_startup_error("profile-in-use")
+
+            self.assertEqual((state / "startup.error").read_text(), "profile-in-use")
+            self.assertEqual(replace.call_count, 1)
+            source, target = replace.call_args.args
+            self.assertEqual(Path(target), state / "startup.error")
+            self.assertNotEqual(Path(source), Path(target))
 
 
 if __name__ == "__main__":
