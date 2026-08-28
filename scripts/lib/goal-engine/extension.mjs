@@ -542,7 +542,8 @@ const goalAmendSchema = { type: "object", anyOf: [
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "transfer_session" }, challenge_id: string, reason: string, action_token: string }, required: ["goal_id", "operation", "challenge_id", "reason", "action_token"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "propose_execution_change" }, reason: string, changes: { type: "object", properties: { update_tasks: { type: "array", items: executionChangeTaskSchema } }, required: ["update_tasks"], additionalProperties: false } }, required: ["goal_id", "operation", "reason", "changes"], additionalProperties: false },
   { type: "object", properties: { goal_id: string, operation: { type: "string", const: "resume_runtime" }, action_token: string }, required: ["operation", "action_token"], additionalProperties: false },
-] };
+  { type: "object", properties: { goal_id: string, operation: { type: "string", const: "abandon_runtime" }, reason: string, action_token: string }, required: ["goal_id", "operation", "reason", "action_token"], additionalProperties: false },
+ ] };
 
 export function createGoalEngineExtension(pi, options = {}) {
   const store = options.store || {};
@@ -2257,6 +2258,66 @@ export function createGoalEngineExtension(pi, options = {}) {
         return JSON.stringify({ status: "METADATA_PROPOSAL_PENDING", challenge_id: challenge.id, reason: challenge.reason, base_metadata: publicMetadata(baseMetadata), target_metadata: publicMetadata(targetMetadata), proposal_hash: challenge.proposalHash, choices: challenge.choices });
       }
       const currentSessionId = sessionIdentity(ctx);
+      if (params.operation === "abandon_runtime") {
+        if (projection.eventSchemaVersion !== "goal-runtime.v1" || projection.runtimeState !== "suspended"
+          || !projection.suspension || suspensionClosureStatus(projection).complete || projection.pendingHumanDecision) {
+          throw new Error("abandon_runtime requires an incompletely closed suspended runtime without a pending decision");
+        }
+        // Re-read all host facts before consuming the offer.  No event or
+        // preservation side effect is allowed when the safety boundary moved.
+        const world = runtimeHost?.captureCurrentWorld?.({ cwd });
+        if (!world?.safe || !Array.isArray(world.activeRuns) || world.activeRuns.length) {
+          throw new Error("abandon_runtime requires a safe world with no active owned run");
+        }
+        const before = projection;
+        const boundParams = { goal_id: goalId, operation: "abandon_runtime" };
+        // Verification is pure: the action is not consumed until the final
+        // atomic batch below, but invalid/stale authority must not preserve anything.
+        const consumed = verifyAndConsumeActionOffer(before, { token: params.action_token, tool: "goal_amend", params: boundParams, sessionId: currentSessionId });
+        const preflight = [];
+        try {
+          for (const taskId of before.suspension.affectedTaskIds || []) {
+            const task = before.tasks.get(taskId);
+            if (!task?.workspace) throw new Error(`managed workspace identity unavailable for ${taskId}`);
+            const lease = resolveWorkspaceLease(task, goalId, taskId, cwd, root);
+            const inspection = inspectExecutorWorkspaceFn(lease);
+            if (!inspection || !inspection.headCommit) throw new Error(`managed workspace cannot be safely preserved for ${taskId}`);
+            preflight.push({ taskId, attempt: task.attempts, lease, head: inspection.headCommit });
+          }
+          const freshWorld = runtimeHost?.captureCurrentWorld?.({ cwd });
+          if (!freshWorld?.safe || !Array.isArray(freshWorld.activeRuns) || freshWorld.activeRuns.length) throw new Error("world drifted during abandon preflight");
+        } catch (error) {
+          throw new Error(`abandon_runtime preserve preflight failed closed: ${error.message}`);
+        }
+        const preserved = [];
+        try {
+          for (const item of preflight) {
+            const receipt = releaseExecutorWorkspace(item.lease, { disposition: "preserved", expectedExecutorHead: item.head });
+            preserved.push({ taskId: item.taskId, attempt: item.attempt, head: item.head, receipt: receipt.preservationReceipt || null });
+          }
+        } catch (error) {
+          throw new Error(`abandon_runtime preserve failed closed: ${error.message}`);
+        }
+        const latest = loadProjectionFn(root, goalId);
+        if (latest.version !== before.version || latest.suspension?.suspensionId !== before.suspension.suspensionId) {
+          throw new Error("abandon_runtime projection drift; no ledger event appended");
+        }
+        const suspension = latest.suspension;
+        const deficits = ["terminal-proof", "workspace-closure", "resource-closure"].filter((kind) => {
+          if (kind === "terminal-proof") return suspensionClosureStatus(latest).missingTerminalRunIds.length > 0;
+          if (kind === "workspace-closure") return suspensionClosureStatus(latest).missingWorkspaceTaskIds.length > 0;
+          return suspensionClosureStatus(latest).missingResourceOwnerIds.length > 0;
+        });
+        const event = makeEvent("goal.runtime_abandoned", {
+          suspensionId: suspension.suspensionId, deficits, ownerSessionId: currentSessionId,
+          reasonDigest: canonicalHash(params.reason), preserveProof: { preserved, safe: true },
+        }, goalId, "goal-runtime.v1");
+        const consumedEvent = makeGoalEvent("goal.action_consumed", consumed, goalId, latest);
+        const expected = [consumedEvent, event].reduce((candidate, next) => applyEvent(candidate, next), latest);
+        try { appendEventBatchFn(root, [consumedEvent, event], latest.version); }
+        catch (cause) { if (!isDeepStrictEqual(loadProjectionFn(root, goalId), expected)) throw cause; }
+        return JSON.stringify({ goalId, status: "ABANDONED" });
+      }
       if (params.operation === "resume_runtime") {
         const closure = projection.suspension;
         const closed = suspensionClosureStatus(projection).complete;

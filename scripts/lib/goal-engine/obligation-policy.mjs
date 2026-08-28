@@ -98,12 +98,25 @@ export function actionableFrontier(input = {}) {
   if (projection.pendingHumanDecision) note(blocking, "decision", "pending", "PENDING_HUMAN_DECISION");
   const suspension = projection.suspension;
   const suspensionClosure = suspension ? suspensionClosureStatus(projection) : null;
+  let abandonRuntime = false;
   if (projection.runtimeState === "suspended" || suspension) {
     if (suspensionClosure?.complete && !projection.pendingHumanDecision) action(actions, "suspension-recovery", suspension?.suspensionId ?? "runtime", 1, "goal_amend", { operation: "resume_runtime" }, "Suspension closure is complete");
     else {
       if (suspensionClosure?.missingTerminalRunIds.length) note(blocking, "suspension", "terminal", "SUSPENSION_TERMINAL_PROOF_PENDING");
       if (suspensionClosure?.missingWorkspaceTaskIds.length) note(blocking, "suspension", "workspace", "SUSPENSION_WORKSPACE_CLOSURE_PENDING");
       if (suspensionClosure?.missingResourceOwnerIds.length) note(blocking, "suspension", "resource", "SUSPENSION_RESOURCE_CLOSURE_PENDING");
+      const active = Array.isArray(world.activeRuns) ? world.activeRuns : null;
+      // CurrentWorld intentionally exposes only observed facts.  Workspace and
+      // lease preservation are proved by the amend handler from Store/Host
+      // identities; do not invent private managed* fields here.
+      // Workspace/resource preservation is an Extension Host preflight, not a
+      // projection field.  The frontier may offer the typed recovery action
+      // from the authoritative world safety boundary; the handler then proves
+      // each Store lease and Host inspection before preserving anything.
+      const preserveSafe = world.safe === true && active?.length === 0;
+      abandonRuntime = projection.runtimeState === "suspended" && !!suspension && !suspensionClosure?.complete
+        && !projection.pendingHumanDecision && preserveSafe;
+      if (abandonRuntime) action(actions, "suspension-abandon", suspension.suspensionId, 1, "goal_amend", { operation: "abandon_runtime" }, "Terminal runtime proof is permanently unavailable; preserve managed resources and abandon runtime");
     }
   }
   const activeWorldRuns = Array.isArray(world.activeRuns) ? world.activeRuns : null, conflictedRuns = new Set();
@@ -154,8 +167,8 @@ export function actionableFrontier(input = {}) {
   if (runtimeState === "calibrating") note(blocking, "runtime", runtimeState, "RUNTIME_CALIBRATION_REQUIRED");
   const globalGate = blocking.some(item => ["WORLD_SNAPSHOT_UNSAFE", "ELAPSED_BUDGET_EXHAUSTED", "NO_PROGRESS_BUDGET_EXHAUSTED", "PENDING_HUMAN_DECISION", "RUNTIME_LIFECYCLE_INACTIVE", "RUNTIME_READINESS_REQUIRED", "RUNTIME_CALIBRATION_REQUIRED"].includes(item.code)) || attention.some(item => ["NO_PROGRESS_AUTHORITY_UNAVAILABLE", "OBSERVATION_RUN_STATE_CONFLICT", "ACTIVE_RUN_AUTHORITY_UNAVAILABLE"].includes(item.code));
   const debtAction = item => ["suspension-recovery", "resource-recovery", "observation-record", "observation-release"].includes(item.kind) || (item.kind === "task" && ["goal_settle", "goal_integrate", "goal_accept"].includes(item.tool));
-  const suspensionDebtAction = item => ["suspension-recovery", "resource-recovery", "observation-record", "observation-release"].includes(item.kind) || (item.kind === "task" && (item.tool === "goal_settle" || (item.tool === "goal_integrate" && ["discard", "preserve"].includes(item.params.action))));
-  const permitted = runtimeState === "suspended" || suspension ? budgetPermitted.filter(suspensionDebtAction) : globalGate ? budgetPermitted.filter(debtAction) : runtimeState === "active" && projection.lifecycle === "active" ? budgetPermitted : [];
+  const suspensionDebtAction = item => ["suspension-recovery", "suspension-abandon", "resource-recovery", "observation-record", "observation-release"].includes(item.kind) || (item.kind === "task" && (item.tool === "goal_settle" || (item.tool === "goal_integrate" && ["discard", "preserve"].includes(item.params.action))));
+  const permitted = runtimeState === "suspended" || suspension ? budgetPermitted.filter(item => abandonRuntime ? item.kind === "suspension-abandon" : suspensionDebtAction(item)) : globalGate ? budgetPermitted.filter(debtAction) : runtimeState === "active" && projection.lifecycle === "active" ? budgetPermitted : [];
   const tasksDone = collection(projection.tasks ?? {}, "tasks").every(([id, task]) => { const app = taskApplicability(projection, id); return app === "superseded" || (app === "applicable" && task?.status === "accepted"); });
   const conditionsDone = collection(projection.conditions ?? {}, "conditions").every(([, state]) => state?.status === "satisfied" && state.freshness !== "stale" && dependencyReady(state, projection, [], "complete"));
   const complete = tasksDone && conditionsDone && !permitted.length && !blocking.length && !attention.length && !suspension;

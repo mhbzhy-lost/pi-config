@@ -22,7 +22,7 @@ export function schemaVersionForMutation(projection, legacyTargetVersion = "goal
   return SCHEMA_RANK.get(legacyTargetVersion) >= SCHEMA_RANK.get(current) ? legacyTargetVersion : current;
 }
 const DISPOSITION_ACTIONS = new Set(["integrate", "discard", "preserve"]);
-const TERMINAL_LIFECYCLES = new Set(["completed", "blocked", "cancelled"]);
+const TERMINAL_LIFECYCLES = new Set(["completed", "blocked", "cancelled", "abandoned"]);
 const COMPLETED_V3_EVENTS = new Set([
   "goal.session_bound", "goal.session_detached", "goal.session_transferred", "goal.discovery_recorded", "goal.discovery_resolved",
   "goal.continuity_checkpointed", "goal.reopened", "goal.action_offered", "goal.action_consumed",
@@ -122,6 +122,7 @@ export function applyEvent(projection, event, { replay = false } = {}) {
     case "goal.runtime_activated": runtimeActivated(next, event.occurredAt); break;
     case "goal.runtime_suspended": runtimeSuspended(next, event.data, event.occurredAt); break;
     case "goal.runtime_resumed": runtimeResumed(next, event.data, event.occurredAt); break;
+    case "goal.runtime_abandoned": runtimeAbandoned(next, event.data); break;
     case "condition.observation_requested": observationRequested(next, event.data); break;
     case "condition.observation_lease_allocated": observationTransition(next, event.data, "requested", "lease_allocated"); break;
     case "condition.observation_process_bound": observationTransition(next, event.data, "lease_allocated", "process_bound"); break;
@@ -371,6 +372,43 @@ function runtimeResumed(p, data, occurredAt) {
   runtimeOnly(p); requireExactFields(data, ["suspensionId", "closureHash"], "runtime resume");
   if (p.runtimeState !== "suspended" || !p.suspension || !isFullSuspensionClosure(p.suspension) || data.suspensionId !== p.suspension.suspensionId || data.closureHash !== suspensionClosureHash(p.suspension)) throw new Error("invalid runtime resume closure");
   p.suspension = null; p.runtimeState = "active"; openRuntimeActiveInterval(p, occurredAt);
+}
+function runtimeAbandoned(p, data) {
+  runtimeOnly(p);
+  requireExactFields(data, ["suspensionId", "deficits", "ownerSessionId", "reasonDigest", "preserveProof"], "runtime abandonment");
+  const deficitKinds = new Set(["terminal-proof", "workspace-closure", "resource-closure"]);
+  const validPreserve = (proof) => {
+    if (!isPlainObject(proof) || Object.keys(proof).length !== 2 || proof.safe !== true || !Array.isArray(proof.preserved)) return false;
+    let previous = "";
+    return proof.preserved.every((item) => {
+      if (!isPlainObject(item) || Object.keys(item).length !== 4 || typeof item.taskId !== "string" || item.taskId <= previous
+        || !Number.isSafeInteger(item.attempt) || item.attempt < 1 || !hash(item.head) || !isPlainObject(item.receipt)) return false;
+      previous = item.taskId;
+      const receipt = item.receipt;
+      const fields = ["ownerCas", "workspacePath", "executorHead", "disposition", "manifest", "receiptHash"];
+      if (Object.keys(receipt).length !== fields.length || fields.some((field) => !Object.hasOwn(receipt, field))
+        || !hash(receipt.ownerCas) || typeof receipt.workspacePath !== "string" || receipt.executorHead !== item.head
+        || receipt.disposition !== "preserved" || !hash(receipt.receiptHash) || !isPlainObject(receipt.manifest)) return false;
+      const manifestFields = ["id", "originRoot", "path", "branchRef", "baseCommit", "headCommit", "state", "disposition"];
+      return Object.keys(receipt.manifest).length === manifestFields.length && manifestFields.every((field) => Object.hasOwn(receipt.manifest, field))
+        && receipt.manifest.headCommit === item.head && receipt.manifest.disposition === "preserved";
+    });
+  };
+  if (p.runtimeState !== "suspended" || !p.suspension || suspensionClosureStatusForAbandon(p).complete
+    || data.suspensionId !== p.suspension.suspensionId || !Array.isArray(data.deficits)
+    || data.deficits.length === 0 || new Set(data.deficits).size !== data.deficits.length
+    || data.deficits.some((id) => !deficitKinds.has(id)) || typeof data.ownerSessionId !== "string" || !data.ownerSessionId
+    || !hash(data.reasonDigest) || !validPreserve(data.preserveProof)) throw new Error("invalid runtime abandonment");
+  p.runtimeState = "abandoned";
+  p.lifecycle = "abandoned";
+  p.actionOffer = null;
+}
+function suspensionClosureStatusForAbandon(p) {
+  const s = p.suspension || {};
+  const refs = (items, key) => new Set((Array.isArray(items) ? items : []).map((x) => x?.[key]));
+  return { complete: s.resourcesQuarantined === true
+    && (s.affectedRunIds || []).every((id) => refs(s.terminalProofRefs, "runId").has(id) && refs(s.resourceClosureProofRefs, "ownerId").has(id))
+    && (s.affectedTaskIds || []).every((id) => refs(s.workspaceClosureProofRefs, "taskId").has(id)) };
 }
 function observationRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["runId", "conditionId", "cycle", "head", "executionRevision", "executionContractHash", "conditionHash", "adapter", "worldSnapshotHash", "resourceClaimsHash"], "observation request"); const condition = p.conditions.get(data.conditionId); if (!condition || p.observationRuns.has(data.runId) || typeof data.runId !== "string" || !data.runId || !Number.isSafeInteger(data.cycle) || data.cycle < 0 || !/^[a-f0-9]{40}$/.test(data.head) || data.executionRevision !== p.executionRevision || data.executionContractHash !== p.executionContractHash || data.conditionHash !== condition.conditionHash || !hash(data.worldSnapshotHash) || !hash(data.resourceClaimsHash) || (p.runtimeState === "calibrating" ? data.cycle !== 0 || data.head !== p.runtimeBaseHead : p.runtimeState === "active" ? data.cycle < 1 : true)) throw new Error("invalid observation request"); requireExactFields(data.adapter, ["ref", "version"], "observation adapter"); if (data.adapter.ref !== condition.definition.oracle_ref || typeof data.adapter.version !== "string" || !data.adapter.version) throw new Error("invalid observation request"); const run = { runId: data.runId, conditionId: data.conditionId, cycle: data.cycle, head: data.head, executionRevision: data.executionRevision, executionContractHash: data.executionContractHash, conditionHash: data.conditionHash, adapter: structuredClone(data.adapter), worldSnapshotHash: data.worldSnapshotHash, resourceClaimsHash: data.resourceClaimsHash, phase: "requested", allocationId: null, leaseReceiptHash: null, processIdentityHash: null, terminalProofHash: null, evidenceId: null, releaseReceiptHash: null }; p.observationRuns.set(data.runId, run); condition.status = "observing"; condition.lastObservationRunId = data.runId; }
 function observationTransition(p, data, from, to) { runtimeOnly(p); const fields = to === "lease_allocated" ? ["runId", "conditionId", "allocationId", "leaseReceiptHash"] : to === "process_bound" ? ["runId", "conditionId", "processIdentityHash"] : to === "terminal" ? ["runId", "conditionId", "terminalProofHash"] : ["runId", "conditionId", "releaseReceiptHash"]; requireExactFields(data, fields, "observation transition"); const run = p.observationRuns.get(data.runId); if (!run || run.conditionId !== data.conditionId || run.phase !== from) throw new Error("invalid observation phase"); if (to === "lease_allocated" && (typeof data.allocationId !== "string" || !data.allocationId || !hash(data.leaseReceiptHash))) throw new Error("invalid observation lease proof"); if (to === "process_bound" && !hash(data.processIdentityHash)) throw new Error("invalid observation process identity"); if (to === "terminal" && !hash(data.terminalProofHash)) throw new Error("invalid observation terminal proof"); if (to === "released" && !hash(data.releaseReceiptHash)) throw new Error("invalid observation release proof"); Object.assign(run, { phase: to, ...(to === "lease_allocated" ? { allocationId: data.allocationId, leaseReceiptHash: data.leaseReceiptHash } : {}), ...(to === "process_bound" ? { processIdentityHash: data.processIdentityHash } : {}), ...(to === "terminal" ? { terminalProofHash: data.terminalProofHash } : {}), ...(to === "released" ? { releaseReceiptHash: data.releaseReceiptHash } : {}) }); }

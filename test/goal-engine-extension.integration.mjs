@@ -813,20 +813,20 @@ test("historical safe ignored state dispatch remains available", async () => {
   ]);
 });
 
-test("goal_amend exposes a strict discriminated eleven-operation schema", () => {
+test("goal_amend exposes a strict discriminated twelve-operation schema", () => {
   const pi = createMockPi(tmpCwd());
   createGoalEngineExtension(pi);
   const schema = pi.tools.find((tool) => tool.name === "goal_amend").parameters;
   assert.equal(schema.type, "object");
-  assert.equal(schema.anyOf.length, 11);
+  assert.equal(schema.anyOf.length, 12);
   assert.deepEqual(schema.anyOf.map((candidate) => candidate.properties.operation.const).sort(), [
-    "detach_session", "patch_active", "propose_execution_change", "propose_transfer_session", "propose_update_goal", "reopen_completed", "resolve_blocked", "resume_runtime", "transfer_session", "triage", "update_goal",
+    "abandon_runtime", "detach_session", "patch_active", "propose_execution_change", "propose_transfer_session", "propose_update_goal", "reopen_completed", "resolve_blocked", "resume_runtime", "transfer_session", "triage", "update_goal",
   ].sort());
   for (const branch of schema.anyOf) {
     assert.equal(branch.additionalProperties, false);
     assert.ok(branch.properties.operation.const);
     assert.ok(Object.hasOwn(branch.properties, "goal_id"), "goal_id remains optional in every branch");
-    assert.equal(branch.required.includes("goal_id"), ["propose_transfer_session", "transfer_session", "propose_execution_change"].includes(branch.properties.operation.const));
+    assert.equal(branch.required.includes("goal_id"), ["propose_transfer_session", "transfer_session", "propose_execution_change", "abandon_runtime"].includes(branch.properties.operation.const));
   }
   const branch = (operation) => schema.anyOf.find((candidate) => candidate.properties.operation.const === operation);
   const propose = branch("propose_update_goal");

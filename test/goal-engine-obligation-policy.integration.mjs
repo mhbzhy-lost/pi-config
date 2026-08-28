@@ -124,6 +124,19 @@ test("non-active runtime states do not offer product actions", () => {
   for (const runtimeState of ["draft", "awaiting_user_approval", "calibrating", "suspended"]) { const projection = base(); projection.runtimeState = runtimeState; projection.progressLedger = ledger(); projection.conditions.set("c", condition("c")); projection.findings.set("f", { findingId: "f", status: "open" }); const result = frontier(projection, world(), new Map(), { claims: new Map([["c", []]]) }); assert(!result.actions.some(x => ["condition", "repair-open", "repair"].includes(x.kind)), runtimeState); if (runtimeState === "calibrating") assert(result.blocking.some(x => x.code === "RUNTIME_CALIBRATION_REQUIRED")); }
 });
 
+test("proof-loss suspension signs abandon from world safety, leaving exact preservation to Host preflight", () => {
+  const projection = base(); projection.runtimeState = "suspended"; projection.suspension = {
+    suspensionId: "s", reason: "follow_up", resourcesQuarantined: false,
+    affectedTaskIds: ["task"], affectedRunIds: ["run"],
+    terminalProofRefs: [], workspaceClosureProofRefs: [], resourceClosureProofRefs: [],
+  }; projection.progressLedger = ledger();
+  const result = frontier(projection);
+  assert.deepEqual(result.actions.map(({ tool, params }) => ({ tool, params })), [{
+    tool: "goal_amend", params: { operation: "abandon_runtime" },
+  }]);
+  assert(result.blocking.some(item => item.code === "SUSPENSION_WORKSPACE_CLOSURE_PENDING"));
+});
+
 test("incomplete suspension closure blocks resume with canonical missing IDs", () => {
   const projection = base(); projection.runtimeState = "suspended"; projection.suspension = { suspensionId: "s", reason: "host_pause", resourcesQuarantined: false, affectedTaskIds: ["task-b", "task-a", "task-a"], affectedRunIds: ["run-b", "run-a", "run-a"], terminalProofRefs: [], workspaceClosureProofRefs: [], resourceClosureProofRefs: [] }; projection.progressLedger = ledger();
   const closure = suspensionClosureStatus(projection), result = frontier(projection);
