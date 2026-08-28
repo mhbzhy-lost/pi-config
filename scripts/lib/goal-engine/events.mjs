@@ -382,7 +382,7 @@ function runtimeAbandoned(p, data) {
     let previous = "";
     return proof.preserved.every((item) => {
       if (!isPlainObject(item) || Object.keys(item).length !== 4 || typeof item.taskId !== "string" || item.taskId <= previous
-        || !Number.isSafeInteger(item.attempt) || item.attempt < 1 || !hash(item.head) || !isPlainObject(item.receipt)) return false;
+        || !Number.isSafeInteger(item.attempt) || item.attempt < 1 || !gitHead(item.head) || !isPlainObject(item.receipt)) return false;
       previous = item.taskId;
       const receipt = item.receipt;
       const fields = ["ownerCas", "workspacePath", "executorHead", "disposition", "manifest", "receiptHash"];
@@ -390,8 +390,13 @@ function runtimeAbandoned(p, data) {
         || !hash(receipt.ownerCas) || typeof receipt.workspacePath !== "string" || receipt.executorHead !== item.head
         || receipt.disposition !== "preserved" || !hash(receipt.receiptHash) || !isPlainObject(receipt.manifest)) return false;
       const manifestFields = ["id", "originRoot", "path", "branchRef", "baseCommit", "headCommit", "state", "disposition"];
-      return Object.keys(receipt.manifest).length === manifestFields.length && manifestFields.every((field) => Object.hasOwn(receipt.manifest, field))
-        && receipt.manifest.headCommit === item.head && receipt.manifest.disposition === "preserved";
+      const manifest = receipt.manifest;
+      return Object.keys(manifest).length === manifestFields.length && manifestFields.every((field) => Object.hasOwn(manifest, field))
+        && ["id", "originRoot", "path", "branchRef", "state", "disposition"].every((field) => typeof manifest[field] === "string" && manifest[field])
+        && gitHead(manifest.baseCommit) && gitHead(manifest.headCommit)
+        && manifest.path === receipt.workspacePath && manifest.headCommit === item.head
+        && receipt.executorHead === manifest.headCommit && manifest.disposition === "preserved";
+
     });
   };
   if (p.runtimeState !== "suspended" || !p.suspension || suspensionClosureStatusForAbandon(p).complete
@@ -523,6 +528,7 @@ function finalReviewRecorded(p, data) {
   p.finalReview = { ...p.finalReview, ...structuredClone(data) };
 }
 function hash(value) { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
+function gitHead(value) { return typeof value === "string" && /^[a-f0-9]{40}$/.test(value); }
 function canonical(value) { return Array.isArray(value) ? value.map(canonical) : isPlainObject(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value; }
 function hashCanonical(value) { return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex"); }
 export function suspensionClosureHash(closure) { return hashCanonical(closure); }

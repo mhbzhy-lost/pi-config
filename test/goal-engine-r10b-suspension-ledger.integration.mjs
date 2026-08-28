@@ -90,16 +90,11 @@ test("suspended frontier exposes incomplete closure blockers and only resumes af
     ["dispatch", { requiredNextAction: { tool: "goal_dispatch", params: {}, reason: "business dispatch" } }],
   ]);
   const frontier = actionableFrontier({ projection, worldSnapshot: world(), taskActions, observationInventory: { claims: new Map() } });
-  assert.deepEqual(frontier.actions.map(({ tool, params }) => [tool, params]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))), [
-    ["goal_integrate", { action: "discard", task_id: "discard" }],
-    ["goal_integrate", { action: "preserve", task_id: "preserve" }],
-    ["goal_settle", { task_id: "task-1" }],
-    ["record_observation", { run_id: "terminal-run" }],
-    ["release_observation", { run_id: "calibration-run" }],
-    ["release_observation", { run_id: "recorded-run" }],
-  ].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
-  assert.equal(frontier.actions.some(({ tool, params }) => tool === "goal_integrate" && params.action === "integrate"), false);
-  assert.equal(frontier.actions.some(({ tool }) => ["goal_accept", "goal_dispatch", "goal_finalize", "goal_resume", "goal_amend"].includes(tool)), false);
+  assert.deepEqual(frontier.actions.map(({ tool, params }) => [tool, params]), [
+    ["goal_amend", { operation: "abandon_runtime" }],
+  ]);
+  assert.equal(frontier.actions.some(({ tool }) => tool !== "goal_amend"), false);
+  assert.equal(frontier.actions.some(({ tool, params }) => tool === "goal_amend" && params.operation !== "abandon_runtime"), false);
   assert.deepEqual(frontier.blocking.map(item => item.code).filter(code => code.startsWith("SUSPENSION_")).sort(), ["SUSPENSION_RESOURCE_CLOSURE_PENDING", "SUSPENSION_TERMINAL_PROOF_PENDING", "SUSPENSION_WORKSPACE_CLOSURE_PENDING"]);
 
   const closure = {

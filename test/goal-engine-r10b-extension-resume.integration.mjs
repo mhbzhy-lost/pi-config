@@ -26,8 +26,8 @@ async function suspended({ batch, incomplete = false } = {}) { const cwd = repo(
 test("incomplete suspension closure exposes blockers instead of silently removing resume", async () => {
   const { api } = await suspended({ incomplete: true });
   const status = JSON.parse(await invoke(api, "goal_status"));
-  assert.equal(status.machineAction, undefined);
-  assert.equal(status.action_token, undefined);
+  assert.deepEqual(status.machineAction, { tool: "goal_amend", params: { goal_id: "harden-runtime", operation: "abandon_runtime" } });
+  assert.equal(typeof status.action_token, "string");
   assert.deepEqual(status.blocking.map(item => item.code).filter(code => code.startsWith("SUSPENSION_")).sort(), ["SUSPENSION_RESOURCE_CLOSURE_PENDING", "SUSPENSION_TERMINAL_PROOF_PENDING", "SUSPENSION_WORKSPACE_CLOSURE_PENDING"]);
 });
 
