@@ -5,7 +5,7 @@ import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.
 const SHA256 = "a".repeat(64);
 const HEAD = "b".repeat(40);
 
-function abandonedData({ head = HEAD, receiptHash = SHA256, manifestHead = head } = {}) {
+function abandonedData({ head = HEAD, receiptHash = SHA256, manifestHead = head, manifestDisposition = "preserved" } = {}) {
   return {
     suspensionId: "suspension-1",
     deficits: ["workspace-closure"],
@@ -21,7 +21,7 @@ function abandonedData({ head = HEAD, receiptHash = SHA256, manifestHead = head 
           manifest: {
             id: "allocation-1", originRoot: "/origin", path: "/workspace/task-1",
             branchRef: "refs/heads/task-1", baseCommit: "c".repeat(40),
-            headCommit: manifestHead, state: "preserved", disposition: "preserved",
+            headCommit: manifestHead, state: "preserved", disposition: manifestDisposition,
           },
         },
       }],
@@ -57,5 +57,7 @@ test("runtime_abandoned rejects invalid head/hash lengths and manifest identity"
     abandonedData({ head: "b".repeat(64) }),
     abandonedData({ receiptHash: "a".repeat(40) }),
     abandonedData({ manifestHead: "d".repeat(40) }),
+    abandonedData({ manifestDisposition: { state: "preserved", reason: "goal workspace preserved" } }),
+    abandonedData({ manifestDisposition: "discarded" }),
   ]) assert.throws(() => abandon(suspendedProjection(), data), /invalid runtime abandonment/);
 });

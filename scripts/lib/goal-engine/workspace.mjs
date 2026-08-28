@@ -823,7 +823,9 @@ function preservationReceipt(lease, receipt, expectedExecutorHead) {
       id: receipt.id, originRoot: receipt.originRoot, path: receipt.path,
       branchRef: receipt.branchRef, baseCommit: receipt.baseCommit,
       headCommit: receipt.headCommit, state: receipt.state,
-      disposition: receipt.disposition,
+      // Managed lifecycle receipts retain a typed disposition internally; the
+      // runtime proof manifest exposes only the reducer's string disposition.
+      disposition: receipt.disposition?.state ?? receipt.disposition,
     },
   };
   return { ...material, receiptHash: createHash("sha256").update(JSON.stringify(canonical(material))).digest("hex") };

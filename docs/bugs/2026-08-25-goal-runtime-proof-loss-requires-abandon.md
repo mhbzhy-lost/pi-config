@@ -4,6 +4,8 @@
 
 合法 public `goal_amend(abandon_runtime)` 已到达 handler，Store/Host preserve 已成功；首个偏离点是 `runtime_abandoned` reducer 将 40 位 Git head 误用为 64 位 SHA-256 hash，导致事件 append 拒绝。该缺陷 production 可达，且首次尝试可能已幂等地 preserve managed workspace；Goal ledger 未追加（version 保持 28）。不得掩盖这一 preserve side effect 或把它描述成 terminal proof。
 
+**当前第二个 production 首偏离点（2026-08-25，Task 6 真实第二次尝试）：真实 Store/Host preserve 幂等成功，ledger version 仍为 58，但 `runtime_abandoned` append 被 reducer 拒绝；原因是 managed `receipt.disposition` 为 `{state,reason}` 对象，`preservationReceipt.material.manifest.disposition` 未归一化为 `state` 字符串。该偏离点不得掩盖。**
+
 当前 projection 是 `suspended/ready`，closure 有三个 blocker：
 
 1. terminal proof 缺失（运行终止事实不可验证）；
