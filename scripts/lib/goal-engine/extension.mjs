@@ -1448,6 +1448,11 @@ export function createGoalEngineExtension(pi, options = {}) {
         await retrySuspendedOwnedStop(ctx, projection);
         projection = loadProjectionFn(root, goalId);
       }
+      // abandoned is a legal read-only terminal state: report it without issuing
+      // any business action and without checkpoint/business mutation.
+      if (projection.lifecycle === "abandoned") {
+        return JSON.stringify({ goalId, status: "ABANDONED", lifecycle: projection.lifecycle, runtimeState: projection.runtimeState, readiness: projection.readiness, progressLedger: projection.progressLedger });
+      }
       const runtimeIntentGate = runtimeIntentGates.get(`${goalId}:${sessionId}`);
       // A persisted input gate protects active runtime authority. Once durable
       // closure makes resume the sole frontier, it is a stale latch.

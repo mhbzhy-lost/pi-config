@@ -22,4 +22,9 @@ Extension handler 通过真实 Store lease 与 Host workspace inspection 做 exa
 此前将 workspace 字段存在性作为 frontier 的额外门禁，会把可签发的恢复意图错误地变成
 不可见状态，且无法替代 handler 的 preserve fence。
 
+本次 registry reload 偏差的根因是 `validateRegistry` 的生命周期白名单遗漏了
+`abandoned`。Reducer 已按契约把该终态从 `active_goal_ids` 移除并保留其 registry entry，
+但任何 fresh `listGoalIds`/status authority reload 都因此 fail-closed。修复仅扩展
+registry authority 的合法终态集合；abandoned 仍是只读终态，不重新加入 active 枚举。
+
 `runtimeAbandoned` 的 preserve receipt 同时包含 Git executor/manifest head（40 位 SHA-1）和 owner CAS、receipt hash、reason digest（64 位 SHA-256）。旧校验器把前者交给 SHA-256 校验，导致合法 preserve receipt 在 append 阶段被拒绝；修复仅调整 schema 类型边界和 manifest identity 校验，不在 append 失败后 discard、delete 或 rollback。

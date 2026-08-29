@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
+import { appendEvent, appendEventBatch, loadProjection, listGoals, listGoalIds } from "../scripts/lib/goal-engine/store.mjs";
 import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
 import { suspensionClosureHash } from "../scripts/lib/goal-engine/events.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
@@ -62,3 +62,44 @@ test("fully closed suspended reload reconciles stale owner intent and reissues r
 test("resume rejects malformed or stale authority without consuming its offer", async () => { const { cwd, api } = await suspended(); const status = JSON.parse(await invoke(api, "goal_status")); for (const input of [{ goal_id: "harden-runtime", operation: "resume_runtime", action_token: "wrong" }, { goal_id: "harden-runtime", operation: "resume_runtime", action_token: status.action_token, extra: true }]) await assert.rejects(invoke(api, "goal_amend", input)); assert.equal(projectionFor(cwd).runtimeState, "suspended"); assert.equal(projectionFor(cwd).actionOffer.token, status.action_token); assert.equal(count(cwd, "goal.action_consumed"), 0); });
 
 test("resume batch is retryable before append and idempotent after durable throw", async () => { let mode = "off"; const { cwd, api } = await suspended({ batch(root, events, version) { if (mode === "pre") { mode = "retry"; throw Error("pre-append"); } const value = appendEventBatch(root, events, version); if (mode === "durable") throw Error("durable-then-throw"); return value; } }); let status = JSON.parse(await invoke(api, "goal_status")); mode = "pre"; await assert.rejects(invoke(api, "goal_amend", { ...status.machineAction.params, action_token: status.action_token }), /pre-append/); assert.equal(projectionFor(cwd).actionOffer.token, status.action_token); status = JSON.parse(await invoke(api, "goal_status")); mode = "durable"; await invoke(api, "goal_amend", { ...status.machineAction.params, action_token: status.action_token }); assert.equal(projectionFor(cwd).runtimeState, "active"); assert.equal(count(cwd, "goal.runtime_resumed"), 1); });
+
+test("abandoned is a legal read-only terminal and does not block a new goal", async () => {
+  const { cwd, api, closure } = await suspended({ incomplete: true });
+  const goalId = projectionFor(cwd).goalId;
+  assert.equal(projectionFor(cwd).runtimeState, "suspended");
+
+  // Typed abandon through the Store authority (same reducer path as the real
+  // goal_amend abandon_runtime batch) without workspace-preserve preflight.
+  appendEvent(rootFor(cwd), event(goalId, "goal.runtime_abandoned", {
+    suspensionId: closure.suspensionId,
+    deficits: ["terminal-proof", "workspace-closure", "resource-closure"],
+    ownerSessionId: "owner",
+    reasonDigest: "a".repeat(64),
+    preserveProof: { safe: true, preserved: [] },
+  }), projectionFor(cwd).version);
+
+  const abandoned = projectionFor(cwd);
+  assert.equal(abandoned.lifecycle, "abandoned");
+  assert.equal(abandoned.runtimeState, "abandoned");
+
+  const registry = JSON.parse(readFileSync(join(rootFor(cwd), "registry.json"), "utf8"));
+  assert.equal(registry.goals[goalId].lifecycle, "abandoned");
+  assert.deepEqual(registry.active_goal_ids, []);
+
+  assert.deepEqual(listGoalIds(rootFor(cwd)), [goalId]);
+  assert.deepEqual(listGoals(rootFor(cwd)), []);
+
+  const status = JSON.parse(await invoke(api, "goal_status", { goal_id: goalId }));
+  assert.equal(status.status, "ABANDONED");
+  assert.equal(status.lifecycle, "abandoned");
+  assert.equal(status.machineAction, undefined);
+  assert.equal(status.action_token, undefined);
+
+  const fresh = pi(cwd);
+  createGoalEngineExtension(fresh, { goalStateEnv: {}, runtimeHost: host(cwd) });
+  await invoke(fresh, "goal_init", runtimeInit());
+  const afterInit = JSON.parse(readFileSync(join(rootFor(cwd), "registry.json"), "utf8"));
+  assert.equal(afterInit.active_goal_ids.length, 1);
+  assert.notEqual(afterInit.active_goal_ids[0], goalId);
+  assert.equal(afterInit.goals[goalId].lifecycle, "abandoned");
+});

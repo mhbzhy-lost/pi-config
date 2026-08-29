@@ -690,7 +690,7 @@ function validateRegistry(registry) {
     activeIds.add(goalId);
   }
   for (const [goalId, entry] of Object.entries(registry.goals)) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry) || !["active", "blocked", "completed", "cancelled"].includes(entry.lifecycle) || typeof entry.objective !== "string" || typeof entry.updatedAt !== "string" || Number.isNaN(Date.parse(entry.updatedAt)) || (entry.lifecycle === "active") !== activeIds.has(goalId)) throw new TypeError("invalid goal engine registry");
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || !["active", "blocked", "completed", "cancelled", "abandoned"].includes(entry.lifecycle) || typeof entry.objective !== "string" || typeof entry.updatedAt !== "string" || Number.isNaN(Date.parse(entry.updatedAt)) || (entry.lifecycle === "active") !== activeIds.has(goalId)) throw new TypeError("invalid goal engine registry");
   }
   for (const goalId of activeIds) {
     if (!Object.hasOwn(registry.goals, goalId) || registry.goals[goalId].lifecycle !== "active") throw new TypeError("invalid goal engine registry");
