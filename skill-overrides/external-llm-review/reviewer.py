@@ -50,6 +50,7 @@ _SENSITIVE_BODY_PATTERNS = (
 _SAFE_API_DIAGNOSTIC = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SAFE_EXCEPTION_TYPE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
+DEFAULT_API_TIMEOUT_SECONDS = 600
 
 
 _REVIEW_SYSTEM_PROMPT = """你是一名资深代码评审者。被评审代码可能涉及多种语言、框架与外部依赖。
@@ -562,9 +563,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--api-timeout-seconds",
         type=int,
-        default=180,
+        default=DEFAULT_API_TIMEOUT_SECONDS,
         help=(
-            "hard wall-clock timeout around the API call (default 180). "
+            f"hard wall-clock timeout around the API call (default {DEFAULT_API_TIMEOUT_SECONDS}). "
             "Set <=0 to drop the wall-clock cap and fall back to the OpenAI "
             "SDK default (~600s)."
         ),

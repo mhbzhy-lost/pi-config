@@ -17,6 +17,7 @@ const { codingAgent, jiti } = await loadPiTestRuntime(import.meta.url);
 const compactToolsModule = await jiti.import("../pi/extensions/compact-tools.ts");
 const compactTools = compactToolsModule.default;
 const names = ["read", "bash", "edit", "write", "find", "grep", "ls"];
+const compactToolNames = names.filter((name) => name !== "bash");
 const factories = Object.fromEntries(names.map((name) => [
   name,
   codingAgent[`create${name[0].toUpperCase()}${name.slice(1)}Tool`],
@@ -28,11 +29,11 @@ function registerCompactTools(factory) {
   return registered;
 }
 
-test("compact overrides retain every native non-renderer field", () => {
+test("compact overrides retain every non-bash native non-renderer field", () => {
   const registered = registerCompactTools(compactTools);
 
-  assert.deepEqual(registered.map((tool) => tool.name), names);
-  for (const name of names) {
+  assert.deepEqual(registered.map((tool) => tool.name), compactToolNames);
+  for (const name of compactToolNames) {
     const native = factories[name](process.cwd());
     const actual = registered.find((tool) => tool.name === name);
     for (const field of ["parameters", "promptSnippet", "promptGuidelines", "prepareArguments", "constrainedSampling"]) {

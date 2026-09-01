@@ -1,6 +1,5 @@
 import { basename, dirname } from "node:path";
 import {
-  createBashTool,
   createEditTool,
   createFindTool,
   createGrepTool,
@@ -143,7 +142,6 @@ function installCompactSkillRenderer(theme: any) {
 
 const factories = {
   read: createReadTool,
-  bash: createBashTool,
   edit: createEditTool,
   write: createWriteTool,
   find: createFindTool,

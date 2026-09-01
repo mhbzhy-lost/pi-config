@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -9,7 +10,24 @@ const NON_CODE_EXTS = new Set([".md", ".json", ".txt", ".yml", ".yaml", ".toml",
 const MAX_EXEMPT_LINES = 10;
 const NEGATIVE_RE = /^(none\.?|_?\(?none\)?_?|n\/?a|no\s+(\w+\s+)?issues(\s+found)?|nothing\s+to\s+report|✅|无)/i;
 const PROVIDER_CHAIN = ["idealab-anthropic", "idealab-openai"];
-const DEFAULT_TIMEOUT_MS = 540_000;
+const DEFAULT_TIMEOUT_MS = 660_000;
+const MAX_DIAGNOSTIC_BYTES = 4_096;
+
+function truncateUtf8(text, maxBytes) {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+function diagnosticSummary(error) {
+  const stderr = typeof error?.stderr === "string" ? error.stderr : "";
+  const bounded = truncateUtf8(stderr, MAX_DIAGNOSTIC_BYTES);
+  const status = typeof error?.code === "number" ? `exit ${error.code}` : error?.name === "AbortError" ? "timed out" : "failed";
+  return bounded.trim() ? `${status}: ${bounded.trim()}` : status;
+}
 
 export function parseSections(text) {
   function hasContent(header) {
@@ -29,6 +47,18 @@ export function shouldExempt({ totalLines, allNonCode, hasBinary }) {
   if (totalLines < MAX_EXEMPT_LINES) return true;
   if (allNonCode) return true;
   return false;
+}
+
+export async function workspaceReviewBypass({ cwd }) {
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 10_000 });
+    const repoRoot = stdout.trim();
+    if (!repoRoot) return false;
+    const config = JSON.parse(await readFile(join(repoRoot, ".push-gate.json"), "utf8"));
+    return config !== null && !Array.isArray(config) && typeof config === "object" && config.bypassReview === true;
+  } catch {
+    return false;
+  }
 }
 
 export async function gatherDiffInfo({ cwd }) {
@@ -89,7 +119,7 @@ export async function gatherDiffInfo({ cwd }) {
   return { exempt: false, baseRef, range, diffHash, fileCount };
 }
 
-export async function runReview({ cwd, baseRef, round, reviewerPy, envFile, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+export async function runReview({ cwd, baseRef, round, reviewerPy, envFile, timeoutMs = DEFAULT_TIMEOUT_MS, diagnosticSink = console.error }) {
   for (const provider of PROVIDER_CHAIN) {
     try {
       const { stdout } = await execFileAsync("uv", [
@@ -100,9 +130,15 @@ export async function runReview({ cwd, baseRef, round, reviewerPy, envFile, time
         "--review-depth", "exhaustive",
         "--review-round", String(round),
         "--max-issues", "25",
+        "--api-timeout-seconds", "600",
       ], { cwd, timeout: timeoutMs, env: { ...process.env, DOTENV_PATH: envFile } });
       if (stdout.trim()) return { output: stdout.trim(), provider };
-    } catch {
+    } catch (error) {
+      try {
+        diagnosticSink(`Push review provider ${provider} ${diagnosticSummary(error)}`);
+      } catch {
+        // Diagnostics must not interfere with provider fallback or fail-open behavior.
+      }
       continue;
     }
   }

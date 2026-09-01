@@ -1,8 +1,10 @@
 import { checkShellPolicy, checkSensitivePath, codingReminderFor } from "./shell-policy.mjs";
+import { validateDeclaredBashCwd } from "./bash-cwd-policy.mjs";
 import { createPushReviewState } from "./push-review-state.mjs";
 import {
   gatherDiffInfo as defaultGatherDiffInfo,
   runReview as defaultRunReview,
+  workspaceReviewBypass as defaultWorkspaceReviewBypass,
   parseSections,
   buildDenyReason,
 } from "./review-invoker.mjs";
@@ -25,8 +27,10 @@ function appendReminder(content, reminder) {
 }
 
 export function createSecurityGatesExtension(pi, {
+  shellPolicy = checkShellPolicy,
   gatherDiffInfo = defaultGatherDiffInfo,
   runReview = defaultRunReview,
+  workspaceBypass = defaultWorkspaceReviewBypass,
   reviewerPy,
   envFile,
   configRoot = join(import.meta.dirname, "..", ".."),
@@ -41,13 +45,22 @@ export function createSecurityGatesExtension(pi, {
     if (sensitiveViolation) return { block: true, reason: sensitiveViolation.reason };
 
     if (event.toolName !== "bash" || typeof event.input?.command !== "string") return undefined;
-    const cwd = ctx.cwd;
-    if (!cwd) return { block: true, reason: "无法取得可信工作目录，安全门禁已按 fail-closed 阻断 bash" };
+    const workspaceRoot = ctx.cwd;
+    if (!workspaceRoot) return { block: true, reason: "无法取得可信工作目录，安全门禁已按 fail-closed 阻断 bash" };
+    let cwd = workspaceRoot;
+    if (event.input.cwd !== undefined) {
+      try {
+        cwd = await validateDeclaredBashCwd({ cwd: event.input.cwd, workspaceRoot });
+      } catch (error) {
+        return { block: true, reason: error instanceof Error ? error.message : "声明的 bash cwd 无效，安全门禁已阻断" };
+      }
+    }
 
-    const violation = checkShellPolicy({ command: event.input.command, cwd, workspaceRoot: ctx.cwd, env: process.env });
+    const violation = shellPolicy({ command: event.input.command, cwd, workspaceRoot, env: process.env });
     if (violation) return { block: true, reason: violation.reason };
 
     if (!isRealGitPush(event.input.command)) return undefined;
+    if (await workspaceBypass({ cwd })) return undefined;
 
     const diffInfo = await gatherDiffInfo({ cwd });
     if (diffInfo.exempt) return undefined;

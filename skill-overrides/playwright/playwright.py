@@ -5,20 +5,23 @@ Manages a persistent Playwright MCP server process, proxies via Unix socket.
 Each start creates an independent browser instance automatically.
 
 Usage:
-  playwright.py start [--headless]   Start a new browser instance
-  playwright.py call <tool> [args]   Call an MCP tool (auto-detects instance)
-  playwright.py stop                 Stop the browser instance
-  playwright.py status               Check running instance
-  playwright.py tools                List available tools
-  playwright.py instances            List all running instances
-  playwright.py stopall              Stop all running instances
+  playwright.py [--instance <name>] [--profile <safe-name>] start [--headless]
+  playwright.py [--instance <name>] call <tool> [args]
+  playwright.py [--instance <name>] stop
+  playwright.py [--instance <name>] status
+  playwright.py [--instance <name>] tools
+  playwright.py instances
+  playwright.py stopall
 """
 
 import json
+import fcntl
 import os
+import re
 import shlex
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -30,9 +33,16 @@ from pathlib import Path
 BASE_STATE_DIR = Path(tempfile.gettempdir()) / "pi-playwright-mcp"
 CLIENT_TIMEOUT = 60.0
 IDLE_TIMEOUT_DEFAULT = 1800.0
+STOP_TIMEOUT = 5.0
+SOCKET_PATH_BUDGET = 100
+SAFE_NAME_RE = re.compile(r"[a-z0-9-]{1,32}\Z")
+STARTUP_ERROR_REASONS = {
+    "profile-in-use", "unsafe-profile-directory", "invalid-profile-name",
+}
 
 _instance_name: str | None = None
 _instance_explicit = False
+_profile_name: str | None = None
 
 
 def state_dir() -> Path:
@@ -55,6 +65,28 @@ def last_activity_file() -> Path:
     return state_dir() / "last_activity"
 
 
+def startup_error_file() -> Path:
+    return state_dir() / "startup.error"
+
+
+def publish_startup_error(reason: str) -> None:
+    """Publish a fixed startup error without exposing partial contents."""
+    safe_reason = reason if reason in STARTUP_ERROR_REASONS else "daemon-start-failed"
+    ensure_state_dir()
+    fd, temporary = tempfile.mkstemp(prefix=".startup.error-", dir=state_dir())
+    try:
+        with os.fdopen(fd, "w") as error_file:
+            error_file.write(safe_reason)
+            error_file.flush()
+            os.fsync(error_file.fileno())
+        os.replace(temporary, startup_error_file())
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+
+
 def idle_timeout_from_env() -> float:
     """Idle timeout from PI_PLAYWRIGHT_IDLE_TIMEOUT, else the default."""
     raw = os.environ.get("PI_PLAYWRIGHT_IDLE_TIMEOUT")
@@ -74,6 +106,108 @@ def ensure_state_dir():
     state_dir().mkdir(parents=True, exist_ok=True)
 
 
+def fail(reason: str) -> None:
+    print(f"error: {reason}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def validate_instance(name: str) -> None:
+    if not SAFE_NAME_RE.fullmatch(name):
+        raise ValueError("invalid-instance")
+    candidate = BASE_STATE_DIR / name / "server.sock"
+    if len(os.fsencode(candidate)) >= SOCKET_PATH_BUDGET:
+        raise ValueError("invalid-instance")
+
+
+def validate_profile_name(name: str) -> None:
+    if not SAFE_NAME_RE.fullmatch(name):
+        raise ValueError("invalid-profile-name")
+
+
+def validate_profile_directory(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ValueError("unsafe-profile-directory") from exc
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ValueError("unsafe-profile-directory")
+
+
+def prepare_profile(name: str) -> Path:
+    validate_profile_name(name)
+    root = Path.home() / ".pi" / "playwright-profiles"
+    try:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as exc:
+        raise ValueError("unsafe-profile-directory") from exc
+    validate_profile_directory(root)
+    profile = root / name
+    try:
+        profile.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise ValueError("unsafe-profile-directory") from exc
+    validate_profile_directory(profile)
+    return profile
+
+
+def acquire_profile_lock(profile: Path):
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(profile / ".pi-playwright.lock", flags, 0o600)
+        lock = os.fdopen(fd, "r+")
+        try:
+            validate_profile_lock(lock.fileno(), profile)
+        except ValueError:
+            lock.close()
+            raise
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock
+    except BlockingIOError as exc:
+        raise ValueError("profile-in-use") from exc
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError("unsafe-profile-directory") from exc
+
+
+def validate_profile_lock(fd: int, profile: Path) -> None:
+    """Verify an open lock descriptor is exactly the profile's lock file."""
+    try:
+        descriptor_info = os.fstat(fd)
+        path_info = (profile / ".pi-playwright.lock").lstat()
+    except OSError as exc:
+        raise ValueError("unsafe-profile-directory") from exc
+    if (not stat.S_ISREG(descriptor_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or stat.S_IMODE(descriptor_info.st_mode) != 0o600
+            or not stat.S_ISREG(path_info.st_mode)
+            or path_info.st_uid != os.getuid()
+            or stat.S_IMODE(path_info.st_mode) != 0o600
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)):
+        raise ValueError("unsafe-profile-directory")
+
+
+def inherited_profile_lock(profile: Path, fd: int):
+    """Adopt the parent-held lock without releasing or reacquiring it."""
+    try:
+        validate_profile_lock(fd, profile)
+        return os.fdopen(fd, "r+")
+    except (OSError, ValueError) as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError("unsafe-profile-directory") from exc
+
+
 def read_pid(path: Path) -> int | None:
     try:
         pid = int(path.read_text().strip())
@@ -81,6 +215,19 @@ def read_pid(path: Path) -> int | None:
         return pid
     except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
         return None
+
+
+def wait_for_process_exit(pid: int, timeout: float = STOP_TIMEOUT) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        time.sleep(0.05)
+    return False
 
 
 def running_instances() -> list[tuple[str, int]]:
@@ -128,37 +275,65 @@ def do_status():
         print(f"Not running (instance={_instance_name})")
 
 
-def do_start(headless: bool = False):
+def do_start(headless: bool = False, profile_name: str | None = None):
     global _instance_name
 
     if _instance_name is None:
         _instance_name = uuid.uuid4().hex[:8]
+    validate_instance(_instance_name)
+
+    profile = prepare_profile(profile_name) if profile_name else None
 
     reaped = reap_idle_instances(idle_timeout_from_env())
     if reaped:
         print(f"Reaped idle instances: {', '.join(reaped)}")
 
+    profile_lock = acquire_profile_lock(profile) if profile is not None else None
+
     ensure_state_dir()
 
     if is_running():
+        if profile_lock is not None:
+            profile_lock.close()
         print(f"Already running (instance={_instance_name})")
         return
+
+    startup_error_file().unlink(missing_ok=True)
 
     cmd = [sys.executable, __file__, "_daemon", "--instance", _instance_name]
     if headless:
         cmd.append("--headless")
+    if profile_name:
+        cmd.extend(["--profile", profile_name])
 
+    if profile_lock is not None:
+        cmd.extend(["--profile-lock-fd", str(profile_lock.fileno())])
     log = open(log_file(), "a")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=log,
-        stderr=log,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            pass_fds=(profile_lock.fileno(),) if profile_lock is not None else (),
+        )
+    finally:
+        log.close()
+        if profile_lock is not None:
+            profile_lock.close()
     pid_file().write_text(str(proc.pid))
 
     for _ in range(50):
+        if startup_error_file().exists():
+            try:
+                reason = startup_error_file().read_text().strip()
+            except OSError:
+                reason = "daemon-start-failed"
+            do_stop(announce=False)
+            fail(reason if reason in {
+                "profile-in-use", "unsafe-profile-directory", "invalid-profile-name"
+            } else "daemon-start-failed")
         if socket_path().exists():
             try:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -170,8 +345,8 @@ def do_start(headless: bool = False):
                 pass
         time.sleep(0.1)
 
-    print(f"Failed to start (check log: {log_file()})", file=sys.stderr)
-    sys.exit(1)
+    do_stop(announce=False)
+    fail("daemon-start-failed")
 
 
 def reap_idle_instances(idle_timeout: float) -> list[str]:
@@ -202,7 +377,9 @@ def reap_idle_instances(idle_timeout: float) -> list[str]:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
-        for f in ["daemon.pid", "server.sock", "mcp.pid", "last_activity", "daemon.log"]:
+        if not wait_for_process_exit(pid):
+            continue
+        for f in ["daemon.pid", "server.sock", "mcp.pid", "last_activity", "daemon.log", "startup.error"]:
             (d / f).unlink(missing_ok=True)
         try:
             d.rmdir()
@@ -212,7 +389,7 @@ def reap_idle_instances(idle_timeout: float) -> list[str]:
     return reaped
 
 
-def do_stop():
+def do_stop(announce: bool = True):
     resolve_instance()
     pid = read_pid(pid_file())
     if pid:
@@ -220,8 +397,10 @@ def do_stop():
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
+        if not wait_for_process_exit(pid):
+            fail("stop-failed")
 
-    for f in [pid_file(), socket_path(), mcp_pid_file(), last_activity_file(), log_file()]:
+    for f in [pid_file(), socket_path(), mcp_pid_file(), last_activity_file(), log_file(), startup_error_file()]:
         f.unlink(missing_ok=True)
 
     try:
@@ -229,7 +408,8 @@ def do_stop():
     except OSError:
         pass
 
-    print(f"Stopped (instance={_instance_name})")
+    if announce:
+        print(f"Stopped (instance={_instance_name})")
 
 
 def do_stopall():
@@ -238,19 +418,25 @@ def do_stopall():
     if not instances:
         print("No running instances")
         return
+    stop_failed = False
     for name, pid in instances:
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
+        if not wait_for_process_exit(pid):
+            stop_failed = True
+            continue
         d = BASE_STATE_DIR / name
-        for f in ["daemon.pid", "server.sock", "mcp.pid", "last_activity", "daemon.log"]:
+        for f in ["daemon.pid", "server.sock", "mcp.pid", "last_activity", "daemon.log", "startup.error"]:
             (d / f).unlink(missing_ok=True)
         try:
             d.rmdir()
         except OSError:
             pass
         print(f"  Stopped {name} (pid={pid})")
+    if stop_failed:
+        fail("stop-failed")
 
 
 def send_request(req: dict, timeout: float = CLIENT_TIMEOUT) -> dict:
@@ -323,7 +509,8 @@ def do_tools():
         print(f"  {t['name']:30s} {desc}")
 
 
-def run_daemon(headless: bool, idle_timeout: float = IDLE_TIMEOUT_DEFAULT):
+def run_daemon(headless: bool, idle_timeout: float = IDLE_TIMEOUT_DEFAULT,
+               profile_name: str | None = None, profile_lock_fd: int | None = None):
     """Daemon: manages MCP subprocess and proxies via Unix socket with threads.
 
     Exits on its own when no client connects for idle_timeout seconds and no
@@ -334,13 +521,24 @@ def run_daemon(headless: bool, idle_timeout: float = IDLE_TIMEOUT_DEFAULT):
     ensure_state_dir()
     socket_path().unlink(missing_ok=True)
 
+    profile = prepare_profile(profile_name) if profile_name else None
+    if profile is None and profile_lock_fd is not None:
+        raise ValueError("unsafe-profile-directory")
+    profile_lock = (
+        inherited_profile_lock(profile, profile_lock_fd)
+        if profile_lock_fd is not None else
+        acquire_profile_lock(profile) if profile is not None else None
+    )
+
     injected = os.environ.get("PI_PLAYWRIGHT_MCP_CMD")
     if injected:
         mcp_cmd = shlex.split(injected)
     else:
         mcp_cmd = ["npx", "-y", "@playwright/mcp"]
-        if headless:
-            mcp_cmd.append("--headless")
+    if headless:
+        mcp_cmd.append("--headless")
+    if profile is not None:
+        mcp_cmd.extend(["--user-data-dir", str(profile)])
 
     mcp = subprocess.Popen(
         mcp_cmd,
@@ -467,17 +665,28 @@ def run_daemon(headless: bool, idle_timeout: float = IDLE_TIMEOUT_DEFAULT):
             mcp.wait(timeout=5)
         except subprocess.TimeoutExpired:
             mcp.kill()
+        if profile_lock is not None:
+            profile_lock.close()
 
 
-def parse_instance(argv: list[str]) -> list[str]:
-    """Extract --instance <name> from argv, set global, return remaining args."""
-    global _instance_name, _instance_explicit
+def parse_options(argv: list[str]) -> list[str]:
+    """Extract global instance/profile options and return remaining args."""
+    global _instance_name, _instance_explicit, _profile_name
     rest = []
     i = 0
     while i < len(argv):
-        if argv[i] == "--instance" and i + 1 < len(argv):
+        if argv[i] == "--instance":
+            if i + 1 >= len(argv):
+                raise ValueError("invalid-instance")
             _instance_name = argv[i + 1]
+            validate_instance(_instance_name)
             _instance_explicit = True
+            i += 2
+        elif argv[i] == "--profile":
+            if i + 1 >= len(argv):
+                raise ValueError("invalid-profile-name")
+            _profile_name = argv[i + 1]
+            validate_profile_name(_profile_name)
             i += 2
         else:
             rest.append(argv[i])
@@ -496,7 +705,10 @@ def do_list_instances():
 
 
 def main():
-    argv = parse_instance(sys.argv[1:])
+    try:
+        argv = parse_options(sys.argv[1:])
+    except ValueError as exc:
+        fail(str(exc))
 
     if len(argv) < 1:
         print(__doc__)
@@ -506,7 +718,10 @@ def main():
 
     if cmd == "start":
         headless = "--headless" in argv
-        do_start(headless)
+        try:
+            do_start(headless, _profile_name)
+        except ValueError as exc:
+            fail(str(exc))
     elif cmd == "stop":
         do_stop()
     elif cmd == "stopall":
@@ -532,7 +747,18 @@ def main():
                 idle_timeout = float(argv[argv.index("--idle-timeout") + 1])
             except (IndexError, ValueError):
                 pass
-        run_daemon(headless, idle_timeout)
+        profile_lock_fd = None
+        if "--profile-lock-fd" in argv:
+            try:
+                profile_lock_fd = int(argv[argv.index("--profile-lock-fd") + 1])
+            except (IndexError, ValueError):
+                fail("unsafe-profile-directory")
+        try:
+            run_daemon(headless, idle_timeout, _profile_name, profile_lock_fd)
+        except (ValueError, OSError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "daemon-start-failed"
+            publish_startup_error(reason)
+            fail(reason if reason in STARTUP_ERROR_REASONS else "daemon-start-failed")
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)

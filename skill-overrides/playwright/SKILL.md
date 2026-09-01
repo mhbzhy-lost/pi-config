@@ -9,7 +9,7 @@ description: Use for browser UI/E2E automation, manual login, headed/headless br
 
 Control a persistent Playwright MCP browser through `playwright.py` and its Unix-socket proxy.
 
-**Core principle:** `start` -> discover runtime tools -> interact with `call` -> stop the exact instance you own. Snapshot before element interaction.
+**Core principle:** `start` -> discover runtime tools -> interact with `call` -> stop the exact instance you own. After authentication is complete, snapshot before element interaction.
 
 ## Auto-Recleaning (safety net)
 
@@ -24,24 +24,43 @@ You should still call `stop` explicitly when you are done — the safety net is 
 
 ```bash
 SCRIPT=~/pi-config/skill-overrides/playwright/playwright.py
-INSTANCE=my-task
+PROFILE=work-sso
+AUTH_INSTANCE=my-task-auth
+RUN_INSTANCE=my-task-headless
 
-# Headless by default. Omit --headless only when the user must log in manually.
-python3 "$SCRIPT" --instance "$INSTANCE" start --headless
-python3 "$SCRIPT" --instance "$INSTANCE" tools
-python3 "$SCRIPT" --instance "$INSTANCE" call browser_navigate \
-  '{"url":"https://example.com"}'
-python3 "$SCRIPT" --instance "$INSTANCE" call browser_snapshot
-python3 "$SCRIPT" --instance "$INSTANCE" stop
+# Headed: navigate to a normal, unsigned application URL, then let the user complete SSO.
+python3 "$SCRIPT" --instance "$AUTH_INSTANCE" --profile "$PROFILE" start
+python3 "$SCRIPT" --instance "$AUTH_INSTANCE" call browser_navigate \
+  '{"url":"https://app.example.com/"}'
+# During authentication, validate only exact origin and non-sensitive business structure.
+python3 "$SCRIPT" --instance "$AUTH_INSTANCE" call browser_evaluate \
+  '{"function":"() => ({ onExpectedOrigin: location.origin === \"https://app.example.com\", authenticatedView: Boolean(document.querySelector(\"[data-testid=app-shell]\")) })"}'
+python3 "$SCRIPT" --instance "$AUTH_INSTANCE" stop
+
+# Headless: only after the headed instance has stopped, reuse the same profile.
+python3 "$SCRIPT" --instance "$RUN_INSTANCE" --profile "$PROFILE" start --headless
+python3 "$SCRIPT" --instance "$RUN_INSTANCE" tools
+python3 "$SCRIPT" --instance "$RUN_INSTANCE" call browser_navigate \
+  '{"url":"https://app.example.com/"}'
+python3 "$SCRIPT" --instance "$RUN_INSTANCE" call browser_snapshot
+python3 "$SCRIPT" --instance "$RUN_INSTANCE" stop
 ```
 
 ## Browser Mode Policy
 
 - 默认使用 `headless` 模式。
 - 仅当用户需要手动登录，或用户明确要求使用 headed/前台模式时，才可使用 headed 模式。
-- **CONDITIONALLY REQUIRED SUB-SKILL:** headed 手动登录后的登录态交接必须使用 `browser-auth-session`；它仅负责安全交接，不在此复制其凭据流程。获取登录态后，立即使用 headless 模式继续任务。
+- **REQUIRED SUB-SKILL:** 需要建立、刷新、验证或交接认证状态时，必须使用 `browser-auth-session`；此处不重复其凭据最小化与安全交接流程。获取登录态后，立即使用 headless 模式继续任务。
 - 已有登录态，或无需用户干预时，禁止自行使用 headed/前台模式。
 - 交接过程不得输出或返回 cookie、token、授权头或其他凭据；只返回脱敏状态、计数或业务结果。
+
+## Persistent Auth Profiles / SSO
+
+- `--profile <safe-name>` 接受安全名称而不是路径；不得猜测或传入 `--user-data-dir`。wrapper 将名称解析到仓库外的私有目录，并要求目录由当前用户拥有、mode 精确为 `0700`、为真实目录且不是 symlink。
+- profile 是持久认证材料：`stop` 只停止 owned instance，不删除 profile。wrapper 对每个 profile 加锁；同一 profile 的 headed 与 headless instance 绝不能并发，锁冲突必须 fail closed。
+- 没有 approved profile 时，停止尝试并建立任务专用的命名 profile。不得扫描或采用现有 profile，不得使用个人 Chrome 主 profile，不得复制 profile 目录，也不得默认导出 `storageState`、Cookie 或 localStorage。
+- 认证阶段只导航到正常、非签名 URL，并由用户手动完成 SSO。不得请求或自动填写密码、MFA、恢复码或安全密钥；认证失败时停止，不得继续自动尝试。
+- SSO/登录阶段禁止 snapshot、截图、HAR、network request details、console 以及任何 storage/Cookie 导出。先仅以 exact origin 和非敏感业务结构做 sanitized 验证；认证完成后，停止 headed instance，才可用同一 profile 启动新的 headless instance 并进行普通页面交互。
 
 `npx -y @playwright/mcp` is not version-pinned. The target instance's `tools` output is authoritative. If a documented name is absent, do not guess an alias; inspect `tools` and the installed `@playwright/mcp` README.
 

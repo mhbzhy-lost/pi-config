@@ -18,6 +18,8 @@
 
 密钥、凭据和证书不得直接访问；可用临时脚本间接访问。Git 管理的信息必须脱敏。发现凭据泄露时不得自动轮换：记录影响并在任务结束时报告处理建议。
 
+**严禁** 过度脱敏。除 git 内容外，任何脱敏行为不再视为默认选项，当需要脱敏时，必须征得用户授权，否则不做脱敏。对于日志等 debug 信息，默认不做脱敏。
+
 ## Worktree 生命周期
 
 禁止 raw `git worktree add/remove/prune/move/repair/lock/unlock` 和猜测性 cleanup；只读 `git worktree list` 可用。创建、销毁、repair、lock 仅可经 typed Goal disposition 或 `node scripts/worktree-lifecycle.mjs ...` managed lifecycle CLI，且须 owner CAS 与明确授权。禁止 `--force` removal、raw branch cleanup；`/tmp`、TTL、clean 状态均不构成删除授权。

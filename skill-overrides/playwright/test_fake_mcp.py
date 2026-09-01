@@ -8,10 +8,16 @@ npx or the network.
 """
 
 import json
+import os
 import sys
 
 
 def main() -> None:
+    argv_file = os.environ.get("PI_PLAYWRIGHT_TEST_ARGV_FILE")
+    if argv_file:
+        with open(argv_file, "w", encoding="utf-8") as f:
+            json.dump(sys.argv[1:], f)
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
