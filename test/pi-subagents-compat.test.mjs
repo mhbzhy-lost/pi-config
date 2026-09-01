@@ -273,10 +273,10 @@ test("accepts the flat runtime compatibility report", () => {
 });
 
 test("accepts approved runtime versions and rejects unapproved patch releases", () => {
-  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3"]) {
+  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4"]) {
     assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }), { ok: true, failures: [] });
   }
-  for (const version of ["0.83.1", "0.84.0", "0.84.4"]) {
+  for (const version of ["0.83.1", "0.84.0"]) {
     assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }).failures, [`unsupported Pi version: ${version}`]);
   }
   assert.deepEqual(evaluate({ ...compatibleReport, version: "0.35.1" }).failures, ["unexpected pi-subagents version: 0.35.1"]);

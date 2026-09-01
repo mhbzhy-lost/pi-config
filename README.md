@@ -13,11 +13,11 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 ## 安装 Pi
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.3
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.4
 pi --version
 ```
 
-本仓已验证 Pi `0.82.0`、`0.82.1`、`0.83.0`、`0.84.1`、`0.84.2` 和 `0.84.3`，初始化默认安装精确 `0.84.3`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
+本仓已验证 Pi `0.82.0`、`0.82.1`、`0.83.0`、`0.84.1`、`0.84.2`、`0.84.3` 和 `0.84.4`，初始化默认安装精确 `0.84.4`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
 
 ## 初始化
 
@@ -27,7 +27,7 @@ pi --version
 
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
-- 安装并固定 Pi `0.84.3`。
+- 安装并固定 Pi `0.84.4`。
 - 在 `pi/npm` 顶层精确安装 `pi-subagents@0.45.2` 与 `typebox@1.1.38`。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
@@ -79,7 +79,7 @@ Shell 集成固定：
 
 `pi/extensions/skill-whitelist.ts` 随后通过 `resources_discover` 扫描全局与项目 Skill 目录；它不读取仓库 Skill 清单，也不复制或创建软链接。
 
-## Pi 0.84.3 TUI 与工具限制
+## Pi 0.84.4 TUI 与工具限制
 
 Pi 官方是 fullscreen 的唯一 owner；Shell 不发送 `DECSET/DECRST 1049`。`pi-inline` 和 `pi-full` 分别是官方 `--tui-mode regular` 与 `--tui-mode fullscreen` 的别名。
 
