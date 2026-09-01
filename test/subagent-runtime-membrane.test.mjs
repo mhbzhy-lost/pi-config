@@ -557,7 +557,7 @@ test("headless runtime installation exposes only project-owned subagent tools", 
         description: "CHAIN PARALLEL proactive skill methodology",
         execute() { throw new Error("must never execute"); },
       });
-      api.registerTool({ name: "subagent_wait", execute() {} });
+      api.registerTool({ name: "bg_wait", execute() {} });
       api.registerCommand("parallel-review", {});
       api.on("session_start", () => {});
     },

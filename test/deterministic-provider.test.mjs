@@ -61,14 +61,14 @@ test("compatibility child completes or requests one supervisor decision", () => 
 
 test("compatibility completion parent spawns, waits, then stops", () => {
   const prompt = user("PI_SUBAGENTS_COMPAT_PARENT_COMPLETE");
-  assert.deepEqual(decide([prompt], ["compat_spawn", "subagent_wait"]), { tool: { name: "compat_spawn", arguments: { mode: "complete" } } });
-  assert.deepEqual(decide([prompt, toolResult("compat_spawn")], ["compat_spawn", "subagent_wait"]), { tool: { name: "subagent_wait", arguments: { all: true, timeoutMs: 30000 } } });
-  assert.deepEqual(decide([prompt, toolResult("compat_spawn"), toolResult("subagent_wait")], ["compat_spawn", "subagent_wait"]), { text: "COMPAT_PARENT_DONE" });
+  assert.deepEqual(decide([prompt], ["compat_spawn", "bg_wait"]), { tool: { name: "compat_spawn", arguments: { mode: "complete" } } });
+  assert.deepEqual(decide([prompt, toolResult("compat_spawn")], ["compat_spawn", "bg_wait"]), { tool: { name: "bg_wait", arguments: { all: true, timeoutMs: 30000 } } });
+  assert.deepEqual(decide([prompt, toolResult("compat_spawn"), toolResult("bg_wait")], ["compat_spawn", "bg_wait"]), { text: "COMPAT_PARENT_DONE" });
 });
 
 test("compatibility attention parent follows status and exact pending request", () => {
   const prompt = user("PI_SUBAGENTS_COMPAT_PARENT_ATTENTION");
-  const tools = ["compat_spawn", "compat_status", "compat_inspect_nested_events", "compat_pause", "subagent_supervisor", "subagent_wait"];
+  const tools = ["compat_spawn", "compat_status", "compat_inspect_nested_events", "compat_pause", "subagent_supervisor", "bg_wait"];
   const started = [prompt, toolResult("compat_spawn")];
   assert.deepEqual(decide(started, tools), { tool: { name: "compat_status", arguments: {} } });
   const observed = [...started, toolResult("compat_status")];
@@ -82,7 +82,7 @@ test("compatibility attention parent follows status and exact pending request", 
 });
 
 test("provider streams generic compatibility tool calls", async () => {
-  const completed = await done([user("PI_SUBAGENTS_COMPAT_PARENT_COMPLETE")], ["compat_spawn", "subagent_wait"]);
+  const completed = await done([user("PI_SUBAGENTS_COMPAT_PARENT_COMPLETE")], ["compat_spawn", "bg_wait"]);
   assert.equal(completed.message.stopReason, "toolUse");
   assert.deepEqual(completed.message.content[0].name, "compat_spawn");
   assert.deepEqual(completed.message.content[0].arguments, { mode: "complete" });

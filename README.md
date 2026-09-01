@@ -28,7 +28,7 @@ pi --version
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
 - 安装并固定 Pi `0.84.4`。
-- 在 `pi/npm` 顶层精确安装 `pi-subagents@0.45.2` 与 `typebox@1.1.38`。
+- 在 `pi/npm` 顶层精确安装 `pi-subagents@0.62.0` 与 `typebox@1.1.38`。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
 

@@ -210,7 +210,7 @@ function dispatchProbeSource() {
   `;
 }
 
-test("project typed dispatch binds the real 0.45.2 workflow leaf to the Root Broker", { skip: !piBinary }, async () => {
+test("project typed dispatch binds the real 0.62.0 workflow leaf to the Root Broker", { skip: !piBinary }, async () => {
   assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
   const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
@@ -230,7 +230,7 @@ test("project typed dispatch binds the real 0.45.2 workflow leaf to the Root Bro
       objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
       requirements: ["Use the project-owned typed facade."],
       workflow: { mode: "existing-tests", reason: "This integration verifies the installed workflow transport." },
-      context: { knownFacts: ["pi-subagents is pinned to 0.45.2."], decisions: ["Bind only the leaf run."], relevantFiles: [] },
+      context: { knownFacts: ["pi-subagents is pinned to 0.62.0."], decisions: ["Bind only the leaf run."], relevantFiles: [] },
       boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
       acceptance: { criteria: ["The child returns the deterministic marker."] },
       execution: { cwd: projectRoot, timeoutMs: 30_000, worktree: true },

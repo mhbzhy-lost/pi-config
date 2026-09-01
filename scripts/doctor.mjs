@@ -27,7 +27,7 @@ import { verifyOrderedModelsRuntimePatch } from "./lib/subagent-dispatch/ordered
 const execFile = promisify(execFileCallback);
 
 const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4"];
-const PI_SUBAGENTS_VERSION = "0.45.2";
+const PI_SUBAGENTS_VERSION = "0.62.0";
 const TYPEBOX_VERSION = "1.1.38";
 const TASK_SCHEDULER_PACKAGES = {
   "@amaster.ai/pi-task-scheduler": "0.1.9",

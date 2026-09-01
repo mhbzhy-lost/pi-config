@@ -49,7 +49,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await chmod(fakeNode, 0o755);
     await writeFile(
       fakePi,
-      "#!/usr/bin/env bash\nprintf 'pi-real registry=%s %s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" && \"$2\" == \"npm:pi-subagents@0.45.2\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.45.2\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'pi-real registry=%s %s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" && \"$2\" == \"npm:pi-subagents@0.62.0\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.62.0\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
     );
     await chmod(fakePi, 0o755);
 
@@ -104,7 +104,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const commands = await readFile(commandLog, "utf8");
     assert.doesNotMatch(commands, /submodule/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.84\.4/);
-    assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:pi-subagents@0\.45\.2/);
+    assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:pi-subagents@0\.62\.0/);
     assert.doesNotMatch(commands, /rpiv-todo/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:subagent-runtime markers=1,1,parent-session,1/);
     assert.match(commands, /node sync-skills markers=1,1,parent-session,1/);

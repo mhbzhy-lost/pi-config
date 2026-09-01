@@ -59,10 +59,10 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
   if (parentMode) {
     const spawned = toolResults.some((message) => message.toolName === "compat_spawn");
     if (!spawned) return { tool: { name: "compat_spawn", arguments: { mode: parentMode } } };
-    const waits = toolResults.filter((message) => message.toolName === "subagent_wait");
+    const waits = toolResults.filter((message) => message.toolName === "bg_wait");
     if (parentMode === "complete") {
       return waits.length === 0
-        ? { tool: { name: "subagent_wait", arguments: { all: true, timeoutMs: 30000 } } }
+        ? { tool: { name: "bg_wait", arguments: { all: true, timeoutMs: 30000 } } }
         : { text: "COMPAT_PARENT_DONE" };
     }
 
@@ -89,7 +89,7 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
       }
     }
     return waits.length === 0
-      ? { tool: { name: "subagent_wait", arguments: { all: true, timeoutMs: 30000 } } }
+      ? { tool: { name: "bg_wait", arguments: { all: true, timeoutMs: 30000 } } }
       : { text: "COMPAT_PARENT_DONE" };
   }
 

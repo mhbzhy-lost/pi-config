@@ -1,5 +1,6 @@
 {
   "maxSubagentSpawnsPerSession": 10000,
   "fleetView": false,
-  "asyncWidget": false
+  "asyncWidget": false,
+  "artifactDir": "project"
 }

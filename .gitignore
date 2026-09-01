@@ -31,6 +31,7 @@ __pycache__/
 
 # Pi runtime (subagent artifacts)
 /.pi-subagents/
+/.pi/subagents/
 /.state/goal-engine/
 /.state/worktree-lifecycle/
 /.state/subagent-dispatch/

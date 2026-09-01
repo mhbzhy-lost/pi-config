@@ -3,10 +3,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
 
-import { createJiti } from "../pi/npm/node_modules/jiti/lib/jiti.mjs";
-
-const jiti = createJiti(import.meta.url, { moduleCache: false });
+const { createJiti } = await import(piHostJitiUrl);
+const jiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
 const { discoverAgents } = await jiti.import("../pi/npm/node_modules/pi-subagents/src/agents/agents.ts");
 const { resolveSubagentLaunchContract } = await jiti.import("../pi/npm/node_modules/pi-subagents/src/api/preflight.ts");
 
@@ -46,10 +46,11 @@ test("models rejects empty, duplicate, and malformed candidates", async (t) => {
   for (const [index, frontmatter] of inputs.entries()) {
     const root = await fixture(frontmatter);
     t.after(() => rm(root, { recursive: true, force: true }));
-    assert.throws(
-      () => discoverAgents(root, "project"),
-      /models.*(?:non-empty|duplicate|candidate)/i,
-      `case ${index} must fail closed`,
+    const discovered = discoverAgents(root, "project");
+    assert.equal(discovered.agents.some((candidate) => candidate.name === "ordered"), false, `case ${index} must omit invalid agent`);
+    assert.ok(
+      discovered.agentDiagnostics.some((diagnostic) => diagnostic.name === "ordered" && /models.*(?:non-empty|duplicate|candidate)/i.test(diagnostic.error)),
+      `case ${index} must record a model validation diagnostic: ${JSON.stringify(discovered.agentDiagnostics)}`,
     );
   }
 });

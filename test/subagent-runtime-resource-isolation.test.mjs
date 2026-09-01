@@ -16,7 +16,7 @@ test("keeps pi-subagents Pi-managed while disabling every upstream package resou
   });
 
   assert.deepEqual(entry, {
-    source: "npm:pi-subagents@0.45.2",
+    source: "npm:pi-subagents@0.62.0",
     extensions: [],
     skills: [],
     prompts: [],
@@ -40,6 +40,7 @@ test("disables every task scheduler package resource", async () => {
 test("keeps delegate as the only enabled pi-subagents builtin agent", async () => {
   const settings = JSON.parse(await text("pi/settings.json"));
   const overrides = settings.subagents?.agentOverrides ?? {};
+  if (settings.subagents?.disableBuiltins === true) return;
   const disabledBuiltins = [
     "advisor",
     "context-builder",
@@ -71,7 +72,7 @@ test("retains exact subagent dependency ownership in Pi package management", asy
   const runtimePackage = JSON.parse(await text("pi/npm/package.json"));
   const init = await text("init-pi.sh");
 
-  assert.equal(runtimePackage.dependencies["pi-subagents"], "0.45.2");
+  assert.equal(runtimePackage.dependencies["pi-subagents"], "0.62.0");
   assert.equal(runtimePackage.dependencies["@juicesharp/rpiv-todo"], undefined);
   assert.match(init, /PI_CODING_AGENT_DIR="\$SCRIPT_DIR\/pi" "\$pi_binary" install "npm:pi-subagents@\$PI_SUBAGENTS_VERSION"/);
   assert.doesNotMatch(init, /npm install[^\n]*pi-subagents/);

@@ -114,7 +114,7 @@ function createGoalEngineFactoryFixture({
 }
 
 const isolatedSubagentPackage = {
-  source: "npm:pi-subagents@0.45.2",
+  source: "npm:pi-subagents@0.62.0",
   extensions: [],
   skills: [],
   prompts: [],
@@ -165,7 +165,7 @@ test("inspectConfiguration rejects pi-subagents package resource autoload", asyn
     await mkdir(join(root, "skill-overrides"), { recursive: true });
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
-    await writeFile(join(root, "pi", "settings.json"), JSON.stringify({ packages: ["npm:pi-subagents@0.45.2"] }));
+    await writeFile(join(root, "pi", "settings.json"), JSON.stringify({ packages: ["npm:pi-subagents@0.62.0"] }));
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
@@ -219,17 +219,17 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     }
     await writeFile(
       join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"),
-      JSON.stringify({ version: "0.45.2", pi: { extensions: ["./src/extension/index.ts"] } }),
+      JSON.stringify({ version: "0.62.0", pi: { extensions: ["./src/extension/index.ts"] } }),
     );
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "index.ts"), "");
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "rpc.ts"), 'const methods = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];\n');
     await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents"), { recursive: true });
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents", "agents.ts"), "// pi-config patch: ordered-models.v2\n");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents", "agent-serializer.ts"), "// pi-config patch: ordered-models.v2\n");
+    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents", "agents.ts"), "// pi-config patch: ordered-models.v3\n");
+    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents", "agent-serializer.ts"), "// pi-config patch: ordered-models.v3\n");
     for (const relative of ["src/runs/shared/model-fallback.ts", "src/api/preflight.ts", "src/runs/background/async-execution.ts", "src/runs/foreground/execution.ts"]) {
       const target = join(root, "pi", "npm", "node_modules", "pi-subagents", relative);
       await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, "// pi-config patch: ordered-models.v2\n");
+      await writeFile(target, "// pi-config patch: ordered-models.v3\n");
     }
     await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "package.json"), JSON.stringify({ version: "1.1.38", type: "module", exports: { "./compile": "./build/compile/index.mjs" } }));
     await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "build", "compile", "index.mjs"), "export {};\n");
@@ -307,7 +307,7 @@ test("inspectConfiguration reports missing pi-subagents package", async () => {
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "unknown" });
-    assert.ok(issues.includes("missing Pi package: pi-subagents@0.45.2"));
+    assert.ok(issues.includes("missing Pi package: pi-subagents@0.62.0"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -327,7 +327,7 @@ test("inspectConfiguration ignores an unrelated retired-list-shaped file", async
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
     assert.equal(issues.some((issue) => issue.includes("Bad_Name")), false);
-    assert.ok(issues.includes("missing Pi package: pi-subagents@0.45.2"));
+    assert.ok(issues.includes("missing Pi package: pi-subagents@0.62.0"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -346,7 +346,7 @@ test("inspectConfiguration reports malformed managed Skill frontmatter and conti
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
     assert.ok(issues.includes("invalid frontmatter for managed skill: writing-plans: missing frontmatter"));
-    assert.ok(issues.includes("missing Pi package: pi-subagents@0.45.2"));
+    assert.ok(issues.includes("missing Pi package: pi-subagents@0.62.0"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -365,7 +365,7 @@ test("inspectConfiguration reports boolean description frontmatter and continues
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
     assert.ok(issues.includes("invalid frontmatter for managed skill: writing-plans: unsupported string scalar"));
-    assert.ok(issues.includes("missing Pi package: pi-subagents@0.45.2"));
+    assert.ok(issues.includes("missing Pi package: pi-subagents@0.62.0"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -400,7 +400,7 @@ test("inspectConfiguration reports an unexpected pi-subagents version", async ()
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.35.1" }));
 
     const issues = await inspectConfiguration(root);
-    assert.ok(issues.includes("unexpected pi-subagents version: 0.35.1; expected 0.45.2"));
+    assert.ok(issues.includes("unexpected pi-subagents version: 0.35.1; expected 0.62.0"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -416,7 +416,7 @@ test("inspectConfiguration reports a failed pi-subagents RPC probe", async () =>
     await writeFile(join(root, "pi", "settings.json"), "{}");
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.45.2" }));
+    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.62.0" }));
 
     const issues = await inspectConfiguration(root);
     assert.ok(issues.some((issue) => issue.startsWith("pi-subagents RPC probe failed:")));
@@ -442,7 +442,7 @@ test("inspectConfiguration reports generic runtime contract gaps without requiri
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
     await mkdir(join(root, "scripts", "lib"), { recursive: true });
     await writeFile(join(root, "scripts", "lib", "subagent-jobs.mjs"), "legacy\n");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.45.2", pi: { extensions: ["./src/extension/index.ts"] } }));
+    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.62.0", pi: { extensions: ["./src/extension/index.ts"] } }));
     await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "index.ts"), "");
     await writeFile(join(root, ".gitignore"), "/var/plan-runs/\n");
 

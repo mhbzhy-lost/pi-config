@@ -18,9 +18,9 @@ test("runtime dependency setup leaves the pinned pi-subagents package patched fo
     piNpmDir: root,
     async run(command, args) {
       calls.push([command, ...args]);
-      if (args.includes("pi-subagents@0.45.2")) {
+      if (args.includes("pi-subagents@0.62.0")) {
         await mkdir(join(packageRoot, "src", "agents"), { recursive: true });
-        await writeFile(join(packageRoot, "package.json"), JSON.stringify({ version: "0.45.2" }));
+        await writeFile(join(packageRoot, "package.json"), JSON.stringify({ version: "0.62.0" }));
         await writeFile(join(packageRoot, "src/agents/agents.ts"), [
           "\tmcpDirectTools?: string[];\n\tmodel?: string;\n\tfallbackModels?: string[];\n\tthinking?: string | false;",
           "const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {} };",
@@ -38,15 +38,27 @@ test("runtime dependency setup leaves the pinned pi-subagents package patched fo
         await mkdir(join(packageRoot, "src/runs/background"), { recursive: true });
         await mkdir(join(packageRoot, "src/runs/foreground"), { recursive: true });
         await writeFile(join(packageRoot, "src/runs/shared/model-fallback.ts"), "\tscope?: ModelScopeConfig;\n\tonWarn?: (violation: ModelScopeViolation) => void;\n\tconst rawCandidates = [primaryModel, ...(fallbackModels ?? [])];\n");
-        await writeFile(join(packageRoot, "src/api/preflight.ts"), "const modelCandidates = buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, { scope: discovered.modelScope })\n");
-        await writeFile(join(packageRoot, "src/runs/background/async-execution.ts"), "const modelCandidates = buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope })\n");
-        await writeFile(join(packageRoot, "src/runs/foreground/execution.ts"), "\t\t{ scope: options.modelScope },\n\t);\n");
+        await writeFile(join(packageRoot, "src/api/preflight.ts"), [
+          "const modelCandidates = buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, {",
+          "\tscope: discovered.modelScope,",
+          "});",
+        ].join("\n"));
+        await writeFile(join(packageRoot, "src/runs/background/async-execution.ts"), [
+          "const modelCandidates = buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, {",
+          "\tscope: ctx.modelScope,",
+          "});",
+        ].join("\n"));
+        await writeFile(join(packageRoot, "src/runs/foreground/execution.ts"), [
+          "const candidates = buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, {",
+          "\tscope: options.modelScope,",
+          "});",
+        ].join("\n"));
       }
       return { stdout: "", stderr: "" };
     },
   });
 
-  assert.equal(calls.some((call) => call.includes("pi-subagents@0.45.2")), true);
+  assert.equal(calls.some((call) => call.includes("pi-subagents@0.62.0")), true);
   assert.equal(await verifyOrderedModelsRuntimePatch(packageRoot), true);
   assert.match(await readFile(join(packageRoot, "src/agents/agents.ts"), "utf8"), /validateOrderedModels/);
 });

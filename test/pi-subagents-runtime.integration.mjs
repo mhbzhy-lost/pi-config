@@ -268,7 +268,7 @@ Use the deterministic compatibility marker from the assigned task.
             "compat_status",
             "compat_inspect_nested_events",
             "compat_pause",
-            "subagent_wait",
+            "bg_wait",
             "subagent_supervisor",
           ])]);
         });
@@ -319,7 +319,7 @@ Use the deterministic compatibility marker from the assigned task.
     for (const method of REQUIRED_METHODS) {
       assert.ok(details.ping.methods.includes(method), `missing RPC method: ${method}`);
     }
-    assert.ok(details.activeTools.includes("subagent_wait"), JSON.stringify(details.activeTools));
+    assert.ok(details.activeTools.includes("bg_wait"), JSON.stringify(details.activeTools));
     assert.ok(details.activeTools.includes("subagent_supervisor"), JSON.stringify(details.activeTools));
     assert.ok(!details.activeTools.includes("subagent"), JSON.stringify(details.activeTools));
     assert.equal(typeof details.workflowRoot?.runId, "string");
@@ -351,9 +351,9 @@ Use the deterministic compatibility marker from the assigned task.
       assert.ok(result.records.some((record) => record.type === "tool_execution_end"
         && record.toolName === "subagent_supervisor"
         && record.result?.details?.replyTo), "supervisor reply evidence is missing");
-      assert.ok(result.records.some((record) => record.type === "tool_execution_end" && record.toolName === "subagent_wait"));
+      assert.ok(result.records.some((record) => record.type === "tool_execution_end" && record.toolName === "bg_wait"));
     } else {
-      assert.ok(result.records.some((record) => record.type === "tool_execution_end" && record.toolName === "subagent_wait"));
+      assert.ok(result.records.some((record) => record.type === "tool_execution_end" && record.toolName === "bg_wait"));
     }
 
     return { terminal, details };
@@ -369,7 +369,7 @@ test("installed runtime resolves a supported Pi and exact dependency versions", 
   const piVersion = execFileSync(piBinary, ["--version"], { encoding: "utf8" }).trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi version: ${piVersion}`);
   const piSubagentsVersion = execFileSync("node", ["-p", `require(${JSON.stringify(join(extension, "package.json"))}).version`], { encoding: "utf8" }).trim();
-  assert.equal(piSubagentsVersion, "0.45.2");
+  assert.equal(piSubagentsVersion, "0.62.0");
   const requireFromExtension = createRequire(join(extension, "package.json"));
   assert.match(requireFromExtension.resolve("typebox/compile"), /typebox/);
   const typeboxPackage = JSON.parse(execFileSync("node", ["-e", `process.stdout.write(require('fs').readFileSync(${JSON.stringify(join(repoRoot, "pi", "npm", "node_modules", "typebox", "package.json"))}, 'utf8'))`], { encoding: "utf8" }));

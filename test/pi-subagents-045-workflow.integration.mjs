@@ -190,7 +190,7 @@ function probeExtensionSource({ projectRoot }) {
   `;
 }
 
-test("pi-subagents 0.45.2 rejects clarify and correlates a public workflow leaf", async () => {
+test("pi-subagents 0.62.0 rejects clarify and correlates a public workflow leaf", async () => {
   assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
   const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
@@ -204,11 +204,11 @@ test("pi-subagents 0.45.2 rejects clarify and correlates a public workflow leaf"
   try {
     await execFileAsync("npm", [
       "install", "--prefix", npmRoot, "--ignore-scripts", "--no-audit", "--no-fund",
-      "pi-subagents@0.45.2", "typebox@1.1.38",
+      "pi-subagents@0.62.0", "typebox@1.1.38",
     ], { env: { ...process.env, NPM_CONFIG_REGISTRY: "https://registry.npmjs.org" } });
     const extension = join(npmRoot, "node_modules", "pi-subagents");
     const installed = JSON.parse(await (await import("node:fs/promises")).readFile(join(extension, "package.json"), "utf8"));
-    assert.equal(installed.version, "0.45.2");
+    assert.equal(installed.version, "0.62.0");
 
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await mkdir(configRoot, { recursive: true });

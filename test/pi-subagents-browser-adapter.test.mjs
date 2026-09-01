@@ -19,7 +19,7 @@ async function makeFixture() {
   const asyncDir = join(root, "async");
   const runCwd = join(root, "run");
   const parentCwd = join(root, "parent");
-  const artifactsDir = join(runCwd, ".pi-subagents", "artifacts");
+  const artifactsDir = join(runCwd, ".pi", "subagents", "artifacts");
   await Promise.all([mkdir(asyncDir), mkdir(artifactsDir, { recursive: true }), mkdir(parentCwd)]);
   return { root, asyncDir, runCwd, parentCwd, artifactsDir };
 }
@@ -63,7 +63,7 @@ test("reads bounded object status and renders the upstream transcript", async (t
 
   const parentSessionFile = join(root, "sessions", "parent.jsonl");
   const cases = [
-    ["project", [asyncDir, artifactsDir, join(parentCwd, ".pi-subagents", "artifacts")]],
+    ["project", [asyncDir, artifactsDir, join(parentCwd, ".pi", "subagents", "artifacts")]],
     ["session", [asyncDir, join(root, "sessions", "subagent-artifacts")]],
     ["temp", [asyncDir]],
   ];

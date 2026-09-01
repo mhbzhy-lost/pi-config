@@ -1,129 +1,92 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export const ORDERED_MODELS_PATCH_VERSION = "ordered-models.v2";
-export const SUPPORTED_PI_SUBAGENTS_VERSION = "0.45.2";
-
+export const ORDERED_MODELS_PATCH_VERSION = "ordered-models.v3";
+export const SUPPORTED_PI_SUBAGENTS_VERSION = "0.62.0";
 const MARKER = `// pi-config patch: ${ORDERED_MODELS_PATCH_VERSION}`;
-const LEGACY_MARKER = "// pi-config patch: ordered-models.v1";
 
-function replaceOnce(source, before, after, path) {
-  const count = source.split(before).length - 1;
-  if (count !== 1) throw new Error(`${path}: expected one patch anchor, found ${count}`);
-  return source.replace(before, after);
+function once(source, re, replacement, path) {
+  const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
+  const matches = [...source.matchAll(new RegExp(re.source, flags))];
+  if (matches.length !== 1) throw new Error(`${path}: expected one patch anchor, found ${matches.length}`);
+  return source.replace(re, replacement);
 }
-
-function patchedAgentsSource(source, path) {
+function agents(source, path) {
   if (source.includes(MARKER)) return source;
-  if (source.includes(LEGACY_MARKER)) {
-    return replaceOnce(source, "fallbackModels: models.slice(1)", "fallbackModels: models", path)
-      .replaceAll(LEGACY_MARKER, MARKER);
+  let next = source;
+  const interfaceStart = next.indexOf("export interface AgentConfig {");
+  if (interfaceStart >= 0) {
+    const interfaceEnd = next.indexOf("\n}", interfaceStart);
+    const block = next.slice(interfaceStart, interfaceEnd);
+    const patchedBlock = once(block, /(\tmodel\?: string;\n)(\tmodelProvider\?: string;)/, `$1\tmodels?: string[];\n$2`, path);
+    next = next.slice(0, interfaceStart) + patchedBlock + next.slice(interfaceEnd);
+  } else {
+    next = once(next, /(\tmcpDirectTools\?: string\[\];\n\tmodel\?: string;)/, `$1\n\tmodels?: string[];`, path);
   }
-  let next = source;
-  next = replaceOnce(next,
-    "\tmcpDirectTools?: string[];\n\tmodel?: string;\n\tfallbackModels?: string[];\n\tthinking?: string | false;",
-    `\tmcpDirectTools?: string[];\n\tmodels?: string[];\n\tmodel?: string;\n\tfallbackModels?: string[];\n\tthinking?: string | false;`, path);
-  next = replaceOnce(next,
-    "const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {} };",
-    `const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {} };\n\n${MARKER}\nfunction validateOrderedModels(models: string[], agentName: string): string[] {\n\tif (models.length === 0) throw new Error(\`Agent '\${agentName}' models must contain at least one non-empty candidate.\`);\n\tconst seen = new Set<string>();\n\tfor (const model of models) {\n\t\tif (!/^[^/\\s]+\\/\\S+$/.test(model) || /["']/.test(model)) {\n\t\t\tthrow new Error(\`Agent '\${agentName}' models contains invalid candidate '\${model}'.\`);\n\t\t}\n\t\tif (seen.has(model)) throw new Error(\`Agent '\${agentName}' models contains duplicate candidate '\${model}'.\`);\n\t\tseen.add(model);\n\t}\n\treturn models;\n}`, path);
-  next = replaceOnce(next,
-    "\t\tconst fallbackModels = parseFrontmatterList(frontmatter.fallbackModels);",
-    "\t\tconst declaredModels = parseFrontmatterList(frontmatter.models);\n\t\tconst models = declaredModels === undefined ? undefined : validateOrderedModels(declaredModels, localName);\n\t\tconst fallbackModels = models === undefined ? parseFrontmatterList(frontmatter.fallbackModels) : undefined;", path);
-  next = replaceOnce(next,
-    "\t\t\t...(frontmatter.model !== undefined ? { model: frontmatter.model } : {}),\n\t\t\t...(fallbackModels?.length ? { fallbackModels } : {}),",
-    "\t\t\t...(models !== undefined ? { models, model: models[0], fallbackModels: models } : frontmatter.model !== undefined ? { model: frontmatter.model } : {}),\n\t\t\t...(models === undefined && fallbackModels?.length ? { fallbackModels } : {}),", path);
-  next = replaceOnce(next,
-    "\t\tfill(\"model\", [\"model\"], override.model === false ? undefined : override.model);",
-    "\t\tfill(\"model\", [\"models\", \"model\"], override.model === false ? undefined : override.model);", path);
-  next = replaceOnce(next,
-    "\t\t\t[\"fallbackModels\"],",
-    "\t\t\t[\"models\", \"fallbackModels\"],", path);
+  next = once(next, /(const EMPTY_SUBAGENT_SETTINGS[^\n]*\n)/, `$1\n${MARKER}\nfunction validateOrderedModels(models: string[], agentName: string): string[] {\n\tif (!models.length) throw new Error(\`Agent '\${agentName}' models must contain at least one candidate.\`);\n\tconst seen = new Set<string>();\n\tfor (const model of models) {\n\t\tif (!/^[^/\\s]+\\/\\S+$/.test(model) || /[\"']/.test(model) || seen.has(model)) throw new Error(\`Agent '\${agentName}' models contains invalid or duplicate candidate '\${model}'.\`);\n\t\tseen.add(model);\n\t}\n\treturn models;\n}\n`, path);
+  next = once(next, /(\t\tconst fallbackModels = parseFrontmatterList\(frontmatter\.fallbackModels\);)/, `\t\tconst declaredModels = parseFrontmatterList(frontmatter.models);\n\t\tconst models = declaredModels === undefined ? undefined : validateOrderedModels(declaredModels, localName);\n\t\tconst fallbackModels = models === undefined ? parseFrontmatterList(frontmatter.fallbackModels) : undefined;`, path);
+  next = once(next, /(\t\t\t\.\.\.\(frontmatter\.model !== undefined \? \{ model: frontmatter\.model \} : \{\}\),\n\t\t\t\.\.\.\(fallbackModels\?\.length \? \{ fallbackModels \} : \{\}\),)/, `\t\t\t...(models !== undefined ? { models, model: models[0], fallbackModels: models } : frontmatter.model !== undefined ? { model: frontmatter.model } : {}),\n\t\t\t...(models === undefined && fallbackModels?.length ? { fallbackModels } : {}),`, path);
+  if (next.includes('fill("model", ["model"], override.model === false ? undefined : override.model);')) {
+    next = once(next, /fill\("model", \["model"\], override\.model === false \? undefined : override\.model\);/, 'fill("model", ["models", "model"], override.model === false ? undefined : override.model);', path);
+  } else {
+    next = once(next, /if \(override\.fallbackModels !== undefined\) \{\n\t\tfill\(\n\t\t\t"fallbackModels",[\s\S]*?\n\t\t\);\n\t\}/, 'if (override.fallbackModels !== undefined) {\n\t\tfill("fallbackModels", ["models", "fallbackModels"], override.fallbackModels === false ? undefined : [...override.fallbackModels]);\n\t}', path);
+  }
+  next = next.replace('["fallbackModels"],', '["models", "fallbackModels"],');
   return next;
 }
-
-function patchedSerializerSource(source, path) {
+function serializer(source, path) {
   if (source.includes(MARKER)) return source;
-  if (source.includes(LEGACY_MARKER)) return source.replaceAll(LEGACY_MARKER, MARKER);
-  let next = source;
-  next = replaceOnce(next,
-    "\t\"model\",\n\t\"fallbackModels\",",
-    `\t"models",\n\t"model",\n\t"fallbackModels",`, path);
-  next = replaceOnce(next,
-    "\tif (config.model || preserve(\"model\")) lines.push(`model: ${config.model ?? \"\"}`);\n\tconst fallbackModelsValue = joinComma(config.fallbackModels);\n\tif (fallbackModelsValue || preserve(\"fallbackModels\")) lines.push(`fallbackModels: ${fallbackModelsValue ?? \"\"}`);",
-    `\t${MARKER}\n\tif (config.models || preserve("models")) {\n\t\tlines.push("models:");\n\t\tfor (const model of config.models ?? []) lines.push(\`  - \${model}\`);\n\t} else {\n\t\tif (config.model || preserve("model")) lines.push(\`model: \${config.model ?? ""}\`);\n\t\tconst fallbackModelsValue = joinComma(config.fallbackModels);\n\t\tif (fallbackModelsValue || preserve("fallbackModels")) lines.push(\`fallbackModels: \${fallbackModelsValue ?? ""}\`);\n\t}`, path);
+  let next = once(source, /\t"model",\n\t"fallbackModels",/, '\t"models",\n\t"model",\n\t"fallbackModels",', path);
+  return once(next, /\tif \(config\.model \|\| preserve\("model"\)\) lines\.push\(`model: \$\{config\.model \?\? ""\}`\);\n\tconst fallbackModelsValue = joinComma\(config\.fallbackModels\);\n\tif \(fallbackModelsValue \|\| preserve\("fallbackModels"\)\) lines\.push\(`fallbackModels: \$\{fallbackModelsValue \?\? ""\}`\);/, `\t${MARKER}\n\tif (config.models || preserve("models")) { lines.push("models:"); for (const model of config.models ?? []) lines.push(\`  - \${model}\`); } else {\n\t\tif (config.model || preserve("model")) lines.push(\`model: \${config.model ?? ""}\`);\n\t\tconst fallbackModelsValue = joinComma(config.fallbackModels);\n\t\tif (fallbackModelsValue || preserve("fallbackModels")) lines.push(\`fallbackModels: \${fallbackModelsValue ?? ""}\`);\n\t}`, path);
+}
+function fallback(source, path) {
+  if (source.includes(MARKER)) return source;
+  const interfaceStart = source.indexOf("export interface BuildModelCandidatesOptions {");
+  let next;
+  if (interfaceStart >= 0) {
+    const interfaceEnd = source.indexOf("\n}", interfaceStart);
+    const block = source.slice(interfaceStart, interfaceEnd);
+    const patchedBlock = once(block, /(\tonWarn\?: \(violation: ModelScopeViolation\) => void;)/, `$1\n\tprioritizePrimaryTier?: boolean;`, path);
+    next = source.slice(0, interfaceStart) + patchedBlock + source.slice(interfaceEnd);
+  } else {
+    next = once(source, /(\tonWarn\?: \(violation: ModelScopeViolation\) => void;)/, `$1\n\tprioritizePrimaryTier?: boolean;`, path);
+  }
+  next = once(next, /\tconst rawCandidates = \[primaryModel, \.\.\.\(fallbackModels \?\? \[\]\)\];/,  `\t${MARKER}\n\tconst declaredFallbacks = fallbackModels ?? [];\n\tconst tier = options?.prioritizePrimaryTier ? primaryModel?.match(/gpt-5\\.6-(terra|luna)(?:$|[/:.-])/i)?.[1]?.toLowerCase() : undefined;\n\tconst matchingTier = tier ? declaredFallbacks.filter((model) => model.toLowerCase().includes(\`gpt-5.6-\${tier}\`)) : [];\n\tconst orderedFallbacks = tier && matchingTier.length ? [...matchingTier, ...declaredFallbacks.filter((model) => !model.toLowerCase().includes(\`gpt-5.6-\${tier}\`))] : declaredFallbacks;\n\tconst rawCandidates = [primaryModel, ...orderedFallbacks];`, path);
   return next;
 }
-
-function patchedModelFallbackSource(source, path) {
-  if (source.includes(MARKER)) return source;
-  let next = source;
-  next = replaceOnce(next,
-    "\tscope?: ModelScopeConfig;\n\tonWarn?: (violation: ModelScopeViolation) => void;",
-    "\tscope?: ModelScopeConfig;\n\tonWarn?: (violation: ModelScopeViolation) => void;\n\tprioritizePrimaryTier?: boolean;", path);
-  next = replaceOnce(next,
-    "\tconst rawCandidates = [primaryModel, ...(fallbackModels ?? [])];",
-    `\t${MARKER}\n\tconst declaredFallbacks = fallbackModels ?? [];\n\tconst tier = options?.prioritizePrimaryTier\n\t\t? primaryModel?.match(/gpt-5\\.6-(terra|luna)(?:$|[/:.-])/i)?.[1]?.toLowerCase()\n\t\t: undefined;\n\tconst matchingTier = tier ? declaredFallbacks.filter((model) => model.toLowerCase().includes(\`gpt-5.6-\${tier}\`)) : [];\n\tconst orderedFallbacks = tier && matchingTier.length > 0\n\t\t? [...matchingTier, ...declaredFallbacks.filter((model) => !model.toLowerCase().includes(\`gpt-5.6-\${tier}\`))]\n\t\t: declaredFallbacks;\n\tconst rawCandidates = [primaryModel, ...orderedFallbacks];`, path);
-  return next;
+function patchBuildModelCandidateCalls(source, path) {
+  let calls = 0;
+  const callPattern = /buildModelCandidates\([\s\S]*?,\s*\{\n([\s\S]*?)\n(\s*)\}\s*\)/g;
+  const next = source.replace(callPattern, (match, options, closeIndent) => {
+    calls += 1;
+    if (/\bprioritizePrimaryTier\s*:/.test(options)) return match;
+    const scope = options.match(/^(\s*)scope:\s*[^,\n]+,\s*$/m);
+    if (!scope) throw new Error(`${path}: buildModelCandidates options have no scope anchor`);
+    return match.replace(scope[0], `${scope[0]}\n${scope[1]}prioritizePrimaryTier: true,`);
+  });
+  if (calls === 0) throw new Error(`${path}: expected one buildModelCandidates call, found 0`);
+  return `${next}\n${MARKER}\n`;
 }
-
-function patchedPreflightSource(source, path) {
+function execution(source, path) {
   if (source.includes(MARKER)) return source;
-  return replaceOnce(source,
-    "const modelCandidates = buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, { scope: discovered.modelScope })",
-    `const modelCandidates = buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, { scope: discovered.modelScope, prioritizePrimaryTier: agent.models !== undefined && input.model !== undefined }) ${MARKER}`, path);
+  if (source.includes("buildModelCandidates(")) return patchBuildModelCandidateCalls(source, path);
+  return once(source, /\{ scope: options\.modelScope \},/, `{ scope: options.modelScope, prioritizePrimaryTier: true },`, path) + `\n${MARKER}\n`;
 }
-
-function patchedAsyncExecutionSource(source, path) {
-  if (source.includes(MARKER)) return source;
-  return replaceOnce(source,
-    "const modelCandidates = buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope })",
-    `const modelCandidates = buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope, prioritizePrimaryTier: agentConfig.models !== undefined && params.modelOverride !== undefined }) ${MARKER}`, path);
-}
-
-function patchedForegroundExecutionSource(source, path) {
-  if (source.includes(MARKER)) return source;
-  return replaceOnce(source,
-    "\t\t{ scope: options.modelScope },\n\t);",
-    `\t\t{ scope: options.modelScope, prioritizePrimaryTier: agent.models !== undefined && options.modelOverride !== undefined },\n\t); ${MARKER}`, path);
-}
-
+function noop(source) { return source; }
+const files = [
+  ["src/agents/agents.ts", agents], ["src/agents/agent-serializer.ts", serializer],
+  ["src/runs/shared/model-fallback.ts", fallback], ["src/api/preflight.ts", execution],
+  ["src/runs/background/async-execution.ts", execution], ["src/runs/foreground/execution.ts", execution],
+];
 export async function verifyOrderedModelsRuntimePatch(packageRoot) {
   const metadata = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
-  if (metadata.version !== SUPPORTED_PI_SUBAGENTS_VERSION) {
-    throw new Error(`ordered models patch supports pi-subagents ${SUPPORTED_PI_SUBAGENTS_VERSION}, found ${metadata.version ?? "unknown"}`);
-  }
-  for (const relative of [
-    "src/agents/agents.ts",
-    "src/agents/agent-serializer.ts",
-    "src/runs/shared/model-fallback.ts",
-    "src/api/preflight.ts",
-    "src/runs/background/async-execution.ts",
-    "src/runs/foreground/execution.ts",
-  ]) {
-    const source = await readFile(join(packageRoot, relative), "utf8");
-    if (!source.includes(MARKER)) throw new Error(`ordered models runtime patch missing: ${relative}`);
-  }
+  if (metadata.version !== SUPPORTED_PI_SUBAGENTS_VERSION) throw new Error(`ordered models patch supports pi-subagents ${SUPPORTED_PI_SUBAGENTS_VERSION}, found ${metadata.version ?? "unknown"}`);
+  for (const [relative] of files) if (!(await readFile(join(packageRoot, relative), "utf8" )).includes(MARKER)) throw new Error(`ordered models runtime patch missing: ${relative}`);
   return true;
 }
-
 export async function applyOrderedModelsRuntimePatch(packageRoot) {
   const metadata = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
-  if (metadata.version !== SUPPORTED_PI_SUBAGENTS_VERSION) {
-    throw new Error(`ordered models patch supports pi-subagents ${SUPPORTED_PI_SUBAGENTS_VERSION}, found ${metadata.version ?? "unknown"}`);
-  }
-  const files = [
-    ["src/agents/agents.ts", patchedAgentsSource],
-    ["src/agents/agent-serializer.ts", patchedSerializerSource],
-    ["src/runs/shared/model-fallback.ts", patchedModelFallbackSource],
-    ["src/api/preflight.ts", patchedPreflightSource],
-    ["src/runs/background/async-execution.ts", patchedAsyncExecutionSource],
-    ["src/runs/foreground/execution.ts", patchedForegroundExecutionSource],
-  ];
-  for (const [relative, patch] of files) {
-    const path = join(packageRoot, relative);
-    const source = await readFile(path, "utf8");
-    const next = patch(source, relative);
-    if (next !== source) await writeFile(path, next, "utf8");
-  }
+  if (metadata.version !== SUPPORTED_PI_SUBAGENTS_VERSION) throw new Error(`ordered models patch supports pi-subagents ${SUPPORTED_PI_SUBAGENTS_VERSION}, found ${metadata.version ?? "unknown"}`);
+  for (const [relative, patch] of files) { const path = join(packageRoot, relative); const source = await readFile(path, "utf8"); const next = patch(source, relative); if (next !== source) await writeFile(path, next); }
   return verifyOrderedModelsRuntimePatch(packageRoot);
 }

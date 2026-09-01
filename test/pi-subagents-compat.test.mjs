@@ -16,7 +16,7 @@ const { createSubagentsRpcClient, REQUIRED_METHODS } = compat;
 const repoRoot = process.cwd();
 const compatibleReport = {
   piVersion: "0.84.1",
-  version: "0.45.2",
+  version: "0.62.0",
   typeboxVersion: "1.1.38",
   typeboxCompileResolvable: true,
   rpcVersion: 1,
@@ -387,7 +387,7 @@ test("builds the exact top-level runtime dependency install command", async () =
     command: "npm",
     args: [
       "install", "--prefix", "/tmp/pi/npm", "--save-exact",
-      "pi-subagents@0.45.2", "typebox@1.1.38",
+      "pi-subagents@0.62.0", "typebox@1.1.38",
     ],
   });
 });
@@ -411,7 +411,7 @@ test("uninstalls retired Todo before installing exact runtime dependencies", asy
     ],
     [
       "npm",
-      ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "pi-subagents@0.45.2", "typebox@1.1.38"],
+      ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "pi-subagents@0.62.0", "typebox@1.1.38"],
       { env: { PATH: "/test/bin" } },
     ],
     [
