@@ -6,6 +6,16 @@
 
 所有 subagent 派发必须遵循 `subagent-dispatch` skill；主 agent 默认只收集报告、形成决策和编写计划，coding 由 executor 执行，除非用户明确要求主 agent 直接执行。禁止每个 subagent 完成后做全量独立审查。
 
+## 计划执行方式
+
+计划完成后由用户选择执行方式：
+
+- **Subagent-Driven：**加载 `subagent-dispatch`，由主 agent 按计划 DAG 编排 subagent。
+- **Inline：**由主 agent 在当前会话执行；用户选择 Inline 即明确授权主 agent coding。
+- **Goal Engine：**加载 `using-goal-engine`，通过 typed tools 持久化编排。
+
+通用执行协议只在对应 Skill 中维护；计划文档只保留自身特定约束。仓库或具体计划对执行方式的显式禁令优先；Goal 改造 R0–R13 通过验收前，继续遵守仓库根 `AGENTS.md` 中禁止 Goal Engine 自举的边界。
+
 ## 测试与逻辑变更
 
 生产代码、配置或 Skill 逻辑/行为变更首次修改前必须加载 `test-driven-development` skill；测试治理、流程和豁免只在相应 Skill 中维护。测试只验证行为，不为文档或配置字面值建立镜像断言。

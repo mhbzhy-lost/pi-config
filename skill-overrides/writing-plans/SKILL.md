@@ -25,7 +25,6 @@ description: 当任务包含多个协调步骤、跨模块依赖或关键不确�
 
 **新计划默认保存到：**`docs/plans/YYYY-MM-DD-<feature-name>.md`
 - 用户明确指定的计划位置优先。
-- 历史 `docs/superpowers` 归档不迁移。
 
 ## 范围与文件结构检查
 
@@ -170,14 +169,4 @@ def function(input):
 
 ## 执行交接
 
-保存计划后，向用户提问并结束当前轮次，让用户选择执行方式：
-
-“计划已完成并保存到 `docs/plans/<filename>.md`。请选择执行方式：
-
-1. **Subagent-Driven（推荐）**：使用 `subagent-dispatch`。主 agent 读取计划 `Deps` 构建 DAG；无依赖任务后台并行派发，所有前驱完成后立即派发后继任务，并在任务间审查。
-2. **Inline Execution**：在当前会话按计划逐任务执行，适合简单计划或无需门禁的场景。
-3. **Goal Engine**：使用 `using-goal-engine` 和 Pi Host 提供的 typed tools，把计划转为持久化 task DAG，持续编排、恢复和验收；适合跨会话、24 小时以上、需要独立 worktree 和证据门禁的长任务。”
-
-### Worktree 生命周期
-
-需要隔离 worktree 时，仅可使用 typed Goal disposition，或受管理生命周期 CLI：`node scripts/worktree-lifecycle.mjs ...`。禁止 raw `git worktree add/remove/prune/move/repair/lock/unlock`。生命周期操作需要 owner CAS 和明确授权；不得以 `/tmp`、TTL 或“干净”状态推断删除授权，不得用 `--force` remove 或 raw branch cleanup。
+保存计划后，只报告“计划已完成并保存到 `docs/plans/<filename>.md`”，再按 `pi/AGENTS.md` 交还用户选择执行方式并结束当前轮次。本 Skill 不定义或重复任何执行方式的协议。

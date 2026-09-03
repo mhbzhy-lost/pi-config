@@ -47,7 +47,7 @@ uv run --no-project \
     <BASE_SHA> <HEAD_SHA> \
     [--worktree PATH] \
     [--provider idealab-anthropic|idealab-openai] \
-    [--spec docs/superpowers/specs/foo.md] \
+    [--spec docs/specs/foo.md] \
     [--max-diff 80000] \
     [--review-depth standard|exhaustive] \
     [--review-round 1|2] \
@@ -98,7 +98,7 @@ Push gate（`scripts/lib/review-invoker.mjs`）按 `idealab-anthropic -> idealab
 uv run --no-project --with httpx --with python-dotenv --with pyyaml \
   python ${PI_CONFIG_HOME}/skill-overrides/external-llm-review/reviewer.py \
   main HEAD --review-depth exhaustive --review-round 1 --max-issues 25 \
-  --spec docs/superpowers/specs/foo.md
+  --spec docs/specs/foo.md
 ```
 
 Round 1 必须：

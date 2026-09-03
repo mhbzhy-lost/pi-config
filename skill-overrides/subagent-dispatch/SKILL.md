@@ -1,9 +1,20 @@
 ---
 name: subagent-dispatch
-description: Use when delegating coding work to executor, or non-coding work to another configured Pi agent.
+description: Use when delegating coding work to executor, delegating non-coding work to another configured Pi agent, or executing an existing implementation plan after the user chooses Subagent-Driven.
 ---
 
 # Subagent Dispatch
+
+## Plan DAG Orchestration
+
+User-selected Subagent-Driven execution is a work-conserving DAG scheduler, not a task-by-task review loop. Read the plan's complete `Deps`, `WritePaths`, and `Resources`, then repeat:
+
+1. Compute the ready set from every incomplete task whose dependencies are complete and, when coding workspace isolation applies, integrated.
+2. Before any wait or status call, dispatch every ready task whose resources are compatible and writes can be isolated, up to the available concurrency capacity. A dispatchable ready task plus a free slot makes waiting invalid.
+3. After any task completes and passes its applicable integration gate, immediately recompute the ready set and fill free slots. A `Wave` is documentation for human review, never a barrier that waits for peer tasks in that Wave.
+4. Review blocks only successors that consume the reviewed artifact. It does not stop unrelated ready tasks or drain all in-flight work.
+
+Limit concurrency only for a real DAG dependency, mutually exclusive resource claim, write conflict that cannot be isolated, an explicit concurrency limit, or an actual dispatch failure. A dirty worktree, a desire to see one result first, per-task review, coordination cost, or reduced simultaneous work is not by itself a serial-execution reason. Record the concrete limiting fact when the ready set is not fully dispatched.
 
 ## Coding
 

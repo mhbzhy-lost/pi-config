@@ -1,6 +1,6 @@
 # Goal Obligation Runtime 实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **给执行 agent：** 必须加载 `subagent-dispatch`，按本计划 DAG 采用 Subagent-Driven 执行；步骤使用复选框（`- [ ]`）跟踪。
 
 **Goal:** 在不改变 `planned.v1` 历史语义的前提下，新增 `goal-runtime.v1` 持久化协议，使同一 Goal 能同时维护不可漏项的计划任务与可失效的状态条件，并通过可恢复 Observation、Finding、Repair Episode、用户授权修订和纯账本终审形成安全的手动收敛闭环。
 
@@ -488,16 +488,12 @@ Wave不是派发屏障；全部前驱完成即可派发。R1/R2/R3与R5/R8的pro
 
 ## Subagent-Driven 执行协议
 
-本计划不由任何Goal自举，固定采用Subagent-Driven执行：
+本计划固定采用Subagent-Driven执行；通用DAG调度、typed派发、terminal proof与workspace disposition全部遵循`subagent-dispatch`，此处只保留本计划特有边界：
 
 1. R0–R13 全程不得创建、恢复、amend或使用任何Goal来执行、编排或验收本计划；当前`planned-goal`保持冻结且不构成R1 production前置，待R13通过并启动fresh Host后再单独typed收尾。
-2. 主Agent只读取本计划`Deps`构建DAG、派发Executor、核对terminal proof、处置managed workspace、运行必要的主工作区回归并形成验收决策；不直接实施production coding。
-3. 每个coding任务使用完整`dispatch-ir.v1`、criteria-only acceptance与独立managed worktree；由Executor严格执行bug文档→tests-only RED→最小GREEN。禁止自由文本coding派发。
-4. 无依赖任务按DAG并行派发；有前驱的任务只在所需产物已集成并验收后派发。并行写路径重叠时不抢写，按本计划既定接口或专门顺序集成处理。
-5. 子任务完成不等于可合入。主Agent先读取official terminal/workspace proof，再使用typed subagent workspace disposition；不得raw worktree或Git清理。
-6. R1之后每个中间提交仍必须保持`planned.v1` replay、action token、Executor contract、settlement与completion向后兼容，但该兼容性由tests和fresh child Pi Host验证，不由active Goal自证。
-7. R10–R12的新runtime canary必须使用独立临时Git repository、独立state root与fresh child Pi Host，不得复用当前cwd的Goal events、session、worktree或resource lease。
-8. R13通过后才重启主Pi Host、运行exact-eight Doctor、typed收尾既有`planned-goal`并允许创建第一个production `goal-runtime.v1` Goal。Auto-continuation继续另立计划。
+2. R1之后每个中间提交仍必须保持`planned.v1` replay、action token、Executor contract、settlement与completion向后兼容；该兼容性由tests和fresh child Pi Host验证，不由active Goal自证。
+3. R10–R12的新runtime canary必须使用独立临时Git repository、独立state root与fresh child Pi Host，不得复用当前cwd的Goal events、session、worktree或resource lease。
+4. R13通过后才重启主Pi Host、运行exact-eight Doctor、typed收尾既有`planned-goal`并允许创建第一个production `goal-runtime.v1` Goal。Auto-continuation继续另立计划。
 
 直接使用`planned.v1`或`goal-runtime.v1`管理R0–R13均视为循环控制面风险，明确禁止。
 
