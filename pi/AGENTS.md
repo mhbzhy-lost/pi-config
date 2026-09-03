@@ -1,28 +1,19 @@
-# 核心约束
+# 全局约束
 
-必须严格遵循。优先级高于一切其他约束和规范。
-
-## Subagent
-
-所有 subagent 派发必须遵循 `subagent-dispatch` skill；主 agent 默认只收集报告、形成决策和编写计划，coding 由 executor 执行，除非用户明确要求主 agent 直接执行。禁止每个 subagent 完成后做全量独立审查。
-
-## 计划执行方式
-
-计划完成后由用户选择执行方式：
-
-- **Subagent-Driven：**加载 `subagent-dispatch`，由主 agent 按计划 DAG 编排 subagent。
-- **Inline：**由主 agent 在当前会话执行；用户选择 Inline 即明确授权主 agent coding。
-- **Goal Engine：**加载 `using-goal-engine`，通过 typed tools 持久化编排。
-
-通用执行协议只在对应 Skill 中维护；计划文档只保留自身特定约束。仓库或具体计划对执行方式的显式禁令优先；Goal 改造 R0–R13 通过验收前，继续遵守仓库根 `AGENTS.md` 中禁止 Goal Engine 自举的边界。
+本文件是当前机器配置中工具无关的全局 prompt 片段，只在宿主配置的全局加载入口生效；不定义任何项目或 cwd 级规则发现标准。
 
 ## 测试与逻辑变更
 
 生产代码、配置或 Skill 逻辑/行为变更首次修改前必须加载 `test-driven-development` skill；测试治理、流程和豁免只在相应 Skill 中维护。测试只验证行为，不为文档或配置字面值建立镜像断言。
 
-## Goal Runtime Manual Preview
+## 计划执行方式
 
-`goal-runtime.v1` 仅为 Manual Preview：只可由人工依据 `goal_status` 与其返回的 typed tool action 推进，不得 auto-continuation。既有 generation 语义保持不变；R13 完成前不得 production cutover。本节只定义操作边界，不复制运行时状态机。
+计划完成后由用户选择执行方式：
+
+- **Subagent-Driven：**由主 agent 按计划 DAG 编排当前宿主提供的 subagent。
+- **Inline：**由主 agent 在当前会话执行；用户选择 Inline 即明确授权主 agent coding。
+
+通用执行协议由当前宿主的对应机制维护，不在计划 Skill 或计划文档中复制；计划文档只保留自身特定约束。
 
 ## 敏感信息
 
@@ -30,13 +21,9 @@
 
 **严禁** 过度脱敏。除 git 内容外，任何脱敏行为不再视为默认选项，当需要脱敏时，必须征得用户授权，否则不做脱敏。对于日志等 debug 信息，默认不做脱敏。
 
-## Worktree 生命周期
-
-禁止 raw `git worktree add/remove/prune/move/repair/lock/unlock` 和猜测性 cleanup；只读 `git worktree list` 可用。创建、销毁、repair、lock 仅可经 typed Goal disposition 或 `node scripts/worktree-lifecycle.mjs ...` managed lifecycle CLI，且须 owner CAS 与明确授权。禁止 `--force` removal、raw branch cleanup；`/tmp`、TTL、clean 状态均不构成删除授权。
-
 ## Git Commit 规范
 
-commit message 格式与主观约束见 `git-commit-convention` skill；机械校验由 Pi `security-gates` Extension 执行。
+commit message 格式与主观约束见 `git-commit-convention` skill。
 
 ## 输出语言
 
