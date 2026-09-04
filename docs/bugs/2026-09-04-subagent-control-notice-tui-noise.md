@@ -2,7 +2,7 @@
 
 ## 现象
 
-Executor 发出 supervisor request 时，TUI 除了显示实际的 `← executor <title>:` 消息，还显示一张 `Subagent needs attention` 卡片。卡片包含 run、token/tool 统计以及 status、steer、resume、interrupt 调用建议，重复占用大量空间但没有新增用户决策信息。
+Executor 发出 supervisor request 时，TUI 除了显示实际的 `← (executor) <title>:` 消息，还显示一张 `Subagent needs attention` 卡片。卡片包含 run、token/tool 统计以及 status、steer、resume、interrupt 调用建议，重复占用大量空间但没有新增用户决策信息。
 
 ## 数据来源与分类
 

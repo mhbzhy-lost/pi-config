@@ -64,9 +64,9 @@ export function formatCompactSubagentSteerResult(result: unknown, args: unknown)
   const title = runId ? registry.titleFor(runId) : undefined;
   const agent = (runId ? registry.agentFor(runId) : undefined)
     ?? (typeof details?.agent === "string" && details.agent.trim() ? details.agent.trim() : undefined);
-  const target = [agent, title].filter(Boolean).join(" ") || (runId ? `run: ${runId}` : "subagent");
+  const target = [agent ? `(${agent})` : undefined, title].filter(Boolean).join(" ") || (runId ? `run: ${runId}` : "subagent");
   const message = typeof input?.message === "string" ? input.message : "";
-  return `→ steer ${target}：\n${message}`;
+  return `→ [steer] ${target}：\n${message}`;
 }
 
 export function formatCompactSupervisorRequest(message: unknown): string {
@@ -87,7 +87,7 @@ export function formatCompactSupervisorRequest(message: unknown): string {
     .filter((line) => !/^(?:Subagent (?:progress update|needs attention|needs a supervisor decision)\.?|Supervisor (?:progress update|request|needs decision)\.?|Agent|Run|Child index|Child intercom target|Intercom target|Supervisor request|Request id):?\s*/i.test(line.trim()))
     .join("\n")
     .trim();
-  return `← ${agent}${title ? ` ${title}` : ""}:\n${body}`;
+  return `← (${agent})${title ? ` ${title}` : ""}:\n${body}`;
 }
 
 export function formatCompactSupervisorToolResult(result: unknown, args: unknown): string {
@@ -101,9 +101,9 @@ export function formatCompactSupervisorToolResult(result: unknown, args: unknown
     ? details.agent.trim()
     : runId ? registry.agentFor(runId) : undefined;
   const title = runId ? registry.titleFor(runId) : undefined;
-  const target = [agent, title].filter(Boolean).join(" ") || (runId ? `run: ${runId}` : "subagent");
+  const target = [agent ? `(${agent})` : undefined, title].filter(Boolean).join(" ") || (runId ? `run: ${runId}` : "subagent");
   const message = typeof input.message === "string" ? input.message : "";
-  return `→ reply ${target}：\n${message}`;
+  return `→ [reply] ${target}：\n${message}`;
 }
 
 export function formatCompactSubagentToolResult(result: unknown, args: unknown) {

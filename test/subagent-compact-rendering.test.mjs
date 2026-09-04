@@ -220,7 +220,7 @@ test("compact steer result separates the target title from the original message"
   const result = { content: [{ type: "text", text: "Message sent to run-steer.\n```\n继续检查失败路径\n```" }], details: { runId: "run-steer", requestId: "req-1" } };
   const beforeArgs = clone(args);
   const beforeResult = clone(result);
-  assert.equal(formatCompactSubagentSteerResult(result, args), "→ steer executor 修复日志：\n继续检查失败路径");
+  assert.equal(formatCompactSubagentSteerResult(result, args), "→ [steer] (executor) 修复日志：\n继续检查失败路径");
   assert.deepEqual(args, beforeArgs);
   assert.deepEqual(result, beforeResult);
 });
@@ -233,15 +233,15 @@ test("compact supervisor request keeps only the agent and actual body", () => {
     details: { agent: "executor", requestId: "req-1" },
   };
   const before = clone(message);
-  assert.equal(formatCompactSupervisorRequest(message), "← executor:\n需要确认日志范围。");
+  assert.equal(formatCompactSupervisorRequest(message), "← (executor):\n需要确认日志范围。");
   assert.deepEqual(message, before);
 });
 
 test("compact supervisor renderer removes real runtime wrappers and metadata lines", () => {
   const cases = [
-    ["Subagent progress update.\nAgent: executor\nChild intercom target: target-1\nUPDATE: 已完成扫描。", "← executor:\nUPDATE: 已完成扫描。"],
-    ["Subagent needs attention.\nAgent: executor\nSupervisor request: request-2\n需要批准继续。", "← executor:\n需要批准继续。"],
-    ["Subagent needs a supervisor decision.\nAgent: executor\nChild intercom target: target-3\n请决定是否重试。", "← executor:\n请决定是否重试。"],
+    ["Subagent progress update.\nAgent: executor\nChild intercom target: target-1\nUPDATE: 已完成扫描。", "← (executor):\nUPDATE: 已完成扫描。"],
+    ["Subagent needs attention.\nAgent: executor\nSupervisor request: request-2\n需要批准继续。", "← (executor):\n需要批准继续。"],
+    ["Subagent needs a supervisor decision.\nAgent: executor\nChild intercom target: target-3\n请决定是否重试。", "← (executor):\n请决定是否重试。"],
   ];
   for (const [content, expected] of cases) {
     const message = { customType: "subagent_supervisor_request", content, details: { agent: "executor" } };
@@ -273,7 +273,7 @@ test("compact supervisor renderer moves the dispatch title to the header and hid
 
   assert.equal(
     rendered,
-    "← executor 物化 spec 并完成 T6:\nT6 is blocked after its single permitted install retry.\nPlease provide an authorized resolver decision or close T6 as blocked.",
+    "← (executor) 物化 spec 并完成 T6:\nT6 is blocked after its single permitted install retry.\nPlease provide an authorized resolver decision or close T6 as blocked.",
   );
   assert.doesNotMatch(rendered, /Reply with|subagent_supervisor|request-1|\[物化 spec/);
   assert.deepEqual(message, before);

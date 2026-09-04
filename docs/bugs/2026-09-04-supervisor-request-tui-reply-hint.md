@@ -14,4 +14,4 @@ Executor 向主 agent 发出需要回复的 supervisor request 时，TUI 在正�
 
 ## 修复边界
 
-只在 TUI renderer 中将标题投影为 `← <agent> <title>:`，并从显示正文中移除 `Reply with:` 及其后续固定提示。原始 custom message、request identity、tool reply 指引、structured details、session 内容和主 agent 实际收到的信息均保持不变。
+只在 TUI renderer 中将标题投影为 `← (<agent>) <title>:`，并从显示正文中移除 `Reply with:` 及其后续固定提示。圆括号只标记 agent identity，title 保持普通文本。原始 custom message、request identity、tool reply 指引、structured details、session 内容和主 agent 实际收到的信息均保持不变。

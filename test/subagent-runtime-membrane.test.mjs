@@ -482,7 +482,7 @@ test("supervisor request renderer compacts inbound progress without mutating the
   const rendered = component.render(40);
   assert.equal(backgrounds.includes("toolPendingBg"), true);
   assert.equal(rendered.length >= 4, true);
-  assert.match(rendered[1], /← executor:/);
+  assert.match(rendered[1], /← \(executor\):/);
   assert.match(rendered.slice(2, -1).join("\n"), /请确认是否继续。/);
   assert.deepEqual(message, before);
 });

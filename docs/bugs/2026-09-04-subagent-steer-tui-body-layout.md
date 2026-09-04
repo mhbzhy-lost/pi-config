@@ -14,4 +14,4 @@
 
 ## 修复边界
 
-只在 TUI renderer 中将动作、目标 agent 与标题作为独立首行，消息正文从第二行开始，形如 `→ steer executor <title>：`。run 启动时的 agent 与 title 仅保存在 renderer identity registry。RPC 参数、tool result、event payload、session 内容和 subagent 实际收到的 steer message 均保持不变。
+只在 TUI renderer 中将动作、目标 agent 与标题作为独立首行，消息正文从第二行开始，形如 `→ [steer] (executor) <title>：`。方括号标记动作类型，圆括号标记 agent identity，title 保持普通文本。run 启动时的 agent 与 title 仅保存在 renderer identity registry。RPC 参数、tool result、event payload、session 内容和 subagent 实际收到的 steer message 均保持不变。

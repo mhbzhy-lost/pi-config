@@ -284,7 +284,7 @@ test("loads exactly one enhanced runtime and footer from a local package source"
     assert.notDeepEqual(supervisor.renderCall({ action: "status" }, theme, { args: { action: "status" } }).render(120), []);
     assert.deepEqual(
       supervisor.renderResult(replyResult, { expanded: true }, theme, { args: replyArgs }).render(120).map((line) => line.trimEnd()),
-      ["→ reply executor 物化 spec 并完成 T6：", "结束本 run 为 BLOCKED。"],
+      ["→ [reply] (executor) 物化 spec 并完成 T6：", "结束本 run 为 BLOCKED。"],
     );
     assert.deepEqual(notifyMessage, notifyBefore);
     assert.deepEqual(statusResult, statusBefore);

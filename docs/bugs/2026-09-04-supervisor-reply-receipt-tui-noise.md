@@ -14,4 +14,4 @@
 
 ## 修复边界
 
-只在 TUI renderer 中将成功 `reply` 的通用 tool call 与回执替换为 `→ reply <agent> <title>：` 和实际回复正文。工具执行、原始参数、成功回执、structured details、session 内容和 subagent 实际收到的回复均保持不变；失败结果继续可见，`pending/status` call 与结果保持可见。
+只在 TUI renderer 中将成功 `reply` 的通用 tool call 与回执替换为 `→ [reply] (<agent>) <title>：` 和实际回复正文。方括号标记动作类型，圆括号标记 agent identity，title 保持普通文本。工具执行、原始参数、成功回执、structured details、session 内容和 subagent 实际收到的回复均保持不变；失败结果继续可见，`pending/status` call 与结果保持可见。
