@@ -726,6 +726,8 @@ export function createTypedSubagentExtension(
     extraDisposables = [],
     renderSubagentCall,
     renderSubagentResult,
+    renderSupervisorCall,
+    renderSupervisorResult,
     prepareCodingSpawn = async () => {},
     resolveCodingSpawnIdentity,
     goalExecutorCoordinator,
@@ -823,7 +825,10 @@ export function createTypedSubagentExtension(
       }
     },
   };
-  const supervisorTool = supervisorAdapter ? createSupervisorTool(supervisorAdapter) : undefined;
+  const supervisorTool = supervisorAdapter ? createSupervisorTool(supervisorAdapter, {
+    renderCall: renderSupervisorCall,
+    renderResult: renderSupervisorResult,
+  }) : undefined;
   let ready;
   try {
     pi.registerTool(tool);

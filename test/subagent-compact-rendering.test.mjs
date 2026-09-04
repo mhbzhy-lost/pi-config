@@ -149,6 +149,38 @@ test("compact status prefers the shared dispatch title and falls back to the run
   );
 });
 
+test("compact resume distinguishes a resumed task without exposing the fixed runtime receipt", () => {
+  const registry = getTitleRegistry();
+  registry.remember("source-run", "集成手淘壳与双 Whale");
+  const args = { action: "resume", id: "source-run", message: "继续处理集成问题" };
+  const result = {
+    content: [{
+      type: "text",
+      text: [
+        "Revived async subagent from source-run.",
+        "Revived run: revived-run",
+        "Agent: executor",
+        "Session: /tmp/session.jsonl",
+        "Async dir: /tmp/revived-run",
+        "Intercom target: subagent-executor-revived-run-1 (if registered)",
+        "Status if needed: subagent({ action: \"status\", id: \"revived-run\" })",
+        "",
+        "The async run is detached and running in the background.",
+      ].join("\n"),
+    }],
+    details: { mode: "single", results: [], asyncId: "revived-run", asyncDir: "/tmp/revived-run" },
+  };
+  const beforeArgs = clone(args);
+  const beforeResult = clone(result);
+
+  const rendered = formatCompactSubagentToolResult(result, args);
+
+  assert.equal(rendered, "▶ 集成手淘壳与双 Whale · resumed");
+  assert.doesNotMatch(rendered, /Revived run|Session|Async dir|Intercom|Status if needed|detached/);
+  assert.deepEqual(args, beforeArgs);
+  assert.deepEqual(result, beforeResult);
+});
+
 test("compact status summarizes active, idle, error, and non-status results", () => {
   assert.equal(
     formatCompactSubagentToolResult(
@@ -180,15 +212,15 @@ test("compact status summarizes active, idle, error, and non-status results", ()
   );
 });
 
-test("compact steer result keeps only the target title and original message", () => {
+test("compact steer result separates the target title from the original message", () => {
   assert.equal(typeof formatCompactSubagentSteerResult, "function");
   const registry = getTitleRegistry();
-  registry.remember("run-steer", "修复日志");
+  registry.remember("run-steer", "修复日志", "executor");
   const args = { action: "steer", id: "run-steer", message: "继续检查失败路径" };
   const result = { content: [{ type: "text", text: "Message sent to run-steer.\n```\n继续检查失败路径\n```" }], details: { runId: "run-steer", requestId: "req-1" } };
   const beforeArgs = clone(args);
   const beforeResult = clone(result);
-  assert.equal(formatCompactSubagentSteerResult(result, args), "→ 修复日志：继续检查失败路径");
+  assert.equal(formatCompactSubagentSteerResult(result, args), "→ steer executor 修复日志：\n继续检查失败路径");
   assert.deepEqual(args, beforeArgs);
   assert.deepEqual(result, beforeResult);
 });
@@ -217,6 +249,34 @@ test("compact supervisor renderer removes real runtime wrappers and metadata lin
     assert.equal(formatCompactSupervisorRequest(message), expected);
     assert.deepEqual(message, before);
   }
+});
+
+test("compact supervisor renderer moves the dispatch title to the header and hides the fixed reply hint", () => {
+  const message = {
+    customType: "subagent_supervisor_request",
+    content: [
+      "T6 is blocked after its single permitted install retry.",
+      "Please provide an authorized resolver decision or close T6 as blocked.",
+      "",
+      "Reply with: subagent_supervisor({ action: \"reply\", replyTo: \"request-1\", message: \"...\" }) [物化 spec 并完成 T6]",
+    ].join("\n"),
+    details: {
+      agent: "executor",
+      requestId: "request-1",
+      runId: "run-1",
+      title: "物化 spec 并完成 T6",
+    },
+  };
+  const before = clone(message);
+
+  const rendered = formatCompactSupervisorRequest(message);
+
+  assert.equal(
+    rendered,
+    "← executor 物化 spec 并完成 T6:\nT6 is blocked after its single permitted install retry.\nPlease provide an authorized resolver decision or close T6 as blocked.",
+  );
+  assert.doesNotMatch(rendered, /Reply with|subagent_supervisor|request-1|\[物化 spec/);
+  assert.deepEqual(message, before);
 });
 
 test("compact notification uses leaf presentation metadata instead of raw failed lifecycle", () => {

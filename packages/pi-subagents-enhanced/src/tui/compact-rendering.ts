@@ -60,11 +60,13 @@ export function formatCompactSubagentSteerResult(result: unknown, args: unknown)
   const runId = typeof input?.id === "string" && input.id.trim()
     ? input.id.trim()
     : typeof details?.runId === "string" && details.runId.trim() ? details.runId.trim() : "";
-  const title = runId ? getTitleRegistry().titleFor(runId) : undefined;
-  const agent = typeof details?.agent === "string" && details.agent.trim() ? details.agent.trim() : undefined;
-  const target = title ?? agent ?? (runId ? `run: ${runId}` : "subagent");
+  const registry = getTitleRegistry();
+  const title = runId ? registry.titleFor(runId) : undefined;
+  const agent = (runId ? registry.agentFor(runId) : undefined)
+    ?? (typeof details?.agent === "string" && details.agent.trim() ? details.agent.trim() : undefined);
+  const target = [agent, title].filter(Boolean).join(" ") || (runId ? `run: ${runId}` : "subagent");
   const message = typeof input?.message === "string" ? input.message : "";
-  return `→ ${target}：${message}`;
+  return `→ steer ${target}：\n${message}`;
 }
 
 export function formatCompactSupervisorRequest(message: unknown): string {
@@ -78,18 +80,52 @@ export function formatCompactSupervisorRequest(message: unknown): string {
     : typeof details?.targetAgent === "string" && details.targetAgent.trim()
       ? details.targetAgent.trim()
       : "subagent";
-  const body = content
-    .split(/\r?\n/)
+  const title = typeof details?.title === "string" ? details.title.trim() : "";
+  const lines = content.split(/\r?\n/);
+  const replyHintIndex = lines.findIndex((line) => /^Reply with:\s*subagent_supervisor\s*\(/i.test(line.trim()));
+  const body = (replyHintIndex >= 0 ? lines.slice(0, replyHintIndex) : lines)
     .filter((line) => !/^(?:Subagent (?:progress update|needs attention|needs a supervisor decision)\.?|Supervisor (?:progress update|request|needs decision)\.?|Agent|Run|Child index|Child intercom target|Intercom target|Supervisor request|Request id):?\s*/i.test(line.trim()))
     .join("\n")
     .trim();
-  return `← ${agent}:\n${body}`;
+  return `← ${agent}${title ? ` ${title}` : ""}:\n${body}`;
+}
+
+export function formatCompactSupervisorToolResult(result: unknown, args: unknown): string {
+  const text = textContent(result);
+  const input = record(args);
+  if (input?.action !== "reply" || record(result)?.isError === true) return text;
+  const details = record(record(result)?.details);
+  const runId = typeof details?.runId === "string" ? details.runId.trim() : "";
+  const registry = getTitleRegistry();
+  const agent = typeof details?.agent === "string" && details.agent.trim()
+    ? details.agent.trim()
+    : runId ? registry.agentFor(runId) : undefined;
+  const title = runId ? registry.titleFor(runId) : undefined;
+  const target = [agent, title].filter(Boolean).join(" ") || (runId ? `run: ${runId}` : "subagent");
+  const message = typeof input.message === "string" ? input.message : "";
+  return `→ reply ${target}：\n${message}`;
 }
 
 export function formatCompactSubagentToolResult(result: unknown, args: unknown) {
   const text = textContent(result);
-  if (record(args)?.action === "steer") return formatCompactSubagentSteerResult(result, args);
-  if (record(args)?.action !== "status") {
+  const input = record(args);
+  const action = input?.action;
+  if (action === "steer") return formatCompactSubagentSteerResult(result, args);
+  if (action === "resume" && record(result)?.isError !== true) {
+    const details = record(record(result)?.details);
+    const sourceRunId = typeof input?.id === "string" && input.id.trim()
+      ? input.id.trim()
+      : typeof input?.runId === "string" && input.runId.trim() ? input.runId.trim() : "";
+    const revivedRunId = typeof details?.runId === "string" && details.runId.trim()
+      ? details.runId.trim()
+      : typeof details?.asyncId === "string" && details.asyncId.trim() ? details.asyncId.trim() : "";
+    const registry = getTitleRegistry();
+    const title = registry.titleFor(sourceRunId) ?? registry.titleFor(revivedRunId);
+    const agent = text.match(/^Agent:\s*(.+?)\s*$/im)?.[1]?.trim();
+    const target = title ?? agent ?? (revivedRunId ? `run: ${revivedRunId}` : "subagent");
+    return `▶ ${target} · resumed`;
+  }
+  if (action !== "status") {
     if (/^Validation failed for tool "subagent":\s*$/m.test(text.split(/\r?\n/, 1)[0] ?? "")) {
       return text.split(/^Received arguments:\s*$/m, 1)[0].trimEnd();
     }

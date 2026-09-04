@@ -19,16 +19,24 @@ function titleError(message) {
 export function createTitleRegistry({ maxEntries = 256 } = {}) {
   const pending = [];
   const titles = new Map();
+  const agents = new Map();
   const completed = [];
   const workflowRoots = new Map();
-  const remember = (runId, title) => {
+  const remember = (runId, title, agent) => {
     if (typeof runId !== "string" || !runId || !title) return;
+    const rememberedAgent = typeof agent === "string" && agent.trim() ? agent.trim() : agents.get(runId);
     titles.delete(runId);
+    agents.delete(runId);
     titles.set(runId, title);
-    while (titles.size > maxEntries) titles.delete(titles.keys().next().value);
+    if (rememberedAgent) agents.set(runId, rememberedAgent);
+    while (titles.size > maxEntries) {
+      const oldest = titles.keys().next().value;
+      titles.delete(oldest);
+      agents.delete(oldest);
+    }
   };
   return Object.freeze({
-    version: 2,
+    version: 3,
     prepare({ agent, task, title }) {
       pending.push({ agent, task, title: normalizeSubagentTitle(title) });
       while (pending.length > maxEntries) pending.shift();
@@ -43,10 +51,10 @@ export function createTitleRegistry({ maxEntries = 256 } = {}) {
       if (index < 0) index = pending.findIndex((entry) => entry.agent === agent);
       if (index < 0) return undefined;
       const [{ title }] = pending.splice(index, 1);
-      remember(runId, title);
+      remember(runId, title, agent);
       return title;
     },
-    remember(runId, title) { remember(runId, normalizeSubagentTitle(title)); },
+    remember(runId, title, agent) { remember(runId, normalizeSubagentTitle(title), agent); },
     bindWorkflowRoot(runId) {
       if (typeof runId !== "string" || !runId) return;
       workflowRoots.set(runId, undefined);
@@ -62,6 +70,7 @@ export function createTitleRegistry({ maxEntries = 256 } = {}) {
       return event?.success === true && typeof runId === "string" && Boolean(workflowRoots.get(runId));
     },
     titleFor(runId) { return titles.get(runId); },
+    agentFor(runId) { return agents.get(runId); },
     completed(event) {
       const title = titles.get(event?.runId ?? event?.id);
       if (title) completed.push({ agent: event?.agent, title, presentation: event?.presentation });
@@ -84,6 +93,6 @@ export function createTitleRegistry({ maxEntries = 256 } = {}) {
 
 export function getTitleRegistry(store = globalThis) {
   const key = "__typedSubagentTitleRegistry";
-  if (store[key]?.version !== 2 || typeof store[key].prepare !== "function") store[key] = createTitleRegistry();
+  if (store[key]?.version !== 3 || typeof store[key].prepare !== "function") store[key] = createTitleRegistry();
   return store[key];
 }

@@ -12,6 +12,7 @@ import {
   formatCompactSubagentSpawnSummary,
   formatCompactSubagentToolResult,
   formatCompactSupervisorRequest,
+  formatCompactSupervisorToolResult,
 } from "../src/tui/compact-rendering.ts";
 import { installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
@@ -84,19 +85,28 @@ export function createSubagentToolRenderers() {
     void options;
     return messageBox(text, "toolPendingBg", theme, true);
   };
+  const renderControlNotice = () => new Text("", 0, 0);
+  const renderSupervisorCall = (args: any, theme: any) => {
+    const action = typeof args?.action === "string" ? args.action.trim() : "";
+    return new Text(action === "reply" ? "" : theme.fg("dim", `subagent_supervisor${action ? ` ${action}` : ""}`), 0, 0);
+  };
+  const renderSupervisorResult = (result: any, _options: any, theme: any, context: any) => {
+    const text = formatCompactSupervisorToolResult(result, context?.args ?? {});
+    return new Text(theme.fg(result?.isError ? "error" : "dim", text), 0, 0);
+  };
   const renderCompletionNotification = (message: any, theme: any) => {
     const text = formatCompactSubagentNotification(message);
     const color = notificationColor(text);
     const background = color === "success" ? "toolSuccessBg" : color === "error" || color === "warning" ? "toolErrorBg" : "toolPendingBg";
     return messageBox(text, background, theme);
   };
-  return { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderCompletionNotification };
+  return { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderCompletionNotification };
 }
 
 export default function subagentRuntime(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.PI_SUBAGENT_FANOUT_CHILD === "1") return;
   const completionBatch = loadConfig().completionBatch;
-  const { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderCompletionNotification } = createSubagentToolRenderers();
+  const { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderCompletionNotification } = createSubagentToolRenderers();
   let brokerStarted = false;
   let brokerReady = false;
   let previousBrokerMarker: string | undefined;
@@ -168,6 +178,8 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     },
     renderSubagentCall,
     renderSubagentResult,
+    renderSupervisorCall,
+    renderSupervisorResult,
     rpc,
     resolveRootSessionId: (sessionManager: any) => resolveRootSessionId(sessionManager),
     registerFacadeRun: (run: any) => {
@@ -190,4 +202,5 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     return renderCompletionNotification(message, theme);
   });
   pi.registerMessageRenderer("subagent_supervisor_request", renderSupervisorRequest);
+  pi.registerMessageRenderer("subagent_control_notice", renderControlNotice);
 }

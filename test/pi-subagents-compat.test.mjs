@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import test from "node:test";
 import * as compat from "../scripts/probes/pi-subagents-compat.ts";
+import { getTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
 import { piHostAliases, piHostJitiUrl, piHostModuleUrl } from "./helpers/pi-host.mjs";
 
 const { createJiti } = await import(piHostJitiUrl);
@@ -212,8 +213,12 @@ test("loads exactly one enhanced runtime and footer from a local package source"
     const supervisorRenderers = loadedExtensions
       .map((extension) => extension.messageRenderers.get("subagent_supervisor_request"))
       .filter((renderer) => typeof renderer === "function");
+    const controlNoticeRenderers = loadedExtensions
+      .map((extension) => extension.messageRenderers.get("subagent_control_notice"))
+      .filter((renderer) => typeof renderer === "function");
     const footerOwners = loadedExtensions.filter((extension) => String(extension.path).endsWith("/extensions/custom-footer.ts"));
     const notifyRenderer = notifyRenderers[0];
+    const controlNoticeRenderer = controlNoticeRenderers[0];
     const supervisor = result.session.getToolDefinition("subagent_supervisor");
     const signal = new AbortController().signal;
     const status = await supervisor.execute("compat-status", { action: "status" }, signal, undefined, undefined);
@@ -240,19 +245,52 @@ test("loads exactly one enhanced runtime and footer from a local package source"
       theme,
       { args: { action: "status", id: "run-1" } },
     ).render(120).map((line) => line.trimEnd());
+    const controlNotice = {
+      customType: "subagent_control_notice",
+      content: "Subagent needs attention: executor\nRun: run-1 step 1\nSignal: executor is waiting for a supervisor reply",
+      display: true,
+      details: {
+        event: { type: "needs_attention", reason: "supervisor_request", runId: "run-1", agent: "executor", index: 0 },
+        source: "async",
+      },
+    };
+    const controlNoticeBefore = structuredClone(controlNotice);
+    const controlNoticeLines = controlNoticeRenderer(controlNotice, { expanded: true, outputPad: 0 }, theme).render(120);
+    const replyArgs = { action: "reply", replyTo: "request-1", message: "结束本 run 为 BLOCKED。" };
+    const replyResult = {
+      content: [{ type: "text", text: "Replied to supervisor request request-1." }],
+      details: { replyTo: "request-1", runId: "reply-run-1", agent: "executor" },
+    };
+    getTitleRegistry().remember("reply-run-1", "物化 spec 并完成 T6", "executor");
+    const replyArgsBefore = structuredClone(replyArgs);
+    const replyResultBefore = structuredClone(replyResult);
 
     assert.deepEqual(errors, []);
     assert.equal(loadedExtensions.length, 2);
     assert.equal(footerOwners.length, 1);
     assert.equal(notifyRenderers.length, 1);
     assert.equal(supervisorRenderers.length, 1);
+    assert.equal(controlNoticeRenderers.length, 1);
     assert.deepEqual(toolNames, ["subagent", "subagent_supervisor"]);
     assert.equal(typeof subagent.renderResult, "function");
     assert.equal(typeof notifyRenderer, "function");
+    assert.equal(typeof controlNoticeRenderer, "function");
+    assert.equal(typeof supervisor.renderCall, "function");
+    assert.equal(typeof supervisor.renderResult, "function");
     assert.deepEqual(notifyLines, ["", " ✓ Renderer smoke · completed", ""]);
     assert.deepEqual(statusLines, ["Status: running · run: run-1"]);
+    assert.deepEqual(controlNoticeLines, []);
+    assert.deepEqual(supervisor.renderCall(replyArgs, theme, { args: replyArgs }).render(120), []);
+    assert.notDeepEqual(supervisor.renderCall({ action: "status" }, theme, { args: { action: "status" } }).render(120), []);
+    assert.deepEqual(
+      supervisor.renderResult(replyResult, { expanded: true }, theme, { args: replyArgs }).render(120).map((line) => line.trimEnd()),
+      ["→ reply executor 物化 spec 并完成 T6：", "结束本 run 为 BLOCKED。"],
+    );
     assert.deepEqual(notifyMessage, notifyBefore);
     assert.deepEqual(statusResult, statusBefore);
+    assert.deepEqual(controlNotice, controlNoticeBefore);
+    assert.deepEqual(replyArgs, replyArgsBefore);
+    assert.deepEqual(replyResult, replyResultBefore);
     assert.doesNotMatch(supervisor.description, /pi-subagents|upstream/i);
     assert.equal(status.details.active, true);
     assert.equal(status.details.pending, 0);

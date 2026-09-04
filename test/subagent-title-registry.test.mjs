@@ -26,8 +26,10 @@ test("associates a pending dispatch with its started run and stays bounded", () 
   registry.prepare({ agent: "delegate", task: "Inspect this change", title: "Inspect diff" });
   assert.equal(registry.started({ id: "run-1", agent: "delegate", goal: "Inspect this change" }), "Inspect diff");
   assert.equal(registry.titleFor("run-1"), "Inspect diff");
+  assert.equal(registry.agentFor("run-1"), "delegate");
   registry.remember("run-2", "Second");
   registry.remember("run-3", "Third");
   assert.equal(registry.titleFor("run-1"), undefined);
+  assert.equal(registry.agentFor("run-1"), undefined);
   assert.equal(registry.titleFor("run-3"), "Third");
 });
