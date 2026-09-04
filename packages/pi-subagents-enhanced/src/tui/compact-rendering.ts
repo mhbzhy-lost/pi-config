@@ -81,7 +81,12 @@ export function formatCompactSupervisorRequest(message: unknown): string {
       ? details.targetAgent.trim()
       : "subagent";
   const title = typeof details?.title === "string" ? details.title.trim() : "";
-  const lines = content.split(/\r?\n/);
+  const trimmedContent = content.trimEnd();
+  const titleSuffix = title ? ` [${title}]` : "";
+  const displayContent = titleSuffix && trimmedContent.endsWith(titleSuffix)
+    ? trimmedContent.slice(0, -titleSuffix.length)
+    : trimmedContent;
+  const lines = displayContent.split(/\r?\n/);
   const replyHintIndex = lines.findIndex((line) => /^Reply with:\s*subagent_supervisor\s*\(/i.test(line.trim()));
   const body = (replyHintIndex >= 0 ? lines.slice(0, replyHintIndex) : lines)
     .filter((line) => !/^(?:Subagent (?:progress update|needs attention|needs a supervisor decision)\.?|Supervisor (?:progress update|request|needs decision)\.?|Agent|Run|Child index|Child intercom target|Intercom target|Supervisor request|Request id):?\s*/i.test(line.trim()))

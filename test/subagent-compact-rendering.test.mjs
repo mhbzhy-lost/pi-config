@@ -279,6 +279,28 @@ test("compact supervisor renderer moves the dispatch title to the header and hid
   assert.deepEqual(message, before);
 });
 
+test("compact supervisor renderer removes only the duplicated trailing dispatch title", () => {
+  const message = {
+    customType: "subagent_supervisor_request",
+    content: "UPDATE: Starting isolated [probe]. I will preserve this body. [验证 external podspec 注册]",
+    details: {
+      agent: "executor",
+      runId: "run-1",
+      title: "验证 external podspec 注册",
+    },
+  };
+  const before = clone(message);
+
+  const rendered = formatCompactSupervisorRequest(message);
+
+  assert.equal(
+    rendered,
+    "← (executor) 验证 external podspec 注册:\nUPDATE: Starting isolated [probe]. I will preserve this body.",
+  );
+  assert.doesNotMatch(rendered, /\[验证 external podspec 注册\]$/);
+  assert.deepEqual(message, before);
+});
+
 test("compact notification uses leaf presentation metadata instead of raw failed lifecycle", () => {
   const rendered = formatCompactSubagentNotification({
     content: "Background tasks failed (2): **executor**, **reviewer**",
