@@ -76,6 +76,10 @@ test("compileCodingDispatchIR rejects unknown fields", () => {
     () => compileCodingDispatchIR(validInput({ bogus: true }), { cwd: "/workspace/project" }),
     /unknown field/,
   );
+  assert.throws(
+    () => compileCodingDispatchIR(validInput({ acceptance: { criteria: ["Handles expired tokens"], commands: ["node --test test/token.test.mjs"] } }), { cwd: "/workspace/project" }),
+    /acceptance contains unknown field commands/,
+  );
 });
 
 test("compileCodingDispatchIR accepts any non-empty discovered-profile-shaped agent", () => {
@@ -96,16 +100,23 @@ test("compileCodingDispatchIR rejects path traversal in writePaths", () => {
   input.boundaries.writePaths = ["../../etc/passwd"];
   assert.throws(
     () => compileCodingDispatchIR(input, { cwd: "/workspace/project" }),
-    /repo-relative|unsafe/,
+    /unsafe path segment/,
   );
 });
 
 test("init writePaths and dispatch IR share the repo-relative POSIX matrix", () => {
-  for (const path of ["a\0b", "src\\x", "/tmp/x", "C:\\x", "\\\\host\\share", "src/../x", "src/*", "src/?", "src/[x]", "src/**/x"]) {
+  for (const [path, expectedMessage] of [
+    ["a\0b", /repo-relative POSIX path/], ["src\\x", /repo-relative POSIX path/], ["/tmp/x", /repo-relative POSIX path/],
+    ["C:\\x", /repo-relative POSIX path/], ["\\\\host\\share", /repo-relative POSIX path/], ["src/../x", /unsafe path segment/],
+    ["src/*", /unsupported path pattern/], ["src/?", /unsupported path pattern/], ["src/[x]", /unsupported path pattern/], ["src/**/x", /unsupported path pattern/],
+  ]) {
     assert.throws(() => validateRepoRelativePath(path), /repo-relative|unsupported/);
     const input = validInput();
     input.boundaries.writePaths = [path];
-    assert.throws(() => compileCodingDispatchIR(input, { cwd: "/workspace/project" }), /repo-relative|unsupported|unsafe/);
+    assert.throws(
+      () => compileCodingDispatchIR(input, { cwd: "/workspace/project" }),
+      (error) => error.code === "INVALID_PATH" && expectedMessage.test(error.message),
+    );
   }
   for (const path of ["src/x.ts", "src/generated/**"]) {
     assert.equal(validateRepoRelativePath(path), path);
@@ -159,6 +170,7 @@ test("renderDispatchPrompt produces structured markdown", () => {
   assert.match(prompt, /token validation/);
   assert.match(prompt, /src\/auth\/token\.ts/);
   assert.match(prompt, /Handles expired tokens/);
+  assert.doesNotMatch(prompt, /node --test test\/token\.test\.mjs/);
   assert.ok(prompt.length < 64 * 1024);
 });
 
