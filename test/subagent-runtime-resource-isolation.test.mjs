@@ -70,7 +70,7 @@ test("keeps subagent dependencies owned by the enhanced package setup", async ()
   assert.equal(runtimePackage.dependencies.typebox, undefined);
   assert.equal(runtimePackage.dependencies["@juicesharp/rpiv-todo"], undefined);
   assert.doesNotMatch(init, /PI_SUBAGENTS_VERSION|pi_binary" install "npm:pi-subagents/);
-  assert.match(init, /npm --prefix "\$SCRIPT_DIR" run setup:subagents-enhanced/);
+  assert.match(init, /npm --no-audit --no-fund --prefix "\$SCRIPT_DIR" run setup:subagents-enhanced/);
 });
 
 test("loads upstream only through the enhanced package and removes duplicate auto-discovered entries", async () => {
