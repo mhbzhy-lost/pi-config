@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "../pi/npm/node_modules/jiti/lib/jiti.mjs";
-import { Compile } from "../pi/npm/node_modules/typebox/build/compile/index.mjs";
+import { createJiti } from "../packages/pi-subagents-enhanced/node_modules/jiti/lib/jiti.mjs";
+import { Compile } from "../packages/pi-subagents-enhanced/node_modules/pi-subagents/node_modules/typebox/build/compile/index.mjs";
 
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 const { CodingDispatchContractError, compileCodingDispatchIR } = await jiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts");

@@ -18,13 +18,18 @@ test("scheduler package is isolated and its exact dependencies install without l
   assert.equal(runtimePackage.dependencies[scheduler], "0.1.9");
   assert.equal(runtimePackage.dependencies["@amaster.ai/pi-shared"], "0.1.9");
   assert.equal(runtimePackage.dependencies.croner, "10.0.1");
+  assert.equal(Object.hasOwn(runtimePackage.dependencies, "typebox"), false, "Doctor forbids pi/npm from owning the scheduler peer as a direct dependency");
 
-  const { buildTaskSchedulerInstallCommand } = await import("../scripts/setup-subagent-runtime-deps.ts");
+  const { buildTaskSchedulerInstallCommand, buildTaskSchedulerPeerInstallCommand } = await import("../scripts/setup-subagent-runtime-deps.ts");
   const install = buildTaskSchedulerInstallCommand("/tmp/pi/npm");
   assert.deepEqual(install, {
     command: "npm",
-    args: ["install", "--prefix", "/tmp/pi/npm", "--omit=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
+    args: ["install", "--prefix", "/tmp/pi/npm", "--include=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
   }, "repeatable setup must install exact libraries through npm rather than loading an upstream extension");
+  assert.deepEqual(buildTaskSchedulerPeerInstallCommand("/tmp/pi/npm"), {
+    command: "npm",
+    args: ["install", "--prefix", "/tmp/pi/npm", "--no-save", "--save-exact", "typebox@1.1.38"],
+  }, "setup must own the scheduler peer without declaring it in pi/npm/package.json");
 
   const init = await readFile(join(repoRoot, "init-pi.sh"), "utf8");
   assert.match(init, /npm --prefix "\$SCRIPT_DIR" run setup:subagents-enhanced/, "init delegates repeatable local dependency setup");

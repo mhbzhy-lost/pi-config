@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import { execFile as execFileCallback } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { assertSafeSubagentRuntimeUpgrade, installSubagentRuntimeDependencies } from "../scripts/setup-subagent-runtime-deps.ts";
+
+const execFile = promisify(execFileCallback);
 
 async function enhancedFixture(t, version) {
   const root = await mkdtemp(join(tmpdir(), "subagent-enhanced-setup-"));
@@ -51,6 +56,25 @@ test("runtime upgrade preflight allows an external terminal and an active same-v
   }));
 });
 
+test("clean runtime setup installs the scheduler ESM peer at its Node resolution host", async (t) => {
+  const enhancedPackageRoot = await enhancedFixture(t, "0.62.0");
+  const piNpmDir = await mkdtemp(join(tmpdir(), "subagent-scheduler-clean-"));
+  t.after(() => rm(piNpmDir, { recursive: true, force: true }));
+
+  await installSubagentRuntimeDependencies({
+    enhancedPackageRoot,
+    piNpmDir,
+    env: process.env,
+    async run(command, args, options) {
+      if (args.includes("@amaster.ai/pi-task-scheduler@0.1.9") || args.includes("typebox@1.1.38")) {
+        return execFile(command, args, options);
+      }
+    },
+  });
+
+  await assert.doesNotReject(() => import(pathToFileURL(join(piNpmDir, "node_modules", "@amaster.ai", "pi-task-scheduler", "dist", "index.js")).href));
+});
+
 test("runtime dependency setup coordinates the enhanced package and scheduler without installing standalone upstream", async (t) => {
   const enhancedPackageRoot = await enhancedFixture(t, "0.62.0");
   const piNpmDir = await mkdtemp(join(tmpdir(), "subagent-scheduler-"));
@@ -71,7 +95,8 @@ test("runtime dependency setup coordinates the enhanced package and scheduler wi
     ["npm", "install", "--prefix", enhancedPackageRoot, "--ignore-scripts", "--omit=peer"],
     ["npm", "--prefix", enhancedPackageRoot, "run", "setup:runtime"],
     ["npm", "--prefix", enhancedPackageRoot, "run", "verify:package"],
-    ["npm", "install", "--prefix", piNpmDir, "--omit=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
+    ["npm", "install", "--prefix", piNpmDir, "--include=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
+    ["npm", "install", "--prefix", piNpmDir, "--no-save", "--save-exact", "typebox@1.1.38"],
   ]);
   assert.equal(calls.some((call) => call.some((arg) => /^pi-subagents@/.test(arg))), false);
 });
