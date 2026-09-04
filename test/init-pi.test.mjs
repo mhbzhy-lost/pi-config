@@ -39,7 +39,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const fakeNpm = join(fakeBin, "npm");
     await writeFile(
       fakeNpm,
-      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"--prefix\" && \"$3\" == \"run\" && \"$4\" == \"setup:subagents-enhanced\" ]]; then mkdir -p \"$2/packages/pi-subagents-enhanced/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.62.0\\\"}' > \"$2/packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$*\" == *\"run setup:subagents-enhanced\"* ]]; then mkdir -p \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.62.0\\\"}' > \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json\"; fi\n",
     );
     await chmod(fakeNpm, 0o755);
     const fakeNode = join(fakeBin, "node");
@@ -104,10 +104,10 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     const commands = await readFile(commandLog, "utf8");
     assert.doesNotMatch(commands, /submodule/);
-    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.84\.4/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.84\.4/);
     assert.doesNotMatch(commands, /pi-real registry=.*install npm:pi-subagents/);
     assert.match(commands, /node check-subagent-upgrade/);
-    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:subagents-enhanced markers=1,1,parent-session,1/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund --prefix .* run setup:subagents-enhanced markers=1,1,parent-session,1/);
     assert.ok(commands.indexOf("node check-subagent-upgrade") < commands.indexOf("run setup:subagents-enhanced"), "live-upgrade preflight must run before package setup mutates the package");
     assert.doesNotMatch(commands, /rpiv-todo/);
     assert.match(commands, /node sync-skills markers=1,1,parent-session,1/);

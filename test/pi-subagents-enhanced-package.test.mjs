@@ -79,7 +79,7 @@ test("package setup and verify exercise the package-local patched upstream", asy
     patch: async () => {},
   });
   assert.deepEqual(calls[0]?.[1], [
-    "install", "--prefix", packageRoot, "--ignore-scripts", "--omit=peer", "--save-exact", "pi-subagents@0.62.0",
+    "--no-audit", "--no-fund", "install", "--prefix", packageRoot, "--ignore-scripts", "--omit=peer", "--save-exact", "pi-subagents@0.62.0",
   ]);
   const report = await verify.verifyEnhancedPackage({ packageRoot });
   assert.deepEqual({ name: report.name, version: report.version, upstreamVersion: report.upstreamVersion, patched: report.patched }, {

@@ -24,14 +24,14 @@ test("scheduler package is isolated and its exact dependencies install without l
   const install = buildTaskSchedulerInstallCommand("/tmp/pi/npm");
   assert.deepEqual(install, {
     command: "npm",
-    args: ["install", "--prefix", "/tmp/pi/npm", "--include=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
+    args: ["--no-audit", "--no-fund", "install", "--prefix", "/tmp/pi/npm", "--include=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
   }, "repeatable setup must install exact libraries through npm rather than loading an upstream extension");
   assert.deepEqual(buildTaskSchedulerPeerInstallCommand("/tmp/pi/npm"), {
     command: "npm",
-    args: ["install", "--prefix", "/tmp/pi/npm", "--no-save", "--save-exact", "typebox@1.1.38"],
+    args: ["--no-audit", "--no-fund", "install", "--prefix", "/tmp/pi/npm", "--no-save", "--save-exact", "typebox@1.1.38"],
   }, "setup must own the scheduler peer without declaring it in pi/npm/package.json");
 
   const init = await readFile(join(repoRoot, "init-pi.sh"), "utf8");
-  assert.match(init, /npm --prefix "\$SCRIPT_DIR" run setup:subagents-enhanced/, "init delegates repeatable local dependency setup");
+  assert.match(init, /npm --no-audit --no-fund --prefix "\$SCRIPT_DIR" run setup:subagents-enhanced/, "init disables audit and fund before delegating repeatable local dependency setup");
   assert.doesNotMatch(init, /pi-task-scheduler.*(?:extension|dist\/index)/s, "init must not load upstream extension");
 });

@@ -446,22 +446,27 @@ test("uninstalls retired standalone dependencies before coordinating enhanced ru
   assert.deepEqual(calls, [
     [
       "npm",
-      ["uninstall", "--prefix", "/tmp/pi/npm", "@juicesharp/rpiv-todo", "pi-subagents", "typebox"],
+      ["--no-audit", "--no-fund", "uninstall", "--prefix", "/tmp/pi/npm", "@juicesharp/rpiv-todo", "pi-subagents", "typebox"],
       { env: { PATH: "/test/bin" } },
     ],
     [
       "npm",
-      ["install", "--prefix", "/tmp/pi-subagents-enhanced", "--ignore-scripts", "--omit=peer"],
+      ["--no-audit", "--no-fund", "install", "--prefix", "/tmp/pi-subagents-enhanced", "--ignore-scripts", "--omit=peer"],
       { env: { PATH: "/test/bin" } },
     ],
-    ["npm", ["--prefix", "/tmp/pi-subagents-enhanced", "run", "setup:runtime"], { env: { PATH: "/test/bin" } }],
-    ["npm", ["--prefix", "/tmp/pi-subagents-enhanced", "run", "verify:package"], { env: { PATH: "/test/bin" } }],
+    ["npm", ["--no-audit", "--no-fund", "--prefix", "/tmp/pi-subagents-enhanced", "run", "setup:runtime"], { env: { PATH: "/test/bin" } }],
+    ["npm", ["--no-audit", "--no-fund", "--prefix", "/tmp/pi-subagents-enhanced", "run", "verify:package"], { env: { PATH: "/test/bin" } }],
     [
       "npm",
       [
-        "install", "--prefix", "/tmp/pi/npm", "--omit=peer", "--save-exact",
+        "--no-audit", "--no-fund", "install", "--prefix", "/tmp/pi/npm", "--include=peer", "--save-exact",
         "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1",
       ],
+      { env: { PATH: "/test/bin" } },
+    ],
+    [
+      "npm",
+      ["--no-audit", "--no-fund", "install", "--prefix", "/tmp/pi/npm", "--no-save", "--save-exact", "typebox@1.1.38"],
       { env: { PATH: "/test/bin" } },
     ],
   ]);

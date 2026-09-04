@@ -10,7 +10,7 @@ const scriptPath = fileURLToPath(import.meta.url);
 const packageRoot = resolve(import.meta.dirname, "..");
 
 export async function setupRuntimeDependencies({ root = packageRoot, env = process.env, run = execFile, patch = applyOrderedModelsRuntimePatch } = {}) {
-  await run("npm", ["install", "--prefix", root, "--ignore-scripts", "--omit=peer", "--save-exact", "pi-subagents@0.62.0"], { env });
+  await run("npm", ["--no-audit", "--no-fund", "install", "--prefix", root, "--ignore-scripts", "--omit=peer", "--save-exact", "pi-subagents@0.62.0"], { env });
   const upstreamRoot = resolve(root, "node_modules/pi-subagents");
   await patch(upstreamRoot);
   return { packageRoot: root, upstreamRoot };

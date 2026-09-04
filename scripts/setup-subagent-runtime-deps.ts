@@ -32,7 +32,7 @@ export function buildTaskSchedulerInstallCommand(piNpmDir) {
   return {
     command: "npm",
     args: [
-      "install", "--prefix", piNpmDir, "--include=peer", "--save-exact",
+      "--no-audit", "--no-fund", "install", "--prefix", piNpmDir, "--include=peer", "--save-exact",
       "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1",
     ],
   };
@@ -41,7 +41,7 @@ export function buildTaskSchedulerInstallCommand(piNpmDir) {
 export function buildTaskSchedulerPeerInstallCommand(piNpmDir) {
   return {
     command: "npm",
-    args: ["install", "--prefix", piNpmDir, "--no-save", "--save-exact", "typebox@1.1.38"],
+    args: ["--no-audit", "--no-fund", "install", "--prefix", piNpmDir, "--no-save", "--save-exact", "typebox@1.1.38"],
   };
 }
 
@@ -52,10 +52,10 @@ export async function installSubagentRuntimeDependencies({
   run = execFile,
 } = {}) {
   await assertSafeSubagentRuntimeUpgrade({ enhancedPackageRoot, env });
-  await run("npm", ["uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo", "pi-subagents", "typebox"], { env });
-  await run("npm", ["install", "--prefix", enhancedPackageRoot, "--ignore-scripts", "--omit=peer"], { env });
-  await run("npm", ["--prefix", enhancedPackageRoot, "run", "setup:runtime"], { env });
-  await run("npm", ["--prefix", enhancedPackageRoot, "run", "verify:package"], { env });
+  await run("npm", ["--no-audit", "--no-fund", "uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo", "pi-subagents", "typebox"], { env });
+  await run("npm", ["--no-audit", "--no-fund", "install", "--prefix", enhancedPackageRoot, "--ignore-scripts", "--omit=peer"], { env });
+  await run("npm", ["--no-audit", "--no-fund", "--prefix", enhancedPackageRoot, "run", "setup:runtime"], { env });
+  await run("npm", ["--no-audit", "--no-fund", "--prefix", enhancedPackageRoot, "run", "verify:package"], { env });
   const schedulerInstall = buildTaskSchedulerInstallCommand(piNpmDir);
   await run(schedulerInstall.command, schedulerInstall.args, { env });
   const schedulerPeerInstall = buildTaskSchedulerPeerInstallCommand(piNpmDir);

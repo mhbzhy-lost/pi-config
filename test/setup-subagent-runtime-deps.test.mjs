@@ -91,12 +91,12 @@ test("runtime dependency setup coordinates the enhanced package and scheduler wi
 
   assert.deepEqual(result, { piNpmDir, enhancedPackageRoot });
   assert.deepEqual(calls, [
-    ["npm", "uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo", "pi-subagents", "typebox"],
-    ["npm", "install", "--prefix", enhancedPackageRoot, "--ignore-scripts", "--omit=peer"],
-    ["npm", "--prefix", enhancedPackageRoot, "run", "setup:runtime"],
-    ["npm", "--prefix", enhancedPackageRoot, "run", "verify:package"],
-    ["npm", "install", "--prefix", piNpmDir, "--include=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
-    ["npm", "install", "--prefix", piNpmDir, "--no-save", "--save-exact", "typebox@1.1.38"],
+    ["npm", "--no-audit", "--no-fund", "uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo", "pi-subagents", "typebox"],
+    ["npm", "--no-audit", "--no-fund", "install", "--prefix", enhancedPackageRoot, "--ignore-scripts", "--omit=peer"],
+    ["npm", "--no-audit", "--no-fund", "--prefix", enhancedPackageRoot, "run", "setup:runtime"],
+    ["npm", "--no-audit", "--no-fund", "--prefix", enhancedPackageRoot, "run", "verify:package"],
+    ["npm", "--no-audit", "--no-fund", "install", "--prefix", piNpmDir, "--include=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
+    ["npm", "--no-audit", "--no-fund", "install", "--prefix", piNpmDir, "--no-save", "--save-exact", "typebox@1.1.38"],
   ]);
   assert.equal(calls.some((call) => call.some((arg) => /^pi-subagents@/.test(arg))), false);
 });
