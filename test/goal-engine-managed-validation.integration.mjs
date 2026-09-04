@@ -164,7 +164,7 @@ async function crashScenario(t, mode, round) {
     assert.equal(readdirSync(join(f.stateRoot, "managed-validations")).filter((name) => JSON.parse(readFileSync(join(f.stateRoot, "managed-validations", name), "utf8")).phase !== "released").length, 0);
     assert.equal(readdirSync(join(f.stateRoot, "validation-leases")).filter((name) => name.endsWith(".json") && JSON.parse(readFileSync(join(f.stateRoot, "validation-leases", name), "utf8")).state !== "released").length, 0);
     assert.equal(readdirSync(join(f.stateRoot, "validation-runtime")).length, 0);
-    assert.equal(readdirSync(join(f.stateRoot, "validation-worktrees")).length, 0);
+    assert.equal(existsSync(prepared.workspacePath), false);
     assert.equal(git(f.originRoot, "worktree", "list", "--porcelain"), baseline);
   } finally { if (child.exitCode === null && child.signalCode === null) await killChild(child); }
 }

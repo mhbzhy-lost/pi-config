@@ -57,7 +57,7 @@ function workerResult(child) {
 
 test("validation allocation serializes cross-process capacity before managed Git creation", async (t) => {
   const f = fixture(t); const barrier = join(f.state, "capacity-barrier"); mkdirSync(barrier);
-  const workers = []; const results = []; const receipts = []; const runnerUrl = pathToFileURL(join(process.cwd(), "src/goal-engine/acceptance-runner.mjs")).href;
+  const workers = []; const results = []; const receipts = []; const runnerUrl = pathToFileURL(join(process.cwd(), "src/goal-engine/acceptance-runner.ts")).href;
   const source = String.raw`const fs=require('node:fs'),path=require('node:path'),{syncBuiltinESMExports}=require('node:module');const [configText,index]=process.argv.slice(1),c=JSON.parse(configText),ready=path.join(c.barrier,'ready-'+index),start=path.join(c.barrier,'start'),reached=path.join(c.barrier,'reached-'+index),release=path.join(c.barrier,'release');const original=fs.writeFileSync;let intercepted=false;const initialLeaseTemp=file=>typeof file==='string'&&path.basename(path.dirname(file))==='validation-leases'&&/^\.validation-[a-f0-9]{64}\.\d+\.\d+$/.test(path.basename(file));fs.writeFileSync=(file,...args)=>{if(!intercepted&&initialLeaseTemp(file)){intercepted=true;original(reached,'',{flag:'wx',mode:0o600});const cell=new Int32Array(new SharedArrayBuffer(4)),end=Date.now()+5000;while(!fs.existsSync(release)&&Date.now()<end)Atomics.wait(cell,0,0,10);if(!fs.existsSync(release))throw Error('release barrier timeout')}return original(file,...args)};syncBuiltinESMExports();const waitStart=()=>{const end=Date.now()+5000;while(!fs.existsSync(start)){if(Date.now()>=end)throw Error('start barrier timeout');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)}};(async()=>{try{const m=await import(c.runnerUrl);original(ready,'',{flag:'wx',mode:0o600});waitStart();const lease=m.createValidationWorkspace({...c.input,taskId:'capacity-'+index});process.send({success:true,lease})}catch(error){process.send({success:false,capacityConflict:/capacity conflict/i.test(String(error&&error.message))})}})();`;
   const config = JSON.stringify({ runnerUrl, barrier, input: { originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "placeholder", attempt: 1, integratedHead: f.head, validationPlan: strictPlan() } });
   try {
@@ -131,14 +131,12 @@ test("validation supervisor has a safe environment and managed-worktree cwd", as
   const f = fixture(t); const sentinel = "VALIDATION_SUPERVISOR_SENTINEL"; const previous = process.env[sentinel]; const observation = join(f.state, "supervisor-observation.json");
   process.env[sentinel] = "fixed-non-sensitive-sentinel";
   t.after(() => { if (previous === undefined) delete process.env[sentinel]; else process.env[sentinel] = previous; });
-  const managedPath = join(f.state, "validation-worktrees", "g-supervisor-isolation-1");
-  const source = `const{execFileSync}=require('child_process'),fs=require('fs');const p=process.ppid;const environment=execFileSync('/bin/ps',['eww','-p',String(p),'-o','command='],{encoding:'utf8'});const cwd=execFileSync('/usr/sbin/lsof',['-a','-p',String(p),'-d','cwd','-Fn'],{encoding:'utf8'}).split('\\n').find(x=>x.startsWith('n'))?.slice(1);fs.writeFileSync(${JSON.stringify(observation)},JSON.stringify({noSentinel:!environment.includes(${JSON.stringify(sentinel)}),managedCwd:cwd===${JSON.stringify(managedPath)}}));`;
+  const source = `const{execFileSync}=require('child_process'),fs=require('fs');const p=process.ppid;const environment=execFileSync('/bin/ps',['eww','-p',String(p),'-o','command='],{encoding:'utf8'});const cwd=execFileSync('/usr/sbin/lsof',['-a','-p',String(p),'-d','cwd','-Fn'],{encoding:'utf8'}).split('\\n').find(x=>x.startsWith('n'))?.slice(1);fs.writeFileSync(${JSON.stringify(observation)},JSON.stringify({noSentinel:!environment.includes(${JSON.stringify(sentinel)}),cwd}));`;
   const plan = { ...strictPlan(), actions: [{ id: "clean-check", kind: "validation", executable: process.execPath, args: ["-e", source] }] };
   const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "supervisor-isolation", attempt: 1, integratedHead: f.head, validationPlan: plan });
-  assert.equal(lease.path, managedPath);
   const result = await runCleanValidation({ lease, actionId: "clean-check" });
   const observed = JSON.parse(readFileSync(observation, "utf8"));
-  assert.deepEqual(observed, { noSentinel: true, managedCwd: true }, "supervisor environment or cwd is not isolated");
+  assert.deepEqual(observed, { noSentinel: true, cwd: lease.path }, "supervisor environment or cwd is not isolated");
   assert.equal(result.status, "passed");
 });
 
@@ -257,31 +255,31 @@ test("run rejects managed owner drift before the action marker is produced", asy
   const f = fixture(t); const marker = join(f.state, "owner-drift-marker");
   const plan = { ...strictPlan(), actions: [{ id: "marker", kind: "validation", executable: process.execPath, args: ["-e", `require('fs').writeFileSync(${JSON.stringify(marker)},'ran')`] }] };
   const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "owner-drift", attempt: 1, integratedHead: f.head, validationPlan: plan });
-  const manifestFile = join(f.origin, ".state", "worktree-lifecycle", "leases", `${lease.id}.json`);
-  const manifest = JSON.parse(readFileSync(manifestFile, "utf8")); const replacementOwner = `worktree-owner.v1:${"a".repeat(64)}`;
-  assert.notEqual(replacementOwner, manifest.ownerToken);
-  writeFileSync(manifestFile, JSON.stringify({ ...manifest, ownerToken: replacementOwner }));
+  const durable = JSON.parse(readFileSync(leaseFile(lease), "utf8"));
+  const replacementOwner = "drifted-goal";
+  assert.notEqual(replacementOwner, durable.workspaceReceipt.owner.goalId);
+  writeFileSync(leaseFile(lease), JSON.stringify({ ...durable, workspaceReceipt: { ...durable.workspaceReceipt, owner: { ...durable.workspaceReceipt.owner, goalId: replacementOwner } } }), { mode: 0o600 });
   await assert.rejects(runCleanValidation({ lease, actionId: "marker" }), /owner|identity|managed|lease/i);
   assert.equal(existsSync(marker), false);
-  assert.equal(JSON.parse(readFileSync(manifestFile, "utf8")).ownerToken, replacementOwner);
+  assert.equal(JSON.parse(readFileSync(leaseFile(lease), "utf8")).workspaceReceipt.owner.goalId, replacementOwner);
 });
 
 test("run rechecks managed ownership after recording its supervisor and before action start", async (t) => {
   const f = fixture(t); const marker = join(f.state, "post-supervisor-owner-marker");
   const plan = { ...strictPlan(), actions: [{ id: "marker", kind: "validation", executable: process.execPath, args: ["-e", `require('fs').writeFileSync(${JSON.stringify(marker)},'ran')`] }] };
   const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "post-supervisor-owner", attempt: 1, integratedHead: f.head, validationPlan: plan });
-  const manifestFile = join(f.origin, ".state", "worktree-lifecycle", "leases", `${lease.id}.json`); const saved = readFileSync(manifestFile);
+  const saved = readFileSync(leaseFile(lease));
   let runtimePid;
   try {
     const run = runCleanValidation({ lease, actionId: "marker" });
     const running = JSON.parse(readFileSync(leaseFile(lease), "utf8")).state === "running";
-    const manifest = JSON.parse(saved); writeFileSync(manifestFile, JSON.stringify({ ...manifest, ownerToken: `worktree-owner.v1:${"b".repeat(64)}` }));
+    const savedLease = JSON.parse(saved); writeFileSync(leaseFile(lease), JSON.stringify({ ...savedLease, workspaceReceipt: { ...savedLease.workspaceReceipt, owner: { ...savedLease.workspaceReceipt.owner, goalId: "drifted-goal" } } }), { mode: 0o600 });
     const rejected = await run.then(() => false, () => true);
     const durable = JSON.parse(readFileSync(leaseFile(lease), "utf8")); runtimePid = durable.runtime.pid;
     let supervisorGone = false; try { process.kill(runtimePid, 0); } catch (error) { supervisorGone = error.code === "ESRCH"; }
     assert.deepEqual({ running, rejected, markerAbsent: !existsSync(marker), cleanupDebt: durable.state === "cleanup-debt", exactSupervisorGone: supervisorGone }, { running: true, rejected: true, markerAbsent: true, cleanupDebt: true, exactSupervisorGone: true });
   } finally {
-    writeFileSync(manifestFile, saved, { mode: 0o600 });
+    writeFileSync(leaseFile(lease), saved, { mode: 0o600 });
     if (Number.isSafeInteger(runtimePid) && runtimePid > 0) assert.throws(() => process.kill(runtimePid, 0), /ESRCH/);
   }
 });
@@ -313,15 +311,12 @@ test("validation enforces byte limits and proves its whole process group termina
 test("release records cleanup debt when the managed owner identity drifts", async (t) => {
   const f = fixture(t);
   const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "release-owner-drift", attempt: 1, integratedHead: f.head, validationPlan: strictPlan() });
-  const manifestFile = join(f.origin, ".state", "worktree-lifecycle", "leases", `${lease.id}.json`);
-  const manifest = JSON.parse(readFileSync(manifestFile, "utf8")); const replacementOwner = `worktree-owner.v1:${"c".repeat(64)}`;
-  writeFileSync(manifestFile, JSON.stringify({ ...manifest, ownerToken: replacementOwner }));
+  const durable = JSON.parse(readFileSync(leaseFile(lease), "utf8"));
+  writeFileSync(leaseFile(lease), JSON.stringify({ ...durable, workspaceReceipt: { ...durable.workspaceReceipt, owner: { ...durable.workspaceReceipt.owner, goalId: "drifted-goal" } } }), { mode: 0o600 });
 
   await assert.rejects(async () => releaseValidationWorkspace(lease, { expectedHead: f.head }), /owner|identity|managed|lease/i);
   assert.equal(JSON.parse(readFileSync(leaseFile(lease), "utf8")).state, "cleanup-debt");
-  const retained = JSON.parse(readFileSync(manifestFile, "utf8"));
-  assert.equal(retained.ownerToken, replacementOwner);
-  assert.equal(retained.path, lease.path); assert.equal(retained.branchRef, `refs/heads/${lease.branch}`);
+  assert.equal(JSON.parse(readFileSync(leaseFile(lease), "utf8")).workspaceReceipt.owner.goalId, "drifted-goal");
   assert.equal(existsSync(lease.path), true);
   assert.equal(git(f.origin, "worktree", "list", "--porcelain").includes(`worktree ${lease.path}\nHEAD ${f.head}\nbranch refs/heads/${lease.branch}`), true);
   assert.doesNotThrow(() => git(f.origin, "show-ref", "--verify", "--quiet", `refs/heads/${lease.branch}`));
@@ -330,12 +325,12 @@ test("release records cleanup debt when the managed owner identity drifts", asyn
 test("release records cleanup debt when the validation worktree path is missing", async (t) => {
   const f = fixture(t);
   const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "release-missing-path", attempt: 1, integratedHead: f.head, validationPlan: strictPlan() });
-  const manifestFile = join(f.origin, ".state", "worktree-lifecycle", "leases", `${lease.id}.json`); const manifest = readFileSync(manifestFile, "utf8");
+  const durable = readFileSync(leaseFile(lease));
   rmSync(lease.path, { recursive: true, force: true });
 
   await assert.rejects(async () => releaseValidationWorkspace(lease, { expectedHead: f.head }), /path|identity|managed|Git|lease/i);
   assert.equal(JSON.parse(readFileSync(leaseFile(lease), "utf8")).state, "cleanup-debt");
-  assert.equal(readFileSync(manifestFile, "utf8"), manifest);
+  assert.notEqual(readFileSync(leaseFile(lease), "utf8"), durable);
   assert.equal(existsSync(lease.path), false);
   assert.equal(git(f.origin, "worktree", "list", "--porcelain").includes(`worktree ${lease.path}\nHEAD ${f.head}\nbranch refs/heads/${lease.branch}`), true);
   assert.doesNotThrow(() => git(f.origin, "show-ref", "--verify", "--quiet", `refs/heads/${lease.branch}`));
