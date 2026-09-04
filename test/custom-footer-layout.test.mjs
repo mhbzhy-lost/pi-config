@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const layoutModule = await import("../scripts/lib/custom-footer-layout.mjs").catch(() => undefined);
+const layoutModule = await import("../packages/pi-subagents-enhanced/src/tui/footer-layout.ts").catch(() => undefined);
 
 const visibleWidth = (text) => text.length;
 const truncateToWidth = (text, width, ellipsis = "...") => {
@@ -147,4 +147,19 @@ test("footer truncates the right status when it alone exceeds terminal width", (
   });
 
   assert.equal(visibleWidth(line), 12);
+});
+
+test("layout preserves pre-wrapped left lines without appending ellipsis to continuations", () => {
+  const line = layoutModule.layoutFooter({
+    width: 30,
+    left: "› ● Long dispatch title\n    continuation text",
+    right: "(delegate)",
+    visibleWidth,
+    truncateToWidth,
+  });
+  const lines = line.split("\n");
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /\(delegate\)$/);
+  assert.equal(lines[1], "    continuation text");
+  assert.doesNotMatch(line, /…|\.\.\./);
 });

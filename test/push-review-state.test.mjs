@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createPushReviewState } from "../scripts/lib/push-review-state.mjs";
+import { createPushReviewState } from "../src/security-gates/push-review-state.ts";
 
 test("首次 push 返回 needs-review round 1", () => {
   const state = createPushReviewState();

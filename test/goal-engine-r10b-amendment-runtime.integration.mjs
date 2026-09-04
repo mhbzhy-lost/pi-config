@@ -4,10 +4,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { applyEvent, createProjection, ownerSessionId } from "../scripts/lib/goal-engine/events.mjs";
-import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { hashRuntimeExecutionContract, normalizeRuntimeGoalInit } from "../scripts/lib/goal-engine/obligation-contract.mjs";
-import { suspensionClosureHash } from "../scripts/lib/goal-engine/suspension.mjs";
+import { applyEvent, createProjection, ownerSessionId } from "../src/goal-engine/events.ts";
+import { appendEvent, appendEventBatch, loadProjection } from "../src/goal-engine/store.ts";
+import { hashRuntimeExecutionContract, normalizeRuntimeGoalInit } from "../src/goal-engine/obligation-contract.ts";
+import { suspensionClosureHash } from "../src/goal-engine/suspension.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;

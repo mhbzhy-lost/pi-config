@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { EXECUTOR_MODEL_BY_TIER, executorModelForTier, normalizeOptionalModelTier } from "../scripts/lib/subagent-dispatch/model-tier.ts";
+import { EXECUTOR_MODEL_BY_TIER, executorModelForTier, normalizeOptionalModelTier } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/model-tier.ts";
 
 test("keeps model tier optional so ordered agent metadata remains the default", () => {
   assert.equal(normalizeOptionalModelTier(undefined), undefined);

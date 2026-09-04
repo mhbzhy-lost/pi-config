@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import * as graph from "../scripts/lib/goal-engine/graph.mjs";
-import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
+import * as graph from "../src/goal-engine/graph.ts";
+import { createProjection, applyEvent } from "../src/goal-engine/events.ts";
 
 function makeEvent(type, data, goalId = "dag-test") {
   return { schemaVersion: "planned.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };

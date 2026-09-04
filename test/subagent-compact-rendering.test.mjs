@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
+import * as compactRendering from "../packages/pi-subagents-enhanced/src/tui/compact-rendering.ts";
+const {
   formatCompactSubagentNotification,
   formatCompactSubagentSpawnSummary,
   formatCompactSubagentToolResult,
-} from "../scripts/lib/subagent-dispatch/compact-rendering.ts";
+  formatCompactSubagentSteerResult,
+  formatCompactSupervisorRequest,
+} = compactRendering;
+import { getTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
 
 function clone(value) {
   return structuredClone(value);
@@ -124,10 +128,25 @@ test("compact status selects only exact state and preserves the original result"
 
     assert.equal(
       formatCompactSubagentToolResult(result, { action: "status", id: "run-1" }),
-      `Status: ${state}`,
+      `Status: ${state} · run: run-1`,
     );
     assert.deepEqual(result, before);
   }
+});
+
+test("compact status prefers the shared dispatch title and falls back to the run id", () => {
+  const registry = getTitleRegistry();
+  registry.remember("run-titled", "审查重新贡献与日志修复");
+  const titled = { content: [{ type: "text", text: "Run: run-titled\nState: running\nDir: /tmp/run-titled" }] };
+  assert.equal(
+    formatCompactSubagentToolResult(titled, { action: "status", id: "run-titled" }),
+    "Status: running · 审查重新贡献与日志修复",
+  );
+  const untitled = { content: [{ type: "text", text: "Run: run-untitled\nState: failed\nDir: /tmp/run-untitled" }] };
+  assert.equal(
+    formatCompactSubagentToolResult(untitled, { action: "status", id: "run-untitled" }),
+    "Status: failed · run: run-untitled",
+  );
 });
 
 test("compact status summarizes active, idle, error, and non-status results", () => {
@@ -150,7 +169,7 @@ test("compact status summarizes active, idle, error, and non-status results", ()
       { content: [{ type: "text", text: "Async run not found. Provide id or dir." }], isError: true },
       { action: "status", id: "missing" },
     ),
-    "Status: error",
+    "Status: error · run: missing",
   );
   assert.equal(
     formatCompactSubagentToolResult(
@@ -159,6 +178,45 @@ test("compact status summarizes active, idle, error, and non-status results", ()
     ),
     "Stop requested for run-1.",
   );
+});
+
+test("compact steer result keeps only the target title and original message", () => {
+  assert.equal(typeof formatCompactSubagentSteerResult, "function");
+  const registry = getTitleRegistry();
+  registry.remember("run-steer", "修复日志");
+  const args = { action: "steer", id: "run-steer", message: "继续检查失败路径" };
+  const result = { content: [{ type: "text", text: "Message sent to run-steer.\n```\n继续检查失败路径\n```" }], details: { runId: "run-steer", requestId: "req-1" } };
+  const beforeArgs = clone(args);
+  const beforeResult = clone(result);
+  assert.equal(formatCompactSubagentSteerResult(result, args), "→ 修复日志：继续检查失败路径");
+  assert.deepEqual(args, beforeArgs);
+  assert.deepEqual(result, beforeResult);
+});
+
+test("compact supervisor request keeps only the agent and actual body", () => {
+  assert.equal(typeof formatCompactSupervisorRequest, "function");
+  const message = {
+    customType: "subagent_supervisor_request",
+    content: "Supervisor progress update.\nRun: run-1\nChild index: 0\nIntercom target: supervisor-1\n需要确认日志范围。",
+    details: { agent: "executor", requestId: "req-1" },
+  };
+  const before = clone(message);
+  assert.equal(formatCompactSupervisorRequest(message), "← executor:\n需要确认日志范围。");
+  assert.deepEqual(message, before);
+});
+
+test("compact supervisor renderer removes real runtime wrappers and metadata lines", () => {
+  const cases = [
+    ["Subagent progress update.\nAgent: executor\nChild intercom target: target-1\nUPDATE: 已完成扫描。", "← executor:\nUPDATE: 已完成扫描。"],
+    ["Subagent needs attention.\nAgent: executor\nSupervisor request: request-2\n需要批准继续。", "← executor:\n需要批准继续。"],
+    ["Subagent needs a supervisor decision.\nAgent: executor\nChild intercom target: target-3\n请决定是否重试。", "← executor:\n请决定是否重试。"],
+  ];
+  for (const [content, expected] of cases) {
+    const message = { customType: "subagent_supervisor_request", content, details: { agent: "executor" } };
+    const before = clone(message);
+    assert.equal(formatCompactSupervisorRequest(message), expected);
+    assert.deepEqual(message, before);
+  }
 });
 
 test("compact notification uses leaf presentation metadata instead of raw failed lifecycle", () => {

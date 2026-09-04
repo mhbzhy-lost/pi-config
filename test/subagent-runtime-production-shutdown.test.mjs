@@ -12,8 +12,8 @@ const {
   DefaultResourceLoader,
   SessionManager,
 } = await import(join(npmRoot.stdout.trim(), "@earendil-works", "pi-coding-agent", "dist", "index.js"));
-import { installHeadlessTypedSubagentRuntime } from "../scripts/lib/subagent-dispatch/extension.ts";
-import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
+import { installHeadlessTypedSubagentRuntime } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 
 function piRunner() {
   const handlers = new Map();

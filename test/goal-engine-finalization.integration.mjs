@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { finalizeGoal } from "../scripts/lib/goal-engine/finalization.mjs";
+import { finalizeGoal } from "../src/goal-engine/finalization.ts";
 
 test("all existing generations fail closed before finalization side effects", () => {
   for (const eventSchemaVersion of ["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3", "planned.v1"]) {

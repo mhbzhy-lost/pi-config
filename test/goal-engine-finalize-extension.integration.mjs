@@ -5,10 +5,10 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
-import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
+import { appendEvent, appendEventBatch, loadProjection } from "../src/goal-engine/store.ts";
+import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
+import { createObservationAdapterRegistry } from "../src/goal-engine/observation-adapters.ts";
 import { runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const hash = value => createHash("sha256").update(value).digest("hex");

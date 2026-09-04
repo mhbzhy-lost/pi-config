@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, openSync, closeSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { startManagedValidation } from "../../../scripts/lib/goal-engine/managed-validation.mjs";
+import { startManagedValidation } from "../../../src/goal-engine/managed-validation.ts";
 
 const [mode, receiptText, handshake] = process.argv.slice(2);
 if (!['before_process_ack', 'action_running', 'terminal_bound'].includes(mode) || !receiptText || !handshake) throw Error("mode, public receipt and handshake path are required");

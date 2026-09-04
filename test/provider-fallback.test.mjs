@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { probeProvider, resolveFallbackModel } from "../scripts/lib/provider-fallback.mjs";
+import { probeProvider, resolveFallbackModel } from "../src/provider-fallback/provider.ts";
 
 test("probeProvider returns true for a reachable endpoint", async () => {
   const probe = probeProvider("http://127.0.0.1:1", { timeoutMs: 100, fetch: async () => ({ ok: true, status: 200 }) });

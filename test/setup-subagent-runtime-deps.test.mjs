@@ -1,64 +1,77 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { installSubagentRuntimeDependencies } from "../scripts/setup-subagent-runtime-deps.mjs";
-import { verifyOrderedModelsRuntimePatch } from "../scripts/lib/subagent-dispatch/ordered-models-runtime-patch.mjs";
+import { assertSafeSubagentRuntimeUpgrade, installSubagentRuntimeDependencies } from "../scripts/setup-subagent-runtime-deps.ts";
 
-test("runtime dependency setup leaves the pinned pi-subagents package patched for ordered models", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "subagent-setup-"));
+async function enhancedFixture(t, version) {
+  const root = await mkdtemp(join(tmpdir(), "subagent-enhanced-setup-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const packageRoot = join(root, "node_modules", "pi-subagents");
-  await mkdir(join(root, "node_modules"), { recursive: true });
+  if (version) {
+    const upstream = join(root, "node_modules", "pi-subagents");
+    await mkdir(upstream, { recursive: true });
+    await writeFile(join(upstream, "package.json"), JSON.stringify({ name: "pi-subagents", version }));
+  }
+  return root;
+}
 
+test("runtime dependency setup rejects a package-local cross-version upgrade from inside an active Pi session before mutation", async (t) => {
+  const enhancedPackageRoot = await enhancedFixture(t, "0.45.2");
+  const piNpmDir = await mkdtemp(join(tmpdir(), "subagent-scheduler-"));
+  t.after(() => rm(piNpmDir, { recursive: true, force: true }));
   const calls = [];
-  await installSubagentRuntimeDependencies({
-    piNpmDir: root,
-    async run(command, args) {
-      calls.push([command, ...args]);
-      if (args.includes("pi-subagents@0.62.0")) {
-        await mkdir(join(packageRoot, "src", "agents"), { recursive: true });
-        await writeFile(join(packageRoot, "package.json"), JSON.stringify({ version: "0.62.0" }));
-        await writeFile(join(packageRoot, "src/agents/agents.ts"), [
-          "\tmcpDirectTools?: string[];\n\tmodel?: string;\n\tfallbackModels?: string[];\n\tthinking?: string | false;",
-          "const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {} };",
-          "\t\tconst fallbackModels = parseFrontmatterList(frontmatter.fallbackModels);",
-          "\t\t\t...(frontmatter.model !== undefined ? { model: frontmatter.model } : {}),\n\t\t\t...(fallbackModels?.length ? { fallbackModels } : {}),",
-          "\t\tfill(\"model\", [\"model\"], override.model === false ? undefined : override.model);",
-          "\t\t\t[\"fallbackModels\"],",
-        ].join("\n"));
-        await writeFile(join(packageRoot, "src/agents/agent-serializer.ts"), [
-          "\t\"model\",\n\t\"fallbackModels\",",
-          "\tif (config.model || preserve(\"model\")) lines.push(`model: ${config.model ?? \"\"}`);\n\tconst fallbackModelsValue = joinComma(config.fallbackModels);\n\tif (fallbackModelsValue || preserve(\"fallbackModels\")) lines.push(`fallbackModels: ${fallbackModelsValue ?? \"\"}`);",
-        ].join("\n"));
-        await mkdir(join(packageRoot, "src/runs/shared"), { recursive: true });
-        await mkdir(join(packageRoot, "src/api"), { recursive: true });
-        await mkdir(join(packageRoot, "src/runs/background"), { recursive: true });
-        await mkdir(join(packageRoot, "src/runs/foreground"), { recursive: true });
-        await writeFile(join(packageRoot, "src/runs/shared/model-fallback.ts"), "\tscope?: ModelScopeConfig;\n\tonWarn?: (violation: ModelScopeViolation) => void;\n\tconst rawCandidates = [primaryModel, ...(fallbackModels ?? [])];\n");
-        await writeFile(join(packageRoot, "src/api/preflight.ts"), [
-          "const modelCandidates = buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, {",
-          "\tscope: discovered.modelScope,",
-          "});",
-        ].join("\n"));
-        await writeFile(join(packageRoot, "src/runs/background/async-execution.ts"), [
-          "const modelCandidates = buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, {",
-          "\tscope: ctx.modelScope,",
-          "});",
-        ].join("\n"));
-        await writeFile(join(packageRoot, "src/runs/foreground/execution.ts"), [
-          "const candidates = buildModelCandidates(primaryModel, agent.fallbackModels, availableModels, preferredProvider, {",
-          "\tscope: options.modelScope,",
-          "});",
-        ].join("\n"));
-      }
-      return { stdout: "", stderr: "" };
-    },
+
+  await assert.rejects(
+    () => installSubagentRuntimeDependencies({
+      enhancedPackageRoot,
+      piNpmDir,
+      env: { PI_ROOT_SUBAGENT_BROKER_ENABLED: "1" },
+      async run(...args) { calls.push(args); },
+      patchSubagentRuntime: async () => {},
+    }),
+    (error) => error?.code === "SUBAGENT_RUNTIME_LIVE_UPGRADE"
+      && /0\.45\.2/.test(error.message)
+      && /0\.62\.0/.test(error.message)
+      && /fresh Host/.test(error.message),
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("runtime upgrade preflight allows an external terminal and an active same-version enhanced package", async (t) => {
+  const enhancedPackageRoot = await enhancedFixture(t, "0.45.2");
+  const packageJsonPath = join(enhancedPackageRoot, "node_modules", "pi-subagents", "package.json");
+  await assert.doesNotReject(() => assertSafeSubagentRuntimeUpgrade({ enhancedPackageRoot, env: {} }));
+
+  await writeFile(packageJsonPath, JSON.stringify({ name: "pi-subagents", version: "0.62.0" }));
+  await assert.doesNotReject(() => assertSafeSubagentRuntimeUpgrade({
+    enhancedPackageRoot,
+    env: { PI_ROOT_SUBAGENT_BROKER_ENABLED: "1" },
+  }));
+});
+
+test("runtime dependency setup coordinates the enhanced package and scheduler without installing standalone upstream", async (t) => {
+  const enhancedPackageRoot = await enhancedFixture(t, "0.62.0");
+  const piNpmDir = await mkdtemp(join(tmpdir(), "subagent-scheduler-"));
+  t.after(() => rm(piNpmDir, { recursive: true, force: true }));
+  const calls = [];
+
+  const result = await installSubagentRuntimeDependencies({
+    enhancedPackageRoot,
+    piNpmDir,
+    env: {},
+    async run(command, args) { calls.push([command, ...args]); },
+    patchSubagentRuntime: async () => {},
   });
 
-  assert.equal(calls.some((call) => call.includes("pi-subagents@0.62.0")), true);
-  assert.equal(await verifyOrderedModelsRuntimePatch(packageRoot), true);
-  assert.match(await readFile(join(packageRoot, "src/agents/agents.ts"), "utf8"), /validateOrderedModels/);
+  assert.deepEqual(result, { piNpmDir, enhancedPackageRoot });
+  assert.deepEqual(calls, [
+    ["npm", "uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo", "pi-subagents", "typebox"],
+    ["npm", "install", "--prefix", enhancedPackageRoot, "--ignore-scripts", "--omit=peer"],
+    ["npm", "--prefix", enhancedPackageRoot, "run", "setup:runtime"],
+    ["npm", "--prefix", enhancedPackageRoot, "run", "verify:package"],
+    ["npm", "install", "--prefix", piNpmDir, "--omit=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
+  ]);
+  assert.equal(calls.some((call) => call.some((arg) => /^pi-subagents@/.test(arg))), false);
 });

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compileCodingDispatchIR as compileGoalDispatchIR, splitDispatchEnvelope } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
-import { compileCodingDispatchIR as compileTypedDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
+import { compileCodingDispatchIR, splitDispatchEnvelope } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+import { bindGoalExecutorCoordinator } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import { compileTaskContract } from "../src/goal-engine/dispatch.ts";
 
 function criteriaOnlyContract(overrides = {}) {
   return {
@@ -17,10 +18,10 @@ function criteriaOnlyContract(overrides = {}) {
     context: {
       knownFacts: ["Goal tasks have already been bounded by the planner."],
       decisions: ["Acceptance transport is criteria-only."],
-      relevantFiles: ["scripts/lib/goal-engine/dispatch-ir.mjs"],
+      relevantFiles: ["packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts"],
     },
     boundaries: {
-      writePaths: ["scripts/lib/goal-engine/dispatch-ir.mjs"],
+      writePaths: ["packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts"],
       excludedWork: ["Do not add model routing fields to the coding contract."],
       forbiddenActions: ["Do not alter typed runtime behavior."],
     },
@@ -30,14 +31,69 @@ function criteriaOnlyContract(overrides = {}) {
   };
 }
 
-test("Goal and typed dispatch IR stay canonical for criteria-only contracts", () => {
-  const input = criteriaOnlyContract();
-  const goal = compileGoalDispatchIR(input, { cwd: "/repo" });
-  const typed = compileTypedDispatchIR(input, { cwd: "/repo" });
+function goalProjection() {
+  return {
+    goalId: "goal-parity",
+    objective: "Keep Goal and typed executor contracts byte-for-byte equivalent.",
+    scope: ["packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts"],
+    nonGoals: ["Do not add model routing fields to the coding contract."],
+    dod: ["Goal output recompiles through the canonical codec."],
+    tasks: new Map([["task-one", {
+      status: "pending",
+      description: "Compile an exact Goal executor contract.",
+      workflow: "tdd",
+      deps: [],
+      writePaths: ["packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts"],
+      acceptance: { criteria: ["Goal and canonical hashes agree."] },
+    }]]),
+  };
+}
 
-  assert.deepEqual(splitDispatchEnvelope(goal).contract, (() => {
-    const { hash: _hash, ...transport } = typed;
-    return transport;
-  })());
-  assert.equal(goal.hash, typed.hash);
+test("real Goal task output recompiles through the canonical package codec", () => {
+  const goal = compileTaskContract(goalProjection(), "task-one", "/repo");
+  const { contract, contractHash } = splitDispatchEnvelope(goal);
+  const canonical = compileCodingDispatchIR(contract, { cwd: "/repo" });
+
+  assert.deepEqual(canonical, goal);
+  assert.equal(canonical.hash, contractHash);
+  assert.equal(canonical.execution.worktree, true);
+  assert.equal(Object.hasOwn(canonical.acceptance, "commands"), false);
+});
+
+test("canonical dispatch hashes retain the worktree request but exclude runtime allocation facts", () => {
+  const source = criteriaOnlyContract({ execution: { cwd: "/repo", timeoutMs: 1_800_000, worktree: true } });
+  const canonical = compileCodingDispatchIR(source, { cwd: "/repo" });
+
+  assert.equal(canonical.execution.worktree, true);
+  assert.equal(Object.hasOwn(canonical.execution, "dispatchCwd"), false);
+  assert.equal(Object.hasOwn(canonical, "leaseId"), false);
+  assert.throws(
+    () => compileCodingDispatchIR({ ...source, leaseId: "private" }, { cwd: "/repo" }),
+    /unknown field/i,
+  );
+  assert.throws(
+    () => compileCodingDispatchIR({ ...source, execution: { ...source.execution, dispatchCwd: "/runtime" } }, { cwd: "/repo" }),
+    /unknown field/i,
+  );
+});
+
+test("Goal coordinator registry rejects legacy two-stage coordinators", () => {
+  const legacy = { prepareSpawn() {}, bindSpawn() {} };
+  assert.throws(() => bindGoalExecutorCoordinator({}, legacy), /coordinator/i);
+});
+
+test("Goal coordinator registry requires every four-stage workspace callback", () => {
+  const coordinator = {
+    prepareSpawn() {},
+    workspaceAllocated() {},
+    confirmSpawn() {},
+    bindSpawn() {},
+  };
+
+  for (const method of Object.keys(coordinator)) {
+    const invalid = { ...coordinator };
+    delete invalid[method];
+    assert.throws(() => bindGoalExecutorCoordinator({}, invalid), /coordinator/i);
+  }
+  bindGoalExecutorCoordinator({}, coordinator);
 });

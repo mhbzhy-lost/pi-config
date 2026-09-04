@@ -7,7 +7,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
-import { createValidationWorkspace, runCleanValidation, releaseValidationWorkspace } from "../scripts/lib/goal-engine/acceptance-runner.mjs";
+import { createValidationWorkspace, runCleanValidation, releaseValidationWorkspace } from "../src/goal-engine/acceptance-runner.ts";
 
 const fs = createRequire(import.meta.url)("node:fs");
 
@@ -57,7 +57,7 @@ function workerResult(child) {
 
 test("validation allocation serializes cross-process capacity before managed Git creation", async (t) => {
   const f = fixture(t); const barrier = join(f.state, "capacity-barrier"); mkdirSync(barrier);
-  const workers = []; const results = []; const receipts = []; const runnerUrl = pathToFileURL(join(process.cwd(), "scripts/lib/goal-engine/acceptance-runner.mjs")).href;
+  const workers = []; const results = []; const receipts = []; const runnerUrl = pathToFileURL(join(process.cwd(), "src/goal-engine/acceptance-runner.mjs")).href;
   const source = String.raw`const fs=require('node:fs'),path=require('node:path'),{syncBuiltinESMExports}=require('node:module');const [configText,index]=process.argv.slice(1),c=JSON.parse(configText),ready=path.join(c.barrier,'ready-'+index),start=path.join(c.barrier,'start'),reached=path.join(c.barrier,'reached-'+index),release=path.join(c.barrier,'release');const original=fs.writeFileSync;let intercepted=false;const initialLeaseTemp=file=>typeof file==='string'&&path.basename(path.dirname(file))==='validation-leases'&&/^\.validation-[a-f0-9]{64}\.\d+\.\d+$/.test(path.basename(file));fs.writeFileSync=(file,...args)=>{if(!intercepted&&initialLeaseTemp(file)){intercepted=true;original(reached,'',{flag:'wx',mode:0o600});const cell=new Int32Array(new SharedArrayBuffer(4)),end=Date.now()+5000;while(!fs.existsSync(release)&&Date.now()<end)Atomics.wait(cell,0,0,10);if(!fs.existsSync(release))throw Error('release barrier timeout')}return original(file,...args)};syncBuiltinESMExports();const waitStart=()=>{const end=Date.now()+5000;while(!fs.existsSync(start)){if(Date.now()>=end)throw Error('start barrier timeout');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)}};(async()=>{try{const m=await import(c.runnerUrl);original(ready,'',{flag:'wx',mode:0o600});waitStart();const lease=m.createValidationWorkspace({...c.input,taskId:'capacity-'+index});process.send({success:true,lease})}catch(error){process.send({success:false,capacityConflict:/capacity conflict/i.test(String(error&&error.message))})}})();`;
   const config = JSON.stringify({ runnerUrl, barrier, input: { originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "placeholder", attempt: 1, integratedHead: f.head, validationPlan: strictPlan() } });
   try {

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compileCodingDispatchIR, renderDispatchPrompt, splitDispatchEnvelope } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
-import { compileTaskContract, assertPendingTaskContractsCompile } from "../scripts/lib/goal-engine/dispatch.mjs";
-import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
-import { validateRepoRelativePath, validateTaskDefinitions, taskContractHash, remediationSubjectHash } from "../scripts/lib/goal-engine/task-definition.mjs";
+import { compileCodingDispatchIR, renderDispatchPrompt, splitDispatchEnvelope } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+import { compileTaskContract, assertPendingTaskContractsCompile } from "../src/goal-engine/dispatch.ts";
+import { createProjection, applyEvent } from "../src/goal-engine/events.ts";
+import { validateRepoRelativePath, validateTaskDefinitions, taskContractHash, remediationSubjectHash } from "../src/goal-engine/task-definition.ts";
 
 function makeEvent(type, data, goalId = "dispatch-test") {
   return { schemaVersion: "goal-engine.event.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
@@ -213,6 +213,7 @@ test("compileTaskContract includes mandatory clean commit requirement", () => {
   assert.equal(contract.workflow.mode, "tdd");
   assert.equal(Object.hasOwn(contract.workflow, "reason"), false);
   assert.equal(contract.execution.cwd, "/workspace/project");
+  assert.equal(contract.execution.worktree, true);
   assert.ok(contract.hash);
 });
 

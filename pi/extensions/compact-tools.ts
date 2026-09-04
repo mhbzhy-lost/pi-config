@@ -10,7 +10,7 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, sliceByColumn, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { createCompactToolRenderers } from "../../scripts/lib/compact-tools-renderer.mjs";
+import { createCompactToolRenderers } from "../../src/compact-tools/renderer.ts";
 
 const COMPACT_SKILL_PATCH = Symbol.for("pi-config.compact-skill-renderer");
 const COMPACT_SUMMARY_KEY = "compactToolsEntrySummary";

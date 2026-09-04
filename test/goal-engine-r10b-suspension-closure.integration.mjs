@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
-import { buildSuspensionPlan, inspectSuspensionCompletion, suspensionClosureHash } from "../scripts/lib/goal-engine/suspension.mjs";
+import { applyEvent, createProjection } from "../src/goal-engine/events.ts";
+import { buildSuspensionPlan, inspectSuspensionCompletion, suspensionClosureHash } from "../src/goal-engine/suspension.ts";
 
 const hash = (char) => char.repeat(64);
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;

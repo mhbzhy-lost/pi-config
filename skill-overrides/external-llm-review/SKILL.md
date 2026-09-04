@@ -82,7 +82,7 @@ uv run --no-project \
 
 ## Fallback（仅限 Push Gate）
 
-Push gate（`scripts/lib/review-invoker.mjs`）按 `idealab-anthropic -> idealab-openai` 依次尝试。超时、配置错误或请求异常都会尝试下一个；全部失败时 fail-open，不阻断 push。直接调用 `reviewer.py` 不走 fallback，单 provider 失败即非零退出。
+Push gate（`src/security-gates/review-invoker.ts`）按 `idealab-anthropic -> idealab-openai` 依次尝试。超时、配置错误或请求异常都会尝试下一个；全部失败时 fail-open，不阻断 push。直接调用 `reviewer.py` 不走 fallback，单 provider 失败即非零退出。
 
 有效 Git 仓库根目录可放置 `.push-gate.json`，内容为 `{ "bypassReview": true }` 时仅跳过异源评审，其他安全门禁仍会执行。Push gate 从有效执行 cwd 通过 Git 解析所属仓库根，只读取该根的配置；非 Git 目录、Git 解析失败、文件缺失、读取失败、JSON 非法或结构不符时均按 fail-closed 继续评审。`bypassReview` 必须是严格布尔值 `true`。该文件可随仓库分发，因此只应在自己信任的 Git 仓库中使用。
 

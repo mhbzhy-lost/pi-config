@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
+import { applyEvent, createProjection } from "../src/goal-engine/events.ts";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";

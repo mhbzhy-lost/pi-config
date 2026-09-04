@@ -2,16 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, writeFileSync, readFileSync, chmodSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { compileTaskContract } from "../scripts/lib/goal-engine/dispatch.mjs";
-import { splitDispatchEnvelope } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
-import { applyEvent } from "../scripts/lib/goal-engine/events.mjs";
+import { appendEvent, appendEventBatch, loadProjection } from "../src/goal-engine/store.ts";
+import { compileTaskContract } from "../src/goal-engine/dispatch.ts";
+import { splitDispatchEnvelope } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+import { applyEvent } from "../src/goal-engine/events.ts";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { issueRepairCapability } from "../scripts/lib/goal-engine/repair-policy.mjs";
-import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
+import { issueRepairCapability } from "../src/goal-engine/repair-policy.ts";
+import { createObservationAdapterRegistry } from "../src/goal-engine/observation-adapters.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }

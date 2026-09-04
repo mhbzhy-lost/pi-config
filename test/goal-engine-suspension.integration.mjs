@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSuspensionPlan, requestOwnedRunStop, inspectSuspensionCompletion, deriveOwnedExecutorStopRequest } from "../scripts/lib/goal-engine/suspension.mjs";
+import { buildSuspensionPlan, requestOwnedRunStop, inspectSuspensionCompletion, deriveOwnedExecutorStopRequest } from "../src/goal-engine/suspension.ts";
 
 const leaseId = "c".repeat(64), dispatchHead = "d".repeat(40);
 const projection = () => ({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", executionContractHash: "a".repeat(64), runtimeBaseHead: "b".repeat(40), sessionBindings: [{ sessionId: "session-1", state: "watching" }], runtimeState: "active", executionRevision: 2, actionOffer: { id: "offer-1", consumed: false }, tasks: new Map([["task-1", { attempts: 3, executorBinding: { runId: "run-1", asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", workspaceLeaseId: leaseId, headAtDispatch: dispatchHead }, status: "dispatched" }]]) });

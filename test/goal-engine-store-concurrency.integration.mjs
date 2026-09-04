@@ -4,7 +4,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, statSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { appendEvent, appendEventBatch, loadProjection, listGoals, acquireWriterLock, releaseWriterLock, acquireRecoveryGuard, releaseRecoveryGuard, updateRegistry } from "../scripts/lib/goal-engine/store.mjs";
+import { appendEvent, appendEventBatch, loadProjection, listGoals, acquireWriterLock, releaseWriterLock, acquireRecoveryGuard, releaseRecoveryGuard, updateRegistry } from "../src/goal-engine/store.ts";
 
 function event(type, data, goalId = "concurrent-goal") {
   return { schemaVersion: "planned.v1", eventId: crypto.randomUUID(), goalId, type, occurredAt: new Date().toISOString(), data };
@@ -18,9 +18,9 @@ function writeLegacyLock(lock, value) { mkdirSync(lock, { recursive: true }); wr
 function readWriterOwner(stateRoot) { return JSON.parse(readFileSync(join(stateRoot, ".writer.lock"), "utf8")); }
 
 function faultInjectedBatchStore(stateRoot, marker, fault) {
-  const storePath = new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url);
-  const eventsUrl = new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).href;
-  const taskDefinitionUrl = new URL("../scripts/lib/goal-engine/task-definition.mjs", import.meta.url).href;
+  const storePath = new URL("../src/goal-engine/store.ts", import.meta.url);
+  const eventsUrl = new URL("../src/goal-engine/events.ts", import.meta.url).href;
+  const taskDefinitionUrl = new URL("../src/goal-engine/task-definition.ts", import.meta.url).href;
   const source = readFileSync(storePath, "utf8");
   assert.equal(source.split(marker).length - 1, 1, "batch fault boundary must be unique");
   const path = join(stateRoot, `fault-store-${crypto.randomUUID()}.mjs`);
@@ -239,9 +239,9 @@ if (process.argv[2] === "guard-owner") {
   });
 
   test("mutation oracle kills every release-before-stage mutant", () => {
-    const storePath = new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url);
-    const eventsUrl = new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).href;
-    const taskDefinitionUrl = new URL("../scripts/lib/goal-engine/task-definition.mjs", import.meta.url).href;
+    const storePath = new URL("../src/goal-engine/store.ts", import.meta.url);
+    const eventsUrl = new URL("../src/goal-engine/events.ts", import.meta.url).href;
+    const taskDefinitionUrl = new URL("../src/goal-engine/task-definition.ts", import.meta.url).href;
     const source = readFileSync(storePath, "utf8");
     const jsonlCall = "    appendJsonlWithWriterReceipt(stateRoot, eventsPath, event, lock.token);";
     const projectionCall = "    publishProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, next, lock.token);";
@@ -449,7 +449,7 @@ if (process.argv[2] === "guard-owner") {
       holder.on("exit", (code) => { if (!output.includes("acquired\n")) reject(new Error(`holder exited ${code}`)); });
     });
     const contender = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ["--input-type=module", "--eval", `import { appendEvent } from ${JSON.stringify(new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url).href)}; try { appendEvent(${JSON.stringify(stateRoot)}, ${JSON.stringify(checkpoint("locale"))}, 1); console.log("ok"); } catch (error) { console.log(error.code); }`], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TZ: "UTC", LC_ALL: "C" } });
+      const child = spawn(process.execPath, ["--input-type=module", "--eval", `import { appendEvent } from ${JSON.stringify(new URL("../src/goal-engine/store.ts", import.meta.url).href)}; try { appendEvent(${JSON.stringify(stateRoot)}, ${JSON.stringify(checkpoint("locale"))}, 1); console.log("ok"); } catch (error) { console.log(error.code); }`], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TZ: "UTC", LC_ALL: "C" } });
       let result = ""; let error = "";
       child.stdout.on("data", (chunk) => { result += chunk; }); child.stderr.on("data", (chunk) => { error += chunk; });
       child.on("exit", (code) => code === 0 ? resolve(result.trim()) : reject(new Error(error)));

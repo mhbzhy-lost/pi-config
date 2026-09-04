@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { buildTopLevelRuntimeEnv, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.mjs";
+import { buildTopLevelRuntimeEnv, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.ts";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;
-const projectRuntime = join(repoRoot, "pi", "extensions", "subagent-runtime.ts");
-const brokerRegistryUrl = new URL("../scripts/lib/subagent-dispatch/root-broker-registry.ts", import.meta.url).href;
+const projectRuntime = join(repoRoot, "packages", "pi-subagents-enhanced", "extensions", "subagent-runtime.ts");
+const brokerRegistryUrl = new URL("../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts", import.meta.url).href;
 
 function withoutSubagentEnvironment(env) {
   return Object.fromEntries(Object.entries(env).filter(([name]) => ![
@@ -243,7 +243,6 @@ description: deterministic typed workflow executor
 model: openai-codex/gpt-5.6-luna
 tools: read
 extensions: ${provider}
-subagentOnlyExtensions: .pi-subagents/root-session-owner-entry.mjs
 ---
 Return the deterministic child marker without modifying files.
 `);
@@ -300,6 +299,96 @@ Return the deterministic child marker without modifying files.
     const terminal = JSON.parse(await readFile(join(handle.asyncDir, "status.json"), "utf8"));
     assert.equal(terminal.state, "complete", JSON.stringify(terminal));
     assert.equal(terminal.runId, handle.runId);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("non-Goal executor ignores a hostile legacy .pi-subagents tree", { skip: !piBinary }, async () => {
+  assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
+  const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
+  assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
+
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-hostile-legacy-"));
+  const projectRoot = join(root, "project");
+  const configRoot = join(root, "config");
+  const provider = join(root, "typed-provider.mjs");
+  const dispatchProbe = join(root, "dispatch-probe.mjs");
+  try {
+    const contract = {
+      version: "dispatch-ir.v1",
+      taskId: "hostile-legacy-non-goal",
+      title: "Ignore hostile legacy runtime entries",
+      agent: "executor",
+      risk: "normal",
+      objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
+      requirements: ["Use package-owned child extensions."],
+      workflow: { mode: "existing-tests", reason: "This integration verifies legacy workspace runtime entries are inert." },
+      context: { knownFacts: ["The workspace contains hostile legacy entries."], decisions: ["Do not inspect or change those entries."], relevantFiles: [] },
+      boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
+      acceptance: { criteria: ["The child returns the deterministic marker."] },
+      execution: { cwd: projectRoot, timeoutMs: 30_000, worktree: false },
+    };
+    await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
+    await writeFile(join(projectRoot, "README.md"), "temporary hostile legacy fixture\n");
+    await writeFile(join(projectRoot, ".pi", "agents", "executor.md"), `---
+name: executor
+description: deterministic hostile legacy executor
+model: openai-codex/gpt-5.6-luna
+tools: read
+extensions: ${provider}
+---
+Return the deterministic child marker without modifying files.
+`);
+    await execFileAsync("git", ["init", "-q"], { cwd: projectRoot });
+    await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectRoot });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: projectRoot });
+    await execFileAsync("git", ["add", "README.md", ".pi/agents/executor.md"], { cwd: projectRoot });
+    await execFileAsync("git", ["commit", "-qm", "fixture"], { cwd: projectRoot });
+    await mkdir(configRoot, { recursive: true });
+
+    const runtimeEntries = join(projectRoot, ".pi-subagents");
+    await mkdir(runtimeEntries, { recursive: true, mode: 0o700 });
+    await writeFile(join(runtimeEntries, "root-session-owner-entry.mjs"), "hostile root entry\n", { mode: 0o600 });
+    await mkdir(join(runtimeEntries, "acceptance-evidence-entry.mjs"));
+    await writeFile(join(runtimeEntries, "unrelated.bin"), Buffer.from([0, 255, 1, 254]), { mode: 0o600 });
+    const identity = (stat) => Object.fromEntries(["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"].map((key) => [key, stat[key]]));
+    const legacySnapshot = async () => ({
+      names: (await readdir(runtimeEntries)).sort(),
+      root: { bytes: await readFile(join(runtimeEntries, "root-session-owner-entry.mjs"), "hex"), stat: identity(await lstat(join(runtimeEntries, "root-session-owner-entry.mjs"), { bigint: true })) },
+      acceptance: identity(await lstat(join(runtimeEntries, "acceptance-evidence-entry.mjs"), { bigint: true })),
+      unrelated: { bytes: await readFile(join(runtimeEntries, "unrelated.bin"), "hex"), stat: identity(await lstat(join(runtimeEntries, "unrelated.bin"), { bigint: true })) },
+    });
+    const beforeLegacy = await legacySnapshot();
+    await writeFile(provider, providerSource(contract));
+    await writeFile(dispatchProbe, dispatchProbeSource());
+
+    const result = await runRpcUntil(piBinary, [
+      "--mode", "rpc", "--no-extensions",
+      "-e", provider,
+      "-e", projectRuntime,
+      "-e", dispatchProbe,
+      "--no-skills", "--no-prompt-templates", "--no-themes",
+      "--provider", "fake", "--model", "fake/deterministic",
+    ], {
+      cwd: projectRoot,
+      env: {
+        ...buildTopLevelRuntimeEnv(withoutSubagentEnvironment(process.env)),
+        PI_CODING_AGENT_DIR: configRoot,
+        OPENAI_API_KEY: "not-used",
+      },
+      input: JSON.stringify({ id: "hostile-legacy-001", type: "prompt", message: "PROJECT_TYPED_PARENT" }),
+    });
+
+    assert.equal(result.error, undefined, `${result.error?.message}\n${result.stderr}\n${result.stdout}`);
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const dispatch = result.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent");
+    assert.equal(dispatch?.result?.isError, false, JSON.stringify(dispatch));
+    assert.equal(typeof dispatch?.result?.details?.runId, "string");
+    assert.equal(typeof dispatch?.result?.details?.asyncDir, "string");
+    const terminal = JSON.parse(await readFile(join(dispatch.result.details.asyncDir, "status.json"), "utf8"));
+    assert.equal(terminal.state, "complete", JSON.stringify(terminal));
+    assert.deepEqual(await legacySnapshot(), beforeLegacy);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }

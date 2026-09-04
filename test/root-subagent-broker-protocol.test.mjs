@@ -16,7 +16,7 @@ import {
   readBrokerGrant,
   resolveRootSessionId,
   writeBrokerGrant,
-} from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
+} from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
 
 const token = "a".repeat(64);
 const request = (method = "ping") => ({
@@ -30,13 +30,31 @@ const request = (method = "ping") => ({
 });
 
 test("broker accepts only direct-owner health and subscription requests", () => {
-  assert.deepEqual([...BROKER_METHODS], ["ping", "subscribe"]);
+  assert.deepEqual([...BROKER_METHODS], ["ping", "subscribe", "acceptance.submit"]);
   assert.equal(Object.isFrozen(BROKER_METHODS), true);
   assert.deepEqual(parseBrokerRequest(request("ping")), request("ping"));
   assert.deepEqual(parseBrokerRequest(request("subscribe")), request("subscribe"));
-  for (const method of ["spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.ack", "supervisor.reply", "caller.followup"]) {
+  for (const method of ["spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.ack", "supervisor.reply", "caller.followup", "acceptance.write"]) {
     assert.throws(() => parseBrokerRequest(request(method)), BrokerProtocolError);
   }
+});
+
+test("broker acceptance submission accepts only the exact bounded evidence payload", () => {
+  const params = {
+    outcome: "succeeded",
+    criteria: [{ id: "criterion-1", status: "satisfied", evidence: [`sha256:${"1".repeat(64)}`] }],
+    commandsRun: [{ command: "node --test", result: "passed", outputRef: `sha256:${"2".repeat(64)}` }],
+    changedFiles: ["src/example.ts"],
+  };
+  assert.deepEqual(parseBrokerRequest({ ...request("acceptance.submit"), params }).params, params);
+  for (const invalid of [
+    { ...params, extra: true },
+    { ...params, outcome: "unknown" },
+    { ...params, criteria: [] },
+    { ...params, criteria: [{ ...params.criteria[0], id: "" }] },
+    { ...params, changedFiles: ["../outside"] },
+    { ...params, commandsRun: [{ ...params.commandsRun[0], outputRef: "raw-secret" }] },
+  ]) assert.throws(() => parseBrokerRequest({ ...request("acceptance.submit"), params: invalid }), BrokerProtocolError);
 });
 
 test("broker rejects unknown request fields and unsafe identities", () => {

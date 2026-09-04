@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-const api = await import("../scripts/lib/goal-engine/observation-adapters.mjs").catch(() => ({}));
+const api = await import("../src/goal-engine/observation-adapters.ts").catch(() => ({}));
 const { createObservationAdapterRegistry, resolveObservationAdapter } = api;
 const plan={schema:"dispatch-ir.v1.validation-plan",limits:{timeoutMs:2000,maxOutputBytes:1024,terminationGraceMs:50,maxConcurrentWorkspaces:1},actions:[{id:"test",kind:"validation",executable:process.execPath,args:["test/fixtures/goal-observation/pass.fixture.mjs"]}]};
 const definition={ref:"host-test",version:"1",deterministic:true,resourceClaims:[{key:"fixture:test",mode:"exclusive",capacity:1,reset:"clean"}],reset:"clean",artifactClassifier:{pass:"passed",fail:"failed",inconclusive:"inconclusive",infrastructure_error:"infrastructure_error"},validationPlan:plan};

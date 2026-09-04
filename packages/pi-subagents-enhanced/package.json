@@ -1,0 +1,48 @@
+{
+  "name": "pi-subagents-enhanced",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "AGENTS.md",
+    "README.md",
+    "extensions",
+    "child-extensions",
+    "scripts",
+    "src"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/subagent-runtime.ts",
+      "./extensions/custom-footer.ts"
+    ]
+  },
+  "exports": {
+    "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
+    "./workspace": "./src/workspace/service.ts",
+    "./workspace/admin": "./src/workspace/administration.ts"
+  },
+  "scripts": {
+    "test": "node --test ../../test/pi-subagents-enhanced-package.test.mjs",
+    "setup:runtime": "node scripts/setup-runtime-deps.ts",
+    "verify:package": "node scripts/verify-package.ts"
+  },
+  "dependencies": {
+    "pi-subagents": "0.62.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "bundleDependencies": [
+    "pi-subagents"
+  ]
+}

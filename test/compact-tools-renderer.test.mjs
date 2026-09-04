@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const rendererModule = await import("../scripts/lib/compact-tools-renderer.mjs").catch(() => undefined);
+const rendererModule = await import("../src/compact-tools/renderer.ts").catch(() => undefined);
 
 class FakeText {
   constructor(text = "") {

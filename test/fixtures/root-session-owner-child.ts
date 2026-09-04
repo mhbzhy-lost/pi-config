@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 
-import { installRootSessionOwner } from "../../pi/child-extensions/root-session-owner.ts";
+import { installRootSessionOwner } from "../../packages/pi-subagents-enhanced/child-extensions/root-session-owner.ts";
 
 const reportPath = process.env.ROOT_OWNER_REPORT;
 if (!reportPath) throw new Error("ROOT_OWNER_REPORT is required");

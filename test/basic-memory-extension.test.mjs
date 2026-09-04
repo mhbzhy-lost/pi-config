@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createBasicMemoryExtension, containsLikelySecret } from "../scripts/lib/basic-memory-extension.mjs";
+import { createBasicMemoryExtension, containsLikelySecret } from "../src/basic-memory/extension.ts";
 
 function createMockPi() {
   const tools = [];

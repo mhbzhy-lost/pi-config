@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "exactOptionalPropertyTypes": false,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "noImplicitAny": false,
+    "noUncheckedIndexedAccess": false,
+    "skipLibCheck": true,
+    "strict": false,
+    "target": "ES2024",
+    "types": ["node"]
+  },
+  "include": [
+    "src/agents-append/**/*.ts",
+    "src/apply-patch/**/*.ts",
+    "src/bash-cwd/**/*.ts",
+    "src/basic-memory/**/*.ts",
+    "src/compact-tools/**/*.ts",
+    "src/goal-contract/**/*.ts",
+    "src/model-system-prompt/**/*.ts",
+    "src/provider-fallback/**/*.ts",
+    "src/security-gates/**/*.ts",
+    "src/skill-whitelist/**/*.ts"
+  ]
+}

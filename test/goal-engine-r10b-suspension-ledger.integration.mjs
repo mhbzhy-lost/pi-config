@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
-import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
-import { issueActionOffer, verifyAndConsumeActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
-import { actionableFrontier } from "../scripts/lib/goal-engine/obligation-policy.mjs";
-import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
+import { applyEvent, createProjection } from "../src/goal-engine/events.ts";
+import { issueActionOffer, verifyAndConsumeActionOffer } from "../src/goal-engine/action-offer.ts";
+import { actionableFrontier } from "../src/goal-engine/obligation-policy.ts";
+import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { auditGoal } from "../scripts/lib/goal-engine/audit.mjs";
+import { auditGoal } from "../src/goal-engine/audit.ts";
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

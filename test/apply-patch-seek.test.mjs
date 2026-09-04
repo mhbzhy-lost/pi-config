@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { seekSequence } from "../scripts/lib/apply-patch/seek-sequence.mjs";
+import { seekSequence } from "../src/apply-patch/seek-sequence.ts";
 
 test("exact match", () => {
   assert.equal(seekSequence(["foo", "bar", "baz"], ["bar", "baz"], 0, false), 1);

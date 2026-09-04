@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildExecutionAmendmentProposal, reconcileExecutionChange } from "../scripts/lib/goal-engine/reconciliation.mjs";
-import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
+import { buildExecutionAmendmentProposal, reconcileExecutionChange } from "../src/goal-engine/reconciliation.ts";
+import { applyEvent, createProjection } from "../src/goal-engine/events.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
-import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
+import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 
 const hash = "a".repeat(64);
 const task = (status, extra = {}) => ({ status, conditionIds: ["condition-a"], writePaths: ["src/a.mjs"], budgetKeys: ["max_repairs"], ...extra });

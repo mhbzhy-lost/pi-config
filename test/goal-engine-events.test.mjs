@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
+import { createProjection, applyEvent } from "../src/goal-engine/events.ts";
 
 const SHA256 = "a".repeat(64);
 const HEAD = "b".repeat(40);

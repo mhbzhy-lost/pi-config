@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { captureCurrentWorld } from "../scripts/lib/goal-engine/current-world.mjs";
+import { captureCurrentWorld } from "../src/goal-engine/current-world.ts";
 
 function repo() { const root = mkdtempSync(join(tmpdir(), "world-")); execFileSync("git", ["init"], { cwd: root }); execFileSync("git", ["config", "user.email", "a@b.invalid"], { cwd: root }); execFileSync("git", ["config", "user.name", "Test"], { cwd: root }); writeFileSync(join(root, "a"), "a"); execFileSync("git", ["add", "a"], { cwd: root }); execFileSync("git", ["commit", "-m", "init"], { cwd: root }); return root; }
 const registries = { adapterRegistry: { oracle: { version: "1" } }, environmentRegistry: { local: { fingerprint: "e", available: true } }, fixtureRegistry: { sample: { fingerprint: "f", available: true } }, resourceRegistry: { cpu: { capacity: 1, holders: [] } }, runInventory: [] };

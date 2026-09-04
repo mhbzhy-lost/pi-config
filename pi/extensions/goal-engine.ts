@@ -57,7 +57,7 @@ export async function createGoalEngineEntry(
   pi: ExtensionAPI,
   {
     settingsPath = goalEngineSettingsPath(),
-    load = (): Promise<GoalEngineModule> => import("../../scripts/lib/goal-engine/extension.mjs"),
+    load = (): Promise<GoalEngineModule> => import("../../src/goal-engine/extension.ts"),
     runtimeHostFactory,
   }: {
     settingsPath?: string;
@@ -69,7 +69,7 @@ export async function createGoalEngineEntry(
   if (!configuration) return;
   let runtimeHost: unknown;
   if (configuration.runtimeHost) {
-    const production = await import("../../scripts/lib/goal-engine/production-runtime-host.mjs");
+    const production = await import("../../src/goal-engine/production-runtime-host.ts");
     let options: Record<string, unknown>;
     try { options = production.normalizeProductionRuntimeHostOptions(configuration.runtimeHost); } catch { return; }
     runtimeHost = runtimeHostFactory ? runtimeHostFactory(pi, options) : production.createProductionGoalRuntimeHost(pi, options);

@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { createSecurityGatesExtension } from "../scripts/lib/security-gates-extension.mjs";
+import { createSecurityGatesExtension } from "../src/security-gates/extension.ts";
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 

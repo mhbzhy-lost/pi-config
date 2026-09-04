@@ -1,18 +1,79 @@
 import assert from "node:assert/strict";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
 
 const { createJiti } = await import(piHostJitiUrl);
 const runtimeJiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
-const { createSubagentToolRenderers } = await runtimeJiti.import("../pi/extensions/subagent-runtime.ts");
+const { createSubagentToolRenderers, initializeCompletionNotifierState } = await runtimeJiti.import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
+const { registerSubagentNotify, currentCompletionOwnerId } = await runtimeJiti.import("../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.62.ts");
 
-import { createHeadlessSubagentApi } from "../scripts/lib/subagent-dispatch/runtime-membrane.ts";
-import { createTitleRegistry } from "../scripts/lib/subagent-dispatch/title-registry.ts";
+import { createHeadlessSubagentApi } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts";
+import { createTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
 import {
   createSupervisorRequestMailbox,
   createTypedSubagentExtension,
   installHeadlessTypedSubagentRuntime,
-} from "../scripts/lib/subagent-dispatch/extension.ts";
+} from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+
+const repoRoot = resolve(import.meta.dirname, "..");
+const enhancedPackageRoot = join(repoRoot, "packages/pi-subagents-enhanced");
+
+async function sourceFiles(root) {
+  const files = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) files.push(...await sourceFiles(path));
+    else if (/\.(?:mjs|ts)$/.test(entry.name)) files.push(path);
+  }
+  return files;
+}
+
+test("the enhanced package runtime closes every relative implementation import inside a copied package", async (t) => {
+  const isolatedRoot = await mkdtemp(join(tmpdir(), "pi-subagents-enhanced-closure-"));
+  t.after(() => rm(isolatedRoot, { recursive: true, force: true }));
+  for (const entry of ["package.json", "extensions", "child-extensions", "scripts", "src"]) {
+    await cp(join(enhancedPackageRoot, entry), join(isolatedRoot, entry), { recursive: true });
+  }
+  await mkdir(join(isolatedRoot, "node_modules"), { recursive: true });
+  await cp(
+    join(enhancedPackageRoot, "node_modules/pi-subagents"),
+    join(isolatedRoot, "node_modules/pi-subagents"),
+    { recursive: true },
+  );
+
+  const implementationRoots = ["extensions", "child-extensions", "scripts", "src"];
+  const files = (await Promise.all(implementationRoots.map((entry) => sourceFiles(join(isolatedRoot, entry))))).flat();
+  const edges = [];
+  const specifierPattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+(?:type\s+)?|\bnew URL\s*\(\s*)["']([^"']+)["']/g;
+  for (const file of files) {
+    const source = await readFile(file, "utf8");
+    for (const match of source.matchAll(specifierPattern)) {
+      const specifier = match[1];
+      if (!specifier.startsWith(".")) continue;
+      const target = new URL(specifier, pathToFileURL(file));
+      const targetPath = decodeURIComponent(target.pathname);
+      const targetRelative = relative(isolatedRoot, targetPath);
+      assert.equal(targetRelative === ".." || targetRelative.startsWith(`..${sep}`) || isAbsolute(targetRelative), false, `${relative(isolatedRoot, file)} escapes through ${specifier}`);
+      await stat(targetPath);
+      edges.push({ source: relative(isolatedRoot, file), specifier, target: targetRelative });
+    }
+  }
+  assert.ok(edges.some((edge) => edge.source === "scripts/setup-runtime-deps.ts" && edge.target === "src/subagent-dispatch/ordered-models-runtime-patch.ts"));
+  assert.ok(edges.some((edge) => edge.source === "scripts/verify-package.ts" && edge.target === "src/subagent-dispatch/ordered-models-runtime-patch.ts"));
+
+  const isolatedExtension = await import(`${pathToFileURL(join(isolatedRoot, "src/subagent-dispatch/extension.ts")).href}?closure=${Date.now()}`);
+  const isolatedOwner = await import(`${pathToFileURL(join(isolatedRoot, "child-extensions/root-session-owner.ts")).href}?closure=${Date.now()}`);
+  const isolatedEvidence = await import(`${pathToFileURL(join(isolatedRoot, "child-extensions/acceptance-evidence.ts")).href}?closure=${Date.now()}`);
+  const packageEntry = await runtimeJiti.import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
+  assert.equal(typeof isolatedExtension.createTypedSubagentExtension, "function");
+  assert.equal(typeof isolatedOwner.installRootSessionOwner, "function");
+  assert.equal(typeof isolatedEvidence.installAcceptanceEvidence, "function");
+  assert.equal(typeof packageEntry.default, "function");
+});
 
 function codingContract(overrides = {}) {
   const base = {
@@ -47,6 +108,27 @@ function codingContract(overrides = {}) {
     boundaries: { ...base.boundaries, ...overrides.boundaries },
     acceptance: { ...base.acceptance, ...overrides.acceptance },
     execution: { ...base.execution, ...overrides.execution },
+  };
+}
+
+function managedReceipt(overrides = {}) {
+  return {
+    schemaVersion: "managed-workspace.v1",
+    workspaceId: "workspace-1",
+    leaseId: "c".repeat(64),
+    owner: { kind: "standalone-subagent", rootSessionId: "root-1", toolCallId: "tool-1" },
+    originRoot: "/repo",
+    requestedCwd: "/repo",
+    originRef: "refs/heads/main",
+    baseCommit: "b".repeat(40),
+    path: "/managed/workspace-1",
+    dispatchCwd: "/managed/workspace-1",
+    branchRef: "refs/heads/pi-managed/workspace-1",
+    state: "active",
+    run: { runId: "run-1", asyncDir: "/tmp/run-1" },
+    disposition: null,
+    cleanupDebt: null,
+    ...overrides,
   };
 }
 
@@ -129,6 +211,84 @@ function createRpc(overrides = {}) {
   };
   return rpc;
 }
+
+test("project completion notifier delivers complete and failed terminal events with the upstream owner", async () => {
+  const pi = createPi();
+  const state = { currentSessionId: "session-owner" };
+  const notifier = registerSubagentNotify(pi, state, { batchConfig: { enabled: false } });
+  const ownerId = currentCompletionOwnerId();
+  assert.equal(await notifier.deliver({
+    id: "missing-owner",
+    agent: "executor",
+    success: false,
+    summary: "failed",
+    sessionId: "session-owner",
+    completionOwnerId: ownerId,
+  }), false);
+  initializeCompletionNotifierState(state);
+  assert.equal(state.completionOwnerId, ownerId);
+  for (const success of [true, false]) {
+    const accepted = await notifier.deliver({
+      id: `completion-${success}`,
+      agent: "executor",
+      success,
+      summary: success ? "done" : "failed",
+      sessionId: "session-owner",
+      completionOwnerId: ownerId,
+    });
+    assert.equal(accepted, true);
+  }
+  assert.equal(pi.messages.length, 2);
+  notifier.dispose();
+});
+
+test("completion notice preserves raw summary and authoritative fields without event rewriting", async () => {
+  const pi = createPi();
+  const state = { currentSessionId: "session-owner", completionOwnerId: currentCompletionOwnerId() };
+  const notifier = registerSubagentNotify(pi, state, { batchConfig: { enabled: false } });
+  const upstreamApi = createHeadlessSubagentApi(pi);
+  let delivery;
+  upstreamApi.events.on("subagent:async-complete", (event) => { delivery = notifier.deliver(event); });
+  upstreamApi.events.emit("subagent:async-complete", {
+    id: "authoritative-failure",
+    agent: "executor",
+    success: false,
+    state: "failed",
+    summary: "Status: completed",
+    acceptance: { status: "rejected" },
+    error: "runtime error: child exited before acceptance",
+    sessionId: "session-owner",
+    completionOwnerId: state.completionOwnerId,
+  });
+  const accepted = await delivery;
+  assert.equal(accepted, true);
+  assert.match(pi.messages[0].content, /Status: completed/);
+  assert.doesNotMatch(pi.messages[0].content, /Acceptance:|Runtime error:/);
+  notifier.dispose();
+});
+
+test("completion lifecycle events preserve the original authoritative payload and summary", () => {
+  const pi = createPi();
+  const api = createHeadlessSubagentApi(pi);
+  const payload = {
+    runId: "raw-completion",
+    agent: "executor",
+    state: "failed",
+    success: false,
+    summary: "Status: completed",
+    acceptance: { status: "rejected" },
+    error: "runtime error",
+  };
+  const before = structuredClone(payload);
+  let observed;
+  api.events.on("subagent:async-complete", (event) => { observed = event; });
+  api.events.emit("subagent:async-complete", payload);
+  assert.notStrictEqual(observed, payload, "presentation projection may clone the event for observers");
+  assert.equal(observed.summary, payload.summary);
+  assert.deepEqual(observed.acceptance, payload.acceptance);
+  assert.equal(observed.error, payload.error);
+  assert.deepEqual(payload, before);
+});
 
 const ctx = { cwd: "/repo" };
 const signal = new AbortController().signal;
@@ -301,6 +461,32 @@ test("project subagent tool retains injected display-only call and result render
   assert.equal(pi.tools[0].renderResult, renderSubagentResult);
 });
 
+test("supervisor request renderer compacts inbound progress without mutating the message", () => {
+  const renderers = createSubagentToolRenderers();
+  assert.equal(typeof renderers.renderSupervisorRequest, "function");
+  const message = {
+    customType: "subagent_supervisor_request",
+    content: "Supervisor needs decision.\nRun: run-7\nChild index: 1\nIntercom target: target-7\n请确认是否继续。",
+    details: { agent: "executor", requestId: "request-7" },
+  };
+  const before = structuredClone(message);
+  const backgrounds = [];
+  const component = renderers.renderSupervisorRequest(message, { outputPad: 0 }, {
+    fg: (_color, value) => value,
+    bg(color, value) { backgrounds.push(color); return `<${color}>${value}</${color}>`; },
+  });
+  assert.equal(component.constructor.name, "Box");
+  assert.equal(component.paddingX, 1);
+  assert.equal(component.paddingY, 1);
+  assert.equal(component.children.length, 2);
+  const rendered = component.render(40);
+  assert.equal(backgrounds.includes("toolPendingBg"), true);
+  assert.equal(rendered.length >= 4, true);
+  assert.match(rendered[1], /← executor:/);
+  assert.match(rendered.slice(2, -1).join("\n"), /请确认是否继续。/);
+  assert.deepEqual(message, before);
+});
+
 test("spawn rendering keeps the complete execute result while showing one stateful call line", async () => {
   const pi = createPi();
   const rpc = createRpc();
@@ -359,6 +545,32 @@ test("spawn rendering keeps the complete execute result while showing one statef
   const statusCall = renderers.renderSubagentCall({ action: "status" }, theme, { state: statusState });
   assert.ok(statusCall, "defined renderCall slots must return a Component");
   assert.deepEqual(statusCall.render(120), []);
+});
+
+test("subagent renderer hides validation Received arguments without changing result or args", () => {
+  const renderers = createSubagentToolRenderers();
+  const result = {
+    isError: true,
+    content: [{ type: "text", text: [
+      'Validation failed for tool "subagent":',
+      "  - $.execution.timeoutMs: expected integer",
+      "  - $.acceptance.criteria: expected at least one item",
+      "",
+      "Received arguments:",
+      JSON.stringify({ version: "dispatch-ir.v1", taskId: "very-long", execution: { timeoutMs: "invalid" }, requirements: ["x".repeat(2048)] }, null, 2),
+    ].join("\n") }],
+    details: { code: "VALIDATION_ERROR", received: { preserved: true } },
+  };
+  const args = { version: "dispatch-ir.v1", execution: { timeoutMs: "invalid" } };
+  const beforeResult = structuredClone(result);
+  const beforeArgs = structuredClone(args);
+  const rendered = renderers.renderSubagentResult(result, { expanded: false }, { fg: (_color, text) => text }, { args, state: {} }).render(120).join("\n");
+  assert.match(rendered, /Validation failed for tool "subagent":/);
+  assert.match(rendered, /execution\.timeoutMs/);
+  assert.match(rendered, /acceptance\.criteria/);
+  assert.doesNotMatch(rendered, /Received arguments|very-long|invalid|x{64}/);
+  assert.deepEqual(result, beforeResult);
+  assert.deepEqual(args, beforeArgs);
 });
 
 test("beforeDispose completes before RPC disposal in the single shutdown handler", async () => {
@@ -811,10 +1023,10 @@ test("compiles a coding contract into one workflow root and returns its correlat
   );
 });
 
-test("coding continuation dispatch rebinds its managed workspace run", async () => {
+test("coding cwd never infers ownership from a legacy workspace-shaped path", async () => {
   const pi = createPi();
   const rpc = createRpc();
-  const bindings = [];
+  const workspaceCalls = [];
   rpc.spawn = async (params) => {
     rpc.calls.push({ method: "spawn", params });
     pi.events.emit("subagent:async-started", {
@@ -828,15 +1040,11 @@ test("coding continuation dispatch rebinds its managed workspace run", async () 
     });
     return { details: { runId: "continuation-workflow-1", asyncDir: "/tmp/continuation-workflow-1" } };
   };
-  const workspaceController = {
-    bindManagedSubagentWorkspaceRun(workspace, binding) { bindings.push({ workspace, binding }); },
-  };
   createTypedSubagentExtension(pi, {
     rpc,
     cleanupStore: {},
     randomUUID: () => "continuation-1",
-    workspaceController,
-    resolveCanonicalOrigin: async () => "/repo",
+    workspaceService: new Proxy({}, { get(_target, property) { return () => workspaceCalls.push(property); } }),
   });
 
   const result = await execute(pi.tools[0], codingContract({
@@ -848,10 +1056,7 @@ test("coding continuation dispatch rebinds its managed workspace run", async () 
   }));
 
   assert.equal(result.isError, false);
-  assert.deepEqual(bindings, [{
-    workspace: { originRoot: "/repo", workspaceId: "workspace-1" },
-    binding: { runId: "continuation-leaf-1", asyncDir: "/tmp/continuation-leaf-1" },
-  }]);
+  assert.deepEqual(workspaceCalls, []);
 });
 
 test("compiles a non-coding agent prompt into one workflow leaf without rewriting its task", async () => {
@@ -961,22 +1166,27 @@ test("maps approved control actions to RPC and requires a resume instruction", a
 
 test("workspace_status text exposes action token and blocked reasons", async () => {
   const pi = createPi();
-  const workspaceController = {
-    loadManagedSubagentWorkspace() { return { workspaceId: "workspace-1", state: "active", runId: "run-1" }; },
-    statusManagedSubagentWorkspace() {
+  const workspaceService = {
+    status() {
       return {
-        workspaceId: "workspace-1",
-        state: "active",
+        receipt: managedReceipt(),
+        terminalProof: { state: "observed", conflict: false, proofHash: "d".repeat(64) },
+        allowedDispositions: ["preserve", "discard"],
+        blockedReasons: ["no-commits"],
+      };
+    },
+    issueDisposition() {
+      return {
+        receipt: managedReceipt(),
+        terminalProof: { state: "observed", conflict: false, proofHash: "d".repeat(64) },
         allowedDispositions: ["preserve", "discard"],
         actionToken: "once-token",
-        integrateBlockedReasons: ["no-commits"],
+        blockedReasons: ["no-commits"],
       };
     },
   };
   createTypedSubagentExtension(pi, {
-    rpc: createRpc(), cleanupStore: {}, workspaceController,
-    inspectFacadeTerminalProof: async () => ({ state: "observed" }),
-    resolveCanonicalOrigin: async () => "/repo",
+    rpc: createRpc(), cleanupStore: {}, workspaceService,
   });
 
   const result = await execute(pi.tools[0], { action: "workspace_status", workspace_id: "workspace-1" });
@@ -992,17 +1202,15 @@ test("workspace_status text exposes action token and blocked reasons", async () 
 test("workspace_disposition release is accepted and releases preserved workspace", async () => {
   const pi = createPi();
   const releases = [];
-  const workspaceController = {
-    loadManagedSubagentWorkspace() { return { workspaceId: "workspace-1", state: "preserved", runId: null }; },
-    releaseManagedSubagentWorkspace(input) {
+  const workspaceService = {
+    release(input) {
       releases.push(input);
-      return { workspaceId: "workspace-1", state: "released" };
+      return managedReceipt({ state: "released", disposition: { action: "preserve", reason: "manual" } });
     },
-    disposeManagedSubagentWorkspace() { throw new Error("release must not dispose through action token path"); },
+    dispose() { throw new Error("release must not dispose through action token path"); },
   };
   createTypedSubagentExtension(pi, {
-    rpc: createRpc(), cleanupStore: {}, workspaceController,
-    resolveCanonicalOrigin: async () => "/repo",
+    rpc: createRpc(), cleanupStore: {}, workspaceService,
   });
   const tool = pi.tools[0];
   const dispositionSchema = tool.parameters.anyOf.find((branch) => branch.properties?.action?.const === "workspace_disposition");
@@ -1012,7 +1220,7 @@ test("workspace_disposition release is accepted and releases preserved workspace
 
   assert.equal(result.isError, false);
   assert.equal(result.details.state, "released");
-  assert.deepEqual(releases, [{ originRoot: "/repo", workspaceId: "workspace-1" }]);
+  assert.deepEqual(releases, [{ workspaceId: "workspace-1" }]);
 });
 
 test("uses persistent sessionFile identity for workflow leaf correlation and falls back for --no-session", async () => {
@@ -1114,18 +1322,45 @@ test("does not bind a Goal executor ticket when the workflow root has no matchin
     ticketId: "ticket-1",
     spawnIdentity: { requestId: "dispatch-1", spawnKey: "dispatch-1" },
   };
+  let workspaceRequest;
+  const workspaceService = {
+    ensureAllocated(request) {
+      return managedReceipt({
+        workspaceId: request.workspaceId,
+        owner: request.owner,
+        requestedCwd: request.requestedCwd,
+      });
+    },
+    bindRun() { throw new Error("timed out spawn must not bind a workspace run"); },
+  };
   createTypedSubagentExtension(pi, {
     rpc,
     cleanupStore: {},
     randomUUID: () => "dispatch-1",
     workflowChildStartTimeoutMs: 10,
+    workspaceService,
     goalExecutorCoordinator: {
-      prepareSpawn() { return ticket; },
+      prepareSpawn(request) {
+        workspaceRequest = {
+          workspaceId: "goal-timeout",
+          owner: { kind: "goal-task", rootSessionId: "root-1", goalId: "goal-1", taskId: "task-1", attempt: 1, executionRevision: 1 },
+          originRoot: "/repo",
+          requestedCwd: "/repo",
+          originRef: "refs/heads/main",
+          baseCommit: "b".repeat(40),
+          contractHash: request.contractHash,
+          mode: "coding",
+          writePaths: codingContract().boundaries.writePaths,
+        };
+        return { ...ticket, workspaceRequest };
+      },
+      workspaceAllocated() {},
+      confirmSpawn() {},
       bindSpawn(_ticket, binding) { bound.push(binding); },
     },
   });
 
-  const result = await execute(pi.tools[0], codingContract());
+  const result = await execute(pi.tools[0], codingContract({ execution: { worktree: true } }));
 
   assert.equal(result.isError, true);
   assert.equal(result.details.code, "WORKFLOW_CHILD_START_TIMEOUT");

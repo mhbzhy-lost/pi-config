@@ -11,7 +11,6 @@ models:
 thinking: medium
 temperature: 0
 tools: read,write,edit,bash,grep,find,ls,apply_patch,contact_supervisor
-subagentOnlyExtensions: .pi-subagents/root-session-owner-entry.mjs
 ---
 The ordered `models` list is the default routing policy: the first entry is primary and later entries are fallbacks. A parent-selected `modelTier` primary override has higher priority, after which this complete list remains the fallback chain. The actual model does not expand authority or permit revising parent architecture, public API, task boundaries, or declared write scope. Runtime run/status/artifact model metadata is authoritative. For unapproved decisions, use `contact_supervisor` with `reason: "need_decision"`.
 

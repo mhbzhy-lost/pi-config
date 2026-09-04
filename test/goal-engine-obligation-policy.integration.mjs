@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { taskActionState } from "../scripts/lib/goal-engine/graph.mjs";
-import { actionableFrontier, nextObligationAction, obligationProgressFingerprint } from "../scripts/lib/goal-engine/obligation-policy.mjs";
-import { suspensionClosureStatus } from "../scripts/lib/goal-engine/suspension.mjs";
+import { taskActionState } from "../src/goal-engine/graph.ts";
+import { actionableFrontier, nextObligationAction, obligationProgressFingerprint } from "../src/goal-engine/obligation-policy.ts";
+import { suspensionClosureStatus } from "../src/goal-engine/suspension.ts";
 
 const condition = (id, status = "unsatisfied", depends_on = []) => ({ definition: { id, depends_on, stability: { mode: "consecutive", count: 2 } }, status });
 const base = () => ({ runtimeGeneration: "goal-runtime.v1", runtimeState: "active", lifecycle: "active", createdAt: "2026-01-01T00:00:00.000Z", runtimeActiveElapsedMs: 0, runtimeActiveSince: "2026-01-01T00:00:00.000Z", tasks: new Map(), taskApplicability: new Map(), conditions: new Map(), observationRuns: new Map(), findings: new Map(), repairEpisodes: new Map(), repairChallenges: new Map(), convergenceBudget: { max_observations: 4, max_repairs: 2, max_elapsed_minutes: 30, max_no_progress: 2 } });

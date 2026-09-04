@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const execFileAsync = promisify(execFile);
-import { registerTaskSchedulerAdapter, repositoryDataDir } from "../scripts/lib/task-scheduler/adapter.mjs";
+import { registerTaskSchedulerAdapter, repositoryDataDir } from "../src/task-scheduler/adapter.ts";
 
 // A local factory exercises the membrane directly, without creating scheduler state or timers.
 function fakeUpstream(pi) {

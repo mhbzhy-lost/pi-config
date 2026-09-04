@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
-import { bindRootBroker, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
-import { createProductionGoalRuntimeHost } from "../scripts/lib/goal-engine/production-runtime-host.mjs";
+import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
+import { bindRootBroker, unbindRootBroker } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import { createProductionGoalRuntimeHost } from "../src/goal-engine/production-runtime-host.ts";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
-import { loadProjection } from "../scripts/lib/goal-engine/store.mjs";
+import { loadProjection } from "../src/goal-engine/store.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const globalModules = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
@@ -38,8 +38,8 @@ function runtimeInput() {
   };
 }
 function wrapperSource({ reviewLog }) {
-  const production = pathToFileURL(join(repoRoot, "scripts/lib/goal-engine/production-runtime-host.mjs")).href;
-  const extension = pathToFileURL(join(repoRoot, "scripts/lib/goal-engine/extension.mjs")).href;
+  const production = pathToFileURL(join(repoRoot, "src/goal-engine/production-runtime-host.mjs")).href;
+  const extension = pathToFileURL(join(repoRoot, "src/goal-engine/extension.mjs")).href;
   const options = {
     adapters: [{
       ref: "canary-oracle", version: "1", deterministic: true, reset: "clean", resourceClaims: [],

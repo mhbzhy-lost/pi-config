@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../scripts/lib/subagent-dispatch/root-broker-protocol.ts";
-import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
-import { createBrokerFrameDecoder, createRootBrokerClient } from "../scripts/lib/subagent-dispatch/root-broker-client.ts";
-import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker, bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, findGoalExecutorCoordinator, unbindGoalExecutorCoordinatorSession } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
-import * as rootBrokerRegistry from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
+import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
+import { createBrokerFrameDecoder, createRootBrokerClient } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-client.ts";
+import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker, bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, findGoalExecutorCoordinator, unbindGoalExecutorCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import * as rootBrokerRegistry from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 
 class EventBus {
   handlers = new Map();
@@ -41,7 +43,7 @@ function startedEvent(rootSessionId, runId = "executor-1") {
   return { runId, id: runId, agent: "executor", pid: 43210, asyncDir: `/tmp/${runId}`, sessionId: rootSessionId };
 }
 function goalAuthority(sessionId, runId) {
-  return { goalId: "test-goal", taskId: "test-task", attempt: 1, runId, asyncDir: `/tmp/${runId}`, workspacePath: "/tmp/test-workspace", leaseId: "a".repeat(64), sessionId, baseHead: "b".repeat(40), headAtDispatch: "b".repeat(40), executionRevision: 1, contractHash: "c".repeat(64), agent: "executor" };
+  return { goalId: "test-goal", taskId: "test-task", attempt: 1, runId, asyncDir: `/tmp/${runId}`, workspacePath: "/tmp/test-workspace", leaseId: "a".repeat(64), sessionId, baseHead: "b".repeat(40), headAtDispatch: "b".repeat(40), executionRevision: 1, contractHash: "c".repeat(64), expectedCriteria: ["criterion-1"], agent: "executor" };
 }
 
 test("Root broker exposes no delegated caller or revival capability", () => {
@@ -91,7 +93,7 @@ test("Root broker grants, serves, and drains one directly owned Executor", async
   assert.equal(broker.ownedRuns.get(runId)?.identityState, "verified");
 
   client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 500 });
-  assert.deepEqual(Object.keys(client).sort(), ["dispose", "ping", "subscribe"]);
+  assert.deepEqual(Object.keys(client).sort(), ["dispose", "ping", "submitAcceptanceEvidence", "subscribe"]);
   assert.deepEqual(await client.ping(), { alive: true });
 
   let resolveClosing;
@@ -113,6 +115,73 @@ test("Root broker grants, serves, and drains one directly owned Executor", async
   await assert.rejects(readBrokerGrant(rootSessionId, runId), { code: "ENOENT" });
   assert.equal(broker.teardown.released, true);
   client.dispose();
+});
+
+test("authenticated Executor submits bound acceptance evidence only after its durable context exists", async (t) => {
+  const rootSessionId = `root-acceptance-${process.pid}-${Date.now()}`;
+  const runId = "executor-acceptance";
+  const root = await mkdtemp(join(tmpdir(), "root-broker-acceptance-"));
+  const workspacePath = join(root, "workspace");
+  const asyncDir = join(root, "async");
+  mkdirSync(workspacePath);
+  mkdirSync(asyncDir);
+  await writeFile(join(workspacePath, "README.md"), "fixture\n");
+  execFileSync("git", ["init", "-q"], { cwd: workspacePath });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: workspacePath });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: workspacePath });
+  execFileSync("git", ["add", "README.md"], { cwd: workspacePath });
+  execFileSync("git", ["commit", "-qm", "fixture"], { cwd: workspacePath });
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspacePath, encoding: "utf8" }).trim();
+  const events = new EventBus();
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    events,
+    captureProcessBirthIdentity: async () => "birth-acceptance",
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+  });
+  let client;
+  t.after(async () => {
+    client?.dispose();
+    broker.observeTerminal(observedProof(runId));
+    await broker.closeRootSession().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  await broker.start();
+  await events.emit("subagent:async-started", { ...startedEvent(rootSessionId, runId), asyncDir });
+  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 500 });
+  const params = {
+    outcome: "succeeded",
+    criteria: [{ id: "criterion-1", status: "satisfied", evidence: [`sha256:${"1".repeat(64)}`] }],
+    commandsRun: [{ command: "node --test", result: "passed", outputRef: `sha256:${"2".repeat(64)}` }],
+    changedFiles: [],
+  };
+  await assert.rejects(client.submitAcceptanceEvidence(params), { code: "CONTEXT_NOT_READY" });
+  broker.persistGoalBindingAuthority({
+    version: "root-broker.goal-binding-authority.v1",
+    ticketId: "d".repeat(64),
+    goalId: "goal-acceptance",
+    taskId: "task-acceptance",
+    attempt: 1,
+    runId,
+    asyncDir,
+    workspacePath,
+    leaseId: "a".repeat(64),
+    sessionId: rootSessionId,
+    baseHead: head,
+    headAtDispatch: head,
+    executionRevision: 1,
+    contractHash: "c".repeat(64),
+    expectedCriteria: ["criterion-1"],
+    agent: "executor",
+  });
+  const first = await client.submitAcceptanceEvidence(params);
+  const second = await client.submitAcceptanceEvidence(params);
+  assert.deepEqual(second, first);
+  assert.equal(first.path, join(asyncDir, "acceptance-evidence", `${first.fingerprint}.yaml`));
+  assert.match(await readFile(first.path, "utf8"), new RegExp(`head: "${head}"`));
+  assert.equal((await lstat(first.path)).mode & 0o777, 0o600);
+  await assert.rejects(client.submitAcceptanceEvidence({ ...params, criteria: [{ ...params.criteria[0], id: "wrong" }] }));
 });
 
 test("Root broker stops only an exact registered Goal-owned run and returns an official proof", async (t) => {
@@ -292,13 +361,13 @@ test("Goal executor coordinator resolves a session alias across ExtensionAPI wra
   const goalPi = { events: {} };
   const subagentPi = { events: {} };
   const foreignPi = { events: {} };
-  const coordinator = { prepareSpawn() {}, bindSpawn() {} };
+  const coordinator = { prepareSpawn() {}, workspaceAllocated() {}, confirmSpawn() {}, bindSpawn() {} };
   bindGoalExecutorCoordinator(goalPi, coordinator);
   bindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", coordinator);
   assert.strictEqual(findGoalExecutorCoordinator(goalPi), coordinator, "same-wrapper lookup remains preferred");
   assert.strictEqual(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), coordinator);
   assert.equal(findGoalExecutorCoordinator(foreignPi, "root-other-session"), undefined);
-  unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", { prepareSpawn() {}, bindSpawn() {} });
+  unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", { prepareSpawn() {}, workspaceAllocated() {}, confirmSpawn() {}, bindSpawn() {} });
   assert.strictEqual(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), coordinator, "foreign shutdown cannot delete the alias");
   unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", coordinator);
   assert.equal(findGoalExecutorCoordinator(goalPi), undefined, "correct shutdown clears the exact wrapper binding");
@@ -309,8 +378,8 @@ test("Goal executor coordinator session replacement does not resurrect the old g
   const events = {};
   const goalPi = { events };
   const replacementPi = { events };
-  const oldCoordinator = { prepareSpawn() {}, bindSpawn() {} };
-  const replacement = { prepareSpawn() {}, bindSpawn() {} };
+  const oldCoordinator = { prepareSpawn() {}, workspaceAllocated() {}, confirmSpawn() {}, bindSpawn() {} };
+  const replacement = { prepareSpawn() {}, workspaceAllocated() {}, confirmSpawn() {}, bindSpawn() {} };
   bindGoalExecutorCoordinatorSession(goalPi, "root-goal-old", oldCoordinator);
   bindGoalExecutorCoordinatorSession(replacementPi, "root-goal-new", replacement);
   unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-old", oldCoordinator);
@@ -320,7 +389,7 @@ test("Goal executor coordinator session replacement does not resurrect the old g
 });
 
 test("Root broker registry reload coexists with a legacy v1 WeakMap process slot", () => {
-  const registryUrl = new URL("../scripts/lib/subagent-dispatch/root-broker-registry.ts", import.meta.url).href;
+  const registryUrl = new URL("../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts", import.meta.url).href;
   const source = `
     const legacyKey = Symbol.for("pi.root-subagent-broker-registry.v1");
     const legacy = new WeakMap();

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 
-const modulePath = "../scripts/lib/goal-engine/managed-validation.mjs";
+const modulePath = "../src/goal-engine/managed-validation.ts";
 const missing = (name) => () => { throw new Error(`RED: managed validation API ${name} is not implemented`); };
 const service = await import(modulePath).catch(() => ({
   prepareManagedValidation: missing("prepareManagedValidation"),

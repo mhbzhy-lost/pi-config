@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { validateDeclaredBashCwd } from "../scripts/lib/bash-cwd-policy.mjs";
+import { validateDeclaredBashCwd } from "../src/bash-cwd/policy.ts";
 
 async function withWorkspace(run) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "bash-cwd-policy-"));

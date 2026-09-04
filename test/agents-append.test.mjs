@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createAgentsAppendExtension } from "../scripts/lib/agents-append.mjs";
+import { createAgentsAppendExtension } from "../src/agents-append/index.ts";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 const { jiti } = await loadPiTestRuntime(import.meta.url);

@@ -7,9 +7,9 @@ import { execFileSync } from "node:child_process";
 import test from "node:test";
 
 import { createGoalEngineEntry } from "../pi/extensions/goal-engine.ts";
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { allocateExecutorWorkspace, inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
+import { loadProjection } from "../src/goal-engine/store.ts";
+import { allocateExecutorWorkspace, inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../src/goal-engine/workspace.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -27,7 +27,7 @@ function enabledSettings() {
 }
 function pi() { return { registerTool() {}, on() {} }; }
 async function host(options = {}) {
-  const { createProductionGoalRuntimeHost } = await import("../scripts/lib/goal-engine/production-runtime-host.mjs");
+  const { createProductionGoalRuntimeHost } = await import("../src/goal-engine/production-runtime-host.ts");
   return createProductionGoalRuntimeHost(pi(), options);
 }
 function exact(keys, value) { assert.deepEqual(Object.keys(value).sort(), [...keys].sort()); }

@@ -2,6 +2,18 @@
 
 Pi config root is `pi/` (not `~/.pi`). See `pi/AGENTS.md` for constraints.
 
+## 目录职责与依赖边界
+
+- `scripts/` 只放可直接执行的 CLI、初始化脚本和诊断探针；可复用实现不得新增到 `scripts/`，production 模块不得新增对 `scripts/**` 的 import。CLI 应从所属 feature 或 package 的公开入口消费能力。
+- Node 原生可执行的 production/CLI 代码统一使用 `.ts`；`scripts/*.ts`、`scripts/probes/*.ts` 和 package 内直接由 Node 调用的 `scripts/*.ts` 仍可通过 shebang/npm script 直接运行。`.mjs` 仅用于 `test/` 下的测试、fixture、测试辅助模块，以及第三方入口或尚未迁移的外部兼容文件；不得为新的 production/CLI 实现选择 `.mjs`。
+- 仓库和 package 的最低 Node 版本固定为 `>=22.19.0`，依赖其原生 TypeScript type-stripping 能力；type-stripping 不等于类型检查，新增或迁移 TypeScript 实现应由 `tsc --noEmit` 或等价静态检查覆盖。
+- `scripts/lib/` 是待迁移的历史目录，不是共享基础库。禁止在其中新增文件、扩大依赖或把新调用方接入其中；修改存量模块时，应优先将实现迁到所属 `src/<feature>/` 或 `packages/<name>/src/`，并在调用方清零后删除旧路径，不保留一行 re-export facade。
+- `pi/extensions/` 只放 Pi 自动发现入口及其入口级配置。入口负责 Host API 绑定、依赖注入和资源注册；可复用业务逻辑归属根 `src/<feature>/` 或对应 package，其他 feature 不得 import `pi/extensions/**` 作为实现库。
+- 根 `src/<feature>/` 存放尚未独立发行的 feature-owned 实现；代码、状态机、codec 和 renderer 按领域归属，不建立根级 `lib/`、`common/`、`utils/` 通用收容目录。
+- `packages/<name>/extensions/` 只放该 package manifest 声明的主 Host 入口，`packages/<name>/child-extensions/` 只放显式注入 child 的入口，实际实现放在 `packages/<name>/src/`。主 Host 与 child 入口不得因复用方便混用发现边界。
+- 跨 feature 依赖只能通过对方明确的公开入口或 package `exports`；禁止深层引用其他 feature 的内部文件，也禁止从 `src/**` 或 `packages/**/src/**` 反向依赖 `scripts/**`、`pi/extensions/**` 等宿主入口。
+- 只有具备稳定领域边界、明确 owner 和独立发行/版本价值的能力才可抽为共享 package；不得仅为消除少量重复创建新的通用库。
+
 ## Goal 改造执行方式
 
 在 `docs/superpowers/plans/2026-08-13-goal-obligation-runtime.md` 的 R0–R13 全部完成并通过 R13 验收前，禁止使用 Goal Engine 执行、编排或验收该改造计划；所有任务必须按计划 DAG 采用 Subagent-Driven 执行。既有 `planned-goal` 仅作为冻结的历史账本，不得阻塞 R1–R13；待 R13 通过并启动 fresh Host 后再通过 typed 工具收尾。
@@ -15,6 +27,10 @@ Pi config root is `pi/` (not `~/.pi`). See `pi/AGENTS.md` for constraints.
 ## `pi/models.json` 本机配置
 
 本机专用 provider/model 定义可通过 `git update-index --skip-worktree pi/models.json` 仅保留在本地，禁止提交。上游修改 `pi/models.json` 时，必须先执行 `git update-index --no-skip-worktree pi/models.json`，再进行同步；同步完成并恢复本机定义后，如仍需隐藏本地差异，再重新设置 `--skip-worktree`。
+
+## TUI 精简边界
+
+所有面向用户的精简、折叠、摘要、截断和换行只能发生在 TUI renderer 层。不得为改善 TUI 展示而改写 agent 实际收到的消息、tool result、event payload、session 内容或其结构化 details；TUI renderer 必须消费原始数据并生成独立的显示文本。
 
 ## 缺陷数据来源分类门禁
 

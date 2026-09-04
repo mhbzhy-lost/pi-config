@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { deriveOwnedExecutorStopRequest } from "../scripts/lib/goal-engine/suspension.mjs";
-import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
-import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
+import { deriveOwnedExecutorStopRequest } from "../src/goal-engine/suspension.ts";
+import { appendEvent, loadProjection } from "../src/goal-engine/store.ts";
+import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
+import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const goalId = "r10b-goal";

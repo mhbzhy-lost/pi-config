@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applyPatch, ApplyError } from "../scripts/lib/apply-patch/apply.mjs";
+import { applyPatch, ApplyError } from "../src/apply-patch/apply.ts";
 
 async function withTempDir(fn) {
   const dir = await mkdtemp(join(tmpdir(), "apply-patch-test-"));

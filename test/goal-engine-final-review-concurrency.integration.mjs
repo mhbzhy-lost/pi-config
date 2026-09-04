@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createFinalReviewFileStore } from "../scripts/lib/goal-engine/final-review.mjs";
+import { createFinalReviewFileStore } from "../src/goal-engine/final-review.ts";
 
 const h = letter => letter.repeat(64);
 const approval = { entryId: "entry-concurrency", sessionId: "session-concurrency", source: "user" };
@@ -20,7 +20,7 @@ function result(base, reportRef) {
 const workerSource = `
 import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createFinalReviewFileStore } from ${JSON.stringify(new URL("../scripts/lib/goal-engine/final-review.mjs", import.meta.url).href)};
+import { createFinalReviewFileStore } from ${JSON.stringify(new URL("../src/goal-engine/final-review.ts", import.meta.url).href)};
 const { stateRoot, operation, value, gate } = JSON.parse(process.env.FINAL_REVIEW_WORKER);
 const ready = join(stateRoot, \`.final-review-ready-\${gate}-\${process.pid}\`);
 const release = join(stateRoot, \`.final-review-release-\${gate}\`);

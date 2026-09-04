@@ -1,7 +1,7 @@
 import { createBashToolDefinition, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, Text, sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { createBashCwdExtension } from "../../scripts/lib/bash-cwd-extension.mjs";
-import { createCompactToolRenderers } from "../../scripts/lib/compact-tools-renderer.mjs";
+import { createBashCwdExtension } from "../../src/bash-cwd/extension.ts";
+import { createCompactToolRenderers } from "../../src/compact-tools/renderer.ts";
 
 function getBashOptions(ctx: { cwd?: string; isProjectTrusted?: () => boolean } = {}) {
   const settings = SettingsManager.create(ctx.cwd || process.cwd(), undefined, {

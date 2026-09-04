@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { hashGoalMetadataProposal } from "../scripts/lib/goal-engine/human-decision.mjs";
-import { allocateExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
+import { appendEvent, loadProjection } from "../src/goal-engine/store.ts";
+import { hashGoalMetadataProposal } from "../src/goal-engine/human-decision.ts";
+import { allocateExecutorWorkspace } from "../src/goal-engine/workspace.mjs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";

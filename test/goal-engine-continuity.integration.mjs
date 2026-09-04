@@ -6,7 +6,7 @@ import {
   buildSessionBinding,
   formatRecoveryInjection,
   selectContinuityCandidate,
-} from "../scripts/lib/goal-engine/continuity.mjs";
+} from "../src/goal-engine/continuity.ts";
 
 function goal(overrides = {}) {
   return {

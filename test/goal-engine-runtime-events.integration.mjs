@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyEvent, createProjection, schemaVersionForMutation, suspensionClosureHash } from "../scripts/lib/goal-engine/events.mjs";
-import { appendEvent, loadProjection, projectionStateHash } from "../scripts/lib/goal-engine/store.mjs";
+import { applyEvent, createProjection, schemaVersionForMutation, suspensionClosureHash } from "../src/goal-engine/events.ts";
+import { appendEvent, loadProjection, projectionStateHash } from "../src/goal-engine/store.ts";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
-import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
-import { evaluateConditionGraph } from "../scripts/lib/goal-engine/condition-validity.mjs";
-import { buildRemediationTaskCandidate, createRepairChallenge, issueRepairCapability, recordRepairUserDecision, repairEpisodeTransition, rejectSubjectHash, validateRemediationTask } from "../scripts/lib/goal-engine/repair-policy.mjs";
+import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
+import { evaluateConditionGraph } from "../src/goal-engine/condition-validity.ts";
+import { buildRemediationTaskCandidate, createRepairChallenge, issueRepairCapability, recordRepairUserDecision, repairEpisodeTransition, rejectSubjectHash, validateRemediationTask } from "../src/goal-engine/repair-policy.ts";
 
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `runtime-${n}`, goalId: "runtime-goal", occurredAt: `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`, type, data }; }
 function hash(n) { return String(n).padStart(64, "0"); }

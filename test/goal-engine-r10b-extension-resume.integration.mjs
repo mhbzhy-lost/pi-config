@@ -5,10 +5,10 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { appendEvent, appendEventBatch, loadProjection, listGoals, listGoalIds } from "../scripts/lib/goal-engine/store.mjs";
-import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
-import { suspensionClosureHash } from "../scripts/lib/goal-engine/events.mjs";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
+import { appendEvent, appendEventBatch, loadProjection, listGoals, listGoalIds } from "../src/goal-engine/store.ts";
+import { createObservationAdapterRegistry } from "../src/goal-engine/observation-adapters.ts";
+import { suspensionClosureHash } from "../src/goal-engine/events.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();

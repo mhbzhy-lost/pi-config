@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeRuntimeGoalInit } from "../scripts/lib/goal-engine/obligation-contract.mjs";
-import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
-import { compileTaskContract } from "../scripts/lib/goal-engine/dispatch.mjs";
-import { splitDispatchEnvelope } from "../scripts/lib/goal-engine/dispatch-ir.mjs";
-import { buildObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
+import { normalizeRuntimeGoalInit } from "../src/goal-engine/obligation-contract.ts";
+import { createProjection, applyEvent } from "../src/goal-engine/events.ts";
+import { compileTaskContract } from "../src/goal-engine/dispatch.ts";
+import { splitDispatchEnvelope } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+import { buildObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const hash = "a".repeat(64);

@@ -5,7 +5,7 @@ import { createTestTui } from "./helpers/pi-tui.mjs";
 const { jiti, codingAgent, piTui } = await loadPiTestRuntime(import.meta.url);
 const { visibleWidth } = piTui;
 const { CustomEditor } = codingAgent;
-const { ReadOnlyBrowserEditor, SubagentTranscriptViewport, parseSgrWheelDirection } = await jiti.import("../pi/extensions/lib/subagent-session-viewport.ts");
+const { ReadOnlyBrowserEditor, SubagentTranscriptViewport, parseSgrWheelDirection } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/session-viewport.ts");
 
 const editorTheme = {
   borderColor: (text) => text,

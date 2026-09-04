@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
-import createSkillWhitelistExtension from "../scripts/lib/skill-whitelist-extension.mjs";
+import createSkillWhitelistExtension from "../src/skill-whitelist/extension.ts";
 import { piHostModuleUrl } from "./helpers/pi-host.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -28,7 +28,7 @@ test("extension discovers global skills from ~/.agents/skills and project skills
   const projectPaths = result.skillPaths.filter((p) => !p.startsWith(globalSkillsDir));
 
   if (globalPaths.length === 0) {
-    t.skip("~/.agents/skills is empty (run: node scripts/sync-skills.mjs)");
+    t.skip("~/.agents/skills is empty (run: node scripts/sync-skills.ts)");
     return;
   }
   for (const p of globalPaths) {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
-import { registerTaskSchedulerAdapter } from "../scripts/lib/task-scheduler/adapter.mjs";
+import { registerTaskSchedulerAdapter } from "../src/task-scheduler/adapter.ts";
 
 function fakePi() {
   const tools = new Map(), handlers = new Map(), commands = [], sent = [];

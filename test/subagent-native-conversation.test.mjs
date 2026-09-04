@@ -7,11 +7,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
-const { jiti, codingAgent } = await loadPiTestRuntime(import.meta.url);
+const { jiti, codingAgent, piTui } = await loadPiTestRuntime(import.meta.url);
 const { getMarkdownTheme, initTheme, SessionManager } = codingAgent;
+const { Text } = piTui;
 
 initTheme("dark", false);
-const native = await jiti.import("../pi/extensions/lib/subagent-native-conversation.ts");
+const native = await jiti.import("../packages/pi-subagents-enhanced/src/tui/native-conversation.ts");
 
 function stripAnsi(value) {
   return value.replace(/\x1B(?:\][^\x07]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~])/g, "");
@@ -108,20 +109,42 @@ function render(renderer, sessionFile, sessions, cwd, overrides = {}) {
   });
 }
 
-test("uses project compact renderers for collapsed child tools and preserves expanded output", async (t) => {
+test("uses the parent tool definition renderer without mutating child tool arguments or results", async (t) => {
   const { sessions, cwd } = await createFixture(t);
   const manager = SessionManager.create(cwd, sessions);
   appendConversation(manager);
   const sessionFile = manager.getSessionFile();
   assert.ok(sessionFile);
 
-  const renderer = new native.NativeChildConversationRenderer();
+  const observed = { names: [], args: [], results: [] };
+  const renderer = new native.NativeChildConversationRenderer({
+    resolveToolRenderer(name) {
+      observed.names.push(name);
+      if (name !== "read") return undefined;
+      return {
+        renderCall(args) {
+          observed.args.push(args);
+          return new Text(`parent read: ${args.path}`, 0, 0);
+        },
+        renderResult(result, options) {
+          observed.results.push(result);
+          return new Text(options.expanded ? `parent expanded: ${result.content[0].text}` : "parent collapsed", 0, 0);
+        },
+      };
+    },
+  });
   const collapsed = stripAnsi(render(renderer, sessionFile, sessions, cwd).lines.join("\n"));
-  assert.match(collapsed, /read.*1 lines/);
+  assert.match(collapsed, /parent read: fixture\.txt/);
+  assert.match(collapsed, /parent collapsed/);
   assert.doesNotMatch(collapsed, /fixture output/);
 
   const expanded = stripAnsi(render(renderer, sessionFile, sessions, cwd, { expandedTools: true }).lines.join("\n"));
-  assert.match(expanded, /fixture output/);
+  assert.match(expanded, /parent expanded: fixture output/);
+  assert.deepEqual(observed.names, ["read", "read"]);
+  for (const args of observed.args) assert.deepEqual(args, { path: "fixture.txt" });
+  for (const result of observed.results) {
+    assert.deepEqual(result.content, [{ type: "text", text: "fixture output" }]);
+  }
 });
 
 test("renders a real SessionManager conversation with native user, assistant, and tool components", async (t) => {

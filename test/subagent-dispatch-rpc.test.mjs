@@ -5,7 +5,7 @@ import {
   TypedSubagentRpcError,
   createRenewableTypedSubagentRpcClient,
   createTypedSubagentRpcClient,
-} from "../scripts/lib/subagent-dispatch/rpc-client.ts";
+} from "../packages/pi-subagents-enhanced/src/subagent-dispatch/rpc-client.ts";
 
 function createEvents() {
   const listeners = new Map();

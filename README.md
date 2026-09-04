@@ -6,7 +6,7 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 ## 环境要求
 
 - Git
-- Node.js 22.19 或更高版本
+- Node.js 22.19 或更高版本（用于原生执行 TypeScript type-stripping）
 - uv (Python package manager)
 - Pi Coding Agent
 
@@ -123,6 +123,6 @@ basic-memory doctor --local
 
 ## Skill 选择
 
-Git 管理的共享 Skill 唯一来源是 `skill-overrides/<name>/SKILL.md`；所有非隐藏直接子目录中的合法 Skill 会由 `scripts/sync-skills.mjs` 自动同步。个人 Skill 直接放在 `~/.agents/skills`，不由仓库清单管理。
+Git 管理的共享 Skill 唯一来源是 `skill-overrides/<name>/SKILL.md`；所有非隐藏直接子目录中的合法 Skill 会由 `scripts/sync-skills.ts` 自动同步。个人 Skill 直接放在 `~/.agents/skills`，不由仓库清单管理。
 `~/.zshrc` 中的 `pi-config` 受控区块由 `init-pi.sh` 维护，不要手工复制或改写；否则 Pi
 会回到默认配置根并重新启用默认 Skill 发现。

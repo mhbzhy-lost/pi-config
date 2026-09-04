@@ -6,7 +6,7 @@ import test from "node:test";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 const { jiti } = await loadPiTestRuntime(import.meta.url);
-const adapter = await jiti.import("../pi/extensions/lib/pi-subagents-browser-adapter.ts");
+const adapter = await jiti.import("../packages/pi-subagents-enhanced/src/tui/browser-adapter.ts");
 
 const theme = {
   bold: (text) => text,

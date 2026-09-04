@@ -8,11 +8,7 @@
   "hideThinkingBlock": true,
   "packages": [
     {
-      "source": "npm:pi-subagents@0.62.0",
-      "extensions": [],
-      "skills": [],
-      "prompts": [],
-      "themes": []
+      "source": "../packages/pi-subagents-enhanced"
     },
     "../../.r2c/integrations/pi-adapter",
     {
@@ -31,8 +27,8 @@
     },
     "disableBuiltins": true
   },
-  "defaultThinkingLevel": "xhigh",
+  "defaultThinkingLevel": "low",
   "goalEngine": {
-    "enabled": true
+    "enabled": false
   }
 }

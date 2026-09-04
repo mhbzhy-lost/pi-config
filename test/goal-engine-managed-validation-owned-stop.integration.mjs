@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { stopOwnedManagedValidation } from "../scripts/lib/goal-engine/managed-validation.mjs";
+import { stopOwnedManagedValidation } from "../src/goal-engine/managed-validation.ts";
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const process = { pid: 17, pidBirthIdentity: "a".repeat(64), processGroupId: 17, processIdentityHash: hash({ pid: 17, pidBirthIdentity: "a".repeat(64), processGroupId: 17 }) };

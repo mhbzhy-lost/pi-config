@@ -7,13 +7,21 @@
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
+    "typecheck": "tsc --noEmit",
     "test:integration": "node --test test/pi-runtime.integration.mjs",
     "test:subagents": "node --test test/pi-subagents-runtime.integration.mjs",
-    "test:goal-engine": "node --test \"test/goal-engine-*.integration.mjs\" \"test/worktree-lifecycle-*.integration.mjs\"",
-    "test:subagent-workspace": "node --test \"test/subagent-*workspace*.integration.mjs\"",
-    "setup:subagent-runtime": "node scripts/setup-subagent-runtime-deps.mjs",
-    "doctor": "node scripts/doctor.mjs",
-    "worktree": "node scripts/worktree-lifecycle.mjs",
-    "worktree:audit": "node scripts/worktree-lifecycle.mjs audit"
+    "test:subagents-enhanced": "npm --prefix packages/pi-subagents-enhanced test",
+    "test:goal-engine": "node --test \"test/goal-engine-*.integration.mjs\"",
+    "test:subagent-workspace": "node --test test/managed-workspace-contract.test.mjs test/managed-workspace-ledger.integration.mjs test/managed-workspace-service.integration.mjs test/subagent-managed-worktree.integration.mjs",
+    "setup:subagent-runtime": "node scripts/setup-subagent-runtime-deps.ts",
+    "setup:subagents-enhanced": "node scripts/setup-subagent-runtime-deps.ts",
+    "verify:subagents-enhanced": "npm --prefix packages/pi-subagents-enhanced run verify:package",
+    "doctor": "node scripts/doctor.ts",
+    "worktree": "node scripts/worktree-lifecycle.ts",
+    "worktree:audit": "node scripts/worktree-lifecycle.ts audit"
+  },
+  "devDependencies": {
+    "@types/node": "26.4.1",
+    "typescript": "7.0.2"
   }
 }

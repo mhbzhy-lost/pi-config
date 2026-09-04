@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
-import { requestObservation, startObservation, recoverObservation, recordObservation, releaseObservation } from "../scripts/lib/goal-engine/observation-runner.mjs";
+import { createObservationAdapterRegistry } from "../src/goal-engine/observation-adapters.ts";
+import { requestObservation, startObservation, recoverObservation, recordObservation, releaseObservation } from "../src/goal-engine/observation-runner.ts";
 const plan={schema:"dispatch-ir.v1.validation-plan",limits:{timeoutMs:2000,maxOutputBytes:1024,terminationGraceMs:50,maxConcurrentWorkspaces:1},actions:[{id:"test",kind:"validation",executable:process.execPath,args:["-e","process.exit(0)"]}]};
 const registry=createObservationAdapterRegistry([{ref:"oracle",version:"1",deterministic:true,resourceClaims:[{key:"fixture:test",mode:"exclusive",capacity:1,reset:"clean"}],reset:"clean",artifactClassifier:{pass:"pass",fail:"fail",inconclusive:"inconclusive",infrastructure_error:"infra"},validationPlan:plan}]);
 const conditionHash="a".repeat(64), head="b".repeat(40);

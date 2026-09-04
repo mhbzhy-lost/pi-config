@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createProjection, applyEvent } from "../scripts/lib/goal-engine/events.mjs";
-import { fingerprintSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
-import { issueActionOffer, verifyAndConsumeActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
-import { appendEvent, appendEventBatchWithSettlementEvidence, loadProjection, listGoals } from "../scripts/lib/goal-engine/store.mjs";
+import { createProjection, applyEvent } from "../src/goal-engine/events.ts";
+import { fingerprintSettlementEvidence } from "../src/goal-engine/settlement-evidence.ts";
+import { issueActionOffer, verifyAndConsumeActionOffer } from "../src/goal-engine/action-offer.ts";
+import { appendEvent, appendEventBatchWithSettlementEvidence, loadProjection, listGoals } from "../src/goal-engine/store.ts";
 import { mkdtempSync, readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync, chmodSync, linkSync, symlinkSync, lstatSync, readlinkSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -59,6 +59,46 @@ function completePlannedSettlementBatch(goalId, sha256) {
     plannedEvent("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead, executorProof: { runId: "run-cas", proofId: "4".repeat(64), rootSessionId: "root-cas", observedAt: 1_700_000_000_000, outcome: "succeeded" }, settlementEvidence }, goalId),
   ];
 }
+
+test("Planned workspace request becomes dispatched only after an exact public allocation receipt", () => {
+  const goalId = "planned-workspace-request";
+  const contractHash = "a".repeat(64);
+  const baseCommit = "b".repeat(40);
+  const workspaceId = "goal-0c534777a695486e0e1dec01d834c83454d17fe336542f603d24d7f33fc001de";
+  let projection = applyEvent(createProjection(), plannedEvent("goal.created", {
+    objective: "Allocate one managed executor workspace",
+    scope: [], nonGoals: [], dod: [], tasks: ["t1"],
+    taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [plannedCriterion("proof")] }, workflow: "tdd" } },
+  }, goalId));
+
+  projection = applyEvent(projection, plannedEvent("task.dispatch_requested", {
+    taskId: "t1", attempt: 1, contractHash, workspaceId,
+    originRoot: "/tmp/origin", requestedCwd: "/tmp/origin", originRef: "refs/heads/main", baseCommit,
+  }, goalId));
+  assert.equal(projection.tasks.get("t1").status, "dispatch_requested");
+  assert.equal(projection.tasks.get("t1").workspace, null);
+  assert.deepEqual(projection.tasks.get("t1").dispatchRequest, {
+    attempt: 1, contractHash, workspaceId,
+    originRoot: "/tmp/origin", requestedCwd: "/tmp/origin", originRef: "refs/heads/main", baseCommit,
+  });
+
+  const owner = { kind: "goal-task", rootSessionId: "root-1", goalId, taskId: "t1", attempt: 1, executionRevision: 1 };
+  const workspace = {
+    schemaVersion: "managed-workspace.v1", workspaceId, leaseId: "d".repeat(64), owner,
+    originRoot: "/tmp/origin", requestedCwd: "/tmp/origin", originRef: "refs/heads/main", baseCommit,
+    path: "/tmp/workspaces/goal-workspace", dispatchCwd: "/tmp/workspaces/goal-workspace",
+    branchRef: "refs/heads/pi-managed/goal-workspace", state: "active", run: null, disposition: null, cleanupDebt: null,
+  };
+  projection = applyEvent(projection, plannedEvent("task.workspace_allocated", {
+    taskId: "t1", attempt: 1, contractHash, workspace,
+  }, goalId));
+
+  const task = projection.tasks.get("t1");
+  assert.equal(task.status, "dispatched");
+  assert.equal(task.attempts, 1);
+  assert.deepEqual(task.workspace, workspace);
+  assert.deepEqual(task.dispatchRequest, projection.tasks.get("t1").dispatchRequest);
+});
 
 // A lone LF is semantically empty even though it has a byte; it must never gain
 // settlement authority merely because it satisfies the terminal-LF transport rule.
@@ -245,7 +285,7 @@ rejectArtifactShape("content writable false data descriptor", nonDefaultDataDesc
 rejectArtifactShape("content configurable false data descriptor", nonDefaultDataDescriptor("content", "configurable"));
 
 test("v2 reducers have no ambient cwd dependency", () => {
-  const source = readFileSync(new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/goal-engine/events.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /process\.cwd\s*\(/);
 });
 
@@ -434,7 +474,7 @@ test("v2 create and amend replay identically across child-process cwd values", (
     { schemaVersion: "goal-engine.event.v2", eventId: "create", goalId: "cwd-replay", occurredAt: "2025-01-01T00:00:00.000Z", type: "goal.created", data: { objective: "cwd replay", scope: ["src"], nonGoals: ["docs"], dod: ["proof"], tasks: ["t1"], taskDefs: { t1: { description: "first", deps: [], writePaths: ["src/a.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" } } } },
     { schemaVersion: "goal-engine.event.v2", eventId: "amend", goalId: "cwd-replay", occurredAt: "2025-01-01T00:00:01.000Z", type: "goal.amended", data: { reason: "Add an independently replayable pending task", addTasks: { t2: { description: "second", deps: ["t1"], writePaths: ["src/b.ts"], acceptance: { criteria: ["works"], commands: ["true"] }, workflow: "existing-tests" } } } },
   ];
-  const moduleUrl = pathToFileURL(new URL("../scripts/lib/goal-engine/events.mjs", import.meta.url).pathname).href;
+  const moduleUrl = pathToFileURL(new URL("../src/goal-engine/events.ts", import.meta.url).pathname).href;
   const program = `const {createProjection,applyEvent}=await import(process.argv[1]); let p=createProjection(); for (const e of JSON.parse(process.argv[2])) p=applyEvent(p,e,{replay:p.version===0}); console.log(JSON.stringify({goalId:p.goalId,version:p.version,objective:p.objective,scope:p.scope,nonGoals:p.nonGoals,dod:p.dod,tasks:[...p.tasks]}));`;
   const first = mkdtempSync(join(tmpdir(), "ge-replay-a-"));
   const second = mkdtempSync(join(tmpdir(), "ge-replay-b-"));
@@ -2437,7 +2477,7 @@ test("planned.v1 is an isolated persisted generation with strict criteria", () =
 test("two child settlements deterministically contend on the writer lock and share one immutable artifact", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "ge-dual-settle-b1-"));
   const content = "settlement: accepted\n", sha256 = createHash("sha256").update(content).digest("hex");
-  const storeUrl = pathToFileURL(join(process.cwd(), "scripts/lib/goal-engine/store.mjs")).href;
+  const storeUrl = pathToFileURL(join(process.cwd(), "src/goal-engine/store.mjs")).href;
   const childProgram = String.raw`
     const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), { pathToFileURL } = require("node:url"), { syncBuiltinESMExports } = require("node:module");
     const input = JSON.parse(process.env.DUAL_SETTLE_INPUT);
@@ -2458,7 +2498,7 @@ test("two child settlements deterministically contend on the writer lock and sha
     const report = (ref) => ({ identity, criteria: [{ id: "proof", status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
     const subagent = report("sha256:" + "2".repeat(64)), main = report("sha256:" + "3".repeat(64));
     const evidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: "acceptance-evidence/sha256/" + input.sha256 + ".yaml", sha256: input.sha256, subagentFingerprint: null, mainFingerprint: null, subagent, main, mainSessionId: "root-cas" };
-    const { fingerprintSettlementEvidence } = await import(pathToFileURL(path.join(process.cwd(), "scripts/lib/goal-engine/settlement-evidence.mjs")).href);
+    const { fingerprintSettlementEvidence } = await import(pathToFileURL(path.join(process.cwd(), "src/goal-engine/settlement-evidence.mjs")).href);
     evidence.subagentFingerprint = fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: ["proof"] }); evidence.mainFingerprint = fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: ["proof"] });
     const batch = [event("goal.created", { objective: "dual", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "proof", statement: "proof", evidenceKinds: ["tests"] }] }, workflow: "tdd" } } }), event("task.dispatched", { taskId: "t1", contractHash: "a".repeat(64), workspace: { attempt: 1, path: "/tmp/cas", branch: "ge/cas", baseCommit: "b".repeat(40) } }), event("task.executor_bound", { taskId: "t1", attempt: 1, runId: identity.runId, contractHash: "a".repeat(64), asyncDir: "/tmp/cas", workspacePath: "/tmp/cas", workspaceLeaseId: "d".repeat(64), headAtDispatch: "b".repeat(40) }), event("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead: "c".repeat(40), executorProof: { runId: identity.runId, proofId: "4".repeat(64), rootSessionId: "root-cas", observedAt: 1700000000000, outcome: "succeeded" }, settlementEvidence: evidence })];
     process.send({ type: "ready" }); await new Promise(resolve => process.once("message", resolve));
@@ -2512,7 +2552,7 @@ test("two child settlements deterministically contend on the writer lock and sha
 }, { timeout: 15_000 });
 
 function runSettlementReplacementRed(boundary) {
-  const input = { boundary, storeUrl: pathToFileURL(join(process.cwd(), "scripts/lib/goal-engine/store.mjs")).href };
+  const input = { boundary, storeUrl: pathToFileURL(join(process.cwd(), "src/goal-engine/store.mjs")).href };
   const child = String.raw`
     (async () => {
       const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
@@ -2546,7 +2586,7 @@ function runSettlementReplacementRed(boundary) {
       const identity = { goalId: "replacement-" + input.boundary, taskId: "t1", runId: "run-replacement", attempt: 1, contractHash: "a".repeat(64), head: "c".repeat(40) };
       const report = ref => ({ identity, criteria: [{ id: "proof", status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
       const subagent = report("sha256:" + "2".repeat(64)), main = report("sha256:" + "3".repeat(64));
-      const { fingerprintSettlementEvidence } = await import(require("node:url").pathToFileURL(path.join(process.cwd(), "scripts/lib/goal-engine/settlement-evidence.mjs")).href);
+      const { fingerprintSettlementEvidence } = await import(require("node:url").pathToFileURL(path.join(process.cwd(), "src/goal-engine/settlement-evidence.mjs")).href);
       const evidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: "acceptance-evidence/sha256/" + sha256 + ".yaml", sha256, subagentFingerprint: fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: ["proof"] }), mainFingerprint: fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: ["proof"] }), subagent, main, mainSessionId: "root-cas" };
       const batch = [event("goal.created", { objective: "replacement", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "proof", statement: "proof", evidenceKinds: ["tests"] }] }, workflow: "tdd" } } }), event("task.dispatched", { taskId: "t1", contractHash: "a".repeat(64), workspace: { attempt: 1, path: "/tmp/cas", branch: "ge/cas", baseCommit: "b".repeat(40) } }), event("task.executor_bound", { taskId: "t1", attempt: 1, runId: identity.runId, contractHash: "a".repeat(64), asyncDir: "/tmp/cas", workspacePath: "/tmp/cas", workspaceLeaseId: "d".repeat(64), headAtDispatch: "b".repeat(40) }), event("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead: "c".repeat(40), executorProof: { runId: identity.runId, proofId: "4".repeat(64), rootSessionId: "root-cas", observedAt: 1700000000000, outcome: "succeeded" }, settlementEvidence: evidence })];
       let error = null; phase = "append"; inAppend = true; try { appendEventBatchWithSettlementEvidence(input.root, batch, 0, { sha256, content }); } catch (cause) { error = String(cause && cause.message); } finally { phase = "post"; inAppend = false; }

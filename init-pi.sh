@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PI_VERSION="0.84.4"
 PI_PACKAGE="@earendil-works/pi-coding-agent@$PI_VERSION"
-PI_SUBAGENTS_VERSION="0.62.0"
 NPM_REGISTRY="https://registry.npmjs.org"
 BASIC_MEMORY_VERSION="0.22.1"
 ZSHRC_PATH="${ZDOTDIR:-$HOME}/.zshrc"
@@ -21,11 +20,14 @@ for required_command in git node npm zsh uv; do
   require_command "$required_command"
 done
 
-node_major="$(node -p 'process.versions.node.split(".")[0]')"
-if [[ "$node_major" -lt 22 ]]; then
-  printf 'Node.js 22 or newer is required; found %s\n' "$(node --version)" >&2
+node_version="$(node -p 'process.versions.node')"
+IFS=. read -r node_major node_minor node_patch <<< "$node_version"
+if (( node_major < 22 || (node_major == 22 && node_minor < 19) )); then
+  printf 'Node.js 22.19.0 or newer is required; found %s\n' "$(node --version)" >&2
   exit 1
 fi
+
+node "$SCRIPT_DIR/scripts/setup-subagent-runtime-deps.ts" --check-upgrade
 
 pi_binary="${PI_REAL_BIN:-$(command -v pi || true)}"
 installed_version=""
@@ -41,10 +43,9 @@ if [[ -z "$pi_binary" || ! -x "$pi_binary" ]]; then
   exit 1
 fi
 
-NPM_CONFIG_REGISTRY="$NPM_REGISTRY" PI_CODING_AGENT_DIR="$SCRIPT_DIR/pi" "$pi_binary" install "npm:pi-subagents@$PI_SUBAGENTS_VERSION"
-NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm --prefix "$SCRIPT_DIR" run setup:subagent-runtime
+NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm --prefix "$SCRIPT_DIR" run setup:subagents-enhanced
 
-node "$SCRIPT_DIR/scripts/sync-skills.mjs"
+node "$SCRIPT_DIR/scripts/sync-skills.ts"
 
 mkdir -p "$(dirname -- "$ZSHRC_PATH")"
 node - "$ZSHRC_PATH" "$SHELL_INTEGRATION" <<'NODE'

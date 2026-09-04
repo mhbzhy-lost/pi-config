@@ -5,10 +5,12 @@ import path from "node:path";
 import test from "node:test";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
-const { jiti, codingAgent } = await loadPiTestRuntime(import.meta.url);
+const { jiti, codingAgent, piTui } = await loadPiTestRuntime(import.meta.url);
 const { SessionManager, initTheme } = codingAgent;
-const customFooterModule = await jiti.import("../pi/extensions/custom-footer.ts");
-const { SubagentSessionBrowserState } = await jiti.import("../pi/extensions/lib/subagent-session-browser.ts");
+const { Text } = piTui;
+const customFooterModule = await jiti.import("../packages/pi-subagents-enhanced/extensions/custom-footer.ts");
+const { SubagentSessionBrowserState } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/session-browser.ts");
+const { getTitleRegistry } = await jiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts");
 
 initTheme("dark", false);
 
@@ -71,7 +73,7 @@ test("main selector expands active children and folds terminal children into dis
   };
 
   const selector = customFooterModule.formatBrowserSelector(snapshot, 80);
-  assert.equal(selector, "● executor  ◯ history 2");
+  assert.equal(selector, "● executor\n◯ history 2");
   assert.doesNotMatch(selector, /main|reviewer|tester/);
 });
 
@@ -111,11 +113,11 @@ test("selector caps one long title without mutating the roster or hiding sibling
   const before = structuredClone(snapshot);
 
   const selector = customFooterModule.formatBrowserSelector(snapshot, 100);
+  const flattenedSelector = selector.replace(/\s+/g, " ");
 
   assert.match(selector, /This is an accidentally verbose/);
-  assert.doesNotMatch(selector, /original task text and keeps going/);
-  assert.match(selector, /Short check \(executor\)/);
-  assert.match(selector, /history 1/);
+  assert.match(flattenedSelector, /original task text and keeps going/);
+  assert.match(flattenedSelector, /history 1/);
   assert.deepEqual(snapshot, before);
 
   const childSelector = customFooterModule.formatBrowserSelector({
@@ -125,6 +127,141 @@ test("selector caps one long title without mutating the roster or hiding sibling
   }, 58);
   assert.match(childSelector, /^› ● This is an accidentally verbose/);
   assert.deepEqual(snapshot, before);
+});
+
+test("selector wraps long child labels without ellipsis and aligns continuation text", () => {
+  const selector = customFooterModule.formatBrowserSelector({
+    active: true,
+    selectedKey: "long:0",
+    children: [{
+      key: "long:0", agent: "executor", state: "running",
+      label: "A very long dispatch title that must remain fully visible",
+    }],
+    activeChildren: [],
+    recentChildren: [],
+  }, 24);
+  const lines = selector.split("\n");
+  assert.equal(lines.length > 2, true);
+  assert.doesNotMatch(selector, /\.\.\./);
+  assert.match(lines[0], /^› ● /);
+  for (const line of lines.slice(1)) assert.match(line, /^    /);
+  const flattened = lines.join(" ");
+  assert.match(flattened, /A very long dispatch/);
+  assert.match(flattened, /fully visible/);
+});
+
+test("main selector wraps a long active label while retaining history counter", () => {
+  const selector = customFooterModule.formatBrowserSelector({
+    active: false,
+    selectedKey: undefined,
+    children: [],
+    activeChildren: [{ key: "main:0", runId: "main", agent: "executor", state: "running", label: "A long active dispatch title" }],
+    recentChildren: [{ key: "done:0", runId: "done", agent: "reviewer", state: "completed" }],
+  }, 18);
+  assert.doesNotMatch(selector, /\.\.\./);
+  assert.match(selector, /A long active/);
+  assert.match(selector, /dispatch title/);
+  assert.match(selector, /history 1/);
+  for (const line of selector.split("\n").slice(1).filter((line) => !line.includes("history"))) assert.match(line, /^  /);
+});
+
+test("main selector places history on its own physical row after wrapped active entries", () => {
+  const selector = customFooterModule.formatBrowserSelector({
+    active: false,
+    selectedKey: undefined,
+    children: [],
+    activeChildren: [{ key: "main-long:0", runId: "main-long", agent: "executor", state: "running", label: "A long active dispatch title" }],
+    recentChildren: [{ key: "done:0", runId: "done", agent: "reviewer", state: "completed" }],
+  }, 18);
+  const lines = selector.split("\n");
+  const historyIndex = lines.findIndex((line) => line.includes("◯ history 1"));
+  assert.ok(historyIndex > 0);
+  assert.doesNotMatch(lines[historyIndex - 1], /history/);
+  assert.match(lines[historyIndex], /^●?\s*◯ history 1$/);
+  for (const line of lines.slice(1, historyIndex)) assert.match(line, /^  /);
+});
+
+test("footer expands wrapped selector rows before the thinking row", () => {
+  const snapshot = {
+    active: true,
+    selectedKey: "long:0",
+    selected: { key: "long:0", agent: "executor", state: "running", label: "A very long dispatch title that needs wrapping", model: "provider/model" },
+    children: [{ key: "long:0", agent: "executor", state: "running", label: "A very long dispatch title that needs wrapping" }],
+    activeChildren: [{ key: "long:0", agent: "executor", state: "running", label: "A very long dispatch title that needs wrapping" }],
+    recentChildren: [],
+  };
+  const component = customFooterModule.createFooterComponent({
+    getCwd: () => "/repo", getHome: () => "/home", getModel: () => ({ id: "main" }),
+    getContextUsage: () => ({ percent: 1, contextWindow: 100_000 }), getThinkingLevel: () => "medium",
+    getSnapshot: () => snapshot, getViewportPosition: () => ({ start: 1, end: 1, total: 1 }), requestRender() {},
+    theme: { fg: (_color, value) => value },
+  });
+  const lines = component.render(40);
+  assert.equal(lines.length, 3);
+  assert.doesNotMatch(lines[2], /\n/);
+  assert.match(lines[2], /thinking: medium$/);
+});
+
+test("footer keeps thinking on the fixed third row when main selector wraps with history", () => {
+  const snapshot = {
+    active: false,
+    selectedKey: undefined,
+    children: [],
+    activeChildren: [{ key: "main-wrap:0", runId: "main-wrap", agent: "executor", state: "running", label: "A long active dispatch title that needs wrapping" }],
+    recentChildren: [{ key: "done:0", runId: "done", agent: "reviewer", state: "completed" }],
+  };
+  const component = customFooterModule.createFooterComponent({
+    getCwd: () => "/repo", getHome: () => "/home", getModel: () => ({ provider: "provider", id: "long-model-name" }),
+    getContextUsage: () => ({ percent: 1, contextWindow: 100_000 }), getThinkingLevel: () => "xhigh",
+    getSnapshot: () => snapshot, getViewportPosition: () => undefined, requestRender() {},
+    theme: { fg: (_color, value) => value },
+  });
+  const lines = component.render(40);
+  assert.ok(lines.length > 3);
+  assert.doesNotMatch(lines[2], /\n/);
+  assert.match(lines[2], /thinking: xhigh$/);
+  assert.match(lines.at(-1), /◯ history 1/);
+});
+
+test("main footer shows every active child without count folding", () => {
+  const activeChildren = ["One long active dispatch title", "Second task", "Third task", "Fourth task"].map((label, index) => ({
+    key: `active-${index}:0`, runId: `active-${index}`, agent: index === 0 ? "executor" : "delegate", state: "running", label,
+  }));
+  const snapshot = {
+    active: false,
+    selectedKey: undefined,
+    children: activeChildren,
+    activeChildren,
+    recentChildren: [{ key: "done:0", runId: "done", agent: "reviewer", state: "completed" }],
+  };
+  const component = customFooterModule.createFooterComponent({
+    getCwd: () => "/repo", getHome: () => "/home", getModel: () => ({ provider: "provider", id: "model" }),
+    getContextUsage: () => ({ percent: 1, contextWindow: 100_000 }), getThinkingLevel: () => "xhigh",
+    getSnapshot: () => snapshot, getViewportPosition: () => undefined, requestRender() {},
+    theme: { fg: (_color, value) => value },
+  });
+  const rendered = component.render(60).join("\n");
+  for (const label of ["One long active dispatch title", "Second task", "Third task", "Fourth task"]) assert.match(rendered, new RegExp(label));
+  assert.match(rendered, /◯ history 1/);
+  assert.doesNotMatch(rendered, /\+\d/);
+  assert.match(component.render(60)[2], /thinking: xhigh$/);
+  assert.match(component.render(60).at(-1), /◯ history 1$/);
+});
+
+test("wide main selector never returns an early count-folded first item", () => {
+  const activeChildren = ["First", "Second", "Third", "Fourth"].map((label, index) => ({
+    key: `wide-${index}:0`, runId: `wide-${index}`, agent: "executor", state: "running", label,
+  }));
+  const selector = customFooterModule.formatBrowserSelector({
+    active: false,
+    selectedKey: undefined,
+    children: activeChildren,
+    activeChildren,
+    recentChildren: [{ key: "wide-done:0", runId: "wide-done", agent: "reviewer", state: "completed" }],
+  }, 30);
+  assert.doesNotMatch(selector, /\+\d/);
+  for (const label of ["First", "Second", "Third", "Fourth"]) assert.match(selector, new RegExp(label));
+  assert.match(selector.split("\n").at(-1), /◯ history 1/);
 });
 
 test("child selector separates selection from lifecycle glyphs and keeps selected child visible when narrow", () => {
@@ -273,7 +410,7 @@ function register(map, name, handler) {
 
 function setup(reason) {
   const handlers = new Map(); const events = new Map(); let footerFactory; let shortcut;
-  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", registerShortcut(_key, definition) { shortcut = definition; } };
+  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", getAllTools: () => [], registerShortcut(_key, definition) { shortcut = definition; } };
   customFooterModule.default(pi);
   const ctx = {
     hasUI: true, cwd: `${process.env.HOME}/workspace`, model: { provider: "codex-pool", id: "gpt-5.6-sol", contextWindow: 272_000 },
@@ -298,9 +435,58 @@ test("footer renders a fixed three-line child status row", (t) => {
   subject.asyncStart({ id: "run-1", asyncDir: "/tmp/run-1", cwd: "/repo", agents: ["executor", "reviewer"] });
   const lines = subject.component.render(58);
   assert.equal(lines.length, 3);
-  assert.match(lines[1], /^● executor  ● reviewer/);
+  assert.match(lines[1], /^● executor/);
+  assert.match(lines[2], /^● reviewer/);
   assert.doesNotMatch(lines[1], /main/);
   assert.match(lines[1], /\(codex-pool\) gpt-5\.6-sol$/);
+});
+
+test("footer keeps the dispatch title when 0.62.0 redacts async-start task and omits title", (t) => {
+  const registry = getTitleRegistry();
+  registry.prepare({ agent: "executor", task: "Implement the footer fix", title: "Investigate footer" });
+  const subject = setup(); t.after(() => subject.shutdown("quit"));
+  subject.asyncStart({ id: "redacted-title-run", asyncDir: "/tmp/redacted-title-run", cwd: "/repo", agent: "executor", task: "[prompt redacted]", goal: "[prompt redacted]" });
+  assert.match(subject.component.render(80)[1], /Investigate footer \(executor\)/);
+  assert.doesNotMatch(subject.component.render(80)[1], /typed-/);
+});
+
+test("footer does not consume the next pending title when runtime event already has a title", (t) => {
+  const registry = getTitleRegistry();
+  registry.prepare({ agent: "executor", task: "first prompt", title: "First concurrent title" });
+  registry.prepare({ agent: "executor", task: "second prompt", title: "Second concurrent title" });
+  const subject = setup(); t.after(() => subject.shutdown("quit"));
+  const emitThroughRuntime = (id, task) => {
+    const raw = { id, asyncDir: `/tmp/${id}`, cwd: "/repo", agent: "executor", task };
+    const title = registry.started(raw);
+    subject.asyncStart(title ? { ...raw, title } : raw);
+  };
+  emitThroughRuntime("concurrent-first", "first prompt");
+  emitThroughRuntime("concurrent-second", "second prompt");
+  const rendered = subject.component.render(100).join("\n");
+  assert.match(rendered, /First concurrent title \(executor\)/);
+  assert.match(rendered, /Second concurrent title \(executor\)/);
+  assert.doesNotMatch(rendered, /^● executor$/m);
+});
+
+test("selector recovers authoritative run titles after reload without rewriting persisted roster", () => {
+  const registry = getTitleRegistry();
+  registry.remember("reload-missing", "Recovered missing title");
+  registry.remember("reload-wrong", "Recovered correct title");
+  const activeChildren = [
+    { key: "reload-missing:0", runId: "reload-missing", agent: "executor", state: "running" },
+    { key: "reload-wrong:0", runId: "reload-wrong", agent: "executor", state: "running", label: "Stale wrong title" },
+    { key: "untyped:0", runId: "untyped", agent: "delegate", state: "running", label: "Untyped label" },
+  ];
+  const snapshot = { active: false, selectedKey: undefined, children: activeChildren, activeChildren, recentChildren: [] };
+  const before = structuredClone(snapshot);
+  const rendered = customFooterModule.formatBrowserSelector(snapshot, 100);
+  assert.match(rendered, /Recovered missing title \(executor\)/);
+  assert.match(rendered, /Recovered correct title \(executor\)/);
+  assert.match(rendered, /Untyped label \(delegate\)/);
+  assert.doesNotMatch(rendered, /Stale wrong title|^● executor$/m);
+  assert.deepEqual(snapshot, before);
+  assert.equal(registry.titleFor("reload-missing"), "Recovered missing title");
+  assert.equal(registry.titleFor("reload-wrong"), "Recovered correct title");
 });
 
 test("child mode reserves the directional focus glyph when a long model label would otherwise take the second line", (t) => {
@@ -309,7 +495,7 @@ test("child mode reserves the directional focus glyph when a long model label wo
   subject.input()("\x1bo");
   const lines = subject.component.render(14);
   assert.equal(lines.length, 3);
-  assert.match(lines[1], /›/);
+  assert.ok(lines[1].includes("›"));
 });
 test("browser input consumes Alt+O and legacy inspector input instead of rewriting shortcuts", (t) => {
   const subject = setup(); t.after(() => subject.shutdown("quit"));
@@ -351,7 +537,7 @@ function runtimeFixture(fixtureOptions = {}) {
   const originalSetInterval = globalThis.setInterval; const originalClearInterval = globalThis.clearInterval;
   globalThis.setInterval = (callback) => { const timer = { callback, unrefCalls: 0, unref() { this.unrefCalls += 1; } }; timers.push(timer); return timer; };
   globalThis.clearInterval = (timer) => { cleared.push(timer); };
-  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", registerShortcut(_key, definition) { shortcut = definition; } };
+  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", getAllTools: () => fixtureOptions.tools ?? [], registerShortcut(_key, definition) { shortcut = definition; } };
   customFooterModule.default(pi);
   const ctx = {
     hasUI: true, cwd: "/repo", model: { id: "model" }, getContextUsage: () => ({ percent: 1, contextWindow: 100 }), sessionManager: { getSessionFile: () => null },
@@ -592,7 +778,16 @@ test("x toggles native tool result visibility while consuming browser input", (t
   child.appendMessage({ role: "toolResult", toolCallId: "footer-tool", toolName: "read", content: [{ type: "text", text: "expanded native tool result" }], isError: false, timestamp: Date.now() });
   const sessionFile = child.getSessionFile();
   assert.ok(sessionFile);
-  const subject = runtimeFixture();
+  const subject = runtimeFixture({
+    tools: [{
+      name: "read",
+      renderCall(args) { return new Text(`parent footer read: ${args.path}`, 0, 0); },
+      renderResult(result, options) {
+        const text = result.content?.find((item) => item.type === "text")?.text ?? "";
+        return new Text(options.expanded ? `parent footer expanded: ${text}` : "parent footer collapsed", 0, 0);
+      },
+    }],
+  });
   subject.ctx.sessionManager.getSessionFile = () => parent.getSessionFile();
   t.after(() => { subject.shutdown(); subject.restore(); fs.rmSync(sessions, { recursive: true, force: true }); });
 
@@ -607,7 +802,9 @@ test("x toggles native tool result visibility while consuming browser input", (t
   const collapsedAgain = subject.custom[0].component.render(80).join("\n");
 
   assert.notEqual(expanded, collapsed);
-  assert.match(expanded, /expanded native tool result/);
+  assert.match(collapsed, /parent footer read: fixture\.txt/);
+  assert.match(collapsed, /parent footer collapsed/);
+  assert.match(expanded, /parent footer expanded: expanded native tool result/);
   assert.equal(collapsedAgain, collapsed);
 });
 

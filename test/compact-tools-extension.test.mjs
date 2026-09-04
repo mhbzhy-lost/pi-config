@@ -51,7 +51,7 @@ test("registered execute selects the live cwd native tool and forwards five argu
     const mockPath = join(temporaryDirectory, "pi-mock.mjs");
     const tuiPath = join(temporaryDirectory, "tui-mock.mjs");
     const extensionPath = join(temporaryDirectory, "compact-tools.ts");
-    const rendererUrl = pathToFileURL(new URL("../scripts/lib/compact-tools-renderer.mjs", import.meta.url).pathname).href;
+    const rendererUrl = pathToFileURL(new URL("../src/compact-tools/renderer.ts", import.meta.url).pathname).href;
 
     await writeFile(mockPath, `
 export const calls = [];
@@ -69,7 +69,7 @@ export class SkillInvocationMessageComponent {}
     const source = extensionSource
       .replace("@earendil-works/pi-coding-agent", pathToFileURL(mockPath).href)
       .replace("@earendil-works/pi-tui", pathToFileURL(tuiPath).href)
-      .replace("../../scripts/lib/compact-tools-renderer.mjs", rendererUrl);
+      .replace("../../src/compact-tools/renderer.ts", rendererUrl);
     await writeFile(extensionPath, source);
 
     const mock = await import(pathToFileURL(mockPath).href);

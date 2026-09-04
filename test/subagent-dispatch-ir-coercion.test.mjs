@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
+import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts";
 
 /**
  * Tests for coercing stringified JSON fields back to objects/arrays.

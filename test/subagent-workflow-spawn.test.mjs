@@ -7,7 +7,7 @@ import {
   buildWorkflowSpawn,
   childStartTimeoutMs,
   createWorkflowChildStartCollector,
-} from "../scripts/lib/subagent-dispatch/workflow-spawn.ts";
+} from "../packages/pi-subagents-enhanced/src/subagent-dispatch/workflow-spawn.ts";
 
 function createEvents() {
   const listeners = new Map();
@@ -62,6 +62,10 @@ test("compiles one safe checked leaf workflow without public direct-execution fi
       criteria: ["The facade remains project-owned."],
       evidence: ["changed-files", "commands-run"],
     },
+    child: {
+      output: false,
+      subagentOnlyExtensions: ["/package/child-extensions/root-session-owner.ts", "/package/child-extensions/acceptance-evidence.ts"],
+    },
   });
 
   assert.deepEqual({ ...request, workflowScript: "<script>" }, {
@@ -100,6 +104,7 @@ test("compiles one safe checked leaf workflow without public direct-execution fi
       async: true,
       worktree: false,
       output: false,
+      subagentOnlyExtensions: ["/package/child-extensions/root-session-owner.ts", "/package/child-extensions/acceptance-evidence.ts"],
       acceptance: {
         level: "checked",
         criteria: ["The facade remains project-owned."],

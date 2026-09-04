@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildObligationFinalizationManifest, validateObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
+import { buildObligationFinalizationManifest, validateObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
 
 const hash = "a".repeat(64);
 const projection = { goalId: "g", executionRevision: 1, executionContractHash: hash, stateHash: hash, tasks: new Map(), conditions: new Map() };

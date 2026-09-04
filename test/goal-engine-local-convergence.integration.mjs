@@ -5,13 +5,13 @@ import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync } from "
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { fingerprintSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
-import { actionableFrontier } from "../scripts/lib/goal-engine/obligation-policy.mjs";
-import { taskActionState } from "../scripts/lib/goal-engine/graph.mjs";
-import { evaluateConditionGraph } from "../scripts/lib/goal-engine/condition-validity.mjs";
+import { appendEvent, loadProjection } from "../src/goal-engine/store.ts";
+import { fingerprintSettlementEvidence } from "../src/goal-engine/settlement-evidence.ts";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
+import { createObservationAdapterRegistry } from "../src/goal-engine/observation-adapters.ts";
+import { actionableFrontier } from "../src/goal-engine/obligation-policy.ts";
+import { taskActionState } from "../src/goal-engine/graph.ts";
+import { evaluateConditionGraph } from "../src/goal-engine/condition-validity.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }

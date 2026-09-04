@@ -4,8 +4,8 @@ import { createJiti } from "../pi/npm/node_modules/jiti/lib/jiti.mjs";
 import { Compile } from "../pi/npm/node_modules/typebox/build/compile/index.mjs";
 
 const jiti = createJiti(import.meta.url, { moduleCache: false });
-const { CodingDispatchContractError, compileCodingDispatchIR } = await jiti.import("../scripts/lib/subagent-dispatch/ir.ts");
-const { createTypedSubagentExtension, TYPED_SUBAGENT_PARAMETERS } = await jiti.import("../scripts/lib/subagent-dispatch/extension.ts");
+const { CodingDispatchContractError, compileCodingDispatchIR } = await jiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts");
+const { createTypedSubagentExtension, TYPED_SUBAGENT_PARAMETERS } = await jiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts");
 
 function contract(overrides = {}) {
   const base = {
@@ -18,7 +18,7 @@ function contract(overrides = {}) {
     workflow: { mode: "tdd" },
     requirements: ["Keep validation strict."],
     context: { knownFacts: [], decisions: [], relevantFiles: [] },
-    boundaries: { writePaths: ["scripts/lib/subagent-dispatch/ir.ts"], excludedWork: [], forbiddenActions: [] },
+    boundaries: { writePaths: ["packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts"], excludedWork: [], forbiddenActions: [] },
     acceptance: { criteria: ["Errors identify their keypath."] },
     execution: { timeoutMs: 60_000 },
   };

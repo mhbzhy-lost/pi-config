@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import * as compat from "../scripts/probes/pi-subagents-compat.mjs";
+import * as compat from "../scripts/probes/pi-subagents-compat.ts";
 import { piHostAliases, piHostJitiUrl, piHostModuleUrl } from "./helpers/pi-host.mjs";
 
 const { createJiti } = await import(piHostJitiUrl);
@@ -14,6 +14,8 @@ const {
 } = await import(piHostModuleUrl);
 const { createSubagentsRpcClient, REQUIRED_METHODS } = compat;
 const repoRoot = process.cwd();
+const enhancedPackageRoot = join(repoRoot, "packages/pi-subagents-enhanced");
+const upstreamPackageRoot = join(enhancedPackageRoot, "node_modules/pi-subagents");
 const compatibleReport = {
   piVersion: "0.84.1",
   version: "0.62.0",
@@ -86,7 +88,7 @@ test("preserves npm stderr when resolving the global root fails", async () => {
 });
 
 test("pinned process-terminal event is declared and emitted by async execution", async () => {
-  const packageRoot = join(repoRoot, "pi/npm/node_modules/pi-subagents");
+  const packageRoot = upstreamPackageRoot;
   const [types, execution] = await Promise.all([
     readFile(join(packageRoot, "src/shared/types.ts"), "utf8"),
     readFile(join(packageRoot, "src/runs/background/async-execution.ts"), "utf8"),
@@ -97,26 +99,27 @@ test("pinned process-terminal event is declared and emitted by async execution",
 
 test("installed launch arguments keep project child agents outside fanout hierarchy", async () => {
   const jiti = createJiti(import.meta.url, { moduleCache: false });
-  const piArgs = await jiti.import(join(repoRoot, "pi/npm/node_modules/pi-subagents/src/runs/shared/pi-args.ts"));
+  const piArgs = await jiti.import(join(upstreamPackageRoot, "src/runs/shared/pi-args.ts"));
+  const rootOwnerExtension = join(enhancedPackageRoot, "child-extensions/root-session-owner.ts");
   const agents = Object.fromEntries(await Promise.all(["executor"].map(async (name) => {
     const source = await readFile(join(repoRoot, "pi/agents", `${name}.md`), "utf8");
     const fields = Object.fromEntries(source.match(/^---\n([\s\S]*?)\n---/)[1].split("\n").map((line) => line.split(/:\s*/, 2)));
     return [name, fields];
   })));
   for (const fields of Object.values(agents)) {
-    const plan = piArgs.resolvePiLaunchToolPlan({ tools: fields.tools?.split(/,\s*/), subagentOnlyExtensions: fields.subagentOnlyExtensions ? [fields.subagentOnlyExtensions] : [], cwd: repoRoot });
+    const plan = piArgs.resolvePiLaunchToolPlan({ tools: fields.tools?.split(/,\s*/), subagentOnlyExtensions: [rootOwnerExtension], cwd: repoRoot });
     assert.equal(plan.fanoutAuthorized, false);
     assert.ok(!plan.declaredBuiltinTools.includes("subagent"));
     assert.ok(!plan.extensionArgs.some((entry) => entry.includes("fanout-child")));
   }
-  await access(join(repoRoot, agents.executor.subagentOnlyExtensions));
-  const built = piArgs.buildPiArgs({ baseArgs: [], task: "probe", sessionEnabled: false, inheritProjectContext: false, inheritSkills: false, tools: agents.executor.tools.split(/,\s*/), subagentOnlyExtensions: [agents.executor.subagentOnlyExtensions], cwd: repoRoot });
+  await access(rootOwnerExtension);
+  const built = piArgs.buildPiArgs({ baseArgs: [], task: "probe", sessionEnabled: false, inheritProjectContext: false, inheritSkills: false, tools: agents.executor.tools.split(/,\s*/), subagentOnlyExtensions: [rootOwnerExtension], cwd: repoRoot });
   try {
     assert.equal(built.env.PI_SUBAGENT_FANOUT_CHILD, "0");
     assert.equal(built.env.PI_SUBAGENT_PARENT_DEPTH || undefined, undefined);
     assert.equal(built.env.PI_SUBAGENT_PARENT_RUN_ID || undefined, undefined);
     assert.equal(built.env.PI_SUBAGENT_PARENT_PATH || undefined, undefined);
-    assert.ok(built.args.includes(agents.executor.subagentOnlyExtensions));
+    assert.ok(built.args.includes(rootOwnerExtension));
     assert.ok(built.args.includes("--no-context-files"));
   } finally { await rm(built.tempDir, { recursive: true, force: true }); }
 });
@@ -135,15 +138,10 @@ test("requires upstream fleet transcript, artifact-root, and every public Pi nat
     piModule,
     jiti: { import: async (path) => {
       imported.push(path);
-      return path.endsWith("fleet-transcript.ts")
-        ? { readFleetTranscript() {}, renderFleetTranscript() {} }
-        : { getArtifactsDir() {} };
+      return { readFleetTranscript() {}, renderFleetTranscript() {}, getArtifactsDir() {} };
     } },
   });
-  assert.deepEqual(imported, [
-    join("/tmp/pi-subagents", "src/tui/fleet-transcript.ts"),
-    join("/tmp/pi-subagents", "src/shared/artifacts.ts"),
-  ]);
+  assert.deepEqual(imported, [join("/tmp/pi-subagents", "src/compat/pi-subagents-0.62.ts")]);
 
   for (const capability of capabilities) {
     const incomplete = { ...piModule };
@@ -158,27 +156,31 @@ test("requires upstream fleet transcript, artifact-root, and every public Pi nat
   }
 });
 
-test("checks browser transcript compatibility against the installed pi-subagents package", async () => {
+test("checks browser transcript compatibility through the enhanced package compat boundary", async () => {
   const jiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
   await compat.assertBrowserTranscriptCompatibility({
-    packageRoot: join(process.cwd(), "pi/npm/node_modules/pi-subagents"),
+    packageRoot: enhancedPackageRoot,
     jiti,
   });
 });
 
-test("binds the installed supervisor runtime behind project-owned tools", async () => {
-  const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED"];
+test("loads exactly one enhanced runtime and footer from a local package source", async () => {
+  const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_CODING_WORKSPACE_DIR"];
   const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
   for (const name of markers) delete process.env[name];
   const runtimeMarkers = new Map(markers.map((name) => [name, process.env[name]]));
 
   const agentDir = await mkdtemp(join(tmpdir(), "pi-subagents-compat-"));
+  process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
   let result;
   try {
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({
+      packages: [{ source: enhancedPackageRoot }],
+      subagents: { disableBuiltins: true },
+    }));
     const loader = new DefaultResourceLoader({
       cwd: repoRoot,
       agentDir,
-      additionalExtensionPaths: [join(repoRoot, "pi/extensions/subagent-runtime.ts")],
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -203,14 +205,20 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
       .map((tool) => tool.name)
       .filter((name) => name.includes("subagent") || name === "intercom");
     const subagent = result.session.getToolDefinition("subagent");
-    const notifyRenderer = result.session.resourceLoader.getExtensions().extensions
+    const loadedExtensions = result.session.resourceLoader.getExtensions().extensions;
+    const notifyRenderers = loadedExtensions
       .map((extension) => extension.messageRenderers.get("subagent-notify"))
-      .find((renderer) => typeof renderer === "function");
+      .filter((renderer) => typeof renderer === "function");
+    const supervisorRenderers = loadedExtensions
+      .map((extension) => extension.messageRenderers.get("subagent_supervisor_request"))
+      .filter((renderer) => typeof renderer === "function");
+    const footerOwners = loadedExtensions.filter((extension) => String(extension.path).endsWith("/extensions/custom-footer.ts"));
+    const notifyRenderer = notifyRenderers[0];
     const supervisor = result.session.getToolDefinition("subagent_supervisor");
     const signal = new AbortController().signal;
     const status = await supervisor.execute("compat-status", { action: "status" }, signal, undefined, undefined);
     const pending = await supervisor.execute("compat-pending", { action: "pending" }, signal, undefined, undefined);
-    const theme = { fg: (_color, text) => text, bold: (text) => text };
+    const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text };
     const notifyMessage = {
       customType: "subagent-notify",
       content: "Background task completed: **delegate** [Renderer smoke]\n\nfull output\n\nSession file: /tmp/session.jsonl",
@@ -234,11 +242,15 @@ test("binds the installed supervisor runtime behind project-owned tools", async 
     ).render(120).map((line) => line.trimEnd());
 
     assert.deepEqual(errors, []);
+    assert.equal(loadedExtensions.length, 2);
+    assert.equal(footerOwners.length, 1);
+    assert.equal(notifyRenderers.length, 1);
+    assert.equal(supervisorRenderers.length, 1);
     assert.deepEqual(toolNames, ["subagent", "subagent_supervisor"]);
     assert.equal(typeof subagent.renderResult, "function");
     assert.equal(typeof notifyRenderer, "function");
-    assert.deepEqual(notifyLines, ["✓ Renderer smoke · completed"]);
-    assert.deepEqual(statusLines, ["Status: running"]);
+    assert.deepEqual(notifyLines, ["", " ✓ Renderer smoke · completed", ""]);
+    assert.deepEqual(statusLines, ["Status: running · run: run-1"]);
     assert.deepEqual(notifyMessage, notifyBefore);
     assert.deepEqual(statusResult, statusBefore);
     assert.doesNotMatch(supervisor.description, /pi-subagents|upstream/i);
@@ -357,7 +369,7 @@ test("builds a top-level runtime environment without inherited child markers", (
 });
 
 test("flat runtime compat probe source retires standalone boundaries", async () => {
-  const source = await readFile(join(repoRoot, "scripts/probes/pi-subagents-compat.mjs"), "utf8");
+  const source = await readFile(join(repoRoot, "scripts/probes/pi-subagents-compat.ts"), "utf8");
   for (const removedName of [
     ["build", "Standalone", "RuntimeEnv"],
     ["standalone", "Root", "Service"],
@@ -377,53 +389,45 @@ test("flat runtime compat probe source retires standalone boundaries", async () 
   }
 });
 
-test("builds the exact top-level runtime dependency install command", async () => {
-  let setup = {};
-  try {
-    setup = await import("../scripts/setup-subagent-runtime-deps.mjs");
-  } catch {}
-  assert.equal(typeof setup.buildSubagentRuntimeInstallCommand, "function");
-  assert.deepEqual(setup.buildSubagentRuntimeInstallCommand("/tmp/pi/npm"), {
-    command: "npm",
-    args: [
-      "install", "--prefix", "/tmp/pi/npm", "--save-exact",
-      "pi-subagents@0.62.0", "typebox@1.1.38",
-    ],
-  });
+test("retires the standalone top-level runtime dependency install command", async () => {
+  const setup = await import("../scripts/setup-subagent-runtime-deps.ts");
+  assert.equal(setup.buildSubagentRuntimeInstallCommand, undefined);
 });
 
-test("uninstalls retired Todo before installing exact runtime dependencies", async () => {
-  const setup = await import("../scripts/setup-subagent-runtime-deps.mjs");
+test("uninstalls retired standalone dependencies before coordinating enhanced runtime and scheduler dependencies", async () => {
+  const setup = await import("../scripts/setup-subagent-runtime-deps.ts");
   assert.equal(typeof setup.installSubagentRuntimeDependencies, "function");
   const calls = [];
   const result = await setup.installSubagentRuntimeDependencies({
+    enhancedPackageRoot: "/tmp/pi-subagents-enhanced",
     piNpmDir: "/tmp/pi/npm",
     env: { PATH: "/test/bin" },
     run: async (...args) => calls.push(args),
-    patchSubagentRuntime: async () => {},
   });
 
   assert.deepEqual(calls, [
     [
       "npm",
-      ["uninstall", "--prefix", "/tmp/pi/npm", "@juicesharp/rpiv-todo"],
+      ["uninstall", "--prefix", "/tmp/pi/npm", "@juicesharp/rpiv-todo", "pi-subagents", "typebox"],
       { env: { PATH: "/test/bin" } },
     ],
     [
       "npm",
-      ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "pi-subagents@0.62.0", "typebox@1.1.38"],
+      ["install", "--prefix", "/tmp/pi-subagents-enhanced", "--ignore-scripts", "--omit=peer"],
       { env: { PATH: "/test/bin" } },
     ],
+    ["npm", ["--prefix", "/tmp/pi-subagents-enhanced", "run", "setup:runtime"], { env: { PATH: "/test/bin" } }],
+    ["npm", ["--prefix", "/tmp/pi-subagents-enhanced", "run", "verify:package"], { env: { PATH: "/test/bin" } }],
     [
       "npm",
       [
-        "install", "--prefix", "/tmp/pi/npm", "--save-exact",
+        "install", "--prefix", "/tmp/pi/npm", "--omit=peer", "--save-exact",
         "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1",
       ],
       { env: { PATH: "/test/bin" } },
     ],
   ]);
-  assert.deepEqual(result, { piNpmDir: "/tmp/pi/npm" });
+  assert.deepEqual(result, { piNpmDir: "/tmp/pi/npm", enhancedPackageRoot: "/tmp/pi-subagents-enhanced" });
 });
 
 function createEvents() {

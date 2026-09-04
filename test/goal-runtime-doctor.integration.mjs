@@ -3,7 +3,7 @@ import { mkdtemp, stat, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { inspectConfiguration, inspectGoalRuntimeBoundaries } from "../scripts/doctor.mjs";
+import { inspectConfiguration, inspectGoalRuntimeBoundaries } from "../scripts/doctor.ts";
 
 const validRuntimeFactory = () => ({
   generationCapabilities(schema) {

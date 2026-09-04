@@ -6,12 +6,12 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { buildTopLevelRuntimeEnv, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.mjs";
+import { buildTopLevelRuntimeEnv, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.ts";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;
-const clientModule = new URL("../scripts/probes/pi-subagents-compat.mjs", import.meta.url).href;
+const clientModule = new URL("../scripts/probes/pi-subagents-compat.ts", import.meta.url).href;
 
 function assistantText(record) {
   if (record.type !== "message_end" || record.message?.role !== "assistant") return "";

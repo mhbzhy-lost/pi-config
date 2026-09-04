@@ -6,7 +6,7 @@ import {
   recordHumanChoice,
   createExecutionAmendmentChallenge,
   issueUserExecutionCapability,
-} from "../scripts/lib/goal-engine/human-decision.mjs";
+} from "../src/goal-engine/human-decision.ts";
 
 function challenge(overrides = {}) {
   return {

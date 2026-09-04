@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { parseSections, shouldExempt, buildDenyReason, runReview, workspaceReviewBypass } from "../scripts/lib/review-invoker.mjs";
+import { parseSections, shouldExempt, buildDenyReason, runReview, workspaceReviewBypass } from "../src/security-gates/review-invoker.ts";
 
 const execFileAsync = promisify(execFile);
 

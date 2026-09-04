@@ -4,8 +4,8 @@ import test from "node:test";
 import {
   CodingDispatchContractError,
   compileCodingDispatchIR,
-} from "../scripts/lib/subagent-dispatch/ir.ts";
-import { renderCodingDispatchPrompt } from "../scripts/lib/subagent-dispatch/prompt.ts";
+} from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts";
+import { renderCodingDispatchPrompt } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/prompt.ts";
 
 function contract(overrides = {}) {
   const base = {
@@ -201,10 +201,10 @@ test("rejects the retired spark coding agent", () => {
 
 test("accepts normalized repo-relative paths and rejects path escapes", () => {
   const ir = compileCodingDispatchIR(contract({
-    context: { relevantFiles: [" scripts/lib/subagent-dispatch/** ", "scripts/lib/subagent-dispatch/**"] },
-    boundaries: { writePaths: ["scripts/lib/subagent-dispatch/**"] },
+    context: { relevantFiles: [" packages/pi-subagents-enhanced/src/subagent-dispatch/** ", "packages/pi-subagents-enhanced/src/subagent-dispatch/**"] },
+    boundaries: { writePaths: ["packages/pi-subagents-enhanced/src/subagent-dispatch/**"] },
   }), { cwd: "/repo" });
-  assert.deepEqual(ir.context.relevantFiles, ["scripts/lib/subagent-dispatch/**"]);
+  assert.deepEqual(ir.context.relevantFiles, ["packages/pi-subagents-enhanced/src/subagent-dispatch/**"]);
 
   for (const path of [
     "/tmp/output.mjs",

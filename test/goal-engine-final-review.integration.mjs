@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildObligationFinalizationManifest, validateObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
-import * as finalReview from "../scripts/lib/goal-engine/final-review.mjs";
+import { buildObligationFinalizationManifest, validateObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
+import * as finalReview from "../src/goal-engine/final-review.ts";
 
 const h = (letter) => letter.repeat(64);
 const head = "0123456789abcdef0123456789abcdef01234567";

@@ -319,10 +319,10 @@ digraph when_flowchart {
 
 See `graphviz-conventions.dot` in this directory for graphviz style rules.
 
-**Visualizing for your human partner:** Use `render-graphs.mjs` in this directory to render a skill's flowcharts to SVG. Graphviz `dot` is optional; if it is absent, the script prints installation commands.
+**Visualizing for your human partner:** Use `render-graphs.ts` in this directory to render a skill's flowcharts to SVG. Graphviz `dot` is optional; if it is absent, the script prints installation commands.
 ```bash
-node render-graphs.mjs ../some-skill           # Each diagram separately
-node render-graphs.mjs ../some-skill --combine # All diagrams in one SVG
+node render-graphs.ts ../some-skill           # Each diagram separately
+node render-graphs.ts ../some-skill --combine # All diagrams in one SVG
 ```
 
 ## Code Examples

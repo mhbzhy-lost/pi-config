@@ -41,7 +41,7 @@ export default function applyPatchTool(pi: ExtensionAPI) {
       ctx: { cwd: string },
     ) {
       const { applyPatch } = await import(
-        "../../scripts/lib/apply-patch/index.mjs"
+        "../../src/apply-patch/index.ts"
       );
       try {
         const result = await applyPatch(params.patch, ctx.cwd);

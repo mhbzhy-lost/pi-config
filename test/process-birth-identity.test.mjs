@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-const modulePath = "../scripts/lib/subagent-dispatch/process-birth-identity.ts";
+const modulePath = "../packages/pi-subagents-enhanced/src/subagent-dispatch/process-birth-identity.ts";
 const processBirthIdentityModule = await import(modulePath).catch(() => null);
 
 function captureForTest(t, fallback) {

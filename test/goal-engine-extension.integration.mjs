@@ -6,13 +6,14 @@ import { cpSync, readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync
 import { basename, join, dirname, isAbsolute, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
-import { appendEvent as appendEventStore, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { createGoalEngineExtension as createGoalEngineExtensionFactory } from "../scripts/lib/goal-engine/extension.mjs";
-import { classifyGoalEvidence, completionVerdictFor } from "../scripts/lib/goal-engine/evidence.mjs";
-import { allocateExecutorWorkspace, inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
-import { ensureGoalStateIdentity, resolveGoalStateScope } from "../scripts/lib/goal-engine/state-scope.mjs";
-import { findGoalExecutorCoordinator } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
-import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
+import { appendEvent as appendEventStore, loadProjection } from "../src/goal-engine/store.ts";
+import { createGoalEngineExtension as createGoalEngineExtensionFactory } from "../src/goal-engine/extension.ts";
+import { classifyGoalEvidence, completionVerdictFor } from "../src/goal-engine/evidence.ts";
+import { allocateExecutorWorkspace, inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../src/goal-engine/workspace.mjs";
+import { ensureGoalStateIdentity, resolveGoalStateScope } from "../src/goal-engine/state-scope.ts";
+import { findGoalExecutorCoordinator } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
+import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../src/goal-engine/settlement-evidence.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const temporaryArena = createTemporaryArenaSync("goal-engine-extension-");
@@ -97,6 +98,7 @@ function createMockPi(cwd, { sessionId = "session-test", autoSettlementEvidence 
     executorBindingSequence: 0,
     autoSettlementEvidence,
     executeContext: { cwd, sessionManager },
+    workspaceService: createManagedWorkspaceService({ stateRoot: temporaryArena.mkdtempSync("managed-workspaces-") }),
     registerTool(def) { tools.push(def); },
     on(event, handler) { (hooks[event] ||= []).push(handler); },
     appendEntry(customType, data) { entries.push({ id: `custom-${entries.length + 1}`, type: "custom", customType, data }); },
@@ -113,7 +115,7 @@ function createGoalEngineExtensionProduction(pi, options = {}) {
 }
 
 function createGoalEngineExtension(pi, options = {}) {
-  return createGoalEngineExtensionProduction(pi, { enforceActionTokens: false, ...options });
+  return createGoalEngineExtensionProduction(pi, { enforceActionTokens: false, allowMissingRootBrokerForTests: true, ...options });
 }
 
 function tmpCwd() {
@@ -226,11 +228,15 @@ async function invoke(pi, name, params = {}) {
       const coordinator = findGoalExecutorCoordinator(pi);
       const ticket = await coordinator?.prepareSpawn({ contract, contractHash, ctx: pi.executeContext });
       if (ticket) {
+        const receipt = pi.workspaceService.ensureAllocated(ticket.workspaceRequest);
+        await coordinator.workspaceAllocated(ticket, receipt);
+        await coordinator.confirmSpawn(ticket, receipt);
         const suffix = ++pi.executorBindingSequence;
         const fixtureIdentity = ticket.ticketId.slice(0, 24);
         const runId = `fixture-run-${fixtureIdentity}`;
         const asyncDir = `/tmp/goal-engine-fixture-run-${fixtureIdentity}`;
-        await coordinator.bindSpawn(ticket, { runId, asyncDir });
+        pi.workspaceService.bindRun({ workspaceId: receipt.workspaceId, run: { runId, asyncDir } });
+        await coordinator.bindSpawn(ticket, { runId, asyncDir, sessionId: pi.sessionManager.getSessionId(), pid: 1, agent: "executor" });
         pi.executorProofs.set(runId, {
           schemaVersion: "root-broker.executor-proof.v1",
           ownership: {
@@ -1356,7 +1362,7 @@ test("goal_status returns NO_ACTIVE_GOAL when none", async () => {
   assert.equal(await invoke(pi, "goal_status", {}), "NO_ACTIVE_GOAL");
 });
 
-test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", async () => {
+test("goal_dispatch records a workspace request without creating a worktree", async () => {
   const cwd = tmpCwd();
   initGitRepo(cwd);
 
@@ -1369,8 +1375,11 @@ test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", asy
     tasks: [{ id: "t1", description: "Implement the widget parser module", deps: [], writePaths: ["src/parser.ts"], acceptance: plannedAcceptance(["Parses valid input"]), workflow: "tdd" }],
   });
 
+  const beforeWorktrees = git(cwd, "worktree", "list", "--porcelain");
+  const beforeHead = git(cwd, "rev-parse", "HEAD");
   const dispatch = pi.tools.find((t) => t.name === "goal_dispatch");
-  const result = JSON.parse(await invoke(pi, "goal_dispatch", { task_id: "t1" }));
+  const raw = await dispatch.execute("dispatch-without-spawn", { task_id: "t1" }, new AbortController().signal, undefined, pi.executeContext);
+  const result = JSON.parse(raw.details.value);
 
   assert.equal(result.status, "dispatched");
   assert.ok(result.contract);
@@ -1382,11 +1391,15 @@ test("goal_dispatch allocates worktree and returns dispatch-ir.v1 contract", asy
   assert.deepEqual(result.contract.acceptance.criteria, [
     JSON.stringify({ id: "criterion-1", statement: "Parses valid input", evidenceKinds: ["tests"] }),
   ]);
-  assert.ok(result.workspace);
-  assert.ok(result.workspace.path.includes("worktrees"));
-  assert.ok(result.workspace.branch.startsWith("ge/"));
-  assert.notEqual(result.contract.execution.cwd, cwd);
-  assert.equal(result.contract.execution.cwd, result.workspace.path);
+  assert.equal(result.contract.execution.cwd, cwd);
+  assert.equal(result.contract.execution.worktree, true);
+  assert.equal(Object.hasOwn(result, "workspace"), false);
+  assert.equal(git(cwd, "worktree", "list", "--porcelain"), beforeWorktrees);
+  assert.equal(git(cwd, "rev-parse", "HEAD"), beforeHead);
+  const projection = loadProjection(join(cwd, ".state/goal-engine"), objectiveToGoalId("Dispatch IR test goal"));
+  assert.equal(projection.tasks.get("t1").status, "dispatch_requested");
+  assert.equal(projection.tasks.get("t1").workspace, null);
+  assert.ok(readGoalEvents(cwd, projection.goalId).some((event) => event.type === "task.dispatch_requested"));
 });
 
 test("goal_dispatch supports existing-tests tasks with a workflow reason", async () => {
@@ -1406,8 +1419,8 @@ test("goal_dispatch supports existing-tests tasks with a workflow reason", async
   assert.equal(result.contract.workflow.mode, "existing-tests");
   assert.ok(result.contract.workflow.reason);
   assert.match(result.contract.workflow.reason, /acceptance|existing test/i);
-  assert.ok(result.workspace);
-  assert.equal(result.contract.execution.cwd, result.workspace.path);
+  assert.equal(result.contract.execution.cwd, cwd);
+  assert.equal(result.contract.execution.worktree, true);
 });
 
 test("goal_dispatch supports docs-only tasks with a workflow reason", async () => {

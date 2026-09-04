@@ -4,8 +4,8 @@ import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, r
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { appendEvent, listGoalIds } from "../scripts/lib/goal-engine/store.mjs";
-import { __setStateLifecycleTestHooks, inspectGoalState, resetGoalState } from "../scripts/lib/goal-engine/state-lifecycle.mjs";
+import { appendEvent, listGoalIds } from "../src/goal-engine/store.ts";
+import { __setStateLifecycleTestHooks, inspectGoalState, resetGoalState } from "../src/goal-engine/state-lifecycle.ts";
 
 function repo() { const root = mkdtempSync(join(tmpdir(), "goal-state-lifecycle-")); execFileSync("git", ["init", "--quiet", root]); return root; }
 function state(root) { return join(root, ".state", "goal-engine"); }
@@ -17,7 +17,7 @@ function createReleasedPlannedGoal(root, goalId = "released-goal") {
   return stateRoot;
 }
 function resetInput(stateRoot, authorizationId = "authorized-reset") { return { stateRoot, expectedStateHash: inspectGoalState({ stateRoot }).stateHash, authorizationId }; }
-function runCli(root, args) { return spawnSync(process.execPath, [resolve("scripts/goal-state-lifecycle.mjs"), ...args], { cwd: root, encoding: "utf8" }); }
+function runCli(root, args) { return spawnSync(process.execPath, [resolve("scripts/goal-state-lifecycle.ts"), ...args], { cwd: root, encoding: "utf8" }); }
 
 test("inspect is stable and exposes only state metadata", () => {
   const root = repo(); const stateRoot = createReleasedPlannedGoal(root);
@@ -105,7 +105,7 @@ test("reset restores the exact inspectable state when retired cleanup fails", ()
 
 test("reset serializes with the Store writer lock", async () => {
   const root = repo(); const stateRoot = createReleasedPlannedGoal(root); const input = resetInput(stateRoot);
-  const storeUrl = new URL("../scripts/lib/goal-engine/store.mjs", import.meta.url).href;
+  const storeUrl = new URL("../src/goal-engine/store.ts", import.meta.url).href;
   const child = spawn(process.execPath, ["-e", `import(${JSON.stringify(storeUrl)}).then(({ acquireWriterLock, releaseWriterLock }) => { const lock = acquireWriterLock(process.argv[1]); process.stdout.write("locked"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250); releaseWriterLock(process.argv[1], lock.token); })`, stateRoot], { stdio: ["ignore", "pipe", "pipe"] });
   await new Promise((resolve, reject) => { child.stdout.once("data", (chunk) => chunk.toString() === "locked" ? resolve() : reject(new Error("lock holder failed"))); child.once("error", reject); });
   const result = resetGoalState(input);

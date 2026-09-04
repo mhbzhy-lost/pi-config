@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   deriveInitialShape, hashRuntimeExecutionContract, normalizeRuntimeGoalInit, validateRuntimeReadiness,
-} from "../scripts/lib/goal-engine/obligation-contract.mjs";
+} from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 test("normalizes a strictly registered runtime contract and derives only its initial shape", () => {

@@ -4,9 +4,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyEvent, createProjection } from "../scripts/lib/goal-engine/events.mjs";
-import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
+import { applyEvent, createProjection } from "../src/goal-engine/events.ts";
+import { appendEvent, appendEventBatch, loadProjection } from "../src/goal-engine/store.ts";
+import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const head = "a".repeat(40);

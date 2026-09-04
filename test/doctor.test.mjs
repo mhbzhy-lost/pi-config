@@ -5,12 +5,11 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import * as doctor from "../scripts/doctor.mjs";
-import { createManagedWorktree } from "../scripts/lib/worktree-lifecycle/managed-worktree.mjs";
-import { markDisposition } from "../scripts/lib/worktree-lifecycle/registry.mjs";
+import * as doctor from "../scripts/doctor.ts";
+import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
 const { inspectConfiguration, inspectGoalContractIntegrity } = doctor;
-import { canonicalJsonSha256 } from "../scripts/lib/goal-contract/authorization-audit.mjs";
-import { discoverManagedSkills } from "../scripts/lib/skill-whitelist.mjs";
+import { canonicalJsonSha256 } from "../src/goal-contract/authorization-audit.ts";
+import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -113,13 +112,7 @@ function createGoalEngineFactoryFixture({
   };
 }
 
-const isolatedSubagentPackage = {
-  source: "npm:pi-subagents@0.62.0",
-  extensions: [],
-  skills: [],
-  prompts: [],
-  themes: [],
-};
+const enhancedSubagentPackage = { source: "../packages/pi-subagents-enhanced" };
 const isolatedTaskSchedulerPackage = {
   source: "npm:@amaster.ai/pi-task-scheduler@0.1.9",
   extensions: [],
@@ -137,7 +130,7 @@ async function createMinimalManagedSkill(root, name) {
 
 function runDoctor() {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["scripts/doctor.mjs"], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["scripts/doctor.ts"], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -159,7 +152,7 @@ function runDoctor() {
   });
 }
 
-test("inspectConfiguration rejects pi-subagents package resource autoload", async () => {
+test("inspectConfiguration requires the enhanced local source and rejects legacy auto-discovered entries", async () => {
   const root = await mkdtemp(join(tmpdir(), "doctor-"));
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
@@ -167,12 +160,14 @@ test("inspectConfiguration rejects pi-subagents package resource autoload", asyn
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "pi", "settings.json"), JSON.stringify({ packages: ["npm:pi-subagents@0.62.0"] }));
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
+    await writeFile(join(root, "pi", "extensions", "subagent-runtime.ts"), "legacy\n");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
-    assert.ok(issues.includes("pi-subagents package resources must all be disabled"));
+    assert.ok(issues.includes("pi-subagents-enhanced local package source must be uniquely configured"));
+    assert.ok(issues.includes("standalone pi-subagents package source is forbidden"));
+    assert.ok(issues.includes("duplicate auto-discovered subagent entry still exists: pi/extensions/subagent-runtime.ts"));
     assert.ok(issues.includes("task scheduler package resources must all be disabled"));
-    assert.ok(issues.includes("missing typed subagent runtime extension: pi/extensions/subagent-runtime.ts"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -192,25 +187,28 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     }
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
     await mkdir(join(root, "pi", "agents"), { recursive: true });
-    await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension"), { recursive: true });
-    await mkdir(join(root, "pi", "npm", "node_modules", "typebox", "build", "compile"), { recursive: true });
+    const enhancedRoot = join(root, "packages", "pi-subagents-enhanced");
+    const upstreamRoot = join(enhancedRoot, "node_modules", "pi-subagents");
+    await mkdir(join(enhancedRoot, "extensions"), { recursive: true });
+    await mkdir(join(enhancedRoot, "child-extensions"), { recursive: true });
+    await mkdir(join(upstreamRoot, "src", "extension"), { recursive: true });
+    await mkdir(join(upstreamRoot, "node_modules", "typebox", "build", "compile"), { recursive: true });
     for (const name of ["@amaster.ai/pi-task-scheduler", "@amaster.ai/pi-shared", "croner"]) {
       await mkdir(join(root, "pi", "npm", "node_modules", ...name.split("/")), { recursive: true });
     }
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "pi", "settings.json"), JSON.stringify({
       theme: "light",
-      packages: [isolatedSubagentPackage, isolatedTaskSchedulerPackage],
+      packages: [enhancedSubagentPackage, isolatedTaskSchedulerPackage],
     }));
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
-    await writeFile(join(root, "pi", "extensions", "subagent-runtime.ts"), "");
-    await mkdir(join(root, "pi", "child-extensions"), { recursive: true });
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
-    await mkdir(join(root, "scripts", "lib", "subagent-dispatch"), { recursive: true });
     for (const source of ["root-broker-server.ts", "root-broker-client.ts", "root-broker-protocol.ts", "root-broker-registry.ts"]) {
-      await writeFile(join(root, "scripts", "lib", "subagent-dispatch", source), "");
+      const target = join(enhancedRoot, "src", "subagent-dispatch", source);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, "");
     }
-    await writeFile(join(root, "pi", "child-extensions", "root-session-owner.ts"), "");
+    await writeFile(join(enhancedRoot, "child-extensions", "root-session-owner.ts"), "");
     await writeFile(join(root, ".gitignore"), "/var/\n");
     for (const [name, models, tools] of [
       ["executor", ["provider/primary", "provider/fallback"], "read"],
@@ -218,21 +216,29 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
       await writeFile(join(root, "pi", "agents", `${name}.md`), `---\nmodels:\n${models.map((model) => `  - ${model}`).join("\n")}\ntools: ${tools}\n---\n`);
     }
     await writeFile(
-      join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"),
+      join(enhancedRoot, "package.json"),
+      JSON.stringify({ name: "pi-subagents-enhanced", version: "0.1.0", pi: { extensions: ["./extensions/subagent-runtime.ts", "./extensions/custom-footer.ts"] } }),
+    );
+    await writeFile(join(enhancedRoot, "extensions", "subagent-runtime.ts"), "");
+    await writeFile(join(enhancedRoot, "extensions", "custom-footer.ts"), "");
+    await writeFile(
+      join(upstreamRoot, "package.json"),
       JSON.stringify({ version: "0.62.0", pi: { extensions: ["./src/extension/index.ts"] } }),
     );
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "index.ts"), "");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "extension", "rpc.ts"), 'const methods = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];\n');
-    await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents"), { recursive: true });
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents", "agents.ts"), "// pi-config patch: ordered-models.v3\n");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "src", "agents", "agent-serializer.ts"), "// pi-config patch: ordered-models.v3\n");
+    await writeFile(join(upstreamRoot, "src", "extension", "index.ts"), "");
+    await writeFile(join(upstreamRoot, "src", "extension", "rpc.ts"), 'const methods = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];\n');
+    await mkdir(join(upstreamRoot, "src", "agents"), { recursive: true });
+    await writeFile(join(upstreamRoot, "src", "agents", "agents.ts"), "// pi-config patch: ordered-models.v3\n");
+    await writeFile(join(upstreamRoot, "src", "agents", "agent-serializer.ts"), "// pi-config patch: ordered-models.v3\n");
     for (const relative of ["src/runs/shared/model-fallback.ts", "src/api/preflight.ts", "src/runs/background/async-execution.ts", "src/runs/foreground/execution.ts"]) {
-      const target = join(root, "pi", "npm", "node_modules", "pi-subagents", relative);
+      const target = join(upstreamRoot, relative);
       await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, "// pi-config patch: ordered-models.v3\n");
+      await writeFile(target, `// pi-config patch: ordered-models.v3\n${relative === "src/runs/background/async-execution.ts" ? "// pi-config patch: workflow-child-extensions.v1\n" : ""}`);
     }
-    await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "package.json"), JSON.stringify({ version: "1.1.38", type: "module", exports: { "./compile": "./build/compile/index.mjs" } }));
-    await writeFile(join(root, "pi", "npm", "node_modules", "typebox", "build", "compile", "index.mjs"), "export {};\n");
+    await writeFile(join(upstreamRoot, "src", "runs", "foreground", "subagent-executor.ts"), "// pi-config patch: workflow-child-extensions.v1\n");
+    await writeFile(join(upstreamRoot, "node_modules", "typebox", "package.json"), JSON.stringify({ version: "1.1.38", type: "module", exports: { "./compile": "./build/compile/index.mjs" } }));
+    await writeFile(join(upstreamRoot, "node_modules", "typebox", "build", "compile", "index.mjs"), "export {};\n");
+    await writeFile(join(root, "pi", "npm", "package.json"), JSON.stringify({ name: "pi-extensions", private: true, dependencies: { "@amaster.ai/pi-task-scheduler": "0.1.9", "@amaster.ai/pi-shared": "0.1.9", croner: "10.0.1" } }));
     for (const [name, version] of [["@amaster.ai/pi-task-scheduler", "0.1.9"], ["@amaster.ai/pi-shared", "0.1.9"], ["croner", "10.0.1"]]) {
       const packageRoot = join(root, "pi", "npm", "node_modules", ...name.split("/"));
       await writeFile(join(packageRoot, "package.json"), JSON.stringify({ name, version, main: "index.js" }));
@@ -267,8 +273,8 @@ test("inspectConfiguration discovers additional managed skills and reports unsyn
     assert.deepEqual(discoveredNames, ["additional-managed-fixture", "managed-fixture"]);
     assert.equal(issues.some((issue) => issue.includes("unexpected Skill whitelist")), false);
     assert.equal(issues.some((issue) => issue.startsWith("invalid frontmatter for managed skill:")), false);
-    assert.ok(issues.includes(`${globalSkillsDir}/additional-managed-fixture is missing (run: node scripts/sync-skills.mjs)`));
-    assert.ok(issues.includes(`${globalSkillsDir}/managed-fixture is missing (run: node scripts/sync-skills.mjs)`));
+    assert.ok(issues.includes(`${globalSkillsDir}/additional-managed-fixture is missing (run: node scripts/sync-skills.ts)`));
+    assert.ok(issues.includes(`${globalSkillsDir}/managed-fixture is missing (run: node scripts/sync-skills.ts)`));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -285,7 +291,7 @@ test("inspectConfiguration requires every Root broker readiness component", asyn
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "0.82.1" });
-    assert.ok(issues.includes("missing Root subagent broker component: scripts/lib/subagent-dispatch/root-broker-server.ts"));
+    assert.ok(issues.includes("missing Root subagent broker component: packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -392,12 +398,12 @@ test("inspectConfiguration reports an unexpected pi-subagents version", async ()
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
-    await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents"), { recursive: true });
+    await mkdir(join(root, "packages", "pi-subagents-enhanced", "node_modules", "pi-subagents"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "pi", "settings.json"), "{}");
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.35.1" }));
+    await writeFile(join(root, "packages", "pi-subagents-enhanced", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.35.1" }));
 
     const issues = await inspectConfiguration(root);
     assert.ok(issues.includes("unexpected pi-subagents version: 0.35.1; expected 0.62.0"));
@@ -411,12 +417,12 @@ test("inspectConfiguration reports a failed pi-subagents RPC probe", async () =>
   try {
     await mkdir(join(root, "skill-overrides"), { recursive: true });
     await mkdir(join(root, "pi", "extensions"), { recursive: true });
-    await mkdir(join(root, "pi", "npm", "node_modules", "pi-subagents"), { recursive: true });
+    await mkdir(join(root, "packages", "pi-subagents-enhanced", "node_modules", "pi-subagents"), { recursive: true });
     await mkdir(join(root, "scripts"), { recursive: true });
     await writeFile(join(root, "pi", "settings.json"), "{}");
     await writeFile(join(root, "pi", "extensions", "skill-whitelist.ts"), "");
     await writeFile(join(root, "scripts", "pi-shell.zsh"), "");
-    await writeFile(join(root, "pi", "npm", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.62.0" }));
+    await writeFile(join(root, "packages", "pi-subagents-enhanced", "node_modules", "pi-subagents", "package.json"), JSON.stringify({ version: "0.62.0" }));
 
     const issues = await inspectConfiguration(root);
     assert.ok(issues.some((issue) => issue.startsWith("pi-subagents RPC probe failed:")));
@@ -653,26 +659,45 @@ test("doctor accepts current registered Goal Contract integrity", async () => {
   assert.deepEqual(await inspectGoalContractIntegrity(repoRoot), []);
 });
 
-test("RED worktree lifecycle doctor warnings are stable, redacted, and not readiness issues", async () => {
+test("managed workspace doctor warnings report resource states and identities without private data", async () => {
   const format = doctor.formatWorktreeLifecycleWarnings;
   assert.equal(typeof format, "function", "doctor must export formatWorktreeLifecycleWarnings");
-  const warnings = format({ items: [
-    { code: "WORKTREE_CLEANUP_DEBT", resources: "001", path: "/safe", ownerToken: "secret", owner: "owner", lastError: "error", probe: "probe" },
-    { code: null, resources: "111", path: "/ignored" },
-  ] });
-  assert.deepEqual(warnings, ["[warning] WORKTREE_CLEANUP_DEBT 001 /safe"]);
-  assert.equal(JSON.stringify(warnings).match(/secret|owner|error|probe/), null);
+  const warnings = format({
+    workspaces: [
+      { receipt: { workspaceId: "active", state: "active", path: "/active", leaseId: "secret-lease", owner: { kind: "standalone-subagent" } }, identity: true, issues: [] },
+      { receipt: { workspaceId: "preserved", state: "preserved", path: "/preserved" }, identity: true, issues: [] },
+      { receipt: { workspaceId: "debt", state: "cleanup-debt", path: "/debt", cleanupDebt: { code: "PRIVATE", message: "private detail" } }, identity: null, issues: ["cleanup-debt"] },
+      { receipt: { workspaceId: "drift", state: "active", path: "/drift" }, identity: false, issues: ["MANAGED_WORKSPACE_IDENTITY"] },
+    ],
+    orphanRegistrations: [{ path: "/orphan" }],
+    legacy: [{ path: "/legacy", status: "untrusted-legacy" }],
+  });
+  assert.deepEqual(warnings, [
+    "[warning] MANAGED_WORKSPACE_ACTIVE active /active",
+    "[warning] MANAGED_WORKSPACE_PRESERVED preserved /preserved",
+    "[warning] MANAGED_WORKSPACE_CLEANUP_DEBT debt /debt",
+    "[warning] MANAGED_WORKSPACE_ACTIVE drift /drift",
+    "[warning] MANAGED_WORKSPACE_IDENTITY_MISMATCH drift /drift",
+    "[warning] MANAGED_WORKSPACE_ORPHAN_REGISTRATION /orphan",
+    "[warning] MANAGED_WORKSPACE_UNTRUSTED_LEGACY /legacy",
+  ]);
+  assert.equal(JSON.stringify(warnings).match(/secret|owner|PRIVATE|private detail/), null);
   const root = await mkdtemp(join(tmpdir(), "doctor-worktree-"));
+  const stateRoot = await mkdtemp(join(tmpdir(), "doctor-workspace-state-"));
   try {
     const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
     git("init", "--initial-branch=main"); git("config", "user.email", "test@example.invalid"); git("config", "user.name", "Test"); await writeFile(join(root, "a"), "a\n"); git("add", "a"); git("commit", "-m", "initial");
-    const allocation = createManagedWorktree({ originRoot: root, id: "safe", branch: "safe", baseCommit: git("rev-parse", "HEAD"), owner: { kind: "test", id: "one" } });
-    markDisposition({ originRoot: root, id: allocation.id, ownerToken: allocation.ownerToken, disposition: "reclaimable" });
-    const report = await doctor.inspectWorktreeLifecycle(root); const item = report.items.find((entry) => entry.id === allocation.id);
-    assert.equal(report.apply, false); assert.deepEqual([item.code, item.automaticAction], ["WORKTREE_CLEANUP_DEBT", "release-worktree-only"]); assert.equal(item.path, allocation.path); assert.equal(git("show-ref", "--verify", "--quiet", allocation.branchRef), "");
+    const service = createManagedWorkspaceService({ stateRoot });
+    const allocation = service.ensureAllocated({ workspaceId: "safe", owner: { kind: "standalone-subagent", rootSessionId: "root-1", toolCallId: "tool-1" }, originRoot: root, requestedCwd: root, originRef: "refs/heads/main", baseCommit: git("rev-parse", "HEAD"), contractHash: "a".repeat(64), mode: "coding", writePaths: ["a"] });
+    const report = await doctor.inspectWorktreeLifecycle(root, { stateRoot });
+    assert.deepEqual([report.workspaces[0].receipt.state, report.workspaces[0].identity], ["active", true]);
+    assert.equal(report.workspaces[0].receipt.path, allocation.path);
     const issues = await inspectConfigurationWithValidatedVersions(repoRoot);
-    assert.equal(issues.some((issue) => issue.includes("WORKTREE_")), false);
-  } finally { await rm(root, { recursive: true, force: true }); }
+    assert.equal(issues.some((issue) => issue.includes("MANAGED_WORKSPACE_")), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(stateRoot, { recursive: true, force: true });
+  }
 });
 
 test("doctor CLI reports Root broker readiness without retired Host terminology", async () => {

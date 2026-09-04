@@ -5,20 +5,21 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION } from "../scripts/lib/goal-engine/events.mjs";
-import { assertExecutorSettlementProof } from "../scripts/lib/goal-engine/executor-binding.mjs";
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { appendEvent as appendGoalEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { createTypedSubagentExtension } from "../scripts/lib/subagent-dispatch/extension.ts";
-import { bindRootBroker, stopRootBrokerGoalOwnedRun, unbindRootBroker } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
-import { RootBrokerServer } from "../scripts/lib/subagent-dispatch/root-broker-server.ts";
-import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
+import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION } from "../src/goal-engine/events.ts";
+import { assertExecutorSettlementProof } from "../src/goal-engine/executor-binding.ts";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
+import { appendEvent as appendGoalEvent, loadProjection } from "../src/goal-engine/store.ts";
+import { createTypedSubagentExtension } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+import { bindRootBroker, findGoalExecutorCoordinator, stopRootBrokerGoalOwnedRun, unbindRootBroker } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
+import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
+import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../src/goal-engine/settlement-evidence.ts";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
-import { buildObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
-import { createProductionGoalRuntimeHost } from "../scripts/lib/goal-engine/production-runtime-host.mjs";
-import { deriveOwnedExecutorStopRequest } from "../scripts/lib/goal-engine/suspension.mjs";
-import { inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
+import { buildObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
+import { createProductionGoalRuntimeHost } from "../src/goal-engine/production-runtime-host.ts";
+import { deriveOwnedExecutorStopRequest } from "../src/goal-engine/suspension.ts";
+import { inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../src/goal-engine/workspace.mjs";
 
 const GOAL_ID = "binding-goal";
 const CONTRACT_HASH = "a".repeat(64);
@@ -389,7 +390,8 @@ function integratedFixture(t) {
     const result = await tool.execute(`call-${name}`, params, new AbortController().signal, undefined, context);
     return result.details.value;
   };
-  return { cwd, pi, tools, context, invoke, branch, handlers };
+  const workspaceService = createManagedWorkspaceService({ stateRoot: arena.mkdtempSync("managed-workspaces-") });
+  return { cwd, pi, tools, context, invoke, branch, handlers, workspaceService };
 }
 
 function runtimeHost(cwd, calls = null) {
@@ -448,40 +450,58 @@ const STRICT_CODING_CONTRACT = Object.freeze({
   execution: { cwd: "/repo", timeoutMs: 1_000 },
 });
 
-test("Subagent recomputes the Goal ticket after prepare and prevents execute-time replacement", async () => {
+test("Subagent confirms the allocated Goal receipt before spawn and rejects projection drift", async () => {
   const tools = [];
   const pi = { events: {}, registerTool(tool) { tools.push(tool); }, on() {} };
   let spawnCalls = 0;
   let prepareCalls = 0;
+  let confirmCalls = 0;
   const rpc = {
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "s", sessionFile: "/tmp/s", cwd: "/repo" } }; },
     async spawn() { spawnCalls += 1; return { details: { runId: "run-1", asyncDir: "/tmp/run-1" } }; },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
+  const workspaceRequest = {
+    workspaceId: "goal-workspace-confirm",
+    owner: { kind: "goal-task", rootSessionId: "root-1", goalId: "goal", taskId: "task", attempt: 1, executionRevision: 1 },
+    originRoot: "/repo", requestedCwd: "/repo", originRef: "refs/heads/main", baseCommit: "b".repeat(40),
+    contractHash: "unused", mode: "coding", writePaths: ["src/task.mjs"],
+  };
+  const receiptFor = (request) => ({
+    schemaVersion: "managed-workspace.v1", workspaceId: request.workspaceId, leaseId: "c".repeat(64), owner: request.owner,
+    originRoot: request.originRoot, requestedCwd: request.requestedCwd, originRef: request.originRef, baseCommit: request.baseCommit,
+    path: "/managed/goal-workspace-confirm", dispatchCwd: "/managed/goal-workspace-confirm", branchRef: "refs/heads/pi-managed/goal-workspace-confirm",
+    state: "active", run: null, disposition: null, cleanupDebt: null,
+  });
   const goalExecutorCoordinator = {
-    prepareSpawn() {
+    prepareSpawn({ contractHash }) {
       prepareCalls += 1;
-      const suffix = String(prepareCalls);
-      return { ticketId: `ticket-${suffix}`, spawnIdentity: { requestId: `request-${suffix}`, spawnKey: `request-${suffix}` } };
+      const request = { ...workspaceRequest, contractHash };
+      return { ticketId: "ticket-1", spawnIdentity: { requestId: "request-1", spawnKey: "request-1" }, workspaceRequest: request };
     },
+    async workspaceAllocated() {},
+    async confirmSpawn() { confirmCalls += 1; throw Object.assign(new Error("Goal projection changed before spawn"), { code: "EXECUTOR_BINDING_MISMATCH" }); },
     async bindSpawn() {},
   };
+  const workspaceService = { ensureAllocated(request) { return receiptFor(request); } };
   createTypedSubagentExtension(pi, {
     rpc,
     cleanupStore: {},
     goalExecutorCoordinator,
+    workspaceService,
     async prepareCodingSpawn() {},
   });
-  const result = await tools[0].execute("replace-at-execute", STRICT_CODING_CONTRACT, undefined, undefined, { cwd: "/repo" });
+  const result = await tools[0].execute("replace-at-execute", { ...STRICT_CODING_CONTRACT, execution: { ...STRICT_CODING_CONTRACT.execution, worktree: true } }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(result.isError, true);
   assert.equal(result.details.code, "EXECUTOR_BINDING_MISMATCH");
-  assert.equal(prepareCalls, 2);
+  assert.equal(prepareCalls, 1);
+  assert.equal(confirmCalls, 1);
   assert.equal(spawnCalls, 0);
 });
 
 async function initializeIntegratedDispatch(fixture, objective = "Integrated executor binding", extensionOptions = {}) {
-  createGoalEngineExtension(fixture.pi, { goalStateEnv: {}, ...extensionOptions });
+  createGoalEngineExtension(fixture.pi, { goalStateEnv: {}, allowMissingRootBrokerForTests: true, ...extensionOptions });
   await fixture.invoke("goal_init", {
     objective,
     tasks: [{
@@ -503,13 +523,20 @@ async function initializeIntegratedDispatch(fixture, objective = "Integrated exe
   return { goalId, dispatched };
 }
 
+async function allocateGoalWorkspace(fixture, dispatched) {
+  const coordinator = findGoalExecutorCoordinator(fixture.pi);
+  const ticket = await coordinator.prepareSpawn({ contract: dispatched.contract, contractHash: dispatched.contract_hash, ctx: fixture.context });
+  const receipt = fixture.workspaceService.ensureAllocated(ticket.workspaceRequest);
+  return { coordinator, ticket, receipt };
+}
+
 async function bindIntegratedRun(fixture, dispatched, { runId = "run-bound-1", asyncDir = "/tmp/run-bound-1" } = {}) {
   const rpc = {
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: "/tmp/s", cwd: fixture.cwd } }; },
     async spawn(params) { return workflowSpawnReply(fixture.pi, params, { runId, asyncDir }); },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
-  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
+  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {}, workspaceService: fixture.workspaceService });
   const result = await fixture.tools.find((tool) => tool.name === "subagent")
     .execute(`spawn-${runId}`, dispatched.contract, undefined, undefined, fixture.context);
   assert.equal(result.isError, false, result.content[0].text);
@@ -528,13 +555,13 @@ function settlementEvidence(fixture, goalId, taskId) {
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
   const task = projection.tasks.get(taskId);
   const head = git(task.workspace.path, "rev-parse", "HEAD");
-  const identity = { goalId, taskId, runId: task.executorBinding.runId, attempt: task.workspace.attempt, contractHash: task.contractHash, head };
+  const identity = { goalId, taskId, runId: task.executorBinding.runId, attempt: task.workspace.owner.attempt, contractHash: task.contractHash, head };
   const expectedCriteria = task.acceptance.criteria.filter(({ evaluator }) => evaluator !== "coordinator").map(({ id }) => id);
   const criteria = expectedCriteria.map((id) => ({ id, status: "satisfied", evidence: [`sha256:${"1".repeat(64)}`] }));
   const child = { identity, criteria, commandsRun: [], changedFiles: [task.writePaths[0]] };
   const main = { identity, criteria: criteria.map((item) => ({ ...item, evidence: [`sha256:${"2".repeat(64)}`] })), commandsRun: [], changedFiles: [task.writePaths[0]] };
   const sha256 = fingerprintSettlementEvidence(child, { expectedIdentity: identity, expectedCriteria, outcome: "succeeded" });
-  const directory = join(task.workspace.path, ".pi-subagents", "acceptance-evidence");
+  const directory = join(task.executorBinding.asyncDir, "acceptance-evidence");
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   writeFileSync(git(task.workspace.path, "rev-parse", "--git-path", "info/exclude"), ".pi-subagents/\n", { flag: "a" });
   const artifact = join(directory, `${sha256}.yaml`);
@@ -570,7 +597,8 @@ test("Planned goal_settle persists the exact successful Root Broker proof with t
     },
   });
   await bindIntegratedRun(fixture, dispatched, { runId, asyncDir });
-  const head = commitExecutorResult(dispatched.workspace.path);
+  const workspace = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one").workspace;
+  const head = commitExecutorResult(workspace.path);
   const status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
   const result = JSON.parse(await fixture.invoke("goal_settle", {
     goal_id: goalId,
@@ -602,7 +630,7 @@ test("real Goal Host settlement reads the bound proof from the Root Broker regis
   const { goalId, dispatched } = await initializeIntegratedDispatch(fixture, "Settle registered broker proof");
   const broker = new RootBrokerServer({
     rootSessionId: "root-session-1",
-    lifecycleSessionId: "root-session-1",
+    lifecycleSessionId: "/tmp/s",
     upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
     captureProcessBirthIdentity: async () => "birth-registry-proof",
     writeGrant: async () => "/tmp/nonexistent-registry-proof-grant",
@@ -616,7 +644,8 @@ test("real Goal Host settlement reads the bound proof from the Root Broker regis
     version: 1, runId, runnerProcessInstanceId: `${runId}-runner`, state: "observed", observedAt: 1_700_000_000_000,
     instances: [{ processInstanceId: `${runId}-runner`, kind: "runner", closeObservedAt: 1_700_000_000_000, exitCode: 0, signal: null }],
   });
-  const head = commitExecutorResult(dispatched.workspace.path);
+  const workspace = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one").workspace;
+  const head = commitExecutorResult(workspace.path);
   const status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
   const result = JSON.parse(await fixture.invoke("goal_settle", {
     goal_id: goalId, task_id: "task-one", outcome: "succeeded",
@@ -635,7 +664,8 @@ test("Planned goal_settle rejects a bound clean commit when official terminal pr
   const fixture = integratedFixture(t);
   const { goalId, dispatched } = await initializeIntegratedDispatch(fixture, "Reject missing terminal proof");
   await bindIntegratedRun(fixture, dispatched, { runId: "run-missing-proof", asyncDir: "/tmp/run-missing-proof" });
-  const head = commitExecutorResult(dispatched.workspace.path);
+  const workspace = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one").workspace;
+  const head = commitExecutorResult(workspace.path);
   const status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
 
   await assert.rejects(
@@ -653,69 +683,32 @@ test("Planned goal_settle rejects a bound clean commit when official terminal pr
   assert.equal(loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one").status, "dispatched");
 });
 
-test("workspace commit created before spawn cannot be attributed to the returned Executor run", async (t) => {
+test("workspace allocation rejects a receipt with a replaced base commit before spawn", async (t) => {
   const fixture = integratedFixture(t);
   const { goalId, dispatched } = await initializeIntegratedDispatch(fixture, "Reject pre-spawn workspace commit");
-  commitExecutorResult(dispatched.workspace.path);
-  let spawnCalls = 0;
-  const rpc = {
-    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: "/tmp/s", cwd: fixture.cwd } }; },
-    async spawn() { spawnCalls += 1; return { details: { runId: "run-too-late", asyncDir: "/tmp/run-too-late" } }; },
-    async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
-  };
-  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
-  const result = await fixture.tools.find((tool) => tool.name === "subagent")
-    .execute("spawn-after-commit", dispatched.contract, undefined, undefined, fixture.context);
-
-  assert.equal(result.isError, true);
-  assert.equal(result.details.code, "EXECUTOR_BINDING_MISMATCH");
-  assert.equal(spawnCalls, 0);
-  assert.equal(loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one").executorBinding, null);
+  const { coordinator, ticket, receipt } = await allocateGoalWorkspace(fixture, dispatched);
+  assert.throws(() => coordinator.workspaceAllocated(ticket, { ...receipt, baseCommit: "f".repeat(40) }), /receipt|binding/i);
+  const task = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one");
+  assert.equal(task.status, "dispatch_requested");
+  assert.equal(task.workspace, null);
 });
 
-test("dirty workspace present before spawn cannot be attributed to the returned Executor run", async (t) => {
+test("confirmSpawn reloads projection and rejects a receipt changed after allocation", async (t) => {
   const fixture = integratedFixture(t);
   const { goalId, dispatched } = await initializeIntegratedDispatch(fixture, "Reject dirty pre-spawn workspace");
-  writeFileSync(join(dispatched.workspace.path, "result.txt"), "unowned change\n");
-  let spawnCalls = 0;
-  const rpc = {
-    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: "/tmp/s", cwd: fixture.cwd } }; },
-    async spawn() { spawnCalls += 1; return { details: { runId: "run-too-late", asyncDir: "/tmp/run-too-late" } }; },
-    async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
-  };
-  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
-  const result = await fixture.tools.find((tool) => tool.name === "subagent")
-    .execute("spawn-after-dirty", dispatched.contract, undefined, undefined, fixture.context);
-
-  assert.equal(result.isError, true);
-  assert.equal(result.details.code, "EXECUTOR_BINDING_MISMATCH");
-  assert.equal(spawnCalls, 0);
+  const { coordinator, ticket, receipt } = await allocateGoalWorkspace(fixture, dispatched);
+  await coordinator.workspaceAllocated(ticket, receipt);
+  assert.throws(() => coordinator.confirmSpawn(ticket, { ...receipt, path: `${receipt.path}-replacement`, dispatchCwd: `${receipt.path}-replacement` }), /receipt|binding/i);
   assert.equal(loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one").executorBinding, null);
 });
 
-test("workspace owner replacement after spawn prevents binding the returned run", async (t) => {
+test("repeated workspace allocation accepts the exact receipt and rejects owner replacement", async (t) => {
   const fixture = integratedFixture(t);
   const { goalId, dispatched } = await initializeIntegratedDispatch(fixture, "Reject replaced workspace owner");
-  const leasePath = join(fixture.cwd, ".state/goal-engine/worktrees", `.${goalId}-task-one-1.lease.json`);
-  let spawnCalls = 0;
-  const rpc = {
-    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: "/tmp/s", cwd: fixture.cwd } }; },
-    async spawn(params) {
-      spawnCalls += 1;
-      const reply = workflowSpawnReply(fixture.pi, params, { runId: "run-replaced-owner", asyncDir: "/tmp/run-replaced-owner" });
-      const lease = JSON.parse(readFileSync(leasePath, "utf8"));
-      writeFileSync(leasePath, `${JSON.stringify({ ...lease, ownerToken: "replacement-owner-token" })}\n`);
-      return reply;
-    },
-    async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
-  };
-  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
-  const result = await fixture.tools.find((tool) => tool.name === "subagent")
-    .execute("spawn-replaced-owner", dispatched.contract, undefined, undefined, fixture.context);
-
-  assert.equal(result.isError, true);
-  assert.equal(result.details.code, "EXECUTOR_BINDING_MISMATCH");
-  assert.equal(spawnCalls, 1);
+  const { coordinator, ticket, receipt } = await allocateGoalWorkspace(fixture, dispatched);
+  await coordinator.workspaceAllocated(ticket, receipt);
+  assert.deepEqual(await coordinator.workspaceAllocated(ticket, receipt), receipt);
+  assert.throws(() => coordinator.workspaceAllocated(ticket, { ...receipt, owner: { ...receipt.owner, rootSessionId: "replacement-root" } }), /conflicting|binding/i);
   assert.equal(loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-one").executorBinding, null);
 });
 
@@ -741,7 +734,7 @@ test("durable-then-throw executor binding append is acknowledged without spawnin
     },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
-  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
+  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {}, workspaceService: fixture.workspaceService });
   const result = await fixture.tools.find((tool) => tool.name === "subagent")
     .execute("spawn-durable-binding", dispatched.contract, undefined, undefined, fixture.context);
 
@@ -761,7 +754,7 @@ test("changing any Goal contract value after dispatch prevents spawn and leaves 
     async spawn() { spawnCalls += 1; return { details: { runId: "run-must-not-start", asyncDir: "/tmp/run-must-not-start" } }; },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
-  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
+  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {}, workspaceService: fixture.workspaceService });
   const changed = { ...dispatched.contract, objective: `${dispatched.contract.objective} replaced` };
   const result = await fixture.tools.find((tool) => tool.name === "subagent")
     .execute("spawn-replaced-contract", changed, undefined, undefined, fixture.context);
@@ -788,7 +781,7 @@ test("non-Goal coding runs and generic reviewers remain spawnable without claimi
     },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
-  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
+  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {}, workspaceService: fixture.workspaceService });
   const subagent = fixture.tools.find((tool) => tool.name === "subagent");
   const coding = await subagent.execute("non-goal-coding", {
     ...STRICT_CODING_CONTRACT,
@@ -821,10 +814,13 @@ test("goal_status recovers one unbound official active-branch executor handle wi
       return officialProof(runId, asyncDir);
     },
   });
+  const { coordinator, ticket, receipt } = await allocateGoalWorkspace(fixture, dispatched);
+  await coordinator.workspaceAllocated(ticket, receipt);
+  await coordinator.confirmSpawn(ticket, receipt);
   const timestamp = new Date(Date.now() + 1_000).toISOString();
   fixture.branch.push(
     { id: "assistant-spawn", timestamp, type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "spawn-call", name: "subagent", arguments: dispatched.contract }] } },
-    { id: "result-spawn", timestamp: new Date(Date.now() + 2_000).toISOString(), type: "message", message: { role: "toolResult", toolCallId: "spawn-call", toolName: "subagent", details: { version: "coding-dispatch-handle.v1", dispatchId: "goal-dispatch", taskId: dispatched.contract.taskId, agent: "executor", title: dispatched.contract.title, contractHash: dispatched.contract_hash, runId, asyncDir } } },
+    { id: "result-spawn", timestamp: new Date(Date.now() + 2_000).toISOString(), type: "message", message: { role: "toolResult", toolCallId: "spawn-call", toolName: "subagent", details: { version: "coding-dispatch-handle.v1", dispatchId: "goal-dispatch", taskId: dispatched.contract.taskId, agent: "executor", title: dispatched.contract.title, contractHash: dispatched.contract_hash, runId, asyncDir, workspace_id: receipt.workspaceId, lease_id: receipt.leaseId } } },
   );
   const status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
   assert.equal(status.status, "RECOVERED_EXECUTOR_BINDING");
@@ -838,9 +834,12 @@ test("runtime goal_status recovers an unbound official executor handle before is
   const runId = "run-runtime-recovered-1";
   const asyncDir = "/tmp/run-runtime-recovered-1";
   const { goalId, dispatched } = await initializeActiveRuntimeDispatch(fixture);
+  const { coordinator, ticket, receipt } = await allocateGoalWorkspace(fixture, dispatched);
+  await coordinator.workspaceAllocated(ticket, receipt);
+  await coordinator.confirmSpawn(ticket, receipt);
   fixture.branch.push(
     { id: "runtime-spawn", timestamp: new Date(Date.now() + 2_000).toISOString(), type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "runtime-spawn-call", name: "subagent", arguments: dispatched.contract }] } },
-    { id: "runtime-spawn-result", timestamp: new Date(Date.now() + 3_000).toISOString(), type: "message", message: { role: "toolResult", toolCallId: "runtime-spawn-call", toolName: "subagent", details: { version: "coding-dispatch-handle.v1", dispatchId: "goal-dispatch", taskId: dispatched.contract.taskId, agent: "executor", title: dispatched.contract.title, contractHash: dispatched.contract_hash, runId, asyncDir } } },
+    { id: "runtime-spawn-result", timestamp: new Date(Date.now() + 3_000).toISOString(), type: "message", message: { role: "toolResult", toolCallId: "runtime-spawn-call", toolName: "subagent", details: { version: "coding-dispatch-handle.v1", dispatchId: "goal-dispatch", taskId: dispatched.contract.taskId, agent: "executor", title: dispatched.contract.title, contractHash: dispatched.contract_hash, runId, asyncDir, workspace_id: receipt.workspaceId, lease_id: receipt.leaseId } } },
   );
   const status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
   assert.equal(status.status, "RECOVERED_EXECUTOR_BINDING");
@@ -856,7 +855,8 @@ test("public runtime dispatch→binding→settle→integrate→accept rejects ac
   const asyncDir = "/tmp/run-runtime-settlement";
   const { goalId, dispatched } = await initializeActiveRuntimeDispatch(fixture, { coordinatorCriteria: true, runtimeCalls });
   await bindIntegratedRun(fixture, dispatched, { runId, asyncDir });
-  const resultHead = commitExecutorResult(dispatched.workspace.path);
+  const workspace = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-1").workspace;
+  const resultHead = commitExecutorResult(workspace.path);
   let status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
 
   const result = JSON.parse(await fixture.invoke("goal_settle", {
@@ -934,23 +934,23 @@ test("Goal dispatch followed by the exact coding spawn persists the returned run
     async stop() { return {}; },
     dispose() {},
   };
-  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {} });
+  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {}, workspaceService: fixture.workspaceService });
   const subagent = fixture.tools.find((tool) => tool.name === "subagent");
   const result = await subagent.execute("spawn-goal-task", dispatched.contract, undefined, undefined, fixture.context);
   assert.equal(result.isError, false, result.content[0].text);
 
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
-  const leasePath = join(fixture.cwd, ".state/goal-engine/worktrees", ".integrated-executor-binding-task-one-1.lease.json");
-  const lease = JSON.parse(readFileSync(leasePath, "utf8"));
+  const workspace = projection.tasks.get("task-one").workspace;
   const expectedBinding = {
     attempt: 1,
     runId: "run-returned-1",
     contractHash: dispatched.contract_hash,
     asyncDir: "/tmp/run-returned-1",
-    workspacePath: dispatched.workspace.path,
-    workspaceLeaseId: createHash("sha256").update(lease.ownerToken).digest("hex"),
-    headAtDispatch: dispatched.workspace.baseCommit,
+    workspacePath: workspace.path,
+    workspaceLeaseId: workspace.leaseId,
+    headAtDispatch: workspace.baseCommit,
   };
+  assert.equal(Object.hasOwn(workspace, "ownerToken"), false);
   assert.deepEqual(projection.tasks.get("task-one").executorBinding, expectedBinding);
   const status = JSON.parse(await fixture.invoke("goal_status", { goal_id: goalId }));
   assert.deepEqual(status.tasks["task-one"].executorBinding, expectedBinding);

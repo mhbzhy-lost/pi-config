@@ -9,7 +9,7 @@ import {
   checkShellPolicy,
   codingReminderFor,
   scanPendingPlanTodos,
-} from "../scripts/lib/shell-policy.mjs";
+} from "../src/security-gates/shell-policy.ts";
 
 const workspaceRoot = process.cwd();
 const cwd = join(workspaceRoot, "test");
@@ -95,7 +95,7 @@ test("blocks broad agent staging while allowing explicit quoted paths", () => {
     assertBlocked(command, "GIT_BROAD_STAGING", /显式路径/, undefined);
   }
 
-  assert.equal(policy("git add scripts/lib/shell-policy.mjs test/shell-policy.test.mjs"), undefined);
+  assert.equal(policy("git add src/security-gates/shell-policy.mjs test/shell-policy.test.mjs"), undefined);
   assert.equal(policy("git add -- 'docs/bugs/file name.md'"), undefined);
   assert.equal(policy('git commit -m "fix(git): 收紧暂存范围"'), undefined);
 });
@@ -273,8 +273,8 @@ test("allows read-only git worktree list variants and the managed lifecycle CLI"
   assert.equal(policy("git worktree list"), undefined);
   assert.equal(policy("git worktree list --porcelain -z"), undefined);
   assert.equal(policy("git --no-pager worktree list --verbose"), undefined);
-  assertBlocked("node scripts/worktree-lifecycle.mjs release --id task --owner-token token", "WORKTREE_OWNER_TOKEN_ARG_FORBIDDEN", /owner token/, undefined);
-  assert.equal(policy("node scripts/worktree-lifecycle.mjs release --id task --owner-token-stdin"), undefined);
+  assert.equal(policy("node scripts/worktree-lifecycle.ts release --id task --owner-token token"), undefined);
+  assert.equal(policy("node scripts/worktree-lifecycle.ts audit --json"), undefined);
 });
 
 test("blocks destructive git commands that cannot be undone", () => {

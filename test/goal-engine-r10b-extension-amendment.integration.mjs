@@ -5,12 +5,12 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
-import { hashRuntimeExecutionContract, normalizeRuntimeGoalInit } from "../scripts/lib/goal-engine/obligation-contract.mjs";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
+import { appendEvent, appendEventBatch, loadProjection } from "../src/goal-engine/store.ts";
+import { createObservationAdapterRegistry } from "../src/goal-engine/observation-adapters.ts";
+import { hashRuntimeExecutionContract, normalizeRuntimeGoalInit } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
-import { buildObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
+import { buildObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const rootFor = (cwd) => join(cwd, ".state/goal-engine");

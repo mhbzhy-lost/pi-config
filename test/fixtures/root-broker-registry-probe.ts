@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 
-import { requireRootBroker } from "../../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { requireRootBroker } from "../../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 
 const outputPath = process.env.PI_ROOT_BROKER_PROBE_OUTPUT;
 if (!outputPath) throw new Error("PI_ROOT_BROKER_PROBE_OUTPUT is required");

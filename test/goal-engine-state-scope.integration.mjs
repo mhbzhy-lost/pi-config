@@ -10,7 +10,7 @@ import {
   ensureGoalStateIdentity,
   resolveGoalStateScope,
   selectGoalStateRoot,
-} from "../scripts/lib/goal-engine/state-scope.mjs";
+} from "../src/goal-engine/state-scope.ts";
 
 function arena(prefix = "goal-state-scope-") {
   const root = mkdtempSync(join(tmpdir(), prefix));

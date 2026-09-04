@@ -9,7 +9,7 @@ import test from "node:test";
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;
 const provider = path.join(repoRoot, "test", "fixtures", "deterministic-provider.mjs");
-const runtime = path.join(repoRoot, "pi", "extensions", "subagent-runtime.ts");
+const runtime = path.join(repoRoot, "packages", "pi-subagents-enhanced", "extensions", "subagent-runtime.ts");
 const probe = path.join(repoRoot, "test", "fixtures", "root-broker-registry-probe.ts");
 
 function brokerSocketPath(sessionId) {

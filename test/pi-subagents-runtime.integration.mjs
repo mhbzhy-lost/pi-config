@@ -6,13 +6,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { buildTopLevelRuntimeEnv, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.mjs";
+import { buildTopLevelRuntimeEnv, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.ts";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;
-const extension = join(repoRoot, "pi", "npm", "node_modules", "pi-subagents");
+const enhancedPackageRoot = join(repoRoot, "packages", "pi-subagents-enhanced");
+const upstreamPackageRoot = join(enhancedPackageRoot, "node_modules", "pi-subagents");
+const extension = join(enhancedPackageRoot, "extensions", "subagent-runtime.ts");
 const providerExtension = join(repoRoot, "test", "fixtures", "deterministic-provider.mjs");
-const clientModule = new URL("../scripts/probes/pi-subagents-compat.mjs", import.meta.url).href;
+const clientModule = new URL("../scripts/probes/pi-subagents-compat.ts", import.meta.url).href;
 
 function runRpcUntil(command, args, { input, until, timeoutMs = 60_000, ...options }) {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -233,6 +235,27 @@ Use the deterministic compatibility marker from the assigned task.
           },
         });
         pi.registerTool({
+          name: "bg_wait",
+          label: "Compatibility Wait",
+          description: "Yield once for the deterministic compatibility fixture.",
+          parameters: { type: "object", properties: {}, additionalProperties: true },
+          async execute() {
+            const deadline = Date.now() + 10_000;
+            while (Date.now() < deadline) {
+              try {
+                const proof = JSON.parse(await readFile(join(spawnedAsyncDir, "process-terminal.json"), "utf8"));
+                if (proof.state === "observed") {
+                  return { content: [{ type: "text", text: "compatibility wait complete" }], details: { processTerminal: proof } };
+                }
+              } catch (error) {
+                if (error?.code !== "ENOENT") throw error;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            throw new Error("process-terminal proof was not observed for " + spawnedAsyncDir);
+          },
+        });
+        pi.registerTool({
           name: "compat_inspect_nested_events",
           label: "Inspect Nested Events",
           description: "Count nested route metadata and event files while the executor is active.",
@@ -342,6 +365,8 @@ Use the deterministic compatibility marker from the assigned task.
       && record.toolName === "compat_inspect_nested_events");
     const statusObservation = result.records.find((record) => record.type === "tool_execution_end"
       && record.toolName === "compat_status");
+    const waitObservation = result.records.find((record) => record.type === "tool_execution_end" && record.toolName === "bg_wait");
+    assert.equal(waitObservation?.result?.details?.processTerminal?.state, "observed", JSON.stringify(waitObservation));
     if (mode === "attention") {
       assert.equal(statusObservation?.result?.details?.currentTool, "contact_supervisor", JSON.stringify(statusObservation));
       assert.equal(statusObservation?.result?.details?.rpcStatusFound, true, JSON.stringify(statusObservation));
@@ -351,9 +376,6 @@ Use the deterministic compatibility marker from the assigned task.
       assert.ok(result.records.some((record) => record.type === "tool_execution_end"
         && record.toolName === "subagent_supervisor"
         && record.result?.details?.replyTo), "supervisor reply evidence is missing");
-      assert.ok(result.records.some((record) => record.type === "tool_execution_end" && record.toolName === "bg_wait"));
-    } else {
-      assert.ok(result.records.some((record) => record.type === "tool_execution_end" && record.toolName === "bg_wait"));
     }
 
     return { terminal, details };
@@ -368,11 +390,11 @@ test("installed runtime resolves a supported Pi and exact dependency versions", 
   assert.ok(piBinary, "PI_REAL_BIN must point to an explicitly supported Pi runtime");
   const piVersion = execFileSync(piBinary, ["--version"], { encoding: "utf8" }).trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi version: ${piVersion}`);
-  const piSubagentsVersion = execFileSync("node", ["-p", `require(${JSON.stringify(join(extension, "package.json"))}).version`], { encoding: "utf8" }).trim();
+  const piSubagentsVersion = execFileSync("node", ["-p", `require(${JSON.stringify(join(upstreamPackageRoot, "package.json"))}).version`], { encoding: "utf8" }).trim();
   assert.equal(piSubagentsVersion, "0.62.0");
-  const requireFromExtension = createRequire(join(extension, "package.json"));
+  const requireFromExtension = createRequire(join(upstreamPackageRoot, "package.json"));
   assert.match(requireFromExtension.resolve("typebox/compile"), /typebox/);
-  const typeboxPackage = JSON.parse(execFileSync("node", ["-e", `process.stdout.write(require('fs').readFileSync(${JSON.stringify(join(repoRoot, "pi", "npm", "node_modules", "typebox", "package.json"))}, 'utf8'))`], { encoding: "utf8" }));
+  const typeboxPackage = JSON.parse(execFileSync("node", ["-e", `process.stdout.write(require('fs').readFileSync(${JSON.stringify(join(upstreamPackageRoot, "node_modules", "typebox", "package.json"))}, 'utf8'))`], { encoding: "utf8" }));
   assert.equal(typeboxPackage.version, "1.1.38");
 });
 

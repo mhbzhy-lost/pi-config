@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   issueActionOffer,
   verifyAndConsumeActionOffer,
-} from "../scripts/lib/goal-engine/action-offer.mjs";
+} from "../src/goal-engine/action-offer.ts";
 
 function projection(overrides = {}) {
   return {

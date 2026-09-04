@@ -3,9 +3,9 @@ import test from "node:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as store from "../scripts/lib/goal-engine/store.mjs";
-import { buildObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
-import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
+import * as store from "../src/goal-engine/store.ts";
+import { buildObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
+import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const goalId = "store-finalization-goal";

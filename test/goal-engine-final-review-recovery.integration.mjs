@@ -3,8 +3,8 @@ import test from "node:test";
 import { mkdtemp, rm, symlink, writeFile, chmod, link, lstat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildObligationFinalizationManifest, validateObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
-import * as finalReview from "../scripts/lib/goal-engine/final-review.mjs";
+import { buildObligationFinalizationManifest, validateObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
+import * as finalReview from "../src/goal-engine/final-review.ts";
 
 const h = x => x.repeat(64);
 const approval = { entryId: "entry-recovery", sessionId: "session-recovery", source: "user" };

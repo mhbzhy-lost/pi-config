@@ -9,7 +9,7 @@ import {
   auditAmendmentAuthorizations,
   auditPracticeProfileSync,
   canonicalJsonSha256,
-} from "../scripts/lib/goal-contract/authorization-audit.mjs";
+} from "../src/goal-contract/authorization-audit.ts";
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "goal-auth-audit-"));

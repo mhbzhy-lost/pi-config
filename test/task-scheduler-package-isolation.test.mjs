@@ -19,14 +19,14 @@ test("scheduler package is isolated and its exact dependencies install without l
   assert.equal(runtimePackage.dependencies["@amaster.ai/pi-shared"], "0.1.9");
   assert.equal(runtimePackage.dependencies.croner, "10.0.1");
 
-  const { buildTaskSchedulerInstallCommand } = await import("../scripts/setup-subagent-runtime-deps.mjs");
+  const { buildTaskSchedulerInstallCommand } = await import("../scripts/setup-subagent-runtime-deps.ts");
   const install = buildTaskSchedulerInstallCommand("/tmp/pi/npm");
   assert.deepEqual(install, {
     command: "npm",
-    args: ["install", "--prefix", "/tmp/pi/npm", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
+    args: ["install", "--prefix", "/tmp/pi/npm", "--omit=peer", "--save-exact", "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1"],
   }, "repeatable setup must install exact libraries through npm rather than loading an upstream extension");
 
   const init = await readFile(join(repoRoot, "init-pi.sh"), "utf8");
-  assert.match(init, /npm --prefix "\$SCRIPT_DIR" run setup:subagent-runtime/, "init delegates repeatable local dependency setup");
+  assert.match(init, /npm --prefix "\$SCRIPT_DIR" run setup:subagents-enhanced/, "init delegates repeatable local dependency setup");
   assert.doesNotMatch(init, /pi-task-scheduler.*(?:extension|dist\/index)/s, "init must not load upstream extension");
 });

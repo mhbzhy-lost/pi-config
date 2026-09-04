@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePatch, ParseError } from "../scripts/lib/apply-patch/parser.mjs";
+import { parsePatch, ParseError } from "../src/apply-patch/parser.ts";
 
 test("parses add file hunk", () => {
   const { hunks } = parsePatch(

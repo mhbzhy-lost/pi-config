@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
-import { discoverManagedSkills } from "../scripts/lib/skill-whitelist.mjs";
+import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
 import { resolvePiCodingAgentRoot } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -16,6 +16,42 @@ const piBinary = process.env.PI_REAL_BIN;
 const piRoot = resolvePiCodingAgentRoot();
 const piPackage = join(piRoot, "dist", "index.js");
 const piTypes = join(piRoot, "dist", "core", "extensions", "types.d.ts");
+
+test("current settings reload the enhanced local package with one subagent owner", async () => {
+  const host = await import(pathToFileURL(piPackage).href);
+  const settingsManager = host.SettingsManager.create(repoRoot, join(repoRoot, "pi"));
+  const resourceLoader = new host.DefaultResourceLoader({
+    cwd: repoRoot,
+    agentDir: join(repoRoot, "pi"),
+    settingsManager,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+  });
+  const inspect = () => {
+    const extensions = resourceLoader.getExtensions().extensions;
+    const enhanced = extensions.filter((extension) => String(extension.path).includes("/packages/pi-subagents-enhanced/extensions/"));
+    const legacy = extensions.filter((extension) => /\/pi\/extensions\/(?:subagent-runtime|custom-footer)\.ts$/.test(String(extension.path)));
+    const toolOwners = enhanced.flatMap((extension) => [...extension.tools.keys()]).filter((name) => name === "subagent" || name === "subagent_supervisor");
+    const notifyOwners = enhanced.filter((extension) => extension.messageRenderers.has("subagent-notify"));
+    const supervisorMessageOwners = enhanced.filter((extension) => extension.messageRenderers.has("subagent_supervisor_request"));
+    return { enhanced, legacy, toolOwners, notifyOwners, supervisorMessageOwners };
+  };
+
+  await resourceLoader.reload();
+  const first = inspect();
+  await resourceLoader.reload();
+  const second = inspect();
+  for (const snapshot of [first, second]) {
+    assert.equal(snapshot.enhanced.length, 2);
+    assert.equal(snapshot.legacy.length, 0);
+    assert.deepEqual(snapshot.toolOwners.sort(), ["subagent", "subagent_supervisor"]);
+    assert.equal(snapshot.notifyOwners.length, 1);
+    assert.equal(snapshot.supervisorMessageOwners.length, 1);
+    assert.equal(snapshot.enhanced.filter((extension) => String(extension.path).endsWith("/custom-footer.ts")).length, 1);
+  }
+});
 
 test("installed Pi SessionManager preserves custom → compaction → real user branch fields", async () => {
   const { SessionManager } = await import(piPackage);
@@ -138,7 +174,7 @@ async function runProviderFallbackCanary(hostRoot) {
       "openai-codex": { type: "api_key", key: "not-used" },
     }));
     const wrapper = join(agentDir, "provider-fallback-canary.mjs");
-    await writeFile(wrapper, `import { createProviderFallbackExtension } from ${JSON.stringify(pathToFileURL(join(repoRoot, "scripts", "lib", "provider-fallback-extension.mjs")).href)};\nexport default (pi) => createProviderFallbackExtension(pi, { configRoot: ${JSON.stringify(configRoot)} });\n`);
+    await writeFile(wrapper, `import { createProviderFallbackExtension } from ${JSON.stringify(pathToFileURL(join(repoRoot, "src", "provider-fallback", "extension.ts")).href)};\nexport default (pi) => createProviderFallbackExtension(pi, { configRoot: ${JSON.stringify(configRoot)} });\n`);
 
     const host = await import(pathToFileURL(join(hostRoot, "dist", "index.js")).href);
     const settingsManager = host.SettingsManager.create(cwd, agentDir);

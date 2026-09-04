@@ -8,20 +8,14 @@ async function text(path) {
   return readFile(new URL(path, repo), "utf8");
 }
 
-test("keeps pi-subagents Pi-managed while disabling every upstream package resource", async () => {
+test("uses the enhanced local package as the only subagent package source", async () => {
   const settings = JSON.parse(await text("pi/settings.json"));
-  const entry = settings.packages.find((candidate) => {
+  const subagentEntries = settings.packages.filter((candidate) => {
     const source = typeof candidate === "string" ? candidate : candidate?.source;
-    return /^npm:pi-subagents(?:@|$)/.test(source ?? "");
+    return source === "../packages/pi-subagents-enhanced" || /^npm:pi-subagents(?:@|$)/.test(source ?? "");
   });
 
-  assert.deepEqual(entry, {
-    source: "npm:pi-subagents@0.62.0",
-    extensions: [],
-    skills: [],
-    prompts: [],
-    themes: [],
-  });
+  assert.deepEqual(subagentEntries, [{ source: "../packages/pi-subagents-enhanced" }]);
 });
 
 test("disables every task scheduler package resource", async () => {
@@ -68,26 +62,35 @@ test("does not configure the Todo package", async () => {
   assert.equal(hasTodoPackage, false);
 });
 
-test("retains exact subagent dependency ownership in Pi package management", async () => {
+test("keeps subagent dependencies owned by the enhanced package setup", async () => {
   const runtimePackage = JSON.parse(await text("pi/npm/package.json"));
   const init = await text("init-pi.sh");
 
-  assert.equal(runtimePackage.dependencies["pi-subagents"], "0.62.0");
+  assert.equal(runtimePackage.dependencies["pi-subagents"], undefined);
+  assert.equal(runtimePackage.dependencies.typebox, undefined);
   assert.equal(runtimePackage.dependencies["@juicesharp/rpiv-todo"], undefined);
-  assert.match(init, /PI_CODING_AGENT_DIR="\$SCRIPT_DIR\/pi" "\$pi_binary" install "npm:pi-subagents@\$PI_SUBAGENTS_VERSION"/);
-  assert.doesNotMatch(init, /npm install[^\n]*pi-subagents/);
+  assert.doesNotMatch(init, /PI_SUBAGENTS_VERSION|pi_binary" install "npm:pi-subagents/);
+  assert.match(init, /npm --prefix "\$SCRIPT_DIR" run setup:subagents-enhanced/);
 });
 
-test("loads upstream only behind the project-owned headless runtime entry", async () => {
-  const entry = await text("pi/extensions/subagent-runtime.ts");
+test("loads upstream only through the enhanced package and removes duplicate auto-discovered entries", async () => {
+  const entry = await text("packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
 
-  assert.match(entry, /\.\.\/npm\/node_modules\/pi-subagents\/index\.ts/);
+  assert.match(entry, /\.\.\/src\/compat\/pi-subagents-0\.62\.ts/);
   assert.match(entry, /installHeadlessTypedSubagentRuntime/);
   assert.doesNotMatch(entry, /registerTool\s*\(/);
+  for (const legacy of [
+    "pi/extensions/subagent-runtime.ts",
+    "pi/extensions/custom-footer.ts",
+    "pi/extensions/lib/pi-subagents-browser-adapter.ts",
+    "pi/extensions/lib/subagent-native-conversation.ts",
+    "pi/extensions/lib/subagent-session-browser.ts",
+    "pi/extensions/lib/subagent-session-viewport.ts",
+  ]) await assert.rejects(() => text(legacy), { code: "ENOENT" }, legacy);
 });
 
 test("production runtime lifecycle identity and retry cleanup contract", async () => {
-  const entry = await text("pi/extensions/subagent-runtime.ts");
+  const entry = await text("packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
 
   assert.match(entry, /const lifecycleSessionId = resolveCurrentSessionId\(ctx\.sessionManager\);/);
   assert.match(entry, /new RootBrokerServer\(\{ rootSessionId, lifecycleSessionId, upstream, events: pi\.events \}\)/);
@@ -97,11 +100,11 @@ test("production runtime lifecycle identity and retry cleanup contract", async (
 
 test("production dispatch modules are independent from Plan Runner and native tool definitions", async () => {
   const sources = await Promise.all([
-    "scripts/lib/subagent-dispatch/ir.ts",
-    "scripts/lib/subagent-dispatch/prompt.ts",
-    "scripts/lib/subagent-dispatch/rpc-client.ts",
-    "scripts/lib/subagent-dispatch/runtime-membrane.ts",
-    "scripts/lib/subagent-dispatch/extension.ts",
+    "packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts",
+    "packages/pi-subagents-enhanced/src/subagent-dispatch/prompt.ts",
+    "packages/pi-subagents-enhanced/src/subagent-dispatch/rpc-client.ts",
+    "packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts",
+    "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",
   ].map(text));
   const joined = sources.join("\n");
 
@@ -119,7 +122,7 @@ test("production dispatch modules are independent from Plan Runner and native to
 });
 
 test("the model-facing description contains the project dispatch and push-notification contract", async () => {
-  const { TYPED_SUBAGENT_DESCRIPTION } = await import("../scripts/lib/subagent-dispatch/extension.ts");
+  const { TYPED_SUBAGENT_DESCRIPTION } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts");
 
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /dispatch-ir\.v1/);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /For executor, provide/);

@@ -15,14 +15,14 @@ function namedImports(source, specifier) {
 
 test("reload-sensitive extension behavior does not depend on newly added MJS exports", async () => {
   const compactTools = await readFile(new URL("../pi/extensions/compact-tools.ts", import.meta.url), "utf8");
-  const customFooter = await readFile(new URL("../pi/extensions/custom-footer.ts", import.meta.url), "utf8");
+  const customFooter = await readFile(new URL("../packages/pi-subagents-enhanced/extensions/custom-footer.ts", import.meta.url), "utf8");
 
   assert.ok(
-    !namedImports(compactTools, "../../scripts/lib/compact-tools-renderer.mjs").includes("installCompactSkillRenderer"),
+    !namedImports(compactTools, "../../src/compact-tools/renderer.ts").includes("installCompactSkillRenderer"),
     "compact-tools must keep the skill installer in its reloadable TypeScript entry",
   );
   assert.ok(
-    !namedImports(customFooter, "../../scripts/lib/custom-footer-layout.mjs").includes("createFooterComponent"),
+    !namedImports(customFooter, "../src/tui/footer-layout.ts").includes("createFooterComponent"),
     "custom-footer must keep its component factory in its reloadable TypeScript entry",
   );
 });

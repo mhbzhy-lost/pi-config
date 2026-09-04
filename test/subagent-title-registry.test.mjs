@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTitleRegistry, normalizeSubagentTitle } from "../scripts/lib/subagent-dispatch/title-registry.ts";
+import { createTitleRegistry, normalizeSubagentTitle } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
 
 test("normalizes concise single-line titles and rejects control injection", () => {
   assert.equal(normalizeSubagentTitle("  Review title  "), "Review title");

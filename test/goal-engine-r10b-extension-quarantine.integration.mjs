@@ -6,10 +6,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { createGoalEngineExtension } from "../scripts/lib/goal-engine/extension.mjs";
-import { appendEvent, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { issueActionOffer } from "../scripts/lib/goal-engine/action-offer.mjs";
-import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
+import { appendEvent, loadProjection } from "../src/goal-engine/store.ts";
+import { issueActionOffer } from "../src/goal-engine/action-offer.ts";
+import { createObservationAdapterRegistry } from "../src/goal-engine/observation-adapters.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");

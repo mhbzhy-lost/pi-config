@@ -19,6 +19,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     await mkdir(join(fixtureRepo, "scripts"), { recursive: true });
     await mkdir(join(fixtureRepo, "pi"), { recursive: true });
+    await mkdir(join(fixtureRepo, "packages", "pi-subagents-enhanced"), { recursive: true });
     await mkdir(join(fixtureRepo, "skill-overrides", "external-llm-review", "tests"), { recursive: true });
     await mkdir(join(home, ".local", "share", "opencode"), { recursive: true });
     await mkdir(fakeBin, { recursive: true });
@@ -38,18 +39,18 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const fakeNpm = join(fakeBin, "npm");
     await writeFile(
       fakeNpm,
-      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"--prefix\" && \"$3\" == \"run\" && \"$4\" == \"setup:subagent-runtime\" ]]; then mkdir -p \"$2/pi/npm/node_modules/typebox\"; printf '{\\\"version\\\":\\\"1.1.38\\\"}' > \"$2/pi/npm/node_modules/typebox/package.json\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"--prefix\" && \"$3\" == \"run\" && \"$4\" == \"setup:subagents-enhanced\" ]]; then mkdir -p \"$2/packages/pi-subagents-enhanced/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.62.0\\\"}' > \"$2/packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json\"; fi\n",
     );
     await chmod(fakeNpm, 0o755);
     const fakeNode = join(fakeBin, "node");
     await writeFile(
       fakeNode,
-      "#!/usr/bin/env bash\nif [[ \"$1\" == */scripts/sync-skills.mjs ]]; then printf 'node sync-skills markers=%s,%s,%s,%s\\n' \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"; exit 0; fi\nexec \"$REAL_NODE\" \"$@\"\n",
+      "#!/usr/bin/env bash\nif [[ \"$1\" == */scripts/setup-subagent-runtime-deps.ts && \"$2\" == \"--check-upgrade\" ]]; then printf 'node check-subagent-upgrade\\n' >> \"$COMMAND_LOG\"; exit 0; fi\nif [[ \"$1\" == */scripts/sync-skills.ts ]]; then printf 'node sync-skills markers=%s,%s,%s,%s\\n' \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"; exit 0; fi\nexec \"$REAL_NODE\" \"$@\"\n",
     );
     await chmod(fakeNode, 0o755);
     await writeFile(
       fakePi,
-      "#!/usr/bin/env bash\nprintf 'pi-real registry=%s %s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == \"install\" && \"$2\" == \"npm:pi-subagents@0.62.0\" ]]; then mkdir -p \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.62.0\\\"}' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/package.json\"; printf 'export default {};\\n' > \"$PI_CODING_AGENT_DIR/npm/node_modules/pi-subagents/index.js\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'pi-real registry=%s %s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" >> \"$COMMAND_LOG\"\n",
     );
     await chmod(fakePi, 0o755);
 
@@ -104,12 +105,14 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const commands = await readFile(commandLog, "utf8");
     assert.doesNotMatch(commands, /submodule/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.84\.4/);
-    assert.match(commands, /pi-real registry=https:\/\/registry\.npmjs\.org install npm:pi-subagents@0\.62\.0/);
+    assert.doesNotMatch(commands, /pi-real registry=.*install npm:pi-subagents/);
+    assert.match(commands, /node check-subagent-upgrade/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:subagents-enhanced markers=1,1,parent-session,1/);
+    assert.ok(commands.indexOf("node check-subagent-upgrade") < commands.indexOf("run setup:subagents-enhanced"), "live-upgrade preflight must run before package setup mutates the package");
     assert.doesNotMatch(commands, /rpiv-todo/);
-    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --prefix .* run setup:subagent-runtime markers=1,1,parent-session,1/);
     assert.match(commands, /node sync-skills markers=1,1,parent-session,1/);
-    const typeboxPackage = JSON.parse(await readFile(join(fixtureRepo, "pi", "npm", "node_modules", "typebox", "package.json"), "utf8"));
-    assert.equal(typeboxPackage.version, "1.1.38");
+    const subagentsPackage = JSON.parse(await readFile(join(fixtureRepo, "packages", "pi-subagents-enhanced", "node_modules", "pi-subagents", "package.json"), "utf8"));
+    assert.equal(subagentsPackage.version, "0.62.0");
     assert.match(commands, /npm registry= test markers=,,,/);
     assert.match(commands, /npm registry= run doctor markers=,,,/);
     assert.match(commands, /npm registry= run test:integration markers=,,,/);

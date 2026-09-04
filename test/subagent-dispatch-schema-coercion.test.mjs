@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { Compile } from "../pi/npm/node_modules/typebox/build/compile/index.mjs";
-import { TYPED_SUBAGENT_PARAMETERS } from "../scripts/lib/subagent-dispatch/extension.ts";
+import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 
 /**
  * Tests that the TYPED_SUBAGENT_PARAMETERS JSON Schema tolerates stringified

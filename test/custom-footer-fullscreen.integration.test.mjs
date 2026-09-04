@@ -4,7 +4,7 @@ import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 const { jiti, piTui } = await loadPiTestRuntime(import.meta.url);
 const { matchesKey, Key } = piTui;
-const { SubagentTranscriptViewport, parseSgrWheelDirection } = await jiti.import("../pi/extensions/lib/subagent-session-viewport.ts");
+const { SubagentTranscriptViewport, parseSgrWheelDirection } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/session-viewport.ts");
 
 test("TuiAltScreen gives focused child overlay input back after official search", (t) => {
   assert.equal(typeof piTui.TuiAltScreen, "function");

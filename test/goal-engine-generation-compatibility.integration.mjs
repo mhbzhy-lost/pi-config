@@ -4,10 +4,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { applyEvent, createProjection, schemaVersionForMutation } from "../scripts/lib/goal-engine/events.mjs";
-import { generationCapabilities } from "../scripts/lib/goal-engine/generation-capabilities.mjs";
-import { appendEvent, appendEventBatch, loadProjection } from "../scripts/lib/goal-engine/store.mjs";
-import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../scripts/lib/goal-engine/obligation-contract.mjs";
+import { applyEvent, createProjection, schemaVersionForMutation } from "../src/goal-engine/events.ts";
+import { generationCapabilities } from "../src/goal-engine/generation-capabilities.ts";
+import { appendEvent, appendEventBatch, loadProjection } from "../src/goal-engine/store.ts";
+import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const at = (n) => `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`;

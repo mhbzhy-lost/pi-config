@@ -12,7 +12,7 @@ const EXECUTOR_HEAD = "3".repeat(40);
 const terminal = { status: "passed", code: 0, signal: null, output: "terminal output", outputBytes: 15, truncated: false, terminal: true, pid: 17, pidBirthIdentity: "a".repeat(64), processGroupTerminalProof: "b".repeat(64), workspaceClean: true };
 
 async function host(options = {}) {
-  const { createProductionGoalRuntimeHost } = await import("../scripts/lib/goal-engine/production-runtime-host.mjs");
+  const { createProductionGoalRuntimeHost } = await import("../src/goal-engine/production-runtime-host.ts");
   return createProductionGoalRuntimeHost({ registerTool() {}, on() {} }, options);
 }
 function workspaceRequest(overrides = {}) {

@@ -6,9 +6,9 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createGoalEngineEntry } from "../pi/extensions/goal-engine.ts";
-import { createProductionGoalRuntimeHost } from "../scripts/lib/goal-engine/production-runtime-host.mjs";
-import { resolveObservationAdapter } from "../scripts/lib/goal-engine/observation-adapters.mjs";
-import { validateRuntimeReadiness } from "../scripts/lib/goal-engine/obligation-contract.mjs";
+import { createProductionGoalRuntimeHost } from "../src/goal-engine/production-runtime-host.ts";
+import { resolveObservationAdapter } from "../src/goal-engine/observation-adapters.ts";
+import { validateRuntimeReadiness } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit } from "./helpers/goal-runtime-fixtures.mjs";
 
 const adapter = {

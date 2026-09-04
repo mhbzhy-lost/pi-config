@@ -15,7 +15,7 @@ test("shell integration makes bare pi use the repository configuration", async (
     const fakePi = join(root, "pi-real");
     await writeFile(
       fakePi,
-      `#!/usr/bin/env bash\nnode -e 'require("fs").writeFileSync(process.env.OUTPUT, JSON.stringify({ config: process.env.PI_CODING_AGENT_DIR, sessions: process.env.PI_CODING_AGENT_SESSION_DIR, goals: process.env.PI_CODING_GOAL_DIR, args: process.argv.slice(1) }))' -- "$@"\n`,
+      `#!/usr/bin/env bash\nnode -e 'require("fs").writeFileSync(process.env.OUTPUT, JSON.stringify({ config: process.env.PI_CODING_AGENT_DIR, sessions: process.env.PI_CODING_AGENT_SESSION_DIR, goals: process.env.PI_CODING_GOAL_DIR, workspaces: process.env.PI_CODING_WORKSPACE_DIR, args: process.argv.slice(1) }))' -- "$@"\n`,
     );
     await chmod(fakePi, 0o755);
 
@@ -34,8 +34,30 @@ test("shell integration makes bare pi use the repository configuration", async (
       config: join(repoRoot, "pi"),
       sessions: join(repoRoot, "var", "sessions"),
       goals: join(repoRoot, "var", "goals"),
+      workspaces: join(repoRoot, "var", "workspaces"),
       args: ["--no-skills", "--version"],
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("shell integration preserves an absolute custom workspace state directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-shell-workspaces-"));
+  try {
+    const output = join(root, "workspace-dir.txt");
+    const fakePi = join(root, "pi-real");
+    await writeFile(fakePi, "#!/usr/bin/env bash\nprintf '%s' \"$PI_CODING_WORKSPACE_DIR\" > \"$OUTPUT\"\n");
+    await chmod(fakePi, 0o755);
+
+    const result = spawnSync(
+      "zsh",
+      ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
+      { encoding: "utf8", env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_WORKSPACE_DIR: "/tmp/custom-pi-workspaces" } },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(await readFile(output, "utf8"), "/tmp/custom-pi-workspaces");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

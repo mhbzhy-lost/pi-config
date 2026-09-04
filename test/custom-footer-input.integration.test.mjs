@@ -4,8 +4,8 @@ import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 import { createTestTui } from "./helpers/pi-tui.mjs";
 
 const { jiti, piTui } = await loadPiTestRuntime(import.meta.url);
-const { SubagentSessionBrowserState } = await jiti.import("../pi/extensions/lib/subagent-session-browser.ts");
-const { createBrowserInputController } = await jiti.import("../pi/extensions/custom-footer.ts");
+const { SubagentSessionBrowserState } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/session-browser.ts");
+const { createBrowserInputController } = await jiti.import("../packages/pi-subagents-enhanced/extensions/custom-footer.ts");
 
 test("real TUI input chain routes child navigation, transcript scrolling, and tool expansion without forwarding editor input", () => {
   const browser = new SubagentSessionBrowserState();

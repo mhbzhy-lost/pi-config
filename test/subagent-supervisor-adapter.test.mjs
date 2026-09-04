@@ -6,7 +6,7 @@ import {
   SUPERVISOR_PARAMETERS,
   createSupervisorAdapter,
   createSupervisorTool,
-} from "../scripts/lib/subagent-dispatch/supervisor-adapter.ts";
+} from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts";
 
 test("project supervisor exposes the stable typed contract", () => {
   const tool = createSupervisorTool(createSupervisorAdapter());

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifySubagentPresentation } from "../scripts/lib/subagent-dispatch/presentation-status.ts";
+import { classifySubagentPresentation } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/presentation-status.ts";
 
 test("classifies normal non-success reports without runtime failure", () => {
   const completed = (child) => ({ state: "failed", success: false, summary: "completion", results: [child] });

@@ -5,8 +5,8 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
-import * as workspace from "../scripts/lib/goal-engine/workspace.mjs";
-import { allocateExecutorWorkspace, inspectExecutorWorkspace, integrateExecutorWorkspace, releaseExecutorWorkspace } from "../scripts/lib/goal-engine/workspace.mjs";
+import * as workspace from "../src/goal-engine/workspace.mjs";
+import { allocateExecutorWorkspace, inspectExecutorWorkspace, integrateExecutorWorkspace, releaseExecutorWorkspace } from "../src/goal-engine/workspace.mjs";
 import { releaseManagedWorktree } from "../scripts/lib/worktree-lifecycle/managed-worktree.mjs";
 import { markDisposition } from "../scripts/lib/worktree-lifecycle/registry.mjs";
 

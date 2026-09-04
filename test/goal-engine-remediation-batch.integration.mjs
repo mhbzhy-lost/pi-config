@@ -3,9 +3,9 @@ import test from "node:test";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEvent, appendEventBatch } from "../scripts/lib/goal-engine/store.mjs";
-import { remediationSubjectHash, taskContractHash } from "../scripts/lib/goal-engine/task-definition.mjs";
-import { validateRemediationTask } from "../scripts/lib/goal-engine/repair-policy.mjs";
+import { appendEvent, appendEventBatch } from "../src/goal-engine/store.ts";
+import { remediationSubjectHash, taskContractHash } from "../src/goal-engine/task-definition.ts";
+import { validateRemediationTask } from "../src/goal-engine/repair-policy.ts";
 
 const task = { description: "Repair", deps: [], writePaths: ["src/**"], acceptance: { criteria: [{ id: "repair", statement: "Repair passes", evidenceKinds: ["tests"] }] }, workflow: "tdd" };
 function event(type, data, n) { return { schemaVersion: "goal-runtime.v1", eventId: `batch-${n}`, goalId: "runtime-goal", occurredAt: "2026-08-13T00:00:00.000Z", type, data }; }

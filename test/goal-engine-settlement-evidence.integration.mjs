@@ -9,7 +9,7 @@ import {
   materializeSettlementEvidence,
   normalizeSettlementEvidence,
   serializeSettlementEvidenceYaml,
-} from "../scripts/lib/goal-engine/settlement-evidence.mjs";
+} from "../src/goal-engine/settlement-evidence.ts";
 
 const sha = (char) => char.repeat(64);
 const identity = { goalId: "goal-1", taskId: "task-1", runId: "run-1", attempt: 1, contractHash: sha("a"), head: "b".repeat(40) };
@@ -22,7 +22,7 @@ function evidence(overrides = {}) {
       { id: "criterion-a", status: "satisfied", evidence: ["sha256:" + sha("1")] },
     ],
     commandsRun: [{ command: "node --test", result: "passed", outputRef: "sha256:" + sha("3") }],
-    changedFiles: ["scripts/lib/goal-engine/settlement-evidence.mjs"],
+    changedFiles: ["src/goal-engine/settlement-evidence.mjs"],
     ...overrides,
   };
 }
@@ -32,7 +32,7 @@ const options = { expectedIdentity: identity, expectedCriteria, outcome: "succee
 test("normalizes exact settlement evidence and fingerprints semantic canonical form", () => {
   const normalized = normalizeSettlementEvidence(evidence(), options);
   assert.deepEqual(normalized.criteria.map(({ id }) => id), ["criterion-a", "criterion-b"]);
-  assert.equal(normalized.changedFiles[0], "scripts/lib/goal-engine/settlement-evidence.mjs");
+  assert.equal(normalized.changedFiles[0], "src/goal-engine/settlement-evidence.mjs");
   assert.equal(fingerprintSettlementEvidence(evidence(), options), fingerprintSettlementEvidence(evidence({ criteria: [...evidence().criteria].reverse() }), options));
 });
 

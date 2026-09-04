@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTypedSubagentExtension } from "../scripts/lib/subagent-dispatch/extension.ts";
-import { compileCodingDispatchIR } from "../scripts/lib/subagent-dispatch/ir.ts";
-import { bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, unbindGoalExecutorCoordinatorSession } from "../scripts/lib/subagent-dispatch/root-broker-registry.ts";
+import { createTypedSubagentExtension } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts";
+import { bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, unbindGoalExecutorCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 
 const contract = {
   version: "dispatch-ir.v1", taskId: "identity-ledger", title: "Bind durable spawn identity", agent: "executor", risk: "normal",
@@ -46,24 +46,218 @@ function workflowLeaf(params: any) {
   return JSON.parse(match[1]);
 }
 
+function goalWorkspaceRequest(contractHash: string) {
+  return {
+    workspaceId: "goal-workspace-1",
+    owner: { kind: "goal-task", rootSessionId: "root-shared", goalId: "goal-1", taskId: "task-1", attempt: 1, executionRevision: 1 },
+    originRoot: "/repo",
+    requestedCwd: "/repo",
+    originRef: "refs/heads/main",
+    baseCommit: "b".repeat(40),
+    contractHash,
+    mode: "coding",
+    writePaths: ["test/subagent-dispatch-extension.test.ts"],
+  };
+}
+
+function workspaceReceipt(workspaceRequest: any, run: any = null) {
+  return {
+    schemaVersion: "managed-workspace.v1",
+    workspaceId: workspaceRequest.workspaceId,
+    leaseId: "c".repeat(64),
+    owner: workspaceRequest.owner,
+    originRoot: workspaceRequest.originRoot,
+    requestedCwd: workspaceRequest.requestedCwd,
+    originRef: workspaceRequest.originRef,
+    baseCommit: workspaceRequest.baseCommit,
+    path: "/managed/goal-workspace-1",
+    dispatchCwd: "/managed/goal-workspace-1",
+    branchRef: "refs/heads/pi-managed/goal-workspace-1",
+    state: "active",
+    run,
+    disposition: null,
+    cleanupDebt: null,
+  };
+}
+
 test("coding spawn binds the Goal coordinator through a same-root different-ExtensionAPI wrapper before returning", async () => {
   const { pi, rpc, tools } = setup();
   const goalPi = { events: {} };
   const bindings: any[] = [];
+  let request: any;
   const coordinator = {
-    prepareSpawn() { return { ticketId: "goal-ticket", spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" } }; },
+    prepareSpawn(input: any) {
+      request = goalWorkspaceRequest(input.contractHash);
+      return { ticketId: "goal-ticket", spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" }, workspaceRequest: request };
+    },
+    workspaceAllocated() {},
+    confirmSpawn() {},
     bindSpawn(ticket: any, binding: any) { bindings.push({ ticket, binding }); },
+  };
+  const workspaceService = {
+    ensureAllocated() { return workspaceReceipt(request); },
+    bindRun({ run }: any) { return workspaceReceipt(request, run); },
   };
   bindGoalExecutorCoordinator(goalPi, coordinator);
   bindGoalExecutorCoordinatorSession(goalPi, "root-shared", coordinator);
   try {
-    createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveRootSessionId() { return "root-shared"; } });
-    const result = await tools[0].execute("goal-wrapper-bridge", contract, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+    createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, workspaceService, resolveRootSessionId() { return "root-shared"; } });
+    const result = await tools[0].execute("goal-wrapper-bridge", { ...contract, execution: { ...contract.execution, worktree: true } }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
     assert.equal(result.isError, false, result.content[0]?.text);
-    assert.deepEqual(bindings, [{ ticket: { ticketId: "goal-ticket", spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" } }, binding: { runId: "leaf-1", asyncDir: "/tmp/leaf-1" } }]);
+    assert.equal(bindings.length, 1);
+    assert.equal(bindings[0].ticket.ticketId, "goal-ticket");
+    assert.deepEqual(bindings[0].binding, { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "s", pid: 123, agent: "executor" });
   } finally {
     unbindGoalExecutorCoordinatorSession(goalPi, "root-shared", coordinator);
   }
+});
+
+test("Goal coding spawn allocates through the shared service in the exact four-stage order", async () => {
+  const { pi, rpc, calls, tools } = setup();
+  const order: string[] = [];
+  let preparedRequest: any;
+  let activeReceipt: any;
+  const workspaceService = {
+    ensureAllocated(request: any) {
+      order.push("ensureAllocated");
+      assert.deepEqual(request, preparedRequest);
+      activeReceipt = workspaceReceipt(request);
+      return activeReceipt;
+    },
+    bindRun({ workspaceId, run }: any) {
+      order.push("bindRun");
+      assert.equal(workspaceId, activeReceipt.workspaceId);
+      activeReceipt = workspaceReceipt(preparedRequest, run);
+      return activeReceipt;
+    },
+  };
+  const coordinator = {
+    prepareSpawn(request: any) {
+      order.push("prepareSpawn");
+      preparedRequest = goalWorkspaceRequest(request.contractHash);
+      return { ticketId: "goal-ticket", spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" }, workspaceRequest: preparedRequest };
+    },
+    workspaceAllocated(_ticket: any, receipt: any) { order.push("workspaceAllocated"); assert.strictEqual(receipt, activeReceipt); },
+    confirmSpawn(_ticket: any, receipt: any) { order.push("confirmSpawn"); assert.strictEqual(receipt, activeReceipt); },
+    bindSpawn(_ticket: any, binding: any) { order.push("bindSpawn"); assert.equal(binding.runId, "leaf-1"); },
+  };
+  const spawn = rpc.spawn;
+  rpc.spawn = async (...args: any[]) => { order.push("spawn"); return spawn(...args); };
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    goalExecutorCoordinator: coordinator,
+    workspaceService,
+    resolveRootSessionId: () => "root-shared",
+    async prepareCodingSpawn() { order.push("prepareCodingSpawn"); },
+  });
+
+  const result = await tools[0].execute("goal-unified", {
+    ...contract,
+    execution: { ...contract.execution, worktree: true },
+  }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.deepEqual(order, [
+    "prepareSpawn",
+    "ensureAllocated",
+    "workspaceAllocated",
+    "confirmSpawn",
+    "prepareCodingSpawn",
+    "spawn",
+    "bindRun",
+    "bindSpawn",
+  ]);
+  assert.equal(calls[0].params.cwd, activeReceipt.dispatchCwd);
+  assert.equal(calls[0].params.worktree, false);
+  assert.equal(workflowLeaf(calls[0].params).worktree, false);
+  assert.equal(result.details.workspace_id, activeReceipt.workspaceId);
+  assert.equal(result.details.lease_id, activeReceipt.leaseId);
+});
+
+test("standalone coding worktree uses the same service and binds before Root Broker registration", async () => {
+  const { pi, rpc, tools } = setup();
+  const order: string[] = [];
+  let allocated: any;
+  const workspaceService = {
+    ensureAllocated(request: any) {
+      order.push("ensureAllocated");
+      assert.equal(request.owner.kind, "standalone-subagent");
+      assert.equal(request.owner.rootSessionId, "root-standalone");
+      assert.equal(request.owner.toolCallId, "standalone-call");
+      assert.equal(request.contractHash, compileCodingDispatchIR({ ...contract, execution: { ...contract.execution, worktree: true } }, { cwd: "/repo" }).hash);
+      allocated = workspaceReceipt({ ...request, workspaceId: request.workspaceId });
+      return allocated;
+    },
+    bindRun({ workspaceId, run }: any) {
+      order.push("bindRun");
+      allocated = { ...allocated, run };
+      assert.equal(workspaceId, allocated.workspaceId);
+      return allocated;
+    },
+  };
+  const spawn = rpc.spawn;
+  rpc.spawn = async (...args: any[]) => { order.push("spawn"); return spawn(...args); };
+  const registered: any[] = [];
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    randomUUID: () => "standalone-workspace",
+    workspaceService,
+    resolveRootSessionId: () => "root-standalone",
+    resolveCanonicalOrigin: async () => "/repo",
+    inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
+    registerFacadeRun(binding: any) { order.push("registerFacadeRun"); registered.push(binding); },
+  });
+
+  const result = await tools[0].execute("standalone-call", {
+    ...contract,
+    execution: { ...contract.execution, worktree: true },
+  }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.deepEqual(order, ["ensureAllocated", "spawn", "bindRun", "registerFacadeRun"]);
+  assert.equal(result.details.dispatch_cwd, "/managed/goal-workspace-1");
+  assert.equal(result.details.workspace_state, "active");
+  assert.equal(registered[0].runId, "leaf-1");
+});
+
+test("generic worktree uses the unified service without enabling upstream worktrees", async () => {
+  const { pi, rpc, calls, tools } = setup();
+  let allocated: any;
+  const workspaceService = {
+    ensureAllocated(request: any) {
+      assert.equal(request.mode, "generic");
+      assert.equal(request.owner.kind, "standalone-subagent");
+      assert.deepEqual(request.writePaths, []);
+      allocated = workspaceReceipt(request);
+      return allocated;
+    },
+    bindRun({ run }: any) { allocated = { ...allocated, run }; return allocated; },
+  };
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    randomUUID: () => "generic-workspace",
+    workspaceService,
+    resolveRootSessionId: () => "root-generic",
+    resolveCanonicalOrigin: async () => "/repo",
+    inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
+    registerFacadeRun() {},
+  });
+
+  const result = await tools[0].execute("generic-call", {
+    agent: "reviewer",
+    title: "Review",
+    task: "Inspect the managed workspace.",
+    worktree: true,
+  }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.equal(calls[0].params.cwd, allocated.dispatchCwd);
+  assert.equal(calls[0].params.worktree, false);
+  assert.equal(workflowLeaf(calls[0].params).worktree, false);
+  assert.equal(result.details.workspace_id, allocated.workspaceId);
 });
 
 test("coding spawn leaves executor model selection to ordered agent metadata", async () => {

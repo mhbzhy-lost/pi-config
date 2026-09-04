@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { generationCapabilities } from "../scripts/lib/goal-engine/generation-capabilities.mjs";
+import { generationCapabilities } from "../src/goal-engine/generation-capabilities.ts";
 
 test("generation capability matrix is exact, frozen, and fail closed", () => {
   for (const version of ["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]) {

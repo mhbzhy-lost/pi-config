@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { addSkill, createFixture } from "./helpers/skill-fixture.mjs";
-import { discoverManagedSkills, resolveSkillSource } from "../scripts/lib/skill-whitelist.mjs";
+import { discoverManagedSkills, resolveSkillSource } from "../src/skill-whitelist/skill.ts";
 
 const repoRoot = new URL("..", import.meta.url);
 

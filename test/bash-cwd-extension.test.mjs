@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { createBashCwdExtension } from "../scripts/lib/bash-cwd-extension.mjs";
+import { createBashCwdExtension } from "../src/bash-cwd/extension.ts";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 async function withWorkspace(run) {
@@ -124,8 +124,8 @@ test("bash-cwd keeps the compact bash renderers while remaining the sole bash ow
     const mockPath = join(temporaryDirectory, "pi-mock.mjs");
     const tuiPath = join(temporaryDirectory, "tui-mock.mjs");
     const extensionPath = join(temporaryDirectory, "bash-cwd.ts");
-    const bashCwdExtensionUrl = pathToFileURL(new URL("../scripts/lib/bash-cwd-extension.mjs", import.meta.url).pathname).href;
-    const compactRendererUrl = pathToFileURL(new URL("../scripts/lib/compact-tools-renderer.mjs", import.meta.url).pathname).href;
+    const bashCwdExtensionUrl = pathToFileURL(new URL("../src/bash-cwd/extension.ts", import.meta.url).pathname).href;
+    const compactRendererUrl = pathToFileURL(new URL("../src/compact-tools/renderer.ts", import.meta.url).pathname).href;
 
     await writeFile(mockPath, `
 export class SettingsManager {
@@ -142,8 +142,8 @@ export function createBashToolDefinition() {
     const source = extensionSource
       .replace("@earendil-works/pi-coding-agent", pathToFileURL(mockPath).href)
       .replace("@earendil-works/pi-tui", pathToFileURL(tuiPath).href)
-      .replace("../../scripts/lib/bash-cwd-extension.mjs", bashCwdExtensionUrl)
-      .replace("../../scripts/lib/compact-tools-renderer.mjs", compactRendererUrl);
+      .replace("../../src/bash-cwd/extension.ts", bashCwdExtensionUrl)
+      .replace("../../src/compact-tools/renderer.ts", compactRendererUrl);
     await writeFile(extensionPath, source);
 
     const { jiti } = await loadPiTestRuntime(import.meta.url);

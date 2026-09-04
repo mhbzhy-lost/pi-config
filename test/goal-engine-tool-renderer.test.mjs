@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGoalToolRenderers } from "../scripts/lib/goal-engine/tool-renderer.mjs";
+import { createGoalToolRenderers } from "../src/goal-engine/tool-renderer.ts";
 
 const renderers = createGoalToolRenderers();
 const render = (name, args, width = 200) => renderers[name].renderCall(args).render(width)[0];

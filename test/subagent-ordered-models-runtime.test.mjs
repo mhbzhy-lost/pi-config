@@ -7,8 +7,8 @@ import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
 
 const { createJiti } = await import(piHostJitiUrl);
 const jiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
-const { discoverAgents } = await jiti.import("../pi/npm/node_modules/pi-subagents/src/agents/agents.ts");
-const { resolveSubagentLaunchContract } = await jiti.import("../pi/npm/node_modules/pi-subagents/src/api/preflight.ts");
+const { discoverAgents } = await jiti.import("../packages/pi-subagents-enhanced/node_modules/pi-subagents/src/agents/agents.ts");
+const { resolveSubagentLaunchContract } = await jiti.import("../packages/pi-subagents-enhanced/node_modules/pi-subagents/src/api/preflight.ts");
 
 async function fixture(frontmatter) {
   const root = await mkdtemp(join(tmpdir(), "ordered-models-"));

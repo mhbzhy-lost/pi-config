@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createObservationAdapterRegistry } from "../scripts/lib/goal-engine/observation-adapters.mjs";
-import { recoverObservation, recordObservation, requestObservation } from "../scripts/lib/goal-engine/observation-runner.mjs";
+import { createObservationAdapterRegistry } from "../src/goal-engine/observation-adapters.ts";
+import { recoverObservation, recordObservation, requestObservation } from "../src/goal-engine/observation-runner.ts";
 
 const head = "b".repeat(40);
 const registry = createObservationAdapterRegistry([{

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildObligationFinalizationManifest, validateObligationFinalizationManifest } from "../scripts/lib/goal-engine/finalization.mjs";
-import { evaluateConditionGraph } from "../scripts/lib/goal-engine/condition-validity.mjs";
-import { fingerprintSettlementEvidence, normalizeSettlementEvidence } from "../scripts/lib/goal-engine/settlement-evidence.mjs";
+import { buildObligationFinalizationManifest, validateObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
+import { evaluateConditionGraph } from "../src/goal-engine/condition-validity.ts";
+import { fingerprintSettlementEvidence, normalizeSettlementEvidence } from "../src/goal-engine/settlement-evidence.ts";
 
 const h = (letter) => letter.repeat(64);
 const head = "b".repeat(40);

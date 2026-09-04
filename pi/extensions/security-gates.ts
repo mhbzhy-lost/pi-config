@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createSecurityGatesExtension } from "../../scripts/lib/security-gates-extension.mjs";
+import { createSecurityGatesExtension } from "../../src/security-gates/extension.ts";
 
 export default function securityGates(pi: ExtensionAPI) {
   createSecurityGatesExtension(pi);

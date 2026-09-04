@@ -45,7 +45,7 @@ description: Use when starting, resuming, amending, recovering, dispatching, or 
 Agent 只调用 Pi Host 暴露的八个 typed tools；调用前从当前 ToolDefinition 读取类型 schema。不得臆造参数；包装层的 failed/timeout 文字不能替代 artifact、session 和 worktree 的实证。旧 `goal-engine.event.v1/v2/v3` 与 `planned.v1` 仍 unsupported；`goal-runtime.v1` 可用。`goal_finalize({goal_id?, action_token, approval_entry_id})` 仅可在 status 显示 `APPROVAL_REQUIRED`、真实 user approve 且随后 status 签发 machineAction/token 后调用。
 
 - shell/CLI 禁止调用 Goal Engine mutation；普通 Git precheck 不受此禁止影响。
-- 禁止 raw git worktree add/remove/prune/move/repair/lock/unlock；仅可按 typed Goal disposition 或 managed lifecycle CLI `node scripts/worktree-lifecycle.mjs ...`，并要求 owner CAS 与明确授权。不得 `--force` remove、raw branch cleanup；`/tmp`、TTL、clean 不构成删除授权。
+- 禁止 raw git worktree add/remove/prune/move/repair/lock/unlock；仅可按 typed Goal disposition 或 typed subagent `workspace_disposition`，并要求 owner CAS 与明确授权。根级 `node scripts/worktree-lifecycle.ts audit|reconcile` 仅用于统一 inventory、dry-run cleanup plan 和显式 public lease authorization apply。不得 `--force` remove、raw branch cleanup；`/tmp`、TTL、clean 不构成删除授权。
 - internal core scripts 禁止直接运行。
 - 搜索源码不得用于补造 schema 或 ABI。
 - 缺 schema/工具时停止并请求恢复 Pi Host 能力。

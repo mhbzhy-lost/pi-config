@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createProviderFallbackExtension } from "../scripts/lib/provider-fallback-extension.mjs";
+import { createProviderFallbackExtension } from "../src/provider-fallback/extension.ts";
 
 function createMockPi() {
   const handlers = new Map();
@@ -43,7 +43,7 @@ test("does not switch model when primary is reachable", async () => {
     const pi = createMockPi();
     createProviderFallbackExtension(pi, { configRoot: root });
 
-    const originalProbe = (await import("../scripts/lib/provider-fallback.mjs")).probeProvider;
+    const originalProbe = (await import("../src/provider-fallback/provider.ts")).probeProvider;
     const handler = pi.handlers.get("session_start");
     const ctx = createMockCtx();
 

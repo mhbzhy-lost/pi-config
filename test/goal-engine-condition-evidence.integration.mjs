@@ -3,7 +3,7 @@ import test from "node:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { normalizeConditionEvidence, deriveObservationVerdict, materializeConditionEvidence } from "../scripts/lib/goal-engine/condition-evidence.mjs";
+import { normalizeConditionEvidence, deriveObservationVerdict, materializeConditionEvidence } from "../src/goal-engine/condition-evidence.ts";
 const hash = "a".repeat(64);
 const identity = { goalId: "g", conditionId: "c", executionRevision: 1, executionContractHash: hash, conditionHash: hash, head: "b".repeat(40), adapter: { ref: "oracle", version: "1" }, environment: { ref: "local", fingerprint: "e" }, fixtures: [{ ref: "sample", fingerprint: "f" }], runId: "r", terminalProofHash: hash, artifact: { id: "artifact", hash } };
 const input = { ...identity, artifact: { id: "artifact", hash, classifier: { code: "PASS" } } };

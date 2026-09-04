@@ -3,7 +3,7 @@ import test from "node:test";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 const { jiti } = await loadPiTestRuntime(import.meta.url);
-const { SubagentSessionBrowserState } = await jiti.import("../pi/extensions/lib/subagent-session-browser.ts");
+const { SubagentSessionBrowserState } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/session-browser.ts");
 
 function startRun(state, id, agents = ["executor", "reviewer"]) {
   state.trackStarted({
@@ -162,10 +162,22 @@ test("exits when reconciliation removes the selected child", () => {
   startRun(state, "run-1", ["executor"]);
   assert.equal(state.enter(), true);
 
-  state.reconcileRun("run-1", { state: "running", steps: [] });
+  state.reconcileRun("run-1", { state: "complete", steps: [] });
 
   assert.equal(state.snapshot().active, false);
   assert.equal(state.snapshot().selectedKey, undefined);
+});
+
+test("preserves a tracked running child when status has no steps", () => {
+  const state = new SubagentSessionBrowserState();
+  startRun(state, "empty-running", ["executor"]);
+  assert.equal(state.enter(), true);
+
+  state.reconcileRun("empty-running", { state: "running", steps: [] });
+
+  assert.equal(state.snapshot().children.length, 1);
+  assert.equal(state.snapshot().activeChildren.length, 1);
+  assert.equal(state.snapshot().selectedKey, "empty-running:0");
 });
 
 test("reconciles appended steps with their run metadata and selection", () => {
