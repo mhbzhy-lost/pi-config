@@ -2477,7 +2477,7 @@ test("planned.v1 is an isolated persisted generation with strict criteria", () =
 test("two child settlements deterministically contend on the writer lock and share one immutable artifact", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "ge-dual-settle-b1-"));
   const content = "settlement: accepted\n", sha256 = createHash("sha256").update(content).digest("hex");
-  const storeUrl = pathToFileURL(join(process.cwd(), "src/goal-engine/store.mjs")).href;
+  const storeUrl = pathToFileURL(join(process.cwd(), "src/goal-engine/store.ts")).href;
   const childProgram = String.raw`
     const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), { pathToFileURL } = require("node:url"), { syncBuiltinESMExports } = require("node:module");
     const input = JSON.parse(process.env.DUAL_SETTLE_INPUT);
@@ -2498,7 +2498,7 @@ test("two child settlements deterministically contend on the writer lock and sha
     const report = (ref) => ({ identity, criteria: [{ id: "proof", status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
     const subagent = report("sha256:" + "2".repeat(64)), main = report("sha256:" + "3".repeat(64));
     const evidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: "acceptance-evidence/sha256/" + input.sha256 + ".yaml", sha256: input.sha256, subagentFingerprint: null, mainFingerprint: null, subagent, main, mainSessionId: "root-cas" };
-    const { fingerprintSettlementEvidence } = await import(pathToFileURL(path.join(process.cwd(), "src/goal-engine/settlement-evidence.mjs")).href);
+    const { fingerprintSettlementEvidence } = await import(pathToFileURL(path.join(process.cwd(), "src/goal-engine/settlement-evidence.ts")).href);
     evidence.subagentFingerprint = fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: ["proof"] }); evidence.mainFingerprint = fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: ["proof"] });
     const batch = [event("goal.created", { objective: "dual", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "proof", statement: "proof", evidenceKinds: ["tests"] }] }, workflow: "tdd" } } }), event("task.dispatched", { taskId: "t1", contractHash: "a".repeat(64), workspace: { attempt: 1, path: "/tmp/cas", branch: "ge/cas", baseCommit: "b".repeat(40) } }), event("task.executor_bound", { taskId: "t1", attempt: 1, runId: identity.runId, contractHash: "a".repeat(64), asyncDir: "/tmp/cas", workspacePath: "/tmp/cas", workspaceLeaseId: "d".repeat(64), headAtDispatch: "b".repeat(40) }), event("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead: "c".repeat(40), executorProof: { runId: identity.runId, proofId: "4".repeat(64), rootSessionId: "root-cas", observedAt: 1700000000000, outcome: "succeeded" }, settlementEvidence: evidence })];
     process.send({ type: "ready" }); await new Promise(resolve => process.once("message", resolve));
@@ -2552,7 +2552,7 @@ test("two child settlements deterministically contend on the writer lock and sha
 }, { timeout: 15_000 });
 
 function runSettlementReplacementRed(boundary) {
-  const input = { boundary, storeUrl: pathToFileURL(join(process.cwd(), "src/goal-engine/store.mjs")).href };
+  const input = { boundary, storeUrl: pathToFileURL(join(process.cwd(), "src/goal-engine/store.ts")).href };
   const child = String.raw`
     (async () => {
       const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
@@ -2586,7 +2586,7 @@ function runSettlementReplacementRed(boundary) {
       const identity = { goalId: "replacement-" + input.boundary, taskId: "t1", runId: "run-replacement", attempt: 1, contractHash: "a".repeat(64), head: "c".repeat(40) };
       const report = ref => ({ identity, criteria: [{ id: "proof", status: "satisfied", evidence: [ref] }], commandsRun: [], changedFiles: ["src/x.mjs"] });
       const subagent = report("sha256:" + "2".repeat(64)), main = report("sha256:" + "3".repeat(64));
-      const { fingerprintSettlementEvidence } = await import(require("node:url").pathToFileURL(path.join(process.cwd(), "src/goal-engine/settlement-evidence.mjs")).href);
+      const { fingerprintSettlementEvidence } = await import(require("node:url").pathToFileURL(path.join(process.cwd(), "src/goal-engine/settlement-evidence.ts")).href);
       const evidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: "acceptance-evidence/sha256/" + sha256 + ".yaml", sha256, subagentFingerprint: fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: ["proof"] }), mainFingerprint: fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: ["proof"] }), subagent, main, mainSessionId: "root-cas" };
       const batch = [event("goal.created", { objective: "replacement", scope: [], nonGoals: [], dod: [], tasks: ["t1"], taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "proof", statement: "proof", evidenceKinds: ["tests"] }] }, workflow: "tdd" } } }), event("task.dispatched", { taskId: "t1", contractHash: "a".repeat(64), workspace: { attempt: 1, path: "/tmp/cas", branch: "ge/cas", baseCommit: "b".repeat(40) } }), event("task.executor_bound", { taskId: "t1", attempt: 1, runId: identity.runId, contractHash: "a".repeat(64), asyncDir: "/tmp/cas", workspacePath: "/tmp/cas", workspaceLeaseId: "d".repeat(64), headAtDispatch: "b".repeat(40) }), event("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executorHead: "c".repeat(40), executorProof: { runId: identity.runId, proofId: "4".repeat(64), rootSessionId: "root-cas", observedAt: 1700000000000, outcome: "succeeded" }, settlementEvidence: evidence })];
       let error = null; phase = "append"; inAppend = true; try { appendEventBatchWithSettlementEvidence(input.root, batch, 0, { sha256, content }); } catch (cause) { error = String(cause && cause.message); } finally { phase = "post"; inAppend = false; }
