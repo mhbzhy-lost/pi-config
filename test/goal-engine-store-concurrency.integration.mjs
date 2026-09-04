@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, statSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, statSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { appendEvent, appendEventBatch, loadProjection, listGoals, acquireWriterLock, releaseWriterLock, acquireRecoveryGuard, releaseRecoveryGuard, updateRegistry } from "../src/goal-engine/store.ts";
 
@@ -17,17 +17,24 @@ function legacyOwner(pid, token, birth) { return { pid, token, createdAt: new Da
 function writeLegacyLock(lock, value) { mkdirSync(lock, { recursive: true }); writeFileSync(join(lock, "owner.json"), typeof value === "string" ? value : JSON.stringify(value)); }
 function readWriterOwner(stateRoot) { return JSON.parse(readFileSync(join(stateRoot, ".writer.lock"), "utf8")); }
 
-function faultInjectedBatchStore(stateRoot, marker, fault) {
-  const storePath = new URL("../src/goal-engine/store.ts", import.meta.url);
-  const eventsUrl = new URL("../src/goal-engine/events.ts", import.meta.url).href;
-  const taskDefinitionUrl = new URL("../src/goal-engine/task-definition.ts", import.meta.url).href;
-  const source = readFileSync(storePath, "utf8");
-  assert.equal(source.split(marker).length - 1, 1, "batch fault boundary must be unique");
-  const path = join(stateRoot, `fault-store-${crypto.randomUUID()}.mjs`);
-  writeFileSync(path, source.replace('from "./events.mjs"', `from ${JSON.stringify(eventsUrl)}`)
-    .replace('from "./task-definition.mjs"', `from ${JSON.stringify(taskDefinitionUrl)}`)
-    .replace(marker, `    throw new Error(${JSON.stringify(fault)});`));
+function mutationStoreSource(stateRoot, name, mutate) {
+  const fixtureRoot = join(stateRoot, `${name}-${crypto.randomUUID()}`);
+  // Copy the real TypeScript closure rather than rewriting imports to files that
+  // do not exist beside the temporary mutant.  This runs under Node's native TS
+  // loader exactly as the production modules do.
+  cpSync(new URL("../src/goal-engine/", import.meta.url), join(fixtureRoot, "src/goal-engine"), { recursive: true });
+  cpSync(new URL("../packages/pi-subagents-enhanced/src/", import.meta.url), join(fixtureRoot, "packages/pi-subagents-enhanced/src"), { recursive: true });
+  const path = join(fixtureRoot, "src/goal-engine/store.ts");
+  const source = readFileSync(path, "utf8");
+  writeFileSync(path, mutate(source));
   return path;
+}
+
+function faultInjectedBatchStore(stateRoot, marker, fault) {
+  return mutationStoreSource(stateRoot, "fault-store", (source) => {
+    assert.equal(source.split(marker).length - 1, 1, "batch fault boundary must be unique");
+    return source.replace(marker, `    throw new Error(${JSON.stringify(fault)});`);
+  });
 }
 
 function createGoal(stateRoot, goalId = "concurrent-goal") {
@@ -122,7 +129,7 @@ if (process.argv[2] === "guard-owner") {
         assert.throws(() => store.appendEventBatch(stateRoot, [checkpoint("rename-one"), checkpoint("rename-two")], 1), (error) => error.code === "GOAL_ENGINE_STORE_BATCH_DURABLE");
         assert.notEqual(readFileSync(eventsPath, "utf8"), before);
         assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 3);
-      } finally { rmSync(path, { force: true }); }
+      } finally { rmSync(dirname(dirname(dirname(path))), { recursive: true, force: true }); }
     }
   });
 
@@ -138,7 +145,7 @@ if (process.argv[2] === "guard-owner") {
       assert.throws(() => store.appendEventBatch(stateRoot, [checkpoint("rename-one"), checkpoint("rename-two")], 1), /before-batch-rename/);
       assert.equal(readFileSync(eventsPath, "utf8"), before);
       assert.equal(loadProjection(stateRoot, "concurrent-goal").version, 1);
-    } finally { rmSync(path, { force: true }); }
+    } finally { rmSync(dirname(dirname(dirname(path))), { recursive: true, force: true }); }
   });
 
   test("state-root writer lock serializes version check, log, projection, and registry across processes", async () => {
@@ -240,8 +247,6 @@ if (process.argv[2] === "guard-owner") {
 
   test("mutation oracle kills every release-before-stage mutant", () => {
     const storePath = new URL("../src/goal-engine/store.ts", import.meta.url);
-    const eventsUrl = new URL("../src/goal-engine/events.ts", import.meta.url).href;
-    const taskDefinitionUrl = new URL("../src/goal-engine/task-definition.ts", import.meta.url).href;
     const source = readFileSync(storePath, "utf8");
     const jsonlCall = "    appendJsonlWithWriterReceipt(stateRoot, eventsPath, event, lock.token);";
     const projectionCall = "    publishProjectionWithWriterReceipt(stateRoot, projectionTmp, projectionPath, next, lock.token);";
@@ -259,10 +264,11 @@ if (process.argv[2] === "guard-owner") {
       for (const skippedCall of skippedCalls) assert.equal(source.split(skippedCall).length - 1, 1, `${name} isolation replacement must be exact once`);
       const replacement = `    releaseWriterLock(stateRoot, lock.token);\n${boundaryCall}\n    console.log("stage-marker");`;
       const stateRoot = root(); createGoal(stateRoot);
-      const mutantPath = join(stateRoot, `store-${name.replaceAll(" ", "-")}.mjs`);
-      let mutantSource = source.replace('from "./events.mjs"', `from ${JSON.stringify(eventsUrl)}`).replace('from "./task-definition.mjs"', `from ${JSON.stringify(taskDefinitionUrl)}`).replace(boundaryCall, replacement);
-      for (const skippedCall of skippedCalls) mutantSource = mutantSource.replace(skippedCall, "    void 0;");
-      writeFileSync(mutantPath, mutantSource);
+      const mutantPath = mutationStoreSource(stateRoot, `store-${name.replaceAll(" ", "-")}`, (storeSource) => {
+        let mutantSource = storeSource.replace(boundaryCall, replacement);
+        for (const skippedCall of skippedCalls) mutantSource = mutantSource.replace(skippedCall, "    void 0;");
+        return mutantSource;
+      });
       const goalDir = join(stateRoot, "goals/concurrent-goal");
       const before = [readFileSync(join(goalDir, "events.jsonl"), "utf8"), readFileSync(join(goalDir, "projection.json"), "utf8"), readFileSync(join(stateRoot, "registry.json"), "utf8")];
       const program = `import { appendEvent } from ${JSON.stringify(new URL(`file://${mutantPath}`).href)}; const event = ${JSON.stringify(checkpoint(`mutant-${name}`))}; try { appendEvent(${JSON.stringify(stateRoot)}, event, 1); console.log('success'); } catch (error) { console.log(error.code); }`;
@@ -271,7 +277,7 @@ if (process.argv[2] === "guard-owner") {
       const after = [readFileSync(join(goalDir, "events.jsonl"), "utf8"), readFileSync(join(goalDir, "projection.json"), "utf8"), readFileSync(join(stateRoot, "registry.json"), "utf8")];
       assert.deepEqual(after, before, name);
       assert.equal(output.includes("stage-marker"), false, `${name} must not return from its boundary`);
-      rmSync(mutantPath, { force: true });
+      rmSync(dirname(dirname(dirname(mutantPath))), { recursive: true, force: true });
     }
   });
 

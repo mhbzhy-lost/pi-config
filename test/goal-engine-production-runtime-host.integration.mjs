@@ -9,7 +9,7 @@ import test from "node:test";
 import { createGoalEngineEntry } from "../pi/extensions/goal-engine.ts";
 import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
 import { loadProjection } from "../src/goal-engine/store.ts";
-import { allocateExecutorWorkspace, inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../src/goal-engine/workspace.mjs";
+import { allocateGoalWorkspaceFixture as allocateExecutorWorkspace, inspectGoalWorkspaceFixture as inspectExecutorWorkspace, loadGoalWorkspaceFixture as loadExecutorWorkspaceLease, releaseGoalWorkspaceFixture as releaseExecutorWorkspace } from "./helpers/goal-workspace-service-fixture.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { appendEvent, loadProjection } from "../src/goal-engine/store.ts";
 import { hashGoalMetadataProposal } from "../src/goal-engine/human-decision.ts";
-import { allocateExecutorWorkspace } from "../src/goal-engine/workspace.mjs";
+import { allocateGoalWorkspaceFixture as allocateExecutorWorkspace } from "./helpers/goal-workspace-service-fixture.mjs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";

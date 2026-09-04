@@ -9,6 +9,7 @@ import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { appendEvent as appendEventStore, loadProjection } from "../src/goal-engine/store.ts";
 import { createGoalEngineExtension as createGoalEngineExtensionFactory } from "../src/goal-engine/extension.ts";
 import { classifyGoalEvidence, completionVerdictFor } from "../src/goal-engine/evidence.ts";
+import { allocateGoalWorkspaceFixture as allocateExecutorWorkspace, inspectGoalWorkspaceFixture as inspectExecutorWorkspace, loadGoalWorkspaceFixture as loadExecutorWorkspaceLease, releaseGoalWorkspaceFixture as releaseExecutorWorkspace } from "./helpers/goal-workspace-service-fixture.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope } from "../src/goal-engine/state-scope.ts";
 import { findGoalRunCoordinator } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
@@ -18,11 +19,6 @@ import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.
 const temporaryArena = createTemporaryArenaSync("goal-engine-extension-");
 test.after(() => temporaryArena.disposeSync());
 function mkdtempSync(prefix) { return temporaryArena.mkdtempSync(basename(prefix)); }
-const obsoleteWorkspaceFixture = () => { throw new Error("legacy workspace fixture is unavailable"); };
-const allocateExecutorWorkspace = obsoleteWorkspaceFixture;
-const inspectExecutorWorkspace = obsoleteWorkspaceFixture;
-const loadExecutorWorkspaceLease = obsoleteWorkspaceFixture;
-const releaseExecutorWorkspace = obsoleteWorkspaceFixture;
 
 test("Root Goal ABI is exact-eight and goal_finalize rejects planned before side effects", async () => {
   const cwd = tmpCwd();
