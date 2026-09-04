@@ -72,12 +72,12 @@ T5 (executor 与 Skill 路由文案) ───────────┘
 
 **接口契约：**
 - Consumes：现有 `createModelSystemPromptExtension(pi)` 和 `before_agent_start` hook。
-- Produces：`openai-idealab-dogfooding/Peach-07-17-DogFooding` 命中 `SYSTEM.qwen.md`；`openai-codex/gpt-5.6-terra` 不命中任何专用 system prompt。
+- Produces：`tokenhub/Peach-07-17-DogFooding` 命中 `SYSTEM.qwen.md`；`openai-codex/gpt-5.6-terra` 不命中任何专用 system prompt。
 
 **验收标准：**
 
 - `openai-idealab/qwen3.8-max` 继续命中 `SYSTEM.qwen.md`。
-- `openai-idealab-dogfooding/Peach-07-17-DogFooding` 命中 `SYSTEM.qwen.md`。
+- `tokenhub/Peach-07-17-DogFooding` 命中 `SYSTEM.qwen.md`。
 - `anthropic-idealab/claude-opus-4-6` 继续命中 `SYSTEM.anthropic.md`。
 - `openai-codex/gpt-5.6-terra` 返回 `undefined`，继续使用 Pi 通用 prompt。
 
@@ -92,7 +92,7 @@ test("replaces system prompt for dogfooding Peach compatibility model", async ()
 
   const handler = pi.handlers.get("before_agent_start");
   const ctx = {
-    model: { provider: "openai-idealab-dogfooding", id: "Peach-07-17-DogFooding" },
+    model: { provider: "tokenhub", id: "Peach-07-17-DogFooding" },
   };
 
   const result = await handler(
@@ -133,7 +133,7 @@ test("keeps OpenAI Codex GPT family on the generic Pi system prompt", async () =
 在 `scripts/lib/model-system-prompt.mjs` 的 `PROVIDER_PROMPT_MAP` 中增加 provider 键：
 
 ```js
-  "openai-idealab-dogfooding": {
+  tokenhub: {
     pattern: /^Peach-07-17-DogFooding$/i,
     file: "SYSTEM.qwen.md",
   },

@@ -75,7 +75,7 @@ test("does not replace system prompt when model id does not match the dogfooding
 
   const handler = pi.handlers.get("before_agent_start");
   const ctx = {
-    model: { provider: "openai-idealab-dogfooding", id: "some-other-model" },
+    model: { provider: "tokenhub", id: "some-other-model" },
   };
 
   const result = await handler(
@@ -86,13 +86,13 @@ test("does not replace system prompt when model id does not match the dogfooding
   assert.equal(result, undefined);
 });
 
-test("replaces system prompt for dogfooding Peach compatibility model", async () => {
+test("replaces system prompt for the TokenHub Peach compatibility model", async () => {
   const pi = createMockPi();
   createModelSystemPromptExtension(pi);
 
   const handler = pi.handlers.get("before_agent_start");
   const ctx = {
-    model: { provider: "openai-idealab-dogfooding", id: "Peach-07-17-DogFooding" },
+    model: { provider: "tokenhub", id: "Peach-07-17-DogFooding" },
   };
 
   const result = await handler(

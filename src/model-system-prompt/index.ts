@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const PROVIDER_PROMPT_MAP = {
-  "openai-idealab-dogfooding": {
+  tokenhub: {
     pattern: /^Peach-07-17-DogFooding$/i,
     file: "SYSTEM.qwen.md",
   },

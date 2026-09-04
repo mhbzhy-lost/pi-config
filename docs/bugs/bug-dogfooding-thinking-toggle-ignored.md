@@ -2,7 +2,7 @@
 
 ## 现象
 
-`openai-idealab-dogfooding/Peach-07-17-DogFooding` 使用 Pi 的
+`tokenhub/Peach-07-17-DogFooding` 使用 Pi 的
 `openai-completions` provider 时，TUI 提供 thinking 档位，且请求会携带
 Qwen 的 `enable_thinking` 参数。Idealab 服务端没有遵循该开关：即使明确请求
 关闭思考，响应仍包含 `reasoning_content`。
@@ -28,7 +28,7 @@ Pi 0.84.4 的 `openai-completions` Qwen 兼容分支仅在模型配置
 
 ## 修复方案
 
-仅将 `openai-idealab-dogfooding/Peach-07-17-DogFooding` 的
+仅将 `tokenhub/Peach-07-17-DogFooding` 的
 `reasoning` 改为 `false`，不修改 provider 级 `compat.thinkingFormat`，以免影响同一
 provider 的其他潜在模型。
 

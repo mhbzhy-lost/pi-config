@@ -293,7 +293,7 @@ test("the real entry appends only after the Peach model system prompt rewrite", 
     { systemPrompt: "generic prompt", systemPromptOptions: {} },
     {
       model: {
-        provider: "openai-idealab-dogfooding",
+        provider: "tokenhub",
         id: "Peach-07-17-DogFooding",
       },
     },
