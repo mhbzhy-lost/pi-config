@@ -187,7 +187,7 @@ export async function stopOwnedManagedValidation(request, services = {}) {
     services = {
       readReceipt: () => read({ id: request.allocationId, stateRoot: request.stateRoot }),
       recover: async (_request, record) => recoverManagedValidation(receipt(record)),
-      preserveManagedWorktree: ({ id, reason }) => { const lease = readLease(request.stateRoot, id); const receipt = managed(lease); const workspace = managedService(lease.stateRoot); const issued = workspace.issueDisposition({ workspaceId: receipt.workspaceId }); return workspace.dispose({ workspaceId: receipt.workspaceId, disposition: "preserve", reason, actionToken: issued.actionToken }); },
+      preserveManagedWorktree: ({ workspaceId, leaseId, reason }) => { const workspace = managedService(request.stateRoot); const current = workspace.status({ workspaceId }).receipt; if (current.leaseId !== leaseId || current.owner.kind !== "goal-validation") throw Error("Managed workspace identity changed"); const issued = workspace.issueDisposition({ workspaceId }); return workspace.dispose({ workspaceId, disposition: "preserve", reason, actionToken: issued.actionToken }); },
       markValidationLeaseDebt: (workspaceLease) => { const lease = readLease(workspaceLease.stateRoot, workspaceLease.id); if (lease.state !== "cleanup-debt") writeLease({ ...lease, state: "cleanup-debt" }); },
       writeRecord: (value) => { const { closure, ...next } = value; const durable = read(receipt(next)); if (durable.id !== next.id || durable.process?.processIdentityHash !== request.processIdentityHash) throw Error("Managed stop identity changed"); const saved = write({ ...durable, workspaceLease: next.workspaceLease, phase: "cleanup_debt", terminal: next.terminal, cleanupDebt: true }); writeClosureFile(next.stateRoot, next.id, closure); return saved; },
       preserveWorkspace: async (_request, record, terminal) => {
@@ -205,7 +205,7 @@ export async function stopOwnedManagedValidation(request, services = {}) {
   if (!receipt?.process || receipt.process.processIdentityHash !== request.processIdentityHash) return unknown;
   const existing = typeof services.readClosure === "function" ? await services.readClosure(request) : null;
   if (existing?.terminalProofHash && existing?.resourceProofHash) return { state: "observed", terminalProofHash: existing.terminalProofHash, resourceProofHash: existing.resourceProofHash, resourceState: "quarantined", debt: true };
-  if (receipt.phase === "cleanup_debt" && receipt.cleanupDebt === true && receipt.terminal?.terminal && receipt.workspaceLease?.state === "preserved" && receipt.workspaceLease.id === receipt.workspaceLease.ownerId) {
+  if (receipt.phase === "cleanup_debt" && receipt.cleanupDebt === true && receipt.terminal?.terminal && receipt.workspaceLease?.state === "preserved" && typeof receipt.workspaceLease.workspaceId === "string" && typeof receipt.workspaceLease.leaseId === "string" && receipt.workspaceLease.owner?.kind === "goal-validation" && receipt.workspaceLease.disposition?.action === "preserve") {
     const closure = { receiptId: receipt.id, runId: request.runId, processIdentityHash: request.processIdentityHash, terminalProofHash: managedHash(receipt.terminal), resourceProofHash: managedHash({ receiptId: receipt.id, terminal: receipt.terminal, workspaceReceipt: receipt.workspaceLease, debt: true }) };
     if (typeof services.writeClosure !== "function") return unknown;
     await services.writeClosure(closure, request, receipt);
@@ -215,8 +215,10 @@ export async function stopOwnedManagedValidation(request, services = {}) {
     const recovered = await services.recover(request, receipt);
     const terminal = recovered?.terminal || recovered;
     if (!terminal?.terminal || !receipt.workspaceLease) return unknown;
-    const workspace = await services.preserveManagedWorktree({ originRoot: receipt.workspaceLease.originRoot, id: receipt.workspaceLease.id, ownerToken: receipt.workspaceLease.ownerToken, reason: "Goal quarantine after owned validation stop" });
-    if (!workspace || workspace.workspaceId !== receipt.workspaceLease.workspaceReceipt?.workspaceId || workspace.owner?.kind !== "goal-validation" || workspace.leaseId !== receipt.workspaceLease.ownerToken || workspace.originRoot !== receipt.workspaceLease.originRoot || workspace.state !== "preserved" || workspace.disposition?.action !== "preserve" || workspace.disposition?.reason !== "Goal quarantine after owned validation stop") return unknown;
+    const workspaceReceipt = receipt.workspaceLease?.workspaceReceipt;
+    if (!workspaceReceipt || typeof workspaceReceipt.workspaceId !== "string" || typeof workspaceReceipt.leaseId !== "string" || workspaceReceipt.owner?.kind !== "goal-validation") return unknown;
+    const workspace = await services.preserveManagedWorktree({ workspaceId: workspaceReceipt.workspaceId, leaseId: workspaceReceipt.leaseId, reason: "Goal quarantine after owned validation stop" });
+    if (!workspace || workspace.workspaceId !== workspaceReceipt.workspaceId || workspace.owner?.kind !== "goal-validation" || workspace.leaseId !== workspaceReceipt.leaseId || workspace.originRoot !== workspaceReceipt.originRoot || workspace.state !== "preserved" || workspace.disposition?.action !== "preserve" || workspace.disposition?.reason !== "Goal quarantine after owned validation stop") return unknown;
     await services.markValidationLeaseDebt(receipt.workspaceLease);
     const closure = { receiptId: receipt.id, runId: request.runId, processIdentityHash: request.processIdentityHash, terminalProofHash: managedHash(terminal), resourceProofHash: managedHash({ receiptId: receipt.id, terminal, workspaceReceipt: workspace, debt: true }) };
     await services.writeRecord({ ...receipt, workspaceLease: workspace, phase: "cleanup_debt", terminal, cleanupDebt: true, closure });

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { createValidationWorkspace, runCleanValidation, releaseValidationWorkspace } from "../src/goal-engine/acceptance-runner.ts";
+import { managedWorkspacePaths } from "../packages/pi-subagents-enhanced/src/workspace/ledger.ts";
 
 const fs = createRequire(import.meta.url)("node:fs");
 
@@ -311,12 +312,15 @@ test("validation enforces byte limits and proves its whole process group termina
 test("release records cleanup debt when the managed owner identity drifts", async (t) => {
   const f = fixture(t);
   const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "release-owner-drift", attempt: 1, integratedHead: f.head, validationPlan: strictPlan() });
-  const durable = JSON.parse(readFileSync(leaseFile(lease), "utf8"));
-  writeFileSync(leaseFile(lease), JSON.stringify({ ...durable, workspaceReceipt: { ...durable.workspaceReceipt, owner: { ...durable.workspaceReceipt.owner, goalId: "drifted-goal" } } }), { mode: 0o600 });
+  const ledgerPath = managedWorkspacePaths({ stateRoot: f.state, originRoot: f.origin, workspaceId: lease.workspaceReceipt.workspaceId }).recordPath;
+  const durable = readFileSync(ledgerPath);
+  const record = JSON.parse(durable);
+  writeFileSync(ledgerPath, JSON.stringify({ ...record, request: { ...record.request, owner: { ...record.request.owner, goalId: "drifted-goal" } } }), { mode: 0o600 });
 
   await assert.rejects(async () => releaseValidationWorkspace(lease, { expectedHead: f.head }), /owner|identity|managed|lease/i);
   assert.equal(JSON.parse(readFileSync(leaseFile(lease), "utf8")).state, "cleanup-debt");
-  assert.equal(JSON.parse(readFileSync(leaseFile(lease), "utf8")).workspaceReceipt.owner.goalId, "drifted-goal");
+  assert.equal(JSON.parse(readFileSync(ledgerPath, "utf8")).request.owner.goalId, "drifted-goal");
+  assert.notEqual(readFileSync(ledgerPath, "utf8"), durable);
   assert.equal(existsSync(lease.path), true);
   assert.equal(git(f.origin, "worktree", "list", "--porcelain").includes(`worktree ${lease.path}\nHEAD ${f.head}\nbranch refs/heads/${lease.branch}`), true);
   assert.doesNotThrow(() => git(f.origin, "show-ref", "--verify", "--quiet", `refs/heads/${lease.branch}`));
@@ -325,12 +329,13 @@ test("release records cleanup debt when the managed owner identity drifts", asyn
 test("release records cleanup debt when the validation worktree path is missing", async (t) => {
   const f = fixture(t);
   const lease = createValidationWorkspace({ originRoot: f.origin, stateRoot: f.state, goalId: "g", taskId: "release-missing-path", attempt: 1, integratedHead: f.head, validationPlan: strictPlan() });
-  const durable = readFileSync(leaseFile(lease));
+  const ledgerPath = managedWorkspacePaths({ stateRoot: f.state, originRoot: f.origin, workspaceId: lease.workspaceReceipt.workspaceId }).recordPath;
+  const durable = readFileSync(ledgerPath);
   rmSync(lease.path, { recursive: true, force: true });
 
   await assert.rejects(async () => releaseValidationWorkspace(lease, { expectedHead: f.head }), /path|identity|managed|Git|lease/i);
   assert.equal(JSON.parse(readFileSync(leaseFile(lease), "utf8")).state, "cleanup-debt");
-  assert.notEqual(readFileSync(leaseFile(lease), "utf8"), durable);
+  assert.deepEqual(readFileSync(ledgerPath), durable);
   assert.equal(existsSync(lease.path), false);
   assert.equal(git(f.origin, "worktree", "list", "--porcelain").includes(`worktree ${lease.path}\nHEAD ${f.head}\nbranch refs/heads/${lease.branch}`), true);
   assert.doesNotThrow(() => git(f.origin, "show-ref", "--verify", "--quiet", `refs/heads/${lease.branch}`));

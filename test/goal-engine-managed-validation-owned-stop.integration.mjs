@@ -35,14 +35,14 @@ test("stopOwnedManagedValidation recovers exact owner then durably preserves onc
 // RED: production must use the typed managed-worktree authority, never the retired
 // high-level preserveWorkspace/preserveResource test doubles.
 test("stopOwnedManagedValidation preserves the exact managed worktree receipt through typed authorities", async () => {
-  const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`;
-  const workspaceReceipt = { id: "validation-lease", ownerKind: "goal-validation", ownerId: "validation-lease", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } };
-  const record = { id: "managed-receipt", process, workspaceLease: workspaceReceipt, terminal: null };
+  const leaseId = "a".repeat(64);
+  const workspaceReceipt = { workspaceId: "validation-workspace", leaseId, owner: { kind: "goal-validation" }, originRoot: "/origin", state: "preserved", disposition: { action: "preserve", reason: "Goal quarantine after owned validation stop" } };
+  const record = { id: "managed-receipt", process, workspaceLease: { id: "validation-lease", stateRoot: "/state", workspaceReceipt }, terminal: null };
   const calls = [];
   const result = await stopOwnedManagedValidation(request, {
     readReceipt() { return record; },
     async recover() { calls.push("recover"); return { terminal }; },
-    async preserveManagedWorktree(binding) { calls.push(["preserve", binding]); assert.deepEqual(binding, { originRoot: workspaceReceipt.originRoot, id: workspaceReceipt.id, ownerToken: workspaceReceipt.ownerToken, reason: "Goal quarantine after owned validation stop" }); return workspaceReceipt; },
+    async preserveManagedWorktree(binding) { calls.push(["preserve", binding]); assert.deepEqual(binding, { workspaceId: workspaceReceipt.workspaceId, leaseId: workspaceReceipt.leaseId, reason: "Goal quarantine after owned validation stop" }); return workspaceReceipt; },
     async markValidationLeaseDebt(value) { calls.push(["debt", value]); return { ...value, state: "cleanup-debt" }; },
     async writeRecord(value) { calls.push(["record", value]); assert.equal(value.workspaceLease, workspaceReceipt); return { ...value, phase: "cleanup_debt", cleanupDebt: true, terminal }; },
     readClosure() { return null; },
@@ -52,9 +52,9 @@ test("stopOwnedManagedValidation preserves the exact managed worktree receipt th
 });
 
 test("stopOwnedManagedValidation rejects a typed preserved workspace whose id differs from the receipt lease", async () => {
-  const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`;
-  const workspaceReceipt = { id: "other-lease", ownerKind: "goal-validation", ownerId: "other-lease", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } };
-  const record = { id: "managed-receipt", process, workspaceLease: { ...workspaceReceipt, id: "validation-lease" }, terminal: null };
+  const leaseId = "a".repeat(64);
+  const workspaceReceipt = { workspaceId: "other-workspace", leaseId, owner: { kind: "goal-validation" }, originRoot: "/origin", state: "preserved", disposition: { action: "preserve", reason: "Goal quarantine after owned validation stop" } };
+  const record = { id: "managed-receipt", process, workspaceLease: { id: "validation-lease", stateRoot: "/state", workspaceReceipt: { ...workspaceReceipt, workspaceId: "validation-workspace" } }, terminal: null };
   let writes = 0;
   const result = await stopOwnedManagedValidation(request, {
     readReceipt() { return record; }, async recover() { return { terminal }; }, async preserveManagedWorktree() { return workspaceReceipt; },
@@ -65,7 +65,7 @@ test("stopOwnedManagedValidation rejects a typed preserved workspace whose id di
 });
 
 test("stopOwnedManagedValidation durable typed preservation retries from closure without another recovery", async () => {
-  const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`, workspaceReceipt = { id: "validation-lease", ownerKind: "goal-validation", ownerId: "validation-lease", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } }, record = { id: "managed-receipt", process, workspaceLease: workspaceReceipt, terminal: null };
+  const leaseId = "a".repeat(64), workspaceReceipt = { workspaceId: "validation-workspace", leaseId, owner: { kind: "goal-validation" }, originRoot: "/origin", state: "preserved", disposition: { action: "preserve", reason: "Goal quarantine after owned validation stop" } }, record = { id: "managed-receipt", process, workspaceLease: { id: "validation-lease", stateRoot: "/state", workspaceReceipt }, terminal: null };
   let closure = null, recoveries = 0, preserves = 0, debts = 0, records = 0;
   const services = {
     readReceipt() { return record; }, readClosure() { return closure; },
@@ -80,7 +80,7 @@ test("stopOwnedManagedValidation durable typed preservation retries from closure
 });
 
 test("stopOwnedManagedValidation fills a missing closure from durable terminal preservation without recovery or preservation", async () => {
-  const ownerToken = `worktree-owner.v1:${"a".repeat(64)}`, workspaceReceipt = { id: "validation-lease", ownerKind: "goal-validation", ownerId: "validation-lease", ownerToken, originRoot: "/origin", headCommit: "2".repeat(40), state: "preserved", disposition: { state: "preserved", reason: "Goal quarantine after owned validation stop" } };
+  const leaseId = "a".repeat(64), workspaceReceipt = { workspaceId: "validation-workspace", leaseId, owner: { kind: "goal-validation" }, originRoot: "/origin", state: "preserved", disposition: { action: "preserve", reason: "Goal quarantine after owned validation stop" } };
   const record = { id: "managed-receipt", phase: "cleanup_debt", cleanupDebt: true, process, workspaceLease: workspaceReceipt, terminal };
   let recoveries = 0, preserves = 0, writes = 0, closure = null;
   const services = {
