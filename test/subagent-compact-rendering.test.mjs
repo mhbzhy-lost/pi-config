@@ -225,6 +225,30 @@ test("compact steer result separates the target title from the original message"
   assert.deepEqual(result, beforeResult);
 });
 
+test("compact interrupt hides the success receipt but keeps errors visible", () => {
+  const args = { action: "interrupt", id: "run-int-1" };
+  const success = {
+    content: [{ type: "text", text: "Interrupt requested for async run run-int-1." }],
+    details: { mode: "management", results: [] },
+  };
+  const beforeArgs = clone(args);
+  const beforeResult = clone(success);
+
+  assert.equal(formatCompactSubagentToolResult(success, args), "");
+  assert.deepEqual(args, beforeArgs);
+  assert.deepEqual(success, beforeResult);
+
+  const failure = {
+    content: [{ type: "text", text: "No running async run with an interrupt-capable pid was found for 'run-int-1'." }],
+    isError: true,
+    details: { mode: "management", results: [] },
+  };
+  assert.equal(
+    formatCompactSubagentToolResult(failure, { action: "interrupt", id: "run-int-1" }),
+    "No running async run with an interrupt-capable pid was found for 'run-int-1'.",
+  );
+});
+
 test("compact supervisor request keeps only the agent and actual body", () => {
   assert.equal(typeof formatCompactSupervisorRequest, "function");
   const message = {

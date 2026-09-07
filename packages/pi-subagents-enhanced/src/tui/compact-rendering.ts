@@ -116,6 +116,7 @@ export function formatCompactSubagentToolResult(result: unknown, args: unknown) 
   const input = record(args);
   const action = input?.action;
   if (action === "steer") return formatCompactSubagentSteerResult(result, args);
+  if (action === "interrupt" && record(result)?.isError !== true) return "";
   if (action === "resume" && record(result)?.isError !== true) {
     const details = record(record(result)?.details);
     const sourceRunId = typeof input?.id === "string" && input.id.trim()
