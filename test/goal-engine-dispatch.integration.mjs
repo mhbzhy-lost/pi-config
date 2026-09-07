@@ -21,7 +21,7 @@ function validInput(overrides = {}) {
     requirements: ["Implement token validation", "Handle expired tokens"],
     context: { knownFacts: ["Goal: Build auth"], decisions: ["Non-goal: UI"], relevantFiles: ["src/auth/token.ts"] },
     boundaries: { writePaths: ["src/auth/token.ts"], excludedWork: ["UI changes"], forbiddenActions: ["Do not modify state files"] },
-    acceptance: { criteria: ["Handles expired tokens"], commands: ["node --test test/token.test.mjs"] },
+    acceptance: { criteria: ["Handles expired tokens"] },
     execution: { cwd: "/workspace/project", timeoutMs: 1800000 },
     ...overrides,
   };
@@ -78,11 +78,8 @@ test("compileCodingDispatchIR rejects unknown fields", () => {
   );
 });
 
-test("compileCodingDispatchIR rejects invalid agent", () => {
-  assert.throws(
-    () => compileCodingDispatchIR(validInput({ agent: "hacker" }), { cwd: "/workspace/project" }),
-    /unsupported.*agent/,
-  );
+test("compileCodingDispatchIR accepts any non-empty discovered-profile-shaped agent", () => {
+  assert.equal(compileCodingDispatchIR(validInput({ agent: "hacker" }), { cwd: "/workspace/project" }).agent, "hacker");
 });
 
 test("compileCodingDispatchIR rejects empty writePaths", () => {
@@ -99,7 +96,7 @@ test("compileCodingDispatchIR rejects path traversal in writePaths", () => {
   input.boundaries.writePaths = ["../../etc/passwd"];
   assert.throws(
     () => compileCodingDispatchIR(input, { cwd: "/workspace/project" }),
-    /repo-relative/,
+    /repo-relative|unsafe/,
   );
 });
 
@@ -108,7 +105,7 @@ test("init writePaths and dispatch IR share the repo-relative POSIX matrix", () 
     assert.throws(() => validateRepoRelativePath(path), /repo-relative|unsupported/);
     const input = validInput();
     input.boundaries.writePaths = [path];
-    assert.throws(() => compileCodingDispatchIR(input, { cwd: "/workspace/project" }), /repo-relative|unsupported/);
+    assert.throws(() => compileCodingDispatchIR(input, { cwd: "/workspace/project" }), /repo-relative|unsupported|unsafe/);
   }
   for (const path of ["src/x.ts", "src/generated/**"]) {
     assert.equal(validateRepoRelativePath(path), path);
@@ -161,7 +158,7 @@ test("renderDispatchPrompt produces structured markdown", () => {
   assert.doesNotMatch(prompt, /model tier/i);
   assert.match(prompt, /token validation/);
   assert.match(prompt, /src\/auth\/token\.ts/);
-  assert.match(prompt, /node --test test\/token\.test\.mjs/);
+  assert.match(prompt, /Handles expired tokens/);
   assert.ok(prompt.length < 64 * 1024);
 });
 
@@ -192,6 +189,7 @@ function buildProjection() {
       },
     },
   }), { replay: true });
+  for (const task of p.tasks.values()) task.agentProfile = "coder-alpha";
   return p;
 }
 
@@ -201,7 +199,7 @@ test("compileTaskContract includes mandatory clean commit requirement", () => {
 
   assert.equal(contract.version, "dispatch-ir.v1");
   assert.equal(contract.taskId, "dispatch-test.t1");
-  assert.equal(contract.agent, "executor");
+  assert.equal(contract.agent, "coder-alpha");
   assert.equal(contract.risk, "normal");
   assert.match(contract.objective, /token validation/i);
   assert.ok(contract.requirements.length >= 2);
@@ -314,7 +312,7 @@ test("planned criteria transport is canonical and never carries commands", () =>
   const criterion = { id: "criterion-1", statement: "Ship the feature", evidenceKinds: ["tests", "changed-files"] };
   const projection = {
     goalId: "planned-goal", objective: "planned objective", scope: [], nonGoals: [], dod: [],
-    tasks: new Map([["t1", { description: "planned task", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [criterion] }, workflow: "tdd", status: "pending", evidence: [] }]]),
+    tasks: new Map([["t1", { agentProfile: "coder-alpha", description: "planned task", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [criterion] }, workflow: "tdd", status: "pending", evidence: [] }]]),
   };
   const first = compileTaskContract(projection, "t1", "/workspace/project");
   const second = compileTaskContract(projection, "t1", "/workspace/project");
@@ -323,6 +321,18 @@ test("planned criteria transport is canonical and never carries commands", () =>
   assert.deepEqual(first.acceptance, second.acceptance);
   assert.ok(first.requirements.includes(encoded));
   assert.equal(JSON.stringify(first).includes("commands"), false);
+});
+
+test("compileTaskContract takes the v2 task agentProfile without a name default", () => {
+  const projection = {
+    goalId: "planned-v2-goal", objective: "planned objective", scope: [], nonGoals: [], dod: [], eventSchemaVersion: "planned.v2",
+    tasks: new Map([["t1", { agentProfile: "coder-alpha", description: "planned task", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [{ id: "criterion-1", statement: "Ship the feature", evidenceKinds: ["tests"], evaluator: "run" }] }, workflow: "tdd", status: "pending", evidence: [] }]]),
+  };
+  assert.equal(compileTaskContract(projection, "t1", "/workspace/project").agent, "coder-alpha");
+  delete projection.tasks.get("t1").agentProfile;
+  assert.throws(() => compileTaskContract(projection, "t1", "/workspace/project"), /agentProfile/i);
+  projection.eventSchemaVersion = "unknown.v1";
+  assert.throws(() => compileTaskContract(projection, "t1", "/workspace/project"), /agentProfile/i);
 });
 
 test("planned task definitions require exact structured criteria", () => {

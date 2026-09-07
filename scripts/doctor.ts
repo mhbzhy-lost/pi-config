@@ -23,6 +23,9 @@ import { loadFinalizationProjection } from "../src/goal-engine/store.ts";
 import { auditGoalContractIntegrity } from "../src/goal-contract/authorization-audit.ts";
 import { inventoryManagedWorkspaces } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
 import { verifyOrderedModelsRuntimePatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ordered-models-runtime-patch.ts";
+import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+import { assertRunAuthorization, createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 
 const execFile = promisify(execFileCallback);
 
@@ -37,9 +40,6 @@ const TASK_SCHEDULER_PACKAGES = {
   croner: "10.0.1",
 };
 const BASIC_MEMORY_VERSION = "0.22.1";
-const REQUIRED_PROFILES = {
-  executor: { orderedModels: true, subagent: false, extensions: undefined },
-};
 const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/spawn.mjs",
   "scripts/lib/runtime/monitor.mjs",
@@ -166,28 +166,34 @@ function hasDisabledTaskSchedulerResources(settings) {
   return hasDisabledPackageResources(settings, "npm:@amaster.ai/pi-task-scheduler@0.1.9");
 }
 
-function parseFrontmatter(content) {
-  const match = content?.match(/^---\n([\s\S]*?)\n---/);
-  if (!match) return null;
-  const result = {};
-  let currentKey;
-  for (const line of match[1].split("\n")) {
-    const field = line.match(/^([\w-]+):(?:\s+(.*))?$/);
-    if (field) {
-      currentKey = field[1];
-      result[currentKey] = field[2] ?? "";
-      continue;
-    }
-    if (currentKey && /^\s+/.test(line)) {
-      result[currentKey] += `${result[currentKey] ? "\n" : ""}${line.trim()}`;
+export async function inspectSubagentRuntime({ requests = [], discovery, cwd = process.cwd() }: { requests?: any[]; discovery?: any; cwd?: string } = {}) {
+  const issues = [];
+  const { Compile } = await import(pathToFileURL(createRequire(new URL("../pi/npm/package.json", import.meta.url)).resolve("typebox/compile")).href);
+  const validator = Compile(TYPED_SUBAGENT_PARAMETERS);
+  const available = Array.isArray(discovery?.agents) && discovery.agents.every((agent) => typeof agent?.name === "string");
+  if (requests.length && !available) issues.push("PROFILE_DISCOVERY_UNAVAILABLE");
+  for (const request of requests) {
+    try {
+      if (!validator.Check(request)) throw new Error("invalid subagent call structure");
+      if (request.version === "dispatch-ir.v1") compileCodingDispatchIR(request, { cwd });
+      if (typeof request.agent !== "string") throw new Error("dispatch request must identify a profile");
+      if (available && !discovery.agents.some((agent) => agent.name === request.agent)) issues.push(`PROFILE_NOT_DISCOVERED: ${request.agent}`);
+    } catch (error) {
+      issues.push(`SUBAGENT_CALL_INVALID: ${error.message}`);
     }
   }
-  return result;
-}
-
-function parseOrderedModels(value) {
-  if (typeof value !== "string") return [];
-  return value.split("\n").map((line) => line.trim().replace(/^-\s+/, "")).filter(Boolean);
+  // 只探测 standalone 矩阵；profile 和不可信 frontmatter 不参与授权输入。
+  for (const kind of ["coding", "generic"] as const) {
+    try {
+      const authorization = createRunAuthorization({ kind, binding: { runId: "doctor", asyncDir: resolve(cwd), sessionId: "doctor", pid: process.pid, agentProfile: "doctor-profile" }, goal: null });
+      assertRunAuthorization(authorization);
+      const expected = kind === "coding" ? ["root.subscribe"] : [];
+      if (JSON.stringify(authorization.capabilities) !== JSON.stringify(expected)) throw new Error("noncanonical capabilities");
+    } catch (error) {
+      issues.push(`RUN_AUTHORIZATION_INVALID: ${error.message}`);
+    }
+  }
+  return issues;
 }
 
 async function readInstalledBasicMemoryVersion() {
@@ -286,6 +292,7 @@ export function formatWorktreeLifecycleWarnings(report) {
 
 export async function inspectConfiguration(repoRoot, options = {}) {
   const issues = [];
+  issues.push(...await inspectSubagentRuntime({ cwd: repoRoot, requests: options.subagentRequests, discovery: options.subagentDiscovery }));
   issues.push(...await inspectGoalContractIntegrity(repoRoot));
   issues.push(...inspectGoalRuntimeBoundaries({ goalRuntimeBoundaryFactory: options.goalRuntimeBoundaryFactory }));
   let desired = new Map();
@@ -364,29 +371,6 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   const bmVersion = await (options.readBasicMemoryVersion ?? readInstalledBasicMemoryVersion)();
   if (bmVersion !== BASIC_MEMORY_VERSION) {
     issues.push(`unexpected basic-memory version: ${bmVersion}; expected ${BASIC_MEMORY_VERSION}`);
-  }
-
-  for (const [name, expected] of Object.entries(REQUIRED_PROFILES)) {
-    const profile = parseFrontmatter(await readIfExists(join(repoRoot, "pi", "agents", `${name}.md`)));
-    if (!profile) {
-      issues.push(`missing required agent profile: ${name}`);
-      continue;
-    }
-    if (expected.orderedModels) {
-      const models = parseOrderedModels(profile.models);
-      if (models.length === 0 || new Set(models).size !== models.length) issues.push(`invalid ${name} ordered models`);
-      if (Object.hasOwn(profile, "model") || Object.hasOwn(profile, "fallbackModels")) issues.push(`legacy ${name} model routing fields are forbidden`);
-    }
-    const tools = new Set((profile.tools ?? "").split(",").map((tool) => tool.trim()).filter(Boolean));
-    if (tools.has("subagent") !== expected.subagent) issues.push(`unexpected ${name} subagent capability`);
-    for (const tool of expected.requiredTools ?? []) {
-      if (!tools.has(tool)) issues.push(`missing ${name} control tool: ${tool}`);
-    }
-    for (const tool of expected.forbiddenTools ?? []) {
-      if (tools.has(tool)) issues.push(`forbidden ${name} control tool: ${tool}`);
-    }
-    if (profile.extensions !== expected.extensions) issues.push(`unexpected ${name} extension isolation`);
-    if (expected.childExtension && profile.subagentOnlyExtensions !== expected.childExtension) issues.push(`unexpected ${name} child extension`);
   }
 
   const gitignore = await readIfExists(join(repoRoot, ".gitignore"));
@@ -606,6 +590,7 @@ if (isMain) {
     if (issues.length === 0) {
       console.log("[ok] Pi Skill allowlist extension is ready");
       console.log("[ok] Root subagent broker: ready");
+      console.log("[info] Subagent profile discovery: not requested (requires Host discovery)");
       for (const limitation of LIMITATIONS) console.warn(`[warning] ${limitation}`);
     }
     else {

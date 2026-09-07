@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { rm, stat } from "node:fs/promises";
+import { rm, stat, writeFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -10,6 +10,7 @@ import {
   createBrokerFailureResponse,
   createBrokerSuccessResponse,
   parseBrokerGrant,
+  parseBrokerGrantV2,
   parseBrokerPush,
   parseBrokerRequest,
   parseBrokerResponse,
@@ -17,6 +18,7 @@ import {
   resolveRootSessionId,
   writeBrokerGrant,
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
+import { readLegacyExecutorProof } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/legacy-executor-compat.ts";
 
 const token = "a".repeat(64);
 const request = (method = "ping") => ({
@@ -63,11 +65,34 @@ test("broker rejects unknown request fields and unsafe identities", () => {
   assert.throws(() => parseBrokerRequest({ ...request(), callerToken: "short" }), /64 lowercase hexadecimal/);
 });
 
-test("broker grants only direct executors", () => {
+test("legacy grants are read-only normalized into canonical capabilities", async () => {
   const grant = { schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: "root-1", runId: "executor-1", callerToken: token, role: "executor" };
-  assert.deepEqual(parseBrokerGrant(grant), grant);
-  assert.throws(() => parseBrokerGrant({ ...grant, role: "plan-runner" }), /role/);
-  assert.throws(() => parseBrokerGrant({ ...grant, role: "caller" }), /role/);
+  assert.deepEqual(parseBrokerGrant(grant), { schemaVersion: "pi-root-subagent-broker-grant.v2", rootSessionId: "root-1", runId: "executor-1", callerToken: token, capabilities: ["acceptance.submit", "root.subscribe"] });
+  for (const invalid of [{ ...grant, extra: true }, { ...grant, role: "coordinator" }, { ...grant, callerToken: "short" }]) assert.throws(() => parseBrokerGrant(invalid), BrokerProtocolError);
+  const v2 = { schemaVersion: "pi-root-subagent-broker-grant.v2", rootSessionId: "root-1", runId: "run-1", callerToken: token, capabilities: ["acceptance.submit", "root.subscribe"] };
+  assert.deepEqual(parseBrokerGrantV2(v2), v2);
+  assert.throws(() => parseBrokerGrantV2({ ...v2, capabilities: ["root.subscribe", "acceptance.submit"] }), /canonical order/);
+  assert.throws(() => parseBrokerGrantV2({ ...v2, capabilities: ["root.subscribe", "root.subscribe"] }), /duplicates/);
+  assert.throws(() => parseBrokerGrantV2({ ...v2, capabilities: [] }), /non-empty/);
+  await assert.rejects(writeBrokerGrant(grant), BrokerProtocolError);
+});
+
+test("legacy executor proof normalization is exact and fail-closed", () => {
+  const legacy = {
+    schemaVersion: "root-broker.executor-proof.v1",
+    ownership: { rootSessionId: "root-1", runId: "executor-1", role: "executor", asyncDir: "/tmp/executor-1", sessionId: "session-1", identityState: "verified" },
+    terminal: { proofId: "e".repeat(64), observedAt: 1_700_000_000_000, outcome: "succeeded" },
+    terminalConflict: false,
+  };
+  const fail = (message) => { throw new BrokerProtocolError(message); };
+  assert.deepEqual(readLegacyExecutorProof(legacy, fail), {
+    schemaVersion: "root-broker.execution-proof.v2",
+    binding: { rootSessionId: "root-1", runId: "executor-1", asyncDir: "/tmp/executor-1", sessionId: "session-1", agentProfile: "executor" },
+    capabilities: ["acceptance.submit", "root.subscribe"],
+    terminal: { proofId: "e".repeat(64), observedAt: 1_700_000_000_000, outcome: "succeeded" },
+    terminalConflict: false,
+  });
+  for (const invalid of [{ ...legacy, extra: true }, { ...legacy, terminalConflict: "false" }, { ...legacy, ownership: { ...legacy.ownership, identityState: "claimed" } }, { ...legacy, terminal: { ...legacy.terminal, proofId: "bad" } }]) assert.throws(() => readLegacyExecutorProof(invalid, fail), BrokerProtocolError);
 });
 
 test("broker push protocol exposes only readiness and root shutdown", () => {
@@ -93,16 +118,27 @@ test("broker responses remain bound to the exact request identity", () => {
   assert.throws(() => parseBrokerResponse(success, { ...request(), requestId: "request-2" }), /identity/);
 });
 
-test("broker grant storage remains exact and owner-only", async (t) => {
+test("broker grant storage remains exact and capability-bound", async (t) => {
   const rootSessionId = `root-${process.pid}-${Date.now()}`;
   const runId = "executor-1";
-  const grant = { schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId, runId, callerToken: token, role: "executor" };
+  const grant = { schemaVersion: "pi-root-subagent-broker-grant.v2", rootSessionId, runId, callerToken: token, capabilities: ["root.subscribe"] };
   const grantPath = brokerGrantPath(rootSessionId, runId);
   t.after(() => rm(grantPath, { force: true }));
   await writeBrokerGrant(grant);
   assert.deepEqual(await readBrokerGrant(rootSessionId, runId), grant);
   assert.equal((await stat(grantPath)).mode & 0o777, 0o600);
   assert.ok(Buffer.byteLength(brokerSocketPath(rootSessionId), "utf8") <= 103);
+});
+
+test("persisted legacy grants are only read through the canonical adapter", async (t) => {
+  const rootSessionId = `legacy-root-${process.pid}-${Date.now()}`;
+  const runId = "executor-1";
+  const grantPath = brokerGrantPath(rootSessionId, runId);
+  const canonical = { schemaVersion: "pi-root-subagent-broker-grant.v2", rootSessionId, runId, callerToken: token, capabilities: ["acceptance.submit", "root.subscribe"] };
+  t.after(() => rm(grantPath, { force: true }));
+  await writeBrokerGrant(canonical);
+  await writeFile(grantPath, `${JSON.stringify({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId, runId, callerToken: token, role: "executor" })}\n`);
+  assert.deepEqual(await readBrokerGrant(rootSessionId, runId), canonical);
 });
 
 test("root identity comes only from the live session id", () => {

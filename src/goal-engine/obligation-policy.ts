@@ -143,7 +143,7 @@ export function actionableFrontier(input = {}) {
   for (const [id, task] of collection(projection.tasks ?? {}, "tasks")) {
     const app = taskApplicability(projection, id); if (app === "reverify_required") { action(actions, "task-reverify", id, 3, "goal_amend", { task_id: id }, "Task requires reverify"); note(blocking, "task", id, "TASK_REVERIFY_REQUIRED"); continue; }
     if (app === "superseded") continue;
-    const bound = task?.executorBinding?.runId; const active = validId(bound) && activeWorldRuns?.some(run => run?.runId === bound);
+    const bound = task?.runBinding?.runId; const active = validId(bound) && activeWorldRuns?.some(run => run?.runId === bound);
     const next = safeTaskAction(id, lookup(taskActions, "taskActions").get(id));
     if (active && next?.tool === "goal_settle") note(blocking, "task", id, "TASK_FUTURE_WAKE"); else if (next) action(actions, "task", id, next.priority, next.tool, next.params, next.reason); else if (["dispatched", "running", "settling"].includes(task?.status)) note(blocking, "task", id, "TASK_FUTURE_WAKE");
   }

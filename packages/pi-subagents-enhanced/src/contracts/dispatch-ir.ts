@@ -6,8 +6,6 @@ const MAX_ARRAY_ITEMS = 32;
 const MAX_STRING_BYTES = 4 * 1024;
 const MAX_PROMPT_BYTES = 64 * 1024;
 const TASK_ID_PATTERN = /^[A-Za-z0-9._-]{1,160}$/;
-const AGENTS = new Set(["executor"]);
-const MODEL_TIERS = new Set(["luna", "terra"]);
 const RISKS = new Set(["low", "normal", "high"]);
 const WORKFLOW_MODES = new Set(["tdd", "existing-tests", "docs-only"]);
 const TOP_LEVEL_KEYS = [
@@ -15,7 +13,7 @@ const TOP_LEVEL_KEYS = [
   "taskId",
   "title",
   "agent",
-  "modelTier",
+  "model",
   "risk",
   "objective",
   "workflow",
@@ -25,7 +23,7 @@ const TOP_LEVEL_KEYS = [
   "acceptance",
   "execution",
 ];
-const REQUIRED_TOP_LEVEL_KEYS = TOP_LEVEL_KEYS.filter((key) => key !== "modelTier");
+const REQUIRED_TOP_LEVEL_KEYS = TOP_LEVEL_KEYS.filter((key) => key !== "model");
 const COERCIBLE_FIELDS = ["workflow", "requirements", "context", "boundaries", "acceptance", "execution"];
 
 export class CodingDispatchContractError extends Error {
@@ -95,6 +93,17 @@ function normalizeString(value, location, { maxBytes = MAX_STRING_BYTES } = {}) 
   const normalized = value.trim();
   if (!normalized) fail("INVALID_CONTRACT", `${location} must not be empty`, location);
   if (Buffer.byteLength(normalized, "utf8") > maxBytes) fail("INVALID_CONTRACT", `${location} exceeds ${maxBytes} bytes`, location);
+  return normalized;
+}
+
+function normalizeAgentProfile(value) {
+  if (typeof value !== "string") failTypeMismatch("agent", "string", value);
+  const normalized = value.trim();
+  if (!normalized) fail("INVALID_AGENT", "agent must not be empty", "agent");
+  if (/[\u0000-\u001F\u007F-\u009F]/.test(normalized)) {
+    fail("INVALID_AGENT", "agent must not contain C0 or C1 control characters", "agent");
+  }
+  if (Buffer.byteLength(normalized, "utf8") > 256) fail("INVALID_AGENT", "agent exceeds 256 bytes", "agent");
   return normalized;
 }
 
@@ -181,13 +190,6 @@ function normalizeExecution(value, baseCwd) {
   return normalized;
 }
 
-function normalizeModelTier(value) {
-  if (value === undefined) return undefined;
-  const normalized = normalizeString(value, "modelTier");
-  if (!MODEL_TIERS.has(normalized)) fail("INVALID_CONTRACT", `modelTier is not supported: ${normalized}`, "modelTier");
-  return normalized;
-}
-
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (!value || typeof value !== "object") return value;
@@ -208,19 +210,18 @@ export function compileCodingDispatchIR(input, { cwd } = {}) {
   const source = validateObject(coerceContractFields(input), "$", TOP_LEVEL_KEYS, REQUIRED_TOP_LEVEL_KEYS);
   const version = normalizeString(source.version, "version");
   if (version !== CONTRACT_VERSION) fail("UNSUPPORTED_VERSION", `unsupported coding dispatch contract version: ${version}`, "version");
-  const agent = normalizeString(source.agent, "agent");
-  if (!AGENTS.has(agent)) fail("INVALID_AGENT", `unsupported coding dispatch agent: ${agent}`, "agent");
+  const agent = normalizeAgentProfile(source.agent);
   const risk = normalizeString(source.risk, "risk");
   if (!RISKS.has(risk)) fail("INVALID_CONTRACT", `unsupported coding dispatch risk: ${risk}`, "risk");
   const taskId = normalizeString(source.taskId, "taskId", { maxBytes: 160 });
   if (!TASK_ID_PATTERN.test(taskId)) fail("INVALID_CONTRACT", "taskId must match ^[A-Za-z0-9._-]{1,160}$", "taskId");
-  const modelTier = normalizeModelTier(source.modelTier);
+  const model = source.model === undefined ? undefined : normalizeString(source.model, "model", { maxBytes: 512 });
   const canonical = {
     version,
     taskId,
     title: normalizeString(source.title, "title"),
     agent,
-    ...(modelTier === undefined ? {} : { modelTier }),
+    ...(model === undefined ? {} : { model }),
     risk,
     objective: normalizeString(source.objective, "objective"),
     requirements: normalizeStringArray(source.requirements, "requirements", { minItems: 1 }),
@@ -250,7 +251,7 @@ export function renderCodingDispatchPrompt(ir) {
   const prompt = [
     "# Coding Dispatch Contract v1", "", "## Identity",
     `- Version: \`${ir.version}\``, `- Task ID: ${JSON.stringify(ir.taskId)}`, `- Title: ${JSON.stringify(ir.title)}`,
-    `- Agent: \`${ir.agent}\``, ...(ir.modelTier === undefined ? [] : [`- Requested model tier override: \`${ir.modelTier}\``]),
+    `- Agent: \`${ir.agent}\``, ...(ir.model === undefined ? [] : [`- Requested model: \`${ir.model}\``]),
     `- Risk: \`${ir.risk}\``, `- Working directory: ${JSON.stringify(ir.execution.cwd)}`, `- Timeout: \`${ir.execution.timeoutMs}ms\``,
     ...(ir.execution.worktree === true ? ["- Managed worktree: `true`"] : []), `- Contract SHA-256: \`${ir.hash}\``,
     "", "## Objective", JSON.stringify(ir.objective), "", "## Requirements", ordered(ir.requirements),

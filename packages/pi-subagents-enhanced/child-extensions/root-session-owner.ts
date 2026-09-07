@@ -46,7 +46,7 @@ export async function installRootSessionOwner(pi: any, options: Options = {}) {
   if (!enabled) return Object.freeze({ dispose() {} });
   if (!rootSessionId || !callerRunId) throw new Error("Root ownership requires PI_SUBAGENT_RUN_ID and PI_SUBAGENT_ORCHESTRATOR_SESSION_ID");
   const createClient = options.createClient ?? createRootBrokerClient;
-  const client = createClient({ rootSessionId, callerRunId });
+  const client = createClient({ rootSessionId, callerRunId, requiredCapability: "root.subscribe" });
   const clock = options.clock ?? Date.now;
   const sleep = options.sleep ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   const kill = options.kill ?? process.kill;

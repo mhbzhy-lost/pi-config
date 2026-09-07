@@ -1,9 +1,10 @@
 import type { RootBrokerServer } from "./root-broker-server.ts";
+import type { RunAuthorization } from "./run-authorization.ts";
 
 const ROOT_BROKER_REGISTRY_KEY = Symbol.for("pi.root-subagent-broker-registry.v2");
-const GOAL_EXECUTOR_COORDINATOR_KEY = Symbol.for("pi.goal-executor-coordinator-registry.v2");
+const GOAL_RUN_COORDINATOR_KEY = Symbol.for("pi.goal-run-coordinator-registry.v2");
 
-type GoalExecutorCoordinator = {
+type GoalRunCoordinator = {
   prepareSpawn: (request: any) => Promise<any> | any;
   workspaceAllocated: (ticket: any, receipt: any) => Promise<void> | void;
   confirmSpawn: (ticket: any, receipt: any) => Promise<void> | void;
@@ -67,44 +68,44 @@ function registryKey(pi: object): object {
 }
 
 const brokers = rootBrokerRegistry();
-type GoalExecutorCoordinatorRegistry = {
-  exact: WeakMap<object, GoalExecutorCoordinator>;
-  byRootSessionId: Map<string, GoalExecutorCoordinator>;
+type GoalRunCoordinatorRegistry = {
+  exact: WeakMap<object, GoalRunCoordinator>;
+  byRootSessionId: Map<string, GoalRunCoordinator>;
 };
 
-function goalExecutorCoordinatorRegistry(): GoalExecutorCoordinatorRegistry {
-  const descriptor = Object.getOwnPropertyDescriptor(process, GOAL_EXECUTOR_COORDINATOR_KEY);
+function goalRunCoordinatorRegistry(): GoalRunCoordinatorRegistry {
+  const descriptor = Object.getOwnPropertyDescriptor(process, GOAL_RUN_COORDINATOR_KEY);
   if (!descriptor) {
-    const registry: GoalExecutorCoordinatorRegistry = { exact: new WeakMap<object, GoalExecutorCoordinator>(), byRootSessionId: new Map<string, GoalExecutorCoordinator>() };
-    Object.defineProperty(process, GOAL_EXECUTOR_COORDINATOR_KEY, { value: registry, enumerable: false, configurable: false, writable: false });
+    const registry: GoalRunCoordinatorRegistry = { exact: new WeakMap<object, GoalRunCoordinator>(), byRootSessionId: new Map<string, GoalRunCoordinator>() };
+    Object.defineProperty(process, GOAL_RUN_COORDINATOR_KEY, { value: registry, enumerable: false, configurable: false, writable: false });
     return registry;
   }
   const registry = descriptor.value;
   if (!registry || typeof registry !== "object" || !(registry.exact instanceof WeakMap) || !(registry.byRootSessionId instanceof Map)) {
     throw new Error("Goal executor coordinator registry slot is invalid");
   }
-  return registry as GoalExecutorCoordinatorRegistry;
+  return registry as GoalRunCoordinatorRegistry;
 }
 
-const goalCoordinators = goalExecutorCoordinatorRegistry();
+const goalCoordinators = goalRunCoordinatorRegistry();
 
-function assertGoalExecutorCoordinator(coordinator: GoalExecutorCoordinator): void {
+function assertGoalRunCoordinator(coordinator: GoalRunCoordinator): void {
   if (!coordinator
       || typeof coordinator.prepareSpawn !== "function"
       || typeof coordinator.workspaceAllocated !== "function"
       || typeof coordinator.confirmSpawn !== "function"
       || typeof coordinator.bindSpawn !== "function") {
-    throw new TypeError("Goal executor coordinator is invalid");
+    throw new TypeError("Goal run coordinator is invalid");
   }
 }
 
-export function bindGoalExecutorCoordinator(pi: object, coordinator: GoalExecutorCoordinator): void {
-  assertGoalExecutorCoordinator(coordinator);
+export function bindGoalRunCoordinator(pi: object, coordinator: GoalRunCoordinator): void {
+  assertGoalRunCoordinator(coordinator);
   goalCoordinators.exact.set(registryKey(pi), coordinator);
 }
 
-export function bindGoalExecutorCoordinatorSession(pi: object, rootSessionId: string, coordinator: GoalExecutorCoordinator): void {
-  assertGoalExecutorCoordinator(coordinator);
+export function bindGoalRunCoordinatorSession(pi: object, rootSessionId: string, coordinator: GoalRunCoordinator): void {
+  assertGoalRunCoordinator(coordinator);
   const identity = rootSessionIdentity(rootSessionId);
   goalCoordinators.exact.set(registryKey(pi), coordinator);
   // A reload replaces the ExtensionAPI facade for the same live root session.
@@ -112,13 +113,13 @@ export function bindGoalExecutorCoordinatorSession(pi: object, rootSessionId: st
   goalCoordinators.byRootSessionId.set(identity, coordinator);
 }
 
-export function findGoalExecutorCoordinator(pi: object, rootSessionId?: string): GoalExecutorCoordinator | undefined {
+export function findGoalRunCoordinator(pi: object, rootSessionId?: string): GoalRunCoordinator | undefined {
   const exact = goalCoordinators.exact.get(registryKey(pi));
   if (exact) return exact;
   return rootSessionId === undefined ? undefined : goalCoordinators.byRootSessionId.get(rootSessionIdentity(rootSessionId));
 }
 
-export function unbindGoalExecutorCoordinatorSession(pi: object, rootSessionId: string, coordinator?: GoalExecutorCoordinator): void {
+export function unbindGoalRunCoordinatorSession(pi: object, rootSessionId: string, coordinator?: GoalRunCoordinator): void {
   const identity = rootSessionIdentity(rootSessionId);
   const current = goalCoordinators.byRootSessionId.get(identity);
   if (!current || (coordinator && current !== coordinator)) return;
@@ -151,17 +152,31 @@ export function requireRootBroker(pi: object, rootSessionId?: string): RootBroke
   return broker;
 }
 
-export async function stopRootBrokerGoalOwnedRun(pi: object, binding: { goalId: string; taskId: string; attempt: number; runId: string; asyncDir: string; workspacePath: string; leaseId: string; sessionId: string; baseHead: string; headAtDispatch: string; executionRevision: number; contractHash: string; expectedCriteria: string[]; agent: "executor" }, rootSessionId?: string) {
+export async function stopRootBrokerGoalOwnedRun(pi: object, binding: { goalId: string; taskId: string; attempt: number; runId: string; asyncDir: string; workspacePath: string; leaseId: string; sessionId: string; baseHead: string; headAtDispatch: string; executionRevision: number; contractHash: string; expectedCriteria: string[]; agentProfile: string }, rootSessionId?: string) {
   return requireRootBroker(pi, rootSessionId).stopGoalOwnedRun(binding);
 }
 
 // This is intentionally an internal coordinator facade, not a dispatch tool.
-export function persistGoalExecutorBindingAuthority(pi: object, authority: any, rootSessionId?: string): void {
+export function persistGoalRunBindingAuthority(pi: object, authority: any, rootSessionId?: string): void {
   requireRootBroker(pi, rootSessionId).persistGoalBindingAuthority(authority);
 }
 
-export function inspectRootBrokerExecutorProof(pi: object, runId: string, rootSessionId?: string) {
-  return requireRootBroker(pi, rootSessionId).inspectExecutorProof(runId);
+export async function registerRootBrokerAuthorizedRun(pi: object, authorization: Readonly<RunAuthorization>, rootSessionId?: string): Promise<void> {
+  await requireRootBroker(pi, rootSessionId).registerAuthorizedRun(authorization);
+}
+
+export function inspectRootBrokerExecutionProof(pi: object, runId: string, rootSessionId?: string) {
+  const observed = requireRootBroker(pi, rootSessionId).inspectExecutionProof(runId);
+  if (!observed || observed.schemaVersion !== "root-broker.execution-proof.v2" || observed.terminalConflict === true) return null;
+  const binding = observed.binding, terminal = observed.terminal, proof = terminal?.proof;
+  if (!binding || !terminal || !proof
+      || binding.runId !== runId
+      || typeof binding.rootSessionId !== "string" || !binding.rootSessionId
+      || typeof binding.agentProfile !== "string" || !binding.agentProfile
+      || typeof terminal.proofId !== "string" || !/^[a-f0-9]{64}$/.test(terminal.proofId)
+      || !Number.isFinite(terminal.observedAt)
+      || !["succeeded", "failed"].includes(proof.outcome)) return null;
+  return Object.freeze({ runId, proofId: terminal.proofId, rootSessionId: binding.rootSessionId, observedAt: terminal.observedAt, outcome: proof.outcome, agentProfile: binding.agentProfile });
 }
 
 export function registerRootBrokerFacadeRun(pi: object, run: { runId: string; asyncDir: string; sessionId: string; pid: number; agent: string; kind: string }, rootSessionId?: string): void {

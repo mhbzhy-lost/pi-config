@@ -131,5 +131,5 @@ test("the model-facing description contains the project dispatch and push-notifi
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /do not use sleep, status polling, or supervisor pending/i);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /if none remains, end the turn/i);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /use status only for explicit user requests, intervention, or diagnostics/i);
-  assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /CHAIN|PARALLEL|proactive skill|Fable|watchdog|schedule/i);
+  assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /PARALLEL|proactive skill|Fable|watchdog|schedule/i);
 });

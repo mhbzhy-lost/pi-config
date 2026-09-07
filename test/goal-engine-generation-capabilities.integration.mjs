@@ -8,6 +8,8 @@ test("generation capability matrix is exact, frozen, and fail closed", () => {
   }
   assert.deepEqual(generationCapabilities("planned.v1"), { taskContract: "criteria-only", executorBinding: "strict", settlement: "dual-path", completion: "accept-auto", conditions: false, executionRevision: false });
   assert.deepEqual(generationCapabilities("goal-runtime.v1"), { taskContract: "criteria-only", executorBinding: "strict", settlement: "dual-path", completion: "goal-finalize", conditions: true, executionRevision: true });
+  assert.deepEqual(generationCapabilities("planned.v2"), { taskContract: "criteria-only", runBinding: "strict", settlement: "execution-proof", completion: "accept-auto", conditions: false, executionRevision: false });
+  assert.deepEqual(generationCapabilities("goal-runtime.v2"), { taskContract: "criteria-only", runBinding: "strict", settlement: "execution-proof", completion: "goal-finalize", conditions: true, executionRevision: true });
   assert.equal(Object.isFrozen(generationCapabilities("goal-runtime.v1")), true);
   assert.throws(() => generationCapabilities("unknown.v1"), /unknown generation/);
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { compileCodingDispatchIR, splitDispatchEnvelope } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
-import { bindGoalExecutorCoordinator } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import { bindGoalRunCoordinator } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 import { compileTaskContract } from "../src/goal-engine/dispatch.ts";
 
 function criteriaOnlyContract(overrides = {}) {
@@ -79,7 +79,7 @@ test("canonical dispatch hashes retain the worktree request but exclude runtime 
 
 test("Goal coordinator registry rejects legacy two-stage coordinators", () => {
   const legacy = { prepareSpawn() {}, bindSpawn() {} };
-  assert.throws(() => bindGoalExecutorCoordinator({}, legacy), /coordinator/i);
+  assert.throws(() => bindGoalRunCoordinator({}, legacy), /coordinator/i);
 });
 
 test("Goal coordinator registry requires every four-stage workspace callback", () => {
@@ -93,7 +93,7 @@ test("Goal coordinator registry requires every four-stage workspace callback", (
   for (const method of Object.keys(coordinator)) {
     const invalid = { ...coordinator };
     delete invalid[method];
-    assert.throws(() => bindGoalExecutorCoordinator({}, invalid), /coordinator/i);
+    assert.throws(() => bindGoalRunCoordinator({}, invalid), /coordinator/i);
   }
-  bindGoalExecutorCoordinator({}, coordinator);
+  bindGoalRunCoordinator({}, coordinator);
 });

@@ -14,6 +14,7 @@ import {
 type ClientOptions = {
   rootSessionId: string;
   callerRunId: string;
+  requiredCapability?: "root.subscribe" | "acceptance.submit";
   timeoutMs?: number;
   randomUUID?: () => string;
 };
@@ -53,7 +54,10 @@ export function createBrokerFrameDecoder() {
   };
 }
 
-export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs = 10_000, randomUUID: createId = randomUUID }: ClientOptions) {
+export function createRootBrokerClient({ rootSessionId, callerRunId, requiredCapability, timeoutMs = 10_000, randomUUID: createId = randomUUID }: ClientOptions) {
+  if (requiredCapability !== undefined && requiredCapability !== "root.subscribe" && requiredCapability !== "acceptance.submit") {
+    throw clientError("Root broker required capability is invalid", "CAPABILITY_INVALID");
+  }
   let disposed = false;
   const sockets = new Set<Socket>();
   const pending = new Set<(error: Error) => void>();
@@ -65,8 +69,13 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, timeoutMs =
 
   const grant = async () => {
     try {
-      return await readBrokerGrant(rootSessionId, callerRunId);
+      const current = await readBrokerGrant(rootSessionId, callerRunId);
+      if (requiredCapability && !current.capabilities.includes(requiredCapability)) {
+        throw clientError(`Root broker grant lacks ${requiredCapability} capability`, "CAPABILITY_DENIED");
+      }
+      return current;
     } catch (error: any) {
+      if (error?.code === "CAPABILITY_DENIED") throw error;
       if (error?.code === "ENOENT") throw clientError("Root broker grant is not ready", "GRANT_NOT_READY");
       throw clientError(`Root broker grant is unavailable: ${error instanceof Error ? error.message : String(error)}`, "GRANT_INVALID");
     }

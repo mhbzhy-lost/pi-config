@@ -5,6 +5,7 @@ import {
   CodingDispatchContractError,
   compileCodingDispatchIR,
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts";
+import { compileCodingDispatchIR as compileRuntimeCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { renderCodingDispatchPrompt } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/prompt.ts";
 
 function contract(overrides = {}) {
@@ -94,17 +95,22 @@ test("compiles a normalized, hashed, deeply frozen dispatch-ir.v1 contract", () 
   assertDeepFrozen(ir);
 });
 
-test("keeps modelTier optional and renders an explicit override", () => {
+test("keeps model optional, normalizes an explicit request, and hashes it", () => {
   const normal = compileCodingDispatchIR(contract(), { cwd: "/repo" });
-  const overridden = compileCodingDispatchIR(contract({ modelTier: "terra" }), { cwd: "/repo" });
-  assert.equal(Object.hasOwn(normal, "modelTier"), false);
-  assert.equal(overridden.modelTier, "terra");
-  assert.match(renderCodingDispatchPrompt(overridden), /Requested model tier override: `terra`/);
-  assert.notEqual(normal.hash, overridden.hash);
+  const firstModel = compileCodingDispatchIR(contract({ model: " codex-pool/gpt-5.6-sol " }), { cwd: "/repo" });
+  const secondModel = compileCodingDispatchIR(contract({ model: "codex-pool/gpt-5.6-luna" }), { cwd: "/repo" });
+  assert.equal(Object.hasOwn(normal, "model"), false);
+  assert.equal(firstModel.model, "codex-pool/gpt-5.6-sol");
+  assert.match(renderCodingDispatchPrompt(firstModel), /Requested model: `codex-pool\/gpt-5.6-sol`/);
+  assert.notEqual(normal.hash, firstModel.hash);
+  assert.notEqual(firstModel.hash, secondModel.hash);
 });
 
-test("rejects unsupported modelTier values", () => {
-  assert.throws(() => compileCodingDispatchIR(contract({ modelTier: "sol" }), { cwd: "/repo" }), /modelTier/);
+test("rejects empty models and retired modelTier fields", () => {
+  for (const model of ["", "   ", null, 1]) {
+    assert.throws(() => compileCodingDispatchIR(contract({ model }), { cwd: "/repo" }), /model/);
+  }
+  assert.throws(() => compileCodingDispatchIR(contract({ modelTier: "terra" }), { cwd: "/repo" }), /modelTier/);
 });
 
 test("renders the complete child prompt in a fixed section order", () => {
@@ -178,9 +184,10 @@ test("rejects commands as an unknown acceptance field in the new strict schema",
   });
 });
 
-test("uses stable error codes for unsupported versions and agents", () => {
+test("uses stable error codes for unsupported versions while accepting normalized agent profiles", () => {
   expectCode("UNSUPPORTED_VERSION", () => compileCodingDispatchIR(contract({ version: "dispatch-ir.v2" }), { cwd: "/repo" }));
-  expectCode("INVALID_AGENT", () => compileCodingDispatchIR(contract({ agent: "reviewer" }), { cwd: "/repo" }));
+  const ir = compileCodingDispatchIR(contract({ agent: " coder-alpha " }), { cwd: "/repo" });
+  assert.equal(ir.agent, "coder-alpha");
 });
 
 test("enforces workflow modes and exemption reasons", () => {
@@ -195,8 +202,12 @@ test("enforces workflow modes and exemption reasons", () => {
   assert.equal(existing.workflow.reason, "The existing integration suite covers this renderer.");
 });
 
-test("rejects the retired spark coding agent", () => {
-  expectCode("INVALID_AGENT", () => compileCodingDispatchIR(contract({ agent: "spark" }), { cwd: "/repo" }));
+test("accepts arbitrary valid agent profiles and rejects invalid profile identities", () => {
+  assert.equal(compileCodingDispatchIR(contract({ agent: "package.coder-alpha" }), { cwd: "/repo" }).agent, "package.coder-alpha");
+  for (const agent of ["", "   ", "coder\u0000alpha", "coder\u001falpha", "coder\u007falpha", "coder\u009falpha", "a".repeat(257)]) {
+    expectCode("INVALID_AGENT", () => compileCodingDispatchIR(contract({ agent }), { cwd: "/repo" }));
+    assert.throws(() => compileRuntimeCodingDispatchIR(contract({ agent }), { cwd: "/repo" }), { code: "INVALID_AGENT" });
+  }
 });
 
 test("accepts normalized repo-relative paths and rejects path escapes", () => {

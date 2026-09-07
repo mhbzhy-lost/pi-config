@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -10,8 +10,32 @@ import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced
 const { inspectConfiguration, inspectGoalContractIntegrity } = doctor;
 import { canonicalJsonSha256 } from "../src/goal-contract/authorization-audit.ts";
 import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
+import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+test("subagent-only Doctor discovers requested profiles across rename without executor", async () => {
+  assert.equal(typeof doctor.inspectSubagentRuntime, "function");
+  const { jiti } = await loadPiTestRuntime(import.meta.url);
+  const { discoverAgents } = await jiti.import("../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.62.ts");
+  const root = await mkdtemp(join(tmpdir(), "doctor-profile-"));
+  try {
+    const agentsDir = join(root, ".pi", "agents");
+    await mkdir(agentsDir, { recursive: true });
+    const profile = (name) => `---\nname: ${name}\ndescription: fixture\nmodels:\n  - fake/deterministic\ntools: read,subagent\nextensions: ./fixture.ts\ncapabilities: root.subscribe,acceptance.submit\n---\n`;
+    await writeFile(join(agentsDir, "coder-alpha.md"), profile("coder-alpha"));
+    const options = (agent) => ({ cwd: root, discovery: discoverAgents(root, "project"), requests: [{ agent, title: "Inspect", task: "Read only" }] });
+    assert.deepEqual(await doctor.inspectSubagentRuntime(options("coder-alpha")), []);
+    await rename(join(agentsDir, "coder-alpha.md"), join(agentsDir, "coder-beta.md"));
+    await writeFile(join(agentsDir, "coder-beta.md"), profile("coder-beta"));
+    assert.deepEqual(await doctor.inspectSubagentRuntime(options("coder-beta")), []);
+    assert.ok((await doctor.inspectSubagentRuntime(options("coder-alpha"))).some((issue) => issue.includes("coder-alpha")));
+    assert.ok((await doctor.inspectSubagentRuntime({ ...options("coder-beta"), requests: [{ agent: "coder-beta", version: "dispatch-ir.v1" }] })).length > 0);
+    assert.ok((await doctor.inspectSubagentRuntime({ requests: options("coder-beta").requests })).includes("PROFILE_DISCOVERY_UNAVAILABLE"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 const GOAL_ENGINE_TOOL_NAMES = ["goal_init", "goal_status", "goal_dispatch", "goal_settle", "goal_accept", "goal_amend", "goal_integrate", "goal_finalize"];
 
@@ -454,7 +478,7 @@ test("inspectConfiguration reports generic runtime contract gaps without requiri
 
     const issues = await inspectConfiguration(root, { readPiVersion: async () => "unknown" });
     assert.ok(issues.some((issue) => issue.startsWith("unexpected Pi version: unknown; supported ")));
-    assert.ok(issues.includes("unexpected executor extension isolation"));
+    assert.equal(issues.includes("unexpected executor extension isolation"), false);
     assert.equal(issues.some((issue) => /plan-runner|plan-capsule|Plan child/.test(issue)), false);
     assert.ok(issues.includes("runtime namespace is not ignored: /var/"));
     assert.ok(issues.includes("legacy Task 7 runtime still exists: scripts/lib/subagent-jobs.mjs"));

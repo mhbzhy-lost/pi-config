@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ownerSessionId, suspensionClosureHash } from "./events.ts";
-import { executorCriteria } from "./task-definition.ts";
+import { runCriteria } from "./task-definition.ts";
+import { runBindingForTask } from "./legacy-executor-compat.ts";
 
 export { suspensionClosureHash };
 
@@ -32,14 +33,15 @@ function durableOwnerSessionId(projection) {
   return sessionId;
 }
 
-export function deriveOwnedExecutorStopRequest({ projection, taskId } = {}) {
+export function deriveOwnedRunStopRequest({ projection, taskId } = {}) {
   if (!projection || projection.runtimeGeneration !== "goal-runtime.v1" || !Number.isSafeInteger(projection.executionRevision) || projection.executionRevision < 1 || typeof projection.executionContractHash !== "string" || !/^[a-f0-9]{64}$/.test(projection.executionContractHash) || typeof projection.goalId !== "string" || !projection.goalId || typeof projection.runtimeBaseHead !== "string" || !/^[a-f0-9]{40}$/.test(projection.runtimeBaseHead)) throw new Error("durable runtime identity is invalid");
   const sessionId = durableOwnerSessionId(projection);
-  const task = projection.tasks?.get?.(taskId); const binding = task?.executorBinding;
+  const task = projection.tasks?.get?.(taskId); let binding;
+  try { binding = task && runBindingForTask(task, projection.eventSchemaVersion); } catch { binding = null; }
   if (typeof taskId !== "string" || !taskId || !task || !["dispatched", "running", "settling"].includes(task.status) || !Number.isSafeInteger(task.attempts) || task.attempts < 1 || !binding || typeof binding.runId !== "string" || !binding.runId || typeof binding.asyncDir !== "string" || !binding.asyncDir.startsWith("/") || typeof binding.workspacePath !== "string" || !binding.workspacePath.startsWith("/") || typeof binding.workspaceLeaseId !== "string" || !/^[a-f0-9]{64}$/.test(binding.workspaceLeaseId) || typeof binding.headAtDispatch !== "string" || !/^[a-f0-9]{40}$/.test(binding.headAtDispatch)) throw new Error("durable executor binding is invalid");
-  const expectedCriteria = executorCriteria(task.acceptance?.criteria ?? []).map((criterion) => criterion.id);
+  const expectedCriteria = runCriteria(task.acceptance?.criteria ?? []).map((criterion) => criterion.id);
   if (!expectedCriteria.length) throw new Error("durable executor acceptance authority is invalid");
-  return Object.freeze({ goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, asyncDir: binding.asyncDir, workspacePath: binding.workspacePath, leaseId: binding.workspaceLeaseId, sessionId, baseHead: projection.runtimeBaseHead, headAtDispatch: binding.headAtDispatch, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, expectedCriteria, agent: "executor" });
+  return Object.freeze({ goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, asyncDir: binding.asyncDir, workspacePath: binding.workspacePath, leaseId: binding.workspaceLeaseId, sessionId, baseHead: projection.runtimeBaseHead, headAtDispatch: binding.headAtDispatch, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, expectedCriteria, agentProfile: binding.agentProfile });
 }
 
 export function suspensionGuard(projection, operation) {
@@ -65,7 +67,7 @@ export function buildSuspensionPlan({ projection, reason, affectedIds = {}, inve
 export async function requestOwnedRunStop(pi, request = {}) {
   const { projection, ...claimed } = request;
   if (!pi || typeof pi.stopOwnedRun !== "function") throw new Error("Root Broker owned stop facade is unavailable");
-  const owned = deriveOwnedExecutorStopRequest({ projection, taskId: claimed.taskId });
+  const owned = deriveOwnedRunStopRequest({ projection, taskId: claimed.taskId });
   if (JSON.stringify(claimed) !== JSON.stringify(owned)) throw new Error("owned stop identity mismatch");
   try {
     const response = await pi.stopOwnedRun(owned);

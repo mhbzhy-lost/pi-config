@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 import { materializeSettlementEvidence } from "../goal-support/settlement-evidence.ts";
 import { captureProcessBirthIdentity } from "./process-birth-identity.ts";
+import { assertRunAuthorization, type RunAuthorization } from "./run-authorization.ts";
 import {
   brokerSocketPath,
   createBrokerFailureResponse,
@@ -24,26 +25,27 @@ type Upstream = {
   stop: (...args: any[]) => Promise<any> | any;
   dispose?: () => void | Promise<void>;
 };
-type Principal = { role: "executor"; callerToken: string };
+type Principal = { callerToken: string; capabilities: ReadonlySet<"root.subscribe" | "acceptance.submit"> };
 type OwnedRun = {
   rootSessionId: string;
   runId: string;
-  role: "executor";
   asyncDir: string;
   sessionId: string;
   pid: number;
+  agentProfile: string;
+  capabilities: ReadonlySet<"root.subscribe" | "acceptance.submit">;
+  authorization: Readonly<RunAuthorization>;
   birthIdentity: string | null;
   identityState: "verified" | "unavailable" | "conflict";
 };
-type StartedFacts = Pick<OwnedRun, "runId" | "role" | "asyncDir" | "sessionId" | "pid">;
 type GoalOwnedAuthority = {
   goalId: string; taskId: string; attempt: number; runId: string; asyncDir: string;
   workspacePath: string; leaseId: string; sessionId: string; baseHead: string;
-  headAtDispatch: string; executionRevision: number; contractHash: string; expectedCriteria: string[]; agent: "executor";
+  headAtDispatch: string; executionRevision: number; contractHash: string; expectedCriteria: string[]; agentProfile: string;
 };
-type GoalBindingSidecar = GoalOwnedAuthority & { version: "root-broker.goal-binding-authority.v1"; ticketId: string };
-const GOAL_BINDING_SIDECAR = "root-broker.goal-binding-authority.v1.json";
-const goalOwnedAuthorityKeys = ["goalId", "taskId", "attempt", "runId", "asyncDir", "workspacePath", "leaseId", "sessionId", "baseHead", "headAtDispatch", "executionRevision", "contractHash", "expectedCriteria", "agent"];
+type GoalBindingSidecar = GoalOwnedAuthority & { version: "root-broker.goal-run-binding-authority.v2"; ticketId: string };
+const GOAL_BINDING_SIDECAR = "root-broker.goal-run-binding-authority.v2.json";
+const goalOwnedAuthorityKeys = ["goalId", "taskId", "attempt", "runId", "asyncDir", "workspacePath", "leaseId", "sessionId", "baseHead", "headAtDispatch", "executionRevision", "contractHash", "expectedCriteria", "agentProfile"];
 function exactKeys(value: any, keys: string[]) { return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)); }
 function authorityFields(value: any) { return Object.fromEntries(goalOwnedAuthorityKeys.map((key) => [key, value?.[key]])); }
 function validGoalOwnedAuthority(value: any): value is GoalOwnedAuthority {
@@ -56,7 +58,8 @@ function validGoalOwnedAuthority(value: any): value is GoalOwnedAuthority {
     && Number.isSafeInteger(value.executionRevision) && value.executionRevision > 0 && typeof value.contractHash === "string" && /^[a-f0-9]{64}$/.test(value.contractHash)
     && Array.isArray(value.expectedCriteria) && value.expectedCriteria.length > 0 && value.expectedCriteria.length <= 32
     && value.expectedCriteria.every((id: unknown) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(id))
-    && new Set(value.expectedCriteria).size === value.expectedCriteria.length && value.agent === "executor";
+    && new Set(value.expectedCriteria).size === value.expectedCriteria.length
+    && typeof value.agentProfile === "string" && value.agentProfile.length > 0;
 }
 type FacadeRun = {
   runId: string;
@@ -130,7 +133,7 @@ export class RootBrokerServer {
   subscriptions = new Map<string, Set<Socket>>();
   sockets = new Set<Socket>();
   grantPaths = new Set<string>();
-  executorGrants = new Map<string, Promise<{ callerToken: string }>>();
+  authorizationGrants = new Map<string, Promise<{ callerToken: string }>>();
   ownedRuns = new Map<string, OwnedRun>();
   facadeRuns = new Map<string, FacadeRun>();
   terminalProofs = new Map<string, any>();
@@ -222,16 +225,8 @@ export class RootBrokerServer {
     }
   }
 
-  startedFacts(event: any): StartedFacts | undefined {
-    const runId = event?.runId ?? event?.id;
-    if (typeof runId !== "string" || runId.length === 0
-      || (event?.runId !== undefined && event?.id !== undefined && event.runId !== event.id)
-      || event?.agent !== "executor"
-      || !Number.isSafeInteger(event?.pid) || event.pid <= 0
-      || typeof event?.asyncDir !== "string" || !path.isAbsolute(event.asyncDir)
-      || event?.sessionId !== this.lifecycleSessionId) return;
-    return { runId, role: "executor", asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid };
-  }
+  // Kept as a non-authorizing ABI stub until the legacy event facade is removed.
+  startedFacts(_event: any): undefined { return undefined; }
 
   registerFacadeRun(value: any): void {
     if (!value || typeof value !== "object" || Array.isArray(value)
@@ -251,8 +246,55 @@ export class RootBrokerServer {
     this.facadeRuns.set(incoming.runId, existing ?? incoming);
   }
 
+  async registerAuthorizedRun(authorization: Readonly<RunAuthorization>): Promise<void> {
+    if (this.closed) throw new Error("Root subagent broker is closing");
+    assertRunAuthorization(authorization);
+    const binding = authorization.binding;
+    if (binding.sessionId !== this.lifecycleSessionId) {
+      throw new Error("Run authorization session does not match Root broker");
+    }
+    const existing = this.ownedRuns.get(binding.runId);
+    if (existing && (existing.asyncDir !== binding.asyncDir || existing.sessionId !== binding.sessionId || existing.pid !== binding.pid || existing.agentProfile !== binding.agentProfile
+      || JSON.stringify([...existing.capabilities].sort()) !== JSON.stringify([...authorization.capabilities].sort())
+      || JSON.stringify(existing.authorization.goal) !== JSON.stringify(authorization.goal))) {
+      throw new Error("Run authorization binding conflicts");
+    }
+    this.registerFacadeRun({ runId: binding.runId, asyncDir: binding.asyncDir, sessionId: binding.sessionId, pid: binding.pid, agent: binding.agentProfile, kind: authorization.kind });
+    if (authorization.capabilities.length === 0) return;
+    if (existing) return;
+    const initial: OwnedRun = {
+      rootSessionId: this.rootSessionId,
+      runId: binding.runId,
+      asyncDir: binding.asyncDir,
+      sessionId: binding.sessionId,
+      pid: binding.pid,
+      agentProfile: binding.agentProfile,
+      capabilities: new Set(authorization.capabilities),
+      authorization,
+      birthIdentity: null,
+      identityState: "unavailable",
+    };
+    this.ownedRuns.set(binding.runId, initial);
+    const observation = (async () => {
+      let birthIdentity: string | null = null;
+      let identityState: OwnedRun["identityState"] = "unavailable";
+      try {
+        const observedBirthIdentity = await this.captureProcessBirthIdentity(binding.pid);
+        if (typeof observedBirthIdentity === "string" && observedBirthIdentity.trim().length > 0) {
+          birthIdentity = observedBirthIdentity;
+          identityState = "verified";
+        }
+      } catch { /* unavailable identity cannot become verified */ }
+      const current = this.ownedRuns.get(binding.runId) ?? initial;
+      this.ownedRuns.set(binding.runId, { ...current, birthIdentity, identityState: current.identityState === "conflict" ? "conflict" : identityState });
+      await this.ensureAuthorizedPrincipal(binding.runId);
+    })();
+    this.startedObservations.set(binding.runId, observation);
+    try { await observation; } finally { if (this.startedObservations.get(binding.runId) === observation) this.startedObservations.delete(binding.runId); }
+  }
+
   persistGoalBindingAuthority(value: GoalBindingSidecar): void {
-    if (!exactKeys(value, [...goalOwnedAuthorityKeys, "version", "ticketId"]) || !validGoalOwnedAuthority(authorityFields(value)) || value.version !== "root-broker.goal-binding-authority.v1" || !/^[a-f0-9]{64}$/.test(value.ticketId)) throw new Error("Goal binding sidecar is invalid");
+    if (!exactKeys(value, [...goalOwnedAuthorityKeys, "version", "ticketId"]) || !validGoalOwnedAuthority(authorityFields(value)) || value.version !== "root-broker.goal-run-binding-authority.v2" || !/^[a-f0-9]{64}$/.test(value.ticketId)) throw new Error("Goal binding sidecar is invalid");
     if (value.sessionId !== this.lifecycleSessionId) throw new Error("Goal binding sidecar session is invalid");
     const directory = value.asyncDir;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -283,16 +325,16 @@ export class RootBrokerServer {
     };
     try {
       const authority = await readSafeJson(path.join(binding.asyncDir, GOAL_BINDING_SIDECAR)) as GoalBindingSidecar;
-      if (!exactKeys(authority, [...goalOwnedAuthorityKeys, "version", "ticketId"]) || !validGoalOwnedAuthority(authorityFields(authority)) || authority.version !== "root-broker.goal-binding-authority.v1" || !/^[a-f0-9]{64}$/.test(authority.ticketId)
+      if (!exactKeys(authority, [...goalOwnedAuthorityKeys, "version", "ticketId"]) || !validGoalOwnedAuthority(authorityFields(authority)) || authority.version !== "root-broker.goal-run-binding-authority.v2" || !/^[a-f0-9]{64}$/.test(authority.ticketId)
         || !sameAuthority(authority, binding)) throw new Error("binding authority is invalid");
       const status = await readSafeJson(path.join(binding.asyncDir, "status.json"));
       if (!status || typeof status !== "object" || Array.isArray(status) || status.runId !== binding.runId
-        || status.sessionId !== binding.sessionId || status.asyncDir !== binding.asyncDir || status.agent !== binding.agent
+        || status.sessionId !== binding.sessionId || status.asyncDir !== binding.asyncDir || status.agent !== binding.agentProfile
         || !["complete", "failed", "stopped", "rejected"].includes(status.state)) throw new Error("runtime status is invalid");
       const runtimeTerminal = await readSafeJson(path.join(binding.asyncDir, "process-terminal.json"));
       const terminal = (value: any) => {
         if (!value || typeof value !== "object" || Array.isArray(value) || value.runId !== binding.runId) throw new Error("official terminal runId mismatch");
-        for (const key of ["sessionId", "asyncDir", "agent"]) if (value[key] !== binding[key as "sessionId" | "asyncDir" | "agent"]) throw new Error(`official terminal ${key} mismatch`);
+        if (value.sessionId !== binding.sessionId || value.asyncDir !== binding.asyncDir || value.agent !== binding.agentProfile) throw new Error("official terminal identity mismatch");
         const { runId: _runId, sessionId: _sessionId, asyncDir: _asyncDir, agent: _agent, pid: _pid, ...proof } = value;
         parseProcessTerminal(proof);
         if (proof.state !== "observed") throw new Error("official terminal is non-observed");
@@ -325,37 +367,14 @@ export class RootBrokerServer {
   }
 
   observeStarted(event: any): Promise<void> {
-    const facts = this.startedFacts(event);
-    if (!facts) return Promise.resolve();
-    const existing = this.ownedRuns.get(facts.runId);
-    if (existing) {
-      if (existing.sessionId !== facts.sessionId || existing.pid !== facts.pid || existing.asyncDir !== facts.asyncDir) {
-        this.ownedRuns.set(facts.runId, { ...existing, identityState: "conflict" });
-      }
-      return this.startedObservations.get(facts.runId) ?? Promise.resolve();
+    const runId = event?.runId ?? event?.id;
+    if (typeof runId !== "string" || (event?.runId !== undefined && event?.id !== undefined && event.runId !== event.id)) return Promise.resolve();
+    const run = this.ownedRuns.get(runId);
+    if (!run) return Promise.resolve();
+    if (event.sessionId !== run.sessionId || event.pid !== run.pid || event.asyncDir !== run.asyncDir || event.agent !== run.agentProfile) {
+      this.ownedRuns.set(runId, { ...run, identityState: "conflict" });
     }
-    this.registerFacadeRun({ ...facts, agent: event.agent, kind: "coding" });
-    const initial: OwnedRun = { rootSessionId: this.rootSessionId, ...facts, birthIdentity: null, identityState: "unavailable" };
-    this.ownedRuns.set(facts.runId, initial);
-    const observation = (async () => {
-      let birthIdentity: string | null = null;
-      let identityState: OwnedRun["identityState"] = "unavailable";
-      try {
-        const observedBirthIdentity = await this.captureProcessBirthIdentity(facts.pid);
-        if (typeof observedBirthIdentity === "string" && observedBirthIdentity.trim().length > 0) {
-          birthIdentity = observedBirthIdentity;
-          identityState = "verified";
-        }
-      } catch { /* missing birth identity remains unavailable */ }
-      const current = this.ownedRuns.get(facts.runId) ?? initial;
-      this.ownedRuns.set(facts.runId, { ...current, birthIdentity, identityState: current.identityState === "conflict" ? "conflict" : identityState });
-      await this.ensureExecutorOwner(facts.runId);
-    })();
-    this.startedObservations.set(facts.runId, observation);
-    void observation.finally(() => {
-      if (this.startedObservations.get(facts.runId) === observation) this.startedObservations.delete(facts.runId);
-    }).catch(() => undefined);
-    return observation.catch(() => undefined);
+    return this.startedObservations.get(runId) ?? Promise.resolve();
   }
 
   acceptTerminalProof(run: FacadeRun, value: any) {
@@ -395,27 +414,15 @@ export class RootBrokerServer {
     return frozen({ runId, state: proof ? "observed" : "pending", proofHash: proof ? proofId(proof) : null, proof, conflict: this.terminalConflicts.has(runId) });
   }
 
-  inspectExecutorProof(runId: string) {
+  inspectExecutionProof(runId: string) {
     const run = this.ownedRuns.get(runId);
-    if (!run) return null;
-    const proof = this.terminalProofs.get(runId);
-    const runner = proof?.instances?.find((instance: any) => instance.kind === "runner" && instance.processInstanceId === proof.runnerProcessInstanceId);
-    const successful = Boolean(runner && proof.instances.every((instance: any) => instance.exitCode === 0 && instance.signal === null));
+    if (!run) return this.inspectFacadeTerminalProof(runId);
+    const proof = this.terminalProofs.get(runId) ?? null;
     return frozen({
-      schemaVersion: "root-broker.executor-proof.v1",
-      ownership: {
-        rootSessionId: run.rootSessionId,
-        runId: run.runId,
-        role: run.role,
-        asyncDir: run.asyncDir,
-        sessionId: run.sessionId,
-        identityState: run.identityState,
-      },
-      terminal: proof ? {
-        proofId: proofId(proof),
-        observedAt: proof.observedAt,
-        outcome: successful ? "succeeded" : "failed",
-      } : null,
+      schemaVersion: "root-broker.execution-proof.v2",
+      binding: { rootSessionId: run.rootSessionId, runId: run.runId, asyncDir: run.asyncDir, sessionId: run.sessionId, pid: run.pid, agentProfile: run.agentProfile },
+      capabilities: [...run.capabilities].sort(),
+      terminal: proof ? { proofId: proofId(proof), observedAt: proof.observedAt, proof } : null,
       terminalConflict: this.terminalConflicts.has(runId),
     });
   }
@@ -592,17 +599,19 @@ export class RootBrokerServer {
     if (deadlineError) await this.forceCleanup(run, deadlineError);
   }
 
-  async ensureExecutorOwner(runId: string) {
+  async ensureAuthorizedPrincipal(runId: string) {
     if (this.closed) throw new Error("Root subagent broker is closing");
-    const existing = this.executorGrants.get(runId);
+    const existing = this.authorizationGrants.get(runId);
     if (existing) return existing;
     const pending = (async () => {
       const principal = this.principals.get(runId);
       if (principal) return { callerToken: principal.callerToken };
       const callerToken = this.randomToken();
-      this.principals.set(runId, { role: "executor", callerToken });
+      const run = this.ownedRuns.get(runId);
+      if (!run || run.capabilities.size === 0) throw new Error("Run authorization has no broker capabilities");
+      this.principals.set(runId, { callerToken, capabilities: run.capabilities });
       try {
-        const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v1", rootSessionId: this.rootSessionId, runId, callerToken, role: "executor" });
+        const grantPath = await this.writeGrant({ schemaVersion: "pi-root-subagent-broker-grant.v2", rootSessionId: this.rootSessionId, runId, callerToken, capabilities: [...run.capabilities].sort() });
         this.grantPaths.add(grantPath);
         if (this.closed) {
           this.principals.delete(runId);
@@ -614,17 +623,17 @@ export class RootBrokerServer {
         throw error;
       }
     })();
-    this.executorGrants.set(runId, pending);
+    this.authorizationGrants.set(runId, pending);
     void pending.finally(() => {
-      if (this.executorGrants.get(runId) === pending) this.executorGrants.delete(runId);
+      if (this.authorizationGrants.get(runId) === pending) this.authorizationGrants.delete(runId);
     }).catch(() => undefined);
     return await pending;
   }
 
   async submitAcceptanceEvidence(request: any) {
     const run = this.ownedRuns.get(request.callerRunId);
-    if (!run || run.role !== "executor" || run.identityState !== "verified") {
-      throw brokerError("ACCEPTANCE_UNAUTHORIZED", "Acceptance evidence requires a verified executor run");
+    if (!run || !run.capabilities.has("acceptance.submit") || !run.authorization.goal || run.identityState !== "verified") {
+      throw brokerError("ACCEPTANCE_UNAUTHORIZED", "Acceptance evidence requires a verified authorized Goal run");
     }
     const sidecarPath = path.join(run.asyncDir, GOAL_BINDING_SIDECAR);
     let authority: GoalBindingSidecar;
@@ -649,10 +658,17 @@ export class RootBrokerServer {
     }
     if (!exactKeys(authority, [...goalOwnedAuthorityKeys, "version", "ticketId"])
       || !validGoalOwnedAuthority(authorityFields(authority))
-      || authority.version !== "root-broker.goal-binding-authority.v1"
+      || authority.version !== "root-broker.goal-run-binding-authority.v2"
       || !/^[a-f0-9]{64}$/.test(authority.ticketId)
-      || authority.runId !== run.runId || authority.asyncDir !== run.asyncDir
-      || authority.sessionId !== run.sessionId || authority.sessionId !== this.lifecycleSessionId) {
+      || authority.runId !== run.runId || authority.asyncDir !== run.asyncDir || authority.agentProfile !== run.agentProfile
+      || authority.sessionId !== run.sessionId || authority.sessionId !== this.lifecycleSessionId
+      || authority.ticketId !== run.authorization.goal.ticketId
+      || authority.goalId !== run.authorization.goal.goalId
+      || authority.taskId !== run.authorization.goal.taskId
+      || authority.attempt !== run.authorization.goal.attempt
+      || authority.contractHash !== run.authorization.goal.contractHash
+      || authority.executionRevision !== run.authorization.goal.executionRevision
+      || JSON.stringify(authority.expectedCriteria) !== JSON.stringify(run.authorization.goal.expectedCriteria)) {
       throw brokerError("ACCEPTANCE_AUTHORITY_INVALID", "Goal acceptance authority does not match the executor run");
     }
     let head: string;
@@ -757,11 +773,15 @@ export class RootBrokerServer {
     if (!principal || principal.callerToken !== request.callerToken) return failure(request, "caller_unauthorized", "Caller is not granted");
     try {
       if (request.method === "subscribe") {
+        if (!principal.capabilities.has("root.subscribe")) return failure(request, "capability_denied", "Caller lacks root.subscribe capability");
         if (!deferSubscription) this.registerSubscription(request.callerRunId, socket);
         return createBrokerSuccessResponse({ ...request, data: { subscribed: true } });
       }
       if (request.method === "ping") return createBrokerSuccessResponse({ ...request, data: await this.upstream.ping() });
-      if (request.method === "acceptance.submit") return createBrokerSuccessResponse({ ...request, data: await this.submitAcceptanceEvidence(request) });
+      if (request.method === "acceptance.submit") {
+        if (!principal.capabilities.has("acceptance.submit")) return failure(request, "capability_denied", "Caller lacks acceptance.submit capability");
+        return createBrokerSuccessResponse({ ...request, data: await this.submitAcceptanceEvidence(request) });
+      }
       return failure(request, "unsupported", `Broker method ${request.method} is unsupported`);
     } catch (error) {
       return failure(request, typeof (error as any)?.code === "string" ? (error as any).code : "upstream_failed", error instanceof Error ? error.message : String(error));
@@ -791,7 +811,7 @@ export class RootBrokerServer {
       });
       try {
         for (;;) {
-          const barrier = [...this.startedObservations.values(), ...this.executorGrants.values()];
+          const barrier = [...this.startedObservations.values(), ...this.authorizationGrants.values()];
           if (barrier.length === 0) break;
           await Promise.race([Promise.allSettled(barrier), startupDeadline]);
           await Promise.resolve();
@@ -860,7 +880,7 @@ export class RootBrokerServer {
       this.subscriptions.clear();
       this.sockets.clear();
       this.grantPaths.clear();
-      this.executorGrants.clear();
+      this.authorizationGrants.clear();
       this.ownedRuns.clear();
       this.terminalProofs.clear();
       this.terminalConflicts.clear();

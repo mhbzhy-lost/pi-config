@@ -5,3 +5,4 @@ export { resolveCurrentSessionId } from "../../node_modules/pi-subagents/src/sha
 export { currentCompletionOwnerId } from "../../node_modules/pi-subagents/src/shared/completion-owner.ts";
 export { getArtifactsDir } from "../../node_modules/pi-subagents/src/shared/artifacts.ts";
 export { readFleetTranscript, renderFleetTranscript } from "../../node_modules/pi-subagents/src/tui/fleet-transcript.ts";
+export { discoverAgents, type AgentConfig } from "../../node_modules/pi-subagents/src/agents/agents.ts";

@@ -14,10 +14,9 @@ const piBinary = process.env.PI_REAL_BIN;
 const projectRuntime = join(repoRoot, "packages", "pi-subagents-enhanced", "extensions", "subagent-runtime.ts");
 const brokerRegistryUrl = new URL("../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts", import.meta.url).href;
 
-function withoutSubagentEnvironment(env) {
-  return Object.fromEntries(Object.entries(env).filter(([name]) => ![
-    "PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION",
-    "PI_SUBAGENT_RUN_ID", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_ROOT_SUBAGENT_BROKER_ENABLED",
+export function withoutSubagentEnvironment(env) {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => !name.startsWith("PI_SUBAGENT_") && !name.startsWith("PI_SESSION_") && ![
+    "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_MODEL", "PI_PROVIDER", "PI_CODING_AGENT_SESSION_DIR", "PI_CODING_WORKSPACE_DIR", "PI_CODING_GOAL_DIR",
   ].includes(name)));
 }
 
@@ -26,7 +25,7 @@ function assistantText(record) {
   return record.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") ?? "";
 }
 
-function runRpcUntil(command, args, { cwd, env, input, timeoutMs = 60_000 }) {
+export function runRpcUntil(command, args, { cwd, env, input, timeoutMs = 60_000 }) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     const records = [];
@@ -73,10 +72,11 @@ function runRpcUntil(command, args, { cwd, env, input, timeoutMs = 60_000 }) {
   });
 }
 
-function providerSource(contract) {
+export function providerSource(contract) {
   return `
     import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
     const contract = ${JSON.stringify(contract)};
+    const contracts = Array.isArray(contract) ? contract : [contract];
     function text(context) {
       return (context?.messages ?? []).filter((message) => message?.role === "user").at(-1)?.content
         ?.filter((part) => part?.type === "text")
@@ -97,9 +97,18 @@ function providerSource(contract) {
           const probe = results.find((message) => message.toolName === "compat_project_probe");
           let tool;
           let output;
-          if (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0) {
+          if (Array.isArray(contract) && (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0)) {
+            if (projectStep < contracts.length) tool = { name: "subagent", arguments: contracts[projectStep++] };
+            else if (projectStep === contracts.length) { projectStep += 1; tool = { name: "compat_project_probe", arguments: {} }; }
+            else output = "PROJECT_TYPED_PARENT_DONE";
+          } else if (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0) {
             if (projectStep++ === 0) tool = { name: "subagent", arguments: contract };
             else if (projectStep === 2) tool = { name: "compat_project_probe", arguments: {} };
+            else if (projectStep === 3 && contract.execution?.worktree) tool = { name: "subagent", arguments: { action: "workspace_status", workspace_id: dispatch?.details?.workspace_id } };
+            else if (projectStep === 4 && contract.execution?.worktree) {
+              const status = results.filter((message) => message.toolName === "subagent").at(-1);
+              tool = { name: "subagent", arguments: { action: "workspace_disposition", workspace_id: dispatch?.details?.workspace_id, disposition: "discard", action_token: status?.details?.action_token } };
+            }
             else output = "PROJECT_TYPED_PARENT_DONE";
           } else {
             output = ${JSON.stringify(`PROJECT_TYPED_CHILD_DONE
@@ -149,9 +158,9 @@ ${JSON.stringify({
   `;
 }
 
-function dispatchProbeSource() {
+export function dispatchProbeSource() {
   return `
-    import { inspectRootBrokerExecutorProof } from ${JSON.stringify(brokerRegistryUrl)};
+    import { requireRootBroker } from ${JSON.stringify(brokerRegistryUrl)};
     export default function (pi) {
       const starts = [];
       const completions = [];
@@ -197,12 +206,15 @@ function dispatchProbeSource() {
         description: "Return observed public-tool lifecycle facts.",
         parameters: { type: "object", properties: {}, additionalProperties: false },
         async execute() {
-          const dispatch = executionEnds.find((event) => event?.toolName === "subagent");
-          const handle = dispatch?.result?.details;
-          if (!handle?.runId) throw new Error("public subagent handle did not include runId");
-          const completion = await waitForCompletion(handle.runId);
-          const proof = inspectRootBrokerExecutorProof(pi, handle.runId, rootSessionId);
-          return { content: [{ type: "text", text: "project workflow probe complete" }], details: { starts, completions, completion, executionEnds: executionEnds.map((event) => ({ toolName: event?.toolName })), proof } };
+          const dispatches = executionEnds.filter((event) => event?.toolName === "subagent");
+          const handles = dispatches.map((event) => event?.result?.details).filter((handle) => handle?.runId);
+          if (handles.length === 0) throw new Error("public subagent handle did not include runId: " + JSON.stringify(dispatches));
+          const terminal = await Promise.all(handles.map(async (handle) => ({
+            handle,
+            completion: await waitForCompletion(handle.runId),
+            proof: requireRootBroker(pi, rootSessionId).inspectExecutionProof(handle.runId),
+          })));
+          return { content: [{ type: "text", text: "project workflow probe complete" }], details: { starts, completions, completion: terminal[0].completion, executionEnds: executionEnds.map((event) => ({ toolName: event?.toolName })), proof: terminal[0].proof, terminal } };
         },
       });
       pi.on("session_start", () => pi.setActiveTools(["subagent", "compat_project_probe"]));
@@ -240,7 +252,7 @@ test("project typed dispatch binds the real 0.62.0 workflow leaf to the Root Bro
     await writeFile(join(projectRoot, ".pi", "agents", "executor.md"), `---
 name: executor
 description: deterministic typed workflow executor
-model: openai-codex/gpt-5.6-luna
+model: fake/deterministic
 tools: read
 extensions: ${provider}
 ---
@@ -267,6 +279,7 @@ Return the deterministic child marker without modifying files.
       env: {
         ...buildTopLevelRuntimeEnv(withoutSubagentEnvironment(process.env)),
         PI_CODING_AGENT_DIR: configRoot,
+        PI_CODING_WORKSPACE_DIR: join(root, "workspaces"),
         OPENAI_API_KEY: "not-used",
       },
       input: JSON.stringify({ id: "project-workflow-045", type: "prompt", message: "PROJECT_TYPED_PARENT" }),
@@ -287,10 +300,13 @@ Return the deterministic child marker without modifying files.
     assert.equal(typeof handle?.workspace_id, "string");
     assert.equal(typeof handle?.dispatch_cwd, "string");
     assert.notEqual(handle.dispatch_cwd, projectRoot);
-    assert.equal(handle.dispatch_cwd.startsWith(`${join(await realpath(projectRoot), ".state", "subagent-dispatch", "worktrees")}/`), true);
-    assert.equal(proof?.ownership?.runId, handle.runId);
-    assert.equal(proof.ownership.asyncDir, handle.asyncDir);
-    assert.equal(proof.ownership.role, "executor");
+    assert.equal(handle.dispatch_cwd.startsWith(`${join(await realpath(root), "workspaces")}/`), true);
+    assert.equal(proof?.binding?.runId, handle.runId);
+    assert.equal(proof.binding.asyncDir, handle.asyncDir);
+    assert.equal(proof.binding.agentProfile, "executor");
+    assert.ok(proof.terminal?.proof?.instances.length > 0);
+    const disposition = result.records.filter((record) => record.type === "tool_execution_end" && record.toolName === "subagent").at(-1);
+    assert.equal(disposition.result.isError, false, JSON.stringify(disposition));
     assert.equal(probe.result.details.starts.some((event) => (event?.runId ?? event?.id) === handle.runId && event?.asyncDir === handle.asyncDir), true);
     assert.equal(probe.result.details.completion?.runId, handle.runId);
     assert.equal(probe.result.details.completions.some((event) => event?.runId === handle.runId), true);
@@ -334,7 +350,7 @@ test("non-Goal executor ignores a hostile legacy .pi-subagents tree", { skip: !p
     await writeFile(join(projectRoot, ".pi", "agents", "executor.md"), `---
 name: executor
 description: deterministic hostile legacy executor
-model: openai-codex/gpt-5.6-luna
+model: fake/deterministic
 tools: read
 extensions: ${provider}
 ---
@@ -375,6 +391,7 @@ Return the deterministic child marker without modifying files.
       env: {
         ...buildTopLevelRuntimeEnv(withoutSubagentEnvironment(process.env)),
         PI_CODING_AGENT_DIR: configRoot,
+        PI_CODING_WORKSPACE_DIR: join(root, "workspaces"),
         OPENAI_API_KEY: "not-used",
       },
       input: JSON.stringify({ id: "hostile-legacy-001", type: "prompt", message: "PROJECT_TYPED_PARENT" }),
@@ -389,6 +406,78 @@ Return the deterministic child marker without modifying files.
     const terminal = JSON.parse(await readFile(join(dispatch.result.details.asyncDir, "status.json"), "utf8"));
     assert.equal(terminal.state, "complete", JSON.stringify(terminal));
     assert.deepEqual(await legacySnapshot(), beforeLegacy);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("non-Goal persistent Host rename canary keeps typed coding and generic authorization separate", { skip: !piBinary }, async () => {
+  assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
+  const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
+  assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
+
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-rename-canary-"));
+  const projectRoot = join(root, "project");
+  const configRoot = join(root, "config");
+  const provider = join(root, "typed-provider.mjs");
+  const dispatchProbe = join(root, "dispatch-probe.mjs");
+  const coding = (agent) => ({
+    version: "dispatch-ir.v1", taskId: `${agent}-rename-canary`, title: `Run ${agent} rename canary`, agent, model: "codex-pool/gpt-5.6-terra", risk: "normal",
+    objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
+    requirements: ["Use the project-owned typed facade."],
+    workflow: { mode: "existing-tests", reason: "This canary verifies name-independent non-Goal authorization." },
+    context: { knownFacts: ["The Host is a fixture."], decisions: ["Use typed standalone dispatch."], relevantFiles: [] },
+    boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
+    acceptance: { criteria: ["The child returns the deterministic marker."] },
+    execution: { cwd: projectRoot, timeoutMs: 30_000, worktree: false },
+  });
+  const generic = { agent: "coder-alpha", title: "Inspect rename canary", task: "Read only.", model: "codex-pool/gpt-5.6-terra", worktree: false };
+  try {
+    await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
+    await writeFile(join(projectRoot, "README.md"), "rename canary fixture\n");
+    const profile = (name) => `---
+name: ${name}
+description: deterministic rename canary profile
+models:
+  - codex-pool/gpt-5.6-terra
+tools: read
+extensions: ${provider}
+---
+Return the deterministic child marker without modifying files.
+`;
+    await writeFile(join(projectRoot, ".pi", "agents", "coder-alpha.md"), profile("coder-alpha"));
+    await writeFile(join(projectRoot, ".pi", "agents", "coder-beta.md"), profile("coder-beta"));
+    await execFileAsync("git", ["init", "-q"], { cwd: projectRoot });
+    await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectRoot });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: projectRoot });
+    await execFileAsync("git", ["add", "README.md", ".pi/agents"], { cwd: projectRoot });
+    await execFileAsync("git", ["commit", "-qm", "fixture"], { cwd: projectRoot });
+    await mkdir(configRoot, { recursive: true });
+    await writeFile(provider, providerSource([coding("coder-alpha"), coding("coder-beta"), generic]));
+    await writeFile(dispatchProbe, dispatchProbeSource());
+
+    const result = await runRpcUntil(piBinary, [
+      "--mode", "rpc", "--no-extensions", "-e", provider, "-e", projectRuntime, "-e", dispatchProbe,
+      "--no-skills", "--no-prompt-templates", "--no-themes", "--provider", "fake", "--model", "fake/deterministic",
+    ], {
+      cwd: projectRoot,
+      env: { ...buildTopLevelRuntimeEnv(withoutSubagentEnvironment(process.env)), PI_CODING_AGENT_DIR: configRoot, PI_CODING_WORKSPACE_DIR: join(root, "workspaces"), OPENAI_API_KEY: "not-used" },
+      input: JSON.stringify({ id: "rename-canary-001", type: "prompt", message: "PROJECT_TYPED_PARENT" }),
+      timeoutMs: 90_000,
+    });
+
+    assert.equal(result.error, undefined, `${result.error?.message}\n${result.stderr}\n${result.stdout}`);
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const probe = result.records.find((record) => record.type === "tool_execution_end" && record.toolName === "compat_project_probe");
+    assert.ok(probe?.result?.details, result.stdout);
+    const terminal = probe.result.details.terminal;
+    assert.ok(Array.isArray(terminal), JSON.stringify(probe));
+    assert.equal(terminal.length, 3);
+    assert.deepEqual(terminal.slice(0, 2).map((entry) => entry.handle.agent), ["coder-alpha", "coder-beta"]);
+    assert.deepEqual(terminal.slice(0, 2).map((entry) => entry.proof?.capabilities), [["root.subscribe"], ["root.subscribe"]]);
+    assert.equal(terminal[2].handle.agent, "coder-alpha");
+    assert.equal(terminal[2].proof, null, "generic calls cannot gain a Broker proof from profile metadata");
+    await assert.rejects(lstat(join(root, "workspaces")), { code: "ENOENT" }, "worktree:false does not allocate a managed workspace root");
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }

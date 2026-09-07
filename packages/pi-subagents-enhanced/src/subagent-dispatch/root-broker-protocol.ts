@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { readLegacyExecutorGrant } from "./legacy-executor-compat.ts";
 
 const REQUEST_SCHEMA_VERSION = "pi-root-subagent-broker-request.v1";
 const PUSH_SCHEMA_VERSION = "pi-root-subagent-broker-push.v1";
-const GRANT_SCHEMA_VERSION = "pi-root-subagent-broker-grant.v1";
+const GRANT_V2_SCHEMA_VERSION = "pi-root-subagent-broker-grant.v2";
 const RESPONSE_SCHEMA_VERSION = "pi-root-subagent-broker-response.v1";
 const SOCKET_PATH_LIMIT = 103;
 const ERROR_MESSAGE_LIMIT = 1024;
@@ -13,7 +14,7 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const METHODS = Object.freeze(["ping", "subscribe", "acceptance.submit"] as const);
 const PUSH_TYPES = Object.freeze(["root.closing", "subscription.ready"] as const);
-const GRANT_ROLES = Object.freeze(["executor"] as const);
+const BROKER_CAPABILITIES = Object.freeze(["acceptance.submit", "root.subscribe"] as const);
 const PROCESS_TERMINAL_STATES = Object.freeze(["pending", "observed", "unknown", "not-started"] as const);
 const PROCESS_TERMINAL_REASONS = Object.freeze([
   "observer-unavailable",
@@ -46,12 +47,13 @@ export type BrokerPush = {
   type: (typeof PUSH_TYPES)[number];
   data: Record<string, unknown>;
 };
-export type BrokerGrant = {
-  schemaVersion: "pi-root-subagent-broker-grant.v1";
+export type BrokerCapability = (typeof BROKER_CAPABILITIES)[number];
+export type BrokerGrantV2 = {
+  schemaVersion: "pi-root-subagent-broker-grant.v2";
   rootSessionId: string;
   runId: string;
   callerToken: string;
-  role: (typeof GRANT_ROLES)[number];
+  capabilities: BrokerCapability[];
 };
 export type BrokerResponse = {
   schemaVersion: "pi-root-subagent-broker-response.v1";
@@ -407,21 +409,42 @@ export function createBrokerFailureResponse({ requestId, rootSessionId, callerRu
 }
 
 export function parseBrokerGrant(value) {
-  const grant = exactObject(value, "grant", ["schemaVersion", "rootSessionId", "runId", "callerToken", "role"]);
-  if (grant.schemaVersion !== GRANT_SCHEMA_VERSION) fail("grant.schemaVersion is unsupported");
-  identity(grant.rootSessionId, "rootSessionId");
-  identity(grant.runId, "runId");
-  callerToken(grant.callerToken);
-  if (typeof grant.role !== "string" || !GRANT_ROLES.includes(grant.role)) fail("grant.role is unsupported");
-  return grant;
+  return readLegacyExecutorGrant(value, fail);
+}
+
+function canonicalCapabilities(value: unknown): BrokerCapability[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > BROKER_CAPABILITIES.length) {
+    fail("grant.capabilities must be a non-empty canonical capability array");
+  }
+  if (value.some((capability) => typeof capability !== "string" || !BROKER_CAPABILITIES.includes(capability as BrokerCapability))) {
+    fail("grant.capabilities contains an unsupported capability");
+  }
+  if (new Set(value).size !== value.length) fail("grant.capabilities contains duplicates");
+  const canonical = BROKER_CAPABILITIES.filter((capability) => value.includes(capability));
+  if (canonical.length !== value.length || canonical.some((capability, index) => capability !== value[index])) {
+    fail("grant.capabilities must be in canonical order");
+  }
+  return canonical;
+}
+
+export function parseBrokerGrantV2(value: unknown): BrokerGrantV2 {
+  const grant = exactObject(value, "grant", ["schemaVersion", "rootSessionId", "runId", "callerToken", "capabilities"]);
+  if (grant.schemaVersion !== GRANT_V2_SCHEMA_VERSION) fail("grant.schemaVersion is unsupported");
+  return {
+    schemaVersion: GRANT_V2_SCHEMA_VERSION,
+    rootSessionId: identity(grant.rootSessionId, "rootSessionId"),
+    runId: identity(grant.runId, "runId"),
+    callerToken: callerToken(grant.callerToken),
+    capabilities: canonicalCapabilities(grant.capabilities),
+  };
 }
 
 export function serializeBrokerGrant(value) {
-  return `${JSON.stringify(parseBrokerGrant(value))}\n`;
+  return `${JSON.stringify(parseBrokerGrantV2(value))}\n`;
 }
 
 export async function writeBrokerGrant(value) {
-  const grant = parseBrokerGrant(value);
+  const grant = parseBrokerGrantV2(value);
   const grantPath = brokerGrantPath(grant.rootSessionId, grant.runId);
   const directory = path.posix.dirname(grantPath);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -436,7 +459,10 @@ export async function writeBrokerGrant(value) {
 
 export async function readBrokerGrant(rootSessionId, runId) {
   const grantPath = brokerGrantPath(rootSessionId, runId);
-  const grant = parseBrokerGrant(JSON.parse(await readFile(grantPath, "utf8")));
+  const persisted = JSON.parse(await readFile(grantPath, "utf8"));
+  const grant = persisted?.schemaVersion === "pi-root-subagent-broker-grant.v1"
+    ? readLegacyExecutorGrant(persisted, fail)
+    : parseBrokerGrantV2(persisted);
   if (grant.rootSessionId !== rootSessionId || grant.runId !== runId) fail("grant identity does not match its path");
   return grant;
 }

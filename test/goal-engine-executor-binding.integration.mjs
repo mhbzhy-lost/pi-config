@@ -6,11 +6,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION } from "../src/goal-engine/events.ts";
-import { assertExecutorSettlementProof } from "../src/goal-engine/executor-binding.ts";
+import { executionProofForLegacyTask } from "../src/goal-engine/legacy-executor-compat.ts";
 import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
 import { appendEvent as appendGoalEvent, loadProjection } from "../src/goal-engine/store.ts";
 import { createTypedSubagentExtension } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
-import { bindRootBroker, findGoalExecutorCoordinator, stopRootBrokerGoalOwnedRun, unbindRootBroker } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import { bindRootBroker, findGoalRunCoordinator, stopRootBrokerGoalOwnedRun, unbindRootBroker } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
 import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../src/goal-engine/settlement-evidence.ts";
@@ -18,13 +18,16 @@ import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 import { buildObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
 import { createProductionGoalRuntimeHost } from "../src/goal-engine/production-runtime-host.ts";
-import { deriveOwnedExecutorStopRequest } from "../src/goal-engine/suspension.ts";
-import { inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../src/goal-engine/workspace.mjs";
+import { deriveOwnedRunStopRequest } from "../src/goal-engine/suspension.ts";
 
 const GOAL_ID = "binding-goal";
 const CONTRACT_HASH = "a".repeat(64);
 const BASE_COMMIT = "b".repeat(40);
 const WORKSPACE = "/tmp/binding-goal-task-one-1";
+
+function legacyWorkspaceManualRecoveryUnavailable() {
+  throw new Error("legacy workspace manual recovery unavailable");
+}
 
 function event(type, data, sequence) {
   return {
@@ -214,14 +217,14 @@ test("one dispatched attempt accepts exactly one immutable executor binding", ()
 });
 
 test("official terminal proof validator rejects conflicting, unsuccessful, or wrongly owned runs", () => {
-  const task = { executorBinding: { runId: "run-official-1", asyncDir: "/tmp/run-official-1" } };
+  const task = applyEvent(dispatchedProjection(), event("task.executor_bound", EXACT_BINDING, 3)).tasks.get("task-one");
   const valid = {
     schemaVersion: "root-broker.executor-proof.v1",
     ownership: {
       rootSessionId: "root-session-1",
       runId: "run-official-1",
       role: "executor",
-      asyncDir: "/tmp/run-official-1",
+      asyncDir: EXACT_BINDING.asyncDir,
       sessionId: "session-1",
       identityState: "verified",
     },
@@ -239,14 +242,15 @@ test("official terminal proof validator rejects conflicting, unsuccessful, or wr
     ["EXECUTOR_TERMINAL_NOT_SUCCESSFUL", { ...valid, terminal: { ...valid.terminal, outcome: "failed" } }],
   ];
   for (const [code, proof] of scenarios) {
-    assert.throws(() => assertExecutorSettlementProof({ task, proof }), (error) => error.code === code, code);
+    assert.throws(() => executionProofForLegacyTask(task, proof), /legacy executor compatibility/, code);
   }
-  assert.deepEqual(assertExecutorSettlementProof({ task, proof: valid }), {
+  assert.deepEqual(executionProofForLegacyTask(task, valid), {
     runId: "run-official-1",
     proofId: "e".repeat(64),
     rootSessionId: "root-session-1",
     observedAt: 1_700_000_000_000,
     outcome: "succeeded",
+    agentProfile: "executor",
   });
 });
 
@@ -335,7 +339,7 @@ function createEventBus() {
   };
 }
 
-function workflowSpawnReply(pi, params, { runId, asyncDir, agent, sessionId = "/tmp/s" }) {
+function workflowSpawnReply(pi, params, { runId, asyncDir, agent, sessionId = "root-session-1" }) {
   const workflowKey = params?.workflowScript?.match(/runs\.run\("([^"\\]+)"/)?.[1];
   const workflowAgent = agent ?? params?.workflowScript?.match(/"agent":"([^"\\]+)"/)?.[1];
   assert.ok(workflowKey, "workflow spawn must use a JSON-encoded runs.run key");
@@ -346,7 +350,7 @@ function workflowSpawnReply(pi, params, { runId, asyncDir, agent, sessionId = "/
     runId,
     asyncDir,
     sessionId,
-    pid: 1,
+    pid: 43210,
     agent: workflowAgent,
     workflowKey,
     parentWorkflowRunId: workflowRunId,
@@ -391,7 +395,23 @@ function integratedFixture(t) {
     return result.details.value;
   };
   const workspaceService = createManagedWorkspaceService({ stateRoot: arena.mkdtempSync("managed-workspaces-") });
-  return { cwd, pi, tools, context, invoke, branch, handlers, workspaceService };
+  const broker = new RootBrokerServer({
+    rootSessionId: "root-session-1", lifecycleSessionId: "root-session-1",
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    captureProcessBirthIdentity: async () => "fixture-birth",
+    killProcess() { throw new Error("fixture broker must not signal synthetic processes"); },
+    writeGrant: async () => join(cwd, "fixture-grant"),
+  });
+  bindRootBroker(pi, broker);
+  t.after(async () => {
+    for (const runId of broker.ownedRuns.keys()) broker.observeTerminal({
+      version: 1, runId, runnerProcessInstanceId: `${runId}-runner`, state: "observed", observedAt: Date.now(),
+      instances: [{ processInstanceId: `${runId}-runner`, kind: "runner", closeObservedAt: Date.now(), exitCode: 0, signal: null }],
+    });
+    unbindRootBroker(pi, broker);
+    await broker.closeRootSession();
+  });
+  return { cwd, pi, tools, context, invoke, branch, handlers, workspaceService, broker };
 }
 
 function runtimeHost(cwd, calls = null) {
@@ -411,12 +431,15 @@ function runtimeHost(cwd, calls = null) {
 async function initializeActiveRuntimeDispatch(fixture, { coordinatorCriteria = false, runtimeCalls = null } = {}) {
   // This lightweight Host deliberately has no Root Broker; production tests
   // bind one and therefore exercise the default fail-closed behavior.
-  createGoalEngineExtension(fixture.pi, { allowMissingRootBrokerForTests: true, goalStateEnv: {}, runtimeHost: runtimeHost(fixture.cwd, runtimeCalls), inspectExecutorProof(runId) { return officialProof(runId, `/tmp/${runId}`); } });
+  createGoalEngineExtension(fixture.pi, { goalStateEnv: {}, runtimeHost: runtimeHost(fixture.cwd, runtimeCalls), inspectExecutionProof(runId) { return officialProof(runId, `/tmp/${runId}`); } });
   const base = runtimeInit();
+  base.execution.schema = "goal-runtime.v2";
   const task = structuredClone(base.execution.tasks[0]);
+  task.agentProfile = "executor";
+  for (const criterion of task.acceptance.criteria) criterion.evaluator = "run";
   if (coordinatorCriteria) task.acceptance.criteria.push(
-    { id: "executor-bound", statement: "The official executor is bound", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "executor-bound" },
-    { id: "terminal-proof", statement: "The official executor terminal proof exists", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "executor-terminal-proof" },
+    { id: "executor-bound", statement: "The official run is bound", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "run-bound" },
+    { id: "terminal-proof", statement: "The official run terminal proof exists", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "run-terminal-proof" },
     { id: "workspace-released", statement: "The workspace is integrated and released", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "workspace-integrated-released" },
     { id: "task-accepted", statement: "The task is accepted", evidenceKinds: ["manual-review"], evaluator: "coordinator", predicate: "task-accepted" },
   );
@@ -524,7 +547,7 @@ async function initializeIntegratedDispatch(fixture, objective = "Integrated exe
 }
 
 async function allocateGoalWorkspace(fixture, dispatched) {
-  const coordinator = findGoalExecutorCoordinator(fixture.pi);
+  const coordinator = findGoalRunCoordinator(fixture.pi);
   const ticket = await coordinator.prepareSpawn({ contract: dispatched.contract, contractHash: dispatched.contract_hash, ctx: fixture.context });
   const receipt = fixture.workspaceService.ensureAllocated(ticket.workspaceRequest);
   return { coordinator, ticket, receipt };
@@ -532,11 +555,14 @@ async function allocateGoalWorkspace(fixture, dispatched) {
 
 async function bindIntegratedRun(fixture, dispatched, { runId = "run-bound-1", asyncDir = "/tmp/run-bound-1" } = {}) {
   const rpc = {
-    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: "/tmp/s", cwd: fixture.cwd } }; },
+    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: null, cwd: fixture.cwd } }; },
     async spawn(params) { return workflowSpawnReply(fixture.pi, params, { runId, asyncDir }); },
     async status() { return {}; }, async steer() { return {}; }, async interrupt() { return {}; }, async stop() { return {}; }, dispose() {},
   };
-  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {}, workspaceService: fixture.workspaceService });
+  createTypedSubagentExtension(fixture.pi, { rpc, cleanupStore: {}, workspaceService: fixture.workspaceService,
+    resolveRootSessionId: (manager) => manager.getSessionId(),
+    registerAuthorizedRun: (authorization) => fixture.broker.registerAuthorizedRun(authorization),
+  });
   const result = await fixture.tools.find((tool) => tool.name === "subagent")
     .execute(`spawn-${runId}`, dispatched.contract, undefined, undefined, fixture.context);
   assert.equal(result.isError, false, result.content[0].text);
@@ -555,13 +581,13 @@ function settlementEvidence(fixture, goalId, taskId) {
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
   const task = projection.tasks.get(taskId);
   const head = git(task.workspace.path, "rev-parse", "HEAD");
-  const identity = { goalId, taskId, runId: task.executorBinding.runId, attempt: task.workspace.owner.attempt, contractHash: task.contractHash, head };
+  const identity = { goalId, taskId, runId: task.runBinding.runId, attempt: task.workspace.owner.attempt, contractHash: task.contractHash, head };
   const expectedCriteria = task.acceptance.criteria.filter(({ evaluator }) => evaluator !== "coordinator").map(({ id }) => id);
   const criteria = expectedCriteria.map((id) => ({ id, status: "satisfied", evidence: [`sha256:${"1".repeat(64)}`] }));
   const child = { identity, criteria, commandsRun: [], changedFiles: [task.writePaths[0]] };
   const main = { identity, criteria: criteria.map((item) => ({ ...item, evidence: [`sha256:${"2".repeat(64)}`] })), commandsRun: [], changedFiles: [task.writePaths[0]] };
   const sha256 = fingerprintSettlementEvidence(child, { expectedIdentity: identity, expectedCriteria, outcome: "succeeded" });
-  const directory = join(task.executorBinding.asyncDir, "acceptance-evidence");
+  const directory = join(task.runBinding.asyncDir, "acceptance-evidence");
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   writeFileSync(git(task.workspace.path, "rev-parse", "--git-path", "info/exclude"), ".pi-subagents/\n", { flag: "a" });
   const artifact = join(directory, `${sha256}.yaml`);
@@ -572,17 +598,8 @@ function settlementEvidence(fixture, goalId, taskId) {
 
 function officialProof(runId, asyncDir) {
   return {
-    schemaVersion: "root-broker.executor-proof.v1",
-    ownership: {
-      rootSessionId: "root-session-1",
-      runId,
-      role: "executor",
-      asyncDir,
-      sessionId: "root-session-1",
-      identityState: "verified",
-    },
-    terminal: { proofId: "f".repeat(64), observedAt: 1_700_000_000_000, outcome: "succeeded" },
-    terminalConflict: false,
+    runId, proofId: "f".repeat(64), rootSessionId: "root-session-1",
+    observedAt: 1_700_000_000_000, outcome: "succeeded", agentProfile: "executor",
   };
 }
 
@@ -832,7 +849,7 @@ test("goal_status recovers one unbound official active-branch executor handle wi
 test("runtime goal_status recovers an unbound official executor handle before issuing another action", async (t) => {
   const fixture = integratedFixture(t);
   const runId = "run-runtime-recovered-1";
-  const asyncDir = "/tmp/run-runtime-recovered-1";
+  const asyncDir = join(fixture.cwd, ".state/goal-engine/async", runId);
   const { goalId, dispatched } = await initializeActiveRuntimeDispatch(fixture);
   const { coordinator, ticket, receipt } = await allocateGoalWorkspace(fixture, dispatched);
   await coordinator.workspaceAllocated(ticket, receipt);
@@ -845,14 +862,15 @@ test("runtime goal_status recovers an unbound official executor handle before is
   assert.equal(status.status, "RECOVERED_EXECUTOR_BINDING");
   assert.equal(status.machineAction, null, "recovery is this status call's only action");
   const task = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-1");
-  assert.equal(task.executorBinding.runId, runId);
+  assert.equal(task.runBinding.runId, runId);
+  assert.equal(task.runBinding.agentProfile, "executor");
   assert.equal(task.status, "dispatched");
 });
 
 test("public runtime dispatch→binding→settle→integrate→accept rejects accepted acceptance amendment before suspension", async (t) => {
   const fixture = integratedFixture(t), runtimeCalls = { stopOwnedRun: 0, quarantineWorkspace: 0, quarantineResource: 0 };
   const runId = "run-runtime-settlement";
-  const asyncDir = "/tmp/run-runtime-settlement";
+  const asyncDir = join(fixture.cwd, ".state/goal-engine/async", runId);
   const { goalId, dispatched } = await initializeActiveRuntimeDispatch(fixture, { coordinatorCriteria: true, runtimeCalls });
   await bindIntegratedRun(fixture, dispatched, { runId, asyncDir });
   const workspace = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId).tasks.get("task-1").workspace;
@@ -966,7 +984,7 @@ test("lower-level fixture: fresh Broker recovery reads a hand-authored failed te
   // is covered by the top-level RPC canary rather than this hand-authored data.
   await bindIntegratedRun(fixture, dispatched, { runId, asyncDir });
   let projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
-  const authority = deriveOwnedExecutorStopRequest({ projection, taskId: "task-1" });
+  const authority = deriveOwnedRunStopRequest({ projection, taskId: "task-1" });
   assert.equal(projection.tasks.get("task-1").executorBinding.runId, runId);
   const terminal = {
     version: 1, runId, sessionId: authority.sessionId, asyncDir, agent: "executor",
@@ -1011,9 +1029,9 @@ test("lower-level fixture: fresh Broker recovery reads a hand-authored failed te
   const freshHost = createProductionGoalRuntimeHost(fixture.pi, {
     registries: runtimeRegistries,
     adapterRegistry: {},
-    loadExecutorWorkspaceLease,
-    inspectExecutorWorkspace,
-    releaseExecutorWorkspace(...args) { try { return releaseExecutorWorkspace(...args); } catch (error) { quarantineFailure = error; throw error; } },
+    loadExecutorWorkspaceLease: legacyWorkspaceManualRecoveryUnavailable,
+    inspectExecutorWorkspace: legacyWorkspaceManualRecoveryUnavailable,
+    releaseExecutorWorkspace(...args) { try { return legacyWorkspaceManualRecoveryUnavailable(...args); } catch (error) { quarantineFailure = error; throw error; } },
     stopRootBrokerGoalOwnedRun(pi, binding) {
       seenAuthorities.push(binding);
       return stopRootBrokerGoalOwnedRun(pi, binding);

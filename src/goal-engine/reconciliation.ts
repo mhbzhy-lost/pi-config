@@ -69,7 +69,7 @@ function taskImpact(task, changes, taskChange) {
 function activeDebt(taskId, task, inventories) {
   const projectionActive = ["dispatched", "running", "settling", "disposing"].includes(task.status)
     || task.workspace?.state === "active" || task.workspace?.active === true
-    || task.executorBinding?.state === "active" || task.executorBinding?.active === true;
+    || task.runBinding?.state === "active" || task.runBinding?.active === true;
   const active = (inventories.activeRuns || []).some((item) => item.taskId === taskId && !["terminal", "released", "cancelled"].includes(item.state));
   const workspace = (inventories.workspaces || []).some((item) => item.taskId === taskId && !item.quarantined && !item.released);
   const resource = (inventories.resources || []).some((item) => item.taskId === taskId && !item.quarantined && !item.released);

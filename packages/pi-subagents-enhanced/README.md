@@ -6,6 +6,14 @@
 
 普通 subagent、Goal task 和 Goal validation 都通过同一 workspace service 分配、绑定、检查与处置 worktree。package 对外只发布三项代码 API：`./dispatch-ir`、`./workspace` 和 `./workspace/admin`；Git mutation、owner token 与 durable ledger 的实现均只归 `src/workspace/` 所有。
 
+## Profile 与授权
+
+`agent` 只表示 discovery 中的 profile identity，可按项目需要重命名；`executor.md` 只是普通默认 profile，不是必需的权限入口。完整 `dispatch-ir.v1` 结构决定 coding，generic object shape 决定 generic，同一 profile 可用于两种调用。coding 工作必须使用 typed 合同，不能以 generic 自由文本绕过。
+
+可信 Host 的 `RunAuthorization` 是唯一授权来源：standalone coding 只有 `root.subscribe`，generic 不获得 privileged capability。名称、frontmatter 额外字段、模型和 started event 都不能授予 coding、acceptance、Goal 或 Broker capability。需要 Goal/acceptance 权限时只能由对应可信 Host 协调流程授权，不能在 profile 中声明提权。
+
+普通 `reviewer` profile 仅用于计划执行前审阅合理性、计划执行后检查完成情况与实现偏差。每次派发前须取得用户针对该次审阅的明确批准，不可复用前次批准；选择 Subagent-Driven 也不等于批准。使用 generic shape，不分配 worktree；审阅建议不是自动验收授权。
+
 ## 来源选择
 
 仓库内开发使用相对 `pi/settings.json` 的 local path source：

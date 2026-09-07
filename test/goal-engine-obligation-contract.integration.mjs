@@ -68,3 +68,17 @@ test("readiness is pure and reports registry blockers without executing anything
     readiness: "needs_clarification", reasons: ["unknown adapter oracle"],
   });
 });
+
+test("goal-runtime.v2 requires an exact agentProfile and hashes it", () => {
+  const base = runtimeInit({ execution: { ...runtimeInit().execution, schema: "goal-runtime.v2", tasks: [{ ...runtimeInit().execution.tasks[0], agentProfile: "coder-alpha", acceptance: { criteria: [{ ...runtimeInit().execution.tasks[0].acceptance.criteria[0], evaluator: "run" }] } }] } });
+  const contract = normalizeRuntimeGoalInit(base, runtimeRegistries);
+  assert.equal(contract.execution.schema, "goal-runtime.v2");
+  assert.equal(contract.execution.tasks[0].agentProfile, "coder-alpha");
+  assert.notEqual(hashRuntimeExecutionContract(contract), hashRuntimeExecutionContract({ ...contract, execution: { ...contract.execution, tasks: [{ ...contract.execution.tasks[0], agentProfile: "coder-beta" }] } }));
+  assert.throws(() => normalizeRuntimeGoalInit(runtimeInit({ execution: { ...base.execution, tasks: [{ ...base.execution.tasks[0], agentProfile: undefined }] } }), runtimeRegistries), /agentProfile|required|unknown/i);
+  assert.throws(() => normalizeRuntimeGoalInit(runtimeInit({ execution: { ...base.execution, tasks: [{ ...base.execution.tasks[0], extra: true }] } }), runtimeRegistries), /unknown/i);
+  assert.throws(() => normalizeRuntimeGoalInit(runtimeInit({ execution: { ...base.execution, tasks: [{ ...base.execution.tasks[0], acceptance: { criteria: [{ id: "proof", statement: "proof", evidenceKinds: ["tests"] }] } }] } }), runtimeRegistries), /evaluator/i);
+  const normalized = normalizeRuntimeGoalInit(runtimeInit({ execution: { ...base.execution, tasks: [{ ...base.execution.tasks[0], agentProfile: " coder-alpha " }] } }), runtimeRegistries);
+  assert.equal(normalized.execution.tasks[0].agentProfile, "coder-alpha");
+  for (const agentProfile of ["", "bad\u0000profile", "bad\u0085profile", "x".repeat(257)]) assert.throws(() => normalizeRuntimeGoalInit(runtimeInit({ execution: { ...base.execution, tasks: [{ ...base.execution.tasks[0], agentProfile }] } }), runtimeRegistries), /agentProfile|required/i);
+});

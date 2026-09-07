@@ -9,8 +9,9 @@ import test from "node:test";
 
 import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
+import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 import { createBrokerFrameDecoder, createRootBrokerClient } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-client.ts";
-import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker, bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, findGoalExecutorCoordinator, unbindGoalExecutorCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import { bindRootBroker, requireRootBroker, startAndBindRootBroker, unbindRootBroker, bindGoalRunCoordinator, bindGoalRunCoordinatorSession, findGoalRunCoordinator, unbindGoalRunCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 import * as rootBrokerRegistry from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 
 class EventBus {
@@ -43,7 +44,14 @@ function startedEvent(rootSessionId, runId = "executor-1") {
   return { runId, id: runId, agent: "executor", pid: 43210, asyncDir: `/tmp/${runId}`, sessionId: rootSessionId };
 }
 function goalAuthority(sessionId, runId) {
-  return { goalId: "test-goal", taskId: "test-task", attempt: 1, runId, asyncDir: `/tmp/${runId}`, workspacePath: "/tmp/test-workspace", leaseId: "a".repeat(64), sessionId, baseHead: "b".repeat(40), headAtDispatch: "b".repeat(40), executionRevision: 1, contractHash: "c".repeat(64), expectedCriteria: ["criterion-1"], agent: "executor" };
+  return { goalId: "test-goal", taskId: "test-task", attempt: 1, runId, asyncDir: `/tmp/${runId}`, workspacePath: "/tmp/test-workspace", leaseId: "a".repeat(64), sessionId, baseHead: "b".repeat(40), headAtDispatch: "b".repeat(40), executionRevision: 1, contractHash: "c".repeat(64), expectedCriteria: ["criterion-1"], agentProfile: "executor" };
+}
+async function authorize(broker, event, goal = null) {
+  await broker.registerAuthorizedRun(createRunAuthorization({
+    kind: "coding",
+    binding: { runId: event.runId, asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid, agentProfile: event.agent },
+    goal: goal && { ticketId: "d".repeat(64), goalId: goal.goalId, taskId: goal.taskId, attempt: goal.attempt, contractHash: goal.contractHash, workspaceId: "workspace-1", executionRevision: goal.executionRevision, expectedCriteria: goal.expectedCriteria },
+  }));
 }
 
 test("Root broker exposes no delegated caller or revival capability", () => {
@@ -86,10 +94,11 @@ test("Root broker grants, serves, and drains one directly owned Executor", async
     await rm(grantPath, { force: true });
   });
   await broker.start();
+  await authorize(broker, startedEvent(rootSessionId, runId));
   await events.emit("subagent:async-started", startedEvent(rootSessionId, runId));
 
   const grant = await readBrokerGrant(rootSessionId, runId);
-  assert.equal(grant.role, "executor");
+  assert.deepEqual(grant.capabilities, ["root.subscribe"]);
   assert.equal(broker.ownedRuns.get(runId)?.identityState, "verified");
 
   client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 500 });
@@ -148,7 +157,10 @@ test("authenticated Executor submits bound acceptance evidence only after its du
     await rm(root, { recursive: true, force: true });
   });
   await broker.start();
-  await events.emit("subagent:async-started", { ...startedEvent(rootSessionId, runId), asyncDir });
+  const acceptanceEvent = { ...startedEvent(rootSessionId, runId), asyncDir };
+  const acceptanceAuthority = { ...goalAuthority(rootSessionId, runId), goalId: "goal-acceptance", taskId: "task-acceptance", asyncDir, workspacePath };
+  await authorize(broker, acceptanceEvent, acceptanceAuthority);
+  await events.emit("subagent:async-started", acceptanceEvent);
   client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 500 });
   const params = {
     outcome: "succeeded",
@@ -158,11 +170,11 @@ test("authenticated Executor submits bound acceptance evidence only after its du
   };
   await assert.rejects(client.submitAcceptanceEvidence(params), { code: "CONTEXT_NOT_READY" });
   broker.persistGoalBindingAuthority({
-    version: "root-broker.goal-binding-authority.v1",
+    version: "root-broker.goal-run-binding-authority.v2",
     ticketId: "d".repeat(64),
-    goalId: "goal-acceptance",
-    taskId: "task-acceptance",
-    attempt: 1,
+    goalId: acceptanceAuthority.goalId,
+    taskId: acceptanceAuthority.taskId,
+    attempt: acceptanceAuthority.attempt,
     runId,
     asyncDir,
     workspacePath,
@@ -170,10 +182,10 @@ test("authenticated Executor submits bound acceptance evidence only after its du
     sessionId: rootSessionId,
     baseHead: head,
     headAtDispatch: head,
-    executionRevision: 1,
-    contractHash: "c".repeat(64),
-    expectedCriteria: ["criterion-1"],
-    agent: "executor",
+    executionRevision: acceptanceAuthority.executionRevision,
+    contractHash: acceptanceAuthority.contractHash,
+    expectedCriteria: acceptanceAuthority.expectedCriteria,
+    agentProfile: "executor",
   });
   const first = await client.submitAcceptanceEvidence(params);
   const second = await client.submitAcceptanceEvidence(params);
@@ -188,8 +200,9 @@ test("Root broker stops only an exact registered Goal-owned run and returns an o
   const runId = "executor-goal-owned"; let broker; const calls = [];
   broker = new RootBrokerServer({ rootSessionId: "root-goal-owned", lifecycleSessionId: "root-goal-owned", captureProcessBirthIdentity: async () => "birth", writeGrant: async () => "/tmp/no-grant", terminalTimeoutMs: 100, upstream: { async ping() { return {}; }, async stop(request) { calls.push(request); broker.observeTerminal(observedProof(runId)); }, async dispose() {} } });
   t.after(() => broker.closeRootSession().catch(() => undefined));
-  await broker.observeStarted(startedEvent("root-goal-owned", runId));
   const binding = goalAuthority("root-goal-owned", runId);
+  await authorize(broker, startedEvent("root-goal-owned", runId), binding);
+  await broker.observeStarted(startedEvent("root-goal-owned", runId));
   const stopped = await broker.stopGoalOwnedRun(binding);
   assert.equal(stopped.state, "observed"); assert.deepEqual(calls, [{ runId, dir: `/tmp/${runId}` }]);
   assert.deepEqual(await broker.stopGoalOwnedRun({ ...binding, asyncDir: "/tmp/other" }), { state: "attention", code: "OWNED_STOP_IDENTITY_UNKNOWN" });
@@ -199,13 +212,14 @@ test("Root broker returns a stable attention code without upstream error leakage
   const runId = "executor-goal-stop-error";
   const broker = new RootBrokerServer({ rootSessionId: "root-stop-error", lifecycleSessionId: "root-stop-error", captureProcessBirthIdentity: async () => "birth", writeGrant: async () => "/tmp/no-grant", terminalTimeoutMs: 10, upstream: { async ping() { return {}; }, async stop() { throw new Error("private upstream failure"); }, async dispose() {} } });
   t.after(() => broker.closeRootSession().catch(() => undefined));
-  await broker.observeStarted(startedEvent("root-stop-error", runId));
   const binding = goalAuthority("root-stop-error", runId);
+  await authorize(broker, startedEvent("root-stop-error", runId), binding);
+  await broker.observeStarted(startedEvent("root-stop-error", runId));
   const result = await broker.stopGoalOwnedRun(binding);
   assert.deepEqual(result, { state: "attention", code: "OWNED_STOP_UNAVAILABLE" });
 });
 
-test("Root broker exposes an immutable read-only ownership and successful terminal proof snapshot", async (t) => {
+test("Root broker exposes an immutable neutral execution proof without the legacy executor inspector", async (t) => {
   const rootSessionId = "root-proof-snapshot";
   const runId = "executor-proof";
   const broker = new RootBrokerServer({
@@ -216,31 +230,35 @@ test("Root broker exposes an immutable read-only ownership and successful termin
     writeGrant: async () => "/tmp/nonexistent-proof-grant",
   });
   t.after(() => broker.closeRootSession().catch(() => undefined));
+  await authorize(broker, startedEvent(rootSessionId, runId));
   await broker.observeStarted(startedEvent(rootSessionId, runId));
   const emittedProof = observedProof(runId);
   broker.observeTerminal(emittedProof);
 
-  assert.equal(typeof broker.inspectExecutorProof, "function");
-  const snapshot = broker.inspectExecutorProof(runId);
+  assert.equal(typeof broker.inspectExecutorProof, "undefined");
+  const snapshot = broker.inspectExecutionProof(runId);
   emittedProof.instances[0].exitCode = 9;
   emittedProof.observedAt += 10;
-  assert.deepEqual(broker.inspectExecutorProof(runId), snapshot);
-  assert.deepEqual(Object.keys(snapshot).sort(), ["ownership", "schemaVersion", "terminal", "terminalConflict"]);
-  assert.deepEqual(snapshot.ownership, {
+  assert.deepEqual(broker.inspectExecutionProof(runId), snapshot);
+  assert.deepEqual(Object.keys(snapshot).sort(), ["binding", "capabilities", "schemaVersion", "terminal", "terminalConflict"]);
+  assert.equal(snapshot.schemaVersion, "root-broker.execution-proof.v2");
+  assert.deepEqual(snapshot.binding, {
     rootSessionId,
     runId,
-    role: "executor",
     asyncDir: `/tmp/${runId}`,
     sessionId: rootSessionId,
-    identityState: "verified",
+    pid: 43210,
+    agentProfile: "executor",
   });
-  assert.equal(snapshot.terminal.outcome, "succeeded");
   assert.equal(snapshot.terminal.observedAt, 1_700_000_000_000);
   assert.match(snapshot.terminal.proofId, /^[a-f0-9]{64}$/);
+  assert.deepEqual(snapshot.terminal.proof, observedProof(runId));
   assert.equal(snapshot.terminalConflict, false);
   assert.equal(Object.isFrozen(snapshot), true);
-  assert.equal(Object.isFrozen(snapshot.ownership), true);
+  assert.equal(Object.isFrozen(snapshot.binding), true);
   assert.equal(Object.isFrozen(snapshot.terminal), true);
+  assert.equal(Object.isFrozen(snapshot.terminal.proof), true);
+  assert.deepEqual(snapshot.capabilities, ["root.subscribe"]);
   for (const forbidden of ["removeWorktree", "deleteBranch", "cleanupGit", "releaseWorkspace"]) {
     assert.equal(Object.hasOwn(snapshot, forbidden), false);
     assert.equal(typeof broker[forbidden], "undefined");
@@ -257,9 +275,10 @@ test("Root broker never marks a missing process birth identity as verified owner
     captureProcessBirthIdentity: async () => null,
     writeGrant: async () => "/tmp/nonexistent-missing-birth-grant",
   });
+  await authorize(broker, startedEvent(rootSessionId, runId));
   await broker.observeStarted(startedEvent(rootSessionId, runId));
 
-  assert.equal(broker.inspectExecutorProof(runId).ownership.identityState, "unavailable");
+  assert.equal(broker.ownedRuns.get(runId)?.identityState, "unavailable");
 });
 
 test("Root broker tracks a registered Generic facade leaf official proof without an Executor grant", async () => {
@@ -284,7 +303,7 @@ test("Root broker tracks a registered Generic facade leaf official proof without
     conflict: false,
   });
   assert.match(proof.proofHash, /^[a-f0-9]{64}$/);
-  assert.equal(broker.inspectExecutorProof(runId), null);
+  assert.deepEqual(broker.inspectExecutionProof(runId), proof);
   assert.deepEqual(grants, []);
 
   broker.observeTerminal({ ...observedProof(runId), sessionId: rootSessionId, pid: 999, asyncDir: "/tmp/generic-proof", agent: "reviewer" });
@@ -307,6 +326,7 @@ test("Root broker marks conflicting official terminal proofs instead of replacin
     writeGrant: async () => "/tmp/nonexistent-proof-conflict-grant",
   });
   t.after(() => broker.closeRootSession().catch(() => undefined));
+  await authorize(broker, startedEvent(rootSessionId, runId));
   await broker.observeStarted(startedEvent(rootSessionId, runId));
   const first = observedProof(runId);
   broker.observeTerminal(first);
@@ -316,13 +336,13 @@ test("Root broker marks conflicting official terminal proofs instead of replacin
     instances: first.instances.map((instance) => ({ ...instance, closeObservedAt: instance.closeObservedAt + 1 })),
   });
 
-  const snapshot = broker.inspectExecutorProof(runId);
+  const snapshot = broker.inspectExecutionProof(runId);
   assert.equal(snapshot.terminalConflict, true);
   assert.equal(snapshot.terminal.observedAt, first.observedAt);
-  assert.equal(snapshot.terminal.outcome, "succeeded");
+  assert.deepEqual(snapshot.terminal.proof, first);
 });
 
-test("Root broker rejects malformed, foreign, and conflicting started ownership", async () => {
+test("Root broker ignores untrusted started events and rejects binding drift", async () => {
   const captures = [];
   const broker = new RootBrokerServer({
     rootSessionId: "root-started",
@@ -337,24 +357,24 @@ test("Root broker rejects malformed, foreign, and conflicting started ownership"
   assert.deepEqual(captures, []);
   assert.equal(broker.ownedRuns.size, 0);
 
+  await authorize(broker, startedEvent("root-started", "executor-conflict"));
   await broker.observeStarted(startedEvent("root-started", "executor-conflict"));
   await broker.observeStarted({ ...startedEvent("root-started", "executor-conflict"), pid: 54321 });
   assert.equal(broker.ownedRuns.get("executor-conflict")?.identityState, "conflict");
   assert.deepEqual(captures, [43210]);
 });
 
-test("Root broker registry exposes only the bound broker's read-only executor proof", () => {
-  assert.equal(typeof rootBrokerRegistry.inspectRootBrokerExecutorProof, "function");
+test("Root broker registry exposes only the bound broker's read-only execution proof", () => {
+  assert.equal(typeof rootBrokerRegistry.inspectRootBrokerExecutionProof, "function");
   const pi = { events: {} };
-  const snapshot = Object.freeze({ schemaVersion: "root-broker.executor-proof.v1", ownership: Object.freeze({ runId: "run-1" }), terminal: null, terminalConflict: false });
-  const broker = { rootSessionId: "root-registry-proof", inspectExecutorProof(runId) { assert.equal(runId, "run-1"); return snapshot; } };
+  const broker = { rootSessionId: "root-registry-proof", inspectExecutionProof(runId) { assert.equal(runId, "run-1"); return null; } };
   bindRootBroker(pi, broker);
   try {
-    assert.strictEqual(rootBrokerRegistry.inspectRootBrokerExecutorProof(pi, "run-1"), snapshot);
+    assert.deepEqual(rootBrokerRegistry.inspectRootBrokerExecutionProof(pi, "run-1"), null);
   } finally {
     unbindRootBroker(pi, broker);
   }
-  assert.throws(() => rootBrokerRegistry.inspectRootBrokerExecutorProof(pi, "run-1"), /unavailable/);
+  assert.throws(() => rootBrokerRegistry.inspectRootBrokerExecutionProof(pi, "run-1"), /unavailable/);
 });
 
 test("Goal executor coordinator resolves a session alias across ExtensionAPI wrappers and CAS-unbinds", () => {
@@ -362,16 +382,16 @@ test("Goal executor coordinator resolves a session alias across ExtensionAPI wra
   const subagentPi = { events: {} };
   const foreignPi = { events: {} };
   const coordinator = { prepareSpawn() {}, workspaceAllocated() {}, confirmSpawn() {}, bindSpawn() {} };
-  bindGoalExecutorCoordinator(goalPi, coordinator);
-  bindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", coordinator);
-  assert.strictEqual(findGoalExecutorCoordinator(goalPi), coordinator, "same-wrapper lookup remains preferred");
-  assert.strictEqual(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), coordinator);
-  assert.equal(findGoalExecutorCoordinator(foreignPi, "root-other-session"), undefined);
-  unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", { prepareSpawn() {}, workspaceAllocated() {}, confirmSpawn() {}, bindSpawn() {} });
-  assert.strictEqual(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), coordinator, "foreign shutdown cannot delete the alias");
-  unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-alias", coordinator);
-  assert.equal(findGoalExecutorCoordinator(goalPi), undefined, "correct shutdown clears the exact wrapper binding");
-  assert.equal(findGoalExecutorCoordinator(subagentPi, "root-goal-alias"), undefined);
+  bindGoalRunCoordinator(goalPi, coordinator);
+  bindGoalRunCoordinatorSession(goalPi, "root-goal-alias", coordinator);
+  assert.strictEqual(findGoalRunCoordinator(goalPi), coordinator, "same-wrapper lookup remains preferred");
+  assert.strictEqual(findGoalRunCoordinator(subagentPi, "root-goal-alias"), coordinator);
+  assert.equal(findGoalRunCoordinator(foreignPi, "root-other-session"), undefined);
+  unbindGoalRunCoordinatorSession(goalPi, "root-goal-alias", { prepareSpawn() {}, workspaceAllocated() {}, confirmSpawn() {}, bindSpawn() {} });
+  assert.strictEqual(findGoalRunCoordinator(subagentPi, "root-goal-alias"), coordinator, "foreign shutdown cannot delete the alias");
+  unbindGoalRunCoordinatorSession(goalPi, "root-goal-alias", coordinator);
+  assert.equal(findGoalRunCoordinator(goalPi), undefined, "correct shutdown clears the exact wrapper binding");
+  assert.equal(findGoalRunCoordinator(subagentPi, "root-goal-alias"), undefined);
 });
 
 test("Goal executor coordinator session replacement does not resurrect the old generation", () => {
@@ -380,12 +400,12 @@ test("Goal executor coordinator session replacement does not resurrect the old g
   const replacementPi = { events };
   const oldCoordinator = { prepareSpawn() {}, workspaceAllocated() {}, confirmSpawn() {}, bindSpawn() {} };
   const replacement = { prepareSpawn() {}, workspaceAllocated() {}, confirmSpawn() {}, bindSpawn() {} };
-  bindGoalExecutorCoordinatorSession(goalPi, "root-goal-old", oldCoordinator);
-  bindGoalExecutorCoordinatorSession(replacementPi, "root-goal-new", replacement);
-  unbindGoalExecutorCoordinatorSession(goalPi, "root-goal-old", oldCoordinator);
-  assert.strictEqual(findGoalExecutorCoordinator(goalPi), replacement);
-  assert.strictEqual(findGoalExecutorCoordinator({ events: {} }, "root-goal-new"), replacement);
-  assert.equal(findGoalExecutorCoordinator({ events: {} }, "root-goal-old"), undefined);
+  bindGoalRunCoordinatorSession(goalPi, "root-goal-old", oldCoordinator);
+  bindGoalRunCoordinatorSession(replacementPi, "root-goal-new", replacement);
+  unbindGoalRunCoordinatorSession(goalPi, "root-goal-old", oldCoordinator);
+  assert.strictEqual(findGoalRunCoordinator(goalPi), replacement);
+  assert.strictEqual(findGoalRunCoordinator({ events: {} }, "root-goal-new"), replacement);
+  assert.equal(findGoalRunCoordinator({ events: {} }, "root-goal-old"), undefined);
 });
 
 test("Root broker registry reload coexists with a legacy v1 WeakMap process slot", () => {

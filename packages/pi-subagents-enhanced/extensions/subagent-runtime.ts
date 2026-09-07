@@ -17,7 +17,7 @@ import {
 import { installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
 import { resolveRootSessionId } from "../src/subagent-dispatch/root-broker-protocol.ts";
-import { closeAndUnbindRootBroker, startAndBindRootBroker } from "../src/subagent-dispatch/root-broker-registry.ts";
+import { closeAndUnbindRootBroker, inspectRootBrokerExecutionProof, registerRootBrokerAuthorizedRun, startAndBindRootBroker } from "../src/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../src/subagent-dispatch/root-broker-server.ts";
 import { createManagedWorkspaceService } from "../src/workspace/service.ts";
 import { bindManagedWorkspaceServiceSession, unbindManagedWorkspaceServiceSession } from "../src/workspace/registry.ts";
@@ -28,6 +28,36 @@ export function createRootBrokerUpstream({ rpc }: { rpc: any }) {
     stop: (...args: any[]) => rpc.stop(...args),
     dispose: (...args: any[]) => rpc.dispose(...args),
   });
+}
+
+export function projectManagedWorkspaceTerminalProof(
+  run: { runId?: string } | null | undefined,
+  snapshot: any,
+) {
+  if (!run?.runId || snapshot === undefined || snapshot === null || snapshot?.state === "pending") {
+    return { state: "pending" };
+  }
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)
+      || (snapshot.schemaVersion === "root-broker.execution-proof.v2" && snapshot.binding?.runId === run.runId)) {
+    if (snapshot?.schemaVersion === "root-broker.execution-proof.v2" && snapshot.binding?.runId === run.runId) {
+      if (snapshot.terminal === null) return { state: "pending" };
+      if (snapshot.terminal && typeof snapshot.terminal === "object"
+          && /^[a-f0-9]{64}$/.test(snapshot.terminal.proofId)
+          && typeof snapshot.terminalConflict === "boolean") {
+        return { state: "observed", conflict: snapshot.terminalConflict, proofHash: snapshot.terminal.proofId };
+      }
+    }
+    const error = new Error("observed facade terminal proof is invalid") as Error & { code: string };
+    error.code = "MANAGED_WORKSPACE_TERMINAL_PROOF_ADAPTER";
+    throw error;
+  }
+  if (snapshot.runId !== run.runId || snapshot.state !== "observed"
+      || typeof snapshot.conflict !== "boolean" || !/^[a-f0-9]{64}$/.test(snapshot.proofHash)) {
+    const error = new Error("observed facade terminal proof is invalid") as Error & { code: string };
+    error.code = "MANAGED_WORKSPACE_TERMINAL_PROOF_ADAPTER";
+    throw error;
+  }
+  return { state: "observed", conflict: snapshot.conflict, proofHash: snapshot.proofHash };
 }
 
 function notificationColor(text: string): "error" | "warning" | "success" | "dim" {
@@ -138,8 +168,8 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         workspaceService = createManagedWorkspaceService({
           stateRoot: process.env.PI_CODING_WORKSPACE_DIR,
           terminalProofProvider({ run }: { run: { runId?: string } | null }) {
-            if (!run?.runId) return { state: "pending" };
-            return startingBroker.inspectFacadeTerminalProof(run.runId) ?? { state: "pending" };
+            const snapshot = run?.runId ? startingBroker.inspectExecutionProof(run.runId) : null;
+            return projectManagedWorkspaceTerminalProof(run, snapshot);
           },
         });
         bindManagedWorkspaceServiceSession(pi, rootSessionId, workspaceService);
@@ -182,17 +212,17 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     renderSupervisorResult,
     rpc,
     resolveRootSessionId: (sessionManager: any) => resolveRootSessionId(sessionManager),
-    registerFacadeRun: (run: any) => {
+    registerAuthorizedRun: async (authorization: any) => {
       if (!brokerReady || !broker) {
         const error = new Error("FACADE_PROOF_UNAVAILABLE");
         error.code = "FACADE_PROOF_UNAVAILABLE";
         throw error;
       }
-      broker.registerFacadeRun(run);
+      await registerRootBrokerAuthorizedRun(pi, authorization, broker.rootSessionId);
     },
-    inspectFacadeTerminalProof: (runId: string) => {
+    inspectExecutionProof: (runId: string) => {
       if (!brokerReady || !broker) return { state: "unknown" };
-      try { return broker.inspectFacadeTerminalProof(runId) ?? { state: "unknown" }; } catch { return { state: "unknown" }; }
+      try { return inspectRootBrokerExecutionProof(pi, runId, broker.rootSessionId) ?? { state: "unknown" }; } catch { return { state: "unknown" }; }
     },
     retainOnBeforeDisposeFailure: true,
   });

@@ -1,23 +1,28 @@
 import { isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
 import { validateDAG } from "./graph.ts";
-import { executorCriteria, validateTaskDefinitions, taskContractHash, remediationSubjectHash } from "./task-definition.ts";
+import { executorCriteria, normalizeAgentProfile, validateTaskDefinitions, taskContractHash, remediationSubjectHash } from "./task-definition.ts";
 import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from "./dispatch.ts";
 import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence } from "./settlement-evidence.ts";
 import { generationCapabilities } from "./generation-capabilities.ts";
 import { deriveInitialShape, hashRuntimeExecutionContract, normalizeRuntimeGoalInit } from "./obligation-contract.ts";
 import { deterministicGoalWorkspaceId, publicManagedWorkspaceReceipt } from "../../packages/pi-subagents-enhanced/src/workspace/contract.ts";
+import { assertExecutionSettlementProof } from "./run-binding.ts";
+import { legacyExecutorTaskFields, resetLegacyExecutorTaskFields } from "./legacy-executor-compat.ts";
 
 const LEGACY_SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]);
 export const PLANNED_SCHEMA_VERSION = "planned.v1";
 export const RUNTIME_SCHEMA_VERSION = "goal-runtime.v1";
-const SCHEMA_VERSIONS = new Set([...LEGACY_SCHEMA_VERSIONS, PLANNED_SCHEMA_VERSION, RUNTIME_SCHEMA_VERSION]);
+export const PLANNED_V2_SCHEMA_VERSION = "planned.v2";
+export const RUNTIME_V2_SCHEMA_VERSION = "goal-runtime.v2";
+const V2_SCHEMA_VERSIONS = new Set([PLANNED_V2_SCHEMA_VERSION, RUNTIME_V2_SCHEMA_VERSION]);
+const SCHEMA_VERSIONS = new Set([...LEGACY_SCHEMA_VERSIONS, PLANNED_SCHEMA_VERSION, RUNTIME_SCHEMA_VERSION, ...V2_SCHEMA_VERSIONS]);
 const SCHEMA_RANK = new Map([["goal-engine.event.v1", 1], ["goal-engine.event.v2", 2], ["goal-engine.event.v3", 3]]);
 
 export function schemaVersionForMutation(projection, legacyTargetVersion = "goal-engine.event.v3") {
   const current = projection?.eventSchemaVersion;
-  if (!current || current === PLANNED_SCHEMA_VERSION) return PLANNED_SCHEMA_VERSION;
-  if (current === RUNTIME_SCHEMA_VERSION) return RUNTIME_SCHEMA_VERSION;
+  if (!current || current === PLANNED_SCHEMA_VERSION || current === PLANNED_V2_SCHEMA_VERSION) return current === PLANNED_V2_SCHEMA_VERSION ? PLANNED_V2_SCHEMA_VERSION : PLANNED_SCHEMA_VERSION;
+  if (current === RUNTIME_SCHEMA_VERSION || current === RUNTIME_V2_SCHEMA_VERSION) return current;
   if (!LEGACY_SCHEMA_VERSIONS.has(current)) throw new Error(`unknown event generation: ${current}`);
   if (!LEGACY_SCHEMA_VERSIONS.has(legacyTargetVersion)) throw new Error(`invalid legacy mutation generation: ${legacyTargetVersion}`);
   return SCHEMA_RANK.get(legacyTargetVersion) >= SCHEMA_RANK.get(current) ? legacyTargetVersion : current;
@@ -44,6 +49,7 @@ export function createProjection() {
     dod: [],
     tasks: new Map(),
     executorRunIds: new Set(),
+    runIds: new Set(),
     eventIds: new Set(),
     checkpointCount: 0,
     completionVerdict: null,
@@ -155,6 +161,7 @@ export function applyEvent(projection, event, { replay = false } = {}) {
     case "task.workspace_allocated": taskWorkspaceAllocated(next, event.data, event.schemaVersion); break;
     case "task.dispatched": taskDispatched(next, event.data, event.schemaVersion); break;
     case "task.executor_bound": taskExecutorBound(next, event.data, event.schemaVersion); break;
+    case "task.run_bound": taskRunBound(next, event.data, event.schemaVersion); break;
     case "task.settled": taskSettled(next, event.data, event.occurredAt, event.schemaVersion, replay); break;
     case "task.accepted": taskAccepted(next, event.data, event.schemaVersion); break;
     case "task.workspace_orphan_recovered": workspaceOrphanRecovered(next, event.data, event.schemaVersion); break;
@@ -197,14 +204,14 @@ function validateEnvelope(event) {
 function validateGeneration(projection, event, replay) {
   generationCapabilities(event.schemaVersion);
   if (!projection.eventSchemaVersion) {
-    if (event.schemaVersion !== PLANNED_SCHEMA_VERSION && event.schemaVersion !== RUNTIME_SCHEMA_VERSION && !replay) throw new Error("legacy event generations are replay-only");
+    if (event.schemaVersion !== PLANNED_SCHEMA_VERSION && event.schemaVersion !== RUNTIME_SCHEMA_VERSION && !V2_SCHEMA_VERSIONS.has(event.schemaVersion) && !replay) throw new Error("legacy event generations are replay-only");
     return;
   }
   // Runtime is an independent persisted codec. Historical v1/v2/v3 retain their
   // rank-based upgrade replay behaviour, while planned remains isolated.
-  if (projection.eventSchemaVersion === RUNTIME_SCHEMA_VERSION || event.schemaVersion === RUNTIME_SCHEMA_VERSION) {
+  if ([RUNTIME_SCHEMA_VERSION, RUNTIME_V2_SCHEMA_VERSION].includes(projection.eventSchemaVersion) || [RUNTIME_SCHEMA_VERSION, RUNTIME_V2_SCHEMA_VERSION].includes(event.schemaVersion)) {
     if (event.schemaVersion !== projection.eventSchemaVersion) throw new Error(`mixed event generations are not allowed: ${projection.eventSchemaVersion} and ${event.schemaVersion}`);
-  } else if (projection.eventSchemaVersion === PLANNED_SCHEMA_VERSION || event.schemaVersion === PLANNED_SCHEMA_VERSION) {
+  } else if ([PLANNED_SCHEMA_VERSION, PLANNED_V2_SCHEMA_VERSION].includes(projection.eventSchemaVersion) || [PLANNED_SCHEMA_VERSION, PLANNED_V2_SCHEMA_VERSION].includes(event.schemaVersion)) {
     if (event.schemaVersion !== projection.eventSchemaVersion) throw new Error(`mixed event generations are not allowed: ${projection.eventSchemaVersion} and ${event.schemaVersion}`);
   }
 }
@@ -225,6 +232,8 @@ function copyTask(task) {
     ...(Object.hasOwn(task, "dispatchRequest") ? { dispatchRequest: task.dispatchRequest ? { ...task.dispatchRequest } : null } : {}),
     ...(Object.hasOwn(task, "executorBinding") ? { executorBinding: task.executorBinding ? { ...task.executorBinding } : null } : {}),
     ...(Object.hasOwn(task, "lastExecutorProof") ? { lastExecutorProof: task.lastExecutorProof ? { ...task.lastExecutorProof } : null } : {}),
+    ...(Object.hasOwn(task, "runBinding") ? { runBinding: task.runBinding ? { ...task.runBinding } : null } : {}),
+    ...(Object.hasOwn(task, "lastRunProof") ? { lastRunProof: task.lastRunProof ? { ...task.lastRunProof } : null } : {}),
     settlement: task.settlement ? { ...task.settlement } : null,
     evidence: [...task.evidence],
     deps: [...task.deps],
@@ -242,6 +251,7 @@ function copyProjection(p) {
     dod: [...p.dod],
     tasks: new Map([...p.tasks].map(([k, v]) => [k, copyTask(v)])),
     executorRunIds: new Set(p.executorRunIds || []),
+    runIds: new Set(p.runIds || []),
     eventIds: new Set(p.eventIds),
     completionHistory: (p.completionHistory || []).map((entry) => ({ ...entry })),
     sessionBindings: (p.sessionBindings || []).map((binding) => ({ ...binding })),
@@ -287,17 +297,18 @@ function runtimeDrafted(p, event) {
   const data = event.data;
   if (!isPlainObject(data.runtimeInit) || typeof data.executionContractHash !== "string" || !/^[a-f0-9]{64}$/.test(data.executionContractHash) || !/^[a-f0-9]{40}$/.test(data.baseHead || "")) throw new Error("invalid runtime draft");
   const contract = data.runtimeInit;
-  if (contract.execution?.schema !== RUNTIME_SCHEMA_VERSION || !Array.isArray(contract.execution.tasks) || !Array.isArray(contract.execution.conditions)) throw new Error("invalid runtime contract");
-  p.goalId = event.goalId; p.eventSchemaVersion = RUNTIME_SCHEMA_VERSION; p.lifecycle = "active";
+  if (!([RUNTIME_SCHEMA_VERSION, RUNTIME_V2_SCHEMA_VERSION].includes(contract.execution?.schema)) || contract.execution.schema !== event.schemaVersion || !Array.isArray(contract.execution.tasks) || !Array.isArray(contract.execution.conditions)) throw new Error("invalid runtime contract");
+  const v2 = event.schemaVersion === RUNTIME_V2_SCHEMA_VERSION;
+  p.goalId = event.goalId; p.eventSchemaVersion = event.schemaVersion; p.lifecycle = "active";
   p.objective = contract.objective; p.scope = [...(contract.scope || [])]; p.nonGoals = [...(contract.non_goals || [])]; p.dod = [...(contract.dod || [])];
-  p.createdAt = event.occurredAt; p.coordinationState = "ready"; p.runtimeGeneration = RUNTIME_SCHEMA_VERSION;
+  p.createdAt = event.occurredAt; p.coordinationState = "ready"; p.runtimeGeneration = event.schemaVersion;
   p.initialShape = deriveInitialShape(contract); p.executionRevision = 1; p.executionContractHash = data.executionContractHash; p.runtimeBaseHead = data.baseHead;
   p.readiness = "draft"; p.runtimeState = "draft";
   p.writePolicy = { allowedPaths: [...contract.execution.write_policy.allowed_paths] };
   p.convergenceBudget = structuredClone(contract.execution.budgets);
   for (const definition of contract.execution.tasks) {
     if (p.tasks.has(definition.id)) throw new Error(`duplicate runtime task: ${definition.id}`);
-    p.tasks.set(definition.id, { description: definition.description, deps: [...(definition.deps || [])], writePaths: [...definition.writePaths], acceptance: { criteria: structuredClone(definition.acceptance.criteria) }, workflow: definition.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, executorBinding: null, lastExecutorProof: null, acceptanceVerification: null, settlement: null });
+    p.tasks.set(definition.id, { ...(v2 ? { agentProfile: normalizeAgentProfile(definition.agentProfile, `runtime task ${definition.id} agentProfile`) } : {}), description: definition.description, deps: [...(definition.deps || [])], writePaths: [...definition.writePaths], acceptance: { criteria: structuredClone(definition.acceptance.criteria) }, workflow: definition.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, ...legacyExecutorTaskFields(event.schemaVersion), ...(v2 ? { runBinding: null, lastRunProof: null } : {}), acceptanceVerification: null, settlement: null });
     p.taskApplicability.set(definition.id, { revision: 1, state: "applicable", reason: null });
     p.taskMutationSequences.set(definition.id, 0);
   }
@@ -483,7 +494,7 @@ function repairRejectedByUser(p, d) { runtimeOnly(p); requireExactFields(d, ["ep
 function validCancellation(p, episode, c) { const keys = ["ownedTaskIds", "ownedRunIds", "terminalProofRefs", "workspaceClosureProofRefs", "resourceClosureProofRefs", "resourceDebt"]; if (!isPlainObject(c) || Object.keys(c).length !== keys.length || keys.some((key) => !Object.hasOwn(c, key)) || !["ownedTaskIds", "ownedRunIds", "terminalProofRefs", "workspaceClosureProofRefs", "resourceClosureProofRefs"].every((key) => Array.isArray(c[key])) || typeof c.resourceDebt !== "boolean") return false; const unique = (ids) => ids.every((id) => typeof id === "string") && new Set(ids).size === ids.length; if (!unique(c.ownedTaskIds) || !unique(c.ownedRunIds) || c.ownedTaskIds.length !== episode.remediationTaskIds.length || c.ownedTaskIds.some((id) => !episode.remediationTaskIds.includes(id)) || c.ownedRunIds.length !== episode.ownedRunIds.length || c.ownedRunIds.some((id) => !episode.ownedRunIds.includes(id))) return false; const exactRefs = (refs, owners, key, shape, check) => refs.length === owners.length && refs.every((ref) => isPlainObject(ref) && Object.keys(ref).length === shape.length && shape.every((field) => Object.hasOwn(ref, field)) && owners.includes(ref[key]) && check(ref)) && new Set(refs.map((ref) => ref[key])).size === owners.length; const terminal = exactRefs(c.terminalProofRefs, c.ownedRunIds, "runId", ["runId", "proofHash", "phase"], (ref) => hash(ref.proofHash) && p.observationRuns.get(ref.runId)?.phase === ref.phase && ["terminal", "recorded", "released"].includes(ref.phase)); const workspace = exactRefs(c.workspaceClosureProofRefs, c.ownedTaskIds, "taskId", ["taskId", "proofHash", "disposition", "released"], (ref) => hash(ref.proofHash) && ref.released === true && (p.tasks.get(ref.taskId)?.workspace ? ["integrated", "discarded", "preserved"].includes(ref.disposition) && p.tasks.get(ref.taskId).workspace.disposition === ref.disposition && p.tasks.get(ref.taskId).workspace.released === true : p.tasks.get(ref.taskId)?.status === "pending" && p.tasks.get(ref.taskId)?.attempts === 0 && ref.disposition === "never_started")); const resource = exactRefs(c.resourceClosureProofRefs, c.ownedRunIds, "runId", ["runId", "proofHash", "state", "debt"], (ref) => hash(ref.proofHash) && typeof ref.debt === "boolean" && ["released", "quarantined"].includes(ref.state)); return terminal && workspace && resource && c.resourceDebt === c.resourceClosureProofRefs.some((ref) => ref.debt || ref.state === "quarantined"); }
 function repairCancelRequested(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "cancellation"], "repair cancellation"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || !["active", "waiting_for_tasks", "reverifying", "blocked"].includes(episode.status) || !validCancellation(p, episode, data.cancellation)) throw new Error("invalid repair cancellation"); episode.status = "cancel_pending"; episode.cancellation = structuredClone(data.cancellation); }
 function repairCancelled(p, data) { runtimeOnly(p); requireExactFields(data, ["episodeId", "cancellation"], "repair cancelled"); const episode = p.repairEpisodes.get(data.episodeId); if (!episode || episode.status !== "cancel_pending" || JSON.stringify(canonical(data.cancellation)) !== JSON.stringify(canonical(episode.cancellation)) || !validCancellation(p, episode, data.cancellation)) throw new Error("repair cancellation is out of order"); episode.status = "cancelled"; }
-function taskApplicabilityChanged(p, data) { runtimeOnly(p); const amendment = p.pendingHumanDecision?.phase === "consumed"; requireExactFields(data, amendment ? ["taskId", "revision", "state", "reason"] : ["taskId", "state", "reason"], "task applicability"); let task = p.tasks.get(data.taskId), current = p.taskApplicability.get(data.taskId); if (amendment && !task) { const definition = p.pendingHumanDecision.targetExecutionContract.execution.tasks.find((entry) => entry.id === data.taskId); if (definition) { task = { description: definition.description, deps: [...(definition.deps || [])], writePaths: [...definition.writePaths], acceptance: { criteria: structuredClone(definition.acceptance.criteria) }, workflow: definition.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, executorBinding: null, lastExecutorProof: null, acceptanceVerification: null, settlement: null }; p.tasks.set(data.taskId, task); current = { revision: data.revision, state: "applicable", reason: null }; p.taskMutationSequences.set(data.taskId, 0); } } if (!task || !current || !["applicable", "superseded", "reverify_required"].includes(data.state) || (amendment && data.revision !== p.pendingHumanDecision.newRevision)) throw new Error("invalid task applicability"); p.taskApplicability.set(data.taskId, { revision: amendment ? data.revision : p.executionRevision, state: data.state, reason: data.reason || null }); recordRuntimeMutation(p, [data.taskId]); }
+function taskApplicabilityChanged(p, data) { runtimeOnly(p); const amendment = p.pendingHumanDecision?.phase === "consumed"; requireExactFields(data, amendment ? ["taskId", "revision", "state", "reason"] : ["taskId", "state", "reason"], "task applicability"); let task = p.tasks.get(data.taskId), current = p.taskApplicability.get(data.taskId); if (amendment && !task) { const definition = p.pendingHumanDecision.targetExecutionContract.execution.tasks.find((entry) => entry.id === data.taskId); if (definition) { task = { description: definition.description, deps: [...(definition.deps || [])], writePaths: [...definition.writePaths], acceptance: { criteria: structuredClone(definition.acceptance.criteria) }, workflow: definition.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, ...legacyExecutorTaskFields(p.eventSchemaVersion), acceptanceVerification: null, settlement: null }; p.tasks.set(data.taskId, task); current = { revision: data.revision, state: "applicable", reason: null }; p.taskMutationSequences.set(data.taskId, 0); } } if (!task || !current || !["applicable", "superseded", "reverify_required"].includes(data.state) || (amendment && data.revision !== p.pendingHumanDecision.newRevision)) throw new Error("invalid task applicability"); p.taskApplicability.set(data.taskId, { revision: amendment ? data.revision : p.executionRevision, state: data.state, reason: data.reason || null }); recordRuntimeMutation(p, [data.taskId]); }
 function proposalRuntimeRegistries(contract) {
   return {
     adapters: Object.fromEntries((contract?.execution?.conditions || []).map((condition) => [condition.oracle_ref, { deterministic: true }])),
@@ -540,7 +551,8 @@ function recordRuntimeMutation(p, taskIds) { p.mutationSequence++; if (!Number.i
 
 function goalCreated(p, event, replay) {
   const { objective, scope, nonGoals, dod, tasks, taskDefs } = event.data;
-  if (generationCapabilities(event.schemaVersion).taskContract === "criteria-only") validateTaskDefinitions(tasks, taskDefs, { planned: true });
+  const v2 = V2_SCHEMA_VERSIONS.has(event.schemaVersion);
+  if (generationCapabilities(event.schemaVersion).taskContract === "criteria-only") validateTaskDefinitions(tasks, taskDefs, v2 ? { runtimeAcceptance: true, requireAgentProfile: true, v2Acceptance: true } : { planned: true });
   else if (event.schemaVersion !== "goal-engine.event.v1" && !replay) validateTaskDefinitions(tasks, taskDefs);
   if (!objective || typeof objective !== "string") throw new Error("objective is required");
   if (!Array.isArray(tasks) || tasks.length === 0) throw new Error("tasks must be non-empty");
@@ -566,6 +578,7 @@ function goalCreated(p, event, replay) {
       throw new Error(`taskDef ${taskId} missing acceptance${generationCapabilities(event.schemaVersion).taskContract === "criteria-only" ? " criteria" : " (criteria + commands)"}`);
     }
     p.tasks.set(taskId, {
+      ...(v2 ? { agentProfile: normalizeAgentProfile(def.agentProfile, `taskDef ${taskId} agentProfile`) } : {}),
       description: def.description,
       deps: def.deps || [],
       writePaths: def.writePaths,
@@ -579,7 +592,8 @@ function goalCreated(p, event, replay) {
       lastSettledOutcome: null,
       contractHash: null,
       workspace: null,
-      ...(generationCapabilities(event.schemaVersion).executorBinding === "strict" ? { executorBinding: null, lastExecutorProof: null } : {}),
+      ...legacyExecutorTaskFields(event.schemaVersion),
+      ...(generationCapabilities(event.schemaVersion).runBinding === "strict" ? { runBinding: null, lastRunProof: null } : {}),
       acceptanceVerification: null,
       settlement: null,
     });
@@ -602,17 +616,14 @@ function taskDispatched(p, data, schemaVersion) {
   if (schemaVersion !== "goal-engine.event.v1") {
     assertWorkspaceRedispatchable(task);
     validateWorkspace(workspace, task.attempts + 1);
-    task.workspace = { ...workspace, phase: "active" };
+    task.workspace = generationCapabilities(schemaVersion).runBinding === "strict" ? structuredClone(workspace) : { ...workspace, phase: "active" };
     task.settlement = null;
   }
   task.status = "dispatched";
   task.attempts++;
   if (generationCapabilities(schemaVersion).conditions) recordRuntimeMutation(p, [taskId]);
   task.contractHash = contractHash;
-  if (generationCapabilities(schemaVersion).executorBinding === "strict") {
-    task.executorBinding = null;
-    task.lastExecutorProof = null;
-  }
+  resetLegacyExecutorTaskFields(task, schemaVersion);
 }
 
 function currentExecutionRevision(p) {
@@ -621,7 +632,7 @@ function currentExecutionRevision(p) {
 
 function taskDispatchRequested(p, data, schemaVersion) {
   requireActive(p);
-  if (generationCapabilities(schemaVersion).executorBinding !== "strict") throw new Error("workspace request requires strict generation");
+  if (generationCapabilities(schemaVersion).executorBinding !== "strict" && generationCapabilities(schemaVersion).runBinding !== "strict") throw new Error("workspace request requires strict generation");
   requireExactFields(data, ["taskId", "attempt", "contractHash", "workspaceId", "originRoot", "requestedCwd", "originRef", "baseCommit"], "workspace request data");
   const { taskId, attempt, contractHash, workspaceId, originRoot, requestedCwd, originRef, baseCommit } = data;
   const task = requireTask(p, taskId);
@@ -642,14 +653,13 @@ function taskDispatchRequested(p, data, schemaVersion) {
   task.dispatchRequest = { attempt, contractHash, workspaceId, originRoot, requestedCwd, originRef, baseCommit };
   task.workspace = null;
   task.settlement = null;
-  task.executorBinding = null;
-  task.lastExecutorProof = null;
+  resetLegacyExecutorTaskFields(task, schemaVersion);
   if (generationCapabilities(schemaVersion).conditions) recordRuntimeMutation(p, [taskId]);
 }
 
 function taskWorkspaceAllocated(p, data, schemaVersion) {
   requireActive(p);
-  if (generationCapabilities(schemaVersion).executorBinding !== "strict") throw new Error("workspace allocation requires strict generation");
+  if (generationCapabilities(schemaVersion).executorBinding !== "strict" && generationCapabilities(schemaVersion).runBinding !== "strict") throw new Error("workspace allocation requires strict generation");
   requireExactFields(data, ["taskId", "attempt", "contractHash", "workspace"], "workspace allocation data");
   const task = requireTask(p, data.taskId);
   const request = task.dispatchRequest;
@@ -702,6 +712,24 @@ function taskExecutorBound(p, data, schemaVersion) {
   p.executorRunIds.add(data.runId);
 }
 
+function taskRunBound(p, data, schemaVersion) {
+  requireActive(p);
+  if (generationCapabilities(schemaVersion).runBinding !== "strict") throw new Error("run binding requires v2 generation");
+  requireExactFields(data, ["taskId", "attempt", "runId", "agentProfile", "contractHash", "workspaceId", "asyncDir", "workspacePath", "workspaceLeaseId", "headAtDispatch"], "run binding data");
+  const task = requireTask(p, data.taskId);
+  if (task.status !== "dispatched") throw new Error(`task is not dispatched: ${data.taskId} (${task.status})`);
+  if (task.runBinding) throw new Error(`run binding is already bound and immutable: ${data.taskId}`);
+  if (normalizeAgentProfile(data.agentProfile, "run binding agentProfile") !== task.agentProfile) throw new Error("run binding agentProfile mismatch");
+  if (!Number.isSafeInteger(data.attempt) || data.attempt !== task.attempts || !/^[A-Za-z0-9._-]{1,160}$/.test(data.runId) || !/^[a-f0-9]{64}$/.test(data.contractHash) || data.contractHash !== task.contractHash || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(data.workspaceId) || !isAbsolute(data.asyncDir) || data.asyncDir.includes("\0") || !/^[a-f0-9]{64}$/.test(data.workspaceLeaseId) || !/^[a-f0-9]{40}$/.test(data.headAtDispatch)) throw new Error("run binding identity is invalid");
+  const workspace = requireWorkspace(task, data.attempt);
+  if (data.workspacePath !== workspace.path || data.headAtDispatch !== workspace.baseCommit || data.workspaceId !== workspace.workspaceId || data.workspaceLeaseId !== workspace.leaseId) throw new Error("run binding workspace identity mismatch");
+  if (p.runIds.has(data.runId)) throw new Error(`runId is already bound or reused: ${data.runId}`);
+  const { taskId: _taskId, agentProfile: _agentProfile, ...binding } = data;
+  binding.agentProfile = task.agentProfile;
+  task.runBinding = binding;
+  p.runIds.add(data.runId);
+}
+
 function validatedExecutorProof(task, data) {
   const binding = task.executorBinding;
   if (!binding) throw new Error("executor terminal proof requires an executor binding");
@@ -716,6 +744,10 @@ function validatedExecutorProof(task, data) {
 
 function validatedPlannedSettlementEvidence(goalId, task, data, executorProof) {
   requireExactFields(data, ["taskId", "outcome", "attempt", "executorHead", "executorProof", "settlementEvidence"], "planned succeeded settlement data");
+  return validatedSettlementEvidence(goalId, task, data, executorProof, task.executorBinding, data.executorHead);
+}
+
+function validatedSettlementEvidence(goalId, task, data, proof, binding, head) {
   const evidence = data.settlementEvidence;
   requireExactFields(evidence, ["schemaVersion", "path", "sha256", "subagentFingerprint", "mainFingerprint", "subagent", "main", "mainSessionId"], "settlement evidence");
   if (evidence.schemaVersion !== "goal-engine.settlement-evidence.v1") throw new Error("settlement evidence schemaVersion is invalid");
@@ -725,8 +757,8 @@ function validatedPlannedSettlementEvidence(goalId, task, data, executorProof) {
   }
   if (!/^[a-f0-9]{64}$/.test(evidence.subagentFingerprint) || !/^[a-f0-9]{64}$/.test(evidence.mainFingerprint)) throw new Error("settlement evidence fingerprint is invalid");
   if (typeof evidence.mainSessionId !== "string" || !evidence.mainSessionId.trim()) throw new Error("settlement evidence mainSessionId is required");
-  if (evidence.mainSessionId !== executorProof.rootSessionId) throw new Error("settlement evidence mainSessionId does not match official proof");
-  const identity = { goalId, taskId: data.taskId, runId: task.executorBinding.runId, attempt: data.attempt, contractHash: task.contractHash, head: data.executorHead };
+  if (evidence.mainSessionId !== proof.rootSessionId) throw new Error("settlement evidence mainSessionId does not match official proof");
+  const identity = { goalId, taskId: data.taskId, runId: binding.runId, attempt: data.attempt, contractHash: task.contractHash, head };
   const criteria = executorCriteria(task.acceptance.criteria).map((criterion) => criterion.id);
   const subagent = normalizeSettlementEvidence(evidence.subagent, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
   const main = normalizeSettlementEvidence(evidence.main, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
@@ -738,6 +770,7 @@ function validatedPlannedSettlementEvidence(goalId, task, data, executorProof) {
 
 function taskSettled(p, data, occurredAt, schemaVersion, replay) {
   requireActive(p);
+  if (generationCapabilities(schemaVersion).runBinding === "strict") return taskRunSettled(p, data, schemaVersion);
   const { taskId, outcome, evidence, evidenceSource, nextAction } = data;
   const task = requireTask(p, taskId);
   if (task.status !== "dispatched") throw new Error(`task is not dispatched: ${taskId} (${task.status})`);
@@ -790,6 +823,23 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
   }
   p.coordinationState = coordinationStateFor(p);
   if (capabilities.conditions) recordRuntimeMutation(p, [taskId]);
+}
+
+function taskRunSettled(p, data, schemaVersion) {
+  if (!data || !["succeeded", "failed", "blocked"].includes(data.outcome)) throw new Error("run settlement outcome is invalid");
+  const fields = data.outcome === "succeeded" ? ["taskId", "outcome", "attempt", "executionHead", "runProof", "settlementEvidence"] : data.outcome === "failed" ? ["taskId", "outcome", "attempt", "runProof", "nextAction"] : ["taskId", "outcome", "attempt", "runProof", "reason", "nextAction"];
+  requireExactFields(data, fields, "run settlement data");
+  const task = requireTask(p, data.taskId);
+  if (task.status !== "dispatched" || !task.runBinding || data.attempt !== task.attempts || (data.outcome === "succeeded" && !/^[a-f0-9]{40}$/.test(data.executionHead))) throw new Error("run settlement identity is invalid");
+  const proof = assertExecutionSettlementProof({ task, proof: data.runProof, taskOutcome: data.outcome });
+  const evidence = data.outcome === "succeeded" ? validatedSettlementEvidence(p.goalId, task, data, proof, task.runBinding, data.executionHead) : null;
+  task.lastRunProof = proof;
+  task.lastSettledOutcome = data.outcome;
+  if (data.outcome === "succeeded") { const workspace = requireWorkspace(task, data.attempt); task.settlement = { attempt: workspace.attempt ?? workspace.owner?.attempt, executionHead: data.executionHead, runId: proof.runId, terminalProofId: proof.proofId, evidence }; task.status = "succeeded"; }
+  else if (data.outcome === "failed") { validateNextAction(data.nextAction); task.settlement = null; task.status = "pending"; }
+  else { if (typeof data.reason !== "string" || !data.reason.trim()) throw new Error("run blocked reason is invalid"); validateNextAction(data.nextAction); task.settlement = null; task.status = "blocked"; task.blockedReason = data.reason; }
+  p.coordinationState = coordinationStateFor(p);
+  if (generationCapabilities(schemaVersion).conditions) recordRuntimeMutation(p, [data.taskId]);
 }
 
 function taskAccepted(p, data, schemaVersion) {
@@ -940,7 +990,7 @@ function requireV2(schemaVersion) {
 }
 
 function requireV3(schemaVersion, eventType) {
-  if (schemaVersion !== "goal-engine.event.v3" && schemaVersion !== PLANNED_SCHEMA_VERSION && schemaVersion !== RUNTIME_SCHEMA_VERSION) {
+  if (!["goal-engine.event.v3", PLANNED_SCHEMA_VERSION, RUNTIME_SCHEMA_VERSION, PLANNED_V2_SCHEMA_VERSION, RUNTIME_V2_SCHEMA_VERSION].includes(schemaVersion)) {
     throw new Error(`${eventType} requires goal-engine.event.v3 or planned.v1`);
   }
 }
@@ -971,8 +1021,8 @@ function validateRecoveryWorkspace(workspace, expectedAttempt) {
 
 function validateWorkspace(workspace, expectedAttempt) {
   if (!workspace || typeof workspace !== "object") throw new Error("workspace is required for v2 dispatch");
-  if (workspace.attempt !== expectedAttempt) throw new Error("workspace attempt mismatch");
-  for (const field of ["path", "branch", "baseCommit"]) if (!workspace[field] || typeof workspace[field] !== "string") throw new Error(`workspace ${field} is required`);
+  if ((workspace.attempt ?? workspace.owner?.attempt) !== expectedAttempt) throw new Error("workspace attempt mismatch");
+  for (const [field, value] of [["path", workspace.path], ["branch", workspace.branch ?? workspace.branchRef], ["baseCommit", workspace.baseCommit]]) if (!value || typeof value !== "string") throw new Error(`workspace ${field} is required`);
 }
 
 function assertWorkspaceRedispatchable(task) {
@@ -1053,7 +1103,7 @@ function goalAmended(p, data, schemaVersion, replay) {
       description: def.description, deps: def.deps || [], writePaths: def.writePaths, acceptance: def.acceptance,
       workflow: def.workflow || "tdd", ...(def.metadata ? { metadata: structuredClone(def.metadata) } : {}), status: "pending", evidence: [], attempts: 0,
       lastSettledOutcome: null, contractHash: null, workspace: null,
-      ...((schemaVersion === PLANNED_SCHEMA_VERSION || schemaVersion === RUNTIME_SCHEMA_VERSION) ? { executorBinding: null, lastExecutorProof: null } : {}),
+      ...legacyExecutorTaskFields(schemaVersion),
       acceptanceVerification: null, settlement: null,
     });
   }
@@ -1337,8 +1387,8 @@ function goalBlocked(p, data) {
 
 function goalCompleted(p, data, occurredAt, eventVersion) {
   requireActive(p);
-  if (p.eventSchemaVersion === RUNTIME_SCHEMA_VERSION && p.runtimeState === "active") closeRuntimeActiveInterval(p, occurredAt);
-  if (p.eventSchemaVersion === RUNTIME_SCHEMA_VERSION) {
+  if (generationCapabilities(p.eventSchemaVersion).conditions && p.runtimeState === "active") closeRuntimeActiveInterval(p, occurredAt);
+  if (generationCapabilities(p.eventSchemaVersion).conditions) {
     requireExactFields(data, ["verdict", "reviewId", "manifestHash", "stateHash", "worldHash", "head", "resultHash"], "runtime goal completion");
     const review = p.finalReview;
     if (data.verdict !== "COMPLETE" || !review || review.status !== "recorded" || !["none", "minor"].includes(review.severity)
@@ -1362,7 +1412,7 @@ function goalCompleted(p, data, occurredAt, eventVersion) {
 
 function goalCheckpoint(p, data) {
   requireActive(p);
-  if (p.eventSchemaVersion === RUNTIME_SCHEMA_VERSION) {
+  if (generationCapabilities(p.eventSchemaVersion).conditions) {
     requireExactFields(data, ["canonicalFingerprint", "advanced", "sequence"], "runtime checkpoint");
     if (!hash(data.canonicalFingerprint) || typeof data.advanced !== "boolean" || !Number.isSafeInteger(data.sequence) || data.sequence !== p.progressLedger.length + 1) throw new Error("invalid runtime checkpoint");
     const previous = p.progressLedger.at(-1); if (data.advanced !== (!previous || previous.canonicalFingerprint !== data.canonicalFingerprint)) throw new Error("runtime checkpoint advanced mismatch");

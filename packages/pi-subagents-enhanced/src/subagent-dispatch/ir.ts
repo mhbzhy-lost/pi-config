@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { CodingDispatchContractError } from "./errors.ts";
-import { normalizeOptionalModelTier } from "./model-tier.ts";
 
 export { CodingDispatchContractError } from "./errors.ts";
 
@@ -9,7 +8,6 @@ const CONTRACT_VERSION = "dispatch-ir.v1";
 const MAX_ARRAY_ITEMS = 32;
 const MAX_STRING_BYTES = 4 * 1024;
 const TASK_ID_PATTERN = /^[A-Za-z0-9._-]{1,160}$/;
-const AGENTS = new Set(["executor"]);
 const RISKS = new Set(["low", "normal", "high"]);
 const WORKFLOW_MODES = new Set(["tdd", "existing-tests", "docs-only"]);
 
@@ -18,7 +16,7 @@ const TOP_LEVEL_KEYS = [
   "taskId",
   "title",
   "agent",
-  "modelTier",
+  "model",
   "risk",
   "objective",
   "workflow",
@@ -28,7 +26,7 @@ const TOP_LEVEL_KEYS = [
   "acceptance",
   "execution",
 ];
-const REQUIRED_TOP_LEVEL_KEYS = TOP_LEVEL_KEYS.filter((key) => key !== "modelTier");
+const REQUIRED_TOP_LEVEL_KEYS = TOP_LEVEL_KEYS.filter((key) => key !== "model");
 
 function fail(code, message, keypath) {
   throw new CodingDispatchContractError(code, `${message}; keypath=${keypath}`, keypath, keypath);
@@ -119,6 +117,17 @@ function normalizeString(value, location, { maxBytes = MAX_STRING_BYTES } = {}) 
   if (stringByteLength(normalized) > maxBytes) {
     fail("INVALID_CONTRACT", `${location} exceeds ${maxBytes} bytes`, location);
   }
+  return normalized;
+}
+
+function normalizeAgentProfile(value) {
+  if (typeof value !== "string") failTypeMismatch("agent", "string", value);
+  const normalized = value.trim();
+  if (!normalized) fail("INVALID_AGENT", "agent must not be empty", "agent");
+  if (/[\u0000-\u001F\u007F-\u009F]/.test(normalized)) {
+    fail("INVALID_AGENT", "agent must not contain C0 or C1 control characters", "agent");
+  }
+  if (stringByteLength(normalized) > 256) fail("INVALID_AGENT", "agent exceeds 256 bytes", "agent");
   return normalized;
 }
 
@@ -273,10 +282,7 @@ export function compileCodingDispatchIR(input, { cwd } = {}) {
     fail("UNSUPPORTED_VERSION", `unsupported coding dispatch contract version: ${version}`, "version");
   }
 
-  const agent = normalizeString(source.agent, "agent");
-  if (!AGENTS.has(agent)) {
-    fail("INVALID_AGENT", `unsupported coding dispatch agent: ${agent}`, "agent");
-  }
+  const agent = normalizeAgentProfile(source.agent);
 
   const risk = normalizeString(source.risk, "risk");
   if (!RISKS.has(risk)) {
@@ -291,13 +297,13 @@ export function compileCodingDispatchIR(input, { cwd } = {}) {
   const requirements = normalizeStringArray(source.requirements, "requirements", { minItems: 1 });
   const boundaries = normalizeBoundaries(source.boundaries);
 
-  const modelTier = normalizeOptionalModelTier(source.modelTier);
+  const model = source.model === undefined ? undefined : normalizeString(source.model, "model", { maxBytes: 512 });
   const canonical = {
     version,
     taskId,
     title: normalizeString(source.title, "title"),
     agent,
-    ...(modelTier === undefined ? {} : { modelTier }),
+    ...(model === undefined ? {} : { model }),
     risk,
     objective: normalizeString(source.objective, "objective"),
     requirements,

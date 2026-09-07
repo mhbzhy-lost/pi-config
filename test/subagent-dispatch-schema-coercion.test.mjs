@@ -118,15 +118,20 @@ test("schema only defers malformed values with the expected coding field contain
   }
 });
 
-test("schema accepts supported coding modelTier overrides and rejects others", () => {
-  for (const value of ["terra", "luna"]) {
+test("schema accepts non-empty coding model requests and rejects empty or retired fields", () => {
+  for (const value of ["codex-pool/gpt-5.6-sol", " gpt-5.6-sol "]) {
     const input = validCodingContract();
-    input.modelTier = value;
+    input.model = value;
     assert.equal(validator.Check(input), true);
   }
-  const invalid = validCodingContract();
-  invalid.modelTier = "sol";
-  assert.equal(validator.Check(invalid), false);
+  for (const value of ["", "   "]) {
+    const invalid = validCodingContract();
+    invalid.model = value;
+    assert.equal(validator.Check(invalid), false);
+  }
+  const retired = validCodingContract();
+  retired.modelTier = "terra";
+  assert.equal(validator.Check(retired), false);
 });
 
 test("schema still rejects contract missing required fields", () => {
@@ -135,12 +140,13 @@ test("schema still rejects contract missing required fields", () => {
   assert.equal(validator.Check(input), false, "missing version should fail");
 });
 
-test("schema still rejects non-executor agent in coding contract", () => {
+test("schema accepts arbitrary valid coding profiles and rejects invalid identities", () => {
   const input = validCodingContract();
-  input.agent = "researcher";
-  // This should not match CODING_SCHEMA (agent enum is ["executor"]),
-  // and should not match GENERIC_SCHEMA either (it has version field which is additional).
-  // Actually GENERIC_SCHEMA has additionalProperties:false and doesn't list version,
-  // so this should fail all anyOf branches.
-  assert.equal(validator.Check(input), false, "non-executor agent with coding fields should fail");
+  input.agent = "coder-alpha";
+  assert.equal(validator.Check(input), true);
+  for (const agent of ["", "   ", "coder\u0000alpha", "coder\u001falpha", "coder\u007falpha", "coder\u009falpha"]) {
+    const invalid = validCodingContract();
+    invalid.agent = agent;
+    assert.equal(validator.Check(invalid), false);
+  }
 });

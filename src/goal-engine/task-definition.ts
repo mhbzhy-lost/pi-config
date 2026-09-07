@@ -8,14 +8,24 @@ const WORKFLOWS = new Set(["tdd", "existing-tests", "docs-only"]);
 const CRITERION_ID = /^[A-Za-z0-9._-]{1,160}$/;
 const EVIDENCE_KINDS = new Set(["changed-files", "tests", "command", "manual-review"]);
 const COORDINATOR_PREDICATES = new Set(["executor-bound", "executor-terminal-proof", "workspace-integrated-released", "task-accepted"]);
+const V2_COORDINATOR_PREDICATES = new Set(["run-bound", "run-terminal-proof", "workspace-integrated-released", "task-accepted"]);
+const AGENT_PROFILE_CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
 
 // The historical three-field form is intentionally executor-owned for replay.
 export function criterionEvaluator(criterion) { return criterion?.evaluator ?? "executor"; }
 export function executorCriteria(criteria) { return criteria.filter((criterion) => criterionEvaluator(criterion) === "executor"); }
 export function coordinatorCriteria(criteria) { return criteria.filter((criterion) => criterionEvaluator(criterion) === "coordinator"); }
+export function runCriteria(criteria) { return criteria.filter((criterion) => criterion?.evaluator === "run"); }
 
 function nonEmpty(value, label) {
   return assertContractString(value, label);
+}
+
+export function normalizeAgentProfile(value, label = "agentProfile") {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  const normalized = value.trim();
+  if (!normalized || AGENT_PROFILE_CONTROL.test(normalized) || Buffer.byteLength(normalized, "utf8") > 256) throw new Error(`${label} must be a non-empty normalized profile identity at most 256 UTF-8 bytes without control characters`);
+  return normalized;
 }
 
 export function validateRepoRelativePath(value, label = "writePath") {
@@ -26,8 +36,8 @@ export function validateRepoRelativePath(value, label = "writePath") {
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
 export function canonicalTaskContract(task) {
   if (!task || typeof task !== "object" || Array.isArray(task)) throw new Error("task contract required");
-  const { description, deps, writePaths, acceptance, workflow } = task;
-  return canonical({ description, deps, writePaths, acceptance, workflow });
+  const { description, deps, writePaths, acceptance, workflow, agentProfile } = task;
+  return canonical({ ...(agentProfile === undefined ? {} : { agentProfile: normalizeAgentProfile(agentProfile) }), description, deps, writePaths, acceptance, workflow });
 }
 export function taskContractHash(task) { return createHash("sha256").update(JSON.stringify(canonicalTaskContract(task))).digest("hex"); }
 export function remediationSubjectHash({ goalId, executionRevision, episodeId, conditionId, findingIds, task }) {
@@ -58,7 +68,7 @@ function validateCommand(value, label, cwd, realpathCwd) {
   return command;
 }
 
-export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd, planned = false, runtimeAcceptance = false, hostInternalRemediation = false } = {}) {
+export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd, planned = false, runtimeAcceptance = false, hostInternalRemediation = false, requireAgentProfile = false, v2Acceptance = false } = {}) {
   if (!Array.isArray(tasks) || (requireNonEmpty && tasks.length === 0)) throw new Error("tasks must be non-empty");
   if (tasks.length > MAX_CONTRACT_ARRAY_ITEMS) throw new Error(`tasks must contain at most ${MAX_CONTRACT_ARRAY_ITEMS} items`);
   if (!taskDefs || typeof taskDefs !== "object" || Array.isArray(taskDefs)) throw new Error("taskDefs is required");
@@ -73,9 +83,10 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
   for (const id of tasks) {
     const def = taskDefs[id];
     if (!def || typeof def !== "object") throw new Error(`missing taskDef for ${id}`);
-    const allowedFields = ["description", "deps", "writePaths", "acceptance", "workflow", "metadata"];
+    const allowedFields = ["description", "deps", "writePaths", "acceptance", "workflow", "metadata", ...(requireAgentProfile ? ["agentProfile"] : [])];
     if (Object.keys(def).some((key) => !allowedFields.includes(key))) throw new Error(`taskDef ${id} contains unknown field`);
     nonEmpty(def.description, `taskDef ${id} description`);
+    if (requireAgentProfile) normalizeAgentProfile(def.agentProfile, `taskDef ${id} agentProfile`);
     if (Object.hasOwn(def, "metadata")) {
       if (!hostInternalRemediation) throw new Error(`taskDef ${id} metadata is Host-internal only`);
       validateRemediationMetadata(def.metadata, `taskDef ${id} metadata`);
@@ -90,7 +101,7 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
     if (!def.writePaths.length) throw new Error(`taskDef ${id} missing writePaths`);
     def.writePaths.forEach((path, index) => validateRepoRelativePath(path, `taskDef ${id} writePaths[${index}]`));
     if (!def.acceptance || typeof def.acceptance !== "object" || Array.isArray(def.acceptance)) throw new Error(`taskDef ${id} requires acceptance`);
-    if (runtimeAcceptance) validateRuntimeAcceptance(def.acceptance, id);
+    if (runtimeAcceptance) validateRuntimeAcceptance(def.acceptance, id, { v2: v2Acceptance });
     else if (planned) validatePlannedAcceptance(def.acceptance, id);
     else {
       assertContractArray(def.acceptance.criteria, `taskDef ${id} acceptance.criteria`);
@@ -105,25 +116,26 @@ export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = tru
   validateDAG(graph);
 }
 
-function validateCriterionFields(criterion, index, taskId, { runtime = false } = {}) {
+function validateCriterionFields(criterion, index, taskId, { runtime = false, v2 = false } = {}) {
   if (!criterion || typeof criterion !== "object" || Array.isArray(criterion)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] is invalid`);
+  if (v2 && !Object.hasOwn(criterion, "evaluator")) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] requires a v2 evaluator`);
   const keys = Object.keys(criterion).sort();
   const expectedKeys = !runtime ? ["evidenceKinds", "id", "statement"]
     : criterion.evaluator === "coordinator" ? ["evaluator", "evidenceKinds", "id", "predicate", "statement"]
-      : criterion.evaluator === "executor" ? ["evaluator", "evidenceKinds", "id", "statement"]
+      : (criterion.evaluator === "executor" || criterion.evaluator === "run") ? ["evaluator", "evidenceKinds", "id", "statement"]
         : ["evidenceKinds", "id", "statement"];
   if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] must contain exactly ${expectedKeys.join(", ")}`);
-  if (runtime && criterion.evaluator === "coordinator" && !COORDINATOR_PREDICATES.has(criterion.predicate)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] has invalid coordinator predicate`);
-  if (runtime && Object.hasOwn(criterion, "evaluator") && !["executor", "coordinator"].includes(criterion.evaluator)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] has invalid evaluator shape`);
+  if (runtime && criterion.evaluator === "coordinator" && !(v2 ? V2_COORDINATOR_PREDICATES : COORDINATOR_PREDICATES).has(criterion.predicate)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] has invalid coordinator predicate`);
+  if (runtime && Object.hasOwn(criterion, "evaluator") && !(v2 ? ["run", "coordinator"] : ["executor", "coordinator"]).includes(criterion.evaluator)) throw new Error(`taskDef ${taskId} acceptance.criteria[${index}] has invalid evaluator shape`);
 }
 
-function validateStructuredAcceptance(acceptance, taskId, { runtime = false } = {}) {
+function validateStructuredAcceptance(acceptance, taskId, { runtime = false, v2 = false } = {}) {
   if (Object.keys(acceptance).length !== 1 || !Object.hasOwn(acceptance, "criteria")) throw new Error(`taskDef ${taskId} planned acceptance must contain only criteria`);
   assertContractArray(acceptance.criteria, `taskDef ${taskId} acceptance.criteria`);
   if (!acceptance.criteria.length) throw new Error(`taskDef ${taskId} acceptance.criteria must be non-empty`);
   const ids = new Set();
   acceptance.criteria.forEach((criterion, index) => {
-    validateCriterionFields(criterion, index, taskId, { runtime });
+    validateCriterionFields(criterion, index, taskId, { runtime, v2 });
     if (!CRITERION_ID.test(criterion.id || "") || ids.has(criterion.id)) throw new Error(`taskDef ${taskId} acceptance.criteria has invalid or duplicate id: ${criterion.id}`);
     ids.add(criterion.id);
     nonEmpty(criterion.statement, `taskDef ${taskId} acceptance.criteria[${index}].statement`);
@@ -133,4 +145,4 @@ function validateStructuredAcceptance(acceptance, taskId, { runtime = false } = 
 }
 
 function validatePlannedAcceptance(acceptance, taskId) { validateStructuredAcceptance(acceptance, taskId); }
-export function validateRuntimeAcceptance(acceptance, taskId) { validateStructuredAcceptance(acceptance, taskId, { runtime: true }); }
+export function validateRuntimeAcceptance(acceptance, taskId, { v2 = false } = {}) { validateStructuredAcceptance(acceptance, taskId, { runtime: true, v2 }); }

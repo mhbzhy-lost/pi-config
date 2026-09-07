@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import { createTypedSubagentExtension } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts";
-import { bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, unbindGoalExecutorCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import { bindGoalRunCoordinator, bindGoalRunCoordinatorSession, unbindGoalRunCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 
 const contract = {
   version: "dispatch-ir.v1", taskId: "identity-ledger", title: "Bind durable spawn identity", agent: "executor", risk: "normal",
@@ -13,7 +14,7 @@ const contract = {
   acceptance: { criteria: ["Identity is trusted."] }, execution: { cwd: "/repo", timeoutMs: 1_000 },
 };
 
-function setup() {
+function setup({ sessionId = "s" }: { sessionId?: string } = {}) {
   const tools = []; const calls = []; const listeners = new Map();
   const events = {
     on(type, listener) {
@@ -25,13 +26,13 @@ function setup() {
   };
   const pi = { events, registerTool(tool) { tools.push(tool); }, on() {} };
   const rpc = {
-    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "s", cwd: "/repo" } }; },
+    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId, cwd: "/repo" } }; },
     async spawn(params, options) {
       calls.push({ params, options });
       const match = params.workflowScript.match(/^return await runs\.run\(([^,]+), (.*)\);$/);
       const workflowKey = JSON.parse(match[1]); const { agent } = JSON.parse(match[2]);
       queueMicrotask(() => events.emit("subagent:async-started", {
-        parentWorkflowRunId: "run-1", runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "s", pid: 123, agent, workflowKey,
+        parentWorkflowRunId: "run-1", runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId, pid: 123, agent, workflowKey,
       }));
       return { details: { runId: "run-1", asyncDir: "/tmp/run-1" } };
     },
@@ -80,15 +81,57 @@ function workspaceReceipt(workspaceRequest: any, run: any = null) {
   };
 }
 
+function strictAuthorizationRegistrar(expectedKind: "coding" | "generic", registered: any[]) {
+  return (authorization: any) => {
+    const value = authorization?.binding;
+    if (!authorization || typeof authorization !== "object" || Array.isArray(authorization)
+      || authorization.kind !== expectedKind
+      || !value || typeof value !== "object" || Array.isArray(value)
+      || typeof value.runId !== "string" || value.runId.length === 0
+      || typeof value.asyncDir !== "string" || !path.isAbsolute(value.asyncDir)
+      || typeof value.sessionId !== "string" || value.sessionId.length === 0
+      || !Number.isSafeInteger(value.pid) || value.pid <= 0
+      || typeof value.agentProfile !== "string" || value.agentProfile.length === 0) {
+      throw new Error("Run authorization binding is invalid");
+    }
+    registered.push(authorization);
+  };
+}
+
+function createTestExtension(pi: any, options: any) {
+  return createTypedSubagentExtension(pi, {
+    registerAuthorizedRun() {},
+    discoverAgents() {
+      return { agents: [{ name: "executor" }, { name: "reviewer" }, { name: "coder-alpha" }, { name: "coder-beta" }] };
+    },
+    ...options,
+  });
+}
+
+function goalTicket(contractHash: string) {
+  return {
+    version: "goal-run-binding-ticket.v2",
+    ticketId: "a".repeat(64),
+    goalId: "goal-1",
+    taskId: "task-1",
+    attempt: 1,
+    contractHash,
+    workspaceId: "goal-workspace-1",
+    executionRevision: 1,
+    expectedCriteria: ["identity"],
+    spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" },
+  };
+}
+
 test("coding spawn binds the Goal coordinator through a same-root different-ExtensionAPI wrapper before returning", async () => {
-  const { pi, rpc, tools } = setup();
+  const { pi, rpc, tools } = setup({ sessionId: "root-shared" });
   const goalPi = { events: {} };
   const bindings: any[] = [];
   let request: any;
   const coordinator = {
     prepareSpawn(input: any) {
       request = goalWorkspaceRequest(input.contractHash);
-      return { ticketId: "goal-ticket", spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" }, workspaceRequest: request };
+      return { ...goalTicket(input.contractHash), workspaceRequest: request };
     },
     workspaceAllocated() {},
     confirmSpawn() {},
@@ -98,22 +141,22 @@ test("coding spawn binds the Goal coordinator through a same-root different-Exte
     ensureAllocated() { return workspaceReceipt(request); },
     bindRun({ run }: any) { return workspaceReceipt(request, run); },
   };
-  bindGoalExecutorCoordinator(goalPi, coordinator);
-  bindGoalExecutorCoordinatorSession(goalPi, "root-shared", coordinator);
+  bindGoalRunCoordinator(goalPi, coordinator);
+  bindGoalRunCoordinatorSession(goalPi, "root-shared", coordinator);
   try {
-    createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, workspaceService, resolveRootSessionId() { return "root-shared"; } });
+    createTestExtension(pi, { rpc, cleanupStore: {}, workspaceService, resolveRootSessionId() { return "root-shared"; } });
     const result = await tools[0].execute("goal-wrapper-bridge", { ...contract, execution: { ...contract.execution, worktree: true } }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
     assert.equal(result.isError, false, result.content[0]?.text);
     assert.equal(bindings.length, 1);
-    assert.equal(bindings[0].ticket.ticketId, "goal-ticket");
-    assert.deepEqual(bindings[0].binding, { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "s", pid: 123, agent: "executor" });
+    assert.equal(bindings[0].ticket.ticketId, "a".repeat(64));
+    assert.deepEqual(bindings[0].binding, { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "root-shared", pid: 123, agent: "executor" });
   } finally {
-    unbindGoalExecutorCoordinatorSession(goalPi, "root-shared", coordinator);
+    unbindGoalRunCoordinatorSession(goalPi, "root-shared", coordinator);
   }
 });
 
 test("Goal coding spawn allocates through the shared service in the exact four-stage order", async () => {
-  const { pi, rpc, calls, tools } = setup();
+  const { pi, rpc, calls, tools } = setup({ sessionId: "root-shared" });
   const order: string[] = [];
   let preparedRequest: any;
   let activeReceipt: any;
@@ -135,7 +178,7 @@ test("Goal coding spawn allocates through the shared service in the exact four-s
     prepareSpawn(request: any) {
       order.push("prepareSpawn");
       preparedRequest = goalWorkspaceRequest(request.contractHash);
-      return { ticketId: "goal-ticket", spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" }, workspaceRequest: preparedRequest };
+      return { ...goalTicket(request.contractHash), workspaceRequest: preparedRequest };
     },
     workspaceAllocated(_ticket: any, receipt: any) { order.push("workspaceAllocated"); assert.strictEqual(receipt, activeReceipt); },
     confirmSpawn(_ticket: any, receipt: any) { order.push("confirmSpawn"); assert.strictEqual(receipt, activeReceipt); },
@@ -143,7 +186,7 @@ test("Goal coding spawn allocates through the shared service in the exact four-s
   };
   const spawn = rpc.spawn;
   rpc.spawn = async (...args: any[]) => { order.push("spawn"); return spawn(...args); };
-  createTypedSubagentExtension(pi, {
+  createTestExtension(pi, {
     rpc,
     cleanupStore: {},
     goalExecutorCoordinator: coordinator,
@@ -176,7 +219,7 @@ test("Goal coding spawn allocates through the shared service in the exact four-s
 });
 
 test("standalone coding worktree uses the same service and binds before Root Broker registration", async () => {
-  const { pi, rpc, tools } = setup();
+  const { pi, rpc, tools } = setup({ sessionId: "root-standalone" });
   const order: string[] = [];
   let allocated: any;
   const workspaceService = {
@@ -199,7 +242,7 @@ test("standalone coding worktree uses the same service and binds before Root Bro
   const spawn = rpc.spawn;
   rpc.spawn = async (...args: any[]) => { order.push("spawn"); return spawn(...args); };
   const registered: any[] = [];
-  createTypedSubagentExtension(pi, {
+  createTestExtension(pi, {
     rpc,
     cleanupStore: {},
     randomUUID: () => "standalone-workspace",
@@ -207,7 +250,10 @@ test("standalone coding worktree uses the same service and binds before Root Bro
     resolveRootSessionId: () => "root-standalone",
     resolveCanonicalOrigin: async () => "/repo",
     inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
-    registerFacadeRun(binding: any) { order.push("registerFacadeRun"); registered.push(binding); },
+    registerAuthorizedRun(authorization: any) {
+      order.push("registerAuthorizedRun");
+      strictAuthorizationRegistrar("coding", registered)(authorization);
+    },
   });
 
   const result = await tools[0].execute("standalone-call", {
@@ -216,14 +262,23 @@ test("standalone coding worktree uses the same service and binds before Root Bro
   }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
-  assert.deepEqual(order, ["ensureAllocated", "spawn", "bindRun", "registerFacadeRun"]);
+  assert.deepEqual(order, ["ensureAllocated", "spawn", "registerAuthorizedRun", "bindRun"]);
   assert.equal(result.details.dispatch_cwd, "/managed/goal-workspace-1");
   assert.equal(result.details.workspace_state, "active");
-  assert.equal(registered[0].runId, "leaf-1");
+  assert.equal(Object.hasOwn(allocated.run, "kind"), false);
+  assert.equal(Object.hasOwn(result.details, "kind"), false);
+  assert.deepEqual(registered[0], {
+    version: "subagent-run-authorization.v1",
+    kind: "coding",
+    binding: { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "root-standalone", pid: 123, agentProfile: "executor" },
+    capabilities: ["root.subscribe"],
+    goal: null,
+  });
 });
 
 test("generic worktree uses the unified service without enabling upstream worktrees", async () => {
-  const { pi, rpc, calls, tools } = setup();
+  const { pi, rpc, calls, tools } = setup({ sessionId: "root-generic" });
+  const registered: any[] = [];
   let allocated: any;
   const workspaceService = {
     ensureAllocated(request: any) {
@@ -235,7 +290,7 @@ test("generic worktree uses the unified service without enabling upstream worktr
     },
     bindRun({ run }: any) { allocated = { ...allocated, run }; return allocated; },
   };
-  createTypedSubagentExtension(pi, {
+  createTestExtension(pi, {
     rpc,
     cleanupStore: {},
     randomUUID: () => "generic-workspace",
@@ -243,7 +298,7 @@ test("generic worktree uses the unified service without enabling upstream worktr
     resolveRootSessionId: () => "root-generic",
     resolveCanonicalOrigin: async () => "/repo",
     inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
-    registerFacadeRun() {},
+    registerAuthorizedRun(authorization: any) { strictAuthorizationRegistrar("generic", registered)(authorization); },
   });
 
   const result = await tools[0].execute("generic-call", {
@@ -258,26 +313,182 @@ test("generic worktree uses the unified service without enabling upstream worktr
   assert.equal(calls[0].params.worktree, false);
   assert.equal(workflowLeaf(calls[0].params).worktree, false);
   assert.equal(result.details.workspace_id, allocated.workspaceId);
+  assert.equal(Object.hasOwn(allocated.run, "kind"), false);
+  assert.equal(Object.hasOwn(result.details, "kind"), false);
+  assert.deepEqual(registered[0], {
+    version: "subagent-run-authorization.v1",
+    kind: "generic",
+    binding: { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "root-generic", pid: 123, agentProfile: "reviewer" },
+    capabilities: [],
+    goal: null,
+  });
+});
+
+test("coding without a worktree registers root ownership while generic does not", async () => {
+  const { pi, rpc, tools, calls } = setup();
+  const registrations: any[] = [];
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    registerAuthorizedRun(authorization: any) { registrations.push(authorization); },
+  });
+
+  const coding = await tools[0].execute("plain-coding", contract, undefined, undefined, { cwd: "/repo" });
+  const generic = await tools[0].execute("plain-generic", { agent: "executor", title: "Review", task: "Inspect." }, undefined, undefined, { cwd: "/repo" });
+
+  assert.equal(coding.isError, false, coding.content[0]?.text);
+  assert.equal(generic.isError, false, generic.content[0]?.text);
+  assert.equal(registrations.length, 1);
+  assert.deepEqual(registrations[0].capabilities, ["root.subscribe"]);
+  assert.equal(registrations[0].binding.agentProfile, "executor");
+  assert.equal(workflowLeaf(calls[0].params).subagentOnlyExtensions.length, 1);
+  assert.equal(Object.hasOwn(workflowLeaf(calls[1].params), "subagentOnlyExtensions"), false);
+});
+
+test("renamed profiles retain typed coding and generic authorization boundaries", async () => {
+  const { pi, rpc, tools } = setup();
+  const registrations: any[] = [];
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    registerAuthorizedRun(authorization: any) { registrations.push(authorization); },
+  });
+
+  for (const agent of ["coder-alpha", "coder-beta"]) {
+    const result = await tools[0].execute(`renamed-${agent}`, { ...contract, agent }, undefined, undefined, { cwd: "/repo" });
+    assert.equal(result.isError, false, result.content[0]?.text);
+  }
+  const generic = await tools[0].execute("same-profile-generic", { agent: "coder-alpha", title: "Inspect", task: "Read only." }, undefined, undefined, { cwd: "/repo" });
+
+  assert.equal(generic.isError, false, generic.content[0]?.text);
+  assert.deepEqual(registrations.map((authorization) => ({
+    agentProfile: authorization.binding.agentProfile,
+    capabilities: authorization.capabilities,
+  })), [
+    { agentProfile: "coder-alpha", capabilities: ["root.subscribe"] },
+    { agentProfile: "coder-beta", capabilities: ["root.subscribe"] },
+  ]);
+});
+
+test("Goal coding registers exact ticket authority before returning a handle", async () => {
+  const { pi, rpc, tools } = setup();
+  let workspaceRequest: any;
+  const registered: any[] = [];
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    goalExecutorCoordinator: {
+      prepareSpawn(request: any) {
+        workspaceRequest = goalWorkspaceRequest(request.contractHash);
+        return { ...goalTicket(request.contractHash), workspaceRequest };
+      },
+      workspaceAllocated() {},
+      confirmSpawn() {},
+      bindSpawn() {},
+    },
+    workspaceService: {
+      ensureAllocated() { return workspaceReceipt(workspaceRequest); },
+      bindRun({ run }: any) { return workspaceReceipt(workspaceRequest, run); },
+    },
+    registerAuthorizedRun(authorization: any) { registered.push(authorization); },
+  });
+
+  const result = await tools[0].execute("goal-authority", { ...contract, agent: "coder-alpha", execution: { ...contract.execution, worktree: true } }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.deepEqual(registered[0], {
+    version: "subagent-run-authorization.v1",
+    kind: "coding",
+    binding: { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "s", pid: 123, agentProfile: "coder-alpha" },
+    capabilities: ["acceptance.submit", "root.subscribe"],
+    goal: {
+      ticketId: "a".repeat(64), goalId: "goal-1", taskId: "task-1", attempt: 1,
+      contractHash: result.details.contractHash, workspaceId: "goal-workspace-1", executionRevision: 1,
+      expectedCriteria: ["identity"],
+    },
+  });
+});
+
+test("authorization registration failure does not return a successful handle", async () => {
+  const { pi, rpc, tools } = setup();
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    registerAuthorizedRun() { throw Object.assign(new Error("broker unavailable"), { code: "BROKER_UNAVAILABLE" }); },
+  });
+
+  const result = await tools[0].execute("registration-failure", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo" });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "BROKER_UNAVAILABLE");
+});
+
+test("persisted lifecycle session remains distinct from the root authority identity", async () => {
+  const { pi, rpc, tools } = setup({ sessionId: "/tmp/root-session.jsonl" });
+  const registrations: any[] = [];
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    resolveRootSessionId: () => "root-session",
+    registerAuthorizedRun(value: any) { strictAuthorizationRegistrar("coding", registrations)(value); },
+  });
+
+  const result = await tools[0].execute("session-mismatch", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.equal(registrations[0].binding.sessionId, "/tmp/root-session.jsonl");
+});
+
+test("unsafe observed lifecycle session is rejected before authorization registration", async () => {
+  const { pi, rpc, tools } = setup({ sessionId: "relative/unsafe-session" });
+  let registrations = 0;
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    registerAuthorizedRun() { registrations += 1; },
+  });
+
+  const result = await tools[0].execute("unsafe-session", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo" });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "SUBAGENT_RPC_FAILED");
+  assert.match(result.content[0]?.text ?? "", /binding\.sessionId/);
+  assert.equal(registrations, 0);
 });
 
 test("coding spawn leaves executor model selection to ordered agent metadata", async () => {
   const { pi, rpc, calls, tools } = setup();
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
-  await tools[0].execute("ordered-models", contract, undefined, undefined, { cwd: "/repo" });
+  createTestExtension(pi, { rpc, cleanupStore: {} });
+  const result = await tools[0].execute("ordered-models", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(workflowLeaf(calls[0]?.params).agent, "executor");
   assert.equal(Object.hasOwn(workflowLeaf(calls[0]?.params), "model"), false);
+  assert.deepEqual(result.details.modelSelection, { source: "default" });
 });
 
-test("coding spawn lets explicit modelTier override the ordered metadata primary", async () => {
+test("coding spawn resolves the first available bare model from executor metadata", async () => {
   const { pi, rpc, calls, tools } = setup();
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
-  await tools[0].execute("tier-luna", { ...contract, modelTier: "luna" }, undefined, undefined, { cwd: "/repo" });
-  assert.equal(workflowLeaf(calls[0]?.params).model, "codex-pool/gpt-5.6-luna");
+  let discoveryCalls = 0;
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    discoverAgents() {
+      discoveryCalls += 1;
+      return { agents: [{ name: "executor", models: ["codex-pool/gpt-5.6-luna", "openai-codex/gpt-5.6-luna"] }] };
+    },
+  });
+  const result = await tools[0].execute("model-luna", { ...contract, model: "gpt-5.6-luna" }, undefined, undefined, {
+    cwd: "/repo",
+    modelRegistry: { getAvailable() { return [{ provider: "openai-codex", id: "gpt-5.6-luna" }]; } },
+  });
+  assert.equal(workflowLeaf(calls[0]?.params).model, "openai-codex/gpt-5.6-luna");
+  assert.deepEqual(result.details.modelSelection, { requestedModel: "gpt-5.6-luna", resolvedModel: "openai-codex/gpt-5.6-luna", source: "agent-candidates" });
+  assert.equal(Object.hasOwn(result.details, "warnings"), false);
+  assert.equal(discoveryCalls, 1);
 });
 
 test("coding spawn resolves durable metadata exactly once", async () => {
   const { pi, rpc, calls, tools } = setup(); const resolved = [];
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-1", spawnKey: "durable-dispatch-1" }; } });
+  createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-1", spawnKey: "durable-dispatch-1" }; } });
   const result = await tools[0].execute("tool-call-identity-1", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(result.isError, false, result.content[0]?.text); assert.equal(resolved.length, 1); assert.equal(calls.length, 1);
   assert.equal(result.details.dispatchId, "durable-dispatch-1");
@@ -287,21 +498,21 @@ test("coding spawn resolves durable metadata exactly once", async () => {
 
 test("coding spawn resolver receives the raw contract", async () => {
   const { pi, rpc, tools } = setup(); const resolved = [];
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
+  createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
   await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
   assert.strictEqual(resolved[0]?.contract, contract);
 });
 
 test("coding spawn resolver receives the tool call id", async () => {
   const { pi, rpc, tools } = setup(); const resolved = [];
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
+  createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
   await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(resolved[0]?.toolCallId, "tool-call-identity-2");
 });
 
 test("coding spawn resolver receives the exact compiled hash", async () => {
   const { pi, rpc, tools } = setup(); const resolved = [];
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
+  createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
   await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(resolved[0]?.contractHash, compileCodingDispatchIR(contract, { cwd: "/repo" }).hash);
 });
@@ -309,7 +520,7 @@ test("coding spawn resolver receives the exact compiled hash", async () => {
 test("coding spawn forwards resolver metadata raw as RPC options and excludes spawnKey from params", async () => {
   const { pi, rpc, calls, tools } = setup();
   const metadata = { requestId: "durable-dispatch-3", spawnKey: "durable-dispatch-3" };
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity() { return metadata; } });
+  createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity() { return metadata; } });
   await tools[0].execute("tool-call-identity-3", contract, undefined, undefined, { cwd: "/repo" });
   assert.strictEqual(calls[0]?.options, metadata);
   assert.equal(Object.hasOwn(calls[0]?.params ?? {}, "spawnKey"), false);
@@ -320,7 +531,7 @@ test("coding prepare runs after ping and before spawn", async () => {
   rpc.ping = async () => { order.push("ping"); return { version: 1, methods: ["spawn"], session: { sessionId: "s", cwd: "/repo" } }; };
   const spawn = rpc.spawn;
   rpc.spawn = async (...args) => { order.push("spawn"); return spawn(...args); };
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { order.push("prepare"); } });
+  createTestExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { order.push("prepare"); } });
   await tools[0].execute("prepare-call", contract, undefined, undefined, { cwd: "/repo" });
   assert.deepEqual(order, ["ping", "prepare", "spawn"]);
 });
@@ -330,14 +541,14 @@ test("coding prepare runs before durable identity resolution", async () => {
   rpc.ping = async () => { order.push("ping"); return { version: 1, methods: ["spawn"], session: { sessionId: "s", cwd: "/repo" } }; };
   const spawn = rpc.spawn;
   rpc.spawn = async (...args) => { order.push("spawn"); return spawn(...args); };
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { order.push("prepare"); }, resolveCodingSpawnIdentity() { order.push("resolveIdentity"); return { requestId: "x", spawnKey: "x" }; } });
+  createTestExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { order.push("prepare"); }, resolveCodingSpawnIdentity() { order.push("resolveIdentity"); return { requestId: "x", spawnKey: "x" }; } });
   await tools[0].execute("prepare-resolver-call", contract, undefined, undefined, { cwd: "/repo" });
   assert.deepEqual(order, ["ping", "prepare", "resolveIdentity", "spawn"]);
 });
 
 test("coding prepare failure prevents identity resolution and spawn", async () => {
   const { pi, rpc, calls, tools } = setup(); let resolved = 0;
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { throw new Error("owner wrapper failed"); }, resolveCodingSpawnIdentity() { resolved += 1; return { requestId: "x", spawnKey: "x" }; } });
+  createTestExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { throw new Error("owner wrapper failed"); }, resolveCodingSpawnIdentity() { resolved += 1; return { requestId: "x", spawnKey: "x" }; } });
   const result = await tools[0].execute("prepare-fail", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(result.isError, true); assert.match(result.content[0].text, /owner wrapper failed/);
   assert.equal(calls.length, 0); assert.equal(resolved, 0);
@@ -345,7 +556,7 @@ test("coding prepare failure prevents identity resolution and spawn", async () =
 
 test("generic and control dispatches never prepare or resolve coding spawn identity", async () => {
   const { pi, rpc, tools } = setup(); let resolved = 0; let prepared = 0;
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { prepared += 1; }, resolveCodingSpawnIdentity() { resolved += 1; return { requestId: "x", spawnKey: "x" }; } });
+  createTestExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { prepared += 1; }, resolveCodingSpawnIdentity() { resolved += 1; return { requestId: "x", spawnKey: "x" }; } });
   await tools[0].execute("generic-call", { agent: "reviewer", title: "Review", task: "Inspect." }, undefined, undefined, { cwd: "/repo" });
   await tools[0].execute("control-call", { action: "status", id: "run-1" }, undefined, undefined, { cwd: "/repo" });
   assert.equal(resolved, 0); assert.equal(prepared, 0);

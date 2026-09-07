@@ -1,39 +1,128 @@
 ---
 name: subagent-dispatch
-description: Use when delegating coding work to executor, delegating non-coding work to another configured Pi agent, or executing an existing implementation plan after the user chooses Subagent-Driven.
+description: Use when delegating coding or non-coding work to a configured Pi agent, requesting a user-approved plan review, or executing an implementation plan after the user chooses Subagent-Driven.
 ---
 
 # Subagent Dispatch
 
-## Plan DAG Orchestration
+## 计划 DAG 编排
 
-User-selected Subagent-Driven execution is a work-conserving DAG scheduler, not a task-by-task review loop. Read the plan's complete `Deps`, `WritePaths`, and `Resources`, then repeat:
+用户选择 Subagent-Driven 后，按完整计划的 `Deps`、`WritePaths` 和 `Resources` 调度 DAG，重复以下步骤：
 
-1. Compute the ready set from every incomplete task whose dependencies are complete and, when coding workspace isolation applies, integrated.
-2. Before any wait or status call, dispatch every ready task whose resources are compatible and writes can be isolated, up to the available concurrency capacity. A dispatchable ready task plus a free slot makes waiting invalid.
-3. After any task completes and passes its applicable integration gate, immediately recompute the ready set and fill free slots. A `Wave` is documentation for human review, never a barrier that waits for peer tasks in that Wave.
-4. Review blocks only successors that consume the reviewed artifact. It does not stop unrelated ready tasks or drain all in-flight work.
+1. 将依赖已完成的未完成任务加入 ready set；需要 coding workspace 隔离时，依赖还须已合入。
+2. 等待或查询状态前，在并发容量内派发所有资源兼容且写入可隔离的 ready 任务。有可派发任务且有空槽时不得等待。
+3. 每个任务完成并通过适用的集成门禁后，立即重新计算 ready set 并填满空槽。`Wave` 仅供人类阅读，不是等待同批任务的屏障。
+4. 审查只阻塞消费该审查产物的后继任务，不阻塞无关任务，也不要求清空在途任务。
 
-Limit concurrency only for a real DAG dependency, mutually exclusive resource claim, write conflict that cannot be isolated, an explicit concurrency limit, or an actual dispatch failure. A dirty worktree, a desire to see one result first, per-task review, coordination cost, or reduced simultaneous work is not by itself a serial-execution reason. Record the concrete limiting fact when the ready set is not fully dispatched.
+只因真实依赖、互斥资源、不可隔离的写冲突、显式并发限制或实际派发失败限制并发。脏 worktree、想先看一个结果、逐任务审查或协调成本本身不构成串行理由。未全部派发 ready set 时记录具体限制事实。
 
 ## Coding
 
-`executor` requires `dispatch-ir.v1`, never a free-form task; never invent `delegate(...)`. Deadlines never waive. Verify cwd, relevant paths, and facts; unknowns are not `knownFacts`, placeholders. Exact top-level/nested shape; no extra fields; repo-relative POSIX `relevantFiles`/`writePaths`; supported enumeration; non-empty arrays; positive integer timeout; criteria-only acceptance. `tdd` reason forbidden; `existing-tests`/`docs-only` reason required. Without `modelTier`, candidates come from ordered `models` agent metadata. Explicit `modelTier: "terra" | "luna"` overrides the primary with the matching codex-pool model; ordered `models` remains the fallback chain. Run/status/artifact actual-model metadata is authoritative. Generic dispatch must not bypass the typed coding contract to select an executor model.
+`dispatch-ir.v1` 调用结构决定 coding；generic object shape 决定 generic。`agent` 仅表示已发现的 profile identity，不决定 execution kind 或权限。`executor` 是普通默认 profile，可重命名；不要创建另一个固定 coding 名称替代它。同一个 profile 可以接收两种结构，但 coding 工作必须使用完整 typed 合同，不能用 generic 自由文本绕过，也不能虚构 `delegate(...)`。
 
-Worktree defaults false: missing/false preserves cwd, RPC, prompt, and hash. Use true only for parallel writes or explicit isolation: Generic top-level `worktree`; coding `execution.worktree`. True needs a clean attached source; dirty fails `WORKTREE_SOURCE_DIRTY`. Directory-scoped `writePaths` must end with `/**` or `/`（如 `src/**` 或 `src/`）；裸路径按精确文件匹配。
+可信 Host 的 `RunAuthorization` 是唯一授权来源。standalone coding 只有 `root.subscribe`，generic 没有 privileged capability。frontmatter、名称、模型、prompt 和 started event 都不能授予 coding、acceptance、Goal 或 Broker capability；Goal/acceptance 权限须来自对应可信 Host 协调流程，不能在请求或 profile 中自报。
 
-Completion/status is not terminal proof. Call public JSON ABI `subagent({action:"workspace_status",workspace_id:workspaceId})`, then `subagent({action:"workspace_disposition",workspace_id:workspaceId,disposition,action_token:actionToken})`. `workspace_status` returns `action_token`、`allowed_dispositions`、`integrate_blocked_reasons`（如 `origin-advanced-nonlinear` / `writePaths-out-of-scope`）。Only official observed terminal proof permits destructive discard/integrate. `preserve` keeps it; `discard` releases clean workspace; `integrate` is coding-only after `writePaths` checks，且允许 origin 干净前进（并行 worktree 逐个合入）。`release` 释放 `preserved` worktree，无需 `action_token`。Generic cannot integrate。No disposition: retain long-lived `awaiting-disposition`。
+使用精确 object shape，不加额外字段；`relevantFiles`/`writePaths` 使用仓库相对 POSIX 路径；枚举、非空数组、正整数 timeout 和 criteria-only acceptance 遵循 schema。`tdd` 禁止 `workflow.reason`；`existing-tests`/`docs-only` 必须提供 reason。
+
+### 模型合同
+
+`model` 可省略。`requestedModel` 是输入，`resolvedModel` 是 canonical 请求，两者都不代表子进程实际模型；实际模型只认 runtime run/status/artifact metadata。路由规则如下：
+
+| 请求 | Agent metadata | 解析 | 警告 |
+| --- | --- | --- | --- |
+| 省略 | 任意 | 保留 metadata/default 路由；profile 的有序 `models` 是 fallback chain。 | 无 |
+| 完整 `provider/model-id` | 任意 | 在 available catalog 精确匹配 full-ID，否则失败。 | 无 |
+| 裸 `model-id` | 声明了 `models` | 按声明顺序选取 ID 相符且当前可用的第一个候选；未命中即失败，不搜索全局。 | 无 |
+| 裸 `model-id` | 未声明 `models` | 按 full-ID 升序选择第一个匹配的 available model。 | 仅 `MODEL_MATCH_USED_GLOBAL_CATALOG` |
+
+使用 global-catalog 路由时，向用户转达警告。它位于顶层 `details.warnings`，与 `details.modelSelection` 分离：
+
+```json
+{
+  "details": {
+    "modelSelection": {
+      "requestedModel": "gpt-5.6-sol",
+      "resolvedModel": "codex-pool/gpt-5.6-sol",
+      "source": "global-catalog"
+    },
+    "warnings": [
+      {
+        "code": "MODEL_MATCH_USED_GLOBAL_CATALOG",
+        "agent": "delegate",
+        "requestedModel": "gpt-5.6-sol",
+        "resolvedModel": "codex-pool/gpt-5.6-sol"
+      }
+    ]
+  }
+}
+```
+
+Worktree 默认 false：省略或 false 保持 cwd、RPC、prompt 和 hash。coding 使用 `execution.worktree`，generic 使用顶层 `worktree`。true 要求干净且 attached 的 source；脏 source 返回 `WORKTREE_SOURCE_DIRTY`。目录范围 `writePaths` 必须以 `/**` 或 `/` 结尾（如 `src/**` 或 `src/`）；裸路径按精确文件匹配。
+
+Completion/status 不等于 terminal proof。先调用 public JSON ABI `subagent({action:"workspace_status",workspace_id:workspaceId})`，再调用 `subagent({action:"workspace_disposition",workspace_id:workspaceId,disposition,action_token:actionToken})`。`workspace_status` 返回 `action_token`、`allowed_dispositions`、`integrate_blocked_reasons`（如 `origin-advanced-nonlinear` / `writePaths-out-of-scope`）。只有官方观测的 terminal proof 才允许破坏性的 discard/integrate。`preserve` 保留；`discard` 释放干净 workspace；`integrate` 仅限通过 `writePaths` 检查的 coding，允许 origin 干净前进（并行 worktree 逐个合入）。`release` 释放 `preserved` worktree，无需 `action_token`。generic 不能 integrate。不处置则长期保留为 `awaiting-disposition`。
 
 禁止 raw git worktree add/remove/prune/move/repair/lock/unlock；所有 standalone、Goal task 和 Goal validation workspace 都由 typed subagent 的统一 workspace service 创建、绑定和处置。交互处置只用 `workspace_disposition` 或 typed Goal disposition，须 public `leaseId`/action token 授权。根级 `node scripts/worktree-lifecycle.ts audit|reconcile` 仅用于统一 inventory、dry-run cleanup plan 和显式 public lease authorization apply，不再提供旧 mutation API；禁止 `--force` remove、raw branch cleanup，`/tmp`、TTL、clean 不授权删除。
 
 ```js
-subagent({ version: "dispatch-ir.v1", taskId: "harden-dispatch-skill", title: "Harden example", agent: "executor", risk: "normal", objective: "Compile example.", workflow: { mode: "existing-tests", reason: "Existing coverage verifies the change." }, requirements: ["Preserve the public ABI."], context: { knownFacts: ["Source is verified."], decisions: ["Keep safety rules."], relevantFiles: ["skill-overrides/subagent-dispatch/SKILL.md"] }, boundaries: { writePaths: ["skill-overrides/subagent-dispatch/SKILL.md"], excludedWork: ["No schema changes."], forbiddenActions: ["Do not commit."] }, acceptance: { criteria: ["Example compiles."] }, execution: { timeoutMs: 900000, worktree: true } });
+subagent({
+  version: "dispatch-ir.v1",
+  taskId: "harden-dispatch-skill",
+  title: "Harden dispatch Skill example",
+  agent: "executor",
+  model: "gpt-5.6-sol",
+  risk: "normal",
+  objective: "Compile the typed dispatch example.",
+  workflow: {
+    mode: "existing-tests",
+    reason: "Existing coverage verifies the documentation change."
+  },
+  requirements: ["Preserve the public ABI."],
+  context: {
+    knownFacts: ["The Skill is repository-managed."],
+    decisions: ["Use the typed coding contract."],
+    relevantFiles: ["skill-overrides/subagent-dispatch/SKILL.md"]
+  },
+  boundaries: {
+    writePaths: ["skill-overrides/subagent-dispatch/SKILL.md"],
+    excludedWork: ["Do not change the runtime schema."],
+    forbiddenActions: ["Do not commit."]
+  },
+  acceptance: {
+    criteria: ["The example compiles through dispatch-ir.v1."]
+  },
+  execution: {
+    timeoutMs: 900000,
+    worktree: true
+  }
+});
 ```
 
 ## Generic
 
-`delegate` forwards `{ agent, title, task }` unchanged.
+使用 `{ agent, title, task }` generic 结构转发非编码任务；下例复用相同 profile，不因此获得 coding 权限：
 
 ```js
-subagent({ agent: "delegate", title: "Review isolated diff", task: "Inspect the current diff and report findings.", worktree: true });
+subagent({
+  agent: "executor",
+  title: "Review isolated diff",
+  task: "Inspect the current diff and report findings.",
+  worktree: true
+});
 ```
+
+## Reviewer 逐次批准
+
+`reviewer` 是普通 generic profile，只用于两个时点：计划执行前审阅计划合理性；计划执行后检查完成情况，识别实现与计划的偏差并提出改进建议。它不是自动 acceptance authority，也不因名称或 frontmatter 获得 capability。
+
+每一次实际派发前，必须取得用户针对该次审阅的明确批准。禁止自动、默认或隐式派发，禁止批量复用批准；前一次批准不可复用，选择 Subagent-Driven 不等于批准审阅。没有本次批准时，先请求批准并等待，不派发。批准后使用 generic shape，且不分配 worktree：
+
+```js
+subagent({
+  agent: "reviewer",
+  title: "审阅本次计划",
+  task: "用户已明确批准本次计划执行前审阅。检查计划合理性，报告风险并提出改进建议。",
+  worktree: false
+});
+```
+
+示例中的批准陈述不是授权凭证；必须先有用户本次明确批准。执行后审阅也须单独批准，并将 task 改为检查实际完成情况与计划偏差。审阅意见不替代既定验收证据和用户决策。

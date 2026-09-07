@@ -8,6 +8,7 @@ import test from "node:test";
 import { deriveOwnedExecutorStopRequest } from "../src/goal-engine/suspension.ts";
 import { appendEvent, loadProjection } from "../src/goal-engine/store.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
+import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 
@@ -17,7 +18,7 @@ const baseHead = "a".repeat(40);
 const contractHash = "b".repeat(64);
 const leaseId = "c".repeat(64);
 const hash = (n) => String(n).padStart(64, "0");
-const authority = (overrides = {}) => ({ goalId, taskId: "task-1", attempt: 1, runId: "r10b-executor", asyncDir: "/tmp/r10b-executor", workspacePath: "/tmp/r10b-workspace", leaseId, sessionId: ownerSessionId, baseHead, headAtDispatch: baseHead, executionRevision: 1, contractHash, agent: "executor", ...overrides });
+const authority = (overrides = {}) => ({ goalId, taskId: "task-1", attempt: 1, runId: "r10b-executor", asyncDir: "/tmp/r10b-executor", workspacePath: "/tmp/r10b-workspace", leaseId, sessionId: ownerSessionId, baseHead, headAtDispatch: baseHead, executionRevision: 1, contractHash, expectedCriteria: ["contract"], agent: "executor", ...overrides });
 
 function writeRecoveryArtifacts(authority, terminal) {
   const runtimeTerminal = { ...terminal, sessionId: authority.sessionId, asyncDir: authority.asyncDir, agent: "executor" };
@@ -37,6 +38,9 @@ function append(root, projection, type, data, number) {
 
 function approvalHash(executionContractHash) {
   return createHash("sha256").update(JSON.stringify({ baseHead, executionContractHash, goalId, proposalId: "r10b-approval", sessionId: ownerSessionId })).digest("hex");
+}
+async function authorize(broker, binding) {
+  await broker.registerAuthorizedRun(createRunAuthorization({ kind: "coding", binding: { runId: binding.runId, asyncDir: binding.asyncDir, sessionId: binding.sessionId, pid: 43210, agentProfile: binding.agent }, goal: null }));
 }
 
 function persistedBoundRuntime() {
@@ -76,6 +80,7 @@ test("RED: reload derives Root Broker request from event-sourced owner session a
       headAtDispatch: baseHead,
       executionRevision: 1,
       contractHash: projection.executionContractHash,
+      expectedCriteria: ["contract"],
       agent: "executor",
     });
   } finally {
@@ -101,8 +106,9 @@ test("GREEN protection: Root Broker stops only the exact registered owned identi
     },
   });
   t.after(() => broker.closeRootSession().catch(() => undefined));
-  await broker.observeStarted({ runId: "r10b-executor", id: "r10b-executor", agent: "executor", pid: 43210, asyncDir: "/tmp/r10b-executor", sessionId: ownerSessionId });
   const exact = authority({ contractHash, executionRevision: 1 });
+  await authorize(broker, exact);
+  await broker.observeStarted({ runId: "r10b-executor", id: "r10b-executor", agent: "executor", pid: 43210, asyncDir: "/tmp/r10b-executor", sessionId: ownerSessionId });
   for (const wrong of [{ ...exact, runId: "other-run" }, { ...exact, asyncDir: "/tmp/other" }, { ...exact, sessionId: "other-session" }]) {
     assert.equal((await broker.stopGoalOwnedRun(wrong)).state, "attention");
     assert.equal(calls.length, 0);
@@ -123,6 +129,7 @@ test("RED: fresh Broker recovers an exact failed Executor terminal artifact with
   const stopped = [];
   const upstream = { async ping() { return {}; }, async stop(request) { stopped.push(request); }, async dispose() {} };
   const brokerA = new RootBrokerServer({ rootSessionId: sessionId, lifecycleSessionId: sessionId, captureProcessBirthIdentity: async () => "restart-birth", writeGrant: async () => "/tmp/r10b-no-grant", upstream });
+  await brokerA.registerAuthorizedRun(createRunAuthorization({ kind: "coding", binding: { runId, asyncDir, sessionId, pid: 43212, agentProfile: "executor" }, goal: null }));
   await brokerA.observeStarted({ runId, id: runId, agent: "executor", pid: 43212, asyncDir, sessionId });
   brokerA.observeTerminal(terminal);
   await brokerA.closeRootSession();
@@ -164,6 +171,7 @@ test("GREEN protection: terminal recovery fails closed for identity, nonterminal
 test("GREEN protection: missing official proof returns attention without terminal fabrication", async (t) => {
   const broker = new RootBrokerServer({ rootSessionId: "r10b-proof-missing", lifecycleSessionId: "r10b-proof-missing", captureProcessBirthIdentity: async () => "r10b-birth", writeGrant: async () => "/tmp/r10b-no-grant", terminalTimeoutMs: 5, artifactPollIntervalMs: 1, upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} } });
   t.after(() => broker.closeRootSession().catch(() => undefined));
+  await broker.registerAuthorizedRun(createRunAuthorization({ kind: "coding", binding: { runId: "r10b-missing", asyncDir: "/tmp/r10b-missing", sessionId: "r10b-proof-missing", pid: 43211, agentProfile: "executor" }, goal: null }));
   await broker.observeStarted({ runId: "r10b-missing", id: "r10b-missing", agent: "executor", pid: 43211, asyncDir: "/tmp/r10b-missing", sessionId: "r10b-proof-missing" });
   assert.deepEqual(await broker.stopGoalOwnedRun(authority({ runId: "r10b-missing", asyncDir: "/tmp/r10b-missing", sessionId: "r10b-proof-missing" })), { state: "attention", code: "OWNED_STOP_TIMEOUT" });
   assert.equal(broker.inspectExecutorProof("r10b-missing").terminal, null);

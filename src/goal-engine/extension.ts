@@ -11,7 +11,7 @@ import { hostObservationAdapter } from "./observation-adapters.ts";
 import { prepareManagedValidation } from "./managed-validation.ts";
 import { actionableFrontier, nextObligationAction, obligationProgressFingerprint } from "./obligation-policy.ts";
 import { evaluateConditionGraph } from "./condition-validity.ts";
-import { generationCapabilities } from "./generation-capabilities.ts";
+import { generationCapabilities, isRuntimeGeneration, runtimeEventSchema } from "./generation-capabilities.ts";
 import { buildTransferChallenge, listCwdGoals, ownerSessionId, transferChallengeState, workspaceReleased } from "./session-transfer.ts";
 import { validateDAG, runnableFrontier, goalProgress, taskActionState, nextDispatchAttempt, orphanWorkspaceActionState } from "./graph.ts";
 import { appendEvent, appendEventBatch, appendEventBatchWithSettlementEvidence, loadProjection, loadFinalizationProjection, listGoals, listGoalIds } from "./store.ts";
@@ -33,16 +33,17 @@ import { finalizeGoal, buildObligationFinalizationManifest } from "./finalizatio
 import { createFinalReviewFileStore, runRecoverableFinalReview } from "./final-review.ts";
 import { deriveFindingFromFailedEvidence, openRepairEpisode, buildRemediationTaskCandidate, createRepairChallenge, recordRepairUserDecision, issueRepairCapability, validateRemediationTask, planRepairObservationLink, repairEpisodeTransition } from "./repair-policy.ts";
 import {
-  assertExecutorBindingTicketCurrent,
-  assertExecutorSettlementProof,
-  executorBoundEventData,
-  prepareExecutorBindingTicket,
-} from "./executor-binding.ts";
-import { bindGoalExecutorCoordinator, bindGoalExecutorCoordinatorSession, unbindGoalExecutorCoordinatorSession, inspectRootBrokerExecutorProof, persistGoalExecutorBindingAuthority } from "../../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+  assertExecutionSettlementProof,
+  assertRunBindingTicketCurrent,
+  assertTicketReceipt,
+  prepareRunBindingTicket,
+  runBoundEventData,
+} from "./run-binding.ts";
+import { bindGoalRunCoordinator, bindGoalRunCoordinatorSession, unbindGoalRunCoordinatorSession, inspectRootBrokerExecutionProof, persistGoalRunBindingAuthority } from "../../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 import { resolveRootSessionId, parseProcessTerminal } from "../../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
 import { findManagedWorkspaceService } from "../../packages/pi-subagents-enhanced/src/workspace/registry.ts";
-import { executorCriteria, validateTaskDefinitions } from "./task-definition.ts";
-import { buildSuspensionPlan, deriveOwnedExecutorStopRequest, suspensionClosureStatus } from "./suspension.ts";
+import { runCriteria, validateTaskDefinitions } from "./task-definition.ts";
+import { buildSuspensionPlan, deriveOwnedRunStopRequest, suspensionClosureStatus } from "./suspension.ts";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.ts";
 import { createGoalToolRenderers } from "./tool-renderer.ts";
 
@@ -78,9 +79,9 @@ function isUnifiedWorkspaceReceipt(workspace) {
   return workspace?.schemaVersion === "managed-workspace.v1" && typeof workspace.workspaceId === "string";
 }
 
-function unifiedTerminalProof(executorProof) {
-  return executorProof
-    ? { state: "observed", conflict: false, proofHash: executorProof.proofId }
+function unifiedTerminalProof(runProof) {
+  return runProof
+    ? { state: "observed", conflict: false, proofHash: runProof.proofId }
     : { state: "pending" };
 }
 
@@ -143,13 +144,13 @@ function preflightError(code, observed, remediation, requiredNextAction) {
   return error;
 }
 
-function readChildSettlementEvidence(task, supplied, identity, criteria) {
+function readChildSettlementEvidence(task, supplied, identity, criteria, binding) {
   if (!supplied || typeof supplied !== "object" || Array.isArray(supplied) || Object.keys(supplied).sort().join(",") !== "content,sha256") throw new Error("subagent_evidence must contain exactly sha256 and content");
   if (!/^[a-f0-9]{64}$/.test(supplied.sha256)) throw new Error("subagent_evidence sha256 is invalid");
-  if (task.executorBinding.workspacePath !== task.workspace.path) throw new Error("executor binding workspacePath mismatch");
+  if (binding.workspacePath !== task.workspace.path) throw new Error("run binding workspacePath mismatch");
   const normalized = normalizeSettlementEvidence(supplied.content, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
   if (fingerprintSettlementEvidence(normalized, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" }) !== supplied.sha256) throw new Error("subagent_evidence fingerprint mismatch");
-  const path = join(task.executorBinding.asyncDir, "acceptance-evidence", `${supplied.sha256}.yaml`);
+  const path = join(binding.asyncDir, "acceptance-evidence", `${supplied.sha256}.yaml`);
   const before = lstatSync(path);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || (before.mode & 0o7777) !== 0o600) throw new Error("unsafe subagent evidence artifact");
   const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
@@ -211,7 +212,9 @@ function validateProjectionForDispatch(projection, cwd) {
     cwd,
     realpathCwd: realpathSync(cwd),
     planned: generationCapabilities(projection.eventSchemaVersion).taskContract === "criteria-only",
-    runtimeAcceptance: projection.eventSchemaVersion === "goal-runtime.v1",
+    runtimeAcceptance: isRuntimeGeneration(projection.eventSchemaVersion),
+    requireAgentProfile: generationCapabilities(projection.eventSchemaVersion).runBinding === "strict",
+    v2Acceptance: generationCapabilities(projection.eventSchemaVersion).runBinding === "strict",
   });
   assertPendingTaskContractsCompile(projection, cwd);
 }
@@ -383,6 +386,7 @@ function stateRoot(cwd) {
 
 function taskDefsFromProjection(projection) {
   return Object.fromEntries([...projection.tasks].map(([taskId, task]) => [taskId, {
+    ...(task.agentProfile === undefined ? {} : { agentProfile: task.agentProfile }),
     description: task.description,
     deps: task.deps,
     writePaths: task.writePaths,
@@ -521,7 +525,10 @@ function statusResponse(projection, cwd, root, { machineAction = null, actionTok
         evidence_count: t.evidence.length,
         attempts: t.attempts,
         contractHash: t.contractHash,
-        ...(Object.hasOwn(t, "executorBinding") ? { executorBinding: t.executorBinding ? { ...t.executorBinding } : null } : {}),
+        ...(Object.hasOwn(t, "runBinding") ? { runBinding: t.runBinding ? { ...t.runBinding } : null } : {}),
+        ...(projection.eventSchemaVersion === "planned.v1" || projection.eventSchemaVersion === "goal-runtime.v1"
+          ? { executorBinding: t.executorBinding ? { ...t.executorBinding } : null }
+          : {}),
         workspace: t.workspace ? { ...t.workspace } : null,
         allowedActions: actionState.allowedActions,
         requiredNextAction: actionState.requiredNextAction,
@@ -635,7 +642,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     return makeEvent(type, data, goalId, schemaVersionForMutation(projection, legacyEventSchemaVersion));
   };
   const inspectExecutorWorkspaceFn = options.inspectExecutorWorkspace || inspectExecutorWorkspace;
-  const inspectExecutorProofFn = options.inspectExecutorProof || ((runId, rootSessionId) => inspectRootBrokerExecutorProof(pi, runId, rootSessionId));
+  const inspectRunProofFn = options.inspectExecutionProof || ((runId, rootSessionId) => inspectRootBrokerExecutionProof(pi, runId, rootSessionId));
   const workspaceServiceFor = (ctx) => {
     const rootSessionId = resolveRootSessionId(ctx?.sessionManager);
     const service = options.workspaceService || findManagedWorkspaceService(pi, rootSessionId);
@@ -858,7 +865,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       });
       if (!ready) return { attention: ["RUNTIME_CALIBRATION_BLOCKED"] };
       const current = loadProjectionFn(root, goalId);
-      appendEventFn(root, makeEvent("goal.runtime_activated", {}, goalId, "goal-runtime.v1"), current.version);
+      appendEventFn(root, makeEvent("goal.runtime_activated", {}, goalId, runtimeEventSchema(current)), current.version);
       return { activated: true };
     }
     try {
@@ -1087,26 +1094,21 @@ export function createGoalEngineExtension(pi, options = {}) {
     return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
   };
   const allocatedGoalReceipts = new Map();
-  const executorCoordinator = {
+  const runCoordinator = {
     prepareSpawn({ contract, contractHash, ctx }) {
       const { cwd, root } = executionScopeFor(ctx);
       const tickets = [];
       for (const goalId of listGoalsFn(root)) {
         const projection = loadProjectionFn(root, goalId);
-        const ticket = prepareExecutorBindingTicket({
-          projection,
-          contract,
-          contractHash,
-          controlCwd: cwd,
-          rootSessionId: resolveRootSessionId(ctx?.sessionManager),
-        });
+        const taskId = [...projection.tasks.keys()].find((id) => contract?.taskId === `${goalId}.${id}`);
+        const ticket = typeof taskId === "string" ? prepareRunBindingTicket({ projection, taskId, contractHash, controlCwd: cwd, rootSessionId: resolveRootSessionId(ctx?.sessionManager) }) : null;
         if (ticket) tickets.push(ticket);
       }
       if (tickets.length > 1) throw preflightError("EXECUTOR_BINDING_MISMATCH", "coding spawn matches multiple Goal tickets", "inspect Goal state and retry the exact dispatched contract");
       return tickets[0] ?? null;
     },
     workspaceAllocated(ticket, value) {
-      const receipt = publicManagedWorkspaceReceipt(value);
+      const receipt = assertTicketReceipt(ticket, value);
       const { root } = executionScopeFor({ cwd: ticket.controlCwd }, { goalId: ticket.goalId });
       let projection = loadProjectionFn(root, ticket.goalId);
       const currentTask = projection.tasks.get(ticket.taskId);
@@ -1114,11 +1116,11 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (!isDeepStrictEqual(currentTask.workspace, receipt)) {
           throw preflightError("EXECUTOR_BINDING_MISMATCH", "attempt already has a conflicting workspace receipt", "inspect goal_status and retain the conflicting workspace for recovery");
         }
-        assertExecutorBindingTicketCurrent(ticket, projection, receipt);
+        assertRunBindingTicketCurrent(ticket, projection);
         allocatedGoalReceipts.set(ticket.ticketId, receipt);
         return receipt;
       }
-      assertExecutorBindingTicketCurrent(ticket, projection);
+      assertRunBindingTicketCurrent(ticket, projection);
       const event = makeGoalEvent("task.workspace_allocated", {
         taskId: ticket.taskId,
         attempt: ticket.attempt,
@@ -1132,15 +1134,15 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (!isDeepStrictEqual(recovered?.tasks?.get(ticket.taskId)?.workspace, receipt)) throw error;
         projection = recovered;
       }
-      assertExecutorBindingTicketCurrent(ticket, projection, receipt);
+      assertRunBindingTicketCurrent(ticket, projection);
       allocatedGoalReceipts.set(ticket.ticketId, receipt);
       return receipt;
     },
     confirmSpawn(ticket, value) {
-      const receipt = publicManagedWorkspaceReceipt(value);
+      const receipt = assertTicketReceipt(ticket, value);
       const { root } = executionScopeFor({ cwd: ticket.controlCwd }, { goalId: ticket.goalId });
       const projection = loadProjectionFn(root, ticket.goalId);
-      assertExecutorBindingTicketCurrent(ticket, projection, receipt);
+      assertRunBindingTicketCurrent(ticket, projection);
       const allocated = allocatedGoalReceipts.get(ticket.ticketId);
       if (allocated && !isDeepStrictEqual(allocated, receipt)) {
         throw preflightError("EXECUTOR_BINDING_MISMATCH", "workspace receipt changed before spawn", "inspect goal_status and do not start an executor for the stale receipt");
@@ -1152,35 +1154,35 @@ export function createGoalEngineExtension(pi, options = {}) {
       const { root } = executionScopeFor({ cwd: ticket.controlCwd }, { goalId: ticket.goalId });
       let projection = loadProjectionFn(root, ticket.goalId);
       const receipt = allocatedGoalReceipts.get(ticket.ticketId) ?? projection.tasks.get(ticket.taskId)?.workspace;
-      const task = assertExecutorBindingTicketCurrent(ticket, projection, receipt);
-      const data = executorBoundEventData(ticket, binding, receipt);
-      if (task.executorBinding) {
+      const task = assertRunBindingTicketCurrent(ticket, projection);
+      const data = runBoundEventData(ticket, binding, receipt);
+      if (task.runBinding) {
         const expected = { ...data }; delete expected.taskId;
-        if (!isDeepStrictEqual(task.executorBinding, expected)) throw preflightError("EXECUTOR_BINDING_MISMATCH", "attempt already has a different executor binding", "do not replace the bound run; inspect goal_status");
+        if (!isDeepStrictEqual(task.runBinding, expected)) throw preflightError("RUN_BINDING_MISMATCH", "attempt already has a different run binding", "do not replace the bound run; inspect goal_status");
       } else {
-        const event = makeGoalEvent("task.executor_bound", data, ticket.goalId, projection);
+        const event = makeGoalEvent("task.run_bound", data, ticket.goalId, projection);
         try {
           projection = appendEventFn(root, event, projection.version);
         } catch (error) {
           const recovered = loadProjectionFn(root, ticket.goalId);
-          const observed = recovered.tasks.get(ticket.taskId)?.executorBinding;
+          const observed = recovered.tasks.get(ticket.taskId)?.runBinding;
           const expected = { ...data }; delete expected.taskId;
           if (!isDeepStrictEqual(observed, expected)) throw error;
           projection = recovered;
         }
       }
-      const persisted = projection.tasks.get(ticket.taskId).executorBinding;
+      const persisted = projection.tasks.get(ticket.taskId).runBinding;
       // Only the coordinator reaches this internal Broker facade, and only after
-      // task.executor_bound has durably appended.
+      // task.run_bound has durably appended.
       if (typeof ticket.rootSessionId === "string" && ticket.rootSessionId && Number.isSafeInteger(ticket.executionRevision) && ticket.executionRevision > 0) {
-        try { persistGoalExecutorBindingAuthority(pi, {
-          version: "root-broker.goal-binding-authority.v1",
+        try { persistGoalRunBindingAuthority(pi, {
+          version: "root-broker.goal-run-binding-authority.v2",
           ticketId: ticket.ticketId,
           goalId: ticket.goalId, taskId: ticket.taskId, attempt: ticket.attempt,
           runId: data.runId, asyncDir: data.asyncDir, workspacePath: receipt.path,
           leaseId: receipt.leaseId, sessionId: binding.sessionId,
           baseHead: ticket.headAtDispatch, headAtDispatch: ticket.headAtDispatch,
-          executionRevision: ticket.executionRevision, contractHash: ticket.contractHash, agent: "executor",
+          executionRevision: ticket.executionRevision, contractHash: ticket.contractHash, agentProfile: data.agentProfile,
           expectedCriteria: [...ticket.expectedCriteria],
         }, ticket.rootSessionId); } catch (error) {
           if (!allowMissingRootBrokerForTests || !String(error?.message).includes("Root subagent broker is unavailable")) throw error;
@@ -1190,7 +1192,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       return persisted;
     },
   };
-  const recoverUnboundExecutorBinding = (projection, ctx, cwd, root) => {
+  const recoverUnboundRunBinding = (projection, ctx, cwd, root) => {
     const branch = ctx?.sessionManager?.getBranch?.();
     let rootSessionId;
     try { rootSessionId = resolveRootSessionId(ctx?.sessionManager); } catch { return null; }
@@ -1204,7 +1206,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     } catch { return null; }
     const candidates = [];
     for (const [taskId, task] of projection.tasks) {
-      if (task.status !== "dispatched" || task.executorBinding || !Number.isFinite(dispatchedAt.get(taskId))) continue;
+      if (task.status !== "dispatched" || task.runBinding || !Number.isFinite(dispatchedAt.get(taskId))) continue;
       const calls = branch.map((entry, index) => ({ entry, index })).filter(({ entry }) => {
         const content = entry?.type === "message" && entry.message?.role === "assistant" ? entry.message.content : null;
         const calls = Array.isArray(content) ? content.filter((part) => part?.type === "toolCall" && part.name === "subagent") : [];
@@ -1215,41 +1217,41 @@ export function createGoalEngineExtension(pi, options = {}) {
         let ticket;
         try {
           const compiled = compileCodingDispatchIR(call.arguments, { cwd });
-          ticket = prepareExecutorBindingTicket({ projection, contract: call.arguments, contractHash: compiled.hash, controlCwd: cwd, rootSessionId });
+          ticket = prepareRunBindingTicket({ projection, taskId, contractHash: compiled.hash, controlCwd: cwd, rootSessionId });
         } catch { continue; }
         if (!ticket || ticket.taskId !== taskId) continue;
         const results = branch.filter((result) => result?.type === "message" && result.message?.role === "toolResult" && result.message.toolName === "subagent" && result.message.toolCallId === call.id);
         if (results.length !== 1) continue;
         const handle = results[0].message.details;
         if (!exactPlainObject(handle, ["version", "dispatchId", "taskId", "agent", "title", "contractHash", "runId", "asyncDir", "workspace_id", "lease_id"])
-          || handle.version !== "coding-dispatch-handle.v1" || handle.agent !== "executor" || handle.taskId !== call.arguments.taskId
+          || handle.version !== "coding-dispatch-handle.v1" || handle.agent !== ticket.agentProfile || handle.taskId !== call.arguments.taskId
           || handle.contractHash !== ticket.contractHash || handle.workspace_id !== ticket.workspaceId
           || handle.lease_id !== task.workspace?.leaseId || handle.runId === undefined || handle.asyncDir === undefined) continue;
-        candidates.push({ ticket, binding: { runId: handle.runId, asyncDir: handle.asyncDir } });
+        candidates.push({ ticket, binding: { runId: handle.runId, asyncDir: handle.asyncDir, agentProfile: handle.agent } });
       }
     }
     if (candidates.length !== 1) return null;
     const candidate = candidates[0];
     try {
       const receipt = projection.tasks.get(candidate.ticket.taskId)?.workspace;
-      const data = executorBoundEventData(candidate.ticket, candidate.binding, receipt);
-      const proof = inspectExecutorProofFn(data.runId, rootSessionId);
-      const verified = assertExecutorSettlementProof({ task: { executorBinding: { ...data, taskId: undefined } }, proof });
-      if (verified.rootSessionId !== rootSessionId || proof.ownership.sessionId !== rootSessionId) return null;
-      return executorCoordinator.bindSpawn(candidate.ticket, candidate.binding);
+      const data = runBoundEventData(candidate.ticket, candidate.binding, receipt);
+      const proof = inspectRunProofFn(data.runId, rootSessionId);
+      const verified = assertExecutionSettlementProof({ task: { runBinding: { ...data, taskId: undefined } }, proof });
+      if (verified.rootSessionId !== rootSessionId) return null;
+      return runCoordinator.bindSpawn(candidate.ticket, { ...candidate.binding, sessionId: verified.rootSessionId });
     } catch { return null; }
   };
-  bindGoalExecutorCoordinator(pi, executorCoordinator);
+  bindGoalRunCoordinator(pi, runCoordinator);
   // ExtensionAPI wrappers are recreated independently.  Alias only the durable
   // root session identity; shutdown uses compare-and-delete so an old wrapper
   // cannot remove a replacement generation's coordinator.
   pi.on?.("session_start", (_event, ctx) => {
     const rootSessionId = resolveRootSessionId(ctx?.sessionManager);
-    bindGoalExecutorCoordinatorSession(pi, rootSessionId, executorCoordinator);
+    bindGoalRunCoordinatorSession(pi, rootSessionId, runCoordinator);
   });
   pi.on?.("session_shutdown", (_event, ctx) => {
     const rootSessionId = resolveRootSessionId(ctx?.sessionManager);
-    unbindGoalExecutorCoordinatorSession(pi, rootSessionId, executorCoordinator);
+    unbindGoalRunCoordinatorSession(pi, rootSessionId, runCoordinator);
   });
   const orphanRecord = (goalId, taskId, attempt, sessionId, inventory) => {
     const hash = stableHash(inventory);
@@ -1435,10 +1437,11 @@ export function createGoalEngineExtension(pi, options = {}) {
         // malformed canonical HEAD has no event authority and must fail before append.
         if (!/^[a-f0-9]{40}$/.test(world?.repo?.head || "")) throw initError("RUNTIME_READINESS_BLOCKER", "CurrentWorld canonical repo.head is absent or invalid", "capture a canonical repository HEAD and retry runtime initialization");
         if (!world.safe) readiness = { readiness: "unsafe_to_run", reasons: ["CurrentWorld is unsafe"] };
-        const runtimeEvent = makeEvent("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: world.repo.head }, goalId, "goal-runtime.v1");
+        const runtimeSchema = contract.execution.schema;
+        const runtimeEvent = makeEvent("goal.runtime_drafted", { runtimeInit: contract, executionContractHash: hashRuntimeExecutionContract(contract), baseHead: world.repo.head }, goalId, runtimeSchema);
         const candidate = applyEvent(createProjection(), runtimeEvent);
         const binding = buildSessionBinding({ projection: candidate, sessionId, leafId: ctx.sessionManager?.getLeafId?.() || "goal-init" });
-        const events = [runtimeEvent, makeEvent("goal.session_bound", binding, goalId, "goal-runtime.v1"), makeEvent("goal.runtime_readiness_recorded", readiness, goalId, "goal-runtime.v1")];
+        const events = [runtimeEvent, makeEvent("goal.session_bound", binding, goalId, runtimeSchema), makeEvent("goal.runtime_readiness_recorded", readiness, goalId, runtimeSchema)];
         const projection = appendEventBatchFn(root, events, 0);
         return JSON.stringify({ goalId, lifecycle: "active", runtimeState: projection.runtimeState, readiness: projection.readiness, attention: projection.runtimeState === "draft" ? "RUNTIME_READINESS_REQUIRED" : undefined });
       }
@@ -1520,7 +1523,7 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (!goalId) return "NO_ACTIVE_GOAL";
       let projection = loadProjectionFn(root, goalId);
       if (!projection) return "NO_ACTIVE_GOAL";
-      if (projection.eventSchemaVersion === "goal-runtime.v1" && projection.runtimeState === "suspended") {
+      if (isRuntimeGeneration(projection.eventSchemaVersion) && projection.runtimeState === "suspended") {
         await retrySuspendedOwnedStop(ctx, projection);
         projection = loadProjectionFn(root, goalId);
       }
@@ -1535,8 +1538,8 @@ export function createGoalEngineExtension(pi, options = {}) {
       if (runtimeIntentGate?.kind === "pending" && fullyClosedSuspendedOwnerProjection(projection, sessionId)) {
         runtimeIntentGates.delete(`${goalId}:${sessionId}`);
       }
-      if (projection.eventSchemaVersion === "goal-runtime.v1" && runtimeIntentGates.get(`${goalId}:${sessionId}`)?.kind === "pending") return JSON.stringify({ status: "R10B_SUSPENSION_REQUIRED" });
-      if (projection.eventSchemaVersion === "goal-runtime.v1") {
+      if (isRuntimeGeneration(projection.eventSchemaVersion) && runtimeIntentGates.get(`${goalId}:${sessionId}`)?.kind === "pending") return JSON.stringify({ status: "R10B_SUSPENSION_REQUIRED" });
+      if (isRuntimeGeneration(projection.eventSchemaVersion)) {
         if (!runtimeHost?.registries || typeof runtimeHost.captureCurrentWorld !== "function") return JSON.stringify({ goalId, status: "RUNTIME_READINESS_BLOCKER", attention: ["RUNTIME_HOST_AUTHORITY_UNAVAILABLE"] });
         let world;
         try { world = runtimeHost.captureCurrentWorld({ cwd }); } catch { world = null; }
@@ -1548,7 +1551,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         if (!pendingFinalIntent && projection.finalReview?.status !== "started") {
           const fingerprint = obligationProgressFingerprint({ projection, worldSnapshot: world });
           const previous = projection.progressLedger?.at(-1);
-          projection = appendEventFn(root, makeEvent("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: !previous || previous.canonicalFingerprint !== fingerprint, sequence: (projection.progressLedger?.length || 0) + 1 }, goalId, "goal-runtime.v1"), projection.version);
+          projection = appendEventFn(root, makeEvent("goal.checkpoint", { canonicalFingerprint: fingerprint, advanced: !previous || previous.canonicalFingerprint !== fingerprint, sequence: (projection.progressLedger?.length || 0) + 1 }, goalId, runtimeEventSchema(projection)), projection.version);
         }
         if (projection.runtimeState === "awaiting_user_approval") {
           const terminal = [...runtimeChallenges.values()].filter((item) => !item.invalid && item.challenge?.goalId === goalId && item.challenge?.sessionId === sessionId && (item.stale || item.rejected)).at(-1);
@@ -1571,7 +1574,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           if (record.decision?.choice === "approve" && record.decision.contractHash === projection.executionContractHash && record.decision.proposalHash === record.challenge.proposalHash && record.decision.baseHead === projection.runtimeBaseHead && world.repo.head === projection.runtimeBaseHead) {
             const nonce = runtimeNonceFactory();
             const capabilityDigest = createHash("sha256").update(Buffer.isBuffer(nonce) ? nonce : String(nonce)).digest("hex");
-            try { projection = appendEventFn(root, makeEvent("goal.runtime_approval_recorded", { proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, userEntryId: record.decision.userEntryId, capabilityDigest }, goalId, "goal-runtime.v1"), projection.version); } catch (error) { const recovered = loadProjectionFn(root, goalId), approval = recovered?.runtimeApproval; if (recovered?.runtimeState !== "calibrating" || approval?.proposalHash !== record.challenge.proposalHash || approval?.userEntryId !== record.decision.userEntryId || approval?.sessionId !== record.challenge.sessionId || approval?.executionContractHash !== record.challenge.executionContractHash || approval?.baseHead !== record.challenge.baseHead || approval?.capabilityDigest !== capabilityDigest) throw error; projection = recovered; }
+            try { projection = appendEventFn(root, makeEvent("goal.runtime_approval_recorded", { proposalId: record.challenge.proposalId, proposalHash: record.challenge.proposalHash, executionContractHash: projection.executionContractHash, baseHead: projection.runtimeBaseHead, sessionId, userEntryId: record.decision.userEntryId, capabilityDigest }, goalId, runtimeEventSchema(projection)), projection.version); } catch (error) { const recovered = loadProjectionFn(root, goalId), approval = recovered?.runtimeApproval; if (recovered?.runtimeState !== "calibrating" || approval?.proposalHash !== record.challenge.proposalHash || approval?.userEntryId !== record.decision.userEntryId || approval?.sessionId !== record.challenge.sessionId || approval?.executionContractHash !== record.challenge.executionContractHash || approval?.baseHead !== record.challenge.baseHead || approval?.capabilityDigest !== capabilityDigest) throw error; projection = recovered; }
             persistMetadata("goal-engine-runtime-approval-consumed", { id: record.challenge.id }); runtimeChallenges.set(record.challenge.id, { ...record, consumed: true });
             // Approval consumption is this status call's sole business step.
             return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, progressLedger: projection.progressLedger });
@@ -1723,7 +1726,7 @@ export function createGoalEngineExtension(pi, options = {}) {
           }
         }
         const recoveredBinding = projection.runtimeState === "active"
-          ? recoverUnboundExecutorBinding(projection, ctx, cwd, root)
+          ? recoverUnboundRunBinding(projection, ctx, cwd, root)
           : null;
         if (recoveredBinding) return JSON.stringify({ ...JSON.parse(statusResponse(loadProjectionFn(root, goalId), cwd, root)), status: "RECOVERED_EXECUTOR_BINDING" });
         const inventory = activeObservationInventory(projection);
@@ -1811,7 +1814,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         return JSON.stringify({ goalId, runtimeState: projection.runtimeState, readiness: projection.readiness, attention: frontier.attention, blocking: frontier.blocking, progressLedger: projection.progressLedger });
       }
       if (!enforceActionTokens) return statusResponse(projection, cwd, root);
-      const recoveredBinding = recoverUnboundExecutorBinding(projection, ctx, cwd, root);
+      const recoveredBinding = recoverUnboundRunBinding(projection, ctx, cwd, root);
       if (recoveredBinding) return JSON.stringify({ ...JSON.parse(statusResponse(loadProjectionFn(root, goalId), cwd, root)), status: "RECOVERED_EXECUTOR_BINDING" });
       if (projection.sessionBindings?.some((binding) => binding.sessionId === sessionId && binding.state === "detached")) {
         return statusResponse(projection, cwd, root);
@@ -1999,18 +2002,19 @@ export function createGoalEngineExtension(pi, options = {}) {
       };
       const task = projection.tasks.get(params.task_id);
       if (params.outcome === "succeeded") validateNextAction(params.next_action);
-      if (generationCapabilities(projection.eventSchemaVersion).executorBinding === "strict" && task) {
+      const neutralSettlement = generationCapabilities(projection.eventSchemaVersion).runBinding === "strict";
+      if (generationCapabilities(projection.eventSchemaVersion).runBinding === "strict" && task) {
         let proof = null;
-        try { proof = await inspectExecutorProofFn(task.executorBinding?.runId); } catch { /* mapped to a stable missing-proof boundary below */ }
-        settlementData.executorProof = assertExecutorSettlementProof({ task, proof });
+        try { proof = await inspectRunProofFn(task.runBinding?.runId); } catch { /* mapped to a stable missing-proof boundary below */ }
+        settlementData.runProof = assertExecutionSettlementProof({ task, proof, taskOutcome: params.outcome });
       }
       // Validate semantic reducer errors before touching Git. A non-empty sentinel
       // exercises strict settlement binding without claiming persisted Git identity.
       if (params.outcome === "succeeded") {
         settlementData.attempt = task?.workspace?.owner?.attempt ?? task?.workspace?.attempt ?? 1;
-        settlementData.executorHead = "candidate-settlement-validation";
+        settlementData.executionHead = "candidate-settlement-validation";
       }
-      if (generationCapabilities(projection.eventSchemaVersion).settlement !== "dual-path") {
+      if (!neutralSettlement && generationCapabilities(projection.eventSchemaVersion).settlement !== "dual-path") {
         try { applyEvent(projection, makeGoalEvent("task.settled", settlementData, goalId, projection)); }
         catch (error) {
           if (params.outcome === "succeeded" && task?.status === "dispatched" && /workspace is required/i.test(error.message)) throw workspaceMutationError(error, { tool: "goal_status", params: { goal_id: goalId } });
@@ -2024,7 +2028,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         let lease;
         let inspection;
         const unifiedWorkspace = isUnifiedWorkspaceReceipt(task.workspace);
-        const terminalProof = unifiedTerminalProof(settlementData.executorProof);
+        const terminalProof = unifiedTerminalProof(settlementData.runProof);
         try {
           if (unifiedWorkspace) {
             const snapshot = workspaceServiceFor(ctx).status({ workspaceId: task.workspace.workspaceId, terminalProof });
@@ -2073,18 +2077,20 @@ export function createGoalEngineExtension(pi, options = {}) {
           throw settlementIdentityError("EXECUTOR_SETTLEMENT_HEAD_MISMATCH", `workspace=${lease.path}; firstHead=${inspection.headCommit}; observedHead=${confirmedInspection.headCommit}; firstClean=${inspection.clean}; observedClean=${confirmedInspection.clean}`, retry, "return to the same Executor worktree, verify the same Executor worktree HEAD and cleanliness, then retry goal_settle");
         }
         settlementData.attempt = lease.attempt;
-        settlementData.executorHead = confirmedInspection.headCommit;
-        if (generationCapabilities(projection.eventSchemaVersion).settlement === "dual-path") {
-          const identity = { goalId, taskId: params.task_id, runId: task.executorBinding.runId, attempt: lease.attempt, contractHash: task.contractHash, head: confirmedInspection.headCommit };
-          const criteria = executorCriteria(task.acceptance.criteria).map((criterion) => criterion.id);
-          const subagent = readChildSettlementEvidence(task, params.subagent_evidence, identity, criteria);
+        settlementData.executionHead = confirmedInspection.headCommit;
+        if (neutralSettlement || generationCapabilities(projection.eventSchemaVersion).settlement === "dual-path") {
+          const binding = neutralSettlement ? task.runBinding : task.executorBinding;
+          const proof = neutralSettlement ? settlementData.runProof : settlementData.executorProof;
+          const identity = { goalId, taskId: params.task_id, runId: binding.runId, attempt: lease.attempt, contractHash: task.contractHash, head: confirmedInspection.headCommit };
+          const criteria = runCriteria(task.acceptance.criteria).map((criterion) => criterion.id);
+          const subagent = readChildSettlementEvidence(task, params.subagent_evidence, identity, criteria, binding);
           const main = normalizeSettlementEvidence(params.main_verification, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
           assertIndependentSettlementEvidence(subagent, main);
           const subagentFingerprint = fingerprintSettlementEvidence(subagent, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
           const mainFingerprint = fingerprintSettlementEvidence(main, { expectedIdentity: identity, expectedCriteria: criteria, outcome: "succeeded" });
-          const content = `${JSON.stringify({ main, mainSessionId: settlementData.executorProof.rootSessionId, schemaVersion: "goal-engine.settlement-evidence.v1", subagent }, null, 2)}\n`;
+          const content = `${JSON.stringify({ main, mainSessionId: proof.rootSessionId, schemaVersion: "goal-engine.settlement-evidence.v1", subagent }, null, 2)}\n`;
           const sha256 = createHash("sha256").update(content).digest("hex");
-          settlementData.settlementEvidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${sha256}.yaml`, sha256, subagentFingerprint, mainFingerprint, subagent, main, mainSessionId: settlementData.executorProof.rootSessionId };
+          settlementData.settlementEvidence = { schemaVersion: "goal-engine.settlement-evidence.v1", path: `acceptance-evidence/sha256/${sha256}.yaml`, sha256, subagentFingerprint, mainFingerprint, subagent, main, mainSessionId: proof.rootSessionId };
           settlementData._artifact = { sha256, content };
         }
       }
@@ -2092,7 +2098,11 @@ export function createGoalEngineExtension(pi, options = {}) {
       const dualPathEventData = generationCapabilities(projection.eventSchemaVersion).settlement === "dual-path" && params.outcome === "succeeded"
         ? (({ taskId, outcome, attempt, executorHead, executorProof, settlementEvidence }) => ({ taskId, outcome, attempt, executorHead, executorProof, settlementEvidence }))(eventData)
         : eventData;
-      const settleEvent = makeGoalEvent("task.settled", dualPathEventData, goalId, projection);
+      const runEventData = neutralSettlement ? {
+        taskId: params.task_id, outcome: params.outcome, attempt: task.attempts, runProof: settlementData.runProof,
+        ...(params.outcome === "succeeded" ? { executionHead: settlementData.executionHead, settlementEvidence: settlementData.settlementEvidence } : { nextAction: params.next_action, ...(params.outcome === "blocked" ? { reason: params.reason } : {}) }),
+      } : dualPathEventData;
+      const settleEvent = makeGoalEvent("task.settled", runEventData, goalId, projection);
       const settlementEvents = generationCapabilities(projection.eventSchemaVersion).conditions
         ? [settleEvent]
         : [settleEvent, makeGoalEvent("goal.checkpoint", { nextAction: params.next_action }, goalId, projection)];
@@ -2650,7 +2660,7 @@ export function createGoalEngineExtension(pi, options = {}) {
         }
         if (taskWorkspace.state !== "active") throw new Error(`managed workspace is not active: ${taskWorkspace.state}`);
         let proof = null;
-        try { proof = task.lastExecutorProof || await inspectExecutorProofFn(task.executorBinding?.runId); } catch {}
+        try { proof = task.lastRunProof || await inspectRunProofFn(task.runBinding?.runId); } catch {}
         const terminalProof = unifiedTerminalProof(proof);
         const challenge = service.issueDisposition({ workspaceId: taskWorkspace.workspaceId, terminalProof });
         const strategy = params.strategy || DEFAULT_DISPOSITION_STRATEGY;
@@ -3123,7 +3133,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     return candidates.length === 1 ? candidates[0] : null;
   };
   const ownedBoundTaskIds = (projection) => [...projection.tasks.entries()]
-    .filter(([, task]) => task.executorBinding && ["dispatched", "running", "settling"].includes(task.status))
+    .filter(([, task]) => task.runBinding && ["dispatched", "running", "settling"].includes(task.status))
     .map(([taskId]) => taskId).sort();
   const exact = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
   const hash = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
@@ -3174,9 +3184,9 @@ export function createGoalEngineExtension(pi, options = {}) {
     // Terminal facts are always persisted before a workspace can be preserved.
     for (const taskId of projection.suspension.affectedTaskIds) {
       projection = loadProjectionFn(root, projection.goalId);
-      const task = projection.tasks.get(taskId), binding = task?.executorBinding;
+      const task = projection.tasks.get(taskId), binding = task?.runBinding;
       if (!task || !binding || has(projection.suspension.terminalProofRefs || [], "runId", binding.runId)) continue;
-      let response; try { const request = deriveOwnedExecutorStopRequest({ projection, taskId }); response = await runtimeHost?.stopOwnedRun?.(request); } catch { response = null; }
+      let response; try { const request = deriveOwnedRunStopRequest({ projection, taskId }); response = await runtimeHost?.stopOwnedRun?.(request); } catch { response = null; }
       const proof = ownedProof(response, binding.runId); if (proof) appendPartial("terminalProofRefs", proof);
     }
     // Managed observations have no workspace receipt. Their typed stop facade
@@ -3196,7 +3206,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     // A durable terminal closure authorizes workspace preservation, never vice versa.
     for (const taskId of projection.suspension.affectedTaskIds) {
       projection = loadProjectionFn(root, projection.goalId);
-      const task = projection.tasks.get(taskId), binding = task?.executorBinding;
+      const task = projection.tasks.get(taskId), binding = task?.runBinding;
       if (!task || !binding || has(projection.suspension.workspaceClosureProofRefs || [], "taskId", taskId)) continue;
       const request = { stateRoot: root, goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, leaseId: binding.workspaceLeaseId, workspacePath: task.workspace.path, headAtDispatch: binding.headAtDispatch, baseHead: projection.runtimeBaseHead, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx), ...(isUnifiedWorkspaceReceipt(task.workspace) ? { workspaceId: task.workspace.workspaceId } : {}) };
       let response; try { response = await runtimeHost?.quarantineWorkspace?.(request); } catch { response = null; }
@@ -3205,7 +3215,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     if (suspensionClosureStatus(projection).missingWorkspaceTaskIds.length) return;
     for (const taskId of projection.suspension.affectedTaskIds) {
       projection = loadProjectionFn(root, projection.goalId);
-      const task = projection.tasks.get(taskId), binding = task?.executorBinding;
+      const task = projection.tasks.get(taskId), binding = task?.runBinding;
       if (!task || !binding || has(projection.suspension.resourceClosureProofRefs || [], "ownerId", binding.runId)) continue;
       const request = { stateRoot: root, goalId: projection.goalId, ownerKind: "executor", ownerId: binding.runId, taskId, attempt: task.attempts, leaseId: binding.workspaceLeaseId, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, sessionId: sessionIdentity(ctx), ...(isUnifiedWorkspaceReceipt(task.workspace) ? { workspaceId: task.workspace.workspaceId } : {}) };
       let response; try { response = await runtimeHost?.quarantineResource?.(request); } catch { response = null; }
@@ -3217,7 +3227,7 @@ export function createGoalEngineExtension(pi, options = {}) {
     const projection = ownedRuntimeProjection(root, sessionId, "active"); if (!projection) return false;
     const taskIds = ownedBoundTaskIds(projection);
     const observationRuns = [...projection.observationRuns.values()].filter((run) => !["terminal", "recorded", "released"].includes(run.phase));
-    const runIds = [...taskIds.map((taskId) => projection.tasks.get(taskId).executorBinding.runId), ...observationRuns.map((run) => run.runId)].sort();
+    const runIds = [...taskIds.map((taskId) => projection.tasks.get(taskId).runBinding.runId), ...observationRuns.map((run) => run.runId)].sort();
     const plan = buildSuspensionPlan({ projection, reason, affectedIds: { taskIds, runIds } });
     const event = makeEvent(plan.events[0].type, plan.events[0].data, projection.goalId, "goal-runtime.v1");
     const expected = applyEvent(projection, event); let suspended;

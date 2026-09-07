@@ -3,16 +3,30 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import test from "node:test";
+import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
 
-import { createTypedSubagentExtension } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+import { createTypedSubagentExtension as createTypedSubagentExtensionProduction } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
+
+const { createJiti } = await import(piHostJitiUrl);
+const runtimeJiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
+const { projectManagedWorkspaceTerminalProof } = await runtimeJiti.import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
+
+function createTypedSubagentExtension(pi, options = {}) {
+  return createTypedSubagentExtensionProduction(pi, {
+    registerAuthorizedRun() {},
+    discoverAgents() { return { agents: [{ name: "executor" }, { name: "reviewer" }] }; },
+    ...options,
+  });
+}
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const terminalProof = { state: "observed", conflict: false, proofHash: "e".repeat(64) };
 
-async function fixture(t) {
+async function fixture(t, { terminalProofProvider = () => terminalProof } = {}) {
   const root = await mkdtemp(join(tmpdir(), "typed-managed-workspace-"));
   const originRoot = join(root, "origin");
   const stateRoot = join(root, "state");
@@ -23,7 +37,7 @@ async function fixture(t) {
   await writeFile(join(originRoot, "allowed.txt"), "base\n");
   git(originRoot, "add", "allowed.txt");
   git(originRoot, "commit", "-m", "base");
-  const service = createManagedWorkspaceService({ stateRoot, terminalProofProvider: () => terminalProof });
+  const service = createManagedWorkspaceService({ stateRoot, terminalProofProvider });
   const workspaceIds = new Set();
   t.after(async () => {
     for (const workspaceId of workspaceIds) {
@@ -95,9 +109,87 @@ function codingContract(originRoot) {
   };
 }
 
-async function execute(tool, input, originRoot) {
-  return tool.execute("tool-call", input, undefined, undefined, { cwd: originRoot, sessionManager: {} });
+async function execute(tool, input, originRoot, toolCallId = "tool-call") {
+  return tool.execute(toolCallId, input, undefined, undefined, { cwd: originRoot, sessionManager: {} });
 }
+
+function strictAuthorizationRegistrar(expectedKind, registered) {
+  return (authorization) => {
+    const value = authorization?.binding;
+    if (!authorization || typeof authorization !== "object" || Array.isArray(authorization)
+      || authorization.kind !== expectedKind
+      || !value || typeof value !== "object" || Array.isArray(value)
+      || typeof value.runId !== "string" || value.runId.length === 0
+      || typeof value.asyncDir !== "string" || !isAbsolute(value.asyncDir)
+      || value.sessionId !== "root-session"
+      || !Number.isSafeInteger(value.pid) || value.pid <= 0
+      || typeof value.agentProfile !== "string" || value.agentProfile.length === 0) {
+      throw new Error("Run authorization binding is invalid");
+    }
+    registered.push(authorization);
+  };
+}
+
+function observedFacadeProof(runId) {
+  const observedAt = 1_700_000_000_000;
+  const runnerProcessInstanceId = `${runId}-runner`;
+  return {
+    version: 1,
+    runId,
+    runnerProcessInstanceId,
+    state: "observed",
+    observedAt,
+    instances: [{ processInstanceId: runnerProcessInstanceId, kind: "runner", closeObservedAt: observedAt, exitCode: 0, signal: null }],
+  };
+}
+
+test("Root broker rich terminal snapshot reaches managed workspace status through the runtime adapter", async (t) => {
+  let broker;
+  const f = await fixture(t, {
+    terminalProofProvider({ run }) {
+      return projectManagedWorkspaceTerminalProof(run, run?.runId ? broker?.inspectExecutionProof(run.runId) : null);
+    },
+  });
+  broker = new RootBrokerServer({
+    rootSessionId: "root-session",
+    lifecycleSessionId: "root-session",
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+  });
+  const { pi, tools, rpc } = piHarness(f.originRoot);
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    randomUUID: () => "broker-proof-workspace",
+    workspaceService: f.service,
+    resolveRootSessionId: () => "root-session",
+    registerAuthorizedRun(authorization) { return broker.registerAuthorizedRun(authorization); },
+  });
+
+  const spawned = await execute(tools[0], codingContract(f.originRoot), f.originRoot);
+  assert.equal(spawned.isError, false, spawned.content[0]?.text);
+  f.workspaceIds.add(spawned.details.workspace_id);
+  broker.observeTerminal({
+    ...observedFacadeProof("leaf-run"),
+    sessionId: "root-session",
+    pid: process.pid,
+    asyncDir: join(f.originRoot, "async-leaf"),
+    agent: "executor",
+  });
+  const richSnapshot = broker.inspectExecutionProof("leaf-run");
+  assert.equal(richSnapshot.schemaVersion, "root-broker.execution-proof.v2");
+  assert.equal(richSnapshot.binding.runId, "leaf-run");
+  assert.match(richSnapshot.terminal.proofId, /^[a-f0-9]{64}$/);
+
+  const status = await execute(tools[0], { action: "workspace_status", workspace_id: spawned.details.workspace_id }, f.originRoot);
+  assert.equal(status.isError, false, status.content[0]?.text);
+  assert.equal(status.details.process_terminal, "observed");
+  assert.ok(status.details.allowed_dispositions.includes("discard"));
+  assert.deepEqual(f.service.status({ workspaceId: spawned.details.workspace_id }).terminalProof, {
+    state: "observed",
+    conflict: false,
+    proofHash: richSnapshot.terminal.proofId,
+  });
+});
 
 test("typed coding facade allocates, binds, reports, integrates, and releases through the unified service", async (t) => {
   const f = await fixture(t);
@@ -109,17 +201,21 @@ test("typed coding facade allocates, binds, reports, integrates, and releases th
     randomUUID: () => "coding-workspace",
     workspaceService: f.service,
     resolveRootSessionId: () => "root-session",
-    registerFacadeRun(run) { registered.push(run); },
+    registerAuthorizedRun: strictAuthorizationRegistrar("coding", registered),
   });
 
   const spawned = await execute(tools[0], codingContract(f.originRoot), f.originRoot);
   assert.equal(spawned.isError, false, spawned.content[0]?.text);
   f.workspaceIds.add(spawned.details.workspace_id);
   assert.equal(spawned.details.workspace_state, "active");
+  assert.equal(f.service.status({ workspaceId: spawned.details.workspace_id }).receipt.owner.toolCallId, "tool-call");
   assert.equal(calls[0].cwd, spawned.details.dispatch_cwd);
   assert.equal(calls[0].worktree, false);
   assert.equal(JSON.parse(calls[0].workflowScript.match(/, (.*)\);$/)[1]).worktree, false);
-  assert.equal(registered[0].runId, "leaf-run");
+  assert.equal(Object.hasOwn(f.service.status({ workspaceId: spawned.details.workspace_id }).receipt.run, "kind"), false);
+  assert.equal(Object.hasOwn(spawned.details, "kind"), false);
+  assert.deepEqual(registered[0].capabilities, ["root.subscribe"]);
+  assert.equal(registered[0].binding.agentProfile, "executor");
 
   await writeFile(join(spawned.details.dispatch_cwd, "allowed.txt"), "integrated\n");
   git(spawned.details.dispatch_cwd, "add", "allowed.txt");
@@ -140,17 +236,22 @@ test("typed coding facade allocates, binds, reports, integrates, and releases th
 test("typed generic facade preserves and explicitly releases through the same service", async (t) => {
   const f = await fixture(t);
   const { pi, tools, rpc } = piHarness(f.originRoot);
+  const registered = [];
   createTypedSubagentExtension(pi, {
     rpc,
     cleanupStore: {},
     randomUUID: () => "generic-workspace",
     workspaceService: f.service,
     resolveRootSessionId: () => "root-session",
-    registerFacadeRun() {},
+    registerAuthorizedRun: strictAuthorizationRegistrar("generic", registered),
   });
 
   const spawned = await execute(tools[0], { agent: "reviewer", title: "Review", task: "Inspect.", cwd: f.originRoot, worktree: true }, f.originRoot);
   assert.equal(spawned.isError, false, spawned.content[0]?.text);
+  assert.equal(Object.hasOwn(f.service.status({ workspaceId: spawned.details.workspace_id }).receipt.run, "kind"), false);
+  assert.equal(Object.hasOwn(spawned.details, "kind"), false);
+  assert.deepEqual(registered[0].capabilities, []);
+  assert.equal(registered[0].binding.agentProfile, "reviewer");
   f.workspaceIds.add(spawned.details.workspace_id);
   const status = await execute(tools[0], { action: "workspace_status", workspace_id: spawned.details.workspace_id }, f.originRoot);
   assert.equal(status.details.allowed_dispositions.includes("integrate"), false);
@@ -164,4 +265,53 @@ test("typed generic facade preserves and explicitly releases through the same se
   const released = await execute(tools[0], { action: "workspace_disposition", workspace_id: spawned.details.workspace_id, disposition: "release" }, f.originRoot);
   assert.equal(released.details.workspace_state, "released");
   assert.equal(existsSync(spawned.details.dispatch_cwd), false);
+});
+
+test("typed coding facade canonicalizes composite Host tool call identities for isolated workspaces", async (t) => {
+  const f = await fixture(t);
+  const { pi, tools, calls, rpc } = piHarness(f.originRoot);
+  const registered = [];
+  let id = 0;
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    randomUUID: () => `coding-workspace-${++id}`,
+    workspaceService: f.service,
+    resolveRootSessionId: () => "root-session",
+    registerAuthorizedRun: strictAuthorizationRegistrar("coding", registered),
+  });
+
+  const hostToolCallId = `call_${"a".repeat(100)}|fc_${"b".repeat(100)}`;
+  const single = await execute(tools[0], codingContract(f.originRoot), f.originRoot, hostToolCallId);
+  assert.equal(single.isError, false, single.content[0]?.text);
+  f.workspaceIds.add(single.details.workspace_id);
+  const singleOwner = f.service.status({ workspaceId: single.details.workspace_id }).receipt.owner.toolCallId;
+  assert.match(singleOwner, /^host-tool-call-[a-f0-9]{64}$/);
+  assert.ok(singleOwner.length <= 160);
+  assert.equal(calls[0].worktree, false);
+
+  const firstHostToolCallId = `call_${"c".repeat(100)}|fc_${"d".repeat(100)}`;
+  const secondHostToolCallId = `call_${"e".repeat(100)}|fc_${"f".repeat(100)}`;
+  const [first, second] = await Promise.all([
+    execute(tools[0], codingContract(f.originRoot), f.originRoot, firstHostToolCallId),
+    execute(tools[0], codingContract(f.originRoot), f.originRoot, secondHostToolCallId),
+  ]);
+  for (const result of [first, second]) {
+    assert.equal(result.isError, false, result.content[0]?.text);
+    f.workspaceIds.add(result.details.workspace_id);
+  }
+  assert.notEqual(first.details.workspace_id, second.details.workspace_id);
+  const firstOwner = f.service.status({ workspaceId: first.details.workspace_id }).receipt.owner.toolCallId;
+  const secondOwner = f.service.status({ workspaceId: second.details.workspace_id }).receipt.owner.toolCallId;
+  assert.match(firstOwner, /^host-tool-call-[a-f0-9]{64}$/);
+  assert.match(secondOwner, /^host-tool-call-[a-f0-9]{64}$/);
+  assert.notEqual(firstOwner, secondOwner);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((call) => call.worktree === false));
+  assert.equal(registered.length, 3);
+  assert.ok(registered.every((authorization) => authorization.kind === "coding"));
+
+  const empty = await execute(tools[0], codingContract(f.originRoot), f.originRoot, "");
+  assert.equal(empty.isError, true);
+  assert.equal(empty.details.code, "WORKSPACE_TOOL_CALL_ID_UNAVAILABLE");
 });

@@ -93,5 +93,5 @@ export default function acceptanceEvidence(pi: any) {
   const rootSessionId = process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID;
   const runId = process.env.PI_SUBAGENT_RUN_ID;
   if (!rootSessionId || !runId) throw new Error("acceptance evidence broker identity is unavailable");
-  return installAcceptanceEvidence(pi, { client: createRootBrokerClient({ rootSessionId, callerRunId: runId }) });
+  return installAcceptanceEvidence(pi, { client: createRootBrokerClient({ rootSessionId, callerRunId: runId, requiredCapability: "acceptance.submit" }) });
 }

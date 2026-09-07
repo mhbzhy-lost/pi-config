@@ -9,6 +9,7 @@ import { generationCapabilities } from "../src/goal-engine/generation-capabiliti
 import { appendEvent, appendEventBatch, loadProjection } from "../src/goal-engine/store.ts";
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
+import { legacyExecutorProfile, legacyExecutorTaskFields } from "../src/goal-engine/legacy-executor-compat.ts";
 
 const at = (n) => `2026-08-13T00:00:${String(n).padStart(2, "0")}.000Z`;
 const hash = (n) => String(n).padStart(64, "0");
@@ -78,6 +79,14 @@ test("generation matrix preserves planned policy and rejects mixed generations/s
     seed(root, [legacyCreated("goal-engine.event.v2", goalId), { ...legacyCreated("planned.v1", goalId), eventId: "mixed", occurredAt: at(2), type: "goal.checkpoint", data: { canonicalFingerprint: hash(1), advanced: true, sequence: 1 } }]);
     assert.throws(() => loadProjection(root, goalId), /mixed|downgrade|checkpoint/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy executor presentation defaults are isolated from v2 task shape", () => {
+  assert.equal(legacyExecutorProfile("planned.v1", undefined), "executor");
+  assert.equal(legacyExecutorProfile("goal-runtime.v1", undefined), "executor");
+  assert.throws(() => legacyExecutorProfile("planned.v2", undefined), /agentProfile/);
+  assert.deepEqual(legacyExecutorTaskFields("planned.v1"), { executorBinding: null, lastExecutorProof: null });
+  assert.deepEqual(legacyExecutorTaskFields("planned.v2"), {});
 });
 
 test("runtime snapshot/replay carries current entities and completion only passes record+complete gate", () => {

@@ -9,9 +9,8 @@ import { createTemporaryArenaSync } from "./helpers/temporary-arena.mjs";
 import { appendEvent as appendEventStore, loadProjection } from "../src/goal-engine/store.ts";
 import { createGoalEngineExtension as createGoalEngineExtensionFactory } from "../src/goal-engine/extension.ts";
 import { classifyGoalEvidence, completionVerdictFor } from "../src/goal-engine/evidence.ts";
-import { allocateExecutorWorkspace, inspectExecutorWorkspace, loadExecutorWorkspaceLease, releaseExecutorWorkspace } from "../src/goal-engine/workspace.mjs";
 import { ensureGoalStateIdentity, resolveGoalStateScope } from "../src/goal-engine/state-scope.ts";
-import { findGoalExecutorCoordinator } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import { findGoalRunCoordinator } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
 import { fingerprintSettlementEvidence, serializeSettlementEvidenceYaml } from "../src/goal-engine/settlement-evidence.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
@@ -19,6 +18,11 @@ import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.
 const temporaryArena = createTemporaryArenaSync("goal-engine-extension-");
 test.after(() => temporaryArena.disposeSync());
 function mkdtempSync(prefix) { return temporaryArena.mkdtempSync(basename(prefix)); }
+const obsoleteWorkspaceFixture = () => { throw new Error("legacy workspace fixture is unavailable"); };
+const allocateExecutorWorkspace = obsoleteWorkspaceFixture;
+const inspectExecutorWorkspace = obsoleteWorkspaceFixture;
+const loadExecutorWorkspaceLease = obsoleteWorkspaceFixture;
+const releaseExecutorWorkspace = obsoleteWorkspaceFixture;
 
 test("Root Goal ABI is exact-eight and goal_finalize rejects planned before side effects", async () => {
   const cwd = tmpCwd();
@@ -225,7 +229,7 @@ async function invoke(pi, name, params = {}) {
       const compiled = dispatched.contract;
       const contractHash = dispatched.contract_hash ?? compiled?.hash;
       const contract = compiled?.hash ? Object.fromEntries(Object.entries(compiled).filter(([key]) => key !== "hash")) : compiled;
-      const coordinator = findGoalExecutorCoordinator(pi);
+      const coordinator = findGoalRunCoordinator(pi);
       const ticket = await coordinator?.prepareSpawn({ contract, contractHash, ctx: pi.executeContext });
       if (ticket) {
         const receipt = pi.workspaceService.ensureAllocated(ticket.workspaceRequest);

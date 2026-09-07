@@ -8,19 +8,87 @@ import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
 
 const { createJiti } = await import(piHostJitiUrl);
 const runtimeJiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
-const { createSubagentToolRenderers, initializeCompletionNotifierState } = await runtimeJiti.import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
+const {
+  createSubagentToolRenderers,
+  initializeCompletionNotifierState,
+  projectManagedWorkspaceTerminalProof,
+} = await runtimeJiti.import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
 const { registerSubagentNotify, currentCompletionOwnerId } = await runtimeJiti.import("../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.62.ts");
 
 import { createHeadlessSubagentApi } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts";
 import { createTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
 import {
   createSupervisorRequestMailbox,
-  createTypedSubagentExtension,
-  installHeadlessTypedSubagentRuntime,
+  createTypedSubagentExtension as createTypedSubagentExtensionProduction,
+  installHeadlessTypedSubagentRuntime as installHeadlessTypedSubagentRuntimeProduction,
+  TYPED_SUBAGENT_DESCRIPTION,
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const enhancedPackageRoot = join(repoRoot, "packages/pi-subagents-enhanced");
+
+function createTypedSubagentExtension(pi, options = {}) {
+  return createTypedSubagentExtensionProduction(pi, {
+    registerAuthorizedRun() {},
+    discoverAgents() { return { agents: [{ name: "executor" }, { name: "reviewer" }] }; },
+    ...options,
+  });
+}
+
+function installHeadlessTypedSubagentRuntime(pi, options = {}) {
+  return installHeadlessTypedSubagentRuntimeProduction(pi, {
+    discoverAgents() { return { agents: [{ name: "executor" }, { name: "reviewer" }] }; },
+    ...options,
+  });
+}
+
+function richFacadeTerminalSnapshot(overrides = {}) {
+  return {
+    runId: "leaf-run",
+    state: "observed",
+    proofHash: "d".repeat(64),
+    proof: { version: 1, runId: "leaf-run", state: "observed" },
+    conflict: false,
+    ...overrides,
+  };
+}
+
+test("workspace terminal proof adapter returns pending without a bound run or observed snapshot", () => {
+  assert.deepEqual(projectManagedWorkspaceTerminalProof(null, richFacadeTerminalSnapshot()), { state: "pending" });
+  assert.deepEqual(projectManagedWorkspaceTerminalProof({ runId: "leaf-run" }, null), { state: "pending" });
+  assert.deepEqual(projectManagedWorkspaceTerminalProof(
+    { runId: "leaf-run" },
+    richFacadeTerminalSnapshot({ state: "pending", proofHash: null, proof: null }),
+  ), { state: "pending" });
+});
+
+test("workspace terminal proof adapter projects a production rich observed snapshot to the strict codec", () => {
+  assert.deepEqual(
+    projectManagedWorkspaceTerminalProof({ runId: "leaf-run" }, richFacadeTerminalSnapshot()),
+    { state: "observed", conflict: false, proofHash: "d".repeat(64) },
+  );
+});
+
+test("workspace terminal proof adapter preserves an observed broker conflict", () => {
+  assert.deepEqual(
+    projectManagedWorkspaceTerminalProof(
+      { runId: "leaf-run" },
+      richFacadeTerminalSnapshot({ conflict: true, proofHash: "e".repeat(64) }),
+    ),
+    { state: "observed", conflict: true, proofHash: "e".repeat(64) },
+  );
+});
+
+test("workspace terminal proof adapter rejects malformed observed broker snapshots", () => {
+  assert.throws(
+    () => projectManagedWorkspaceTerminalProof(
+      { runId: "leaf-run" },
+      richFacadeTerminalSnapshot({ conflict: undefined, proofHash: "not-a-proof-hash" }),
+    ),
+    (error) => error?.code === "MANAGED_WORKSPACE_TERMINAL_PROOF_ADAPTER"
+      && error.message === "observed facade terminal proof is invalid",
+  );
+});
 
 async function sourceFiles(root) {
   const files = [];
@@ -193,7 +261,7 @@ function createRpc(overrides = {}) {
       return {
         version: 1,
         methods: ["ping", "spawn", "status", "steer", "interrupt", "stop"],
-        session: { sessionId: "session-1", sessionFile: "/tmp/session.jsonl", cwd: "/repo" },
+        session: { sessionId: "session-1", sessionFile: "session-1", cwd: "/repo" },
       };
     },
     async spawn(params) {
@@ -494,7 +562,7 @@ test("spawn rendering keeps the complete execute result while showing one statef
     rpc.calls.push({ method: "spawn", params });
     pi.events.emit("subagent:async-started", {
       id: "leaf-run-1", runId: "leaf-run-1", asyncDir: "/tmp/leaf-run-1",
-      sessionId: "/tmp/session.jsonl", agent: "executor", pid: 102,
+      sessionId: "session-1", agent: "executor", pid: 102,
       workflowKey: "typed-dispatch-1", parentWorkflowRunId: "workflow-run-1",
     });
     return { text: "workflow spawned", details: { runId: "workflow-run-1", asyncDir: "/tmp/workflow-run-1" } };
@@ -759,6 +827,7 @@ test("project subagent schema exposes an object root to OpenAI-compatible provid
 test("headless runtime installation exposes only project-owned subagent tools", () => {
   const pi = createPi();
   const rpc = createRpc();
+  const upstreamMethodologyDescription = "CHAIN PARALLEL proactive skill methodology";
   let upstreamApi;
 
   installHeadlessTypedSubagentRuntime(pi, {
@@ -766,7 +835,7 @@ test("headless runtime installation exposes only project-owned subagent tools", 
       upstreamApi = api;
       api.registerTool({
         name: "subagent",
-        description: "CHAIN PARALLEL proactive skill methodology",
+        description: upstreamMethodologyDescription,
         execute() { throw new Error("must never execute"); },
       });
       api.registerTool({ name: "bg_wait", execute() {} });
@@ -781,7 +850,8 @@ test("headless runtime installation exposes only project-owned subagent tools", 
   assert.notEqual(upstreamApi, pi);
   assert.deepEqual(pi.tools.map((tool) => tool.name), ["subagent", "subagent_supervisor"]);
   assert.equal(pi.commands.length, 0);
-  assert.doesNotMatch(pi.tools[0].description, /CHAIN|PARALLEL|proactive skill|Fable/i);
+  assert.equal(pi.tools[0].description, TYPED_SUBAGENT_DESCRIPTION);
+  assert.doesNotMatch(pi.tools[0].description, /proactive skill methodology/i);
   assert.doesNotMatch(pi.tools[1].description, /pi-subagents|upstream/i);
 });
 
@@ -893,7 +963,7 @@ test("confirmed facade workflow success is filtered before the completion notifi
   rpc.spawn = async () => {
     upstreamApi.events.emit("subagent:async-started", {
       id: "leaf-run-1", runId: "leaf-run-1", asyncDir: "/tmp/leaf-run-1",
-      sessionId: "/tmp/session.jsonl", pid: 101, agent: "reviewer", workflowKey: "typed-notify-1", parentWorkflowRunId: "workflow-root-1",
+      sessionId: "session-1", pid: 101, agent: "reviewer", workflowKey: "typed-notify-1", parentWorkflowRunId: "workflow-root-1",
     });
     return { details: { runId: "workflow-root-1", asyncDir: "/tmp/workflow-root-1" } };
   };
@@ -951,7 +1021,7 @@ test("confirmed facade workflow success is filtered before the completion notifi
   assert.equal(pi.messages.length, 5, "unrelated workflow and internal non-success states remain visible");
 });
 
-test("executor rejects free-form task dispatch before RPC", async () => {
+test("generic dispatch validates required fields without using profile names as authorization", async () => {
   const pi = createPi();
   const rpc = createRpc();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
@@ -960,7 +1030,7 @@ test("executor rejects free-form task dispatch before RPC", async () => {
   for (const agent of ["executor"]) {
     const result = await execute(tool, { agent, task: "Implement it." });
     assert.equal(result.isError, true);
-    assert.equal(result.details.code, "CODING_CONTRACT_REQUIRED");
+    assert.equal(result.details.code, "INVALID_GENERIC_DISPATCH");
   }
   assert.deepEqual(rpc.calls, []);
 });
@@ -974,7 +1044,7 @@ test("compiles a coding contract into one workflow root and returns its correlat
       id: "leaf-run-1",
       runId: "leaf-run-1",
       asyncDir: "/tmp/leaf-run-1",
-      sessionId: "/tmp/session.jsonl",
+      sessionId: "session-1",
       agent: "executor", pid: 102,
       workflowKey: "typed-dispatch-1",
       parentWorkflowRunId: "workflow-run-1",
@@ -1000,6 +1070,7 @@ test("compiles a coding contract into one workflow root and returns its correlat
     contractHash: result.details.contractHash,
     runId: "leaf-run-1",
     asyncDir: "/tmp/leaf-run-1",
+    modelSelection: { source: "default" },
   });
   assert.match(result.details.contractHash, /^[a-f0-9]{64}$/);
   for (const key of ["agent", "title", "task", "clarify", "acceptance"]) {
@@ -1033,7 +1104,7 @@ test("coding cwd never infers ownership from a legacy workspace-shaped path", as
       id: "continuation-leaf-1",
       runId: "continuation-leaf-1",
       asyncDir: "/tmp/continuation-leaf-1",
-      sessionId: "/tmp/session.jsonl",
+      sessionId: "session-1",
       agent: "executor", pid: 103,
       workflowKey: "typed-continuation-1",
       parentWorkflowRunId: "continuation-workflow-1",
@@ -1068,7 +1139,7 @@ test("compiles a non-coding agent prompt into one workflow leaf without rewritin
       id: "leaf-review-1",
       runId: "leaf-review-1",
       asyncDir: "/tmp/leaf-review-1",
-      sessionId: "/tmp/session.jsonl",
+      sessionId: "session-1",
       agent: "reviewer", pid: 103,
       workflowKey: "typed-generic-1",
       parentWorkflowRunId: "workflow-review-1",
@@ -1112,7 +1183,7 @@ test("uses a bounded fallback while waiting for a generic leaf without input tim
     rpc.calls.push({ method: "spawn", params });
     pi.events.emit("subagent:async-started", {
       id: "fallback-leaf-1", runId: "fallback-leaf-1", asyncDir: "/tmp/fallback-leaf-1",
-      sessionId: "/tmp/session.jsonl", pid: 104, agent: "reviewer", workflowKey: "typed-fallback-1", parentWorkflowRunId: "workflow-fallback-1",
+      sessionId: "session-1", pid: 104, agent: "reviewer", workflowKey: "typed-fallback-1", parentWorkflowRunId: "workflow-fallback-1",
     });
     return { details: { runId: "workflow-fallback-1", asyncDir: "/tmp/workflow-fallback-1" } };
   };
@@ -1226,12 +1297,12 @@ test("workspace_disposition release is accepted and releases preserved workspace
 test("uses persistent sessionFile identity for workflow leaf correlation and falls back for --no-session", async () => {
   const persistentPi = createPi();
   const persistentRpc = createRpc({
-    ping: async () => ({ version: 1, methods: ["spawn"], session: { sessionId: "logical-session-id", sessionFile: "/var/sessions/persistent.jsonl", cwd: "/repo" } }),
+    ping: async () => ({ version: 1, methods: ["spawn"], session: { sessionId: "logical-session-id", sessionFile: "logical-session-id", cwd: "/repo" } }),
     async spawn(params) {
       this.calls.push({ method: "spawn", params });
       persistentPi.events.emit("subagent:async-started", {
         id: "persistent-leaf", runId: "persistent-leaf", asyncDir: "/tmp/persistent-leaf",
-        sessionId: "/var/sessions/persistent.jsonl", pid: 105, agent: "executor",
+        sessionId: "logical-session-id", pid: 105, agent: "executor",
         workflowKey: "typed-persistent-1", parentWorkflowRunId: "persistent-root",
       });
       return { details: { runId: "persistent-root", asyncDir: "/tmp/persistent-root" } };
@@ -1289,7 +1360,7 @@ test("uses the coding IR deadline when a delayed leaf exceeds the former fixed s
         id: "delayed-leaf-1",
         runId: "delayed-leaf-1",
         asyncDir: "/tmp/delayed-leaf-1",
-        sessionId: "/tmp/session.jsonl",
+        sessionId: "session-1",
         agent: "executor", pid: 107,
         workflowKey: "typed-delayed-1",
         parentWorkflowRunId: "workflow-delayed-1",

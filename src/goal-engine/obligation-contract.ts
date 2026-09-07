@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { assertContractArray, assertContractString } from "./contract-limits.ts";
 import { normalizeRepoRelativePosixPath } from "./repo-path.ts";
-import { validateTaskDefinitions } from "./task-definition.ts";
+import { normalizeAgentProfile, validateTaskDefinitions } from "./task-definition.ts";
 
 const ID = /^[A-Za-z0-9._-]{1,160}$/;
 const READINESS = new Set(["draft", "ready", "needs_clarification", "environment_blocked", "unsafe_to_run"]);
@@ -32,10 +32,11 @@ function known(registries, name, ref) { return Object.hasOwn(registry(registries
 function freeze(value) { if (!value || typeof value !== "object" || Object.isFrozen(value)) return value; Object.values(value).forEach(freeze); return Object.freeze(value); }
 function canonicalize(value) { if (Array.isArray(value)) return value.map(canonicalize); if (!plain(value)) return value; return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])])); }
 
-function normalizeTask(value, index) {
-  object(value, `execution.tasks[${index}]`, ["id", "description", "deps", "writePaths", "acceptance", "workflow"]);
+function normalizeTask(value, index, { v2 = false } = {}) {
+  object(value, `execution.tasks[${index}]`, ["id", "description", "deps", "writePaths", "acceptance", "workflow", ...(v2 ? ["agentProfile"] : [])]);
   const normalized = {
     id: id(value.id, `execution.tasks[${index}].id`),
+    ...(v2 ? { agentProfile: normalizeAgentProfile(value.agentProfile, `execution.tasks[${index}].agentProfile`) } : {}),
     description: string(value.description, `execution.tasks[${index}].description`),
     ...(Object.hasOwn(value, "deps") ? { deps: array(value.deps, `execution.tasks[${index}].deps`).map((dep, item) => id(dep, `execution.tasks[${index}].deps[${item}]`)) } : {}),
     writePaths: paths(value.writePaths, `execution.tasks[${index}].writePaths`),
@@ -75,11 +76,12 @@ export function normalizeRuntimeGoalInit(input, registries) {
   object(input, "runtime init", ["objective", "scope", "non_goals", "dod", "execution"]);
   if (Object.hasOwn(input, "tasks")) fail("top-level tasks cannot be mixed with execution");
   const execution = object(input.execution, "execution", ["schema", "tasks", "conditions", "write_policy", "budgets"]);
-  if (execution.schema !== "goal-runtime.v1") fail("execution.schema must be goal-runtime.v1");
+  if (!["goal-runtime.v1", "goal-runtime.v2"].includes(execution.schema)) fail("execution.schema must be goal-runtime.v1 or goal-runtime.v2");
   object(execution.write_policy, "execution.write_policy", ["allowed_paths"]);
   const allowed_paths = paths(execution.write_policy.allowed_paths, "execution.write_policy.allowed_paths");
-  const tasks = array(execution.tasks ?? [], "execution.tasks").map(normalizeTask); if (new Set(tasks.map((task) => task.id)).size !== tasks.length) fail("task ids are duplicated");
-  try { validateTaskDefinitions(tasks.map((task) => task.id), Object.fromEntries(tasks.map(({ id: taskId, ...task }) => [taskId, task])), { requireNonEmpty: false, runtimeAcceptance: true }); } catch (error) { fail(error.message); }
+  const v2 = execution.schema === "goal-runtime.v2";
+  const tasks = array(execution.tasks ?? [], "execution.tasks").map((task, index) => normalizeTask(task, index, { v2 })); if (new Set(tasks.map((task) => task.id)).size !== tasks.length) fail("task ids are duplicated");
+  try { validateTaskDefinitions(tasks.map((task) => task.id), Object.fromEntries(tasks.map(({ id: taskId, ...task }) => [taskId, task])), { requireNonEmpty: false, runtimeAcceptance: true, requireAgentProfile: v2, v2Acceptance: v2 }); } catch (error) { fail(error.message); }
   if (tasks.some((task) => task.writePaths.some((path) => !subset(path, allowed_paths)))) fail("task writePaths exceed write policy");
   const conditions = array(execution.conditions ?? [], "execution.conditions").map((condition, index) => normalizeCondition(condition, index, allowed_paths, registries));
   if (!tasks.length && !conditions.length) fail("tasks or conditions must be non-empty");
@@ -94,12 +96,12 @@ export function normalizeRuntimeGoalInit(input, registries) {
   object(execution.budgets, "execution.budgets", ["max_observations", "max_repairs", "max_elapsed_minutes", "max_no_progress"]);
   const budgets = {}; for (const key of ["max_observations", "max_repairs", "max_elapsed_minutes", "max_no_progress"]) { if (!Number.isSafeInteger(execution.budgets[key]) || execution.budgets[key] < 0) fail(`budget ${key} is invalid`); budgets[key] = execution.budgets[key]; }
   const normalizeText = (key) => Object.hasOwn(input, key) ? array(input[key], key).map((entry, index) => string(entry, `${key}[${index}]`)) : [];
-  return freeze({ objective: string(input.objective, "objective"), scope: normalizeText("scope"), non_goals: normalizeText("non_goals"), dod: normalizeText("dod"), execution: { schema: "goal-runtime.v1", tasks, conditions, write_policy: { allowed_paths }, budgets } });
+  return freeze({ objective: string(input.objective, "objective"), scope: normalizeText("scope"), non_goals: normalizeText("non_goals"), dod: normalizeText("dod"), execution: { schema: execution.schema, tasks, conditions, write_policy: { allowed_paths }, budgets } });
 }
 export function hashRuntimeExecutionContract(contract) { return createHash("sha256").update(JSON.stringify(canonicalize(contract))).digest("hex"); }
 export function deriveInitialShape(contract) { const tasks = contract?.execution?.tasks?.length > 0, conditions = contract?.execution?.conditions?.length > 0; if (tasks && conditions) return "hybrid"; if (tasks) return "planned"; if (conditions) return "convergent"; fail("contract has no obligations"); }
 export function validateRuntimeReadiness(contract, registries) {
-  const reasons = []; if (!contract || contract.execution?.schema !== "goal-runtime.v1") return { readiness: "unsafe_to_run", reasons: ["invalid runtime contract"] };
+  const reasons = []; if (!contract || !["goal-runtime.v1", "goal-runtime.v2"].includes(contract.execution?.schema)) return { readiness: "unsafe_to_run", reasons: ["invalid runtime contract"] };
   for (const condition of contract.execution.conditions) { if (!known(registries, "adapters", condition.oracle_ref)) reasons.push(`unknown adapter ${condition.oracle_ref}`); else if (!known(registries, "environments", condition.environment_ref)) reasons.push(`unknown environment ${condition.environment_ref}`); else if (registry(registries, "environments")[condition.environment_ref]?.available !== true) reasons.push(`environment ${condition.environment_ref} is unavailable`); for (const ref of condition.fixture_refs) if (!known(registries, "fixtures", ref)) reasons.push(`unknown fixture ${ref}`); else if (registry(registries, "fixtures")[ref]?.available !== true) reasons.push(`fixture ${ref} is unavailable`); }
   const readiness = reasons.some((reason) => reason.includes("unavailable")) ? "environment_blocked" : reasons.length ? "needs_clarification" : "ready"; if (!READINESS.has(readiness)) fail("invalid readiness"); return freeze({ readiness, reasons });
 }

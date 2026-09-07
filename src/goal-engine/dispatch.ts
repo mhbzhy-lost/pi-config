@@ -1,6 +1,7 @@
 import { compileCodingDispatchIR } from "../../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
-import { executorCriteria, validateRemediationMetadata, taskContractHash, remediationSubjectHash } from "./task-definition.ts";
+import { executorCriteria, runCriteria, validateRemediationMetadata, taskContractHash, remediationSubjectHash } from "./task-definition.ts";
 import { MAX_CONTRACT_ARRAY_ITEMS, MAX_CONTRACT_STRING_BYTES } from "./contract-limits.ts";
+import { legacyExecutorProfile } from "./legacy-executor-compat.ts";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 // Reducers need a stable absolute value only to validate derived IR; command origin
@@ -45,12 +46,14 @@ export function compileTaskContract(projection, taskId, cwd, { timeoutMs = DEFAU
 
   // Coordinator predicates are authoritative lifecycle facts, not executable
   // acceptance work. Keep the dispatch-ir ABI criteria-only and executor-only.
-  const criteria = executorCriteria(transportTask.acceptance.criteria);
+  const isV2 = projection.eventSchemaVersion === "planned.v2" || projection.eventSchemaVersion === "goal-runtime.v2";
+  const agentProfile = legacyExecutorProfile(projection.eventSchemaVersion, transportTask.agentProfile);
+  const criteria = isV2 ? runCriteria(transportTask.acceptance.criteria) : executorCriteria(transportTask.acceptance.criteria);
   const input = {
     version: "dispatch-ir.v1",
     taskId: `${projection.goalId}.${taskId}`,
     title: `${taskId}: ${transportTask.description.slice(0, 80)}`,
-    agent: "executor",
+    agent: agentProfile,
     risk: "normal",
     objective: transportTask.description,
     workflow,
