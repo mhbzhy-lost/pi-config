@@ -1,6 +1,6 @@
-# Pi 专属全局约束
+# Pi 覆盖约束
 
-本文件仅由当前 `PI_CODING_AGENT_DIR` 的全局 Extension 追加到 Pi system prompt，不参与 cwd、父目录或项目级规则发现。
+本章节为上文的覆盖约束，若与上文冲突则以下文为准；其余情形应视为补充说明。
 
 ## Subagent
 
@@ -21,7 +21,3 @@ Pi 额外提供以下计划执行方式：
 ## Worktree 生命周期
 
 禁止 raw `git worktree add/remove/prune/move/repair/lock/unlock` 和猜测性 cleanup；只读 `git worktree list` 可用。创建、销毁、repair、lock 仅可经 typed subagent workspace disposition 或 typed Goal disposition；根级 `node scripts/worktree-lifecycle.ts audit|reconcile` 仅提供统一 workspace inventory、dry-run cleanup plan 和显式 public lease authorization apply。禁止 `--force` removal、raw branch cleanup；`/tmp`、TTL、clean 状态均不构成删除授权。
-
-## Git Commit 机械门禁
-
-commit message 的机械校验由 Pi `security-gates` Extension 执行。
