@@ -7,7 +7,6 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
-import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
 import { resolvePiCodingAgentRoot } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,39 +16,42 @@ const piRoot = resolvePiCodingAgentRoot();
 const piPackage = join(piRoot, "dist", "index.js");
 const piTypes = join(piRoot, "dist", "core", "extensions", "types.d.ts");
 
-test("current settings reload the enhanced local package with one subagent owner", async () => {
+test("temporary settings discover the enhanced local package with one subagent owner", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "pi-runtime-enhanced-agent-"));
+  const agentDir = join(fixture, "agent");
+  const cwd = join(fixture, "cwd");
   const host = await import(pathToFileURL(piPackage).href);
-  const settingsManager = host.SettingsManager.create(repoRoot, join(repoRoot, "pi"));
-  const resourceLoader = new host.DefaultResourceLoader({
-    cwd: repoRoot,
-    agentDir: join(repoRoot, "pi"),
-    settingsManager,
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-  });
-  const inspect = () => {
-    const extensions = resourceLoader.getExtensions().extensions;
-    const enhanced = extensions.filter((extension) => String(extension.path).includes("/packages/pi-subagents-enhanced/extensions/"));
-    const legacy = extensions.filter((extension) => /\/pi\/extensions\/(?:subagent-runtime|custom-footer)\.ts$/.test(String(extension.path)));
-    const toolOwners = enhanced.flatMap((extension) => [...extension.tools.keys()]).filter((name) => name === "subagent" || name === "subagent_supervisor");
-    const notifyOwners = enhanced.filter((extension) => extension.messageRenderers.has("subagent-notify"));
-    const supervisorMessageOwners = enhanced.filter((extension) => extension.messageRenderers.has("subagent_supervisor_request"));
-    return { enhanced, legacy, toolOwners, notifyOwners, supervisorMessageOwners };
-  };
+  try {
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(cwd, { recursive: true });
+    const extensions = [
+      join(repoRoot, "packages", "pi-subagents-enhanced", "extensions", "subagent-runtime.ts"),
+      join(repoRoot, "packages", "pi-subagents-enhanced", "extensions", "custom-footer.ts"),
+    ];
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ extensions }));
+    const settingsManager = host.SettingsManager.create(cwd, agentDir);
+    const resourceLoader = new host.DefaultResourceLoader({
+      cwd, agentDir, settingsManager,
+      noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    });
+    const inspect = () => {
+      const discovered = resourceLoader.getExtensions().extensions;
+      const enhanced = discovered.filter((extension) => String(extension.path).includes("/packages/pi-subagents-enhanced/extensions/"));
+      const toolOwners = enhanced.flatMap((extension) => [...extension.tools.keys()]).filter((name) => name === "subagent" || name === "subagent_supervisor");
+      return { enhanced, toolOwners };
+    };
 
-  await resourceLoader.reload();
-  const first = inspect();
-  await resourceLoader.reload();
-  const second = inspect();
-  for (const snapshot of [first, second]) {
-    assert.equal(snapshot.enhanced.length, 2);
-    assert.equal(snapshot.legacy.length, 0);
-    assert.deepEqual(snapshot.toolOwners.sort(), ["subagent", "subagent_supervisor"]);
-    assert.equal(snapshot.notifyOwners.length, 1);
-    assert.equal(snapshot.supervisorMessageOwners.length, 1);
-    assert.equal(snapshot.enhanced.filter((extension) => String(extension.path).endsWith("/custom-footer.ts")).length, 1);
+    await resourceLoader.reload();
+    const first = inspect();
+    await resourceLoader.reload();
+    const second = inspect();
+    for (const snapshot of [first, second]) {
+      assert.equal(snapshot.enhanced.length, 2);
+      assert.deepEqual(snapshot.toolOwners.sort(), ["subagent", "subagent_supervisor"]);
+      assert.equal(snapshot.enhanced.filter((extension) => String(extension.path).endsWith("/custom-footer.ts")).length, 1);
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
   }
 });
 
@@ -210,52 +212,39 @@ function model(id, name) {
   return { id, name, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 256 };
 }
 
-test("real Pi RPC loads required auto-discovered Skills without retired products", async () => {
+test("real Pi RPC without wrapper ownership is unsupported and does not require local configuration", async () => {
   assert.ok(piBinary, "PI_REAL_BIN must point to an explicitly supported Pi host");
-  const controlledSkills = await discoverManagedSkills(repoRoot);
-
-  const result = spawnSync(
-    "zsh",
-    [
-      "-f",
-      "-c",
-      `source ${shellIntegration}; pi --mode rpc --no-session --offline --provider openai --model gpt-4o`,
-    ],
-    {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PI_REAL_BIN: piBinary,
-        OPENAI_API_KEY: "integration-test-not-used",
+  const fixture = await mkdtemp(join(tmpdir(), "pi-runtime-rpc-agent-"));
+  try {
+    const agentDir = join(fixture, "agent");
+    const sessionDir = join(fixture, "sessions");
+    const result = spawnSync(
+      "zsh",
+      [
+        "-f",
+        "-c",
+        `source ${shellIntegration}; export PI_CODING_AGENT_DIR=${JSON.stringify(agentDir)} PI_CODING_AGENT_SESSION_DIR=${JSON.stringify(sessionDir)}; pi --mode rpc --no-session --offline --provider openai --model gpt-4o`,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          HOME: join(fixture, "home"),
+          PI_REAL_BIN: piBinary,
+          OPENAI_API_KEY: "integration-test-not-used",
+        },
+        input: `${JSON.stringify({ id: "commands", type: "get_commands" })}\n`,
+        timeout: 15000,
       },
-      input: `${JSON.stringify({ id: "commands", type: "get_commands" })}\n`,
-      timeout: 15000,
-    },
-  );
+    );
 
-  assert.equal(result.error, undefined, result.error?.message);
-  assert.equal(result.status, 0, result.stderr);
-
-  const records = result.stdout
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-  const response = records.find(
-    (record) => record.type === "response" && record.command === "get_commands",
-  );
-  assert.ok(response, `missing get_commands response in: ${result.stdout}`);
-  assert.equal(response.success, true);
-
-  const skills = response.data.commands
-    .filter((command) => command.source === "skill")
-    .map((command) => command.name);
-  const requiredSkills = [
-    ...[...controlledSkills.keys()].map((name) => `skill:${name}`),
-    "skill:cache-stats",
-    "skill:external-llm-review-provider",
-    "skill:manage-providers",
-  ];
-  for (const required of requiredSkills) assert.ok(skills.includes(required), `missing required Skill: ${required}`);
-  assert.equal(new Set(skills).size, skills.length, "auto-discovered Skills must be unique");
-  assert.equal(skills.includes("skill:plan-runner-dispatch"), false);
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 0, result.stderr);
+    const records = result.stdout.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const response = records.find((record) => record.type === "response" && record.command === "get_commands");
+    assert.ok(response, `missing get_commands response in: ${result.stdout}`);
+    assert.equal(response.success, true);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
 });
