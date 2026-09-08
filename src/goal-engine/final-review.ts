@@ -6,6 +6,20 @@ import { withGoalStateWriterLock } from "./store.ts";
 
 const INTENT_KEYS = ["approval", "goalId", "head", "idempotencyKey", "manifestHash", "reviewId", "stateHash", "worldHash"];
 const RESULT_KEYS = [...INTENT_KEYS, "reportRef", "residual", "resultHash", "severity", "status"];
+
+type FinalReviewIntent = Readonly<{
+  approval: { entryId: string; sessionId: string; source: "user" };
+  goalId: string; head: string; idempotencyKey: string; manifestHash: string;
+  reviewId: string; stateHash: string; worldHash: string;
+}>;
+type FinalReviewRecordedResult = FinalReviewIntent & Readonly<{
+  reportRef: string; residual: string | null; resultHash: string;
+  severity: "none" | "minor" | "important" | "critical";
+  status: "recorded" | "changes_required";
+}>;
+type FinalReviewProviderFailure = FinalReviewIntent & Readonly<{
+  status: "failed"; code: "FINAL_REVIEW_PROVIDER_FAILED";
+}>;
 const locks = new Map();
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 const hash = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
@@ -15,13 +29,13 @@ const digest = value => createHash("sha256").update(JSON.stringify(canonical(val
 const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 
 function fail(message) { throw new Error(`FINAL_REVIEW_INVALID: ${message}`); }
-function approvalOf(value) {
+function approvalOf(value): FinalReviewIntent["approval"] {
   if (!sameKeys(value, ["entryId", "sessionId", "source"]) || value.source !== "user" || ![value.entryId, value.sessionId].every(item => typeof item === "string" && item)) fail("approval");
   return { entryId: value.entryId, sessionId: value.sessionId, source: "user" };
 }
 function reviewIdFor(intent) { return `review-${digest({ goalId: intent.goalId, manifestHash: intent.manifestHash, stateHash: intent.stateHash, worldHash: intent.worldHash, head: intent.head, approval: intent.approval })}`; }
 function validReviewId(reviewId) { return typeof reviewId === "string" && /^review-[a-z0-9-]{1,127}$/.test(reviewId); }
-function assertIntent(value, requireDerived = false) {
+function assertIntent(value, requireDerived = false): FinalReviewIntent {
   if (!sameKeys(value, INTENT_KEYS) || !validReviewId(value.reviewId) || value.idempotencyKey !== value.reviewId || typeof value.goalId !== "string" || !value.goalId || !hash(value.manifestHash) || !hash(value.stateHash) || !hash(value.worldHash) || !/^[a-f0-9]{40}$/.test(value.head)) fail("intent");
   const approval = approvalOf(value.approval);
   const normalized = { reviewId: value.reviewId, idempotencyKey: value.idempotencyKey, goalId: value.goalId, manifestHash: value.manifestHash, stateHash: value.stateHash, worldHash: value.worldHash, head: value.head, approval };
@@ -29,7 +43,7 @@ function assertIntent(value, requireDerived = false) {
   return normalized;
 }
 function resultHash(result) { const { resultHash: ignored, ...body } = result; return digest(body); }
-function assertResult(value, intent) {
+function assertResult(value, intent): FinalReviewRecordedResult {
   if (!sameKeys(value, RESULT_KEYS)) fail("result");
   const identity = assertIntent(Object.fromEntries(INTENT_KEYS.map(key => [key, value[key]])));
   if (!same(identity, intent) || !["none", "minor", "important", "critical"].includes(value.severity) || !["recorded", "changes_required"].includes(value.status) || (value.status === "recorded") !== !["important", "critical"].includes(value.severity) || typeof value.reportRef !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.reportRef) || (value.severity === "minor") !== (value.residual === "minor") || (value.severity !== "minor" && value.residual !== null) || !hash(value.resultHash) || value.resultHash !== resultHash(value)) fail("result identity");
@@ -58,7 +72,7 @@ async function withStateWriterLock(stateRoot, fn) {
   return serialized(stateRoot, () => withGoalStateWriterLock(stateRoot, fn));
 }
 
-export async function runRecoverableFinalReview(input) {
+export async function runRecoverableFinalReview(input): Promise<FinalReviewRecordedResult | FinalReviewProviderFailure> {
   if (!sameKeys(input, ["approval", "manifest", "provider", "reviewStore"]) || typeof input.provider !== "function") fail("input");
   const { manifest, approval, reviewStore, provider } = input;
   assertStore(reviewStore);
@@ -69,10 +83,10 @@ export async function runRecoverableFinalReview(input) {
   else if (!same(assertIntent(existing.intent, true), intent)) fail("intent conflict");
   if (existing.result !== null) return assertResult(existing.result, intent);
   let output;
-  try { output = await provider({ reviewId: intent.reviewId, idempotencyKey: intent.reviewId, writerLockHeld: false }); }
+  try { output = await provider(Object.freeze({ manifest, approval: intent.approval, reviewId: intent.reviewId, idempotencyKey: intent.reviewId, writerLockHeld: false })); }
   catch { return Object.freeze({ ...intent, status: "failed", code: "FINAL_REVIEW_PROVIDER_FAILED" }); }
   if (!object(output) || !["none", "minor", "important", "critical"].includes(output.severity) || typeof output.reportRef !== "string" || !/^sha256:[a-f0-9]{64}$/.test(output.reportRef)) fail("provider output");
-  const result = { ...intent, severity: output.severity, status: ["important", "critical"].includes(output.severity) ? "changes_required" : "recorded", reportRef: output.reportRef, residual: output.severity === "minor" ? "minor" : null };
+  const result: Omit<FinalReviewRecordedResult, "resultHash"> & { resultHash: string } = { ...intent, severity: output.severity, status: ["important", "critical"].includes(output.severity) ? "changes_required" : "recorded", reportRef: output.reportRef, residual: output.severity === "minor" ? "minor" : null, resultHash: "" };
   result.resultHash = resultHash(result);
   const normalized = assertResult(result, intent);
   await reviewStore.persistResult(normalized);
@@ -112,7 +126,7 @@ async function replaceRecord(path, record, reviews) {
   try { await rename(temp, path); await fsyncPath(reviews); } catch (error) { await unlink(temp).catch(() => {}); throw error; }
 }
 
-export function createFinalReviewFileStore({ stateRoot } = {}) {
+export function createFinalReviewFileStore({ stateRoot }: { stateRoot?: string } = {}) {
   async function pathFor(reviewId) { if (!validReviewId(reviewId)) fail("reviewId"); return { reviews: await safeRoot(stateRoot), path: join(stateRoot, "final-reviews", `${reviewId}.json`) }; }
   return Object.freeze({
     async inspect(reviewId) {

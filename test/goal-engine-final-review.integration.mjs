@@ -37,11 +37,14 @@ test("R11 uses a deep-frozen complete authoritative manifest", () => {
   assert.equal(manifest.complete, true); assert.equal(Object.isFrozen(manifest), true);
   assert.equal(manifest.schemaVersion, "goal-runtime.v1.finalization-manifest.v1");
 });
-test("stable host API accepts exactly manifest approval reviewStore and provider", async () => {
-  const seen = [];
-  const result = await run({ manifest: completeManifest(), approval, reviewStore: store(), provider: async input => { seen.push(input); return { severity: "none", reportRef: `sha256:${h("a")}` }; } });
+test("production provider receives immutable manifest, approval, and derived review identity outside writer lock", async () => {
+  const manifest = completeManifest(), seen = [];
+  const result = await run({ manifest, approval, reviewStore: store(), provider: async input => { seen.push(input); return { severity: "none", reportRef: `sha256:${h("a")}` }; } });
   assert.equal(result.status, "recorded");
-  assert.deepEqual(Object.keys(seen[0]).sort(), ["idempotencyKey", "reviewId", "writerLockHeld"]);
+  assert.deepEqual(Object.keys(seen[0]).sort(), ["approval", "idempotencyKey", "manifest", "reviewId", "writerLockHeld"]);
+  assert.equal(seen[0].manifest, manifest);
+  assert.equal(Object.isFrozen(seen[0].manifest), true);
+  assert.deepEqual(seen[0].approval, approval);
   assert.equal(seen[0].writerLockHeld, false);
   assert.equal(seen[0].idempotencyKey, seen[0].reviewId);
 });
@@ -92,11 +95,13 @@ test("provider raw text is not made durable", async () => {
   await run({ manifest: completeManifest(), approval, reviewStore, provider: async () => ({ severity: "none", reportRef: `sha256:${h("3")}`, summary: "secret", prompt: "secret", response: "secret" }) });
   assert.doesNotMatch(JSON.stringify([...reviewStore.results.values()]), /secret/);
 });
-test("provider gets no manifest or approval payload", async () => {
-  await run({ manifest: completeManifest(), approval, reviewStore: store(), provider: async input => {
-    assert.equal(input.manifestHash, undefined); assert.equal(input.approval, undefined);
+test("provider input does not expose mutable identity aliases", async () => {
+  const result = await run({ manifest: completeManifest(), approval, reviewStore: store(), provider: async input => {
+    assert.equal(input.manifestHash, undefined); assert.equal(input.manifest.manifestHash.length, 64);
+    assert.equal(input.approval.entryId, approval.entryId);
     return { severity: "none", reportRef: `sha256:${h("4")}` };
   } });
+  assert.equal(result.status, "recorded");
 });
 for (const output of [undefined, null, {}, { severity: "unknown" }, { severity: "bogus", reportRef: `sha256:${h("5")}` }, { severity: "none", reportRef: "sha256:short" }, { severity: "none", reportRef: "file:///tmp/report" }]) test(`fail closed malformed provider output ${JSON.stringify(output)}`, async () => {
   await assert.rejects(run({ manifest: completeManifest(), approval, reviewStore: store(), provider: async () => output }));
