@@ -18,6 +18,8 @@ __pycache__/
 /pi/logs/
 /pi/tmp/
 /pi/run-history.jsonl
+/pi/missions/
+/pi/profiles/
 
 # Sessions and logs
 /var/
