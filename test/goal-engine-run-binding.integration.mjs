@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyEvent, createProjection } from "../src/goal-engine/events.ts";
-import { assertExecutionSettlementProof, assertRunBindingTicketCurrent, prepareRunBindingTicket, runBoundEventData } from "../src/goal-engine/run-binding.ts";
+import { prepareRunBindingTicket } from "../src/goal-engine/run-binding.ts";
 
 const hash = (value) => value.repeat(64).slice(0, 64);
 const event = (type, data, n) => ({ schemaVersion: "planned.v2", eventId: `v2-${n}`, goalId: "v2-goal", occurredAt: "2026-09-07T00:00:00.000Z", type, data });
@@ -13,7 +13,7 @@ function dispatched() {
   return projection;
 }
 
-test("v2 run binding is profile-bound, unique, and immutable", () => {
+test("historical v2 run-binding replay remains profile-bound, unique, and immutable", () => {
   const projection = dispatched();
   const data = { taskId: "t1", attempt: 1, runId: "run-v2", agentProfile: "coder-alpha", contractHash: hash("a"), workspaceId: "goal-v2-workspace", asyncDir: "/tmp/v2-async", workspacePath: "/tmp/v2-workspace", workspaceLeaseId: hash("c"), headAtDispatch: "b".repeat(40) };
   const bound = applyEvent(projection, event("task.run_bound", data, 3));
@@ -26,12 +26,12 @@ test("v2 run binding is profile-bound, unique, and immutable", () => {
   assert.throws(() => applyEvent(projection, event("task.run_bound", { ...data, agentProfile: "x".repeat(257) }, 4)), /profile/i);
   assert.throws(() => applyEvent(projection, event("task.run_bound", { ...data, workspaceId: "goal-other" }, 4)), /workspace/i);
   assert.throws(() => applyEvent(projection, event("task.run_bound", { ...data, runId: "run-v2", taskId: "missing" }, 4)), /task/i);
-  const settled = applyEvent(bound, event("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executionHead: "d".repeat(40), runProof: { runId: "run-v2", proofId: hash("d"), rootSessionId: "root", observedAt: 1, outcome: "succeeded", agentProfile: "coder-alpha" } }, 5));
-  assert.equal(settled.tasks.get("t1").lastRunProof.runId, "run-v2");
-  assert.equal(Object.hasOwn(settled.tasks.get("t1"), "lastExecutorProof"), false);
+  // Historical v2 payloads remain subject to their frozen strict reducer shape.
+  assert.throws(() => applyEvent(bound, event("task.settled", { taskId: "t1", outcome: "succeeded", attempt: 1, executionHead: "d".repeat(40), runProof: { runId: "run-v2", proofId: hash("d"), rootSessionId: "root", observedAt: 1, outcome: "succeeded", agentProfile: "coder-alpha" } }, 5)), /exactly: taskId, outcome, attempt, executionHead, runProof, settlementEvidence/);
+  assert.equal(Object.hasOwn(bound.tasks.get("t1"), "lastExecutorProof"), false);
 });
 
-test("v2 settlements preserve failed and blocked lifecycle outcomes", () => {
+test("historical v2 settlement replay preserves failed and blocked lifecycle outcomes", () => {
   const bind = (projection, runId, n) => applyEvent(projection, event("task.run_bound", { taskId: "t1", attempt: 1, runId, agentProfile: "coder-alpha", contractHash: hash("a"), workspaceId: "goal-v2-workspace", asyncDir: "/tmp/v2-async", workspacePath: "/tmp/v2-workspace", workspaceLeaseId: hash("c"), headAtDispatch: "b".repeat(40) }, n));
   const proof = (runId, outcome) => ({ runId, proofId: hash("d"), rootSessionId: "root", observedAt: 1, outcome, agentProfile: "coder-alpha" });
   for (const proofOutcome of ["succeeded", "failed"]) {
@@ -45,31 +45,11 @@ test("v2 settlements preserve failed and blocked lifecycle outcomes", () => {
   assert.throws(() => applyEvent(bind(dispatched(), "run-bad", 3), event("task.settled", { taskId: "t1", outcome: "failed", attempt: 1, runProof: proof("run-bad", "blocked"), nextAction: "Investigate the failed execution and prepare a concrete retry plan." }, 4)), /proof/i);
 });
 
-test("run binding ticket and settlement proof reject identity drift", () => {
+test("v2 direct dispatch is read-only and cannot mint a run-binding ticket", () => {
   const projection = dispatched();
-  const ticket = prepareRunBindingTicket({ projection, taskId: "t1", contractHash: hash("a"), controlCwd: "/repo", rootSessionId: "root" });
-  assert.equal(ticket.agentProfile, "coder-alpha");
-  assert.equal(ticket.workspaceId, "goal-v2-workspace");
-  assert.deepEqual(ticket.workspaceRequest, {
-    workspaceId: "goal-v2-workspace",
-    owner: { kind: "goal-task", rootSessionId: "root", goalId: "v2-goal", taskId: "t1", attempt: 1, executionRevision: 1 },
-    originRoot: "/repo",
-    requestedCwd: "/repo",
-    originRef: "refs/heads/main",
-    baseCommit: "b".repeat(40),
-    contractHash: hash("a"),
-    mode: "coding",
-    writePaths: ["src/a.ts"],
-  });
-  assert.doesNotThrow(() => assertRunBindingTicketCurrent(ticket, projection));
-  assert.throws(() => assertRunBindingTicketCurrent({ ...ticket, agentProfile: "coder-beta" }, projection), /binding/i);
-  assert.throws(() => assertRunBindingTicketCurrent({ ...ticket, workspaceRequest: { ...ticket.workspaceRequest, contractHash: hash("e") } }, projection), /binding/i);
-  const data = runBoundEventData(ticket, { runId: "run-v2", asyncDir: "/tmp/v2-async", agentProfile: "coder-alpha" }, workspaceReceipt());
-  assert.equal(data.workspaceId, "goal-v2-workspace");
-  assert.throws(() => runBoundEventData(ticket, { runId: "run-v2", asyncDir: "/tmp/v2-async", agentProfile: "coder-alpha" }, { ...workspaceReceipt(), workspaceId: "goal-other" }), /workspace/i);
-  const bound = applyEvent(projection, event("task.run_bound", data, 3));
-  assert.deepEqual(assertExecutionSettlementProof({ task: bound.tasks.get("t1"), proof: { runId: "run-v2", proofId: hash("d"), rootSessionId: "root", observedAt: 1, outcome: "succeeded", agentProfile: "coder-alpha" } }), { runId: "run-v2", proofId: hash("d"), rootSessionId: "root", observedAt: 1, outcome: "succeeded", agentProfile: "coder-alpha" });
-  assert.throws(() => assertExecutionSettlementProof({ task: bound.tasks.get("t1"), proof: { runId: "run-v2", proofId: hash("d"), rootSessionId: "root", observedAt: 1, outcome: "succeeded", agentProfile: "coder-beta" } }), /profile/i);
-  for (const taskOutcome of ["failed", "blocked"]) for (const proofOutcome of ["succeeded", "failed"]) assert.equal(assertExecutionSettlementProof({ task: bound.tasks.get("t1"), taskOutcome, proof: { runId: "run-v2", proofId: hash("d"), rootSessionId: "root", observedAt: 1, outcome: proofOutcome, agentProfile: "coder-alpha" } }).outcome, proofOutcome);
-  assert.throws(() => assertExecutionSettlementProof({ task: bound.tasks.get("t1"), taskOutcome: "failed", proof: { runId: "run-v2", proofId: hash("d"), rootSessionId: "root", observedAt: 1, outcome: "blocked", agentProfile: "coder-alpha" } }), /proof/i);
+  const before = projection.tasks.get("t1");
+  assert.equal(prepareRunBindingTicket({ projection, taskId: "t1", contractHash: hash("a"), controlCwd: "/repo", rootSessionId: "root" }), null);
+  assert.equal(before.status, "dispatched");
+  assert.equal(before.runBinding, null);
+  assert.deepEqual([...projection.runIds], []);
 });

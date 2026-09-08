@@ -88,7 +88,7 @@ for (const [streamingBehavior, reason] of [["steer", "interactive_steer"], ["fol
     workspacePath: task.executorBinding.workspacePath, leaseId: task.executorBinding.workspaceLeaseId,
     sessionId: "owner", baseHead: projection.runtimeBaseHead,
     headAtDispatch: task.executorBinding.headAtDispatch, executionRevision: projection.executionRevision,
-    contractHash: projection.executionContractHash, expectedCriteria: ["contract"], agent: "executor",
+    contractHash: projection.executionContractHash, agent: "executor",
   });
   assert.match(events, /"type":"goal.runtime_suspended"/); assert.doesNotMatch(events, new RegExp(raw));
   for (const value of [JSON.stringify(projection.suspension), JSON.stringify(stops[0].request), JSON.stringify(await invoke(api, "goal_status", {}))]) assert.doesNotMatch(value, new RegExp(raw));

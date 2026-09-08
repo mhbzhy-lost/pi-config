@@ -13,6 +13,9 @@ const OWNER_PROTOCOL = "goal-engine.writer-owner.v2";
 const OWNER_IDENTITY_KIND = "ps-lstart-utc";
 let selfBirthIdentity;
 const ownerIdentityFreshness = new Map();
+type GoalRegistryEntry = { lifecycle: "active" | "blocked" | "completed" | "cancelled" | "abandoned"; objective: string; updatedAt: string };
+type GoalRegistry = { schema_version: typeof REGISTRY_SCHEMA_VERSION; active_goal_ids: string[]; goals: Record<string, GoalRegistryEntry> };
+type FinalizationProjectionOptions = { version?: number };
 
 export function appendEventBatch(stateRoot, events, expectedVersion) {
   validateEventBatch(events);
@@ -217,7 +220,7 @@ export function loadProjection(stateRoot, goalId) {
 // Finalization consumes an independently replayed, checked Store snapshot.  It
 // deliberately does not repair a partial publication: callers must fail closed
 // rather than turn a validation read into a Store mutation.
-export function loadFinalizationProjection(stateRoot, goalId, options = {}) {
+export function loadFinalizationProjection(stateRoot, goalId, options: FinalizationProjectionOptions = {}) {
   if (typeof stateRoot !== "string" || !stateRoot || typeof goalId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(goalId) || goalId === "." || goalId === "..") throw new TypeError("unsafe finalization projection path");
   const root = resolve(stateRoot);
   const lock = acquireWriterLock(root);
@@ -669,10 +672,10 @@ export function updateRegistry(stateRoot, event, projection, identity, writerTok
 function prepareRegistryUpdate(stateRoot, event, projection, writerToken) {
   assertWriterLockOwned(stateRoot, writerToken);
   const registryPath = join(stateRoot, "registry.json");
-  const registry = existsSync(registryPath) ? JSON.parse(readFileSync(registryPath, "utf8")) : { schema_version: REGISTRY_SCHEMA_VERSION, active_goal_ids: [], goals: {} };
+  const registry: GoalRegistry = existsSync(registryPath) ? JSON.parse(readFileSync(registryPath, "utf8")) : { schema_version: REGISTRY_SCHEMA_VERSION, active_goal_ids: [], goals: {} };
   validateRegistry(registry);
   const goalId = event.goalId;
-  if (!registry.goals[goalId]) registry.goals[goalId] = {};
+  if (!registry.goals[goalId]) registry.goals[goalId] = { lifecycle: projection.lifecycle, objective: projection.objective, updatedAt: projection.updatedAt };
   registry.goals[goalId].lifecycle = projection.lifecycle;
   registry.goals[goalId].objective = projection.objective;
   registry.goals[goalId].updatedAt = projection.updatedAt;
@@ -682,9 +685,9 @@ function prepareRegistryUpdate(stateRoot, event, projection, writerToken) {
   return registry;
 }
 
-function validateRegistry(registry) {
+function validateRegistry(registry: GoalRegistry) {
   if (!registry || typeof registry !== "object" || Array.isArray(registry) || registry.schema_version !== REGISTRY_SCHEMA_VERSION || !Array.isArray(registry.active_goal_ids) || !registry.goals || typeof registry.goals !== "object" || Array.isArray(registry.goals)) throw new TypeError("invalid goal engine registry");
-  const activeIds = new Set();
+  const activeIds = new Set<string>();
   for (const goalId of registry.active_goal_ids) {
     if (typeof goalId !== "string" || !goalId || activeIds.has(goalId)) throw new TypeError("invalid goal engine registry");
     activeIds.add(goalId);

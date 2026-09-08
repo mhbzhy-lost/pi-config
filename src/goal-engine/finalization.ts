@@ -5,6 +5,25 @@ import { coordinatorCriteria, executorCriteria } from "./task-definition.ts";
 
 const UNSUPPORTED_GENERATIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3", "planned.v1"]);
 const MANIFEST_KEYS = ["schemaVersion", "goalId", "revision", "contractHash", "head", "worldHash", "stateHash", "obligationStateHash", "tasks", "conditions", "debts", "blockers", "complete", "manifestHash"];
+
+type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
+type DynamicRecord = { readonly [key: string]: unknown };
+type ResourceRow = Readonly<{ key: string; holders: readonly string[]; capacity: number }>;
+type WorldSnapshot = Readonly<DynamicRecord & { resources?: readonly ResourceRow[]; repo?: Readonly<DynamicRecord & { head?: string }> }>;
+type ConditionValidity = ReadonlyMap<string, Readonly<{ status: "fresh" | "stale"; reason: string | null }>> | Readonly<Record<string, Readonly<{ status: "fresh" | "stale"; reason: string | null }>>>;
+type FinalizationProjection = Readonly<DynamicRecord>;
+type FinalizationStoreProjection = Readonly<{ goalId: string; version: number; projection: FinalizationProjection; projectionStateHash: string }>;
+type FinalizationBlocker = Readonly<{ code: string; id?: string }>;
+type FinalizationManifest = Readonly<{
+  schemaVersion: "goal-runtime.v1.finalization-manifest.v1"; goalId: string | null; revision: number | null;
+  contractHash: string | null; head: string | null; worldHash: string; stateHash: string;
+  obligationStateHash: string; tasks: readonly JsonValue[]; conditions: readonly JsonValue[];
+  debts: JsonValue; blockers: readonly FinalizationBlocker[]; complete: boolean; manifestHash: string | null;
+}>;
+type FinalizationInput = Readonly<{
+  projection?: FinalizationProjection; worldSnapshot?: WorldSnapshot; conditionValidity?: ConditionValidity;
+  resourceInventory?: readonly ResourceRow[] | Readonly<Record<string, never>>; storeProjection?: FinalizationStoreProjection;
+}>;
 const isObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const hash = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const head = value => typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
@@ -13,7 +32,7 @@ const sha = value => createHash("sha256").update(JSON.stringify(canonical(value)
 const freeze = value => { if (value && typeof value === "object" && !Object.isFrozen(value)) { Object.values(value).forEach(freeze); Object.freeze(value); } return value; };
 const rows = value => (value instanceof Map ? [...value.entries()] : isObject(value) ? Object.entries(value) : Array.isArray(value) ? value.map((row, index) => [String(index), row]) : []).map(([key, row]) => [String(row?.id ?? row?.definition?.id ?? key), row]).sort(([a], [b]) => a.localeCompare(b));
 const get = (value, id) => value instanceof Map ? value.get(id) : value?.[id];
-const add = (blockers, code, id) => blockers.push(id === undefined ? { code } : { code, id });
+const add = (blockers, code, id = undefined) => blockers.push(id === undefined ? { code } : { code, id });
 const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 
 function currentWorld(world) { const { worldHash: _hash, capturedAt: _capturedAt, ...stable } = world ?? {}; return canonical(stable); }
@@ -57,7 +76,12 @@ function taskManifest(goalId, id, task, applicability) {
   const binding = task?.executorBinding, proof = task?.lastExecutorProof, settlement = task?.settlement, workspace = task?.workspace;
   const criteria = acceptanceCriteria(task);
   const coordinator = Array.isArray(task?.acceptance?.criteria) ? coordinatorCriteria(task.acceptance.criteria).map(({ id: criterionId, predicate }) => ({ id: criterionId, predicate, satisfied: coordinatorPredicateSatisfied(task, predicate) })) : [];
-  const out = { id, applicability, status: task?.status ?? null, attempts: task?.attempts ?? null, contractHash: task?.contractHash ?? null, acceptanceCriteria: criteria ?? [], coordinatorCriteria: coordinator, acceptanceVerification: task?.acceptanceVerification ?? null };
+  const out: {
+    id: unknown; applicability: unknown; status: unknown; attempts: unknown; contractHash: unknown;
+    acceptanceCriteria: unknown[]; coordinatorCriteria: unknown[]; acceptanceVerification: unknown;
+    binding?: unknown; executorProof?: unknown; executorProofIdentity?: unknown; settlement?: unknown;
+    settlementEvidence?: unknown; settlementHash?: string; workspaceProof?: unknown;
+  } = { id, applicability, status: task?.status ?? null, attempts: task?.attempts ?? null, contractHash: task?.contractHash ?? null, acceptanceCriteria: criteria ?? [], coordinatorCriteria: coordinator, acceptanceVerification: task?.acceptanceVerification ?? null };
   if (applicability === "superseded") return out;
   out.binding = binding ? { attempt: binding.attempt, runId: binding.runId, contractHash: binding.contractHash, asyncDir: binding.asyncDir, workspacePath: binding.workspacePath, workspaceLeaseId: binding.workspaceLeaseId, headAtDispatch: binding.headAtDispatch } : null;
   out.executorProof = proof ? { runId: proof.runId, proofId: proof.proofId } : null;
@@ -81,7 +105,7 @@ function conditionManifest(id, condition, validity, projection) {
   return { id, status: condition?.status ?? null, freshness: fresh && base && sequence ? "fresh" : "stale", sequenceValid: sequence, supportingEvidenceIds: support, supportingEvidenceRefs: selected.filter(Boolean).map(row => ({ evidenceId: row.evidenceId, terminalProofHash: row.terminalProofHash, artifact: { id: row.artifact?.id, hash: row.artifact?.hash } })), stability: policy ?? null, conditionHash: condition?.conditionHash ?? null };
 }
 function debts(projection, world, resourceRows, resourceInventoryValid) { return { resourceInventoryValid, findings: rows(projection.findings).map(([id, row]) => ({ id, status: row?.status ?? null })), episodes: rows(projection.repairEpisodes).map(([id, row]) => ({ id, status: row?.status ?? null, resourceDebt: row?.cancellation?.resourceDebt === true })), observations: rows(projection.observationRuns).map(([id, row]) => ({ id, conditionId: row?.conditionId ?? null, phase: row?.phase ?? null, terminalProofHash: row?.terminalProofHash ?? null, releaseReceiptHash: row?.releaseReceiptHash ?? null })), workspaces: rows(projection.tasks).filter(([, task]) => task?.workspace).map(([id, task]) => task.workspace.schemaVersion === "managed-workspace.v1" ? ({ id, state: task.workspace.state, disposition: task.workspace.disposition, cleanupDebt: task.workspace.cleanupDebt }) : ({ id, phase: task.workspace.phase ?? null, disposition: task.workspace.disposition ?? null, released: task.workspace.released ?? null })), resources: resourceRows, activeRuns: Array.isArray(world?.activeRuns) ? world.activeRuns.map(row => ({ runId: row?.runId, kind: row?.kind, state: row?.state })) : null, suspension: projection.suspension ?? null, pendingHumanDecision: projection.pendingHumanDecision ?? null, discovery: projection.discovery ?? projection.discoveryDebt ?? null, world: currentWorld(world) }; }
-function deriveBlockers({ goalId, revision, contractHash, head: manifestHead, worldHash, tasks, conditions, debts: debt }) {
+function deriveBlockers({ goalId, revision, contractHash, head: manifestHead, worldHash, tasks, conditions, debts: debt, stateHash: _stateHash, obligationStateHash: _obligationStateHash }) {
   const blockers = [], world = debt?.world, repo = world?.repo;
   if (!goalId || !Number.isSafeInteger(revision) || !hash(contractHash)) add(blockers, "REVISION_OR_CONTRACT_UNKNOWN");
   if (!same(sha(world), worldHash) || !head(manifestHead) || manifestHead !== repo?.head) add(blockers, "UNKNOWN_WORLD");
@@ -111,9 +135,9 @@ function deriveBlockers({ goalId, revision, contractHash, head: manifestHead, wo
   return blockers.sort((a, b) => `${a.code}:${a.id ?? ""}`.localeCompare(`${b.code}:${b.id ?? ""}`));
 }
 
-export function buildObligationFinalizationManifest({ projection, worldSnapshot, conditionValidity, resourceInventory } = {}) {
+export function buildObligationFinalizationManifest({ projection, worldSnapshot, conditionValidity, resourceInventory, storeProjection }: FinalizationInput = {}) {
   if (!isObject(projection) || !isObject(worldSnapshot)) throw new Error("projection and worldSnapshot are required");
-  const store = arguments[0]?.storeProjection;
+  const store = storeProjection;
   const authority = store ? assertStoreProjection(store, projection) : null;
   const source = authority?.projection ?? projection;
   const resource = inventory(resourceInventory, worldSnapshot), tasks = rows(source.tasks).map(([id, task]) => taskManifest(source.goalId, id, task, get(source.taskApplicability, id)?.state ?? "applicable")), conditions = rows(source.conditions).map(([id, condition]) => conditionManifest(id, condition, get(conditionValidity, id), source)), debt = { ...debts(source, worldSnapshot, resource.rows, resource.valid), ...(authority ? { storeAuthority: true } : {}) };

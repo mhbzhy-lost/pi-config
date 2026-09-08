@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { ownerSessionId, suspensionClosureHash } from "./events.ts";
-import { runCriteria } from "./task-definition.ts";
 import { runBindingForTask } from "./legacy-executor-compat.ts";
 
 export { suspensionClosureHash };
+type SuspensionProjection = { goalId?: string; runtimeGeneration?: string; executionRevision?: number; executionContractHash?: string; runtimeBaseHead?: string; eventSchemaVersion?: string; runtimeState?: string; suspension?: Record<string, unknown>; sessionBindings?: Array<{ state?: string; sessionId?: string }>; tasks?: Map<string, { status?: string; attempts?: number; acceptance?: { criteria?: unknown[] } }> };
+type SuspensionPlanInput = { projection?: SuspensionProjection; reason?: string; affectedIds?: { taskIds?: string[]; runIds?: string[] }; inventories?: { workspaces?: Array<{ affected?: boolean; taskId?: string; runId?: string; policy?: string }> } };
+type SuspensionCompletionInput = { projection?: SuspensionProjection; stopProofs?: Array<{ runId?: string; proofHash?: string; state?: string }>; workspaceInventories?: Array<{ taskId?: string; attempt?: number; proofHash?: string; state?: string; disposition?: string }>; resourceProofs?: Array<{ ownerId?: string; proofHash?: string; state?: string; debt?: boolean }> };
 
 export function suspensionClosureStatus(projection) {
   const suspension = projection?.suspension || {};
@@ -33,15 +35,13 @@ function durableOwnerSessionId(projection) {
   return sessionId;
 }
 
-export function deriveOwnedRunStopRequest({ projection, taskId } = {}) {
+export function deriveOwnedRunStopRequest({ projection, taskId }: { projection?: SuspensionProjection; taskId?: string } = {}) {
   if (!projection || projection.runtimeGeneration !== "goal-runtime.v1" || !Number.isSafeInteger(projection.executionRevision) || projection.executionRevision < 1 || typeof projection.executionContractHash !== "string" || !/^[a-f0-9]{64}$/.test(projection.executionContractHash) || typeof projection.goalId !== "string" || !projection.goalId || typeof projection.runtimeBaseHead !== "string" || !/^[a-f0-9]{40}$/.test(projection.runtimeBaseHead)) throw new Error("durable runtime identity is invalid");
   const sessionId = durableOwnerSessionId(projection);
   const task = projection.tasks?.get?.(taskId); let binding;
   try { binding = task && runBindingForTask(task, projection.eventSchemaVersion); } catch { binding = null; }
   if (typeof taskId !== "string" || !taskId || !task || !["dispatched", "running", "settling"].includes(task.status) || !Number.isSafeInteger(task.attempts) || task.attempts < 1 || !binding || typeof binding.runId !== "string" || !binding.runId || typeof binding.asyncDir !== "string" || !binding.asyncDir.startsWith("/") || typeof binding.workspacePath !== "string" || !binding.workspacePath.startsWith("/") || typeof binding.workspaceLeaseId !== "string" || !/^[a-f0-9]{64}$/.test(binding.workspaceLeaseId) || typeof binding.headAtDispatch !== "string" || !/^[a-f0-9]{40}$/.test(binding.headAtDispatch)) throw new Error("durable executor binding is invalid");
-  const expectedCriteria = runCriteria(task.acceptance?.criteria ?? []).map((criterion) => criterion.id);
-  if (!expectedCriteria.length) throw new Error("durable executor acceptance authority is invalid");
-  return Object.freeze({ goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, asyncDir: binding.asyncDir, workspacePath: binding.workspacePath, leaseId: binding.workspaceLeaseId, sessionId, baseHead: projection.runtimeBaseHead, headAtDispatch: binding.headAtDispatch, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, expectedCriteria, agentProfile: binding.agentProfile });
+  return Object.freeze({ goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, asyncDir: binding.asyncDir, workspacePath: binding.workspacePath, leaseId: binding.workspaceLeaseId, sessionId, baseHead: projection.runtimeBaseHead, headAtDispatch: binding.headAtDispatch, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, agent: "executor" as const });
 }
 
 export function suspensionGuard(projection, operation) {
@@ -51,7 +51,7 @@ export function suspensionGuard(projection, operation) {
   return true;
 }
 
-export function buildSuspensionPlan({ projection, reason, affectedIds = {}, inventories = {} } = {}) {
+export function buildSuspensionPlan({ projection, reason, affectedIds = {}, inventories = {} }: SuspensionPlanInput = {}) {
   if (!projection?.goalId) throw new Error("runtime projection is required");
   if (!REASONS.has(reason)) throw new Error("invalid suspension reason");
   const taskIds = [...new Set(affectedIds.taskIds || [])].sort(); const runIds = [...new Set(affectedIds.runIds || [])].sort();
@@ -64,7 +64,7 @@ export function buildSuspensionPlan({ projection, reason, affectedIds = {}, inve
   return Object.freeze({ suspensionId, blocked: BLOCKED, guard: (operation) => suspensionGuard({ runtimeState: "suspended" }, operation), workspaceStrategies, events: Object.freeze(events) });
 }
 
-export async function requestOwnedRunStop(pi, request = {}) {
+export async function requestOwnedRunStop(pi: { stopOwnedRun?: (request: ReturnType<typeof deriveOwnedRunStopRequest>) => Promise<{ state?: string; proof?: unknown }> }, request: { projection?: SuspensionProjection; taskId?: string; [key: string]: unknown } = {}) {
   const { projection, ...claimed } = request;
   if (!pi || typeof pi.stopOwnedRun !== "function") throw new Error("Root Broker owned stop facade is unavailable");
   const owned = deriveOwnedRunStopRequest({ projection, taskId: claimed.taskId });
@@ -76,7 +76,7 @@ export async function requestOwnedRunStop(pi, request = {}) {
   } catch { return Object.freeze({ terminal: false, attention: true, reason: "owned_stop_unavailable" }); }
 }
 
-export function inspectSuspensionCompletion({ projection, stopProofs = [], workspaceInventories = [], resourceProofs = [] } = {}) {
+export function inspectSuspensionCompletion({ projection, stopProofs = [], workspaceInventories = [], resourceProofs = [] }: SuspensionCompletionInput = {}) {
   const suspension = projection?.suspension;
   const taskIds = Array.isArray(suspension?.affectedTaskIds) ? suspension.affectedTaskIds : [];
   const runIds = Array.isArray(suspension?.affectedRunIds) ? suspension.affectedRunIds : [];

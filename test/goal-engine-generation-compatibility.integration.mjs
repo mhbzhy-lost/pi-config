@@ -4,8 +4,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
 import { applyEvent, createProjection, schemaVersionForMutation } from "../src/goal-engine/events.ts";
-import { generationCapabilities } from "../src/goal-engine/generation-capabilities.ts";
+import { generationCapabilities, isWritableGoalGeneration } from "../src/goal-engine/generation-capabilities.ts";
 import { appendEvent, appendEventBatch, loadProjection } from "../src/goal-engine/store.ts";
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
@@ -42,6 +44,38 @@ function runtimeFixture() {
   return { p, rows, contract };
 }
 
+test("public v2 runtime init is read-only before ledger or resource side effects", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "goal-generation-read-only-"));
+  try {
+    execFileSync("git", ["init", "-b", "main"], { cwd });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd });
+    writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n");
+    execFileSync("git", ["add", ".gitignore"], { cwd });
+    execFileSync("git", ["commit", "-m", "init"], { cwd });
+    const tools = [];
+    const sessionManager = { getSessionId: () => "owner", getSessionFile: () => join(cwd, "session"), getLeafId: () => "leaf", getBranch: () => [], getEntries: () => [] };
+    const api = { registerTool: tool => tools.push(tool), on() {} };
+    let appends = 0, workspaceAllocations = 0, brokerRegistrations = 0;
+    createGoalEngineExtension(api, {
+      goalStateEnv: {},
+      appendEventBatch() { appends++; throw new Error("v2 writer reached ledger"); },
+      workspaceService: { allocate() { workspaceAllocations++; } },
+      runtimeHost: {
+        registries: runtimeRegistries,
+        captureCurrentWorld() { return { safe: true, repo: { head: execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim() } }; },
+        registerBroker() { brokerRegistrations++; },
+      },
+    });
+    const v2 = runtimeInit({ execution: { ...runtimeInit().execution, schema: "goal-runtime.v2", tasks: [{ ...runtimeInit().execution.tasks[0], agentProfile: "coder-alpha", acceptance: { criteria: [{ ...runtimeInit().execution.tasks[0].acceptance.criteria[0], evaluator: "run" }] } }] } });
+    const init = tools.find(tool => tool.name === "goal_init");
+    await assert.rejects(() => init.execute("call", v2, undefined, undefined, { cwd, sessionManager }), /GOAL_GENERATION_READ_ONLY/);
+    assert.equal(appends, 0);
+    assert.equal(workspaceAllocations, 0);
+    assert.equal(brokerRegistrations, 0);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
 test("table-driven historical v1/v2/v3/planned replay is isolated and runtime fields are not inferred", () => {
   const root = mkdtempSync(join(tmpdir(), "goal-generation-replay-"));
   try {
@@ -68,6 +102,15 @@ test("planned snapshots retain their existing serialization without runtime acti
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("writable Goal generation gate admits only public v1 dispatch generations", () => {
+  for (const [schemaVersion, expected] of [
+    ["planned.v1", true], ["goal-runtime.v1", true],
+    ["planned.v2", false], ["goal-runtime.v2", false],
+    ["goal-engine.event.v1", false], ["goal-engine.event.v2", false], ["goal-engine.event.v3", false],
+    ["unknown", false],
+  ]) assert.equal(isWritableGoalGeneration(schemaVersion), expected, schemaVersion);
+});
+
 test("generation matrix preserves planned policy and rejects mixed generations/schema mutation", () => {
   for (const version of ["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]) {
     assert.deepEqual(generationCapabilities(version), { taskContract: "legacy-commands", executorBinding: "legacy", settlement: "legacy", completion: "accept-auto", conditions: false, executionRevision: false });
@@ -78,6 +121,27 @@ test("generation matrix preserves planned policy and rejects mixed generations/s
     const goalId = "mixed-generation";
     seed(root, [legacyCreated("goal-engine.event.v2", goalId), { ...legacyCreated("planned.v1", goalId), eventId: "mixed", occurredAt: at(2), type: "goal.checkpoint", data: { canonicalFingerprint: hash(1), advanced: true, sequence: 1 } }]);
     assert.throws(() => loadProjection(root, goalId), /mixed|downgrade|checkpoint/i);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("fresh writers reject v2 before any public mutation while historical v2 replay remains exact", () => {
+  const v2 = createProjection();
+  v2.eventSchemaVersion = "planned.v2";
+  assert.throws(() => schemaVersionForMutation(v2), (error) => error?.code === "GOAL_GENERATION_READ_ONLY");
+
+  const root = mkdtempSync(join(tmpdir(), "goal-v2-replay-only-"));
+  try {
+    const goalId = "historical-v2";
+    const historical = legacyCreated("planned.v2", goalId);
+    historical.data.taskDefs["task-1"] = {
+      ...plannedDef,
+      agentProfile: "coder-alpha",
+      acceptance: { criteria: [{ ...plannedDef.acceptance.criteria[0], evaluator: "run" }] },
+    };
+    seed(root, [historical]);
+    const replay = loadProjection(root, goalId);
+    assert.equal(replay.eventSchemaVersion, "planned.v2");
+    assert.throws(() => schemaVersionForMutation(replay), (error) => error?.code === "GOAL_GENERATION_READ_ONLY");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -34,9 +34,18 @@ function exact(keys, value) { assert.deepEqual(Object.keys(value).sort(), [...ke
 function workspaceRequest(overrides = {}) {
   return { stateRoot: "/state", goalId: "goal", taskId: "task", attempt: 1, runId: "run", leaseId: hash("owner-token"), workspacePath: "/workspace", headAtDispatch: DISPATCH_HEAD, baseHead: BASE_HEAD, executionRevision: 1, contractHash: hash("contract"), sessionId: "session", ...overrides };
 }
-function durableReceipt(lease, inspection) {
-  const material = { ownerCas: hash(lease.ownerToken), workspacePath: lease.path, executorHead: inspection.headCommit, disposition: "preserved", manifest: { id: "managed", state: "preserved" } };
-  return { ...material, receiptHash: canonicalHash(material) };
+function publicLease({ goalId = "goal", taskId = "task", attempt = 1, executionRevision = 1, stateRoot = "/state", workspaceId = "workspace", leaseId = hash("public-owner-digest"), path = "/workspace", baseCommit = DISPATCH_HEAD, state = "active" } = {}) {
+  return {
+    schemaVersion: "managed-workspace.v1", workspaceId, leaseId,
+    owner: { kind: "goal-task", rootSessionId: "fixture-root", goalId, taskId, attempt, executionRevision },
+    originRoot: "/origin", requestedCwd: "/origin", originRef: "refs/heads/main", baseCommit,
+    path, dispatchCwd: path, branchRef: "refs/heads/managed", state, run: null,
+    disposition: state === "preserved" ? { action: "preserve", reason: "Goal quarantine after owned executor stop" } : null,
+    cleanupDebt: null,
+  };
+}
+function publicPreserved(options = {}) {
+  return publicLease({ ...options, state: "preserved" });
 }
 
 test("enabled entry without runtimeHost keeps task-only extension loadable without empty runtime authority", async () => {
@@ -118,79 +127,50 @@ test("stopOwnedRun accepts only complete Store-derived exact Root Broker authori
   for (const bad of [{ runId: binding.runId, asyncDir: binding.asyncDir, sessionId: binding.sessionId }, { ...binding, extra: 1 }, { ...binding, asyncDir: "relative" }, { ...binding, runId: "" }, { ...binding, agent: "reviewer" }]) await assert.rejects(() => h.stopOwnedRun(bad));
 });
 
-test("quarantineWorkspace preserves the inspected durable lease with canonical proof", async () => {
-  const request = workspaceRequest(), inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true };
-  const ownerToken = "owner-token", seen = [];
-  const lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: DISPATCH_HEAD, ownerToken };
+test("quarantineWorkspace consumes a real public managed receipt without ownerToken", async () => {
+  const lease = publicLease(), request = workspaceRequest({ leaseId: lease.leaseId }), inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true }, seen = [];
+  assert.equal(Object.hasOwn(lease, "ownerToken"), false);
   const h = await host({
     loadExecutorWorkspaceLease(input) { seen.push(["load", input]); return lease; },
     inspectExecutorWorkspace(input) { seen.push(["inspect", input]); return inspection; },
-    releaseExecutorWorkspace(input, options) { seen.push(["release", input, options]); return { released: false, preserved: true, disposition: "preserved", preservationReceipt: durableReceipt(lease, inspection) }; },
+    releaseExecutorWorkspace(input, options) { seen.push(["release", input, options]); return publicPreserved(); },
   });
-  const first = await h.quarantineWorkspace(request), second = await h.quarantineWorkspace(request);
-  const material = { request, receiptHash: durableReceipt(lease, inspection).receiptHash, disposition: "preserved" };
-  assert.deepEqual(first, { taskId: "task", attempt: 1, proofHash: canonicalHash(material), state: "quarantined", disposition: "preserved" });
-  assert.deepEqual(second, first);
-  assert.deepEqual(seen.filter(([name]) => name === "release").map(([, input, options]) => [input, options]), [
-    [lease, { disposition: "preserved", expectedExecutorHead: inspection.headCommit }],
-    [lease, { disposition: "preserved", expectedExecutorHead: inspection.headCommit }],
-  ]);
+  const result = await h.quarantineWorkspace(request);
+  assert.deepEqual(result, { taskId: "task", attempt: 1, proofHash: canonicalHash({ request, receipt: publicPreserved() }), state: "quarantined", disposition: "preserved" });
+  assert.deepEqual(seen.filter(([name]) => name === "release").map(([, input, options]) => [input, options]), [[lease, { disposition: "preserved", expectedExecutorHead: inspection.headCommit }]]);
+  assert.equal(JSON.stringify(result).includes("ownerToken"), false);
 });
 
-test("quarantineWorkspace rejects lease, inspection, and caller identity drift before release", async () => {
-  const request = workspaceRequest();
-  for (const [name, lease, inspection, drift] of [
-    ["path", { path: "/other", baseCommit: BASE_HEAD, ownerToken: "owner-token" }, { path: "/workspace", headCommit: EXECUTOR_HEAD, clean: true }, {}],
-    ["baseCommit", { path: "/workspace", baseCommit: "4444444444444444444444444444444444444444", ownerToken: "owner-token" }, { path: "/workspace", headCommit: EXECUTOR_HEAD, clean: true }, {}],
-    ["ownerToken", { path: "/workspace", baseCommit: BASE_HEAD, ownerToken: "other-owner" }, { path: "/workspace", headCommit: EXECUTOR_HEAD, clean: true }, {}],
-    ["head-missing", { path: "/workspace", baseCommit: BASE_HEAD, ownerToken: "owner-token" }, { path: "/workspace", clean: true }, {}],
-    ["head-invalid", { path: "/workspace", baseCommit: BASE_HEAD, ownerToken: "owner-token" }, { path: "/workspace", headCommit: "not-a-sha", clean: true }, {}],
+test("quarantineWorkspace fails closed for public receipt identity, digest, path, or HEAD drift", async () => {
+  const lease = publicLease(), request = workspaceRequest({ leaseId: lease.leaseId }), inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true };
+  for (const [name, supplied, observed, released] of [
+    ["owner", publicLease({ taskId: "other" }), inspection, publicPreserved()],
+    ["digest", publicLease({ leaseId: hash("other") }), inspection, publicPreserved()],
+    ["path", publicLease({ path: "/other" }), inspection, publicPreserved()],
+    ["base", publicLease({ baseCommit: BASE_HEAD }), inspection, publicPreserved()],
+    ["head", lease, { path: "/workspace", clean: true }, publicPreserved()],
+    ["preserved-owner", lease, inspection, publicPreserved({ taskId: "other" })],
+    ["preserved-digest", lease, inspection, publicPreserved({ leaseId: hash("other") })],
+    ["preserved-path", lease, inspection, publicPreserved({ path: "/other" })],
+    ["preserved-state", lease, inspection, publicLease()],
   ]) {
     let releases = 0;
-    const h = await host({ loadExecutorWorkspaceLease() { return { ...lease, goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state" }; }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { releases++; } });
-    await assert.rejects(() => h.quarantineWorkspace({ ...request, ...drift }), name); assert.equal(releases, 0, name);
+    const h = await host({ loadExecutorWorkspaceLease() { return supplied; }, inspectExecutorWorkspace() { return observed; }, releaseExecutorWorkspace() { releases++; return released; } });
+    await assert.rejects(() => h.quarantineWorkspace(request), name);
+    if (["owner", "digest", "path", "base", "head"].includes(name)) assert.equal(releases, 0, name);
   }
-  const h = await host({}); await assert.rejects(() => h.quarantineWorkspace({ ...request, preserved: true }));
 });
 
-test("quarantineWorkspace fails closed for durable receipt, owner, HEAD, or path drift and never exposes ownerToken", async () => {
-  const request = workspaceRequest(), lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: DISPATCH_HEAD, ownerToken: "owner-token" }, inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true };
-  for (const mutate of [
-    (receipt) => ({ ...receipt, ownerCas: hash("other") }),
-    (receipt) => ({ ...receipt, workspacePath: "/other" }),
-    (receipt) => ({ ...receipt, executorHead: DISPATCH_HEAD }),
-    (receipt) => ({ ...receipt, receiptHash: hash("forged") }),
-  ]) {
-    const h = await host({ loadExecutorWorkspaceLease() { return lease; }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { return { preserved: true, disposition: "preserved", preservationReceipt: mutate(durableReceipt(lease, inspection)) }; } });
-    await assert.rejects(() => h.quarantineWorkspace(request));
-  }
-  const h = await host({ loadExecutorWorkspaceLease() { return lease; }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { return { preserved: true, disposition: "preserved", preservationReceipt: durableReceipt(lease, inspection) }; } });
-  const response = await h.quarantineWorkspace(request);
-  assert.equal(JSON.stringify(response).includes(lease.ownerToken), false);
+test("quarantineResource re-verifies the public owner digest and identity", async () => {
+  const lease = publicLease({ baseCommit: BASE_HEAD }), request = { stateRoot: "/state", goalId: "goal", ownerKind: "executor", ownerId: "run", taskId: "task", attempt: 1, leaseId: lease.leaseId, executionRevision: 1, contractHash: hash("contract"), sessionId: "session" };
+  const inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true };
+  const h = await host({ loadExecutorWorkspaceLease() { return lease; }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { return publicPreserved({ baseCommit: BASE_HEAD }); } });
+  assert.deepEqual(await h.quarantineResource(request), { ownerId: "run", proofHash: canonicalHash({ request, receipt: publicPreserved({ baseCommit: BASE_HEAD }) }), state: "quarantined", debt: true });
 });
 
-test("quarantineResource proves preservation through the owning Goal workspace lease", async () => {
-  const request = { stateRoot: "/state", goalId: "goal", ownerKind: "executor", ownerId: "run", taskId: "task", attempt: 1, leaseId: hash("owner-token"), executionRevision: 1, contractHash: hash("contract"), sessionId: "session" };
-  const lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: BASE_HEAD, ownerToken: "owner-token" };
-  const inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true }, calls = [];
-  const h = await host({ loadExecutorWorkspaceLease(value) { calls.push(["load", value]); return lease; }, inspectExecutorWorkspace(value) { calls.push(["inspect", value]); return inspection; }, releaseExecutorWorkspace(value, options) { calls.push(["release", value, options]); return { released: false, preserved: true, disposition: "preserved", preservationReceipt: durableReceipt(lease, inspection) }; } });
-  const result = await h.quarantineResource(request);
-  exact(["ownerId", "proofHash", "state", "debt"], result); assert.deepEqual(result, { ownerId: "run", proofHash: canonicalHash({ request, receiptHash: durableReceipt(lease, inspection).receiptHash, disposition: "preserved" }), state: "quarantined", debt: true });
-  assert.equal(calls.filter(([name]) => name === "release").length, 1, "resource quarantine re-verifies the durable receipt");
-});
-
-test("workspace then resource re-verifies the exact durable receipt after preservation", async () => {
-  const request = workspaceRequest(), resourceRequest = { stateRoot: "/state", goalId: "goal", ownerKind: "executor", ownerId: "run", taskId: "task", attempt: 1, leaseId: hash("owner-token"), executionRevision: 1, contractHash: hash("contract"), sessionId: "session" };
-  const lease = { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit: DISPATCH_HEAD, ownerToken: "owner-token" };
-  const inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true }, calls = [];
-  const h = await host({ loadExecutorWorkspaceLease() { return lease; }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace(value, options) { calls.push([value, options]); return { released: false, preserved: true, disposition: "preserved", preservationReceipt: durableReceipt(lease, inspection) }; } });
-  await h.quarantineWorkspace(request); await h.quarantineResource(resourceRequest);
-  assert.equal(calls.length, 2);
-});
-
-test("Host restart re-reads the managed preservation receipt before resource quarantine", async () => {
+test("Host restart re-reads the real public managed receipt before resource quarantine", async () => {
   const origin = mkdtempSync(join(tmpdir(), "goal-engine-host-restart-origin-"));
-  const stateRoot = join(origin, ".state", "goal-engine");
+  const stateRoot = mkdtempSync(join(tmpdir(), "goal-engine-host-restart-state-"));
   let lease;
   try {
     execFileSync("git", ["init", "-b", "main"], { cwd: origin });
@@ -198,35 +178,31 @@ test("Host restart re-reads the managed preservation receipt before resource qua
     execFileSync("git", ["config", "user.name", "Host Restart"], { cwd: origin });
     writeFileSync(join(origin, "README.md"), "fixture\n");
     execFileSync("git", ["add", "README.md"], { cwd: origin }); execFileSync("git", ["commit", "-m", "fixture"], { cwd: origin });
-    mkdirSync(stateRoot, { recursive: true, mode: 0o700 }); chmodSync(stateRoot, 0o700);
+    chmodSync(stateRoot, 0o700);
     const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: origin, encoding: "utf8" }).trim();
     lease = allocateExecutorWorkspace({ goalId: "goal", taskId: "task", attempt: 1, originRoot: origin, stateRoot, baseCommit: head });
-    const request = workspaceRequest({ stateRoot, workspacePath: lease.path, headAtDispatch: head, baseHead: head, leaseId: hash(lease.ownerToken) });
-    const resourceRequest = { stateRoot, goalId: "goal", ownerKind: "executor", ownerId: "run", taskId: "task", attempt: 1, leaseId: hash(lease.ownerToken), executionRevision: 1, contractHash: hash("contract"), sessionId: "session" };
+    exact(["schemaVersion", "workspaceId", "leaseId", "owner", "originRoot", "requestedCwd", "originRef", "baseCommit", "path", "dispatchCwd", "branchRef", "state", "run", "disposition", "cleanupDebt"], lease);
+    assert.equal(Object.hasOwn(lease, "ownerToken"), false, "fixture returns the canonical public receipt");
+    assert.deepEqual({ owner: lease.owner, leaseId: lease.leaseId, path: lease.path, baseCommit: lease.baseCommit, state: lease.state }, { owner: { kind: "goal-task", rootSessionId: "fixture-root", goalId: "goal", taskId: "task", attempt: 1, executionRevision: 1 }, leaseId: lease.leaseId, path: lease.path, baseCommit: head, state: "active" });
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: origin, encoding: "utf8" }), "", "fixture allocation must leave the origin clean");
+    const request = workspaceRequest({ stateRoot, workspacePath: lease.path, headAtDispatch: head, baseHead: head, leaseId: lease.leaseId });
+    const resourceRequest = { stateRoot, goalId: "goal", ownerKind: "executor", ownerId: "run", taskId: "task", attempt: 1, leaseId: lease.leaseId, executionRevision: 1, contractHash: hash("contract"), sessionId: "session" };
 
-    const hostA = await host();
-    const preserved = await hostA.quarantineWorkspace(request);
-    assert.equal(preserved.disposition, "preserved");
-    const receiptBeforeRestart = releaseExecutorWorkspace(loadExecutorWorkspaceLease({ goalId: "goal", taskId: "task", attempt: 1, stateRoot }), { disposition: "preserved", expectedExecutorHead: head }).preservationReceipt;
-
-    // Host B has no Host-A object or receipt map; both lease and receipt are
-    // reloaded from the managed lifecycle files by the production services.
-    const hostB = await host();
-    const quarantined = await hostB.quarantineResource(resourceRequest);
-    assert.equal(quarantined.state, "quarantined"); assert.equal(quarantined.debt, true);
-    const reloadedLease = loadExecutorWorkspaceLease({ goalId: "goal", taskId: "task", attempt: 1, stateRoot });
-    const receiptAfterRestart = releaseExecutorWorkspace(reloadedLease, { disposition: "preserved", expectedExecutorHead: head }).preservationReceipt;
-    assert.deepEqual(receiptAfterRestart, receiptBeforeRestart);
-    assert.equal(inspectExecutorWorkspace(reloadedLease).headCommit, head, "preservation must not destructively dispose the workspace");
+    const adapters = { loadExecutorWorkspaceLease, inspectExecutorWorkspace, releaseExecutorWorkspace };
+    const hostA = await host(adapters);
+    assert.equal((await hostA.quarantineWorkspace(request)).disposition, "preserved");
+    const hostB = await host(adapters);
+    assert.equal((await hostB.quarantineResource(resourceRequest)).state, "quarantined");
+    const reloaded = loadExecutorWorkspaceLease({ goalId: "goal", taskId: "task", attempt: 1, stateRoot });
+    assert.equal(Object.hasOwn(reloaded, "ownerToken"), false);
+    assert.deepEqual({ owner: reloaded.owner, leaseId: reloaded.leaseId, path: reloaded.path, baseCommit: reloaded.baseCommit, state: reloaded.state }, { owner: lease.owner, leaseId: lease.leaseId, path: lease.path, baseCommit: head, state: "preserved" });
+    assert.equal(inspectExecutorWorkspace(reloaded).headCommit, head, "preservation must not destructively dispose the workspace");
   } finally {
-    if (lease) {
-      try {
-        const current = loadExecutorWorkspaceLease({ goalId: "goal", taskId: "task", attempt: 1, stateRoot });
-        const inspection = inspectExecutorWorkspace(current);
-        releaseExecutorWorkspace(current, { disposition: "discarded-cleanup", expectedExecutorHead: inspection.headCommit, requireClean: true });
-      } catch {}
-    }
-    rmSync(origin, { recursive: true, force: true });
+    if (lease) try {
+      const current = loadExecutorWorkspaceLease({ goalId: "goal", taskId: "task", attempt: 1, stateRoot });
+      releaseExecutorWorkspace(current, { disposition: "discarded-cleanup" });
+    } catch {}
+    rmSync(origin, { recursive: true, force: true }); rmSync(stateRoot, { recursive: true, force: true });
   }
 });
 

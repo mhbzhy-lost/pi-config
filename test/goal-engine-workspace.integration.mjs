@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { createManagedWorkspaceRequest, deterministicGoalWorkspaceId, validateManagedWorkspaceReceipt } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
+import { goalWorkspaceTerminalProof } from "../src/goal-engine/managed-workspace.ts";
 
 const hash = (value) => execFileSync("git", ["hash-object", "--stdin"], { input: value, encoding: "utf8" }).trim().padEnd(64, "0");
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -38,7 +39,8 @@ function request(f, { taskId = "task-1", writePaths = ["src/result.ts"] } = {}) 
   });
 }
 
-const observed = { state: "observed", conflict: false, proofHash: "b".repeat(64) };
+const officialExecutorProof = { runId: "run-1", proofId: "b".repeat(64), rootSessionId: "root-1", observedAt: 1, outcome: "succeeded" };
+const observed = goalWorkspaceTerminalProof(officialExecutorProof);
 
 function dispose(service, receipt, disposition, extra = {}) {
   const issued = service.issueDisposition({ workspaceId: receipt.workspaceId, terminalProof: observed });
@@ -58,21 +60,26 @@ test("public managed workspace contract allocates a deterministic Goal workspace
   assert.deepEqual(service.ensureAllocated(input), receipt, "allocation is idempotent for the exact public request");
 });
 
-test("public managed workspace service integrates only clean committed writes within writePaths", () => {
+test("public managed workspace service integrates a clean allowed Goal workspace after bind and official terminal proof", () => {
   const f = fixture();
   const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
   const receipt = service.ensureAllocated(request(f));
+  service.bindRun({ workspaceId: receipt.workspaceId, run: { runId: officialExecutorProof.runId, asyncDir: join(f.stateRoot, "runs", officialExecutorProof.runId) } });
   mkdirSync(join(receipt.path, "src"), { recursive: true });
   writeFileSync(join(receipt.path, "src", "result.ts"), "export const result = true;\n");
   git(receipt.path, "add", "src/result.ts");
   git(receipt.path, "commit", "-m", "feat: add result");
 
   const status = service.status({ workspaceId: receipt.workspaceId, terminalProof: observed });
+  assert.equal(status.receipt.state, "active");
+  assert.deepEqual(status.terminalProof, observed);
   assert.equal(status.inspection.clean, true);
   assert.deepEqual(status.inspection.changedFiles, ["src/result.ts"]);
+  assert.deepEqual(status.blockedReasons, []);
   assert.equal(status.allowedDispositions.includes("integrate"), true);
   const released = dispose(service, receipt, "integrate");
   assert.equal(released.state, "released");
+  assert.deepEqual(released.disposition, { action: "integrate", strategy: "cherry-pick" });
   assert.equal(git(f.originRoot, "show", "HEAD:src/result.ts"), "export const result = true;");
 });
 

@@ -4,6 +4,13 @@ import path from "node:path";
 const MAX_SNAPSHOT_BYTES = 2048;
 const VALID_SOURCES = new Set(["user_intent", "mutation_gate", "compaction", "tool_error"]);
 const VALID_CHECKPOINT_REASONS = new Set(["manual", "threshold", "overflow", "reload", "shutdown"]);
+type ContinuityTask = { writePaths?: string[] };
+type ContinuityObservation = { status: string; id: string; summary: string };
+type ContinuityProjection = {
+  goalId?: string; lifecycle?: string; sessionBindings?: Array<{ sessionId: string; state: string }>;
+  scope?: string[]; tasks?: Map<string, ContinuityTask> | Record<string, ContinuityTask>;
+  epoch?: number; nextAction?: string; continuity?: { lastCheckpoint?: { checkpointId?: string; reason?: string; nextAction?: string } | null; observations?: Record<string, ContinuityObservation> };
+};
 
 function fail(message) {
   throw new Error(`invalid continuity input: ${message}`);
@@ -40,7 +47,7 @@ function boundedPaths(paths, location) {
   return [...new Set(normalized)].sort().slice(0, 32);
 }
 
-function taskValues(projection) {
+function taskValues(projection: ContinuityProjection) {
   if (projection.tasks instanceof Map) return [...projection.tasks.values()];
   if (projection.tasks && typeof projection.tasks === "object") return Object.values(projection.tasks);
   return [];
@@ -59,7 +66,7 @@ function repoRelativePath(cwd, candidate) {
   return normalizedBoundary(relative);
 }
 
-function boundariesFor(projection) {
+function boundariesFor(projection: ContinuityProjection) {
   return [...new Set([
     ...(Array.isArray(projection.scope) ? projection.scope : []),
     ...taskValues(projection).flatMap((task) => Array.isArray(task.writePaths) ? task.writePaths : []),
@@ -77,7 +84,7 @@ function resultForCandidates(candidates, selectedReason, ambiguousReason) {
   return null;
 }
 
-export function selectContinuityCandidate({ projections, cwd, paths = [], sessionId } = {}) {
+export function selectContinuityCandidate({ projections, cwd, paths = [], sessionId }: { projections?: ContinuityProjection[]; cwd?: string; paths?: string[]; sessionId?: string } = {}) {
   if (!Array.isArray(projections)) fail("projections must be an array");
   const active = projections.filter((projection) => projection?.lifecycle === "active"
     && (projection.sessionBindings || [])[0]?.sessionId === sessionId
@@ -97,12 +104,12 @@ export function selectContinuityCandidate({ projections, cwd, paths = [], sessio
   return pathResult || { status: "none", reason: "no_related_goal" };
 }
 
-export function buildSessionBinding({ projection, sessionId, leafId } = {}) {
+export function buildSessionBinding({ projection, sessionId, leafId }: { projection?: ContinuityProjection; sessionId?: string; leafId?: string } = {}) {
   if (!projection?.goalId) fail("projection.goalId is required");
   return { sessionId: requiredString(sessionId, "sessionId"), leafId: requiredString(leafId, "leafId") };
 }
 
-export function buildDiscovery({ userText, userEntryId, paths = [], sessionId, source } = {}) {
+export function buildDiscovery({ userText, userEntryId, paths = [], sessionId, source }: { userText?: string; userEntryId?: string; paths?: string[]; sessionId?: string; source?: string } = {}) {
   const entryId = requiredString(userEntryId, "userEntryId");
   const boundSessionId = requiredString(sessionId, "sessionId");
   const normalizedSource = requiredString(source, "source");
@@ -120,7 +127,7 @@ export function buildDiscovery({ userText, userEntryId, paths = [], sessionId, s
   return discovery;
 }
 
-export function buildContinuityCheckpoint({ projection, sessionId, reason, modifiedFiles = [], userEntryId } = {}) {
+export function buildContinuityCheckpoint({ projection, sessionId, reason, modifiedFiles = [], userEntryId }: { projection?: ContinuityProjection; sessionId?: string; reason?: string; modifiedFiles?: string[]; userEntryId?: string } = {}) {
   if (!projection?.goalId || !Number.isSafeInteger(projection.epoch)) fail("projection goalId and epoch are required");
   const normalizedReason = requiredString(reason, "reason");
   if (!VALID_CHECKPOINT_REASONS.has(normalizedReason)) fail(`unsupported checkpoint reason: ${normalizedReason}`);
@@ -139,7 +146,7 @@ export function buildContinuityCheckpoint({ projection, sessionId, reason, modif
   return checkpoint;
 }
 
-export function formatRecoveryInjection(projection) {
+export function formatRecoveryInjection(projection: ContinuityProjection) {
   if (!projection?.goalId || !Number.isSafeInteger(projection.epoch)) fail("projection goalId and epoch are required");
   const checkpoint = projection.continuity?.lastCheckpoint;
   const observations = Object.values(projection.continuity?.observations || {})

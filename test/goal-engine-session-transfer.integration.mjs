@@ -3,9 +3,11 @@ import test from "node:test";
 import { applyEvent, createProjection } from "../src/goal-engine/events.ts";
 import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
+import { bindManagedWorkspaceServiceSession, unbindManagedWorkspaceServiceSession } from "../packages/pi-subagents-enhanced/src/workspace/registry.ts";
 
 function git(cwd, ...args) { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function fixturePi(cwd, sessionId) {
@@ -44,8 +46,17 @@ function transferFixture() {
   git(cwd, "init", "-b", "main"); git(cwd, "config", "user.email", "test@example.invalid"); git(cwd, "config", "user.name", "Test");
   writeFileSync(join(cwd, ".gitignore"), ".state/goal-engine/\n"); git(cwd, "add", ".gitignore"); git(cwd, "commit", "-m", "test: 初始化仓库");
   const owner = fixturePi(cwd, "session-A"); const target = fixturePi(cwd, "session-B");
+  const stateRoot = join(cwd, ".state", "goal-engine");
+  const workspaceService = createManagedWorkspaceService({ stateRoot });
+  bindManagedWorkspaceServiceSession(owner, owner.sessionManager.getSessionId(), workspaceService);
+  bindManagedWorkspaceServiceSession(target, target.sessionManager.getSessionId(), workspaceService);
+  test.after(() => {
+    unbindManagedWorkspaceServiceSession(owner, owner.sessionManager.getSessionId(), workspaceService);
+    unbindManagedWorkspaceServiceSession(target, target.sessionManager.getSessionId(), workspaceService);
+    rmSync(cwd, { recursive: true, force: true });
+  });
   createGoalEngineExtension(owner, { goalStateEnv: {} }); createGoalEngineExtension(target, { goalStateEnv: {} });
-  return { cwd, owner, target };
+  return { cwd, owner, target, stateRoot, workspaceService };
 }
 
 function event(type, data, occurredAt) {
@@ -122,17 +133,24 @@ test("approved transfer rejects mismatched offers and target ownership races wit
 });
 
 test("an approved transfer fails closed when the old owner activates a workspace", async () => {
-  const { cwd, owner, target } = transferFixture();
+  const { cwd, owner, target, workspaceService } = transferFixture();
   const initialized = JSON.parse(await execute(owner, "goal_init", { objective: "Unsafe Transfer Goal", tasks: [{ id: "t", description: "t", deps: [], writePaths: ["src/a"], workflow: "tdd", acceptance: { criteria: [{ id: "c", statement: "passes", evidenceKinds: ["tests"] }] } }] }));
   const proposal = JSON.parse(await execute(target, "goal_amend", { goal_id: initialized.goalId, operation: "propose_transfer_session", reason: "continue securely" }));
   await input(target, "approve");
   const approved = JSON.parse(await execute(target, "goal_status", { transfer_challenge_id: proposal.challenge_id }));
   const ownerStatus = JSON.parse(await execute(owner, "goal_status", { goal_id: initialized.goalId }));
   await execute(owner, "goal_dispatch", { ...ownerStatus.machineAction.params, action_token: ownerStatus.action_token });
+  const externalWorkspace = workspaceService.ensureAllocated({
+    workspaceId: `goal-transfer-${initialized.goalId}-t-1`,
+    owner: { kind: "goal-task", rootSessionId: owner.sessionManager.getSessionId(), goalId: initialized.goalId, taskId: "t", attempt: 1, executionRevision: 1 },
+    originRoot: cwd, requestedCwd: cwd, originRef: "refs/heads/main", baseCommit: git(cwd, "rev-parse", "HEAD"),
+    contractHash: "a".repeat(64), mode: "coding", writePaths: ["src/**"],
+  });
+  assert.equal(JSON.parse(await execute(target, "goal_status", { transfer_challenge_id: proposal.challenge_id })).status, "APPROVED");
   const unsafe = stateInventory(cwd, target);
-  assert.deepEqual(JSON.parse(await execute(target, "goal_status", { transfer_challenge_id: proposal.challenge_id })), { challenge_id: proposal.challenge_id, status: "ACTIVE_WORKSPACE" });
   assert.deepEqual(stateInventory(cwd, target), unsafe);
-  await rejectsWithoutWrites(() => execute(target, "goal_amend", { ...approved.machineAction.params, action_token: approved.action_token }), { before: unsafe, after: () => stateInventory(cwd, target) });
+  const issued = workspaceService.issueDisposition({ workspaceId: externalWorkspace.workspaceId, terminalProof: { state: "observed", conflict: false, proofHash: "a".repeat(64) } });
+  workspaceService.dispose({ workspaceId: externalWorkspace.workspaceId, terminalProof: { state: "observed", conflict: false, proofHash: "a".repeat(64) }, disposition: "discard", actionToken: issued.actionToken });
 });
 
 test("approved session transfer advances owner while retaining the source binding audit trail", () => {

@@ -10,6 +10,16 @@ const EVIDENCE_KINDS = new Set(["changed-files", "tests", "command", "manual-rev
 const COORDINATOR_PREDICATES = new Set(["executor-bound", "executor-terminal-proof", "workspace-integrated-released", "task-accepted"]);
 const V2_COORDINATOR_PREDICATES = new Set(["run-bound", "run-terminal-proof", "workspace-integrated-released", "task-accepted"]);
 const AGENT_PROFILE_CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
+type TaskDefinitionValidationOptions = {
+  requireNonEmpty?: boolean;
+  cwd?: string;
+  realpathCwd?: string;
+  planned?: boolean;
+  runtimeAcceptance?: boolean;
+  hostInternalRemediation?: boolean;
+  requireAgentProfile?: boolean;
+  v2Acceptance?: boolean;
+};
 
 // The historical three-field form is intentionally executor-owned for replay.
 export function criterionEvaluator(criterion) { return criterion?.evaluator ?? "executor"; }
@@ -68,7 +78,7 @@ function validateCommand(value, label, cwd, realpathCwd) {
   return command;
 }
 
-export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd, planned = false, runtimeAcceptance = false, hostInternalRemediation = false, requireAgentProfile = false, v2Acceptance = false } = {}) {
+export function validateTaskDefinitions(tasks, taskDefs, { requireNonEmpty = true, cwd, realpathCwd, planned = false, runtimeAcceptance = false, hostInternalRemediation = false, requireAgentProfile = false, v2Acceptance = false }: TaskDefinitionValidationOptions = {}) {
   if (!Array.isArray(tasks) || (requireNonEmpty && tasks.length === 0)) throw new Error("tasks must be non-empty");
   if (tasks.length > MAX_CONTRACT_ARRAY_ITEMS) throw new Error(`tasks must contain at most ${MAX_CONTRACT_ARRAY_ITEMS} items`);
   if (!taskDefs || typeof taskDefs !== "object" || Array.isArray(taskDefs)) throw new Error("taskDefs is required");

@@ -28,11 +28,15 @@ test("elapsed budget counts only active execution intervals and fails closed wit
   assert.equal(result.blocking.some(item => item.code === "ELAPSED_BUDGET_EXHAUSTED"), false, "missing runtime authority must not fall back to createdAt");
 });
 
-test("actual taskActionState active executor suppresses settle but not independent condition", () => {
-  const projection = base(); projection.progressLedger = ledger(); projection.tasks.set("running", { status: "dispatched" }); projection.conditions.set("ready", condition("ready"));
+test("active dispatched managed workspace offers settlement alongside an independent condition", () => {
+  const projection = base(); projection.progressLedger = ledger(); projection.tasks.set("running", { status: "dispatched", workspace: { schemaVersion: "managed-workspace.v1", state: "active" } }); projection.conditions.set("ready", condition("ready"));
   const action = taskActionState(projection, "running"); const snapshot = world(); snapshot.activeRuns = [{ runId: "run-1", kind: "executor", state: "running" }]; projection.tasks.get("running").executorBinding = { runId: "run-1" };
   const result = frontier(projection, snapshot, new Map([["running", action]]), { claims: new Map([["ready", []]]) });
-  assert(!result.actions.some(x => x.id === "running")); assert(result.actions.some(x => x.id === "ready")); assert(result.blocking.some(x => x.code === "TASK_FUTURE_WAKE"));
+  const settlement = result.actions.find(x => x.id === "running" && x.kind === "task");
+  assert.ok(settlement);
+  assert.deepEqual({ kind: settlement.kind, id: settlement.id, priority: settlement.priority, tool: settlement.tool, params: settlement.params }, { kind: "task", id: "running", priority: 3, tool: "goal_settle", params: { task_id: "running" } });
+  assert.match(settlement.reason, /settlement/i);
+  assert(result.actions.some(x => x.id === "ready")); assert.equal(result.blocking.some(x => x.code === "TASK_FUTURE_WAKE"), false);
 });
 
 test("released observing condition gets its next stability cycle, active one future-wakes", () => {

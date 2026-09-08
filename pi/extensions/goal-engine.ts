@@ -10,27 +10,16 @@ function agentDir(): string {
   return configured || join(homedir(), ".pi", "agent");
 }
 
-export function goalEngineSettingsPath(dir = agentDir()): string {
-  return join(dir, "settings.json");
-}
+export function goalEngineSettingsPath(dir = agentDir()): string { return join(dir, "settings.json"); }
 
-/**
- * Goal engine switch, default OFF. Absent, malformed, or invalid values fail closed.
- * Enables via `"goalEngine": true` or `"goalEngine": { "enabled": true }` in settings.json.
- */
+/** Goal engine switch defaults to off; malformed values fail closed. */
 export function isGoalEngineEnabled(settingsPath = goalEngineSettingsPath()): boolean {
   if (!existsSync(settingsPath)) return false;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(settingsPath, "utf8"));
-  } catch {
-    return false;
-  }
+  let parsed: unknown; try { parsed = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { return false; }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
   const goalEngine = (parsed as Record<string, unknown>).goalEngine;
   if (goalEngine === true) return true;
-  if (!goalEngine || typeof goalEngine !== "object" || Array.isArray(goalEngine)) return false;
-  return (goalEngine as Record<string, unknown>).enabled === true;
+  return !!goalEngine && typeof goalEngine === "object" && !Array.isArray(goalEngine) && (goalEngine as Record<string, unknown>).enabled === true;
 }
 
 type GoalEngineModule = {
@@ -40,8 +29,7 @@ type GoalEngineModule = {
 type GoalEngineConfiguration = { runtimeHost?: Record<string, unknown> };
 function goalEngineConfiguration(settingsPath: string): GoalEngineConfiguration | null {
   if (!existsSync(settingsPath)) return null;
-  let parsed: unknown;
-  try { parsed = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { return null; }
+  let parsed: unknown; try { parsed = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { return null; }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const value = (parsed as Record<string, unknown>).goalEngine;
   if (value === true) return {};
@@ -53,33 +41,28 @@ function goalEngineConfiguration(settingsPath: string): GoalEngineConfiguration 
   return { runtimeHost: goal.runtimeHost as Record<string, unknown> };
 }
 
-export async function createGoalEngineEntry(
-  pi: ExtensionAPI,
-  {
-    settingsPath = goalEngineSettingsPath(),
-    load = (): Promise<GoalEngineModule> => import("../../src/goal-engine/extension.ts"),
-    runtimeHostFactory,
-  }: {
-    settingsPath?: string;
-    load?: () => Promise<GoalEngineModule>;
-    runtimeHostFactory?: (pi: ExtensionAPI, options: object) => unknown;
-  } = {},
-): Promise<void> {
+async function productionFinalReviewFactory(configuration: FinalReviewConfiguration) {
+  try {
+    const [{ ModelRuntime }, provider] = await Promise.all([import("@earendil-works/pi-coding-agent"), import("../../src/goal-engine/production-final-review-provider.ts")]);
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false, refreshOnCreate: false });
+    const model = modelRuntime.getModel(configuration.provider, configuration.id);
+    if (!model || !(await modelRuntime.getAvailable(configuration.provider)).some(candidate => candidate.id === configuration.id)) return undefined;
+    return ({ stateRoot }: { stateRoot: string }) => provider.createProductionFinalReviewProvider({ modelRuntime, model, timeoutMs: configuration.timeoutMs, reportStore: provider.createFinalReviewReportStore({ stateRoot }) });
+  } catch { return undefined; }
+}
+
+export async function createGoalEngineEntry(pi: ExtensionAPI, { settingsPath = goalEngineSettingsPath(), load = (): Promise<GoalEngineModule> => import("../../src/goal-engine/extension.ts"), runtimeHostFactory, finalReviewFactory = productionFinalReviewFactory }: { settingsPath?: string; load?: () => Promise<GoalEngineModule>; runtimeHostFactory?: (pi: ExtensionAPI, options: object) => unknown; finalReviewFactory?: (configuration: FinalReviewConfiguration) => Promise<((input: { stateRoot: string }) => unknown) | undefined>; } = {}): Promise<void> {
   const configuration = goalEngineConfiguration(settingsPath);
   if (!configuration) return;
   let runtimeHost: unknown;
   if (configuration.runtimeHost) {
     const production = await import("../../src/goal-engine/production-runtime-host.ts");
-    let options: Record<string, unknown>;
-    try { options = production.normalizeProductionRuntimeHostOptions(configuration.runtimeHost); } catch { return; }
+    let options: Record<string, unknown>; try { options = production.normalizeProductionRuntimeHostOptions(configuration.runtimeHost); } catch { return; }
     runtimeHost = runtimeHostFactory ? runtimeHostFactory(pi, options) : production.createProductionGoalRuntimeHost(pi, options);
-  } else if (runtimeHostFactory) {
-    runtimeHost = runtimeHostFactory(pi, {});
-  }
+  } else if (runtimeHostFactory) runtimeHost = runtimeHostFactory(pi, {});
+  const finalReviewProviderFactory = configuration.finalReview ? await finalReviewFactory(configuration.finalReview) : undefined;
   const { createGoalEngineExtension } = await load();
   createGoalEngineExtension(pi, runtimeHost ? { runtimeHost } : {});
 }
 
-export default function goalEngine(pi: ExtensionAPI): Promise<void> {
-  return createGoalEngineEntry(pi);
-}
+export default function goalEngine(pi: ExtensionAPI): Promise<void> { return createGoalEngineEntry(pi); }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildExecutionAmendmentProposal, reconcileExecutionChange } from "../src/goal-engine/reconciliation.ts";
-import { applyEvent, createProjection } from "../src/goal-engine/events.ts";
+import { applyEvent, createProjection, PLANNED_SCHEMA_VERSION } from "../src/goal-engine/events.ts";
 import { runtimeInit, runtimeRegistries } from "./helpers/goal-runtime-fixtures.mjs";
 import { normalizeRuntimeGoalInit, hashRuntimeExecutionContract } from "../src/goal-engine/obligation-contract.ts";
 
@@ -13,6 +13,13 @@ const projection = () => ({
   tasks: new Map([["accepted", task("accepted")], ["keep", task("pending")], ["remove", task("pending")], ["reverify", task("pending")]]),
   conditions: new Map([["condition-a", { id: "condition-a" }], ["condition-b", { id: "condition-b" }]]),
 });
+const v1BoundTask = () => {
+  const event = (type, data, sequence) => ({ schemaVersion: PLANNED_SCHEMA_VERSION, eventId: `reconciliation-v1-${sequence}`, goalId: "reconciliation-v1", occurredAt: `2026-09-07T00:00:0${sequence}.000Z`, type, data });
+  let value = applyEvent(createProjection(), event("goal.created", { objective: "v1 binding provenance", scope: [], nonGoals: [], dod: [], tasks: ["task-1"], taskDefs: { "task-1": { description: "bound task", deps: [], writePaths: ["src/a.mjs"], acceptance: { criteria: [{ id: "criterion", statement: "binding is owned", evidenceKinds: ["tests"] }] }, workflow: "tdd" } } }, 1));
+  value = applyEvent(value, event("task.dispatched", { taskId: "task-1", contractHash: hash, workspace: { attempt: 1, path: "/tmp/reconciliation-v1", branch: "ge/reconciliation-v1/task-1/1", baseCommit: "b".repeat(40), originRef: "refs/heads/main" } }, 2));
+  value = applyEvent(value, event("task.executor_bound", { taskId: "task-1", attempt: 1, runId: "reconciliation-v1-run", contractHash: hash, asyncDir: "/tmp/reconciliation-v1-async", workspacePath: "/tmp/reconciliation-v1", workspaceLeaseId: "c".repeat(64), headAtDispatch: "b".repeat(40) }, 3));
+  return value;
+};
 const change = (id, intent, expected = intent === "remove" ? "removed" : { condition: "changed" }) => ({ id, intent, expected });
 const capabilityFor = (proposal) => ({ prefix: "goal-user-capability.v1", goalId: "goal-1", executionRevision: 4, proposalId: proposal.proposalId, proposalHash: proposal.proposalHash, sessionId: "session-1", userEntryId: "entry-1", nonce: "n", singleUse: true });
 
@@ -83,7 +90,7 @@ test("only affected identity-bound active debt blocks and never consumes capabil
 test("durable active Task state and active projection bindings block even with empty inventories", () => {
   for (const extra of [
     { status: "dispatched" }, { status: "running" }, { status: "settling" }, { status: "disposing" },
-    { workspace: { state: "active" } }, { executorBinding: { state: "active" } },
+    { workspace: { state: "active" } },
   ]) {
     const active = projection();
     active.tasks.set("remove", task(extra.status || "pending", extra));
@@ -93,6 +100,15 @@ test("durable active Task state and active projection bindings block even with e
     assert.equal(result.applyAllowed, false);
     assert.deepEqual(result.events, []);
   }
+  const active = projection();
+  const bound = v1BoundTask();
+  active.eventSchemaVersion = bound.eventSchemaVersion;
+  active.tasks.set("remove", bound.tasks.get("task-1"));
+  const proposal = buildExecutionAmendmentProposal({ projection: active, reason: "active v1 binding", changes: { tasks: [change("remove", "remove")] } });
+  const result = reconcileExecutionChange({ projection: active, proposal, capability: capabilityFor(proposal), inventories: {} });
+  assert.equal(result.actions.find((action) => action.entityId === "remove").action, "block_until_terminal");
+  assert.equal(result.applyAllowed, false);
+  assert.deepEqual(result.events, []);
 });
 
 test("Task and Condition intents must match projection existence before reconciliation", () => {

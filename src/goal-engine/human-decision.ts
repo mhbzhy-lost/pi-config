@@ -7,6 +7,14 @@ const CHOICE_ALIASES = new Map([
   ["approve", "approve"], ["批准", "approve"], ["同意", "approve"],
   ["reject", "reject"], ["拒绝", "reject"],
 ]);
+type UserInputEvent = { role: string; source: string; sessionId: string; occurredAt: string; text: string; id: string };
+type HumanChallenge = {
+  id: string; kind: string; choices: string[]; requestedAt: string; sessionId: string;
+  proposalPresented?: boolean; proposalHash?: string; goalId?: string; contractHash?: string;
+  baseHead?: string; proposalId?: string; executionRevision?: number;
+};
+type AmendmentProjection = { goalId: string; sessionId: string; executionRevision: number };
+type AmendmentProposal = { goalId: string; revision: number; sessionId: string; proposalHash: string; proposalId: string };
 
 function fail(message) {
   throw new Error(`invalid human decision: ${message}`);
@@ -29,7 +37,7 @@ function normalizeStringArray(value, location) {
   return value.map((entry, index) => requiredString(entry, `${location}[${index}]`));
 }
 
-export function recordHumanChoice({ inputEvent, challenge, sessionId } = {}) {
+export function recordHumanChoice({ inputEvent, challenge, sessionId }: { inputEvent?: UserInputEvent; challenge?: HumanChallenge; sessionId?: string } = {}) {
   if (!inputEvent || typeof inputEvent !== "object") fail("inputEvent is required");
   if (!challenge || typeof challenge !== "object") fail("challenge is required");
   const boundSessionId = requiredString(sessionId, "sessionId");
@@ -81,7 +89,7 @@ export function recordHumanChoice({ inputEvent, challenge, sessionId } = {}) {
   };
 }
 
-export function createRuntimeActivationChallenge({ goalId, contractHash, baseHead, sessionId, proposalId } = {}) {
+export function createRuntimeActivationChallenge({ goalId, contractHash, baseHead, sessionId, proposalId }: { goalId?: string; contractHash?: string; baseHead?: string; sessionId?: string; proposalId?: string } = {}) {
   const normalizedGoalId = requiredString(goalId, "goalId");
   const normalizedContractHash = requiredString(contractHash, "contractHash");
   const normalizedBaseHead = requiredString(baseHead, "baseHead");
@@ -95,7 +103,7 @@ export function createRuntimeActivationChallenge({ goalId, contractHash, baseHea
   });
 }
 
-export function createExecutionAmendmentChallenge({ projection, proposal } = {}) {
+export function createExecutionAmendmentChallenge({ projection, proposal }: { projection?: AmendmentProjection; proposal?: AmendmentProposal } = {}) {
   if (!projection || !proposal) fail("projection and proposal are required");
   const goalId = requiredString(projection.goalId, "projection.goalId"); const sessionId = requiredString(projection.sessionId, "projection.sessionId");
   if (!Number.isSafeInteger(projection.executionRevision) || projection.executionRevision < 1) fail("projection.executionRevision is invalid");
@@ -103,14 +111,14 @@ export function createExecutionAmendmentChallenge({ projection, proposal } = {})
   return Object.freeze({ id: randomUUID(), kind: "execution_amendment_approval", choices: ["approve", "reject"], requestedAt: new Date().toISOString(), goalId, executionRevision: projection.executionRevision, proposalId: requiredString(proposal.proposalId, "proposal.proposalId"), proposalHash: proposal.proposalHash, sessionId });
 }
 
-export function issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce } = {}) {
+export function issueUserExecutionCapability({ challenge, decision, projection, proposal, nonce }: { challenge?: HumanChallenge; decision?: { choice: string; source: string; challengeId: string; goalId: string; executionRevision: number; proposalId: string; proposalHash: string; sessionId: string; userEntryId: string }; projection?: AmendmentProjection; proposal?: AmendmentProposal; nonce?: string } = {}) {
   if (!challenge || challenge.kind !== "execution_amendment_approval" || !decision || decision.choice !== "approve" || !REAL_USER_SOURCES.has(decision.source)) fail("interactive approved amendment decision is required");
   if (!projection || !proposal || decision.challengeId !== challenge.id || challenge.goalId !== projection.goalId || challenge.executionRevision !== projection.executionRevision || challenge.sessionId !== projection.sessionId || proposal.proposalId !== challenge.proposalId || proposal.proposalHash !== challenge.proposalHash || decision.goalId !== challenge.goalId || decision.executionRevision !== challenge.executionRevision || decision.proposalId !== challenge.proposalId || decision.proposalHash !== challenge.proposalHash || decision.sessionId !== challenge.sessionId) fail("amendment approval binding mismatch");
   const normalizedNonce = requiredString(nonce, "nonce");
   return Object.freeze({ prefix: "goal-user-capability.v1", goalId: challenge.goalId, executionRevision: challenge.executionRevision, proposalId: challenge.proposalId, proposalHash: challenge.proposalHash, sessionId: challenge.sessionId, userEntryId: decision.userEntryId, nonce: normalizedNonce, singleUse: true });
 }
 
-export function hashGoalMetadataProposal({ objective, scope, nonGoals, dod } = {}) {
+export function hashGoalMetadataProposal({ objective, scope, nonGoals, dod }: { objective?: string; scope?: string[]; nonGoals?: string[]; dod?: string[] } = {}) {
   const normalized = {
     objective: requiredString(objective, "objective"),
     scope: normalizeStringArray(scope, "scope"),

@@ -2,6 +2,19 @@ import { createHash, randomBytes } from "node:crypto";
 import { evaluateConditionGraph } from "./condition-validity.ts";
 import { validateRemediationMetadata, validateTaskDefinitions, taskContractHash, remediationSubjectHash as taskSubjectHash } from "./task-definition.ts";
 
+type RepairInput = { projection?: unknown; runId?: string; evidenceId?: string; findingIds?: string[]; challengeId?: string; taskDef?: { deps?: string[]; workflow?: string; writePaths?: string[]; [key: string]: unknown }; now?: number; episodeId?: string; capability?: RepairCapability; consumedAt?: number; action?: "authorize_task" | "reject"; sessionId?: string; requestedAt?: number; expiresAt?: number; baseHead?: string; subjectHash?: string; taskId?: string | null; taskDefHash?: string | null; userEntryId?: string; userEntryHash?: string; branchBindingHash?: string; userEntryOccurredAt?: number; choice?: "approve" | "reject"; approved?: boolean; source?: "interactive" | "rpc"; recordedAt?: number; event?: RepairTransition; worldSnapshot?: unknown; gitRunner?: Parameters<typeof evaluateConditionGraph>[0]["gitRunner"] };
+type RepairCapability = { nonce: string; episodeId: string; action: "authorize_task" | "reject"; subjectHash: string; [key: string]: unknown };
+type RepairProjection = { goalId: string; executionRevision: number; executionContractHash: string; findings: Map<string, RepairFinding>; conditions: Map<string, RepairCondition>; repairEpisodes: Map<string, RepairEpisode>; observationRuns: Map<string, ObservationRun>; repairChallenges?: Map<string, RepairChallenge>; evidenceHistory?: EvidenceRow[]; tasks: Map<string, RepairTask>; writePolicy?: { allowedPaths: string[] } };
+type RepairFinding = { findingId: string; conditionId: string; observationRunId?: string; executionRevision: number; fingerprint?: string; status: string; episodeId: string | null };
+type RepairCondition = { definition: { remediation?: { policy: "autonomous" | "user-approved"; allowed_paths: string[] } }; supportingEvidenceIds?: string[] };
+type RepairEpisode = { episodeId: string; conditionId: string; findingIds: string[]; remediationTaskIds: string[]; ownedRunIds?: string[]; status: string; cancellation?: Cancellation };
+type ObservationRun = { runId?: string; conditionId: string; cycle?: number; phase: string; evidenceId?: string; terminalProofHash?: string };
+type EvidenceRow = { run?: { runId?: string }; evidenceId: string; conditionId: string; executionRevision?: number; executionContractHash?: string; verdict?: { kind: string; findingFingerprint?: string } };
+type RepairChallenge = { challengeId: string; goalId: string; executionRevision: number; executionContractHash: string; baseHead: string; episodeId: string; conditionId: string; findingIds: string[]; action: "authorize_task" | "reject"; subjectHash: string; taskId: string | null; taskDefHash: string | null; sessionId: string; requestedAt: number; expiresAt: number; challengeHash: string; phase: string; userEntryId: string; decisionId: string; userEntryHash: string; branchBindingHash: string; recordedAt: number };
+type RepairTask = { status: string; workspace?: { disposition: string; released: boolean }; attempts?: number };
+type Cancellation = { ownedTaskIds: string[]; ownedRunIds: string[]; terminalProofRefs: { runId: string; proofHash: string; phase: string }[]; workspaceClosureProofRefs: { taskId: string; proofHash: string; disposition: string; released: boolean }[]; resourceClosureProofRefs: { runId: string; proofHash: string; state: string; debt: boolean }[]; resourceDebt: boolean };
+type RepairTransition = { type: string; taskId?: string; conditionId?: string; runId?: string; evidenceId?: string; capability?: RepairCapability; consumedAt?: number; cancellation?: Cancellation };
+
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9._-]{1,160}$/;
 const CANCELLATION_KEYS = ["ownedTaskIds", "ownedRunIds", "terminalProofRefs", "workspaceClosureProofRefs", "resourceClosureProofRefs", "resourceDebt"];
@@ -10,7 +23,7 @@ const digest = (value) => createHash("sha256").update(JSON.stringify(canonical(v
 function fail(message) { throw new Error(`invalid repair protocol: ${message}`); }
 function exact(value, keys) { return value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype && Object.getOwnPropertyNames(value).length === keys.length && Object.getOwnPropertySymbols(value).length === 0 && keys.every((key) => Object.hasOwn(value, key)); }
 function ids(value, label) { if (!Array.isArray(value) || !value.length || value.some((id) => typeof id !== "string" || !ID.test(id)) || new Set(value).size !== value.length) fail(`${label} must be unique ids`); return value; }
-function runtime(p) { if (!p || typeof p.goalId !== "string" || !Number.isSafeInteger(p.executionRevision) || !(p.findings instanceof Map) || !(p.conditions instanceof Map) || !(p.repairEpisodes instanceof Map) || !(p.observationRuns instanceof Map)) fail("runtime projection required"); }
+function runtime(p: unknown): asserts p is RepairProjection { if (!p || typeof (p as { goalId?: unknown }).goalId !== "string" || !Number.isSafeInteger((p as { executionRevision?: unknown }).executionRevision) || !((p as { findings?: unknown }).findings instanceof Map) || !((p as { conditions?: unknown }).conditions instanceof Map) || !((p as { repairEpisodes?: unknown }).repairEpisodes instanceof Map) || !((p as { observationRuns?: unknown }).observationRuns instanceof Map)) fail("runtime projection required"); }
 function condition(p, id) { const state = p.conditions.get(id); if (!state?.definition?.remediation) fail("unknown remediation condition"); return state; }
 function event(type, data) { return Object.freeze({ type, data: Object.freeze(data) }); }
 function pathCovered(path, scope) { return scope.some((allowed) => allowed === path || allowed.endsWith("/**") && path.startsWith(allowed.slice(0, -2))); }
@@ -18,7 +31,7 @@ function ledger(p, runId, evidenceId) { const run = p.observationRuns.get(runId)
 
 // The caller can name only immutable ledger references; verdict, identity and fingerprint
 // are recovered from the R4 evidence record.
-export function deriveFindingFromFailedEvidence({ projection, runId, evidenceId } = {}) {
+export function deriveFindingFromFailedEvidence({ projection, runId, evidenceId }: RepairInput = {}) {
   runtime(projection);
   if (!ID.test(runId || "") || !HASH.test(evidenceId || "")) fail("ledger references required");
   const { run, evidence } = ledger(projection, runId, evidenceId);
@@ -36,7 +49,7 @@ export function deriveFindingFromFailedEvidence({ projection, runId, evidenceId 
   return Object.freeze({ finding: Object.freeze(finding), events: Object.freeze([event("finding.recorded", { findingId, conditionId, runId, evidenceId, fingerprint })]) });
 }
 
-export function openRepairEpisode({ projection, findingIds } = {}) {
+export function openRepairEpisode({ projection, findingIds }: RepairInput = {}) {
   runtime(projection); ids(findingIds, "findingIds");
   const findings = findingIds.map((id) => projection.findings.get(id));
   if (findings.some((f) => !f || f.status !== "open" || f.episodeId !== null || f.executionRevision !== projection.executionRevision)) fail("findings must be open, current, and unowned");
@@ -60,7 +73,7 @@ function validateCapability(capability, p, episode, action, subjectHash, consume
   if (!c || c.executionRevision !== p.executionRevision || c.phase !== "approved" || c.recordedAt > consumedAt || consumedAt >= c.expiresAt || Object.entries(publicBinding(c)).some(([key, value]) => capability[key] !== value)) fail("challenge capability is not valid");
   return c;
 }
-export function issueRepairCapability({ projection, challengeId, taskDef, now } = {}) {
+export function issueRepairCapability({ projection, challengeId, taskDef, now }: RepairInput = {}) {
   runtime(projection); const c = projection.repairChallenges?.get(challengeId), episode = projection.repairEpisodes?.get(c?.episodeId);
   if (!c || c.executionRevision !== projection.executionRevision || !actionAllowed(episode, c.action) || c.phase !== "approved" || !Number.isFinite(now) || now >= c.expiresAt) fail("approved unexpired challenge required");
   if (c.action === "authorize_task") { const candidate = buildRemediationTaskCandidate({ projection, episodeId: c.episodeId, findingIds: [...episode.findingIds].sort(), taskDef }); if (candidate.taskId !== c.taskId || candidate.taskDef.metadata.taskDefHash !== c.taskDefHash || candidate.taskDef.metadata.subjectHash !== c.subjectHash) fail("challenge task candidate mismatch"); }
@@ -68,7 +81,7 @@ export function issueRepairCapability({ projection, challengeId, taskDef, now } 
   // user choice=reject decision; only the latter is rejected before this point.
   return Object.freeze({ prefix: "goal-repair-capability.v1", goalId: projection.goalId, executionRevision: projection.executionRevision, ...publicBinding(c), nonce: randomBytes(32).toString("hex"), singleUse: true });
 }
-export function buildRemediationTaskCandidate({ projection, episodeId, findingIds, taskDef } = {}) {
+export function buildRemediationTaskCandidate({ projection, episodeId, findingIds, taskDef }: RepairInput = {}) {
   runtime(projection); if (!ID.test(episodeId || "")) fail("episode id required"); ids(findingIds, "findingIds"); const episode = projection.repairEpisodes.get(episodeId);
   if (!episode || episode.status !== "active" || findingIds.length !== episode.findingIds.length || findingIds.some((id) => !episode.findingIds.includes(id))) fail("finding set must exactly match active episode");
   const state = condition(projection, episode.conditionId), remediation = state.definition.remediation, taskId = `repair-task-${episodeId}-${episode.remediationTaskIds.length + 1}`;
@@ -79,14 +92,14 @@ export function buildRemediationTaskCandidate({ projection, episodeId, findingId
   const internal = { ...normalizedTaskDef, metadata: { kind: "remediation", goalId: projection.goalId, executionRevision: projection.executionRevision, episodeId, conditionId: episode.conditionId, findingIds: [...findingIds].sort(), subjectHash: remediationSubjectHash(projection, episode, findingIds, normalizedTaskDef), taskDefHash: taskContractHash(normalizedTaskDef) } };
   return Object.freeze({ taskId, taskDef: Object.freeze(internal), episode: Object.freeze(structuredClone(episode)), remediation: Object.freeze(structuredClone(remediation)) });
 }
-export function validateRemediationTask({ projection, episodeId, findingIds, taskDef, capability, consumedAt } = {}) {
+export function validateRemediationTask({ projection, episodeId, findingIds, taskDef, capability, consumedAt }: RepairInput = {}) {
   const candidate = buildRemediationTaskCandidate({ projection, episodeId, findingIds, taskDef }); const { taskId, taskDef: internal, episode, remediation } = candidate;
   if (remediation.policy === "user-approved") { const c = validateCapability(capability, projection, episode, "authorize_task", internal.metadata.subjectHash, consumedAt); return Object.freeze({ taskId, taskDef: Object.freeze(internal), events: Object.freeze([amendmentEvent(taskId, internal), consumeEvent(c, capability, consumedAt), event("repair.task_linked", { episodeId, taskId, challengeId: c.challengeId })]) }); }
   if (remediation.policy !== "autonomous") fail("unknown remediation policy"); return Object.freeze({ taskId, taskDef: Object.freeze(internal), events: Object.freeze([amendmentEvent(taskId, internal), event("repair.task_linked", { episodeId, taskId, challengeId: null })]) });
 }
 function amendmentEvent(taskId, taskDef) { return event("goal.amended", { addTasks: { [taskId]: taskDef }, removeTasks: [], updateTasks: {}, reason: "Materialize canonical remediation task", hostInternalRemediation: true }); }
 function consumeEvent(c, capability, consumedAt) { return event("repair.capability_consumed", { nonceDigest: createHash("sha256").update(capability.nonce).digest("hex"), consumedAt, ...publicBinding(c) }); }
-export function createRepairChallenge({ projection, episodeId, action, sessionId, requestedAt, expiresAt, baseHead, subjectHash, taskId = null, taskDefHash = null, taskDef } = {}) {
+export function createRepairChallenge({ projection, episodeId, action, sessionId, requestedAt, expiresAt, baseHead, subjectHash, taskId = null, taskDefHash = null, taskDef }: RepairInput = {}) {
   runtime(projection); const episode = projection.repairEpisodes.get(episodeId), findingIds = [...(episode?.findingIds || [])].sort();
   if (!episode || !actionAllowed(episode, action) || !ID.test(sessionId || "") || !Number.isFinite(requestedAt) || !Number.isFinite(expiresAt) || expiresAt <= requestedAt || !HASH.test(subjectHash || "") || !HASH.test(projection.executionContractHash || "") || !/^[a-f0-9]{40}$/.test(baseHead || "")) fail("invalid repair challenge");
   const candidate = action === "authorize_task" ? buildRemediationTaskCandidate({ projection, episodeId, findingIds, taskDef }) : null;
@@ -95,16 +108,16 @@ export function createRepairChallenge({ projection, episodeId, action, sessionId
   const challengeHash = digest(body), challengeId = `repair-challenge-${challengeHash.slice(0, 32)}`;
   const data = { challengeId, ...body, challengeHash }; return Object.freeze({ challengeId, events: Object.freeze([event("repair.challenge_created", data)]) });
 }
-export function recordRepairUserDecision({ projection, challengeId, sessionId, userEntryId, userEntryHash, branchBindingHash, userEntryOccurredAt, choice, approved, source, recordedAt } = {}) {
+export function recordRepairUserDecision({ projection, challengeId, sessionId, userEntryId, userEntryHash, branchBindingHash, userEntryOccurredAt, choice, approved, source, recordedAt }: RepairInput = {}) {
   runtime(projection); const c = projection.repairChallenges?.get(challengeId), parity = choice === "approve";
   if (!c || c.phase !== "created" || c.sessionId !== sessionId || [...projection.repairChallenges.values()].some((challenge) => challenge.userEntryId === userEntryId || challenge.userEntryHash === userEntryHash) || !Number.isFinite(userEntryOccurredAt) || !Number.isFinite(recordedAt) || !(c.requestedAt < userEntryOccurredAt && userEntryOccurredAt <= recordedAt && recordedAt < c.expiresAt) || !ID.test(userEntryId || "") || !HASH.test(userEntryHash || "") || !HASH.test(branchBindingHash || "") || !["approve", "reject"].includes(choice) || approved !== parity || !["interactive", "rpc"].includes(source)) fail("invalid real user decision");
   const challengeHash = c.challengeHash, decisionId = digest({ challengeId, challengeHash, sessionId, userEntryId, userEntryHash, branchBindingHash, choice, approved, source, userEntryOccurredAt, recordedAt });
   return Object.freeze({ events: Object.freeze([event("repair.user_decision_recorded", { challengeId, challengeHash, sessionId, userEntryId, userEntryHash, branchBindingHash, userEntryOccurredAt, choice, approved, source, recordedAt, decisionId })]) });
 }
-export function consumeRepairCapability({ projection, capability, consumedAt } = {}) { runtime(projection); const c = validateCapability(capability, projection, projection.repairEpisodes.get(capability?.episodeId), capability?.action, capability?.subjectHash, consumedAt); return Object.freeze({ events: Object.freeze([consumeEvent(c, capability, consumedAt)]) }); }
+export function consumeRepairCapability({ projection, capability, consumedAt }: RepairInput = {}) { runtime(projection); const c = validateCapability(capability, projection, projection.repairEpisodes.get(capability?.episodeId), capability?.action, capability?.subjectHash, consumedAt); return Object.freeze({ events: Object.freeze([consumeEvent(c, capability, consumedAt)]) }); }
 
-export function planRepairObservationLink({ projection, episodeId, runId } = {}) { runtime(projection); const episode = projection.repairEpisodes.get(episodeId), run = projection.observationRuns.get(runId); if (!episode || episode.status !== "reverifying" || !run || run.phase !== "requested" || run.conditionId !== episode.conditionId || episode.ownedRunIds?.includes(runId)) fail("reobservation must be requested and unlinked"); return Object.freeze({ events: Object.freeze([event("repair.observation_linked", { episodeId, conditionId: episode.conditionId, runId })]) }); }
-export function repairEpisodeTransition({ projection, episodeId, event: input, worldSnapshot, gitRunner } = {}) {
+export function planRepairObservationLink({ projection, episodeId, runId }: RepairInput = {}) { runtime(projection); const episode = projection.repairEpisodes.get(episodeId), run = projection.observationRuns.get(runId); if (!episode || episode.status !== "reverifying" || !run || run.phase !== "requested" || run.conditionId !== episode.conditionId || episode.ownedRunIds?.includes(runId)) fail("reobservation must be requested and unlinked"); return Object.freeze({ events: Object.freeze([event("repair.observation_linked", { episodeId, conditionId: episode.conditionId, runId })]) }); }
+export function repairEpisodeTransition({ projection, episodeId, event: input, worldSnapshot, gitRunner }: RepairInput = {}) {
   runtime(projection); const episode = projection.repairEpisodes.get(episodeId); if (!episode || !input || typeof input.type !== "string") fail("episode and event required");
   if (input.type === "task.accepted") {
     if (episode.status !== "waiting_for_tasks" || !episode.remediationTaskIds.includes(input.taskId)) fail("accepted task cannot reverify this episode");

@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { appendEvent, loadProjection } from "../src/goal-engine/store.ts";
 import { hashGoalMetadataProposal } from "../src/goal-engine/human-decision.ts";
-import { allocateGoalWorkspaceFixture as allocateExecutorWorkspace } from "./helpers/goal-workspace-service-fixture.mjs";
+import { goalWorkspaceService, releaseGoalWorkspaceFixture } from "./helpers/goal-workspace-service-fixture.mjs";
+import { bindManagedWorkspaceServiceSession } from "../packages/pi-subagents-enhanced/src/workspace/registry.ts";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -25,6 +26,15 @@ function goalEngineLoader(options) {
   writeFileSync(join(options.agentDir, "settings.json"), JSON.stringify({ goalEngine: { enabled: true } }));
   process.env.PI_CODING_AGENT_DIR = options.agentDir;
   return new DefaultResourceLoader(options);
+}
+
+async function createGoalHost({ workspaceService = true, ...options }) {
+  const host = await createAgentSession(options);
+  if (workspaceService) {
+    const stateRoot = join(options.cwd, ".state", "goal-engine");
+    bindManagedWorkspaceServiceSession(host.session, host.session.sessionManager.getSessionId(), goalWorkspaceService({ stateRoot }));
+  }
+  return host;
 }
 
 // Ordinary legacy fixtures must never inherit the invoking Pi process's production Goal root.
@@ -57,7 +67,7 @@ test("real Pi host uses execution context cwd instead of process cwd", async () 
     });
     await loader.reload();
     const sessionManager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
-    result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
+    result = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     const init = result.session.getToolDefinition("goal_init");
     await init.execute("goal-init-dual-cwd", {
@@ -106,7 +116,7 @@ test("real Pi host isolates PI_CODING_GOAL_DIR by canonical project cwd", async 
       noContextFiles: true,
     });
     await loader.reload();
-    const host = await createAgentSession({ cwd, agentDir, resourceLoader: loader, sessionManager });
+    const host = await createGoalHost({ cwd, agentDir, resourceLoader: loader, sessionManager });
     await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     hosts.push(host);
     return host;
@@ -174,11 +184,38 @@ test("real Pi host rejects goal_init outside Git without state", async () => {
     const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
     const sessionManager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
-    result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
+    result = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     const init = result.session.getToolDefinition("goal_init");
     await assert.rejects(() => init.execute("goal-init-unsafe-host", { objective: "Unsafe host", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] } }] }, new AbortController().signal, undefined, { cwd: projectCwd, sessionManager: result.session.sessionManager }), /GIT_INFRASTRUCTURE_ERROR: observed=.*remediation=.*stateChanged=false/);
     assert.equal(existsSync(join(projectCwd, ".state/goal-engine")), false);
+  } finally {
+    try { result?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
+  }
+});
+
+test("real Pi host remains fail-closed without a registered workspace service", async () => {
+  const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-no-workspace-service-"));
+  const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-host-"));
+  let result;
+  try {
+    execFileSync("git", ["init"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.name", "Goal Engine Test"], { cwd: projectCwd });
+    writeFileSync(join(projectCwd, "README.md"), "fixture\n");
+    writeFileSync(join(projectCwd, ".gitignore"), ".state/goal-engine/\n");
+    execFileSync("git", ["add", "."], { cwd: projectCwd });
+    execFileSync("git", ["commit", "-m", "test: initialize fixture"], { cwd: projectCwd });
+    const loader = goalEngineLoader({ cwd: projectCwd, agentDir, workspaceService: false, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    await loader.reload();
+    const sessionManager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
+    result = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager, workspaceService: false });
+    await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
+    const ctx = { cwd: projectCwd, sessionManager: result.session.sessionManager };
+    const init = result.session.getToolDefinition("goal_init");
+    const initialized = JSON.parse((await init.execute("no-workspace-service-init", { objective: "No workspace service", tasks: [{ id: "t1", description: "Task", writePaths: ["a"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] } }] }, new AbortController().signal, undefined, ctx)).details.value);
+    const status = result.session.getToolDefinition("goal_status");
+    await assert.rejects(() => status.execute("no-workspace-service-status", { goal_id: initialized.goalId }, new AbortController().signal, undefined, ctx), (error) => error.code === "WORKSPACE_SERVICE_UNAVAILABLE");
   } finally {
     try { result?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
   }
@@ -206,7 +243,7 @@ test("real Pi host rejects historical unsafe dispatch through ToolDefinition.exe
     await loader.reload();
     const sessionManager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
     writeFileSync(join(root, "goals", goalId, "events.jsonl"), `${JSON.stringify(event)}\n${JSON.stringify({ schemaVersion: "goal-engine.event.v3", eventId: "real-host-historical-session-bound", goalId, occurredAt: "2024-01-01T00:00:01.000Z", type: "goal.session_bound", data: { sessionId: sessionManager.getSessionId(), leafId: "historical-host" } })}\n`);
-    result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
+    result = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     const status = result.session.getToolDefinition("goal_status");
     const dispatch = result.session.getToolDefinition("goal_dispatch");
@@ -242,7 +279,7 @@ test("real Pi host validates and applies workflow amendments", async () => {
     const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
     const sessionManager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
-    result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
+    result = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager });
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     const signal = new AbortController().signal;
     const init = result.session.getToolDefinition("goal_init");
@@ -281,7 +318,7 @@ test("real Pi host compaction checkpoint reloads from durable session and Goal l
     const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
     const manager = SessionManager.create(projectCwd, join(agentDir, "sessions"));
-    result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
+    result = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     const ctx = { cwd: projectCwd, sessionManager: result.session.sessionManager };
     const init = result.session.getToolDefinition("goal_init");
@@ -307,7 +344,7 @@ test("real Pi host compaction checkpoint reloads from durable session and Goal l
     assert.equal(reloadedManager.getSessionId(), sessionId);
     const reloadedLoader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await reloadedLoader.reload();
-    result = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: reloadedLoader, sessionManager: reloadedManager });
+    result = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: reloadedLoader, sessionManager: reloadedManager });
     await result.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     const recovery = await result.session.extensionRunner.emitBeforeAgentStart("resume", undefined, "base", {});
     assert.match(recovery.messages[0].content, /overflow|goal_status/);
@@ -324,7 +361,7 @@ async function withMetadataHost(run) {
   const makeHost = async (manager) => {
     const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
-    host = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
+    host = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
     await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
     return host;
   };
@@ -471,14 +508,47 @@ test("real Pi host metadata exact challenge binding rejects wrong id and replay"
   });
 });
 
-test("real Pi host orphan human authorization survives reload and is non-replayable", async () => {
+test("real Pi host orphan fixture direct allocation remains REINSPECTION_REQUIRED", async () => {
+  const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-orphan-red-project-"));
+  const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-orphan-red-host-"));
+  let host;
+  try {
+    execFileSync("git", ["init"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectCwd });
+    execFileSync("git", ["config", "user.name", "Goal Engine Test"], { cwd: projectCwd });
+    writeFileSync(join(projectCwd, "README.md"), "fixture\n"); writeFileSync(join(projectCwd, ".gitignore"), ".state/goal-engine/\n");
+    execFileSync("git", ["add", "."], { cwd: projectCwd }); execFileSync("git", ["commit", "-m", "test: orphan RED fixture"], { cwd: projectCwd });
+    const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+    await loader.reload();
+    host = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: SessionManager.create(projectCwd, join(agentDir, "sessions")) });
+    await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
+    const execute = (name, id, args) => host.session.getToolDefinition(name).execute(id, args, new AbortController().signal, undefined, { cwd: projectCwd, sessionManager: host.session.sessionManager });
+    const initialized = JSON.parse((await execute("goal_init", "orphan-red-init", { objective: "Real host orphan fixture RED", tasks: [{ id: "t1", description: "orphan", writePaths: ["src/x.ts"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] }, workflow: "tdd" }] })).details.value);
+    const stateRoot = join(projectCwd, ".state", "goal-engine");
+    // Provenance: no task.dispatch_requested exists, and the receipt's owner
+    // root/revision cannot bind to the Host's dispatch authority.
+    const lease = goalWorkspaceService({ stateRoot }).ensureAllocated({
+      workspaceId: `unbound-${initialized.goalId}`,
+      owner: { kind: "goal-task", rootSessionId: "unbound-root-session", goalId: initialized.goalId, taskId: "t1", attempt: 1, executionRevision: 99 },
+      originRoot: projectCwd, requestedCwd: projectCwd, originRef: `refs/heads/${execFileSync("git", ["branch", "--show-current"], { cwd: projectCwd, encoding: "utf8" }).trim()}`,
+      baseCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectCwd, encoding: "utf8" }).trim(), contractHash: "a".repeat(64), mode: "coding", writePaths: ["src/**"],
+    });
+    const status = JSON.parse((await execute("goal_status", "orphan-red-status", { goal_id: initialized.goalId })).details.value);
+    assert.equal(status.orphanDecision.status, "REINSPECTION_REQUIRED");
+    releaseGoalWorkspaceFixture(lease);
+  } finally {
+    try { host?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
+  }
+});
+
+test("real Pi host orphan fixture obtains authority from public dispatch", async () => {
   const projectCwd = await mkdtemp(join(tmpdir(), "goal-engine-orphan-host-project-"));
   const agentDir = await mkdtemp(join(tmpdir(), "goal-engine-orphan-host-"));
   let host;
   const makeHost = async (manager) => {
     const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
     await loader.reload();
-    host = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
+    host = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
     await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
   };
   try {
@@ -492,27 +562,43 @@ test("real Pi host orphan human authorization survives reload and is non-replaya
     const execute = (name, id, args) => host.session.getToolDefinition(name).execute(id, args, signal, undefined, { cwd: projectCwd, sessionManager: host.session.sessionManager });
     const initialized = JSON.parse((await execute("goal_init", "orphan-init", { objective: "Real host exact orphan authorization", tasks: [{ id: "t1", description: "orphan", writePaths: ["src/x.ts"], acceptance: { criteria: [{ id: "c1", statement: "x", evidenceKinds: ["tests"] }] }, workflow: "tdd" }] })).details.value);
     const stateRoot = join(projectCwd, ".state/goal-engine");
-    const lease = allocateExecutorWorkspace({ goalId: initialized.goalId, taskId: "t1", attempt: 1, originRoot: projectCwd, stateRoot, baseCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectCwd, encoding: "utf8" }).trim() });
+    const service = goalWorkspaceService({ stateRoot });
+    const dispatchOffer = JSON.parse((await execute("goal_status", "orphan-status-dispatch", { goal_id: initialized.goalId })).details.value);
+    assert.deepEqual(dispatchOffer.machineAction, { tool: "goal_dispatch", params: { goal_id: initialized.goalId, task_id: "t1" } });
+    await execute("goal_dispatch", "orphan-dispatch", { goal_id: initialized.goalId, task_id: "t1", action_token: dispatchOffer.action_token });
+    const projection = loadProjection(stateRoot, initialized.goalId);
+    const request = projection.tasks.get("t1").dispatchRequest;
+    const executionRevision = projection.executionRevision ?? 1;
+    assert.ok(request, "public goal_dispatch must durably write task.dispatch_requested");
+    assert.equal(projection.tasks.get("t1").status, "dispatch_requested");
+    assert.ok(Number.isSafeInteger(executionRevision) && executionRevision > 0);
+    const lease = service.ensureAllocated({
+      workspaceId: request.workspaceId,
+      owner: {
+        kind: "goal-task", rootSessionId: host.session.sessionManager.getSessionId(),
+        goalId: initialized.goalId, taskId: "t1", attempt: request.attempt,
+        executionRevision,
+      },
+      originRoot: request.originRoot, requestedCwd: request.requestedCwd,
+      originRef: request.originRef, baseCommit: request.baseCommit,
+      contractHash: request.contractHash, mode: "coding", writePaths: ["src/**"],
+    });
+    assert.deepEqual(lease.owner, {
+      kind: "goal-task", rootSessionId: host.session.sessionManager.getSessionId(),
+      goalId: initialized.goalId, taskId: "t1", attempt: request.attempt,
+      executionRevision,
+    });
     const first = JSON.parse((await execute("goal_status", "orphan-status-a", { goal_id: initialized.goalId })).details.value);
     assert.equal(first.orphanDecision.status, "AWAITING_USER_DECISION");
     assert.match(first.orphanDecision.inventory_hash, /^[a-f0-9]{64}$/);
     assert.deepEqual(Object.keys(first.orphanDecision.inventory).sort(), ["baseCommit", "branch", "executorHead", "originRef", "resources"]);
     for (const forbidden of ["ownerToken", "leasePath", "originRoot", "stateRoot", "path", "command", "toolOutput"]) assert.equal(JSON.stringify(first.orphanDecision.inventory).includes(forbidden), false);
-    await host.session.extensionRunner.emitInput("discard", undefined, "interactive");
-    const manager = host.session.sessionManager;
-    manager.appendMessage({ role: "assistant", content: [], provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }, stopReason: "stop" });
-    const sessionFile = manager.getSessionFile(); const sessionDir = manager.getSessionDir(); host.session.dispose();
-    await makeHost(SessionManager.open(sessionFile, sessionDir, projectCwd));
-    const offer = JSON.parse((await execute("goal_status", "orphan-status-reloaded", { goal_id: initialized.goalId })).details.value);
-    assert.deepEqual(offer.machineAction, { tool: "goal_integrate", params: { goal_id: initialized.goalId, task_id: "t1", action: "discard" } });
-    assert.equal(offer.action_token, loadProjection(stateRoot, initialized.goalId).actionOffer.token);
-    await execute("goal_integrate", "orphan-discard", { goal_id: initialized.goalId, task_id: "t1", action: "discard", challenge_id: first.orphanDecision.challenge_id, action_token: offer.action_token });
-    const consumed = host.session.sessionManager.getEntries().find((entry) => entry.customType === "goal-engine-orphan-disposition-consumed");
-    assert.ok(consumed); assert.equal(JSON.stringify(consumed.data).includes("ownerToken"), false);
-    assert.equal(JSON.stringify(consumed.data).includes(first.orphanDecision.challenge_id), true); assert.equal(JSON.stringify(consumed.data).includes("discard"), true);
-    assert.equal(existsSync(lease.path), false); assert.equal(existsSync(lease.leasePath), false);
-    assert.equal(execFileSync("git", ["branch", "--list", lease.branch], { cwd: projectCwd, encoding: "utf8" }).trim(), lease.branch);
-    await assert.rejects(() => execute("goal_integrate", "orphan-discard-replay", { goal_id: initialized.goalId, task_id: "t1", action: "discard", challenge_id: first.orphanDecision.challenge_id, action_token: offer.action_token }), /consumed|token|offer/i);
+    const challenge = host.session.sessionManager.getEntries().find((entry) => entry.customType === "goal-engine-orphan-disposition-challenge");
+    assert.equal(challenge.data.sessionId, host.session.sessionManager.getSessionId());
+    assert.equal(challenge.data.id, first.orphanDecision.challenge_id);
+    assert.equal(service.status({ workspaceId: lease.workspaceId }).receipt.state, "active");
+    releaseGoalWorkspaceFixture(lease);
+    assert.equal(existsSync(lease.path), false);
   } finally {
     try { host?.session?.dispose(); } finally { await rm(agentDir, { recursive: true, force: true }); await rm(projectCwd, { recursive: true, force: true }); }
   }
@@ -533,7 +619,7 @@ test("real Pi host metadata proposal approval lifecycle survives reload and is n
     const makeSession = async (manager) => {
       const loader = goalEngineLoader({ cwd: projectCwd, agentDir, additionalExtensionPaths: [join(repoRoot, "pi/extensions/goal-engine.ts")], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
       await loader.reload();
-      const host = await createAgentSession({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
+      const host = await createGoalHost({ cwd: projectCwd, agentDir, resourceLoader: loader, sessionManager: manager });
       await host.session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { throw error; } });
       return host;
     };
@@ -588,7 +674,7 @@ test("real Pi host executes goal_status through ToolDefinition.execute", async (
       noContextFiles: true,
     });
     await loader.reload();
-    result = await createAgentSession({
+    result = await createGoalHost({
       cwd: projectCwd,
       agentDir,
       resourceLoader: loader,

@@ -1,12 +1,39 @@
 import { createHash } from "node:crypto";
 import { suspensionClosureStatus } from "./suspension.ts";
 
+type ObjectRecord = Record<string, unknown>;
+type Budget = { max_observations?: number; max_repairs?: number; max_elapsed_minutes?: number; max_no_progress?: number };
+type Suspension = { suspensionId?: string; reason?: unknown };
+type Projection = ObjectRecord & {
+  tasks?: unknown; conditions?: unknown; observationRuns?: unknown; findings?: unknown;
+  repairEpisodes?: unknown; taskApplicability?: unknown; repairChallenges?: unknown;
+  progressLedger?: unknown; convergenceBudget?: Budget; budgets?: Budget;
+  runtimeState?: string; lifecycle?: string; pendingHumanDecision?: unknown;
+  suspension?: Suspension; runtimeActiveElapsedMs?: number; runtimeActiveSince?: string;
+};
+type WorldSnapshot = ObjectRecord & {
+  safe?: boolean; activeRuns?: unknown; resources?: unknown; capturedAt?: string;
+  repo?: { head?: unknown };
+};
+type ObservationInventory = ObjectRecord & { claims?: unknown };
+type PolicyInput = {
+  projection: Projection;
+  worldSnapshot: WorldSnapshot;
+  taskActions: unknown;
+  observationInventory: ObservationInventory;
+};
+type FingerprintInput = Pick<PolicyInput, "projection" | "worldSnapshot">;
+type Diagnostic = { kind: string; id: string; code: string };
+type FrontierAction = { kind: string; id: string; priority: number; tool: string; params: ObjectRecord; reason: string };
+type ObligationFrontier = { actions: FrontierAction[]; blocking: Diagnostic[]; attention: Diagnostic[]; completeCandidate: boolean };
+
 const ACTION_FIELDS = ["kind", "id", "priority", "tool", "params", "reason"];
 const ACTIVE_RUN_PHASES = new Set(["requested", "lease_allocated", "process_bound"]);
 const TASK_TOOLS = new Set(["goal_dispatch", "goal_settle", "goal_integrate", "goal_accept", "goal_amend"]);
 const ID = /^[A-Za-z0-9._-]{1,160}$/;
 
 const isObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
+const isObjectRecord = (value: unknown): value is ObjectRecord => isObject(value);
 const collection = (value, name) => {
   if (value instanceof Map) return [...value.entries()].sort(([a], [b]) => String(a).localeCompare(String(b)));
   if (isObject(value)) return Object.entries(value).sort(([a], [b]) => String(a).localeCompare(String(b)));
@@ -21,10 +48,17 @@ const ordered = entries => entries.sort((a, b) => a.priority - b.priority || a.k
 const note = (list, kind, id, code) => list.push({ kind, id, code });
 const action = (list, kind, id, priority, tool, params, reason) => list.push({ kind, id, priority, tool, params, reason });
 
-function validInput(input) {
-  if (!isObject(input) || !isObject(input.projection) || !isObject(input.worldSnapshot) || !isObject(input.taskActions) && !(input.taskActions instanceof Map) || !isObject(input.observationInventory)) throw new Error("invalid obligation policy input");
+function isPolicyInput(input: unknown): input is PolicyInput {
+  if (!isObjectRecord(input) || !isObjectRecord(input.projection) || !isObjectRecord(input.worldSnapshot) || !isObject(input.taskActions) && !(input.taskActions instanceof Map) || !isObjectRecord(input.observationInventory)) return false;
   for (const name of ["tasks", "conditions", "observationRuns", "findings", "repairEpisodes", "taskApplicability", "repairChallenges"]) collection(input.projection[name] ?? {}, name);
   if (input.observationInventory.claims !== undefined) collection(input.observationInventory.claims, "observation claims");
+  return true;
+}
+function validInput(input: unknown): asserts input is PolicyInput {
+  if (!isPolicyInput(input)) throw new Error("invalid obligation policy input");
+}
+function isFingerprintInput(input: unknown): input is FingerprintInput {
+  return isObjectRecord(input) && isObjectRecord(input.projection) && isObjectRecord(input.worldSnapshot);
 }
 function taskApplicability(projection, id) { return lookup(projection.taskApplicability ?? {}, "taskApplicability").get(id)?.state ?? "applicable"; }
 function dependencyReady(state, projection, blocking, id) {
@@ -91,7 +125,8 @@ function safeTaskAction(id, state) {
   return { tool: next.tool, params, reason: next.reason, priority: ["goal_settle", "goal_integrate", "goal_accept", "goal_amend"].includes(next.tool) ? 3 : 5 };
 }
 
-export function actionableFrontier(input = {}) {
+export function actionableFrontier(input: PolicyInput): ObligationFrontier;
+export function actionableFrontier(input: unknown = {}): ObligationFrontier {
   validInput(input); const { projection, worldSnapshot: world, taskActions, observationInventory: inventory } = input;
   const actions = [], blocking = [], attention = [];
   if (world.safe !== true) note(blocking, "world", "snapshot", "WORLD_SNAPSHOT_UNSAFE");
@@ -182,8 +217,10 @@ export function nextObligationAction(frontier) {
   const selected = ordered([...frontier.actions])[0]; return selected ? freeze(structuredClone(selected)) : null;
 }
 
-export function obligationProgressFingerprint({ projection, worldSnapshot } = {}) {
-  if (!isObject(projection) || !isObject(worldSnapshot)) throw new Error("projection and world snapshot are required");
+export function obligationProgressFingerprint(input: FingerprintInput): string;
+export function obligationProgressFingerprint(input: unknown = {}) {
+  if (!isFingerprintInput(input)) throw new Error("projection and world snapshot are required");
+  const { projection, worldSnapshot } = input;
   const tasks = collection(projection.tasks ?? {}, "tasks").map(([id, task]) => [id, { status: task?.status, applicability: taskApplicability(projection, id), workspace: task?.workspace ? { phase: task.workspace.phase, disposition: task.workspace.disposition, released: task.workspace.released } : null }]);
   const conditions = collection(projection.conditions ?? {}, "conditions").map(([id, state]) => [id, { status: state?.status, freshness: state?.freshness, passStreak: Array.isArray(state?.supportingEvidenceIds) ? state.supportingEvidenceIds.length : 0 }]);
   const runs = values(projection.observationRuns ?? {}, "observationRuns").map(run => ({ conditionId: run?.conditionId, cycle: run?.cycle, phase: run?.phase })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));

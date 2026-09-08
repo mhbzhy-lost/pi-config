@@ -6,9 +6,10 @@ import { assertPendingTaskContractsCompile, DISPATCH_VALIDATION_SENTINEL } from 
 import { assertIndependentSettlementEvidence, fingerprintSettlementEvidence, normalizeSettlementEvidence } from "./settlement-evidence.ts";
 import { generationCapabilities } from "./generation-capabilities.ts";
 import { deriveInitialShape, hashRuntimeExecutionContract, normalizeRuntimeGoalInit } from "./obligation-contract.ts";
-import { deterministicGoalWorkspaceId, publicManagedWorkspaceReceipt } from "../../packages/pi-subagents-enhanced/src/workspace/contract.ts";
+import { deterministicGoalWorkspaceId } from "../../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { assertExecutionSettlementProof } from "./run-binding.ts";
 import { legacyExecutorTaskFields, resetLegacyExecutorTaskFields } from "./legacy-executor-compat.ts";
+import { canonicalManagedWorkspaceReceipt, isCanonicalManagedWorkspaceReceipt, managedWorkspaceDisposition, managedWorkspaceOwner, managedWorkspaceState } from "./managed-workspace.ts";
 
 const LEGACY_SCHEMA_VERSIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3"]);
 export const PLANNED_SCHEMA_VERSION = "planned.v1";
@@ -21,8 +22,11 @@ const SCHEMA_RANK = new Map([["goal-engine.event.v1", 1], ["goal-engine.event.v2
 
 export function schemaVersionForMutation(projection, legacyTargetVersion = "goal-engine.event.v3") {
   const current = projection?.eventSchemaVersion;
-  if (!current || current === PLANNED_SCHEMA_VERSION || current === PLANNED_V2_SCHEMA_VERSION) return current === PLANNED_V2_SCHEMA_VERSION ? PLANNED_V2_SCHEMA_VERSION : PLANNED_SCHEMA_VERSION;
-  if (current === RUNTIME_SCHEMA_VERSION || current === RUNTIME_V2_SCHEMA_VERSION) return current;
+  if (V2_SCHEMA_VERSIONS.has(current)) {
+    throw Object.assign(new Error("GOAL_GENERATION_READ_ONLY"), { code: "GOAL_GENERATION_READ_ONLY" });
+  }
+  if (!current || current === PLANNED_SCHEMA_VERSION) return PLANNED_SCHEMA_VERSION;
+  if (current === RUNTIME_SCHEMA_VERSION) return current;
   if (!LEGACY_SCHEMA_VERSIONS.has(current)) throw new Error(`unknown event generation: ${current}`);
   if (!LEGACY_SCHEMA_VERSIONS.has(legacyTargetVersion)) throw new Error(`invalid legacy mutation generation: ${legacyTargetVersion}`);
   return SCHEMA_RANK.get(legacyTargetVersion) >= SCHEMA_RANK.get(current) ? legacyTargetVersion : current;
@@ -37,6 +41,34 @@ const VALID_EVIDENCE_TYPES = new Set(["diff", "file", "test_output", "screenshot
 const VALID_EVIDENCE_SOURCES = new Set(["self_produced", "pre_existing", "external"]);
 const VAGUE_PATTERNS = /\b(continue|proceed|next step|next|TBD|todo|keep going|carry on)\b/i;
 const MIN_NEXT_ACTION_LEN = 20;
+
+type ContinuityObservation = { paths?: string[]; status?: string };
+type TaskAcceptance = { criteria: unknown[]; commands?: string[] };
+type TaskDefinition = {
+  description: string;
+  deps?: string[];
+  writePaths: string[];
+  acceptance: TaskAcceptance;
+  workflow?: string;
+  metadata?: unknown;
+  agentProfile?: string;
+};
+type TaskUpdate = Partial<TaskDefinition>;
+type GoalAmendmentData = {
+  addTasks?: Record<string, TaskDefinition>;
+  removeTasks?: string[];
+  updateTasks?: Record<string, TaskUpdate>;
+  reason?: unknown;
+  hostInternalRemediation?: boolean;
+};
+type RuntimeGoalInit = {
+  execution: {
+    tasks: Array<TaskDefinition & { id: string }>;
+    conditions: Array<{ id: string }>;
+    write_policy: { allowed_paths: string[] };
+    budgets: Record<string, number>;
+  };
+};
 
 export function createProjection() {
   return {
@@ -167,9 +199,11 @@ export function applyEvent(projection, event, { replay = false } = {}) {
     case "task.workspace_orphan_recovered": workspaceOrphanRecovered(next, event.data, event.schemaVersion); break;
     case "task.workspace_preservation_released": workspacePreservationReleased(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposition_started": workspaceDispositionStarted(next, event.data, event.schemaVersion, replay); break;
+    case "task.managed_workspace_disposition_intent": managedWorkspaceDispositionIntent(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposition_rebased": workspaceDispositionRebased(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposition_applied": workspaceDispositionApplied(next, event.data, event.schemaVersion); break;
     case "task.workspace_disposed": workspaceDisposed(next, event.data, event.schemaVersion); break;
+    case "task.managed_workspace_disposition_receipt": managedWorkspaceDispositionReceipt(next, event.data, event.schemaVersion); break;
     case "goal.amended": goalAmended(next, event.data, event.schemaVersion, replay); break;
     case "goal.contract_amended": goalContractAmended(next, event.data, event.schemaVersion); break;
     case "goal.session_bound": goalSessionBound(next, event, event.schemaVersion); break;
@@ -229,6 +263,7 @@ function copyTask(task) {
   return {
     ...task,
     workspace: task.workspace ? { ...task.workspace } : null,
+    ...(Object.hasOwn(task, "managedDisposition") ? { managedDisposition: task.managedDisposition ? structuredClone(task.managedDisposition) : null } : {}),
     ...(Object.hasOwn(task, "dispatchRequest") ? { dispatchRequest: task.dispatchRequest ? { ...task.dispatchRequest } : null } : {}),
     ...(Object.hasOwn(task, "executorBinding") ? { executorBinding: task.executorBinding ? { ...task.executorBinding } : null } : {}),
     ...(Object.hasOwn(task, "lastExecutorProof") ? { lastExecutorProof: task.lastExecutorProof ? { ...task.lastExecutorProof } : null } : {}),
@@ -256,7 +291,7 @@ function copyProjection(p) {
     completionHistory: (p.completionHistory || []).map((entry) => ({ ...entry })),
     sessionBindings: (p.sessionBindings || []).map((binding) => ({ ...binding })),
     continuity: {
-      observations: Object.fromEntries(Object.entries(p.continuity?.observations || {}).map(([id, observation]) => [id, { ...observation, paths: [...(observation.paths || [])] }])),
+      observations: Object.fromEntries(Object.entries(p.continuity?.observations as Record<string, ContinuityObservation> || {}).map(([id, observation]) => [id, { ...observation, paths: [...(observation.paths || [])] }])),
       lastCheckpoint: p.continuity?.lastCheckpoint ? { ...p.continuity.lastCheckpoint, modifiedFiles: [...p.continuity.lastCheckpoint.modifiedFiles] } : null,
     },
     actionOffer: p.actionOffer ? structuredClone(p.actionOffer) : null,
@@ -507,8 +542,8 @@ function amendmentProposed(p, data) {
   runtimeOnly(p);
   const fields = ["proposalId", "proposalHash", "changes", "changesHash", "targetExecutionContract", "targetContractHash", "baseHead", "ownerSessionId", "oldRevision", "newRevision", "goalId"];
   requireExactFields(data, fields, "amendment proposal");
-  let normalizedTarget;
-  try { normalizedTarget = normalizeRuntimeGoalInit(data.targetExecutionContract, proposalRuntimeRegistries(data.targetExecutionContract)); } catch { throw new Error("invalid amendment target runtime contract"); }
+  let normalizedTarget: RuntimeGoalInit;
+  try { normalizedTarget = normalizeRuntimeGoalInit(data.targetExecutionContract, proposalRuntimeRegistries(data.targetExecutionContract)) as RuntimeGoalInit; } catch { throw new Error("invalid amendment target runtime contract"); }
   const { proposalHash, ...material } = data;
   if (p.runtimeState !== "suspended" || data.goalId !== p.goalId || data.ownerSessionId !== ownerSessionId(p) || !/^[a-f0-9]{40}$/.test(data.baseHead || "") || (p.pendingHumanDecision && p.pendingHumanDecision.phase !== "rejected") || data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || !data.proposalId || !isPlainObject(data.changes) || !hash(data.proposalHash) || !hash(data.changesHash) || !hash(data.targetContractHash) || data.changesHash !== hashCanonical(data.changes) || data.targetContractHash !== hashRuntimeExecutionContract(data.targetExecutionContract) || !sameCanonical(data.targetExecutionContract, normalizedTarget) || data.proposalHash !== hashCanonical(material)) throw new Error("invalid amendment proposal");
   p.pendingHumanDecision = { ...structuredClone(data), sourceTaskIds: [...p.tasks.keys()].sort(), sourceConditionIds: [...p.conditions.keys()].sort(), phase: "proposed" };
@@ -522,7 +557,7 @@ function amendmentApproved(p, data) {
   p.pendingHumanDecision = { ...pending, ...structuredClone(data), phase: data.approved ? "approved" : "rejected" };
 }
 function amendmentCapabilityConsumed(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "nonceDigest"], "amendment capability"); const pending = p.pendingHumanDecision; if (!pending || pending.phase !== "approved" || pending.proposalId !== data.proposalId || !hash(data.nonceDigest) || p.consumedAmendmentNonceDigests.has(data.nonceDigest)) throw new Error("invalid amendment capability"); pending.phase = "consumed"; pending.nonceDigest = data.nonceDigest; p.consumedAmendmentNonceDigests.add(data.nonceDigest); }
-function amendmentApplied(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "oldRevision", "newRevision", "targetContractHash", "reconciliation"], "amendment apply"); const pending = p.pendingHumanDecision; const target = pending?.targetExecutionContract; const reconciliation = data.reconciliation; const targetTasks = new Map((target?.execution?.tasks || []).map((task) => [task.id, task])); if (!pending || pending.phase !== "consumed" || pending.proposalId !== data.proposalId || pending.proposalHash !== data.proposalHash || data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || data.newRevision !== pending.newRevision || data.targetContractHash !== pending.targetContractHash || !Array.isArray(reconciliation) || !reconciliation.length) throw new Error("invalid amendment apply"); const sourceTaskIds = pending.sourceTaskIds, ids = [...new Set([...(sourceTaskIds || []), ...targetTasks.keys()])].sort(); if (!Array.isArray(sourceTaskIds) || JSON.stringify(sourceTaskIds) !== JSON.stringify([...sourceTaskIds].sort()) || sourceTaskIds.some((id) => !p.tasks.has(id)) || reconciliation.length !== ids.length || reconciliation.some((row, i) => !isPlainObject(row) || Object.keys(row).length !== 2 || row.taskId !== ids[i])) throw new Error("invalid amendment reconciliation"); for (const row of reconciliation) { const source = sourceTaskIds.includes(row.taskId), targetTask = targetTasks.has(row.taskId), applicability = p.taskApplicability.get(row.taskId); const expected = !source && targetTask ? applicability?.state === "applicable" ? "add" : null : source && !targetTask ? applicability?.state === "superseded" ? "supersede" : null : applicability?.state === "applicable" ? "keep" : applicability?.state === "reverify_required" ? "reverify" : null; if (!applicability || applicability.revision !== data.newRevision || (targetTask && applicability.state === "superseded") || row.action !== expected) throw new Error("invalid amendment reconciliation"); } for (const id of ids) { const targetTask = targetTasks.get(id), task = p.tasks.get(id); if (targetTask && task) Object.assign(task, { description: targetTask.description, deps: [...(targetTask.deps || [])], writePaths: [...targetTask.writePaths], acceptance: { criteria: structuredClone(targetTask.acceptance.criteria) }, workflow: targetTask.workflow || "tdd" }); else if (targetTask) { p.tasks.set(id, { description: targetTask.description, deps: [...(targetTask.deps || [])], writePaths: [...targetTask.writePaths], acceptance: { criteria: structuredClone(targetTask.acceptance.criteria) }, workflow: targetTask.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, executorBinding: null, lastExecutorProof: null, acceptanceVerification: null, settlement: null }); p.taskMutationSequences.set(id, 0); } } for (const definition of target.execution.conditions) { const previous = p.conditions.get(definition.id); if (previous) { previous.definition = structuredClone(definition); previous.conditionHash = hashCanonical(definition); } else p.conditions.set(definition.id, { definition: structuredClone(definition), conditionHash: hashCanonical(definition), status: "inactive", supportingEvidenceIds: [], lastObservationRunId: null, invalidationReason: null }); } p.writePolicy = { allowedPaths: [...target.execution.write_policy.allowed_paths] }; p.convergenceBudget = structuredClone(target.execution.budgets); p.executionRevision = data.newRevision; p.executionContractHash = data.targetContractHash; p.pendingHumanDecision = null; recordRuntimeMutation(p, [...p.tasks.keys()]); }
+function amendmentApplied(p, data) { runtimeOnly(p); requireExactFields(data, ["proposalId", "proposalHash", "oldRevision", "newRevision", "targetContractHash", "reconciliation"], "amendment apply"); const pending = p.pendingHumanDecision; const target = pending?.targetExecutionContract as RuntimeGoalInit | undefined; const reconciliation = data.reconciliation; const targetTasks = new Map((target?.execution?.tasks || []).map((task) => [task.id, task])); if (!pending || pending.phase !== "consumed" || pending.proposalId !== data.proposalId || pending.proposalHash !== data.proposalHash || data.oldRevision !== p.executionRevision || data.newRevision !== data.oldRevision + 1 || data.newRevision !== pending.newRevision || data.targetContractHash !== pending.targetContractHash || !Array.isArray(reconciliation) || !reconciliation.length) throw new Error("invalid amendment apply"); const sourceTaskIds = pending.sourceTaskIds, ids = [...new Set([...(sourceTaskIds || []), ...targetTasks.keys()])].sort(); if (!Array.isArray(sourceTaskIds) || JSON.stringify(sourceTaskIds) !== JSON.stringify([...sourceTaskIds].sort()) || sourceTaskIds.some((id) => !p.tasks.has(id)) || reconciliation.length !== ids.length || reconciliation.some((row, i) => !isPlainObject(row) || Object.keys(row).length !== 2 || row.taskId !== ids[i])) throw new Error("invalid amendment reconciliation"); for (const row of reconciliation) { const source = sourceTaskIds.includes(row.taskId), targetTask = targetTasks.has(row.taskId), applicability = p.taskApplicability.get(row.taskId); const expected = !source && targetTask ? applicability?.state === "applicable" ? "add" : null : source && !targetTask ? applicability?.state === "superseded" ? "supersede" : null : applicability?.state === "applicable" ? "keep" : applicability?.state === "reverify_required" ? "reverify" : null; if (!applicability || applicability.revision !== data.newRevision || (targetTask && applicability.state === "superseded") || row.action !== expected) throw new Error("invalid amendment reconciliation"); } for (const id of ids) { const targetTask = targetTasks.get(id), task = p.tasks.get(id); if (targetTask && task) Object.assign(task, { description: targetTask.description, deps: [...(targetTask.deps || [])], writePaths: [...targetTask.writePaths], acceptance: { criteria: structuredClone(targetTask.acceptance.criteria) }, workflow: targetTask.workflow || "tdd" }); else if (targetTask) { p.tasks.set(id, { description: targetTask.description, deps: [...(targetTask.deps || [])], writePaths: [...targetTask.writePaths], acceptance: { criteria: structuredClone(targetTask.acceptance.criteria) }, workflow: targetTask.workflow || "tdd", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, executorBinding: null, lastExecutorProof: null, acceptanceVerification: null, settlement: null }); p.taskMutationSequences.set(id, 0); } } for (const definition of target.execution.conditions) { const previous = p.conditions.get(definition.id); if (previous) { previous.definition = structuredClone(definition); previous.conditionHash = hashCanonical(definition); } else p.conditions.set(definition.id, { definition: structuredClone(definition), conditionHash: hashCanonical(definition), status: "inactive", supportingEvidenceIds: [], lastObservationRunId: null, invalidationReason: null }); } p.writePolicy = { allowedPaths: [...target.execution.write_policy.allowed_paths] }; p.convergenceBudget = structuredClone(target.execution.budgets); p.executionRevision = data.newRevision; p.executionContractHash = data.targetContractHash; p.pendingHumanDecision = null; recordRuntimeMutation(p, [...p.tasks.keys()]); }
 function finalReviewStarted(p, data) {
   runtimeOnly(p);
   requireExactFields(data, ["reviewId", "manifestHash", "stateHash", "worldHash", "head", "approval"], "final review start");
@@ -665,9 +700,9 @@ function taskWorkspaceAllocated(p, data, schemaVersion) {
   const request = task.dispatchRequest;
   if (task.status !== "dispatch_requested" || !request) throw new Error("workspace allocation requires a current dispatch request");
   if (data.attempt !== request.attempt || data.contractHash !== request.contractHash) throw new Error("workspace allocation request identity mismatch");
-  const workspace = publicManagedWorkspaceReceipt(data.workspace);
-  const owner = workspace.owner;
-  if (workspace.state !== "active" || workspace.run !== null || workspace.workspaceId !== request.workspaceId
+  const workspace = canonicalManagedWorkspaceReceipt(data.workspace);
+  const owner = managedWorkspaceOwner(workspace);
+  if (managedWorkspaceState(workspace) !== "active" || workspace.run !== null || workspace.workspaceId !== request.workspaceId
       || workspace.originRoot !== request.originRoot || workspace.requestedCwd !== request.requestedCwd
       || workspace.originRef !== request.originRef || workspace.baseCommit !== request.baseCommit
       || owner.kind !== "goal-task" || owner.goalId !== p.goalId || owner.taskId !== data.taskId
@@ -738,7 +773,7 @@ function validatedExecutorProof(task, data) {
   if (data.executorProof.runId !== binding.runId) throw new Error("executor terminal proof runId mismatch");
   if (!/^[a-f0-9]{64}$/.test(data.executorProof.proofId)) throw new Error("executor terminal proofId is invalid");
   if (typeof data.executorProof.observedAt !== "number" || !Number.isFinite(data.executorProof.observedAt)) throw new Error("executor terminal observedAt is invalid");
-  if (data.executorProof.outcome !== "succeeded") throw new Error("executor terminal proof is not successful");
+  if (!["succeeded", "failed"].includes(data.executorProof.outcome) || (data.outcome === "succeeded" && data.executorProof.outcome !== "succeeded")) throw new Error("executor terminal proof outcome is invalid");
   return { ...data.executorProof };
 }
 
@@ -804,7 +839,7 @@ function taskSettled(p, data, occurredAt, schemaVersion, replay) {
         const executorIdentity = executorProof
           ? { executorRunId: task.executorBinding.runId, terminalProofId: executorProof.proofId }
           : {};
-        task.settlement = { attempt: workspace.attempt, executorHead: data.executorHead, ...executorIdentity, ...(settlementEvidence ? { evidence: settlementEvidence } : {}) };
+        task.settlement = { attempt: data.attempt, executorHead: data.executorHead, ...executorIdentity, ...(settlementEvidence ? { evidence: settlementEvidence } : {}) };
       } else if (!replay) {
         throw new Error("settlement identity requires attempt and executorHead");
       } else {
@@ -849,16 +884,93 @@ function taskAccepted(p, data, schemaVersion) {
   if (task.status !== "succeeded") throw new Error(`task is not succeeded: ${taskId} (${task.status})`);
   if (schemaVersion !== "goal-engine.event.v1") {
     const workspace = task.workspace;
-    if (!workspace || workspace.phase !== "disposed" || workspace.disposition !== "integrated" || workspace.released !== true) {
-      throw new Error("workspace must be disposed, integrated, and released before acceptance");
+    if (isCanonicalManagedWorkspaceReceipt(workspace)) {
+      const disposition = task.managedDisposition, owner = managedWorkspaceOwner(workspace);
+      if (!disposition || disposition.phase !== "receipt" || disposition.attempt !== owner.attempt
+        || disposition.action !== "integrate" || disposition.receipt?.released !== true
+        || disposition.receipt?.disposition?.action !== "integrate"
+        || managedWorkspaceState(workspace) !== "released" || managedWorkspaceDisposition(workspace)?.action !== "integrate") {
+        throw new Error("managed workspace receipt must be integrated and released before acceptance");
+      }
+      if (workspaceAttempt !== owner.attempt) throw new Error("workspace attempt mismatch");
+    } else {
+      if (!workspace || workspace.phase !== "disposed" || workspace.disposition !== "integrated" || workspace.released !== true) {
+        throw new Error("workspace must be disposed, integrated, and released before acceptance");
+      }
+      if (workspaceAttempt !== workspace.attempt) throw new Error("workspace attempt mismatch");
     }
-    if (workspaceAttempt !== workspace.attempt) throw new Error("workspace attempt mismatch");
     task.acceptanceVerification = "integrated";
   } else {
     task.acceptanceVerification = "legacy_unverified";
   }
   task.status = "accepted";
   if (generationCapabilities(schemaVersion).conditions) recordRuntimeMutation(p, [taskId]);
+}
+
+function exactManagedOwner(owner) {
+  return isPlainObject(owner)
+    && Object.keys(owner).length === 6
+    && owner.kind === "goal-task"
+    && typeof owner.rootSessionId === "string" && owner.rootSessionId
+    && typeof owner.goalId === "string" && owner.goalId
+    && typeof owner.taskId === "string" && owner.taskId
+    && Number.isSafeInteger(owner.attempt) && owner.attempt >= 1
+    && Number.isSafeInteger(owner.executionRevision) && owner.executionRevision >= 1;
+}
+
+function managedWorkspaceDispositionIntent(p, data, schemaVersion) {
+  requireActive(p);
+  if (generationCapabilities(schemaVersion).executorBinding !== "strict") throw new Error("managed workspace disposition requires strict generation");
+  requireExactFields(data, ["taskId", "attempt", "executionRevision", "workspaceId", "leaseId", "action", "strategy"], "managed workspace disposition intent");
+  const task = requireTask(p, data.taskId), workspace = task.workspace;
+  if (!isCanonicalManagedWorkspaceReceipt(workspace) || task.managedDisposition?.phase === "receipt") throw new Error("managed workspace disposition requires an active receipt");
+  const owner = managedWorkspaceOwner(workspace);
+  if (managedWorkspaceState(workspace) !== "active" || workspace.workspaceId !== data.workspaceId || workspace.leaseId !== data.leaseId
+    || !DISPOSITION_ACTIONS.has(data.action) || (data.action === "integrate" ? !["cherry-pick", "merge"].includes(data.strategy) : data.strategy !== null)
+    || !Number.isSafeInteger(data.executionRevision) || data.executionRevision < 1 || !exactManagedOwner(owner)
+    || owner.goalId !== p.goalId || owner.taskId !== data.taskId
+    || owner.attempt !== data.attempt || owner.executionRevision !== data.executionRevision
+    || data.executionRevision !== currentExecutionRevision(p)) {
+    throw new Error("managed workspace disposition intent identity mismatch");
+  }
+  if (data.action === "integrate" && task.status !== "succeeded") throw new Error("integrate disposition requires succeeded task");
+  if (data.action !== "integrate" && !((task.status === "pending" && task.lastSettledOutcome === "failed") || task.status === "succeeded" || task.status === "blocked")) throw new Error("discard and preserve dispositions require settled task");
+  task.managedDisposition = { phase: "intent", attempt: data.attempt, executionRevision: data.executionRevision, workspaceId: data.workspaceId, leaseId: data.leaseId, action: data.action, strategy: data.strategy };
+}
+
+function managedWorkspaceDispositionReceipt(p, data, schemaVersion) {
+  requireActive(p);
+  if (generationCapabilities(schemaVersion).executorBinding !== "strict") throw new Error("managed workspace disposition requires strict generation");
+  requireExactFields(data, ["taskId", "attempt", "workspaceId", "leaseId", "serviceReceiptHash", "receipt"], "managed workspace disposition receipt");
+  const task = requireTask(p, data.taskId), intent = task.managedDisposition, before = task.workspace;
+  const receipt = canonicalManagedWorkspaceReceipt(data.receipt);
+  const preservingRelease = intent?.phase === "receipt" && intent.action === "preserve" && isCanonicalManagedWorkspaceReceipt(before) && managedWorkspaceState(before) === "preserved";
+  const receiptOwner = managedWorkspaceOwner(receipt), beforeOwner = isCanonicalManagedWorkspaceReceipt(before) ? managedWorkspaceOwner(before) : null;
+  if ((!intent || (!preservingRelease && intent.phase !== "intent")) || !isCanonicalManagedWorkspaceReceipt(before)
+    || !hash(data.serviceReceiptHash) || data.serviceReceiptHash !== hashCanonical(receipt)
+    || receipt.workspaceId !== data.workspaceId || receipt.leaseId !== data.leaseId || receipt.workspaceId !== intent.workspaceId || receipt.leaseId !== intent.leaseId
+    || !exactManagedOwner(beforeOwner) || !exactManagedOwner(receiptOwner)
+    || JSON.stringify(canonical(receiptOwner)) !== JSON.stringify(canonical(beforeOwner))
+    || receiptOwner.goalId !== p.goalId || receiptOwner.taskId !== data.taskId
+    || receiptOwner.attempt !== data.attempt || receiptOwner.executionRevision !== intent.executionRevision
+    || intent.executionRevision !== currentExecutionRevision(p)
+    || !(intent.action === "preserve" ? ["preserved", "released"].includes(managedWorkspaceState(receipt)) : managedWorkspaceState(receipt) === "released")
+    || managedWorkspaceDisposition(receipt)?.action !== intent.action
+    || (intent.action === "integrate" && managedWorkspaceDisposition(receipt)?.strategy !== intent.strategy)) {
+    throw new Error("managed workspace disposition receipt identity mismatch");
+  }
+  task.workspace = structuredClone(receipt);
+  task.managedDisposition = {
+    ...intent,
+    phase: "receipt",
+    serviceReceiptHash: data.serviceReceiptHash,
+    // This is the terminal business receipt, not a copy of the service state
+    // machine. The service receipt remains the resource authority.
+    receipt: { disposition: structuredClone(managedWorkspaceDisposition(receipt)), released: managedWorkspaceState(receipt) === "released" },
+  };
+  // A released non-integration receipt closes this attempt. Preserve remains
+  // preserve in the receipt; it is never rewritten as a synthetic discard.
+  if (managedWorkspaceState(receipt) === "released" && ["discard", "preserve"].includes(intent.action) && task.lastSettledOutcome !== "blocked") task.status = "pending";
 }
 
 function workspaceDispositionStarted(p, data, schemaVersion, replay) {
@@ -956,10 +1068,32 @@ function workspaceOrphanRecovered(p, data, schemaVersion) {
   if (!Number.isInteger(attempt) || attempt < 1) throw new Error("invalid orphan recovery attempt");
   validateRecoveryWorkspace(workspace, attempt);
   const task = requireTask(p, taskId);
-  if (task.status !== "pending") throw new Error(`orphan recovery requires pending task: ${taskId}`);
-  if (attempt !== task.attempts + 1) throw new Error("orphan recovery attempt must be the next candidate");
-  if (!workspaceReleasedForRetry(task)) throw new Error("orphan recovery requires no workspace or a retry-released workspace");
+  const allocationAppendGap = task.status === "dispatch_requested";
+  if (allocationAppendGap) {
+    const request = task.dispatchRequest;
+    if (!request || task.workspace !== null || task.attempts !== attempt || request.attempt !== attempt
+      || task.contractHash !== request.contractHash
+      || (Object.hasOwn(task, "executorBinding") && task.executorBinding !== null)
+      || (Object.hasOwn(task, "lastExecutorProof") && task.lastExecutorProof !== null)
+      || (Object.hasOwn(task, "runBinding") && task.runBinding !== null)
+      || (Object.hasOwn(task, "lastRunProof") && task.lastRunProof !== null)) {
+      throw new Error("orphan recovery dispatch request identity mismatch");
+    }
+    requireExactFields(request, ["attempt", "contractHash", "workspaceId", "originRoot", "requestedCwd", "originRef", "baseCommit"], "orphan recovery dispatch request");
+    const expectedWorkspaceId = deterministicGoalWorkspaceId({
+      goalId: p.goalId, taskId, attempt, executionRevision: currentExecutionRevision(p), contractHash: request.contractHash, baseCommit: request.baseCommit,
+    });
+    if (!hash(request.contractHash) || !gitHead(request.baseCommit) || request.workspaceId !== expectedWorkspaceId
+      || workspace.baseCommit !== request.baseCommit || workspace.originRef !== request.originRef) {
+      throw new Error("orphan recovery dispatch request identity mismatch");
+    }
+  } else {
+    if (task.status !== "pending") throw new Error(`orphan recovery requires pending task: ${taskId}`);
+    if (attempt !== task.attempts + 1) throw new Error("orphan recovery attempt must be the next candidate");
+    if (!workspaceReleasedForRetry(task)) throw new Error("orphan recovery requires no workspace or a retry-released workspace");
+  }
   task.attempts = attempt;
+  task.status = "pending";
   task.lastSettledOutcome = "failed";
   task.settlement = null;
   task.workspace = { ...workspace, executorHead, phase: "active", recovery: "orphaned" };
@@ -1025,14 +1159,29 @@ function validateWorkspace(workspace, expectedAttempt) {
   for (const [field, value] of [["path", workspace.path], ["branch", workspace.branch ?? workspace.branchRef], ["baseCommit", workspace.baseCommit]]) if (!value || typeof value !== "string") throw new Error(`workspace ${field} is required`);
 }
 
+function legacyWorkspaceReleasedForRetry(workspace) {
+  return workspace.phase === "disposed" && ((workspace.disposition === "discarded" && workspace.released === true)
+    || (workspace.disposition === "preserved" && workspace.preservedResourcesReleased === true));
+}
+
+function workspaceReleasedForRetryReceipt(workspace) {
+  if (!workspace) return true;
+  if (isCanonicalManagedWorkspaceReceipt(workspace)) {
+    return managedWorkspaceState(workspace) === "released"
+      && ["discard", "preserve"].includes(managedWorkspaceDisposition(workspace)?.action);
+  }
+  // Historical replay is the only remaining consumer of the legacy shape.
+  return legacyWorkspaceReleasedForRetry(workspace);
+}
+
 function assertWorkspaceRedispatchable(task) {
-  if (!task.workspace) return;
-  const { phase, disposition, released, preservedResourcesReleased } = task.workspace;
-  const isReleasable = phase === "disposed" && ((disposition === "discarded" && released === true)
-    || (disposition === "preserved" && preservedResourcesReleased === true));
-  if (isReleasable) return;
+  if (!task.workspace || workspaceReleasedForRetryReceipt(task.workspace)) return;
+  const workspace = task.workspace;
+  if (isCanonicalManagedWorkspaceReceipt(workspace)) {
+    throw new Error(`workspace redispatch error: canonical workspace is not released for redispatch (state=${managedWorkspaceState(workspace)}, action=${managedWorkspaceDisposition(workspace)?.action})`);
+  }
   throw new Error(
-    `workspace redispatch error: existing workspace must be disposed, discarded, and released before redispatch (phase=${phase}, disposition=${disposition}, released=${released})`,
+    `workspace redispatch error: existing workspace must be disposed, discarded, and released before redispatch (phase=${workspace.phase}, disposition=${workspace.disposition}, released=${workspace.released})`,
   );
 }
 
@@ -1056,7 +1205,7 @@ function assertDepsAccepted(p, task) {
   }
 }
 
-function goalAmended(p, data, schemaVersion, replay) {
+function goalAmended(p, data: GoalAmendmentData, schemaVersion, replay) {
   requireActive(p);
   const { addTasks, removeTasks, updateTasks, reason, hostInternalRemediation = false } = data;
   if (hostInternalRemediation !== false && hostInternalRemediation !== true) throw new Error("invalid Host-internal remediation flag");
@@ -1146,9 +1295,7 @@ function taskDefinitions(tasks) {
 }
 
 function workspaceReleasedForRetry(task) {
-  const workspace = task.workspace;
-  return !workspace || (workspace.phase === "disposed" && ((workspace.disposition === "discarded" && workspace.released === true)
-    || (workspace.disposition === "preserved" && workspace.preservedResourcesReleased === true)));
+  return workspaceReleasedForRetryReceipt(task.workspace);
 }
 
 function assertTaskUpdatable(task, taskId, schemaVersion) {
@@ -1370,7 +1517,7 @@ function taskBlockResolved(p, data, schemaVersion) {
 }
 
 function coordinationStateFor(p) {
-  if (Object.values(p.continuity?.observations || {}).some((observation) => observation.status === "untriaged")) return "needs_triage";
+  if (Object.values(p.continuity?.observations as Record<string, ContinuityObservation> || {}).some((observation) => observation.status === "untriaged")) return "needs_triage";
   if (p.lifecycle === "completed") return p.sessionBindings.some((binding) => binding.state === "watching") ? "watching" : "quiescent";
   if ([...p.tasks.values()].some((task) => task.status === "blocked")) return "blocked";
   return "ready";

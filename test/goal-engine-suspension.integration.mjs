@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSuspensionPlan, requestOwnedRunStop, inspectSuspensionCompletion, deriveOwnedExecutorStopRequest } from "../src/goal-engine/suspension.ts";
+import { buildSuspensionPlan, requestOwnedRunStop, inspectSuspensionCompletion, deriveOwnedRunStopRequest } from "../src/goal-engine/suspension.ts";
 
 const leaseId = "c".repeat(64), dispatchHead = "d".repeat(40);
-const projection = () => ({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", executionContractHash: "a".repeat(64), runtimeBaseHead: "b".repeat(40), sessionBindings: [{ sessionId: "session-1", state: "watching" }], runtimeState: "active", executionRevision: 2, actionOffer: { id: "offer-1", consumed: false }, tasks: new Map([["task-1", { attempts: 3, acceptance: { criteria: [{ id: "contract" }] }, executorBinding: { runId: "run-1", asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", workspaceLeaseId: leaseId, headAtDispatch: dispatchHead }, status: "dispatched" }]]) });
+const projection = () => ({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", eventSchemaVersion: "goal-runtime.v1", executionContractHash: "a".repeat(64), runtimeBaseHead: "b".repeat(40), sessionBindings: [{ sessionId: "session-1", state: "watching" }], runtimeState: "active", executionRevision: 2, actionOffer: { id: "offer-1", consumed: false }, tasks: new Map([["task-1", { attempts: 3, acceptance: { criteria: [{ id: "contract" }] }, executorBinding: { attempt: 3, runId: "run-1", contractHash: "a".repeat(64), asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", workspaceLeaseId: leaseId, headAtDispatch: dispatchHead }, status: "dispatched" }]]) });
 test("interactive intent changes durably suspend and block stale operations", () => {
   for (const reason of ["interactive_steer", "follow_up", "abort", "execution_amendment"]) {
     const plan = buildSuspensionPlan({ projection: projection(), reason, affectedIds: { taskIds: ["task-1"], runIds: ["run-1"] }, inventories: { workspaces: [{ taskId: "task-1", runId: "run-1", affected: true }] } });
@@ -23,22 +23,21 @@ test("suspended guards quarantine affected success and permit only explicit unaf
   assert.throws(() => plan.guard("integrate"), /suspended/);
 });
 test("reload derives an exact owned stop request from durable executor binding", () => {
-  const reloaded = structuredClone({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", executionRevision: 2, executionContractHash: "a".repeat(64), runtimeBaseHead: "b".repeat(40), sessionBindings: [{ sessionId: "session-1", state: "watching" }], tasks: [["task-1", { attempts: 3, acceptance: { criteria: [{ id: "contract" }] }, status: "dispatched", executorBinding: { runId: "run-1", asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", workspaceLeaseId: leaseId, headAtDispatch: dispatchHead } }]] });
+  const reloaded = structuredClone({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", eventSchemaVersion: "goal-runtime.v1", executionRevision: 2, executionContractHash: "a".repeat(64), runtimeBaseHead: "b".repeat(40), sessionBindings: [{ sessionId: "session-1", state: "watching" }], tasks: [["task-1", { attempts: 3, acceptance: { criteria: [{ id: "contract" }] }, status: "dispatched", executorBinding: { attempt: 3, runId: "run-1", contractHash: "a".repeat(64), asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", workspaceLeaseId: leaseId, headAtDispatch: dispatchHead } }]] });
   reloaded.tasks = new Map(reloaded.tasks);
-  const request = deriveOwnedExecutorStopRequest({ projection: reloaded, taskId: "task-1" });
-  assert.deepEqual(request, { goalId: "goal-1", taskId: "task-1", attempt: 3, runId: "run-1", asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", leaseId, sessionId: "session-1", baseHead: "b".repeat(40), headAtDispatch: dispatchHead, executionRevision: 2, contractHash: "a".repeat(64), expectedCriteria: ["contract"], agent: "executor" });
-  assert.throws(() => deriveOwnedExecutorStopRequest({ projection: { ...reloaded, executionRevision: 0 }, taskId: "task-1" }), /identity/);
-  const missingAuthority = structuredClone(reloaded); missingAuthority.tasks = new Map(missingAuthority.tasks); missingAuthority.tasks.set("task-1", { ...missingAuthority.tasks.get("task-1"), acceptance: undefined });
-  assert.throws(() => deriveOwnedExecutorStopRequest({ projection: missingAuthority, taskId: "task-1" }), /acceptance authority/);
+  const request = deriveOwnedRunStopRequest({ projection: reloaded, taskId: "task-1" });
+  assert.deepEqual(request, { goalId: "goal-1", taskId: "task-1", attempt: 3, runId: "run-1", asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", leaseId, sessionId: "session-1", baseHead: "b".repeat(40), headAtDispatch: dispatchHead, executionRevision: 2, contractHash: "a".repeat(64), agent: "executor" });
+  assert.equal(Object.keys(request).length, 13);
+  assert.throws(() => deriveOwnedRunStopRequest({ projection: { ...reloaded, executionRevision: 0 }, taskId: "task-1" }), /identity/);
 });
 test("owned stop requires every immutable identity and official terminal proof", async () => {
   const calls = []; const pi = { stopOwnedRun: async (request) => { calls.push(request); return { state: "observed", proof: { id: "proof-1" } }; } };
-  const authority = deriveOwnedExecutorStopRequest({ projection: projection(), taskId: "task-1" });
+  const authority = deriveOwnedRunStopRequest({ projection: projection(), taskId: "task-1" });
   const result = await requestOwnedRunStop(pi, { projection: projection(), ...authority });
   assert.equal(result.attention, false); assert.equal(calls.length, 1);
   await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, attempt: 2 }), /identity/);
-  await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, expectedCriteria: ["replaced"] }), /identity/);
-  await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, expectedCriteria: undefined }), /identity/);
+  await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, expectedCriteria: ["caller-supplied"] }), /identity/);
+  await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, agentProfile: "caller-supplied" }), /identity/);
   const noProof = await requestOwnedRunStop({ stopOwnedRun: async () => ({ state: "pending" }) }, { projection: projection(), ...authority });
   assert.equal(noProof.attention, true); assert.equal(noProof.terminal, false);
 });

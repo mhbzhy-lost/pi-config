@@ -60,7 +60,7 @@ async function invoke(api, name, input = {}) { return (await api.tools.find(tool
 function events(cwd, goalId) { return readFileSync(join(rootFor(cwd), "goals", goalId, "events.jsonl"), "utf8").trim().split("\n").map(JSON.parse); }
 function count(cwd, goalId, type) { return events(cwd, goalId).filter(row => row.type === type).length; }
 function finalIntent(api) { return api.entries.filter(row => row.customType === "goal-engine-final-review-approval-intent"); }
-function setup(options = {}) { const cwd = repo(), calls = { world: 0, adapter: 0, managed: 0, start: 0, recover: 0, release: 0, provider: 0 };  const api = pi(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd, calls, options.world), finalReviewProvider: async input => { calls.provider++; return options.provider?.(input) ?? { severity: "none", reportRef: `sha256:${"b".repeat(64)}` }; }, ...(options.append ? { appendEvent: options.append } : {}), ...(options.appendBatch ? { appendEventBatch: options.appendBatch } : {}), ...options.extension }); const fixture = converged(cwd, api, options); return { cwd, api, calls, ...fixture }; }
+function setup(options = {}) { const cwd = repo(), calls = { world: 0, adapter: 0, managed: 0, start: 0, recover: 0, release: 0, provider: 0 };  const api = pi(cwd); createGoalEngineExtension(api, { goalStateEnv: {}, runtimeHost: host(cwd, calls, options.world), finalReviewProviderFactory: () => async input => { calls.provider++; return options.provider?.(input) ?? { severity: "none", reportRef: `sha256:${"b".repeat(64)}` }; }, ...(options.append ? { appendEvent: options.append } : {}), ...(options.appendBatch ? { appendEventBatch: options.appendBatch } : {}), ...options.extension }); const fixture = converged(cwd, api, options); return { cwd, api, calls, ...fixture }; }
 async function requestFinalReview(fixture) { return JSON.parse(await invoke(fixture.api, "goal_status", { goal_id: fixture.goalId })); }
 async function approve(fixture, text = "approve") { await fixture.api.handlers.get("input")({ type: "input", source: "interactive", text }, { cwd: fixture.cwd, sessionManager: fixture.api.ctx.sessionManager }); return requestFinalReview(fixture); }
 
@@ -110,10 +110,18 @@ test("未完成的 runnable runtime task 保持 R9 goal_dispatch，不创建终�
 });
 
 test("缺失 finalReviewProvider 明确阻塞且不写终审自定义或 durable event", async () => {
-  const fixture = setup({ extension: { finalReviewProvider: undefined } });
+  const fixture = setup({ extension: { finalReviewProviderFactory: undefined } });
   const status = await requestFinalReview(fixture);
   assert.ok(["R11_FINALIZATION_REQUIRED", "PROVIDER_UNAVAILABLE"].includes(status.status));
   assert.equal(finalIntent(fixture.api).length, 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_offered"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal(fixture.calls.provider, 0);
+});
+
+test("factory failure fails closed before final-review started event", async () => {
+  const fixture = setup({ extension: { finalReviewProviderFactory() { throw Error("model unavailable"); } } });
+  await requestFinalReview(fixture); const offer = await approve(fixture);
+  await assert.rejects(invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token }), /FINAL_REVIEW_PROVIDER_UNAVAILABLE/);
+  assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0);
+  assert.equal(fixture.calls.provider, 0);
 });
 
 test("合法 single compaction 的 approve 只签一个绑定最新 user entry 的 offer", async () => {
@@ -148,11 +156,11 @@ test("错误 token、session、approval entry、extra、planned 与缺失 provid
   await assert.rejects(invoke(wrongSession, "goal_finalize", { ...offered.machineAction.params, action_token: offered.action_token }));
   assert.equal(fixture.calls.provider, 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0);
   const plannedCwd = repo(), planned = pi(plannedCwd), plannedCalls = { world: 0, adapter: 0, managed: 0, start: 0, recover: 0, release: 0, provider: 0 };
-  createGoalEngineExtension(planned, { goalStateEnv: {}, runtimeHost: host(plannedCwd, plannedCalls), finalReviewProvider: async () => { plannedCalls.provider++; return { severity: "none", reportRef: `sha256:${"a".repeat(64)}` }; } });
+  createGoalEngineExtension(planned, { goalStateEnv: {}, runtimeHost: host(plannedCwd, plannedCalls), finalReviewProviderFactory: () => async () => { plannedCalls.provider++; return { severity: "none", reportRef: `sha256:${"a".repeat(64)}` }; } });
   const plannedGoal = JSON.parse(await invoke(planned, "goal_init", { objective: "Real planned finalize rejection", tasks: [{ id: "planned-task", description: "real planned task", writePaths: ["test/**"], acceptance: { criteria: [{ id: "planned-criterion", statement: "planned remains a real goal", evidenceKinds: ["tests"] }] }, workflow: "tdd" }] })).goalId;
   await assert.rejects(invoke(planned, "goal_finalize", { goal_id: plannedGoal, action_token: "planned-token", approval_entry_id: "planned-entry" }));
   assert.equal(plannedCalls.provider, 0); assert.equal(count(plannedCwd, plannedGoal, "goal.final_review_started"), 0); assert.equal(count(plannedCwd, plannedGoal, "goal.completed"), 0);
-  const noProvider = setup({ extension: { finalReviewProvider: undefined } }); const unavailable = await requestFinalReview(noProvider);
+  const noProvider = setup({ extension: { finalReviewProviderFactory: undefined } }); const unavailable = await requestFinalReview(noProvider);
   assert.equal(unavailable.status, "R11_FINALIZATION_REQUIRED"); assert.equal(unavailable.machineAction, undefined); assert.equal(unavailable.action_token, undefined);
   await assert.rejects(invoke(noProvider.api, "goal_finalize", { goal_id: noProvider.goalId, approval_entry_id: "dummy-approval-entry", action_token: "dummy-action-token" }), /FINAL_REVIEW_PROVIDER_UNAVAILABLE/);
   assert.equal(finalIntent(noProvider.api).length, 0); assert.equal(count(noProvider.cwd, noProvider.goalId, "goal.action_offered"), 0); assert.equal(count(noProvider.cwd, noProvider.goalId, "goal.final_review_started"), 0); assert.equal(count(noProvider.cwd, noProvider.goalId, "goal.completed"), 0); assert.equal(noProvider.calls.provider, 0);
@@ -173,7 +181,7 @@ test("important 与 critical 只 changes_required，Goal 保持 active 且新的
 test("provider throw 后 reload/status 只给同一 recovery action，显式 retry 才完成", async () => {
   let fail = true, firstKey; const fixture = setup({ provider: input => { firstKey ??= input.idempotencyKey; if (fail) throw Error("timeout"); assert.equal(input.idempotencyKey, firstKey); return { severity: "none", reportRef: `sha256:${"e".repeat(64)}` }; } }); await requestFinalReview(fixture); const offer = await approve(fixture);
   await assert.rejects(invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token })); assert.equal(fixture.calls.provider, 1);
-  fail = false; const reloaded = pi(fixture.cwd, structuredClone(fixture.api.entries)); createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(fixture.cwd, fixture.calls), finalReviewProvider: async input => { fixture.calls.provider++; assert.equal(input.idempotencyKey, firstKey); return { severity: "none", reportRef: `sha256:${"e".repeat(64)}` }; } });
+  fail = false; const reloaded = pi(fixture.cwd, structuredClone(fixture.api.entries)); createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(fixture.cwd, fixture.calls), finalReviewProviderFactory: () => async input => { fixture.calls.provider++; assert.equal(input.idempotencyKey, firstKey); return { severity: "none", reportRef: `sha256:${"e".repeat(64)}` }; } });
   const recovery = await requestFinalReview({ ...fixture, api: reloaded }); assert.equal(recovery.machineAction.tool, "goal_finalize"); assert.equal(recovery.action_token, offer.action_token); assert.equal(fixture.calls.provider, 1);
   await invoke(reloaded, "goal_finalize", { ...recovery.machineAction.params, action_token: recovery.action_token }); assert.equal(fixture.calls.provider, 2); assert.equal(count(fixture.cwd, fixture.goalId, "goal.action_consumed"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_started"), 1); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 1);
 });
@@ -181,7 +189,7 @@ test("provider throw 后 reload/status 只给同一 recovery action，显式 ret
 test("result 已 durable 而 Goal completion batch pre-append throw 时 reload recovery 不重跑 provider 且只完成一次", async () => {
   let throwBeforeCompletion = true; const fixture = setup({ appendBatch(root, rows, version) { if (rows.some(row => row.type === "goal.completed") && throwBeforeCompletion) { throwBeforeCompletion = false; throw Error("before durable completion batch"); } return appendEventBatch(root, rows, version); } }); await requestFinalReview(fixture); const offer = await approve(fixture); await assert.rejects(invoke(fixture.api, "goal_finalize", { ...offer.machineAction.params, action_token: offer.action_token })); const calls = fixture.calls.provider;
   assert.equal(count(fixture.cwd, fixture.goalId, "goal.final_review_recorded"), 0); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 0); assert.equal(fixture.calls.provider, 1);
-  const reloaded = pi(fixture.cwd, structuredClone(fixture.api.entries)); createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(fixture.cwd, fixture.calls), finalReviewProvider: async () => { fixture.calls.provider++; throw Error("provider must not rerun"); } }); const recovery = await requestFinalReview({ ...fixture, api: reloaded }); assert.equal(recovery.machineAction.tool, "goal_finalize"); assert.equal(recovery.action_token, offer.action_token); assert.equal(fixture.calls.provider, calls); await invoke(reloaded, "goal_finalize", { ...recovery.machineAction.params, action_token: recovery.action_token }); assert.equal(fixture.calls.provider, calls); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 1); assert.equal(loadProjection(fixture.root, fixture.goalId).completionHistory.length, 1);
+  const reloaded = pi(fixture.cwd, structuredClone(fixture.api.entries)); createGoalEngineExtension(reloaded, { goalStateEnv: {}, runtimeHost: host(fixture.cwd, fixture.calls), finalReviewProviderFactory: () => async () => { fixture.calls.provider++; throw Error("provider must not rerun"); } }); const recovery = await requestFinalReview({ ...fixture, api: reloaded }); assert.equal(recovery.machineAction.tool, "goal_finalize"); assert.equal(recovery.action_token, offer.action_token); assert.equal(fixture.calls.provider, calls); await invoke(reloaded, "goal_finalize", { ...recovery.machineAction.params, action_token: recovery.action_token }); assert.equal(fixture.calls.provider, calls); assert.equal(count(fixture.cwd, fixture.goalId, "goal.completed"), 1); assert.equal(loadProjection(fixture.root, fixture.goalId).completionHistory.length, 1);
 });
 
 test("appendEventBatch durable completion 后 throw 时同一调用 reload completed 且不 retry provider", async () => {

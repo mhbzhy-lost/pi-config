@@ -34,17 +34,24 @@ function criteriaOnlyContract(overrides = {}) {
 function goalProjection() {
   return {
     goalId: "goal-parity",
+    eventSchemaVersion: "planned.v2",
     objective: "Keep Goal and typed executor contracts byte-for-byte equivalent.",
     scope: ["packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts"],
     nonGoals: ["Do not add model routing fields to the coding contract."],
     dod: ["Goal output recompiles through the canonical codec."],
     tasks: new Map([["task-one", {
       status: "pending",
+      agentProfile: "executor",
       description: "Compile an exact Goal executor contract.",
       workflow: "tdd",
       deps: [],
       writePaths: ["packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts"],
-      acceptance: { criteria: ["Goal and canonical hashes agree."] },
+      acceptance: { criteria: [{
+        id: "goal-canonical-hash",
+        statement: "Goal and canonical hashes agree.",
+        evidenceKinds: ["tests"],
+        evaluator: "run",
+      }] },
     }]]),
   };
 }

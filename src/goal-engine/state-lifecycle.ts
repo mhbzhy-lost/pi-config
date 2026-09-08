@@ -104,7 +104,7 @@ function withLock(stateRoot, operation) {
   try { return operation(root); } finally { releaseWriterLock(root, lock.token); }
 }
 
-export function inspectGoalState({ stateRoot } = {}) {
+export function inspectGoalState({ stateRoot }: { stateRoot?: string } = {}) {
   if (typeof stateRoot !== "string" || !stateRoot) throw failure("state root is required");
   return withLock(stateRoot, () => {
     const inspected = inspectUnlocked(stateRoot);
@@ -112,7 +112,7 @@ export function inspectGoalState({ stateRoot } = {}) {
   });
 }
 
-export function resetGoalState({ stateRoot, expectedStateHash, authorizationId } = {}) {
+export function resetGoalState({ stateRoot, expectedStateHash, authorizationId }: { stateRoot?: string; expectedStateHash?: string; authorizationId?: string } = {}) {
   if (typeof stateRoot !== "string" || !stateRoot || !/^[a-f0-9]{64}$/.test(expectedStateHash || "")) throw failure("state root and expected state hash are required");
   safeAuthorizationId(authorizationId);
   return withLock(stateRoot, (root) => {

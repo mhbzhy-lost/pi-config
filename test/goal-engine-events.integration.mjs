@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createProjection, applyEvent } from "../src/goal-engine/events.ts";
+import { createProjection, applyEvent, schemaVersionForMutation } from "../src/goal-engine/events.ts";
 import { fingerprintSettlementEvidence } from "../src/goal-engine/settlement-evidence.ts";
 import { issueActionOffer, verifyAndConsumeActionOffer } from "../src/goal-engine/action-offer.ts";
 import { appendEvent, appendEventBatchWithSettlementEvidence, loadProjection, listGoals } from "../src/goal-engine/store.ts";
@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
+import { deterministicGoalWorkspaceId } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 
 function makeEvent(type, data, goalId = "test-goal") {
   return {
@@ -466,7 +467,7 @@ test("legacy v1 create replays oversized historical shapes unchanged", () => {
   assert.equal(projection.version, 1);
   assert.equal(projection.eventSchemaVersion, "goal-engine.event.v1");
   assert.equal(projection.tasks.size, 33);
-  assert.deepEqual(projection.tasks.get(taskId), { description: "d".repeat(4097), deps: [], writePaths: ["../unsafe-path"], acceptance: { criteria: [], commands: [] }, workflow: "legacy-workflow", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, acceptanceVerification: null, settlement: null });
+  assert.deepEqual(projection.tasks.get(taskId), { description: "d".repeat(4097), deps: [], writePaths: ["../unsafe-path"], acceptance: { criteria: [], commands: [] }, workflow: "legacy-workflow", status: "pending", evidence: [], attempts: 0, lastSettledOutcome: null, contractHash: null, workspace: null, executorBinding: null, lastExecutorProof: null, acceptanceVerification: null, settlement: null });
 });
 
 test("v2 create and amend replay identically across child-process cwd values", () => {
@@ -1994,6 +1995,51 @@ function preservedReleaseFixture(goalId = "preservation-release-goal", kind = "s
   return preserveWorkspace(projection, goalId, "executor-head");
 }
 
+function allocationAppendGap(goalId = "allocation-append-gap") {
+  const contractHash = "a".repeat(64), baseCommit = "b".repeat(40);
+  const workspaceId = deterministicGoalWorkspaceId({ goalId, taskId: "t1", attempt: 1, executionRevision: 1, contractHash, baseCommit });
+  let projection = applyEvent(createProjection(), plannedEvent("goal.created", {
+    objective: "Recover a durably allocated workspace after its Goal append fails",
+    scope: [], nonGoals: [], dod: [], tasks: ["t1"],
+    taskDefs: { t1: { description: "work", deps: [], writePaths: ["src/x.mjs"], acceptance: { criteria: [plannedCriterion("proof")] }, workflow: "tdd" } },
+  }, goalId));
+  projection = applyEvent(projection, plannedEvent("task.dispatch_requested", {
+    taskId: "t1", attempt: 1, contractHash, workspaceId,
+    originRoot: "/tmp/origin", requestedCwd: "/tmp/origin", originRef: "refs/heads/main", baseCommit,
+  }, goalId));
+  return { projection, recovery: orphanRecoveredEvent({
+    workspace: { attempt: 1, path: "/tmp/service-owned-orphan", branch: "refs/heads/pi-managed/orphan", baseCommit, originRef: "refs/heads/main" },
+    executorHead: "c".repeat(40),
+  }, goalId, "planned.v1") };
+}
+
+test("allocation append gap recovery admits only the exact unbound dispatch request", () => {
+  const { projection, recovery } = allocationAppendGap();
+  const recovered = applyEvent(projection, recovery);
+  const task = recovered.tasks.get("t1");
+  assert.equal(task.status, "pending");
+  assert.equal(task.attempts, 1);
+  assert.equal(task.contractHash, "a".repeat(64));
+  assert.equal(task.workspace.recovery, "orphaned");
+
+  const reject = (label, mutate) => {
+    const fixture = allocationAppendGap(`allocation-append-gap-${label}`);
+    mutate(fixture.projection, fixture.recovery);
+    const before = eventSnapshot(fixture.projection);
+    assert.throws(() => applyEvent(fixture.projection, fixture.recovery), /orphan recovery|dispatch|workspace|identity|pending|attempt|binding/i, label);
+    assert.deepEqual(eventSnapshot(fixture.projection), before, label);
+  };
+  reject("base", (_p, event) => { event.data.workspace.baseCommit = "d".repeat(40); });
+  reject("request", (p) => { p.tasks.get("t1").dispatchRequest = null; });
+  reject("workspace", (p) => { p.tasks.get("t1").workspace = { phase: "active" }; });
+  reject("attempt", (p) => { p.tasks.get("t1").attempts = 2; });
+  reject("contract", (p) => { p.tasks.get("t1").contractHash = "e".repeat(64); });
+  reject("workspace-id", (p) => { p.tasks.get("t1").dispatchRequest.workspaceId = "wrong-workspace-id"; });
+  reject("executor-binding", (p) => { p.tasks.get("t1").executorBinding = { runId: "bound" }; });
+  reject("run-binding", (p) => { p.tasks.get("t1").runBinding = { runId: "bound" }; });
+  for (const status of ["dispatched", "running", "succeeded"]) reject(status, (p) => { p.tasks.get("t1").status = status; });
+});
+
 test("orphan recovery restores the Task4 attempt-one rollback baseline", () => {
   const baseline = orphanRecoveryBaseline();
   assert.deepEqual(baseline.tasks.get("t1").workspace, null);
@@ -2461,7 +2507,7 @@ test("planned.v1 is an isolated persisted generation with strict criteria", () =
 
   assert.throws(() => applyEvent(checkpointed, { ...created, eventId: "legacy-mix", type: "goal.checkpoint", data: { nextAction: "Use the isolated planned generation for every future event" }, schemaVersion: "goal-engine.event.v3" }), /mixed event generations/);
   assert.throws(() => applyEvent(createProjection(), { ...created, eventId: "legacy-new", schemaVersion: "goal-engine.event.v3" }), /replay-only/);
-  assert.throws(() => applyEvent(createProjection(), { ...created, eventId: "unknown-new", schemaVersion: "planned.v2" }), /invalid schemaVersion/);
+  assert.throws(() => schemaVersionForMutation({ eventSchemaVersion: "planned.v2" }), (error) => error?.code === "GOAL_GENERATION_READ_ONLY");
 
   const legacy = replayLegacyCreate(v2Created("legacy-generation"));
   assert.throws(() => applyEvent(legacy, plannedEvent("goal.checkpoint", {

@@ -2,12 +2,26 @@ import { execFileSync } from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
-const plain = (v) => v && typeof v === "object" && !Array.isArray(v);
+type JsonScalar = string | number | boolean;
+type RegistryRow = { identity?: string; [field: string]: JsonScalar | undefined };
+type ResourceRow = { capacity: number; holders: string[] };
+type RunInventoryRow = { runId: string; kind: "executor" | "observation"; state: string };
+type CurrentWorldOptions = {
+  repoRoot?: string;
+  adapterRegistry?: Record<string, RegistryRow>;
+  environmentRegistry?: Record<string, RegistryRow>;
+  fixtureRegistry?: Record<string, RegistryRow>;
+  resourceRegistry?: Record<string, ResourceRow>;
+  runInventory?: RunInventoryRow[];
+  gitRunner?: (root: string, args: string[]) => Buffer | string;
+};
+type RegistrySnapshot = { ref: string; [field: string]: JsonScalar };
+const plain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const emptyRepo = () => ({ root: null, head: null, branch: null, trackedDirty: [], untracked: [], unmerged: [], sequencer: null });
 function unsafe(reason = "capture-failed") { return Object.freeze({ safe: false, reason, repo: emptyRepo(), adapters: [], environments: [], fixtures: [], resources: [], activeRuns: [], capturedAt: new Date().toISOString() }); }
-function defaultGit(root, args) { return execFileSync("git", args, { cwd: root, encoding: "buffer", stdio: ["ignore", "pipe", "ignore"] }); }
-function text(value) { const b = Buffer.isBuffer(value) ? value : Buffer.from(value); const out = b.toString("utf8"); if (!Buffer.from(out).equals(b)) throw Error("non-utf8 git output"); return out.trim(); }
-function relative(path) { return typeof path === "string" && path && !path.includes("\0") && !path.startsWith("/") && !path.split("/").some((part) => !part || part === "." || part === "..") && !/^[A-Za-z]:/.test(path); }
+function defaultGit(root: string, args: string[]) { return execFileSync("git", args, { cwd: root, encoding: "buffer", stdio: ["ignore", "pipe", "ignore"] }); }
+function text(value: Buffer | string) { const b = Buffer.isBuffer(value) ? value : Buffer.from(value); const out = b.toString("utf8"); if (!Buffer.from(out).equals(b)) throw Error("non-utf8 git output"); return out.trim(); }
+function relative(path: unknown): path is string { return typeof path === "string" && !!path && !path.includes("\0") && !path.startsWith("/") && !path.split("/").some((part) => !part || part === "." || part === "..") && !/^[A-Za-z]:/.test(path); }
 function afterSpaces(record, count) { let at = -1; while (count--) { at = record.indexOf(" ", at + 1); if (at < 0) throw Error("invalid porcelain v2"); } return record.slice(at + 1); }
 function status(root, git) { const raw = git(root, ["status", "--porcelain=v2", "-z", "--untracked-files=all"]); const buffers = Buffer.isBuffer(raw) ? raw.toString("binary").split("\0").map((part) => Buffer.from(part, "binary")) : String(raw).split("\0").map((part) => Buffer.from(part)); const parts = buffers.map((part) => { const decoded = part.toString("utf8"); if (!Buffer.from(decoded).equals(part)) throw Error("non-utf8 status path"); return decoded; }); const trackedDirty = [], untracked = [], unmerged = [];
   for (let i = 0; i < parts.length; i++) { const entry = parts[i]; if (!entry) continue; let code, paths;
@@ -22,10 +36,10 @@ function status(root, git) { const raw = git(root, ["status", "--porcelain=v2", 
   }
   return { trackedDirty: [...new Set(trackedDirty)].sort(), untracked: [...new Set(untracked)].sort(), unmerged: [...new Set(unmerged)].sort() };
 }
-function registry(value, kind, fields) { if (!plain(value)) throw Error("unknown registry"); const seen = new Set(); return Object.entries(value).map(([ref, row]) => { if (!relative(ref) || !plain(row)) throw Error("unknown registry"); const identity = row.identity ?? ref; if (typeof identity !== "string" || seen.has(identity)) throw Error(`duplicate ${kind} identity`); seen.add(identity); const out = { ref }; for (const field of fields) { if (typeof row[field] !== "string" && typeof row[field] !== "boolean" && typeof row[field] !== "number") throw Error("unknown registry"); out[field] = row[field]; } return out; }).sort((a, b) => a.ref.localeCompare(b.ref)); }
-function resources(value) { if (!plain(value)) throw Error("unknown resources"); const seen = new Set(); return Object.entries(value).map(([key, row]) => { if (!relative(key) || !plain(row) || seen.has(key) || !Number.isSafeInteger(row.capacity) || row.capacity < 0 || !Array.isArray(row.holders) || row.holders.some((x) => typeof x !== "string" || !x)) throw Error("unknown resources"); seen.add(key); return { key, holders: [...new Set(row.holders)].sort(), capacity: row.capacity }; }).sort((a, b) => a.key.localeCompare(b.key)); }
+function registry(value: unknown, kind: string, fields: string[]): RegistrySnapshot[] { if (!plain(value)) throw Error("unknown registry"); const seen = new Set<string>(); return Object.entries(value).map(([ref, row]) => { if (!relative(ref) || !plain(row)) throw Error("unknown registry"); const identity = row.identity ?? ref; if (typeof identity !== "string" || seen.has(identity)) throw Error(`duplicate ${kind} identity`); seen.add(identity); const out: RegistrySnapshot = { ref }; for (const field of fields) { const fieldValue = row[field]; if (typeof fieldValue !== "string" && typeof fieldValue !== "boolean" && typeof fieldValue !== "number") throw Error("unknown registry"); out[field] = fieldValue; } return out; }).sort((a, b) => a.ref.localeCompare(b.ref)); }
+function resources(value: unknown) { if (!plain(value)) throw Error("unknown resources"); const seen = new Set<string>(); return Object.entries(value).map(([key, row]) => { if (!relative(key) || !plain(row) || seen.has(key)) throw Error("unknown resources"); const { capacity, holders } = row; if (typeof capacity !== "number" || !Number.isSafeInteger(capacity) || capacity < 0 || !Array.isArray(holders) || holders.some((x) => typeof x !== "string" || !x)) throw Error("unknown resources"); seen.add(key); return { key, holders: [...new Set(holders)].sort(), capacity }; }).sort((a, b) => a.key.localeCompare(b.key)); }
 function hasSequencer(root, git) { for (const name of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "rebase-merge", "rebase-apply", "sequencer"]) { const raw = text(git(root, ["rev-parse", "--git-path", name])); const path = resolve(root, raw); let stat; try { stat = lstatSync(path); } catch (error) { if (error?.code === "ENOENT") continue; throw error; } if (stat.isSymbolicLink()) throw Error("unsafe sequencer path"); if (["rebase-merge", "rebase-apply", "sequencer"].includes(name) ? stat.isDirectory() : stat.isFile()) return name.toLowerCase(); } return null; }
-export function captureCurrentWorld({ repoRoot, adapterRegistry, environmentRegistry, fixtureRegistry, resourceRegistry = {}, runInventory = [], gitRunner = defaultGit } = {}) { try {
+export function captureCurrentWorld({ repoRoot, adapterRegistry, environmentRegistry, fixtureRegistry, resourceRegistry = {}, runInventory = [], gitRunner = defaultGit }: CurrentWorldOptions = {}) { try {
   if (typeof repoRoot !== "string" || lstatSync(repoRoot).isSymbolicLink() || !lstatSync(repoRoot).isDirectory() || typeof gitRunner !== "function") return unsafe("unsafe-repo-root");
   const root = realpathSync(repoRoot), git = gitRunner; const top = text(git(root, ["rev-parse", "--show-toplevel"])); if (realpathSync(top) !== root) return unsafe("repo-root-mismatch");
   const head = text(git(root, ["rev-parse", "HEAD"])); if (!/^[a-f0-9]{40}$/.test(head)) return unsafe("invalid-head"); let branch = null; try { branch = text(git(root, ["symbolic-ref", "--short", "-q", "HEAD"])) || null; } catch {}

@@ -1,4 +1,4 @@
-const LEGACY_EXECUTOR_GENERATIONS = new Set(["planned.v1", "goal-runtime.v1"]);
+const LEGACY_EXECUTOR_GENERATIONS = new Set(["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3", "planned.v1", "goal-runtime.v1"]);
 const LEGACY_BINDING_FIELDS = ["attempt", "runId", "contractHash", "asyncDir", "workspacePath", "workspaceLeaseId", "headAtDispatch"];
 const LEGACY_PROOF_FIELDS = ["runId", "proofId", "rootSessionId", "observedAt", "outcome"];
 const RUN_BINDING_FIELDS = ["attempt", "runId", "agentProfile", "contractHash", "workspaceId", "asyncDir", "workspacePath", "workspaceLeaseId", "headAtDispatch"];
@@ -74,25 +74,19 @@ export function runProofForTask(task, schemaVersion) {
 }
 
 /** Exact old broker proof reader. This is replay-only and never authorizes a run. */
-export function executionProofForLegacyTask(task, proof) {
+export function executionProofForLegacyTask(task, proof, taskOutcome = "succeeded") {
   const binding = runBindingForTask(task, "planned.v1");
-  if (!binding) fail("legacy task has no binding");
+  if (!binding || !["succeeded", "failed", "blocked"].includes(taskOutcome)) fail("legacy task proof input is invalid");
+  // T2's registry boundary has already validated the canonical async envelope.
+  // This adapter only removes its transport-only agent profile for the v1 reducer.
   if (!proof || typeof proof !== "object" || Array.isArray(proof)
-    || Object.keys(proof).length !== 4
-    || proof.schemaVersion !== "root-broker.executor-proof.v1"
-    || proof.terminalConflict !== false
-    || !proof.ownership || !proof.terminal) fail("legacy broker proof is invalid");
-  const ownership = proof.ownership, terminal = proof.terminal;
-  if (Object.keys(ownership).length !== 6
-    || ownership.runId !== binding.runId
-    || ownership.asyncDir !== binding.asyncDir
-    || ownership.role !== "executor"
-    || ownership.identityState !== "verified"
-    || typeof ownership.rootSessionId !== "string" || !ownership.rootSessionId
-    || typeof ownership.sessionId !== "string" || !ownership.sessionId
-    || Object.keys(terminal).length !== 3
-    || !/^[a-f0-9]{64}$/.test(terminal.proofId || "")
-    || !Number.isFinite(terminal.observedAt)
-    || terminal.outcome !== "succeeded") fail("legacy broker proof identity is invalid");
-  return Object.freeze({ runId: binding.runId, proofId: terminal.proofId, rootSessionId: ownership.rootSessionId, observedAt: terminal.observedAt, outcome: terminal.outcome, agentProfile: "executor" });
+    || Object.keys(proof).length !== 6
+    || proof.runId !== binding.runId
+    || !/^[a-f0-9]{64}$/.test(proof.proofId || "")
+    || typeof proof.rootSessionId !== "string" || !proof.rootSessionId
+    || !Number.isFinite(proof.observedAt)
+    || !["succeeded", "failed"].includes(proof.outcome)
+    || proof.agentProfile !== "executor"
+    || (taskOutcome === "succeeded" && proof.outcome !== "succeeded")) fail("legacy broker proof identity is invalid");
+  return Object.freeze({ runId: binding.runId, proofId: proof.proofId, rootSessionId: proof.rootSessionId, observedAt: proof.observedAt, outcome: proof.outcome });
 }

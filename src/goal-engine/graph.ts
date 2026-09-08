@@ -1,4 +1,5 @@
 import { generationCapabilities } from "./generation-capabilities.ts";
+import { isCanonicalManagedWorkspaceReceipt, managedWorkspaceDisposition, managedWorkspaceState } from "./managed-workspace.ts";
 
 export function validateDAG(tasks) {
   for (const [taskId, task] of tasks) {
@@ -66,8 +67,13 @@ function actionState(tool, taskId, params, reason, blockingReason = null) {
 }
 
 function workspaceReleasedForRetry(workspace) {
-  return !workspace || (workspace.phase === "disposed" && ((workspace.disposition === "discarded" && workspace.released === true)
-    || (workspace.disposition === "preserved" && workspace.preservedResourcesReleased === true)));
+  if (!workspace) return true;
+  if (isCanonicalManagedWorkspaceReceipt(workspace)) {
+    // The public service receipt, not a legacy phase, is authoritative here.
+    return managedWorkspaceState(workspace) === "released" && ["discard", "preserve"].includes(managedWorkspaceDisposition(workspace)?.action);
+  }
+  return workspace.phase === "disposed" && ((workspace.disposition === "discarded" && workspace.released === true)
+    || (workspace.disposition === "preserved" && workspace.preservedResourcesReleased === true));
 }
 
 function dependencyBlockingReason(task, projection) {
@@ -91,7 +97,7 @@ export function orphanWorkspaceActionState(taskId, inventory) {
       },
     };
   }
-  const blockingReason = {
+  const blockingReason: { code: string; resources: unknown; observed?: unknown; error?: unknown } = {
     code: "ORPHANED_WORKSPACE_IDENTITY_UNVERIFIED",
     resources: inventory?.resources || { workspaceExists: null, branchExists: null, leaseExists: null },
   };
@@ -115,6 +121,32 @@ export function taskActionState(projection, taskId) {
   }
 
   const workspace = task.workspace;
+  if (isCanonicalManagedWorkspaceReceipt(workspace)) {
+    const disposition = task.managedDisposition;
+    const state = managedWorkspaceState(workspace);
+    const serviceDisposition = managedWorkspaceDisposition(workspace);
+    if (disposition?.phase === "intent") {
+      return actionState("goal_integrate", taskId, { action: disposition.action, ...(disposition.strategy ? { strategy: disposition.strategy } : {}) }, "Managed workspace disposition intent is durable; continue its requested action");
+    }
+    if (state === "preserved") {
+      return actionState("goal_integrate", taskId, { action: "discard" }, "Preserved managed workspace must be explicitly released before retrying");
+    }
+    if (state === "active") {
+      if (task.status === "dispatched") return actionState("goal_settle", taskId, {}, "Dispatched managed workspace requires settlement");
+      if (task.status === "succeeded") return actionState("goal_integrate", taskId, { action: "integrate" }, "Succeeded managed workspace is still active");
+      if (task.status === "pending" && ["failed", "blocked"].includes(task.lastSettledOutcome)) return actionState("goal_integrate", taskId, { action: "discard" }, "Failed or blocked managed workspace must be discarded before retrying");
+      if (task.status === "blocked") return actionState("goal_integrate", taskId, { action: "discard" }, "Blocked managed workspace must be discarded");
+      return noAction();
+    }
+    if (state === "released") {
+      if (task.status === "succeeded" && disposition?.phase === "receipt" && disposition.action === "integrate" && serviceDisposition?.action === "integrate") return actionState("goal_accept", taskId, {}, "Managed workspace integrated and released with a durable Goal receipt");
+      if (task.status === "pending" && ["discard", "preserve"].includes(serviceDisposition?.action)) {
+        const blockingReason = dependencyBlockingReason(task, projection);
+        return blockingReason ? noAction(blockingReason) : actionState("goal_dispatch", taskId, {}, "Released managed workspace is redispatchable");
+      }
+    }
+    return noAction();
+  }
   if (workspace?.phase === "disposing" || workspace?.phase === "applied") {
     const requestedAction = workspace.requestedAction;
     const strategy = workspace.strategy;

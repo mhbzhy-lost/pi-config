@@ -15,16 +15,22 @@ async function host(options = {}) {
   const { createProductionGoalRuntimeHost } = await import("../src/goal-engine/production-runtime-host.ts");
   return createProductionGoalRuntimeHost({ registerTool() {}, on() {} }, options);
 }
+function lease(baseCommit = DISPATCH_HEAD, overrides = {}) {
+  const { state = "active", leaseId = hash("public-owner-digest"), taskId = "task", owner = { kind: "goal-task", rootSessionId: "fixture-root", goalId: "goal", taskId, attempt: 1, executionRevision: 1 } } = overrides;
+  return {
+    schemaVersion: "managed-workspace.v1", workspaceId: "workspace", leaseId, owner,
+    originRoot: "/origin", requestedCwd: "/origin", originRef: "refs/heads/main", baseCommit,
+    path: "/workspace", dispatchCwd: "/workspace", branchRef: "refs/heads/managed", state,
+    run: null, disposition: state === "preserved" ? { action: "preserve", reason: "Goal quarantine after owned executor stop" } : null, cleanupDebt: null,
+  };
+}
+function publicPreservationReceipt(baseCommit = DISPATCH_HEAD, overrides = {}) {
+  return lease(baseCommit, { ...overrides, state: "preserved" });
+}
 function workspaceRequest(overrides = {}) {
-  return { stateRoot: "/state", goalId: "goal", taskId: "task", attempt: 1, runId: "run", leaseId: hash("owner-token"), workspacePath: "/workspace", headAtDispatch: DISPATCH_HEAD, baseHead: RUNTIME_HEAD, executionRevision: 1, contractHash: hash("contract"), sessionId: "session", ...overrides };
+  return { stateRoot: "/state", goalId: "goal", taskId: "task", attempt: 1, runId: "run", leaseId: lease().leaseId, workspacePath: "/workspace", headAtDispatch: DISPATCH_HEAD, baseHead: RUNTIME_HEAD, executionRevision: 1, contractHash: hash("contract"), sessionId: "session", ...overrides };
 }
-function lease(baseCommit = DISPATCH_HEAD) { return { goalId: "goal", taskId: "task", attempt: 1, stateRoot: "/state", path: "/workspace", baseCommit, ownerToken: "owner-token" }; }
 const inspection = { headCommit: EXECUTOR_HEAD, path: "/workspace", clean: true };
-const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
-function durableReceipt(value, observed = inspection) {
-  const material = { ownerCas: hash(value.ownerToken), workspacePath: value.path, executorHead: observed.headCommit, disposition: "preserved", manifest: { id: "managed", state: "preserved" } };
-  return { ...material, receiptHash: hash(JSON.stringify(canonical(material))) };
-}
 
 // RED: artifact input is the durable TERMINAL_KEYS result, not a lossy four-field projection.
 test("artifactRefForRun accepts exactly the real managed 11-field terminal and materializes only output", async () => {
@@ -64,11 +70,26 @@ test("artifactRefForRun rejects a symlinked artifact directory without changing 
 
 test("quarantineWorkspace binds the lease baseCommit to headAtDispatch, not runtime baseHead", async () => {
   let releases = 0;
-  const value = await (await host({ loadExecutorWorkspaceLease() { return lease(DISPATCH_HEAD); }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { releases++; return { preserved: true, disposition: "preserved", preservationReceipt: durableReceipt(lease(DISPATCH_HEAD)) }; } })).quarantineWorkspace(workspaceRequest());
+  const value = await (await host({ loadExecutorWorkspaceLease() { return lease(DISPATCH_HEAD); }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { releases++; return publicPreservationReceipt(DISPATCH_HEAD); } })).quarantineWorkspace(workspaceRequest());
   assert.equal(value.disposition, "preserved"); assert.equal(releases, 1);
 });
 
 function requireMode(value) { return lstatSync(value).mode & 0o777; }
+
+test("quarantineWorkspace rejects private and drifting receipt authority at the Host boundary", async () => {
+  const request = workspaceRequest();
+  for (const [name, loaded, released] of [
+    ["ownerToken", { ...lease(), ownerToken: "managed-workspace-owner.v1:" + "a".repeat(64) }, publicPreservationReceipt()],
+    ["private-receipt", lease(), { ownerCas: hash("private"), workspacePath: "/workspace", executorHead: EXECUTOR_HEAD, disposition: "preserved", manifest: {}, receiptHash: hash("private") }],
+    ["digest-drift", lease(), publicPreservationReceipt(DISPATCH_HEAD, { leaseId: hash("other-owner") })],
+    ["owner-drift", lease(), publicPreservationReceipt(DISPATCH_HEAD, { taskId: "other" })],
+  ]) {
+    let releases = 0;
+    const h = await host({ loadExecutorWorkspaceLease() { return loaded; }, inspectExecutorWorkspace() { return inspection; }, releaseExecutorWorkspace() { releases++; return released; } });
+    await assert.rejects(() => h.quarantineWorkspace(request), name);
+    if (name === "ownerToken") assert.equal(releases, 0, name);
+  }
+});
 
 test("quarantineWorkspace rejects non-40hex headAtDispatch before touching a lease", async () => {
   let loads = 0;
@@ -78,7 +99,7 @@ test("quarantineWorkspace rejects non-40hex headAtDispatch before touching a lea
 });
 
 test("quarantineResource exactly validates every owner request field before loading a lease", async () => {
-  const request = { stateRoot: "/state", goalId: "goal", ownerKind: "executor", ownerId: "run", taskId: "task", attempt: 1, leaseId: hash("owner-token"), executionRevision: 1, contractHash: hash("contract"), sessionId: "session" };
+  const request = { stateRoot: "/state", goalId: "goal", ownerKind: "executor", ownerId: "run", taskId: "task", attempt: 1, leaseId: lease().leaseId, executionRevision: 1, contractHash: hash("contract"), sessionId: "session" };
   for (const bad of [{ ...request, stateRoot: "relative" }, { ...request, goalId: "" }, { ...request, ownerId: "" }, { ...request, taskId: "" }, { ...request, sessionId: "" }, { ...request, attempt: 0 }, { ...request, executionRevision: 0 }, { ...request, leaseId: "x".repeat(64) }, { ...request, contractHash: "x".repeat(64) }, { ...request, extra: true }]) {
     let loads = 0; const h = await host({ loadExecutorWorkspaceLease() { loads++; return lease(RUNTIME_HEAD); } });
     await assert.rejects(() => h.quarantineResource(bad)); assert.equal(loads, 0);
