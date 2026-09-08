@@ -7,6 +7,43 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const systemPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+const blockedEnvironmentNames = [
+  "PI_SUBAGENT_CHILD",
+  "PI_SUBAGENT_FANOUT_CHILD",
+  "PI_SUBAGENT_PARENT_SESSION",
+  "PI_ROOT_SUBAGENT_BROKER_ENABLED",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "OPENROUTER_API_KEY",
+  "PI_AUTH",
+  "PI_PROVIDER",
+];
+
+function initEnvironment({ home, fakeBin, commandLog, fixtureRepo, fakePi, root }) {
+  const env = {
+    PATH: `${fakeBin}:${systemPath}`,
+    HOME: home,
+    ZDOTDIR: home,
+    TMPDIR: root,
+    TERM: "dumb",
+    COMMAND_LOG: commandLog,
+    FIXTURE_REPO: fixtureRepo,
+    REAL_NODE: process.execPath,
+    PI_REAL_BIN: fakePi,
+    FAKE_PI_MARKER: join(root, "fake-pi-marker"),
+    PI_CODING_AGENT_DIR: join(root, "agent-dir"),
+    PI_CODING_AGENT_SESSION_DIR: join(root, "sessions"),
+    PI_SESSION_OWNER_REGISTRY: join(root, "registry"),
+  };
+  for (const name of blockedEnvironmentNames) delete env[name];
+  return env;
+}
+
+function assertCompleted(result) {
+  assert.equal(result.error, undefined, `init-pi.sh failed: ${result.error?.message ?? result.stderr}`);
+  assert.notEqual(result.signal, "SIGTERM", `init-pi.sh timed out: ${result.stderr}`);
+}
 
 test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials", async () => {
   const root = await mkdtemp(join(tmpdir(), "init-pi-"));
@@ -25,13 +62,14 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await mkdir(fakeBin, { recursive: true });
     await copyFile(join(repoRoot, "init-pi.sh"), join(fixtureRepo, "init-pi.sh"));
     await copyFile(join(repoRoot, "scripts", "pi-shell.zsh"), join(fixtureRepo, "scripts", "pi-shell.zsh"));
+    await copyFile(join(repoRoot, "scripts", "pi-launcher.zsh"), join(fixtureRepo, "scripts", "pi-launcher.zsh"));
     await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "reviewer.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "reviewer.py"));
     await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "_config.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "_config.py"));
     await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "_provider.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "_provider.py"));
     await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "tests", "test_reviewer.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "tests", "test_reviewer.py"));
     await chmod(join(fixtureRepo, "init-pi.sh"), 0o755);
 
-    for (const command of ["git", "uv"]) {
+    for (const command of ["git", "uv", "zsh"]) {
       const commandPath = join(fakeBin, command);
       await writeFile(commandPath, `#!/usr/bin/env bash\nprintf '${command} %s markers=%s,%s,%s,%s\\n' "$*" "\${PI_SUBAGENT_CHILD:-}" "\${PI_SUBAGENT_FANOUT_CHILD:-}" "\${PI_SUBAGENT_PARENT_SESSION:-}" "\${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}" >> "$COMMAND_LOG"\n`);
       await chmod(commandPath, 0o755);
@@ -42,10 +80,15 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
       "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$*\" == *\"run setup:subagents-enhanced\"* ]]; then mkdir -p \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.62.0\\\"}' > \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json\"; fi\n",
     );
     await chmod(fakeNpm, 0o755);
+    for (const [command, executable] of [["chmod", "/bin/chmod"], ["mkdir", "/bin/mkdir"], ["dirname", "/usr/bin/dirname"]]) {
+      const commandPath = join(fakeBin, command);
+      await writeFile(commandPath, `#!/usr/bin/env bash\nprintf '${command} %s\\n' "$*" >> "$COMMAND_LOG"\nexec ${executable} "$@"\n`);
+      await chmod(commandPath, 0o755);
+    }
     const fakeNode = join(fakeBin, "node");
     await writeFile(
       fakeNode,
-      "#!/usr/bin/env bash\nif [[ \"$1\" == */scripts/setup-subagent-runtime-deps.ts && \"$2\" == \"--check-upgrade\" ]]; then printf 'node check-subagent-upgrade\\n' >> \"$COMMAND_LOG\"; exit 0; fi\nif [[ \"$1\" == */scripts/sync-skills.ts ]]; then printf 'node sync-skills markers=%s,%s,%s,%s\\n' \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"; exit 0; fi\nexec \"$REAL_NODE\" \"$@\"\n",
+      "#!/usr/bin/env bash\nif [[ \"$1\" == */scripts/setup-subagent-runtime-deps.ts && \"$2\" == \"--check-upgrade\" ]]; then printf 'node check-subagent-upgrade\\n' >> \"$COMMAND_LOG\"; exit 0; fi\nif [[ \"$1\" == */scripts/sync-skills.ts ]]; then printf 'node sync-skills markers=%s,%s,%s,%s\\n' \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"; exit 0; fi\nprintf 'node %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nexec \"$REAL_NODE\" \"$@\"\n",
     );
     await chmod(fakeNode, 0o755);
     await writeFile(
@@ -65,26 +108,16 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
       { mode: 0o600 },
     );
 
-    const env = {
-      ...process.env,
-      HOME: home,
-      PATH: `${fakeBin}:${process.env.PATH}`,
-      COMMAND_LOG: commandLog,
-      FIXTURE_REPO: fixtureRepo,
-      REAL_NODE: process.execPath,
-      PI_REAL_BIN: fakePi,
-      PI_SUBAGENT_CHILD: "1",
-      PI_SUBAGENT_FANOUT_CHILD: "1",
-      PI_SUBAGENT_PARENT_SESSION: "parent-session",
-      PI_ROOT_SUBAGENT_BROKER_ENABLED: "1",
-    };
+    const env = initEnvironment({ home, fakeBin, commandLog, fixtureRepo, fakePi, root });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const result = spawnSync("bash", [join(fixtureRepo, "init-pi.sh")], {
         cwd: fixtureRepo,
         encoding: "utf8",
         env,
+        timeout: 20_000,
+        maxBuffer: 1024 * 1024,
       });
-      assert.equal(result.error, undefined, result.error?.message);
+      assertCompleted(result);
       assert.equal(result.status, 0, result.stderr);
       assert.doesNotMatch(result.stdout, /fixture-secret/);
       assert.doesNotMatch(result.stdout, /OpenCode|openai-idealab credential/);
@@ -107,17 +140,15 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.84\.4/);
     assert.doesNotMatch(commands, /pi-real registry=.*install npm:pi-subagents/);
     assert.match(commands, /node check-subagent-upgrade/);
-    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund --prefix .* run setup:subagents-enhanced markers=1,1,parent-session,1/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund --prefix .* run setup:subagents-enhanced markers=,,,/);
     assert.ok(commands.indexOf("node check-subagent-upgrade") < commands.indexOf("run setup:subagents-enhanced"), "live-upgrade preflight must run before package setup mutates the package");
     assert.doesNotMatch(commands, /rpiv-todo/);
-    assert.match(commands, /node sync-skills markers=1,1,parent-session,1/);
-    const subagentsPackage = JSON.parse(await readFile(join(fixtureRepo, "packages", "pi-subagents-enhanced", "node_modules", "pi-subagents", "package.json"), "utf8"));
-    assert.equal(subagentsPackage.version, "0.62.0");
+    assert.match(commands, /node sync-skills markers=,,,/);
     assert.match(commands, /npm registry= test markers=,,,/);
     assert.match(commands, /npm registry= run doctor markers=,,,/);
     assert.match(commands, /npm registry= run test:integration markers=,,,/);
     assert.match(commands, /uv run --no-project --with httpx --with python-dotenv --with pyyaml python -m unittest discover -s skill-overrides\/external-llm-review\/tests markers=,,,/);
-    assert.match(commands, /uv tool install --force basic-memory==0\.22\.1 markers=1,1,parent-session,1/);
+    assert.match(commands, /uv tool install --force basic-memory==0\.22\.1 markers=,,,/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

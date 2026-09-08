@@ -8,6 +8,7 @@ NPM_REGISTRY="https://registry.npmjs.org"
 BASIC_MEMORY_VERSION="0.22.1"
 ZSHRC_PATH="${ZDOTDIR:-$HOME}/.zshrc"
 SHELL_INTEGRATION="$SCRIPT_DIR/scripts/pi-shell.zsh"
+PI_LAUNCHER="$SCRIPT_DIR/scripts/pi-launcher.zsh"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -46,6 +47,8 @@ fi
 NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" run setup:subagents-enhanced
 
 node "$SCRIPT_DIR/scripts/sync-skills.ts"
+
+chmod +x "$PI_LAUNCHER"
 
 mkdir -p "$(dirname -- "$ZSHRC_PATH")"
 node - "$ZSHRC_PATH" "$SHELL_INTEGRATION" <<'NODE'

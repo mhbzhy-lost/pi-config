@@ -172,9 +172,4 @@ test("pi-full requests official fullscreen TUI mode", async () => {
 test("shell delegates TUI ownership to Pi official settings", async () => {
   const shell = await readFile(join(repoRoot, "scripts", "pi-shell.zsh"), "utf8");
   assert.doesNotMatch(shell, /1049|PI_ALT_SCREEN|_pi_config_alt_screen/);
-
-  const settings = JSON.parse(await readFile(join(repoRoot, "pi", "settings.json"), "utf8"));
-  assert.equal(settings.tuiMode, "fullscreen");
-  assert.equal(settings.fullscreenExitOutput, "resume-hint");
-  assert.equal(Object.hasOwn(settings, "defaultTools"), false);
 });

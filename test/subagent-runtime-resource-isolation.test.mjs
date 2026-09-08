@@ -127,6 +127,7 @@ test("the model-facing description contains the project dispatch and push-notifi
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /dispatch-ir\.v1/);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /For coding work, provide the complete dispatch-ir\.v1 contract/);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /For generic work, provide \{ agent, title, task \}/);
+  assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /For executor, provide/);
   assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /spark/);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /completion notifications are delivered automatically/i);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /do not use sleep, status polling, or supervisor pending/i);

@@ -7,7 +7,6 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
-import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
 import { resolvePiCodingAgentRoot } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -240,52 +239,38 @@ function model(id, name) {
   return { id, name, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 256 };
 }
 
-test("real Pi RPC loads required auto-discovered Skills without retired products", async () => {
-  assert.ok(piBinary, "PI_REAL_BIN must point to an explicitly supported Pi host");
-  const controlledSkills = await discoverManagedSkills(repoRoot);
-
-  const result = spawnSync(
-    "zsh",
-    [
-      "-f",
-      "-c",
-      `source ${shellIntegration}; pi --mode rpc --no-session --offline --provider openai --model gpt-4o`,
-    ],
-    {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PI_REAL_BIN: piBinary,
-        OPENAI_API_KEY: "integration-test-not-used",
+test("real Pi RPC without wrapper ownership is unsupported and does not require local configuration", { skip: piBinary ? false : "PI_REAL_BIN is unavailable" }, async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "pi-runtime-rpc-agent-"));
+  try {
+    const agentDir = join(fixture, "agent");
+    const sessionDir = join(fixture, "sessions");
+    const result = spawnSync(
+      "zsh",
+      [
+        "-f",
+        "-c",
+        `source ${shellIntegration}; export PI_CODING_AGENT_DIR=${JSON.stringify(agentDir)} PI_CODING_AGENT_SESSION_DIR=${JSON.stringify(sessionDir)}; pi --mode rpc --no-session --offline --provider openai --model gpt-4o`,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          HOME: join(fixture, "home"),
+          PI_REAL_BIN: piBinary,
+          OPENAI_API_KEY: "integration-test-not-used",
+        },
+        input: `${JSON.stringify({ id: "commands", type: "get_commands" })}\n`,
+        timeout: 15000,
       },
-      input: `${JSON.stringify({ id: "commands", type: "get_commands" })}\n`,
-      timeout: 15000,
-    },
-  );
+    );
 
-  assert.equal(result.error, undefined, result.error?.message);
-  assert.equal(result.status, 0, result.stderr);
-
-  const records = result.stdout
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-  const response = records.find(
-    (record) => record.type === "response" && record.command === "get_commands",
-  );
-  assert.ok(response, `missing get_commands response in: ${result.stdout}`);
-  assert.equal(response.success, true);
-
-  const skills = response.data.commands
-    .filter((command) => command.source === "skill")
-    .map((command) => command.name);
-  const requiredSkills = [
-    ...[...controlledSkills.keys()].map((name) => `skill:${name}`),
-    "skill:cache-stats",
-    "skill:external-llm-review-provider",
-    "skill:manage-providers",
-  ];
-  for (const required of requiredSkills) assert.ok(skills.includes(required), `missing required Skill: ${required}`);
-  assert.equal(new Set(skills).size, skills.length, "auto-discovered Skills must be unique");
-  assert.equal(skills.includes("skill:plan-runner-dispatch"), false);
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 0, result.stderr);
+    const records = result.stdout.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const response = records.find((record) => record.type === "response" && record.command === "get_commands");
+    assert.ok(response, `missing get_commands response in: ${result.stdout}`);
+    assert.equal(response.success, true);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
 });

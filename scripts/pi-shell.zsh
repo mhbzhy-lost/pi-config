@@ -1,5 +1,4 @@
 typeset -g _PI_CONFIG_ROOT="${${(%):-%N}:A:h:h}"
-typeset -g _PI_CONFIG_UPSTREAM_PI="${PI_REAL_BIN:-${commands[pi]:-}}"
 
 export PI_CONFIG_HOME="$_PI_CONFIG_ROOT"
 export PI_CODING_AGENT_DIR="$_PI_CONFIG_ROOT/pi"
@@ -8,12 +7,7 @@ export PI_CODING_GOAL_DIR="${PI_CODING_GOAL_DIR:-$_PI_CONFIG_ROOT/var/goals}"
 export PI_CODING_WORKSPACE_DIR="${PI_CODING_WORKSPACE_DIR:-$_PI_CONFIG_ROOT/var/workspaces}"
 
 _pi_config_invoke() {
-  if [[ -z "$_PI_CONFIG_UPSTREAM_PI" || ! -x "$_PI_CONFIG_UPSTREAM_PI" ]]; then
-    print -u2 -- "pi executable not found; set PI_REAL_BIN"
-    return 1
-  fi
-
-  "$_PI_CONFIG_UPSTREAM_PI" --no-skills "$@"
+  "$_PI_CONFIG_ROOT/scripts/pi-launcher.zsh" --no-skills "$@"
 }
 
 pi() {

@@ -65,11 +65,16 @@ export function createTypedSubagentRpcClient(
   const pending = new Map();
   let disposed = false;
 
-  function call(method, params = {}, options: { requestId?: string } = {}) {
+  function call(method, params = {}, options: { requestId?: string; diagnostic?: { toolCallId?: string; sink?: (phase: string, fields?: Record<string, unknown>) => void } } = {}) {
     if (disposed) {
       return Promise.reject(new TypedSubagentRpcError("disposed", "typed subagent RPC client is disposed"));
     }
     const requestId = validateRequestId(options.requestId ?? createId());
+    const diagnostic = options.diagnostic;
+    const trace = (phase, fields = {}) => {
+      if (typeof diagnostic?.sink !== "function" || typeof diagnostic.toolCallId !== "string") return;
+      try { diagnostic.sink(phase, { method, requestId, ...fields }); } catch { /* 诊断输出不得改变 RPC 语义。 */ }
+    };
     if (pending.has(requestId)) {
       throw new TypedSubagentRpcError(
         "duplicate_request_id",
@@ -113,6 +118,7 @@ export function createTypedSubagentRpcClient(
           return;
         }
         if (reply.success === true) {
+          trace(`rpc-${method}-replied`);
           settle(resolve, reply.data);
           return;
         }
@@ -135,6 +141,7 @@ export function createTypedSubagentRpcClient(
         () => entry.reject(new TypedSubagentRpcError("timeout", `typed subagent RPC ${method} timed out`)),
         timeoutMs,
       );
+      trace(`rpc-${method}-sent`);
       events.emit(REQUEST_CHANNEL, {
         version: 1,
         requestId,
