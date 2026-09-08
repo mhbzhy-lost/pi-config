@@ -156,18 +156,50 @@ test("Root broker rich terminal snapshot reaches managed workspace status throug
     upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
   });
   const { pi, tools, rpc } = piHarness(f.originRoot);
+  // Bounded Host adapter: it issues the same Goal ticket consumed by the
+  // public coding facade, rather than manufacturing a Broker snapshot.
+  const bound = [];
+  const goalExecutorCoordinator = {
+    async prepareSpawn({ contractHash }) {
+      const baseCommit = git(f.originRoot, "rev-parse", "HEAD");
+      return {
+        version: "goal-run-binding-ticket.v2",
+        ticketId: "a".repeat(64), goalId: "fixture-goal", taskId: "unified-workspace", attempt: 1,
+        contractHash, workspaceId: "broker-proof-workspace", executionRevision: 1,
+        expectedCriteria: ["managed-workspace"], agentProfile: "executor",
+        workspaceRequest: {
+          workspaceId: "broker-proof-workspace",
+          owner: { kind: "goal-task", rootSessionId: "root-session", goalId: "fixture-goal", taskId: "unified-workspace", attempt: 1, executionRevision: 1 },
+          originRoot: f.originRoot, requestedCwd: f.originRoot, originRef: "refs/heads/main", baseCommit, contractHash,
+          mode: "coding", writePaths: ["allowed.txt"],
+        },
+      };
+    },
+    async workspaceAllocated(ticket, receipt) { assert.equal(receipt.workspaceId, ticket.workspaceId); },
+    async confirmSpawn() {},
+    async bindSpawn(ticket, binding) { bound.push({ ticket, binding }); },
+  };
+  const registered = [];
   createTypedSubagentExtension(pi, {
     rpc,
     cleanupStore: {},
     randomUUID: () => "broker-proof-workspace",
     workspaceService: f.service,
+    goalExecutorCoordinator,
     resolveRootSessionId: () => "root-session",
-    registerAuthorizedRun(authorization) { return broker.registerAuthorizedRun(authorization); },
+    registerAuthorizedRun(authorization) { registered.push(authorization); return broker.registerAuthorizedRun(authorization); },
   });
 
   const spawned = await execute(tools[0], codingContract(f.originRoot), f.originRoot);
   assert.equal(spawned.isError, false, spawned.content[0]?.text);
   f.workspaceIds.add(spawned.details.workspace_id);
+  assert.deepEqual(bound.map(({ ticket, binding }) => [ticket.goalId, binding.runId, binding.asyncDir]), [["fixture-goal", "leaf-run", join(f.originRoot, "async-leaf")]]);
+  assert.equal(Object.isFrozen(registered[0]), true);
+  assert.equal(Object.isFrozen(registered[0].binding), true);
+  assert.equal(Object.isFrozen(registered[0].capabilities), true);
+  assert.equal(Object.isFrozen(registered[0].goal), true);
+  assert.equal(Object.isFrozen(registered[0].goal.expectedCriteria), true);
+  assert.deepEqual(registered[0].goal, { ticketId: "a".repeat(64), goalId: "fixture-goal", taskId: "unified-workspace", attempt: 1, contractHash: bound[0].ticket.contractHash, workspaceId: "broker-proof-workspace", executionRevision: 1, expectedCriteria: ["managed-workspace"] });
   broker.observeTerminal({
     ...observedFacadeProof("leaf-run"),
     sessionId: "root-session",
@@ -178,12 +210,13 @@ test("Root broker rich terminal snapshot reaches managed workspace status throug
   const richSnapshot = broker.inspectExecutionProof("leaf-run");
   assert.equal(richSnapshot.schemaVersion, "root-broker.execution-proof.v2");
   assert.equal(richSnapshot.binding.runId, "leaf-run");
+  assert.equal(richSnapshot.authorization.state, "verified");
+  assert.deepEqual(richSnapshot.capabilities, ["acceptance.submit", "root.subscribe"]);
   assert.match(richSnapshot.terminal.proofId, /^[a-f0-9]{64}$/);
 
-  const status = await execute(tools[0], { action: "workspace_status", workspace_id: spawned.details.workspace_id }, f.originRoot);
-  assert.equal(status.isError, false, status.content[0]?.text);
-  assert.equal(status.details.process_terminal, "observed");
-  assert.ok(status.details.allowed_dispositions.includes("discard"));
+  const status = f.service.status({ workspaceId: spawned.details.workspace_id });
+  assert.equal(status.terminalProof.state, "observed");
+  assert.ok(status.allowedDispositions.includes("discard"));
   assert.deepEqual(f.service.status({ workspaceId: spawned.details.workspace_id }).terminalProof, {
     state: "observed",
     conflict: false,
@@ -214,16 +247,15 @@ test("typed coding facade allocates, binds, reports, integrates, and releases th
   assert.equal(JSON.parse(calls[0].workflowScript.match(/, (.*)\);$/)[1]).worktree, false);
   assert.equal(Object.hasOwn(f.service.status({ workspaceId: spawned.details.workspace_id }).receipt.run, "kind"), false);
   assert.equal(Object.hasOwn(spawned.details, "kind"), false);
-  assert.deepEqual(registered[0].capabilities, ["root.subscribe"]);
-  assert.equal(registered[0].binding.agentProfile, "executor");
+  assert.deepEqual(registered, []);
 
   await writeFile(join(spawned.details.dispatch_cwd, "allowed.txt"), "integrated\n");
   git(spawned.details.dispatch_cwd, "add", "allowed.txt");
   git(spawned.details.dispatch_cwd, "commit", "-m", "child change");
-  const status = await execute(tools[0], { action: "workspace_status", workspace_id: spawned.details.workspace_id }, f.originRoot);
+  const status = await execute(tools[1], { action: "status", workspace_id: spawned.details.workspace_id }, f.originRoot);
   assert.ok(status.details.allowed_dispositions.includes("integrate"));
-  const disposed = await execute(tools[0], {
-    action: "workspace_disposition",
+  const disposed = await execute(tools[1], {
+    action: "dispose",
     workspace_id: spawned.details.workspace_id,
     disposition: "integrate",
     action_token: status.details.action_token,
@@ -253,16 +285,16 @@ test("typed generic facade preserves and explicitly releases through the same se
   assert.deepEqual(registered[0].capabilities, []);
   assert.equal(registered[0].binding.agentProfile, "reviewer");
   f.workspaceIds.add(spawned.details.workspace_id);
-  const status = await execute(tools[0], { action: "workspace_status", workspace_id: spawned.details.workspace_id }, f.originRoot);
+  const status = await execute(tools[1], { action: "status", workspace_id: spawned.details.workspace_id }, f.originRoot);
   assert.equal(status.details.allowed_dispositions.includes("integrate"), false);
-  const preserved = await execute(tools[0], {
-    action: "workspace_disposition",
+  const preserved = await execute(tools[1], {
+    action: "dispose",
     workspace_id: spawned.details.workspace_id,
     disposition: "preserve",
     action_token: status.details.action_token,
   }, f.originRoot);
   assert.equal(preserved.details.workspace_state, "preserved");
-  const released = await execute(tools[0], { action: "workspace_disposition", workspace_id: spawned.details.workspace_id, disposition: "release" }, f.originRoot);
+  const released = await execute(tools[1], { action: "release", workspace_id: spawned.details.workspace_id }, f.originRoot);
   assert.equal(released.details.workspace_state, "released");
   assert.equal(existsSync(spawned.details.dispatch_cwd), false);
 });
@@ -308,8 +340,7 @@ test("typed coding facade canonicalizes composite Host tool call identities for 
   assert.notEqual(firstOwner, secondOwner);
   assert.equal(calls.length, 3);
   assert.ok(calls.every((call) => call.worktree === false));
-  assert.equal(registered.length, 3);
-  assert.ok(registered.every((authorization) => authorization.kind === "coding"));
+  assert.equal(registered.length, 0);
 
   const empty = await execute(tools[0], codingContract(f.originRoot), f.originRoot, "");
   assert.equal(empty.isError, true);

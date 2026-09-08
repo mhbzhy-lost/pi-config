@@ -6,6 +6,11 @@ import { inspectManagedGitWorkspace, listManagedGitRegistrations } from "./git-w
 import { createManagedWorkspaceLedger, managedWorkspaceReceiptFromRecord } from "./ledger.ts";
 import { createManagedWorkspaceService } from "./service.ts";
 
+type AdministrationOptions = { stateRoot?: string; originRoot?: string };
+type CleanupAuthorization = { workspaceId: string; leaseId: string };
+type CleanupPlan = { schemaVersion: "managed-workspace-cleanup-plan.v1"; stateRoot: string; actions: CleanupAuthorization[]; planHash: string };
+type ApplyCleanupInput = { stateRoot?: string; plan?: CleanupPlan; authorizations?: CleanupAuthorization[] };
+
 function pathExists(value) {
   try { lstatSync(value); return true; }
   catch (error) {
@@ -24,7 +29,7 @@ function planHash(value) {
   return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 }
 
-export function inventoryManagedWorkspaces({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, originRoot } = {}) {
+export function inventoryManagedWorkspaces({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, originRoot }: AdministrationOptions = {}) {
   const ledger = createManagedWorkspaceLedger({ stateRoot });
   const records = ledger.list({ originRoot });
   const workspaces = records.map((record) => {
@@ -59,7 +64,7 @@ export function inventoryManagedWorkspaces({ stateRoot = process.env.PI_CODING_W
   return Object.freeze({ schemaVersion: "managed-workspace-inventory.v1", stateRoot: ledger.stateRoot, workspaces, orphanRegistrations, legacy });
 }
 
-export function planManagedWorkspaceCleanup({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, originRoot } = {}) {
+export function planManagedWorkspaceCleanup({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, originRoot }: AdministrationOptions = {}) {
   const inventory = inventoryManagedWorkspaces({ stateRoot, originRoot });
   const actions = inventory.workspaces
     .filter((entry) => entry.receipt.state === "preserved" && entry.identity === true)
@@ -68,7 +73,7 @@ export function planManagedWorkspaceCleanup({ stateRoot = process.env.PI_CODING_
   return Object.freeze({ ...body, planHash: planHash(body) });
 }
 
-export function applyManagedWorkspaceCleanup({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, plan, authorizations } = {}) {
+export function applyManagedWorkspaceCleanup({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, plan, authorizations }: ApplyCleanupInput = {}) {
   const ledger = createManagedWorkspaceLedger({ stateRoot });
   const body = { schemaVersion: plan?.schemaVersion, stateRoot: plan?.stateRoot, actions: plan?.actions };
   if (!plan || plan.schemaVersion !== "managed-workspace-cleanup-plan.v1" || plan.stateRoot !== ledger.stateRoot

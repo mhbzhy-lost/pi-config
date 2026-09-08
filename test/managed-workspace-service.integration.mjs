@@ -12,6 +12,7 @@ import {
   planManagedWorkspaceCleanup,
 } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
+import { createManagedWorkspaceLedger } from "../packages/pi-subagents-enhanced/src/workspace/ledger.ts";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const sha64 = (value) => value.repeat(64);
@@ -63,6 +64,26 @@ async function commitWorkspace(receipt, name, content = name) {
   await writeFile(join(receipt.path, "src", name), `${content}\n`);
   git(receipt.path, "add", ".");
   git(receipt.path, "commit", "-m", `add ${name}`);
+}
+
+async function reserveWithStaleOrigin(f, service, workspaceId, owner, { mode = "coding", writePaths = ["src/**"] } = {}) {
+  const originRoot = join(f.root, `${workspaceId}-stale-origin`);
+  await mkdir(join(originRoot, "src"), { recursive: true });
+  git(originRoot, "init", "-b", "main");
+  git(originRoot, "config", "user.email", "test@example.com");
+  git(originRoot, "config", "user.name", "Test User");
+  await writeFile(join(originRoot, "src", "base.txt"), "base\n");
+  git(originRoot, "add", ".");
+  git(originRoot, "commit", "-m", "initial");
+  service.reserve(request(f, workspaceId, {
+    owner,
+    originRoot,
+    requestedCwd: join(originRoot, "src"),
+    baseCommit: git(originRoot, "rev-parse", "HEAD"),
+    mode,
+    writePaths,
+  }));
+  await rm(originRoot, { recursive: true, force: true });
 }
 
 test("all owner kinds reserve, allocate, and bind through one service state machine", async (t) => {
@@ -146,10 +167,38 @@ test("hostile legacy runtime trees are neither consumed nor modified", async (t)
   }
 });
 
-test("terminal proof and action token gate discard, and replay is rejected", async (t) => {
+test("unbound allocation orphan disposes without terminal proof but retains service identity gates", async (t) => {
+  const f = await fixture(t);
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
+  const active = service.ensureAllocated(request(f, "allocation-orphan-discard"));
+
+  assert.equal(active.run, null, "durable allocation exists before Goal append/run binding");
+  const beforeDiscard = service.status({ workspaceId: active.workspaceId });
+  assert.deepEqual(beforeDiscard.receipt.owner, active.owner);
+  assert.equal(beforeDiscard.receipt.leaseId, active.leaseId);
+  const discard = service.issueDisposition({ workspaceId: active.workspaceId });
+  assert.equal(discard.actionToken.startsWith("managed-workspace-action.v1:"), true);
+  const released = service.dispose({ workspaceId: active.workspaceId, disposition: "discard", actionToken: discard.actionToken });
+  assert.equal(released.state, "released");
+  assert.equal(await lstat(active.path).catch(() => null), null);
+
+  const preservedActive = service.ensureAllocated(request(f, "allocation-orphan-preserve"));
+  const status = service.status({ workspaceId: preservedActive.workspaceId });
+  assert.equal(status.terminalProof, null);
+  assert.deepEqual(status.allowedDispositions, ["discard", "preserve"]);
+  assert.equal(status.allowedDispositions.includes("integrate"), false);
+  const issued = service.issueDisposition({ workspaceId: preservedActive.workspaceId });
+  assert.throws(() => service.dispose({ workspaceId: preservedActive.workspaceId, disposition: "integrate", strategy: "cherry-pick", actionToken: issued.actionToken }), /terminal|allowed/i);
+  const preserved = service.dispose({ workspaceId: preservedActive.workspaceId, disposition: "preserve", reason: "orphan inspection", actionToken: issued.actionToken });
+  assert.equal(preserved.state, "preserved");
+  assert.equal(service.release({ workspaceId: preservedActive.workspaceId }).state, "released");
+});
+
+test("terminal proof and action token gate discard for bound runs, and replay is rejected", async (t) => {
   const f = await fixture(t);
   const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
   const active = service.ensureAllocated(request(f, "discard"));
+  service.bindRun({ workspaceId: active.workspaceId, run: { runId: "bound-discard", asyncDir: join(f.root, "bound-discard") } });
 
   const pending = service.issueDisposition({ workspaceId: active.workspaceId, terminalProof: { state: "pending" } });
   assert.deepEqual(pending.allowedDispositions, ["preserve"]);
@@ -167,6 +216,7 @@ test("integration accepts a clean forward origin and enforces rename source and 
   const f = await fixture(t);
   const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
   const active = service.ensureAllocated(request(f, "integrate"));
+  service.bindRun({ workspaceId: active.workspaceId, run: { runId: "bound-integrate", asyncDir: join(f.root, "bound-integrate") } });
   await commitWorkspace(active, "executor.txt", "executor");
 
   await writeFile(join(f.originRoot, "README.md"), "origin forward\n");
@@ -184,6 +234,7 @@ test("integration accepts a clean forward origin and enforces rename source and 
     baseCommit: git(f.originRoot, "rev-parse", "HEAD"),
     writePaths: ["src/base.txt"],
   }));
+  service.bindRun({ workspaceId: narrow.workspaceId, run: { runId: "bound-rename", asyncDir: join(f.root, "bound-rename") } });
   git(narrow.path, "mv", "src/base.txt", "outside.txt");
   git(narrow.path, "commit", "-m", "move outside scope");
   const blocked = service.status({ workspaceId: narrow.workspaceId, terminalProof: observed("f") });
@@ -210,6 +261,23 @@ test("preserved workspaces require explicit release and Git identity drift fails
   );
 });
 
+test("expectedHead CAS rejects a stale disposition before its durable intent or Git side effects", async (t) => {
+  const f = await fixture(t);
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
+  const active = service.ensureAllocated(request(f, "expected-head"));
+  service.bindRun({ workspaceId: active.workspaceId, run: { runId: "expected-head-run", asyncDir: join(f.root, "expected-head-run") } });
+  await commitWorkspace(active, "expected-head.ts");
+  const head = git(active.path, "rev-parse", "HEAD");
+  const issued = service.issueDisposition({ workspaceId: active.workspaceId, terminalProof: observed(), expectedHead: head });
+  await commitWorkspace(active, "expected-head-drift.ts");
+  assert.throws(
+    () => service.dispose({ workspaceId: active.workspaceId, terminalProof: observed(), expectedHead: head, disposition: "discard", actionToken: issued.actionToken }),
+    (error) => error?.code === "MANAGED_WORKSPACE_EXPECTED_HEAD",
+  );
+  assert.equal(service.status({ workspaceId: active.workspaceId }).receipt.state, "active");
+  assert.ok(await lstat(active.path));
+});
+
 test("reconcile resumes an authorized disposition without replaying its action token", async (t) => {
   const f = await fixture(t);
   let injected = false;
@@ -228,6 +296,88 @@ test("reconcile resumes an authorized disposition without replaying its action t
 
   const recovered = createManagedWorkspaceService({ stateRoot: f.stateRoot }).reconcile({ originRoot: f.originRoot });
   assert.equal(recovered.find((entry) => entry.workspaceId === active.workspaceId).state, "released");
+});
+
+test("owner scope gates listOwned and every scoped operation before inspection or mutation", async (t) => {
+  const f = await fixture(t);
+  let inspections = 0;
+  const service = createManagedWorkspaceService({
+    stateRoot: f.stateRoot,
+    fault(event) { if (event.operation === "status" && event.phase === "after-inspection") inspections += 1; },
+  });
+  const ledger = createManagedWorkspaceLedger({ stateRoot: f.stateRoot });
+  const own = { kind: "standalone-subagent", rootSessionId: "session-a" };
+  const foreign = { kind: "standalone-subagent", rootSessionId: "session-b" };
+  const ownA = service.ensureAllocated(request(f, "workspace-a", { owner: { kind: "standalone-subagent", rootSessionId: "session-a", toolCallId: "tool-a" } }));
+  const ownZ = service.ensureAllocated(request(f, "workspace-z", { owner: { kind: "standalone-subagent", rootSessionId: "session-a", toolCallId: "tool-z" } }));
+  const foreignReceipt = service.ensureAllocated(request(f, "workspace-b", { owner: { kind: "standalone-subagent", rootSessionId: "session-b", toolCallId: "tool-b" } }));
+  const goal = service.ensureAllocated(request(f, "goal-workspace", { owner: { kind: "goal-task", rootSessionId: "session-a", goalId: "goal-a", taskId: "task-a", attempt: 1, executionRevision: 1 } }));
+  const validation = service.ensureAllocated(request(f, "validation-workspace", { owner: { kind: "goal-validation", rootSessionId: "session-a", goalId: "goal-a", validationId: "validation-a", executionRevision: 1 }, mode: "validation", writePaths: [] }));
+  service.bindRun({ workspaceId: ownA.workspaceId, run: { runId: "run-a", asyncDir: join(f.root, "run-a") } });
+  service.bindRun({ workspaceId: foreignReceipt.workspaceId, run: { runId: "run-b", asyncDir: join(f.root, "run-b") } });
+
+  assert.deepEqual(service.listOwned({ ownerScope: own }).map(({ workspaceId }) => workspaceId), ["workspace-a", "workspace-z"]);
+  assert.deepEqual(service.listOwned({ ownerScope: own, runId: "run-a" }).map(({ workspaceId }) => workspaceId), ["workspace-a"]);
+  assert.deepEqual(service.listOwned({ ownerScope: own, runId: "run-b" }), []);
+  assert.throws(() => service.listOwned({ ownerScope: { ...own, extra: true } }), (error) => error?.code === "MANAGED_WORKSPACE_OWNER_SCOPE");
+
+  const before = Object.fromEntries([foreignReceipt, goal, validation].map(({ workspaceId }) => [workspaceId, structuredClone(ledger.load(workspaceId).record)]));
+  const originHead = git(f.originRoot, "rev-parse", "HEAD");
+  const terminalProof = observed();
+  assert.throws(() => service.statusOwned({ workspaceId: foreignReceipt.workspaceId, ownerScope: own, terminalProof }), (error) => error?.code === "MANAGED_WORKSPACE_OWNER_SCOPE");
+  assert.throws(() => service.issueOwnedDisposition({ workspaceId: goal.workspaceId, ownerScope: own, terminalProof }), (error) => error?.code === "MANAGED_WORKSPACE_OWNER_SCOPE");
+  assert.throws(() => service.releaseOwned({ workspaceId: validation.workspaceId, ownerScope: own }), (error) => error?.code === "MANAGED_WORKSPACE_OWNER_SCOPE");
+  assert.throws(() => service.statusOwned({ workspaceId: "unknown-workspace", ownerScope: own }), (error) => error?.code === "MANAGED_WORKSPACE_NOT_FOUND");
+  assert.equal(inspections, 0, "rejected scopes must not inspect Git");
+  assert.equal(git(f.originRoot, "rev-parse", "HEAD"), originHead);
+  for (const [workspaceId, record] of Object.entries(before)) assert.deepEqual(ledger.load(workspaceId).record, record, `${workspaceId} must remain unchanged`);
+
+  const issued = service.issueOwnedDisposition({ workspaceId: ownA.workspaceId, ownerScope: own, terminalProof });
+  const ownBeforeForeignToken = structuredClone(ledger.load(ownA.workspaceId).record);
+  assert.throws(() => service.disposeOwned({ workspaceId: ownA.workspaceId, ownerScope: foreign, terminalProof, disposition: "preserve", reason: "foreign", actionToken: issued.actionToken }), (error) => error?.code === "MANAGED_WORKSPACE_OWNER_SCOPE");
+  assert.deepEqual(ledger.load(ownA.workspaceId).record, ownBeforeForeignToken, "cross-session token rejection must precede pending intent");
+  const preserved = service.disposeOwned({ workspaceId: ownA.workspaceId, ownerScope: own, terminalProof, disposition: "preserve", reason: "same session", actionToken: issued.actionToken });
+  assert.equal(preserved.state, "preserved");
+  assert.equal(service.releaseOwned({ workspaceId: ownA.workspaceId, ownerScope: own }).state, "released");
+  assert.equal(service.statusOwned({ workspaceId: ownZ.workspaceId, ownerScope: own }).receipt.state, "active");
+});
+
+test("listOwned skips foreign goal and validation records whose origins are stale", async (t) => {
+  const f = await fixture(t);
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
+  const own = { kind: "standalone-subagent", rootSessionId: "session-a" };
+  service.reserve(request(f, "current-live", { owner: { ...own, toolCallId: "tool-current" } }));
+  await reserveWithStaleOrigin(f, service, "foreign-goal-stale", {
+    kind: "goal-task", rootSessionId: "session-a", goalId: "goal-a", taskId: "task-a", attempt: 1, executionRevision: 1,
+  });
+  await reserveWithStaleOrigin(f, service, "foreign-validation-stale", {
+    kind: "goal-validation", rootSessionId: "session-a", goalId: "goal-a", validationId: "validation-a", executionRevision: 1,
+  }, { mode: "validation", writePaths: [] });
+
+  assert.deepEqual(service.listOwned({ ownerScope: own }).map(({ workspaceId }) => workspaceId), ["current-live"]);
+});
+
+test("listOwned skips a foreign standalone record whose origin is stale", async (t) => {
+  const f = await fixture(t);
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
+  const own = { kind: "standalone-subagent", rootSessionId: "session-a" };
+  service.reserve(request(f, "current-live", { owner: { ...own, toolCallId: "tool-current" } }));
+  await reserveWithStaleOrigin(f, service, "foreign-standalone-stale", {
+    kind: "standalone-subagent", rootSessionId: "session-b", toolCallId: "tool-foreign",
+  });
+
+  assert.deepEqual(service.listOwned({ ownerScope: own }).map(({ workspaceId }) => workspaceId), ["current-live"]);
+});
+
+test("listOwned fails closed when the current standalone record has a stale origin", async (t) => {
+  const f = await fixture(t);
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
+  const own = { kind: "standalone-subagent", rootSessionId: "session-a" };
+  await reserveWithStaleOrigin(f, service, "current-standalone-stale", {
+    kind: "standalone-subagent", rootSessionId: "session-a", toolCallId: "tool-current",
+  });
+
+  assert.throws(() => service.listOwned({ ownerScope: own }), (error) => error?.code === "MANAGED_WORKSPACE_ORIGIN");
 });
 
 test("administration cleanup is dry-run until an exact public lease is authorized", async (t) => {

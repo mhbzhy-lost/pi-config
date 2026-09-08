@@ -12,30 +12,40 @@ const LEGACY_PATHS = [
   ".state/worktree-lifecycle/**",
 ];
 
-function failure(code, message, cause) {
-  const error = new Error(message);
-  error.code = code;
-  if (cause !== undefined) error.cause = cause;
-  return error;
+class ManagedWorkspaceError extends Error {
+  code: string;
+  cause?: unknown;
+  constructor(code: string, message: string, cause?: unknown) {
+    super(message);
+    this.code = code;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+type GitRunner = (cwd: string, args: readonly string[]) => string;
+type ManagedWorkspaceRecord = { path: string; dispatchCwd: string; branchRef: string; request: { originRoot: string; originRef: string; baseCommit: string; mode: string; writePaths: string[] } };
+type GitInspection = { headCommit: string; baseCommit: string; descendant: boolean; aheadCommits: string[]; aheadCount: number; hasCommits: boolean; changedFiles: string[]; clean: boolean; originRef: string | null; originHead: string | null; originClean: boolean; originError: string | null };
+
+function failure(code: string, message: string, cause?: unknown): ManagedWorkspaceError {
+  return new ManagedWorkspaceError(code, message, cause);
 }
 
-function git(cwd, args) {
+const git: GitRunner = (cwd, args) => {
   try {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   } catch (cause) {
     throw failure("MANAGED_WORKSPACE_GIT", `git ${args.join(" ")} failed`, cause);
   }
-}
+};
 
-function gitRaw(cwd, args) {
+const gitRaw: GitRunner = (cwd, args) => {
   try {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (cause) {
     throw failure("MANAGED_WORKSPACE_GIT", `git ${args.join(" ")} failed`, cause);
   }
-}
+};
 
-function gitSucceeds(cwd, args) {
+function gitSucceeds(cwd: string, args: readonly string[]): boolean {
   return spawnSync("git", args, { cwd, stdio: "ignore" }).status === 0;
 }
 
@@ -47,7 +57,7 @@ function pathExists(value) {
   }
 }
 
-function primaryOrigin(record) {
+function primaryOrigin(record: ManagedWorkspaceRecord) {
   const root = realpathSync(record.request.originRoot);
   if (root !== record.request.originRoot || realpathSync(git(root, ["rev-parse", "--show-toplevel"])) !== root) {
     throw failure("MANAGED_WORKSPACE_IDENTITY", "originRoot is not the canonical Git top-level");
@@ -67,7 +77,7 @@ function userStatus(cwd) {
   return gitRaw(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", ...exclusions]);
 }
 
-function originPreflight(record, { exactBase = false } = {}) {
+function originPreflight(record: ManagedWorkspaceRecord, { exactBase = false }: { exactBase?: boolean } = {}) {
   const root = primaryOrigin(record);
   const ref = currentRef(root);
   if (ref !== record.request.originRef) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "origin branch ref changed");
@@ -98,7 +108,7 @@ function registrations(originRoot) {
   return values;
 }
 
-function registrationFor(record) {
+function registrationFor(record: ManagedWorkspaceRecord) {
   const target = path.resolve(record.path);
   return registrations(record.request.originRoot).find((entry) => path.resolve(entry.path) === target) ?? null;
 }
@@ -108,16 +118,16 @@ function commonDir(cwd) {
   return realpathSync(path.isAbsolute(value) ? value : path.resolve(cwd, value));
 }
 
-function originCommonDir(record) {
+function originCommonDir(record: ManagedWorkspaceRecord) {
   return commonDir(record.request.originRoot);
 }
 
-function branchHead(record) {
+function branchHead(record: ManagedWorkspaceRecord): string | null {
   if (!gitSucceeds(record.request.originRoot, ["show-ref", "--verify", "--quiet", record.branchRef])) return null;
   return git(record.request.originRoot, ["rev-parse", "--verify", `${record.branchRef}^{commit}`]);
 }
 
-function inspectIdentity(record) {
+function inspectIdentity(record: ManagedWorkspaceRecord) {
   if (!pathExists(record.path)) throw failure("MANAGED_WORKSPACE_IDENTITY", "managed worktree path is missing");
   const info = lstatSync(record.path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw failure("MANAGED_WORKSPACE_IDENTITY", "managed worktree path is not a directory");
@@ -164,7 +174,7 @@ export function assertManagedWorkspaceWritePaths(changedFiles, writePaths) {
   if (rejected.length > 0) throw failure("MANAGED_WORKSPACE_WRITE_PATHS", `changed files outside writePaths: ${rejected.join(", ")}`);
 }
 
-export function ensureManagedGitWorkspace(record) {
+export function ensureManagedGitWorkspace(record: ManagedWorkspaceRecord) {
   const origin = originPreflight(record, { exactBase: true });
   const exists = pathExists(record.path);
   const registration = registrationFor(record);
@@ -187,7 +197,7 @@ export function ensureManagedGitWorkspace(record) {
   return identity;
 }
 
-export function inspectManagedGitWorkspace(record) {
+export function inspectManagedGitWorkspace(record: ManagedWorkspaceRecord): GitInspection {
   primaryOrigin(record);
   const identity = inspectIdentity(record);
   const descendant = gitSucceeds(identity.workspacePath, ["merge-base", "--is-ancestor", record.request.baseCommit, identity.headCommit]);
@@ -226,7 +236,7 @@ function sequencerActive(cwd) {
     .some((name) => existsSync(path.join(gitDir, name)));
 }
 
-export function managedWorkspaceAlreadyIntegrated(record, { strategy, executorHead }) {
+export function managedWorkspaceAlreadyIntegrated(record: ManagedWorkspaceRecord, { strategy, executorHead }: { strategy: string; executorHead: string }) {
   const originHead = git(record.request.originRoot, ["rev-parse", "HEAD"]);
   if (strategy === "merge") return gitSucceeds(record.request.originRoot, ["merge-base", "--is-ancestor", executorHead, originHead]);
   if (strategy !== "cherry-pick") throw failure("MANAGED_WORKSPACE_DISPOSITION", "integration strategy is invalid");
@@ -235,7 +245,7 @@ export function managedWorkspaceAlreadyIntegrated(record, { strategy, executorHe
   return lines.length > 0 && lines.every((line) => line.startsWith("-"));
 }
 
-export function integrateManagedGitWorkspace(record, { strategy, executorHead }) {
+export function integrateManagedGitWorkspace(record: ManagedWorkspaceRecord, { strategy, executorHead }: { strategy: string; executorHead: string }) {
   const inspection = inspectManagedGitWorkspace(record);
   if (inspection.headCommit !== executorHead || !inspection.clean || !inspection.descendant || !inspection.hasCommits) {
     throw failure("MANAGED_WORKSPACE_INTEGRATE", "workspace is not a clean committed descendant");
@@ -260,7 +270,7 @@ export function integrateManagedGitWorkspace(record, { strategy, executorHead })
   return { alreadyIntegrated: false, headCommit: git(origin.root, ["rev-parse", "HEAD"]) };
 }
 
-export function releaseManagedGitWorkspace(record, { expectedHead } = {}) {
+export function releaseManagedGitWorkspace(record: ManagedWorkspaceRecord, { expectedHead }: { expectedHead?: string } = {}) {
   const exists = pathExists(record.path);
   const registration = registrationFor(record);
   const currentBranchHead = branchHead(record);
@@ -280,7 +290,7 @@ export function releaseManagedGitWorkspace(record, { expectedHead } = {}) {
   return { released: true };
 }
 
-export function managedWorkspaceSnapshotHash(inspection, terminalProof) {
+export function managedWorkspaceSnapshotHash(inspection: GitInspection, terminalProof: unknown) {
   const value = {
     headCommit: inspection.headCommit,
     baseCommit: inspection.baseCommit,

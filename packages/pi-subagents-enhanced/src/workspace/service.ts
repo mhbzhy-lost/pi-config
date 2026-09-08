@@ -15,16 +15,41 @@ import {
   managedWorkspaceReceiptFromRecord,
 } from "./ledger.ts";
 
-function failure(code, message, cause) {
-  const error = new Error(message);
-  error.code = code;
-  if (cause !== undefined) error.cause = cause;
-  return error;
+class ManagedWorkspaceError extends Error {
+  code: string;
+  cause?: unknown;
+  constructor(code: string, message: string, cause?: unknown) {
+    super(message);
+    this.code = code;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+type TerminalProof = { state: "pending" } | { state: "observed"; conflict: boolean; proofHash: string };
+type ServiceFault = (event: { operation: string; phase: string; workspaceId: string }) => void;
+type ServiceOptions = { stateRoot?: string; terminalProofProvider?: (input: { workspaceId: string; run: unknown }) => unknown; fault?: ServiceFault };
+export type WorkspaceOwnerScope = Readonly<{ kind: "standalone-subagent"; rootSessionId: string }>;
+type StatusInput = { workspaceId?: string; terminalProof?: unknown; expectedHead?: string };
+type DisposeInput = StatusInput & { disposition?: "integrate" | "discard" | "preserve"; strategy?: "cherry-pick" | "merge"; reason?: string; actionToken?: string };
+type ReleaseInput = { workspaceId?: string };
+type ReconcileInput = { originRoot?: string };
+
+function failure(code: string, message: string, cause?: unknown): ManagedWorkspaceError {
+  return new ManagedWorkspaceError(code, message, cause);
 }
 
 function exactKeys(value, keys) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function ownerScopeValue(value: unknown): WorkspaceOwnerScope {
+  const input = value as { kind?: unknown; rootSessionId?: unknown };
+  if (!exactKeys(value, ["kind", "rootSessionId"]) || input.kind !== "standalone-subagent"
+      || typeof input.rootSessionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(input.rootSessionId) || input.rootSessionId.includes("..")) {
+    throw failure("MANAGED_WORKSPACE_OWNER_SCOPE", "workspace owner scope is invalid");
+  }
+  return Object.freeze({ kind: input.kind, rootSessionId: input.rootSessionId });
 }
 
 function same(left, right) {
@@ -41,7 +66,17 @@ function proofValue(value) {
 }
 
 function observed(proof) {
-  return proof.state === "observed" && proof.conflict === false;
+  return proof?.state === "observed" && proof.conflict === false;
+}
+
+function assertExpectedHead(inspection, expectedHead) {
+  if (expectedHead === undefined) return;
+  if (typeof expectedHead !== "string" || !/^[a-f0-9]{40}$/.test(expectedHead)) {
+    throw failure("MANAGED_WORKSPACE_EXPECTED_HEAD", "expected workspace HEAD is invalid");
+  }
+  if (inspection?.headCommit !== expectedHead) {
+    throw failure("MANAGED_WORKSPACE_EXPECTED_HEAD", "workspace HEAD does not match the required settled HEAD");
+  }
 }
 
 function actionToken() {
@@ -78,7 +113,7 @@ function cleanupDebt(error, phase) {
   };
 }
 
-export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, terminalProofProvider, fault } = {}) {
+export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, terminalProofProvider, fault }: ServiceOptions = {}) {
   const ledger = createManagedWorkspaceLedger({ stateRoot });
 
   function receipt(record) {
@@ -87,6 +122,16 @@ export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODIN
 
   function load(workspaceId) {
     return ledger.load(workspaceId);
+  }
+
+  function loadOwned(workspaceId, ownerScope: unknown) {
+    const scope = ownerScopeValue(ownerScope);
+    const lease = load(workspaceId);
+    const owner = lease.record.request.owner;
+    if (owner.kind !== scope.kind || owner.rootSessionId !== scope.rootSessionId) {
+      throw failure("MANAGED_WORKSPACE_OWNER_SCOPE", "workspace does not belong to the current standalone session");
+    }
+    return lease;
   }
 
   function mutate(lease, change) {
@@ -151,8 +196,13 @@ export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODIN
   }
 
   function inspectStatus(record, suppliedProof) {
-    const terminalProof = resolveProof(record, suppliedProof);
+    const unbound = record.run === null;
+    const terminalProof = unbound ? null : resolveProof(record, suppliedProof);
     const inspection = inspectManagedGitWorkspace(record);
+    if (unbound) {
+      const snapshotHash = managedWorkspaceSnapshotHash(inspection, terminalProof);
+      return { receipt: receipt(record), inspection, terminalProof, allowedDispositions: ["discard", "preserve"], blockedReasons: [], snapshotHash };
+    }
     const allowedDispositions = ["preserve"];
     const blockedReasons = [];
     if (!observed(terminalProof)) blockedReasons.push("terminal-unobserved");
@@ -171,8 +221,7 @@ export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODIN
     return { receipt: receipt(record), inspection, terminalProof, allowedDispositions, blockedReasons: [...new Set(blockedReasons)], snapshotHash };
   }
 
-  function status({ workspaceId, terminalProof } = {}) {
-    const lease = load(workspaceId);
+  function statusForLease(lease, { terminalProof, expectedHead }: Omit<StatusInput, "workspaceId"> = {}) {
     if (lease.record.state === "released" || lease.record.state === "cleanup-debt") {
       return { receipt: receipt(lease.record), inspection: null, terminalProof: null, allowedDispositions: [], blockedReasons: [], snapshotHash: null };
     }
@@ -180,13 +229,29 @@ export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODIN
       return { receipt: receipt(lease.record), inspection: inspectManagedGitWorkspace(lease.record), terminalProof: null, allowedDispositions: [], blockedReasons: [], snapshotHash: null };
     }
     if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", `workspace status is unavailable in ${lease.record.state}`);
-    return inspectStatus(lease.record, terminalProof);
+    const snapshot = inspectStatus(lease.record, terminalProof);
+    // Test/runtime barriers run after canonical Git inspection; no caller
+    // inspector participates in this authority boundary.
+    fault?.({ operation: "status", phase: "after-inspection", workspaceId: lease.workspaceId });
+    // An expected settled HEAD asks for a bounded post-barrier reinspection.
+    // This closes the status-to-intent TOCTOU without accepting caller facts.
+    const confirmed = expectedHead === undefined ? snapshot : inspectStatus(lease.record, terminalProof);
+    assertExpectedHead(confirmed.inspection, expectedHead);
+    return confirmed;
   }
 
-  function issueDisposition({ workspaceId, terminalProof } = {}) {
-    let lease = load(workspaceId);
+  function status({ workspaceId, terminalProof, expectedHead }: StatusInput = {}) {
+    return statusForLease(load(workspaceId), { terminalProof, expectedHead });
+  }
+
+  function statusOwned({ workspaceId, ownerScope, terminalProof, expectedHead }: StatusInput & { ownerScope: WorkspaceOwnerScope }) {
+    return statusForLease(loadOwned(workspaceId, ownerScope), { terminalProof, expectedHead });
+  }
+
+  function issueDispositionForLease(lease, { terminalProof, expectedHead }: Omit<StatusInput, "workspaceId"> = {}) {
     if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", "disposition can be issued only for an active workspace");
     const snapshot = inspectStatus(lease.record, terminalProof);
+    assertExpectedHead(snapshot.inspection, expectedHead);
     const token = actionToken();
     const challenge = {
       tokenHash: tokenHash(token),
@@ -197,6 +262,14 @@ export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODIN
     };
     lease = mutate(lease, (record) => { record.actionChallenge = challenge; return record; });
     return { ...snapshot, receipt: receipt(lease.record), actionToken: token };
+  }
+
+  function issueDisposition({ workspaceId, terminalProof, expectedHead }: StatusInput = {}) {
+    return issueDispositionForLease(load(workspaceId), { terminalProof, expectedHead });
+  }
+
+  function issueOwnedDisposition({ workspaceId, ownerScope, terminalProof, expectedHead }: StatusInput & { ownerScope: WorkspaceOwnerScope }) {
+    return issueDispositionForLease(loadOwned(workspaceId, ownerScope), { terminalProof, expectedHead });
   }
 
   function recoverDisposition(lease) {
@@ -222,14 +295,16 @@ export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODIN
     }
   }
 
-  function dispose({ workspaceId, terminalProof, disposition, strategy = "cherry-pick", reason, actionToken: suppliedToken } = {}) {
-    let lease = load(workspaceId);
+  function disposeForLease(lease, { terminalProof, expectedHead, disposition, strategy = "cherry-pick", reason, actionToken: suppliedToken }: Omit<DisposeInput, "workspaceId"> = {}) {
     if (lease.record.state === "disposing") {
       if (tokenHash(suppliedToken) !== lease.record.actionChallenge?.tokenHash) throw failure("MANAGED_WORKSPACE_ACTION", "action token does not own pending disposition");
       return receipt(recoverDisposition(lease).record);
     }
     if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", "workspace disposition token was replayed or state is closed");
     const snapshot = inspectStatus(lease.record, terminalProof);
+    // This check happens in the service disposition authority immediately
+    // before its durable intent; callers cannot substitute a stale snapshot.
+    assertExpectedHead(snapshot.inspection, expectedHead);
     const challenge = lease.record.actionChallenge;
     if (!challenge || challenge.used || tokenHash(suppliedToken) !== challenge.tokenHash
         || challenge.snapshotHash !== snapshot.snapshotHash || challenge.proofHash !== (observed(snapshot.terminalProof) ? snapshot.terminalProof.proofHash : null)) {
@@ -253,12 +328,19 @@ export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODIN
       };
       return record;
     });
-    fault?.({ operation: "dispose", phase: "after-intent", workspaceId });
+    fault?.({ operation: "dispose", phase: "after-intent", workspaceId: lease.workspaceId });
     return receipt(recoverDisposition(lease).record);
   }
 
-  function release({ workspaceId } = {}) {
-    let lease = load(workspaceId);
+  function dispose({ workspaceId, terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken }: DisposeInput = {}) {
+    return disposeForLease(load(workspaceId), { terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken });
+  }
+
+  function disposeOwned({ workspaceId, ownerScope, terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken }: DisposeInput & { ownerScope: WorkspaceOwnerScope }) {
+    return disposeForLease(loadOwned(workspaceId, ownerScope), { terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken });
+  }
+
+  function releaseForLease(lease) {
     if (lease.record.state !== "preserved") throw failure("MANAGED_WORKSPACE_STATE", "only a preserved workspace can be released");
     try {
       const inspection = inspectManagedGitWorkspace(lease.record);
@@ -271,7 +353,25 @@ export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODIN
     }
   }
 
-  function reconcile({ originRoot } = {}) {
+  function release({ workspaceId }: ReleaseInput = {}) {
+    return releaseForLease(load(workspaceId));
+  }
+
+  function releaseOwned({ workspaceId, ownerScope }: ReleaseInput & { ownerScope: WorkspaceOwnerScope }) {
+    return releaseForLease(loadOwned(workspaceId, ownerScope));
+  }
+
+  function listOwned({ ownerScope, runId }: { ownerScope: WorkspaceOwnerScope; runId?: string }) {
+    const scope = ownerScopeValue(ownerScope);
+    if (runId !== undefined && (typeof runId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(runId) || runId.includes(".."))) {
+      throw failure("MANAGED_WORKSPACE_OWNER_SCOPE", "workspace run identity is invalid");
+    }
+    return ledger.listScoped({ owner: scope })
+      .filter((record) => runId === undefined || record.run?.runId === runId)
+      .map(receipt);
+  }
+
+  function reconcile({ originRoot }: ReconcileInput = {}) {
     const results = [];
     for (const record of ledger.list({ originRoot })) {
       let current = ledger.load(record.workspaceId, { originRoot: record.request.originRoot });
@@ -296,5 +396,5 @@ export function createManagedWorkspaceService({ stateRoot = process.env.PI_CODIN
     return results.sort((left, right) => left.workspaceId.localeCompare(right.workspaceId));
   }
 
-  return Object.freeze({ stateRoot: ledger.stateRoot, reserve, ensureAllocated, bindRun, status, issueDisposition, dispose, release, reconcile });
+  return Object.freeze({ stateRoot: ledger.stateRoot, reserve, ensureAllocated, bindRun, listOwned, status, statusOwned, issueDisposition, issueOwnedDisposition, dispose, disposeOwned, release, releaseOwned, reconcile });
 }

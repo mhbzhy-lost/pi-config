@@ -59,9 +59,20 @@ description: Use when delegating coding or non-coding work to a configured Pi ag
 
 Worktree 默认 false：省略或 false 保持 cwd、RPC、prompt 和 hash。coding 使用 `execution.worktree`，generic 使用顶层 `worktree`。true 要求干净且 attached 的 source；脏 source 返回 `WORKTREE_SOURCE_DIRTY`。目录范围 `writePaths` 必须以 `/**` 或 `/` 结尾（如 `src/**` 或 `src/`）；裸路径按精确文件匹配。
 
-Completion/status 不等于 terminal proof。先调用 public JSON ABI `subagent({action:"workspace_status",workspace_id:workspaceId})`，再调用 `subagent({action:"workspace_disposition",workspace_id:workspaceId,disposition,action_token:actionToken})`。`workspace_status` 返回 `action_token`、`allowed_dispositions`、`integrate_blocked_reasons`（如 `origin-advanced-nonlinear` / `writePaths-out-of-scope`）。只有官方观测的 terminal proof 才允许破坏性的 discard/integrate。`preserve` 保留；`discard` 释放干净 workspace；`integrate` 仅限通过 `writePaths` 检查的 coding，允许 origin 干净前进（并行 worktree 逐个合入）。`release` 释放 `preserved` worktree，无需 `action_token`。generic 不能 integrate。不处置则长期保留为 `awaiting-disposition`。
+`subagent_worktree` 只列出、检查和处置当前 root session 创建的 standalone-subagent workspace；Goal、validation、foreign-session、legacy workspace 一律不在此工具的范围。保存 dispatch 返回的 `workspace_id`；完成时 `subagent-workspace-reminder` 会作为原始主-agent上下文消息提示处置，但 completion/status 都不等于 terminal proof。
 
-禁止 raw git worktree add/remove/prune/move/repair/lock/unlock；所有 standalone、Goal task 和 Goal validation workspace 都由 typed subagent 的统一 workspace service 创建、绑定和处置。交互处置只用 `workspace_disposition` 或 typed Goal disposition，须 public `leaseId`/action token 授权。根级 `node scripts/worktree-lifecycle.ts audit|reconcile` 仅用于统一 inventory、dry-run cleanup plan 和显式 public lease authorization apply，不再提供旧 mutation API；禁止 `--force` remove、raw branch cleanup，`/tmp`、TTL、clean 不授权删除。
+按此顺序调用，并只信任 `status` 返回的 `action_token`、`allowed_dispositions` 与 `integrate_blocked_reasons`：
+
+```js
+subagent_worktree({ action: "list" })
+subagent_worktree({ action: "status", workspace_id: workspaceId })
+subagent_worktree({ action: "dispose", workspace_id: workspaceId, disposition: "integrate", action_token: actionToken })
+subagent_worktree({ action: "release", workspace_id: workspaceId })
+```
+
+`dispose` 也可选择 `discard` 或 `preserve`；`integrate` 仅限通过 `writePaths` 门禁的 coding workspace，generic 不能 integrate。`preserve` 保留现场，完成保留用途后用 `release` 回收，且不需 action token。只有官方观测的 terminal proof 才允许破坏性的 discard/integrate。
+
+禁止 raw git worktree add/remove/prune/move/repair/lock/unlock；所有 standalone、Goal task 和 Goal validation workspace 都由统一 workspace service 创建、绑定和处置。根级 `node scripts/worktree-lifecycle.ts audit|reconcile` 仅用于 inventory、dry-run cleanup plan 和显式 public lease authorization apply；禁止 `--force` remove、raw branch cleanup，`/tmp`、TTL、clean 不授权删除。
 
 ```js
 subagent({

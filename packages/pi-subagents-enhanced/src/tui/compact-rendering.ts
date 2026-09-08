@@ -19,7 +19,7 @@ function textContent(value: unknown) {
 function notificationTitles(message: unknown, firstLine: string) {
   const details = record(record(message)?.details);
   const structured = Array.isArray(details?.titles)
-    ? details.titles.filter((title): title is string => typeof title === "string" && title.trim()).map((title) => title.trim())
+    ? details.titles.filter((title): title is string => typeof title === "string" && Boolean(title.trim())).map((title) => title.trim())
     : [];
   if (structured.length > 0) return structured;
   const titled = [...firstLine.matchAll(/\[([^\]\r\n]+)\]/g)].map((match) => match[1]?.trim()).filter(Boolean) as string[];
@@ -43,6 +43,15 @@ export function formatCompactSubagentNotification(message: unknown) {
     const state = states[index];
     return state ? `${PRESENTATION_GLYPH[state]} ${title} · ${state}` : `${rawStatus === "completed" ? "✓" : rawStatus === "paused" ? "Ⅱ" : rawStatus === "stopped" ? "■" : rawStatus === "failed" ? "◇" : "?"} ${title} · ${rawStatus === "failed" ? "reported" : rawStatus}`;
   }).join("\n");
+}
+
+export function formatCompactSubagentWorkspaceReminder(message: unknown): string {
+  const details = record(record(message)?.details);
+  const workspaceId = typeof details?.workspaceId === "string" && details.workspaceId.trim()
+    ? details.workspaceId.trim() : "workspace";
+  return details?.workspaceState === "preserved"
+    ? `↳ workspace ${workspaceId} · preserved; release when no longer needed`
+    : `↳ workspace ${workspaceId} · awaiting disposition`;
 }
 
 export function formatCompactSubagentSpawnSummary(result: unknown): string | undefined {
@@ -138,7 +147,8 @@ export function formatCompactSubagentToolResult(result: unknown, args: unknown) 
     return text;
   }
   const details = record(record(result)?.details);
-  const requestedId = typeof record(args)?.id === "string" ? record(args).id.trim() : "";
+  const requestedArgs = record(args);
+  const requestedId = typeof requestedArgs?.id === "string" ? requestedArgs.id.trim() : "";
   const reportedId = text.match(/^Run:\s*(\S+)\s*$/im)?.[1] ?? "";
   const runId = typeof details?.runId === "string" && details.runId.trim()
     ? details.runId.trim()

@@ -1,13 +1,20 @@
+import type { WorkspaceOwnerScope } from "./service.ts";
+
 const MANAGED_WORKSPACE_SERVICE_REGISTRY_KEY = Symbol.for("pi.managed-workspace-service-registry.v1");
 
 export type ManagedWorkspaceService = {
   reserve: (request: any) => any;
   ensureAllocated: (request: any) => any;
   bindRun: (binding: { workspaceId: string; run: { runId: string; asyncDir: string } }) => any;
+  listOwned: (request: { ownerScope: WorkspaceOwnerScope; runId?: string }) => any;
   status: (request: { workspaceId: string; terminalProof?: any }) => any;
+  statusOwned: (request: { workspaceId: string; ownerScope: WorkspaceOwnerScope; terminalProof?: any }) => any;
   issueDisposition: (request: { workspaceId: string; terminalProof?: any }) => any;
+  issueOwnedDisposition: (request: { workspaceId: string; ownerScope: WorkspaceOwnerScope; terminalProof?: any }) => any;
   dispose: (request: any) => any;
+  disposeOwned: (request: any & { ownerScope: WorkspaceOwnerScope }) => any;
   release: (request: { workspaceId: string }) => any;
+  releaseOwned: (request: { workspaceId: string; ownerScope: WorkspaceOwnerScope }) => any;
   reconcile: (request: { originRoot?: string }) => any;
 };
 
@@ -52,7 +59,7 @@ function rootSessionId(value: unknown): string {
 }
 
 function assertService(value: ManagedWorkspaceService): void {
-  const methods = ["reserve", "ensureAllocated", "bindRun", "status", "issueDisposition", "dispose", "release", "reconcile"] as const;
+  const methods = ["reserve", "ensureAllocated", "bindRun", "listOwned", "status", "statusOwned", "issueDisposition", "issueOwnedDisposition", "dispose", "disposeOwned", "release", "releaseOwned", "reconcile"] as const;
   if (!value || methods.some((method) => typeof value[method] !== "function")) {
     throw new TypeError("Managed workspace service is invalid");
   }

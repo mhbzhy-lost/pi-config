@@ -4,6 +4,7 @@ import test from "node:test";
 import * as compactRendering from "../packages/pi-subagents-enhanced/src/tui/compact-rendering.ts";
 const {
   formatCompactSubagentNotification,
+  formatCompactSubagentWorkspaceReminder,
   formatCompactSubagentSpawnSummary,
   formatCompactSubagentToolResult,
   formatCompactSubagentSteerResult,
@@ -322,6 +323,17 @@ test("compact supervisor renderer removes only the duplicated trailing dispatch 
     "← (executor) 验证 external podspec 注册:\nUPDATE: Starting isolated [probe]. I will preserve this body.",
   );
   assert.doesNotMatch(rendered, /\[验证 external podspec 注册\]$/);
+  assert.deepEqual(message, before);
+});
+
+test("compact workspace reminder renders a separate disposition summary without mutation", () => {
+  const message = {
+    customType: "subagent-workspace-reminder",
+    content: "Subagent workspace awaiting disposition: workspace-a. Call subagent_worktree({action:\"status\",workspace_id:\"workspace-a\"}), then integrate, discard, or preserve according to the returned allowed_dispositions.",
+    details: { schemaVersion: "subagent-workspace-reminder.v1", rootSessionId: "root", runId: "run", workspaceId: "workspace-a", workspaceState: "preserved", mode: "coding" },
+  };
+  const before = clone(message);
+  assert.equal(formatCompactSubagentWorkspaceReminder(message), "↳ workspace workspace-a · preserved; release when no longer needed");
   assert.deepEqual(message, before);
 });
 

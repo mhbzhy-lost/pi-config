@@ -36,11 +36,23 @@ const RECORD_KEYS = [
   "actionChallenge", "pendingAction", "createdAt", "updatedAt", "revision",
 ];
 
-function failure(code, message, cause) {
-  const error = new Error(message);
-  error.code = code;
-  if (cause !== undefined) error.cause = cause;
-  return error;
+class ManagedWorkspaceError extends Error {
+  code: string;
+  cause?: unknown;
+  constructor(code: string, message: string, cause?: unknown) {
+    super(message);
+    this.code = code;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+type LedgerFault = (event: { operation: string; phase: string; workspaceId: string }) => void;
+type LedgerOptions = { stateRoot?: string; fault?: LedgerFault };
+type LoadOptions = { originRoot?: string };
+type MutateOptions = { originRoot?: string; leaseId?: string };
+
+function failure(code: string, message: string, cause?: unknown): ManagedWorkspaceError {
+  return new ManagedWorkspaceError(code, message, cause);
 }
 
 function normalizedStateRoot(value) {
@@ -139,7 +151,7 @@ function ownBirth() {
   return ownBirthIdentity;
 }
 
-function openNoFollow(file, flags, mode) {
+function openNoFollow(file, flags, mode = 0o600) {
   return openSync(file, flags | (constants.O_NOFOLLOW ?? 0), mode);
 }
 
@@ -295,17 +307,22 @@ function validatePendingAction(value) {
     && (value.executorHead === null || /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.executorHead)));
 }
 
-function validateRecord(value, expectedOrigin) {
+function validateRecordEnvelope(value, filenameWorkspaceId?: string) {
   if (!exactKeys(value, RECORD_KEYS) || value.schemaVersion !== RECORD_SCHEMA || !STATES.has(value.state)
       || !SHA256.test(value.requestHash) || !OWNER_TOKEN.test(value.ownerToken) || !SHA256.test(value.leaseId)
       || createHash("sha256").update(value.ownerToken).digest("hex") !== value.leaseId
       || !Number.isSafeInteger(value.revision) || value.revision < 0
       || typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt))
       || typeof value.updatedAt !== "string" || Number.isNaN(Date.parse(value.updatedAt))
-      || !validateActionChallenge(value.actionChallenge) || !validatePendingAction(value.pendingAction)) {
+      || !validateActionChallenge(value.actionChallenge) || !validatePendingAction(value.pendingAction)
+      || (filenameWorkspaceId !== undefined && value.workspaceId !== filenameWorkspaceId)) {
     throw failure("MANAGED_WORKSPACE_SCHEMA", "managed workspace record schema is invalid");
   }
-  const request = createManagedWorkspaceRequest(value.request);
+  return createManagedWorkspaceRequest(value.request);
+}
+
+function validateRecord(value, expectedOrigin) {
+  const request = validateRecordEnvelope(value);
   if (request.originRoot !== expectedOrigin || hashValue(request) !== value.requestHash || request.workspaceId !== value.workspaceId) {
     throw failure("MANAGED_WORKSPACE_IDENTITY", "managed workspace request identity is invalid");
   }
@@ -362,7 +379,7 @@ export function managedWorkspaceReceiptFromRecord(record) {
   return publicManagedWorkspaceReceipt({ ...receiptFields(record), ownerToken: record.ownerToken });
 }
 
-export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, fault } = {}) {
+export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, fault }: LedgerOptions = {}) {
   const root = normalizedStateRoot(stateRoot);
 
   function locate(workspaceId, originRoot) {
@@ -408,12 +425,12 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     });
   }
 
-  function load(workspaceId, { originRoot } = {}) {
+  function load(workspaceId, { originRoot }: LoadOptions = {}) {
     const paths = locate(workspaceId, originRoot);
     return privateLease(readRecord(paths));
   }
 
-  function mutate(workspaceId, change, { originRoot, leaseId } = {}) {
+  function mutate(workspaceId, change, { originRoot, leaseId }: MutateOptions = {}) {
     const paths = locate(workspaceId, originRoot);
     return withLock(paths, () => {
       const current = readRecord(paths);
@@ -429,7 +446,33 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     });
   }
 
-  function list({ originRoot } = {}) {
+  function listScoped({ owner }: { owner: { kind: "standalone-subagent"; rootSessionId: string } }) {
+    if (!exactKeys(owner, ["kind", "rootSessionId"]) || owner.kind !== "standalone-subagent"
+        || typeof owner.rootSessionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(owner.rootSessionId) || owner.rootSessionId.includes("..")) {
+      throw failure("MANAGED_WORKSPACE_OWNER_SCOPE", "workspace owner scope is invalid");
+    }
+    const records = [];
+    for (const repositoryDir of scopeDirectories(root)) {
+      const recordsDir = path.join(repositoryDir, "records");
+      if (!existsSync(recordsDir)) continue;
+      const info = lstatSync(recordsDir);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw failure("MANAGED_WORKSPACE_STORAGE", "records storage is invalid");
+      for (const entry of readdirSync(recordsDir, { withFileTypes: true })) {
+        if (!entry.name.endsWith(".json")) continue;
+        if (!entry.isFile() || entry.isSymbolicLink()) throw failure("MANAGED_WORKSPACE_RECORD", "records storage contains a non-regular entry");
+        const parsed = readPrivateJson(path.join(recordsDir, entry.name), "managed workspace record");
+        const request = validateRecordEnvelope(parsed, entry.name.slice(0, -".json".length));
+        if (hashValue(request) !== parsed.requestHash || request.workspaceId !== parsed.workspaceId) {
+          throw failure("MANAGED_WORKSPACE_IDENTITY", "managed workspace request identity is invalid");
+        }
+        if (request.owner.kind !== owner.kind || request.owner.rootSessionId !== owner.rootSessionId) continue;
+        records.push(validateRecord(parsed, canonicalOrigin(request.originRoot)));
+      }
+    }
+    return records.sort((left, right) => left.workspaceId.localeCompare(right.workspaceId)).map((record) => structuredClone(record));
+  }
+
+  function list({ originRoot }: LoadOptions = {}) {
     const records = [];
     const scopes = originRoot
       ? [managedWorkspacePaths({ stateRoot: root, originRoot, workspaceId: "inventory" }).repositoryDir]
@@ -450,5 +493,5 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     return records.sort((left, right) => left.workspaceId.localeCompare(right.workspaceId)).map((record) => structuredClone(record));
   }
 
-  return Object.freeze({ stateRoot: root, reserve, load, mutate, list });
+  return Object.freeze({ stateRoot: root, reserve, load, mutate, list, listScoped });
 }
