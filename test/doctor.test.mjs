@@ -1,18 +1,30 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtemp, mkdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
 import * as doctor from "../scripts/doctor.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
+import { compiledNodeRuntimePath } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ordered-models-runtime-patch.ts";
 const { inspectConfiguration, inspectGoalContractIntegrity } = doctor;
 import { canonicalJsonSha256 } from "../src/goal-contract/authorization-audit.ts";
 import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Static coverage must be proven from the compiler's resolved program, not imports or text search.
+test("focused Goal typecheck covers the Goal production entry points", () => {
+  const result = execFileSync("npx", ["tsc", "--noEmit", "--listFilesOnly", "-p", "tsconfig.goal-engine.json"], { cwd: repoRoot, encoding: "utf8" });
+  const files = new Set(result.trim().split(/\r?\n/).map((file) => resolve(file)));
+  for (const relativePath of [
+    "src/goal-engine/extension.ts",
+    "pi/extensions/goal-engine.ts",
+    "packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts",
+  ]) assert.ok(files.has(join(repoRoot, relativePath)), `typecheck omits ${relativePath}`);
+});
 
 test("subagent-only Doctor discovers requested profiles across rename without executor", async () => {
   assert.equal(typeof doctor.inspectSubagentRuntime, "function");
@@ -213,6 +225,11 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     await mkdir(join(root, "pi", "agents"), { recursive: true });
     const enhancedRoot = join(root, "packages", "pi-subagents-enhanced");
     const upstreamRoot = join(enhancedRoot, "node_modules", "pi-subagents");
+    await cp(
+      join(repoRoot, "packages", "pi-subagents-enhanced", "node_modules", "pi-subagents", "node-runtime"),
+      join(upstreamRoot, "node-runtime"),
+      { recursive: true },
+    );
     await mkdir(join(enhancedRoot, "extensions"), { recursive: true });
     await mkdir(join(enhancedRoot, "child-extensions"), { recursive: true });
     await mkdir(join(upstreamRoot, "src", "extension"), { recursive: true });
@@ -245,10 +262,20 @@ test("inspectConfiguration accepts a configured pi-subagents package", async () 
     );
     await writeFile(join(enhancedRoot, "extensions", "subagent-runtime.ts"), "");
     await writeFile(join(enhancedRoot, "extensions", "custom-footer.ts"), "");
+    const runtimePath = (...segments) => compiledNodeRuntimePath(upstreamRoot, ...segments);
+    const runtimeExport = (...segments) => `./${relative(upstreamRoot, runtimePath(...segments)).replaceAll("\\", "/")}`;
     await writeFile(
       join(upstreamRoot, "package.json"),
-      JSON.stringify({ version: "0.62.0", pi: { extensions: ["./src/extension/index.ts"] } }),
+      JSON.stringify({ version: "0.62.0", pi: { extensions: ["./src/extension/index.ts"] }, exports: { ".": runtimeExport("index.js"), "./config": runtimeExport("src", "extension", "config.js"), "./enhanced-agents": runtimeExport("src", "agents", "agents.js") } }),
     );
+    await mkdir(dirname(runtimePath("src", "extension", "config.js")), { recursive: true });
+    await mkdir(dirname(runtimePath("src", "agents", "agents.js")), { recursive: true });
+    await mkdir(dirname(runtimePath("src", "runs", "background", "async-execution.js")), { recursive: true });
+    await writeFile(runtimePath("index.js"), "export {};\n");
+    await writeFile(runtimePath("src", "extension", "config.js"), "export {};\n");
+    await writeFile(runtimePath("src", "agents", "agents.js"), "export {};\n");
+    await writeFile(runtimePath("src", "runs", "background", "async-execution.js"), "// pi-config patch: compiled-runner-path.v1\nconst runner = 'subagent-runner.js';\n");
+    await writeFile(runtimePath("src", "runs", "background", "subagent-runner.js"), "export {};\n");
     await writeFile(join(upstreamRoot, "src", "extension", "index.ts"), "");
     await writeFile(join(upstreamRoot, "src", "extension", "rpc.ts"), 'const methods = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];\n');
     await mkdir(join(upstreamRoot, "src", "agents"), { recursive: true });
@@ -519,9 +546,10 @@ test("Goal Engine tool ABI default factory does not report ABI issues", async ()
   );
 });
 
-test("Doctor runtime boundary probe adds no issue or Goal state", async () => {
+test("Doctor production readiness probes the public Goal composition", async () => {
+  assert.deepEqual(await doctor.inspectGoalProductionReadiness(), []);
   const issues = await inspectConfigurationWithValidatedVersions(repoRoot);
-  assert.equal(issues.some((issue) => issue.startsWith("GOAL_RUNTIME_")), false);
+  assert.equal(issues.some((issue) => issue.startsWith("GOAL_RUNTIME_") || issue.startsWith("GOAL_READINESS_")), false);
 });
 
 test("Goal Engine tool ABI validator rejects missing execute", async () => {

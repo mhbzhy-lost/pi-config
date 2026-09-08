@@ -22,10 +22,7 @@ export function isGoalEngineEnabled(settingsPath = goalEngineSettingsPath()): bo
   return !!goalEngine && typeof goalEngine === "object" && !Array.isArray(goalEngine) && (goalEngine as Record<string, unknown>).enabled === true;
 }
 
-type GoalEngineModule = {
-  createGoalEngineExtension: (pi: ExtensionAPI, options?: { runtimeHost?: unknown; runtimeTrace?: { enabled: boolean } }) => unknown;
-};
-
+type GoalEngineModule = { createGoalEngineExtension: (pi: ExtensionAPI, options?: { runtimeHost?: unknown; runtimeTrace?: { enabled: boolean }; finalReviewProviderFactory?: (input: { stateRoot: string }) => unknown }) => unknown; };
 type FinalReviewConfiguration = { provider: string; id: string; timeoutMs: number };
 type GoalEngineConfiguration = { runtimeHost?: Record<string, unknown>; runtimeTrace?: { enabled: boolean }; finalReview?: FinalReviewConfiguration };
 function goalEngineConfiguration(settingsPath: string): GoalEngineConfiguration | null {
@@ -36,20 +33,19 @@ function goalEngineConfiguration(settingsPath: string): GoalEngineConfiguration 
   if (value === true) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const goal = value as Record<string, unknown>;
-  if (goal.enabled !== true || Object.keys(goal).some((key) => key !== "enabled" && key !== "runtimeHost" && key !== "runtimeTrace")) return null;
+  if (goal.enabled !== true || Object.keys(goal).some(key => !["enabled", "runtimeHost", "runtimeTrace", "finalReview"].includes(key))) return null;
   let runtimeHost: Record<string, unknown> | undefined;
-  if (Object.hasOwn(goal, "runtimeHost")) {
-    if (!goal.runtimeHost || typeof goal.runtimeHost !== "object" || Array.isArray(goal.runtimeHost)) return null;
-    runtimeHost = goal.runtimeHost as Record<string, unknown>;
-  }
+  if (Object.hasOwn(goal, "runtimeHost")) { if (!goal.runtimeHost || typeof goal.runtimeHost !== "object" || Array.isArray(goal.runtimeHost)) return null; runtimeHost = goal.runtimeHost as Record<string, unknown>; }
   let runtimeTrace: { enabled: boolean } | undefined;
-  if (Object.hasOwn(goal, "runtimeTrace")) {
-    if (!goal.runtimeTrace || typeof goal.runtimeTrace !== "object" || Array.isArray(goal.runtimeTrace)) return null;
-    const trace = goal.runtimeTrace as Record<string, unknown>;
-    if (Object.keys(trace).some((key) => key !== "enabled") || typeof trace.enabled !== "boolean") return null;
-    runtimeTrace = { enabled: trace.enabled };
+  if (Object.hasOwn(goal, "runtimeTrace")) { if (!goal.runtimeTrace || typeof goal.runtimeTrace !== "object" || Array.isArray(goal.runtimeTrace)) return null; const trace = goal.runtimeTrace as Record<string, unknown>; if (Object.keys(trace).some(key => key !== "enabled") || typeof trace.enabled !== "boolean") return null; runtimeTrace = { enabled: trace.enabled }; }
+  let finalReview: FinalReviewConfiguration | undefined;
+  if (Object.hasOwn(goal, "finalReview")) {
+    if (!goal.finalReview || typeof goal.finalReview !== "object" || Array.isArray(goal.finalReview)) return null;
+    const review = goal.finalReview as Record<string, unknown>;
+    if (Object.keys(review).sort().join("\0") !== "id\0provider\0timeoutMs" || typeof review.provider !== "string" || !review.provider.trim() || review.provider.trim() !== review.provider || typeof review.id !== "string" || !review.id.trim() || review.id.trim() !== review.id || typeof review.timeoutMs !== "number" || !Number.isInteger(review.timeoutMs) || review.timeoutMs < 1 || review.timeoutMs > 600000) return null;
+    finalReview = { provider: review.provider, id: review.id, timeoutMs: review.timeoutMs };
   }
-  return { ...(runtimeHost ? { runtimeHost } : {}), ...(runtimeTrace ? { runtimeTrace } : {}) };
+  return { ...(runtimeHost ? { runtimeHost } : {}), ...(runtimeTrace ? { runtimeTrace } : {}), ...(finalReview ? { finalReview } : {}) };
 }
 
 async function productionFinalReviewFactory(configuration: FinalReviewConfiguration) {
@@ -73,7 +69,7 @@ export async function createGoalEngineEntry(pi: ExtensionAPI, { settingsPath = g
   } else if (runtimeHostFactory) runtimeHost = runtimeHostFactory(pi, {});
   const finalReviewProviderFactory = configuration.finalReview ? await finalReviewFactory(configuration.finalReview) : undefined;
   const { createGoalEngineExtension } = await load();
-  createGoalEngineExtension(pi, { ...(runtimeHost ? { runtimeHost } : {}), ...(configuration.runtimeTrace ? { runtimeTrace: configuration.runtimeTrace } : {}) });
+  createGoalEngineExtension(pi, { ...(runtimeHost ? { runtimeHost } : {}), ...(configuration.runtimeTrace ? { runtimeTrace: configuration.runtimeTrace } : {}), ...(finalReviewProviderFactory ? { finalReviewProviderFactory } : {}) });
 }
 
 export default function goalEngine(pi: ExtensionAPI): Promise<void> { return createGoalEngineEntry(pi); }

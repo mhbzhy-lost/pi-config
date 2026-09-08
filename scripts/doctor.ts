@@ -2,11 +2,11 @@
 import { createRequire } from "node:module";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFile as execFileCallback } from "node:child_process";
-import { access, lstat, readFile } from "node:fs/promises";
+import { access, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
 import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
 import { generationCapabilities } from "../src/goal-engine/generation-capabilities.ts";
@@ -26,6 +26,9 @@ import { verifyOrderedModelsRuntimePatch } from "../packages/pi-subagents-enhanc
 import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { assertRunAuthorization, createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
+import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
+import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
+import { createGoalEngineEntry } from "../pi/extensions/goal-engine.ts";
 
 const execFile = promisify(execFileCallback);
 
@@ -215,6 +218,42 @@ async function readInstalledPiVersion() {
   }
 }
 
+export async function inspectGoalProductionReadiness() {
+  const issues = [];
+  const definitions = [];
+  try {
+    await Promise.resolve(createGoalEngineExtension({ registerTool: (definition) => definitions.push(definition), on() {} }));
+    const names = definitions.map((definition) => definition?.name).sort();
+    if (JSON.stringify(names) !== JSON.stringify([...GOAL_ENGINE_TOOL_NAMES].sort()) || definitions.some((definition) => typeof definition?.execute !== "function" || Object.hasOwn(definition, "handler"))) throw new Error("exact-eight public tool ABI is unavailable");
+  } catch { issues.push("GOAL_READINESS_EXACT_EIGHT"); }
+  try {
+    const authorization = createRunAuthorization({ kind: "coding", binding: { runId: "doctor-goal-run", asyncDir: resolve(process.cwd()), sessionId: "doctor-goal-session", pid: process.pid, agentProfile: "doctor-profile" }, goal: { ticketId: "1".repeat(64), goalId: "doctor-goal", taskId: "doctor-task", attempt: 1, contractHash: "2".repeat(64), workspaceId: "doctor-workspace", executionRevision: 1, expectedCriteria: ["criterion-1"] } });
+    assertRunAuthorization(authorization);
+    if (!authorization.capabilities.includes("acceptance.submit")) throw new Error("Goal authorization did not grant acceptance capability");
+  } catch { issues.push("GOAL_READINESS_HOST_AUTHORIZATION"); }
+  try {
+    const broker = new RootBrokerServer({ rootSessionId: "doctor-root", upstream: {} });
+    if (typeof broker.inspectExecutorProofAsync !== "function" || await broker.inspectExecutorProofAsync("unknown-run") !== null) throw new Error("unknown runs must not produce settlement proof");
+  } catch { issues.push("GOAL_READINESS_CANONICAL_PROOF_READER"); }
+  try {
+    const managed = createManagedWorkspaceService({ stateRoot: join(tmpdir(), "doctor-readiness-no-state") });
+    if (!["issueDisposition", "dispose", "release"].every((name) => typeof managed[name] === "function")) throw new Error("missing managed public lifecycle");
+  } catch { issues.push("GOAL_READINESS_MANAGED_DISPOSITION"); }
+  const settingsRoot = await mkdtemp(join(tmpdir(), "doctor-goal-entry-"));
+  try {
+    await writeFile(join(settingsRoot, "settings.json"), JSON.stringify({ goalEngine: { enabled: true, finalReview: { provider: "doctor", id: "doctor", timeoutMs: 1 } } }));
+    let injected = false;
+    await createGoalEngineEntry({ registerTool() {}, on() {} }, {
+      settingsPath: join(settingsRoot, "settings.json"),
+      finalReviewFactory: async () => () => { injected = true; return undefined; },
+      load: async () => ({ createGoalEngineExtension: (_pi, options) => { if (typeof options?.finalReviewProviderFactory === "function") injected = true; } }),
+    });
+    if (!injected) throw new Error("production entry omitted final review provider");
+  } catch { issues.push("GOAL_READINESS_FINAL_REVIEW_PROVIDER");
+  } finally { await rm(settingsRoot, { recursive: true, force: true }); }
+  return issues;
+}
+
 export async function inspectGoalContractIntegrity(repoRoot) {
   const registryPath = join(repoRoot, ".state", "goal-contract", "registry.json");
   const registrySource = await readIfExists(registryPath);
@@ -295,6 +334,7 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   issues.push(...await inspectSubagentRuntime({ cwd: repoRoot, requests: options.subagentRequests, discovery: options.subagentDiscovery }));
   issues.push(...await inspectGoalContractIntegrity(repoRoot));
   issues.push(...inspectGoalRuntimeBoundaries({ goalRuntimeBoundaryFactory: options.goalRuntimeBoundaryFactory }));
+  issues.push(...await inspectGoalProductionReadiness());
   let desired = new Map();
   try {
     desired = await discoverManagedSkills(repoRoot);

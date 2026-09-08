@@ -120,6 +120,30 @@ test("enabled entry forwards the optional runtime trace switch", async () => {
   assert.deepEqual(created[0].options, { runtimeTrace: { enabled: true } });
 });
 
+test("production entry only injects a factory for exact explicit finalReview model configuration", async () => {
+  const dir = settingsDir({ goalEngine: { enabled: true, finalReview: { provider: "configured-provider", id: "configured-model", timeoutMs: 1234 } } });
+  const created = [], selected = [];
+  const factory = ({ stateRoot }) => async () => ({ stateRoot });
+  await createGoalEngineEntry(disabledPi(), {
+    settingsPath: join(dir, "settings.json"),
+    finalReviewFactory: async configuration => { selected.push(configuration); return factory; },
+    async load() { return { createGoalEngineExtension(_target, options) { created.push(options); } }; },
+  });
+  assert.deepEqual(selected, [{ provider: "configured-provider", id: "configured-model", timeoutMs: 1234 }]);
+  assert.equal(created[0].finalReviewProviderFactory, factory);
+});
+
+test("invalid or unavailable finalReview configuration fails closed without a provider factory", async () => {
+  for (const finalReview of [{ provider: "x", id: "y" }, { provider: " x", id: "y", timeoutMs: 1 }, { provider: "x", id: "y", timeoutMs: 0 }, { provider: "x", id: "y", timeoutMs: 600001 }, { provider: "x", id: "y", timeoutMs: 1, key: "forbidden" }]) {
+    const dir = settingsDir({ goalEngine: { enabled: true, finalReview } }); let calls = 0;
+    await createGoalEngineEntry(disabledPi(), { settingsPath: join(dir, "settings.json"), finalReviewFactory: async () => { calls++; return () => async () => ({ severity: "none" }); }, async load() { throw new Error("invalid configuration must not load"); } });
+    assert.equal(calls, 0);
+  }
+  const dir = settingsDir({ goalEngine: { enabled: true, finalReview: { provider: "x", id: "y", timeoutMs: 1 } } }); const created = [];
+  await createGoalEngineEntry(disabledPi(), { settingsPath: join(dir, "settings.json"), finalReviewFactory: async () => undefined, async load() { return { createGoalEngineExtension(_target, options) { created.push(options); } }; } });
+  assert.equal(created[0].finalReviewProviderFactory, undefined);
+});
+
 test("enabled entry propagates loader failures", async () => {
   const dir = settingsDir({ goalEngine: true });
   const expected = new Error("goal engine module failed to load");
