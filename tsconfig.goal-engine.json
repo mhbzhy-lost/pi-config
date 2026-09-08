@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "src/goal-engine/**/*.ts",
+    "pi/extensions/goal-engine.ts",
+    "packages/pi-subagents-enhanced/src/**/*.ts",
+    "packages/pi-subagents-enhanced/extensions/**/*.ts",
+    "packages/pi-subagents-enhanced/child-extensions/**/*.ts",
+    "packages/pi-subagents-enhanced/scripts/**/*.ts"
+  ]
+}

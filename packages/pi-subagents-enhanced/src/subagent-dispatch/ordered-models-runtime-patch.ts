@@ -1,11 +1,92 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { execFile as execFileCallback } from "node:child_process";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 
 export const ORDERED_MODELS_PATCH_VERSION = "ordered-models.v3";
 export const WORKFLOW_CHILD_EXTENSIONS_PATCH_VERSION = "workflow-child-extensions.v1";
 export const SUPPORTED_PI_SUBAGENTS_VERSION = "0.62.0";
 const MARKER = `// pi-config patch: ${ORDERED_MODELS_PATCH_VERSION}`;
 const CHILD_EXTENSIONS_MARKER = `// pi-config patch: ${WORKFLOW_CHILD_EXTENSIONS_PATCH_VERSION}`;
+const COMPILED_RUNNER_PATH_MARKER = "// pi-config patch: compiled-runner-path.v1";
+const COMPILED_EXTENSION_PATHS_MARKER = "// pi-config patch: compiled-extension-paths.v1";
+/** The compiler configuration is the sole source for the installed JS runtime tree. */
+export const NODE_RUNTIME_TSC_CONFIG = {
+  compilerOptions: {
+    module: "NodeNext", moduleResolution: "NodeNext", target: "ES2022", rewriteRelativeImportExtensions: true, noCheck: true,
+    outDir: "./node-runtime", rootDir: ".",
+  },
+  include: ["index.ts", "src/**/*.ts"],
+  exclude: ["test", "node_modules", "node-runtime"],
+} as const;
+export const NODE_RUNTIME_TSC_CONFIG_FILE = "node-runtime.tsconfig.json";
+const NODE_RUNTIME_COMPAT_EXPORTS = {
+  "./config": "./src/extension/config.ts",
+  "./background-notify": "./src/runs/background/notify.ts",
+  "./session-identity": "./src/shared/session-identity.ts",
+  "./completion-owner": "./src/shared/completion-owner.ts",
+  "./artifacts": "./src/shared/artifacts.ts",
+  "./fleet-transcript": "./src/tui/fleet-transcript.ts",
+  "./enhanced-agents": "./src/agents/agents.ts",
+};
+const execFile = promisify(execFileCallback);
+
+/** Resolves the runtime tree from tsc's configured outDir, never from a duplicated path literal. */
+export function compiledNodeRuntimeRoot(packageRoot: string) {
+  return resolve(packageRoot, NODE_RUNTIME_TSC_CONFIG.compilerOptions.outDir);
+}
+
+export function compiledNodeRuntimePath(packageRoot: string, ...segments: string[]) {
+  return join(compiledNodeRuntimeRoot(packageRoot), ...segments);
+}
+
+function nodeRuntimeTarget(target: unknown) {
+  const runtimePrefix = `./${NODE_RUNTIME_TSC_CONFIG.compilerOptions.outDir.replace(/^\.\//, "")}/`;
+  if (typeof target === "string" && target.startsWith(runtimePrefix) && target.endsWith(".js")) return target;
+  if (typeof target !== "string" || !target.startsWith("./") || !target.endsWith(".ts")) throw new Error(`Unsupported pi-subagents export target: ${target}`);
+  return `${runtimePrefix}${target.slice(2, -3)}.js`;
+}
+
+async function patchCompiledRuntimePaths(packageRoot: string) {
+  const runnerPath = compiledNodeRuntimePath(packageRoot, "src/runs/background/async-execution.js");
+  const runnerSource = await readFile(runnerPath, "utf8");
+  if (!runnerSource.includes(COMPILED_RUNNER_PATH_MARKER)) {
+    const next = once(
+      runnerSource,
+      /const runner = path\.join\(path\.dirname\(fileURLToPath\(import\.meta\.url\)\), "subagent-runner\.ts"\);/,
+      `const runner = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-runner.js");\n${COMPILED_RUNNER_PATH_MARKER}`,
+      "node-runtime/src/runs/background/async-execution.js",
+    );
+    await writeFile(runnerPath, next);
+  }
+
+  const piArgsPath = compiledNodeRuntimePath(packageRoot, "src/runs/shared/pi-args.js");
+  const piArgsSource = await readFile(piArgsPath, "utf8");
+  if (!piArgsSource.includes(COMPILED_EXTENSION_PATHS_MARKER)) {
+    let next = once(piArgsSource, /"subagent-prompt-runtime\.ts"/, '"subagent-prompt-runtime.js"', "node-runtime/src/runs/shared/pi-args.js");
+    next = once(next, /"fanout-child\.ts"/, '"fanout-child.js"', "node-runtime/src/runs/shared/pi-args.js");
+    next = once(next, /"fast-mode-extension\.ts"/, '"fast-mode-extension.js"', "node-runtime/src/runs/shared/pi-args.js");
+    await writeFile(piArgsPath, `${next}\n${COMPILED_EXTENSION_PATHS_MARKER}\n`);
+  }
+}
+
+/** Compiles the pinned upstream TS package before its exports are exposed to plain Node. */
+export async function buildNodeRuntime(packageRoot, { run = execFile }: { run?: (file: string, args: string[]) => Promise<unknown> } = {}) {
+  const metadataPath = join(packageRoot, "package.json");
+  const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+  if (metadata.version !== SUPPORTED_PI_SUBAGENTS_VERSION) throw new Error(`node runtime build supports pi-subagents ${SUPPORTED_PI_SUBAGENTS_VERSION}, found ${metadata.version ?? "unknown"}`);
+  const output = compiledNodeRuntimeRoot(packageRoot);
+  await rm(output, { recursive: true, force: true });
+  await writeFile(join(packageRoot, NODE_RUNTIME_TSC_CONFIG_FILE), `${JSON.stringify(NODE_RUNTIME_TSC_CONFIG)}\n`);
+  const tsc = resolve(packageRoot, "..", "typescript", "bin", "tsc");
+  await run(process.execPath, [tsc, "--project", join(packageRoot, NODE_RUNTIME_TSC_CONFIG_FILE)]);
+  await patchCompiledRuntimePaths(packageRoot);
+  const exports = { ...metadata.exports, ...NODE_RUNTIME_COMPAT_EXPORTS };
+  metadata.exports = Object.fromEntries(Object.entries(exports).map(([key, target]) => [key, nodeRuntimeTarget(target)]));
+  metadata.files = [...new Set([...(metadata.files ?? []), NODE_RUNTIME_TSC_CONFIG.compilerOptions.outDir.replace(/^\.\//, "")])];
+  await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+  return { output, exports: metadata.exports };
+}
 
 function once(source, re, replacement, path) {
   const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
@@ -90,12 +171,12 @@ function asyncExecution(source, path) {
   return workflowChildExtensions(execution(source, path), path);
 }
 function noop(source) { return source; }
-const files = [
+const files: readonly [string, typeof agents][] = [
   ["src/agents/agents.ts", agents], ["src/agents/agent-serializer.ts", serializer],
   ["src/runs/shared/model-fallback.ts", fallback], ["src/api/preflight.ts", execution],
   ["src/runs/background/async-execution.ts", asyncExecution], ["src/runs/foreground/execution.ts", execution],
 ];
-const workflowChildExtensionFiles = [["src/runs/foreground/subagent-executor.ts", workflowChildExtensionBridge]];
+const workflowChildExtensionFiles: readonly [string, typeof workflowChildExtensionBridge][] = [["src/runs/foreground/subagent-executor.ts", workflowChildExtensionBridge]];
 export async function verifyOrderedModelsRuntimePatch(packageRoot) {
   const metadata = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
   if (metadata.version !== SUPPORTED_PI_SUBAGENTS_VERSION) throw new Error(`ordered models patch supports pi-subagents ${SUPPORTED_PI_SUBAGENTS_VERSION}, found ${metadata.version ?? "unknown"}`);
@@ -105,6 +186,31 @@ export async function verifyOrderedModelsRuntimePatch(packageRoot) {
     if (relative === "src/runs/background/async-execution.ts" && !source.includes(CHILD_EXTENSIONS_MARKER)) throw new Error(`workflow child extensions runtime patch missing: ${relative}`);
   }
   for (const [relative] of workflowChildExtensionFiles) if (!(await readFile(join(packageRoot, relative), "utf8")).includes(CHILD_EXTENSIONS_MARKER)) throw new Error(`workflow child extensions runtime patch missing: ${relative}`);
+  const runtime = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+  const runtimePrefix = `./${NODE_RUNTIME_TSC_CONFIG.compilerOptions.outDir.replace(/^\.\//, "")}`;
+  if (runtime.exports?.["."] !== `${runtimePrefix}/index.js`
+    || runtime.exports?.["./config"] !== `${runtimePrefix}/src/extension/config.js`
+    || runtime.exports?.["./enhanced-agents"] !== `${runtimePrefix}/src/agents/agents.js`) {
+    throw new Error("pi-subagents node runtime exports are missing or uncompiled.");
+  }
+  await readFile(compiledNodeRuntimePath(packageRoot, "index.js"), "utf8");
+  const compiledAsyncExecution = await readFile(compiledNodeRuntimePath(packageRoot, "src/runs/background/async-execution.js"), "utf8");
+  if (!compiledAsyncExecution.includes(COMPILED_RUNNER_PATH_MARKER)
+    || compiledAsyncExecution.includes("subagent-runner.ts")
+    || !compiledAsyncExecution.includes("subagent-runner.js")) {
+    throw new Error("pi-subagents compiled async runner path is invalid.");
+  }
+  await readFile(compiledNodeRuntimePath(packageRoot, "src/runs/background/subagent-runner.js"), "utf8");
+  const compiledPiArgs = await readFile(compiledNodeRuntimePath(packageRoot, "src/runs/shared/pi-args.js"), "utf8");
+  if (!compiledPiArgs.includes(COMPILED_EXTENSION_PATHS_MARKER)
+    || /(?:subagent-prompt-runtime|fanout-child|fast-mode-extension)\.ts/.test(compiledPiArgs)) {
+    throw new Error("pi-subagents compiled child extension paths are invalid.");
+  }
+  for (const segments of [
+    ["src", "runs", "shared", "subagent-prompt-runtime.js"],
+    ["src", "extension", "fanout-child.js"],
+    ["src", "runs", "shared", "fast-mode-extension.js"],
+  ]) await readFile(compiledNodeRuntimePath(packageRoot, ...segments), "utf8");
   return true;
 }
 export async function applyOrderedModelsRuntimePatch(packageRoot) {
@@ -112,5 +218,6 @@ export async function applyOrderedModelsRuntimePatch(packageRoot) {
   if (metadata.version !== SUPPORTED_PI_SUBAGENTS_VERSION) throw new Error(`ordered models patch supports pi-subagents ${SUPPORTED_PI_SUBAGENTS_VERSION}, found ${metadata.version ?? "unknown"}`);
   for (const [relative, patch] of files) { const path = join(packageRoot, relative); const source = await readFile(path, "utf8"); const next = patch(source, relative); if (next !== source) await writeFile(path, next); }
   for (const [relative, patch] of workflowChildExtensionFiles) { const path = join(packageRoot, relative); const source = await readFile(path, "utf8"); const next = patch(source, relative); if (next !== source) await writeFile(path, next); }
+  await buildNodeRuntime(packageRoot);
   return verifyOrderedModelsRuntimePatch(packageRoot);
 }

@@ -30,10 +30,12 @@
   "scripts": {
     "test": "node --test ../../test/pi-subagents-enhanced-package.test.mjs",
     "setup:runtime": "node scripts/setup-runtime-deps.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "verify:package": "node scripts/verify-package.ts"
   },
   "dependencies": {
-    "pi-subagents": "0.62.0"
+    "pi-subagents": "0.62.0",
+    "typescript": "5.9.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

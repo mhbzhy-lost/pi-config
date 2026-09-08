@@ -4,7 +4,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { verifyOrderedModelsRuntimePatch } from "../src/subagent-dispatch/ordered-models-runtime-patch.ts";
+import { compiledNodeRuntimePath, verifyOrderedModelsRuntimePatch } from "../src/subagent-dispatch/ordered-models-runtime-patch.ts";
 
 const execFile = promisify(execFileCallback);
 const scriptPath = fileURLToPath(import.meta.url);
@@ -41,8 +41,13 @@ const requiredTarballPaths = [
   "src/workspace/git-worktree.ts",
   "src/workspace/service.ts",
   "src/workspace/registry.ts",
+  "src/workspace/tool.ts",
+  "src/workspace/completion-reminder.ts",
   "src/workspace/administration.ts",
   "node_modules/pi-subagents/package.json",
+  "node_modules/pi-subagents/node-runtime/index.js",
+  "node_modules/pi-subagents/node-runtime/src/runs/background/async-execution.js",
+  "node_modules/pi-subagents/node-runtime/src/runs/background/subagent-runner.js",
   "node_modules/pi-subagents/src/agents/agents.ts",
   "node_modules/acorn/package.json",
   "node_modules/jiti/package.json",
@@ -153,9 +158,10 @@ export async function verifyEnhancedPackage({ packageRoot = defaultPackageRoot, 
   const manifest = await json(resolve(packageRoot, "package.json"));
   if (manifest.name !== "pi-subagents-enhanced" || manifest.version !== "0.1.0") throw new Error("Enhanced package identity must be pi-subagents-enhanced@0.1.0.");
   if (manifest.dependencies?.["pi-subagents"] !== "0.62.0"
+    || manifest.dependencies?.typescript !== "5.9.3"
     || JSON.stringify(manifest.bundleDependencies) !== JSON.stringify(["pi-subagents"])
     || Object.hasOwn(manifest, "bundledDependencies")) {
-    throw new Error("Enhanced package must declare only canonical bundleDependencies for pi-subagents 0.62.0.");
+    throw new Error("Enhanced package must declare the pinned pi-subagents runtime compiler and canonical bundleDependencies.");
   }
   if (JSON.stringify(manifest.pi?.extensions) !== JSON.stringify(expectedExtensions)) throw new Error("Enhanced package must declare exactly the runtime and footer extensions.");
   if (JSON.stringify(manifest.exports) !== JSON.stringify(expectedExports)) throw new Error("Enhanced package exports must expose only canonical dispatch and workspace APIs.");
@@ -168,6 +174,10 @@ export async function verifyEnhancedPackage({ packageRoot = defaultPackageRoot, 
   const upstream = await json(resolve(upstreamRoot, "package.json"));
   if (upstream.version !== "0.62.0") throw new Error(`Expected pi-subagents 0.62.0, found ${upstream.version ?? "unknown"}.`);
   await verifyPatch(upstreamRoot);
+  await Promise.all([
+    lstat(compiledNodeRuntimePath(upstreamRoot, "src/runs/background/async-execution.js")),
+    lstat(compiledNodeRuntimePath(upstreamRoot, "src/runs/background/subagent-runner.js")),
+  ]);
   for (const entry of manifest.pi.extensions) await lstat(resolve(packageRoot, entry));
   const importEdges = await verifyImportClosure(packageRoot);
   const tarball = verifyTarball(await runPack(packageRoot));

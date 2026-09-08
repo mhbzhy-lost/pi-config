@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { cp, lstat, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { after } from "node:test";
 import test from "node:test";
 import { resolvePiHostPaths } from "./helpers/pi-host.mjs";
 
@@ -24,6 +26,30 @@ const forbiddenLocalPeers = [
   "@earendil-works/pi-tui",
 ];
 
+let fixtureRoot;
+let fixturePromise;
+async function preparedPackageFixture() {
+  if (!fixturePromise) fixturePromise = (async () => {
+    fixtureRoot = join(await mkdtemp(join(tmpdir(), "enhanced-runtime-fixture-")), "package");
+    await cp(packageRoot, fixtureRoot, {
+      recursive: true,
+      filter: (source) => !source.endsWith("/node_modules") && !source.endsWith("/package-lock.json") && !source.endsWith(".tgz"),
+    });
+    const manifest = await metadata(fixtureRoot);
+    delete manifest.bundleDependencies;
+    await writeFile(join(fixtureRoot, "package.json"), JSON.stringify(manifest));
+    const setup = await import("../packages/pi-subagents-enhanced/scripts/setup-runtime-deps.ts");
+    await setup.setupRuntimeDependencies({ root: fixtureRoot });
+    manifest.bundleDependencies = ["pi-subagents"];
+    await writeFile(join(fixtureRoot, "package.json"), JSON.stringify(manifest));
+    return fixtureRoot;
+  })();
+  return fixturePromise;
+}
+after(async () => {
+  if (fixtureRoot) await rm(dirname(fixtureRoot), { recursive: true, force: true });
+});
+
 async function metadata(root = packageRoot) {
   return JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 }
@@ -36,12 +62,14 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
     test: rootManifest.scripts["test:subagents-enhanced"],
     workspace: rootManifest.scripts["test:subagent-workspace"],
     goal: rootManifest.scripts["test:goal-engine"],
+    canary: rootManifest.scripts["test:goal-runtime-canary"],
     setup: rootManifest.scripts["setup:subagents-enhanced"],
     verify: rootManifest.scripts["verify:subagents-enhanced"],
   }, {
     test: "npm --prefix packages/pi-subagents-enhanced test",
     workspace: "node --test test/managed-workspace-contract.test.mjs test/managed-workspace-ledger.integration.mjs test/managed-workspace-service.integration.mjs test/subagent-managed-worktree.integration.mjs",
     goal: "node --test \"test/goal-engine-*.integration.mjs\"",
+    canary: "node --test test/goal-runtime-real-canary.integration.mjs",
     setup: "node scripts/setup-subagent-runtime-deps.ts",
     verify: "npm --prefix packages/pi-subagents-enhanced run verify:package",
   });
@@ -55,7 +83,7 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
     "./workspace": "./src/workspace/service.ts",
     "./workspace/admin": "./src/workspace/administration.ts",
   });
-  assert.equal(manifest.dependencies["pi-subagents"], "0.62.0");
+  assert.deepEqual(manifest.dependencies, { "pi-subagents": "0.62.0", typescript: "5.9.3" });
   assert.deepEqual(manifest.bundleDependencies, ["pi-subagents"]);
   assert.equal(Object.hasOwn(manifest, "bundledDependencies"), false);
   assert.deepEqual(manifest.peerDependencies, {
@@ -81,7 +109,8 @@ test("package setup and verify exercise the package-local patched upstream", asy
   assert.deepEqual(calls[0]?.[1], [
     "--no-audit", "--no-fund", "install", "--prefix", packageRoot, "--ignore-scripts", "--omit=peer", "--save-exact", "pi-subagents@0.62.0",
   ]);
-  const report = await verify.verifyEnhancedPackage({ packageRoot });
+  const root = await preparedPackageFixture();
+  const report = await verify.verifyEnhancedPackage({ packageRoot: root });
   assert.deepEqual({ name: report.name, version: report.version, upstreamVersion: report.upstreamVersion, patched: report.patched }, {
     name: "pi-subagents-enhanced",
     version: "0.1.0",
@@ -93,9 +122,10 @@ test("package setup and verify exercise the package-local patched upstream", asy
 });
 
 test("npm dry-run tarball contains the complete runtime closure and no repository-private files", async () => {
-  const tarballs = async () => (await readdir(packageRoot)).filter((name) => name.endsWith(".tgz")).sort();
+  const root = await preparedPackageFixture();
+  const tarballs = async () => (await readdir(root)).filter((name) => name.endsWith(".tgz")).sort();
   const before = await tarballs();
-  const packed = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: packageRoot, encoding: "utf8" }))[0];
+  const packed = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf8" }))[0];
   const paths = packed.files.map((file) => file.path);
   const required = [
     "extensions/subagent-runtime.ts",
@@ -115,8 +145,12 @@ test("npm dry-run tarball contains the complete runtime closure and no repositor
     "src/workspace/git-worktree.ts",
     "src/workspace/service.ts",
     "src/workspace/registry.ts",
+    "src/workspace/tool.ts",
+    "src/workspace/completion-reminder.ts",
     "src/workspace/administration.ts",
     "node_modules/pi-subagents/package.json",
+    "node_modules/pi-subagents/node-runtime/src/runs/background/async-execution.js",
+    "node_modules/pi-subagents/node-runtime/src/runs/background/subagent-runner.js",
     "node_modules/pi-subagents/src/agents/agents.ts",
     "node_modules/acorn/package.json",
     "node_modules/jiti/package.json",
@@ -147,28 +181,67 @@ test("npm dry-run tarball contains the complete runtime closure and no repositor
 
 test("package setup leaves Pi core peers owned exclusively by the host", async () => {
   for (const peer of forbiddenLocalPeers) {
-    await assert.rejects(lstat(join(packageRoot, "node_modules", peer)), { code: "ENOENT" }, peer);
+    await assert.rejects(lstat(join(await preparedPackageFixture(), "node_modules", peer)), { code: "ENOENT" }, peer);
   }
-  assert.equal((await metadata(join(packageRoot, "node_modules/pi-subagents/node_modules/typebox"))).name, "typebox");
+  assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules/pi-subagents/node_modules/typebox"))).name, "typebox");
 });
 
 test("compat imports every required upstream API from package-local pi-subagents", async () => {
-  const { createJiti } = await import(new URL("../packages/pi-subagents-enhanced/node_modules/jiti/lib/jiti.mjs", import.meta.url));
+  const root = await preparedPackageFixture();
+  const { createJiti } = await import(pathToFileURL(join(root, "node_modules/jiti/lib/jiti.mjs")).href);
   const jiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
-  const compat = await jiti.import("../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.62.ts");
+  const compat = await jiti.import(join(root, "src/compat/pi-subagents-0.62.ts"));
   for (const name of [
     "upstreamSubagentRuntime", "loadConfig", "registerSubagentNotify", "resolveCurrentSessionId",
     "currentCompletionOwnerId", "getArtifactsDir", "readFleetTranscript", "renderFleetTranscript",
   ]) assert.equal(typeof compat[name], "function", name);
 });
 
+test("compiled runtime resolves emitted JavaScript runner and child extensions", async () => {
+  const upstreamRoot = join(packageRoot, "node_modules", "pi-subagents");
+  const { compiledNodeRuntimePath } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/ordered-models-runtime-patch.ts");
+  const backgroundRuntime = dirname(compiledNodeRuntimePath(upstreamRoot, "src", "runs", "background", "async-execution.js"));
+  const asyncExecution = await readFile(join(backgroundRuntime, "async-execution.js"), "utf8");
+  assert.doesNotMatch(asyncExecution, /subagent-runner\.ts/);
+  assert.match(asyncExecution, /subagent-runner\.js/);
+  await lstat(join(backgroundRuntime, "subagent-runner.js"));
+
+  const sharedRuntime = dirname(compiledNodeRuntimePath(upstreamRoot, "src", "runs", "shared", "pi-args.js"));
+  const piArgs = await readFile(join(sharedRuntime, "pi-args.js"), "utf8");
+  for (const extension of ["subagent-prompt-runtime", "fast-mode-extension"]) {
+    assert.doesNotMatch(piArgs, new RegExp(`${extension}\\.ts`));
+    assert.match(piArgs, new RegExp(`${extension}\\.js`));
+    await lstat(join(sharedRuntime, `${extension}.js`));
+  }
+  assert.doesNotMatch(piArgs, /fanout-child\.ts/);
+  assert.match(piArgs, /fanout-child\.js/);
+  await lstat(compiledNodeRuntimePath(upstreamRoot, "src", "extension", "fanout-child.js"));
+});
+
+test("compiled pinned upstream uses package exports and loads in plain Node", async () => {
+  const root = await preparedPackageFixture();
+  const command = 'import("pi-subagents").then(() => process.stdout.write("loaded"))';
+  assert.equal(execFileSync("node", ["--input-type=module", "-e", command], { cwd: root, encoding: "utf8" }), "loaded");
+  const upstreamRoot = join(root, "node_modules", "pi-subagents");
+  const { compiledNodeRuntimePath } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/ordered-models-runtime-patch.ts");
+  const runtimeExport = (...segments) => `./${relative(upstreamRoot, compiledNodeRuntimePath(upstreamRoot, ...segments)).replaceAll("\\", "/")}`;
+  const upstream = JSON.parse(await readFile(join(upstreamRoot, "package.json"), "utf8"));
+  assert.equal(upstream.exports["."], runtimeExport("index.js"));
+  assert.equal(upstream.exports["./enhanced-agents"], runtimeExport("src", "agents", "agents.js"));
+  for (const target of Object.values(upstream.exports)) {
+    assert.match(target, /^\.\/node-runtime\/.+\.js$/, target);
+    assert.doesNotMatch(target, /\.ts$/, target);
+  }
+});
+
 test("package verification rejects upstream drift, missing patch, and escaping extension entries", async (t) => {
   const { verifyEnhancedPackage } = await import("../packages/pi-subagents-enhanced/scripts/verify-package.ts");
+  const preparedRoot = await preparedPackageFixture();
   const fixture = async (name) => {
     const root = await mkdtemp(join(tmpdir(), `enhanced-${name}-`));
     t.after(() => rm(root, { recursive: true, force: true }));
     await mkdir(join(root, "node_modules"), { recursive: true });
-    await cp(join(packageRoot, "package.json"), join(root, "package.json"));
+    await cp(join(preparedRoot, "package.json"), join(root, "package.json"));
     return root;
   };
 
@@ -196,6 +269,15 @@ test("package verification rejects upstream drift, missing patch, and escaping e
     await writeFile(join(duplicatedPeer, "node_modules", peer, "package.json"), JSON.stringify({ name: peer, version: "0.84.4" }));
     await assert.rejects(() => verifyEnhancedPackage({ packageRoot: duplicatedPeer }), /peer|duplicate|module identity/i, peer);
   }
+
+  const missingWorkspaceTool = await mkdtemp(join(tmpdir(), "enhanced-missing-workspace-tool-"));
+  t.after(() => rm(missingWorkspaceTool, { recursive: true, force: true }));
+  await cp(preparedRoot, missingWorkspaceTool, { recursive: true });
+  await rm(join(missingWorkspaceTool, "src/workspace/tool.ts"));
+  await assert.rejects(
+    () => verifyEnhancedPackage({ packageRoot: missingWorkspaceTool, verifyPatch: async () => {} }),
+    /tool\.ts|runtime closure/i,
+  );
 
   const escapingImport = await fixture("escaping-import");
   await mkdir(join(escapingImport, "extensions"), { recursive: true });

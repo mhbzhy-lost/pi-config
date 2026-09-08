@@ -1,8 +1,8 @@
-export { default as upstreamSubagentRuntime } from "../../node_modules/pi-subagents/index.ts";
-export { loadConfig } from "../../node_modules/pi-subagents/src/extension/config.ts";
-export { default as registerSubagentNotify } from "../../node_modules/pi-subagents/src/runs/background/notify.ts";
-export { resolveCurrentSessionId } from "../../node_modules/pi-subagents/src/shared/session-identity.ts";
-export { currentCompletionOwnerId } from "../../node_modules/pi-subagents/src/shared/completion-owner.ts";
-export { getArtifactsDir } from "../../node_modules/pi-subagents/src/shared/artifacts.ts";
-export { readFleetTranscript, renderFleetTranscript } from "../../node_modules/pi-subagents/src/tui/fleet-transcript.ts";
-export { discoverAgents, type AgentConfig } from "../../node_modules/pi-subagents/src/agents/agents.ts";
+export { default as upstreamSubagentRuntime } from "pi-subagents";
+export { loadConfig } from "pi-subagents/config";
+export { default as registerSubagentNotify } from "pi-subagents/background-notify";
+export { resolveCurrentSessionId } from "pi-subagents/session-identity";
+export { currentCompletionOwnerId } from "pi-subagents/completion-owner";
+export { getArtifactsDir } from "pi-subagents/artifacts";
+export { readFleetTranscript, renderFleetTranscript } from "pi-subagents/fleet-transcript";
+export { discoverAgents, type AgentConfig } from "pi-subagents/enhanced-agents";
