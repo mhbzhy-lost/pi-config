@@ -47,8 +47,71 @@ import { buildSuspensionPlan, deriveOwnedRunStopRequest, suspensionClosureStatus
 import { runBindingForTask } from "./legacy-executor-compat.ts";
 import { ensureGoalStateIdentity, resolveGoalStateScope, selectGoalStateRoot } from "./state-scope.ts";
 import { createGoalToolRenderers } from "./tool-renderer.ts";
+import { createGoalRuntimeTrace } from "./runtime-trace.ts";
+import { canonicalManagedWorkspaceReceipt, createGoalManagedWorkspaceInspector, goalWorkspaceTerminalProof, isCanonicalManagedWorkspaceReceipt, managedWorkspaceOwner, managedWorkspaceState, sameManagedWorkspaceSnapshot } from "./managed-workspace.ts";
+import { executionProofForLegacyTask } from "./legacy-executor-compat.ts";
 
-function legacyWorkspaceManualRecovery() {
+type GoalToolContext = {
+  cwd?: string;
+  signal?: AbortSignal;
+  sessionManager?: {
+    getCwd?: () => string | undefined;
+    getSessionId?: () => string | undefined;
+    getSessionFile?: () => string | undefined;
+    getBranch?: () => unknown[] | undefined;
+    getEntries?: () => unknown[] | undefined;
+    getLeafId?: () => string | undefined;
+  };
+};
+type LegacyLease = { goalId: string; taskId: string; attempt: number; path: string; branch: string; baseCommit: string; originRef: string; originRoot: string; stateRoot: string; leasePath: string; ownerToken?: string };
+type LegacyInspection = { headCommit: string; clean: boolean; dirtyFiles: string[]; untrackedFiles: string[]; changedFiles: string[]; descendant: boolean; aheadCount: number; treeChanged: boolean; hasCommits: boolean };
+type LegacyResources = { workspaceExists: boolean; branchExists: boolean; leaseExists: boolean };
+type OrphanInventory = ReturnType<ReturnType<typeof createGoalManagedWorkspaceInspector>>;
+type ManagedWorkspaceService = NonNullable<ReturnType<typeof findManagedWorkspaceService>>;
+type RuntimeHost = {
+  nonceFactory?: () => Uint8Array; amendmentNonceFactory?: () => Uint8Array;
+  clock?: () => number; now?: () => number; registries?: unknown; adapterRegistry?: object;
+  captureCurrentWorld?: (input: { cwd: string }) => ReturnType<typeof captureCurrentWorld>;
+  artifactRefForRun?: (input: unknown) => Promise<{ id: string; path: string }>;
+  prepareManagedValidation?: typeof prepareManagedValidation;
+  startManagedValidation?: typeof startManagedValidation;
+  recoverManagedValidation?: typeof recoverManagedValidation;
+  inspectManagedValidation?: typeof inspectManagedValidation;
+  releaseManagedValidation?: typeof releaseManagedValidation;
+  issueRepairCapability?: typeof issueRepairCapability;
+  stopOwnedRun?: (binding: unknown) => Promise<unknown>;
+  stopManagedValidation?: (request: unknown) => Promise<unknown>;
+  quarantineWorkspace?: (request: unknown) => Promise<unknown>;
+  quarantineResource?: (request: unknown) => Promise<unknown>;
+};
+function isRuntimeHost(value: unknown): value is RuntimeHost {
+  return value !== null && typeof value === "object";
+}
+type SettlementData = {
+  taskId: string; outcome: string; evidence: unknown; evidenceSource: string; nextAction: string; reason: string | null;
+  runProof?: ReturnType<typeof assertExecutionSettlementProof>; executorProof?: ReturnType<typeof executionProofForLegacyTask>;
+  attempt?: number; executionHead?: string; executorHead?: string;
+  settlementEvidence?: unknown; _artifact?: { sha256: string; content: string };
+};
+type GoalEngineExtensionOptions = {
+  store?: { appendEvent?: typeof appendEvent; appendEventBatch?: typeof appendEventBatch; loadProjection?: typeof loadProjection; listGoals?: typeof listGoals; listGoalIds?: typeof listGoalIds };
+  appendEvent?: typeof appendEvent; appendEventBatch?: typeof appendEventBatch;
+  goalStateEnv?: NodeJS.ProcessEnv; runtimeTrace?: Record<string, unknown>; runtimeTraceEnv?: NodeJS.ProcessEnv;
+  runtimeHost?: unknown; enforceActionTokens?: boolean;
+  inspectExecutorWorkspace?: (lease: LegacyLease) => LegacyInspection;
+  inspectExecutionProof?: (runId: string | undefined, rootSessionId?: string) => unknown;
+  inspectExecutorProof?: (runId: string | undefined, rootSessionId?: string) => unknown;
+  inspectExecutorProofForSettlement?: (runId: string | undefined, rootSessionId?: string) => unknown | Promise<unknown>;
+  workspaceService?: ManagedWorkspaceService;
+  inspectOrphanedExecutorWorkspace?: (request: { goalId: string; taskId: string; attempt: number; originRoot: string; stateRoot: string }) => OrphanInventory;
+  allowMissingRootBrokerForTests?: boolean;
+  beforePreservedWorkspaceCleanupBarrier?: () => void;
+  inspectOrphanedExecutorWorkspaceBarrier?: (lease: LegacyLease) => LegacyInspection;
+  betweenOrphanInventoriesBarrier?: (lease: LegacyLease | undefined) => void;
+  finalReviewProviderFactory?: (input: { stateRoot: string }) => unknown;
+};
+
+function legacyWorkspaceManualRecovery(..._args: unknown[]): never {
   throw Object.assign(new Error("legacy/manual recovery required: Goal workspace has no managed-workspace.v1 receipt"), { code: "LEGACY_WORKSPACE_MANUAL_RECOVERY" });
 }
 const allocateExecutorWorkspace: (input: unknown) => never = legacyWorkspaceManualRecovery;
@@ -656,6 +719,52 @@ export function createGoalEngineExtension(pi, options: GoalEngineExtensionOption
     || ((options.appendEvent || store.appendEvent)
       ? (root, events, version) => events.reduce((projection, event) => rawAppendEventFn(root, event, projection.version), { version })
       : appendEventBatch);
+  const runtimeTraceByRoot = new Map();
+  let runtimeTraceRoot = null;
+  let runtimeTraceSessionId = null;
+  const traceRootFor = (ctx) => {
+    const fallbackCwd = typeof ctx?.cwd === "string" && isAbsolute(ctx.cwd)
+      ? ctx.cwd
+      : ctx?.sessionManager?.getCwd?.();
+    if (typeof fallbackCwd === "string" && isAbsolute(fallbackCwd)) {
+      try { return resolveGoalStateScope({ cwd: fallbackCwd, env: options.goalStateEnv ?? process.env }).preferredRoot; }
+      catch { return stateRoot(fallbackCwd); }
+    }
+    if (runtimeTraceRoot) return runtimeTraceRoot;
+    const processCwd = process.cwd();
+    try { return resolveGoalStateScope({ cwd: processCwd, env: options.goalStateEnv ?? process.env }).preferredRoot; }
+    catch { return stateRoot(processCwd); }
+  };
+  const runtimeTraceFor = (root, sessionId = runtimeTraceSessionId) => {
+    if (!root) return null;
+    runtimeTraceRoot = root;
+    if (!runtimeTraceByRoot.has(root)) runtimeTraceByRoot.set(root, createGoalRuntimeTrace({ root, config: { runtimeTrace: options.runtimeTrace ?? {} }, env: options.runtimeTraceEnv ?? process.env, sessionId }));
+    const trace = runtimeTraceByRoot.get(root);
+    trace.setSessionId?.(sessionId);
+    return trace;
+  };
+  const appendEventFn = (root, event, version) => {
+    const projection = rawAppendEventFn(root, event, version);
+    runtimeTraceFor(root)?.record("goal_event", {
+      goalId: event?.goalId,
+      eventId: event?.eventId,
+      eventType: event?.type,
+      eventVersion: event?.schemaVersion,
+      data: event?.data,
+    });
+    return projection;
+  };
+  const appendEventBatchFn = (root, events, version) => {
+    const projection = rawAppendEventBatchFn(root, events, version);
+    for (const event of events || []) runtimeTraceFor(root)?.record("goal_event", {
+      goalId: event?.goalId,
+      eventId: event?.eventId,
+      eventType: event?.type,
+      eventVersion: event?.schemaVersion,
+      data: event?.data,
+    });
+    return projection;
+  };
   const loadProjectionFn = store.loadProjection || loadProjection;
   const listGoalsFn = store.listGoals || listGoals;
   const listGoalIdsFn = store.listGoalIds || listGoalIds;
@@ -3487,6 +3596,12 @@ export function createGoalEngineExtension(pi, options: GoalEngineExtensionOption
   const retrySuspendedOwnedStop = async (ctx, projection) => { await closeSuspendedRuntime(ctx, projection); };
 
   pi.on("input", async (event, ctx) => {
+    try {
+      const root = traceRootFor(ctx);
+      const sessionId = sessionIdentity(ctx);
+      runtimeTraceSessionId = sessionId;
+      runtimeTraceFor(root, sessionId)?.record("user_message_received", { entryId: event?.entryId, source: event?.source, text: event?.text, streamingBehavior: event?.streamingBehavior });
+    } catch { /* trace must not affect user-message control semantics */ }
     if (event.source !== "interactive" && event.source !== "rpc") return { action: "continue" };
     if (!event.images?.length && event.streamingBehavior === undefined && ["approve", "reject"].includes(event.text)) {
       try {
@@ -3596,6 +3711,8 @@ export function createGoalEngineExtension(pi, options: GoalEngineExtensionOption
   });
 
   pi.on("session_start", (_event, ctx) => {
+    try { runtimeTraceSessionId = sessionIdentity(ctx); } catch { runtimeTraceSessionId = null; }
+    try { runtimeTraceFor(traceRootFor(ctx))?.record("session_start", { reason: _event?.reason }); } catch { /* trace is observational */ }
     restoreMetadata(ctx);
     reconcileReloadedRuntimeIntentGates(ctx);
     const entries = ctx.sessionManager?.getEntries?.() || [];
@@ -3604,6 +3721,11 @@ export function createGoalEngineExtension(pi, options: GoalEngineExtensionOption
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
+    let traceRoot = traceRootFor(ctx);
+    let traceSession = runtimeTraceSessionId;
+    try { traceSession = sessionIdentity(ctx); runtimeTraceSessionId = traceSession; } catch { /* Goal recovery below owns control semantics */ }
+    runtimeTraceFor(traceRoot, traceSession)?.record("before_agent_start", { turnId: ctx?.sessionManager?.getLeafId?.(), prompt: _event?.prompt });
+    const recordInjection = (message) => runtimeTraceFor(traceRoot, traceSession)?.record("prompt_injection", { turnId: ctx?.sessionManager?.getLeafId?.(), customType: message?.customType, content: message?.content });
     try {
       const { cwd, root } = executionScopeFor(ctx);
       const projections = loadAllProjections(root);
@@ -3631,6 +3753,19 @@ export function createGoalEngineExtension(pi, options: GoalEngineExtensionOption
   });
 
   pi.on("tool_call", (event, ctx) => {
+    const traceGate = (decision, reasonCode, result) => {
+      try {
+        const root = traceRootFor(ctx);
+        runtimeTraceFor(root, runtimeTraceSessionId)?.record("tool_call_gate", { turnId: ctx?.sessionManager?.getLeafId?.(), toolCallId: event?.toolCallId, toolName: event?.toolName, decision, reasonCode });
+      } catch { /* trace must not affect the mutation gate */ }
+      return result;
+    };
+    try {
+      const root = traceRootFor(ctx);
+      const sessionId = sessionIdentity(ctx);
+      runtimeTraceSessionId = sessionId;
+      runtimeTraceFor(root, sessionId)?.record("tool_call_seen", { turnId: ctx?.sessionManager?.getLeafId?.(), toolCallId: event?.toolCallId, toolName: event?.toolName, input: event?.input });
+    } catch { /* trace must not affect the mutation gate */ }
     const writeTools = new Set(["write", "edit", "subagent", "bash"]);
     if (!writeTools.has(event.toolName)) return traceGate("allow", "not_goal_write_tool", undefined);
     let cwd, root;
@@ -3706,6 +3841,9 @@ export function createGoalEngineExtension(pi, options: GoalEngineExtensionOption
 
   // --- tool_result hook: checkpoint reminder ---
   pi.on("tool_result", (event, ctx) => {
+    let sessionId = runtimeTraceSessionId;
+    try { sessionId = sessionIdentity(ctx); runtimeTraceSessionId = sessionId; } catch { /* session identity remains optional for diagnostics */ }
+    runtimeTraceFor(traceRootFor(ctx), sessionId)?.record("tool_result", { turnId: ctx?.sessionManager?.getLeafId?.(), toolCallId: event?.toolCallId, toolName: event?.toolName, isError: event?.isError, content: event?.content, details: event?.details });
     let cwd, root;
     try { ({ cwd, root } = executionScopeFor(ctx)); } catch { return undefined; }
     if (event.isError) return undefined;

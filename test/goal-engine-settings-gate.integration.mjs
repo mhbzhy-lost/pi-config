@@ -108,6 +108,18 @@ test("enabled entry loads the goal engine module and creates the extension", asy
   assert.deepEqual(created, [pi]);
 });
 
+test("enabled entry forwards the optional runtime trace switch", async () => {
+  const dir = settingsDir({ goalEngine: { enabled: true, runtimeTrace: { enabled: true } } });
+  const pi = disabledPi();
+  const created = [];
+  await createGoalEngineEntry(pi, {
+    settingsPath: join(dir, "settings.json"),
+    async load() { return { createGoalEngineExtension(target, options) { created.push({ target, options }); } }; },
+  });
+  assert.equal(created.length, 1);
+  assert.deepEqual(created[0].options, { runtimeTrace: { enabled: true } });
+});
+
 test("enabled entry propagates loader failures", async () => {
   const dir = settingsDir({ goalEngine: true });
   const expected = new Error("goal engine module failed to load");

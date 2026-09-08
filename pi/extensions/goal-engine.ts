@@ -23,10 +23,11 @@ export function isGoalEngineEnabled(settingsPath = goalEngineSettingsPath()): bo
 }
 
 type GoalEngineModule = {
-  createGoalEngineExtension: (pi: ExtensionAPI, options?: { runtimeHost?: unknown }) => unknown;
+  createGoalEngineExtension: (pi: ExtensionAPI, options?: { runtimeHost?: unknown; runtimeTrace?: { enabled: boolean } }) => unknown;
 };
 
-type GoalEngineConfiguration = { runtimeHost?: Record<string, unknown> };
+type FinalReviewConfiguration = { provider: string; id: string; timeoutMs: number };
+type GoalEngineConfiguration = { runtimeHost?: Record<string, unknown>; runtimeTrace?: { enabled: boolean }; finalReview?: FinalReviewConfiguration };
 function goalEngineConfiguration(settingsPath: string): GoalEngineConfiguration | null {
   if (!existsSync(settingsPath)) return null;
   let parsed: unknown; try { parsed = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { return null; }
@@ -35,10 +36,20 @@ function goalEngineConfiguration(settingsPath: string): GoalEngineConfiguration 
   if (value === true) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const goal = value as Record<string, unknown>;
-  if (goal.enabled !== true || Object.keys(goal).some((key) => key !== "enabled" && key !== "runtimeHost")) return null;
-  if (!Object.hasOwn(goal, "runtimeHost")) return {};
-  if (!goal.runtimeHost || typeof goal.runtimeHost !== "object" || Array.isArray(goal.runtimeHost)) return null;
-  return { runtimeHost: goal.runtimeHost as Record<string, unknown> };
+  if (goal.enabled !== true || Object.keys(goal).some((key) => key !== "enabled" && key !== "runtimeHost" && key !== "runtimeTrace")) return null;
+  let runtimeHost: Record<string, unknown> | undefined;
+  if (Object.hasOwn(goal, "runtimeHost")) {
+    if (!goal.runtimeHost || typeof goal.runtimeHost !== "object" || Array.isArray(goal.runtimeHost)) return null;
+    runtimeHost = goal.runtimeHost as Record<string, unknown>;
+  }
+  let runtimeTrace: { enabled: boolean } | undefined;
+  if (Object.hasOwn(goal, "runtimeTrace")) {
+    if (!goal.runtimeTrace || typeof goal.runtimeTrace !== "object" || Array.isArray(goal.runtimeTrace)) return null;
+    const trace = goal.runtimeTrace as Record<string, unknown>;
+    if (Object.keys(trace).some((key) => key !== "enabled") || typeof trace.enabled !== "boolean") return null;
+    runtimeTrace = { enabled: trace.enabled };
+  }
+  return { ...(runtimeHost ? { runtimeHost } : {}), ...(runtimeTrace ? { runtimeTrace } : {}) };
 }
 
 async function productionFinalReviewFactory(configuration: FinalReviewConfiguration) {
@@ -62,7 +73,7 @@ export async function createGoalEngineEntry(pi: ExtensionAPI, { settingsPath = g
   } else if (runtimeHostFactory) runtimeHost = runtimeHostFactory(pi, {});
   const finalReviewProviderFactory = configuration.finalReview ? await finalReviewFactory(configuration.finalReview) : undefined;
   const { createGoalEngineExtension } = await load();
-  createGoalEngineExtension(pi, runtimeHost ? { runtimeHost } : {});
+  createGoalEngineExtension(pi, { ...(runtimeHost ? { runtimeHost } : {}), ...(configuration.runtimeTrace ? { runtimeTrace: configuration.runtimeTrace } : {}) });
 }
 
 export default function goalEngine(pi: ExtensionAPI): Promise<void> { return createGoalEngineEntry(pi); }
