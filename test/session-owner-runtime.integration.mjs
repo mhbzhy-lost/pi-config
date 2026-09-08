@@ -125,24 +125,87 @@ function waitForOutput(child, pattern) {
   });
 }
 
-async function waitForRecord(store, predicate) {
-  const ready = async () => (await listLiveRecords(store)).find(predicate);
+test("waitForRecord 在注册 watch 窗口内变 active 且无后续事件时仍返回记录", { timeout: 250 }, async () => {
+  const store = createRegistryStore(join(tmpdir(), `session-owner-watch-race-${process.pid}`));
+  const ownerId = "owner-watch-race-0123456789";
+  const activeRecord = {
+    ownerId, pid: process.pid, state: "active", sessionFile: "/tmp/selected.jsonl",
+  };
+  let records = [];
+  let closeCount = 0;
+
+  const record = await waitForRecord(store, (candidate) => candidate.state === "active", {
+    readRecords: async () => records,
+    watchDirectory() {
+      // 真实注册表在 watch 注册完成前发布 active，且不会再产生事件。
+      records = [activeRecord];
+      return { close() { closeCount += 1; } };
+    },
+    timeoutMs: 50,
+  });
+
+  assert.equal(record, activeRecord);
+  assert.equal(closeCount, 1, "成功读取必须只关闭一次 watcher");
+});
+
+test("waitForRecord 在 watch 不发事件且二次读取过早时周期重读 active record", { timeout: 250 }, async () => {
+  const store = createRegistryStore(join(tmpdir(), `session-owner-watch-unreachable-${process.pid}`));
+  const activeRecord = { ownerId: "owner-watch-unreachable-012345", state: "active" };
+  let reads = 0;
+  let closeCount = 0;
+
+  const record = await waitForRecord(store, (candidate) => candidate.state === "active", {
+    readRecords: async () => (++reads < 3 ? [] : [activeRecord]),
+    watchDirectory() { return { close() { closeCount += 1; } }; },
+    pollIntervalMs: 1,
+    timeoutMs: 50,
+  });
+
+  assert.equal(record, activeRecord);
+  assert.equal(reads, 3, "首次、二次与周期重读依次观察 registry");
+  assert.equal(closeCount, 1, "周期重读成功必须只关闭一次 watcher");
+});
+
+async function waitForRecord(store, predicate, {
+  readRecords = () => listLiveRecords(store), watchDirectory = watch, pollIntervalMs = 25, timeoutMs = 20_000,
+} = {}) {
+  const ready = async () => (await readRecords()).find(predicate);
   const initial = await ready();
   if (initial) return initial;
   return new Promise((resolveRecord, reject) => {
-    const watcher = watch(store.root, async () => {
+    let settled = false;
+    let watcher;
+    let timer;
+    let poller;
+    let observing = false;
+    function finish(done, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poller);
+      watcher?.close();
+      done(value);
+    }
+    const observe = async () => {
+      if (settled || observing) return;
+      observing = true;
       try {
         const record = await ready();
         if (record) finish(resolveRecord, record);
       } catch (error) {
         if (error?.code !== "REGISTRY_UNAVAILABLE") finish(reject, error);
+      } finally {
+        observing = false;
       }
-    });
-    const timer = setTimeout(() => finish(reject, new Error("registry record did not reach its ready state")), 20_000);
-    function finish(done, value) {
-      clearTimeout(timer);
-      watcher.close();
-      done(value);
+    };
+    try {
+      watcher = watchDirectory(store.root, observe);
+      if (settled) watcher.close();
+      timer = setTimeout(() => finish(reject, new Error("registry record did not reach its ready state")), timeoutMs);
+      poller = setInterval(() => void observe(), pollIntervalMs);
+      void observe();
+    } catch (error) {
+      finish(reject, error);
     }
   });
 }
