@@ -20,4 +20,4 @@ Pi 额外提供以下计划执行方式：
 
 ## Worktree 生命周期
 
-禁止 raw `git worktree add/remove/prune/move/repair/lock/unlock` 和猜测性 cleanup；只读 `git worktree list` 可用。创建、销毁、repair、lock 仅可经 typed subagent workspace disposition 或 typed Goal disposition；根级 `node scripts/worktree-lifecycle.ts audit|reconcile` 仅提供统一 workspace inventory、dry-run cleanup plan 和显式 public lease authorization apply。禁止 `--force` removal、raw branch cleanup；`/tmp`、TTL、clean 状态均不构成删除授权。
+禁止通过任何 bash git 操作清理 worktree，若用户明确要求清理，生成相应 git 命令，让用户手动执行。
