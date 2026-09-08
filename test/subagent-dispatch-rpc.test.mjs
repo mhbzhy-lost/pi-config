@@ -58,6 +58,23 @@ test("subscribes before emitting a request with the isolated runtime source", as
   client.dispose();
 });
 
+test("correlates RPC diagnostic phases with the generated request id without changing the wire payload", async () => {
+  const events = createEvents();
+  const trace = [];
+  const client = createTypedSubagentRpcClient(events, { randomUUID: () => "trace-request-1" });
+  const request = client.ping({ diagnostic: { toolCallId: "tool-1", sink: (...args) => trace.push(args) } });
+  events.emit("subagents:rpc:v1:reply:trace-request-1", {
+    version: 1, requestId: "trace-request-1", success: true, data: { ok: true },
+  });
+  assert.deepEqual(await request, { ok: true });
+  assert.deepEqual(trace, [
+    ["rpc-ping-sent", { method: "ping", requestId: "trace-request-1" }],
+    ["rpc-ping-replied", { method: "ping", requestId: "trace-request-1" }],
+  ]);
+  assert.deepEqual(events.emitted[0].value.params, {});
+  client.dispose();
+});
+
 test("spawn forwards a normalized workflow payload without injecting direct-execution fields", async () => {
   const events = createEvents();
   const client = createTypedSubagentRpcClient(events, { randomUUID: () => "request-2" });

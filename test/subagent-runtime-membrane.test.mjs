@@ -455,6 +455,49 @@ test("project completion notifier makes only completed subagent messages visible
   assert.equal(source.display, false);
 });
 
+test("ExtensionRunner lifecycle records only supported actual pi.on events without manufacturing run identity", async () => {
+  const pi = createPi();
+  const trace = [];
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) { api.registerTool({ name: "subagent_supervisor", execute() {} }); },
+    completionNotifierFactory(_api, state) {
+      state.completionOwnerId = "owner-1";
+      return { dispose() {} };
+    },
+    resolveSessionId() { return "session-1"; },
+    workingStateTrace(entry) { trace.push(entry); },
+  });
+
+  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { sessionManager: {} });
+  const emitLifecycle = async (type, payload, context) => {
+    for (const handler of pi.handlers.get(type) ?? []) await handler(payload, context);
+  };
+  const payload = { sessionId: "session-1" };
+  await emitLifecycle("agent_settled", payload, { sessionManager: {} });
+
+  assert.deepEqual(trace.map((entry) => entry.event), ["agent-settled", "host-idle"]);
+  assert.equal(trace[0].hostSessionId, "session-1");
+  assert.equal(trace[0].completionOwnerId, "owner-1");
+  assert.equal(Object.hasOwn(trace[0], "runId"), false);
+  assert.equal(pi.handlers.has("queue_update"), false);
+  assert.deepEqual(payload, { sessionId: "session-1" });
+});
+
+test("ExtensionRunner shutdown disposes an owner-scoped trace sink exactly once", async () => {
+  const pi = createPi();
+  let disposals = 0;
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) { api.registerTool({ name: "subagent_supervisor", execute() {} }); },
+    extraDisposables: [{ dispose() { disposals += 1; } }],
+  });
+  const emitLifecycle = async (type, payload, context) => {
+    for (const handler of pi.handlers.get(type) ?? []) await handler(payload, context);
+  };
+  await emitLifecycle("session_shutdown", { reason: "reload" }, { sessionManager: {} });
+  await emitLifecycle("session_shutdown", { reason: "reload" }, { sessionManager: {} });
+  assert.equal(disposals, 1);
+});
+
 test("grouped same-agent completions render each title in the header and matching numbered block", () => {
   const messages = [];
   const queued = ["First task", "Second task"];

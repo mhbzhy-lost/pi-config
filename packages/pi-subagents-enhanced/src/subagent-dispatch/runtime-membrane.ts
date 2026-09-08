@@ -80,6 +80,31 @@ function decorateVisibleMessage(message, titleRegistry) {
   return message;
 }
 
+function traceMonotonicMs() {
+  return Math.floor(Number(process.hrtime.bigint() / 1_000_000n));
+}
+
+function completionDecision(payload, identity) {
+  const source = payload?.source === "foreground" ? "foreground" : "async";
+  const sessionMatches = payload?.sessionId === identity?.hostSessionId;
+  if (source === "foreground") {
+    return {
+      source,
+      accepted: sessionMatches,
+      ownershipDecision: sessionMatches ? "foreground-session-match" : "foreground-session-mismatch",
+    };
+  }
+  const ownerMatches = typeof payload?.completionOwnerId === "string"
+    && payload.completionOwnerId === identity?.completionOwnerId;
+  return {
+    source,
+    accepted: sessionMatches && ownerMatches,
+    ownershipDecision: sessionMatches && ownerMatches
+      ? "async-session-and-owner-match"
+      : "async-session-and-owner-mismatch",
+  };
+}
+
 export function createHeadlessSubagentApi(pi, {
   supervisorAdapter,
   titleRegistry,
@@ -89,22 +114,66 @@ export function createHeadlessSubagentApi(pi, {
   captureSessionShutdown,
   captureSessionStart,
   captureEventSubscription,
+  workingStateTrace,
+  getHostIdentity,
 } = {}) {
   if (!pi || typeof pi !== "object") {
     throw new TypeError("headless subagent runtime requires an ExtensionAPI object");
   }
 
+  const traceWorkingState = (event, fields = {}) => {
+    if (typeof workingStateTrace !== "function") return;
+    try {
+      const identity = typeof getHostIdentity === "function" ? getHostIdentity() : undefined;
+      workingStateTrace({
+        version: 1,
+        hostSessionId: identity?.hostSessionId,
+        completionOwnerId: identity?.completionOwnerId,
+        event,
+        monotonicMs: traceMonotonicMs(),
+        ...fields,
+      });
+    } catch {
+      // 诊断输出不得影响 completion、事件或 TUI。
+    }
+  };
+  const observeEvent = (type, payload) => {
+    if (type !== "subagent:async-complete" && type !== "subagent:foreground-complete") return;
+    const identity = typeof getHostIdentity === "function" ? getHostIdentity() : undefined;
+    const decision = completionDecision(payload, identity);
+    const fields = {
+      source: decision.source,
+      ...(typeof payload?.runId === "string" ? { runId: payload.runId } : {}),
+      ...(typeof payload?.sessionId === "string" ? { eventSessionId: payload.sessionId } : {}),
+      ...(typeof payload?.completionOwnerId === "string" ? { eventCompletionOwnerId: payload.completionOwnerId } : {}),
+    };
+    traceWorkingState("completion-received", fields);
+    traceWorkingState(decision.accepted ? "ownership-match" : "ownership-mismatch", {
+      ...fields,
+      ownershipDecision: decision.ownershipDecision,
+    });
+  };
   const events = pi.events && typeof pi.events === "object"
     ? new Proxy(pi.events, {
     get(target, property, receiver) {
       if (property === "emit") {
         return (type, payload) => target.emit(type, decorateLifecycle(type, payload, titleRegistry));
       }
-      if (property === "on" && typeof captureEventSubscription === "function") {
-        return (type, handler) => captureEventSubscription(type, (payload) => {
-          if (type === COMPLETE_EVENT && suppressSuccessfulCompletion?.(payload)) return;
-          handler(payload);
-        });
+      if (property === "on") {
+        return (type, handler) => {
+          if (typeof workingStateTrace !== "function" && typeof suppressSuccessfulCompletion !== "function") {
+            return typeof captureEventSubscription === "function"
+              ? captureEventSubscription(type, handler)
+              : target.on(type, handler);
+          }
+          const observedHandler = (payload) => {
+            observeEvent(type, payload);
+            if (type === COMPLETE_EVENT && suppressSuccessfulCompletion?.(payload)) return;
+            return handler(payload);
+          };
+          if (typeof captureEventSubscription === "function") return captureEventSubscription(type, observedHandler);
+          return target.on(type, observedHandler);
+        };
       }
       const value = Reflect.get(target, property, receiver);
       return typeof value === "function" ? value.bind(target) : value;
@@ -129,7 +198,14 @@ export function createHeadlessSubagentApi(pi, {
           const visible = forceCompletionDisplay && decorated?.customType === "subagent-notify"
             ? { ...decorated, display: true }
             : decorated;
-          return target.sendMessage(visible, options);
+          const fields = {
+            ...(typeof visible?.customType === "string" ? { customType: visible.customType } : {}),
+            ...(typeof options?.triggerTurn === "boolean" ? { triggerTurn: options.triggerTurn } : {}),
+            ...(typeof visible?.display === "boolean" ? { display: visible.display } : {}),
+          };
+          const result = target.sendMessage(visible, options);
+          traceWorkingState("send-message", fields);
+          return result;
         };
       }
       if (property === "registerTool") {

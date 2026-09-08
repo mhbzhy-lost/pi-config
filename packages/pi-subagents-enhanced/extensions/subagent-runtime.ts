@@ -14,7 +14,7 @@ import {
   formatCompactSupervisorRequest,
   formatCompactSupervisorToolResult,
 } from "../src/tui/compact-rendering.ts";
-import { installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
+import { createSubagentDispatchTraceFileSink, installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
 import { resolveRootSessionId } from "../src/subagent-dispatch/root-broker-protocol.ts";
 import { closeAndUnbindRootBroker, inspectRootBrokerExecutionProof, registerRootBrokerAuthorizedRun, startAndBindRootBroker } from "../src/subagent-dispatch/root-broker-registry.ts";
@@ -141,10 +141,20 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   let brokerReady = false;
   let previousBrokerMarker: string | undefined;
   const rpc = createRenewableTypedSubagentRpcClient(() => createTypedSubagentRpcClient(pi.events));
+  let diagnosticSink: ((entry: unknown) => void) | undefined;
+  try {
+    diagnosticSink = createSubagentDispatchTraceFileSink();
+  } catch {
+    // 无效的显式诊断文件不能影响生产派发。
+  }
   let broker: RootBrokerServer | undefined;
   let workspaceService: any;
   let workspaceRootSessionId: string | undefined;
+  try {
   installHeadlessTypedSubagentRuntime(pi, {
+    diagnosticSink,
+    workingStateTrace: diagnosticSink,
+    extraDisposables: diagnosticSink ? [diagnosticSink] : [],
     bootstrap: upstreamSubagentRuntime,
     completionNotifierFactory(api: ExtensionAPI, state: { currentSessionId: string | null; completionOwnerId?: string }) {
       initializeCompletionNotifierState(state);
@@ -226,6 +236,10 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     },
     retainOnBeforeDisposeFailure: true,
   });
+  } catch (error) {
+    diagnosticSink?.dispose?.();
+    throw error;
+  }
   // Upstream registers the same custom type during bootstrap; the project renderer must win last-write ownership.
   pi.registerMessageRenderer("subagent-notify", (message, { outputPad }, theme) => {
     void outputPad;
