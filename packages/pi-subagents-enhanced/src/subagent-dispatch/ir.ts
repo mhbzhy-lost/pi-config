@@ -223,7 +223,7 @@ function normalizeAcceptance(value) {
   };
 }
 
-function normalizeExecution(value, baseCwd) {
+function normalizeExecution(value, baseCwd): { cwd: string; timeoutMs: number; worktree?: true } {
   const execution = validateObject(value, "execution", ["timeoutMs", "cwd", "worktree"], ["timeoutMs"]);
   if (!Number.isSafeInteger(execution.timeoutMs) || execution.timeoutMs <= 0) {
     fail("INVALID_CONTRACT", `execution.timeoutMs must be a positive safe integer; expected positive safe integer; received ${runtimeType(execution.timeoutMs)}`, "execution.timeoutMs");
@@ -240,7 +240,7 @@ function normalizeExecution(value, baseCwd) {
     fail("INVALID_PATH", "execution.cwd contains NUL", "execution.cwd");
   }
 
-  const normalized = {
+  const normalized: { cwd: string; timeoutMs: number; worktree?: true } = {
     cwd: path.resolve(root, requested),
     timeoutMs: execution.timeoutMs,
   };
@@ -273,7 +273,7 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-export function compileCodingDispatchIR(input, { cwd } = {}) {
+export function compileCodingDispatchIR(input, { cwd }: { cwd?: string } = {}) {
   // Coerce stringified JSON fields before validation (model compatibility)
   const coercedInput = coerceContractFields(input);
   const source = validateObject(coercedInput, "$", TOP_LEVEL_KEYS, REQUIRED_TOP_LEVEL_KEYS);

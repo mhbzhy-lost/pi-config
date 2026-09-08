@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import test from "node:test";
 import * as compat from "../scripts/probes/pi-subagents-compat.ts";
+import { createSupervisorAdapter } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts";
 import { getTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
 import { piHostAliases, piHostJitiUrl, piHostModuleUrl } from "./helpers/pi-host.mjs";
 
@@ -43,6 +44,20 @@ function evaluate(report) {
   assert.equal(typeof compat.evaluatePlanHarnessCompatibility, "function");
   return compat.evaluatePlanHarnessCompatibility(report);
 }
+
+test("public supervisor adapter setup reaches an explicitly bound target", async () => {
+  const adapter = createSupervisorAdapter();
+  const params = { action: "status" };
+  const targetResult = { content: [{ type: "text", text: "fixture target active" }], details: { active: true, pending: 0 } };
+  let received;
+  adapter.bind(async (...args) => {
+    received = args;
+    return targetResult;
+  });
+
+  assert.equal(await adapter.execute("fixture-status", params), targetResult);
+  assert.deepEqual(received.slice(0, 2), ["fixture-status", params]);
+});
 
 test("exports the stable RPC v1 methods", () => {
   assert.deepEqual(REQUIRED_METHODS, ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"]);
@@ -177,7 +192,6 @@ test("loads exactly one enhanced runtime and footer from a local package source"
   try {
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({
       packages: [{ source: enhancedPackageRoot }],
-      subagents: { disableBuiltins: true },
     }));
     const loader = new DefaultResourceLoader({
       cwd: repoRoot,
@@ -221,8 +235,14 @@ test("loads exactly one enhanced runtime and footer from a local package source"
     const controlNoticeRenderer = controlNoticeRenderers[0];
     const supervisor = result.session.getToolDefinition("subagent_supervisor");
     const signal = new AbortController().signal;
-    const status = await supervisor.execute("compat-status", { action: "status" }, signal, undefined, undefined);
-    const pending = await supervisor.execute("compat-pending", { action: "pending" }, signal, undefined, undefined);
+    await assert.rejects(
+      supervisor.execute("compat-status", { action: "status" }, signal, undefined, undefined),
+      (error) => error?.code === "SUPERVISOR_TARGET_UNAVAILABLE",
+    );
+    await assert.rejects(
+      supervisor.execute("compat-pending", { action: "pending" }, signal, undefined, undefined),
+      (error) => error?.code === "SUPERVISOR_TARGET_UNAVAILABLE",
+    );
     const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text };
     const notifyMessage = {
       customType: "subagent-notify",
@@ -265,13 +285,13 @@ test("loads exactly one enhanced runtime and footer from a local package source"
     const replyArgsBefore = structuredClone(replyArgs);
     const replyResultBefore = structuredClone(replyResult);
 
-    assert.deepEqual(errors, []);
+    assert.ok(errors.every((error) => error.error === "SUPERVISOR_TARGET_UNAVAILABLE"));
     assert.equal(loadedExtensions.length, 2);
     assert.equal(footerOwners.length, 1);
     assert.equal(notifyRenderers.length, 1);
     assert.equal(supervisorRenderers.length, 1);
     assert.equal(controlNoticeRenderers.length, 1);
-    assert.deepEqual(toolNames, ["subagent", "subagent_supervisor"]);
+    assert.deepEqual(toolNames, ["subagent", "subagent_worktree", "subagent_supervisor"]);
     assert.equal(typeof subagent.renderResult, "function");
     assert.equal(typeof notifyRenderer, "function");
     assert.equal(typeof controlNoticeRenderer, "function");
@@ -292,9 +312,6 @@ test("loads exactly one enhanced runtime and footer from a local package source"
     assert.deepEqual(replyArgs, replyArgsBefore);
     assert.deepEqual(replyResult, replyResultBefore);
     assert.doesNotMatch(supervisor.description, /pi-subagents|upstream/i);
-    assert.equal(status.details.active, true);
-    assert.equal(status.details.pending, 0);
-    assert.deepEqual(pending.details.pending, []);
   } finally {
     try {
       if (result) {

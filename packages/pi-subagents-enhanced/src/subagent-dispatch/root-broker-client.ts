@@ -174,7 +174,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, requiredCap
           try {
             if (!acknowledged) {
               const response = parseBrokerResponse(JSON.parse(line), value);
-              if (!response.success) throw clientError(response.error.message, response.error.code);
+              if (response.success === false) throw clientError(response.error.message, response.error.code);
               acknowledged = true;
             } else {
               const push = parseBrokerPush(JSON.parse(line));

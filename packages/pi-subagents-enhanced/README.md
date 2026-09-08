@@ -6,6 +6,12 @@
 
 普通 subagent、Goal task 和 Goal validation 都通过同一 workspace service 分配、绑定、检查与处置 worktree。package 对外只发布三项代码 API：`./dispatch-ir`、`./workspace` 和 `./workspace/admin`；Git mutation、owner token 与 durable ledger 的实现均只归 `src/workspace/` 所有。
 
+## Standalone subagent workspace management
+
+运行时公开的 `subagent_worktree` 只管理当前 root session 创建、owner 为 `standalone-subagent` 的 workspace；它不会列出或处置 Goal、validation、foreign-session 或 legacy workspace。subagent 完成时，原始主-agent上下文会收到 `subagent-workspace-reminder`；TUI 只渲染其摘要，不能改写该提醒或把 completion 文案当作 terminal proof。
+
+保存 dispatch 返回的 `workspace_id`，并按以下 typed 流程处置：`list` 仅查看当前 session，`status` 返回 action token、`allowed_dispositions` 和 integrate blockers；随后以该 token `dispose` 为 `integrate`、`discard` 或 `preserve`。`preserve` 保留现场，完成保留用途后以 `release` 回收。completion reminder 和 status 都不替代 Root Broker 的 official terminal proof；禁止 raw `git worktree` lifecycle。
+
 ## Profile 与授权
 
 `agent` 只表示 discovery 中的 profile identity，可按项目需要重命名；`executor.md` 只是普通默认 profile，不是必需的权限入口。完整 `dispatch-ir.v1` 结构决定 coding，generic object shape 决定 generic，同一 profile 可用于两种调用。coding 工作必须使用 typed 合同，不能以 generic 自由文本绕过。

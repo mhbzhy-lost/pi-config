@@ -15,6 +15,17 @@ function documentedCalls(markdown) {
     .map(([, source]) => Function(`"use strict"; return (${source});`)());
 }
 
+test("subagent-dispatch documents only scoped subagent_worktree lifecycle actions", async () => {
+  const skill = await readFile(skillPath, "utf8");
+  assert.doesNotMatch(skill, /subagent\(\{action:\"workspace_(?:status|disposition)/);
+  assert.match(skill, /subagent_worktree\(\{ action: "list" \}\)/);
+  assert.match(skill, /subagent_worktree\(\{ action: "status", workspace_id: workspaceId \}\)/);
+  assert.match(skill, /subagent_worktree\(\{ action: "dispose", workspace_id: workspaceId, disposition: "integrate", action_token: actionToken \}\)/);
+  assert.match(skill, /subagent_worktree\(\{ action: "release", workspace_id: workspaceId \}\)/);
+  assert.match(skill, /completion\/status.*terminal proof|terminal proof.*completion\/status/is);
+  assert.match(skill, /raw git worktree add\/remove\/prune\/move\/repair\/lock\/unlock/i);
+});
+
 test("subagent-dispatch remains a discoverable managed Skill with executable typed and generic examples", async () => {
   const skill = await readFile(skillPath, "utf8");
   assert.match(skill, /^---\nname: subagent-dispatch\ndescription: .+\n---/);

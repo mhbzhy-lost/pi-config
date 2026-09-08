@@ -36,7 +36,7 @@ async function emitRunner(pi, type, event = {}, ctx = {}) {
   return errors;
 }
 
-test("project startup installs Root Broker listeners before synchronous upstream recovery events", async () => {
+test("project startup observes a synchronous recovered started event as an unowned facade", async () => {
   const pi = piRunner();
   const rootSessionId = `recovery-order-${process.pid}`;
   const runId = "recovered-executor";
@@ -77,7 +77,15 @@ test("project startup installs Root Broker listeners before synchronous upstream
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(errors, []);
     assert.ok(broker, "the project startup hook must run before upstream recovery");
-    assert.equal(broker.ownedRuns.has(runId), true, "the Broker must observe the synchronous recovered started event");
+    assert.deepEqual(broker.facadeRuns.get(runId), {
+      runId,
+      pid: 4242,
+      sessionId: rootSessionId,
+      agent: "executor",
+      asyncDir: `/async/${runId}`,
+      kind: "executor",
+    }, "the Broker must exactly observe the synchronous recovered started event");
+    assert.equal(broker.ownedRuns.has(runId), false, "an unregistered recovery event must not gain owned-run authority");
   } finally {
     if (broker) {
       const observedAt = Date.now();

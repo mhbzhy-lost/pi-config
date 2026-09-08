@@ -1,5 +1,6 @@
 import type { RootBrokerServer } from "./root-broker-server.ts";
 import type { RunAuthorization } from "./run-authorization.ts";
+import { executionProofForLegacySettlement } from "./legacy-executor-compat.ts";
 
 const ROOT_BROKER_REGISTRY_KEY = Symbol.for("pi.root-subagent-broker-registry.v2");
 const GOAL_RUN_COORDINATOR_KEY = Symbol.for("pi.goal-run-coordinator-registry.v2");
@@ -152,7 +153,7 @@ export function requireRootBroker(pi: object, rootSessionId?: string): RootBroke
   return broker;
 }
 
-export async function stopRootBrokerGoalOwnedRun(pi: object, binding: { goalId: string; taskId: string; attempt: number; runId: string; asyncDir: string; workspacePath: string; leaseId: string; sessionId: string; baseHead: string; headAtDispatch: string; executionRevision: number; contractHash: string; expectedCriteria: string[]; agentProfile: string }, rootSessionId?: string) {
+export async function stopRootBrokerGoalOwnedRun(pi: object, binding: { goalId: string; taskId: string; attempt: number; runId: string; asyncDir: string; workspacePath: string; leaseId: string; sessionId: string; baseHead: string; headAtDispatch: string; executionRevision: number; contractHash: string; agent: "executor" }, rootSessionId?: string) {
   return requireRootBroker(pi, rootSessionId).stopGoalOwnedRun(binding);
 }
 
@@ -165,18 +166,28 @@ export async function registerRootBrokerAuthorizedRun(pi: object, authorization:
   await requireRootBroker(pi, rootSessionId).registerAuthorizedRun(authorization);
 }
 
+export function recoverRootBrokerGoalRunBinding(pi: object, ticket: any, rootSessionId?: string) {
+  return requireRootBroker(pi, rootSessionId).recoverGoalRunBinding(ticket);
+}
+
 export function inspectRootBrokerExecutionProof(pi: object, runId: string, rootSessionId?: string) {
   const observed = requireRootBroker(pi, rootSessionId).inspectExecutionProof(runId);
-  if (!observed || observed.schemaVersion !== "root-broker.execution-proof.v2" || observed.terminalConflict === true) return null;
-  const binding = observed.binding, terminal = observed.terminal, proof = terminal?.proof;
-  if (!binding || !terminal || !proof
-      || binding.runId !== runId
-      || typeof binding.rootSessionId !== "string" || !binding.rootSessionId
-      || typeof binding.agentProfile !== "string" || !binding.agentProfile
-      || typeof terminal.proofId !== "string" || !/^[a-f0-9]{64}$/.test(terminal.proofId)
-      || !Number.isFinite(terminal.observedAt)
-      || !["succeeded", "failed"].includes(proof.outcome)) return null;
-  return Object.freeze({ runId, proofId: terminal.proofId, rootSessionId: binding.rootSessionId, observedAt: terminal.observedAt, outcome: proof.outcome, agentProfile: binding.agentProfile });
+  if (!observed) return null;
+  try {
+    const normalized = executionProofForLegacySettlement(observed, (message) => { throw new Error(message); });
+    return normalized.runId === runId ? normalized : null;
+  } catch { return null; }
+}
+
+// The registry is the sole legacy-v1 settlement boundary; callers never parse
+// raw process-terminal proof fields or infer an outcome from status.
+export async function inspectRootBrokerExecutorProofAsync(pi: object, runId: string, rootSessionId?: string) {
+  const observed = await requireRootBroker(pi, rootSessionId).inspectExecutorProofAsync(runId);
+  if (!observed) return null;
+  try {
+    const normalized = executionProofForLegacySettlement(observed, (message) => { throw new Error(message); });
+    return normalized.runId === runId ? normalized : null;
+  } catch { return null; }
 }
 
 export function registerRootBrokerFacadeRun(pi: object, run: { runId: string; asyncDir: string; sessionId: string; pid: number; agent: string; kind: string }, rootSessionId?: string): void {

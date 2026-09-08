@@ -818,7 +818,7 @@ test("project subagent schema exposes an object root to OpenAI-compatible provid
 
   const schema = pi.tools[0].parameters;
   assert.equal(schema.type, "object");
-  assert.equal(schema.anyOf.length, 5);
+  assert.equal(schema.anyOf.length, 3);
   for (const [index, branch] of schema.anyOf.entries()) {
     assert.equal(branch.type, "object", `anyOf branch ${index} must expose an object root`);
   }
@@ -848,7 +848,8 @@ test("headless runtime installation exposes only project-owned subagent tools", 
   });
 
   assert.notEqual(upstreamApi, pi);
-  assert.deepEqual(pi.tools.map((tool) => tool.name), ["subagent", "subagent_supervisor"]);
+  assert.deepEqual(pi.tools.map((tool) => tool.name), ["subagent", "subagent_worktree", "subagent_supervisor"]);
+  assert.equal(pi.tools.some((tool) => tool.name === "subagent_workspace"), false);
   assert.equal(pi.commands.length, 0);
   assert.equal(pi.tools[0].description, TYPED_SUBAGENT_DESCRIPTION);
   assert.doesNotMatch(pi.tools[0].description, /proactive skill methodology/i);
@@ -909,6 +910,30 @@ test("headless installation wires the title-aware completion notifier to session
 
   for (const handler of pi.handlers.get("session_shutdown") ?? []) await handler({ reason: "reload" });
   assert.equal(notifierDisposals, 1);
+});
+
+test("workspace reminder listener registers before the completion notifier and disposes on shutdown", async () => {
+  const pi = createPi();
+  const order = [];
+  let reminderDisposals = 0;
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) { api.registerTool({ name: "subagent_supervisor", execute() {} }); }, rpc: createRpc(), cleanupStore: {},
+    resolveSessionId(sessionManager) { return sessionManager.id; },
+    workspaceCompletionReminderFactory(api, state) {
+      assert.equal(state.currentSessionId, null);
+      api.events.on("subagent:async-complete", () => order.push("reminder"));
+      return { dispose() { reminderDisposals += 1; } };
+    },
+    completionNotifierFactory(api) {
+      api.events.on("subagent:async-complete", () => order.push("notifier"));
+      return { dispose() {} };
+    },
+  });
+  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { sessionManager: { id: "session-1" } });
+  await pi.events.emit("subagent:async-complete", { runId: "leaf" });
+  assert.deepEqual(order, ["reminder", "notifier"]);
+  for (const handler of pi.handlers.get("session_shutdown") ?? []) await handler({}, {});
+  assert.equal(reminderDisposals, 1);
 });
 
 test("production upstream completion emits decorate each same-agent leaf once", async () => {
@@ -1235,10 +1260,10 @@ test("maps approved control actions to RPC and requires a resume instruction", a
   assert.equal(rpc.calls.length, callCount, "invalid resume calls must not reach RPC");
 });
 
-test("workspace_status text exposes action token and blocked reasons", async () => {
+test("subagent_worktree status exposes action token and blocked reasons", async () => {
   const pi = createPi();
   const workspaceService = {
-    status() {
+    statusOwned() {
       return {
         receipt: managedReceipt(),
         terminalProof: { state: "observed", conflict: false, proofHash: "d".repeat(64) },
@@ -1246,7 +1271,7 @@ test("workspace_status text exposes action token and blocked reasons", async () 
         blockedReasons: ["no-commits"],
       };
     },
-    issueDisposition() {
+    issueOwnedDisposition() {
       return {
         receipt: managedReceipt(),
         terminalProof: { state: "observed", conflict: false, proofHash: "d".repeat(64) },
@@ -1257,10 +1282,10 @@ test("workspace_status text exposes action token and blocked reasons", async () 
     },
   };
   createTypedSubagentExtension(pi, {
-    rpc: createRpc(), cleanupStore: {}, workspaceService,
+    rpc: createRpc(), cleanupStore: {}, workspaceService, resolveRootSessionId: () => "root-1",
   });
 
-  const result = await execute(pi.tools[0], { action: "workspace_status", workspace_id: "workspace-1" });
+  const result = await execute(pi.tools[1], { action: "status", workspace_id: "workspace-1" });
 
   assert.equal(result.isError, false);
   assert.match(result.content[0].text, /"workspace_id":"workspace-1"/);
@@ -1270,28 +1295,28 @@ test("workspace_status text exposes action token and blocked reasons", async () 
   assert.match(result.content[0].text, /"integrate_blocked_reasons":\["no-commits"\]/);
 });
 
-test("workspace_disposition release is accepted and releases preserved workspace", async () => {
+test("subagent_worktree release accepts only the scoped service path", async () => {
   const pi = createPi();
   const releases = [];
   const workspaceService = {
-    release(input) {
+    releaseOwned(input) {
       releases.push(input);
       return managedReceipt({ state: "released", disposition: { action: "preserve", reason: "manual" } });
     },
-    dispose() { throw new Error("release must not dispose through action token path"); },
+    disposeOwned() { throw new Error("release must not dispose through action token path"); },
   };
   createTypedSubagentExtension(pi, {
-    rpc: createRpc(), cleanupStore: {}, workspaceService,
+    rpc: createRpc(), cleanupStore: {}, workspaceService, resolveRootSessionId: () => "root-1",
   });
-  const tool = pi.tools[0];
-  const dispositionSchema = tool.parameters.anyOf.find((branch) => branch.properties?.action?.const === "workspace_disposition");
+  const tool = pi.tools[1];
+  const releaseSchema = tool.parameters.anyOf.find((branch) => branch.properties?.action?.const === "release");
 
-  assert.ok(dispositionSchema.properties.disposition.enum.includes("release"));
-  const result = await execute(tool, { action: "workspace_disposition", workspace_id: "workspace-1", disposition: "release" });
+  assert.ok(releaseSchema);
+  const result = await execute(tool, { action: "release", workspace_id: "workspace-1" });
 
   assert.equal(result.isError, false);
   assert.equal(result.details.state, "released");
-  assert.deepEqual(releases, [{ workspaceId: "workspace-1" }]);
+  assert.deepEqual(releases, [{ workspaceId: "workspace-1", ownerScope: { kind: "standalone-subagent", rootSessionId: "root-1" } }]);
 });
 
 test("uses persistent sessionFile identity for workflow leaf correlation and falls back for --no-session", async () => {
@@ -1491,7 +1516,7 @@ test("routes native Supervisor messages through the Root ingress callback", asyn
     rpc: createRpc(), cleanupStore: {},
   });
 
-  assert.deepEqual(pi.tools.map((tool) => tool.name), ["subagent", "subagent_supervisor"]);
+  assert.deepEqual(pi.tools.map((tool) => tool.name), ["subagent", "subagent_worktree", "subagent_supervisor"]);
   for (const handler of pi.handlers.get("message_end") ?? []) await handler({ message: ignoredMessage }, ignoredContext);
   assert.deepEqual(calls, [], "unrelated native messages must be ignored");
   for (const handler of pi.handlers.get("message_end") ?? []) await handler({ message: supervisorMessage }, supervisorContext);

@@ -18,7 +18,7 @@ import {
   resolveRootSessionId,
   writeBrokerGrant,
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
-import { readLegacyExecutorProof } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/legacy-executor-compat.ts";
+import { executionProofForLegacySettlement, readLegacyExecutorProof } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/legacy-executor-compat.ts";
 
 const token = "a".repeat(64);
 const request = (method = "ping") => ({
@@ -93,6 +93,18 @@ test("legacy executor proof normalization is exact and fail-closed", () => {
     terminalConflict: false,
   });
   for (const invalid of [{ ...legacy, extra: true }, { ...legacy, terminalConflict: "false" }, { ...legacy, ownership: { ...legacy.ownership, identityState: "claimed" } }, { ...legacy, terminal: { ...legacy.terminal, proofId: "bad" } }]) assert.throws(() => readLegacyExecutorProof(invalid, fail), BrokerProtocolError);
+});
+
+test("registry legacy settlement adapter reads outcome from the canonical terminal envelope", () => {
+  const envelope = {
+    schemaVersion: "root-broker.execution-proof.v2",
+    binding: { rootSessionId: "root-1", runId: "executor-1", asyncDir: "/tmp/executor-1", sessionId: "session-1", pid: 1, agentProfile: "executor" },
+    authorization: { state: "verified" }, capabilities: ["acceptance.submit", "root.subscribe"], terminalConflict: false,
+    terminal: { proofId: "e".repeat(64), observedAt: 1, outcome: "failed", proof: { version: 1, runId: "executor-1", state: "observed" } },
+  };
+  const fail = (message) => { throw new BrokerProtocolError(message); };
+  assert.deepEqual(executionProofForLegacySettlement(envelope, fail), { runId: "executor-1", proofId: "e".repeat(64), rootSessionId: "root-1", observedAt: 1, outcome: "failed", agentProfile: "executor" });
+  assert.throws(() => executionProofForLegacySettlement({ ...envelope, authorization: { state: "unavailable" } }, fail), BrokerProtocolError);
 });
 
 test("broker push protocol exposes only readiness and root shutdown", () => {

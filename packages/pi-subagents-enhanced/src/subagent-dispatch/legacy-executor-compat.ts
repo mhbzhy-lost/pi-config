@@ -32,6 +32,20 @@ export function readLegacyExecutorGrant(value: unknown, fail: (message: string) 
 }
 
 /** Read-only adapter for the retired Goal inspector proof shape. */
+/** Registry-bound v1 settlement adapter. Canonical envelope outcome lives in terminal,
+ * never in the raw upstream process-terminal proof. */
+export function executionProofForLegacySettlement(value: unknown, fail: (message: string) => never) {
+  const envelope = exact(value, "execution proof", ["schemaVersion", "binding", "authorization", "capabilities", "terminal", "terminalConflict"], fail);
+  if (envelope.schemaVersion !== "root-broker.execution-proof.v2" || envelope.terminalConflict !== false) fail("execution proof schema or conflict flag is unsupported");
+  const binding = exact(envelope.binding, "execution proof binding", ["rootSessionId", "runId", "asyncDir", "sessionId", "pid", "agentProfile"], fail);
+  const authorization = exact(envelope.authorization, "execution proof authorization", ["state"], fail);
+  if (authorization.state !== "verified" || typeof binding.asyncDir !== "string" || !binding.asyncDir.startsWith("/") || binding.asyncDir.includes("\0")) fail("execution proof authorization is unsupported");
+  if (!Array.isArray(envelope.capabilities) || !envelope.capabilities.includes("acceptance.submit")) fail("execution proof capabilities are unsupported");
+  const terminal = exact(envelope.terminal, "execution proof terminal", ["proofId", "observedAt", "outcome", "proof"], fail);
+  if (typeof terminal.proofId !== "string" || !PROOF_ID.test(terminal.proofId) || !Number.isFinite(terminal.observedAt) || !["succeeded", "failed"].includes(terminal.outcome as string)) fail("execution proof terminal is unsupported");
+  return Object.freeze({ runId: id(binding.runId, "runId", fail), proofId: terminal.proofId, rootSessionId: id(binding.rootSessionId, "rootSessionId", fail), observedAt: terminal.observedAt as number, outcome: terminal.outcome as "succeeded" | "failed", agentProfile: id(binding.agentProfile, "agentProfile", fail) });
+}
+
 export function readLegacyExecutorProof(value: unknown, fail: (message: string) => never) {
   const proof = exact(value, "executor proof", ["schemaVersion", "ownership", "terminal", "terminalConflict"], fail);
   if (proof.schemaVersion !== LEGACY_PROOF_SCHEMA || typeof proof.terminalConflict !== "boolean") fail("executor proof schema or conflict flag is unsupported");

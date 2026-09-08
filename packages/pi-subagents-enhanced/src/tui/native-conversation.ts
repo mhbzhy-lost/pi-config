@@ -56,6 +56,25 @@ type CachedSession = {
   items: unknown[];
 };
 
+function bashTruncationResult(output: unknown) {
+  const content = typeof output === "string" ? output : "";
+  const totalLines = content === "" ? 0 : content.split("\n").length;
+  const totalBytes = Buffer.byteLength(content, "utf8");
+  return {
+    content,
+    truncated: true,
+    truncatedBy: null,
+    totalLines,
+    totalBytes,
+    outputLines: totalLines,
+    outputBytes: totalBytes,
+    lastLinePartial: false,
+    firstLineExceedsLimit: false,
+    maxLines: totalLines,
+    maxBytes: totalBytes,
+  };
+}
+
 function isInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
@@ -63,7 +82,7 @@ function isInside(root: string, candidate: string): boolean {
 
 function customEntryMessage(entry: any) {
   const content = typeof entry.data === "string" ? entry.data : JSON.stringify(entry.data ?? "");
-  return { role: "custom", customType: entry.customType, content, display: true, timestamp: entry.timestamp };
+  return { role: "custom" as const, customType: entry.customType, content, display: true, timestamp: entry.timestamp };
 }
 
 export class NativeChildConversationRenderer {
@@ -231,7 +250,7 @@ export class NativeChildConversationRenderer {
           }
           if (item.stopReason === "aborted" || item.stopReason === "error") {
             for (const [toolCallId, tool] of pendingTools) {
-              tool.updateResult({ type: "toolResult", toolCallId, toolName: "", content: [{ type: "text", text: "Tool execution interrupted" }], isError: true });
+              tool.updateResult({ content: [{ type: "text", text: "Tool execution interrupted" }], isError: true });
               this.onToolResult?.({ toolCallId, isError: true, content: "Tool execution interrupted" });
               pendingTools.delete(toolCallId);
             }
@@ -248,7 +267,7 @@ export class NativeChildConversationRenderer {
         case "bashExecution": {
           const bash = new BashExecutionComponent(item.command, options.ui as any, item.excludeFromContext);
           if (item.output) bash.appendOutput(item.output);
-          bash.setComplete(item.exitCode, item.cancelled, item.truncated ? { truncated: true } : undefined, item.fullOutputPath);
+          bash.setComplete(item.exitCode, item.cancelled, item.truncated ? bashTruncationResult(item.output) : undefined, item.fullOutputPath);
           bash.setExpanded(options.expandedTools);
           container.addChild(bash);
           break;

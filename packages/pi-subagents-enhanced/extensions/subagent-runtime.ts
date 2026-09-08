@@ -9,6 +9,7 @@ import {
 } from "../src/compat/pi-subagents-0.62.ts";
 import {
   formatCompactSubagentNotification,
+  formatCompactSubagentWorkspaceReminder,
   formatCompactSubagentSpawnSummary,
   formatCompactSubagentToolResult,
   formatCompactSupervisorRequest,
@@ -20,6 +21,7 @@ import { resolveRootSessionId } from "../src/subagent-dispatch/root-broker-proto
 import { closeAndUnbindRootBroker, inspectRootBrokerExecutionProof, registerRootBrokerAuthorizedRun, startAndBindRootBroker } from "../src/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer } from "../src/subagent-dispatch/root-broker-server.ts";
 import { createManagedWorkspaceService } from "../src/workspace/service.ts";
+import { createWorkspaceCompletionReminder } from "../src/workspace/completion-reminder.ts";
 import { bindManagedWorkspaceServiceSession, unbindManagedWorkspaceServiceSession } from "../src/workspace/registry.ts";
 
 export function createRootBrokerUpstream({ rpc }: { rpc: any }) {
@@ -144,8 +146,20 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   let broker: RootBrokerServer | undefined;
   let workspaceService: any;
   let workspaceRootSessionId: string | undefined;
+  let workspaceLifecycleSessionId: string | undefined;
   installHeadlessTypedSubagentRuntime(pi, {
     bootstrap: upstreamSubagentRuntime,
+    workspaceCompletionReminderFactory(api: ExtensionAPI) {
+      return createWorkspaceCompletionReminder({
+        events: api.events,
+        sendMessage: (message, options) => api.sendMessage(message as any, options),
+        getContext() {
+          return workspaceService && workspaceRootSessionId && workspaceLifecycleSessionId
+            ? { service: workspaceService, rootSessionId: workspaceRootSessionId, lifecycleSessionId: workspaceLifecycleSessionId }
+            : undefined;
+        },
+      });
+    },
     completionNotifierFactory(api: ExtensionAPI, state: { currentSessionId: string | null; completionOwnerId?: string }) {
       initializeCompletionNotifierState(state);
       return registerSubagentNotify(api, state, { batchConfig: completionBatch });
@@ -165,6 +179,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         broker = startingBroker;
         brokerStarted = true;
         workspaceRootSessionId = rootSessionId;
+        workspaceLifecycleSessionId = lifecycleSessionId;
         workspaceService = createManagedWorkspaceService({
           stateRoot: process.env.PI_CODING_WORKSPACE_DIR,
           terminalProofProvider({ run }: { run: { runId?: string } | null }) {
@@ -180,6 +195,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
           unbindManagedWorkspaceServiceSession(pi, workspaceRootSessionId, workspaceService);
           workspaceService = undefined;
           workspaceRootSessionId = undefined;
+          workspaceLifecycleSessionId = undefined;
         }
         if (brokerStarted) {
           await closeAndUnbindRootBroker(pi, startingBroker);
@@ -196,6 +212,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         unbindManagedWorkspaceServiceSession(pi, workspaceRootSessionId, workspaceService);
         workspaceService = undefined;
         workspaceRootSessionId = undefined;
+        workspaceLifecycleSessionId = undefined;
       }
       if (!brokerStarted || !broker) return;
       await closeAndUnbindRootBroker(pi, broker);
@@ -227,6 +244,10 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     retainOnBeforeDisposeFailure: true,
   });
   // Upstream registers the same custom type during bootstrap; the project renderer must win last-write ownership.
+  pi.registerMessageRenderer("subagent-workspace-reminder", (message, { outputPad }, theme) => {
+    void outputPad;
+    return new Text(theme.fg("dim", formatCompactSubagentWorkspaceReminder(message)), 0, 0);
+  });
   pi.registerMessageRenderer("subagent-notify", (message, { outputPad }, theme) => {
     void outputPad;
     return renderCompletionNotification(message, theme);

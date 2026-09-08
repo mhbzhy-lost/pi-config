@@ -17,39 +17,69 @@ const piRoot = resolvePiCodingAgentRoot();
 const piPackage = join(piRoot, "dist", "index.js");
 const piTypes = join(piRoot, "dist", "core", "extensions", "types.d.ts");
 
-test("current settings reload the enhanced local package with one subagent owner", async () => {
-  const host = await import(pathToFileURL(piPackage).href);
-  const settingsManager = host.SettingsManager.create(repoRoot, join(repoRoot, "pi"));
-  const resourceLoader = new host.DefaultResourceLoader({
-    cwd: repoRoot,
-    agentDir: join(repoRoot, "pi"),
-    settingsManager,
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-  });
-  const inspect = () => {
+test("configured enhanced local package registers one authoritative subagent tool owner", async () => {
+  const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_CODING_WORKSPACE_DIR"];
+  const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-runtime-enhanced-"));
+  let session;
+  try {
+    for (const name of markers) delete process.env[name];
+    process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({
+      packages: [{ source: join(repoRoot, "packages", "pi-subagents-enhanced") }],
+    }));
+    const host = await import(pathToFileURL(piPackage).href);
+    const resourceLoader = new host.DefaultResourceLoader({
+      cwd: repoRoot,
+      agentDir,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+    await resourceLoader.reload();
+    ({ session } = await host.createAgentSession({
+      cwd: repoRoot,
+      agentDir,
+      resourceLoader,
+      sessionManager: host.SessionManager.inMemory(repoRoot),
+    }));
+    const errors = [];
+    await session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { errors.push(error); } });
+
     const extensions = resourceLoader.getExtensions().extensions;
     const enhanced = extensions.filter((extension) => String(extension.path).includes("/packages/pi-subagents-enhanced/extensions/"));
     const legacy = extensions.filter((extension) => /\/pi\/extensions\/(?:subagent-runtime|custom-footer)\.ts$/.test(String(extension.path)));
-    const toolOwners = enhanced.flatMap((extension) => [...extension.tools.keys()]).filter((name) => name === "subagent" || name === "subagent_supervisor");
-    const notifyOwners = enhanced.filter((extension) => extension.messageRenderers.has("subagent-notify"));
-    const supervisorMessageOwners = enhanced.filter((extension) => extension.messageRenderers.has("subagent_supervisor_request"));
-    return { enhanced, legacy, toolOwners, notifyOwners, supervisorMessageOwners };
-  };
+    const toolNames = session.getAllTools().map((tool) => tool.name)
+      .filter((name) => ["subagent", "subagent_worktree", "subagent_supervisor"].includes(name)).sort();
+    const runtime = enhanced.find((extension) => String(extension.path).endsWith("/subagent-runtime.ts"));
 
-  await resourceLoader.reload();
-  const first = inspect();
-  await resourceLoader.reload();
-  const second = inspect();
-  for (const snapshot of [first, second]) {
-    assert.equal(snapshot.enhanced.length, 2);
-    assert.equal(snapshot.legacy.length, 0);
-    assert.deepEqual(snapshot.toolOwners.sort(), ["subagent", "subagent_supervisor"]);
-    assert.equal(snapshot.notifyOwners.length, 1);
-    assert.equal(snapshot.supervisorMessageOwners.length, 1);
-    assert.equal(snapshot.enhanced.filter((extension) => String(extension.path).endsWith("/custom-footer.ts")).length, 1);
+    assert.deepEqual(errors, []);
+    assert.equal(enhanced.length, 2);
+    assert.equal(legacy.length, 0);
+    assert.deepEqual(toolNames, ["subagent", "subagent_supervisor", "subagent_worktree"]);
+    assert.deepEqual(runtime?.sourceInfo, {
+      path: join(repoRoot, "packages", "pi-subagents-enhanced", "extensions", "subagent-runtime.ts"),
+      source: join(repoRoot, "packages", "pi-subagents-enhanced"),
+      scope: "user",
+      origin: "package",
+      baseDir: join(repoRoot, "packages", "pi-subagents-enhanced"),
+    });
+    assert.equal(enhanced.filter((extension) => extension.messageRenderers.has("subagent-notify")).length, 1);
+    assert.equal(enhanced.filter((extension) => extension.messageRenderers.has("subagent_supervisor_request")).length, 1);
+  } finally {
+    try {
+      if (session) {
+        await session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });
+        session.dispose();
+      }
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+      for (const [name, value] of previousMarkers) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   }
 });
 

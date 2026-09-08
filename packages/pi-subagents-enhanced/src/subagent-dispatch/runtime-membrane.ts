@@ -10,6 +10,17 @@ import { classifySubagentPresentation } from "./presentation-status.ts";
 
 const blockedRegistration = () => undefined;
 
+type HeadlessApiOptions = {
+  supervisorAdapter?: { bind(execute: unknown): unknown };
+  titleRegistry?: unknown;
+  suppressCompletionNotifications?: boolean;
+  suppressSuccessfulCompletion?: (payload: unknown) => boolean;
+  forceCompletionDisplay?: boolean;
+  captureSessionShutdown?: (handler: unknown) => unknown;
+  captureSessionStart?: (handler: unknown) => unknown;
+  captureEventSubscription?: (type: unknown, handler: unknown) => unknown;
+};
+
 function titleSuffix(title) {
   return title ? ` [${title}]` : "";
 }
@@ -89,7 +100,7 @@ export function createHeadlessSubagentApi(pi, {
   captureSessionShutdown,
   captureSessionStart,
   captureEventSubscription,
-} = {}) {
+}: HeadlessApiOptions = {}) {
   if (!pi || typeof pi !== "object") {
     throw new TypeError("headless subagent runtime requires an ExtensionAPI object");
   }

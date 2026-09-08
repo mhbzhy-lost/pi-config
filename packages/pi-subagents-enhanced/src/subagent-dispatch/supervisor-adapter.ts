@@ -40,7 +40,12 @@ export function createSupervisorAdapter() {
   });
 }
 
-export function createSupervisorTool(adapter, { name = "subagent_supervisor", label = "Subagent Supervisor", renderCall, renderResult } = {}) {
+export function createSupervisorTool(adapter, { name = "subagent_supervisor", label = "Subagent Supervisor", renderCall, renderResult }: {
+  name?: string;
+  label?: string;
+  renderCall?: unknown;
+  renderResult?: unknown;
+} = {}) {
   if (!adapter || typeof adapter.execute !== "function") {
     throw new TypeError("supervisor tool requires an adapter");
   }

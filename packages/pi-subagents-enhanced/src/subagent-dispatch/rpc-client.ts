@@ -6,6 +6,7 @@ const REQUEST_ID = /^[A-Za-z0-9._-]{1,160}$/;
 const SOURCE = Object.freeze({ extension: "typed-subagent-runtime" });
 
 export class TypedSubagentRpcError extends Error {
+  code: string;
   constructor(code, message) {
     super(message);
     this.name = "TypedSubagentRpcError";
@@ -64,7 +65,7 @@ export function createTypedSubagentRpcClient(
   const pending = new Map();
   let disposed = false;
 
-  function call(method, params = {}, options = {}) {
+  function call(method, params = {}, options: { requestId?: string } = {}) {
     if (disposed) {
       return Promise.reject(new TypedSubagentRpcError("disposed", "typed subagent RPC client is disposed"));
     }

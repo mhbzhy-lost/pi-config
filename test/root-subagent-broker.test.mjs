@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -27,6 +27,15 @@ class EventBus {
   }
 }
 
+// Equivalent to upstream writeAtomicJson: an unspecified write mode followed by
+// same-directory atomic rename. Native Node refuses type stripping for TS below
+// node_modules, so the test cannot invoke that upstream TS source directly.
+function upstreamWriteAtomicJsonFixture(file, value) {
+  const temp = `${file}.${process.pid}.fixture.tmp`;
+  writeFileSync(temp, JSON.stringify(value));
+  renameSync(temp, file);
+}
+
 function observedProof(runId) {
   const observedAt = 1_700_000_000_000;
   const runnerProcessInstanceId = `${runId}-runner`;
@@ -46,6 +55,8 @@ function startedEvent(rootSessionId, runId = "executor-1") {
 function goalAuthority(sessionId, runId) {
   return { goalId: "test-goal", taskId: "test-task", attempt: 1, runId, asyncDir: `/tmp/${runId}`, workspacePath: "/tmp/test-workspace", leaseId: "a".repeat(64), sessionId, baseHead: "b".repeat(40), headAtDispatch: "b".repeat(40), executionRevision: 1, contractHash: "c".repeat(64), expectedCriteria: ["criterion-1"], agentProfile: "executor" };
 }
+function goalStopRequest({ expectedCriteria: _expectedCriteria, agentProfile: _agentProfile, ...request }) { return { ...request, agent: "executor" }; }
+function persistGoalAuthority(broker, authority) { broker.persistGoalBindingAuthority({ version: "root-broker.goal-run-binding-authority.v2", ticketId: "d".repeat(64), ...authority }); }
 async function authorize(broker, event, goal = null) {
   await broker.registerAuthorizedRun(createRunAuthorization({
     kind: "coding",
@@ -202,10 +213,11 @@ test("Root broker stops only an exact registered Goal-owned run and returns an o
   t.after(() => broker.closeRootSession().catch(() => undefined));
   const binding = goalAuthority("root-goal-owned", runId);
   await authorize(broker, startedEvent("root-goal-owned", runId), binding);
+  persistGoalAuthority(broker, binding);
   await broker.observeStarted(startedEvent("root-goal-owned", runId));
-  const stopped = await broker.stopGoalOwnedRun(binding);
+  const stopped = await broker.stopGoalOwnedRun(goalStopRequest(binding));
   assert.equal(stopped.state, "observed"); assert.deepEqual(calls, [{ runId, dir: `/tmp/${runId}` }]);
-  assert.deepEqual(await broker.stopGoalOwnedRun({ ...binding, asyncDir: "/tmp/other" }), { state: "attention", code: "OWNED_STOP_IDENTITY_UNKNOWN" });
+  assert.deepEqual(await broker.stopGoalOwnedRun({ ...goalStopRequest(binding), asyncDir: "/tmp/other" }), { state: "attention", code: "OWNED_STOP_IDENTITY_UNKNOWN" });
 });
 
 test("Root broker returns a stable attention code without upstream error leakage", async (t) => {
@@ -214,8 +226,9 @@ test("Root broker returns a stable attention code without upstream error leakage
   t.after(() => broker.closeRootSession().catch(() => undefined));
   const binding = goalAuthority("root-stop-error", runId);
   await authorize(broker, startedEvent("root-stop-error", runId), binding);
+  persistGoalAuthority(broker, binding);
   await broker.observeStarted(startedEvent("root-stop-error", runId));
-  const result = await broker.stopGoalOwnedRun(binding);
+  const result = await broker.stopGoalOwnedRun(goalStopRequest(binding));
   assert.deepEqual(result, { state: "attention", code: "OWNED_STOP_UNAVAILABLE" });
 });
 
@@ -230,7 +243,7 @@ test("Root broker exposes an immutable neutral execution proof without the legac
     writeGrant: async () => "/tmp/nonexistent-proof-grant",
   });
   t.after(() => broker.closeRootSession().catch(() => undefined));
-  await authorize(broker, startedEvent(rootSessionId, runId));
+  await authorize(broker, startedEvent(rootSessionId, runId), goalAuthority(rootSessionId, runId));
   await broker.observeStarted(startedEvent(rootSessionId, runId));
   const emittedProof = observedProof(runId);
   broker.observeTerminal(emittedProof);
@@ -240,7 +253,7 @@ test("Root broker exposes an immutable neutral execution proof without the legac
   emittedProof.instances[0].exitCode = 9;
   emittedProof.observedAt += 10;
   assert.deepEqual(broker.inspectExecutionProof(runId), snapshot);
-  assert.deepEqual(Object.keys(snapshot).sort(), ["binding", "capabilities", "schemaVersion", "terminal", "terminalConflict"]);
+  assert.deepEqual(Object.keys(snapshot).sort(), ["authorization", "binding", "capabilities", "schemaVersion", "terminal", "terminalConflict"]);
   assert.equal(snapshot.schemaVersion, "root-broker.execution-proof.v2");
   assert.deepEqual(snapshot.binding, {
     rootSessionId,
@@ -250,7 +263,9 @@ test("Root broker exposes an immutable neutral execution proof without the legac
     pid: 43210,
     agentProfile: "executor",
   });
+  assert.deepEqual(snapshot.authorization, { state: "verified" });
   assert.equal(snapshot.terminal.observedAt, 1_700_000_000_000);
+  assert.equal(snapshot.terminal.outcome, "succeeded");
   assert.match(snapshot.terminal.proofId, /^[a-f0-9]{64}$/);
   assert.deepEqual(snapshot.terminal.proof, observedProof(runId));
   assert.equal(snapshot.terminalConflict, false);
@@ -258,11 +273,60 @@ test("Root broker exposes an immutable neutral execution proof without the legac
   assert.equal(Object.isFrozen(snapshot.binding), true);
   assert.equal(Object.isFrozen(snapshot.terminal), true);
   assert.equal(Object.isFrozen(snapshot.terminal.proof), true);
-  assert.deepEqual(snapshot.capabilities, ["root.subscribe"]);
+  assert.deepEqual(snapshot.capabilities, ["acceptance.submit", "root.subscribe"]);
   for (const forbidden of ["removeWorktree", "deleteBranch", "cleanupGit", "releaseWorkspace"]) {
     assert.equal(Object.hasOwn(snapshot, forbidden), false);
     assert.equal(typeof broker[forbidden], "undefined");
   }
+});
+
+test("Root broker canonical settlement reader accepts the upstream writer shape only for a verified Goal-owned run", async (t) => {
+  const rootSessionId = "root-async-proof-recovery";
+  const runId = "executor-async-proof-recovery";
+  const asyncDir = mkdtempSync(join(tmpdir(), "root-broker-terminal-"));
+  const event = { ...startedEvent(rootSessionId, runId), asyncDir };
+  const broker = new RootBrokerServer({ rootSessionId, lifecycleSessionId: rootSessionId, upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} }, captureProcessBirthIdentity: async () => "birth-async-proof-recovery", writeGrant: async () => join(asyncDir, "grant") });
+  t.after(async () => { await broker.closeRootSession().catch(() => undefined); await rm(asyncDir, { recursive: true, force: true }); });
+  const authority = { ...goalAuthority(rootSessionId, runId), asyncDir };
+  await authorize(broker, event, authority); await broker.observeStarted(event);
+  const terminal = observedProof(runId);
+  // Real writer fixture: it writes the native proof (no session/path/agent/pid)
+  // and currently leaves its mode umask-derived rather than forcing 0600.
+  upstreamWriteAtomicJsonFixture(join(asyncDir, "process-terminal.json"), terminal);
+  chmodSync(join(asyncDir, "process-terminal.json"), 0o644);
+  const recovered = await broker.inspectExecutorProofAsync(runId);
+  assert.deepEqual(Object.keys(recovered).sort(), ["authorization", "binding", "capabilities", "schemaVersion", "terminal", "terminalConflict"]);
+  assert.deepEqual(recovered.authorization, { state: "verified" });
+  assert.equal(recovered.terminal.outcome, "succeeded");
+
+  for (const [label, value, mode] of [["pending", { ...terminal, state: "pending" }, 0o600], ["foreign", { ...terminal, runId: "foreign-run" }, 0o600], ["malformed", { runId }, 0o600], ["group-writable", terminal, 0o660], ["world-writable", terminal, 0o666]]) {
+    const isolated = new RootBrokerServer({ rootSessionId: `${rootSessionId}-${label}`, lifecycleSessionId: `${rootSessionId}-${label}`, upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} }, captureProcessBirthIdentity: async () => "birth", writeGrant: async () => join(asyncDir, "grant") });
+    const isolatedEvent = { ...event, sessionId: `${rootSessionId}-${label}` };
+    await authorize(isolated, isolatedEvent, { ...authority, sessionId: isolatedEvent.sessionId }); await isolated.observeStarted(isolatedEvent);
+    writeFileSync(join(asyncDir, "process-terminal.json"), JSON.stringify(value), { mode }); chmodSync(join(asyncDir, "process-terminal.json"), mode);
+    assert.equal((await isolated.inspectExecutorProofAsync(runId)).terminal, null, label);
+    isolated.terminalProofs.set(runId, terminal); await isolated.closeRootSession().catch(() => undefined);
+  }
+  writeFileSync(join(asyncDir, "process-terminal.json"), JSON.stringify(terminal), { mode: 0o600 }); chmodSync(join(asyncDir, "process-terminal.json"), 0o600);
+  linkSync(join(asyncDir, "process-terminal.json"), join(asyncDir, "terminal-hardlink.json"));
+  rmSync(join(asyncDir, "process-terminal.json"));
+  linkSync(join(asyncDir, "terminal-hardlink.json"), join(asyncDir, "process-terminal.json"));
+  const hardlinkBroker = new RootBrokerServer({ rootSessionId: "root-hardlink", lifecycleSessionId: "root-hardlink", upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} }, captureProcessBirthIdentity: async () => "birth", writeGrant: async () => join(asyncDir, "grant") });
+  const hardlinkEvent = { ...event, sessionId: "root-hardlink" }; await authorize(hardlinkBroker, hardlinkEvent, { ...authority, sessionId: "root-hardlink" }); await hardlinkBroker.observeStarted(hardlinkEvent);
+  assert.equal((await hardlinkBroker.inspectExecutorProofAsync(runId)).terminal, null, "hardlink"); hardlinkBroker.terminalProofs.set(runId, terminal); await hardlinkBroker.closeRootSession().catch(() => undefined);
+  rmSync(join(asyncDir, "process-terminal.json")); symlinkSync(join(asyncDir, "terminal-hardlink.json"), join(asyncDir, "process-terminal.json"));
+  const symlinkBroker = new RootBrokerServer({ rootSessionId: "root-symlink", lifecycleSessionId: "root-symlink", upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} }, captureProcessBirthIdentity: async () => "birth", writeGrant: async () => join(asyncDir, "grant") });
+  const symlinkEvent = { ...event, sessionId: "root-symlink" }; await authorize(symlinkBroker, symlinkEvent, { ...authority, sessionId: "root-symlink" }); await symlinkBroker.observeStarted(symlinkEvent);
+  assert.equal((await symlinkBroker.inspectExecutorProofAsync(runId)).terminal, null, "symlink"); symlinkBroker.terminalProofs.set(runId, terminal); await symlinkBroker.closeRootSession().catch(() => undefined);
+
+  rmSync(join(asyncDir, "process-terminal.json")); linkSync(join(asyncDir, "terminal-hardlink.json"), join(asyncDir, "process-terminal.json"));
+  const ownerMismatch = new RootBrokerServer({ rootSessionId: "root-owner", lifecycleSessionId: "root-owner", upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} }, captureProcessBirthIdentity: async () => "birth", writeGrant: async () => join(asyncDir, "grant"), lstat: (file) => ({ ...lstatSync(file), uid: process.getuid() + 1 }) });
+  const ownerEvent = { ...event, sessionId: "root-owner" }; await authorize(ownerMismatch, ownerEvent, { ...authority, sessionId: "root-owner" }); await ownerMismatch.observeStarted(ownerEvent);
+  assert.equal((await ownerMismatch.inspectExecutorProofAsync(runId)).terminal, null, "owner mismatch"); ownerMismatch.terminalProofs.set(runId, terminal); await ownerMismatch.closeRootSession().catch(() => undefined);
+
+  const facade = new RootBrokerServer({ rootSessionId: "root-facade", lifecycleSessionId: "root-facade", upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} } });
+  facade.registerFacadeRun({ ...event, sessionId: "root-facade", agent: "executor", kind: "executor" });
+  assert.equal(await facade.inspectExecutorProofAsync(runId), null, "facade-only run has no settlement proof");
 });
 
 test("Root broker never marks a missing process birth identity as verified ownership", async () => {
@@ -303,7 +367,7 @@ test("Root broker tracks a registered Generic facade leaf official proof without
     conflict: false,
   });
   assert.match(proof.proofHash, /^[a-f0-9]{64}$/);
-  assert.deepEqual(broker.inspectExecutionProof(runId), proof);
+  assert.equal(broker.inspectExecutionProof(runId), null, "facade runs are never execution-proof authority");
   assert.deepEqual(grants, []);
 
   broker.observeTerminal({ ...observedProof(runId), sessionId: rootSessionId, pid: 999, asyncDir: "/tmp/generic-proof", agent: "reviewer" });
@@ -338,8 +402,51 @@ test("Root broker marks conflicting official terminal proofs instead of replacin
 
   const snapshot = broker.inspectExecutionProof(runId);
   assert.equal(snapshot.terminalConflict, true);
-  assert.equal(snapshot.terminal.observedAt, first.observedAt);
-  assert.deepEqual(snapshot.terminal.proof, first);
+  assert.equal(snapshot.terminal, null, "conflicting terminals never produce settlement proof");
+});
+
+test("Root broker promotes an exact started facade only from frozen Host authorization in both arrival orders", async () => {
+  const rootSessionId = "root-facade-promotion";
+  for (const order of ["started-first", "authorization-first"]) {
+    const runId = `executor-${order}`;
+    const broker = new RootBrokerServer({
+      rootSessionId,
+      lifecycleSessionId: rootSessionId,
+      upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+      captureProcessBirthIdentity: async () => `birth-${runId}`,
+      writeGrant: async () => `/tmp/${runId}-grant`,
+    });
+    const event = startedEvent(rootSessionId, runId);
+    const authorization = createRunAuthorization({ kind: "coding", binding: { runId, asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid, agentProfile: event.agent }, goal: goalAuthority(rootSessionId, runId) && { ticketId: "d".repeat(64), goalId: "test-goal", taskId: "test-task", attempt: 1, contractHash: "c".repeat(64), workspaceId: "workspace-1", executionRevision: 1, expectedCriteria: ["criterion-1"] } });
+    assert.equal(Object.isFrozen(authorization), true);
+    if (order === "started-first") {
+      await broker.observeStarted(event);
+      broker.observeTerminal(observedProof(runId));
+      assert.equal(broker.inspectFacadeTerminalProof(runId).state, "observed", order);
+    }
+    await broker.registerAuthorizedRun(authorization);
+    if (order === "authorization-first") await broker.observeStarted(event);
+    assert.equal(broker.facadeRuns.has(runId), false, order);
+    assert.equal(broker.inspectExecutionProof(runId).terminal, null, `${order} pre-authorization facade terminal is not promoted`);
+    assert.equal(broker.ownedRuns.get(runId)?.identityState, "verified", order);
+    assert.deepEqual([...broker.ownedRuns.get(runId).capabilities].sort(), ["acceptance.submit", "root.subscribe"], order);
+    broker.observeTerminal(observedProof(runId));
+    assert.equal(broker.inspectExecutionProof(runId).terminal.outcome, "succeeded", order);
+  }
+});
+
+test("Root broker fails closed rather than promoting facade identity or terminal facts that drift", async () => {
+  const rootSessionId = "root-facade-promotion-conflict";
+  const runId = "executor-conflict";
+  const broker = new RootBrokerServer({ rootSessionId, lifecycleSessionId: rootSessionId, upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} }, captureProcessBirthIdentity: async () => "birth", writeGrant: async () => "/tmp/conflict-grant" });
+  const event = startedEvent(rootSessionId, runId);
+  await broker.observeStarted(event);
+  broker.observeTerminal(observedProof(runId));
+  const authorization = createRunAuthorization({ kind: "coding", binding: { runId, asyncDir: "/tmp/other", sessionId: event.sessionId, pid: event.pid, agentProfile: event.agent }, goal: null });
+  await assert.rejects(broker.registerAuthorizedRun(authorization), /Facade run identity conflicts/);
+  assert.equal(broker.ownedRuns.has(runId), false);
+  assert.equal(broker.principals.has(runId), false);
+  assert.equal(broker.inspectFacadeTerminalProof(runId).state, "observed");
 });
 
 test("Root broker ignores untrusted started events and rejects binding drift", async () => {

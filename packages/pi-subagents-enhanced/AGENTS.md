@@ -19,3 +19,5 @@ package 内由 Node 直接执行的 `scripts/*.ts` 和所有 `src/**/*.ts` 均�
 所有 standalone subagent、Goal task 和 Goal validation workspace 共用 `src/workspace/` 中的一套 service、ledger 和 Git lifecycle。`src/workspace/` 外禁止直接执行 subagent/Goal 的 `git worktree` mutation，也不得建立第二套 workspace ledger、owner token 或 disposition 状态机。
 
 公开入口只允许 package exports `./workspace` 与 `./workspace/admin`。运行时 owner token 只能保存在统一私有 ledger 中；agent、Goal event 和管理输出只能消费公开 receipt 与其 `leaseId`。
+
+任何 agent-callable workspace 工具都必须调用唯一 workspace service，并在 service 内对 live root session identity 和 exact owner kind 执行验证；不得以工具参数、workspace ID、路径或调用前检查替代该门禁。

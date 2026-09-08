@@ -119,6 +119,7 @@ function goalTicket(contractHash: string) {
     workspaceId: "goal-workspace-1",
     executionRevision: 1,
     expectedCriteria: ["identity"],
+    agentProfile: "executor",
     spawnIdentity: { requestId: "goal-request", spawnKey: "goal-request" },
   };
 }
@@ -149,7 +150,7 @@ test("coding spawn binds the Goal coordinator through a same-root different-Exte
     assert.equal(result.isError, false, result.content[0]?.text);
     assert.equal(bindings.length, 1);
     assert.equal(bindings[0].ticket.ticketId, "a".repeat(64));
-    assert.deepEqual(bindings[0].binding, { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "root-shared", pid: 123, agent: "executor" });
+    assert.deepEqual(bindings[0].binding, { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "root-shared", pid: 123, agentProfile: "executor" });
   } finally {
     unbindGoalRunCoordinatorSession(goalPi, "root-shared", coordinator);
   }
@@ -218,7 +219,7 @@ test("Goal coding spawn allocates through the shared service in the exact four-s
   assert.equal(result.details.lease_id, activeReceipt.leaseId);
 });
 
-test("standalone coding worktree uses the same service and binds before Root Broker registration", async () => {
+test("standalone coding worktree uses the same service and binds without Goal registration", async () => {
   const { pi, rpc, tools } = setup({ sessionId: "root-standalone" });
   const order: string[] = [];
   let allocated: any;
@@ -262,18 +263,12 @@ test("standalone coding worktree uses the same service and binds before Root Bro
   }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
-  assert.deepEqual(order, ["ensureAllocated", "spawn", "registerAuthorizedRun", "bindRun"]);
+  assert.deepEqual(order, ["ensureAllocated", "spawn", "bindRun"]);
   assert.equal(result.details.dispatch_cwd, "/managed/goal-workspace-1");
   assert.equal(result.details.workspace_state, "active");
   assert.equal(Object.hasOwn(allocated.run, "kind"), false);
   assert.equal(Object.hasOwn(result.details, "kind"), false);
-  assert.deepEqual(registered[0], {
-    version: "subagent-run-authorization.v1",
-    kind: "coding",
-    binding: { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "root-standalone", pid: 123, agentProfile: "executor" },
-    capabilities: ["root.subscribe"],
-    goal: null,
-  });
+  assert.deepEqual(registered, []);
 });
 
 test("generic worktree uses the unified service without enabling upstream worktrees", async () => {
@@ -324,7 +319,7 @@ test("generic worktree uses the unified service without enabling upstream worktr
   });
 });
 
-test("coding without a worktree registers root ownership while generic does not", async () => {
+test("coding without a worktree does not register Goal ownership", async () => {
   const { pi, rpc, tools, calls } = setup();
   const registrations: any[] = [];
   createTestExtension(pi, {
@@ -338,14 +333,12 @@ test("coding without a worktree registers root ownership while generic does not"
 
   assert.equal(coding.isError, false, coding.content[0]?.text);
   assert.equal(generic.isError, false, generic.content[0]?.text);
-  assert.equal(registrations.length, 1);
-  assert.deepEqual(registrations[0].capabilities, ["root.subscribe"]);
-  assert.equal(registrations[0].binding.agentProfile, "executor");
+  assert.equal(registrations.length, 0);
   assert.equal(workflowLeaf(calls[0].params).subagentOnlyExtensions.length, 1);
   assert.equal(Object.hasOwn(workflowLeaf(calls[1].params), "subagentOnlyExtensions"), false);
 });
 
-test("renamed profiles retain typed coding and generic authorization boundaries", async () => {
+test("renamed standalone profiles do not acquire Goal authorization", async () => {
   const { pi, rpc, tools } = setup();
   const registrations: any[] = [];
   createTestExtension(pi, {
@@ -361,13 +354,7 @@ test("renamed profiles retain typed coding and generic authorization boundaries"
   const generic = await tools[0].execute("same-profile-generic", { agent: "coder-alpha", title: "Inspect", task: "Read only." }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(generic.isError, false, generic.content[0]?.text);
-  assert.deepEqual(registrations.map((authorization) => ({
-    agentProfile: authorization.binding.agentProfile,
-    capabilities: authorization.capabilities,
-  })), [
-    { agentProfile: "coder-alpha", capabilities: ["root.subscribe"] },
-    { agentProfile: "coder-beta", capabilities: ["root.subscribe"] },
-  ]);
+  assert.deepEqual(registrations, []);
 });
 
 test("Goal coding registers exact ticket authority before returning a handle", async () => {
@@ -380,7 +367,7 @@ test("Goal coding registers exact ticket authority before returning a handle", a
     goalExecutorCoordinator: {
       prepareSpawn(request: any) {
         workspaceRequest = goalWorkspaceRequest(request.contractHash);
-        return { ...goalTicket(request.contractHash), workspaceRequest };
+        return { ...goalTicket(request.contractHash), agentProfile: "coder-alpha", workspaceRequest };
       },
       workspaceAllocated() {},
       confirmSpawn() {},
@@ -409,7 +396,7 @@ test("Goal coding registers exact ticket authority before returning a handle", a
   });
 });
 
-test("authorization registration failure does not return a successful handle", async () => {
+test("standalone coding does not depend on Goal authorization registration", async () => {
   const { pi, rpc, tools } = setup();
   createTestExtension(pi, {
     rpc,
@@ -419,11 +406,10 @@ test("authorization registration failure does not return a successful handle", a
 
   const result = await tools[0].execute("registration-failure", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo" });
 
-  assert.equal(result.isError, true);
-  assert.equal(result.details.code, "BROKER_UNAVAILABLE");
+  assert.equal(result.isError, false);
 });
 
-test("persisted lifecycle session remains distinct from the root authority identity", async () => {
+test("standalone lifecycle session does not create Goal authorization", async () => {
   const { pi, rpc, tools } = setup({ sessionId: "/tmp/root-session.jsonl" });
   const registrations: any[] = [];
   createTestExtension(pi, {
@@ -436,10 +422,10 @@ test("persisted lifecycle session remains distinct from the root authority ident
   const result = await tools[0].execute("session-mismatch", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
-  assert.equal(registrations[0].binding.sessionId, "/tmp/root-session.jsonl");
+  assert.deepEqual(registrations, []);
 });
 
-test("unsafe observed lifecycle session is rejected before authorization registration", async () => {
+test("unsafe lifecycle session does not matter without Goal authorization", async () => {
   const { pi, rpc, tools } = setup({ sessionId: "relative/unsafe-session" });
   let registrations = 0;
   createTestExtension(pi, {
@@ -450,9 +436,7 @@ test("unsafe observed lifecycle session is rejected before authorization registr
 
   const result = await tools[0].execute("unsafe-session", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo" });
 
-  assert.equal(result.isError, true);
-  assert.equal(result.details.code, "SUBAGENT_RPC_FAILED");
-  assert.match(result.content[0]?.text ?? "", /binding\.sessionId/);
+  assert.equal(result.isError, false);
   assert.equal(registrations, 0);
 });
 

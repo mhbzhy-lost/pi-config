@@ -27,7 +27,10 @@ const REQUIRED_TOP_LEVEL_KEYS = TOP_LEVEL_KEYS.filter((key) => key !== "model");
 const COERCIBLE_FIELDS = ["workflow", "requirements", "context", "boundaries", "acceptance", "execution"];
 
 export class CodingDispatchContractError extends Error {
-  constructor(code, message, detail = message, keypath) {
+  code: string;
+  detail: string;
+  keypath?: string;
+  constructor(code, message, detail = message, keypath?: string) {
     super(message);
     this.name = "CodingDispatchContractError";
     this.code = code;
@@ -173,7 +176,7 @@ function normalizeAcceptance(value) {
   return { criteria: normalizeStringArray(acceptance.criteria, "acceptance.criteria", { minItems: 1 }) };
 }
 
-function normalizeExecution(value, baseCwd) {
+function normalizeExecution(value, baseCwd): { cwd: string; timeoutMs: number; worktree?: true } {
   const execution = validateObject(value, "execution", ["timeoutMs", "cwd", "worktree"], ["timeoutMs"]);
   if (!Number.isSafeInteger(execution.timeoutMs) || execution.timeoutMs <= 0) {
     fail("INVALID_CONTRACT", `execution.timeoutMs must be a positive safe integer; expected positive safe integer; received ${runtimeType(execution.timeoutMs)}`, "execution.timeoutMs");
@@ -182,7 +185,7 @@ function normalizeExecution(value, baseCwd) {
   if (!path.isAbsolute(root) || root.includes("\0")) fail("INVALID_PATH", "options.cwd must be an absolute path", "options.cwd");
   const requested = Object.hasOwn(execution, "cwd") ? normalizeString(execution.cwd, "execution.cwd") : root;
   if (requested.includes("\0")) fail("INVALID_PATH", "execution.cwd contains NUL", "execution.cwd");
-  const normalized = { cwd: path.resolve(root, requested), timeoutMs: execution.timeoutMs };
+  const normalized: { cwd: string; timeoutMs: number; worktree?: true } = { cwd: path.resolve(root, requested), timeoutMs: execution.timeoutMs };
   if (Object.hasOwn(execution, "worktree")) {
     if (typeof execution.worktree !== "boolean") failTypeMismatch("execution.worktree", "boolean", execution.worktree);
     if (execution.worktree) normalized.worktree = true;
@@ -206,7 +209,7 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-export function compileCodingDispatchIR(input, { cwd } = {}) {
+export function compileCodingDispatchIR(input, { cwd }: { cwd?: string } = {}) {
   const source = validateObject(coerceContractFields(input), "$", TOP_LEVEL_KEYS, REQUIRED_TOP_LEVEL_KEYS);
   const version = normalizeString(source.version, "version");
   if (version !== CONTRACT_VERSION) fail("UNSUPPORTED_VERSION", `unsupported coding dispatch contract version: ${version}`, "version");

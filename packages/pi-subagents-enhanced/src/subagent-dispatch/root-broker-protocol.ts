@@ -86,7 +86,7 @@ export class BrokerProtocolError extends Error {
   }
 }
 
-function fail(message) {
+function fail(message: string): never {
   throw new BrokerProtocolError(message);
 }
 
@@ -416,12 +416,13 @@ function canonicalCapabilities(value: unknown): BrokerCapability[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > BROKER_CAPABILITIES.length) {
     fail("grant.capabilities must be a non-empty canonical capability array");
   }
-  if (value.some((capability) => typeof capability !== "string" || !BROKER_CAPABILITIES.includes(capability as BrokerCapability))) {
+  const capabilities = value;
+  if (capabilities.some((capability) => typeof capability !== "string" || !BROKER_CAPABILITIES.includes(capability as BrokerCapability))) {
     fail("grant.capabilities contains an unsupported capability");
   }
-  if (new Set(value).size !== value.length) fail("grant.capabilities contains duplicates");
-  const canonical = BROKER_CAPABILITIES.filter((capability) => value.includes(capability));
-  if (canonical.length !== value.length || canonical.some((capability, index) => capability !== value[index])) {
+  if (new Set(capabilities).size !== capabilities.length) fail("grant.capabilities contains duplicates");
+  const canonical = BROKER_CAPABILITIES.filter((capability) => capabilities.includes(capability));
+  if (canonical.length !== capabilities.length || canonical.some((capability, index) => capability !== capabilities[index])) {
     fail("grant.capabilities must be in canonical order");
   }
   return canonical;

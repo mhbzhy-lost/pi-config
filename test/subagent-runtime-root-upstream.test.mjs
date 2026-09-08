@@ -40,8 +40,8 @@ test("workspace service registry survives ExtensionAPI reload and CAS-unbinds th
   const consumerPi = { events: {} };
   const service = (name) => ({
     name,
-    reserve() {}, ensureAllocated() {}, bindRun() {}, status() {},
-    issueDisposition() {}, dispose() {}, release() {}, reconcile() {},
+    reserve() {}, ensureAllocated() {}, bindRun() {}, listOwned() {}, status() {}, statusOwned() {},
+    issueDisposition() {}, issueOwnedDisposition() {}, dispose() {}, disposeOwned() {}, release() {}, releaseOwned() {}, reconcile() {},
   });
   const first = service("first");
   const replacement = service("replacement");

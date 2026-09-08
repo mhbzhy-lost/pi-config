@@ -96,7 +96,7 @@ function absolutePath(value: unknown, label: string): string {
 }
 
 function positiveInteger(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || value <= 0) fail(`${label} must be a positive safe integer`);
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) fail(`${label} must be a positive safe integer`);
   return value;
 }
 
@@ -182,7 +182,9 @@ export function assertRunAuthorization(value: unknown): asserts value is Readonl
   if (!Array.isArray(value.capabilities) || value.capabilities.length !== capabilities.length || value.capabilities.some((capability, index) => capability !== capabilities[index])) {
     fail("authorization.capabilities must match the canonical authorization matrix");
   }
-  if (!Object.isFrozen(value) || !Object.isFrozen(value.binding) || !Object.isFrozen(value.capabilities) || (value.goal !== null && (!Object.isFrozen(value.goal) || !Object.isFrozen(value.goal.expectedCriteria)))) {
+  const receivedGoal = value.goal;
+  if (!Object.isFrozen(value) || !Object.isFrozen(value.binding) || !Object.isFrozen(value.capabilities)
+      || (goal !== null && (!isPlainObject(receivedGoal) || !Object.isFrozen(receivedGoal) || !Object.isFrozen(receivedGoal.expectedCriteria)))) {
     fail("authorization must be deeply frozen");
   }
   void binding;

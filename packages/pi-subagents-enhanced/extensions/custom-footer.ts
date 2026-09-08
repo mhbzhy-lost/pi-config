@@ -19,7 +19,7 @@ function store(): SubagentStatusStore {
   if (existing?.version === 1 && Array.isArray(existing.children)) return existing;
   // Migrate the short-lived v2 class-instance cache once, then retain data only.
   const children = existing?.browser?.snapshot?.().children;
-  return root[SUBAGENT_STATUS_STORE] = { version: 1, children: Array.isArray(children) ? children : [] };
+  return root[SUBAGENT_STATUS_STORE] = { version: 1 as const, children: Array.isArray(children) ? children : [] };
 }
 
 function lifecycleGlyph(state: string | undefined, presentation?: string): string {

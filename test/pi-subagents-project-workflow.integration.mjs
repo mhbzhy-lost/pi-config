@@ -104,10 +104,10 @@ export function providerSource(contract) {
           } else if (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0) {
             if (projectStep++ === 0) tool = { name: "subagent", arguments: contract };
             else if (projectStep === 2) tool = { name: "compat_project_probe", arguments: {} };
-            else if (projectStep === 3 && contract.execution?.worktree) tool = { name: "subagent", arguments: { action: "workspace_status", workspace_id: dispatch?.details?.workspace_id } };
+            else if (projectStep === 3 && contract.execution?.worktree) tool = { name: "subagent_worktree", arguments: { action: "status", workspace_id: dispatch?.details?.workspace_id } };
             else if (projectStep === 4 && contract.execution?.worktree) {
-              const status = results.filter((message) => message.toolName === "subagent").at(-1);
-              tool = { name: "subagent", arguments: { action: "workspace_disposition", workspace_id: dispatch?.details?.workspace_id, disposition: "discard", action_token: status?.details?.action_token } };
+              const status = results.filter((message) => message.toolName === "subagent_worktree").at(-1);
+              tool = { name: "subagent_worktree", arguments: { action: "dispose", workspace_id: dispatch?.details?.workspace_id, disposition: "discard", action_token: status?.details?.action_token } };
             }
             else output = "PROJECT_TYPED_PARENT_DONE";
           } else {

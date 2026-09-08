@@ -2,8 +2,10 @@ const WORKFLOW_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const STARTED_EVENT = "subagent:async-started";
 const COMPLETE_EVENT = "subagent:async-complete";
 const DEFAULT_CHILD_START_TIMEOUT_MS = 120_000;
+type WorkflowRootBinding = { runId: string; asyncDir: string };
 
 export class WorkflowSpawnError extends Error {
+  code: string;
   constructor(code, message) {
     super(message);
     this.name = "WorkflowSpawnError";
@@ -25,7 +27,7 @@ function nonempty(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function record(value) {
+function record(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -67,6 +69,9 @@ export function buildWorkflowSpawn({
   artifacts = true,
   acceptance,
   child,
+}: {
+  workflowKey?: string; agent?: string; task?: string; cwd?: string; context?: "fresh" | "fork";
+  timeoutMs?: number; artifacts?: boolean; acceptance?: unknown; child?: unknown;
 } = {}) {
   const normalizedKey = workflowKey(key);
   if (!nonempty(agent) || !nonempty(task) || !nonempty(cwd)) {
@@ -125,13 +130,13 @@ function rootFinishedError(completion) {
   );
 }
 
-export function createWorkflowChildStartCollector(events, {
+export function createWorkflowChildStartCollector(events: { on(type: string, handler: (event: unknown) => void): (() => void) | undefined }, {
   workflowKey: expectedKey,
   agent: expectedAgent,
   sessionId: expectedSessionId,
   timeoutMs,
   onBinding,
-} = {}) {
+}: { workflowKey?: string; agent?: string; sessionId?: string; timeoutMs?: number; onBinding?: (binding: { runId: string; asyncDir: string; sessionId: string; pid: number; agent: string }) => void } = {}) {
   workflowKey(expectedKey);
   if (!events || typeof events.on !== "function") throw new TypeError("workflow child collector requires an event bus");
   if (!nonempty(expectedAgent) || !nonempty(expectedSessionId)) {
@@ -200,7 +205,7 @@ export function createWorkflowChildStartCollector(events, {
   };
   const buffered = [];
   const completed = [];
-  unsubscribe = events.on(STARTED_EVENT, (event) => {
+  unsubscribe = events.on(STARTED_EVENT, (event: unknown) => {
     if (!record(event)
       || event.sessionId !== expectedSessionId
       || event.agent !== expectedAgent
@@ -223,7 +228,7 @@ export function createWorkflowChildStartCollector(events, {
   }) ?? (() => {});
 
   return Object.freeze({
-    waitFor(root) {
+    waitFor(root: WorkflowRootBinding): Promise<WorkflowRootBinding> {
       if (rootRunId !== undefined) {
         return Promise.reject(new WorkflowSpawnError("WORKFLOW_CHILD_BINDING_INVALID", "workflow child binding can only wait for one root run"));
       }
@@ -244,7 +249,7 @@ export function createWorkflowChildStartCollector(events, {
       completed.length = 0;
       if (terminalError) return Promise.reject(terminalError);
       if (candidate?.resolved) return Promise.resolve({ runId: candidate.runId, asyncDir: candidate.asyncDir });
-      return new Promise((resolve, reject) => {
+      return new Promise<WorkflowRootBinding>((resolve, reject) => {
         resolveWaiting = resolve;
         rejectWaiting = reject;
         timer = setTimeout(() => {
