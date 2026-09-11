@@ -465,7 +465,7 @@ const STRICT_CODING_CONTRACT = Object.freeze({
   context: { knownFacts: [], decisions: [], relevantFiles: [] },
   boundaries: { writePaths: ["src/task.mjs"], excludedWork: [], forbiddenActions: [] },
   acceptance: { criteria: ["The ticket remains exact."] },
-  execution: { cwd: "/repo", timeoutMs: 1_000 },
+  execution: { cwd: "/repo" },
 });
 
 test("Subagent confirms the allocated Goal receipt before spawn and rejects projection drift", async () => {

@@ -105,7 +105,7 @@ function codingContract(originRoot) {
     context: { knownFacts: [], decisions: [], relevantFiles: ["allowed.txt"] },
     boundaries: { writePaths: ["allowed.txt"], excludedWork: [], forbiddenActions: [] },
     acceptance: { criteria: ["The committed change is integrated."] },
-    execution: { cwd: originRoot, timeoutMs: 10_000, worktree: true },
+    execution: { cwd: originRoot, worktree: true },
   };
 }
 

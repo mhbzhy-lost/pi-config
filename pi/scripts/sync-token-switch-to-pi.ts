@@ -11,6 +11,12 @@ const settingsPath = process.env.PI_SETTINGS_CONFIG || resolve(import.meta.dirna
 const helperCommandPrefix = "!node \"$PI_CODING_AGENT_DIR/scripts/token-switch-api-key.ts\" ";
 const formerHelperCommandPrefix = "!node \"$PI_CODING_AGENT_DIR/pi/scripts/token-switch-api-key.ts\" ";
 const tokenSwitchUserAgent = "opencode/1.18.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+// Token Hub catalog 的 contextWindowSize 是档位策略值，不等于模型真实能力。
+// Qwen3.8-Max-DogFooding 实测输入上限为 983616 tokens，这里按期望的 900000 压缩阈值
+// 加上 Pi 默认 reserveTokens 16384 反推。上游修正 catalog 后应删除本覆盖。
+const contextWindowOverrides: Record<string, number> = {
+  "Qwen3.8-Max-DogFooding": 916384
+};
 
 function isRecord(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -59,7 +65,7 @@ function modelFromConfig(value: unknown): JsonRecord {
   }
   return {
     name: value.name,
-    contextWindow: limit.context,
+    contextWindow: contextWindowOverrides[value.name] ?? limit.context,
     maxTokens: limit.output,
     reasoning: value.reasoning === true,
     input: modalities.input

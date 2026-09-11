@@ -35,8 +35,11 @@ test("reviewer and executor profiles keep configuration out of their operating i
   const reviewerBody = reviewer.split("---\n").at(-1);
   const executorBody = executor.split("---\n").at(-1);
 
-  assert.match(reviewer, /^models:\n  - openai-codex\/gpt-6-astra\nthinking: xhigh/m);
-  assert.match(executor, /^models:\n  - codex-pool\/gpt-5\.6-terra\n  - openai-codex\/gpt-5\.6-terra\n  - codex-pool\/gpt-5\.6-luna\n  - openai-codex\/gpt-5\.6-luna\n  - deepseek\/deepseek-v4-pro\n  - deepseek\/deepseek-v4-flash\nthinking: medium/m);
+  assert.match(reviewer, /^models:\n  - openai-codex\/gpt-6-astra\n  - codex-pool\/gpt-5\.6-sol\nthinking: xhigh/m);
+  assert.match(executor, /^models:\n  - codex-pool\/gpt-5\.6-terra\n  - openai-codex\/gpt-5\.6-terra\n  - codex-pool\/gpt-5\.6-luna\n  - openai-codex\/gpt-5\.6-luna\nthinking: medium/m);
+  assert.doesNotMatch(executor, /^\s*- deepseek\//m);
+  const subagentConfig = JSON.parse(await readFile(new URL("../pi/extensions/subagent/config.json", import.meta.url), "utf8"));
+  assert.deepEqual(subagentConfig.providerBlacklist, ["deepseek"]);
   assert.doesNotMatch(reviewerBody, /模型|thinking|Host|runtime|profile|frontmatter|审批机制/i);
   assert.match(reviewerBody, /计划执行前.*(?:审阅|审查)/);
   assert.match(reviewerBody, /计划执行完成后.*核对/);

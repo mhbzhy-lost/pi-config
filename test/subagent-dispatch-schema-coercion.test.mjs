@@ -37,7 +37,7 @@ function validCodingContract() {
       forbiddenActions: ["Nothing forbidden."],
     },
     acceptance: { criteria: ["Criterion one."] },
-    execution: { timeoutMs: 60000 },
+    execution: {},
   };
 }
 
@@ -78,7 +78,7 @@ test("schema accepts stringified acceptance", () => {
 
 test("schema accepts stringified execution", () => {
   const input = validCodingContract();
-  input.execution = '{"timeoutMs": 120000, "worktree": true}';
+  input.execution = '{"worktree": true}';
   assert.equal(validator.Check(input), true, "stringified execution should pass schema validation");
 });
 
@@ -89,12 +89,12 @@ test("schema accepts all fields stringified simultaneously", () => {
   input.context = '{"knownFacts": [], "decisions": [], "relevantFiles": []}';
   input.boundaries = '{"writePaths": ["src/x.ts"], "excludedWork": [], "forbiddenActions": []}';
   input.acceptance = '{"criteria": ["Done."]}';
-  input.execution = '{"timeoutMs": 90000}';
+  input.execution = '{"worktree": true}';
   assert.equal(validator.Check(input), true, "all-stringified contract should pass schema validation");
 });
 
 test("schema only defers malformed values with the expected coding field container kind", () => {
-  const objectFields = ["workflow", "context", "boundaries", "acceptance", "execution"];
+  const objectFields = ["workflow", "context", "boundaries", "acceptance"];
 
   for (const field of objectFields) {
     const malformed = validCodingContract();
@@ -106,6 +106,14 @@ test("schema only defers malformed values with the expected coding field contain
       invalid[field] = value;
       assert.equal(validator.Check(invalid), false, `${field} must reject ${value === null ? "null" : typeof value} at schema validation`);
     }
+  }
+
+  // execution 是严格 public 容器：没有 loose object 回退，也没有 caller timeout。
+  // 畸形对象与非 object/string 值在 schema 层被拒绝，不进 IR 校验。
+  for (const value of [{ unexpected: [7] }, [], 7, false, null]) {
+    const invalid = validCodingContract();
+    invalid.execution = value;
+    assert.equal(validator.Check(invalid), false, `execution must reject ${value === null ? "null" : typeof value} at schema validation`);
   }
 
   const malformedRequirements = validCodingContract();

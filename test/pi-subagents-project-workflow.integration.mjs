@@ -245,7 +245,7 @@ test("project typed dispatch binds the real 0.62.0 workflow leaf to the Root Bro
       context: { knownFacts: ["pi-subagents is pinned to 0.62.0."], decisions: ["Bind only the leaf run."], relevantFiles: [] },
       boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
       acceptance: { criteria: ["The child returns the deterministic marker."] },
-      execution: { cwd: projectRoot, timeoutMs: 30_000, worktree: true },
+      execution: { cwd: projectRoot, worktree: true },
     };
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, "README.md"), "temporary real-host fixture\n");
@@ -279,7 +279,10 @@ Return the deterministic child marker without modifying files.
       env: {
         ...buildTopLevelRuntimeEnv(withoutSubagentEnvironment(process.env)),
         PI_CODING_AGENT_DIR: configRoot,
+        PI_CODING_AGENT_SESSION_DIR: join(root, "sessions"),
+        PI_SESSION_OWNER_REGISTRY: join(root, "registry"),
         PI_CODING_WORKSPACE_DIR: join(root, "workspaces"),
+        PI_CODING_GOAL_DIR: join(root, "goals"),
         OPENAI_API_KEY: "not-used",
       },
       input: JSON.stringify({ id: "project-workflow-045", type: "prompt", message: "PROJECT_TYPED_PARENT" }),
@@ -343,7 +346,7 @@ test("non-Goal executor ignores a hostile legacy .pi-subagents tree", { skip: !p
       context: { knownFacts: ["The workspace contains hostile legacy entries."], decisions: ["Do not inspect or change those entries."], relevantFiles: [] },
       boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
       acceptance: { criteria: ["The child returns the deterministic marker."] },
-      execution: { cwd: projectRoot, timeoutMs: 30_000, worktree: false },
+      execution: { cwd: projectRoot, worktree: false },
     };
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, "README.md"), "temporary hostile legacy fixture\n");
@@ -429,7 +432,7 @@ test("non-Goal persistent Host rename canary keeps typed coding and generic auth
     context: { knownFacts: ["The Host is a fixture."], decisions: ["Use typed standalone dispatch."], relevantFiles: [] },
     boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
     acceptance: { criteria: ["The child returns the deterministic marker."] },
-    execution: { cwd: projectRoot, timeoutMs: 30_000, worktree: false },
+    execution: { cwd: projectRoot, worktree: false },
   });
   const generic = { agent: "coder-alpha", title: "Inspect rename canary", task: "Read only.", model: "codex-pool/gpt-5.6-terra", worktree: false };
   try {

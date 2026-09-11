@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 
-import { createTypedSubagentExtension } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
-import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts";
+import { createTypedSubagentExtension, preparePublicCodingDispatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { bindGoalRunCoordinator, bindGoalRunCoordinatorSession, unbindGoalRunCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 
 const contract = {
@@ -11,7 +11,7 @@ const contract = {
   objective: "Bind coding calls to durable identities.", workflow: { mode: "tdd" }, requirements: ["Preserve the exact contract."],
   context: { knownFacts: [], decisions: [], relevantFiles: ["test/subagent-dispatch-extension.test.ts"] },
   boundaries: { writePaths: ["test/subagent-dispatch-extension.test.ts"], excludedWork: [], forbiddenActions: [] },
-  acceptance: { criteria: ["Identity is trusted."] }, execution: { cwd: "/repo", timeoutMs: 1_000 },
+  acceptance: { criteria: ["Identity is trusted."] }, execution: { cwd: "/repo" },
 };
 
 function setup({ sessionId = "s" }: { sessionId?: string } = {}) {
@@ -108,6 +108,128 @@ function createTestExtension(pi: any, options: any) {
   });
 }
 
+async function assertCallerTimeoutRejected(name: string, input: any) {
+  const { pi, rpc, calls, tools } = setup();
+  let discoveries = 0;
+  let allocations = 0;
+  let rpcCalls = 0;
+  rpc.ping = async () => { rpcCalls += 1; return { version: 1, methods: ["spawn"], session: { sessionId: "s", cwd: "/repo" } }; };
+  rpc.spawn = async () => { rpcCalls += 1; throw new Error("RPC must not be reached"); };
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    discoverAgents() { discoveries += 1; return { agents: [{ name: "executor" }, { name: "reviewer" }] }; },
+    workspaceService: { ensureAllocated() { allocations += 1; throw new Error("workspace must not be reached"); } },
+  });
+
+  const result = await tools[0].execute(`caller-timeout-${name}`, input, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  assert.equal(discoveries, 0, `${name}: discovery`);
+  assert.equal(allocations, 0, `${name}: workspace allocation`);
+  assert.equal(rpcCalls, 0, `${name}: RPC`);
+  assert.equal(calls.length, 0, `${name}: spawn`);
+  assert.equal(result.isError, true, name);
+  assert.equal(result.details.code, "INVALID_CONTRACT", name);
+}
+
+test("coding object timeout is rejected before discovery, workspace allocation, and RPC", async () => {
+  await assertCallerTimeoutRejected("coding-object", { ...contract, execution: { ...contract.execution, timeoutMs: 1_000, worktree: true } });
+});
+
+test("stringified coding execution timeout is rejected before discovery, workspace allocation, and RPC", async () => {
+  await assertCallerTimeoutRejected("coding-string", { ...contract, execution: JSON.stringify({ ...contract.execution, timeoutMs: 1_000, worktree: true }) });
+});
+
+test("generic timeout is rejected before discovery, workspace allocation, and RPC", async () => {
+  await assertCallerTimeoutRejected("generic", { agent: "reviewer", title: "Review", task: "Inspect.", timeoutMs: 60_000, worktree: true });
+});
+
+test("caller timeout is rejected even with an active coordinator that issues no ticket", async () => {
+  const { pi, rpc, calls, tools } = setup();
+  let discoveries = 0;
+  let allocations = 0;
+  let rpcCalls = 0;
+  let prepareSpawnCalls = 0;
+  rpc.ping = async () => { rpcCalls += 1; return { version: 1, methods: ["spawn"], session: { sessionId: "s", cwd: "/repo" } }; };
+  rpc.spawn = async () => { rpcCalls += 1; throw new Error("RPC must not be reached"); };
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    discoverAgents() { discoveries += 1; return { agents: [{ name: "executor" }, { name: "reviewer" }] }; },
+    workspaceService: { ensureAllocated() { allocations += 1; throw new Error("workspace must not be reached"); } },
+    goalExecutorCoordinator: {
+      prepareSpawn() { prepareSpawnCalls += 1; return null; },
+      workspaceAllocated() {},
+      confirmSpawn() {},
+      bindSpawn() {},
+    },
+  });
+
+  const result = await tools[0].execute("caller-timeout-no-ticket", { ...contract, execution: { ...contract.execution, timeoutMs: 1_000, worktree: true } }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "INVALID_CONTRACT");
+  assert.equal(result.details.keypath, "execution.timeoutMs");
+  assert.equal(prepareSpawnCalls, 1, "coordinator preflight must run once");
+  assert.equal(discoveries, 0, "discovery");
+  assert.equal(allocations, 0, "workspace allocation");
+  assert.equal(rpcCalls, 0, "RPC");
+  assert.equal(calls.length, 0, "spawn");
+});
+
+test("Host owns coding execution timeout while generic workflow omits it", async () => {
+  const { pi, rpc, calls, tools } = setup();
+  createTestExtension(pi, { rpc, cleanupStore: {} });
+
+  const coding = await tools[0].execute("host-coding-timeout", {
+    ...contract,
+    execution: { cwd: "/repo" },
+  }, undefined, undefined, { cwd: "/repo" });
+
+  assert.equal(coding.isError, false, coding.content[0]?.text);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 30 * 60_000);
+});
+
+test("generic workflow omits execution timeout while the Host collector remains bounded", async () => {
+  const { pi, rpc, calls, tools } = setup();
+  createTestExtension(pi, { rpc, cleanupStore: {} });
+  const generic = await tools[0].execute("host-generic-timeout", {
+    agent: "reviewer", title: "Review", task: "Inspect.",
+  }, undefined, undefined, { cwd: "/repo" });
+
+  assert.equal(generic.isError, false, generic.content[0]?.text);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
+});
+
+test("generic facade passes the 120000ms default to the child-start collector while the workflow omits its timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { pi, rpc, calls, tools } = setup();
+  // Never emit the leaf start event, so the collector watchdog is the only
+  // path that can settle waitFor and its exact delay becomes observable.
+  rpc.spawn = async (params: any) => {
+    calls.push({ params });
+    return { details: { runId: "run-1", asyncDir: "/tmp/run-1" } };
+  };
+  createTestExtension(pi, { rpc, cleanupStore: {} });
+
+  const pending = tools[0].execute("generic-collector-default", {
+    agent: "reviewer", title: "Review", task: "Inspect.",
+  }, undefined, undefined, { cwd: "/repo" });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  // The generic workflow payload keeps the execution timeout undefined...
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
+  // ...while the facade's child-start collector is armed at exactly 120000ms.
+  t.mock.timers.tick(119_999);
+  assert.equal(await Promise.race([
+    pending.then(() => true, () => true),
+    new Promise((resolve) => setImmediate(() => resolve(false))),
+  ]), false, "collector watchdog must not fire before 120000ms");
+  t.mock.timers.tick(1);
+  const result = await pending;
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "WORKFLOW_CHILD_START_TIMEOUT");
+});
+
 function goalTicket(contractHash: string) {
   return {
     version: "goal-run-binding-ticket.v2",
@@ -154,6 +276,42 @@ test("coding spawn binds the Goal coordinator through a same-root different-Exte
   } finally {
     unbindGoalRunCoordinatorSession(goalPi, "root-shared", coordinator);
   }
+});
+
+test("Goal trusted contract keeps a non-default caller timeout and canonical hash", async () => {
+  const { pi, rpc, calls, tools } = setup();
+  const trustedTimeout = 45_000;
+  const goalInput = {
+    ...contract,
+    execution: { cwd: "/repo", timeoutMs: trustedTimeout, worktree: true },
+  };
+  const expectedHash = compileCodingDispatchIR(goalInput, { cwd: "/repo" }).hash;
+  let preparedRequest: any;
+  const workspaceService = {
+    ensureAllocated(request: any) { preparedRequest = request; return workspaceReceipt(request); },
+    bindRun({ run }: any) { return workspaceReceipt(preparedRequest, run); },
+  };
+  createTestExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    goalExecutorCoordinator: {
+      prepareSpawn(request: any) {
+        assert.equal(request.contractHash, expectedHash);
+        preparedRequest = goalWorkspaceRequest(request.contractHash);
+        return { ...goalTicket(request.contractHash), workspaceRequest: preparedRequest };
+      },
+      workspaceAllocated() {},
+      confirmSpawn() {},
+      bindSpawn() {},
+    },
+    workspaceService,
+  });
+
+  const result = await tools[0].execute("goal-trusted-timeout", goalInput, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.equal(result.details.contractHash, expectedHash);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, trustedTimeout);
 });
 
 test("Goal coding spawn allocates through the shared service in the exact four-stage order", async () => {
@@ -229,7 +387,7 @@ test("standalone coding worktree uses the same service and binds without Goal re
       assert.equal(request.owner.kind, "standalone-subagent");
       assert.equal(request.owner.rootSessionId, "root-standalone");
       assert.equal(request.owner.toolCallId, "standalone-call");
-      assert.equal(request.contractHash, compileCodingDispatchIR({ ...contract, execution: { ...contract.execution, worktree: true } }, { cwd: "/repo" }).hash);
+      assert.equal(request.contractHash, preparePublicCodingDispatch({ ...contract, execution: { ...contract.execution, worktree: true } }, { cwd: "/repo", timeoutMs: 30 * 60_000 }).hash);
       allocated = workspaceReceipt({ ...request, workspaceId: request.workspaceId });
       return allocated;
     },
@@ -498,7 +656,7 @@ test("coding spawn resolver receives the exact compiled hash", async () => {
   const { pi, rpc, tools } = setup(); const resolved = [];
   createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
   await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
-  assert.equal(resolved[0]?.contractHash, compileCodingDispatchIR(contract, { cwd: "/repo" }).hash);
+  assert.equal(resolved[0]?.contractHash, preparePublicCodingDispatch(contract, { cwd: "/repo", timeoutMs: 30 * 60_000 }).hash);
 });
 
 test("coding spawn forwards resolver metadata raw as RPC options and excludes spawnKey from params", async () => {

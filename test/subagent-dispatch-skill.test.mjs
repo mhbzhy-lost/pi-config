@@ -3,8 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { Compile } from "../pi/npm/node_modules/typebox/build/compile/index.mjs";
-import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
-import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+import { preparePublicCodingDispatch, TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
 
 const validator = Compile(TYPED_SUBAGENT_PARAMETERS);
@@ -39,7 +38,9 @@ test("subagent-dispatch remains a discoverable managed Skill with executable typ
   const coding = calls.find((call) => call.version === "dispatch-ir.v1");
   assert.ok(coding);
   assert.equal(coding.risk, "normal");
-  const compiled = compileCodingDispatchIR(coding, { cwd: process.cwd() });
+  // public coding ABI 不提供 execution.timeoutMs；编译必须走 Host-inject 路径。
+  assert.equal(Object.hasOwn(coding.execution ?? {}, "timeoutMs"), false);
+  const compiled = preparePublicCodingDispatch(coding, { cwd: process.cwd(), timeoutMs: 30 * 60_000 });
   assert.equal(compiled.hash.length, 64);
   assert.equal(compiled.taskId, coding.taskId);
 

@@ -17,6 +17,7 @@
     "test:goal-engine": "node --test \"test/goal-engine-*.integration.mjs\"",
     "test:goal-runtime-canary": "node --test test/goal-runtime-real-canary.integration.mjs",
     "test:subagent-workspace": "node --test test/managed-workspace-contract.test.mjs test/managed-workspace-ledger.integration.mjs test/managed-workspace-service.integration.mjs test/subagent-managed-worktree.integration.mjs",
+    "test:delegation-workspace-harness": "node --test test/subagent-generic-prompt-contract.test.mjs test/subagent-generic-prompt-contract-security.test.mjs test/subagent-execution-contract.test.mjs test/subagent-dispatch-shared-execution.integration.mjs test/managed-workspace-contract.test.mjs test/managed-workspace-ledger.integration.mjs test/managed-workspace-service.integration.mjs test/managed-workspace-v1-replay.test.mjs test/managed-workspace-terminal-proof.test.mjs test/managed-workspace-action-token.concurrent.mjs test/subagent-managed-worktree.integration.mjs test/subagent-delegation-workspace.e2e.mjs test/runtime-side-effects.integration.mjs",
     "setup:subagent-runtime": "node scripts/setup-subagent-runtime-deps.ts",
     "setup:subagents-enhanced": "node scripts/setup-subagent-runtime-deps.ts",
     "verify:subagents-enhanced": "npm --prefix packages/pi-subagents-enhanced run verify:package",

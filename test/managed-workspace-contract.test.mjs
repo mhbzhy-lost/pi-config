@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-import {
+import * as workspaceContract from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
+
+const {
   createManagedWorkspaceRequest,
   deterministicGoalWorkspaceId,
   publicManagedWorkspaceReceipt,
   validateManagedWorkspaceReceipt,
-} from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
+} = workspaceContract;
 
 const sha40 = (character) => character.repeat(40);
 const sha64 = (character) => character.repeat(64);
@@ -35,6 +37,20 @@ function request(overrides = {}) {
     contractHash: sha64("a"),
     mode: "coding",
     writePaths: ["packages/app/**"],
+    ...overrides,
+  };
+}
+
+function requestV2(overrides = {}) {
+  return {
+    workspaceId: "workspace-v2-1",
+    owner: { kind: "standalone-subagent", rootSessionId: "root-1", toolCallId: "tool-1" },
+    originRoot: "/repo",
+    requestedCwd: "/repo/packages/app",
+    originRef: "refs/heads/main",
+    baseCommit: sha64("b"),
+    contractHash: sha64("a"),
+    policy: { publication: "allowed", application: "allowed", writePaths: ["packages/app/**"] },
     ...overrides,
   };
 }
@@ -119,6 +135,31 @@ test("managed workspace requests fail closed on fields, paths, refs, hashes, and
   for (const value of invalid) {
     assert.throws(() => createManagedWorkspaceRequest(value));
   }
+});
+
+test("v2 workspace policy is independent from owner and rejects invalid capability combinations", () => {
+  const valid = [
+    { publication: "forbidden", application: "forbidden", writePaths: [] },
+    { publication: "allowed", application: "forbidden", writePaths: [] },
+    { publication: "allowed", application: "forbidden", writePaths: ["packages/app/**"] },
+    { publication: "allowed", application: "allowed", writePaths: ["packages/app/**"] },
+  ];
+  for (const policy of valid) {
+    assert.equal(typeof workspaceContract.createManagedWorkspaceRequestV2, "function");
+    const actual = workspaceContract.createManagedWorkspaceRequestV2(requestV2({ policy }));
+    assert.deepEqual(actual.policy, policy);
+    assert.equal(Object.hasOwn(actual, "mode"), false);
+    assertDeepFrozen(actual);
+  }
+
+  const invalid = [
+    { publication: "forbidden", application: "allowed", writePaths: [] },
+    { publication: "forbidden", application: "allowed", writePaths: ["packages/app/**"] },
+    { publication: "allowed", application: "allowed", writePaths: [] },
+    { publication: "allowed", application: "forbidden", writePaths: ["../outside"] },
+    { publication: "allowed", application: "forbidden", writePaths: [], mode: "coding" },
+  ];
+  for (const policy of invalid) assert.throws(() => workspaceContract.createManagedWorkspaceRequestV2(requestV2({ policy })), /policy|writePaths|unknown/i);
 });
 
 test("managed workspace receipts validate exact public fields and nested run data", () => {

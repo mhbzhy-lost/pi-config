@@ -113,6 +113,24 @@ test("all owner kinds reserve, allocate, and bind through one service state mach
   assert.equal(inventoryManagedWorkspaces({ stateRoot: f.stateRoot }).workspaces.length, 3);
 });
 
+test("allocates from base commit while preserving dirty origin for integration gating", async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.originRoot, "src", "pre-existing.txt"), "leave me dirty\n");
+  const input = request(f, "dirty-origin");
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
+
+  const receipt = service.ensureAllocated(input);
+  assert.equal(receipt.state, "active");
+  assert.equal(git(receipt.path, "rev-parse", "HEAD"), f.baseCommit);
+  assert.equal(await readFile(join(f.originRoot, "src", "pre-existing.txt"), "utf8"), "leave me dirty\n");
+
+  service.bindRun({ workspaceId: input.workspaceId, run: { runId: "dirty-origin-run", asyncDir: join(f.root, "dirty-origin-async") } });
+  const status = service.status({ workspaceId: input.workspaceId });
+  assert.equal(status.inspection.originClean, false);
+  assert.equal(status.blockedReasons.includes("origin-dirty"), true);
+  assert.equal(status.allowedDispositions.includes("integrate"), false);
+});
+
 test("allocation recovers after worktree creation without a durable active transition", async (t) => {
   const f = await fixture(t);
   let injected = false;
@@ -210,6 +228,43 @@ test("terminal proof and action token gate discard for bound runs, and replay is
   assert.equal(released.state, "released");
   assert.equal(await lstat(active.path).catch(() => null), null);
   assert.throws(() => service.dispose({ workspaceId: active.workspaceId, terminalProof: observed(), disposition: "discard", actionToken: issued.actionToken }), /state|replay|token/i);
+});
+
+test("runtime metadata does not dirty or block release of a managed workspace", async (t) => {
+  const f = await fixture(t);
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
+  const active = service.ensureAllocated(request(f, "runtime-metadata"));
+  await mkdir(join(active.path, ".pi", "subagents"), { recursive: true });
+  await writeFile(join(active.path, ".pi", "subagents", "runtime.json"), "{}\n");
+  service.bindRun({ workspaceId: active.workspaceId, run: { runId: "runtime-metadata-run", asyncDir: join(f.root, "runtime-metadata-async") } });
+
+  const status = service.status({ workspaceId: active.workspaceId, terminalProof: observed("a") });
+  assert.equal(status.inspection.clean, true);
+  assert.equal(status.blockedReasons.includes("workspace-dirty"), false);
+  assert.equal(status.allowedDispositions.includes("discard"), true);
+
+  const issued = service.issueDisposition({ workspaceId: active.workspaceId, terminalProof: observed("a") });
+  const released = service.dispose({
+    workspaceId: active.workspaceId,
+    terminalProof: observed("a"),
+    disposition: "discard",
+    actionToken: issued.actionToken,
+  });
+  assert.equal(released.state, "released");
+  assert.equal(await lstat(active.path).catch(() => null), null);
+});
+
+test("ordinary untracked files still block destructive workspace disposition", async (t) => {
+  const f = await fixture(t);
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
+  const active = service.ensureAllocated(request(f, "ordinary-dirty"));
+  await writeFile(join(active.path, "unexpected.txt"), "keep\n");
+  service.bindRun({ workspaceId: active.workspaceId, run: { runId: "ordinary-dirty-run", asyncDir: join(f.root, "ordinary-dirty-async") } });
+
+  const status = service.status({ workspaceId: active.workspaceId, terminalProof: observed("b") });
+  assert.equal(status.inspection.clean, false);
+  assert.equal(status.blockedReasons.includes("workspace-dirty"), true);
+  assert.equal(status.allowedDispositions.includes("discard"), false);
 });
 
 test("integration accepts a clean forward origin and enforces rename source and destination writePaths", async (t) => {
@@ -411,4 +466,39 @@ test("administration cleanup is dry-run until an exact public lease is authorize
   assert.equal(applied[0].state, "released");
   assert.equal(await lstat(preserved.path).catch(() => null), null);
   assert.throws(() => applyManagedWorkspaceCleanup({ stateRoot: f.stateRoot, plan, authorizations: [] }), /stale|changed/i);
+});
+
+test("administration recovers identity-valid cleanup debt with exact lease authorization", async (t) => {
+  const f = await fixture(t);
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
+  await reserveWithStaleOrigin(f, service, "unrelated-stale-cleanup", {
+    kind: "standalone-subagent",
+    rootSessionId: "other-session",
+    toolCallId: "other-tool",
+  });
+  const active = service.ensureAllocated(request(f, "admin-cleanup-debt"));
+  await mkdir(join(active.path, ".pi", "subagents"), { recursive: true });
+  await writeFile(join(active.path, ".pi", "subagents", "runtime.json"), "{}\n");
+  const ledger = createManagedWorkspaceLedger({ stateRoot: f.stateRoot });
+  ledger.mutate(active.workspaceId, (record) => {
+    record.state = "cleanup-debt";
+    record.cleanupDebt = {
+      phase: "release",
+      code: "MANAGED_WORKSPACE_GIT",
+      message: "prior release failed",
+    };
+    return record;
+  }, { leaseId: active.leaseId });
+
+  const plan = planManagedWorkspaceCleanup({ stateRoot: f.stateRoot, originRoot: f.originRoot });
+  assert.deepEqual(plan.actions, [{ workspaceId: active.workspaceId, leaseId: active.leaseId, action: "release" }]);
+  assert.throws(() => applyManagedWorkspaceCleanup({ stateRoot: f.stateRoot, plan, authorizations: [] }), /authorized/i);
+
+  const applied = applyManagedWorkspaceCleanup({
+    stateRoot: f.stateRoot,
+    plan,
+    authorizations: [{ workspaceId: active.workspaceId, leaseId: active.leaseId }],
+  });
+  assert.equal(applied[0].state, "released");
+  assert.equal(await lstat(active.path).catch(() => null), null);
 });

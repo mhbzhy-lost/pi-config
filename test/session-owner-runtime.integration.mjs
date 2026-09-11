@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { createTestRuntime } from "./helpers/test-runtime.mjs";
 
 import { createRegistryStore, listLiveRecords, prepareLaunch } from "../src/session-owner/registry.ts";
 import { installSessionOwnerExtension } from "../src/session-owner/extension.ts";
@@ -60,14 +61,16 @@ const launcher = join(repoRoot, "scripts", "pi-launcher.zsh");
 const provider = join(repoRoot, "test", "fixtures", "deterministic-provider.mjs");
 const piArgs = ["--offline", "--provider", "fake", "--model", "fake/deterministic", "-e", provider, "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"];
 
-async function ptyFixture() {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "session-owner-pty-matrix-")));
-  const store = createRegistryStore(join(root, "registry"));
-  const cwd = join(root, "cwd");
+async function ptyFixture(t) {
+  const fixture = await createTestRuntime(t, "session-owner-pty-matrix-");
+  const root = await realpath(fixture.root);
+  const store = createRegistryStore(fixture.registryDir);
+  const cwd = fixture.cwd;
   await Promise.all(["home", "agent", "sessions", "tmp", "registry", "cwd"].map((name) => mkdir(join(root, name), { recursive: true, mode: 0o700 })));
   return { root, store, cwd, env: {
-    PATH: process.env.PATH ?? "", HOME: join(root, "home"), PI_CODING_AGENT_DIR: join(root, "agent"),
-    PI_CODING_AGENT_SESSION_DIR: join(root, "sessions"), PI_SESSION_OWNER_REGISTRY: store.root,
+    PATH: process.env.PATH ?? "", HOME: join(root, "home"), PI_CODING_AGENT_DIR: fixture.agentDir,
+    PI_CODING_AGENT_SESSION_DIR: fixture.sessionDir, PI_SESSION_OWNER_REGISTRY: store.root,
+    PI_CODING_WORKSPACE_DIR: fixture.workspaceDir, PI_CODING_GOAL_DIR: fixture.goalDir,
     TMPDIR: join(root, "tmp"), PI_REAL_BIN: "/opt/homebrew/bin/pi", LAUNCHER: launcher,
     PROVIDER: provider, TERM: "xterm-256color",
   } };
@@ -125,8 +128,9 @@ function waitForOutput(child, pattern) {
   });
 }
 
-test("waitForRecord 在注册 watch 窗口内变 active 且无后续事件时仍返回记录", { timeout: 250 }, async () => {
-  const store = createRegistryStore(join(tmpdir(), `session-owner-watch-race-${process.pid}`));
+test("waitForRecord 在注册 watch 窗口内变 active 且无后续事件时仍返回记录", { timeout: 250 }, async (t) => {
+  const fixture = await createTestRuntime(t, "session-owner-watch-race-");
+  const store = createRegistryStore(fixture.registryDir);
   const ownerId = "owner-watch-race-0123456789";
   const activeRecord = {
     ownerId, pid: process.pid, state: "active", sessionFile: "/tmp/selected.jsonl",
@@ -148,8 +152,9 @@ test("waitForRecord 在注册 watch 窗口内变 active 且无后续事件时仍
   assert.equal(closeCount, 1, "成功读取必须只关闭一次 watcher");
 });
 
-test("waitForRecord 在 watch 不发事件且二次读取过早时周期重读 active record", { timeout: 250 }, async () => {
-  const store = createRegistryStore(join(tmpdir(), `session-owner-watch-unreachable-${process.pid}`));
+test("waitForRecord 在 watch 不发事件且二次读取过早时周期重读 active record", { timeout: 250 }, async (t) => {
+  const fixture = await createTestRuntime(t, "session-owner-watch-unreachable-");
+  const store = createRegistryStore(fixture.registryDir);
   const activeRecord = { ownerId: "owner-watch-unreachable-012345", state: "active" };
   let reads = 0;
   let closeCount = 0;
@@ -393,8 +398,8 @@ expect {
   }
 });
 
-test("真实 Pi PTY: active recent blocks a second -c before real Pi exec", { timeout: 120_000 }, async () => {
-  const state = await ptyFixture();
+test("真实 Pi PTY: active recent blocks a second -c before real Pi exec", { timeout: 120_000 }, async (t) => {
+  const state = await ptyFixture(t);
   let first;
   try {
     const session = await freeSession(state, "active recent fixture");
@@ -407,8 +412,8 @@ test("真实 Pi PTY: active recent blocks a second -c before real Pi exec", { ti
   }
 });
 
-test("真实 Pi PTY: -c pins the exact free recent session while another old session is active", { timeout: 120_000 }, async () => {
-  const state = await ptyFixture();
+test("真实 Pi PTY: -c pins the exact free recent session while another old session is active", { timeout: 120_000 }, async (t) => {
+  const state = await ptyFixture(t);
   let owner;
   let continued;
   try {
@@ -431,8 +436,8 @@ test("真实 Pi PTY: -c pins the exact free recent session while another old ses
   }
 });
 
-test("真实 Pi PTY: --no-extensions cannot bypass an active owner", { timeout: 120_000 }, async () => {
-  const state = await ptyFixture();
+test("真实 Pi PTY: --no-extensions cannot bypass an active owner", { timeout: 120_000 }, async (t) => {
+  const state = await ptyFixture(t);
   let first;
   try {
     const session = await freeSession(state, "no extension fixture");
@@ -446,8 +451,8 @@ test("真实 Pi PTY: --no-extensions cannot bypass an active owner", { timeout: 
   }
 });
 
-test("真实 Pi PTY: selecting picker blocks -c and --session reuse before either Pi executes", { timeout: 120_000 }, async () => {
-  const state = await ptyFixture();
+test("真实 Pi PTY: selecting picker blocks -c and --session reuse before either Pi executes", { timeout: 120_000 }, async (t) => {
+  const state = await ptyFixture(t);
   let picker;
   try {
     const session = await freeSession(state, "picker free fixture");
@@ -466,8 +471,8 @@ test("真实 Pi PTY: selecting picker blocks -c and --session reuse before eithe
   }
 });
 
-test("真实 Pi PTY: SIGKILL owner is cleaned by ESRCH before the next wrapper starts", { timeout: 120_000 }, async () => {
-  const state = await ptyFixture();
+test("真实 Pi PTY: SIGKILL owner is cleaned by ESRCH before the next wrapper starts", { timeout: 120_000 }, async (t) => {
+  const state = await ptyFixture(t);
   let first;
   let second;
   try {

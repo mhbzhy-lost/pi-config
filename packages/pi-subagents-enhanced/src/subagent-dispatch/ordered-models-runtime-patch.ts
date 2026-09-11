@@ -10,6 +10,46 @@ const MARKER = `// pi-config patch: ${ORDERED_MODELS_PATCH_VERSION}`;
 const CHILD_EXTENSIONS_MARKER = `// pi-config patch: ${WORKFLOW_CHILD_EXTENSIONS_PATCH_VERSION}`;
 const COMPILED_RUNNER_PATH_MARKER = "// pi-config patch: compiled-runner-path.v1";
 const COMPILED_EXTENSION_PATHS_MARKER = "// pi-config patch: compiled-extension-paths.v1";
+const STREAM_RECOVERY_MARKER = "// pi-config patch: stream-read-error-recovery.v1";
+
+/** Provider-stream recovery is deliberately narrower than model fallback. */
+export function isSafeStreamReadRecovery(result: any): boolean {
+  return result?.error === "stream_read_error"
+    && (!result.messages || result.messages.length === 0)
+    && !String(result.finalOutput ?? "").trim()
+    && !Object.values(result.usage ?? {}).some((value) => typeof value === "number" && value > 0)
+    && !(result.toolCount > 0)
+    && result.observedMutationAttempt !== true
+    && !result.mutationEvidence
+    && !result.currentTool
+    && result.supervisorWait !== true
+    && result.supervisorWaiting !== true
+    && result.waitObserved !== true
+    && result.interrupted !== true
+    && result.timedOut !== true
+    && result.stopped !== true
+    && result.abortRequested !== true
+    && !result.protocolError;
+}
+
+export async function recoverProviderStream<T extends { error?: string }>(
+  invoke: () => Promise<T>,
+  options: { signal?: AbortSignal; sleep?: (ms: number, signal?: AbortSignal) => Promise<void>; model?: string } = {},
+): Promise<T> {
+  const sleep = options.sleep ?? ((ms, signal) => new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error("aborted"));
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("aborted")); }, { once: true });
+  }));
+  let result = await invoke();
+  for (const delay of [250, 750]) {
+    if (!isSafeStreamReadRecovery(result)) return result;
+    try { await sleep(delay, options.signal); } catch { return result; }
+    if (options.signal?.aborted) return result;
+    result = await invoke();
+  }
+  return result;
+}
 /** The compiler configuration is the sole source for the installed JS runtime tree. */
 export const NODE_RUNTIME_TSC_CONFIG = {
   compilerOptions: {
@@ -167,6 +207,53 @@ function workflowChildExtensionBridge(source, path) {
   if (source.includes(CHILD_EXTENSIONS_MARKER)) return source;
   return once(source, /(\t{3}workflowAwaitAsync: params\.workflowAwaitAsync,\n)/, `$1\t\t\t${CHILD_EXTENSIONS_MARKER}\n\t\t\tsubagentOnlyExtensions: (params as typeof params & { subagentOnlyExtensions?: string[] }).subagentOnlyExtensions,\n`, path);
 }
+function streamRecovery(source, path) {
+  if (source.includes(STREAM_RECOVERY_MARKER)) {
+    return source.includes(MARKER) ? source : `${MARKER}\n${source}`;
+  }
+  const orderedModelsMarker = source.includes(MARKER) ? "" : `${MARKER}\n`;
+  const helper = `
+${orderedModelsMarker}${STREAM_RECOVERY_MARKER}
+function isSafeStreamReadRecovery(result) {
+\treturn result?.error === "stream_read_error"
+\t\t&& (!result.messages || result.messages.length === 0)
+\t\t&& !String(result.finalOutput ?? "").trim()
+\t\t&& !Object.values(result.usage ?? {}).some((value) => typeof value === "number" && value > 0)
+\t\t&& !(result.toolCount > 0)
+\t\t&& result.observedMutationAttempt !== true
+\t\t&& !result.mutationEvidence
+\t\t&& !result.currentTool
+\t\t&& result.supervisorWait !== true && result.supervisorWaiting !== true && result.waitObserved !== true
+\t\t&& result.interrupted !== true && result.timedOut !== true && result.stopped !== true
+\t\t&& result.abortRequested !== true
+\t\t&& !result.protocolError;
+}
+function recoverProviderStream(invoke, options = {}) {
+\tconst sleep = (ms, signal) => new Promise((resolve, reject) => {
+\t\tif (signal?.aborted) return reject(new Error("aborted"));
+\t\tconst timer = setTimeout(resolve, ms);
+\t\tsignal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("aborted")); }, { once: true });
+\t});
+\treturn (async () => {
+\t\tlet result = await invoke();
+\t\tfor (const delay of [250, 750]) {
+\t\t\tif (!isSafeStreamReadRecovery(result)) return result;
+\t\t\ttry { await sleep(delay, options.signal); } catch { return result; }
+\t\t\tif (options.signal?.aborted) return result;
+\t\t\tresult = await invoke();
+\t\t}
+\t\treturn result;
+\t})();
+}
+`;
+  let next = once(source, /function runPiStreaming\(/, `${helper}\nfunction runPiStreaming(`, path);
+  next = once(next, /const run = await runPiStreaming\(/, "const run = await recoverProviderStream(() => runPiStreaming(", path);
+  next = once(next, /\n\t\t\);\n\t\tif \(run\.processCloseObservedAt/, "\n\t\t), { signal: combinedAbortSignal([ctx.timeoutSignal, ctx.stopSignal]), model: candidate ?? step.model });\n\t\tif (run.processCloseObservedAt", path);
+  return next;
+}
+export function patchStreamRecoverySource(source: string, path = "src/runs/background/subagent-runner.ts") {
+  return streamRecovery(source, path);
+}
 function asyncExecution(source, path) {
   return workflowChildExtensions(execution(source, path), path);
 }
@@ -174,7 +261,7 @@ function noop(source) { return source; }
 const files: readonly [string, typeof agents][] = [
   ["src/agents/agents.ts", agents], ["src/agents/agent-serializer.ts", serializer],
   ["src/runs/shared/model-fallback.ts", fallback], ["src/api/preflight.ts", execution],
-  ["src/runs/background/async-execution.ts", asyncExecution], ["src/runs/foreground/execution.ts", execution],
+  ["src/runs/background/async-execution.ts", asyncExecution], ["src/runs/background/subagent-runner.ts", streamRecovery], ["src/runs/foreground/execution.ts", execution],
 ];
 const workflowChildExtensionFiles: readonly [string, typeof workflowChildExtensionBridge][] = [["src/runs/foreground/subagent-executor.ts", workflowChildExtensionBridge]];
 export async function verifyOrderedModelsRuntimePatch(packageRoot) {
@@ -184,6 +271,7 @@ export async function verifyOrderedModelsRuntimePatch(packageRoot) {
     const source = await readFile(join(packageRoot, relative), "utf8");
     if (!source.includes(MARKER)) throw new Error(`ordered models runtime patch missing: ${relative}`);
     if (relative === "src/runs/background/async-execution.ts" && !source.includes(CHILD_EXTENSIONS_MARKER)) throw new Error(`workflow child extensions runtime patch missing: ${relative}`);
+    if (relative === "src/runs/background/subagent-runner.ts" && !source.includes(STREAM_RECOVERY_MARKER)) throw new Error(`stream recovery runtime patch missing: ${relative}`);
   }
   for (const [relative] of workflowChildExtensionFiles) if (!(await readFile(join(packageRoot, relative), "utf8")).includes(CHILD_EXTENSIONS_MARKER)) throw new Error(`workflow child extensions runtime patch missing: ${relative}`);
   const runtime = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
