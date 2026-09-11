@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 const REQUEST_KEYS = ["workspaceId", "owner", "originRoot", "requestedCwd", "originRef", "baseCommit", "contractHash", "mode", "writePaths"];
+const REQUEST_V2_KEYS = ["workspaceId", "owner", "originRoot", "requestedCwd", "originRef", "baseCommit", "contractHash", "policy"];
 const RECEIPT_KEYS = ["schemaVersion", "workspaceId", "leaseId", "owner", "originRoot", "requestedCwd", "originRef", "baseCommit", "path", "dispatchCwd", "branchRef", "state", "run", "disposition", "cleanupDebt"];
 const STATES = new Set(["reserved", "allocating", "active", "disposing", "preserved", "released", "cleanup-debt"]);
 const MODES = new Set(["coding", "generic", "validation"]);
@@ -93,6 +94,21 @@ function writePaths(value, mode) {
   return result;
 }
 
+function policyWritePaths(value) {
+  if (!Array.isArray(value) || value.length > 32) fail("policy.writePaths must be a bounded array");
+  return [...new Set(value.map((entry, index) => writePath(entry, `policy.writePaths[${index}]`)))];
+}
+
+function policy(value) {
+  const input = exactObject(value, "policy", ["publication", "application", "writePaths"]);
+  if (input.publication !== "forbidden" && input.publication !== "allowed") fail("policy.publication is unsupported");
+  if (input.application !== "forbidden" && input.application !== "allowed") fail("policy.application is unsupported");
+  const normalizedWritePaths = policyWritePaths(input.writePaths);
+  if (input.application === "allowed" && input.publication !== "allowed") fail("policy.application requires allowed publication");
+  if (input.application === "allowed" && normalizedWritePaths.length === 0) fail("policy.application requires non-empty writePaths");
+  return { publication: input.publication, application: input.application, writePaths: normalizedWritePaths };
+}
+
 function owner(value) {
   if (!isPlainObject(value)) fail("owner must be an object");
   if (value.kind === "standalone-subagent") {
@@ -158,6 +174,27 @@ function normalizeRequest(value) {
 
 export function createManagedWorkspaceRequest(value) {
   return cloneFrozen(normalizeRequest(value));
+}
+
+function normalizeRequestV2(value) {
+  const input = exactObject(value, "request", REQUEST_V2_KEYS);
+  const normalizedOwner = owner(input.owner);
+  const originRoot = absolutePath(input.originRoot, "originRoot");
+  const requestedCwd = inside(originRoot, absolutePath(input.requestedCwd, "requestedCwd"), "requestedCwd");
+  return {
+    workspaceId: identity(input.workspaceId, "workspaceId"),
+    owner: normalizedOwner,
+    originRoot,
+    requestedCwd,
+    originRef: gitRef(input.originRef, "originRef"),
+    baseCommit: digest(input.baseCommit, "baseCommit"),
+    contractHash: digest(input.contractHash, "contractHash", SHA256),
+    policy: policy(input.policy),
+  };
+}
+
+export function createManagedWorkspaceRequestV2(value) {
+  return cloneFrozen(normalizeRequestV2(value));
 }
 
 function run(value) {

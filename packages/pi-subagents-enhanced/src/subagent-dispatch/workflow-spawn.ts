@@ -53,7 +53,7 @@ function childControls(value) {
   if (value === undefined) return {};
   if (!record(value)) throw new TypeError("workflow child controls must be an object");
   const controls = {};
-  for (const key of ["model", "output", "outputMode", "outputSchema", "skill", "reads", "progress", "acceptance", "subagentOnlyExtensions"]) {
+  for (const key of ["model", "output", "outputMode", "outputSchema", "skill", "reads", "progress", "acceptance", "subagentOnlyExtensions", "timeoutMs"]) {
     if (value[key] !== undefined) controls[key] = value[key];
   }
   return controls;

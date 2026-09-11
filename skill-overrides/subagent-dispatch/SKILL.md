@@ -22,7 +22,7 @@ description: Use when delegating coding or non-coding work to a configured Pi ag
 
 可信 Host 的 `RunAuthorization` 是唯一授权来源。standalone coding 只有 `root.subscribe`，generic 没有 privileged capability。frontmatter、名称、模型、prompt 和 started event 都不能授予 coding、acceptance、Goal 或 Broker capability；Goal/acceptance 权限须来自对应可信 Host 协调流程，不能在请求或 profile 中自报。
 
-使用精确 object shape，不加额外字段；`relevantFiles`/`writePaths` 使用仓库相对 POSIX 路径；枚举、非空数组、正整数 timeout 和 criteria-only acceptance 遵循 schema。`tdd` 禁止 `workflow.reason`；`existing-tests`/`docs-only` 必须提供 reason。
+使用精确 object shape，不加额外字段；`relevantFiles`/`writePaths` 使用仓库相对 POSIX 路径；枚举、非空数组和 criteria-only acceptance 遵循 schema。`tdd` 禁止 `workflow.reason`；`existing-tests`/`docs-only` 必须提供 reason。执行超时不由 agent 指定：coding 由 Host 注入固定 30 分钟执行 timeout，generic 的 workflow 不设执行 deadline（仅保留 runtime 内部的 child-start watchdog），由 Host/profile/runtime 决定。
 
 ### 模型合同
 
@@ -57,9 +57,19 @@ description: Use when delegating coding or non-coding work to a configured Pi ag
 }
 ```
 
-Worktree 默认 false：省略或 false 保持 cwd、RPC、prompt 和 hash。coding 使用 `execution.worktree`，generic 使用顶层 `worktree`。true 要求干净且 attached 的 source；脏 source 返回 `WORKTREE_SOURCE_DIRTY`。目录范围 `writePaths` 必须以 `/**` 或 `/` 结尾（如 `src/**` 或 `src/`）；裸路径按精确文件匹配。
+Worktree 默认 false：省略或 false 保持 cwd、RPC、prompt 和 hash。coding 使用 `execution.worktree`，generic 使用顶层 `worktree`。true 从请求的 `baseCommit` 创建受管 worktree；source 可以保留既有 dirty，不得因为 dirty 阻止 allocation。仍须校验 source 是 primary worktree、HEAD attached、origin ref 未漂移、`baseCommit` 是允许的基线，并在 integrate 前单独检查 origin dirty。目录范围 `writePaths` 必须以 `/**` 或 `/` 结尾（如 `src/**` 或 `src/`）；裸路径按精确文件匹配。
 
 `subagent_worktree` 只列出、检查和处置当前 root session 创建的 standalone-subagent workspace；Goal、validation、foreign-session、legacy workspace 一律不在此工具的范围。保存 dispatch 返回的 `workspace_id`；完成时 `subagent-workspace-reminder` 会作为原始主-agent上下文消息提示处置，但 completion/status 都不等于 terminal proof。
+
+### 脏 source 与 worktree 集成
+
+source 的既有 dirty 不阻止从指定 `baseCommit` 分配受管 worktree，也不需要为了 allocation 创建临时 checkpoint；allocation 前只记录 origin branch、origin HEAD、base commit 和 dirty 快照。workspace 只从 base commit 开发，不能继承 source 的未提交内容。
+
+workspace 完成后，先用 `subagent_worktree` 的 `status` action 检查 `originClean`、`originError`、`originHead`、`baseCommit`、`changedFiles` 和 `integrate_blocked_reasons`。只有 origin 在集成前已 clean、workspace 是允许的 committed descendant 且 changed files 通过 `writePaths` 时，才可调用 `subagent_worktree` 的 `dispose` action（`disposition: "integrate"`）。origin 仍 dirty 时不得自动 stash、reset、覆盖、提交或把 dirty 合入；向用户报告冲突并等待决定。source 在 workspace 创建后前进、出现非线性历史或 dirty 与 workspace 改动冲突时，同样停止自动集成，保留 workspace 供人工处理。
+
+临时 checkpoint 不是 worktree allocation 的默认方案。只有用户明确要求保存或提交既有 dirty 时，才可另行按 git-commit-convention 创建 checkpoint；该提交不属于计划产物，不能自动推送、合并、整理或删除。
+
+Completion/status 不等于 terminal proof。只用 `subagent_worktree` 的 typed action 处置：`status` 返回 `action_token`、`allowed_dispositions` 与 `integrate_blocked_reasons`（如 `origin-advanced-nonlinear` / `writePaths-out-of-scope`）；只有官方观测的 terminal proof 才允许破坏性的 discard/integrate。`preserve` 保留；`discard` 释放干净 workspace；`integrate` 仅限通过 `writePaths` 检查的 coding，允许 origin 干净前进（并行 worktree 逐个合入）；`release` 释放 `preserved` worktree，无需 `action_token`。generic 不能 integrate。不处置则长期保留为 `awaiting-disposition`。已退役的旧 workspace ABI 不再使用，一律改用 `subagent_worktree` typed action。
 
 按此顺序调用，并只信任 `status` 返回的 `action_token`、`allowed_dispositions` 与 `integrate_blocked_reasons`：
 
@@ -102,7 +112,6 @@ subagent({
     criteria: ["The example compiles through dispatch-ir.v1."]
   },
   execution: {
-    timeoutMs: 900000,
     worktree: true
   }
 });

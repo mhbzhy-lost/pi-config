@@ -21,6 +21,7 @@ export type ModelSelectionInput = {
   agentName: string;
   agentModels?: string[];
   availableModels: AvailableModel[];
+  blockedProviders?: readonly string[];
 };
 
 export class ModelSelectionError extends Error {
@@ -41,31 +42,44 @@ function candidateModelId(model: string): string {
   return separator === -1 ? model : model.slice(separator + 1);
 }
 
+function candidateProvider(model: string): string | undefined {
+  const separator = model.indexOf("/");
+  return separator === -1 ? undefined : model.slice(0, separator);
+}
+
+function blockedProviderSet(blockedProviders: readonly string[] | undefined): Set<string> {
+  return new Set((blockedProviders ?? []).map((provider) => provider.trim().toLowerCase()).filter(Boolean));
+}
+
 export function resolveModelSelection({
   requestedModel,
   agentName,
   agentModels,
   availableModels,
+  blockedProviders,
 }: ModelSelectionInput): ModelSelection {
   const requested = requestedModel?.trim();
   if (!requested) return { source: "default" };
+  const blocked = blockedProviderSet(blockedProviders);
+  const allowedModels = availableModels.filter((model) => !blocked.has(model.provider.trim().toLowerCase()));
 
   if (requested.includes("/")) {
-    const matched = availableModels.find((model) => fullModelId(model) === requested);
+    const matched = allowedModels.find((model) => fullModelId(model) === requested);
     if (matched) return { model: fullModelId(matched), source: "qualified" };
     throw new ModelSelectionError(requested, agentName);
   }
 
   if (agentModels !== undefined) {
-    const availableModelIds = new Set(availableModels.map(fullModelId));
+    const availableModelIds = new Set(allowedModels.map(fullModelId));
     const matched = agentModels.find((model) => (
-      candidateModelId(model) === requested && availableModelIds.has(model)
+      !blocked.has(candidateProvider(model)?.toLowerCase() ?? "")
+      && candidateModelId(model) === requested && availableModelIds.has(model)
     ));
     if (matched) return { model: matched, source: "agent-candidates" };
     throw new ModelSelectionError(requested, agentName);
   }
 
-  const matched = [...availableModels]
+  const matched = [...allowedModels]
     .sort((left, right) => {
       const leftId = fullModelId(left);
       const rightId = fullModelId(right);

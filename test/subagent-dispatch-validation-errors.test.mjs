@@ -20,7 +20,7 @@ function contract(overrides = {}) {
     context: { knownFacts: [], decisions: [], relevantFiles: [] },
     boundaries: { writePaths: ["packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts"], excludedWork: [], forbiddenActions: [] },
     acceptance: { criteria: ["Errors identify their keypath."] },
-    execution: { timeoutMs: 60_000 },
+    execution: {},
   };
   return {
     ...base,
@@ -29,7 +29,9 @@ function contract(overrides = {}) {
     context: { ...base.context, ...overrides.context },
     boundaries: { ...base.boundaries, ...overrides.boundaries },
     acceptance: { ...base.acceptance, ...overrides.acceptance },
-    execution: { ...base.execution, ...overrides.execution },
+    execution: typeof overrides.execution === "string"
+      ? overrides.execution
+      : { ...base.execution, ...overrides.execution },
   };
 }
 
@@ -46,11 +48,11 @@ function expectValidationError(operation, { keypath, expected, received }) {
   });
 }
 
-function extensionTool() {
+function extensionTool(options = {}) {
   const tools = [];
   const pi = { events: { on() { return () => {}; }, emit() {} }, registerTool(tool) { tools.push(tool); }, on() {} };
   const rpc = { async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "s", sessionFile: "/tmp/s", cwd: "/repo" } }; }, dispose() {} };
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, ...options });
   return tools[0];
 }
 
@@ -98,4 +100,15 @@ test("extension exposes visible and structured coding validation keypaths", asyn
   assert.match(nested.content[0].text, /expected array; received string/);
   assert.equal(nested.details.keypath, "context.knownFacts");
   assert.equal(nested.details.detail, "context.knownFacts");
+});
+
+test("extension rejects a stringified execution timeout as an invalid public contract", async () => {
+  const tool = extensionTool({ discoverAgents() { return { agents: [{ name: "executor" }] }; } });
+  const result = await tool.execute("caller-string-timeout", contract({
+    execution: JSON.stringify({ cwd: "/repo", timeoutMs: 60_000 }),
+  }), undefined, undefined, { cwd: "/repo" });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "INVALID_CONTRACT");
+  assert.equal(result.details.keypath, "execution.timeoutMs");
 });

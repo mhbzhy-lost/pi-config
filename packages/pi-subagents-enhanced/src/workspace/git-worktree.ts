@@ -1,15 +1,25 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
+import { createPublishedArtifact, validatePublishedArtifact, type PublishedArtifact } from "./published-artifact.ts";
 
 const LEGACY_PATHS = [
+  ".pi",
+  ".pi/**",
   ".pi-subagents",
   ".pi-subagents/**",
   ".state/subagent-dispatch",
   ".state/subagent-dispatch/**",
   ".state/worktree-lifecycle",
   ".state/worktree-lifecycle/**",
+];
+
+const RUNTIME_METADATA_ROOTS = [
+  ".pi",
+  ".pi-subagents",
+  ".state/subagent-dispatch",
+  ".state/worktree-lifecycle",
 ];
 
 class ManagedWorkspaceError extends Error {
@@ -22,7 +32,7 @@ class ManagedWorkspaceError extends Error {
   }
 }
 type GitRunner = (cwd: string, args: readonly string[]) => string;
-type ManagedWorkspaceRecord = { path: string; dispatchCwd: string; branchRef: string; request: { originRoot: string; originRef: string; baseCommit: string; mode: string; writePaths: string[] } };
+type ManagedWorkspaceRecord = { path: string; dispatchCwd: string; branchRef: string; request: { workspaceId: string; originRoot: string; originRef: string; baseCommit: string; mode?: string; writePaths?: string[]; policy?: { publication: string; application: string; writePaths: string[] } } };
 type GitInspection = { headCommit: string; baseCommit: string; descendant: boolean; aheadCommits: string[]; aheadCount: number; hasCommits: boolean; changedFiles: string[]; clean: boolean; originRef: string | null; originHead: string | null; originClean: boolean; originError: string | null };
 
 function failure(code: string, message: string, cause?: unknown): ManagedWorkspaceError {
@@ -77,7 +87,16 @@ function userStatus(cwd) {
   return gitRaw(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", ...exclusions]);
 }
 
-function originPreflight(record: ManagedWorkspaceRecord, { exactBase = false }: { exactBase?: boolean } = {}) {
+function removeUntrackedRuntimeMetadata(cwd) {
+  for (const relativePath of RUNTIME_METADATA_ROOTS) {
+    if (gitRaw(cwd, ["ls-files", "-z", "--", relativePath]).length !== 0) {
+      throw failure("MANAGED_WORKSPACE_IDENTITY", `runtime metadata path is tracked: ${relativePath}`);
+    }
+    rmSync(path.join(cwd, relativePath), { recursive: true, force: true });
+  }
+}
+
+function originPreflight(record: ManagedWorkspaceRecord, { exactBase = false, requireClean = true }: { exactBase?: boolean; requireClean?: boolean } = {}) {
   const root = primaryOrigin(record);
   const ref = currentRef(root);
   if (ref !== record.request.originRef) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "origin branch ref changed");
@@ -86,7 +105,7 @@ function originPreflight(record: ManagedWorkspaceRecord, { exactBase = false }: 
   if (!exactBase && !gitSucceeds(root, ["merge-base", "--is-ancestor", record.request.baseCommit, head])) {
     throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "origin HEAD is not a clean forward advance of baseCommit");
   }
-  if (userStatus(root).length !== 0) throw failure("MANAGED_WORKSPACE_ORIGIN_DIRTY", "origin must be clean");
+  if (requireClean && userStatus(root).length !== 0) throw failure("MANAGED_WORKSPACE_ORIGIN_DIRTY", "origin must be clean");
   return { root, ref, head };
 }
 
@@ -175,7 +194,7 @@ export function assertManagedWorkspaceWritePaths(changedFiles, writePaths) {
 }
 
 export function ensureManagedGitWorkspace(record: ManagedWorkspaceRecord) {
-  const origin = originPreflight(record, { exactBase: true });
+  const origin = originPreflight(record, { exactBase: true, requireClean: false });
   const exists = pathExists(record.path);
   const registration = registrationFor(record);
   if (exists !== Boolean(registration)) throw failure("MANAGED_WORKSPACE_IDENTITY", "worktree path and registration disagree");
@@ -278,6 +297,7 @@ export function releaseManagedGitWorkspace(record: ManagedWorkspaceRecord, { exp
   if (exists) {
     const identity = inspectIdentity(record);
     if (expectedHead && identity.headCommit !== expectedHead) throw failure("MANAGED_WORKSPACE_IDENTITY", "workspace HEAD changed before release");
+    removeUntrackedRuntimeMetadata(identity.workspacePath);
     git(record.request.originRoot, ["worktree", "remove", record.path]);
   }
   const remainingBranchHead = branchHead(record);
@@ -308,4 +328,85 @@ export function managedWorkspaceSnapshotHash(inspection: GitInspection, terminal
 
 export function listManagedGitRegistrations(originRoot) {
   return registrations(realpathSync(originRoot)).map((entry) => ({ ...entry }));
+}
+
+function gitWithEnv(cwd: string, args: readonly string[], env: Record<string, string>) {
+  try { return execFileSync("git", args, { cwd, env: { ...process.env, ...env, GIT_CONFIG_PARAMETERS: "'core.hooksPath=/dev/null'" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(); }
+  catch (cause) { throw failure("MANAGED_WORKSPACE_GIT", `git ${args.join(" ")} failed`, cause); }
+}
+
+function policyDigest(policy: unknown) { return createHash("sha256").update(JSON.stringify(policy)).digest("hex"); }
+function treeChangedFiles(cwd: string, base: string, tree: string) {
+  return parseChangedPaths(gitRaw(cwd, ["diff-tree", "-r", "--name-status", "-z", "--find-renames", base, tree]));
+}
+function rejectUnsafeTree(cwd: string, tree: string) {
+  const modes = git(cwd, ["ls-tree", "-r", tree]);
+  if (modes.split("\n").some((line) => /^(?:120000|160000)\s/.test(line))) throw failure("MANAGED_WORKSPACE_UNSUPPORTED_STATE", "symlink and gitlink entries are not supported");
+}
+function refValue(cwd: string, ref: string): string | null {
+  return gitSucceeds(cwd, ["show-ref", "--verify", "--quiet", ref]) ? git(cwd, ["rev-parse", ref]) : null;
+}
+function operationLock(root: string) {
+  const lock = path.join(commonDir(root), "pi-managed-workspace-operation.lock");
+  try { mkdirSync(lock, { mode: 0o700 }); }
+  catch (cause) { throw failure("MANAGED_WORKSPACE_LOCKED", "repository-wide Git operation lock is held", cause); }
+  return () => rmSync(lock, { recursive: true, force: true });
+}
+
+/** 将工作区当前结果固化为独立 tree 和 CAS 保护的 durable ref。 */
+export function publishWorkspaceSnapshot(input: {
+  record: ManagedWorkspaceRecord; policy: { publication: string; application: string; writePaths: string[] };
+  proofId: string; expectedRef?: string | null;
+}): PublishedArtifact {
+  const { record, policy } = input;
+  if (!record?.request || !policy || policy.publication !== "allowed") throw failure("MANAGED_WORKSPACE_POLICY", "publish requires an allowed v2 policy");
+  const identity = inspectIdentity(record);
+  const root = primaryOrigin(record);
+  const sourceHead = git(identity.workspacePath, ["rev-parse", "HEAD^{commit}"]);
+  const baseCommit = record.request.baseCommit;
+  rejectUnsafeTree(identity.workspacePath, sourceHead);
+  const dirty = userStatus(identity.workspacePath).length !== 0;
+  let tree: string;
+  let temporaryIndex: string | undefined;
+  try {
+    if (!dirty) tree = git(identity.workspacePath, ["rev-parse", "HEAD^{tree}"]);
+    else {
+      temporaryIndex = path.join(mkdtempSync(path.join(path.dirname(identity.workspacePath), ".pi-snapshot-")), "index");
+      tree = gitWithEnv(identity.workspacePath, ["read-tree", "HEAD"], { GIT_INDEX_FILE: temporaryIndex });
+      gitWithEnv(identity.workspacePath, ["add", "-A", "--", ".", ...LEGACY_PATHS.map((v) => `:(exclude)${v}`)], { GIT_INDEX_FILE: temporaryIndex });
+      tree = gitWithEnv(identity.workspacePath, ["write-tree"], { GIT_INDEX_FILE: temporaryIndex });
+    }
+    rejectUnsafeTree(identity.workspacePath, tree);
+    const changedFiles = treeChangedFiles(identity.workspacePath, baseCommit, tree);
+    assertManagedWorkspaceWritePaths(changedFiles, policy.writePaths);
+    const refName = `refs/pi/workspaces/${record.request.workspaceId}/published`;
+    const current = refValue(root, refName);
+    const expected = input.expectedRef === undefined ? current : input.expectedRef;
+    if (current !== expected) throw failure("MANAGED_WORKSPACE_REF_CAS", "published ref changed concurrently");
+    git(root, ["update-ref", refName, tree, expected ?? ""]);
+    return createPublishedArtifact({ workspaceId: record.request.workspaceId, baseCommit, publishedTree: tree, sourceHead,
+      refName, policyHash: policyDigest(policy), changedFiles, proofId: input.proofId });
+  } finally {
+    if (temporaryIndex) rmSync(path.dirname(temporaryIndex), { recursive: true, force: true });
+  }
+}
+
+export function applyPublishedArtifact(input: { record: ManagedWorkspaceRecord; artifact: PublishedArtifact; expectedOriginHead?: string }): { headCommit: string; changedFiles: string[] } {
+  const artifact = validatePublishedArtifact(input.artifact);
+  const root = primaryOrigin(input.record);
+  if (input.record.request.policy?.application !== "allowed") throw failure("MANAGED_WORKSPACE_POLICY", "apply requires an allowed v2 policy");
+  const unlock = operationLock(root);
+  try {
+    if (sequencerActive(root) || userStatus(root).length !== 0) throw failure("MANAGED_WORKSPACE_ORIGIN_DIRTY", "origin must be clean and have no active sequencer");
+    const head = git(root, ["rev-parse", "HEAD^{commit}"]);
+    if (input.expectedOriginHead && head !== input.expectedOriginHead) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "origin HEAD changed");
+    if (!gitSucceeds(root, ["merge-base", "--is-ancestor", artifact.baseCommit, head])) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "origin is unrelated to published base");
+    const changedFiles = treeChangedFiles(root, artifact.baseCommit, artifact.publishedTree);
+    assertManagedWorkspaceWritePaths(changedFiles, input.record.request.policy.writePaths);
+    rejectUnsafeTree(root, artifact.publishedTree);
+    const patch = execFileSync("git", ["diff", "--binary", artifact.baseCommit, artifact.publishedTree], { cwd: root, encoding: "buffer", env: { ...process.env, GIT_CONFIG_PARAMETERS: "'core.hooksPath=/dev/null'" } });
+    try { execFileSync("git", ["apply", "--index", "--whitespace=nowarn"], { cwd: root, input: patch, stdio: ["pipe", "ignore", "pipe"], env: { ...process.env, GIT_CONFIG_PARAMETERS: "'core.hooksPath=/dev/null'" } }); }
+    catch (cause) { throw failure("MANAGED_WORKSPACE_APPLY_CONFLICT", "published tree conflicts with origin", cause); }
+    return { headCommit: git(root, ["rev-parse", "HEAD^{commit}"]), changedFiles };
+  } finally { unlock(); }
 }

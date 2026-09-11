@@ -35,13 +35,13 @@ function withoutOwnerToken(value) {
 function print(value, json) {
   const safeValue = withoutOwnerToken(value);
   if (json) return console.log(JSON.stringify(safeValue));
-  if (safeValue?.schemaVersion === "managed-workspace-inventory.v1") {
+  if (safeValue?.schemaVersion === "managed-workspace-inventory.v1" || safeValue?.schemaVersion === "managed-workspace-inventory.v2") {
     for (const entry of safeValue.workspaces) console.log(`${entry.receipt.state}\t${escapeSingleLine(entry.receipt.path)}\t${entry.identity === false ? "identity-mismatch" : entry.issues.join(",") || "none"}`);
     for (const entry of safeValue.orphanRegistrations) console.log(`orphan-registration\t${escapeSingleLine(entry.path)}\tnone`);
     for (const entry of safeValue.legacy) console.log(`${entry.status}\t${escapeSingleLine(entry.path)}\tnone`);
     return;
   }
-  if (safeValue?.schemaVersion === "managed-workspace-cleanup-plan.v1") {
+  if (safeValue?.schemaVersion === "managed-workspace-cleanup-plan.v1" || safeValue?.schemaVersion === "managed-workspace-reconcile-plan.v2") {
     for (const action of safeValue.actions) console.log(`${action.action}\t${action.workspaceId}\t${action.leaseId}`);
     return;
   }

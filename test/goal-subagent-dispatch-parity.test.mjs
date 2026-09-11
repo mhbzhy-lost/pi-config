@@ -67,6 +67,18 @@ test("real Goal task output recompiles through the canonical package codec", () 
   assert.equal(Object.hasOwn(canonical.acceptance, "commands"), false);
 });
 
+test("Goal trusted non-default timeout survives recompilation with an unchanged hash", () => {
+  const timeoutMs = 45_000;
+  const goal = compileTaskContract(goalProjection(), "task-one", "/repo", { timeoutMs });
+  const { contract, contractHash } = splitDispatchEnvelope(goal);
+  const canonical = compileCodingDispatchIR(contract, { cwd: "/repo" });
+
+  assert.deepEqual(canonical, goal);
+  assert.equal(canonical.hash, contractHash);
+  assert.equal(canonical.execution.timeoutMs, timeoutMs);
+  assert.equal(canonical.execution.worktree, true);
+});
+
 test("canonical dispatch hashes retain the worktree request but exclude runtime allocation facts", () => {
   const source = criteriaOnlyContract({ execution: { cwd: "/repo", timeoutMs: 1_800_000, worktree: true } });
   const canonical = compileCodingDispatchIR(source, { cwd: "/repo" });

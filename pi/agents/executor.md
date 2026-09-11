@@ -6,8 +6,6 @@ models:
   - openai-codex/gpt-5.6-terra
   - codex-pool/gpt-5.6-luna
   - openai-codex/gpt-5.6-luna
-  - deepseek/deepseek-v4-pro
-  - deepseek/deepseek-v4-flash
 thinking: medium
 tools: read,write,edit,bash,grep,find,ls,apply_patch,contact_supervisor
 ---

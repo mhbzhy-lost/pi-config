@@ -12,7 +12,7 @@ function codingInput() {
     risk: "normal", objective: "Validate tool union fields.", workflow: { mode: "tdd" }, requirements: ["Test it."],
     context: { knownFacts: [], decisions: [], relevantFiles: [] },
     boundaries: { writePaths: ["src/index.ts"], excludedWork: [], forbiddenActions: [] },
-    acceptance: { criteria: ["Pass."] }, execution: { timeoutMs: 60_000 },
+    acceptance: { criteria: ["Pass."] }, execution: {},
   };
 }
 
@@ -48,4 +48,14 @@ test("schema routes coding and generic contracts by shape rather than agent name
   const mixed = codingInput();
   mixed.task = "This generic field must not be accepted by the coding schema.";
   assert.equal(validator.Check(mixed), false);
+});
+
+test("public schemas reject caller-controlled execution timeouts", () => {
+  const codingObject = codingInput();
+  codingObject.execution = { timeoutMs: 60_000 };
+  assert.equal(validator.Check(codingObject), false);
+
+  const generic = genericInput();
+  generic.timeoutMs = 60_000;
+  assert.equal(validator.Check(generic), false);
 });

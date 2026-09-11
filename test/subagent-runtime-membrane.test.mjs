@@ -166,7 +166,7 @@ function codingContract(overrides = {}) {
     acceptance: {
       criteria: ["The main Agent sees only the project-owned facade."],
     },
-    execution: { timeoutMs: 900_000 },
+    execution: {},
   };
   return {
     ...base,
@@ -1150,7 +1150,7 @@ test("compiles a coding contract into one workflow root and returns its correlat
   assert.equal(spawn.params.worktree, false);
   assert.equal(spawn.params.mission, false);
   assert.equal(spawn.params.chatProgress, "off");
-  assert.equal(spawn.params.timeoutMs, 900_000);
+  assert.equal(spawn.params.timeoutMs, 30 * 60_000);
   assert.match(spawn.params.workflowScript, /runs\.run\("typed-dispatch-1"/);
   assert.match(spawn.params.workflowScript, /# Coding Dispatch Contract v1/);
   assert.match(spawn.params.workflowScript, /"level":"checked"/);
@@ -1188,7 +1188,6 @@ test("coding cwd never infers ownership from a legacy workspace-shaped path", as
 
   const result = await execute(pi.tools[0], codingContract({
     execution: {
-      timeoutMs: 900_000,
       cwd: "/repo/.state/subagent-dispatch/worktrees/workspace-1/sub",
       worktree: false,
     },
@@ -1222,7 +1221,6 @@ test("compiles a non-coding agent prompt into one workflow leaf without rewritin
     task,
     context: "fresh",
     cwd: "/repo",
-    timeoutMs: 60_000,
     output: false,
   };
 
@@ -1419,7 +1417,7 @@ test("fails closed when RPC capabilities or spawn identity are incomplete", asyn
   }
 });
 
-test("uses the coding IR deadline when a delayed leaf exceeds the former fixed start limit", async () => {
+test("coding spawn uses the Host collector deadline for a delayed leaf", async () => {
   const pi = createPi();
   const rpc = createRpc({
     async spawn(params) {
@@ -1442,7 +1440,7 @@ test("uses the coding IR deadline when a delayed leaf exceeds the former fixed s
     randomUUID: () => "delayed-1",
   });
 
-  const result = await execute(pi.tools[0], codingContract({ execution: { timeoutMs: 50 } }));
+  const result = await execute(pi.tools[0], codingContract());
 
   assert.equal(result.isError, false);
   assert.equal(result.details.runId, "delayed-leaf-1");

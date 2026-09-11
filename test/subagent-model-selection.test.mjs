@@ -12,6 +12,25 @@ const availableModels = [
   { provider: "codex-pool", id: "gpt-5.6-luna" },
 ];
 
+test("provider blacklist rejects qualified models and skips blocked agent candidates", () => {
+  assert.throws(() => resolveModelSelection({
+    requestedModel: "deepseek/deepseek-v4-pro",
+    agentName: "delegate",
+    availableModels: [{ provider: "deepseek", id: "deepseek-v4-pro" }],
+    blockedProviders: ["deepseek"],
+  }), /blocked|available/i);
+  assert.deepEqual(resolveModelSelection({
+    requestedModel: "gpt-5.6-sol",
+    agentName: "delegate",
+    agentModels: ["deepseek/gpt-5.6-sol", "codex-pool/gpt-5.6-sol"],
+    availableModels: [
+      { provider: "deepseek", id: "gpt-5.6-sol" },
+      { provider: "codex-pool", id: "gpt-5.6-sol" },
+    ],
+    blockedProviders: ["deepseek"],
+  }).model, "codex-pool/gpt-5.6-sol");
+});
+
 function selection(overrides = {}) {
   return resolveModelSelection({
     agentName: "delegate",

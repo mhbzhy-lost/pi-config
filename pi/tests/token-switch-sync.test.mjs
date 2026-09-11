@@ -147,6 +147,40 @@ test("uses readable model ids derived from names and migrates old hash reference
   ]);
 });
 
+test("applies the measured context window override only to Qwen3.8-Max-DogFooding", () => {
+  const dir = mkdtempSync(join(tmpdir(), "token-switch-sync-"));
+  const { source, target, settingsTarget } = writeFixture(dir, {
+    provider: {
+      dogfooding: modeProvider("24b28efaa85443a5bf7eac4de15190f5", {
+        models: {
+          "mode-24b28efaa85443a5bf7eac4de15190f5": {
+            name: "Qwen3.8-Max-DogFooding",
+            limit: { context: 200000, output: 32000 }, reasoning: false, modalities: { input: ["text"] }
+          }
+        }
+      }),
+      advanced: modeProvider("8a8dd030c1ac46eab434e59b9b9a951a", {
+        models: {
+          "mode-8a8dd030c1ac46eab434e59b9b9a951a": {
+            name: "高级", limit: { context: 200000, output: 32000 }, reasoning: false, modalities: { input: ["text"] }
+          }
+        }
+      })
+    }
+  }, { enabledModels: [] });
+
+  const first = runSync(source, target, settingsTarget);
+  assert.equal(first.status, 0, first.stderr);
+  const firstOutput = readFileSync(target, "utf8");
+  const models = JSON.parse(firstOutput);
+  assert.equal(models.providers["token-switcher"].models[0].contextWindow, 916384);
+  assert.equal(models.providers["token-switcher-1"].models[0].contextWindow, 200000);
+
+  const second = runSync(source, target, settingsTarget);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(readFileSync(target, "utf8"), firstOutput);
+});
+
 test("numbers providers by OpenCode declaration order beyond ten modes", () => {
   const dir = mkdtempSync(join(tmpdir(), "token-switch-sync-"));
   const provider = {};

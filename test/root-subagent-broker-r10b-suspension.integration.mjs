@@ -60,6 +60,7 @@ test("RED: reload derives Root Broker request from event-sourced owner session a
   try {
     assert.equal(Object.hasOwn(projection, "sessionId"), false, "the reducer has no compatibility sessionId alias");
     assert.equal(Object.hasOwn(projection, "baseHead"), false, "the reducer has no compatibility baseHead alias");
+    const binding = projection.tasks.get("task-1").executorBinding;
     assert.deepEqual(deriveOwnedRunStopRequest({ projection, taskId: "task-1" }), {
       goalId,
       taskId: "task-1",
@@ -69,10 +70,10 @@ test("RED: reload derives Root Broker request from event-sourced owner session a
       workspacePath: "/tmp/r10b-workspace",
       leaseId,
       sessionId: ownerSessionId,
-      baseHead,
-      headAtDispatch: baseHead,
+      baseHead: binding.headAtDispatch,
+      headAtDispatch: binding.headAtDispatch,
       executionRevision: 1,
-      contractHash: projection.executionContractHash,
+      contractHash: binding.contractHash,
       agent: "executor",
     });
   } finally {

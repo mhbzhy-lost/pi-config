@@ -22,10 +22,12 @@ import path from "node:path";
 
 import {
   createManagedWorkspaceRequest,
+  createManagedWorkspaceRequestV2,
   publicManagedWorkspaceReceipt,
 } from "./contract.ts";
 
-const RECORD_SCHEMA = "managed-workspace-ledger.v1";
+const RECORD_SCHEMA_V1 = "managed-workspace-ledger.v1";
+const RECORD_SCHEMA_V2 = "managed-workspace-ledger.v2";
 const LOCK_SCHEMA = "managed-workspace-lock.v1";
 const OWNER_TOKEN = /^managed-workspace-owner\.v1:[a-f0-9]{64}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -35,6 +37,7 @@ const RECORD_KEYS = [
   "path", "dispatchCwd", "branchRef", "state", "run", "disposition", "cleanupDebt",
   "actionChallenge", "pendingAction", "createdAt", "updatedAt", "revision",
 ];
+const RECORD_V2_KEYS = [...RECORD_KEYS, "publishedArtifact", "v2Action", "application", "recoveryChallenge", "recoveryPlan"];
 
 class ManagedWorkspaceError extends Error {
   code: string;
@@ -293,7 +296,7 @@ function validateActionChallenge(value) {
   return value === null || (exactKeys(value, ["tokenHash", "snapshotHash", "allowed", "proofHash", "used"])
     && SHA256.test(value.tokenHash) && SHA256.test(value.snapshotHash)
     && Array.isArray(value.allowed) && value.allowed.length > 0
-    && value.allowed.every((item) => ["integrate", "discard", "preserve"].includes(item))
+    && value.allowed.every((item) => ["integrate", "discard", "preserve", "publish", "apply", "release"].includes(item))
     && new Set(value.allowed).size === value.allowed.length
     && (value.proofHash === null || SHA256.test(value.proofHash)) && typeof value.used === "boolean");
 }
@@ -307,18 +310,33 @@ function validatePendingAction(value) {
     && (value.executorHead === null || /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.executorHead)));
 }
 
+function validateRecoveryChallenge(value) {
+  return value === null || (exactKeys(value, ["generation", "planHash", "nonceHash", "expiresAt", "consumedAt"])
+    && Number.isSafeInteger(value.generation) && value.generation >= 0
+    && SHA256.test(value.planHash) && SHA256.test(value.nonceHash)
+    && typeof value.expiresAt === "string" && !Number.isNaN(Date.parse(value.expiresAt))
+    && (value.consumedAt === null || (typeof value.consumedAt === "string" && !Number.isNaN(Date.parse(value.consumedAt)))));
+}
+
 function validateRecordEnvelope(value, filenameWorkspaceId?: string) {
-  if (!exactKeys(value, RECORD_KEYS) || value.schemaVersion !== RECORD_SCHEMA || !STATES.has(value.state)
+  const keys = value?.schemaVersion === RECORD_SCHEMA_V2 ? RECORD_V2_KEYS : RECORD_KEYS;
+  if (!exactKeys(value, keys) || ![RECORD_SCHEMA_V1, RECORD_SCHEMA_V2].includes(value.schemaVersion) || !STATES.has(value.state)
       || !SHA256.test(value.requestHash) || !OWNER_TOKEN.test(value.ownerToken) || !SHA256.test(value.leaseId)
       || createHash("sha256").update(value.ownerToken).digest("hex") !== value.leaseId
       || !Number.isSafeInteger(value.revision) || value.revision < 0
       || typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt))
       || typeof value.updatedAt !== "string" || Number.isNaN(Date.parse(value.updatedAt))
       || !validateActionChallenge(value.actionChallenge) || !validatePendingAction(value.pendingAction)
-      || (filenameWorkspaceId !== undefined && value.workspaceId !== filenameWorkspaceId)) {
+      || (filenameWorkspaceId !== undefined && value.workspaceId !== filenameWorkspaceId)
+      || (value.schemaVersion === RECORD_SCHEMA_V2 && (value.publishedArtifact !== null && (typeof value.publishedArtifact !== "object" || Array.isArray(value.publishedArtifact))))
+      || (value.schemaVersion === RECORD_SCHEMA_V2 && (value.v2Action !== null && (typeof value.v2Action !== "object" || Array.isArray(value.v2Action))))
+      || (value.schemaVersion === RECORD_SCHEMA_V2 && !validateRecoveryChallenge(value.recoveryChallenge))
+      || (value.schemaVersion === RECORD_SCHEMA_V2 && value.recoveryPlan !== null && !SHA256.test(value.recoveryPlan))) {
     throw failure("MANAGED_WORKSPACE_SCHEMA", "managed workspace record schema is invalid");
   }
-  return createManagedWorkspaceRequest(value.request);
+  return value.schemaVersion === RECORD_SCHEMA_V1
+    ? createManagedWorkspaceRequest(value.request)
+    : createManagedWorkspaceRequestV2(value.request);
 }
 
 function validateRecord(value, expectedOrigin) {
@@ -326,7 +344,7 @@ function validateRecord(value, expectedOrigin) {
   if (request.originRoot !== expectedOrigin || hashValue(request) !== value.requestHash || request.workspaceId !== value.workspaceId) {
     throw failure("MANAGED_WORKSPACE_IDENTITY", "managed workspace request identity is invalid");
   }
-  publicManagedWorkspaceReceipt({ ...receiptFields(value), ownerToken: value.ownerToken });
+  if (value.schemaVersion === RECORD_SCHEMA_V1) publicManagedWorkspaceReceipt({ ...receiptFields(value), ownerToken: value.ownerToken });
   return value;
 }
 
@@ -344,7 +362,7 @@ function requestPlan(input, paths) {
   const ownerToken = `managed-workspace-owner.v1:${randomBytes(32).toString("hex")}`;
   const timestamp = new Date().toISOString();
   return {
-    schemaVersion: RECORD_SCHEMA,
+    schemaVersion: Object.hasOwn(input, "policy") ? RECORD_SCHEMA_V2 : RECORD_SCHEMA_V1,
     workspaceId: input.workspaceId,
     request: input,
     requestHash: hashValue(input),
@@ -362,6 +380,7 @@ function requestPlan(input, paths) {
     createdAt: timestamp,
     updatedAt: timestamp,
     revision: 0,
+    ...(Object.hasOwn(input, "policy") ? { publishedArtifact: null, v2Action: null, application: null, recoveryChallenge: null, recoveryPlan: null } : {}),
   };
 }
 
@@ -376,6 +395,7 @@ function scopeDirectories(stateRoot) {
 }
 
 export function managedWorkspaceReceiptFromRecord(record) {
+  if (record.schemaVersion !== RECORD_SCHEMA_V1) throw failure("MANAGED_WORKSPACE_VERSION", "v2 leases require the v2 workspace service");
   return publicManagedWorkspaceReceipt({ ...receiptFields(record), ownerToken: record.ownerToken });
 }
 
@@ -403,12 +423,17 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
   }
 
   function reserve(value) {
-    const supplied = createManagedWorkspaceRequest(value);
-    const input = createManagedWorkspaceRequest({
+    const supplied = value !== null && typeof value === "object" && Object.hasOwn(value, "policy")
+      ? createManagedWorkspaceRequestV2(value)
+      : createManagedWorkspaceRequest(value);
+    const canonicalized = {
       ...supplied,
       originRoot: canonicalOrigin(supplied.originRoot),
       requestedCwd: canonicalOrigin(supplied.requestedCwd),
-    });
+    };
+    const input = Object.hasOwn(supplied, "policy")
+      ? createManagedWorkspaceRequestV2(canonicalized)
+      : createManagedWorkspaceRequest(canonicalized);
     const paths = managedWorkspacePaths({ stateRoot: root, originRoot: input.originRoot, workspaceId: input.workspaceId });
     return withLock(paths, () => {
       if (existsSync(paths.recordPath)) {
@@ -438,6 +463,48 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
       const draft = structuredClone(current);
       const changed = change(draft);
       const next = changed ?? draft;
+      next.revision = current.revision + 1;
+      next.updatedAt = new Date().toISOString();
+      validateRecord(next, paths.originRoot);
+      atomicWrite(paths, next, fault);
+      return privateLease(next);
+    });
+  }
+
+  function issueRecoveryChallenge(workspaceId, { planHash, expiresAt }: { planHash: string; expiresAt?: string }) {
+    const lease = locate(workspaceId, undefined);
+    return withLock(lease, () => {
+      const current = readRecord(lease);
+      if (current.schemaVersion !== RECORD_SCHEMA_V2) throw failure("MANAGED_WORKSPACE_VERSION", "recovery challenges require a v2 lease");
+      if (!SHA256.test(planHash)) throw failure("MANAGED_WORKSPACE_RECOVERY", "recovery plan hash is invalid");
+      const expiry = expiresAt ?? new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      if (typeof expiry !== "string" || Number.isNaN(Date.parse(expiry)) || Date.parse(expiry) <= Date.now()) throw failure("MANAGED_WORKSPACE_RECOVERY", "recovery challenge expiry is invalid");
+      const nonce = randomBytes(32).toString("hex");
+      const challenge = { generation: current.revision + 1, planHash, nonceHash: hashValue(nonce), expiresAt: expiry, consumedAt: null };
+      const next = structuredClone(current);
+      next.recoveryChallenge = challenge;
+      next.recoveryPlan = planHash;
+      next.revision = current.revision + 1;
+      next.updatedAt = new Date().toISOString();
+      validateRecord(next, lease.originRoot);
+      atomicWrite(lease, next, fault);
+      return Object.freeze({ ...challenge, nonce });
+    });
+  }
+
+  function consumeRecoveryChallenge(workspaceId, challenge, { originRoot, leaseId }: MutateOptions = {}) {
+    const paths = locate(workspaceId, originRoot);
+    return withLock(paths, () => {
+      const current = readRecord(paths);
+      if (current.schemaVersion !== RECORD_SCHEMA_V2 || !current.recoveryChallenge) throw failure("MANAGED_WORKSPACE_RECOVERY", "recovery challenge is unavailable");
+      const stored = current.recoveryChallenge;
+      if (leaseId !== undefined && current.leaseId !== leaseId) throw failure("MANAGED_WORKSPACE_CAS", "workspace lease identity changed");
+      if (!challenge || current.revision !== stored.generation || challenge.generation !== stored.generation || challenge.planHash !== stored.planHash
+          || challenge.nonceHash !== stored.nonceHash || stored.consumedAt !== null
+          || Date.parse(stored.expiresAt) <= Date.now() || typeof challenge.nonce !== "string"
+          || hashValue(challenge.nonce) !== stored.nonceHash) throw failure("MANAGED_WORKSPACE_RECOVERY", "recovery challenge is stale, expired, or replayed");
+      const next = structuredClone(current);
+      next.recoveryChallenge.consumedAt = new Date().toISOString();
       next.revision = current.revision + 1;
       next.updatedAt = new Date().toISOString();
       validateRecord(next, paths.originRoot);
@@ -493,5 +560,5 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     return records.sort((left, right) => left.workspaceId.localeCompare(right.workspaceId)).map((record) => structuredClone(record));
   }
 
-  return Object.freeze({ stateRoot: root, reserve, load, mutate, list, listScoped });
+  return Object.freeze({ stateRoot: root, reserve, load, mutate, list, listScoped, issueRecoveryChallenge, consumeRecoveryChallenge });
 }

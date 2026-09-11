@@ -380,6 +380,10 @@ test("caps the child-start wait at the default ceiling when the execution timeou
   assert.equal(childStartTimeoutMs(undefined, 900_000), 120_000);
 });
 
+test("keeps the generic collector fallback at the 120 second default", () => {
+  assert.equal(childStartTimeoutMs(undefined, 120_000), 120_000);
+});
+
 test("keeps short execution timeouts as the child-start wait", () => {
   assert.equal(childStartTimeoutMs(undefined, 60_000), 60_000);
 });

@@ -2,5 +2,9 @@
   "maxSubagentSpawnsPerSession": 10000,
   "fleetView": false,
   "asyncWidget": false,
-  "artifactDir": "project"
+  "providerBlacklist": ["deepseek"],
+  "artifactDir": "project",
+  "modelExclusions": {
+    "defaultTtlMs": 1000
+  }
 }

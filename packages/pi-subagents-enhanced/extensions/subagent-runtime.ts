@@ -137,7 +137,9 @@ export function createSubagentToolRenderers() {
 
 export default function subagentRuntime(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.PI_SUBAGENT_FANOUT_CHILD === "1") return;
-  const completionBatch = loadConfig().completionBatch;
+  const config = loadConfig() as Record<string, unknown>;
+  const completionBatch = config.completionBatch;
+  const providerBlacklist = Array.isArray(config.providerBlacklist) ? config.providerBlacklist : ["deepseek"];
   const { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderCompletionNotification } = createSubagentToolRenderers();
   let brokerStarted = false;
   let brokerReady = false;
@@ -155,6 +157,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   let workspaceLifecycleSessionId: string | undefined;
   try {
   installHeadlessTypedSubagentRuntime(pi, {
+    providerBlacklist,
     diagnosticSink,
     workingStateTrace: diagnosticSink,
     extraDisposables: diagnosticSink ? [diagnosticSink] : [],

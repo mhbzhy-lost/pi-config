@@ -26,7 +26,7 @@ const codingContract = {
   version: "dispatch-ir.v1", taskId: "undiscovered-executor", title: "Undiscovered executor", agent: "executor", risk: "normal",
   objective: "Prove discovery rejects before lifecycle effects.", workflow: { mode: "tdd" }, requirements: ["Do not spawn."],
   context: { knownFacts: [], decisions: [], relevantFiles: [] }, boundaries: { writePaths: ["test/subagent-model-selection.integration.mjs"], excludedWork: [], forbiddenActions: [] },
-  acceptance: { criteria: ["No effects occur."] }, execution: { cwd: "/repo", timeoutMs: 1_000, worktree: true },
+  acceptance: { criteria: ["No effects occur."] }, execution: { cwd: "/repo", worktree: true },
 };
 
 test("generic bare model uses sorted global catalog warning and normalized request separates workspace hashes", async () => {
@@ -162,4 +162,28 @@ test("model discovery receives the current host model provider", async () => {
   assert.equal(result.isError, false);
   assert.deepEqual(discoveryCalls, [["/repo", "both", "codex-pool"]]);
   assert.equal(Object.hasOwn(result.details, "warnings"), false);
+});
+
+test("provider blacklist rejects deepseek before workspace and RPC side effects", async () => {
+  const { pi, rpc, calls, tools } = harness();
+  let effects = 0;
+  rpc.ping = async () => { effects += 1; return {}; };
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    providerBlacklist: ["deepseek"],
+    discoverAgents() { return { agents: [{ name: "executor", models: ["deepseek/deepseek-v4-pro"] }] }; },
+    workspaceService: { ensureAllocated() { effects += 1; } },
+  });
+  const result = await tools[0].execute("blocked-provider", {
+    ...codingContract,
+    model: "deepseek/deepseek-v4-pro",
+  }, undefined, undefined, {
+    cwd: "/repo",
+    modelRegistry: { getAvailable() { return [{ provider: "deepseek", id: "deepseek-v4-pro" }]; } },
+  });
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "MODEL_NOT_AVAILABLE");
+  assert.equal(effects, 0);
+  assert.equal(calls.length, 0);
 });

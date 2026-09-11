@@ -41,7 +41,11 @@ export function deriveOwnedRunStopRequest({ projection, taskId }: { projection?:
   const task = projection.tasks?.get?.(taskId); let binding;
   try { binding = task && runBindingForTask(task, projection.eventSchemaVersion); } catch { binding = null; }
   if (typeof taskId !== "string" || !taskId || !task || !["dispatched", "running", "settling"].includes(task.status) || !Number.isSafeInteger(task.attempts) || task.attempts < 1 || !binding || typeof binding.runId !== "string" || !binding.runId || typeof binding.asyncDir !== "string" || !binding.asyncDir.startsWith("/") || typeof binding.workspacePath !== "string" || !binding.workspacePath.startsWith("/") || typeof binding.workspaceLeaseId !== "string" || !/^[a-f0-9]{64}$/.test(binding.workspaceLeaseId) || typeof binding.headAtDispatch !== "string" || !/^[a-f0-9]{40}$/.test(binding.headAtDispatch)) throw new Error("durable executor binding is invalid");
-  return Object.freeze({ goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, asyncDir: binding.asyncDir, workspacePath: binding.workspacePath, leaseId: binding.workspaceLeaseId, sessionId, baseHead: projection.runtimeBaseHead, headAtDispatch: binding.headAtDispatch, executionRevision: projection.executionRevision, contractHash: projection.executionContractHash, agent: "executor" as const });
+  // Dispatch/binding authority is durable and task-scoped.  Runtime-level
+  // contract/base values describe the current episode and may differ after a
+  // reload or amendment; they are not owned-stop identity.
+  if (typeof binding.contractHash !== "string" || !/^[a-f0-9]{64}$/.test(binding.contractHash) || typeof binding.headAtDispatch !== "string" || !/^[a-f0-9]{40}$/.test(binding.headAtDispatch)) throw new Error("durable dispatch identity is invalid");
+  return Object.freeze({ goalId: projection.goalId, taskId, attempt: task.attempts, runId: binding.runId, asyncDir: binding.asyncDir, workspacePath: binding.workspacePath, leaseId: binding.workspaceLeaseId, sessionId, baseHead: binding.headAtDispatch, headAtDispatch: binding.headAtDispatch, executionRevision: projection.executionRevision, contractHash: binding.contractHash, agent: "executor" as const });
 }
 
 export function suspensionGuard(projection, operation) {

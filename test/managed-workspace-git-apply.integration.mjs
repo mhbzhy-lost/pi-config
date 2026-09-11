@@ -1,0 +1,11 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { publishWorkspaceSnapshot, applyPublishedArtifact } from "../packages/pi-subagents-enhanced/src/workspace/git-worktree.ts";
+const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+async function fixture(t) { const root = await mkdtemp(join(tmpdir(), "apply-git-")); const originRoot = join(root, "origin"); await mkdir(originRoot); git(originRoot, "init", "-b", "main"); git(originRoot, "config", "user.email", "test@example.com"); git(originRoot, "config", "user.name", "Test"); await writeFile(join(originRoot, "base.txt"), "base\n"); git(originRoot, "add", "."); git(originRoot, "commit", "-m", "base"); const workspace = join(root, "workspace"); git(originRoot, "worktree", "add", "-b", "worker", workspace, "main"); await writeFile(join(workspace, "result.txt"), "result\n"); t.after(() => rm(root, { recursive: true, force: true })); return { root, originRoot, workspace, baseCommit: git(originRoot, "rev-parse", "HEAD") }; }
+test("applies the complete published tree diff while preserving a durable artifact", async (t) => { const f = await fixture(t); const record = { path: realpathSync(f.workspace), dispatchCwd: realpathSync(f.workspace), branchRef: "refs/heads/worker", request: { workspaceId: "w2", originRoot: realpathSync(f.originRoot), originRef: "refs/heads/main", baseCommit: f.baseCommit, policy: { application: "allowed", writePaths: ["result.txt"] } } }; const artifact = publishWorkspaceSnapshot({ record, policy: { publication: "allowed", application: "allowed", writePaths: ["result.txt"] }, proofId: "b".repeat(64) }); const result = applyPublishedArtifact({ record, artifact }); assert.equal(result.changedFiles[0], "result.txt"); assert.equal(await (await import("node:fs/promises")).readFile(join(f.originRoot, "result.txt"), "utf8"), "result\n"); assert.equal(git(f.originRoot, "rev-parse", "HEAD"), f.baseCommit); });

@@ -245,6 +245,29 @@ export function splitDispatchEnvelope(ir) {
   return deepFreeze({ contract: deepFreeze(transportContract), contractHash });
 }
 
+export function projectCodingPrompt(ir) {
+  const context = [
+    ...ir.context.knownFacts.map((item) => `Authoritative known fact: ${item}`),
+    ...ir.context.decisions.map((item) => `Decision already made: ${item}`),
+    ...ir.context.relevantFiles.map((item) => `Relevant file: ${item}`),
+  ];
+  const constraints = [
+    ...ir.requirements.map((item) => `Requirement: ${item}`),
+    ...ir.boundaries.writePaths.map((item) => `Declared write path: ${item}`),
+    ...ir.boundaries.excludedWork.map((item) => `Excluded work: ${item}`),
+    ...ir.boundaries.forbiddenActions.map((item) => `Forbidden action: ${item}`),
+    `Workflow mode: ${ir.workflow.mode}`,
+    ...(ir.workflow.reason === undefined ? [] : [`Workflow reason: ${ir.workflow.reason}`]),
+  ];
+  return deepFreeze({
+    task: ir.objective,
+    context,
+    constraints,
+    deliverable: ir.title,
+    done: [...ir.acceptance.criteria],
+  });
+}
+
 function ordered(items) {
   return items.length === 0 ? "_None declared._" : items.map((item, index) => `${index + 1}. ${JSON.stringify(item)}`).join("\n");
 }

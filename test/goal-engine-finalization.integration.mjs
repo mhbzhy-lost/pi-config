@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { finalizeGoal } from "../src/goal-engine/finalization.ts";
+import { finalizeGoal, buildObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
 
-test("all existing generations fail closed before finalization side effects", () => {
-  for (const eventSchemaVersion of ["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3", "planned.v1"]) {
-    let sideEffects = 0;
-    assert.throws(() => finalizeGoal({ eventSchemaVersion }, { onSideEffect() { sideEffects += 1; } }), (error) => error.code === "FINALIZATION_UNSUPPORTED_GENERATION");
-    assert.equal(sideEffects, 0);
-  }
-});
+import { createHash } from "node:crypto";
+const sha256 = "a".repeat(64), baseCommit = "b".repeat(40), executorHead = "c".repeat(40);
+const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+const receiptHash = value => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+const canonicalReceipt = (state = "released", disposition = { action: "integrate", strategy: "cherry-pick" }) => ({ schemaVersion: "managed-workspace.v1", workspaceId: "workspace-1", leaseId: sha256, owner: { kind: "goal-task", rootSessionId: "root-1", goalId: "goal-1", taskId: "task-1", attempt: 1, executionRevision: 1 }, originRoot: "/origin", requestedCwd: "/origin", originRef: "refs/heads/main", baseCommit, path: "/workspace", dispatchCwd: "/workspace", branchRef: "refs/heads/pi-managed/workspace-1", state, run: null, disposition, cleanupDebt: null });
+const manifestInput = (receipt = canonicalReceipt(), managedDisposition = { phase: "receipt", serviceReceiptHash: receiptHash(receipt), receipt: { disposition: receipt.disposition, released: receipt.state === "released" } }) => ({ projection: { goalId: "goal-1", executionRevision: 1, executionContractHash: sha256, tasks: new Map([["task-1", { status: "accepted", attempts: 1, contractHash: sha256, deps: [], writePaths: [], acceptance: { criteria: [{ id: "proof", statement: "proof", evidenceKinds: ["tests"] }] }, executorBinding: { attempt: 1, runId: "run-1", contractHash: sha256, asyncDir: "/run", workspacePath: "/workspace", workspaceLeaseId: sha256, headAtDispatch: baseCommit }, lastExecutorProof: { runId: "run-1", proofId: sha256, rootSessionId: "root-1", observedAt: 1, outcome: "succeeded" }, settlement: { attempt: 1, executorHead, executorRunId: "run-1", terminalProofId: sha256, evidence: {} }, workspace: receipt, managedDisposition }]]), taskApplicability: new Map(), conditions: new Map(), findings: new Map(), repairEpisodes: new Map(), observationRuns: new Map() }, worldSnapshot: { safe: true, repo: { head: executorHead, trackedDirty: [], untracked: [], unmerged: [], sequencer: null }, resources: [], activeRuns: [] }, resourceInventory: [] });
+
+test("all existing generations fail closed before finalization side effects", () => { for (const eventSchemaVersion of ["goal-engine.event.v1", "goal-engine.event.v2", "goal-engine.event.v3", "planned.v1"]) { let sideEffects = 0; assert.throws(() => finalizeGoal({ eventSchemaVersion }, { onSideEffect() { sideEffects += 1; } }), (error) => error.code === "FINALIZATION_UNSUPPORTED_GENERATION"); assert.equal(sideEffects, 0); } });
+test("canonical non-empty released integration receipt is not blocked by legacy workspace gates", () => { const manifest = buildObligationFinalizationManifest(manifestInput()); assert.equal(manifest.tasks[0].workspaceProof.state, "released"); assert.equal(manifest.tasks[0].workspaceProof.serviceReceiptHash, receiptHash(canonicalReceipt())); assert.equal(manifest.blockers.some((row) => row.code === "TASK_WORKSPACE_UNCLOSED"), false); });
+test("canonical finalization rejects missing or drifting disposition receipt facts", () => { for (const managedDisposition of [null, { phase: "receipt", serviceReceiptHash: "d".repeat(64), receipt: { disposition: { action: "integrate", strategy: "cherry-pick" }, released: true } }]) { const manifest = buildObligationFinalizationManifest(manifestInput(canonicalReceipt(), managedDisposition)); assert.equal(manifest.blockers.some((row) => row.code === "TASK_WORKSPACE_UNCLOSED"), true); } });

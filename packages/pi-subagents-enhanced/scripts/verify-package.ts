@@ -13,6 +13,7 @@ const expectedExtensions = ["./extensions/subagent-runtime.ts", "./extensions/cu
 const expectedFiles = ["AGENTS.md", "README.md", "extensions", "child-extensions", "scripts", "src"];
 const expectedExports = {
   "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
+  "./generic-prompt": "./src/contracts/generic-prompt.ts",
   "./workspace": "./src/workspace/service.ts",
   "./workspace/admin": "./src/workspace/administration.ts",
 };
@@ -36,6 +37,7 @@ const requiredTarballPaths = [
   "src/tui/native-conversation.ts",
   "src/tui/session-browser.ts",
   "src/contracts/dispatch-ir.ts",
+  "src/contracts/generic-prompt.ts",
   "src/workspace/contract.ts",
   "src/workspace/ledger.ts",
   "src/workspace/git-worktree.ts",
@@ -164,7 +166,7 @@ export async function verifyEnhancedPackage({ packageRoot = defaultPackageRoot, 
     throw new Error("Enhanced package must declare the pinned pi-subagents runtime compiler and canonical bundleDependencies.");
   }
   if (JSON.stringify(manifest.pi?.extensions) !== JSON.stringify(expectedExtensions)) throw new Error("Enhanced package must declare exactly the runtime and footer extensions.");
-  if (JSON.stringify(manifest.exports) !== JSON.stringify(expectedExports)) throw new Error("Enhanced package exports must expose only canonical dispatch and workspace APIs.");
+  if (JSON.stringify(manifest.exports) !== JSON.stringify(expectedExports)) throw new Error("Enhanced package exports must expose only canonical prompt, dispatch, and workspace APIs.");
   if (JSON.stringify(manifest.files) !== JSON.stringify(expectedFiles)) throw new Error("Enhanced package files allowlist is incomplete or unexpected.");
   for (const [index, entry] of manifest.pi.extensions.entries()) assertPackagePath(packageRoot, entry, `pi.extensions[${index}]`);
   for (const [index, entry] of manifest.files.entries()) assertPackagePath(packageRoot, entry, `files[${index}]`);
