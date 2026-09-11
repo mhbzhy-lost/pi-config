@@ -18,12 +18,6 @@ const expectedExports = {
   "./workspace/admin": "./src/workspace/administration.ts",
 };
 const implementationRoots = ["extensions", "src", "child-extensions", "scripts"];
-const forbiddenLocalPeers = [
-  "@earendil-works/pi-agent-core",
-  "@earendil-works/pi-ai",
-  "@earendil-works/pi-coding-agent",
-  "@earendil-works/pi-tui",
-];
 const requiredTarballPaths = [
   "extensions/subagent-runtime.ts",
   "extensions/custom-footer.ts",
@@ -76,18 +70,6 @@ function assertPackagePath(packageRoot, value, label) {
   const rel = relative(packageRoot, target);
   if (rel === ".." || rel.startsWith(`..${sep}`) || rel === "" && value.includes("..")) throw new Error(`${label} escapes the package root: ${value}`);
   return target;
-}
-
-async function assertNoLocalPeerCopies(packageRoot) {
-  for (const peer of forbiddenLocalPeers) {
-    try {
-      await lstat(resolve(packageRoot, "node_modules", peer));
-    } catch (error) {
-      if (error?.code === "ENOENT") continue;
-      throw error;
-    }
-    throw new Error(`Package-local peer duplicate breaks Host module identity: ${peer}`);
-  }
 }
 
 async function sourceFiles(root) {
@@ -171,7 +153,6 @@ export async function verifyEnhancedPackage({ packageRoot = defaultPackageRoot, 
   for (const [index, entry] of manifest.pi.extensions.entries()) assertPackagePath(packageRoot, entry, `pi.extensions[${index}]`);
   for (const [index, entry] of manifest.files.entries()) assertPackagePath(packageRoot, entry, `files[${index}]`);
   for (const [entry, target] of Object.entries(manifest.exports)) assertPackagePath(packageRoot, target, `exports[${entry}]`);
-  await assertNoLocalPeerCopies(packageRoot);
   const upstreamRoot = resolve(packageRoot, "node_modules/pi-subagents");
   const upstream = await json(resolve(upstreamRoot, "package.json"));
   if (upstream.version !== "0.62.0") throw new Error(`Expected pi-subagents 0.62.0, found ${upstream.version ?? "unknown"}.`);

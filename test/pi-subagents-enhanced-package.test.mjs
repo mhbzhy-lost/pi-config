@@ -85,6 +85,12 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
     "./workspace/admin": "./src/workspace/administration.ts",
   });
   assert.deepEqual(manifest.dependencies, { "pi-subagents": "0.62.0", typescript: "5.9.3" });
+  assert.deepEqual(manifest.devDependencies, {
+    "@earendil-works/pi-agent-core": "0.84.4",
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4",
+  });
   assert.deepEqual(manifest.bundleDependencies, ["pi-subagents"]);
   assert.equal(Object.hasOwn(manifest, "bundledDependencies"), false);
   assert.deepEqual(manifest.peerDependencies, {
@@ -181,9 +187,9 @@ test("npm dry-run tarball contains the complete runtime closure and no repositor
   assert.deepEqual(await tarballs(), before);
 });
 
-test("package setup leaves Pi core peers owned exclusively by the host", async () => {
+test("package setup installs Pi core typings as development dependencies", async () => {
   for (const peer of forbiddenLocalPeers) {
-    await assert.rejects(lstat(join(await preparedPackageFixture(), "node_modules", peer)), { code: "ENOENT" }, peer);
+    assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules", peer))).version, "0.84.4", peer);
   }
   assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules/pi-subagents/node_modules/typebox"))).name, "typebox");
 });
@@ -263,14 +269,6 @@ test("package verification rejects upstream drift, missing patch, and escaping e
   const agentsPath = join(unpatched, "node_modules/pi-subagents/src/agents/agents.ts");
   await writeFile(agentsPath, (await readFile(agentsPath, "utf8")).replace("// pi-config patch: ordered-models.v3", ""));
   await assert.rejects(() => verifyEnhancedPackage({ packageRoot: unpatched }), /patch/i);
-
-  for (const [index, peer] of forbiddenLocalPeers.entries()) {
-    const duplicatedPeer = await fixture(`peer-${index}`);
-    await cp(join(packageRoot, "node_modules/pi-subagents"), join(duplicatedPeer, "node_modules/pi-subagents"), { recursive: true });
-    await mkdir(join(duplicatedPeer, "node_modules", peer), { recursive: true });
-    await writeFile(join(duplicatedPeer, "node_modules", peer, "package.json"), JSON.stringify({ name: peer, version: "0.84.4" }));
-    await assert.rejects(() => verifyEnhancedPackage({ packageRoot: duplicatedPeer }), /peer|duplicate|module identity/i, peer);
-  }
 
   const missingWorkspaceTool = await mkdtemp(join(tmpdir(), "enhanced-missing-workspace-tool-"));
   t.after(() => rm(missingWorkspaceTool, { recursive: true, force: true }));
