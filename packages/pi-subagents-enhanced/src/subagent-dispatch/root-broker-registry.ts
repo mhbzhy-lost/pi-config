@@ -181,13 +181,18 @@ export function inspectRootBrokerExecutionProof(pi: object, runId: string, rootS
 
 // The registry is the sole legacy-v1 settlement boundary; callers never parse
 // raw process-terminal proof fields or infer an outcome from status.
-export async function inspectRootBrokerExecutorProofAsync(pi: object, runId: string, rootSessionId?: string) {
-  const observed = await requireRootBroker(pi, rootSessionId).inspectExecutorProofAsync(runId);
+export async function inspectExecutionProofForSettlement(pi: object, runId: string, rootSessionId?: string) {
+  const observed = await requireRootBroker(pi, rootSessionId).inspectExecutionProofForSettlement(runId);
   if (!observed) return null;
   try {
     const normalized = executionProofForLegacySettlement(observed, (message) => { throw new Error(message); });
     return normalized.runId === runId ? normalized : null;
   } catch { return null; }
+}
+
+// Compatibility alias retained for the existing Goal extension import.
+export async function inspectRootBrokerExecutorProofAsync(pi: object, runId: string, rootSessionId?: string) {
+  return inspectExecutionProofForSettlement(pi, runId, rootSessionId);
 }
 
 export function registerRootBrokerFacadeRun(pi: object, run: { runId: string; asyncDir: string; sessionId: string; pid: number; agent: string; kind: string }, rootSessionId?: string): void {

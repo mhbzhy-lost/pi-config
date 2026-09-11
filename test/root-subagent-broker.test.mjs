@@ -329,6 +329,44 @@ test("Root broker canonical settlement reader accepts the upstream writer shape 
   assert.equal(await facade.inspectExecutorProofAsync(runId), null, "facade-only run has no settlement proof");
 });
 
+test("Root broker lifecycle readers accept one upstream artifact through the same proof facts", async (t) => {
+  const runId = "executor-lifecycle-core";
+  const terminal = observedProof(runId);
+  const snapshots = [];
+  for (const lifecycle of ["settlement", "restart", "stop"]) {
+    const rootSessionId = `root-lifecycle-${lifecycle}`;
+    const asyncDir = mkdtempSync(join(tmpdir(), `root-broker-${lifecycle}-`));
+    const event = { ...startedEvent(rootSessionId, runId), asyncDir };
+    const authority = { ...goalAuthority(rootSessionId, runId), asyncDir };
+    const broker = new RootBrokerServer({
+      rootSessionId,
+      lifecycleSessionId: rootSessionId,
+      captureProcessBirthIdentity: async () => `birth-${lifecycle}`,
+      writeGrant: async () => join(asyncDir, "grant"),
+      terminalTimeoutMs: 100,
+      artifactPollIntervalMs: 1,
+      upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    });
+    t.after(async () => { await broker.closeRootSession().catch(() => undefined); await rm(asyncDir, { recursive: true, force: true }); });
+    await authorize(broker, event, authority);
+    await broker.observeStarted(event);
+    persistGoalAuthority(broker, authority);
+    upstreamWriteAtomicJsonFixture(join(asyncDir, "process-terminal.json"), terminal);
+    chmodSync(join(asyncDir, "process-terminal.json"), 0o644);
+
+    const result = lifecycle === "settlement"
+      ? await broker.inspectExecutionProofForSettlement(runId)
+      : lifecycle === "restart"
+        ? await broker.recoverExactTerminalProof(authority)
+        : await broker.stopGoalOwnedRun(goalStopRequest(authority));
+    assert.equal(result.state ?? result.authorization.state, lifecycle === "settlement" ? "verified" : "observed", lifecycle);
+    snapshots.push(broker.inspectExecutionProof(runId));
+  }
+  assert.deepEqual(snapshots.map((snapshot) => snapshot.terminal.proofId), [snapshots[0].terminal.proofId, snapshots[0].terminal.proofId, snapshots[0].terminal.proofId]);
+  assert.deepEqual(snapshots.map((snapshot) => snapshot.terminal.outcome), ["succeeded", "succeeded", "succeeded"]);
+  assert.deepEqual(snapshots.map((snapshot) => snapshot.terminalConflict), [false, false, false]);
+});
+
 test("Root broker never marks a missing process birth identity as verified ownership", async () => {
   const rootSessionId = "root-missing-birth";
   const runId = "executor-missing-birth";
@@ -471,13 +509,19 @@ test("Root broker ignores untrusted started events and rejects binding drift", a
   assert.deepEqual(captures, [43210]);
 });
 
-test("Root broker registry exposes only the bound broker's read-only execution proof", () => {
+test("Root broker registry exposes only bound sync snapshots and the canonical settlement reader", async () => {
   assert.equal(typeof rootBrokerRegistry.inspectRootBrokerExecutionProof, "function");
+  assert.equal(typeof rootBrokerRegistry.inspectExecutionProofForSettlement, "function");
   const pi = { events: {} };
-  const broker = { rootSessionId: "root-registry-proof", inspectExecutionProof(runId) { assert.equal(runId, "run-1"); return null; } };
+  const broker = {
+    rootSessionId: "root-registry-proof",
+    inspectExecutionProof(runId) { assert.equal(runId, "run-1"); return null; },
+    async inspectExecutionProofForSettlement(runId) { assert.equal(runId, "run-1"); return null; },
+  };
   bindRootBroker(pi, broker);
   try {
     assert.deepEqual(rootBrokerRegistry.inspectRootBrokerExecutionProof(pi, "run-1"), null);
+    assert.deepEqual(await rootBrokerRegistry.inspectExecutionProofForSettlement(pi, "run-1"), null);
   } finally {
     unbindRootBroker(pi, broker);
   }

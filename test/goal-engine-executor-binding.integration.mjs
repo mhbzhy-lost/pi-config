@@ -1078,8 +1078,14 @@ test("non-Goal coding runs and generic reviewers remain spawnable without claimi
   assert.equal(coding.isError, false, coding.content[0].text);
   assert.equal(review.isError, false, review.content[0].text);
   assert.equal(calls.length, 2);
-  assert.equal(calls[0].options, undefined);
-  assert.equal(calls[1].options, undefined);
+  for (const [index, toolCallId] of ["non-goal-coding", "generic-review"].entries()) {
+    const options = calls[index].options;
+    assert.deepEqual(Object.keys(options).sort(), ["diagnostic"]);
+    assert.equal(options.diagnostic.toolCallId, toolCallId);
+    assert.equal(typeof options.diagnostic.sink, "function");
+    assert.equal(Object.hasOwn(options, "requestId"), false);
+    assert.equal(Object.hasOwn(options, "spawnKey"), false);
+  }
   const projection = loadProjection(join(fixture.cwd, ".state/goal-engine"), goalId);
   assert.equal(projection.tasks.get("task-one").executorBinding, null);
 });
@@ -1155,8 +1161,11 @@ test("Goal dispatch followed by the exact coding spawn persists the returned run
       return { version: 1, methods: ["spawn"], session: { sessionId: "root-session-1", sessionFile: null, cwd: fixture.cwd } };
     },
     async spawn(params, options) {
+      assert.deepEqual(Object.keys(options).sort(), ["diagnostic", "requestId", "spawnKey"]);
       assert.match(options.requestId, /^goal-executor-/);
       assert.equal(options.requestId, options.spawnKey);
+      assert.equal(options.diagnostic.toolCallId, "spawn-goal-task");
+      assert.equal(typeof options.diagnostic.sink, "function");
       return workflowSpawnReply(fixture.pi, params, returnedRun);
     },
     async status() { return {}; },

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { createServer, Socket } from "node:net";
-import { readFile as nodeReadFile, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync, constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -84,7 +84,6 @@ type Dependencies = {
   killProcess?: (pid: number, signal: "SIGKILL") => void;
   events?: { on(channel: string, listener: (event: any) => void | Promise<void>): () => void };
   terminalTimeoutMs?: number;
-  readFile?: typeof nodeReadFile;
   lstat?: typeof lstatSync;
   artifactPollIntervalMs?: number;
   lifecycleSessionId?: string;
@@ -167,7 +166,6 @@ export class RootBrokerServer {
   killProcess: (pid: number, signal: "SIGKILL") => void;
   events: Dependencies["events"];
   terminalTimeoutMs: number;
-  readFile: typeof nodeReadFile;
   lstat: typeof lstatSync;
   artifactPollIntervalMs: number;
   setSocketPermissions: typeof setBrokerSocketPermissions;
@@ -182,7 +180,6 @@ export class RootBrokerServer {
     killProcess = process.kill,
     events,
     terminalTimeoutMs = 5_000,
-    readFile = nodeReadFile,
     lstat: stat = lstatSync,
     artifactPollIntervalMs = 50,
     setSocketPermissions: applySocketPermissions = setBrokerSocketPermissions,
@@ -198,7 +195,6 @@ export class RootBrokerServer {
     this.killProcess = killProcess;
     this.events = events;
     this.terminalTimeoutMs = terminalTimeoutMs;
-    this.readFile = readFile;
     this.lstat = stat;
     this.artifactPollIntervalMs = artifactPollIntervalMs;
     this.setSocketPermissions = applySocketPermissions;
@@ -359,7 +355,9 @@ export class RootBrokerServer {
     this.goalAuthorities.set(value.runId, existing ?? registered);
   }
 
-  async readOfficialTerminalArtifact(run: OwnedRun) {
+  // The sole file-backed terminal authority: secure sidecar read, protocol
+  // parse/accept, then lifecycle wrappers project the in-memory snapshot.
+  readAndAcceptOfficialTerminalArtifact(run: OwnedRun) {
     const file = path.join(run.asyncDir, "process-terminal.json");
     const safeStat = (stat: ReturnType<typeof lstatSync>) => {
       const mode = Number(stat.mode) & 0o777;
@@ -373,7 +371,7 @@ export class RootBrokerServer {
     const after = this.lstat(file); safeStat(after);
     if (before.dev !== opened.dev || before.ino !== opened.ino || after.dev !== opened.dev || after.ino !== opened.ino || opened.size !== bytes.length) throw new Error("official terminal artifact changed while reading");
     const value = JSON.parse(bytes.toString("utf8"));
-    this.acceptTerminalProof(run, value);
+    return this.acceptTerminalProof(run, value);
   }
 
   recoverGoalRunBinding(ticket: any) {
@@ -403,7 +401,7 @@ export class RootBrokerServer {
     if (!run || !run.authorization.goal || run.identityState !== "verified" || run.asyncDir !== binding.asyncDir || run.sessionId !== binding.sessionId) {
       return frozen({ state: "attention", code: "OWNED_STOP_RECOVERY_UNAVAILABLE" });
     }
-    try { await this.readOfficialTerminalArtifact(run); }
+    try { this.readAndAcceptOfficialTerminalArtifact(run); }
     catch { return frozen({ state: "attention", code: "OWNED_STOP_RECOVERY_UNAVAILABLE" }); }
     const proof = this.terminalProofs.get(run.runId);
     return proof && !this.terminalConflicts.has(run.runId)
@@ -511,22 +509,26 @@ export class RootBrokerServer {
     return run ? this.executorProofSnapshot(run) : null;
   }
 
-  async inspectExecutorProofAsync(runId: string) {
+  async inspectExecutionProofForSettlement(runId: string) {
     const run = this.ownedRuns.get(runId);
     if (!run) return null; // facade registration is never settlement authority.
     if (run.identityState === "verified" && run.authorization.goal && !this.terminalProofs.has(runId) && !this.terminalConflicts.has(runId)) {
-      try { await this.readOfficialTerminalArtifact(run); } catch { /* unsafe/malformed/foreign/pending sidecars fail closed */ }
+      try { this.readAndAcceptOfficialTerminalArtifact(run); } catch { /* unsafe/malformed/foreign/pending sidecars fail closed */ }
     }
     return this.executorProofSnapshot(run);
   }
 
+  // Compatibility alias retained while the Goal settlement extension imports it.
+  async inspectExecutorProofAsync(runId: string) {
+    return this.inspectExecutionProofForSettlement(runId);
+  }
+
   async pollTerminalArtifact(run: OwnedRun, cancelled: () => boolean, setCancelSleep: (cancel: () => void) => void) {
-    const readJson = async (file: string) => JSON.parse(await this.readFile(file, "utf8"));
     while (!cancelled()) {
       try {
-        const sidecar = await readJson(path.join(run.asyncDir, "process-terminal.json"));
+        const proof = this.readAndAcceptOfficialTerminalArtifact(run);
         if (cancelled()) return undefined;
-        return this.acceptTerminalProof(run, sidecar);
+        return proof;
       } catch (error: any) {
         if (error?.code !== "ENOENT") {
           if (error instanceof Error && /official terminal/.test(error.message)) throw error;

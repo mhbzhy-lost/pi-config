@@ -84,9 +84,9 @@ async function reload(f, { freshHost = false } = {}) {
 
 test("steer durably closes an executor in stop-proof, preserved-workspace, resource-debt order", { concurrency: false }, async () => {
   const f = await ready(); await steer(f.api);
-  const p = projectionFor(f.cwd), proof = officialProof(f.runId);
+  const p = projectionFor(f.cwd), proof = officialProof(f.runId), binding = p.tasks.get("task-1").executorBinding;
   assert.deepEqual(f.calls.map(({ name }) => name), ["stop", "workspace", "resource"]);
-  assert.deepEqual(f.calls[0].request, { goalId: p.goalId, taskId: "task-1", attempt: f.attempt, runId: f.runId, asyncDir: join(tmpdir(), "executor-async"), workspacePath: f.workspacePath, leaseId: f.leaseId, sessionId: f.api.sessionId, baseHead: f.head, headAtDispatch: f.head, executionRevision: 1, contractHash: p.executionContractHash, agent: "executor" });
+  assert.deepEqual(f.calls[0].request, { goalId: p.goalId, taskId: "task-1", attempt: f.attempt, runId: f.runId, asyncDir: join(tmpdir(), "executor-async"), workspacePath: f.workspacePath, leaseId: f.leaseId, sessionId: f.api.sessionId, baseHead: binding.headAtDispatch, headAtDispatch: binding.headAtDispatch, executionRevision: 1, contractHash: binding.contractHash, agent: "executor" });
   assert.deepEqual(f.calls[1].request, { stateRoot: rootFor(f.cwd), goalId: p.goalId, taskId: "task-1", attempt: f.attempt, runId: f.runId, leaseId: f.leaseId, workspacePath: f.workspacePath, headAtDispatch: f.head, baseHead: f.head, executionRevision: 1, contractHash: p.executionContractHash, sessionId: f.api.sessionId });
   assert.deepEqual(f.calls[2].request, { stateRoot: rootFor(f.cwd), goalId: p.goalId, ownerKind: "executor", ownerId: f.runId, taskId: "task-1", attempt: f.attempt, leaseId: f.leaseId, executionRevision: 1, contractHash: p.executionContractHash, sessionId: f.api.sessionId });
   assert.equal(p.suspension.resourcesQuarantined, true);

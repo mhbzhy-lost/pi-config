@@ -87,7 +87,8 @@ test("spawn forwards a normalized workflow payload without injecting direct-exec
     mission: false,
     chatProgress: "off",
   };
-  const request = client.spawn(params);
+  const trace = [];
+  const request = client.spawn(params, { diagnostic: { toolCallId: "tool-spawn-1", sink: (...args) => trace.push(args) } });
 
   assert.deepEqual(params, {
     workflowScript: "return await runs.run('typed-request-1', { agent: 'reviewer', task: 'Review exactly this diff.', async: true, worktree: false });",
@@ -108,6 +109,14 @@ test("spawn forwards a normalized workflow payload without injecting direct-exec
   await request;
   assert.deepEqual(emitted, params);
   assert.equal(Object.hasOwn(emitted, "clarify"), false);
+  assert.equal(Object.hasOwn(emitted, "diagnostic"), false);
+  assert.equal(Object.hasOwn(emitted, "spawnKey"), false);
+  assert.equal(Object.hasOwn(emitted, "toolCallId"), false);
+  assert.equal(Object.hasOwn(emitted, "sink"), false);
+  assert.deepEqual(trace, [
+    ["rpc-spawn-sent", { method: "spawn", requestId: "request-2" }],
+    ["rpc-spawn-replied", { method: "spawn", requestId: "request-2" }],
+  ]);
   assert.equal(Object.hasOwn(emitted, "agent"), false);
   assert.equal(Object.hasOwn(emitted, "task"), false);
   client.dispose();

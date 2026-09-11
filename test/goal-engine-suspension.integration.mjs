@@ -26,9 +26,10 @@ test("reload derives an exact owned stop request from durable executor binding",
   const reloaded = structuredClone({ goalId: "goal-1", runtimeGeneration: "goal-runtime.v1", eventSchemaVersion: "goal-runtime.v1", executionRevision: 2, executionContractHash: "a".repeat(64), runtimeBaseHead: "b".repeat(40), sessionBindings: [{ sessionId: "session-1", state: "watching" }], tasks: [["task-1", { attempts: 3, acceptance: { criteria: [{ id: "contract" }] }, status: "dispatched", executorBinding: { attempt: 3, runId: "run-1", contractHash: "a".repeat(64), asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", workspaceLeaseId: leaseId, headAtDispatch: dispatchHead } }]] });
   reloaded.tasks = new Map(reloaded.tasks);
   const request = deriveOwnedRunStopRequest({ projection: reloaded, taskId: "task-1" });
-  assert.deepEqual(request, { goalId: "goal-1", taskId: "task-1", attempt: 3, runId: "run-1", asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", leaseId, sessionId: "session-1", baseHead: "b".repeat(40), headAtDispatch: dispatchHead, executionRevision: 2, contractHash: "a".repeat(64), agent: "executor" });
+  assert.deepEqual(request, { goalId: "goal-1", taskId: "task-1", attempt: 3, runId: "run-1", asyncDir: "/tmp/run-1", workspacePath: "/tmp/workspace-1", leaseId, sessionId: "session-1", baseHead: dispatchHead, headAtDispatch: dispatchHead, executionRevision: 2, contractHash: "a".repeat(64), agent: "executor" });
   assert.equal(Object.keys(request).length, 13);
   assert.throws(() => deriveOwnedRunStopRequest({ projection: { ...reloaded, executionRevision: 0 }, taskId: "task-1" }), /identity/);
+  assert.deepEqual(deriveOwnedRunStopRequest({ projection: { ...reloaded, runtimeBaseHead: "e".repeat(40), executionContractHash: "f".repeat(64) }, taskId: "task-1" }), request);
 });
 test("owned stop requires every immutable identity and official terminal proof", async () => {
   const calls = []; const pi = { stopOwnedRun: async (request) => { calls.push(request); return { state: "observed", proof: { id: "proof-1" } }; } };
@@ -38,6 +39,8 @@ test("owned stop requires every immutable identity and official terminal proof",
   await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, attempt: 2 }), /identity/);
   await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, expectedCriteria: ["caller-supplied"] }), /identity/);
   await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, agentProfile: "caller-supplied" }), /identity/);
+  await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, baseHead: "e".repeat(40) }), /identity/);
+  await assert.rejects(requestOwnedRunStop(pi, { projection: projection(), ...authority, contractHash: "f".repeat(64) }), /identity/);
   const noProof = await requestOwnedRunStop({ stopOwnedRun: async () => ({ state: "pending" }) }, { projection: projection(), ...authority });
   assert.equal(noProof.attention, true); assert.equal(noProof.terminal, false);
 });
