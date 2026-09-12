@@ -5,7 +5,6 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import createSkillWhitelistExtension from "../src/skill-whitelist/extension.ts";
-import { piHostModuleUrl } from "./helpers/pi-host.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const globalSkillsDir = join(homedir(), ".agents", "skills");
@@ -37,22 +36,6 @@ test("extension discovers global skills from ~/.agents/skills and project skills
   for (const p of projectPaths) {
     assert.match(p, /\.pi\/skills\/|\.agents\/skills\//, `unexpected project skill path: ${p}`);
   }
-});
-
-test("production discovery loads using-goal-engine through the Pi Skill loader", async () => {
-  const handlers = new Map();
-  createSkillWhitelistExtension({ on(name, handler) { handlers.set(name, handler); } });
-  const { skillPaths } = await handlers.get("resources_discover")({ cwd: repoRoot, reason: "startup" }, {});
-  const usingGoalEnginePath = skillPaths.find((path) => path.endsWith("using-goal-engine"));
-  assert.ok(usingGoalEnginePath, "resources_discover must return using-goal-engine");
-
-  const { loadSkillsFromDir } = await import(piHostModuleUrl);
-  const result = await loadSkillsFromDir({ dir: usingGoalEnginePath, source: "auto-discovery" });
-  assert.deepEqual(result.diagnostics, []);
-  assert.deepEqual(result.skills.map(({ name, description }) => ({ name, description })), [{
-    name: "using-goal-engine",
-    description: "Use when starting, resuming, amending, recovering, dispatching, or disposing worktrees for a multi-task Goal Engine objective.",
-  }]);
 });
 
 test("Pi extension entry delegates to the tested factory", async () => {

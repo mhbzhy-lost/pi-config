@@ -54,7 +54,6 @@ const retiredTarballPaths = [
   "src/subagent-dispatch/workspace.ts",
   "src/subagent-dispatch/workspace-controller.ts",
   "src/subagent-dispatch/workspace-ledger.ts",
-  "src/goal-support/workspace.ts",
   "src/worktree-lifecycle/inventory.ts",
   "src/worktree-lifecycle/managed-worktree.ts",
   "src/worktree-lifecycle/registry.ts",

@@ -61,15 +61,11 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
   assert.deepEqual({
     test: rootManifest.scripts["test:subagents-enhanced"],
     workspace: rootManifest.scripts["test:subagent-workspace"],
-    goal: rootManifest.scripts["test:goal-engine"],
-    canary: rootManifest.scripts["test:goal-runtime-canary"],
     setup: rootManifest.scripts["setup:subagents-enhanced"],
     verify: rootManifest.scripts["verify:subagents-enhanced"],
   }, {
     test: "npm --prefix packages/pi-subagents-enhanced test",
     workspace: "node --test test/managed-workspace-contract.test.mjs test/managed-workspace-ledger.integration.mjs test/managed-workspace-service.integration.mjs test/subagent-managed-worktree.integration.mjs",
-    goal: "node --test \"test/goal-engine-*.integration.mjs\"",
-    canary: "node --test test/goal-runtime-real-canary.integration.mjs",
     setup: "node scripts/setup-subagent-runtime-deps.ts",
     verify: "npm --prefix packages/pi-subagents-enhanced run verify:package",
   });
@@ -170,7 +166,6 @@ test("npm dry-run tarball contains the complete runtime closure and no repositor
     "src/subagent-dispatch/workspace.ts",
     "src/subagent-dispatch/workspace-controller.ts",
     "src/subagent-dispatch/workspace-ledger.ts",
-    "src/goal-support/workspace.ts",
     "src/worktree-lifecycle/inventory.ts",
     "src/worktree-lifecycle/managed-worktree.ts",
     "src/worktree-lifecycle/registry.ts",

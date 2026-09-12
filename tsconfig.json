@@ -18,7 +18,6 @@
     "src/bash-cwd/**/*.ts",
     "src/basic-memory/**/*.ts",
     "src/compact-tools/**/*.ts",
-    "src/goal-contract/**/*.ts",
     "src/model-system-prompt/**/*.ts",
     "src/provider-fallback/**/*.ts",
     "src/security-gates/**/*.ts",

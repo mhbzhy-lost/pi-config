@@ -23,6 +23,7 @@ __pycache__/
 
 # Sessions and logs
 /var/
+/pi/sessions/
 /.nano/
 
 # Playwright MCP generated files
@@ -34,6 +35,7 @@ __pycache__/
 # Pi runtime (subagent artifacts)
 /.pi-subagents/
 /.pi/subagents/
+/src/session-owner/.pi/
 /.state/goal-engine/
 /.state/worktree-lifecycle/
 /.state/subagent-dispatch/

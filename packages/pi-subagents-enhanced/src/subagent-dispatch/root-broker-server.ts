@@ -6,7 +6,7 @@ import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFi
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { materializeSettlementEvidence } from "../goal-support/settlement-evidence.ts";
+import { materializeSettlementEvidence } from "../contracts/settlement-evidence.ts";
 import { captureProcessBirthIdentity } from "./process-birth-identity.ts";
 import { assertRunAuthorization, type RunAuthorization } from "./run-authorization.ts";
 import {
