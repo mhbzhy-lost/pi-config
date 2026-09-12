@@ -180,7 +180,7 @@ test("narrow path calls stay on one line and preserve the file name", () => {
     fg: (_color, text) => text,
   };
   const call = renderers.write.renderCall({
-    path: "/tmp/account-pool-fork-baseline-migration/.agent-state/goal-contract/goals/sub2api/recovery.md",
+    path: "/tmp/account-pool-fork-baseline-migration/.agent-state/contracts/tasks/sub2api/recovery.md",
   }, plainTheme);
 
   const lines = call.render(40);

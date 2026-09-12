@@ -85,7 +85,7 @@ test("configured enhanced local package registers one authoritative subagent too
 test("installed Pi SessionManager preserves custom → compaction → real user branch fields", async () => {
   const { SessionManager } = await import(piPackage);
   const manager = SessionManager.inMemory(repoRoot);
-  const intentId = manager.appendCustomEntry("goal-engine-runtime-approval-intent", { protocol: "goal-engine-runtime-approval-intent.v1" });
+  const intentId = manager.appendCustomEntry("runtime-approval-intent", { protocol: "runtime-approval-intent.v1" });
   const compactionId = manager.appendCompaction("Pi summary", intentId, 1);
   const userEntryId = manager.appendMessage({ role: "user", content: "approve", timestamp: Date.now() });
   const branch = manager.getBranch();

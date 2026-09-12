@@ -27,8 +27,5 @@
     },
     "disableBuiltins": true
   },
-  "defaultThinkingLevel": "low",
-  "goalEngine": {
-    "enabled": false
-  }
+  "defaultThinkingLevel": "low"
 }

@@ -8,19 +8,6 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { homedir, tmpdir } from "node:os";
 import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
-import { createGoalEngineExtension } from "../src/goal-engine/extension.ts";
-import { generationCapabilities } from "../src/goal-engine/generation-capabilities.ts";
-import { normalizeRuntimeGoalInit } from "../src/goal-engine/obligation-contract.ts";
-import { createRuntimeActivationChallenge } from "../src/goal-engine/human-decision.ts";
-import { prepareManagedValidation, startManagedValidation, inspectManagedValidation, recoverManagedValidation, releaseManagedValidation } from "../src/goal-engine/managed-validation.ts";
-import { captureCurrentWorld } from "../src/goal-engine/current-world.ts";
-import { evaluateConditionGraph } from "../src/goal-engine/condition-validity.ts";
-import { deriveFindingFromFailedEvidence, openRepairEpisode } from "../src/goal-engine/repair-policy.ts";
-import { buildSuspensionPlan, suspensionGuard } from "../src/goal-engine/suspension.ts";
-import { finalizeGoal, buildObligationFinalizationManifest } from "../src/goal-engine/finalization.ts";
-import { runRecoverableFinalReview } from "../src/goal-engine/final-review.ts";
-import { loadFinalizationProjection } from "../src/goal-engine/store.ts";
-import { auditGoalContractIntegrity } from "../src/goal-contract/authorization-audit.ts";
 import { inventoryManagedWorkspaces } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
 import { verifyOrderedModelsRuntimePatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ordered-models-runtime-patch.ts";
 import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
@@ -28,7 +15,6 @@ import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/c
 import { assertRunAuthorization, createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
-import { createGoalEngineEntry } from "../pi/extensions/goal-engine.ts";
 
 const execFile = promisify(execFileCallback);
 
@@ -51,17 +37,6 @@ const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/index.mjs",
 ];
 const REQUIRED_RPC_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];
-const GOAL_ENGINE_TOOL_NAMES = [
-  "goal_init",
-  "goal_status",
-  "goal_dispatch",
-  "goal_settle",
-  "goal_accept",
-  "goal_amend",
-  "goal_integrate",
-  "goal_finalize",
-];
-const GOAL_ENGINE_TOOL_SET = new Set(GOAL_ENGINE_TOOL_NAMES);
 const LEGACY_TASK7_FILES = [
   "scripts/lib/subagent-jobs.mjs",
   "scripts/lib/subagent-extension.mjs",
@@ -89,58 +64,6 @@ const FORBIDDEN_LOCAL_PI_PEERS = [
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-tui",
 ];
-
-const runtimeBoundaryIssue = (code, message) => `${code}: ${message}`;
-
-function defaultGoalRuntimeBoundaryFactory() {
-  return {
-    generationCapabilities,
-    normalizeRuntimeGoalInit,
-    createRuntimeActivationChallenge,
-    managedValidation: { prepareManagedValidation, startManagedValidation, inspectManagedValidation, recoverManagedValidation, releaseManagedValidation },
-    currentWorld: { captureCurrentWorld, evaluateConditionGraph },
-    repair: { deriveFindingFromFailedEvidence, openRepairEpisode },
-    suspension: { buildSuspensionPlan, suspensionGuard },
-    finalization: { finalizeGoal, buildObligationFinalizationManifest },
-    finalReview: { runRecoverableFinalReview },
-    store: { loadFinalizationProjection },
-  };
-}
-
-export function inspectGoalRuntimeBoundaries({ goalRuntimeBoundaryFactory = defaultGoalRuntimeBoundaryFactory } = {}) {
-  let runtime;
-  try { runtime = goalRuntimeBoundaryFactory(); } catch { return [runtimeBoundaryIssue("GOAL_RUNTIME_FACTORY", "runtime capability factory failed")]; }
-  const issues = [];
-  const missing = (code, owner, names) => {
-    for (const name of names) if (typeof owner?.[name] !== "function") issues.push(runtimeBoundaryIssue(code, `missing ${name}`));
-  };
-  try {
-    const planned = runtime.generationCapabilities("planned.v1");
-    const goalRuntime = runtime.generationCapabilities("goal-runtime.v1");
-    if (planned?.taskContract !== "criteria-only" || planned?.executorBinding !== "strict" || planned?.settlement !== "dual-path" || planned?.completion !== "accept-auto" || goalRuntime?.taskContract !== "criteria-only" || goalRuntime?.executorBinding !== "strict" || goalRuntime?.settlement !== "dual-path" || goalRuntime?.completion !== "goal-finalize" || goalRuntime?.conditions !== true || goalRuntime?.executionRevision !== true) throw new Error("forged");
-  } catch { issues.push(runtimeBoundaryIssue("GOAL_RUNTIME_GENERATION_CAPABILITIES", "planned.v1 must retain strict accept-auto and runtime must require goal-finalize")); }
-  const draft = { objective: "doctor probe", execution: { schema: "goal-runtime.v1", tasks: [], conditions: [], write_policy: { allowed_paths: [] }, budgets: { max_observations: 0, max_repairs: 0, max_elapsed_minutes: 0, max_no_progress: 0 } } };
-  try {
-    if (typeof runtime.normalizeRuntimeGoalInit !== "function") throw new Error("missing");
-    for (const rejected of [{ ...draft, profile: "caller" }, { ...draft, command: "unsafe" }, draft]) {
-      let rejectedInput = false;
-      try { runtime.normalizeRuntimeGoalInit(rejected, {}); } catch { rejectedInput = true; }
-      if (!rejectedInput) throw new Error("forged");
-    }
-  } catch { issues.push(runtimeBoundaryIssue("GOAL_RUNTIME_CONTRACT_AUTHORITY", "runtime contract must require an obligation and reject caller profile or command")); }
-  try {
-    if (runtime.createRuntimeActivationChallenge({ goalId: "doctor", contractHash: "0".repeat(64), baseHead: "0".repeat(40), sessionId: "doctor", proposalId: "doctor" })?.kind !== "runtime_activation_approval") throw new Error("forged");
-  } catch { issues.push(runtimeBoundaryIssue("GOAL_RUNTIME_DRAFT_APPROVAL", "missing runtime draft approval boundary")); }
-  missing("GOAL_RUNTIME_MANAGED_VALIDATION_RECOVERY", runtime.managedValidation, ["prepareManagedValidation", "startManagedValidation", "inspectManagedValidation", "recoverManagedValidation", "releaseManagedValidation"]);
-  missing("GOAL_RUNTIME_CURRENT_WORLD", runtime.currentWorld, ["captureCurrentWorld", "evaluateConditionGraph"]);
-  missing("GOAL_RUNTIME_FINDING_REPAIR_SUSPEND", runtime.repair, ["deriveFindingFromFailedEvidence", "openRepairEpisode"]);
-  missing("GOAL_RUNTIME_FINDING_REPAIR_SUSPEND", runtime.suspension, ["buildSuspensionPlan", "suspensionGuard"]);
-  try { runtime.finalization?.finalizeGoal({ eventSchemaVersion: "planned.v1" }); throw new Error("forged"); } catch (error) { if (!String(error?.message).includes("FINALIZATION_UNSUPPORTED_GENERATION")) issues.push(runtimeBoundaryIssue("GOAL_RUNTIME_FINALIZATION", "planned finalization must be rejected")); }
-  missing("GOAL_RUNTIME_FINALIZATION", runtime.finalization, ["buildObligationFinalizationManifest"]);
-  missing("GOAL_RUNTIME_FINALIZATION", runtime.finalReview, ["runRecoverableFinalReview"]);
-  missing("GOAL_RUNTIME_FINALIZATION", runtime.store, ["loadFinalizationProjection"]);
-  return issues;
-}
 
 async function readIfExists(path) {
   try {
@@ -218,81 +141,6 @@ async function readInstalledPiVersion() {
   }
 }
 
-export async function inspectGoalProductionReadiness() {
-  const issues = [];
-  const definitions = [];
-  try {
-    await Promise.resolve(createGoalEngineExtension({ registerTool: (definition) => definitions.push(definition), on() {} }));
-    const names = definitions.map((definition) => definition?.name).sort();
-    if (JSON.stringify(names) !== JSON.stringify([...GOAL_ENGINE_TOOL_NAMES].sort()) || definitions.some((definition) => typeof definition?.execute !== "function" || Object.hasOwn(definition, "handler"))) throw new Error("exact-eight public tool ABI is unavailable");
-  } catch { issues.push("GOAL_READINESS_EXACT_EIGHT"); }
-  try {
-    const authorization = createRunAuthorization({ kind: "coding", binding: { runId: "doctor-goal-run", asyncDir: resolve(process.cwd()), sessionId: "doctor-goal-session", pid: process.pid, agentProfile: "doctor-profile" }, goal: { ticketId: "1".repeat(64), goalId: "doctor-goal", taskId: "doctor-task", attempt: 1, contractHash: "2".repeat(64), workspaceId: "doctor-workspace", executionRevision: 1, expectedCriteria: ["criterion-1"] } });
-    assertRunAuthorization(authorization);
-    if (!authorization.capabilities.includes("acceptance.submit")) throw new Error("Goal authorization did not grant acceptance capability");
-  } catch { issues.push("GOAL_READINESS_HOST_AUTHORIZATION"); }
-  try {
-    const broker = new RootBrokerServer({ rootSessionId: "doctor-root", upstream: {} });
-    if (typeof broker.inspectExecutorProofAsync !== "function" || await broker.inspectExecutorProofAsync("unknown-run") !== null) throw new Error("unknown runs must not produce settlement proof");
-  } catch { issues.push("GOAL_READINESS_CANONICAL_PROOF_READER"); }
-  try {
-    const managed = createManagedWorkspaceService({ stateRoot: join(tmpdir(), "doctor-readiness-no-state") });
-    if (!["issueDisposition", "dispose", "release"].every((name) => typeof managed[name] === "function")) throw new Error("missing managed public lifecycle");
-  } catch { issues.push("GOAL_READINESS_MANAGED_DISPOSITION"); }
-  const settingsRoot = await mkdtemp(join(tmpdir(), "doctor-goal-entry-"));
-  try {
-    await writeFile(join(settingsRoot, "settings.json"), JSON.stringify({ goalEngine: { enabled: true, finalReview: { provider: "doctor", id: "doctor", timeoutMs: 1 } } }));
-    let injected = false;
-    await createGoalEngineEntry({ registerTool() {}, on() {} }, {
-      settingsPath: join(settingsRoot, "settings.json"),
-      finalReviewFactory: async () => () => { injected = true; return undefined; },
-      load: async () => ({ createGoalEngineExtension: (_pi, options) => { if (typeof options?.finalReviewProviderFactory === "function") injected = true; } }),
-    });
-    if (!injected) throw new Error("production entry omitted final review provider");
-  } catch { issues.push("GOAL_READINESS_FINAL_REVIEW_PROVIDER");
-  } finally { await rm(settingsRoot, { recursive: true, force: true }); }
-  return issues;
-}
-
-export async function inspectGoalContractIntegrity(repoRoot) {
-  const registryPath = join(repoRoot, ".state", "goal-contract", "registry.json");
-  const registrySource = await readIfExists(registryPath);
-  if (registrySource == null) return [];
-
-  let registry;
-  try {
-    registry = JSON.parse(registrySource);
-  } catch (error) {
-    return [`Goal Contract registry is not valid JSON: ${error.message}`];
-  }
-  if (!registry?.goals || typeof registry.goals !== "object" || Array.isArray(registry.goals)) {
-    return ["Goal Contract registry goals must be an object"];
-  }
-
-  const issues = [];
-  for (const [goalId, entry] of Object.entries(registry.goals)) {
-    const contractDir = entry?.contract_dir;
-    if (typeof contractDir !== "string" || !contractDir) {
-      issues.push(`Goal Contract ${goalId} has no contract_dir`);
-      continue;
-    }
-    const goalRoot = resolve(repoRoot, contractDir);
-    const relativeGoalRoot = relative(repoRoot, goalRoot);
-    if (!relativeGoalRoot || relativeGoalRoot.startsWith("..") || isAbsolute(relativeGoalRoot)) {
-      issues.push(`Goal Contract ${goalId} contract_dir escapes repository root`);
-      continue;
-    }
-    try {
-      for (const error of auditGoalContractIntegrity(goalRoot)) {
-        issues.push(`Goal Contract ${goalId} integrity: ${error}`);
-      }
-    } catch (error) {
-      issues.push(`Goal Contract ${goalId} integrity audit failed: ${error.message}`);
-    }
-  }
-  return issues;
-}
-
 export async function inspectWorktreeLifecycle(repoRoot, { stateRoot = process.env.PI_CODING_WORKSPACE_DIR ?? join(repoRoot, "var", "workspaces") } = {}) {
   return inventoryManagedWorkspaces({ stateRoot, originRoot: repoRoot });
 }
@@ -332,9 +180,6 @@ export function formatWorktreeLifecycleWarnings(report) {
 export async function inspectConfiguration(repoRoot, options = {}) {
   const issues = [];
   issues.push(...await inspectSubagentRuntime({ cwd: repoRoot, requests: options.subagentRequests, discovery: options.subagentDiscovery }));
-  issues.push(...await inspectGoalContractIntegrity(repoRoot));
-  issues.push(...inspectGoalRuntimeBoundaries({ goalRuntimeBoundaryFactory: options.goalRuntimeBoundaryFactory }));
-  issues.push(...await inspectGoalProductionReadiness());
   let desired = new Map();
   try {
     desired = await discoverManagedSkills(repoRoot);
@@ -548,67 +393,6 @@ export async function inspectConfiguration(repoRoot, options = {}) {
       }
     } catch {
       issues.push(`missing Pi package: ${name}@${version}`);
-    }
-  }
-
-  const goalEngineFactory = options.goalEngineFactory ?? createGoalEngineExtension;
-  const goalEngineToolDefinitions = [];
-  const goalEnginePi = {
-    registerTool(definition) {
-      goalEngineToolDefinitions.push(definition);
-    },
-    on() {},
-  };
-
-  let goalEngineFactoryFailed = false;
-  try {
-    await Promise.resolve(goalEngineFactory(goalEnginePi));
-  } catch {
-    issues.push("invalid Goal Engine tool ABI: factory");
-    goalEngineFactoryFailed = true;
-  }
-
-  if (!goalEngineFactoryFailed) {
-    const invalidTools = new Set();
-    const seenTools = new Set();
-    const registeredTools = new Set();
-
-    for (const definition of goalEngineToolDefinitions) {
-      const name = typeof definition?.name === "string" ? definition.name : String(definition?.name);
-      if (seenTools.has(name)) {
-        invalidTools.add(name);
-      } else {
-        seenTools.add(name);
-      }
-
-      if (typeof definition !== "object" || definition === null || typeof definition?.name !== "string") {
-        invalidTools.add(name);
-        continue;
-      }
-
-      if (Object.prototype.hasOwnProperty.call(definition, "handler")) {
-        invalidTools.add(name);
-      }
-      if (typeof definition.execute !== "function") {
-        invalidTools.add(name);
-      }
-      registeredTools.add(name);
-    }
-
-    for (const required of GOAL_ENGINE_TOOL_NAMES) {
-      if (!registeredTools.has(required)) {
-        invalidTools.add(required);
-      }
-    }
-
-    for (const name of registeredTools) {
-      if (!GOAL_ENGINE_TOOL_SET.has(name)) {
-        invalidTools.add(name);
-      }
-    }
-
-    for (const name of invalidTools) {
-      issues.push(`invalid Goal Engine tool ABI: ${name}`);
     }
   }
 

@@ -15,7 +15,7 @@ export class TemporaryArena {
   #disposeHooks = [];
   #disposed = false;
 
-  constructor(prefix = "goal-engine-test-") {
+  constructor(prefix = "runtime-test-") {
     const canonicalTmp = realpathSync(tmpdir());
     this.path = realpathSync(mkdtempSync(join(canonicalTmp, childPrefix(prefix))));
   }
