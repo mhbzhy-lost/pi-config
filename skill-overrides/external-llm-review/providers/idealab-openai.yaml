@@ -1,5 +1,0 @@
-provider: idealab-openai
-base_url: https://idealab.alibaba-inc.com/api/openai/v1
-api_key: ${IDEALAB_OPENAI_API_KEY}
-model: qwen3.8-max
-max_tokens: 32768
