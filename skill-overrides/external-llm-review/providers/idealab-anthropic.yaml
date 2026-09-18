@@ -1,5 +1,0 @@
-provider: idealab-anthropic
-base_url: https://idealab.alibaba-inc.com/api/anthropic
-api_key: ${ANTHROPIC_API_KEY}
-model: claude-opus-4-6
-max_tokens: 16000
