@@ -12,10 +12,6 @@
 - 执行前：用户批准后派发一次 reviewer；用户拒绝或跳过时，直接执行。
 - 执行后：最后一个子任务完成后，用户批准才派发 reviewer，最多两次；用户拒绝或跳过时，直接交付。
 
-额外提供以下计划执行方式：
-
-- **Goal Engine：**加载 `using-goal-engine`，通过 typed tools 持久化编排。
-
 ## Worktree 生命周期
 
 禁止主 agent 通过任何 bash git 删除回收受管 worktree，若用户明确要求删除目标 worktree，生成相应 git 命令，让用户手动执行。
