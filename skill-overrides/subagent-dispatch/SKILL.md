@@ -98,6 +98,12 @@ description: Use when delegating coding or non-coding work to a configured Pi ag
 }
 ```
 
+### Worktree 选择与用户授权
+
+- 并发隔离场景优先 `worktree: true`：多个 child 会写同一仓库（尤其可能触碰相同或相邻文件）、需要互不污染的工作区、或任务要求从干净 base 验证时，coding 派发使用 `execution.worktree: true`。managed worktree 由 Auto Integration 队列串行 rebase/publish，child 只负责业务修改与冲突解决，不需要也不会被要求手工编排集成。
+- 用户明确禁止使用 worktree 时不得使用：用户在任务、会话或工单中明说不用 worktree（或等义表述）后，即使并发写同一仓库也保持 `worktree: false`，改用写路径互斥或串行派发来隔离；不得以“隔离更安全”为由覆盖用户决定。
+- 用户未表态时按上一条判断：可隔离的并发写优先 worktree；只读任务、写路径天然互不重叠、或单 child 任务不需要 worktree。
+
 Worktree 默认 false：省略或 false 保持 cwd、RPC、prompt 和 hash。coding 使用 `execution.worktree`，generic 使用顶层 `worktree`。true 从请求的 `baseCommit` 创建受管 worktree；source 可以保留既有 dirty，不得因为 dirty 阻止 allocation。仍须校验 source 是 primary worktree、HEAD attached、origin ref 未漂移、`baseCommit` 是允许的基线，并在 integrate 前单独检查 origin dirty。目录范围 `writePaths` 必须以 `/**` 或 `/` 结尾（如 `src/**` 或 `src/`）；裸路径按精确文件匹配。
 
 `subagent_worktree` 只列出、检查和处置当前 root session 创建的 standalone-subagent workspace；Goal、validation、foreign-session、legacy workspace 一律不在此工具的范围。保存 dispatch 返回的 `workspace_id`；完成时 `subagent-workspace-reminder` 会作为原始主-agent上下文消息提示处置，但 completion/status 都不等于 terminal proof。
