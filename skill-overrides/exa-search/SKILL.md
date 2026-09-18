@@ -31,6 +31,17 @@ python3 ~/pi-config/skill-overrides/exa-search/exa.py search "your query" [num_r
 python3 ~/pi-config/skill-overrides/exa-search/exa.py fetch "url1" ["url2" ...]
 ```
 
+## 独立代理
+
+Exa 请求单独使用本机 HTTP 代理 `127.0.0.1:7897`，不会修改宿主或其他工具的代理设置，也不会沿用宿主的 `https_proxy` 或系统代理。宿主代理端口不是 `7897` 时，agent 可在**该次调用**前通过 `EXA_PROXY_PORT` 覆盖（仅接受十进制端口 `1`–`65535`）：
+
+```bash
+EXA_PROXY_PORT=8888 python3 ~/pi-config/skill-overrides/exa-search/exa.py search "your query" 5
+EXA_PROXY_PORT=8888 python3 ~/pi-config/skill-overrides/exa-search/exa.py fetch "https://example.com"
+```
+
+端口覆盖只对这条命令生效；不设置时仍使用 `7897`。若代理不可用，应核对宿主实际端口并在调用时覆盖；不要为此设置全局代理，也不要读取或输出密钥。程序调用 `search`、`fetch` 时可传入 `proxy_port` 整数参数覆盖。
+
 ## Query Tips
 
 Write queries as **descriptive phrases**, not keywords:
