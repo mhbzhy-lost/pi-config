@@ -21,3 +21,7 @@ package 内由 Node 直接执行的 `scripts/*.ts` 和所有 `src/**/*.ts` 均�
 公开入口只允许 package exports `./workspace` 与 `./workspace/admin`。运行时 owner token 只能保存在统一私有 ledger 中；agent、Goal event 和管理输出只能消费公开 receipt 与其 `leaseId`。
 
 任何 agent-callable workspace 工具都必须调用唯一 workspace service，并在 service 内对 live root session identity 和 exact owner kind 执行验证；不得以工具参数、workspace ID、路径或调用前检查替代该门禁。
+
+## T9 acceptance probe
+
+`repository-merge-queue-acceptance.ts` 是诊断/验收 CLI，不属于 production coordinator。合同验证先运行 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`；真实验收另行显式执行，禁止以 deterministic/fake model 代替 coding child。测试 barrier 只允许五个不同 trusted child 在相同 `baseCommit` 登记后一次释放，并且失败必须保留临时 repo、queue、worktree 与进程现场。

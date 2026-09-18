@@ -34,6 +34,14 @@
 npm:pi-subagents-enhanced@0.1.0
 ```
 
+## Repository merge-queue acceptance probe
+
+T9 的聚焦验收入口是 `node scripts/probes/repository-merge-queue-acceptance.ts`。它只接受 `PI_REAL_BIN` 指向的真实 Pi 0.85.1 Host；合同测试使用 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`，不会运行五 child 验收或全量 `npm test`。
+
+Probe 使用独立 temporary repo、session、state 和 socket roots。失败时保留现场并在 receipt 中记录路径；不要手动删除失败现场，需先检查两个 Host、queue、worktree 和 terminal proof。barrier fixture 位于 `test/fixtures/repository-merge-queue-acceptance/`，仅可通过 `subagentOnlyExtensions` 注入测试 Host。
+
+合同层同时验证 trusted `run/cwd/HEAD/PID` barrier、来自 Git 事实的冲突 digest（含非零 rebase、unmerged entries、sequencer）和 public `agent_end`/follow-up/next `agent_start` 计数；`agent_settled` 不是 Auto Integration 成功信号。`ACCEPTANCE_OVERALL_TIMEOUT_MS` 覆盖 barrier、child settlement 与 public audit settlement，失败时保留 repository/worktree/receipts。
+
 两种来源互斥，同一 Pi 配置中只能启用一种。不得同时安装或启用 standalone `npm:pi-subagents@0.62.0`，否则会形成重复 runtime、tool、message renderer 或模块身份。
 
 ## 准备与升级

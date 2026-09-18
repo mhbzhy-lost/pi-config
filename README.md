@@ -79,6 +79,19 @@ Shell 集成固定：
 
 `pi/extensions/skill-whitelist.ts` 随后通过 `resources_discover` 扫描全局与项目 Skill 目录；它不读取仓库 Skill 清单，也不复制或创建软链接。
 
+## T9 Repository Merge Queue 验收
+
+验收 probe 仅用于聚焦合同验证与诊断：
+
+```bash
+node --test test/repository-merge-queue-acceptance-probe.test.mjs
+node scripts/probes/repository-merge-queue-acceptance.ts
+```
+
+真实 probe 必须设置 `PI_REAL_BIN` 指向 Pi 0.85.1，并使用真实 `executor` child model；不得用 fake 或 deterministic model 替代。probe 使用独立临时 repo、session、state、socket roots，失败时保留现场并报告路径；本任务不运行五 child 真实验收或全量 `npm test`。
+
+合同测试还校验 trusted `run/cwd/HEAD/PID` barrier ready、Git 冲突证据（非零 rebase、unmerged、sequencer、digest）、public receipt 生命周期计数，以及统一的 `ACCEPTANCE_OVERALL_TIMEOUT_MS` 门禁。失败现场不得 force cleanup；真实五-child 命令仅在 T11 完成后运行。
+
 ## Pi 0.84.4 TUI 与工具限制
 
 Pi 官方是 fullscreen 的唯一 owner；Shell 不发送 `DECSET/DECRST 1049`。`pi-inline` 和 `pi-full` 分别是官方 `--tui-mode regular` 与 `--tui-mode fullscreen` 的别名。
