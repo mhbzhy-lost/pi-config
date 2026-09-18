@@ -68,7 +68,17 @@ export async function installRootSessionOwner(pi: any, options: Options = {}) {
 
   for (;;) {
     try {
-      subscription = await client.subscribe((push: any) => { if (push.type === "root.closing") void terminate(); });
+      subscription = await client.subscribe((push: any) => {
+        if (push.type === "root.closing") void terminate();
+        // Recovery notifications are intentionally consumed as durable
+        // observations by the root owner; the broker has already persisted the
+        // event and no model wake-up is needed here.
+        if (push.type === "recovery.event") void Promise.resolve(pi.sendMessage?.({
+          customType: "pi-root-recovery-event-v1",
+          content: "Recovery event observed by root session.",
+          details: push.data,
+        })).catch(() => {});
+      });
       break;
     } catch (error: any) {
       if (error?.code !== "GRANT_NOT_READY" || clock() >= deadline) {

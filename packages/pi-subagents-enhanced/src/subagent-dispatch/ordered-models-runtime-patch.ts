@@ -4,10 +4,11 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 export const ORDERED_MODELS_PATCH_VERSION = "ordered-models.v3";
-export const WORKFLOW_CHILD_EXTENSIONS_PATCH_VERSION = "workflow-child-extensions.v1";
+export const WORKFLOW_CHILD_EXTENSIONS_PATCH_VERSION = "workflow-child-extensions.v2";
 export const SUPPORTED_PI_SUBAGENTS_VERSION = "0.62.0";
 const MARKER = `// pi-config patch: ${ORDERED_MODELS_PATCH_VERSION}`;
-const CHILD_EXTENSIONS_MARKER = `// pi-config patch: ${WORKFLOW_CHILD_EXTENSIONS_PATCH_VERSION}`;
+const CHILD_EXTENSIONS_MARKER = `// pi-config patch: workflow-child-extensions.v1`;
+const CHILD_EXTENSIONS_V2_MARKER = `// pi-config patch: ${WORKFLOW_CHILD_EXTENSIONS_PATCH_VERSION}`;
 const COMPILED_RUNNER_PATH_MARKER = "// pi-config patch: compiled-runner-path.v1";
 const COMPILED_EXTENSION_PATHS_MARKER = "// pi-config patch: compiled-extension-paths.v1";
 const STREAM_RECOVERY_MARKER = "// pi-config patch: stream-read-error-recovery.v1";
@@ -207,6 +208,19 @@ function workflowChildExtensionBridge(source, path) {
   if (source.includes(CHILD_EXTENSIONS_MARKER)) return source;
   return once(source, /(\t{3}workflowAwaitAsync: params\.workflowAwaitAsync,\n)/, `$1\t\t\t${CHILD_EXTENSIONS_MARKER}\n\t\t\tsubagentOnlyExtensions: (params as typeof params & { subagentOnlyExtensions?: string[] }).subagentOnlyExtensions,\n`, path);
 }
+// v2：v1 只把 workflow 注入的 child extensions 合入 launch toolPlan，recovery
+// descriptor 仍读 agentConfig 的原始列表；resumed child 因此丢失 managed
+// integration child 扩展（root-session-owner + integration-queue）。v2 使
+// descriptor 捕获 effective 列表，resume 后扩展随 session 重载。
+function workflowChildExtensionsV2(source, path) {
+  if (source.includes(CHILD_EXTENSIONS_V2_MARKER)) return source;
+  return once(source, /\.\.\.\(recoveryAgentConfig\.subagentOnlyExtensions \? \{ subagentOnlyExtensions: \[\.\.\.recoveryAgentConfig\.subagentOnlyExtensions\] \} : \{\}\),/,
+    `\t${CHILD_EXTENSIONS_V2_MARKER}\n\t...(recoveryAgentConfig.subagentOnlyExtensions || effectiveSubagentOnlyExtensions?.length ? { subagentOnlyExtensions: [...new Set([...(recoveryAgentConfig.subagentOnlyExtensions ?? []), ...(effectiveSubagentOnlyExtensions ?? [])])] } : {}),`,
+    path);
+}
+export function patchWorkflowChildExtensionsSource(source: string, path = "src/runs/background/async-execution.ts") {
+  return workflowChildExtensionsV2(source, path);
+}
 function streamRecovery(source, path) {
   if (source.includes(STREAM_RECOVERY_MARKER)) {
     return source.includes(MARKER) ? source : `${MARKER}\n${source}`;
@@ -255,7 +269,7 @@ export function patchStreamRecoverySource(source: string, path = "src/runs/backg
   return streamRecovery(source, path);
 }
 function asyncExecution(source, path) {
-  return workflowChildExtensions(execution(source, path), path);
+  return workflowChildExtensionsV2(workflowChildExtensions(execution(source, path), path), path);
 }
 function noop(source) { return source; }
 const files: readonly [string, typeof agents][] = [
@@ -271,6 +285,7 @@ export async function verifyOrderedModelsRuntimePatch(packageRoot) {
     const source = await readFile(join(packageRoot, relative), "utf8");
     if (!source.includes(MARKER)) throw new Error(`ordered models runtime patch missing: ${relative}`);
     if (relative === "src/runs/background/async-execution.ts" && !source.includes(CHILD_EXTENSIONS_MARKER)) throw new Error(`workflow child extensions runtime patch missing: ${relative}`);
+    if (relative === "src/runs/background/async-execution.ts" && !source.includes(CHILD_EXTENSIONS_V2_MARKER)) throw new Error(`workflow child extensions v2 runtime patch missing: ${relative}`);
     if (relative === "src/runs/background/subagent-runner.ts" && !source.includes(STREAM_RECOVERY_MARKER)) throw new Error(`stream recovery runtime patch missing: ${relative}`);
   }
   for (const [relative] of workflowChildExtensionFiles) if (!(await readFile(join(packageRoot, relative), "utf8")).includes(CHILD_EXTENSIONS_MARKER)) throw new Error(`workflow child extensions runtime patch missing: ${relative}`);

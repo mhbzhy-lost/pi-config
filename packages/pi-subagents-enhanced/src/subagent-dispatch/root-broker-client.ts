@@ -7,9 +7,19 @@ import {
   brokerSocketPath,
   parseBrokerPush,
   parseBrokerResponse,
+  parseCoordinatorChallengeProof,
   readBrokerGrant,
   type BrokerPush,
 } from "./root-broker-protocol.ts";
+import { processBirthIdentityMatches } from "./process-birth-identity.ts";
+
+export type RootBrokerRegistryEntry = {
+  protocol: "pi-root-subagent-broker-registry.v1";
+  rootSessionId: string;
+  endpoint: string;
+  pid: number;
+  processBirthIdentity: string;
+};
 
 type ClientOptions = {
   rootSessionId: string;
@@ -52,6 +62,47 @@ export function createBrokerFrameDecoder() {
       return lines;
     },
   };
+}
+
+export async function challengeRootBroker(registry: RootBrokerRegistryEntry, challenge: { nonce: string; repositoryId: string; coordinatorInstanceId: string }, { timeoutMs = 5_000 } = {}) {
+  if (!registry || registry.protocol !== "pi-root-subagent-broker-registry.v1" || registry.endpoint !== brokerSocketPath(registry.rootSessionId)) {
+    throw clientError("Root Broker registry is invalid", "BROKER_REGISTRY_INVALID");
+  }
+  if (!await processBirthIdentityMatches(registry.pid, registry.processBirthIdentity)) {
+    throw clientError("Root Broker process identity mismatch", "BROKER_PROCESS_IDENTITY_MISMATCH");
+  }
+  const request = {
+    schemaVersion: "pi-root-subagent-broker-request.v1",
+    requestId: safeRequestId(randomUUID),
+    rootSessionId: registry.rootSessionId,
+    callerRunId: challenge.coordinatorInstanceId,
+    callerToken: challenge.nonce,
+    method: "coordinator.register",
+    params: challenge,
+  };
+  return await new Promise<any>((resolve, reject) => {
+    const socket = connect(registry.endpoint);
+    let buffer = ""; let settled = false;
+    const finish = (error?: Error, value?: unknown) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); socket.destroy();
+      if (error) reject(error); else resolve(value);
+    };
+    const timer = setTimeout(() => finish(clientError("Root Broker challenge timed out", "BROKER_TIMEOUT")), timeoutMs);
+    socket.once("error", (error) => finish(clientError(`Root Broker challenge failed: ${error.message}`, "BROKER_DISCONNECTED")));
+    socket.once("close", () => { if (!settled) finish(clientError("Root Broker challenge disconnected", "BROKER_DISCONNECTED")); });
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      if (Buffer.byteLength(buffer, "utf8") > BROKER_FRAME_LIMIT_BYTES) return finish(clientError("Root Broker challenge response is too large"));
+      const newline = buffer.indexOf("\n"); if (newline < 0) return;
+      try {
+        const response = parseBrokerResponse(JSON.parse(buffer.slice(0, newline)), request);
+        if (response.success === false) return finish(clientError(response.error.message, response.error.code));
+        finish(undefined, parseCoordinatorChallengeProof(response.data, { ...challenge, rootSessionId: registry.rootSessionId, brokerPid: registry.pid, brokerProcessIdentity: registry.processBirthIdentity }));
+      } catch (error) { finish(error as Error); }
+    });
+    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+  });
 }
 
 export function createRootBrokerClient({ rootSessionId, callerRunId, requiredCapability, timeoutMs = 10_000, randomUUID: createId = randomUUID }: ClientOptions) {
@@ -209,5 +260,11 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, requiredCap
       sockets.clear();
     },
   };
-  return Object.freeze(api);
+  Object.defineProperty(api, "coordinatorRequest", {
+    enumerable: false,
+    value: (operation: string, input: Record<string, unknown> = {}) => request("coordinator.request", { operation, input }),
+  });
+  return Object.freeze(api) as Readonly<typeof api> & {
+    coordinatorRequest: (operation: string, input?: Record<string, unknown>) => Promise<unknown>;
+  };
 }

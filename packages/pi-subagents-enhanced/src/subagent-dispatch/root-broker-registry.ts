@@ -1,6 +1,8 @@
 import type { RootBrokerServer } from "./root-broker-server.ts";
 import type { RunAuthorization } from "./run-authorization.ts";
 import { executionProofForLegacySettlement } from "./legacy-executor-compat.ts";
+import { captureProcessBirthIdentity } from "./process-birth-identity.ts";
+import { brokerSocketPath } from "./root-broker-protocol.ts";
 
 const ROOT_BROKER_REGISTRY_KEY = Symbol.for("pi.root-subagent-broker-registry.v2");
 const GOAL_RUN_COORDINATOR_KEY = Symbol.for("pi.goal-run-coordinator-registry.v2");
@@ -137,6 +139,11 @@ export function bindRootBroker(pi: object, broker: RootBrokerServer): void {
   brokers.byRootSessionId.set(rootSessionId, broker);
 }
 
+/** Returns the live broker only to trusted in-process coordinator code. */
+export function findRootBroker(pi: object, rootSessionId?: string): RootBrokerServer | undefined {
+  try { return requireRootBroker(pi, rootSessionId); } catch { return undefined; }
+}
+
 export function requireRootBroker(pi: object, rootSessionId?: string): RootBrokerServer {
   const exact = brokers.exact.get(registryKey(pi));
   if (rootSessionId === undefined) {
@@ -151,6 +158,17 @@ export function requireRootBroker(pi: object, rootSessionId?: string): RootBroke
   const broker = brokers.byRootSessionId.get(identity);
   if (!broker) throw new Error("Root subagent broker is unavailable");
   return broker;
+}
+
+export async function rootBrokerRegistryEntry(pi: object, rootSessionId?: string) {
+  const broker = requireRootBroker(pi, rootSessionId);
+  return Object.freeze({
+    protocol: "pi-root-subagent-broker-registry.v1" as const,
+    rootSessionId: broker.rootSessionId,
+    endpoint: brokerSocketPath(broker.rootSessionId),
+    pid: process.pid,
+    processBirthIdentity: await captureProcessBirthIdentity(process.pid),
+  });
 }
 
 export async function stopRootBrokerGoalOwnedRun(pi: object, binding: { goalId: string; taskId: string; attempt: number; runId: string; asyncDir: string; workspacePath: string; leaseId: string; sessionId: string; baseHead: string; headAtDispatch: string; executionRevision: number; contractHash: string; agent: "executor" }, rootSessionId?: string) {

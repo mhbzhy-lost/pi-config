@@ -73,7 +73,12 @@ export function createSubagentWorkspaceTool({ service, resolveRootSessionId, ren
           value = status.receipt?.state === "active" ? scopedService.issueOwnedDisposition({ workspaceId: input.workspace_id, ownerScope }) : status;
         } else if (input?.action === "dispose") {
           if (input.strategy !== undefined && input.disposition !== "integrate") return failure("INVALID_WORKSPACE_STRATEGY", "strategy is only valid for integrate");
-          value = scopedService.disposeOwned({ workspaceId: input.workspace_id, ownerScope, disposition: input.disposition, strategy: input.strategy ?? "cherry-pick", reason: input.disposition === "preserve" ? "subagent workspace preserved" : undefined, actionToken: input.action_token });
+          try {
+            value = scopedService.disposeOwned({ workspaceId: input.workspace_id, ownerScope, disposition: input.disposition, strategy: input.strategy ?? "cherry-pick", reason: input.disposition === "preserve" ? "subagent workspace preserved" : undefined, actionToken: input.action_token });
+          } catch (error) {
+            if (error?.code !== "CHILD_OWNS_INTEGRATION") throw error;
+            return failure("CHILD_OWNS_INTEGRATION", error.message);
+          }
         } else if (input?.action === "release") {
           value = scopedService.releaseOwned({ workspaceId: input.workspace_id, ownerScope });
         } else return failure("UNSUPPORTED_WORKSPACE_ACTION", "unsupported subagent workspace action");

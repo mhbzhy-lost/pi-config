@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { Box, Text } from "@earendil-works/pi-tui";
 import {
   currentCompletionOwnerId,
@@ -17,12 +19,170 @@ import {
 } from "../src/tui/compact-rendering.ts";
 import { createSubagentDispatchTraceFileSink, installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
+import { createCoordinatorProofOutbox } from "../src/subagent-dispatch/coordinator-proof-outbox.ts";
 import { resolveRootSessionId } from "../src/subagent-dispatch/root-broker-protocol.ts";
+import { COORDINATOR_OPERATIONS } from "../src/subagent-dispatch/root-broker-protocol.ts";
 import { closeAndUnbindRootBroker, inspectRootBrokerExecutionProof, registerRootBrokerAuthorizedRun, startAndBindRootBroker } from "../src/subagent-dispatch/root-broker-registry.ts";
-import { RootBrokerServer } from "../src/subagent-dispatch/root-broker-server.ts";
+import { RootBrokerServer, rootBrokerTerminalProofId, type TerminalProofDeliveryOutcome } from "../src/subagent-dispatch/root-broker-server.ts";
+import { rootBrokerRegistryEntry } from "../src/subagent-dispatch/root-broker-registry.ts";
+import { createTrustedRunBindingResolver } from "../src/subagent-dispatch/run-binding-resolver.ts";
+import { createRecoveryResumeOrchestrator } from "../src/subagent-dispatch/recovery-resume-orchestrator.ts";
+import { connectRepositoryCoordinator } from "../src/workspace/coordinator-client.ts";
+import { createCoordinatorRegistry } from "../src/workspace/coordinator-registry.ts";
+import { createCoordinatorServer } from "../src/workspace/coordinator-server.ts";
+import { createManagedWorkspaceLedger } from "../src/workspace/ledger.ts";
+import { resolveRepositoryIdentity } from "../src/workspace/repository-identity.ts";
 import { createManagedWorkspaceService } from "../src/workspace/service.ts";
 import { createWorkspaceCompletionReminder } from "../src/workspace/completion-reminder.ts";
 import { bindManagedWorkspaceServiceSession, unbindManagedWorkspaceServiceSession } from "../src/workspace/registry.ts";
+
+export function shouldStartRepositoryCoordinator(cwd: string): boolean {
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Connect the Host to the common-dir singleton after the Root Broker exists. */
+export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rpc }: { pi: object; cwd: string; broker: RootBrokerServer; stateRoot?: string; rpc?: any }) {
+  if (!shouldStartRepositoryCoordinator(cwd) || typeof stateRoot !== "string" || stateRoot.length === 0) return undefined;
+  const identity = await resolveRepositoryIdentity(cwd);
+  const registry = createCoordinatorRegistry({ commonDir: identity.commonDir, stateRoot });
+  const metadata = await registry.claim({ repositoryId: identity.repositoryId, storageRepositoryId: identity.storageRepositoryId });
+  let server: any;
+  let recoveryOrchestrator: ReturnType<typeof createRecoveryResumeOrchestrator> | undefined;
+  const ownsServer = metadata.pid === process.pid;
+  if (ownsServer) {
+    server = createCoordinatorServer({
+      endpoint: metadata.endpoint,
+      repositoryId: metadata.repositoryId,
+      storageRepositoryId: metadata.storageRepositoryId,
+      instanceId: metadata.instanceId,
+      stateRoot: metadata.canonicalStateRoot,
+      recoveryEventSink: (intent: any) => {
+        // resume intent 的快路径：本 Host 的 orchestrator 直接消费（仅限本
+        // root 拥有的 intent，submit 内部校验 owner scope）；跨 Host 投递由
+        // durable recovery.status 轮询通道负责。legacy preserve 事件仍走
+        // broker push。coordinator 的 durable 状态仍是唯一权威。
+        if (intent?.requiredAction === "resume-child") {
+          void recoveryOrchestrator?.submit(intent);
+          return { state: "delivered" };
+        }
+        return broker.publishRecoveryEvent(intent);
+      },
+    });
+    try { await server.listen(); } catch (error) {
+      await registry.release().catch(() => undefined);
+      throw error;
+    }
+  }
+  try {
+    const client = await connectRepositoryCoordinator(identity, await rootBrokerRegistryEntry(pi, broker.rootSessionId), { metadata });
+    const proofOwnerScope = Object.freeze({ kind: "standalone-subagent" as const, rootSessionId: broker.rootSessionId });
+    // One durable proof outbox shared with the coordinator daemon; the broker
+    // writes pending/debt entries when the daemon cannot settle them.
+    const proofOutbox = createCoordinatorProofOutbox(path.join(metadata.canonicalStateRoot, "repositories", identity.storageRepositoryId, "terminal-proof-outbox"));
+    const operationMethods = Object.freeze({
+      enqueue: client.enqueueIntegration,
+      await_admission: client.awaitIntegrationAdmission,
+      report_conflict: client.reportResolvingConflict,
+      publish: client.publishRebasedCandidate,
+      fail: client.abandonIntegration,
+      inspect_integration_state: client.inspectIntegrationState,
+      preserve_integration_debt: client.preserveIntegrationDebt,
+      prepare_auto_integration: client.prepareAutoIntegration,
+      inspect_auto_integration: client.inspectAutoIntegration,
+      // The child wire input stays empty. coordinatorRequest adds the binding
+      // resolved from the trusted run registration before this socket call.
+      advance_auto_integration: client.advanceAutoIntegration,
+    });
+    const bindingResolver = createTrustedRunBindingResolver(client, { rootSessionId: broker.rootSessionId });
+    broker.coordinatorRequest = async (runId, operation, input) => {
+      if (!COORDINATOR_OPERATIONS.includes(operation as any)) throw new Error("unsupported coordinator operation");
+      const binding = await bindingResolver.resolve(runId);
+      const method = operationMethods[operation as keyof typeof operationMethods];
+      return method({ ...input, ...binding });
+    };
+    broker.recordTerminalProof = async (run, proof): Promise<TerminalProofDeliveryOutcome> => {
+      const proofId = rootBrokerTerminalProofId(proof);
+      // A coordinator transport failure is not an unresolved binding: the
+      // durable ledger still proves the workspace/run pair, so the proof stays
+      // replayable instead of becoming proof debt.
+      const ledgerBinding = () => {
+        try {
+          const records = createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
+            .listScoped({ owner: proofOwnerScope })
+            .filter((record: any) => record.run?.runId === run.runId);
+          return records.length === 1 ? records[0].workspaceId : undefined;
+        } catch { return undefined; }
+      };
+      let workspaceId: string | undefined;
+      try {
+        const owned = await client.listOwned({ runId: run.runId });
+        workspaceId = Array.isArray(owned) && owned.length === 1 ? owned[0].workspaceId : undefined;
+      } catch { workspaceId = ledgerBinding(); }
+      if (typeof workspaceId !== "string" || !workspaceId) {
+        const reason = "trusted run binding is unavailable";
+        await proofOutbox.recordDebt({ proofId, runId: run.runId, reason });
+        return { state: "debt", reason };
+      }
+      // The workspace ledger v2 requires exactly this proof identity; the
+      // proofId is the Root Broker canonical hash of the accepted terminal.
+      const terminalProof = {
+        state: "observed",
+        conflict: false,
+        runId: run.runId,
+        rootSessionId: broker.rootSessionId,
+        asyncDir: run.asyncDir,
+        processInstance: typeof proof.runnerProcessInstanceId === "string" && proof.runnerProcessInstanceId ? proof.runnerProcessInstanceId : String(run.pid),
+        proofId,
+      };
+      // Durability first: a crash before the coordinator reply must not lose
+      // the accepted terminal, and the daemon replays pending on startup.
+      await proofOutbox.enqueue({ ...terminalProof, workspaceId, ownerScope: proofOwnerScope });
+      try {
+        const receipt = await client.recordTerminalProof({ workspaceId, ownerScope: proofOwnerScope, proof: terminalProof });
+        return { state: "delivered", receipt };
+      } catch (error) {
+        return { state: "pending", reason: error instanceof Error && error.message ? error.message : String(error) };
+      }
+    };
+    // durable recovery resume：轮询 recovery.status（按 rootSessionId 过滤）
+    // 发现本 root children 的 pending/starting resume intent，经 upstream
+    // public resume 恢复 session 后注册新 run 授权并激活 rebind。仅在本
+    // Host 持有 typed RPC 时启用；无 RPC 的宿主保持纯观察。
+    if (rpc && typeof rpc.resume === "function") {
+      recoveryOrchestrator = createRecoveryResumeOrchestrator({
+        rpc,
+        events: (pi as any).events,
+        coordinatorClient: client,
+        registerAuthorizedRun: (authorization: unknown) => broker.registerAuthorizedRun(authorization as any),
+        activateResume: (input: any) => client.activateResume(input),
+        rootSessionId: broker.rootSessionId,
+        lifecycleSessionId: broker.lifecycleSessionId,
+        // 诊断打点写 root host stderr（acceptance harness 会保留 stderr tail）；
+// 阶段与身份字段不含 prompt/token/凭据。
+        trace: (entry: any) => { try { process.stderr.write(`${JSON.stringify(entry)}\n`); } catch { /* 诊断输出不得影响恢复主链 */ } },
+      });
+      recoveryOrchestrator.start();
+    }
+    return Object.freeze({ client, server, registry, ownsServer, identity, async close() {
+      recoveryOrchestrator?.dispose();
+      await client.close();
+      if (ownsServer) {
+        await server.close();
+        await registry.release();
+      }
+      bindingResolver.dispose();
+      broker.recordTerminalProof = undefined;
+      broker.coordinatorRequest = undefined;
+    } });
+  } catch (error) {
+    if (ownsServer) { await server.close().catch(() => undefined); await registry.release().catch(() => undefined); }
+    throw error;
+  }
+}
 
 export function createRootBrokerUpstream({ rpc }: { rpc: any }) {
   return Object.freeze({
@@ -36,30 +196,36 @@ export function projectManagedWorkspaceTerminalProof(
   run: { runId?: string } | null | undefined,
   snapshot: any,
 ) {
-  if (!run?.runId || snapshot === undefined || snapshot === null || snapshot?.state === "pending") {
+  if (!run?.runId || snapshot === undefined || snapshot === null) {
     return { state: "pending" };
   }
-  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)
-      || (snapshot.schemaVersion === "root-broker.execution-proof.v2" && snapshot.binding?.runId === run.runId)) {
-    if (snapshot?.schemaVersion === "root-broker.execution-proof.v2" && snapshot.binding?.runId === run.runId) {
-      if (snapshot.terminal === null) return { state: "pending" };
-      if (snapshot.terminal && typeof snapshot.terminal === "object"
-          && /^[a-f0-9]{64}$/.test(snapshot.terminal.proofId)
-          && typeof snapshot.terminalConflict === "boolean") {
-        return { state: "observed", conflict: snapshot.terminalConflict, proofHash: snapshot.terminal.proofId };
-      }
+  if (snapshot.schemaVersion === "root-broker.execution-proof.v2" && snapshot.binding?.runId === run.runId) {
+    if (snapshot.terminal === null) return { state: "pending" };
+    const officialProof = snapshot.terminal?.proof;
+    if (snapshot.terminal && typeof snapshot.terminal === "object"
+        && /^[a-f0-9]{64}$/.test(snapshot.terminal.proofId)
+        && typeof snapshot.terminalConflict === "boolean"
+        && typeof snapshot.binding.rootSessionId === "string" && snapshot.binding.rootSessionId
+        && typeof snapshot.binding.asyncDir === "string" && snapshot.binding.asyncDir) {
+      // v2 ledger 要求七字段 proof 身份；processInstance 与
+      // broker.recordTerminalProof 的构造一致（runnerProcessInstanceId，退回 pid）。
+      const processInstance = typeof officialProof?.runnerProcessInstanceId === "string" && officialProof.runnerProcessInstanceId
+        ? officialProof.runnerProcessInstanceId
+        : String(snapshot.binding.pid);
+      return {
+        state: "observed",
+        conflict: snapshot.terminalConflict,
+        runId: snapshot.binding.runId,
+        rootSessionId: snapshot.binding.rootSessionId,
+        asyncDir: snapshot.binding.asyncDir,
+        processInstance,
+        proofId: snapshot.terminal.proofId,
+      };
     }
-    const error = new Error("observed facade terminal proof is invalid") as Error & { code: string };
-    error.code = "MANAGED_WORKSPACE_TERMINAL_PROOF_ADAPTER";
-    throw error;
   }
-  if (snapshot.runId !== run.runId || snapshot.state !== "observed"
-      || typeof snapshot.conflict !== "boolean" || !/^[a-f0-9]{64}$/.test(snapshot.proofHash)) {
-    const error = new Error("observed facade terminal proof is invalid") as Error & { code: string };
-    error.code = "MANAGED_WORKSPACE_TERMINAL_PROOF_ADAPTER";
-    throw error;
-  }
-  return { state: "observed", conflict: snapshot.conflict, proofHash: snapshot.proofHash };
+  const error = new Error("observed facade terminal proof is invalid") as Error & { code: string };
+  error.code = "MANAGED_WORKSPACE_TERMINAL_PROOF_ADAPTER";
+  throw error;
 }
 
 function notificationColor(text: string): "error" | "warning" | "success" | "dim" {
@@ -152,6 +318,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     // 无效的显式诊断文件不能影响生产派发。
   }
   let broker: RootBrokerServer | undefined;
+  let coordinatorRuntime: Awaited<ReturnType<typeof connectRuntimeCoordinator>>;
   let workspaceService: any;
   let workspaceRootSessionId: string | undefined;
   let workspaceLifecycleSessionId: string | undefined;
@@ -191,10 +358,18 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         await startAndBindRootBroker(pi, startingBroker);
         broker = startingBroker;
         brokerStarted = true;
+        coordinatorRuntime = await connectRuntimeCoordinator({
+          pi,
+          cwd: (ctx.sessionManager as { getCwd(): string }).getCwd(),
+          broker: startingBroker,
+          stateRoot: process.env.PI_CODING_WORKSPACE_DIR,
+          rpc,
+        });
         workspaceRootSessionId = rootSessionId;
         workspaceLifecycleSessionId = lifecycleSessionId;
         workspaceService = createManagedWorkspaceService({
           stateRoot: process.env.PI_CODING_WORKSPACE_DIR,
+          storageRepositoryId: coordinatorRuntime?.identity.storageRepositoryId,
           terminalProofProvider({ run }: { run: { runId?: string } | null }) {
             const snapshot = run?.runId ? startingBroker.inspectExecutionProof(run.runId) : null;
             return projectManagedWorkspaceTerminalProof(run, snapshot);
@@ -211,6 +386,8 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
           workspaceLifecycleSessionId = undefined;
         }
         if (brokerStarted) {
+          await coordinatorRuntime?.close().catch(() => undefined);
+          coordinatorRuntime = undefined;
           await closeAndUnbindRootBroker(pi, startingBroker);
           brokerStarted = false;
         }
@@ -221,6 +398,11 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       }
     },
     async beforeRuntimeDispose() {
+      // Keep coordinator callbacks alive while Root Broker drains accepted child
+      // integration requests and terminal proof delivery.
+      if (brokerStarted && broker) await closeAndUnbindRootBroker(pi, broker).catch(() => undefined);
+      await coordinatorRuntime?.close().catch(() => undefined);
+      coordinatorRuntime = undefined;
       if (workspaceService && workspaceRootSessionId) {
         unbindManagedWorkspaceServiceSession(pi, workspaceRootSessionId, workspaceService);
         workspaceService = undefined;
@@ -228,7 +410,6 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         workspaceLifecycleSessionId = undefined;
       }
       if (!brokerStarted || !broker) return;
-      await closeAndUnbindRootBroker(pi, broker);
       if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
       else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
       previousBrokerMarker = undefined;

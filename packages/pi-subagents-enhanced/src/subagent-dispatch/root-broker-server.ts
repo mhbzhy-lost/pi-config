@@ -16,6 +16,7 @@ import {
   ensureBrokerSocketDirectory,
   parseBrokerRequest,
   parseProcessTerminal,
+  COORDINATOR_OPERATIONS,
   setBrokerSocketPermissions,
   writeBrokerGrant,
 } from "./root-broker-protocol.ts";
@@ -26,6 +27,11 @@ type Upstream = {
   dispose?: () => void | Promise<void>;
 };
 type Principal = { callerToken: string; capabilities: ReadonlySet<"root.subscribe" | "acceptance.submit"> };
+/** Observable outcome of handing an accepted official terminal to the coordinator proof sink. */
+export type TerminalProofDeliveryOutcome =
+  | { state: "delivered"; receipt: unknown }
+  | { state: "pending"; reason: string }
+  | { state: "debt"; reason: string };
 type OwnedRun = {
   rootSessionId: string;
   runId: string;
@@ -88,6 +94,21 @@ type Dependencies = {
   artifactPollIntervalMs?: number;
   lifecycleSessionId?: string;
   setSocketPermissions?: typeof setBrokerSocketPermissions;
+  /**
+   * Delivers only a proof accepted by the Root Broker authority boundary and
+   * must report a durable outcome: a persisted receipt, a replayable pending
+   * proof, or an observable proof debt. Failures are never silent.
+   */
+  recordTerminalProof?: (run: OwnedRun | FacadeRun, proof: any) => Promise<TerminalProofDeliveryOutcome> | TerminalProofDeliveryOutcome;
+  coordinatorRequest?: (runId: string, operation: string, input: any) => Promise<unknown> | unknown;
+  /**
+   * Bounded wait for an owned child's in-flight integration (coordinator)
+   * request during Root close. The broker must never tear down its transport
+   * while a child integration request is still settling; if the request cannot
+   * settle within this deadline it becomes observable integration debt instead
+   * of an unbounded hang.
+   */
+  integrationTimeoutMs?: number;
 };
 
 const MAX_BUFFER = 64 * 1024;
@@ -107,6 +128,11 @@ function proofId(value: any) {
   return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 }
 
+/** Canonical identity of an accepted official terminal; shared with the coordinator proof outbox. */
+export function rootBrokerTerminalProofId(proof: any): string {
+  return proofId(proof);
+}
+
 function frozen<T>(value: T): T {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
   for (const child of Object.values(value as any)) frozen(child);
@@ -121,6 +147,14 @@ function sameAuthority(left: any, right: any) {
 
 function brokerError(code: string, message: string) {
   return Object.assign(new Error(message), { code });
+}
+
+/** A sink that does not report a durable outcome is treated as proof debt. */
+function deliveryOutcome(value: any): TerminalProofDeliveryOutcome {
+  if (value?.state === "delivered") return { state: "delivered", receipt: structuredClone(value.receipt ?? null) };
+  if (value?.state === "pending") return { state: "pending", reason: typeof value.reason === "string" && value.reason.trim() ? value.reason : "coordinator proof sink did not persist a receipt" };
+  if (value?.state === "debt") return { state: "debt", reason: typeof value.reason === "string" && value.reason.trim() ? value.reason : "coordinator proof sink could not resolve the trusted run binding" };
+  return { state: "debt", reason: "coordinator proof sink did not report a delivery outcome" };
 }
 
 function failure(request: any, code: string, message: string) {
@@ -138,7 +172,11 @@ export class RootBrokerServer {
   lifecycleSessionId: string;
   upstream: Upstream;
   principals = new Map<string, Principal>();
+  revokedRuns = new Set<string>();
   subscriptions = new Map<string, Set<Socket>>();
+  /** Recovery notifications are delivery-only; coordinator/workspace receipts remain authoritative. */
+  recoveryNotifications: any[] = [];
+  recoveryNotificationDebt: any[] = [];
   sockets = new Set<Socket>();
   grantPaths = new Set<string>();
   authorizationGrants = new Map<string, Promise<{ callerToken: string }>>();
@@ -149,6 +187,8 @@ export class RootBrokerServer {
   terminalConflicts = new Set<string>();
   forcePendingRuns = new Set<string>();
   terminalWaiters = new Map<string, Set<(proof: any) => void>>();
+  terminalProofDelivery = new Map<string, TerminalProofDeliveryOutcome>();
+  terminalProofDeliveries = new Map<string, Promise<void>>();
   startedObservations = new Map<string, Promise<void>>();
   unsubscribeStarted: (() => void) | undefined;
   unsubscribeTerminal: (() => void) | undefined;
@@ -169,6 +209,21 @@ export class RootBrokerServer {
   lstat: typeof lstatSync;
   artifactPollIntervalMs: number;
   setSocketPermissions: typeof setBrokerSocketPermissions;
+  recordTerminalProof?: Dependencies["recordTerminalProof"];
+  coordinatorRequest?: Dependencies["coordinatorRequest"];
+  coordinatorChallengeNonces = new Set<string>();
+  integrationTimeoutMs: number;
+  /**
+   * In-flight child integration (coordinator) requests keyed by caller run. The
+   * broker keeps its transport open until each owned request settles so a child
+   * never observes BROKER_DISCONNECTED for work the Root asked it to perform.
+   */
+  integrationRequests = new Map<string, Set<{ operation: string; settled: Promise<void> }>>();
+  /** Connections whose first request line has not reached the parser yet. */
+  requestBoundaries = new Set<Socket>();
+  /** Observable preserved/debt state when an integration request cannot settle before close. */
+  integrationDebt = new Map<string, { operation: string; reason: string }>();
+  requestBoundaryDebt = 0;
 
   constructor({
     rootSessionId,
@@ -183,9 +238,13 @@ export class RootBrokerServer {
     lstat: stat = lstatSync,
     artifactPollIntervalMs = 50,
     setSocketPermissions: applySocketPermissions = setBrokerSocketPermissions,
+    recordTerminalProof,
+    coordinatorRequest,
+    integrationTimeoutMs = 10_000,
   }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
+    if (!Number.isSafeInteger(integrationTimeoutMs) || integrationTimeoutMs <= 0) throw new Error("Root subagent broker integration timeout must be a positive safe integer");
     this.rootSessionId = rootSessionId;
     this.lifecycleSessionId = lifecycleSessionId;
     this.upstream = upstream;
@@ -198,6 +257,9 @@ export class RootBrokerServer {
     this.lstat = stat;
     this.artifactPollIntervalMs = artifactPollIntervalMs;
     this.setSocketPermissions = applySocketPermissions;
+    this.recordTerminalProof = recordTerminalProof;
+    this.coordinatorRequest = coordinatorRequest;
+    this.integrationTimeoutMs = integrationTimeoutMs;
   }
 
   async start() {
@@ -283,6 +345,7 @@ export class RootBrokerServer {
     if (this.closed) throw new Error("Root subagent broker is closing");
     assertRunAuthorization(authorization);
     const binding = authorization.binding;
+    if (this.revokedRuns.has(binding.runId)) throw new Error("Run authorization has been revoked");
     if (binding.sessionId !== this.lifecycleSessionId) {
       throw new Error("Run authorization session does not match Root broker");
     }
@@ -326,7 +389,15 @@ export class RootBrokerServer {
       await this.ensureAuthorizedPrincipal(binding.runId);
     })();
     this.startedObservations.set(binding.runId, observation);
-    try { await observation; } finally { if (this.startedObservations.get(binding.runId) === observation) this.startedObservations.delete(binding.runId); }
+    try {
+      await observation;
+    } catch (error) {
+      const current = this.ownedRuns.get(binding.runId);
+      if (current?.authorization === authorization && !this.principals.has(binding.runId)) this.ownedRuns.delete(binding.runId);
+      throw error;
+    } finally {
+      if (this.startedObservations.get(binding.runId) === observation) this.startedObservations.delete(binding.runId);
+    }
   }
 
   persistGoalBindingAuthority(value: GoalBindingSidecar): void {
@@ -470,10 +541,50 @@ export class RootBrokerServer {
       return existing;
     }
     this.terminalProofs.set(run.runId, accepted);
+    // A capability is single-lifecycle: once the official terminal is
+    // accepted, no late or replayed child request may use its grant. Facade
+    // observations have no capability and must remain non-authorizing.
+    if ("authorization" in run) {
+      this.revokedRuns.add(run.runId);
+      this.principals.delete(run.runId);
+    }
     const waiters = this.terminalWaiters.get(run.runId);
     this.terminalWaiters.delete(run.runId);
     for (const resolve of waiters ?? []) resolve(accepted);
+    // Delivery is tracked, not fire-and-forget: an accepted official terminal
+    // must reach the coordinator proof sink, and a failure must stay
+    // observable as pending or as proof debt instead of being swallowed.
+    if (this.recordTerminalProof) this.trackTerminalProofDelivery(run, accepted);
     return accepted;
+  }
+
+  trackTerminalProofDelivery(run: OwnedRun | FacadeRun, proof: any) {
+    this.terminalProofDelivery.set(run.runId, frozen({ state: "pending", reason: "coordinator proof sink delivery is in flight" }));
+    const attempt = (async () => {
+      // A conflicting official terminal cannot be delivered as an outcome.
+      if (this.terminalConflicts.has(run.runId)) {
+        this.terminalProofDelivery.set(run.runId, frozen({ state: "debt", reason: "official terminal proof conflicts with an earlier accepted proof" }));
+        return;
+      }
+      try {
+        this.terminalProofDelivery.set(run.runId, frozen(deliveryOutcome(await this.recordTerminalProof!(run, proof))));
+      } catch (error) {
+        const reason = error instanceof Error && error.message ? error.message : String(error);
+        this.terminalProofDelivery.set(run.runId, frozen({ state: "debt", reason }));
+      }
+    })();
+    this.terminalProofDeliveries.set(run.runId, attempt.catch(() => undefined));
+  }
+
+  /** Read-only observability; it never infers a terminal that was not accepted. */
+  inspectTerminalProofDelivery(runId: string) {
+    const delivery = this.terminalProofDelivery.get(runId);
+    if (delivery) return frozen({ runId, ...delivery });
+    return frozen({ runId, state: this.terminalProofs.has(runId) ? "pending" : "none", reason: null });
+  }
+
+  async awaitTerminalProofDeliveries() {
+    await Promise.allSettled([...this.terminalProofDeliveries.values()]);
   }
 
   observeTerminal(event: any) {
@@ -792,7 +903,11 @@ export class RootBrokerServer {
 
   handleSocket(socket: Socket) {
     this.sockets.add(socket);
-    socket.once("close", () => this.sockets.delete(socket));
+    this.requestBoundaries.add(socket);
+    socket.once("close", () => {
+      this.sockets.delete(socket);
+      this.requestBoundaries.delete(socket);
+    });
     let buffer = "";
     let handled = false;
     socket.on("data", (chunk) => {
@@ -802,6 +917,10 @@ export class RootBrokerServer {
       const lineEnd = buffer.indexOf("\n");
       if (lineEnd < 0) return;
       handled = true;
+      // The request boundary is now owned by respond(). Close must not tear
+      // down this socket in the interval between receiving bytes and parsing
+      // the first complete frame.
+      this.requestBoundaries.delete(socket);
       void this.respond(socket, buffer.slice(0, lineEnd));
     });
     socket.on("error", () => {});
@@ -810,18 +929,133 @@ export class RootBrokerServer {
   async respond(socket: Socket, line: string) {
     let request: any;
     try { request = parseBrokerRequest(JSON.parse(line)); } catch { socket.destroy(); return; }
+    // A child integration request is tracked from receipt until its response is
+    // delivered, so Root close never tears down the transport mid-request.
+    const integration = request.method === "coordinator.request"
+      ? this.beginIntegrationRequest(request.callerRunId, request.params.operation)
+      : undefined;
+    const finishIntegration = () => integration?.end();
     try {
       const response = await this.dispatch(request, socket, { deferSubscription: request.method === "subscribe" });
       if (!socket.destroyed) socket.write(`${JSON.stringify(response)}\n`, (error) => {
+        finishIntegration();
         if (error) return socket.destroy();
         if (request.method === "subscribe") {
           if (response.success) this.activateSubscription(request, socket);
           else socket.end();
         } else socket.end();
       });
+      else finishIntegration();
     } catch (error) {
+      finishIntegration();
       try { if (!socket.destroyed) socket.end(`${JSON.stringify(failure(request, "broker_failed", error instanceof Error ? error.message : String(error)))}\n`); } catch { socket.destroy(); }
     }
+  }
+
+  /**
+   * Registers an in-flight child integration request. `end` resolves the settle
+   * promise only once the response has been delivered, so Root close waits for
+   * the child to actually receive the result rather than racing the write.
+   */
+  beginIntegrationRequest(callerRunId: string, operation: string) {
+    let resolveSettled!: () => void;
+    const settled = new Promise<void>((resolve) => { resolveSettled = resolve; });
+    const entry = { operation, settled };
+    const set = this.integrationRequests.get(callerRunId) ?? new Set<{ operation: string; settled: Promise<void> }>();
+    this.integrationRequests.set(callerRunId, set);
+    set.add(entry);
+    let ended = false;
+    return {
+      settled,
+      end: () => {
+        if (ended) return;
+        ended = true;
+        resolveSettled();
+        set.delete(entry);
+        if (set.size === 0) this.integrationRequests.delete(callerRunId);
+      },
+    };
+  }
+
+  /**
+   * Bounded wait for every owned child integration request to settle. A request
+   * that cannot settle within `integrationTimeoutMs` becomes observable debt
+   * instead of an unbounded hang; the broker then proceeds to drain.
+   */
+  async awaitIntegrationRequests() {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"deadline">((resolve) => { timeout = setTimeout(() => resolve("deadline"), this.integrationTimeoutMs); });
+    try {
+      for (;;) {
+        const entries = [...this.integrationRequests.values()].flatMap((set) => [...set]);
+        const boundaries = [...this.requestBoundaries];
+        if (entries.length === 0 && boundaries.length === 0) return;
+        // Do not spin a promise per microtask while a partial socket frame is
+        // waiting for its newline. The socket close/data handlers change the
+        // set; a short bounded timer observes that state without allocating an
+        // unbounded chain of async-hook records.
+        const boundariesSettled = boundaries.length === 0
+          ? Promise.resolve("settled" as const)
+          : new Promise<"settled">((resolve) => {
+            const timer = setInterval(() => {
+              if (this.requestBoundaries.size === 0) { clearInterval(timer); resolve("settled"); }
+            }, 5);
+            timer.unref();
+          });
+        // Await the accepted integration frames once, then independently
+        // await parser boundaries. Rebuilding allSettled in a loop can create
+        // an unbounded async-hook graph when a client remains connected.
+        const integrationsSettled = entries.length === 0
+          ? Promise.resolve("settled" as const)
+          : Promise.allSettled(entries.map((entry) => entry.settled)).then(() => "settled" as const);
+        const outcome = await Promise.race([
+          Promise.all([integrationsSettled, boundariesSettled]).then(() => "settled" as const),
+          deadline,
+        ]);
+        if (outcome === "deadline") {
+          for (const [runId, set] of this.integrationRequests) {
+            for (const entry of set) {
+              this.integrationDebt.set(runId, frozen({ operation: entry.operation, reason: "child integration request did not settle before the Root close deadline" }));
+            }
+          }
+          if (this.requestBoundaries.size > 0) this.requestBoundaryDebt += this.requestBoundaries.size;
+          return;
+        }
+      }
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  /** Read-only observability of in-flight integration requests and close debt. */
+  inspectIntegrationRequests(runId: string) {
+    const entries = this.integrationRequests.get(runId);
+    const inflight = entries ? [...entries].map((entry) => entry.operation).sort() : [];
+    const debt = this.integrationDebt.get(runId) ?? null;
+    return frozen({ runId, inflight, debt, pendingRequestBoundary: this.requestBoundaries.size, requestBoundaryDebt: this.requestBoundaryDebt });
+  }
+
+  publishRecoveryEvent(event: any) {
+    const safe = frozen({ schemaVersion: "recovery-event.v1", rootSessionId: this.rootSessionId,
+      recoveryIntentId: event?.recoveryIntentId, queueItemId: event?.queueItemId, workspaceId: event?.workspaceId,
+      ownerScope: event?.ownerScope, runId: event?.runId, attempt: event?.attempt, reason: event?.reason, requiredAction: event?.requiredAction,
+      generation: event?.generation, delivery: { state: "delivered" } });
+    this.recoveryNotifications.push(safe);
+    const callerRunId = typeof event?.runId === "string" ? event.runId : undefined;
+    const sockets = callerRunId ? this.subscriptions.get(callerRunId) : undefined;
+    if (!sockets || sockets.size === 0) {
+      this.recoveryNotificationDebt.push({ ...safe, delivery: { state: "debt", reason: "root-not-subscribed" } });
+      return { state: "debt", reason: "root-not-subscribed" };
+    }
+    for (const socket of sockets) { if (!socket.destroyed) { try { socket.write(`${JSON.stringify({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "recovery.event", data: safe })}\n`); } catch {} } }
+    return { state: "delivered" };
+  }
+
+  replayRecoveryNotifications(callerRunId: string) {
+    const pending = this.recoveryNotificationDebt.filter((event) => event.runId === callerRunId);
+    for (const event of pending) this.publishRecoveryEvent({ ...event, runId: callerRunId });
+    this.recoveryNotificationDebt = this.recoveryNotificationDebt.filter((event) => event.runId !== callerRunId);
+    return pending.length;
   }
 
   registerSubscription(callerRunId: string, socket: Socket) {
@@ -836,9 +1070,10 @@ export class RootBrokerServer {
 
   activateSubscription(request: any, socket: Socket) {
     if (this.closed || socket.destroyed) return;
-    const principal = this.principals.get(request.callerRunId);
+    const principal = this.revokedRuns.has(request.callerRunId) ? undefined : this.principals.get(request.callerRunId);
     if (!principal || principal.callerToken !== request.callerToken) return;
     this.registerSubscription(request.callerRunId, socket);
+    this.replayRecoveryNotifications(request.callerRunId);
     if (this.closed || socket.destroyed || this.principals.get(request.callerRunId)?.callerToken !== request.callerToken) return;
     try {
       socket.write(`${JSON.stringify({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: request.callerRunId, type: "subscription.ready", data: {} })}\n`);
@@ -848,7 +1083,23 @@ export class RootBrokerServer {
   async dispatch(request: any, socket: Socket, { deferSubscription = false }: { deferSubscription?: boolean } = {}) {
     if (this.closed) return failure(request, "root_closing", "Root session is closing");
     if (request.rootSessionId !== this.rootSessionId) return failure(request, "root_mismatch", "Root session does not match");
-    const principal = this.principals.get(request.callerRunId);
+    if (request.method === "coordinator.register") {
+      if (this.coordinatorChallengeNonces.has(request.params.nonce)) return failure(request, "nonce_replay", "Coordinator challenge nonce was already consumed");
+      this.coordinatorChallengeNonces.add(request.params.nonce);
+      let processIdentity: string;
+      try { processIdentity = await this.captureProcessBirthIdentity(process.pid); }
+      catch { return failure(request, "process_identity_unavailable", "Root Broker process identity is unavailable"); }
+      if (!/^[a-f0-9]{64}$/.test(processIdentity)) return failure(request, "process_identity_unavailable", "Root Broker process identity is unavailable");
+      return createBrokerSuccessResponse({ ...request, data: {
+        nonce: request.params.nonce,
+        rootSessionId: this.rootSessionId,
+        brokerPid: process.pid,
+        brokerProcessIdentity: processIdentity,
+        repositoryId: request.params.repositoryId,
+        coordinatorInstanceId: request.params.coordinatorInstanceId,
+      } });
+    }
+    const principal = this.revokedRuns.has(request.callerRunId) ? undefined : this.principals.get(request.callerRunId);
     if (!principal || principal.callerToken !== request.callerToken) return failure(request, "caller_unauthorized", "Caller is not granted");
     try {
       if (request.method === "subscribe") {
@@ -860,6 +1111,16 @@ export class RootBrokerServer {
       if (request.method === "acceptance.submit") {
         if (!principal.capabilities.has("acceptance.submit")) return failure(request, "capability_denied", "Caller lacks acceptance.submit capability");
         return createBrokerSuccessResponse({ ...request, data: await this.submitAcceptanceEvidence(request) });
+      }
+      if (request.method === "coordinator.request") {
+        if (!this.coordinatorRequest) {
+          if (request.params.operation === "inspect_integration_state" || request.params.operation === "preserve_integration_debt") {
+            this.integrationDebt.set(request.callerRunId, frozen({ operation: request.params.operation, reason: "repository coordinator is unavailable during integration completion settlement" }));
+          }
+          return failure(request, "coordinator_unavailable", "Repository coordinator is unavailable");
+        }
+        if (!COORDINATOR_OPERATIONS.includes(request.params.operation)) return failure(request, "unsupported_coordinator_operation", "Coordinator operation is unsupported");
+        return createBrokerSuccessResponse({ ...request, data: await this.coordinatorRequest(request.callerRunId, request.params.operation, request.params.input) });
       }
       return failure(request, "unsupported", `Broker method ${request.method} is unsupported`);
     } catch (error) {
@@ -899,10 +1160,20 @@ export class RootBrokerServer {
         if (startupTimeout) clearTimeout(startupTimeout);
       }
 
+      // An owned child's in-flight integration request must settle (or become
+      // observable debt) before the broker drains runs and tears down its
+      // transport; otherwise the child observes BROKER_DISCONNECTED for work the
+      // Root asked it to perform.
+      await this.awaitIntegrationRequests();
+
       const runs = [...this.ownedRuns.values()].filter((run) => this.forcePendingRuns.has(run.runId) || !this.terminalProofs.has(run.runId));
       const settled = await Promise.allSettled(runs.map((run) => this.drainRun(run)));
       const errors = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected").map((result) => result.reason);
       if (errors.length) throw new AggregateError(errors, "Root subagent broker executor drain failed");
+
+      // An accepted official terminal must reach the durable proof sink before
+      // the broker transport disappears; otherwise the proof is lost.
+      await this.awaitTerminalProofDeliveries();
 
       if (!this.teardown.grants) {
         for (const grantPath of this.grantPaths) {
@@ -956,6 +1227,7 @@ export class RootBrokerServer {
       this.unsubscribeTerminal?.();
       this.unsubscribeTerminal = undefined;
       this.principals.clear();
+      this.revokedRuns.clear();
       this.subscriptions.clear();
       this.sockets.clear();
       this.grantPaths.clear();
@@ -966,7 +1238,12 @@ export class RootBrokerServer {
       this.terminalConflicts.clear();
       this.forcePendingRuns.clear();
       this.terminalWaiters.clear();
+      this.terminalProofDelivery.clear();
+      this.terminalProofDeliveries.clear();
       this.startedObservations.clear();
+      this.integrationRequests.clear();
+      this.requestBoundaries.clear();
+      this.requestBoundaryDebt = 0;
       this.transportSockets.clear();
       this.closingSockets.clear();
       this.endedSockets.clear();

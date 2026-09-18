@@ -21,23 +21,20 @@ import {
 import path from "node:path";
 
 import {
-  createManagedWorkspaceRequest,
   createManagedWorkspaceRequestV2,
-  publicManagedWorkspaceReceipt,
 } from "./contract.ts";
 
-const RECORD_SCHEMA_V1 = "managed-workspace-ledger.v1";
 const RECORD_SCHEMA_V2 = "managed-workspace-ledger.v2";
 const LOCK_SCHEMA = "managed-workspace-lock.v1";
 const OWNER_TOKEN = /^managed-workspace-owner\.v1:[a-f0-9]{64}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const STATES = new Set(["reserved", "allocating", "active", "disposing", "preserved", "released", "cleanup-debt"]);
-const RECORD_KEYS = [
+const RECORD_V2_KEYS = [
   "schemaVersion", "workspaceId", "request", "requestHash", "ownerToken", "leaseId",
   "path", "dispatchCwd", "branchRef", "state", "run", "disposition", "cleanupDebt",
-  "actionChallenge", "pendingAction", "createdAt", "updatedAt", "revision",
+  "actionChallenge", "pendingAction", "integrationIntent", "integrationReceipt", "integrationHistory", "createdAt", "updatedAt", "revision",
+  "publishedArtifact", "v2Action", "application", "recoveryChallenge", "recoveryPlan", "terminalProof",
 ];
-const RECORD_V2_KEYS = [...RECORD_KEYS, "publishedArtifact", "v2Action", "application", "recoveryChallenge", "recoveryPlan"];
 
 class ManagedWorkspaceError extends Error {
   code: string;
@@ -50,7 +47,7 @@ class ManagedWorkspaceError extends Error {
 }
 
 type LedgerFault = (event: { operation: string; phase: string; workspaceId: string }) => void;
-type LedgerOptions = { stateRoot?: string; fault?: LedgerFault };
+type LedgerOptions = { stateRoot?: string; storageRepositoryId?: string; fault?: LedgerFault };
 type LoadOptions = { originRoot?: string };
 type MutateOptions = { originRoot?: string; leaseId?: string };
 
@@ -89,20 +86,23 @@ function repositoryId(originRoot) {
   return createHash("sha256").update(originRoot).digest("hex");
 }
 
-export function managedWorkspacePaths({ stateRoot, originRoot, workspaceId }) {
+export function managedWorkspacePaths({ stateRoot, originRoot, workspaceId, storageRepositoryId }) {
   const root = normalizedStateRoot(stateRoot);
   const origin = canonicalOrigin(originRoot);
   if (typeof workspaceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(workspaceId) || workspaceId.includes("..")) {
     throw failure("MANAGED_WORKSPACE_ID", "workspaceId is invalid");
   }
   const repositoriesDir = path.join(root, "repositories");
-  const repositoryDir = path.join(repositoriesDir, repositoryId(origin));
+  const storageId = storageRepositoryId ?? repositoryId(origin);
+  if (!SHA256.test(storageId)) throw failure("MANAGED_WORKSPACE_STORAGE", "storageRepositoryId is invalid");
+  const repositoryDir = path.join(repositoriesDir, storageId);
   const recordsDir = path.join(repositoryDir, "records");
   const worktreesDir = path.join(repositoryDir, "worktrees");
   return {
     stateRoot: root,
     originRoot: origin,
     repositoryId: repositoryId(origin),
+    storageRepositoryId: storageId,
     repositoriesDir,
     repositoryDir,
     recordsDir,
@@ -272,29 +272,12 @@ function withLock(paths, operation) {
   finally { releaseLock(paths, lock); }
 }
 
-function receiptFields(record) {
-  return {
-    schemaVersion: "managed-workspace.v1",
-    workspaceId: record.workspaceId,
-    leaseId: record.leaseId,
-    owner: record.request.owner,
-    originRoot: record.request.originRoot,
-    requestedCwd: record.request.requestedCwd,
-    originRef: record.request.originRef,
-    baseCommit: record.request.baseCommit,
-    path: record.path,
-    dispatchCwd: record.dispatchCwd,
-    branchRef: record.branchRef,
-    state: record.state,
-    run: record.run,
-    disposition: record.disposition,
-    cleanupDebt: record.cleanupDebt,
-  };
-}
-
 function validateActionChallenge(value) {
   return value === null || (exactKeys(value, ["tokenHash", "snapshotHash", "allowed", "proofHash", "used"])
-    && SHA256.test(value.tokenHash) && SHA256.test(value.snapshotHash)
+    && SHA256.test(value.tokenHash)
+    // Release-only challenges have no workspace snapshot to bind; disposition
+    // challenges always carry the inspected snapshot hash.
+    && (value.snapshotHash === null || SHA256.test(value.snapshotHash))
     && Array.isArray(value.allowed) && value.allowed.length > 0
     && value.allowed.every((item) => ["integrate", "discard", "preserve", "publish", "apply", "release"].includes(item))
     && new Set(value.allowed).size === value.allowed.length
@@ -318,25 +301,54 @@ function validateRecoveryChallenge(value) {
     && (value.consumedAt === null || (typeof value.consumedAt === "string" && !Number.isNaN(Date.parse(value.consumedAt)))));
 }
 
+function validateIntegrationIntent(value) {
+  return value === null || (exactKeys(value, ["integrationIntentId", "queueItemId", "queueLeaseId", "admissionGeneration", "targetRef", "targetHead", "candidateHead", "ownerScope", "workspaceLeaseId", "createdAt"])
+    && typeof value.integrationIntentId === "string" && value.integrationIntentId.length > 0
+    && typeof value.queueItemId === "string" && value.queueItemId.length > 0
+    && typeof value.queueLeaseId === "string" && value.queueLeaseId.length > 0
+    && Number.isSafeInteger(value.admissionGeneration) && value.admissionGeneration > 0
+    && typeof value.targetRef === "string" && value.targetRef.startsWith("refs/heads/")
+    && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.targetHead)
+    && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.candidateHead)
+    && exactKeys(value.ownerScope, ["kind", "rootSessionId"])
+    && value.ownerScope.kind === "standalone-subagent" && typeof value.ownerScope.rootSessionId === "string"
+    && SHA256.test(value.workspaceLeaseId)
+    && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)));
+}
+
+function validateIntegrationReceipt(value) {
+  return value === null || (exactKeys(value, ["receiptId", "integrationIntentId", "queueItemId", "candidateHead", "targetRef", "completedAt"])
+    && typeof value.receiptId === "string" && value.receiptId.length > 0
+    && typeof value.integrationIntentId === "string" && value.integrationIntentId.length > 0
+    && typeof value.queueItemId === "string" && value.queueItemId.length > 0
+    && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.candidateHead)
+    && typeof value.targetRef === "string" && value.targetRef.startsWith("refs/heads/")
+    && typeof value.completedAt === "string" && !Number.isNaN(Date.parse(value.completedAt)));
+}
+
+function validateIntegrationHistory(value) {
+  return Array.isArray(value) && value.every(entry => exactKeys(entry, ["intent", "disposition", "closedAt"])
+    && validateIntegrationIntent(entry.intent) && entry.intent !== null && entry.disposition === "preserved"
+    && typeof entry.closedAt === "string" && !Number.isNaN(Date.parse(entry.closedAt)));
+}
+
 function validateRecordEnvelope(value, filenameWorkspaceId?: string) {
-  const keys = value?.schemaVersion === RECORD_SCHEMA_V2 ? RECORD_V2_KEYS : RECORD_KEYS;
-  if (!exactKeys(value, keys) || ![RECORD_SCHEMA_V1, RECORD_SCHEMA_V2].includes(value.schemaVersion) || !STATES.has(value.state)
+  if (!exactKeys(value, RECORD_V2_KEYS) || value.schemaVersion !== RECORD_SCHEMA_V2 || !STATES.has(value.state)
       || !SHA256.test(value.requestHash) || !OWNER_TOKEN.test(value.ownerToken) || !SHA256.test(value.leaseId)
       || createHash("sha256").update(value.ownerToken).digest("hex") !== value.leaseId
       || !Number.isSafeInteger(value.revision) || value.revision < 0
       || typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt))
       || typeof value.updatedAt !== "string" || Number.isNaN(Date.parse(value.updatedAt))
       || !validateActionChallenge(value.actionChallenge) || !validatePendingAction(value.pendingAction)
+      || !validateIntegrationIntent(value.integrationIntent) || !validateIntegrationReceipt(value.integrationReceipt) || !validateIntegrationHistory(value.integrationHistory)
       || (filenameWorkspaceId !== undefined && value.workspaceId !== filenameWorkspaceId)
-      || (value.schemaVersion === RECORD_SCHEMA_V2 && (value.publishedArtifact !== null && (typeof value.publishedArtifact !== "object" || Array.isArray(value.publishedArtifact))))
-      || (value.schemaVersion === RECORD_SCHEMA_V2 && (value.v2Action !== null && (typeof value.v2Action !== "object" || Array.isArray(value.v2Action))))
-      || (value.schemaVersion === RECORD_SCHEMA_V2 && !validateRecoveryChallenge(value.recoveryChallenge))
-      || (value.schemaVersion === RECORD_SCHEMA_V2 && value.recoveryPlan !== null && !SHA256.test(value.recoveryPlan))) {
+      || (value.publishedArtifact !== null && (typeof value.publishedArtifact !== "object" || Array.isArray(value.publishedArtifact)))
+      || (value.v2Action !== null && (typeof value.v2Action !== "object" || Array.isArray(value.v2Action)))
+      || !validateRecoveryChallenge(value.recoveryChallenge)
+      || (value.recoveryPlan !== null && !SHA256.test(value.recoveryPlan))) {
     throw failure("MANAGED_WORKSPACE_SCHEMA", "managed workspace record schema is invalid");
   }
-  return value.schemaVersion === RECORD_SCHEMA_V1
-    ? createManagedWorkspaceRequest(value.request)
-    : createManagedWorkspaceRequestV2(value.request);
+  return createManagedWorkspaceRequestV2(value.request);
 }
 
 function validateRecord(value, expectedOrigin) {
@@ -344,7 +356,6 @@ function validateRecord(value, expectedOrigin) {
   if (request.originRoot !== expectedOrigin || hashValue(request) !== value.requestHash || request.workspaceId !== value.workspaceId) {
     throw failure("MANAGED_WORKSPACE_IDENTITY", "managed workspace request identity is invalid");
   }
-  if (value.schemaVersion === RECORD_SCHEMA_V1) publicManagedWorkspaceReceipt({ ...receiptFields(value), ownerToken: value.ownerToken });
   return value;
 }
 
@@ -362,7 +373,7 @@ function requestPlan(input, paths) {
   const ownerToken = `managed-workspace-owner.v1:${randomBytes(32).toString("hex")}`;
   const timestamp = new Date().toISOString();
   return {
-    schemaVersion: Object.hasOwn(input, "policy") ? RECORD_SCHEMA_V2 : RECORD_SCHEMA_V1,
+    schemaVersion: RECORD_SCHEMA_V2,
     workspaceId: input.workspaceId,
     request: input,
     requestHash: hashValue(input),
@@ -377,10 +388,18 @@ function requestPlan(input, paths) {
     cleanupDebt: null,
     actionChallenge: null,
     pendingAction: null,
+    integrationIntent: null,
+    integrationReceipt: null,
+    integrationHistory: [],
     createdAt: timestamp,
     updatedAt: timestamp,
     revision: 0,
-    ...(Object.hasOwn(input, "policy") ? { publishedArtifact: null, v2Action: null, application: null, recoveryChallenge: null, recoveryPlan: null } : {}),
+    publishedArtifact: null,
+    v2Action: null,
+    application: null,
+    recoveryChallenge: null,
+    recoveryPlan: null,
+    terminalProof: null,
   };
 }
 
@@ -394,16 +413,12 @@ function scopeDirectories(stateRoot) {
     .map((entry) => path.join(repositoriesDir, entry.name));
 }
 
-export function managedWorkspaceReceiptFromRecord(record) {
-  if (record.schemaVersion !== RECORD_SCHEMA_V1) throw failure("MANAGED_WORKSPACE_VERSION", "v2 leases require the v2 workspace service");
-  return publicManagedWorkspaceReceipt({ ...receiptFields(record), ownerToken: record.ownerToken });
-}
-
-export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, fault }: LedgerOptions = {}) {
+export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, storageRepositoryId, fault }: LedgerOptions = {}) {
   const root = normalizedStateRoot(stateRoot);
+  if (storageRepositoryId !== undefined && !SHA256.test(storageRepositoryId)) throw failure("MANAGED_WORKSPACE_STORAGE", "storageRepositoryId is invalid");
 
   function locate(workspaceId, originRoot) {
-    if (originRoot) return managedWorkspacePaths({ stateRoot: root, originRoot, workspaceId });
+    if (originRoot) return managedWorkspacePaths({ stateRoot: root, originRoot, workspaceId, storageRepositoryId });
     const matches = [];
     for (const repositoryDir of scopeDirectories(root)) {
       const recordPath = path.join(repositoryDir, "records", `${workspaceId}.json`);
@@ -419,22 +434,18 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     }
     if (matches.length !== 1) throw failure(matches.length === 0 ? "MANAGED_WORKSPACE_NOT_FOUND" : "MANAGED_WORKSPACE_CONFLICT", matches.length === 0 ? "managed workspace record was not found" : "workspaceId is not globally unique");
     const parsed = readPrivateJson(matches[0].recordPath, "managed workspace record");
-    return { ...matches[0], originRoot: canonicalOrigin(parsed?.request?.originRoot), repositoryId: path.basename(matches[0].repositoryDir), repositoriesDir: path.join(root, "repositories") };
+    return { ...matches[0], originRoot: canonicalOrigin(parsed?.request?.originRoot), repositoryId: path.basename(matches[0].repositoryDir), storageRepositoryId: path.basename(matches[0].repositoryDir), repositoriesDir: path.join(root, "repositories") };
   }
 
   function reserve(value) {
-    const supplied = value !== null && typeof value === "object" && Object.hasOwn(value, "policy")
-      ? createManagedWorkspaceRequestV2(value)
-      : createManagedWorkspaceRequest(value);
+    const supplied = createManagedWorkspaceRequestV2(value);
     const canonicalized = {
       ...supplied,
       originRoot: canonicalOrigin(supplied.originRoot),
       requestedCwd: canonicalOrigin(supplied.requestedCwd),
     };
-    const input = Object.hasOwn(supplied, "policy")
-      ? createManagedWorkspaceRequestV2(canonicalized)
-      : createManagedWorkspaceRequest(canonicalized);
-    const paths = managedWorkspacePaths({ stateRoot: root, originRoot: input.originRoot, workspaceId: input.workspaceId });
+    const input = createManagedWorkspaceRequestV2(canonicalized);
+    const paths = managedWorkspacePaths({ stateRoot: root, originRoot: input.originRoot, workspaceId: input.workspaceId, storageRepositoryId });
     return withLock(paths, () => {
       if (existsSync(paths.recordPath)) {
         const current = readRecord(paths);
@@ -475,7 +486,6 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     const lease = locate(workspaceId, undefined);
     return withLock(lease, () => {
       const current = readRecord(lease);
-      if (current.schemaVersion !== RECORD_SCHEMA_V2) throw failure("MANAGED_WORKSPACE_VERSION", "recovery challenges require a v2 lease");
       if (!SHA256.test(planHash)) throw failure("MANAGED_WORKSPACE_RECOVERY", "recovery plan hash is invalid");
       const expiry = expiresAt ?? new Date(Date.now() + 15 * 60 * 1000).toISOString();
       if (typeof expiry !== "string" || Number.isNaN(Date.parse(expiry)) || Date.parse(expiry) <= Date.now()) throw failure("MANAGED_WORKSPACE_RECOVERY", "recovery challenge expiry is invalid");
@@ -496,7 +506,7 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     const paths = locate(workspaceId, originRoot);
     return withLock(paths, () => {
       const current = readRecord(paths);
-      if (current.schemaVersion !== RECORD_SCHEMA_V2 || !current.recoveryChallenge) throw failure("MANAGED_WORKSPACE_RECOVERY", "recovery challenge is unavailable");
+      if (!current.recoveryChallenge) throw failure("MANAGED_WORKSPACE_RECOVERY", "recovery challenge is unavailable");
       const stored = current.recoveryChallenge;
       if (leaseId !== undefined && current.leaseId !== leaseId) throw failure("MANAGED_WORKSPACE_CAS", "workspace lease identity changed");
       if (!challenge || current.revision !== stored.generation || challenge.generation !== stored.generation || challenge.planHash !== stored.planHash
@@ -542,7 +552,7 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
   function list({ originRoot }: LoadOptions = {}) {
     const records = [];
     const scopes = originRoot
-      ? [managedWorkspacePaths({ stateRoot: root, originRoot, workspaceId: "inventory" }).repositoryDir]
+      ? [managedWorkspacePaths({ stateRoot: root, originRoot, workspaceId: "inventory", storageRepositoryId }).repositoryDir]
       : scopeDirectories(root);
     for (const repositoryDir of scopes) {
       const recordsDir = path.join(repositoryDir, "records");

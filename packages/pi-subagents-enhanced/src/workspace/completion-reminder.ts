@@ -1,7 +1,6 @@
 type WorkspaceReceipt = {
   workspaceId?: unknown;
   state?: unknown;
-  mode?: unknown;
   run?: { runId?: unknown } | null;
 };
 
@@ -15,7 +14,8 @@ type CompletionReminderOptions = {
   events: { on(type: string, listener: (event: unknown) => unknown): (() => unknown) | undefined };
   sendMessage(message: unknown, options: { deliverAs: "followUp"; triggerTurn: false }): unknown;
   getContext(): ReminderContext | undefined;
-  onDiagnostic?: (diagnostic: { code: "SUBAGENT_WORKSPACE_REMINDER_AMBIGUOUS"; rootSessionId: string; runId: string; count: number }) => void;
+  onDiagnostic?: (diagnostic: { code: "SUBAGENT_WORKSPACE_REMINDER_AMBIGUOUS"; rootSessionId: string; runId: string; count: number }
+    | { code: "SUBAGENT_WORKSPACE_REMINDER_DELIVERY_DEBT"; rootSessionId: string; runId: string; workspaceId: string; message: string }) => void;
 };
 
 function text(value: unknown): value is string {
@@ -30,7 +30,7 @@ function terminalWorkspace(receipt: WorkspaceReceipt | undefined) {
 
 export function createWorkspaceCompletionReminder({ events, sendMessage, getContext, onDiagnostic }: CompletionReminderOptions) {
   const delivered = new Set<string>();
-  const unsubscribe = events.on("subagent:async-complete", (event: unknown) => {
+  const unsubscribe = events.on("subagent:async-complete", async (event: unknown) => {
     const completion = event as { runId?: unknown; sessionId?: unknown; agent?: unknown };
     if (!text(completion.runId)) return;
     const context = getContext();
@@ -49,20 +49,30 @@ export function createWorkspaceCompletionReminder({ events, sendMessage, getCont
     const receipt = matches[0];
     const key = `${context.rootSessionId}\u0000${completion.runId}\u0000${receipt.workspaceId}\u0000${receipt.state}`;
     if (delivered.has(key)) return;
-    delivered.add(key);
-    sendMessage({
-      customType: "subagent-workspace-reminder",
-      content: `Subagent workspace awaiting disposition: ${receipt.workspaceId}. Call subagent_worktree({action:"status",workspace_id:"${receipt.workspaceId}"}), then integrate, discard, or preserve according to the returned allowed_dispositions. After preserve, use release when the workspace is no longer needed.`,
-      display: true,
-      details: {
-        schemaVersion: "subagent-workspace-reminder.v1",
+    try {
+      await sendMessage({
+        customType: "subagent-workspace-reminder",
+        content: `Subagent workspace awaiting disposition: ${receipt.workspaceId}. Call subagent_worktree({action:"status",workspace_id:"${receipt.workspaceId}"}), then integrate, discard, or preserve according to the returned allowed_dispositions. After preserve, use release when the workspace is no longer needed.`,
+        display: true,
+        details: {
+          schemaVersion: "subagent-workspace-reminder.v1",
+          rootSessionId: context.rootSessionId,
+          runId: completion.runId,
+          workspaceId: receipt.workspaceId,
+          workspaceState: receipt.state,
+          mode: "standalone-subagent",
+        },
+      }, { deliverAs: "followUp", triggerTurn: false });
+      delivered.add(key);
+    } catch (error) {
+      onDiagnostic?.({
+        code: "SUBAGENT_WORKSPACE_REMINDER_DELIVERY_DEBT",
         rootSessionId: context.rootSessionId,
         runId: completion.runId,
         workspaceId: receipt.workspaceId,
-        workspaceState: receipt.state,
-        mode: text(receipt.mode) ? receipt.mode : "standalone-subagent",
-      },
-    }, { deliverAs: "followUp", triggerTurn: false });
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   });
   return Object.freeze({ dispose() { delivered.clear(); unsubscribe?.(); } });
 }

@@ -208,7 +208,7 @@ function normalizeBoundaries(value) {
   const boundaries = validateObject(value, "boundaries", ["writePaths", "excludedWork", "forbiddenActions"]);
   return {
     writePaths: normalizeStringArray(boundaries.writePaths, "boundaries.writePaths", {
-      minItems: 1,
+      minItems: 0,
       item: normalizeRepoRelativePath,
     }),
     excludedWork: normalizeStringArray(boundaries.excludedWork, "boundaries.excludedWork"),

@@ -28,6 +28,7 @@ export function renderCodingDispatchPrompt(ir) {
     `- Working directory: ${scalar(ir.execution.cwd)}`,
     `- Timeout: \`${ir.execution.timeoutMs}ms\``,
     ...(ir.execution.worktree === true ? ["- Managed worktree: `true`"] : []),
+    ...(ir.execution.worktree === true ? ["- Child integration lifecycle: commit -> subagent_integration enqueue -> await_admission -> git rebase targetHead -> report_conflict on conflict while retaining target changes -> verify -> publish. Do not finish before publish succeeds or an explicit fail is recorded."] : []),
     `- Contract SHA-256: \`${ir.hash}\``,
     "",
     "## Objective",
