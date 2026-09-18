@@ -87,6 +87,32 @@ test("schema rejects non-object roots while routing malformed nested coding inpu
   assert.equal(validator.Check(contract({ boundaries: { writePaths: [7], excludedWork: [], forbiddenActions: [] } })), true);
 });
 
+test("coding contract with empty writePaths is an explicit read-only dispatch", () => {
+  // 空数组 writePaths 是显式只读声明：纯运行/观测任务不再被迫造假路径。
+  const ir = compileCodingDispatchIR(contract({ boundaries: { writePaths: [], excludedWork: [], forbiddenActions: [] }, execution: { timeoutMs: 1000 } }), { cwd: "/repo" });
+  assert.deepEqual(ir.boundaries.writePaths, []);
+});
+
+test("extension rejects a coding contract missing its version router field with a self-diagnosing error", async () => {
+  // 根节点拍平后 schema 不再拒绝缺字段合同；无 version 时 runtime 路由到
+  // generic 分支。含 coding 特征字段的输入必须得到指向真实原因（缺 version）
+  // 的精确报错，而不是误导性的 generic agent/title/task 错误（实际派发事故：
+  // 缺 version 的 coding 合同被拒后模型需自行推理根因）。
+  const tool = extensionTool();
+  const { version, ...versionless } = contract();
+  const result = await tool.execute("missing-version", versionless, undefined, undefined, { cwd: "/repo" });
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "INVALID_CODING_ROUTER");
+  assert.match(result.content[0].text, /missing version: "dispatch-ir\.v1"/);
+});
+
+test("generic dispatch without coding fields keeps the plain generic error", async () => {
+  const tool = extensionTool();
+  const result = await tool.execute("plain-generic-missing", { agent: "executor" }, undefined, undefined, { cwd: "/repo" });
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "INVALID_GENERIC_DISPATCH");
+});
+
 test("extension exposes visible and structured coding validation keypaths", async () => {
   const tool = extensionTool();
   const topLevel = await tool.execute("invalid-top-level", ["not", "a", "contract"], undefined, undefined, { cwd: "/repo" });

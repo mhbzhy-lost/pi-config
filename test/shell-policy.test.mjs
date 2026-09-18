@@ -8,7 +8,6 @@ import test from "node:test";
 import {
   checkShellPolicy,
   codingReminderFor,
-  scanPendingPlanTodos,
 } from "../src/security-gates/shell-policy.ts";
 
 const workspaceRoot = process.cwd();
@@ -114,83 +113,37 @@ test("blocks invalid commit messages from inline, file, amend, and skip forms", 
   assert.equal(policy('GIT_COMMIT_HOOK_SKIP=1 git commit -m "feat: 添加登录校验"'), undefined);
 });
 
-test("blocks git push when the caller repository has pending plan TODOs, including read errors", async () => {
+test("git push is no longer gated on pending plan TODOs (external review removed)", async () => {
   const repo = await mkdtemp(join(tmpdir(), "shell-policy-repo-"));
   try {
     await mkdir(join(repo, "docs", "plans"), { recursive: true });
-    const plan = join(repo, "docs", "plans", "release.md");
-    await writeFile(plan, "# Release\nTODO: finish verification\n");
-    assert.deepEqual(scanPendingPlanTodos(repo), [{ file: plan, text: "TODO: finish verification" }]);
-    assertBlocked("git push", "PUSH_PENDING_PLAN_TODOS", /TODO/, { cwd: repo, workspaceRoot: repo });
+    await writeFile(join(repo, "docs", "plans", "release.md"), "# Release\nTODO: finish verification\n");
+    assert.equal(policy("git push", { cwd: repo, workspaceRoot: repo }), undefined);
     assert.equal(policy("git push --dry-run", { cwd: repo, workspaceRoot: repo }), undefined);
-
-    await writeFile(plan, "# Release\ncomplete\n");
-    await chmod(plan, 0o000);
-    const invalidPlans = join(repo, "docs", "plans");
-    await rm(invalidPlans, { recursive: true, force: true });
-    await writeFile(invalidPlans, "not a directory");
-    const unreadable = scanPendingPlanTodos(repo);
-    assert.equal(unreadable.length, 1);
-    assert.equal(unreadable[0].file, invalidPlans);
-    assert.match(unreadable[0].text, /读取失败/);
-    assertBlocked("git push", "PUSH_PENDING_PLAN_TODOS", /读取失败/, { cwd: repo, workspaceRoot: repo });
-  } finally {
-    await chmod(join(repo, "docs", "plans", "release.md"), 0o600).catch(() => {});
-    await rm(repo, { recursive: true, force: true });
-  }
-});
-
-test("finds plan TODOs only in the caller repository", async () => {
-  const repo = await mkdtemp(join(tmpdir(), "shell-policy-caller-"));
-  try {
-    await mkdir(join(repo, "docs", "plans"), { recursive: true });
-    await writeFile(join(repo, "docs", "plans", "one.md"), "TODO: caller only\n");
-    assert.deepEqual(scanPendingPlanTodos(repo), [{
-      file: join(repo, "docs", "plans", "one.md"),
-      text: "TODO: caller only",
-    }]);
   } finally {
     await rm(repo, { recursive: true, force: true });
   }
 });
 
-test("recognizes git commands reached through cd and git -C", () => {
-  assertBlocked('cd /tmp/repo && git commit -m "fix: 修复问题"', "GIT_CWD_FORBIDDEN", /cd/);
-  assertBlocked('git -C /tmp/repo commit -m "fix: 修复问题"', "GIT_C_FORBIDDEN", /git -C/);
+
+test("git context switches through cd and the git dash-C flag are allowed (external review boundary removed)", () => {
+  assert.equal(policy('cd /tmp/repo && git commit -m "fix: 修复问题"'), undefined);
+  assert.equal(policy('git -C /tmp/repo commit -m "fix: 修复问题"'), undefined);
+  assert.equal(policy("cd /tmp && git status"), undefined);
+  assert.equal(policy("git -C /tmp status"), undefined);
 });
 
-test("blocks cd followed by git regardless of git subcommand validity", () => {
-  assertBlocked('cd /tmp && git status', "GIT_CWD_FORBIDDEN", /cd/);
-  assertBlocked('cd /tmp && git commit -m "feat: 添加提交校验"', "GIT_CWD_FORBIDDEN", /cd/);
+test("git repository and worktree overrides are allowed (external review boundary removed)", () => {
+  assert.equal(policy("git --git-dir=/outside/.git --work-tree=/outside rm tracked.txt"), undefined);
+  assert.equal(policy("git --git-dir /outside/.git --work-tree /outside rm tracked.txt"), undefined);
+  assert.equal(policy("GIT_DIR=/outside/.git GIT_WORK_TREE=/outside git rm tracked.txt"), undefined);
 });
 
-test("blocks git -C regardless of commit message validity", () => {
-  assertBlocked('git -C /tmp status', "GIT_C_FORBIDDEN", /git -C/);
-  assertBlocked('git -C /tmp commit -m "feat: 添加提交校验"', "GIT_C_FORBIDDEN", /git -C/);
-});
-
-test("blocks Git repository and worktree overrides that bypass workspace deletion boundaries", () => {
-  assertBlocked(
-    "git --git-dir=/outside/.git --work-tree=/outside rm tracked.txt",
-    "GIT_CONTEXT_FORBIDDEN",
-    /Git.*工作目录|仓库/,
-  );
-  assertBlocked(
-    "git --git-dir /outside/.git --work-tree /outside rm tracked.txt",
-    "GIT_CONTEXT_FORBIDDEN",
-    /Git.*工作目录|仓库/,
-  );
-  assertBlocked(
-    "GIT_DIR=/outside/.git GIT_WORK_TREE=/outside git rm tracked.txt",
-    "GIT_CONTEXT_FORBIDDEN",
-    /Git.*工作目录|仓库/,
-  );
-});
 
 test("commit skip only bypasses commit validation", () => {
   assert.equal(policy('GIT_COMMIT_HOOK_SKIP=1 git commit -m "bad: english"'), undefined);
   assertBlocked('GIT_COMMIT_HOOK_SKIP=1 rm -rf /Users/shared', "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
-  assertBlocked('GIT_COMMIT_HOOK_SKIP=1 cd /tmp && git status', "GIT_CWD_FORBIDDEN", /cd/);
+  assert.equal(policy("GIT_COMMIT_HOOK_SKIP=1 cd /tmp && git status"), undefined);
 });
 
 test("allows symlinks whose canonical target remains in a temporary root", async () => {
@@ -232,13 +185,12 @@ test("aligns commit subject and AI signature rules with the convention", () => {
   assertBlocked('git commit -m "fix: 修改"', "COMMIT_MESSAGE_INVALID", /信息量/);
 });
 
-test("matches only anchored plan TODOs and recognizes git global options for push", async () => {
+test("git push with global options is no longer gated on plan TODOs", async () => {
   const repo = await mkdtemp(join(tmpdir(), "shell-policy-push-"));
   try {
     await mkdir(join(repo, "docs", "plans"), { recursive: true });
     await writeFile(join(repo, "docs", "plans", "release.md"), "示例 TODO: 不应匹配\n- TODO: 需要完成\n");
-    assert.deepEqual(scanPendingPlanTodos(repo), [{ file: join(repo, "docs", "plans", "release.md"), text: "TODO: 需要完成" }]);
-    assertBlocked("git --no-pager push", "PUSH_PENDING_PLAN_TODOS", /TODO/, { cwd: repo, workspaceRoot: repo });
+    assert.equal(policy("git --no-pager push", { cwd: repo, workspaceRoot: repo }), undefined);
   } finally {
     await rm(repo, { recursive: true, force: true });
   }
@@ -311,8 +263,8 @@ test("blocks git -C with destructive subcommand", () => {
   assertBlocked("git -C /some/path reset --hard", "GIT_DESTRUCTIVE", /不可逆 Git/);
   assertBlocked("git -C /worktree clean -fd", "GIT_DESTRUCTIVE", /不可逆 Git/);
   assertBlocked("git --git-dir /x -C /y reset --hard HEAD~5", "GIT_DESTRUCTIVE", /不可逆 Git/);
-  // Non-destructive git -C still blocked by GIT_C_FORBIDDEN
-  assertBlocked("git -C /some/path status", "GIT_C_FORBIDDEN", /git -C/);
+  // Non-destructive context switches are allowed now that the external review boundary is removed
+  assert.equal(policy("git -C /some/path status"), undefined);
 });
 
 test("blocks dangerous commands with multi-flag sh -c variants", () => {

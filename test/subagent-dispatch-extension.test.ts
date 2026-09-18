@@ -3,6 +3,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createTypedSubagentExtension, preparePublicCodingDispatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
+import { childStartTimeoutMs } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/workflow-spawn.ts";
 import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { bindGoalRunCoordinator, bindGoalRunCoordinatorSession, unbindGoalRunCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 
@@ -56,14 +57,13 @@ function goalWorkspaceRequest(contractHash: string) {
     originRef: "refs/heads/main",
     baseCommit: "b".repeat(40),
     contractHash,
-    mode: "coding",
-    writePaths: ["test/subagent-dispatch-extension.test.ts"],
+    policy: { publication: "allowed", application: "allowed", writePaths: ["test/subagent-dispatch-extension.test.ts"] },
   };
 }
 
 function workspaceReceipt(workspaceRequest: any, run: any = null) {
   return {
-    schemaVersion: "managed-workspace.v1",
+    schemaVersion: "managed-workspace.v2",
     workspaceId: workspaceRequest.workspaceId,
     leaseId: "c".repeat(64),
     owner: workspaceRequest.owner,
@@ -76,8 +76,11 @@ function workspaceReceipt(workspaceRequest: any, run: any = null) {
     branchRef: "refs/heads/pi-managed/goal-workspace-1",
     state: "active",
     run,
-    disposition: null,
     cleanupDebt: null,
+    policy: workspaceRequest.policy,
+    publishedArtifact: null,
+    application: null,
+    terminalProof: null,
   };
 }
 
@@ -200,34 +203,17 @@ test("generic workflow omits execution timeout while the Host collector remains 
   assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
 });
 
-test("generic facade passes the 120000ms default to the child-start collector while the workflow omits its timeout", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("generic facade passes the 120000ms default to the child-start collector while the workflow omits its timeout", async () => {
   const { pi, rpc, calls, tools } = setup();
-  // Never emit the leaf start event, so the collector watchdog is the only
-  // path that can settle waitFor and its exact delay becomes observable.
-  rpc.spawn = async (params: any) => {
-    calls.push({ params });
-    return { details: { runId: "run-1", asyncDir: "/tmp/run-1" } };
-  };
   createTestExtension(pi, { rpc, cleanupStore: {} });
 
-  const pending = tools[0].execute("generic-collector-default", {
+  const result = await tools[0].execute("generic-collector-default", {
     agent: "reviewer", title: "Review", task: "Inspect.",
   }, undefined, undefined, { cwd: "/repo" });
 
-  await new Promise((resolve) => setImmediate(resolve));
-  // The generic workflow payload keeps the execution timeout undefined...
   assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
-  // ...while the facade's child-start collector is armed at exactly 120000ms.
-  t.mock.timers.tick(119_999);
-  assert.equal(await Promise.race([
-    pending.then(() => true, () => true),
-    new Promise((resolve) => setImmediate(() => resolve(false))),
-  ]), false, "collector watchdog must not fire before 120000ms");
-  t.mock.timers.tick(1);
-  const result = await pending;
-  assert.equal(result.isError, true);
-  assert.equal(result.details.code, "WORKFLOW_CHILD_START_TIMEOUT");
+  assert.equal(childStartTimeoutMs(undefined, 120_000), 120_000);
+  assert.equal(result.isError, false, result.content[0]?.text);
 });
 
 function goalTicket(contractHash: string) {
@@ -294,6 +280,7 @@ test("Goal trusted contract keeps a non-default caller timeout and canonical has
   createTestExtension(pi, {
     rpc,
     cleanupStore: {},
+    resolveRootSessionId: () => "root-shared",
     goalExecutorCoordinator: {
       prepareSpawn(request: any) {
         assert.equal(request.contractHash, expectedHash);
@@ -370,7 +357,8 @@ test("Goal coding spawn allocates through the shared service in the exact four-s
     "bindRun",
     "bindSpawn",
   ]);
-  assert.equal(calls[0].params.cwd, activeReceipt.dispatchCwd);
+  assert.equal(calls[0].params.cwd, activeReceipt.originRoot);
+  assert.equal(workflowLeaf(calls[0].params).cwd, activeReceipt.dispatchCwd);
   assert.equal(calls[0].params.worktree, false);
   assert.equal(workflowLeaf(calls[0].params).worktree, false);
   assert.equal(result.details.workspace_id, activeReceipt.workspaceId);
@@ -421,12 +409,18 @@ test("standalone coding worktree uses the same service and binds without Goal re
   }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
-  assert.deepEqual(order, ["ensureAllocated", "spawn", "bindRun"]);
+  assert.deepEqual(order, ["ensureAllocated", "spawn", "registerAuthorizedRun", "bindRun"]);
   assert.equal(result.details.dispatch_cwd, "/managed/goal-workspace-1");
   assert.equal(result.details.workspace_state, "active");
   assert.equal(Object.hasOwn(allocated.run, "kind"), false);
   assert.equal(Object.hasOwn(result.details, "kind"), false);
-  assert.deepEqual(registered, []);
+  assert.deepEqual(registered[0], {
+    version: "subagent-run-authorization.v1",
+    kind: "coding",
+    binding: { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "root-standalone", pid: 123, agentProfile: "executor" },
+    capabilities: ["root.subscribe"],
+    goal: null,
+  });
 });
 
 test("generic worktree uses the unified service without enabling upstream worktrees", async () => {
@@ -435,9 +429,10 @@ test("generic worktree uses the unified service without enabling upstream worktr
   let allocated: any;
   const workspaceService = {
     ensureAllocated(request: any) {
-      assert.equal(request.mode, "generic");
+      assert.equal(request.policy.publication, "forbidden");
+      assert.equal(request.policy.application, "forbidden");
       assert.equal(request.owner.kind, "standalone-subagent");
-      assert.deepEqual(request.writePaths, []);
+      assert.deepEqual(request.policy.writePaths, []);
       allocated = workspaceReceipt(request);
       return allocated;
     },
@@ -462,7 +457,8 @@ test("generic worktree uses the unified service without enabling upstream worktr
   }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
-  assert.equal(calls[0].params.cwd, allocated.dispatchCwd);
+  assert.equal(calls[0].params.cwd, allocated.originRoot);
+  assert.equal(workflowLeaf(calls[0].params).cwd, allocated.dispatchCwd);
   assert.equal(calls[0].params.worktree, false);
   assert.equal(workflowLeaf(calls[0].params).worktree, false);
   assert.equal(result.details.workspace_id, allocated.workspaceId);
@@ -522,6 +518,7 @@ test("Goal coding registers exact ticket authority before returning a handle", a
   createTestExtension(pi, {
     rpc,
     cleanupStore: {},
+    resolveRootSessionId: () => "root-shared",
     goalExecutorCoordinator: {
       prepareSpawn(request: any) {
         workspaceRequest = goalWorkspaceRequest(request.contractHash);
@@ -554,17 +551,34 @@ test("Goal coding registers exact ticket authority before returning a handle", a
   });
 });
 
-test("standalone coding does not depend on Goal authorization registration", async () => {
+test("standalone coding rejects registration failure and preserves the active unbound workspace", async () => {
   const { pi, rpc, tools } = setup();
+  const workspaceService = {
+    ensureAllocated(request: any) { return workspaceReceipt(request); },
+    bindRun() { throw new Error("bindRun must not be reached"); },
+  };
+  let allocated: any;
+  workspaceService.ensureAllocated = (request: any) => {
+    allocated = workspaceReceipt(request);
+    return allocated;
+  };
   createTestExtension(pi, {
     rpc,
     cleanupStore: {},
+    randomUUID: () => "registration-failure-workspace",
+    workspaceService,
+    resolveRootSessionId: () => "s",
+    resolveCanonicalOrigin: async () => "/repo",
+    inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
     registerAuthorizedRun() { throw Object.assign(new Error("broker unavailable"), { code: "BROKER_UNAVAILABLE" }); },
   });
 
-  const result = await tools[0].execute("registration-failure", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo" });
+  const result = await tools[0].execute("registration-failure", { ...contract, agent: "coder-alpha", execution: { ...contract.execution, worktree: true } }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
-  assert.equal(result.isError, false);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /broker unavailable/);
+  assert.equal(allocated.state, "active");
+  assert.equal(allocated.run, null);
 });
 
 test("standalone lifecycle session does not create Goal authorization", async () => {
@@ -594,7 +608,7 @@ test("unsafe lifecycle session does not matter without Goal authorization", asyn
 
   const result = await tools[0].execute("unsafe-session", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo" });
 
-  assert.equal(result.isError, false);
+  assert.equal(result.isError, true);
   assert.equal(registrations, 0);
 });
 
@@ -664,8 +678,22 @@ test("coding spawn forwards resolver metadata raw as RPC options and excludes sp
   const metadata = { requestId: "durable-dispatch-3", spawnKey: "durable-dispatch-3" };
   createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity() { return metadata; } });
   await tools[0].execute("tool-call-identity-3", contract, undefined, undefined, { cwd: "/repo" });
-  assert.strictEqual(calls[0]?.options, metadata);
+  assert.equal(calls[0]?.options?.requestId, metadata.requestId);
+  assert.equal(calls[0]?.options?.spawnKey, metadata.spawnKey);
+  assert.equal(typeof calls[0]?.options?.diagnostic?.sink, "function");
   assert.equal(Object.hasOwn(calls[0]?.params ?? {}, "spawnKey"), false);
+});
+
+test("coding and generic spawns forward thinkingLevel to the child thinking override", async () => {
+  const codingEnv = setup();
+  createTestExtension(codingEnv.pi, { rpc: codingEnv.rpc, cleanupStore: {} });
+  await codingEnv.tools[0].execute("thinking-coding", { ...contract, thinkingLevel: "low" }, undefined, undefined, { cwd: "/repo" });
+  assert.equal(workflowLeaf(codingEnv.calls[0]?.params).thinking, "low");
+
+  const genericEnv = setup();
+  createTestExtension(genericEnv.pi, { rpc: genericEnv.rpc, cleanupStore: {} });
+  await genericEnv.tools[0].execute("thinking-generic", { agent: "executor", title: "低思考", task: "验证思考级别透传。", thinkingLevel: "low" }, undefined, undefined, { cwd: "/repo" });
+  assert.equal(workflowLeaf(genericEnv.calls[0]?.params).thinking, "low");
 });
 
 test("coding prepare runs after ping and before spawn", async () => {

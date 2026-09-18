@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createManagedWorkspaceRequest } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
+import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createManagedWorkspaceLedger, managedWorkspacePaths } from "../packages/pi-subagents-enhanced/src/workspace/ledger.ts";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -26,7 +26,8 @@ async function fixture(t) {
 }
 
 function request(f, overrides = {}) {
-  return createManagedWorkspaceRequest({
+  const { policy = { publication: "allowed", application: "allowed", writePaths: ["README.md"] }, ...rest } = overrides;
+  return createManagedWorkspaceRequestV2({
     workspaceId: "workspace-1",
     owner: { kind: "standalone-subagent", rootSessionId: "root-1", toolCallId: "tool-1" },
     originRoot: f.originRoot,
@@ -34,9 +35,8 @@ function request(f, overrides = {}) {
     originRef: "refs/heads/main",
     baseCommit: f.baseCommit,
     contractHash: "a".repeat(64),
-    mode: "coding",
-    writePaths: ["README.md"],
-    ...overrides,
+    policy,
+    ...rest,
   });
 }
 
@@ -72,7 +72,7 @@ test("all workspace owners use the same record schema and state transition imple
   const requests = [
     request(f, { workspaceId: "standalone", owner: { kind: "standalone-subagent", rootSessionId: "root-1", toolCallId: "tool-1" } }),
     request(f, { workspaceId: "goal-task", owner: { kind: "goal-task", rootSessionId: "root-1", goalId: "goal-1", taskId: "task-1", attempt: 1, executionRevision: 1 } }),
-    request(f, { workspaceId: "validation", owner: { kind: "goal-validation", rootSessionId: "root-1", goalId: "goal-1", validationId: "validation-1", executionRevision: 1 }, mode: "validation", writePaths: [] }),
+    request(f, { workspaceId: "validation", owner: { kind: "goal-validation", rootSessionId: "root-1", goalId: "goal-1", validationId: "validation-1", executionRevision: 1 }, policy: { publication: "forbidden", application: "forbidden", writePaths: [] } }),
   ];
 
   const records = requests.map((input) => ledger.reserve(input).record);

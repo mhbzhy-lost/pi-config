@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { buildTopLevelRuntimeEnv, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.ts";
+import { renderCodingDispatchPrompt } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/prompt.ts";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;
@@ -15,6 +16,34 @@ const upstreamPackageRoot = join(enhancedPackageRoot, "node_modules", "pi-subage
 const extension = join(enhancedPackageRoot, "extensions", "subagent-runtime.ts");
 const providerExtension = join(repoRoot, "test", "fixtures", "deterministic-provider.mjs");
 const clientModule = new URL("../scripts/probes/pi-subagents-compat.ts", import.meta.url).href;
+
+test("coding Host loads the child integration tool and prompt while generic non-Git cwd does not start a coordinator", async (t) => {
+  const { codingWorkflowSpawnParams } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts");
+  const { shouldStartRepositoryCoordinator } = await import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
+  const root = await mkdtemp(join(tmpdir(), "runtime-coordinator-gate-"));
+  const repository = join(root, "repository");
+  const plain = join(root, "plain");
+  await mkdir(repository); await mkdir(plain);
+  execFileSync("git", ["init", "-b", "main"], { cwd: repository, stdio: "ignore" });
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const ir = {
+    version: "dispatch-ir.v1", taskId: "task", title: "title", agent: "executor", risk: "high", hash: "a".repeat(64),
+    execution: { cwd: repository, timeoutMs: 60_000, worktree: true }, workflow: { mode: "tdd" }, objective: "objective",
+    requirements: [], context: { knownFacts: [], decisions: [], relevantFiles: [] }, boundaries: { writePaths: ["result.txt"], excludedWork: [], forbiddenActions: [] },
+    acceptance: { criteria: ["criterion"] },
+  };
+  const prompt = renderCodingDispatchPrompt(ir);
+  assert.match(prompt, /commit -> subagent_integration enqueue -> await_admission -> git rebase targetHead/);
+  const spawn = codingWorkflowSpawnParams(ir, prompt, "workflow-key");
+  const leaf = JSON.parse(spawn.workflowScript.match(/runs\.run\([^,]+, (.*)\);$/s)[1]);
+  assert.equal(leaf.worktree, false);
+  assert.ok(leaf.subagentOnlyExtensions.some((entry) => entry.endsWith("/child-extensions/integration-queue.ts")));
+  const sharedSpawn = codingWorkflowSpawnParams({ ...ir, execution: { ...ir.execution, worktree: false } }, prompt, "shared-workflow-key");
+  const sharedLeaf = JSON.parse(sharedSpawn.workflowScript.match(/runs\.run\([^,]+, (.*)\);$/s)[1]);
+  assert.equal(sharedLeaf.subagentOnlyExtensions.some((entry) => entry.endsWith("/child-extensions/integration-queue.ts")), false);
+  assert.equal(await shouldStartRepositoryCoordinator(repository), true);
+  assert.equal(await shouldStartRepositoryCoordinator(plain), false);
+});
 
 function runRpcUntil(command, args, { input, until, timeoutMs = 60_000, ...options }) {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -316,12 +345,10 @@ Use the deterministic compatibility marker from the assigned task.
       ],
       {
         cwd: projectRoot,
-        env: {
-          ...buildTopLevelRuntimeEnv(process.env),
-          TMPDIR: runtimeTmp,
-          PI_CODING_AGENT_DIR: join(repoRoot, "pi"),
-          OPENAI_API_KEY: "not-used",
-        },
+        env: (() => {
+          const { PI_SUBAGENT_CHILD: _child, PI_SUBAGENT_FANOUT_CHILD: _fanout, PI_SUBAGENT_PARENT_SESSION: _parent, ...topLevelEnv } = process.env;
+          return { ...buildTopLevelRuntimeEnv(topLevelEnv), TMPDIR: runtimeTmp, PI_CODING_AGENT_DIR: join(repoRoot, "pi"), OPENAI_API_KEY: "not-used" };
+        })(),
         input: JSON.stringify({ id: `top-level-rpc-${mode}`, type: "prompt", message: prompt }),
         until: (record) => {
           const text = assistantText(record);

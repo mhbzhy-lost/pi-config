@@ -82,10 +82,10 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
   });
   assert.deepEqual(manifest.dependencies, { "pi-subagents": "0.62.0", typescript: "5.9.3" });
   assert.deepEqual(manifest.devDependencies, {
-    "@earendil-works/pi-agent-core": "0.84.4",
-    "@earendil-works/pi-ai": "0.84.4",
-    "@earendil-works/pi-coding-agent": "0.84.4",
-    "@earendil-works/pi-tui": "0.84.4",
+    "@earendil-works/pi-agent-core": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
   });
   assert.deepEqual(manifest.bundleDependencies, ["pi-subagents"]);
   assert.equal(Object.hasOwn(manifest, "bundledDependencies"), false);
@@ -184,7 +184,7 @@ test("npm dry-run tarball contains the complete runtime closure and no repositor
 
 test("package setup installs Pi core typings as development dependencies", async () => {
   for (const peer of forbiddenLocalPeers) {
-    assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules", peer))).version, "0.84.4", peer);
+    assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules", peer))).version, "0.85.1", peer);
   }
   assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules/pi-subagents/node_modules/typebox"))).name, "typebox");
 });

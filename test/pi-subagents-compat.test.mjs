@@ -6,6 +6,7 @@ import test from "node:test";
 import * as compat from "../scripts/probes/pi-subagents-compat.ts";
 import { createSupervisorAdapter } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts";
 import { getTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
+import { createIsolatedHostRepository } from "./helpers/pi-runtime.mjs";
 import { piHostAliases, piHostJitiUrl, piHostModuleUrl } from "./helpers/pi-host.mjs";
 
 const { createJiti } = await import(piHostJitiUrl);
@@ -67,9 +68,9 @@ test("loads the public Pi API after asynchronously resolving the npm global root
   const globalRoot = await mkdtemp(join(tmpdir(), "pi-global-root-"));
   const packageRoot = join(globalRoot, "@earendil-works", "pi-coding-agent");
   try {
-    await mkdir(join(packageRoot, "dist"), { recursive: true });
-    await writeFile(join(packageRoot, "package.json"), JSON.stringify({ type: "module" }));
-    await writeFile(join(packageRoot, "dist", "index.js"), "export const fixtureMarker = 'portable-pi-api';\n");
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, "package.json"), JSON.stringify({ type: "module", exports: { ".": "./public.js" } }));
+    await writeFile(join(packageRoot, "public.js"), "export const fixtureMarker = 'portable-pi-api';\n");
 
     const piModule = await compat.loadPublicPiModule({
       resolveGlobalNodeModules: async () => globalRoot,
@@ -186,7 +187,12 @@ test("loads exactly one enhanced runtime and footer from a local package source"
   for (const name of markers) delete process.env[name];
   const runtimeMarkers = new Map(markers.map((name) => [name, process.env[name]]));
 
-  const agentDir = await mkdtemp(join(tmpdir(), "pi-subagents-compat-"));
+  // The Host must start inside an isolated Git common-dir: the repository
+  // under test carries a live coordinator whose recorded state root is not
+  // this fixture's temporary workspace dir, so reusing it fails closed.
+  const { root, repository } = await createIsolatedHostRepository("pi-subagents-compat-");
+  const agentDir = join(root, "agent");
+  await mkdir(agentDir);
   process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
   let result;
   try {
@@ -194,7 +200,7 @@ test("loads exactly one enhanced runtime and footer from a local package source"
       packages: [{ source: enhancedPackageRoot }],
     }));
     const loader = new DefaultResourceLoader({
-      cwd: repoRoot,
+      cwd: repository,
       agentDir,
       noSkills: true,
       noPromptTemplates: true,
@@ -203,10 +209,10 @@ test("loads exactly one enhanced runtime and footer from a local package source"
     });
     await loader.reload();
     result = await createAgentSession({
-      cwd: repoRoot,
+      cwd: repository,
       agentDir,
       resourceLoader: loader,
-      sessionManager: SessionManager.inMemory(repoRoot),
+      sessionManager: SessionManager.inMemory(repository),
     });
     const errors = [];
 
@@ -324,7 +330,7 @@ test("loads exactly one enhanced runtime and footer from a local package source"
       }
     } finally {
       try {
-        await rm(agentDir, { recursive: true, force: true });
+        await rm(root, { recursive: true, force: true });
       } finally {
         for (const [name, value] of previousMarkers) {
           if (value === undefined) delete process.env[name];

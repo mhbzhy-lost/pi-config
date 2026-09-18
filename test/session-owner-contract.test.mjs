@@ -13,7 +13,7 @@ test("exports the session owner contract", () => {
   assert.equal(typeof api.resolveRecentSession, "function");
 });
 
-test("classifies Pi 0.84.4 guarded separated startup forms", () => {
+test("classifies Pi 0.85.1 guarded separated startup forms", () => {
   assert.deepEqual(api.classifyPiLaunch([]), { kind: "new", continueArgIndex: null });
   assert.deepEqual(api.classifyPiLaunch(["-c"]), { kind: "continue", continueArgIndex: 0 });
   assert.deepEqual(api.classifyPiLaunch(["--continue"]), { kind: "continue", continueArgIndex: 0 });

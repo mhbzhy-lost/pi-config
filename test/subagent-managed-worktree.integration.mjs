@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -9,6 +9,7 @@ import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
 
 import { createTypedSubagentExtension as createTypedSubagentExtensionProduction } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
+import { createManagedWorkspaceLedger } from "../packages/pi-subagents-enhanced/src/workspace/ledger.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
 
 const { createJiti } = await import(piHostJitiUrl);
@@ -24,9 +25,11 @@ function createTypedSubagentExtension(pi, options = {}) {
 }
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-const terminalProof = { state: "observed", conflict: false, proofHash: "e".repeat(64) };
+// The service validates proofs against the v2 ledger schema, so the fixture
+// provider projects the v2 seven-field identity shape.
+const v2TerminalProof = (run) => ({ state: "observed", conflict: false, runId: run.runId, rootSessionId: "root-session", asyncDir: run.asyncDir, processInstance: `runner-${run.runId}`, proofId: "e".repeat(64) });
 
-async function fixture(t, { terminalProofProvider = () => terminalProof } = {}) {
+async function fixture(t, { terminalProofProvider = ({ run }) => run?.runId ? v2TerminalProof(run) : { state: "pending" } } = {}) {
   const root = await mkdtemp(join(tmpdir(), "typed-managed-workspace-"));
   const originRoot = join(root, "origin");
   const stateRoot = join(root, "state");
@@ -38,24 +41,29 @@ async function fixture(t, { terminalProofProvider = () => terminalProof } = {}) 
   git(originRoot, "add", "allowed.txt");
   git(originRoot, "commit", "-m", "base");
   const service = createManagedWorkspaceService({ stateRoot, terminalProofProvider });
+  const ledger = createManagedWorkspaceLedger({ stateRoot });
   const workspaceIds = new Set();
   t.after(async () => {
     for (const workspaceId of workspaceIds) {
       try {
-        const current = service.status({ workspaceId });
+        const record = ledger.load(workspaceId).record;
+        const proof = record.run ? v2TerminalProof(record.run) : undefined;
+        const current = service.status({ workspaceId, ...(proof ? { terminalProof: proof } : {}) });
         if (current.receipt.state === "preserved") service.release({ workspaceId });
         else if (current.receipt.state === "active") {
-          const issued = service.issueDisposition({ workspaceId, terminalProof });
-          service.dispose({ workspaceId, terminalProof, disposition: "discard", actionToken: issued.actionToken });
+          const issued = service.issueDisposition({ workspaceId, ...(proof ? { terminalProof: proof } : {}) });
+          service.dispose({ workspaceId, ...(proof ? { terminalProof: proof } : {}), disposition: record.run ? "discard" : "preserve", actionToken: issued.actionToken });
+          if (!record.run) service.release({ workspaceId });
         }
       } catch {}
     }
     await rm(root, { recursive: true, force: true });
   });
-  return { root, originRoot, stateRoot, service, workspaceIds };
+  return { root, originRoot, stateRoot, service, ledger, workspaceIds };
 }
 
 function piHarness(originRoot) {
+  const sessionRoot = realpathSync(originRoot);
   const tools = [];
   const listeners = new Map();
   const events = {
@@ -70,7 +78,7 @@ function piHarness(originRoot) {
   const pi = { events, registerTool(tool) { tools.push(tool); }, on() {} };
   const calls = [];
   const rpc = {
-    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session", cwd: originRoot } }; },
+    async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session", sessionFile: "root-session", cwd: sessionRoot } }; },
     async spawn(params) {
       calls.push(params);
       const match = params.workflowScript.match(/^return await runs\.run\(([^,]+), (.*)\);$/);
@@ -171,7 +179,7 @@ test("Root broker rich terminal snapshot reaches managed workspace status throug
           workspaceId: "broker-proof-workspace",
           owner: { kind: "goal-task", rootSessionId: "root-session", goalId: "fixture-goal", taskId: "unified-workspace", attempt: 1, executionRevision: 1 },
           originRoot: f.originRoot, requestedCwd: f.originRoot, originRef: "refs/heads/main", baseCommit, contractHash,
-          mode: "coding", writePaths: ["allowed.txt"],
+          policy: { publication: "allowed", application: "allowed", writePaths: ["allowed.txt"] },
         },
       };
     },
@@ -220,11 +228,15 @@ test("Root broker rich terminal snapshot reaches managed workspace status throug
   assert.deepEqual(f.service.status({ workspaceId: spawned.details.workspace_id }).terminalProof, {
     state: "observed",
     conflict: false,
-    proofHash: richSnapshot.terminal.proofId,
+    runId: "leaf-run",
+    rootSessionId: "root-session",
+    asyncDir: join(f.originRoot, "async-leaf"),
+    processInstance: "leaf-run-runner",
+    proofId: richSnapshot.terminal.proofId,
   });
 });
 
-test("typed coding facade allocates, binds, reports, integrates, and releases through the unified service", async (t) => {
+test("typed coding facade allocates, binds, reports, discards, and releases through the unified v2 service", async (t) => {
   const f = await fixture(t);
   const { pi, tools, calls, rpc } = piHarness(f.originRoot);
   const registered = [];
@@ -241,27 +253,41 @@ test("typed coding facade allocates, binds, reports, integrates, and releases th
   assert.equal(spawned.isError, false, spawned.content[0]?.text);
   f.workspaceIds.add(spawned.details.workspace_id);
   assert.equal(spawned.details.workspace_state, "active");
+  assert.equal(f.ledger.load(spawned.details.workspace_id).record.schemaVersion, "managed-workspace-ledger.v2");
   assert.equal(f.service.status({ workspaceId: spawned.details.workspace_id }).receipt.owner.toolCallId, "tool-call");
-  assert.equal(calls[0].cwd, spawned.details.dispatch_cwd);
+  assert.equal(calls[0].cwd, realpathSync(f.originRoot));
   assert.equal(calls[0].worktree, false);
   assert.equal(JSON.parse(calls[0].workflowScript.match(/, (.*)\);$/)[1]).worktree, false);
   assert.equal(Object.hasOwn(f.service.status({ workspaceId: spawned.details.workspace_id }).receipt.run, "kind"), false);
   assert.equal(Object.hasOwn(spawned.details, "kind"), false);
-  assert.deepEqual(registered, []);
+  assert.equal(registered.length, 1);
+  assert.deepEqual(registered[0].capabilities, ["root.subscribe"]);
 
   await writeFile(join(spawned.details.dispatch_cwd, "allowed.txt"), "integrated\n");
   git(spawned.details.dispatch_cwd, "add", "allowed.txt");
   git(spawned.details.dispatch_cwd, "commit", "-m", "child change");
   const status = await execute(tools[1], { action: "status", workspace_id: spawned.details.workspace_id }, f.originRoot);
-  assert.ok(status.details.allowed_dispositions.includes("integrate"));
-  const disposed = await execute(tools[1], {
+  // v2 workspaces own integration in the child queue; the root tool only
+  // offers destructive or preserving dispositions plus release.
+  assert.equal(status.details.allowed_dispositions.includes("integrate"), false);
+  assert.ok(status.details.allowed_dispositions.includes("discard"));
+  assert.ok(status.details.allowed_dispositions.includes("preserve"));
+  const childOwned = await execute(tools[1], {
     action: "dispose",
     workspace_id: spawned.details.workspace_id,
     disposition: "integrate",
     action_token: status.details.action_token,
   }, f.originRoot);
+  assert.equal(childOwned.isError, true);
+  assert.equal(childOwned.details.code, "CHILD_OWNS_INTEGRATION");
+  const disposed = await execute(tools[1], {
+    action: "dispose",
+    workspace_id: spawned.details.workspace_id,
+    disposition: "discard",
+    action_token: status.details.action_token,
+  }, f.originRoot);
   assert.equal(disposed.details.workspace_state, "released");
-  assert.equal(await readFile(join(f.originRoot, "allowed.txt"), "utf8"), "integrated\n");
+  assert.equal(await readFile(join(f.originRoot, "allowed.txt"), "utf8"), "base\n");
   assert.equal(existsSync(spawned.details.dispatch_cwd), false);
 });
 
@@ -340,9 +366,56 @@ test("typed coding facade canonicalizes composite Host tool call identities for 
   assert.notEqual(firstOwner, secondOwner);
   assert.equal(calls.length, 3);
   assert.ok(calls.every((call) => call.worktree === false));
-  assert.equal(registered.length, 0);
+  assert.equal(registered.length, 3);
+  assert.ok(registered.every((authorization) => authorization.capabilities.includes("root.subscribe")));
 
   const empty = await execute(tools[0], codingContract(f.originRoot), f.originRoot, "");
   assert.equal(empty.isError, true);
   assert.equal(empty.details.code, "WORKSPACE_TOOL_CALL_ID_UNAVAILABLE");
+});
+
+test("standalone coding and generic dispatch allocate managed-workspace-ledger.v2 records", async (t) => {
+  const f = await fixture(t);
+  const ledger = createManagedWorkspaceLedger({ stateRoot: f.stateRoot });
+  let id = 0;
+  const { pi, tools, rpc } = piHarness(f.originRoot);
+  const registered = [];
+  const registerEitherAuthorization = (authorization) => {
+    if (!["coding", "generic"].includes(authorization?.kind)) throw new Error("Run authorization binding is invalid");
+    const value = authorization?.binding;
+    if (!value || typeof value !== "object" || typeof value.runId !== "string" || value.sessionId !== "root-session") {
+      throw new Error("Run authorization binding is invalid");
+    }
+    registered.push(authorization);
+  };
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
+    randomUUID: () => `v2-allocation-${++id}`,
+    workspaceService: f.service,
+    resolveRootSessionId: () => "root-session",
+    registerAuthorizedRun: registerEitherAuthorization,
+  });
+
+  const coding = await execute(tools[0], codingContract(f.originRoot), f.originRoot, "v2-coding");
+  assert.equal(coding.isError, false, coding.content[0]?.text);
+  f.workspaceIds.add(coding.details.workspace_id);
+  const codingRecord = ledger.load(coding.details.workspace_id).record;
+  assert.equal(codingRecord.schemaVersion, "managed-workspace-ledger.v2");
+  assert.deepEqual(codingRecord.request.policy, {
+    publication: "allowed",
+    application: "allowed",
+    writePaths: ["allowed.txt"],
+  });
+
+  const generic = await execute(tools[0], { agent: "reviewer", title: "Review", task: "Inspect.", cwd: f.originRoot, worktree: true }, f.originRoot, "v2-generic");
+  assert.equal(generic.isError, false, generic.content[0]?.text);
+  f.workspaceIds.add(generic.details.workspace_id);
+  const genericRecord = ledger.load(generic.details.workspace_id).record;
+  assert.equal(genericRecord.schemaVersion, "managed-workspace-ledger.v2");
+  assert.deepEqual(genericRecord.request.policy, {
+    publication: "forbidden",
+    application: "forbidden",
+    writePaths: [],
+  });
 });

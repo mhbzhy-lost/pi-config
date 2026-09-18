@@ -73,3 +73,31 @@ test("workspace reminder ignores foreign, wrapper, closed, ambiguous, and malfor
   assert.deepEqual(messages, []);
   reminder.dispose();
 });
+
+test("workspace reminder records delivery debt and retries instead of losing the notification", async () => {
+  const bus = events();
+  const diagnostics = [];
+  const messages = [];
+  let fail = true;
+  const reminder = createWorkspaceCompletionReminder({
+    events: bus,
+    sendMessage(message) {
+      if (fail) { fail = false; throw new Error("delivery unavailable"); }
+      messages.push(message);
+    },
+    onDiagnostic(diagnostic) { diagnostics.push(diagnostic); },
+    getContext() { return { rootSessionId: "root-session", lifecycleSessionId: "lifecycle-session", service: {
+      listOwned() { return [{ workspaceId: "workspace-debt", state: "active", run: { runId: "run-debt" } }]; },
+    } }; },
+  });
+  const completion = { runId: "run-debt", sessionId: "lifecycle-session", state: "complete" };
+  await assert.doesNotReject(() => bus.emit("subagent:async-complete", completion));
+  assert.equal(messages.length, 0);
+  assert.deepEqual(diagnostics, [{
+    code: "SUBAGENT_WORKSPACE_REMINDER_DELIVERY_DEBT", rootSessionId: "root-session", runId: "run-debt",
+    workspaceId: "workspace-debt", message: "delivery unavailable",
+  }]);
+  await bus.emit("subagent:async-complete", completion);
+  assert.equal(messages.length, 1);
+  reminder.dispose();
+});

@@ -5,10 +5,8 @@ import test from "node:test";
 import * as workspaceContract from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 
 const {
-  createManagedWorkspaceRequest,
+  createManagedWorkspaceRequestV2,
   deterministicGoalWorkspaceId,
-  publicManagedWorkspaceReceipt,
-  validateManagedWorkspaceReceipt,
 } = workspaceContract;
 
 const sha40 = (character) => character.repeat(40);
@@ -22,21 +20,6 @@ function goalOwner(overrides = {}) {
     taskId: "task-1",
     attempt: 1,
     executionRevision: 2,
-    ...overrides,
-  };
-}
-
-function request(overrides = {}) {
-  return {
-    workspaceId: "goal-workspace-1",
-    owner: goalOwner(),
-    originRoot: "/repo",
-    requestedCwd: "/repo/packages/app",
-    originRef: "refs/heads/main",
-    baseCommit: sha40("b"),
-    contractHash: sha64("a"),
-    mode: "coding",
-    writePaths: ["packages/app/**"],
     ...overrides,
   };
 }
@@ -55,50 +38,37 @@ function requestV2(overrides = {}) {
   };
 }
 
-function receipt(overrides = {}) {
-  return {
-    schemaVersion: "managed-workspace.v1",
-    workspaceId: "goal-workspace-1",
-    leaseId: sha64("c"),
-    owner: goalOwner(),
-    originRoot: "/repo",
-    requestedCwd: "/repo/packages/app",
-    originRef: "refs/heads/main",
-    baseCommit: sha40("b"),
-    path: "/state/repositories/repo/worktrees/goal-workspace-1",
-    dispatchCwd: "/state/repositories/repo/worktrees/goal-workspace-1/packages/app",
-    branchRef: "refs/heads/pi-managed/goal-workspace-1",
-    state: "active",
-    run: null,
-    disposition: null,
-    cleanupDebt: null,
-    ...overrides,
-  };
-}
-
 function assertDeepFrozen(value) {
   if (!value || typeof value !== "object") return;
   assert.equal(Object.isFrozen(value), true);
   for (const child of Object.values(value)) assertDeepFrozen(child);
 }
 
+test("the v1 codec surface is fully removed", () => {
+  assert.equal(typeof workspaceContract.createManagedWorkspaceRequest, "undefined", "v1 request codec must not exist");
+  assert.equal(typeof workspaceContract.validateManagedWorkspaceReceipt, "undefined", "v1 receipt codec must not exist");
+  assert.equal(typeof workspaceContract.publicManagedWorkspaceReceipt, "undefined", "v1 receipt codec must not exist");
+  assert.throws(() => createManagedWorkspaceRequestV2(requestV2({ mode: "coding" })), /unknown field mode|policy/i);
+  assert.throws(() => createManagedWorkspaceRequestV2(requestV2({ writePaths: ["packages/app/**"] })), /unknown field writePaths|missing required field policy|policy/i);
+});
+
 test("managed workspace requests accept each exact owner variant and freeze the result", () => {
   const variants = [
-    request(),
-    request({
-      workspaceId: "standalone-1",
-      owner: { kind: "standalone-subagent", rootSessionId: "root-1", toolCallId: "tool-1" },
+    requestV2(),
+    requestV2({
+      workspaceId: "goal-1",
+      owner: goalOwner(),
+      policy: { publication: "allowed", application: "forbidden", writePaths: ["packages/app/**"] },
     }),
-    request({
+    requestV2({
       workspaceId: "validation-1",
       owner: { kind: "goal-validation", rootSessionId: "root-1", goalId: "goal-1", validationId: "validation-1", executionRevision: 2 },
-      mode: "validation",
-      writePaths: [],
+      policy: { publication: "forbidden", application: "forbidden", writePaths: [] },
     }),
   ];
 
   for (const input of variants) {
-    const actual = createManagedWorkspaceRequest(input);
+    const actual = createManagedWorkspaceRequestV2(input);
     assert.deepEqual(actual, input);
     assert.notStrictEqual(actual, input);
     assertDeepFrozen(actual);
@@ -115,29 +85,26 @@ test("managed workspace requests reject incomplete, mixed, and unknown owner fie
   ];
 
   for (const owner of invalidOwners) {
-    assert.throws(() => createManagedWorkspaceRequest(request({ owner })), /owner/i);
+    assert.throws(() => createManagedWorkspaceRequestV2(requestV2({ owner })), /owner/i);
   }
 });
 
-test("managed workspace requests fail closed on fields, paths, refs, hashes, and mode invariants", () => {
+test("managed workspace requests fail closed on fields, paths, refs, and hashes", () => {
   const invalid = [
-    { ...request(), unexpected: true },
-    request({ originRoot: "repo" }),
-    request({ requestedCwd: "/outside" }),
-    request({ originRef: "main" }),
-    request({ baseCommit: "short" }),
-    request({ contractHash: sha40("a") }),
-    request({ mode: "generic", owner: goalOwner() }),
-    request({ mode: "coding", writePaths: [] }),
-    request({ mode: "validation", writePaths: ["src/**"], owner: { kind: "goal-validation", rootSessionId: "root-1", goalId: "goal-1", validationId: "validation-1", executionRevision: 2 } }),
+    { ...requestV2(), unexpected: true },
+    requestV2({ originRoot: "repo" }),
+    requestV2({ requestedCwd: "/outside" }),
+    requestV2({ originRef: "main" }),
+    requestV2({ baseCommit: "short" }),
+    requestV2({ contractHash: sha40("a") }),
   ];
 
   for (const value of invalid) {
-    assert.throws(() => createManagedWorkspaceRequest(value));
+    assert.throws(() => createManagedWorkspaceRequestV2(value));
   }
 });
 
-test("v2 workspace policy is independent from owner and rejects invalid capability combinations", () => {
+test("workspace policy is independent from owner and rejects invalid capability combinations", () => {
   const valid = [
     { publication: "forbidden", application: "forbidden", writePaths: [] },
     { publication: "allowed", application: "forbidden", writePaths: [] },
@@ -145,8 +112,8 @@ test("v2 workspace policy is independent from owner and rejects invalid capabili
     { publication: "allowed", application: "allowed", writePaths: ["packages/app/**"] },
   ];
   for (const policy of valid) {
-    assert.equal(typeof workspaceContract.createManagedWorkspaceRequestV2, "function");
-    const actual = workspaceContract.createManagedWorkspaceRequestV2(requestV2({ policy }));
+    assert.equal(typeof createManagedWorkspaceRequestV2, "function");
+    const actual = createManagedWorkspaceRequestV2(requestV2({ policy }));
     assert.deepEqual(actual.policy, policy);
     assert.equal(Object.hasOwn(actual, "mode"), false);
     assertDeepFrozen(actual);
@@ -157,68 +124,8 @@ test("v2 workspace policy is independent from owner and rejects invalid capabili
     { publication: "forbidden", application: "allowed", writePaths: ["packages/app/**"] },
     { publication: "allowed", application: "allowed", writePaths: [] },
     { publication: "allowed", application: "forbidden", writePaths: ["../outside"] },
-    { publication: "allowed", application: "forbidden", writePaths: [], mode: "coding" },
   ];
-  for (const policy of invalid) assert.throws(() => workspaceContract.createManagedWorkspaceRequestV2(requestV2({ policy })), /policy|writePaths|unknown/i);
-});
-
-test("managed workspace receipts validate exact public fields and nested run data", () => {
-  const input = receipt({ run: { runId: "run-1", asyncDir: "/async/run-1" } });
-  const actual = validateManagedWorkspaceReceipt(input);
-  assert.deepEqual(actual, input);
-  assert.notStrictEqual(actual, input);
-  assertDeepFrozen(actual);
-
-  for (const invalid of [
-    { ...input, extra: true },
-    { ...input, ownerToken: `managed-workspace-owner.v1:${sha64("d")}` },
-    receipt({ schemaVersion: "managed-workspace.v2" }),
-    receipt({ leaseId: "lease-secret" }),
-    receipt({ path: "relative/worktree" }),
-    receipt({ dispatchCwd: "/outside/worktree" }),
-    receipt({ branchRef: "pi-managed/workspace" }),
-    receipt({ state: "unknown" }),
-    receipt({ run: { runId: "run-1", asyncDir: "/async/run-1", pid: 10 } }),
-    receipt({ cleanupDebt: { phase: "git-add", code: "EIO" } }),
-  ]) assert.throws(() => validateManagedWorkspaceReceipt(invalid));
-});
-
-test("public workspace receipts strip the validated owner secret and bind its digest", () => {
-  const ownerToken = `managed-workspace-owner.v1:${sha64("d")}`;
-  const leaseId = createHash("sha256").update(ownerToken).digest("hex");
-  const result = publicManagedWorkspaceReceipt({ ...receipt({ leaseId }), ownerToken });
-
-  assert.deepEqual(result, receipt({ leaseId }));
-  assert.equal(Object.hasOwn(result, "ownerToken"), false);
-  assert.throws(
-    () => publicManagedWorkspaceReceipt({ ...receipt(), ownerToken }),
-    /lease/i,
-  );
-  assert.throws(
-    () => publicManagedWorkspaceReceipt({ ...receipt({ leaseId }), ownerToken, actionToken: "private" }),
-    /field|unknown/i,
-  );
-});
-
-test("cleanup debt and disposition are strict discriminated receipt values", () => {
-  const disposing = validateManagedWorkspaceReceipt(receipt({
-    state: "disposing",
-    disposition: { action: "integrate", strategy: "cherry-pick" },
-  }));
-  assert.equal(disposing.disposition.action, "integrate");
-
-  const debt = validateManagedWorkspaceReceipt(receipt({
-    state: "cleanup-debt",
-    cleanupDebt: { phase: "worktree-remove", code: "EIO", message: "release incomplete" },
-  }));
-  assert.equal(debt.cleanupDebt.code, "EIO");
-
-  for (const invalid of [
-    receipt({ disposition: { action: "discard", strategy: "merge" } }),
-    receipt({ disposition: { action: "preserve", reason: "keep", extra: true } }),
-    receipt({ state: "cleanup-debt", cleanupDebt: null }),
-    receipt({ state: "active", cleanupDebt: { phase: "git", code: "EIO", message: "failed" } }),
-  ]) assert.throws(() => validateManagedWorkspaceReceipt(invalid));
+  for (const policy of invalid) assert.throws(() => createManagedWorkspaceRequestV2(requestV2({ policy })), /policy|writePaths|unknown/i);
 });
 
 test("deterministic Goal workspace ids are stable and sensitive to every execution fact", () => {

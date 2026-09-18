@@ -36,7 +36,6 @@ test("tool_call keeps ctx.cwd as shell-policy workspaceRoot while using a valid 
   const policyCalls = [];
   const handlers = setup({
     shellPolicy: (input) => { policyCalls.push(input); return undefined; },
-    workspaceBypass: async () => true,
   });
 
   try {
@@ -74,26 +73,6 @@ test("tool_call fails closed when bash context cwd is unavailable", async () => 
 
   assert.equal(result.block, true);
   assert.match(result.reason, /工作目录|安全门禁/);
-});
-
-test("shell policy allows ordinary git push without invoking external review", async () => {
-  let gatherCalls = 0;
-  let reviewCalls = 0;
-  const handlers = setup({
-    shellPolicy: () => undefined,
-    workspaceBypass: async () => false,
-    gatherDiffInfo: async () => { gatherCalls++; return {}; },
-    runReview: async () => { reviewCalls++; return { output: null }; },
-  });
-
-  const result = await handlers.get("tool_call")(
-    { toolName: "bash", input: { command: "git push origin main" } },
-    { cwd: workspace },
-  );
-
-  assert.equal(result, undefined);
-  assert.equal(gatherCalls, 0);
-  assert.equal(reviewCalls, 0);
 });
 
 test("tool_result appends a coding reminder only to successful text content without mutation", async () => {
