@@ -1,22 +1,49 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { basename, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-function hostPackageEntry(packageName: string, packageEntry: string): string {
+function hostPackageEntry(packageName: string, options: { inferredRoot?: string; selfUrl?: string } = {}): string {
   const configuredRoot = process.env.PI_PACKAGE_DIR?.trim();
   const entryPath = process.argv[1] ? realpathSync(process.argv[1]) : "";
   const entryDirectory = dirname(entryPath);
-  const distDirectory = basename(entryDirectory) === "bundle" ? dirname(entryDirectory) : entryDirectory;
-  const inferredRoot = dirname(distDirectory);
-  const configuredEntry = configuredRoot ? join(configuredRoot, "node_modules", packageName, packageEntry) : "";
-  const candidate = configuredEntry && existsSync(configuredEntry)
-    ? configuredEntry
-    : join(inferredRoot, "node_modules", packageName, packageEntry);
-  return pathToFileURL(candidate).href;
+  const inferredRoot = options.inferredRoot
+    ?? (basename(entryDirectory) === "bundle" ? dirname(dirname(entryDirectory)) : dirname(entryDirectory));
+  const root = configuredRoot || inferredRoot;
+  const selfUrl = options.selfUrl ?? import.meta.url;
+  // 依次尝试三个解析起点：①进程/配置推断的 root（生产 bundle 布局）；
+  // ②本模块自身位置（测试经 jiti alias 加载时指向全局 pi 包内）；
+  // ③从本模块位置逐级向上找含该包的 node_modules。undici 是 Pi 包树的
+  // 传递依赖，repo root 无本地副本，不再依赖 argv 布局。
+  const candidates: Array<() => string> = [
+    () => createRequire(pathToFileURL(join(root, "package.json"))).resolve(packageName),
+    () => createRequire(selfUrl).resolve(packageName),
+    () => {
+      let directory = dirname(realpathSync(fileURLToPath(selfUrl)));
+      for (let depth = 0; depth < 16 && directory !== "/"; depth += 1) {
+        try {
+          return createRequire(pathToFileURL(join(directory, "package.json"))).resolve(packageName);
+        } catch {
+          directory = dirname(directory);
+        }
+      }
+      throw new Error(`${packageName} is not resolvable upward from ${directory}`);
+    },
+  ];
+  for (const resolve of candidates) {
+    try {
+      return pathToFileURL(resolve()).href;
+    } catch {
+      continue;
+    }
+  }
+  throw new Error(`openai-codex proxy cannot resolve ${packageName} from the Pi host package tree`);
 }
 
-async function loadCodexApi() {
-  const module = await import(hostPackageEntry("@earendil-works/pi-ai", "dist/compat.js"));
+export const hostPackageEntryForTest = hostPackageEntry;
+
+export async function loadCodexApi() {
+  const module = await import("@earendil-works/pi-ai/compat");
   return { stream: module.streamOpenAICodexResponses };
 }
 
@@ -46,7 +73,7 @@ export function loadOpenAICodexProxyConfig(configPath: string, { onError }: { on
 }
 
 async function defaultCreateProxyFetch(proxy: string) {
-  const { fetch: undiciFetch, ProxyAgent } = await import(hostPackageEntry("undici", "index.js"));
+  const { fetch: undiciFetch, ProxyAgent } = await import(hostPackageEntry("undici"));
   const dispatcher = new ProxyAgent(proxy);
   return (input: any, init: any = {}) => undiciFetch(input, { ...init, dispatcher }) as any;
 }
