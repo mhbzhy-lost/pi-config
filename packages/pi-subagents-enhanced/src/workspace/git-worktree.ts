@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createPublishedArtifact, validatePublishedArtifact, type PublishedArtifact } from "./published-artifact.ts";
 
@@ -16,7 +16,9 @@ const LEGACY_PATHS = [
 ];
 
 const RUNTIME_METADATA_ROOTS = [
-  ".pi",
+  // 只清理运行时产物根（.pi/subagents、.pi-subagents 等）；.pi/agents 等
+  // tracked 项目配置不得被当作可删元数据（R11：tracked .pi/agents 曾阻塞 discard）。
+  ".pi/subagents",
   ".pi-subagents",
   ".state/subagent-dispatch",
   ".state/worktree-lifecycle",
@@ -32,7 +34,7 @@ class ManagedWorkspaceError extends Error {
   }
 }
 type GitRunner = (cwd: string, args: readonly string[]) => string;
-type ManagedWorkspaceRecord = { path: string; dispatchCwd: string; branchRef: string; request: { workspaceId: string; originRoot: string; originRef: string; baseCommit: string; mode?: string; writePaths?: string[]; policy?: { publication: string; application: string; writePaths: string[] } } };
+type ManagedWorkspaceRecord = { path: string; dispatchCwd: string; branchRef: string; request: { workspaceId: string; originRoot: string; originRef: string; baseCommit: string; policy: { publication: string; application: string; writePaths: string[] } } };
 type GitInspection = { headCommit: string; baseCommit: string; descendant: boolean; aheadCommits: string[]; aheadCount: number; hasCommits: boolean; changedFiles: string[]; clean: boolean; originRef: string | null; originHead: string | null; originClean: boolean; originError: string | null };
 
 function failure(code: string, message: string, cause?: unknown): ManagedWorkspaceError {
@@ -248,45 +250,170 @@ export function inspectManagedGitWorkspace(record: ManagedWorkspaceRecord): GitI
   };
 }
 
+function gitDirectory(cwd: string) {
+  const value = git(cwd, ["rev-parse", "--git-dir"]);
+  return realpathSync(path.isAbsolute(value) ? value : path.resolve(cwd, value));
+}
+
+function rebaseDirectory(cwd: string): string | null {
+  const gitDir = gitDirectory(cwd);
+  for (const name of ["rebase-merge", "rebase-apply"]) {
+    const candidate = path.join(gitDir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 function sequencerActive(cwd) {
-  const gitDirValue = git(cwd, ["rev-parse", "--git-dir"]);
-  const gitDir = path.resolve(cwd, gitDirValue);
+  const gitDir = gitDirectory(cwd);
   return ["CHERRY_PICK_HEAD", "MERGE_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"]
     .some((name) => existsSync(path.join(gitDir, name)));
 }
 
-export function managedWorkspaceAlreadyIntegrated(record: ManagedWorkspaceRecord, { strategy, executorHead }: { strategy: string; executorHead: string }) {
-  const originHead = git(record.request.originRoot, ["rev-parse", "HEAD"]);
-  if (strategy === "merge") return gitSucceeds(record.request.originRoot, ["merge-base", "--is-ancestor", executorHead, originHead]);
-  if (strategy !== "cherry-pick") throw failure("MANAGED_WORKSPACE_DISPOSITION", "integration strategy is invalid");
-  const output = git(record.request.originRoot, ["cherry", originHead, executorHead, record.request.baseCommit]);
-  const lines = output.split("\n").filter(Boolean);
-  return lines.length > 0 && lines.every((line) => line.startsWith("-"));
+const managedGitEnvironment = () => {
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (name.startsWith("GIT_CONFIG_") || ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+      "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS"].includes(name)) delete env[name];
+  }
+  return { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_EDITOR: "/usr/bin/true", GIT_SEQUENCE_EDITOR: "/usr/bin/true", GIT_PAGER: "/bin/cat" };
+};
+
+function managedGit(cwd: string, args: readonly string[]) {
+  try {
+    return execFileSync("git", args, { cwd, encoding: "utf8", env: managedGitEnvironment(), stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } catch (cause) {
+    throw failure("MANAGED_WORKSPACE_REBASE", `git ${args.join(" ")} failed`, cause);
+  }
 }
 
-export function integrateManagedGitWorkspace(record: ManagedWorkspaceRecord, { strategy, executorHead }: { strategy: string; executorHead: string }) {
-  const inspection = inspectManagedGitWorkspace(record);
-  if (inspection.headCommit !== executorHead || !inspection.clean || !inspection.descendant || !inspection.hasCommits) {
-    throw failure("MANAGED_WORKSPACE_INTEGRATE", "workspace is not a clean committed descendant");
+function unmergedEntries(cwd: string) {
+  return managedGit(cwd, ["ls-files", "-u", "-z"]).length > 0;
+}
+
+function rebaseConfigurationIsSafe(cwd: string) {
+  if (!pathExists(cwd) || !gitSucceeds(cwd, ["rev-parse", "--is-inside-work-tree"])) {
+    throw failure("MANAGED_WORKSPACE_IDENTITY", "managed worktree path is missing or unregistered");
   }
-  if (record.request.mode !== "coding") throw failure("MANAGED_WORKSPACE_INTEGRATE", "only coding workspaces can integrate");
-  assertManagedWorkspaceWritePaths(inspection.changedFiles, record.request.writePaths);
-  const origin = originPreflight(record);
-  if (sequencerActive(origin.root)) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "origin has an active Git sequencer");
-  if (managedWorkspaceAlreadyIntegrated(record, { strategy, executorHead })) return { alreadyIntegrated: true, headCommit: origin.head };
-  try {
-    if (strategy === "cherry-pick") git(origin.root, ["cherry-pick", `${record.request.baseCommit}..${executorHead}`]);
-    else if (strategy === "merge") git(origin.root, ["merge", "--no-ff", "--no-edit", executorHead]);
-    else throw failure("MANAGED_WORKSPACE_DISPOSITION", "integration strategy is invalid");
-  } catch (error) {
-    const operation = strategy === "merge" ? "merge" : "cherry-pick";
-    if (sequencerActive(origin.root)) {
-      try { git(origin.root, [operation, "--abort"]); }
-      catch (recoveryError) { throw failure("MANAGED_WORKSPACE_CLEANUP_DEBT", "integration failed and sequencer recovery failed", recoveryError); }
+  const names = managedGit(cwd, ["config", "--local", "--name-only", "--get-regexp", "."])
+    .split("\n").filter(Boolean).map((value) => value.toLowerCase());
+  const unsafe = names.some((name) => name === "core.hookspath" || /^merge\..+\.driver$/.test(name) || /^filter\..+\.(?:clean|smudge|process)$/.test(name)
+    || name === "rebase.exec" || name === "commit.gpgsign" || name === "gpg.program" || name === "core.editor" || name === "sequence.editor"
+    || name === "core.pager" || name.startsWith("pager."));
+  const hooks = path.join(commonDir(cwd), "hooks");
+  let executableHook = false;
+  if (existsSync(hooks)) {
+    for (const name of ["pre-rebase", "post-rewrite", "pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"]) {
+      const hook = path.join(hooks, name);
+      if (existsSync(hook)) { const info = lstatSync(hook); if (info.isFile() && (info.mode & 0o111) !== 0) executableHook = true; }
     }
-    throw error;
   }
-  return { alreadyIntegrated: false, headCommit: git(origin.root, ["rev-parse", "HEAD"]) };
+  if (unsafe || executableHook) throw failure("MANAGED_WORKSPACE_CONFIG", "repository-local executable Git configuration is not permitted");
+}
+
+function assertDispatchCwd(record: ManagedWorkspaceRecord, workspacePath: string) {
+  if (!pathExists(record.dispatchCwd)) throw failure("MANAGED_WORKSPACE_IDENTITY", "requested cwd is missing from managed worktree");
+  const cwd = realpathSync(record.dispatchCwd);
+  const relative = path.relative(workspacePath, cwd);
+  if (cwd !== record.dispatchCwd || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw failure("MANAGED_WORKSPACE_IDENTITY", "requested cwd is outside the managed worktree");
+  }
+}
+
+function continuingIdentity(record: ManagedWorkspaceRecord) {
+  if (!pathExists(record.path) || realpathSync(record.path) !== record.path) throw failure("MANAGED_WORKSPACE_IDENTITY", "managed worktree path is invalid");
+  const registration = registrationFor(record);
+  const directory = rebaseDirectory(record.path);
+  if (!directory) throw failure("MANAGED_WORKSPACE_SEQUENCER", "continue requires the active managed rebase");
+  const headName = path.join(directory, "head-name");
+  if (!registration || registration.locked || registration.prunable || registration.branchRef !== null || !existsSync(headName)
+      || readFileSync(headName, "utf8").trim() !== record.branchRef
+      || realpathSync(git(record.path, ["rev-parse", "--show-toplevel"])) !== record.path
+      || commonDir(record.path) !== originCommonDir(record)) throw failure("MANAGED_WORKSPACE_IDENTITY", "managed rebase identity changed");
+  assertDispatchCwd(record, record.path);
+  return { workspacePath: record.path, headCommit: git(record.path, ["rev-parse", "--verify", "HEAD^{commit}"]) };
+}
+
+function rebaseCandidateFacts(record: ManagedWorkspaceRecord, targetHead: string, state: "completed" | "resolving-conflict") {
+  const head = managedGit(record.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  const changedFiles = parseChangedPaths(managedGit(record.path, ["diff", "-l0", "--name-status", "-z", "--find-renames", `${targetHead}..${head}`]));
+  assertManagedWorkspaceWritePaths(changedFiles, record.request.policy.writePaths);
+  if (state === "completed") {
+    const identity = inspectIdentity(record);
+    if (identity.headCommit !== head || !gitSucceeds(record.path, ["merge-base", "--is-ancestor", targetHead, head])) {
+      throw failure("MANAGED_WORKSPACE_REBASE", "candidate identity or ancestry is invalid");
+    }
+  }
+  return { state, head, targetHead, targetAncestor: targetHead, clean: userStatus(record.path).length === 0, sequencerEmpty: !sequencerActive(record.path), changedFiles };
+}
+
+type RebaseAdmission = { admissionGeneration?: number; queueLeaseId?: string; validate?: () => { admissionGeneration?: number; queueLeaseId?: string } };
+type RebaseOptions = { continue?: boolean; admission?: RebaseAdmission; fault?: (phase: "locked" | "before-git") => void };
+
+function assertRebaseAdmission(admission?: RebaseAdmission) {
+  if (!admission) return;
+  if (!Number.isSafeInteger(admission.admissionGeneration) || (admission.admissionGeneration ?? 0) <= 0 || typeof admission.queueLeaseId !== "string" || admission.queueLeaseId.length === 0) {
+    throw failure("MANAGED_WORKSPACE_QUEUE", "queue admission is invalid");
+  }
+  if (admission.validate) {
+    const current = admission.validate();
+    if (current.admissionGeneration !== admission.admissionGeneration || current.queueLeaseId !== admission.queueLeaseId) {
+      throw failure("MANAGED_WORKSPACE_QUEUE", "queue admission lease or generation drifted");
+    }
+  }
+}
+
+function assertRebaseTarget(root: string, record: ManagedWorkspaceRecord, targetHead: string) {
+  if (currentRef(root) !== record.request.originRef) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "canonical target ref changed");
+  if (managedGit(root, ["rev-parse", "--verify", `${record.request.originRef}^{commit}`]) !== targetHead) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "target head drifted");
+}
+
+export function managedGitRebase(record: ManagedWorkspaceRecord, targetHead: string, options: RebaseOptions = {}) {
+  const continuing = options.continue === true;
+  // Inspect executable repository configuration before status/identity commands:
+  // attributes can make even `git status` invoke a configured filter.
+  rebaseConfigurationIsSafe(record.path);
+  const identity = continuing ? continuingIdentity(record) : inspectIdentity(record);
+  assertDispatchCwd(record, identity.workspacePath);
+  if (identity.workspacePath !== record.path || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(targetHead)) throw failure("MANAGED_WORKSPACE_IDENTITY", "invalid managed rebase identity or target");
+  const initialHead = identity.headCommit;
+  const root = primaryOrigin(record);
+  assertRebaseTarget(root, record, targetHead);
+  if (!gitSucceeds(record.path, ["cat-file", "-e", `${targetHead}^{commit}`])) throw failure("MANAGED_WORKSPACE_TARGET", "target is not a commit");
+  assertRebaseAdmission(options.admission);
+  if (!continuing && (userStatus(record.path).length !== 0 || sequencerActive(record.path))) throw failure("MANAGED_WORKSPACE_DIRTY", "workspace must be clean and have no sequencer");
+  if (continuing && !rebaseDirectory(record.path)) throw failure("MANAGED_WORKSPACE_SEQUENCER", "continue requires the active managed rebase");
+  const unlock = operationLock(root);
+  try {
+    options.fault?.("locked");
+    assertRebaseTarget(root, record, targetHead);
+    assertRebaseAdmission(options.admission);
+    const confirmed = continuing ? continuingIdentity(record) : inspectIdentity(record);
+    if (confirmed.headCommit !== initialHead) throw failure("MANAGED_WORKSPACE_IDENTITY", "workspace HEAD drifted after admission");
+    if (!continuing && (userStatus(record.path).length !== 0 || sequencerActive(record.path))) throw failure("MANAGED_WORKSPACE_DIRTY", "workspace changed after admission");
+    options.fault?.("before-git");
+    assertRebaseTarget(root, record, targetHead);
+    assertRebaseAdmission(options.admission);
+    try {
+      const safeOverrides = ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false"];
+      managedGit(record.path, continuing ? [...safeOverrides, "rebase", "--continue"] : [...safeOverrides, "rebase", "--no-autostash", targetHead]);
+    } catch (cause) {
+      if (rebaseDirectory(record.path) && unmergedEntries(record.path)) return rebaseCandidateFacts(record, targetHead, "resolving-conflict");
+      throw failure("MANAGED_WORKSPACE_REBASE", "rebase failed; operation preserved", cause);
+    }
+    assertRebaseTarget(root, record, targetHead);
+    assertRebaseAdmission(options.admission);
+    return rebaseCandidateFacts(record, targetHead, "completed");
+  } finally { unlock(); }
+}
+
+export function inspectManagedIntegrationAdmission(record: ManagedWorkspaceRecord, targetRef: string) {
+  const source = inspectManagedGitWorkspace(record);
+  if (sequencerActive(record.path)) throw failure("MANAGED_WORKSPACE_INTEGRATE", "workspace has an active Git sequencer");
+  const root = primaryOrigin(record);
+  if (currentRef(root) !== targetRef || targetRef !== record.request.originRef) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "canonical checkout is not on the requested target ref");
+  if (sequencerActive(root) || userStatus(root).length !== 0) throw failure("MANAGED_WORKSPACE_ORIGIN_DIRTY", "canonical checkout must be clean and have no active sequencer");
+  return { inspection: source, targetHead: git(root, ["rev-parse", "HEAD^{commit}"]) };
 }
 
 export function releaseManagedGitWorkspace(record: ManagedWorkspaceRecord, { expectedHead }: { expectedHead?: string } = {}) {
@@ -346,11 +473,79 @@ function rejectUnsafeTree(cwd: string, tree: string) {
 function refValue(cwd: string, ref: string): string | null {
   return gitSucceeds(cwd, ["show-ref", "--verify", "--quiet", ref]) ? git(cwd, ["rev-parse", ref]) : null;
 }
+function processBirthIdentity(pid: number) {
+  const output = execFileSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "lstart=", "-o", "command="], { encoding: "buffer", stdio: ["ignore", "pipe", "ignore"] });
+  if (!output.toString().trim()) throw new Error("process is unavailable");
+  return createHash("sha256").update(output).digest("hex");
+}
+let ownProcessBirthIdentity: string | undefined;
 function operationLock(root: string) {
   const lock = path.join(commonDir(root), "pi-managed-workspace-operation.lock");
-  try { mkdirSync(lock, { mode: 0o700 }); }
-  catch (cause) { throw failure("MANAGED_WORKSPACE_LOCKED", "repository-wide Git operation lock is held", cause); }
-  return () => rmSync(lock, { recursive: true, force: true });
+  const token = randomUUID();
+  const owner = { token, pid: process.pid, birthIdentity: ownProcessBirthIdentity ??= processBirthIdentity(process.pid), createdAt: new Date().toISOString() };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      mkdirSync(lock, { mode: 0o700 });
+      const descriptor = openSync(path.join(lock, "owner.json"), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+      try { writeFileSync(descriptor, `${JSON.stringify(owner)}\n`); fsyncSync(descriptor); } finally { closeSync(descriptor); }
+      return () => {
+        try {
+          const observed = JSON.parse(readFileSync(path.join(lock, "owner.json"), "utf8"));
+          if (observed.token === token && observed.pid === process.pid && observed.birthIdentity === owner.birthIdentity) rmSync(lock, { recursive: true });
+        } catch (cause) { if (existsSync(lock)) throw cause; }
+      };
+    } catch (cause: any) {
+      if (cause?.code !== "EEXIST") throw failure("MANAGED_WORKSPACE_LOCKED", "repository-wide Git operation lock cannot be created", cause);
+      let stale = false;
+      try {
+        const observed = JSON.parse(readFileSync(path.join(lock, "owner.json"), "utf8"));
+        if (!Number.isSafeInteger(observed.pid) || typeof observed.birthIdentity !== "string") stale = true;
+        else {
+          try { process.kill(observed.pid, 0); stale = processBirthIdentity(observed.pid) !== observed.birthIdentity; }
+          catch (error: any) { stale = error?.code === "ESRCH" || error?.message === "process is unavailable"; }
+        }
+      } catch {
+        try { stale = Date.now() - lstatSync(lock).mtimeMs > 5_000; }
+        catch { stale = false; }
+      }
+      if (!stale) throw failure("MANAGED_WORKSPACE_LOCKED", "repository-wide Git operation lock is held", cause);
+      const quarantine = `${lock}.stale-${process.pid}-${randomUUID()}`;
+      try { renameSync(lock, quarantine); rmSync(quarantine, { recursive: true, force: true }); }
+      catch (recoveryCause) { throw failure("MANAGED_WORKSPACE_LOCKED", "stale repository-wide Git operation lock cannot be recovered", recoveryCause); }
+    }
+  }
+  throw failure("MANAGED_WORKSPACE_LOCKED", "repository-wide Git operation lock is held");
+}
+
+export function fastForwardManagedGitWorkspace(input: {
+  record: ManagedWorkspaceRecord; targetRef: string; targetHead: string; candidateHead: string;
+  fault?: (phase: string) => void;
+}) {
+  const { record, targetRef, targetHead, candidateHead } = input;
+  if (targetRef !== record.request.originRef || !targetRef.startsWith("refs/heads/")) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "target ref is not the workspace canonical origin ref");
+  const source = inspectManagedGitWorkspace(record);
+  if (source.headCommit !== candidateHead || !source.clean || sequencerActive(record.path) || !gitSucceeds(record.path, ["merge-base", "--is-ancestor", targetHead, candidateHead])) {
+    throw failure("MANAGED_WORKSPACE_INTEGRATE", "sealed candidate is not a clean target descendant at workspace HEAD");
+  }
+  assertManagedWorkspaceWritePaths(parseChangedPaths(gitRaw(record.path, ["diff", "-l0", "--name-status", "-z", "--find-renames", "--find-copies-harder", `${targetHead}..${candidateHead}`])), record.request.policy.writePaths);
+  const root = primaryOrigin(record);
+  const unlock = operationLock(root);
+  try {
+    if (currentRef(root) !== targetRef) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "canonical checkout is not on the admitted target ref");
+    const before = git(root, ["rev-parse", "HEAD^{commit}"]);
+    if (before !== targetHead && before !== candidateHead) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "canonical target advanced outside the admission CAS");
+    if (sequencerActive(root) || userStatus(root).length !== 0) throw failure("MANAGED_WORKSPACE_ORIGIN_DIRTY", "canonical checkout must be clean and have no active sequencer");
+    input.fault?.("before-merge");
+    if (before === targetHead) git(root, ["merge", "--ff-only", candidateHead]);
+    input.fault?.("after-merge");
+    if (currentRef(root) !== targetRef || git(root, ["rev-parse", "HEAD^{commit}"]) !== candidateHead
+        || refValue(root, targetRef) !== candidateHead || sequencerActive(root) || userStatus(root).length !== 0) {
+      throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "canonical checkout did not settle at the exact candidate");
+    }
+    const confirmedSource = inspectManagedGitWorkspace(record);
+    if (confirmedSource.headCommit !== candidateHead || !confirmedSource.clean) throw failure("MANAGED_WORKSPACE_INTEGRATE", "source workspace changed during fast-forward");
+    return { headCommit: candidateHead, alreadyIntegrated: before === candidateHead };
+  } finally { unlock(); }
 }
 
 /** 将工作区当前结果固化为独立 tree 和 CAS 保护的 durable ref。 */
@@ -359,7 +554,7 @@ export function publishWorkspaceSnapshot(input: {
   proofId: string; expectedRef?: string | null;
 }): PublishedArtifact {
   const { record, policy } = input;
-  if (!record?.request || !policy || policy.publication !== "allowed") throw failure("MANAGED_WORKSPACE_POLICY", "publish requires an allowed v2 policy");
+  if (!record?.request || !policy || policy.publication !== "allowed") throw failure("MANAGED_WORKSPACE_POLICY", "publish requires an allowed policy");
   const identity = inspectIdentity(record);
   const root = primaryOrigin(record);
   const sourceHead = git(identity.workspacePath, ["rev-parse", "HEAD^{commit}"]);
@@ -394,7 +589,7 @@ export function publishWorkspaceSnapshot(input: {
 export function applyPublishedArtifact(input: { record: ManagedWorkspaceRecord; artifact: PublishedArtifact; expectedOriginHead?: string }): { headCommit: string; changedFiles: string[] } {
   const artifact = validatePublishedArtifact(input.artifact);
   const root = primaryOrigin(input.record);
-  if (input.record.request.policy?.application !== "allowed") throw failure("MANAGED_WORKSPACE_POLICY", "apply requires an allowed v2 policy");
+  if (input.record.request.policy?.application !== "allowed") throw failure("MANAGED_WORKSPACE_POLICY", "apply requires an allowed policy");
   const unlock = operationLock(root);
   try {
     if (sequencerActive(root) || userStatus(root).length !== 0) throw failure("MANAGED_WORKSPACE_ORIGIN_DIRTY", "origin must be clean and have no active sequencer");

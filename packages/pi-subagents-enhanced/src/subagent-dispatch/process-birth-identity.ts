@@ -48,3 +48,8 @@ export async function captureProcessBirthIdentity(
 
   return createHash("sha256").update(bytes).digest("hex");
 }
+
+export async function processBirthIdentityMatches(pid: number, birthIdentity: string, options: { execFile?: ExecFile } = {}) {
+  if (typeof birthIdentity !== "string" || !/^[a-f0-9]{64}$/.test(birthIdentity)) return false;
+  try { return (await captureProcessBirthIdentity(pid, options)) === birthIdentity; } catch { return false; }
+}

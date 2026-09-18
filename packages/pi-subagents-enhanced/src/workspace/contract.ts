@@ -1,14 +1,12 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 
-const REQUEST_KEYS = ["workspaceId", "owner", "originRoot", "requestedCwd", "originRef", "baseCommit", "contractHash", "mode", "writePaths"];
 const REQUEST_V2_KEYS = ["workspaceId", "owner", "originRoot", "requestedCwd", "originRef", "baseCommit", "contractHash", "policy"];
-const RECEIPT_KEYS = ["schemaVersion", "workspaceId", "leaseId", "owner", "originRoot", "requestedCwd", "originRef", "baseCommit", "path", "dispatchCwd", "branchRef", "state", "run", "disposition", "cleanupDebt"];
-const STATES = new Set(["reserved", "allocating", "active", "disposing", "preserved", "released", "cleanup-debt"]);
-const MODES = new Set(["coding", "generic", "validation"]);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+
+export const WORKSPACE_COORDINATOR_PROTOCOL = "repository-workspace-coordinator.v1";
 
 function fail(message) {
   throw new TypeError(`Managed workspace contract: ${message}`);
@@ -86,15 +84,7 @@ function writePath(value, location) {
   return result;
 }
 
-function writePaths(value, mode) {
-  if (!Array.isArray(value) || value.length > 32) fail("writePaths must be a bounded array");
-  const result = [...new Set(value.map((entry, index) => writePath(entry, `writePaths[${index}]`)))];
-  if (mode === "coding" && result.length === 0) fail("coding writePaths must not be empty");
-  if (mode !== "coding" && result.length !== 0) fail(`${mode} writePaths must be empty`);
-  return result;
-}
-
-function policyWritePaths(value) {
+function writePaths(value) {
   if (!Array.isArray(value) || value.length > 32) fail("policy.writePaths must be a bounded array");
   return [...new Set(value.map((entry, index) => writePath(entry, `policy.writePaths[${index}]`)))];
 }
@@ -103,7 +93,7 @@ function policy(value) {
   const input = exactObject(value, "policy", ["publication", "application", "writePaths"]);
   if (input.publication !== "forbidden" && input.publication !== "allowed") fail("policy.publication is unsupported");
   if (input.application !== "forbidden" && input.application !== "allowed") fail("policy.application is unsupported");
-  const normalizedWritePaths = policyWritePaths(input.writePaths);
+  const normalizedWritePaths = writePaths(input.writePaths);
   if (input.application === "allowed" && input.publication !== "allowed") fail("policy.application requires allowed publication");
   if (input.application === "allowed" && normalizedWritePaths.length === 0) fail("policy.application requires non-empty writePaths");
   return { publication: input.publication, application: input.application, writePaths: normalizedWritePaths };
@@ -149,33 +139,6 @@ function cloneFrozen(value) {
   return freeze(clone);
 }
 
-function normalizeRequest(value) {
-  const input = exactObject(value, "request", REQUEST_KEYS);
-  const mode = text(input.mode, "mode", { maxBytes: 16 });
-  if (!MODES.has(mode)) fail("mode is unsupported");
-  const normalizedOwner = owner(input.owner);
-  if (mode === "validation" ? normalizedOwner.kind !== "goal-validation" : mode === "generic" ? normalizedOwner.kind !== "standalone-subagent" : normalizedOwner.kind === "goal-validation") {
-    fail(`owner is incompatible with ${mode} mode`);
-  }
-  const originRoot = absolutePath(input.originRoot, "originRoot");
-  const requestedCwd = inside(originRoot, absolutePath(input.requestedCwd, "requestedCwd"), "requestedCwd");
-  return {
-    workspaceId: identity(input.workspaceId, "workspaceId"),
-    owner: normalizedOwner,
-    originRoot,
-    requestedCwd,
-    originRef: gitRef(input.originRef, "originRef"),
-    baseCommit: digest(input.baseCommit, "baseCommit"),
-    contractHash: digest(input.contractHash, "contractHash", SHA256),
-    mode,
-    writePaths: writePaths(input.writePaths, mode),
-  };
-}
-
-export function createManagedWorkspaceRequest(value) {
-  return cloneFrozen(normalizeRequest(value));
-}
-
 function normalizeRequestV2(value) {
   const input = exactObject(value, "request", REQUEST_V2_KEYS);
   const normalizedOwner = owner(input.owner);
@@ -195,93 +158,6 @@ function normalizeRequestV2(value) {
 
 export function createManagedWorkspaceRequestV2(value) {
   return cloneFrozen(normalizeRequestV2(value));
-}
-
-function run(value) {
-  if (value === null) return null;
-  const input = exactObject(value, "run", ["runId", "asyncDir"]);
-  return { runId: identity(input.runId, "run.runId"), asyncDir: absolutePath(input.asyncDir, "run.asyncDir") };
-}
-
-function disposition(value) {
-  if (value === null) return null;
-  if (!isPlainObject(value)) fail("disposition must be an object or null");
-  if (value.action === "integrate") {
-    exactObject(value, "disposition", ["action", "strategy"]);
-    if (value.strategy !== "cherry-pick" && value.strategy !== "merge") fail("disposition.strategy is unsupported");
-    return { action: value.action, strategy: value.strategy };
-  }
-  if (value.action === "discard") {
-    exactObject(value, "disposition", ["action"]);
-    return { action: value.action };
-  }
-  if (value.action === "preserve") {
-    exactObject(value, "disposition", ["action", "reason"]);
-    return { action: value.action, reason: text(value.reason, "disposition.reason") };
-  }
-  fail("disposition.action is unsupported");
-}
-
-function cleanupDebt(value) {
-  if (value === null) return null;
-  const input = exactObject(value, "cleanupDebt", ["phase", "code", "message"]);
-  return { phase: identity(input.phase, "cleanupDebt.phase"), code: identity(input.code, "cleanupDebt.code"), message: text(input.message, "cleanupDebt.message") };
-}
-
-function normalizeReceipt(value) {
-  const input = exactObject(value, "receipt", RECEIPT_KEYS);
-  if (input.schemaVersion !== "managed-workspace.v1") fail("schemaVersion is unsupported");
-  const state = text(input.state, "state", { maxBytes: 32 });
-  if (!STATES.has(state)) fail("state is unsupported");
-  const normalizedOwner = owner(input.owner);
-  const originRoot = absolutePath(input.originRoot, "originRoot");
-  const requestedCwd = inside(originRoot, absolutePath(input.requestedCwd, "requestedCwd"), "requestedCwd");
-  const workspacePath = absolutePath(input.path, "path");
-  const dispatchCwd = inside(workspacePath, absolutePath(input.dispatchCwd, "dispatchCwd"), "dispatchCwd");
-  const normalizedDisposition = disposition(input.disposition);
-  const normalizedDebt = cleanupDebt(input.cleanupDebt);
-  if (state === "cleanup-debt" ? normalizedDebt === null : normalizedDebt !== null) fail("cleanupDebt must match state");
-  if (state === "disposing" && normalizedDisposition === null) fail("disposing receipt requires disposition");
-  if (["reserved", "allocating", "active"].includes(state) && normalizedDisposition !== null) fail(`${state} receipt cannot have disposition`);
-  if (state === "preserved" && normalizedDisposition?.action !== "preserve") fail("preserved receipt requires preserve disposition");
-  if (state === "released" && normalizedDisposition === null) fail("released receipt requires disposition");
-  return {
-    schemaVersion: input.schemaVersion,
-    workspaceId: identity(input.workspaceId, "workspaceId"),
-    leaseId: digest(input.leaseId, "leaseId", SHA256),
-    owner: normalizedOwner,
-    originRoot,
-    requestedCwd,
-    originRef: gitRef(input.originRef, "originRef"),
-    baseCommit: digest(input.baseCommit, "baseCommit"),
-    path: workspacePath,
-    dispatchCwd,
-    branchRef: gitRef(input.branchRef, "branchRef"),
-    state,
-    run: run(input.run),
-    disposition: normalizedDisposition,
-    cleanupDebt: normalizedDebt,
-  };
-}
-
-export function validateManagedWorkspaceReceipt(value) {
-  return cloneFrozen(normalizeReceipt(value));
-}
-
-export function publicManagedWorkspaceReceipt(value) {
-  if (!isPlainObject(value)) fail("receipt must be an object");
-  const allowed = new Set([...RECEIPT_KEYS, "ownerToken"]);
-  for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) fail(`receipt contains unknown field ${key}`);
-  }
-  const projected = Object.fromEntries(RECEIPT_KEYS.map((key) => [key, value[key]]));
-  if (Object.hasOwn(value, "ownerToken")) {
-    const token = text(value.ownerToken, "ownerToken");
-    if (!/^managed-workspace-owner\.v1:[a-f0-9]{64}$/.test(token)) fail("ownerToken is invalid");
-    const expectedLeaseId = createHash("sha256").update(token).digest("hex");
-    if (projected.leaseId !== expectedLeaseId) fail("leaseId does not match ownerToken");
-  }
-  return validateManagedWorkspaceReceipt(projected);
 }
 
 export function deterministicGoalWorkspaceId(value) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { applyManagedWorkspaceCleanup, inventoryManagedWorkspaces, planManagedWorkspaceCleanup } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
+import { applyManagedWorkspaceCleanup, auditManagedWorkspaces, planManagedWorkspaceCleanup } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
 const DEFAULT_STATE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../var/workspaces");
 const SCHEMAS = {
   audit: { flags: new Set(["json"]), values: new Set() },
@@ -41,6 +41,12 @@ function print(value, json) {
     for (const entry of safeValue.legacy) console.log(`${entry.status}\t${escapeSingleLine(entry.path)}\tnone`);
     return;
   }
+  if (safeValue?.schemaVersion === "managed-workspace-administration.v1") {
+    if (safeValue.coordinator?.status !== "missing") console.log(`coordinator\t${safeValue.coordinator.status}\t${safeValue.coordinator.protocol ?? "unknown"}`);
+    for (const item of safeValue.queue?.items ?? []) console.log(`queue\t${item.state ?? "unknown"}\t${item.queueItemId ?? ""}`);
+    for (const debt of safeValue.debts ?? []) console.log(`debt\t${debt.kind ?? "unknown"}\t${debt.workspaceId ?? debt.queueItemId ?? debt.status ?? ""}`);
+    return;
+  }
   if (safeValue?.schemaVersion === "managed-workspace-cleanup-plan.v1" || safeValue?.schemaVersion === "managed-workspace-reconcile-plan.v2") {
     for (const action of safeValue.actions) console.log(`${action.action}\t${action.workspaceId}\t${action.leaseId}`);
     return;
@@ -53,7 +59,7 @@ const parsed = (() => { try { return parseCommand(process.argv.slice(2)); } catc
 if (parsed) {
   try {
     const { command, json, apply } = parsed; const originRoot = process.cwd(); const stateRoot = process.env.PI_CODING_WORKSPACE_DIR ?? DEFAULT_STATE_ROOT;
-    if (command === "audit") print(inventoryManagedWorkspaces({ stateRoot, originRoot }), json);
+    if (command === "audit") print(auditManagedWorkspaces({ stateRoot, originRoot }), json);
     else if (command === "reconcile") { if (!apply) print(planManagedWorkspaceCleanup({ stateRoot, originRoot }), json); else { const { plan, authorizations } = await readApplyPayload(); print(applyManagedWorkspaceCleanup({ stateRoot, plan, authorizations }), json); } }
     else usage(`Unknown command: ${command}`);
   } catch (error) { console.error(`${error.code || "WORKTREE_LIFECYCLE_ERROR"}: ${error.message}`); process.exitCode = 1; }

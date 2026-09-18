@@ -53,7 +53,7 @@ function childControls(value) {
   if (value === undefined) return {};
   if (!record(value)) throw new TypeError("workflow child controls must be an object");
   const controls = {};
-  for (const key of ["model", "output", "outputMode", "outputSchema", "skill", "reads", "progress", "acceptance", "subagentOnlyExtensions", "timeoutMs"]) {
+  for (const key of ["model", "output", "outputMode", "outputSchema", "skill", "reads", "progress", "acceptance", "subagentOnlyExtensions", "timeoutMs", "thinking"]) {
     if (value[key] !== undefined) controls[key] = value[key];
   }
   return controls;
@@ -64,17 +64,20 @@ export function buildWorkflowSpawn({
   agent,
   task,
   cwd,
+  orchestratorCwd,
+  childCwd,
   context,
   timeoutMs,
   artifacts = true,
   acceptance,
   child,
 }: {
-  workflowKey?: string; agent?: string; task?: string; cwd?: string; context?: "fresh" | "fork";
+  workflowKey?: string; agent?: string; task?: string; cwd?: string; orchestratorCwd?: string; childCwd?: string; context?: "fresh" | "fork";
   timeoutMs?: number; artifacts?: boolean; acceptance?: unknown; child?: unknown;
 } = {}) {
   const normalizedKey = workflowKey(key);
-  if (!nonempty(agent) || !nonempty(task) || !nonempty(cwd)) {
+  const rootCwd = orchestratorCwd ?? cwd;
+  if (!nonempty(agent) || !nonempty(task) || !nonempty(rootCwd)) {
     throw new TypeError("workflow spawn requires non-empty agent, task, and cwd");
   }
   if (context !== "fresh" && context !== "fork") throw new TypeError("workflow spawn context must be fresh or fork");
@@ -88,12 +91,13 @@ export function buildWorkflowSpawn({
     task,
     async: true,
     worktree: false,
+    ...(childCwd === undefined ? {} : { cwd: childCwd }),
     ...(child === undefined ? { output: false } : childControls(child)),
     ...(acceptance === undefined ? {} : { acceptance: checkedAcceptance(acceptance) }),
   };
   return {
     workflowScript: `return await runs.run(${JSON.stringify(normalizedKey)}, ${JSON.stringify(leaf)});`,
-    cwd,
+    cwd: rootCwd,
     context,
     async: true,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),

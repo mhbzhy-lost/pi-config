@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { homedir, tmpdir } from "node:os";
 import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
-import { inventoryManagedWorkspaces } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
+import { auditManagedWorkspaces } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
 import { verifyOrderedModelsRuntimePatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ordered-models-runtime-patch.ts";
 import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
@@ -18,7 +18,7 @@ import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced
 
 const execFile = promisify(execFileCallback);
 
-const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4"];
+const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4", "0.85.1"];
 const PI_SUBAGENTS_VERSION = "0.62.0";
 const ENHANCED_SUBAGENTS_VERSION = "0.1.0";
 const ENHANCED_SUBAGENTS_SOURCE = "../packages/pi-subagents-enhanced";
@@ -142,17 +142,34 @@ async function readInstalledPiVersion() {
 }
 
 export async function inspectWorktreeLifecycle(repoRoot, { stateRoot = process.env.PI_CODING_WORKSPACE_DIR ?? join(repoRoot, "var", "workspaces") } = {}) {
-  return inventoryManagedWorkspaces({ stateRoot, originRoot: repoRoot });
+  return auditManagedWorkspaces({ stateRoot, originRoot: repoRoot });
+}
+
+export function inspectCoordinatorDoctor(report: any) {
+  const issues: string[] = [];
+  if (!report || report.schemaVersion !== "managed-workspace-administration.v1") return ["coordinator audit schema is unknown"];
+  const coordinator = report.coordinator ?? {};
+  if (coordinator.status === "observed" && coordinator.protocol !== "repository-workspace-coordinator.v1") issues.push("coordinator protocol is unknown");
+  if (coordinator.status === "stale") issues.push("coordinator singleton identity is stale");
+  for (const debt of report.debts ?? []) {
+    if (debt.kind === "state-root-split-brain") issues.push("coordinator state-root split-brain detected");
+    else if (debt.kind === "queue-schema") issues.push("integration queue schema is unknown");
+    else if (["proof", "delivery", "cleanup"].includes(debt.kind)) issues.push(`${debt.kind} debt remains unresolved`);
+    else if (debt.status === "migration-debt") issues.push(`${debt.kind} migration debt requires manual review`);
+    else if (debt.kind === "coordinator-metadata") issues.push("coordinator metadata schema is unknown");
+  }
+  return [...new Set(issues)];
 }
 
 export function formatWorktreeLifecycleWarnings(report) {
   if (!report || typeof report !== "object") return [];
+  const inventory = report.inventory ?? report;
   const escapeSingleLine = (value) => String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) => {
     const escapes = { "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r" };
     return escapes[character] ?? `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
   });
   const warnings = [];
-  for (const entry of Array.isArray(report.workspaces) ? report.workspaces : []) {
+  for (const entry of Array.isArray(inventory.workspaces) ? inventory.workspaces : []) {
     const receipt = entry?.receipt;
     if (!receipt || typeof receipt !== "object") continue;
     const workspaceId = typeof receipt.workspaceId === "string" ? receipt.workspaceId : "unknown";
@@ -165,11 +182,11 @@ export function formatWorktreeLifecycleWarnings(report) {
     if (stateCode) warnings.push(`[warning] ${stateCode} ${workspaceId} ${path}`.trimEnd());
     if (entry.identity === false) warnings.push(`[warning] MANAGED_WORKSPACE_IDENTITY_MISMATCH ${workspaceId} ${path}`.trimEnd());
   }
-  for (const entry of Array.isArray(report.orphanRegistrations) ? report.orphanRegistrations : []) {
+  for (const entry of Array.isArray(inventory.orphanRegistrations) ? inventory.orphanRegistrations : []) {
     const path = typeof entry?.path === "string" ? escapeSingleLine(entry.path) : "";
     warnings.push(`[warning] MANAGED_WORKSPACE_ORPHAN_REGISTRATION ${path}`.trimEnd());
   }
-  for (const entry of Array.isArray(report.legacy) ? report.legacy : []) {
+  for (const entry of Array.isArray(inventory.legacy) ? inventory.legacy : []) {
     if (entry?.status !== "untrusted-legacy") continue;
     const path = typeof entry.path === "string" ? escapeSingleLine(entry.path) : "";
     warnings.push(`[warning] MANAGED_WORKSPACE_UNTRUSTED_LEGACY ${path}`.trimEnd());
@@ -179,6 +196,7 @@ export function formatWorktreeLifecycleWarnings(report) {
 
 export async function inspectConfiguration(repoRoot, options = {}) {
   const issues = [];
+  if (options.coordinatorAudit) issues.push(...inspectCoordinatorDoctor(options.coordinatorAudit));
   issues.push(...await inspectSubagentRuntime({ cwd: repoRoot, requests: options.subagentRequests, discovery: options.subagentDiscovery }));
   let desired = new Map();
   try {
@@ -408,8 +426,8 @@ const isMain = process.argv[1] && import.meta.url === pathToFileURL(resolve(proc
 if (isMain) {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   try {
-    const issues = await inspectConfiguration(repoRoot);
     const lifecycle = await inspectWorktreeLifecycle(repoRoot);
+    const issues = await inspectConfiguration(repoRoot, { coordinatorAudit: lifecycle });
     for (const warning of formatWorktreeLifecycleWarnings(lifecycle)) console.warn(warning);
     if (issues.length === 0) {
       console.log("[ok] Pi Skill allowlist extension is ready");

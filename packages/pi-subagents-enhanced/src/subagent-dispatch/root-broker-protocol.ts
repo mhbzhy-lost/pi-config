@@ -12,8 +12,8 @@ const ERROR_MESSAGE_LIMIT = 1024;
 export const BROKER_FRAME_LIMIT_BYTES = 64 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
-const METHODS = Object.freeze(["ping", "subscribe", "acceptance.submit"] as const);
-const PUSH_TYPES = Object.freeze(["root.closing", "subscription.ready"] as const);
+const METHODS = Object.freeze(["ping", "subscribe", "acceptance.submit", "coordinator.register"] as const);
+const PUSH_TYPES = Object.freeze(["root.closing", "subscription.ready", "recovery.event"] as const);
 const BROKER_CAPABILITIES = Object.freeze(["acceptance.submit", "root.subscribe"] as const);
 const PROCESS_TERMINAL_STATES = Object.freeze(["pending", "observed", "unknown", "not-started"] as const);
 const PROCESS_TERMINAL_REASONS = Object.freeze([
@@ -29,6 +29,13 @@ const PROCESS_TERMINAL_REASONS = Object.freeze([
 ] as const);
 
 export const BROKER_METHODS = METHODS;
+
+export const BROKER_REGISTRATION_METHOD = "coordinator.register" as const;
+export const COORDINATOR_OPERATIONS = Object.freeze([
+  "enqueue", "await_admission", "report_conflict", "publish", "fail",
+  "inspect_integration_state", "preserve_integration_debt",
+  "prepare_auto_integration", "inspect_auto_integration", "advance_auto_integration",
+] as const);
 
 export type BrokerMethod = (typeof METHODS)[number];
 export type BrokerRequest = {
@@ -78,6 +85,16 @@ export type BrokerResponseIdentity = {
   rootSessionId?: string;
   callerRunId?: string;
 };
+export type CoordinatorChallenge = {
+  nonce: string;
+  repositoryId: string;
+  coordinatorInstanceId: string;
+};
+export type CoordinatorChallengeProof = CoordinatorChallenge & {
+  rootSessionId: string;
+  brokerPid: number;
+  brokerProcessIdentity: string;
+};
 
 export class BrokerProtocolError extends Error {
   constructor(message) {
@@ -117,6 +134,11 @@ function identity(value, name) {
 
 function callerToken(value) {
   if (typeof value !== "string" || !TOKEN_PATTERN.test(value)) fail("callerToken must be 64 lowercase hexadecimal characters");
+  return value;
+}
+
+function digestToken(value, name) {
+  if (typeof value !== "string" || !TOKEN_PATTERN.test(value)) fail(`${name} must be 64 lowercase hexadecimal characters`);
   return value;
 }
 
@@ -192,6 +214,33 @@ function acceptanceParams(value) {
     changedFiles.add(file);
   }
   return params;
+}
+
+function coordinatorParams(value: any) {
+  const operation = boundedString(value.operation, "params.operation", 64);
+  if (!(COORDINATOR_OPERATIONS as readonly string[]).includes(operation)) fail("params.operation is unsupported");
+  const input = record(value.input, "params.input");
+  const requireString = (name: string) => boundedString(input[name], `params.input.${name}`, 4096);
+  if (operation === "enqueue") {
+    exactObject(input, "params.input", ["requestId", "authorizedWorkspaceHead", "targetRef"]);
+    requireString("requestId"); requireString("authorizedWorkspaceHead"); requireString("targetRef");
+    if (!/^[a-f0-9]{40}$/.test(input.authorizedWorkspaceHead)) fail("params.input.authorizedWorkspaceHead must be a Git commit");
+  } else if (operation === "await_admission") {
+    exactObject(input, "params.input", ["queueItemId"]); requireString("queueItemId");
+  } else if (operation === "report_conflict") {
+    exactObject(input, "params.input", ["queueItemId", "queueLeaseId"]); requireString("queueItemId"); requireString("queueLeaseId");
+  } else if (operation === "publish") {
+    exactObject(input, "params.input", ["queueItemId", "queueLeaseId", "candidateHead"]);
+    requireString("queueItemId"); requireString("queueLeaseId"); requireString("candidateHead");
+  } else if (operation === "fail") {
+    exactObject(input, "params.input", ["queueItemId", "queueLeaseId", "retry"]);
+    requireString("queueItemId"); requireString("queueLeaseId");
+    if (typeof input.retry !== "boolean") fail("params.input.retry must be a boolean");
+  } else if (operation === "prepare_auto_integration" || operation === "inspect_auto_integration" || operation === "advance_auto_integration") {
+    exactObject(input, "params.input", []);
+  } else {
+    exactObject(input, "params.input", []);
+  }
 }
 
 function exactOptionalObject(value, name, required, optional = []) {
@@ -326,8 +375,19 @@ export function parseBrokerRequest(value) {
   identity(request.rootSessionId, "rootSessionId");
   identity(request.callerRunId, "callerRunId");
   callerToken(request.callerToken);
-  if (typeof request.method !== "string" || !METHODS.includes(request.method)) fail("request.method is unsupported");
+  if (typeof request.method !== "string" || (!METHODS.includes(request.method) && request.method !== "coordinator.request")) fail("request.method is unsupported");
   if (request.method === "acceptance.submit") acceptanceParams(request.params);
+  else if (request.method === BROKER_REGISTRATION_METHOD) {
+    const params = exactObject(request.params, "params", ["nonce", "repositoryId", "coordinatorInstanceId"]);
+    digestToken(params.nonce, "params.nonce");
+    digestToken(params.repositoryId, "params.repositoryId");
+    identity(params.coordinatorInstanceId, "params.coordinatorInstanceId");
+    if (request.callerToken !== params.nonce) fail("coordinator challenge token must equal nonce");
+    if (request.callerRunId !== params.coordinatorInstanceId) fail("coordinator challenge caller must equal coordinator instance");
+  } else if (request.method === "coordinator.request") {
+    const params = exactObject(request.params, "params", ["operation", "input"]);
+    coordinatorParams(params);
+  }
   else exactObject(request.params, "params", []);
   try {
     const size = Buffer.byteLength(`${JSON.stringify(request)}\n`, "utf8");
@@ -339,13 +399,39 @@ export function parseBrokerRequest(value) {
   return request;
 }
 
+export function parseCoordinatorChallengeProof(value: unknown, expected: CoordinatorChallenge & { rootSessionId: string; brokerPid: number; brokerProcessIdentity: string }): CoordinatorChallengeProof {
+  const proof = exactObject(value, "coordinator challenge proof", ["nonce", "rootSessionId", "brokerPid", "brokerProcessIdentity", "repositoryId", "coordinatorInstanceId"]);
+  digestToken(proof.nonce, "proof.nonce");
+  identity(proof.rootSessionId, "proof.rootSessionId");
+  if (!Number.isSafeInteger(proof.brokerPid) || proof.brokerPid <= 0) fail("proof.brokerPid must be a positive safe integer");
+  digestToken(proof.brokerProcessIdentity, "proof.brokerProcessIdentity");
+  digestToken(proof.repositoryId, "proof.repositoryId");
+  identity(proof.coordinatorInstanceId, "proof.coordinatorInstanceId");
+  for (const key of ["nonce", "rootSessionId", "brokerPid", "brokerProcessIdentity", "repositoryId", "coordinatorInstanceId"] as const) {
+    if (proof[key] !== expected[key]) fail(`proof.${key} does not match challenge registry`);
+  }
+  return proof as CoordinatorChallengeProof;
+}
+
+const RECOVERY_EVENT_DATA_FIELDS = Object.freeze([
+  "schemaVersion", "rootSessionId", "recoveryIntentId", "queueItemId", "workspaceId",
+  "ownerScope", "runId", "attempt", "reason", "requiredAction", "generation", "delivery",
+]);
+
 export function parseBrokerPush(value) {
   const push = exactObject(value, "push", ["schemaVersion", "rootSessionId", "callerRunId", "type", "data"]);
   if (push.schemaVersion !== PUSH_SCHEMA_VERSION) fail("push.schemaVersion is unsupported");
   identity(push.rootSessionId, "rootSessionId");
   identity(push.callerRunId, "callerRunId");
   if (typeof push.type !== "string" || !PUSH_TYPES.includes(push.type)) fail("push.type is unsupported");
-  exactObject(push.data, "push.data", []);
+  // recovery.event 携带 recovery-event.v1 data 负载（见 server publishRecoveryEvent）；
+  // 其余 push 类型保持无 data 的原协议形态。
+  if (push.type === "recovery.event") {
+    const data = exactObject(push.data, "push.data", RECOVERY_EVENT_DATA_FIELDS);
+    if (data.schemaVersion !== "recovery-event.v1") fail("push.data.schemaVersion is unsupported");
+  } else {
+    exactObject(push.data, "push.data", []);
+  }
   assertPushFrameSize(push);
   return push;
 }

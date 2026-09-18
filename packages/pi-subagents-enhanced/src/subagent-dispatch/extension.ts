@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { compileCodingDispatchIR, CodingDispatchContractError, renderCodingDispatchPrompt } from "../contracts/dispatch-ir.ts";
-import { createManagedWorkspaceRequest } from "../workspace/contract.ts";
+import { createManagedWorkspaceRequestV2 } from "../workspace/contract.ts";
 import { findManagedWorkspaceService } from "../workspace/registry.ts";
 import { createSubagentWorkspaceTool } from "../workspace/tool.ts";
 import { createTypedSubagentRpcClient } from "./rpc-client.ts";
@@ -18,6 +18,7 @@ import { resolveModelSelection, type ModelSelectionWarning } from "./model-selec
 import { createRunAuthorization } from "./run-authorization.ts";
 import { createAuthorizedDispatch } from "./execution-contract.ts";
 import { dispatchExecution, createGenericDispatchAdapter, createCodingDispatchAdapter } from "./execution.ts";
+import { createSubagentRpcFailureDetails } from "./errors.ts";
 
 const CLEANUP_KEY = "__typedSubagentRuntimeCleanup";
 const SHUTDOWN_DEBT_KEY = "__typedSubagentRuntimeShutdownDebt";
@@ -40,29 +41,22 @@ const looseArray = { type: "array" };
 // Host 唯一决定 coding 执行超时；模型不得通过 public ABI 提供 timeoutMs。
 const HOST_CODING_TIMEOUT_MS = 30 * 60_000;
 
-const CODING_SCHEMA = {
+// 根节点保持显式单一 object：glm/zai 等严格 OpenAI 兼容端对顶层联合组合子
+// （anyOf/oneOf/allOf）会生成空 arguments（docs/bugs/2026-09-14-glm-empty-tool-args-from-root-union-schema.md）。
+// 分支互斥由 runtime 路由（action→control、version→coding、其余→generic）与
+// compileCodingDispatchIR 的 keypath 诊断权威裁决；schema 只引导字段集与类型。
+// 冲突字段显式合并：title 取宽上限、context 为字段级联合、acceptance 宽松交由分支裁决。
+export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
   type: "object",
   additionalProperties: false,
-  required: [
-    "version",
-    "taskId",
-    "title",
-    "agent",
-    "risk",
-    "objective",
-    "workflow",
-    "requirements",
-    "context",
-    "boundaries",
-    "acceptance",
-    "execution",
-  ],
   properties: {
+    // coding（dispatch-ir.v1）分支字段
     version: { const: "dispatch-ir.v1" },
     taskId: { type: "string", pattern: "^[A-Za-z0-9._-]{1,160}$" },
     title: { type: "string", minLength: 1, maxLength: 4096 },
     agent: { type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\u0000-\\u001F\\u007F-\\u009F]*[^\\s\\u0000-\\u001F\\u007F-\\u009F][^\\u0000-\\u001F\\u007F-\\u009F]*$" },
     model: { type: "string", minLength: 1, maxLength: 512, pattern: ".*\\S.*" },
+    thinkingLevel: { enum: ["minimal", "low", "medium", "high", "xhigh", "max"] },
     risk: { enum: ["low", "normal", "high"] },
     objective: { type: "string", minLength: 1, maxLength: 4096 },
     requirements: runtimeValidated({ ...stringList, minItems: 1 }, looseArray),
@@ -75,34 +69,48 @@ const CODING_SCHEMA = {
         reason: { type: "string", minLength: 1, maxLength: 4096 },
       },
     }, looseObject),
-    context: runtimeValidated({
-      type: "object",
-      additionalProperties: false,
-      required: ["knownFacts", "decisions", "relevantFiles"],
-      properties: {
-        knownFacts: stringList,
-        decisions: stringList,
-        relevantFiles: pathList,
-      },
-    }, looseObject),
+    context: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["knownFacts", "decisions", "relevantFiles"],
+          properties: {
+            knownFacts: stringList,
+            decisions: stringList,
+            relevantFiles: pathList,
+          },
+        },
+        looseObject,
+        { type: "string" },
+        { enum: ["fresh", "fork"] },
+      ],
+    },
     boundaries: runtimeValidated({
       type: "object",
       additionalProperties: false,
       required: ["writePaths", "excludedWork", "forbiddenActions"],
       properties: {
-        writePaths: { ...pathList, minItems: 1 },
+        writePaths: pathList,
         excludedWork: stringList,
         forbiddenActions: stringList,
       },
     }, looseObject),
-    acceptance: runtimeValidated({
-      type: "object",
-      additionalProperties: false,
-      required: ["criteria"],
-      properties: {
-        criteria: { ...stringList, minItems: 1 },
-      },
-    }, looseObject),
+    acceptance: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["criteria"],
+          properties: {
+            criteria: { ...stringList, minItems: 1 },
+          },
+        },
+        looseObject,
+        { type: "array" },
+        { type: "string" },
+      ],
+    },
     execution: {
       anyOf: [
         {
@@ -116,24 +124,12 @@ const CODING_SCHEMA = {
         { type: "string" },
       ],
     },
-  },
-};
-
-const GENERIC_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["agent", "title", "task"],
-  properties: {
-    agent: { type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\u0000-\\u001F\\u007F-\\u009F]*[^\\s\\u0000-\\u001F\\u007F-\\u009F][^\\u0000-\\u001F\\u007F-\\u009F]*$" },
-    title: { type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\r\\n\\u0000-\\u001F\\u007F-\\u009F]+$" },
+    // generic 分支字段
     task: { type: "string", minLength: 1, maxLength: 65536 },
-    context: { enum: ["fresh", "fork"] },
     cwd: { type: "string", minLength: 1, maxLength: 4096 },
-    model: { type: "string", minLength: 1, maxLength: 512, pattern: ".*\\S.*" },
     output: { anyOf: [{ type: "string", minLength: 1 }, { const: false }] },
     outputMode: { enum: ["inline", "file-only"] },
     outputSchema: { type: "object", additionalProperties: true },
-    acceptance: {},
     artifacts: { type: "boolean" },
     progress: { type: "boolean" },
     worktree: { type: "boolean" },
@@ -150,14 +146,7 @@ const GENERIC_SCHEMA = {
         { type: "boolean" },
       ],
     },
-  },
-};
-
-const CONTROL_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["action"],
-  properties: {
+    // control 分支字段
     action: { enum: ["status", "steer", "interrupt", "resume", "stop"] },
     id: { type: "string", minLength: 1, maxLength: 4096 },
     runId: { type: "string", minLength: 1, maxLength: 4096 },
@@ -165,11 +154,6 @@ const CONTROL_SCHEMA = {
     index: { type: "integer", minimum: 0 },
     message: { type: "string", minLength: 1, maxLength: 65536 },
   },
-};
-
-export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
-  type: "object",
-  anyOf: [CODING_SCHEMA, GENERIC_SCHEMA, CONTROL_SCHEMA],
 });
 
 export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime.
@@ -179,7 +163,8 @@ For coding work, provide the complete dispatch-ir.v1 contract; free-form task di
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 const TRACE_PHASES = new Set([
   "tool-entered", "agent-discovery-started", "agent-discovery-finished", "rpc-ping-sent", "rpc-ping-replied",
-  "rpc-spawn-sent", "rpc-spawn-replied", "leaf-wait-started", "leaf-wait-finished", "tool-returned", "tool-failed",
+  "rpc-spawn-sent", "rpc-spawn-replied", "leaf-wait-started", "leaf-wait-finished", "grant-created", "grant-failed",
+  "tool-returned", "tool-failed",
 ]);
 const WORKING_STATE_EVENTS = new Set([
   "host-idle", "completion-received", "ownership-match", "ownership-mismatch", "send-message",
@@ -220,6 +205,8 @@ export function createSubagentDispatchTraceFileSink(file = process.env.PI_SUBAGE
         ...(typeof entry.rootRunId === "string" ? { rootRunId: entry.rootRunId } : {}),
         ...(typeof entry.leafRunId === "string" ? { leafRunId: entry.leafRunId } : {}),
         ...(typeof entry.errorCode === "string" ? { errorCode: entry.errorCode } : {}),
+        ...(typeof entry.stage === "string" ? { stage: entry.stage } : {}),
+        ...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
       }
       : typeof entry.hostSessionId === "string" && typeof entry.completionOwnerId === "string" && WORKING_STATE_EVENTS.has(entry.event)
         ? {
@@ -369,20 +356,27 @@ const CODING_ACCEPTANCE_EVIDENCE = Object.freeze([
 ]);
 const ROOT_SESSION_OWNER_EXTENSION = fileURLToPath(new URL("../../child-extensions/root-session-owner.ts", import.meta.url));
 const ACCEPTANCE_EVIDENCE_EXTENSION = fileURLToPath(new URL("../../child-extensions/acceptance-evidence.ts", import.meta.url));
+const INTEGRATION_QUEUE_EXTENSION = fileURLToPath(new URL("../../child-extensions/integration-queue.ts", import.meta.url));
 
-function codingWorkflowSpawnParams(ir, prompt, workflowKey, goalTicket) {
+export function codingWorkflowSpawnParams(ir, prompt, workflowKey, goalTicket?) {
   return buildWorkflowSpawn({
     workflowKey,
     agent: ir.agent,
     task: prompt,
-    cwd: ir.execution.cwd,
+    orchestratorCwd: ir.orchestratorCwd ?? ir.execution.cwd,
+    childCwd: ir.execution.cwd,
     context: "fresh",
     timeoutMs: ir.execution.timeoutMs,
     child: {
       output: false,
       timeoutMs: ir.execution.timeoutMs,
-      subagentOnlyExtensions: [ROOT_SESSION_OWNER_EXTENSION, ...(goalTicket ? [ACCEPTANCE_EVIDENCE_EXTENSION] : [])],
+      subagentOnlyExtensions: [
+        ROOT_SESSION_OWNER_EXTENSION,
+        ...(ir.execution.worktree === true ? [INTEGRATION_QUEUE_EXTENSION] : []),
+        ...(goalTicket ? [ACCEPTANCE_EVIDENCE_EXTENSION] : []),
+      ],
       ...(ir.model === undefined ? {} : { model: ir.model }),
+      ...(ir.thinkingLevel === undefined ? {} : { thinking: ir.thinkingLevel }),
     },
     acceptance: {
       criteria: ir.acceptance.criteria,
@@ -392,14 +386,17 @@ function codingWorkflowSpawnParams(ir, prompt, workflowKey, goalTicket) {
 }
 
 function genericWorkflowSpawnParams(input, ctx, workflowKey) {
-  const child = {};
+  const child: Record<string, unknown> = {};
   for (const key of ["model", "output", "outputMode", "outputSchema", "skill", "reads", "progress", "acceptance"]) {
     if (input[key] !== undefined) child[key] = input[key];
   }
+  if (input.thinkingLevel !== undefined) child.thinking = input.thinkingLevel;
   return buildWorkflowSpawn({
     workflowKey,
     agent: input.agent,
     task: input.task,
+    orchestratorCwd: input.orchestratorCwd ?? input.cwd ?? ctx.cwd,
+    childCwd: input.childCwd,
     cwd: input.cwd ?? ctx.cwd,
     context: input.context ?? "fresh",
     artifacts: input.artifacts ?? true,
@@ -585,7 +582,7 @@ function codingRunAuthorization(binding, ticket) {
 }
 
 async function hostAuthorizedDispatch(request, { workspace, rootSessionId, sessionId, dispatchId }) {
-  let root = workspace?.dispatchCwd ?? request.cwd;
+  let root = workspace?.originRoot ?? request.orchestratorCwd ?? request.cwd;
   try { root = realpathSync(root); } catch { root = realpathSync(process.cwd()); }
   const authorization = createRunAuthorization({
     kind: request.contractHash ? "coding" : "generic",
@@ -632,6 +629,15 @@ function requireWorkspaceService(pi, configured, rootSessionId) {
   return service;
 }
 
+// Every allocation — standalone or Goal-ticket — is created through the v2
+// request codec so the proof settlement chain (v2 status/action/discard) is
+// reachable on every real Auto Integration workspace. v1 is not a creation
+// shape anymore.
+function standaloneWorkspacePolicy(kind, writePaths) {
+  if (kind !== "coding") return { publication: "forbidden", application: "forbidden", writePaths: [] };
+  return { publication: "allowed", application: "allowed", writePaths };
+}
+
 async function standaloneWorkspaceRequest({ input, ctx, toolCallId, kind, contractHash, createId, resolveCanonicalOrigin, resolveRootSessionId, inspectWorkspaceSource }) {
   if (typeof resolveRootSessionId !== "function") {
     const error = new Error("WORKSPACE_SESSION_ID_UNAVAILABLE"); error.code = "WORKSPACE_SESSION_ID_UNAVAILABLE"; throw error;
@@ -646,7 +652,7 @@ async function standaloneWorkspaceRequest({ input, ctx, toolCallId, kind, contra
   try { canonicalRequestedCwd = realpathSync(requestedCwd); } catch { /* injected/fake origins may not exist until the service allocates them */ }
   const originRoot = await resolveCanonicalOrigin({ requestedCwd: canonicalRequestedCwd, ctx });
   const source = await inspectWorkspaceSource({ originRoot, requestedCwd, ctx });
-  return createManagedWorkspaceRequest({
+  return createManagedWorkspaceRequestV2({
     workspaceId: createId(),
     owner: { kind: "standalone-subagent", rootSessionId, toolCallId: canonicalStandaloneToolCallId(toolCallId) },
     originRoot,
@@ -654,8 +660,7 @@ async function standaloneWorkspaceRequest({ input, ctx, toolCallId, kind, contra
     originRef: source.originRef,
     baseCommit: source.baseCommit,
     contractHash: contractHash ?? genericContractHash(input, requestedCwd),
-    mode: kind,
-    writePaths: kind === "coding" ? input.boundaries.writePaths : [],
+    policy: standaloneWorkspacePolicy(kind, kind === "coding" ? input.boundaries.writePaths : []),
   });
 }
 
@@ -705,6 +710,12 @@ export function preparePublicCodingDispatch(input, { cwd, timeoutMs }) {
 }
 
 async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, configuredWorkspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun, inspectWorkspaceSource, discover, trace, providerBlacklist) {
+  // thinkingLevel 是执行参数而非任务合同：不进入 IR/contractHash，
+  // 只透传到 spawn 的 child.thinking（与 model 选择器同一消费层）。
+  // resolver 与 Goal ticket 仍接收 raw contract 原引用，仅在 compile 入口剥离。
+  const dispatchThinkingLevel = typeof input.thinkingLevel === "string" ? input.thinkingLevel : undefined;
+  const { thinkingLevel: strippedThinkingLevel, ...compileInput } = input;
+  void strippedThinkingLevel;
   const rootSessionId = typeof resolveRootSessionId === "function" ? resolveRootSessionId(ctx.sessionManager) : undefined;
   const goalCoordinator = configuredGoalCoordinator ?? findGoalRunCoordinator(pi, rootSessionId);
   // The Host coordinator is the production contract preflight.  It must run
@@ -714,7 +725,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   if (callerSuppliesExecutionTimeout(input)) {
     // Goal trusted contract: keep the caller-shaped timeout and its canonical
     // hash, but continue only when the Goal coordinator signs a ticket.
-    ir = compileCodingDispatchIR(input, { cwd: ctx.cwd });
+    ir = compileCodingDispatchIR(compileInput, { cwd: ctx.cwd });
     const bindingRequest = { toolCallId, contract: input, contractHash: ir.hash, ctx };
     ticket = await goalCoordinator?.prepareSpawn(bindingRequest);
     if (!ticket) {
@@ -726,7 +737,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
       );
     }
   } else {
-    ir = preparePublicCodingDispatch(input, { cwd: ctx.cwd, timeoutMs: HOST_CODING_TIMEOUT_MS });
+    ir = preparePublicCodingDispatch(compileInput, { cwd: ctx.cwd, timeoutMs: HOST_CODING_TIMEOUT_MS });
     const bindingRequest = { toolCallId, contract: input, contractHash: ir.hash, ctx };
     ticket = await goalCoordinator?.prepareSpawn(bindingRequest);
   }
@@ -739,7 +750,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
       error.code = "RUN_BINDING_MISMATCH";
       throw error;
     }
-    workspaceRequest = createManagedWorkspaceRequest(ticket.workspaceRequest);
+    workspaceRequest = createManagedWorkspaceRequestV2(ticket.workspaceRequest);
     if (workspaceRequest.owner.kind !== "goal-task" || workspaceRequest.contractHash !== selectedIr.hash) {
       const error = new Error("Goal run workspace request does not match the source contract");
       error.code = "RUN_BINDING_MISMATCH";
@@ -749,15 +760,19 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     workspaceRequest = await standaloneWorkspaceRequest({ input, ctx, toolCallId, kind: "coding", contractHash: selectedIr.hash, createId, resolveCanonicalOrigin, resolveRootSessionId, inspectWorkspaceSource });
   }
   const workspaceService = workspaceRequest ? requireWorkspaceService(pi, configuredWorkspaceService, rootSessionId) : undefined;
+  trace.stage = "preallocate";
   let workspace = workspaceRequest ? await workspaceService.ensureAllocated(workspaceRequest) : undefined;
   if (ticket) {
     await goalCoordinator.workspaceAllocated(ticket, workspace);
     await goalCoordinator.confirmSpawn(ticket, workspace);
   }
-  const runtimeIr = workspace ? { ...selectedIr, execution: { ...selectedIr.execution, cwd: workspace.dispatchCwd, worktree: true } } : selectedIr;
+  const orchestratorCwd = workspace?.originRoot ?? ctx.cwd;
+  const runtimeIr = workspace ? { ...selectedIr, execution: { ...selectedIr.execution, cwd: workspace.dispatchCwd, worktree: true }, orchestratorCwd } : selectedIr;
   const runtimePrompt = renderCodingDispatchPrompt(runtimeIr);
+  trace.stage = "rpc-ping";
   const capabilities = await rpc.ping({ diagnostic: { toolCallId, sink: trace } });
-  assertSpawnCapabilities(capabilities, ctx.cwd);
+  trace.stage = "workflow-spawn";
+  assertSpawnCapabilities(capabilities, orchestratorCwd);
   trace.parentSessionId = lifecycleSessionIdentity(capabilities.session);
   await prepareCodingSpawn(runtimeIr, ticket);
   titleRegistry.prepare({ agent: runtimeIr.agent, task: runtimePrompt, title: runtimeIr.title });
@@ -794,6 +809,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   const authorizedDispatch = await hostAuthorizedDispatch(codingRequest, {
     workspace, rootSessionId, sessionId: lifecycleSessionIdentity(capabilities.session), dispatchId,
   });
+  trace.stage = "workflow-spawn";
   const binding = await dispatchExecution(codingRequest, {
     workspace,
     authorizedDispatch,
@@ -802,11 +818,12 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
       agent: ir.agent,
       sessionId: lifecycleSessionIdentity(capabilities.session),
       timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, ir.execution.timeoutMs),
-      params: codingWorkflowSpawnParams(runtimeIr, runtimePrompt, workflowKey, ticket),
+      params: codingWorkflowSpawnParams(dispatchThinkingLevel === undefined ? runtimeIr : { ...runtimeIr, thinkingLevel: dispatchThinkingLevel }, runtimePrompt, workflowKey, ticket),
       identity,
       titleRegistry,
       trace,
       onBinding: (observed) => {
+        trace.stage = "child-binding";
         authoritativeBinding = {
           runId: observed.runId, asyncDir: observed.asyncDir, sessionId: observed.sessionId,
           pid: observed.pid, agentProfile: observed.agent,
@@ -816,20 +833,40 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
           error.code = "RUN_BINDING_MISMATCH";
           throw error;
         }
-        // Only an authorized, bound Goal run may request Goal settlement proof.
-        // Ordinary coding has no Goal authority and therefore no facade-proof gate.
-        if (ticket) {
+        // Managed coding children need Root subscribe authority for integration;
+        // only a Host ticket may add Goal settlement authority.
+        if (workspace) {
           if (typeof registerAuthorizedRun !== "function") {
             const error = new Error("FACADE_PROOF_UNAVAILABLE");
             error.code = "FACADE_PROOF_UNAVAILABLE";
             throw error;
           }
-          authorizationRegistration = Promise.resolve(registerAuthorizedRun(codingRunAuthorization(authoritativeBinding, ticket)));
+          const owner = workspace.owner;
+          if (authoritativeBinding.agentProfile !== runtimeIr.agent
+              || authoritativeBinding.sessionId !== lifecycleSessionIdentity(capabilities.session)
+              || !owner || (owner.kind !== "standalone-subagent" && owner.kind !== "goal-task")
+              || owner.rootSessionId !== rootSessionId) {
+            const error = new Error("Managed coding authorization does not match the authoritative Host binding");
+            error.code = "RUN_BINDING_MISMATCH";
+            throw error;
+          }
+          trace.stage = "grant-registration";
+          try {
+            authorizationRegistration = Promise.resolve(registerAuthorizedRun(codingRunAuthorization(authoritativeBinding, ticket)))
+              .then(() => { trace("grant-created", { stage: "grant-registration", timestamp: new Date().toISOString() }); })
+              .catch((error) => {
+                trace("grant-failed", { stage: "grant-registration", timestamp: new Date().toISOString(), errorCode: error?.code ?? "GRANT_REGISTRATION_FAILED" });
+                throw error;
+              });
+          } catch (error) {
+            trace("grant-failed", { stage: "grant-registration", timestamp: new Date().toISOString(), errorCode: error?.code ?? "GRANT_REGISTRATION_FAILED" });
+            throw error;
+          }
         }
       },
     }),
   });
-  if (ticket) {
+  if (workspace) {
     if (!authorizationRegistration) {
       const error = new Error("FACADE_PROOF_UNAVAILABLE");
       error.code = "FACADE_PROOF_UNAVAILABLE";
@@ -838,6 +875,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     await authorizationRegistration;
   }
   if (workspace) {
+    trace.stage = "bind-run";
     workspace = await workspaceService.bindRun({ workspaceId: workspace.workspaceId, run: binding });
   }
   if (ticket) {
@@ -871,6 +909,12 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     return failure("INVALID_CONTRACT", "caller must not supply top-level timeoutMs; keypath=timeoutMs", undefined, "timeoutMs");
   }
   if (!nonempty(input.agent) || !nonempty(input.task) || !nonempty(input.title)) {
+    // 缺 version 的 coding 合同会被静默路由到 generic 分支；含 coding 特征
+    // 字段的输入必须得到指向真实原因的自诊断报错，而非误导性的
+    // generic agent/title/task 错误（实际派发事故复盘 2026-09-15）。
+    if (Object.hasOwn(input, "taskId") || Object.hasOwn(input, "objective") || Object.hasOwn(input, "workflow")) {
+      return failure("INVALID_CODING_ROUTER", "input resembles a coding contract but is missing version: \"dispatch-ir.v1\"; coding dispatch routes on the version field");
+    }
     return failure("INVALID_GENERIC_DISPATCH", "generic dispatch requires non-empty agent, title, and task");
   }
   const normalizedInput = { ...input, agent: normalizeAgentProfile(input.agent) };
@@ -892,9 +936,12 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     : undefined;
   const rootSessionId = typeof resolveRootSessionId === "function" ? resolveRootSessionId(ctx.sessionManager) : undefined;
   const workspaceService = workspaceRequest ? requireWorkspaceService(pi, configuredWorkspaceService, rootSessionId) : undefined;
+  trace.stage = "preallocate";
   let workspace = workspaceRequest ? await workspaceService.ensureAllocated(workspaceRequest) : undefined;
+  const orchestratorCwd = workspace?.originRoot ?? ctx.cwd;
+  trace.stage = "rpc-ping";
   const capabilities = await rpc.ping({ diagnostic: { toolCallId, sink: trace } });
-  assertSpawnCapabilities(capabilities, ctx.cwd);
+  assertSpawnCapabilities(capabilities, orchestratorCwd);
   trace.parentSessionId = lifecycleSessionIdentity(capabilities.session);
   titleRegistry.prepare({ agent: normalizedInput.agent, task: normalizedInput.task, title });
   const workflowKey = `typed-${createId()}`;
@@ -916,6 +963,7 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
   const authorizedDispatch = await hostAuthorizedDispatch(genericRequest, {
     workspace, rootSessionId, sessionId: lifecycleSessionIdentity(capabilities.session), dispatchId: createId(),
   });
+  trace.stage = "workflow-spawn";
   const binding = await dispatchExecution(genericRequest, {
     workspace,
     authorizedDispatch,
@@ -926,13 +974,15 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
       timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, 120_000),
       params: genericWorkflowSpawnParams({
         ...(workspace ? { ...selectedInput, cwd: workspace.dispatchCwd } : selectedInput),
+        ...(workspace ? { orchestratorCwd, childCwd: workspace.dispatchCwd } : {}),
         // The shared adapter owns the canonical five-section generic prompt.
         task: genericRequest.prompt,
       }, ctx, workflowKey),
       titleRegistry,
       trace,
       onBinding: (observed) => {
-        authoritativeBinding = observed;
+          trace.stage = "child-binding";
+          authoritativeBinding = observed;
         if (workspace) {
           if (typeof registerAuthorizedRun !== "function") {
             const error = new Error("FACADE_PROOF_UNAVAILABLE");
@@ -951,6 +1001,7 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
       throw error;
     }
     await authorizationRegistration;
+    trace.stage = "bind-run";
     workspace = await workspaceService.bindRun({ workspaceId: workspace.workspaceId, run: binding });
   }
   titleRegistry.remember(binding.runId, title);
@@ -1266,8 +1317,16 @@ export function createTypedSubagentExtension(
       } catch (error) {
         const code = error?.code
           ?? (error instanceof CodingDispatchContractError ? error.code : "SUBAGENT_RPC_FAILED");
-        trace("tool-failed", { errorCode: code });
-        return failure(code, error instanceof Error ? error.message : String(error), error?.detail, error?.keypath);
+        const isRpcFailure = code === "SUBAGENT_RPC_FAILED" || typeof error?.operation === "string";
+        const details = isRpcFailure
+          ? createSubagentRpcFailureDetails({
+            taskId: input?.taskId, toolCallId, stage: trace.stage,
+            rpcOperation: error?.operation ?? (trace.stage === "rpc-ping" ? "ping" : trace.stage === "workflow-spawn" ? "spawn" : trace.stage),
+            error,
+          })
+          : error?.detail;
+        trace("tool-failed", { errorCode: code, ...(isRpcFailure ? details : {}) });
+        return failure(code, error instanceof Error ? error.message : String(error), details, error?.keypath);
       }
     },
   };

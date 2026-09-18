@@ -7,10 +7,12 @@ const SOURCE = Object.freeze({ extension: "typed-subagent-runtime" });
 
 export class TypedSubagentRpcError extends Error {
   code: string;
-  constructor(code, message) {
+  operation: string;
+  constructor(code, message, operation = "unknown") {
     super(message);
     this.name = "TypedSubagentRpcError";
     this.code = code;
+    this.operation = operation;
   }
 }
 
@@ -102,7 +104,7 @@ export function createTypedSubagentRpcClient(
             reject,
             new TypedSubagentRpcError(
               "protocol_error",
-              `unexpected typed subagent RPC reply version: ${reply?.version}`,
+              `unexpected typed subagent RPC reply version: ${reply?.version}`, method,
             ),
           );
           return;
@@ -112,7 +114,7 @@ export function createTypedSubagentRpcClient(
             reject,
             new TypedSubagentRpcError(
               "protocol_error",
-              `unexpected typed subagent RPC reply request id: ${reply.requestId}`,
+              `unexpected typed subagent RPC reply request id: ${reply.requestId}`, method,
             ),
           );
           return;
@@ -126,7 +128,7 @@ export function createTypedSubagentRpcClient(
           reject,
           new TypedSubagentRpcError(
             reply.error?.code ?? "execution_failed",
-            reply.error?.message ?? "typed subagent RPC failed",
+            reply.error?.message ?? "typed subagent RPC failed", method,
           ),
         );
       }) ?? (() => {});
@@ -138,7 +140,7 @@ export function createTypedSubagentRpcClient(
       };
       pending.set(requestId, entry);
       timeout = setTimeout(
-        () => entry.reject(new TypedSubagentRpcError("timeout", `typed subagent RPC ${method} timed out`)),
+        () => entry.reject(new TypedSubagentRpcError("timeout", `typed subagent RPC ${method} timed out`, method)),
         timeoutMs,
       );
       trace(`rpc-${method}-sent`);

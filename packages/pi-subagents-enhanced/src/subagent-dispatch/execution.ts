@@ -16,6 +16,7 @@ export type DispatchExecutionRequest = Readonly<{
   cwd: string;
   model?: string;
   contractHash?: string;
+  orchestratorCwd?: string;
 }>;
 
 export type DispatchExecutionDependencies = Readonly<{
