@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createManagedWorkspaceRequest } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -28,20 +27,6 @@ async function fixture(t) {
   git(originRoot, "commit", "-m", "initial");
   t.after(() => rm(root, { recursive: true, force: true }));
   return { originRoot, root, baseCommit: git(originRoot, "rev-parse", "HEAD") };
-}
-
-function request(fixture, workspaceId) {
-  return createManagedWorkspaceRequest({
-    workspaceId,
-    owner: { kind: "standalone-subagent", rootSessionId: "root-1", toolCallId: `tool-${workspaceId}` },
-    originRoot: fixture.originRoot,
-    requestedCwd: join(fixture.originRoot, "src"),
-    originRef: "refs/heads/main",
-    baseCommit: fixture.baseCommit,
-    contractHash: hash("a"),
-    mode: "coding",
-    writePaths: ["src/**"],
-  });
 }
 
 function v2Request(fixture, workspaceId, baseCommit) {
@@ -67,30 +52,6 @@ test("requires a public v2 policy codec before creating a publishable lease", as
     assert.equal(requestV2.baseCommit, baseCommit, "v2 policy codec must accept 40- and 64-character commit identities");
     assert.equal(requestV2.policy.application, "allowed");
   }
-});
-
-test("keeps a v1 lease on frozen dispositions without publish or apply authority", async (t) => {
-  const f = await fixture(t);
-  const service = createManagedWorkspaceService({ stateRoot: join(f.root, "state") });
-  const active = service.ensureAllocated(request(f, "frozen-v1"));
-  const status = service.status({ workspaceId: active.workspaceId });
-
-  assert.equal(active.schemaVersion, "managed-workspace.v1");
-  assert.equal(Object.hasOwn(active, "policy"), false);
-  assert.equal(Object.hasOwn(active, "publication"), false);
-  assert.equal(Object.hasOwn(active, "application"), false);
-  assert.deepEqual(status.allowedDispositions, ["discard", "preserve"]);
-  assert.equal(status.allowedDispositions.includes("publish"), false);
-  assert.equal(status.allowedDispositions.includes("apply"), false);
-  const issued = service.issueDisposition({ workspaceId: active.workspaceId });
-  const preserved = service.dispose({
-    workspaceId: active.workspaceId,
-    disposition: "preserve",
-    reason: "v1 disposition remains frozen",
-    actionToken: issued.actionToken,
-  });
-  assert.deepEqual(preserved.disposition, { action: "preserve", reason: "v1 disposition remains frozen" });
-  assert.equal(service.release({ workspaceId: active.workspaceId }).state, "released");
 });
 
 test("publishes and applies only an observed v2 lease through status and action tokens", async (t) => {

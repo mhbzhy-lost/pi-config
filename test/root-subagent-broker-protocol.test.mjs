@@ -31,8 +31,8 @@ const request = (method = "ping") => ({
   params: {},
 });
 
-test("broker accepts only direct-owner health and subscription requests", () => {
-  assert.deepEqual([...BROKER_METHODS], ["ping", "subscribe", "acceptance.submit"]);
+test("broker accepts only direct-owner operations and coordinator registration challenge", () => {
+  assert.deepEqual([...BROKER_METHODS], ["ping", "subscribe", "acceptance.submit", "coordinator.register"]);
   assert.equal(Object.isFrozen(BROKER_METHODS), true);
   assert.deepEqual(parseBrokerRequest(request("ping")), request("ping"));
   assert.deepEqual(parseBrokerRequest(request("subscribe")), request("subscribe"));
@@ -63,6 +63,29 @@ test("broker rejects unknown request fields and unsafe identities", () => {
   assert.throws(() => parseBrokerRequest({ ...request(), extra: true }), /unknown field/);
   assert.throws(() => parseBrokerRequest({ ...request(), callerRunId: "../executor" }), /safe non-path identity/);
   assert.throws(() => parseBrokerRequest({ ...request(), callerToken: "short" }), /64 lowercase hexadecimal/);
+});
+
+test("broker coordinator requests accept exact child integration and completion guard operations", () => {
+  const inputs = {
+    enqueue: { requestId: "tool-call", authorizedWorkspaceHead: "a".repeat(40), targetRef: "refs/heads/main" },
+    await_admission: { queueItemId: "queue-1" },
+    report_conflict: { queueItemId: "queue-1", queueLeaseId: "lease-1" },
+    publish: { queueItemId: "queue-1", queueLeaseId: "lease-1", candidateHead: "b".repeat(40) },
+    fail: { queueItemId: "queue-1", queueLeaseId: "lease-1", retry: false },
+    inspect_integration_state: {},
+    preserve_integration_debt: {},
+  };
+  for (const [operation, input] of Object.entries(inputs)) {
+    const value = { ...request("coordinator.request"), params: { operation, input } };
+    assert.deepEqual(parseBrokerRequest(value), value, operation);
+    assert.throws(() => parseBrokerRequest({ ...value, params: { operation, input: { ...input, workspaceId: "forged" } } }), BrokerProtocolError, operation);
+  }
+  for (const params of [
+    { operation: "listOwned", input: {} },
+    { operation: "enqueueIntegration", input: inputs.enqueue },
+    { operation: "enqueue", input: null },
+    { operation: "enqueue", input: { requestId: "tool-call", authorizedWorkspaceHead: "bad", targetRef: "refs/heads/main" } },
+  ]) assert.throws(() => parseBrokerRequest({ ...request("coordinator.request"), params }), BrokerProtocolError);
 });
 
 test("legacy grants are read-only normalized into canonical capabilities", async () => {

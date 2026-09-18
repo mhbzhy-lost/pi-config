@@ -115,6 +115,35 @@ test("compiles one safe checked leaf workflow without public direct-execution fi
   assert.equal(Object.hasOwn(started[0].params.acceptance, "verify"), false);
 });
 
+test("separates orchestrator root cwd from managed leaf cwd", async () => {
+  const request = buildWorkflowSpawn({
+    workflowKey: "typed-managed-1", agent: "executor", task: "inspect", orchestratorCwd: "/repo", childCwd: "/state/worktrees/managed",
+    context: "fresh", child: { output: false },
+  });
+  assert.equal(request.cwd, "/repo");
+  const started = [];
+  await runInNewContext(`(async () => {\n${request.workflowScript}\n})()`, {
+    runs: { async run(key, params) { started.push({ key, params }); return { key }; } },
+  });
+  assert.equal(started[0].params.cwd, "/state/worktrees/managed");
+  assert.equal(started[0].params.worktree, false);
+});
+
+test("managed coding child controls carry the integration extension without exposing it to other leaves", async () => {
+  const integration = "/package/child-extensions/integration-queue.ts";
+  const managed = buildWorkflowSpawn({
+    workflowKey: "typed-managed-tool", agent: "executor", task: "implement", cwd: "/repo", context: "fresh",
+    child: { output: false, subagentOnlyExtensions: [integration] },
+  });
+  const generic = buildWorkflowSpawn({
+    workflowKey: "typed-generic-tool", agent: "reviewer", task: "review", cwd: "/repo", context: "fresh", child: { output: false },
+  });
+  const managedLeaf = JSON.parse(managed.workflowScript.match(/, (.*)\);$/s)[1]);
+  const genericLeaf = JSON.parse(generic.workflowScript.match(/, (.*)\);$/s)[1]);
+  assert.deepEqual(managedLeaf.subagentOnlyExtensions, [integration]);
+  assert.equal(Object.hasOwn(genericLeaf, "subagentOnlyExtensions"), false);
+});
+
 test("keeps supported generic execution controls inside the workflow leaf", async () => {
   const request = buildWorkflowSpawn({
     workflowKey: "typed-generic-1",

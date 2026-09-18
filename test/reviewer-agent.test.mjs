@@ -35,8 +35,8 @@ test("reviewer and executor profiles keep configuration out of their operating i
   const reviewerBody = reviewer.split("---\n").at(-1);
   const executorBody = executor.split("---\n").at(-1);
 
-  assert.match(reviewer, /^models:\n  - openai-codex\/gpt-6-astra\n  - codex-pool\/gpt-5\.6-sol\nthinking: xhigh/m);
-  assert.match(executor, /^models:\n  - codex-pool\/gpt-5\.6-terra\n  - openai-codex\/gpt-5\.6-terra\n  - codex-pool\/gpt-5\.6-luna\n  - openai-codex\/gpt-5\.6-luna\nthinking: medium/m);
+  assert.match(reviewer, /^models:\n  - openai-codex\/gpt-6-astra\n  - codex-pool\/gpt-5\.6-sol\n  - qoder-pool\/GLM-5\.3-0\.6x\n  - zai-coding-cn\/glm-5\.3\nthinking: xhigh/m);
+  assert.match(executor, /^models:\n  - codex-pool\/gpt-5\.6-terra\n  - openai-codex\/gpt-5\.6-terra\n  - qoder-pool\/GLM-5\.3-Flash-0\.1x\n  - qoder-pool\/Qwen3\.8-Flash-0\.04x\n  - zai-coding-cn\/glm-5\.3-flash\n  - codex-pool\/gpt-5\.6-luna\n  - openai-codex\/gpt-5\.6-luna\nthinking: medium/m);
   assert.doesNotMatch(executor, /^\s*- deepseek\//m);
   const subagentConfig = JSON.parse(await readFile(new URL("../pi/extensions/subagent/config.json", import.meta.url), "utf8"));
   assert.deepEqual(subagentConfig.providerBlacklist, ["deepseek"]);

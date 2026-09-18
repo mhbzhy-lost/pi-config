@@ -42,51 +42,76 @@ function installHeadlessTypedSubagentRuntime(pi, options = {}) {
   });
 }
 
-function richFacadeTerminalSnapshot(overrides = {}) {
+function executionProofV2Snapshot(overrides = {}) {
   return {
-    runId: "leaf-run",
-    state: "observed",
-    proofHash: "d".repeat(64),
-    proof: { version: 1, runId: "leaf-run", state: "observed" },
-    conflict: false,
+    schemaVersion: "root-broker.execution-proof.v2",
+    binding: { rootSessionId: "root-1", runId: "leaf-run", asyncDir: "/tmp/async", sessionId: "s", pid: 42, agentProfile: "executor" },
+    authorization: { state: "verified" },
+    capabilities: ["root.subscribe"],
+    terminal: {
+      proofId: "d".repeat(64),
+      observedAt: 1,
+      outcome: "succeeded",
+      proof: { version: 1, runId: "leaf-run", runnerProcessInstanceId: "pi-1", instances: [] },
+    },
+    terminalConflict: false,
     ...overrides,
   };
 }
 
-test("workspace terminal proof adapter returns pending without a bound run or observed snapshot", () => {
-  assert.deepEqual(projectManagedWorkspaceTerminalProof(null, richFacadeTerminalSnapshot()), { state: "pending" });
+test("workspace terminal proof adapter returns pending without a bound run or observed terminal", () => {
+  assert.deepEqual(projectManagedWorkspaceTerminalProof(null, executionProofV2Snapshot()), { state: "pending" });
   assert.deepEqual(projectManagedWorkspaceTerminalProof({ runId: "leaf-run" }, null), { state: "pending" });
   assert.deepEqual(projectManagedWorkspaceTerminalProof(
     { runId: "leaf-run" },
-    richFacadeTerminalSnapshot({ state: "pending", proofHash: null, proof: null }),
+    executionProofV2Snapshot({ terminal: null }),
   ), { state: "pending" });
 });
 
-test("workspace terminal proof adapter projects a production rich observed snapshot to the strict codec", () => {
-  assert.deepEqual(
-    projectManagedWorkspaceTerminalProof({ runId: "leaf-run" }, richFacadeTerminalSnapshot()),
-    { state: "observed", conflict: false, proofHash: "d".repeat(64) },
-  );
+test("workspace terminal proof adapter projects execution-proof.v2 snapshots to the v2 seven-field codec", () => {
+  // v2 ledger 的 proof 校验要求 {state,conflict,runId,rootSessionId,asyncDir,processInstance,proofId}；
+  // 投影曾输出 v1 三字段（proofHash 伪装 proofId），使 v2 workspace 终结后 subagent_worktree status 报 MANAGED_WORKSPACE_TERMINAL。
+  const snapshot = executionProofV2Snapshot({ terminal: { proofId: "a".repeat(64), observedAt: 1, outcome: "succeeded", proof: { version: 1, runId: "leaf-run", runnerProcessInstanceId: "pi-1", instances: [] } } });
+  assert.deepEqual(projectManagedWorkspaceTerminalProof({ runId: "leaf-run" }, snapshot), {
+    state: "observed",
+    conflict: false,
+    runId: "leaf-run",
+    rootSessionId: "root-1",
+    asyncDir: "/tmp/async",
+    processInstance: "pi-1",
+    proofId: "a".repeat(64),
+  });
 });
 
 test("workspace terminal proof adapter preserves an observed broker conflict", () => {
+  const snapshot = executionProofV2Snapshot({ terminalConflict: true });
   assert.deepEqual(
-    projectManagedWorkspaceTerminalProof(
-      { runId: "leaf-run" },
-      richFacadeTerminalSnapshot({ conflict: true, proofHash: "e".repeat(64) }),
-    ),
-    { state: "observed", conflict: true, proofHash: "e".repeat(64) },
+    projectManagedWorkspaceTerminalProof({ runId: "leaf-run" }, snapshot),
+    {
+      state: "observed",
+      conflict: true,
+      runId: "leaf-run",
+      rootSessionId: "root-1",
+      asyncDir: "/tmp/async",
+      processInstance: "pi-1",
+      proofId: "d".repeat(64),
+    },
   );
 });
 
-test("workspace terminal proof adapter rejects malformed observed broker snapshots", () => {
+test("workspace terminal proof adapter rejects malformed snapshots and the removed v1 facade shape", () => {
   assert.throws(
     () => projectManagedWorkspaceTerminalProof(
       { runId: "leaf-run" },
-      richFacadeTerminalSnapshot({ conflict: undefined, proofHash: "not-a-proof-hash" }),
+      executionProofV2Snapshot({ terminalConflict: undefined, terminal: { proofId: "not-a-proof-hash", observedAt: 1, outcome: "succeeded", proof: { version: 1, runId: "leaf-run", instances: [] } } }),
     ),
     (error) => error?.code === "MANAGED_WORKSPACE_TERMINAL_PROOF_ADAPTER"
       && error.message === "observed facade terminal proof is invalid",
+  );
+  // v1 三字段 facade 形态已随 v1 全删：非 v2 envelope 的 snapshot 必须 fail closed。
+  assert.throws(
+    () => projectManagedWorkspaceTerminalProof({ runId: "leaf-run" }, { runId: "leaf-run", state: "observed", conflict: false, proofHash: "d".repeat(64), proof: null }),
+    (error) => error?.code === "MANAGED_WORKSPACE_TERMINAL_PROOF_ADAPTER",
   );
 });
 
@@ -181,7 +206,7 @@ function codingContract(overrides = {}) {
 
 function managedReceipt(overrides = {}) {
   return {
-    schemaVersion: "managed-workspace.v1",
+    schemaVersion: "managed-workspace.v2",
     workspaceId: "workspace-1",
     leaseId: "c".repeat(64),
     owner: { kind: "standalone-subagent", rootSessionId: "root-1", toolCallId: "tool-1" },
@@ -194,8 +219,11 @@ function managedReceipt(overrides = {}) {
     branchRef: "refs/heads/pi-managed/workspace-1",
     state: "active",
     run: { runId: "run-1", asyncDir: "/tmp/run-1" },
-    disposition: null,
     cleanupDebt: null,
+    policy: { publication: "allowed", application: "allowed", writePaths: ["pi/extensions/subagent-runtime.ts"] },
+    publishedArtifact: null,
+    application: null,
+    terminalProof: null,
     ...overrides,
   };
 }
@@ -859,11 +887,16 @@ test("project subagent schema exposes an object root to OpenAI-compatible provid
     cleanupStore: {},
   });
 
+  // 根节点必须是显式单一 object：deepseek 要求顶层 type:object（历史 bug），
+  // glm 对顶层联合组合子生成空 arguments（docs/bugs/2026-09-14-glm-empty-tool-args-from-root-union-schema.md）。
+  // 分支字段以字段级联合形态内联在 properties 中。
   const schema = pi.tools[0].parameters;
   assert.equal(schema.type, "object");
-  assert.equal(schema.anyOf.length, 3);
-  for (const [index, branch] of schema.anyOf.entries()) {
-    assert.equal(branch.type, "object", `anyOf branch ${index} must expose an object root`);
+  for (const combinator of ["anyOf", "oneOf", "allOf"]) {
+    assert.equal(schema[combinator], undefined, `root must not use ${combinator}`);
+  }
+  for (const field of ["version", "taskId", "task", "action", "execution", "worktree"]) {
+    assert.ok(schema.properties[field], `flattened root must keep the ${field} field for its branch`);
   }
 });
 
@@ -1232,7 +1265,11 @@ test("compiles a non-coding agent prompt into one workflow leaf without rewritin
     assert.equal(Object.hasOwn(spawn.params, key), false, `${key} must not reach public RPC spawn`);
   }
   assert.equal(spawn.params.workflowScript.includes(task), false, "task must be JSON-escaped inside the workflow script");
-  assert.match(spawn.params.workflowScript, /Review exactly this diff\.\\nPreserve this whitespace/);
+  const workflowRun = spawn.params.workflowScript.match(/^return await runs\.run\("typed-generic-1", (.+)\);$/);
+  assert.ok(workflowRun, "workflow script must contain a serialized child leaf");
+  const leaf = JSON.parse(workflowRun[1]);
+  const expectedLeafTask = "# Generic Subagent Prompt\n\n## Task\n\"Review exactly this diff.\\nPreserve this whitespace.\"\n\n## Context\n_None declared._\n\n## Constraints\n_None declared._\n\n## Deliverable\n\"Review the diff\"\n\n## Done\n1. \"Subagent reports completion.\"";
+  assert.equal(leaf.task, expectedLeafTask);
   assert.equal(result.details.runId, "leaf-review-1");
   assert.equal(result.details.asyncDir, "/tmp/leaf-review-1");
   assert.equal(result.details.title, "Review the diff");
@@ -1307,7 +1344,7 @@ test("subagent_worktree status exposes action token and blocked reasons", async 
     statusOwned() {
       return {
         receipt: managedReceipt(),
-        terminalProof: { state: "observed", conflict: false, proofHash: "d".repeat(64) },
+        terminalProof: { state: "observed", conflict: false, runId: "run-1", rootSessionId: "root-1", asyncDir: "/tmp/run-1", processInstance: "proc-1", proofId: "d".repeat(64) },
         allowedDispositions: ["preserve", "discard"],
         blockedReasons: ["no-commits"],
       };
@@ -1315,7 +1352,7 @@ test("subagent_worktree status exposes action token and blocked reasons", async 
     issueOwnedDisposition() {
       return {
         receipt: managedReceipt(),
-        terminalProof: { state: "observed", conflict: false, proofHash: "d".repeat(64) },
+        terminalProof: { state: "observed", conflict: false, runId: "run-1", rootSessionId: "root-1", asyncDir: "/tmp/run-1", processInstance: "proc-1", proofId: "d".repeat(64) },
         allowedDispositions: ["preserve", "discard"],
         actionToken: "once-token",
         blockedReasons: ["no-commits"],
@@ -1486,8 +1523,7 @@ test("does not bind a Goal executor ticket when the workflow root has no matchin
           originRef: "refs/heads/main",
           baseCommit: "b".repeat(40),
           contractHash: request.contractHash,
-          mode: "coding",
-          writePaths: codingContract().boundaries.writePaths,
+          policy: { publication: "allowed", application: "allowed", writePaths: codingContract().boundaries.writePaths },
         };
         return { ...ticket, workspaceRequest };
       },
@@ -1502,6 +1538,89 @@ test("does not bind a Goal executor ticket when the workflow root has no matchin
   assert.equal(result.isError, true);
   assert.equal(result.details.code, "WORKFLOW_CHILD_START_TIMEOUT");
   assert.deepEqual(bound, []);
+});
+
+test("standalone managed coding registers minimal Host authority before binding the workspace", async () => {
+  const pi = createPi();
+  const order = [];
+  const registrations = [];
+  const diagnostics = [];
+  const rpc = createRpc({
+    async spawn(params) {
+      this.calls.push({ method: "spawn", params });
+      const [workflowKey, leaf] = JSON.parse(`[${params.workflowScript.match(/^return await runs\.run\((.*)\);$/s)[1]}]`);
+      queueMicrotask(() => pi.events.emit("subagent:async-started", {
+        parentWorkflowRunId: "workflow-managed", workflowKey, runId: "leaf-managed", asyncDir: "/tmp/leaf-managed",
+        sessionId: "session-1", pid: 4242, agent: leaf.agent,
+      }));
+      return { details: { runId: "workflow-managed", asyncDir: "/tmp/workflow-managed" } };
+    },
+  });
+  const workspaceService = {
+    ensureAllocated(request) { order.push("allocate"); return managedReceipt({ workspaceId: request.workspaceId, owner: request.owner, run: null }); },
+    bindRun({ run }) { order.push("bind"); return managedReceipt({ workspaceId: "standalone-managed", run }); },
+  };
+  createTypedSubagentExtension(pi, {
+    rpc, cleanupStore: {}, randomUUID: () => "standalone-managed", workspaceService,
+    resolveRootSessionId: () => "root-1", resolveCanonicalOrigin: async () => "/repo",
+    inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
+    async registerAuthorizedRun(authorization) { order.push("grant"); registrations.push(authorization); },
+    diagnosticSink(entry) { diagnostics.push(entry); },
+  });
+
+  const result = await execute(pi.tools[0], codingContract({ execution: { worktree: true } }), { cwd: "/repo", sessionManager: {} });
+
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.deepEqual(order, ["allocate", "grant", "bind"]);
+  assert.deepEqual(registrations.map(({ kind, capabilities, goal, binding }) => ({ kind, capabilities, goal, binding })), [{
+    kind: "coding", capabilities: ["root.subscribe"], goal: null,
+    binding: { runId: "leaf-managed", asyncDir: "/tmp/leaf-managed", sessionId: "session-1", pid: 4242, agentProfile: "executor" },
+  }]);
+  const created = diagnostics.find((entry) => entry.phase === "grant-created");
+  assert.equal(created.stage, "grant-registration");
+  assert.match(created.timestamp, /^\d{4}-\d{2}-\d{2}T/);
+  assert.doesNotMatch(JSON.stringify(created), /callerToken|token=/i);
+});
+
+test("standalone grant failure rejects dispatch, preserves the allocated workspace, and records redacted diagnostics", async () => {
+  const pi = createPi();
+  const diagnostics = [];
+  let bound = 0;
+  let allocated;
+  const rpc = createRpc({
+    async spawn(params) {
+      this.calls.push({ method: "spawn", params });
+      const [workflowKey, leaf] = JSON.parse(`[${params.workflowScript.match(/^return await runs\.run\((.*)\);$/s)[1]}]`);
+      queueMicrotask(() => pi.events.emit("subagent:async-started", {
+        parentWorkflowRunId: "workflow-denied", workflowKey, runId: "leaf-denied", asyncDir: "/tmp/leaf-denied",
+        sessionId: "session-1", pid: 4343, agent: leaf.agent,
+      }));
+      return { details: { runId: "workflow-denied", asyncDir: "/tmp/workflow-denied" } };
+    },
+  });
+  const workspaceService = {
+    ensureAllocated(request) { allocated = managedReceipt({ workspaceId: request.workspaceId, owner: request.owner, run: null }); return allocated; },
+    bindRun() { bound += 1; throw new Error("must not bind after grant failure"); },
+  };
+  createTypedSubagentExtension(pi, {
+    rpc, cleanupStore: {}, randomUUID: () => "standalone-denied", workspaceService,
+    resolveRootSessionId: () => "root-1", resolveCanonicalOrigin: async () => "/repo",
+    inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
+    registerAuthorizedRun() { throw Object.assign(new Error("grant writer unavailable token=secret"), { code: "GRANT_WRITE_FAILED" }); },
+    diagnosticSink(entry) { diagnostics.push(entry); },
+  });
+
+  const result = await execute(pi.tools[0], codingContract({ execution: { worktree: true } }), { cwd: "/repo", sessionManager: {} });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "GRANT_WRITE_FAILED");
+  assert.equal(bound, 0);
+  assert.equal(allocated.state, "active");
+  assert.equal(allocated.run, null);
+  const failed = diagnostics.find((entry) => entry.phase === "grant-failed");
+  assert.equal(failed.stage, "grant-registration");
+  assert.match(failed.timestamp, /^\d{4}-\d{2}-\d{2}T/);
+  assert.doesNotMatch(JSON.stringify(failed), /secret|callerToken|token=/i);
 });
 
 test("independent Pi runtimes do not dispose each other", () => {

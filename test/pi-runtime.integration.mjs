@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
-import { resolvePiCodingAgentRoot } from "./helpers/pi-runtime.mjs";
+import { createIsolatedHostRepository, resolvePiCodingAgentRoot } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const shellIntegration = join(repoRoot, "scripts", "pi-shell.zsh");
@@ -19,9 +19,14 @@ const piTypes = join(piRoot, "dist", "core", "extensions", "types.d.ts");
 test("configured enhanced local package registers one authoritative subagent tool owner", async () => {
   const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_CODING_WORKSPACE_DIR"];
   const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
-  const agentDir = await mkdtemp(join(tmpdir(), "pi-runtime-enhanced-"));
+  // The Host must start inside an isolated Git common-dir: the repository
+  // under test carries a live coordinator whose recorded state root is not
+  // this fixture's temporary workspace dir, so reusing it fails closed.
+  const { root, repository } = await createIsolatedHostRepository("pi-runtime-enhanced-");
+  const agentDir = join(root, "agent");
   let session;
   try {
+    await mkdir(agentDir);
     for (const name of markers) delete process.env[name];
     process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({
@@ -29,7 +34,7 @@ test("configured enhanced local package registers one authoritative subagent too
     }));
     const host = await import(pathToFileURL(piPackage).href);
     const resourceLoader = new host.DefaultResourceLoader({
-      cwd: repoRoot,
+      cwd: repository,
       agentDir,
       noSkills: true,
       noPromptTemplates: true,
@@ -38,10 +43,10 @@ test("configured enhanced local package registers one authoritative subagent too
     });
     await resourceLoader.reload();
     ({ session } = await host.createAgentSession({
-      cwd: repoRoot,
+      cwd: repository,
       agentDir,
       resourceLoader,
-      sessionManager: host.SessionManager.inMemory(repoRoot),
+      sessionManager: host.SessionManager.inMemory(repository),
     }));
     const errors = [];
     await session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { errors.push(error); } });
@@ -73,7 +78,7 @@ test("configured enhanced local package registers one authoritative subagent too
         session.dispose();
       }
     } finally {
-      await rm(agentDir, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
       for (const [name, value] of previousMarkers) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;

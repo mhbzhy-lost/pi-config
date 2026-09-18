@@ -94,7 +94,7 @@ test("schema accepts all fields stringified simultaneously", () => {
 });
 
 test("schema only defers malformed values with the expected coding field container kind", () => {
-  const objectFields = ["workflow", "context", "boundaries", "acceptance"];
+  const objectFields = ["workflow", "context", "boundaries"];
 
   for (const field of objectFields) {
     const malformed = validCodingContract();
@@ -106,6 +106,22 @@ test("schema only defers malformed values with the expected coding field contain
       invalid[field] = value;
       assert.equal(validator.Check(invalid), false, `${field} must reject ${value === null ? "null" : typeof value} at schema validation`);
     }
+  }
+
+  // acceptance 是 coding/generic 共享字段：generic 侧数组 constraints 是真实能力，
+  // 故宽松放行 object/array/string，由分支路由后的 IR/runtime 校验裁决形态。
+  const malformedAcceptance = validCodingContract();
+  malformedAcceptance.acceptance = { unexpected: [7] };
+  assert.equal(validator.Check(malformedAcceptance), true, "malformed acceptance object should reach IR validation");
+  for (const value of [["criterion"], "{\"criteria\":[\"ok\"]}"]) {
+    const shared = validCodingContract();
+    shared.acceptance = value;
+    assert.equal(validator.Check(shared), true, `acceptance ${JSON.stringify(value)} belongs to a shared branch`);
+  }
+  for (const value of [7, false, null]) {
+    const invalid = validCodingContract();
+    invalid.acceptance = value;
+    assert.equal(validator.Check(invalid), false, `acceptance must reject ${value === null ? "null" : typeof value} at schema validation`);
   }
 
   // execution 是严格 public 容器：没有 loose object 回退，也没有 caller timeout。
@@ -142,10 +158,12 @@ test("schema accepts non-empty coding model requests and rejects empty or retire
   assert.equal(validator.Check(retired), false);
 });
 
-test("schema still rejects contract missing required fields", () => {
+test("missing required fields pass the schema layer and are rejected by runtime routing", async () => {
+  // 根节点拍平后不再承担分支 required；缺 version 的合同被 runtime 路由到
+  // generic 分支并以 INVALID_GENERIC_DISPATCH 拒绝，不会静默成功。
   const input = validCodingContract();
   delete input.version;
-  assert.equal(validator.Check(input), false, "missing version should fail");
+  assert.equal(validator.Check(input), true, "flattened schema only guides field sets");
 });
 
 test("schema accepts arbitrary valid coding profiles and rejects invalid identities", () => {

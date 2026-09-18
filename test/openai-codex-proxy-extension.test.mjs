@@ -6,7 +6,16 @@ import test from "node:test";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 const { jiti } = await loadPiTestRuntime(import.meta.url);
-const { createOpenAICodexProxyExtension, loadOpenAICodexProxyConfig } = await jiti.import("../pi/extensions/openai-codex-proxy.ts");
+const {
+  createOpenAICodexProxyExtension,
+  loadCodexApi,
+  loadOpenAICodexProxyConfig,
+} = await jiti.import("../pi/extensions/openai-codex-proxy.ts");
+
+test("Codex proxy default API loader uses the public ESM compat export", async () => {
+  const api = await loadCodexApi();
+  assert.equal(typeof api.stream, "function");
+});
 
 test("Codex proxy config is loaded from the extension-owned JSON file", async () => {
   const root = await mkdtemp(join(tmpdir(), "openai-codex-proxy-config-"));
@@ -87,4 +96,16 @@ test("Codex proxy extension scopes proxy settings to the openai-codex stream", a
   assert.deepEqual(proxyFetches, ["http://127.0.0.1:7897"]);
   assert.equal(process.env.HTTP_PROXY, undefined);
   assert.equal(process.env.HTTPS_PROXY, undefined);
+});
+
+test("Codex proxy undici resolver works outside the Pi bundle process (node --test argv)", async () => {
+  // 复现 process-fleet-removal 场景：测试进程 argv[1] 不是 pi bundle、repo root
+  // 无本地 undici。resolver 必须仍能从 pi 包依赖树解析 undici。
+  const { hostPackageEntryForTest } = await jiti.import("../pi/extensions/openai-codex-proxy.ts");
+  assert.equal(typeof hostPackageEntryForTest, "function", "resolver 需可注入测试");
+  const url = hostPackageEntryForTest("undici", { inferredRoot: process.cwd() });
+  assert.match(url, /undici/);
+  const module = await import(url);
+  assert.equal(typeof module.fetch, "function");
+  assert.equal(typeof module.ProxyAgent, "function");
 });

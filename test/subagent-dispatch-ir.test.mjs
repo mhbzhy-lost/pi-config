@@ -7,6 +7,30 @@ import {
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts";
 import { compileCodingDispatchIR as compileRuntimeCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { renderCodingDispatchPrompt } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/prompt.ts";
+import { createSubagentRpcFailureDetails, sanitizeErrorRecord, SUBAGENT_RPC_STAGES } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/errors.ts";
+
+test("RPC failure diagnostics preserve safe stage/cause correlation", async () => {
+  assert.deepEqual(SUBAGENT_RPC_STAGES, ["preallocate", "rpc-ping", "workflow-spawn", "child-binding", "bind-run"]);
+  const results = await Promise.all(["a", "b", "c"].map(async (suffix) => createSubagentRpcFailureDetails({
+    taskId: `task-${suffix}`, toolCallId: `call-${suffix}`, stage: "rpc-ping", rpcOperation: "ping",
+    error: Object.assign(new Error(`/private/${suffix} prompt=secret`), { code: `E_${suffix}` }),
+  })));
+  assert.deepEqual(results.map((result) => [result.taskId, result.toolCallId, result.causeCode]), [
+    ["task-a", "call-a", "E_a"], ["task-b", "call-b", "E_b"], ["task-c", "call-c", "E_c"],
+  ]);
+  for (const result of results) {
+    assert.equal(result.stage, "rpc-ping");
+    assert.equal(result.rpcOperation, "ping");
+    assert.ok(result.causeMessage.length <= 500);
+    assert.doesNotMatch(result.causeMessage, /\/private|secret/);
+    assert.equal(Object.hasOwn(result, "arguments"), false);
+  }
+});
+
+test("T9 error record sanitizer retains only diagnostic whitelist", () => {
+  const result = sanitizeErrorRecord({ taskId: "t", toolCallId: "c", stage: "bind-run", rpcOperation: "bind-run", causeCode: "E_BIND", causeMessage: "safe", prompt: "private", arguments: { token: "secret" }, error: new Error("raw") });
+  assert.deepEqual(result, { taskId: "t", toolCallId: "c", stage: "bind-run", rpcOperation: "bind-run", causeCode: "E_BIND", causeMessage: "safe" });
+});
 
 function contract(overrides = {}) {
   const base = {

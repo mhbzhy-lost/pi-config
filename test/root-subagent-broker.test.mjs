@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { brokerGrantPath, brokerSocketPath, readBrokerGrant } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
+import { brokerGrantPath, brokerSocketPath, parseBrokerPush, readBrokerGrant } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 import { createBrokerFrameDecoder, createRootBrokerClient } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-client.ts";
@@ -26,6 +26,29 @@ class EventBus {
     await Promise.all([...this.handlers.get(type) ?? []].map((handler) => handler(value)));
   }
 }
+
+test("Root Broker replays pending recovery event when root attaches a subscription", () => {
+  const broker = new RootBrokerServer({ rootSessionId: "root-replay", upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} } });
+  const writes = [];
+  const socket = { destroyed: false, once(_event, handler) { this.closeHandler = handler; }, write(value) { writes.push(JSON.parse(value)); } };
+  const event = { recoveryIntentId: "intent-replay", queueItemId: "queue-replay", workspaceId: "workspace-replay", runId: "run-replay", ownerScope: { kind: "standalone-subagent", rootSessionId: "root-replay" }, attempt: 1, generation: 1, reason: "root restart", requiredAction: "preserve" };
+  assert.deepEqual(broker.publishRecoveryEvent(event), { state: "debt", reason: "root-not-subscribed" });
+  broker.registerSubscription("run-replay", socket);
+  broker.replayRecoveryNotifications("run-replay");
+  assert.equal(writes[0].type, "recovery.event");
+  assert.equal(writes[0].data.recoveryIntentId, "intent-replay");
+  assert.equal(writes[0].data.schemaVersion, "recovery-event.v1");
+});
+
+test("Root Broker recovery event is structured and offline delivery becomes replayable debt", () => {
+  const broker = new RootBrokerServer({ rootSessionId: "root-recovery", upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} } });
+  const event = { recoveryIntentId: "intent-1", queueItemId: "queue-1", workspaceId: "workspace-1", runId: "run-1", ownerScope: { kind: "standalone-subagent", rootSessionId: "root-recovery" }, attempt: 1, generation: 2, reason: "broker disconnected", requiredAction: "preserve" };
+  const result = broker.publishRecoveryEvent(event);
+  assert.deepEqual(result, { state: "debt", reason: "root-not-subscribed" });
+  assert.equal(broker.recoveryNotificationDebt.length, 1);
+  assert.equal(broker.recoveryNotifications[0].schemaVersion, "recovery-event.v1");
+  assert.equal("token" in broker.recoveryNotifications[0], false);
+});
 
 // Equivalent to upstream writeAtomicJson: an unspecified write mode followed by
 // same-directory atomic rename. Native Node refuses type stripping for TS below
@@ -135,6 +158,212 @@ test("Root broker grants, serves, and drains one directly owned Executor", async
   await assert.rejects(readBrokerGrant(rootSessionId, runId), { code: "ENOENT" });
   assert.equal(broker.teardown.released, true);
   client.dispose();
+});
+
+test("Root broker rolls back authorization when durable grant creation fails", async () => {
+  const rootSessionId = "root-grant-failure";
+  const runId = "executor-grant-failure";
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    captureProcessBirthIdentity: async () => "birth-grant-failure",
+    writeGrant: async () => { throw Object.assign(new Error("grant storage unavailable"), { code: "EIO" }); },
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+  });
+  const event = startedEvent(rootSessionId, runId);
+  await assert.rejects(authorize(broker, event), { code: "EIO" });
+  assert.equal(broker.ownedRuns.has(runId), false);
+  assert.equal(broker.principals.has(runId), false);
+  assert.equal(broker.authorizationGrants.has(runId), false);
+});
+
+test("Root broker authorizes all child integration operations by caller run and rejects foreign or revoked grants", async (t) => {
+  const rootSessionId = "root-coordinator-request";
+  const runId = "child-coordinator-request";
+  const calls = [];
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    writeGrant: async () => "/tmp/coordinator-request-grant",
+    captureProcessBirthIdentity: async () => "birth-coordinator-request",
+    coordinatorRequest: async (...args) => { calls.push(args); return { accepted: true }; },
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+  });
+  t.after(() => broker.closeRootSession().catch(() => undefined));
+  const event = startedEvent(rootSessionId, runId);
+  await authorize(broker, event);
+  await broker.observeStarted(event);
+  const token = broker.principals.get(runId).callerToken;
+  const inputs = {
+    enqueue: { requestId: "tool-call", authorizedWorkspaceHead: "a".repeat(40), targetRef: "refs/heads/main" },
+    await_admission: { queueItemId: "queue-1" },
+    report_conflict: { queueItemId: "queue-1", queueLeaseId: "lease-1" },
+    publish: { queueItemId: "queue-1", queueLeaseId: "lease-1", candidateHead: "b".repeat(40) },
+    fail: { queueItemId: "queue-1", queueLeaseId: "lease-1", retry: false },
+    inspect_integration_state: {},
+    preserve_integration_debt: {},
+  };
+  const dispatch = (callerRunId, callerToken, operation, input) => broker.dispatch({
+    schemaVersion: "pi-root-subagent-broker-request.v1", requestId: `request-${operation}`,
+    rootSessionId, callerRunId, callerToken, method: "coordinator.request", params: { operation, input },
+  }, {});
+  for (const [operation, input] of Object.entries(inputs)) {
+    assert.equal((await dispatch(runId, token, operation, input)).success, true, operation);
+    assert.equal((await dispatch("foreign-run", token, operation, input)).success, false, operation);
+  }
+  assert.equal(calls.length, 7);
+  assert.deepEqual(calls.map(([callerRunId, operation]) => [callerRunId, operation]), Object.keys(inputs).map((operation) => [runId, operation]));
+  broker.coordinatorRequest = undefined;
+  assert.equal((await dispatch(runId, token, "inspect_integration_state", {})).success, false);
+  assert.equal(broker.inspectIntegrationRequests(runId).debt.operation, "inspect_integration_state");
+  broker.revokedRuns.add(runId);
+  for (const [operation, input] of Object.entries(inputs)) assert.equal((await dispatch(runId, token, operation, input)).success, false, operation);
+  assert.equal(calls.length, 7);
+});
+
+test("Root broker keeps an owned child integration request alive across Root session close", async (t) => {
+  const rootSessionId = `root-integration-drain-${process.pid}-${Date.now()}`;
+  const runId = "child-integration-drain";
+  const grantPath = brokerGrantPath(rootSessionId, runId);
+  let releaseIntegration;
+  const integrationGate = new Promise((resolve) => { releaseIntegration = resolve; });
+  const coordinatorCalls = [];
+  let broker;
+  broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    captureProcessBirthIdentity: async () => "birth-integration-drain",
+    terminalTimeoutMs: 250,
+    integrationTimeoutMs: 5_000,
+    coordinatorRequest: async (callerRunId, operation, input) => {
+      coordinatorCalls.push({ callerRunId, operation, input });
+      await integrationGate;
+      return { accepted: true, operation };
+    },
+    upstream: {
+      async ping() { return {}; },
+      async stop(params) { broker.observeTerminal(observedProof(params.runId)); return { stopped: true }; },
+      async dispose() {},
+    },
+  });
+  let client;
+  t.after(async () => {
+    releaseIntegration();
+    client?.dispose();
+    await broker.closeRootSession().catch(() => undefined);
+    await rm(grantPath, { force: true });
+  });
+  await broker.start();
+  await authorize(broker, startedEvent(rootSessionId, runId));
+  await broker.observeStarted(startedEvent(rootSessionId, runId));
+  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 5_000 });
+
+  // The child still has an integration request in flight when the Root session
+  // begins to close. A premature drain tears down the broker transport and the
+  // child observes BROKER_DISCONNECTED for work the Root asked it to perform.
+  const inflight = client.coordinatorRequest("enqueue", {
+    requestId: "tool-call", authorizedWorkspaceHead: "a".repeat(40), targetRef: "refs/heads/main",
+  });
+  // Wait until the broker has accepted the request and started the (blocked)
+  // coordinator operation, so the request is genuinely in flight before close.
+  while (coordinatorCalls.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  const close = broker.closeRootSession();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  releaseIntegration();
+  // GREEN: the Root waits for the owned integration request to settle, so it
+  // completes. RED: the request rejects with BROKER_DISCONNECTED.
+  assert.deepEqual(await inflight, { accepted: true, operation: "enqueue" });
+  await close;
+  assert.equal(broker.teardown.released, true);
+  assert.deepEqual(coordinatorCalls.map((call) => call.operation), ["enqueue"]);
+});
+
+test("Root broker records integration debt and stays bounded when a child request cannot settle before close", async (t) => {
+  const rootSessionId = `root-integration-debt-${process.pid}-${Date.now()}`;
+  const runId = "child-integration-debt";
+  const grantPath = brokerGrantPath(rootSessionId, runId);
+  let releaseIntegration;
+  const integrationGate = new Promise((resolve) => { releaseIntegration = resolve; });
+  let broker;
+  broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    captureProcessBirthIdentity: async () => "birth-integration-debt",
+    terminalTimeoutMs: 250,
+    integrationTimeoutMs: 100,
+    coordinatorRequest: async () => { await integrationGate; return { accepted: true }; },
+    upstream: {
+      async ping() { return {}; },
+      async stop(params) { broker.observeTerminal(observedProof(params.runId)); return { stopped: true }; },
+      async dispose() {},
+    },
+  });
+  let client;
+  t.after(async () => {
+    releaseIntegration();
+    client?.dispose();
+    await broker.closeRootSession().catch(() => undefined);
+    await rm(grantPath, { force: true });
+  });
+  await broker.start();
+  await authorize(broker, startedEvent(rootSessionId, runId));
+  await broker.observeStarted(startedEvent(rootSessionId, runId));
+  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 5_000 });
+
+  const inflight = client.coordinatorRequest("enqueue", {
+    requestId: "tool-call", authorizedWorkspaceHead: "a".repeat(40), targetRef: "refs/heads/main",
+  });
+  // Attach a handler immediately so the bounded disconnect during close is not
+  // an unhandled rejection; the outcome is asserted after the close completes.
+  const inflightOutcome = inflight.then(() => undefined, (error) => error);
+  while (broker.inspectIntegrationRequests(runId).inflight.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  // The close deadline expires before the request settles; the broker records
+  // observable debt and proceeds instead of hanging forever.
+  await broker.closeRootSession();
+  const debt = broker.inspectIntegrationRequests(runId).debt;
+  assert.equal(debt.operation, "enqueue");
+  assert.match(debt.reason, /settle/i);
+  // The pending request is disconnected (a bounded outcome), never left hanging.
+  const outcome = await inflightOutcome;
+  assert.equal(outcome?.code, "BROKER_DISCONNECTED");
+  assert.equal(broker.teardown.released, true);
+});
+
+test("Root broker close is idempotent under duplicate close and leaves no residual transport", async (t) => {
+  const rootSessionId = `root-duplicate-close-${process.pid}-${Date.now()}`;
+  const runId = "child-duplicate-close";
+  const grantPath = brokerGrantPath(rootSessionId, runId);
+  let broker;
+  const disposeCalls = [];
+  broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    captureProcessBirthIdentity: async () => "birth-duplicate-close",
+    terminalTimeoutMs: 250,
+    upstream: {
+      async ping() { return {}; },
+      async stop(params) { broker.observeTerminal(observedProof(params.runId)); return { stopped: true }; },
+      async dispose() { disposeCalls.push("dispose"); },
+    },
+  });
+  let client;
+  t.after(async () => {
+    client?.dispose();
+    await broker.closeRootSession().catch(() => undefined);
+    await rm(grantPath, { force: true });
+  });
+  await broker.start();
+  await authorize(broker, startedEvent(rootSessionId, runId));
+  await broker.observeStarted(startedEvent(rootSessionId, runId));
+  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 500 });
+
+  await Promise.all([broker.closeRootSession(), broker.closeRootSession()]);
+  assert.equal(broker.teardown.released, true);
+  assert.deepEqual(disposeCalls, ["dispose"], "duplicate close tears down upstream exactly once");
+  assert.equal(broker.server, undefined, "the listening server is released");
+  assert.equal(broker.sockets.size, 0, "no residual accepted sockets");
+  assert.equal(broker.transportSockets.size, 0, "no residual transport sockets");
+  assert.equal(broker.integrationRequests.size, 0, "no residual integration tracking");
 });
 
 test("authenticated Executor submits bound acceptance evidence only after its durable context exists", async (t) => {
@@ -509,6 +738,34 @@ test("Root broker ignores untrusted started events and rejects binding drift", a
   assert.deepEqual(captures, [43210]);
 });
 
+test("authoritative terminal events are delivered to the proof sink exactly once", async (t) => {
+  const delivered = [];
+  const broker = new RootBrokerServer({
+    rootSessionId: "root-proof-sink",
+    lifecycleSessionId: "root-proof-sink",
+    captureProcessBirthIdentity: async () => "b".repeat(64),
+    writeGrant: async () => "/tmp/proof-sink-grant",
+    recordTerminalProof: (run, proof) => { delivered.push({ runId: run.runId, proof }); },
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+  });
+  t.after(() => broker.closeRootSession().catch(() => undefined));
+  const event = startedEvent("root-proof-sink", "proof-sink-run");
+  await broker.registerAuthorizedRun(createRunAuthorization({
+    kind: "coding",
+    binding: { runId: event.runId, asyncDir: event.asyncDir, sessionId: event.sessionId, pid: event.pid, agentProfile: event.agent },
+    goal: null,
+  }));
+  await broker.observeStarted(event);
+  const terminal = observedProof(event.runId);
+  const authoritativeEvent = { ...terminal, sessionId: event.sessionId, pid: event.pid, asyncDir: event.asyncDir, agent: event.agent };
+  broker.observeTerminal(authoritativeEvent);
+  broker.observeTerminal(authoritativeEvent);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].runId, event.runId);
+  assert.deepEqual(delivered[0].proof, { runId: event.runId, ...terminal });
+});
+
 test("Root broker registry exposes only bound sync snapshots and the canonical settlement reader", async () => {
   assert.equal(typeof rootBrokerRegistry.inspectRootBrokerExecutionProof, "function");
   assert.equal(typeof rootBrokerRegistry.inspectExecutionProofForSettlement, "function");
@@ -709,6 +966,33 @@ test("Root broker closes an accepted socket before waiting for failed startup tr
     clearTimeout(timeout);
   }
   assert.equal(broker.sockets.size, 0);
+});
+
+test("parseBrokerPush accepts recovery.event pushes with a recovery-event.v1 data payload", () => {
+  // server 的 publishRecoveryEvent 推送 data=recovery-event.v1（含 schemaVersion 等 12 字段）；
+  // client 侧 parseBrokerPush 曾强制 push.data 为空对象导致 BROKER_DISCONNECTED（R7 现场）。
+  const push = parseBrokerPush({
+    schemaVersion: "pi-root-subagent-broker-push.v1",
+    rootSessionId: "root-1",
+    callerRunId: "run-1",
+    type: "recovery.event",
+    data: {
+      schemaVersion: "recovery-event.v1",
+      rootSessionId: "root-1",
+      recoveryIntentId: "ri-1",
+      queueItemId: "qi-1",
+      workspaceId: "ws-1",
+      ownerScope: { kind: "standalone-subagent", rootSessionId: "root-1" },
+      runId: "run-1",
+      attempt: 1,
+      reason: "integration recovery required",
+      requiredAction: "preserve",
+      generation: 0,
+      delivery: { state: "delivered" },
+    },
+  });
+  assert.equal(push.type, "recovery.event");
+  assert.equal(push.data.schemaVersion, "recovery-event.v1");
 });
 
 test("broker frame decoder preserves split UTF-8 and rejects oversized frames", () => {
