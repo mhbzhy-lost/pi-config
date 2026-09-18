@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -28,12 +29,16 @@ export async function loadPublicPiModule({ globalNodeModules, resolveGlobalNodeM
   if (typeof resolvedRoot !== "string" || !resolvedRoot.trim()) {
     throw new Error("Pi public API requires a non-empty npm global module root");
   }
-  const moduleUrl = pathToFileURL(join(resolvedRoot.trimEnd(), "@earendil-works/pi-coding-agent/dist/index.js")).href;
-  return import(moduleUrl);
+  const packageRoot = join(resolvedRoot.trimEnd(), "@earendil-works", "pi-coding-agent");
+  const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+  const rootExport = manifest.exports?.["."];
+  const target = typeof rootExport === "string" ? rootExport : rootExport?.import ?? rootExport?.default ?? manifest.main;
+  if (typeof target !== "string") throw new Error("Pi public API package has no public root export");
+  return import(pathToFileURL(join(packageRoot, target)).href);
 }
 
 export const REQUIRED_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];
-export const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4"];
+export const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4", "0.85.1"];
 
 export async function assertBrowserTranscriptCompatibility({
   packageRoot,
