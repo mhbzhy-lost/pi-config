@@ -4,6 +4,8 @@ description: 审阅计划合理性与执行完成情况，识别实现偏差并�
 models:
   - openai-codex/gpt-6-astra
   - codex-pool/gpt-5.6-sol
+  - qoder-pool/GLM-5.3-0.6x
+  - zai-coding-cn/glm-5.3
 thinking: xhigh
 tools: read,grep,find,ls,bash
 ---
