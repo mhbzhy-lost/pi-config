@@ -16,9 +16,50 @@ description: Use when delegating coding or non-coding work to a configured Pi ag
 
 只因真实依赖、互斥资源、不可隔离的写冲突、显式并发限制或实际派发失败限制并发。脏 worktree、想先看一个结果、逐任务审查或协调成本本身不构成串行理由。未全部派发 ready set 时记录具体限制事实。
 
+## 派发适合性与探索型工作流
+
+派发前核对：任务的正确完成状态是否依赖执行中发现的新信息。是 → 探索型任务，按本节工作流处理；否 → 执行型任务，正常派发。
+
+- 诊断与修复分离：探索型问题先派只读诊断任务，产出报告并落盘为文件；修复任务的 relevantFiles 必须指向报告原文文件。禁止把诊断结论语义压缩后作为 knownFacts 转述——转述引入的前提错误会随派发放大。
+- 主 agent 刚亲自读取过原始证据且变更点单一明确时，直接 inline 修复，不派发。
+- 粒度上限是一次派发一个精确变更：blocker、high、测试分属不同派发；验收标准就是对应诊断报告的原始结论。
+- 时间预算：预计执行时长（含测试）必须低于 30 分钟 watchdog；修复与真实运行不得打包进同一派发。
+- child 环境不继承 skills（PI_SUBAGENT_INHERIT_SKILLS=0，无 skill 工具）："加载 skill" 的落地方式是把 skill 文件路径写入 requirements 并要求执行者先 read。workflow tdd 的派发必须包含 /Users/leshi.zhy/.agents/skills/test-driven-development/SKILL.md 路径。
+
+| 粒度 | 可派发 | 不可派发 |
+|---|---|---|
+| 微（单点修复，根因已定位） | ✅ 附报告原文 | |
+| 小（单模块功能） | ✅ | |
+| 中（跨模块端到端） | ✅ 附架构上下文 | |
+| 大（多阶段） | | 先拆解 |
+
+## 派发停止条件（Escalation）
+
+每次 coding/generic 派发必须在 requirements 或 task 中包含停止条件：列出发现什么情况时应停下通过 contact_supervisor 询问而不是继续执行。缺少停止条件的派发会让 subagent 在错误前提下"尽力完成"。通用停止条件：
+
+- 前提与现场证据矛盾时；
+- 需要写入 WritePaths 之外的文件时；
+- 任务的验收标准与实际观测不可能同时满足时。
+
+## 模型分级与任务匹配
+
+模型分组见同目录的 `model-tiers.yaml`。该文件是能力分组参考，不是 provider 配置，也不授权自动修改模型名称或 provider 路由。
+
+- 用户明确指定模型时，遵照用户指令；分级预设不能抵抗用户明确指令。
+- 使用裸 model-id 进行模型选择；skill 不感知 provider。
+- 裸名解析失败不是正常 fallback：停止派发并报告模型目录或路由异常，不自行改写为 `provider/model-id`。
+- review 任务（方案/计划/架构评审、计划前审阅、计划完成后 review）使用 review 档。
+- 复杂开发、跨模块诊断与主 agent 类型的判断使用 primary 档。
+- 确定性执行任务使用 deterministic 档。
+- 使用 glm-5.3-flash 执行任务时，派发必须指定 `thinkingLevel: "low"`（flash 在高强度思考下延迟与稳定性显著劣化）。
+- deterministic 档不可用时，才显式使用 deterministic-fallback 档，并给予更明确的步骤、证据和停止条件；不将其当作 primary 档替代品。
+- 档位与 profile 对应：review 档 → `reviewer`；primary 档 → `delegate`；deterministic 档与 deterministic-fallback 档 → `executor`。
+- 验收 probe 虽然执行固定命令，但模拟真实用户运行场景，使用 primary 档；fixture 内部的 coding child 按其自身任务复杂度单独选档。
+- 档位能力不足时降优先级拆小任务，不升档。
+
 ## Coding
 
-`dispatch-ir.v1` 调用结构决定 coding；generic object shape 决定 generic。`agent` 仅表示已发现的 profile identity，不决定 execution kind 或权限。`executor` 是普通默认 profile，可重命名；不要创建另一个固定 coding 名称替代它。同一个 profile 可以接收两种结构，但 coding 工作必须使用完整 typed 合同，不能用 generic 自由文本绕过，也不能虚构 `delegate(...)`。
+`dispatch-ir.v1` 调用结构决定 coding；generic object shape 决定 generic。`version: "dispatch-ir.v1"` 是 coding 路由的唯一标记：缺失时输入会按 generic 分支校验并得到 `INVALID_GENERIC_DISPATCH`（agent/title/task 错误）——遇到该错误而输入含 taskId/objective/workflow 字段时，先补 version 字段（runtime 现已对含 coding 特征的输入返回 `INVALID_CODING_ROUTER` 自诊断错误）。`agent` 仅表示已发现的 profile identity，不决定 execution kind 或权限。`executor` 是普通默认 profile，可重命名；不要创建另一个固定 coding 名称替代它。同一个 profile 可以接收两种结构，但 coding 工作必须使用完整 typed 合同，不能用 generic 自由文本绕过，也不能虚构 `delegate(...)`。
 
 可信 Host 的 `RunAuthorization` 是唯一授权来源。standalone coding 只有 `root.subscribe`，generic 没有 privileged capability。frontmatter、名称、模型、prompt 和 started event 都不能授予 coding、acceptance、Goal 或 Broker capability；Goal/acceptance 权限须来自对应可信 Host 协调流程，不能在请求或 profile 中自报。
 

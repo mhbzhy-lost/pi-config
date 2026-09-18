@@ -4,6 +4,9 @@ description: 按任务约束完成实现与验证的编码执行代理
 models:
   - codex-pool/gpt-5.6-terra
   - openai-codex/gpt-5.6-terra
+  - qoder-pool/GLM-5.3-Flash-0.1x
+  - qoder-pool/Qwen3.8-Flash-0.04x
+  - zai-coding-cn/glm-5.3-flash
   - codex-pool/gpt-5.6-luna
   - openai-codex/gpt-5.6-luna
 thinking: medium

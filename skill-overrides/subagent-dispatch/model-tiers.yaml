@@ -1,0 +1,51 @@
+version: 1
+
+# 模型能力分组参考。只描述逻辑模型名与任务适配，不描述 provider、凭据、
+# 自动 fallback 或强制路由；运行时路由由 dispatch-ir 模型合同决定。
+
+tiers:
+  review:
+    rank: 1
+    models:
+      - gpt-6-astra
+    suitable_for:
+      - 方案评审
+      - 计划评审
+      - 架构评审
+    unsuitable_for:
+      - 执行代码修改
+      - 大量工具调用
+      - 长时间测试或验收运行
+
+  primary:
+    rank: 2
+    models:
+      - gpt-5.6-sol
+      - glm-5.3
+    suitable_for:
+      - 复杂大型任务
+      - 跨模块 TDD 开发
+      - 源码级归因诊断
+      - 主 agent 类型的编排与判断
+
+  deterministic:
+    rank: 3
+    models:
+      - gpt-5.6-terra
+      - glm-5.3-flash
+    suitable_for:
+      - 固定命令执行
+      - 单元测试运行
+      - 固定文件读取
+      - 机械单点修改
+      - 格式化和结果整理
+
+  deterministic-fallback:
+    rank: 3
+    models:
+      - gpt-5.6-luna
+    suitable_for:
+      - deterministic 档模型不可用时的确定性任务
+    notes:
+      - 能力弱于 deterministic 档
+      - 需要更明确的步骤、证据和停止条件
