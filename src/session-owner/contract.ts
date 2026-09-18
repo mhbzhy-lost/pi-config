@@ -1,4 +1,5 @@
 import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ForkSource, LaunchReservation } from "./registry.ts";
@@ -149,7 +150,8 @@ export async function loadPublicSessionManager(input: Readonly<{ piBinary?: stri
   const root = input.packageRoot ?? (input.piBinary ? piPackageRoot(input.piBinary) : null);
   if (!root) return null;
   try {
-    const module = await import(pathToFileURL(resolve(root, "dist", "index.js")).href) as { SessionManager?: PiSessionManager };
+    const require = createRequire(pathToFileURL(resolve(root, "package.json")));
+    const module = await import(pathToFileURL(require.resolve("@earendil-works/pi-coding-agent")).href) as { SessionManager?: PiSessionManager };
     return module.SessionManager && typeof module.SessionManager.list === "function" ? module.SessionManager : null;
   } catch { return null; }
 }

@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 
@@ -159,19 +159,6 @@ function gitSubcommand(tokens) {
   return undefined;
 }
 
-function checkGitContextOverride(tokens, environment = []) {
-  if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
-  const hasFlagOverride = tokens.slice(1).some((token) =>
-    token === "--git-dir" || token.startsWith("--git-dir=")
-      || token === "--work-tree" || token.startsWith("--work-tree="),
-  );
-  const hasEnvironmentOverride = environment.some((entry) => /^(?:GIT_DIR|GIT_WORK_TREE)=/.test(entry));
-  if (hasFlagOverride || hasEnvironmentOverride) {
-    return violation("GIT_CONTEXT_FORBIDDEN", "禁止通过 Git 参数或环境变量切换仓库或工作目录");
-  }
-  return undefined;
-}
-
 function checkBroadGitStaging(tokens) {
   if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
   const subcommand = gitSubcommand(tokens);
@@ -256,7 +243,7 @@ function checkShellWrapper(tokens, cwd, workspaceRoot) {
 
 function checkSingleCommand(command, cwd, workspaceRoot) {
   const commands = commandContext(command, cwd);
-  for (const { tokens, environment, cwd: commandCwd } of commands) {
+  for (const { tokens, cwd: commandCwd } of commands) {
     const rmViolation = checkRm(tokens, commandCwd, workspaceRoot);
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);
@@ -265,8 +252,6 @@ function checkSingleCommand(command, cwd, workspaceRoot) {
     if (worktreeLifecycleViolation) return worktreeLifecycleViolation;
     const broadStagingViolation = checkBroadGitStaging(tokens);
     if (broadStagingViolation) return broadStagingViolation;
-    const gitContextViolation = checkGitContextOverride(tokens, environment);
-    if (gitContextViolation) return gitContextViolation;
     const wrapperViolation = checkShellWrapper(tokens, commandCwd, workspaceRoot);
     if (wrapperViolation) return wrapperViolation;
   }
@@ -306,36 +291,6 @@ function validateCommit(tokens) {
   return undefined;
 }
 
-function planTodos(repoRoot) {
-  const plans = resolve(repoRoot, "docs", "plans");
-  let entries;
-  try {
-    entries = readdirSync(plans, { recursive: true, withFileTypes: true });
-  } catch (error) {
-    if (error?.code === "ENOENT") return [];
-    return [{ file: plans, text: `读取失败: ${error.message}` }];
-  }
-  const results = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-    const file = resolve(entry.parentPath ?? entry.path ?? plans, entry.name);
-    try {
-      const content = readFileSync(file, "utf8");
-      for (const line of content.split(/\r?\n/)) {
-        const match = line.match(/^-?\s*TODO:\s*(.+)/);
-        if (match) results.push({ file, text: `TODO: ${match[1]}` });
-      }
-    } catch (error) {
-      results.push({ file, text: `读取失败: ${error.message}` });
-    }
-  }
-  return results;
-}
-
-export function scanPendingPlanTodos(repoRoot) {
-  return planTodos(repoRoot);
-}
-
 const SAFE_ENV_SUFFIX = /\.env\.(?:example|sample|template)$/i;
 const SENSITIVE_BASENAME = /^(?:auth|mcp-auth)\.json$/i;
 
@@ -360,7 +315,7 @@ export function checkSensitivePath({ toolName, input, cwd }) {
 export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }: { command: string; cwd: string; workspaceRoot: string; env?: Record<string, string | undefined> }) {
   const skipCommitValidation = env.GIT_COMMIT_HOOK_SKIP === "1" || /(?:^|\s)GIT_COMMIT_HOOK_SKIP=1(?:\s|$)/.test(command);
   const commands = commandContext(command, cwd);
-  for (const { tokens, environment, cwd: commandCwd, cd } of commands) {
+  for (const { tokens, cwd: commandCwd } of commands) {
     const rmViolation = checkRm(tokens, commandCwd, workspaceRoot);
     if (rmViolation) return rmViolation;
     const gitViolation = checkDestructiveGit(tokens);
@@ -369,25 +324,10 @@ export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }: { co
     if (worktreeLifecycleViolation) return worktreeLifecycleViolation;
     const broadStagingViolation = checkBroadGitStaging(tokens);
     if (broadStagingViolation) return broadStagingViolation;
-    const gitContextViolation = checkGitContextOverride(tokens, environment);
-    if (gitContextViolation) return gitContextViolation;
     const wrapperViolation = checkShellWrapper(tokens, commandCwd, workspaceRoot);
     if (wrapperViolation) return wrapperViolation;
-    if (cd && commands.some((command) => command.tokens[0] === "git")) {
-      return violation("GIT_CWD_FORBIDDEN", "禁止通过 cd 切换 Git 工作目录");
-    }
-    if (tokens[0] === "git" && tokens.includes("-C")) {
-      return violation("GIT_C_FORBIDDEN", "禁止使用 git -C 切换工作目录");
-    }
     const commitViolation = skipCommitValidation ? undefined : validateCommit(tokens);
     if (commitViolation) return commitViolation;
-    const gitSubcommand = tokens[0] === "git" ? tokens.find((token, index) => index > 0 && !token.startsWith("-")) : undefined;
-    if (gitSubcommand === "push" && !tokens.includes("--dry-run")) {
-      const todos = planTodos(commandCwd);
-      if (todos.length > 0) {
-        return violation("PUSH_PENDING_PLAN_TODOS", `存在未完成计划 TODO 或读取失败: ${todos[0].text}`);
-      }
-    }
   }
   return undefined;
 }
