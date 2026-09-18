@@ -3,9 +3,12 @@
 import importlib.util
 import io
 import os
+import socket
+import sys
 import tempfile
 import unittest
 import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Optional
@@ -33,6 +36,55 @@ def _api_key(value: Optional[str]):
         else:
             os.environ["EXA_API_KEY"] = value
         yield
+
+
+_PROXY_ENV_KEYS = (
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "ftp_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "FTP_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+    "EXA_PROXY_PORT",
+)
+
+
+@contextmanager
+def _proxy_env(https_proxy: Optional[str] = None):
+    """Pin ambient proxy env so macOS system-proxy fallback cannot flake tests.
+
+    A non-matching no_proxy keeps ``proxy_bypass`` on the deterministic
+    environment path instead of reading macOS system proxy settings.
+    """
+    with patch.dict(os.environ, {}, clear=False):
+        for key in _PROXY_ENV_KEYS:
+            os.environ.pop(key, None)
+        if https_proxy is not None:
+            os.environ["https_proxy"] = https_proxy
+        os.environ["no_proxy"] = "bypass-control.invalid"
+        yield
+
+
+@contextmanager
+def _blocked_transport():
+    """Record outbound connect targets as (host, port); allow no real network I/O."""
+    targets = []
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (str(host), int(port)))]
+
+    def fake_connect(self, address):
+        targets.append((address[0], address[1]))
+        raise OSError("blocked by test harness")
+
+    with patch.object(socket, "getaddrinfo", fake_getaddrinfo), patch.object(
+        socket.socket, "connect", fake_connect
+    ):
+        yield targets
 
 
 class ExaAuthenticationTests(unittest.TestCase):
@@ -111,10 +163,10 @@ class ExaAuthenticationTests(unittest.TestCase):
             with open(script_dotenv, "w", encoding="utf-8") as stream:
                 stream.write("EXA_API_KEY=script-sibling-test-key\n")
         try:
-            with _api_key(None), patch.object(mod.urllib.request, "urlopen") as urlopen:
+            with _api_key(None), patch.object(mod, "_open") as proxied_open:
                 with self.assertRaisesRegex(RuntimeError, "EXA_API_KEY"):
                     mod.mcp_call("tools/list", {})
-            urlopen.assert_not_called()
+            proxied_open.assert_not_called()
         finally:
             if created_fixture:
                 os.unlink(script_dotenv)
@@ -122,21 +174,21 @@ class ExaAuthenticationTests(unittest.TestCase):
     def test_whitespace_api_key_fails_before_network_request(self):
         mod = _load_exa()
 
-        with _api_key("   \t"), patch.object(mod.urllib.request, "urlopen") as urlopen:
+        with _api_key("   \t"), patch.object(mod, "_open") as proxied_open:
             with self.assertRaisesRegex(RuntimeError, "EXA_API_KEY"):
                 mod.mcp_call("tools/list", {})
-        urlopen.assert_not_called()
+        proxied_open.assert_not_called()
 
     def test_invalid_api_key_content_fails_before_network_request(self):
         mod = _load_exa()
 
         for key in ("valid-prefix\nembedded", "valid-prefix\x1fembedded", "x" * 257):
             with self.subTest(key_length=len(key)), _api_key(key), patch.object(
-                mod.urllib.request, "urlopen"
-            ) as urlopen:
+                mod, "_open"
+            ) as proxied_open:
                 with self.assertRaisesRegex(RuntimeError, "EXA_API_KEY"):
                     mod.mcp_call("tools/list", {})
-                urlopen.assert_not_called()
+                proxied_open.assert_not_called()
 
     def test_api_key_is_read_when_request_is_created(self):
         mod = _load_exa()
@@ -212,7 +264,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         )
 
         with _api_key(key), patch.object(
-            mod.urllib.request, "urlopen", side_effect=upstream
+            mod, "_open", side_effect=upstream
         ):
             with self.assertRaises(RuntimeError) as raised:
                 mod.mcp_call("tools/list", {})
@@ -243,7 +295,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         )
 
         with _api_key(key), patch.object(
-            mod.urllib.request, "urlopen", side_effect=upstream
+            mod, "_open", side_effect=upstream
         ):
             with self.assertRaisesRegex(RuntimeError, "quota exhausted"):
                 mod.mcp_call("tools/list", {})
@@ -271,7 +323,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         )
 
         with _api_key(key), patch.object(
-            mod.urllib.request, "urlopen", side_effect=upstream
+            mod, "_open", side_effect=upstream
         ):
             with self.assertRaisesRegex(RuntimeError, "HTTP 403") as raised:
                 mod.mcp_call("tools/list", {})
@@ -292,7 +344,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         )
 
         with _api_key(key), patch.object(
-            mod.urllib.request, "urlopen", side_effect=upstream
+            mod, "_open", side_effect=upstream
         ):
             with self.assertRaises(RuntimeError) as raised:
                 mod.mcp_call("tools/list", {})
@@ -305,7 +357,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         mod = _load_exa()
         original_key = "original-sensitive-key"
 
-        def rotate_then_fail(_request, timeout):
+        def rotate_then_fail(_request, timeout, proxy_dict):
             os.environ["EXA_API_KEY"] = "rotated-sensitive-key"
             raise urllib.error.HTTPError(
                 "https://mcp.exa.ai/mcp",
@@ -316,7 +368,7 @@ class ExaAuthenticationTests(unittest.TestCase):
             )
 
         with _api_key(original_key), patch.object(
-            mod.urllib.request, "urlopen", side_effect=rotate_then_fail
+            mod, "_open", side_effect=rotate_then_fail
         ):
             with self.assertRaises(RuntimeError) as raised:
                 mod.mcp_call("tools/list", {})
@@ -332,7 +384,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         )
 
         with _api_key(key), patch.object(
-            mod.urllib.request, "urlopen", side_effect=upstream
+            mod, "_open", side_effect=upstream
         ):
             with self.assertRaises(RuntimeError) as raised:
                 mod.mcp_call("tools/list", {})
@@ -373,7 +425,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         response.__enter__.return_value = response
 
         with _api_key("test-key"), patch.object(
-            mod.urllib.request, "urlopen", return_value=response
+            mod, "_open", return_value=response
         ):
             with self.assertRaisesRegex(RuntimeError, "Unexpected response"):
                 mod.mcp_call("tools/list", {})
@@ -385,7 +437,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         response.__enter__.return_value = response
 
         with _api_key("test-key"), patch.object(
-            mod.urllib.request, "urlopen", return_value=response
+            mod, "_open", return_value=response
         ):
             with self.assertRaisesRegex(RuntimeError, "read timed out"):
                 mod.mcp_call("tools/list", {})
@@ -397,7 +449,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         response.__enter__.return_value = response
 
         with _api_key("test-key"), patch.object(
-            mod.urllib.request, "urlopen", return_value=response
+            mod, "_open", return_value=response
         ):
             with self.assertRaisesRegex(RuntimeError, "response exceeds"):
                 mod.mcp_call("tools/list", {})
@@ -413,7 +465,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         response.__enter__.return_value = response
 
         with _api_key("test-key"), patch.object(
-            mod.urllib.request, "urlopen", return_value=response
+            mod, "_open", return_value=response
         ):
             result = mod.mcp_call("tools/list", {})
 
@@ -428,7 +480,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         response.__enter__.return_value = response
 
         with _api_key(key), patch.object(
-            mod.urllib.request, "urlopen", return_value=response
+            mod, "_open", return_value=response
         ):
             with self.assertRaises(RuntimeError) as raised:
                 mod.mcp_call("tools/list", {})
@@ -444,7 +496,7 @@ class ExaAuthenticationTests(unittest.TestCase):
         response.__enter__.return_value = response
 
         with _api_key("test-key"), patch.object(
-            mod.urllib.request, "urlopen", return_value=response
+            mod, "_open", return_value=response
         ):
             with self.assertRaises(RuntimeError) as raised:
                 mod.mcp_call("tools/list", {})
@@ -461,6 +513,97 @@ class ExaAuthenticationTests(unittest.TestCase):
         self.assertNotIn("Python", ua)
         with self.assertRaises(TypeError):
             mod.HEADERS["Authorization"] = "forbidden"
+
+
+class ExaProxyTests(unittest.TestCase):
+    """Exa 请求必须经由仅作用于自身的本机代理，且不污染全局 urllib 状态。"""
+
+    def test_default_mcp_call_connects_to_local_proxy_7897(self):
+        mod = _load_exa()
+        with _api_key("proxy-routing-test-key"), _proxy_env(), _blocked_transport() as targets:
+            with self.assertRaisesRegex(RuntimeError, "blocked by test harness"):
+                mod.mcp_call("tools/list", {})
+        self.assertEqual(targets, [("127.0.0.1", 7897)])
+
+    def test_ambient_proxy_env_cannot_redirect_exa_requests(self):
+        """环境变量代理是全局的、隐式的；Exa 请求必须改走自己的固定代理。"""
+        mod = _load_exa()
+        decoy = "http://10.255.255.10:3128"
+        with _api_key("ambient-decoy-test-key"), _proxy_env(
+            https_proxy=decoy
+        ), _blocked_transport() as targets:
+            with self.assertRaisesRegex(RuntimeError, "blocked by test harness"):
+                mod.mcp_call("tools/list", {})
+        self.assertEqual(targets, [("127.0.0.1", 7897)])
+
+    def test_mcp_call_proxy_port_overrides_proxy_target(self):
+        mod = _load_exa()
+        for port in (1, 7898, 65535):
+            with self.subTest(port=port):
+                with _api_key("port-override-test-key"), _proxy_env(), _blocked_transport() as targets:
+                    with self.assertRaisesRegex(RuntimeError, "blocked by test harness"):
+                        mod.mcp_call("tools/list", {}, proxy_port=port)
+                self.assertEqual(targets, [("127.0.0.1", port)])
+
+    def test_search_and_fetch_forward_proxy_port(self):
+        mod = _load_exa()
+        cases = (
+            (mod.search, ("proxy-passthrough-query", 5), 7898),
+            (mod.fetch, (["https://passthrough.example/doc"],), 7900),
+        )
+        for func, args, port in cases:
+            with self.subTest(func=func.__name__):
+                with _api_key("passthrough-test-key"), _proxy_env(), _blocked_transport() as targets:
+                    with self.assertRaisesRegex(RuntimeError, "blocked by test harness"):
+                        func(*args, proxy_port=port)
+                self.assertEqual(targets, [("127.0.0.1", port)])
+
+    def test_cli_exa_proxy_port_env_overrides_default(self):
+        mod = _load_exa()
+        with _api_key("cli-override-test-key"), _proxy_env(), patch.dict(
+            os.environ, {"EXA_PROXY_PORT": "7898"}
+        ), patch.object(sys, "argv", ["exa.py", "search", "cli-override-query"]), _blocked_transport() as targets:
+            with self.assertRaisesRegex(RuntimeError, "blocked by test harness"):
+                mod.main()
+        self.assertEqual(targets, [("127.0.0.1", 7898)])
+
+    def test_cli_rejects_invalid_exa_proxy_port_before_any_request(self):
+        mod = _load_exa()
+        invalid = ("0", "-1", "abc", "70000", "65536", "1.5", "", " 7897", "+7897", "0x1f90")
+        for raw in invalid:
+            with self.subTest(raw=raw):
+                with _api_key("cli-invalid-port-key"), _proxy_env(), patch.dict(
+                    os.environ, {"EXA_PROXY_PORT": raw}
+                ), patch.object(
+                    sys, "argv", ["exa.py", "search", "invalid-port-query"]
+                ), _blocked_transport() as targets:
+                    with self.assertRaisesRegex(RuntimeError, "EXA_PROXY_PORT"):
+                        mod.main()
+                self.assertEqual(targets, [])
+
+    def test_mcp_call_rejects_invalid_proxy_port_before_any_request(self):
+        mod = _load_exa()
+        invalid = (0, -1, 70000, 65536, "7898", 1.5, True)
+        for port in invalid:
+            with self.subTest(port=port):
+                with _api_key("param-invalid-port-key"), _proxy_env(), _blocked_transport() as targets:
+                    with self.assertRaisesRegex(RuntimeError, "port"):
+                        mod.mcp_call("tools/list", {}, proxy_port=port)
+                self.assertEqual(targets, [])
+
+    def test_global_default_opener_still_follows_ambient_env(self):
+        """Exa 调用之后，普通 urlopen 仍必须遵循环境代理（作用域未泄漏）。"""
+        mod = _load_exa()
+        decoy = "http://10.255.255.10:3128"
+        with _api_key("global-opener-test-key"), _proxy_env(
+            https_proxy=decoy
+        ), _blocked_transport() as targets:
+            with self.assertRaisesRegex(RuntimeError, "blocked by test harness"):
+                mod.mcp_call("tools/list", {})
+            probe = urllib.request.Request("https://global-probe.example/check")
+            with self.assertRaises(OSError):
+                urllib.request.urlopen(probe, timeout=5)
+        self.assertEqual(targets, [("127.0.0.1", 7897), ("10.255.255.10", 3128)])
 
 
 if __name__ == "__main__":
