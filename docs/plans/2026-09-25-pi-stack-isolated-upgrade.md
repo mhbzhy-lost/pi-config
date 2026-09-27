@@ -14,6 +14,7 @@
 - **前置门禁（T1 阻塞项）：** 主树在途 WIP 须由用户先行处置（已落地）；clone 从落地后的主树创建，T1 记录基点 SHA、主树 clean 证明与审计差异说明。主树唯一豁免的本地差异：`pi/settings.json` 的 `enabledModels`（per-machine 字段，铁律禁提交；经用户决策保留在主树、不侵入 clone——clone 仅取提交态）。主 agent 不代用户提交、stash 或清理 WIP。
 - **隔离铁律：** 一切变更只发生在 `~/pi-config-upgrade` clone 及其派生的 managed worktree；严禁修改主树工作区、严禁修改全局 pi 安装与用户级状态（`~/.zshrc`、全局 npm、uv tool）；**T1–T11 禁止调用 `init-pi.sh`**（副作用仅在 T12 授权③后发生）。clone 的删除与主树 worktree 管理不由本计划执行；managed worktree 一律经 `subagent_worktree` typed action（list/status/dispose/release）处置，禁止任何 bash git 删受管 worktree。
 - **并发模型：**
+  - **编排宿主必须在 clone 内运行（T1 实测发现）**：`extension.ts:763-769` 的身份断言要求 `session.cwd === workspace.originRoot`，而上游 root runtime 的 `session.cwd` 锚定在宿主会话启动目录。因此派发必须来自一个 cwd 为 clone 的 pi 会话（用 T1 隔离 shell 模板启动），不能从主树会话跨仓派发（实测 CAPABILITY_MISMATCH）。
   - Deps 是唯一调度权威：前驱任务的集成（`dispose integrate` 完成、clone 分支前进）完成后才派发后继。
   - 同 Wave 无写路径交集且无共享符号依赖的任务以 `execution.worktree: true`（`cwd=~/pi-config-upgrade`）**同时派发**，由集成队列串行 rebase/publish；`extension.ts` 串行链（T7→T8→T9）等交集任务按 Deps 逐个派发集成。
   - 只写忽略路径（`var/**`）的测量/验收任务（T2、T11）直接在 clone checkout 执行（`worktree: false`）。
@@ -31,6 +32,23 @@
 - **输出语言：** 新文档、注释一律中文。
 - **每任务执行时长（含测试）低于 30 分钟 watchdog**；T3/T5/T11 已预拆。
 - **范围声明：** 本计划仅覆盖 Phase 1；「持续跟随机制」为后续独立计划。
+
+## 执行移交（T1 产出，2026-09-27）
+
+T1 已在主树会话完成环境搭建，并实测发现编排宿主约束（见并发模型第一条）：后续执行必须由 **clone 内的编排会话**驱动。启动方式：
+
+```bash
+env PI_REAL_BIN="$HOME/pi-config-upgrade/node_modules/.bin/pi" \
+    PI_CODING_AGENT_SESSION_DIR="$HOME/pi-config-upgrade/var/sessions" \
+    PI_CODING_AGENT_GOAL_DIR="$HOME/pi-config-upgrade/var/goals" \
+    PI_CODING_AGENT_WORKSPACE_DIR="$HOME/pi-config-upgrade/var/workspaces" \
+    PI_SESSION_OWNER_REGISTRY="$HOME/pi-config-upgrade/var/tmp/session-owner-registry" \
+    TMPDIR="$HOME/pi-config-upgrade/var/tmp" \
+    npm_config_cache="$HOME/pi-config-upgrade/var/tmp/npm-cache" \
+    zsh -f -c 'source ~/pi-config-upgrade/scripts/pi-shell.zsh; cd ~/pi-config-upgrade; pi'
+```
+
+编排会话开启后首步：重跑 smoke 全链路（allocate→status→dispose(discard)，从本会话应全部通过），然后从 T2 开始按 DAG 推进。T1 详细记录见 clone 内 `var/upgrade/precondition.md`；遗留清理债（workspace `c0479751-…`，主树会话 typed tool 故障无法自动 dispose）在 T12 门禁核验时处理。
 
 ## DAG
 
