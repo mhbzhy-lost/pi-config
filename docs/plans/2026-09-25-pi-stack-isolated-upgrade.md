@@ -34,6 +34,16 @@
 - **每任务执行时长（含测试）低于 30 分钟 watchdog**；T3/T5/T11 已预拆。
 - **范围声明：** 本计划仅覆盖 Phase 1；「持续跟随机制」为后续独立计划。
 
+## 执行模式修订（方案 A，用户选定）
+
+T1 冒烟实证：本会话（宿主 cwd=主树）以 `worktree: false + cwd=~/pi-config-upgrade` 派发可通过身份断言（orchestratorCwd 走 ctx.cwd 回退），子任务在 clone 内直接执行。据此：
+
+- 全部任务以 `worktree: false`、`cwd=~/pi-config-upgrade` 派发；managed worktree/集成队列不用。
+- 任务步骤中的「`dispose integrate`」一律替换为「确认改动已落盘 + 本任务验收命令通过」；无逐任务提交。
+- clone 允许渐进 dirty（正常工作区状态）；T12 授权①统一提交全部累积变更。
+- 并发限制：共享 runtime 资源（root broker、session-owner、集成测试进程）的任务串行；写路径无交集且无共享资源冲突的任务可并行（保守起见默认串行）。
+- 冒烟全链路验证已完成（冒烟 2：派发成功、pwd/分支/HEAD 正确），T2 直接开始。
+
 ## 执行移交（T1 产出，2026-09-27）
 
 T1 已在主树会话完成环境搭建，并实测发现编排宿主约束（见并发模型第一条）：后续执行必须由 **clone 内的编排会话**驱动。启动方式：
