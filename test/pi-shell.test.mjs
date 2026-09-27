@@ -169,6 +169,49 @@ test("pi-full requests official fullscreen TUI mode", async () => {
   }
 });
 
+test("pi-explore launches the lean read-only exploration mode", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-shell-explore-"));
+  try {
+    const output = join(root, "args.txt");
+    const fakePi = join(root, "pi-real");
+    await writeFile(fakePi, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$OUTPUT\"\n");
+    await chmod(fakePi, 0o755);
+
+    const result = spawnSync(
+      "zsh",
+      ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi-explore --version`],
+      {
+        encoding: "utf8",
+        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output },
+      },
+    );
+
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(
+      await readFile(output, "utf8"),
+      [
+        "--no-skills",
+        "-nc",
+        "-na",
+        "--no-extensions",
+        "--no-prompt-templates",
+        "--skill",
+        join(repoRoot, "skill-overrides", "exa-search", "SKILL.md"),
+        "--skill",
+        join(repoRoot, "skill-overrides", "playwright", "SKILL.md"),
+        "--tools",
+        "read,bash",
+        "--version",
+        "",
+      ].join("\n"),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("shell delegates TUI ownership to Pi official settings", async () => {
   const shell = await readFile(join(repoRoot, "scripts", "pi-shell.zsh"), "utf8");
   assert.doesNotMatch(shell, /1049|PI_ALT_SCREEN|_pi_config_alt_screen/);
