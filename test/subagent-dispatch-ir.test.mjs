@@ -4,9 +4,9 @@ import test from "node:test";
 import {
   CodingDispatchContractError,
   compileCodingDispatchIR,
-} from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts";
+  renderCodingDispatchPrompt,
+} from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { compileCodingDispatchIR as compileRuntimeCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
-import { renderCodingDispatchPrompt } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/prompt.ts";
 import { createSubagentRpcFailureDetails, sanitizeErrorRecord, SUBAGENT_RPC_STAGES } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/errors.ts";
 
 test("RPC failure diagnostics preserve safe stage/cause correlation", async () => {
@@ -40,7 +40,6 @@ function contract(overrides = {}) {
     agent: "executor",
     risk: "normal",
     objective: "Add a native child conversation renderer without changing Fleet fallback.",
-    workflow: { mode: "tdd" },
     requirements: [
       "Render initial user, thinking, assistant text, tool calls and tool results.",
       "Use SessionManager.open() and buildContextEntries().",
@@ -70,7 +69,6 @@ function contract(overrides = {}) {
   return {
     ...base,
     ...overrides,
-    workflow: { ...base.workflow, ...overrides.workflow },
     context: { ...base.context, ...overrides.context },
     boundaries: { ...base.boundaries, ...overrides.boundaries },
     acceptance: { ...base.acceptance, ...overrides.acceptance },
@@ -154,7 +152,6 @@ test("renders the complete child prompt in a fixed section order", () => {
       "## Declared Write Scope",
       "## Excluded Work",
       "## Forbidden Actions",
-      "## Workflow",
       "## Acceptance Criteria",
       "## Escalation",
       "## Required Report",
@@ -214,16 +211,8 @@ test("uses stable error codes for unsupported versions while accepting normalize
   assert.equal(ir.agent, "coder-alpha");
 });
 
-test("enforces workflow modes and exemption reasons", () => {
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ workflow: { mode: "tdd", reason: "Not needed" } }), { cwd: "/repo" }));
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ workflow: { mode: "existing-tests" } }), { cwd: "/repo" }));
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ workflow: { mode: "docs-only", reason: "  " } }), { cwd: "/repo" }));
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ workflow: { mode: "ad-hoc" } }), { cwd: "/repo" }));
-
-  const existing = compileCodingDispatchIR(contract({
-    workflow: { mode: "existing-tests", reason: "The existing integration suite covers this renderer." },
-  }), { cwd: "/repo" });
-  assert.equal(existing.workflow.reason, "The existing integration suite covers this renderer.");
+test("rejects the retired workflow field while preserving the canonical contract", () => {
+  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR({ ...contract(), workflow: { mode: "tdd" } }, { cwd: "/repo" }));
 });
 
 test("accepts arbitrary valid agent profiles and rejects invalid profile identities", () => {
@@ -276,7 +265,7 @@ test("normalizes execution.worktree false away while retaining true in the hash 
   const managed = compileCodingDispatchIR(contract({ execution: { worktree: true } }), { cwd: "/repo" });
 
   assert.deepEqual(disabled.execution, omitted.execution);
-  assert.equal(omitted.hash, "0277a443fe03e26083044165b30043ecb005e00a4423f8c6cef1fcb4c55ab729");
+  assert.equal(omitted.hash, "a1aa8196fe99ba2983346551e150c580f6da8119a21fd325056070d2d8daaf04");
   assert.equal(disabled.hash, omitted.hash);
   assert.deepEqual(managed.execution, { cwd: "/repo", timeoutMs: 900_000, worktree: true });
   assert.notEqual(managed.hash, omitted.hash);

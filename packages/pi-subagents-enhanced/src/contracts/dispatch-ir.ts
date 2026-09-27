@@ -7,7 +7,6 @@ const MAX_STRING_BYTES = 4 * 1024;
 const MAX_PROMPT_BYTES = 64 * 1024;
 const TASK_ID_PATTERN = /^[A-Za-z0-9._-]{1,160}$/;
 const RISKS = new Set(["low", "normal", "high"]);
-const WORKFLOW_MODES = new Set(["tdd", "existing-tests", "docs-only"]);
 const TOP_LEVEL_KEYS = [
   "version",
   "taskId",
@@ -16,7 +15,6 @@ const TOP_LEVEL_KEYS = [
   "model",
   "risk",
   "objective",
-  "workflow",
   "requirements",
   "context",
   "boundaries",
@@ -24,7 +22,7 @@ const TOP_LEVEL_KEYS = [
   "execution",
 ];
 const REQUIRED_TOP_LEVEL_KEYS = TOP_LEVEL_KEYS.filter((key) => key !== "model");
-const COERCIBLE_FIELDS = ["workflow", "requirements", "context", "boundaries", "acceptance", "execution"];
+const COERCIBLE_FIELDS = ["requirements", "context", "boundaries", "acceptance", "execution"];
 
 export class CodingDispatchContractError extends Error {
   code: string;
@@ -82,11 +80,12 @@ function coerceContractFields(input) {
 function validateObject(value, location, allowedKeys, requiredKeys = allowedKeys) {
   if (!isPlainObject(value)) failTypeMismatch(location, "object", value);
   const allowed = new Set(allowedKeys);
+  const shapeHint = `{ ${allowedKeys.join(", ")} }`;
   for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) fail("INVALID_CONTRACT", `${location} contains unknown field ${key}`, `${location}.${key}`);
+    if (!allowed.has(key)) fail("INVALID_CONTRACT", `${location} contains unknown field ${key}; 完整 shape 提示：${shapeHint}`, `${location}.${key}`);
   }
   for (const key of requiredKeys) {
-    if (!Object.hasOwn(value, key)) fail("INVALID_CONTRACT", `${location} is missing required field ${key}`, `${location}.${key}`);
+    if (!Object.hasOwn(value, key)) fail("INVALID_CONTRACT", `${location} is missing required field ${key}; 完整 shape 提示：${shapeHint}`, `${location}.${key}`);
   }
   return value;
 }
@@ -125,32 +124,40 @@ function normalizeStringArray(value, location, { minItems = 0, item = normalizeS
   return normalized;
 }
 
+// 合法文法：精确路径，或末尾带单个 /** 的递归目录范围。仅改错误分类，不放宽合法输入。
+export const PATH_EXAMPLE = 'e.g. "src/a.ts" or "src/**"';
+
 function normalizeRepoRelativePath(value, location) {
   const normalized = normalizeString(value, location);
-  const windowsAbsolute = /^[A-Za-z]:[\\/]/.test(normalized) || normalized.startsWith("\\\\");
-  if (normalized.includes("\0") || normalized.includes("\\") || normalized.startsWith("/") || windowsAbsolute) {
-    fail("INVALID_PATH", `${location} must be a repo-relative POSIX path`, location);
+  const echoed = JSON.stringify(normalized);
+  if (normalized === "/**") {
+    fail("INVALID_PATH", `${location} must not be "/**": a recursive scope needs a directory prefix; got ${echoed}. ${PATH_EXAMPLE}`, location);
+  }
+  if (normalized.includes("\0")) {
+    fail("INVALID_PATH", `${location} must not contain NUL; got a value with an embedded \\0. ${PATH_EXAMPLE}`, location);
+  }
+  const windowsAbsolute = /^[A-Za-z]:[\\/]/.test(normalized);
+  if (normalized.startsWith("/") || windowsAbsolute || normalized.startsWith("\\\\")) {
+    fail("INVALID_PATH", `${location} must be repo-relative: no leading '/' and no Windows drive/UNC prefix; got ${echoed}. ${PATH_EXAMPLE}`, location);
+  }
+  if (normalized.includes("\\")) {
+    fail("INVALID_PATH", `${location} must use POSIX '/' separators and must not contain backslashes; got ${echoed}. ${PATH_EXAMPLE}`, location);
   }
   const recursive = normalized.endsWith("/**");
   const base = recursive ? normalized.slice(0, -3) : normalized;
-  if (!base || base.endsWith("/") || /[*?\[\]]/.test(base)) fail("INVALID_PATH", `${location} contains an unsupported path pattern`, location);
+  if (base.endsWith("/")) {
+    fail("INVALID_PATH", `${location} must not end with '/'; the only supported directory scope is a single trailing '/**'; got ${echoed}. ${PATH_EXAMPLE}`, location);
+  }
+  const glob = base.match(/[*?[\]]/);
+  if (glob) {
+    fail("INVALID_PATH", `${location} contains unsupported glob character ${JSON.stringify(glob[0])}; globs are only allowed as one trailing '/**'; got ${echoed}. ${PATH_EXAMPLE}`, location);
+  }
   const segments = base.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    fail("INVALID_PATH", `${location} contains an unsafe path segment`, location);
+  const unsafe = segments.find((segment) => !segment || segment === "." || segment === "..");
+  if (unsafe !== undefined) {
+    fail("INVALID_PATH", `${location} contains an unsafe path segment ${JSON.stringify(unsafe)}; empty, '.' and '..' segments are forbidden; got ${echoed}. ${PATH_EXAMPLE}`, location);
   }
   return recursive ? `${segments.join("/")}/**` : segments.join("/");
-}
-
-function normalizeWorkflow(value) {
-  const workflow = validateObject(value, "workflow", ["mode", "reason"], ["mode"]);
-  const mode = normalizeString(workflow.mode, "workflow.mode");
-  if (!WORKFLOW_MODES.has(mode)) fail("INVALID_CONTRACT", `workflow.mode is not supported: ${mode}`, "workflow.mode");
-  if (mode === "tdd") {
-    if (Object.hasOwn(workflow, "reason")) fail("INVALID_CONTRACT", "workflow.reason is forbidden when mode is tdd", "workflow.reason");
-    return { mode };
-  }
-  if (!Object.hasOwn(workflow, "reason")) fail("INVALID_CONTRACT", `workflow.reason is required when mode is ${mode}`, "workflow.reason");
-  return { mode, reason: normalizeString(workflow.reason, "workflow.reason") };
 }
 
 function normalizeContext(value) {
@@ -165,7 +172,7 @@ function normalizeContext(value) {
 function normalizeBoundaries(value) {
   const boundaries = validateObject(value, "boundaries", ["writePaths", "excludedWork", "forbiddenActions"]);
   return {
-    writePaths: normalizeStringArray(boundaries.writePaths, "boundaries.writePaths", { minItems: 1, item: normalizeRepoRelativePath }),
+    writePaths: normalizeStringArray(boundaries.writePaths, "boundaries.writePaths", { minItems: 0, item: normalizeRepoRelativePath }),
     excludedWork: normalizeStringArray(boundaries.excludedWork, "boundaries.excludedWork"),
     forbiddenActions: normalizeStringArray(boundaries.forbiddenActions, "boundaries.forbiddenActions"),
   };
@@ -230,7 +237,6 @@ export function compileCodingDispatchIR(input, { cwd }: { cwd?: string } = {}) {
     requirements: normalizeStringArray(source.requirements, "requirements", { minItems: 1 }),
     context: normalizeContext(source.context),
     boundaries: normalizeBoundaries(source.boundaries),
-    workflow: normalizeWorkflow(source.workflow),
     acceptance: normalizeAcceptance(source.acceptance),
     execution: normalizeExecution(source.execution, cwd),
   };
@@ -256,8 +262,6 @@ export function projectCodingPrompt(ir) {
     ...ir.boundaries.writePaths.map((item) => `Declared write path: ${item}`),
     ...ir.boundaries.excludedWork.map((item) => `Excluded work: ${item}`),
     ...ir.boundaries.forbiddenActions.map((item) => `Forbidden action: ${item}`),
-    `Workflow mode: ${ir.workflow.mode}`,
-    ...(ir.workflow.reason === undefined ? [] : [`Workflow reason: ${ir.workflow.reason}`]),
   ];
   return deepFreeze({
     task: ir.objective,
@@ -273,19 +277,18 @@ function ordered(items) {
 }
 
 export function renderCodingDispatchPrompt(ir) {
-  const workflowReason = ir.workflow.reason === undefined ? "" : `\n- Exemption reason: ${JSON.stringify(ir.workflow.reason)}`;
   const prompt = [
     "# Coding Dispatch Contract v1", "", "## Identity",
     `- Version: \`${ir.version}\``, `- Task ID: ${JSON.stringify(ir.taskId)}`, `- Title: ${JSON.stringify(ir.title)}`,
     `- Agent: \`${ir.agent}\``, ...(ir.model === undefined ? [] : [`- Requested model: \`${ir.model}\``]),
     `- Risk: \`${ir.risk}\``, `- Working directory: ${JSON.stringify(ir.execution.cwd)}`, `- Timeout: \`${ir.execution.timeoutMs}ms\``,
-    ...(ir.execution.worktree === true ? ["- Managed worktree: `true`"] : []), `- Contract SHA-256: \`${ir.hash}\``,
+    ...(ir.execution.worktree === true ? ["- Managed worktree: `true`"] : []),
+    ...(ir.execution.worktree === true ? ["- Child integration lifecycle: commit -> subagent_integration enqueue -> await_admission -> git rebase targetHead -> report_conflict on conflict while retaining target changes -> verify -> publish. Do not finish before publish succeeds or an explicit fail is recorded."] : []), `- Contract SHA-256: \`${ir.hash}\``,
     "", "## Objective", JSON.stringify(ir.objective), "", "## Requirements", ordered(ir.requirements),
     "", "## Authoritative Known Facts", ordered(ir.context.knownFacts), "", "## Decisions Already Made", ordered(ir.context.decisions),
     "", "## Relevant Files", ordered(ir.context.relevantFiles), "", "## Declared Write Scope", ordered(ir.boundaries.writePaths), "",
     "Modify only the declared write paths. They are a contract and acceptance boundary, not an OS sandbox. Escalate before changing any other path.",
     "", "## Excluded Work", ordered(ir.boundaries.excludedWork), "", "## Forbidden Actions", ordered(ir.boundaries.forbiddenActions),
-    "", "## Workflow", `- Mode: \`${ir.workflow.mode}\`${workflowReason}`, "- Follow the selected workflow exactly and preserve its evidence.",
     "", "## Acceptance Criteria", ordered(ir.acceptance.criteria), "", "## Escalation",
     "If required information or an unapproved decision is missing, use `contact_supervisor` when available and return `NEEDS_CONTEXT`. Do not substitute broad exploration for missing context or revisit decisions already recorded above.",
     "", "## Required Report", "Return a compact final report containing:", "1. status (`completed` or `NEEDS_CONTEXT`)",

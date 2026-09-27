@@ -24,7 +24,7 @@ description: Use when delegating coding or non-coding work to a configured Pi ag
 - 主 agent 刚亲自读取过原始证据且变更点单一明确时，直接 inline 修复，不派发。
 - 粒度上限是一次派发一个精确变更：blocker、high、测试分属不同派发；验收标准就是对应诊断报告的原始结论。
 - 时间预算：预计执行时长（含测试）必须低于 30 分钟 watchdog；修复与真实运行不得打包进同一派发。
-- child 环境不继承 skills（PI_SUBAGENT_INHERIT_SKILLS=0，无 skill 工具）："加载 skill" 的落地方式是把 skill 文件路径写入 requirements 并要求执行者先 read。workflow tdd 的派发必须包含 /Users/leshi.zhy/.agents/skills/test-driven-development/SKILL.md 路径。
+- child 环境不继承 skills（PI_SUBAGENT_INHERIT_SKILLS=0，无 skill 工具）："加载 skill" 的落地方式是把 skill 文件路径写入 requirements 并要求执行者先 read。coding 派发涉及生产变更时，requirements 必须包含 /Users/leshi.zhy/.agents/skills/test-driven-development/SKILL.md 路径，并要求执行者先 read。
 
 | 粒度 | 可派发 | 不可派发 |
 |---|---|---|
@@ -59,11 +59,26 @@ description: Use when delegating coding or non-coding work to a configured Pi ag
 
 ## Coding
 
-`dispatch-ir.v1` 调用结构决定 coding；generic object shape 决定 generic。`version: "dispatch-ir.v1"` 是 coding 路由的唯一标记：缺失时输入会按 generic 分支校验并得到 `INVALID_GENERIC_DISPATCH`（agent/title/task 错误）——遇到该错误而输入含 taskId/objective/workflow 字段时，先补 version 字段（runtime 现已对含 coding 特征的输入返回 `INVALID_CODING_ROUTER` 自诊断错误）。`agent` 仅表示已发现的 profile identity，不决定 execution kind 或权限。`executor` 是普通默认 profile，可重命名；不要创建另一个固定 coding 名称替代它。同一个 profile 可以接收两种结构，但 coding 工作必须使用完整 typed 合同，不能用 generic 自由文本绕过，也不能虚构 `delegate(...)`。
+`dispatch-ir.v1` 调用结构决定 coding；generic object shape 决定 generic。TDD 信号由 requirements 中的 skill 路径与 profile 指令承载，不由合同字段机械门禁执行。`version: "dispatch-ir.v1"` 是 coding 路由的唯一标记：缺失时输入会按 generic 分支校验并得到 `INVALID_GENERIC_DISPATCH`（agent/title/task 错误）——遇到该错误而输入含 taskId/objective 字段时，先补 version 字段（runtime 现已对含 coding 特征的输入返回 `INVALID_CODING_ROUTER` 自诊断错误）。`agent` 仅表示已发现的 profile identity，不决定 execution kind 或权限。`executor` 是普通默认 profile，可重命名；不要创建另一个固定 coding 名称替代它。同一个 profile 可以接收两种结构，但 coding 工作必须使用完整 typed 合同，不能用 generic 自由文本绕过，也不能虚构 `delegate(...)`。
 
 可信 Host 的 `RunAuthorization` 是唯一授权来源。standalone coding 只有 `root.subscribe`，generic 没有 privileged capability。frontmatter、名称、模型、prompt 和 started event 都不能授予 coding、acceptance、Goal 或 Broker capability；Goal/acceptance 权限须来自对应可信 Host 协调流程，不能在请求或 profile 中自报。
 
-使用精确 object shape，不加额外字段；`relevantFiles`/`writePaths` 使用仓库相对 POSIX 路径；枚举、非空数组和 criteria-only acceptance 遵循 schema。`tdd` 禁止 `workflow.reason`；`existing-tests`/`docs-only` 必须提供 reason。执行超时不由 agent 指定：coding 由 Host 注入固定 30 分钟执行 timeout，generic 的 workflow 不设执行 deadline（仅保留 runtime 内部的 child-start watchdog），由 Host/profile/runtime 决定。
+### 生命周期与控制面边界
+
+只按 runtime 已返回、可验证的 receipt、outcome 和 terminal proof 描述运行；prompt、profile、名称和 started event 不是 authority 证据，completion/status 也不是 terminal proof。
+
+| 情况 | 模型可见语义 |
+| --- | --- |
+| 正常关闭 | 两进程模型下正常 close 遵循 stop/drain；不得承诺 detached child 会继续执行。 |
+| resume/rebind | 同一 `sessionFile` 上创建新 process incarnation；source identity 与 resumed identity 分别保留，resumed identity never replaces source identity；rebind 受 identity、generation/revision 和授权验证 fenced 保护，不是原 OS process 复活。 |
+| Supervisor 控制 | 存在 identity/generation 匹配的 pending request 时优先 reply；无 pending 时不能 reply，只有 child 仍运行且可 steer 才能 steer。reply 后同一 intent 的 equivalent steer 被禁止（`STEER_DUPLICATES_REPLY`）；重试只返回 idempotent receipt，不重复投递。 |
+| completion replay | transport/processing 是 durable at-least-once；用户可见 completion 以 `runId + terminalReceiptId` exactly-once 去重。不要把 transport 或 processing receipt 当作 terminal proof。 |
+| authority lease | 仅 durable `expiresAt` 判定 authority 过期，并报告 `authority_lease_expired`；它不是 stopped、terminal 或 workspace disposition。 |
+| orphan/recovery | 无法证明现场时结果是 `blocked-unknown` 或 `debt`；不得承诺 automatic recovery、重启、settlement 或 workspace mutation。`SchedulerRecoveryOutcome` 仅由 `consumeRecoveryOutcome` 在 scheduler 边界消费并 dedupe。 |
+
+TUI 只渲染 protocol outcome 的精简 projection，must not 保存、回显或改写 raw payload（包括 agent message、tool result、event/session payload 或 structured details）。Skill、示例和测试记录同样不得包含 token、secret、credential、authorization、cookie 或 privateKey。
+
+使用精确 object shape，不加额外字段；`relevantFiles`/`writePaths` 使用仓库相对 POSIX 路径；枚举、非空数组和 criteria-only acceptance 遵循 schema。执行超时不由 agent 指定：coding 由 Host 注入固定 30 分钟执行 timeout，generic 不设执行 deadline（仅保留 runtime 内部的 child-start watchdog），由 Host/profile/runtime 决定。
 
 ### 模型合同
 
@@ -104,7 +119,7 @@ description: Use when delegating coding or non-coding work to a configured Pi ag
 - 用户明确禁止使用 worktree 时不得使用：用户在任务、会话或工单中明说不用 worktree（或等义表述）后，即使并发写同一仓库也保持 `worktree: false`，改用写路径互斥或串行派发来隔离；不得以“隔离更安全”为由覆盖用户决定。
 - 用户未表态时按上一条判断：可隔离的并发写优先 worktree；只读任务、写路径天然互不重叠、或单 child 任务不需要 worktree。
 
-Worktree 默认 false：省略或 false 保持 cwd、RPC、prompt 和 hash。coding 使用 `execution.worktree`，generic 使用顶层 `worktree`。true 从请求的 `baseCommit` 创建受管 worktree；source 可以保留既有 dirty，不得因为 dirty 阻止 allocation。仍须校验 source 是 primary worktree、HEAD attached、origin ref 未漂移、`baseCommit` 是允许的基线，并在 integrate 前单独检查 origin dirty。目录范围 `writePaths` 必须以 `/**` 或 `/` 结尾（如 `src/**` 或 `src/`）；裸路径按精确文件匹配。
+Worktree 默认 false：省略或 false 保持 cwd、RPC、prompt 和 hash。coding 使用 `execution.worktree`，generic 使用顶层 `worktree`。true 从请求的 `baseCommit` 创建受管 worktree；source 可以保留既有 dirty，不得因为 dirty 阻止 allocation。仍须校验 source 是 primary worktree、HEAD attached、origin ref 未漂移、`baseCommit` 是允许的基线，并在 integrate 前单独检查 origin dirty。`writePaths` 的文法只有一种：仓库相对 POSIX 路径，写作精确路径（`src/a.ts`）或末尾带 `/**` 的递归目录范围（`src/**`）。唯一支持的目录范围写法是末尾 `/**`；尾随 `/` 会被拒绝（`src/` 非法，必须写 `src/**`），末尾 `/**` 之外的任何 `* ? [ ]` 均非法，`.`/`..`/空段非法，绝对路径、Windows 盘符、UNC、反斜杠与 NUL 均非法。裸路径（如 `src`）按精确条目匹配，不展开为目录范围。`writePaths` 可以是空数组，表示显式只读派发。
 
 `subagent_worktree` 只列出、检查和处置当前 root session 创建的 standalone-subagent workspace；Goal、validation、foreign-session、legacy workspace 一律不在此工具的范围。保存 dispatch 返回的 `workspace_id`；完成时 `subagent-workspace-reminder` 会作为原始主-agent上下文消息提示处置，但 completion/status 都不等于 terminal proof。
 
@@ -140,10 +155,6 @@ subagent({
   model: "gpt-5.6-sol",
   risk: "normal",
   objective: "Compile the typed dispatch example.",
-  workflow: {
-    mode: "existing-tests",
-    reason: "Existing coverage verifies the documentation change."
-  },
   requirements: ["Preserve the public ABI."],
   context: {
     knownFacts: ["The Skill is repository-managed."],

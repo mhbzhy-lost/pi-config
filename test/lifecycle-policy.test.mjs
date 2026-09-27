@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createJiti } from "../packages/pi-subagents-enhanced/node_modules/jiti/lib/jiti.mjs";
+const jiti = createJiti(import.meta.url, { moduleCache: false });
+const policy = await jiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/lifecycle-policy.ts");
+const { createLifecyclePolicyV1, evaluateLeaseExpiry, classifyProgressStall, transitionLifecycleState, resolveReplyOrSteer } = policy;
+test("policy v1 冻结 60s/15s/20m/10m 且无 grace/counter", () => { const p=createLifecyclePolicyV1(); assert.deepEqual(p,{version:"lifecycle-policy.v1",heartbeatLeaseMs:60000,renewIntervalMs:15000,progressStallMs:1200000,continueLeaseMs:600000}); assert.equal("decisionGraceMs" in p,false); assert.equal("missedHeartbeatCounter" in p,false); });
+test("expiry 仅由 expiresAt 与可注入 clock 判定",()=>{ const p=createLifecyclePolicyV1(); assert.equal(evaluateLeaseExpiry({expiresAt:100,clock:{now:()=>99},policy:p}),false); assert.equal(evaluateLeaseExpiry({expiresAt:100,clock:{now:()=>100},policy:p}),true); });
+test("stall 排除 active bash/tool、合法等待和 provider I/O",()=>{ const p=createLifecyclePolicyV1(); for(const reason of ["active-async-bash","active-tool","supervisor-wait","provider-io"]) assert.equal(classifyProgressStall({lastProgressAt:0,clock:{now:()=>1200001},activity:reason,policy:p}).status,"active"); assert.equal(classifyProgressStall({lastProgressAt:0,clock:{now:()=>1200001},activity:"none",policy:p}).status,"stalled-suspected"); });
+test("状态转换和 reply/steer 规则纯决策",()=>{ assert.equal(transitionLifecycleState("running","progress_stalled"),"stalled-suspected"); assert.equal(transitionLifecycleState("running","explicit_stop"),"stopping"); assert.equal(transitionLifecycleState("running","authority_lease_expired"),"lease-expired"); assert.equal(resolveReplyOrSteer({pendingSupervisor:true,running:true}),"reply"); assert.equal(resolveReplyOrSteer({pendingSupervisor:false,running:true}),"steer"); assert.equal(resolveReplyOrSteer({pendingSupervisor:false,running:false}),"blocked"); });

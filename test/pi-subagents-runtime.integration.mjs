@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { buildTopLevelRuntimeEnv, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.ts";
-import { renderCodingDispatchPrompt } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/prompt.ts";
+import { renderCodingDispatchPrompt } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;

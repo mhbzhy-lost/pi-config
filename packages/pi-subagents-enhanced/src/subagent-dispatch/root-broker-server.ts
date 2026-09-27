@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 
 import { materializeSettlementEvidence } from "../contracts/settlement-evidence.ts";
 import { captureProcessBirthIdentity } from "./process-birth-identity.ts";
+import { AuthorityStore, AuthorityStoreError } from "./authority-store.ts";
+import { createOwnerReceipt, HEARTBEAT_LEASE_MS, HEARTBEAT_RENEW_MS, parseRebindRequest, parseRevokeRequest, type OwnerReceiptV1 } from "./authority-contract.ts";
 import { assertRunAuthorization, type RunAuthorization } from "./run-authorization.ts";
 import {
   brokerSocketPath,
@@ -31,7 +33,8 @@ type Principal = { callerToken: string; capabilities: ReadonlySet<"root.subscrib
 export type TerminalProofDeliveryOutcome =
   | { state: "delivered"; receipt: unknown }
   | { state: "pending"; reason: string }
-  | { state: "debt"; reason: string };
+  | { state: "debt"; reason: string }
+  | { state: "not-applicable"; reason: string };
 type OwnedRun = {
   rootSessionId: string;
   runId: string;
@@ -109,6 +112,10 @@ type Dependencies = {
    * of an unbounded hang.
    */
   integrationTimeoutMs?: number;
+  authorityStore?: AuthorityStore;
+  clock?: () => number;
+  setInterval?: typeof setInterval;
+  clearInterval?: typeof clearInterval;
 };
 
 const MAX_BUFFER = 64 * 1024;
@@ -150,10 +157,11 @@ function brokerError(code: string, message: string) {
 }
 
 /** A sink that does not report a durable outcome is treated as proof debt. */
-function deliveryOutcome(value: any): TerminalProofDeliveryOutcome {
+export function deliveryOutcome(value: any): TerminalProofDeliveryOutcome {
   if (value?.state === "delivered") return { state: "delivered", receipt: structuredClone(value.receipt ?? null) };
   if (value?.state === "pending") return { state: "pending", reason: typeof value.reason === "string" && value.reason.trim() ? value.reason : "coordinator proof sink did not persist a receipt" };
   if (value?.state === "debt") return { state: "debt", reason: typeof value.reason === "string" && value.reason.trim() ? value.reason : "coordinator proof sink could not resolve the trusted run binding" };
+  if (value?.state === "not-applicable") return { state: "not-applicable", reason: typeof value.reason === "string" && value.reason.trim() ? value.reason : "run owns no managed workspace" };
   return { state: "debt", reason: "coordinator proof sink did not report a delivery outcome" };
 }
 
@@ -189,6 +197,8 @@ export class RootBrokerServer {
   terminalWaiters = new Map<string, Set<(proof: any) => void>>();
   terminalProofDelivery = new Map<string, TerminalProofDeliveryOutcome>();
   terminalProofDeliveries = new Map<string, Promise<void>>();
+  leaseReleasePromises = new Map<string, Promise<void>>();
+  leaseReleaseDebt = new Map<string, string>();
   startedObservations = new Map<string, Promise<void>>();
   unsubscribeStarted: (() => void) | undefined;
   unsubscribeTerminal: (() => void) | undefined;
@@ -213,6 +223,11 @@ export class RootBrokerServer {
   coordinatorRequest?: Dependencies["coordinatorRequest"];
   coordinatorChallengeNonces = new Set<string>();
   integrationTimeoutMs: number;
+  authorityStore?: AuthorityStore;
+  clock: () => number;
+  setHeartbeatInterval: typeof setInterval;
+  clearHeartbeatInterval: typeof clearInterval;
+  heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   /**
    * In-flight child integration (coordinator) requests keyed by caller run. The
    * broker keeps its transport open until each owned request settles so a child
@@ -241,6 +256,10 @@ export class RootBrokerServer {
     recordTerminalProof,
     coordinatorRequest,
     integrationTimeoutMs = 10_000,
+    authorityStore,
+    clock = Date.now,
+    setInterval: setHeartbeatInterval = setInterval,
+    clearInterval: clearHeartbeatInterval = clearInterval,
   }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
@@ -260,6 +279,11 @@ export class RootBrokerServer {
     this.recordTerminalProof = recordTerminalProof;
     this.coordinatorRequest = coordinatorRequest;
     this.integrationTimeoutMs = integrationTimeoutMs;
+    this.authorityStore = authorityStore;
+    this.clock = clock;
+    this.setHeartbeatInterval = setHeartbeatInterval;
+    this.clearHeartbeatInterval = clearHeartbeatInterval;
+    this.authorityStore?.setRootSessionId(rootSessionId);
   }
 
   async start() {
@@ -279,6 +303,9 @@ export class RootBrokerServer {
       await this.setSocketPermissions(socketPath);
       this.unsubscribeStarted = this.events?.on("subagent:async-started", (event) => this.observeStarted(event));
       this.unsubscribeTerminal = this.events?.on("subagent:process-terminal", (event) => this.observeTerminal(event));
+      // Returning the Promise keeps injected deterministic timers awaitable;
+      // native setInterval intentionally ignores callback return values.
+      this.heartbeatTimer = this.setHeartbeatInterval(() => this.renewHeartbeats(), HEARTBEAT_RENEW_MS);
     } catch (error) {
       try { this.unsubscribeTerminal?.(); } catch { /* preserve the startup failure */ }
       this.unsubscribeTerminal = undefined;
@@ -386,6 +413,21 @@ export class RootBrokerServer {
       } catch { /* unavailable identity cannot become verified */ }
       const current = this.ownedRuns.get(binding.runId) ?? initial;
       this.ownedRuns.set(binding.runId, { ...current, birthIdentity, identityState: current.identityState === "conflict" ? "conflict" : identityState });
+      // Legacy construction remains valid without durable authority storage,
+      // but authority receipts are never synthesized from this in-memory run.
+      if (identityState === "verified" && this.authorityStore) {
+        const receipt = createOwnerReceipt({
+          receiptId: `owner-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`,
+          rootSessionId: this.rootSessionId,
+          runId: binding.runId,
+          ownerGeneration: 1,
+          processBirth: birthIdentity!,
+          revision: 1,
+          authorizationReference: `sha256:${createHash("sha256").update(JSON.stringify(authorization)).digest("hex")}`,
+        });
+        await this.authorityStore.createWithLease(receipt, { leaseId: `lease-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`, now: this.clock(), windowMs: HEARTBEAT_LEASE_MS });
+      }
+      // A successful authorization reply follows the durable owner receipt.
       await this.ensureAuthorizedPrincipal(binding.runId);
     })();
     this.startedObservations.set(binding.runId, observation);
@@ -397,6 +439,73 @@ export class RootBrokerServer {
       throw error;
     } finally {
       if (this.startedObservations.get(binding.runId) === observation) this.startedObservations.delete(binding.runId);
+    }
+  }
+
+  private requireAuthorityStore(): AuthorityStore {
+    if (!this.authorityStore) throw brokerError("authority_store_unavailable", "Root Broker authority storage is unavailable");
+    return this.authorityStore;
+  }
+
+  async readOwnerReceipt(runId: string): Promise<OwnerReceiptV1> {
+    try {
+      const current = await this.requireAuthorityStore().read(runId);
+      if (current.revoked || current.supersededTo) throw brokerError("unknown_run", "Owner is no longer current");
+      return current.receipt;
+    } catch (error) { throw this.authorityError(error); }
+  }
+
+  async rebindRun(value: unknown): Promise<OwnerReceiptV1> {
+    const request = parseRebindRequest(value);
+    const store = this.requireAuthorityStore();
+    try {
+      const source = await store.read(request.sourceRunId);
+      const resumed = await store.read(request.resumedRunId);
+      if (source.revoked) throw brokerError("unknown_run", "Source owner is revoked");
+      if (source.receipt.ownerGeneration !== request.expectedGeneration || source.receipt.revision !== request.expectedRevision) throw brokerError("stale_generation", "Source authority is stale");
+      if (source.receipt.processBirth !== request.expectedProcessBirth) throw brokerError("process_birth_mismatch", "Expected source process birth does not match");
+      if (resumed.receipt.revision !== request.expectedResumedRevision) throw brokerError("cas_conflict", "Resumed authority revision conflicts");
+      const sourceRun = this.ownedRuns.get(request.sourceRunId), resumedRun = this.ownedRuns.get(request.resumedRunId);
+      if (!sourceRun || sourceRun.identityState !== "verified" || !resumedRun || resumedRun.identityState !== "verified") throw brokerError("unknown_run", "Both runs require verified process birth");
+      if (sourceRun.sessionId !== this.lifecycleSessionId || resumedRun.sessionId !== this.lifecycleSessionId) throw brokerError("process_birth_mismatch", "Lifecycle session does not match");
+      const requestDigest = `sha256:${createHash("sha256").update(JSON.stringify(request)).digest("hex")}`;
+      return await store.associate(request.sourceRunId, request.resumedRunId, requestDigest, request.expectedRevision, request.expectedResumedRevision);
+    } catch (error) { throw this.authorityError(error); }
+  }
+
+  async revokeOwner(value: unknown): Promise<void> {
+    const request = parseRevokeRequest(value);
+    const store = this.requireAuthorityStore();
+    try {
+      const current = await store.read(request.runId);
+      if (current.revoked) return;
+      if (current.receipt.ownerGeneration !== request.ownerGeneration) throw brokerError("stale_generation", "Owner generation is stale");
+      if (current.receipt.revision !== request.expectedRevision) throw brokerError("cas_conflict", "Owner revision conflicts");
+      if (current.receipt.processBirth !== request.processBirth) throw brokerError("process_birth_mismatch", "Process birth does not match");
+      await store.revoke(request.runId, current.revision);
+    } catch (error) { throw this.authorityError(error); }
+  }
+
+  private authorityError(error: unknown): Error {
+    if (error instanceof AuthorityStoreError) return brokerError(error.code, error.message);
+    return error instanceof Error ? error : brokerError("authority_store_unavailable", "Root Broker authority storage is unavailable");
+  }
+
+  /** Pure Host control-plane renewal: no upstream, event, message, or turn call. */
+  async renewHeartbeats() {
+    if (this.closed || !this.authorityStore) return;
+    for (const run of this.ownedRuns.values()) {
+      if (run.identityState !== "verified" || !run.birthIdentity) continue;
+      try {
+        const lease = await this.authorityStore.readLease(run.runId);
+        const renewed = await this.authorityStore.renewLease({ runId: run.runId, leaseId: lease.leaseId, ownerGeneration: lease.ownerGeneration, processBirth: run.birthIdentity, expectedRevision: lease.revision, expectedRenewalSequence: lease.renewalSequence, now: this.clock(), windowMs: HEARTBEAT_LEASE_MS });
+        this.publishLeaseUpdate(run.runId, renewed);
+      } catch { /* A fenced, terminal, or unavailable lease is never revived. */ }
+    }
+  }
+  publishLeaseUpdate(callerRunId: string, lease: any) {
+    for (const socket of this.subscriptions.get(callerRunId) ?? []) if (!socket.destroyed) {
+      try { socket.write(`${JSON.stringify({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId, type: "lease.updated", data: { leaseId: lease.leaseId, runId: lease.runId, ownerGeneration: lease.ownerGeneration, lastRenewedAt: lease.lastRenewedAt, expiresAt: lease.expiresAt, renewalSequence: lease.renewalSequence } })}\n`); } catch {}
     }
   }
 
@@ -547,6 +656,7 @@ export class RootBrokerServer {
     if ("authorization" in run) {
       this.revokedRuns.add(run.runId);
       this.principals.delete(run.runId);
+      this.trackTerminalLeaseRelease(run);
     }
     const waiters = this.terminalWaiters.get(run.runId);
     this.terminalWaiters.delete(run.runId);
@@ -576,6 +686,19 @@ export class RootBrokerServer {
     this.terminalProofDeliveries.set(run.runId, attempt.catch(() => undefined));
   }
 
+  trackTerminalLeaseRelease(run: OwnedRun) {
+    if (!this.authorityStore || this.leaseReleasePromises.has(run.runId)) return;
+    const release = (async () => {
+      try {
+        const lease = await this.authorityStore!.readLease(run.runId);
+        await this.authorityStore!.releaseLease({ runId: run.runId, leaseId: lease.leaseId, ownerGeneration: lease.ownerGeneration, processBirth: run.birthIdentity ?? lease.processBirth, expectedRevision: lease.revision });
+      } catch (error) {
+        this.leaseReleaseDebt.set(run.runId, error instanceof Error ? error.message : String(error));
+      }
+    })();
+    this.leaseReleasePromises.set(run.runId, release);
+  }
+
   /** Read-only observability; it never infers a terminal that was not accepted. */
   inspectTerminalProofDelivery(runId: string) {
     const delivery = this.terminalProofDelivery.get(runId);
@@ -584,7 +707,7 @@ export class RootBrokerServer {
   }
 
   async awaitTerminalProofDeliveries() {
-    await Promise.allSettled([...this.terminalProofDeliveries.values()]);
+    await Promise.allSettled([...this.terminalProofDeliveries.values(), ...this.leaseReleasePromises.values()]);
   }
 
   observeTerminal(event: any) {
@@ -1077,6 +1200,7 @@ export class RootBrokerServer {
     if (this.closed || socket.destroyed || this.principals.get(request.callerRunId)?.callerToken !== request.callerToken) return;
     try {
       socket.write(`${JSON.stringify({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: request.callerRunId, type: "subscription.ready", data: {} })}\n`);
+      if (this.authorityStore) void this.authorityStore.readLease(request.callerRunId).then((lease) => this.publishLeaseUpdate(request.callerRunId, lease)).catch(() => {});
     } catch { /* socket failure leaves the subscription unready */ }
   }
 
@@ -1108,6 +1232,19 @@ export class RootBrokerServer {
         return createBrokerSuccessResponse({ ...request, data: { subscribed: true } });
       }
       if (request.method === "ping") return createBrokerSuccessResponse({ ...request, data: await this.upstream.ping() });
+      if (request.method === "owner.read") {
+        if (request.callerRunId !== request.params.runId) return failure(request, "caller_unauthorized", "Caller does not own this run");
+        return createBrokerSuccessResponse({ ...request, data: await this.readOwnerReceipt(request.params.runId) });
+      }
+      if (request.method === "owner.rebind") {
+        if (request.callerRunId !== request.params.sourceRunId) return failure(request, "caller_unauthorized", "Caller does not own the source run");
+        return createBrokerSuccessResponse({ ...request, data: await this.rebindRun(request.params) });
+      }
+      if (request.method === "owner.revoke") {
+        if (request.callerRunId !== request.params.runId) return failure(request, "caller_unauthorized", "Caller does not own this run");
+        await this.revokeOwner(request.params);
+        return createBrokerSuccessResponse({ ...request, data: { revoked: true } });
+      }
       if (request.method === "acceptance.submit") {
         if (!principal.capabilities.has("acceptance.submit")) return failure(request, "capability_denied", "Caller lacks acceptance.submit capability");
         return createBrokerSuccessResponse({ ...request, data: await this.submitAcceptanceEvidence(request) });
@@ -1226,6 +1363,8 @@ export class RootBrokerServer {
       this.unsubscribeStarted = undefined;
       this.unsubscribeTerminal?.();
       this.unsubscribeTerminal = undefined;
+      if (this.heartbeatTimer) this.clearHeartbeatInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
       this.principals.clear();
       this.revokedRuns.clear();
       this.subscriptions.clear();
@@ -1240,6 +1379,8 @@ export class RootBrokerServer {
       this.terminalWaiters.clear();
       this.terminalProofDelivery.clear();
       this.terminalProofDeliveries.clear();
+      this.leaseReleasePromises.clear();
+      this.leaseReleaseDebt.clear();
       this.startedObservations.clear();
       this.integrationRequests.clear();
       this.requestBoundaries.clear();

@@ -16,6 +16,7 @@ import {
   inspectManagedIntegrationAdmission,
 } from "./git-worktree.ts";
 import {
+  allowedActionsFor,
   createManagedWorkspaceLedger,
 } from "./ledger.ts";
 
@@ -40,6 +41,30 @@ type ReconcileInput = { originRoot?: string };
 
 function failure(code: string, message: string, cause?: unknown): ManagedWorkspaceError {
   return new ManagedWorkspaceError(code, message, cause);
+}
+
+const STATE_NEXT_ACTION: Record<string, string> = {
+  reserved: "稍后重试 status；若长期停留说明 allocation 未完成。",
+  allocating: "稍后重试 status；若长期停留说明 allocation 未完成。",
+  active: "先调用 status，再用 dispose。",
+  disposing: "重放同一 dispose 调用以完成 pendingAction。",
+  preserved: "调用 release 回收。",
+  "cleanup-debt": "调用 release 重试回收；持续失败需人工处理。",
+  released: "终态，无可调用动作。",
+};
+
+export function managedWorkspaceStateFailure(state: string, message: string) {
+  const allowedActions = [...allowedActionsFor(state)];
+  const nextAction = STATE_NEXT_ACTION[state] ?? "状态未知，请人工检查 ledger 记录。";
+  const detail = Object.freeze({ state, allowedActions: Object.freeze(allowedActions), nextAction });
+  return Object.assign(failure("MANAGED_WORKSPACE_STATE", `${message}; state=${state}; allowed actions: ${allowedActions.join(", ") || "(none)"}; next: ${nextAction}`), { detail });
+}
+
+function cleanupDebtStateFailure(state: string, message: string) {
+  const allowedActions = [...allowedActionsFor(state)];
+  const nextAction = STATE_NEXT_ACTION[state] ?? "状态未知，请人工检查 ledger 记录。";
+  const detail = Object.freeze({ state, allowedActions: Object.freeze(allowedActions), nextAction });
+  return Object.assign(failure("MANAGED_WORKSPACE_CLEANUP_DEBT", `${message}; state=${state}; allowed actions: ${allowedActions.join(", ") || "(none)"}; next: ${nextAction}`), { detail });
 }
 
 function exactKeys(value, keys) {
@@ -158,7 +183,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     if (lease.record.leaseId !== binding?.leaseId || lease.record.run?.runId !== binding?.runId) {
       throw failure("MANAGED_WORKSPACE_BINDING", "workspace lease and trusted run binding do not match");
     }
-    if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", "integration requires an active workspace");
+    if (lease.record.state !== "active") throw managedWorkspaceStateFailure(lease.record.state, "integration requires an active workspace");
     return lease;
   }
 
@@ -183,9 +208,9 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     const request = createManagedWorkspaceRequestV2(input);
     let lease = ledger.reserve(request);
     if (lease.record.state === "active") return receipt(lease.record);
-    if (lease.record.state === "released") throw failure("MANAGED_WORKSPACE_STATE", "released workspace cannot be allocated again");
-    if (lease.record.state === "cleanup-debt") throw failure("MANAGED_WORKSPACE_CLEANUP_DEBT", "workspace allocation requires manual recovery");
-    if (!new Set(["reserved", "allocating"]).has(lease.record.state)) throw failure("MANAGED_WORKSPACE_STATE", `workspace cannot allocate from ${lease.record.state}`);
+    if (lease.record.state === "released") throw managedWorkspaceStateFailure(lease.record.state, "released workspace cannot be allocated again");
+    if (lease.record.state === "cleanup-debt") throw cleanupDebtStateFailure(lease.record.state, "workspace allocation requires manual recovery");
+    if (!new Set(["reserved", "allocating"]).has(lease.record.state)) throw managedWorkspaceStateFailure(lease.record.state, `workspace cannot allocate from ${lease.record.state}`);
     if (lease.record.state === "reserved") {
       lease = mutate(lease, (record) => { record.state = "allocating"; return record; });
     }
@@ -206,7 +231,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
   function bindRun({ workspaceId, run }) {
     if (!exactKeys(run, ["runId", "asyncDir"])) throw failure("MANAGED_WORKSPACE_RUN", "run binding is invalid");
     let lease = load(workspaceId);
-    if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", "run can bind only to an active workspace");
+    if (lease.record.state !== "active") throw managedWorkspaceStateFailure(lease.record.state, "run can bind only to an active workspace");
     if (lease.record.run) {
       if (!same(lease.record.run, run)) throw failure("MANAGED_WORKSPACE_RUN_CONFLICT", "workspace is already bound to another run");
       return receipt(lease.record);
@@ -231,7 +256,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
         || typeof resumedRun.agentProfile !== "string" || !resumedRun.agentProfile
         || sourceRunId === resumedRun.runId) throw failure("MANAGED_WORKSPACE_RUN", "resumed run binding is invalid");
     let lease = loadOwned(workspaceId, ownerScope);
-    if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", "run can bind only to an active workspace");
+    if (lease.record.state !== "active") throw managedWorkspaceStateFailure(lease.record.state, "run can bind only to an active workspace");
     if (lease.record.leaseId !== leaseId) throw failure("MANAGED_WORKSPACE_BINDING", "workspace lease and recovery rebind do not match");
     options.authorizeResumeIntent(input);
     if (!lease.record.run) throw failure("MANAGED_WORKSPACE_RUN_CONFLICT", "workspace is not bound to the source run");
@@ -343,7 +368,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       throw failure("MANAGED_WORKSPACE_BINDING", "workspace lease and trusted run binding do not match");
     }
     if (lease.record.state === "preserved") return receipt(lease.record);
-    if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", "integration debt can preserve only an active workspace");
+    if (lease.record.state !== "active") throw managedWorkspaceStateFailure(lease.record.state, "integration debt can preserve only an active workspace");
     lease = mutate(lease, record => {
       record.state = "preserved";
       record.disposition = { action: "preserve", reason: "managed child settled without a terminal integration receipt" };
@@ -383,7 +408,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
   }
 
   function statusForLease(lease, { terminalProof, expectedHead }: Omit<StatusInput, "workspaceId"> = {}) {
-    if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", `workspace status is unavailable in ${lease.record.state}`);
+    if (lease.record.state !== "active") throw managedWorkspaceStateFailure(lease.record.state, `workspace status is unavailable in ${lease.record.state}`);
     const proof = resolveProof(lease.record, terminalProof);
     const inspection = inspectManagedGitWorkspace(lease.record);
     const blockedReasons = [];
@@ -478,7 +503,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
   }
 
   function issueDispositionForLease(lease, { terminalProof, expectedHead }: Omit<StatusInput, "workspaceId"> = {}) {
-    if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", "disposition can be issued only for an active workspace");
+    if (lease.record.state !== "active") throw managedWorkspaceStateFailure(lease.record.state, "disposition can be issued only for an active workspace");
     const snapshot = statusForLease(lease, { terminalProof, expectedHead });
     assertExpectedHead(snapshot.inspection, expectedHead);
     const token = actionToken();
@@ -503,7 +528,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
 
   function recoverDisposition(lease, settledProof = undefined) {
     const pending = lease.record.pendingAction;
-    if (lease.record.state !== "disposing" || !pending) throw failure("MANAGED_WORKSPACE_STATE", "workspace has no disposition to recover");
+    if (lease.record.state !== "disposing" || !pending) throw managedWorkspaceStateFailure(lease.record.state, "workspace has no disposition to recover");
     try {
       if (pending.disposition === "preserve") {
         return mutate(lease, (record) => { record.state = "preserved"; return record; });
@@ -532,7 +557,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       if (tokenHash(suppliedToken) !== lease.record.actionChallenge?.tokenHash) throw failure("MANAGED_WORKSPACE_ACTION", "action token does not own pending disposition");
       return receipt(recoverDisposition(lease).record);
     }
-    if (lease.record.state !== "active") throw failure("MANAGED_WORKSPACE_STATE", "workspace disposition token was replayed or state is closed");
+    if (lease.record.state !== "active") throw managedWorkspaceStateFailure(lease.record.state, "workspace disposition token was replayed or state is closed");
     const snapshot = statusForLease(lease, { terminalProof, expectedHead });
     // This check happens in the service disposition authority immediately
     // before its durable intent; callers cannot substitute a stale snapshot.
@@ -573,7 +598,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
   }
 
   function issueReleaseForLease(lease, { terminalProof }: { terminalProof?: unknown } = {}) {
-    if (lease.record.state !== "preserved" && lease.record.state !== "cleanup-debt") throw failure("MANAGED_WORKSPACE_STATE", "release authorization requires a preserved workspace");
+    if (lease.record.state !== "preserved" && lease.record.state !== "cleanup-debt") throw managedWorkspaceStateFailure(lease.record.state, "release authorization requires a preserved workspace");
     const proof = proofValue(terminalProof);
     if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof");
     const token = actionToken();
@@ -585,7 +610,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
 
   function releaseForLease(lease, { terminalProof, actionToken: suppliedToken }: ReleaseInput = {}) {
     if (lease.record.state !== "preserved" && lease.record.state !== "cleanup-debt") {
-      throw failure("MANAGED_WORKSPACE_STATE", "only a preserved or cleanup-debt workspace can be released");
+      throw managedWorkspaceStateFailure(lease.record.state, "only a preserved or cleanup-debt workspace can be released");
     }
     const proof = proofValue(terminalProof);
     // Unbound preserved workspaces have no terminal proof to bind; issue a

@@ -6,13 +6,13 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("sourcing pi-shell exposes the project root for external review paths", () => {
+test("sourcing pi-shell exposes the project and Pi config roots", () => {
   const result = spawnSync(
     "zsh",
     [
       "-f",
       "-c",
-      `source ${repoRoot}/scripts/pi-shell.zsh; print -r -- "$PI_CONFIG_HOME|$PI_CODING_AGENT_DIR|$PI_CONFIG_HOME/skill-overrides/external-llm-review/reviewer.py"`,
+      `source ${repoRoot}/scripts/pi-shell.zsh; print -r -- "$PI_CONFIG_HOME|$PI_CODING_AGENT_DIR"`,
     ],
     { encoding: "utf8" },
   );
@@ -22,6 +22,5 @@ test("sourcing pi-shell exposes the project root for external review paths", () 
   assert.deepEqual(result.stdout.trim().split("|"), [
     repoRoot,
     `${repoRoot}/pi`,
-    `${repoRoot}/skill-overrides/external-llm-review/reviewer.py`,
   ]);
 });

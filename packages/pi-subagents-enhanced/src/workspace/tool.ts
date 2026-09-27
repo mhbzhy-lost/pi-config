@@ -1,3 +1,5 @@
+import { allowedActionsFor, MANAGED_WORKSPACE_STATES } from "./ledger.ts";
+
 const WORKSPACE_LIST_SCHEMA = {
   type: "object", additionalProperties: false, required: ["action"],
   properties: { action: { const: "list" } },
@@ -23,7 +25,11 @@ const WORKSPACE_RELEASE_SCHEMA = {
 export const SUBAGENT_WORKSPACE_PARAMETERS = Object.freeze({
   type: "object", anyOf: [WORKSPACE_LIST_SCHEMA, WORKSPACE_STATUS_SCHEMA, WORKSPACE_DISPOSE_SCHEMA, WORKSPACE_RELEASE_SCHEMA],
 });
-export const SUBAGENT_WORKSPACE_DESCRIPTION = "Manage only standalone subagent workspaces owned by the current session. Use status before dispose; use release only after preserve.";
+export const SUBAGENT_WORKSPACE_DESCRIPTION =
+  "Manage only standalone subagent workspaces owned by the current session. " +
+  "Use status before dispose; use release only after preserve. " +
+  `Workspace states: ${MANAGED_WORKSPACE_STATES.join(" | ")}. ` +
+  `Agent-callable actions per state: ${MANAGED_WORKSPACE_STATES.map((state) => `${state}=[${allowedActionsFor(state).join(",") || "none"}]`).join("; ")}.`;
 
 function nonempty(value) { return typeof value === "string" && value.length > 0; }
 function failure(code, message, detail = undefined, keypath = undefined) {

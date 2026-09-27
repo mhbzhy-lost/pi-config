@@ -1,6 +1,6 @@
 import { validateDeclaredBashCwd } from "./policy.ts";
 
-const cwdDescription = "可选；命令在此目录执行；必须在工作区内";
+const cwdDescription = "可选；命令在此目录执行";
 
 export function createBashCwdExtension(pi, {
   workspaceRoot = process.cwd(),

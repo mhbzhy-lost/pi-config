@@ -24,7 +24,6 @@ function validCodingContract() {
     agent: "executor",
     risk: "normal",
     objective: "Verify schema accepts stringified nested fields.",
-    workflow: { mode: "tdd" },
     requirements: ["Requirement one."],
     context: {
       knownFacts: ["Fact one."],
@@ -46,11 +45,6 @@ test("schema accepts native object coding contract", () => {
   assert.equal(validator.Check(input), true, "native contract should pass schema validation");
 });
 
-test("schema accepts stringified workflow", () => {
-  const input = validCodingContract();
-  input.workflow = '{"mode": "tdd"}';
-  assert.equal(validator.Check(input), true, "stringified workflow should pass schema validation");
-});
 
 test("schema accepts stringified requirements", () => {
   const input = validCodingContract();
@@ -84,7 +78,6 @@ test("schema accepts stringified execution", () => {
 
 test("schema accepts all fields stringified simultaneously", () => {
   const input = validCodingContract();
-  input.workflow = '{"mode": "tdd"}';
   input.requirements = '["Req."]';
   input.context = '{"knownFacts": [], "decisions": [], "relevantFiles": []}';
   input.boundaries = '{"writePaths": ["src/x.ts"], "excludedWork": [], "forbiddenActions": []}';
@@ -94,7 +87,7 @@ test("schema accepts all fields stringified simultaneously", () => {
 });
 
 test("schema only defers malformed values with the expected coding field container kind", () => {
-  const objectFields = ["workflow", "context", "boundaries"];
+  const objectFields = ["context", "boundaries"];
 
   for (const field of objectFields) {
     const malformed = validCodingContract();

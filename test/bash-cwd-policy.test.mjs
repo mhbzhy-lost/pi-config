@@ -39,32 +39,35 @@ test("validateDeclaredBashCwd rejects missing paths and files", async () => {
   });
 });
 
-test("validateDeclaredBashCwd fails closed for paths outside the workspace", async () => {
+test("validateDeclaredBashCwd accepts an existing directory outside the workspace", async () => {
   await withWorkspace(async (workspaceRoot) => {
     const outside = await mkdtemp(join(tmpdir(), "bash-cwd-outside-"));
     try {
-      await assert.rejects(
-        validateDeclaredBashCwd({ cwd: outside, workspaceRoot }),
-        /工作区|workspace|cwd/i,
-      );
+      assert.equal(await validateDeclaredBashCwd({ cwd: outside, workspaceRoot }), await realpath(outside));
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
   });
 });
 
-test("validateDeclaredBashCwd rejects symlinks that escape the workspace", async () => {
+test("validateDeclaredBashCwd resolves symlinks to their real directory", async () => {
   await withWorkspace(async (workspaceRoot) => {
     const outside = await mkdtemp(join(tmpdir(), "bash-cwd-outside-"));
     const escaped = join(workspaceRoot, "escaped");
     try {
       await symlink(outside, escaped);
-      await assert.rejects(
-        validateDeclaredBashCwd({ cwd: escaped, workspaceRoot }),
-        /工作区|workspace|cwd/i,
-      );
+      assert.equal(await validateDeclaredBashCwd({ cwd: escaped, workspaceRoot }), await realpath(outside));
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+});
+
+test("isWithinWorkspace reports canonical containment independently", async () => {
+  await withWorkspace(async (workspaceRoot) => {
+    const nested = join(workspaceRoot, "nested");
+    await mkdir(nested);
+    assert.equal((await import("../src/bash-cwd/policy.ts")).isWithinWorkspace(workspaceRoot, nested), true);
+    assert.equal((await import("../src/bash-cwd/policy.ts")).isWithinWorkspace(workspaceRoot, await mkdtemp(join(tmpdir(), "bash-cwd-other-"))), false);
   });
 });

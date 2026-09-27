@@ -12,6 +12,7 @@ import {
   type BrokerPush,
 } from "./root-broker-protocol.ts";
 import { processBirthIdentityMatches } from "./process-birth-identity.ts";
+import { RECOVERY_RPC_DEADLINE_MS, parseRebindRequest, parseRevokeRequest } from "./authority-contract.ts";
 
 export type RootBrokerRegistryEntry = {
   protocol: "pi-root-subagent-broker-registry.v1";
@@ -146,7 +147,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, requiredCap
     };
   };
 
-  const request = async (method: string, params: Record<string, unknown> = {}, options: { requestId?: string } = {}) => {
+  const request = async (method: string, params: Record<string, unknown> = {}, options: { requestId?: string; timeoutMs?: number } = {}) => {
     assertLive();
     const value = await envelope(method, params, options.requestId);
     return await new Promise<unknown>((resolve, reject) => {
@@ -165,7 +166,7 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, requiredCap
       };
       const rejectPending = (error: Error) => finish(error);
       pending.add(rejectPending);
-      const timer = setTimeout(() => finish(clientError("Root broker request timed out", "BROKER_TIMEOUT")), timeoutMs);
+      const timer = setTimeout(() => finish(clientError("Root broker request timed out", "BROKER_TIMEOUT")), options.timeoutMs ?? timeoutMs);
       socket.once("error", (error) => finish(clientError(`Root broker disconnected: ${error.message}`, "BROKER_DISCONNECTED")));
       socket.once("close", () => { if (!settled) finish(clientError("Root broker disconnected before response", "BROKER_DISCONNECTED")); });
       socket.on("data", (chunk) => {
@@ -249,6 +250,9 @@ export function createRootBrokerClient({ rootSessionId, callerRunId, requiredCap
     ping: () => request("ping"),
     submitAcceptanceEvidence: (params: Record<string, unknown>) => request("acceptance.submit", params),
     subscribe,
+    readOwnerReceipt: (runId: string) => request("owner.read", { runId }, { timeoutMs: RECOVERY_RPC_DEADLINE_MS }),
+    rebindRun: (params: Record<string, unknown>) => request("owner.rebind", parseRebindRequest(params), { timeoutMs: RECOVERY_RPC_DEADLINE_MS }),
+    revokeOwner: (params: Record<string, unknown>) => request("owner.revoke", parseRevokeRequest(params), { timeoutMs: RECOVERY_RPC_DEADLINE_MS }),
     dispose() {
       if (disposed) return;
       disposed = true;

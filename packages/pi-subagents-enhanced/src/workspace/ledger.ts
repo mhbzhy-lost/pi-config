@@ -28,7 +28,6 @@ const RECORD_SCHEMA_V2 = "managed-workspace-ledger.v2";
 const LOCK_SCHEMA = "managed-workspace-lock.v1";
 const OWNER_TOKEN = /^managed-workspace-owner\.v1:[a-f0-9]{64}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const STATES = new Set(["reserved", "allocating", "active", "disposing", "preserved", "released", "cleanup-debt"]);
 const RECORD_V2_KEYS = [
   "schemaVersion", "workspaceId", "request", "requestHash", "ownerToken", "leaseId",
   "path", "dispatchCwd", "branchRef", "state", "run", "disposition", "cleanupDebt",
@@ -45,6 +44,25 @@ class ManagedWorkspaceError extends Error {
     if (cause !== undefined) this.cause = cause;
   }
 }
+
+// workspace record 的权威状态词表。其他生命周期词不是 ledger state。
+export const MANAGED_WORKSPACE_STATES = [
+  "reserved", "allocating", "active", "disposing", "preserved", "released", "cleanup-debt",
+] as const;
+export type ManagedWorkspaceState = typeof MANAGED_WORKSPACE_STATES[number];
+export function allowedActionsFor(state: ManagedWorkspaceState | string): readonly string[] {
+  switch (state) {
+    case "reserved":
+    case "allocating":
+    case "released": return [];
+    case "active": return ["status", "dispose"];
+    case "disposing": return ["dispose"];
+    case "preserved":
+    case "cleanup-debt": return ["release"];
+    default: throw new Error(`${String(state)} is not a managed workspace state`);
+  }
+}
+const STATES = new Set<string>(MANAGED_WORKSPACE_STATES);
 
 type LedgerFault = (event: { operation: string; phase: string; workspaceId: string }) => void;
 type LedgerOptions = { stateRoot?: string; storageRepositoryId?: string; fault?: LedgerFault };

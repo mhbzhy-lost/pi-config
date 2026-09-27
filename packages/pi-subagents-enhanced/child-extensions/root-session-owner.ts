@@ -8,6 +8,8 @@ type Options = {
   createClient?: typeof createRootBrokerClient;
   clock?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
+  setInterval?: typeof setInterval;
+  clearInterval?: typeof clearInterval;
   kill?: (pid: number, signal: NodeJS.Signals) => void;
   pid?: number;
 };
@@ -54,22 +56,35 @@ export async function installRootSessionOwner(pi: any, options: Options = {}) {
   const deadline = clock() + RETRY_DEADLINE_MS;
   let subscription: any;
   let terminating = false;
+  let terminationReason: "authority_lease_expired" | "explicit_stop" | "subscription_eof" | undefined;
+  let expiresAt: number | undefined;
+  let ownerGeneration: number | undefined;
+  const setExpiryInterval = options.setInterval ?? setInterval;
+  const clearExpiryInterval = options.clearInterval ?? clearInterval;
+  let expiryTimer: ReturnType<typeof setInterval> | undefined;
 
-  const terminate = async () => {
+  const terminate = async (reason: "authority_lease_expired" | "explicit_stop" | "subscription_eof" = "authority_lease_expired") => {
     if (terminating) return;
     terminating = true;
-    await Promise.resolve(pi.sendMessage?.({
-      customType: "pi-root-session-closing-v1",
-      content: "Root session closed; this child must terminate.",
-      details: { rootSessionId, runId: callerRunId },
-    })).catch(() => {});
+    terminationReason = reason;
     kill(pid, "SIGTERM");
   };
 
   for (;;) {
     try {
       subscription = await client.subscribe((push: any) => {
-        if (push.type === "root.closing") void terminate();
+        if (push.type === "root.closing") void terminate("explicit_stop");
+        if (push.type === "lease.updated"
+          && push.data?.runId === callerRunId
+          && Number.isSafeInteger(push.data.ownerGeneration) && push.data.ownerGeneration > 0
+          && (ownerGeneration === undefined || push.data.ownerGeneration >= ownerGeneration)
+          && Number.isFinite(push.data.lastRenewedAt) && Number.isFinite(push.data.expiresAt)
+          && push.data.lastRenewedAt <= clock()
+          && push.data.expiresAt >= push.data.lastRenewedAt
+          && (expiresAt === undefined || push.data.expiresAt >= expiresAt)) {
+          ownerGeneration = push.data.ownerGeneration;
+          expiresAt = push.data.expiresAt;
+        }
         // Recovery notifications are intentionally consumed as durable
         // observations by the root owner; the broker has already persisted the
         // event and no model wake-up is needed here.
@@ -88,13 +103,18 @@ export async function installRootSessionOwner(pi: any, options: Options = {}) {
       await sleep(RETRY_DELAY_MS);
     }
   }
-  subscription.closed.catch(() => { if (!terminating) void terminate(); });
+  expiryTimer = setExpiryInterval(() => { if (!terminating && expiresAt !== undefined && clock() >= expiresAt) void terminate("authority_lease_expired"); }, 5_000);
+  subscription.closed.catch(() => { if (!terminating && (expiresAt === undefined || clock() >= expiresAt)) void terminate(expiresAt === undefined ? "subscription_eof" : "authority_lease_expired"); });
   return Object.freeze({
     client,
     subscription,
+    get terminationReason() { return terminationReason; },
+    get expiresAt() { return expiresAt; },
     dispose() {
+      if (expiryTimer) clearExpiryInterval(expiryTimer);
       subscription.dispose();
       client.dispose();
+      terminating = true;
     },
   });
 }

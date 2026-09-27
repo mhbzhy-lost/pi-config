@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readLegacyExecutorGrant } from "./legacy-executor-compat.ts";
+import { parseRebindRequest, parseRevokeRequest } from "./authority-contract.ts";
 
 const REQUEST_SCHEMA_VERSION = "pi-root-subagent-broker-request.v1";
 const PUSH_SCHEMA_VERSION = "pi-root-subagent-broker-push.v1";
@@ -12,8 +13,8 @@ const ERROR_MESSAGE_LIMIT = 1024;
 export const BROKER_FRAME_LIMIT_BYTES = 64 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
-const METHODS = Object.freeze(["ping", "subscribe", "acceptance.submit", "coordinator.register"] as const);
-const PUSH_TYPES = Object.freeze(["root.closing", "subscription.ready", "recovery.event"] as const);
+const METHODS = Object.freeze(["ping", "subscribe", "acceptance.submit", "coordinator.register", "owner.read", "owner.rebind", "owner.revoke"] as const);
+const PUSH_TYPES = Object.freeze(["root.closing", "subscription.ready", "recovery.event", "lease.updated"] as const);
 const BROKER_CAPABILITIES = Object.freeze(["acceptance.submit", "root.subscribe"] as const);
 const PROCESS_TERMINAL_STATES = Object.freeze(["pending", "observed", "unknown", "not-started"] as const);
 const PROCESS_TERMINAL_REASONS = Object.freeze([
@@ -387,6 +388,12 @@ export function parseBrokerRequest(value) {
   } else if (request.method === "coordinator.request") {
     const params = exactObject(request.params, "params", ["operation", "input"]);
     coordinatorParams(params);
+  } else if (request.method === "owner.read") {
+    exactObject(request.params, "params", ["runId"]); identity(request.params.runId, "params.runId");
+  } else if (request.method === "owner.rebind") {
+    parseRebindRequest(request.params);
+  } else if (request.method === "owner.revoke") {
+    parseRevokeRequest(request.params);
   }
   else exactObject(request.params, "params", []);
   try {
@@ -429,6 +436,10 @@ export function parseBrokerPush(value) {
   if (push.type === "recovery.event") {
     const data = exactObject(push.data, "push.data", RECOVERY_EVENT_DATA_FIELDS);
     if (data.schemaVersion !== "recovery-event.v1") fail("push.data.schemaVersion is unsupported");
+  } else if (push.type === "lease.updated") {
+    const data = exactObject(push.data, "push.data", ["leaseId", "runId", "ownerGeneration", "lastRenewedAt", "expiresAt", "renewalSequence"]);
+    identity(data.leaseId, "push.data.leaseId"); identity(data.runId, "push.data.runId");
+    if (!Number.isSafeInteger(data.ownerGeneration) || data.ownerGeneration <= 0 || !Number.isFinite(data.lastRenewedAt) || !Number.isFinite(data.expiresAt) || data.expiresAt < data.lastRenewedAt || !Number.isSafeInteger(data.renewalSequence) || data.renewalSequence < 0) fail("push.data lease is invalid");
   } else {
     exactObject(push.data, "push.data", []);
   }

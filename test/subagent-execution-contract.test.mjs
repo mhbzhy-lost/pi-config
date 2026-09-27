@@ -113,6 +113,53 @@ test("managed state roots cannot become a dispatch cwd", async (t) => {
   await assert.rejects(createAuthorizedDispatch({ agent: "executor", cwd: stateRoot }, grant), /managed state|cwd/i);
 });
 
+test("cwd 落在 managed state root 内时报 INVALID_EXECUTION_CWD，而非 SUBAGENT_RPC_FAILED", async (t) => {
+  const { cwdRoot, grant } = await fixture(t);
+  const stateRoot = join(cwdRoot, "managed-state");
+  const inside = join(stateRoot, "repositories", "aa", "worktrees", "wt-1");
+  await mkdir(inside, { recursive: true });
+
+  const previous = process.env.PI_CODING_WORKSPACE_DIR;
+  process.env.PI_CODING_WORKSPACE_DIR = stateRoot;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_CODING_WORKSPACE_DIR;
+    else process.env.PI_CODING_WORKSPACE_DIR = previous;
+  });
+
+  await assert.rejects(
+    createAuthorizedDispatch({ agent: grant.allowedProfiles[0], cwd: inside }, grant),
+    (error) => {
+      assert.equal(error.code, "INVALID_EXECUTION_CWD", `实际 code=${error.code}`);
+      assert.notEqual(error.code, "SUBAGENT_RPC_FAILED");
+      assert.equal("operation" in error, false, "不得携带 operation，否则会被兜底逻辑判为 RPC 失败");
+      assert.match(error.message, /managed state root/);
+      assert.ok(error.message.includes(inside), "message 应回显实际 cwd");
+      assert.match(error.message, /repository origin|execution\\.worktree/, "message 应给出下一步");
+      assert.equal(error.detail?.code, "INVALID_EXECUTION_CWD");
+      assert.equal(error.detail?.keypath, "cwd");
+      return true;
+    },
+  );
+});
+
+test("既有 fail() 调用点的 message 文本未被改变", async (t) => {
+  const { grant, cwdRoot } = await fixture(t);
+  const previous = process.env.PI_CODING_WORKSPACE_DIR;
+  process.env.PI_CODING_WORKSPACE_DIR = join(cwdRoot, "managed-state");
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_CODING_WORKSPACE_DIR;
+    else process.env.PI_CODING_WORKSPACE_DIR = previous;
+  });
+
+  await assert.rejects(
+    createAuthorizedDispatch({ agent: "definitely-not-an-allowed-profile", cwd: grant.cwdRoot }, grant),
+    (error) => {
+      assert.equal(error.message, "Dispatch execution contract is invalid: dispatch request agent is not an allowed profile");
+      return true;
+    },
+  );
+});
+
 test("callers may narrow shared isolation but cannot downgrade managed isolation", async (t) => {
   const managed = await fixture(t, "managed-workspace");
   await assert.rejects(

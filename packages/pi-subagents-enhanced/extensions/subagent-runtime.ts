@@ -18,12 +18,15 @@ import {
   formatCompactSupervisorToolResult,
 } from "../src/tui/compact-rendering.ts";
 import { createSubagentDispatchTraceFileSink, installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
+import { createSupervisorControlPlane } from "../src/subagent-dispatch/supervisor-control-plane.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
 import { createCoordinatorProofOutbox } from "../src/subagent-dispatch/coordinator-proof-outbox.ts";
+import { classifyTerminalProofBinding } from "../src/subagent-dispatch/terminal-proof-binding.ts";
 import { resolveRootSessionId } from "../src/subagent-dispatch/root-broker-protocol.ts";
 import { COORDINATOR_OPERATIONS } from "../src/subagent-dispatch/root-broker-protocol.ts";
 import { closeAndUnbindRootBroker, inspectRootBrokerExecutionProof, registerRootBrokerAuthorizedRun, startAndBindRootBroker } from "../src/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer, rootBrokerTerminalProofId, type TerminalProofDeliveryOutcome } from "../src/subagent-dispatch/root-broker-server.ts";
+import { AuthorityStore } from "../src/subagent-dispatch/authority-store.ts";
 import { rootBrokerRegistryEntry } from "../src/subagent-dispatch/root-broker-registry.ts";
 import { createTrustedRunBindingResolver } from "../src/subagent-dispatch/run-binding-resolver.ts";
 import { createRecoveryResumeOrchestrator } from "../src/subagent-dispatch/recovery-resume-orchestrator.ts";
@@ -106,47 +109,23 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
     };
     broker.recordTerminalProof = async (run, proof): Promise<TerminalProofDeliveryOutcome> => {
       const proofId = rootBrokerTerminalProofId(proof);
-      // A coordinator transport failure is not an unresolved binding: the
-      // durable ledger still proves the workspace/run pair, so the proof stays
-      // replayable instead of becoming proof debt.
-      const ledgerBinding = () => {
-        try {
-          const records = createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
-            .listScoped({ owner: proofOwnerScope })
-            .filter((record: any) => record.run?.runId === run.runId);
-          return records.length === 1 ? records[0].workspaceId : undefined;
-        } catch { return undefined; }
-      };
-      let workspaceId: string | undefined;
-      try {
-        const owned = await client.listOwned({ runId: run.runId });
-        workspaceId = Array.isArray(owned) && owned.length === 1 ? owned[0].workspaceId : undefined;
-      } catch { workspaceId = ledgerBinding(); }
-      if (typeof workspaceId !== "string" || !workspaceId) {
-        const reason = "trusted run binding is unavailable";
-        await proofOutbox.recordDebt({ proofId, runId: run.runId, reason });
-        return { state: "debt", reason };
-      }
-      // The workspace ledger v2 requires exactly this proof identity; the
-      // proofId is the Root Broker canonical hash of the accepted terminal.
-      const terminalProof = {
-        state: "observed",
-        conflict: false,
-        runId: run.runId,
-        rootSessionId: broker.rootSessionId,
-        asyncDir: run.asyncDir,
-        processInstance: typeof proof.runnerProcessInstanceId === "string" && proof.runnerProcessInstanceId ? proof.runnerProcessInstanceId : String(run.pid),
+      return classifyTerminalProofBinding({
+        client,
+        proofOutbox,
+        readLedger: () => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
+          .listScoped({ owner: proofOwnerScope }).filter((record: any) => record.run?.runId === run.runId),
+        run,
+        proof,
         proofId,
-      };
-      // Durability first: a crash before the coordinator reply must not lose
-      // the accepted terminal, and the daemon replays pending on startup.
-      await proofOutbox.enqueue({ ...terminalProof, workspaceId, ownerScope: proofOwnerScope });
-      try {
-        const receipt = await client.recordTerminalProof({ workspaceId, ownerScope: proofOwnerScope, proof: terminalProof });
-        return { state: "delivered", receipt };
-      } catch (error) {
-        return { state: "pending", reason: error instanceof Error && error.message ? error.message : String(error) };
-      }
+        proofOwnerScope,
+        rootSessionId: broker.rootSessionId,
+        buildTerminalProof: () => ({
+          state: "observed", conflict: false, runId: run.runId, rootSessionId: broker.rootSessionId,
+          asyncDir: run.asyncDir,
+          processInstance: typeof proof.runnerProcessInstanceId === "string" && proof.runnerProcessInstanceId ? proof.runnerProcessInstanceId : String(run.pid),
+          proofId,
+        }),
+      });
     };
     // durable recovery resume：轮询 recovery.status（按 rootSessionId 过滤）
     // 发现本 root children 的 pending/starting resume intent，经 upstream
@@ -322,6 +301,25 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   let workspaceService: any;
   let workspaceRootSessionId: string | undefined;
   let workspaceLifecycleSessionId: string | undefined;
+  const supervisorControlPlane = createSupervisorControlPlane({
+    readOwnerReceipt: async (runId) => {
+      if (!brokerReady || !broker) return undefined;
+      try { return await broker.readOwnerReceipt(runId); } catch { return undefined; }
+    },
+    readRuntime: async (runId) => {
+      if (!brokerReady) return undefined;
+      try {
+        const status: any = await rpc.status({ id: runId });
+        const details = status?.details ?? status;
+        const owner = broker ? await broker.readOwnerReceipt(runId) : undefined;
+        return { runId, ownerGeneration: owner?.ownerGeneration, liveRunEpoch: details?.liveRunEpoch, running: details?.state === "running" || details?.running === true, steerable: details?.steerable === true };
+      } catch { return undefined; }
+    },
+  });
+  const enabledSupervisorControlPlane = Object.freeze({
+    ...supervisorControlPlane,
+    enabled: () => brokerReady && !!broker,
+  });
   try {
   installHeadlessTypedSubagentRuntime(pi, {
     providerBlacklist,
@@ -352,7 +350,12 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       const rootSessionId = resolveRootSessionId(ctx.sessionManager);
       const lifecycleSessionId = resolveCurrentSessionId(ctx.sessionManager);
       const upstream = createRootBrokerUpstream({ rpc });
-      const startingBroker = new RootBrokerServer({ rootSessionId, lifecycleSessionId, upstream, events: pi.events });
+      const stateRoot = process.env.PI_CODING_WORKSPACE_DIR;
+      // This is an independent private authority root, never a workspace ledger.
+      const authorityStore = typeof stateRoot === "string" && stateRoot.length > 0
+        ? new AuthorityStore({ root: path.join(stateRoot, "root-broker-authority", rootSessionId) })
+        : undefined;
+      const startingBroker = new RootBrokerServer({ rootSessionId, lifecycleSessionId, upstream, events: pi.events, authorityStore });
       previousBrokerMarker = process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
       try {
         await startAndBindRootBroker(pi, startingBroker);
@@ -422,6 +425,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     renderSupervisorCall,
     renderSupervisorResult,
     rpc,
+    supervisorControlPlane: enabledSupervisorControlPlane,
     resolveRootSessionId: (sessionManager: any) => resolveRootSessionId(sessionManager),
     registerAuthorizedRun: async (authorization: any) => {
       if (!brokerReady || !broker) {

@@ -17,6 +17,8 @@ const { registerSubagentNotify, currentCompletionOwnerId } = await runtimeJiti.i
 
 import { createHeadlessSubagentApi } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts";
 import { createTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
+import { createSupervisorAdapter } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts";
+import { createSupervisorControlPlane } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts";
 import {
   createSupervisorRequestMailbox,
   createTypedSubagentExtension as createTypedSubagentExtensionProduction,
@@ -1683,6 +1685,74 @@ test("routes native Supervisor messages through the Root ingress callback", asyn
   assert.equal(calls.length, 1, "Root ingress must receive one native Supervisor message");
   assert.strictEqual(calls[0].message, supervisorMessage);
   assert.strictEqual(calls[0].context, supervisorContext);
+});
+
+test("configured supervisor control plane fences reply and steer delivery without changing its public tool schema", async () => {
+  const pi = createPi();
+  const rpc = createRpc();
+  let nativeCalls = 0;
+  const controlPlane = createSupervisorControlPlane({
+    readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }),
+    readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: true, steerable: true }),
+    randomId: () => "receipt-1",
+  });
+  const adapter = createSupervisorAdapter();
+  adapter.bind(async () => { nativeCalls += 1; return { content: [{ type: "text", text: "native" }] }; });
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorAdapter: adapter, supervisorControlPlane: controlPlane });
+  const ingress = pi.handlers.get("message_end")[0];
+  await ingress({ message: { customType: "subagent_supervisor_request", details: { id: "request-1", runId: "run-1", reason: "needs approval" } } }, ctx);
+
+  const blockedSteer = await pi.tools[0].execute("steer-1", { action: "steer", runId: "run-1", message: "approve" }, signal, undefined, ctx);
+  assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
+  const absentReply = await pi.tools[2].execute("reply-absent", { action: "reply", replyTo: "missing", message: "approve" }, signal, undefined, ctx);
+  assert.equal(absentReply.details.code, "SUPERVISOR_REQUEST_NOT_PENDING");
+
+  const reply = await pi.tools[2].execute("reply-1", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  assert.equal(reply.isError, undefined);
+  assert.equal(nativeCalls, 1);
+  const repeated = await pi.tools[2].execute("reply-1", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  assert.equal(repeated.details.receiptId, "receipt-receipt-1");
+  assert.equal(nativeCalls, 1);
+  const duplicateSteer = await pi.tools[0].execute("steer-2", { action: "steer", runId: "run-1", message: "approve" }, signal, undefined, ctx);
+  assert.equal(duplicateSteer.details.code, "STEER_DUPLICATES_REPLY");
+  assert.equal(rpc.calls.filter((call) => call.method === "steer").length, 0);
+});
+
+test("supervisor control plane fails closed for stale owners, expired requests, and non-running steers", async () => {
+  async function createScenario({ now = () => 1_000, readOwnerReceipt, readRuntime } = {}) {
+    const pi = createPi();
+    const rpc = createRpc();
+    const owner = readOwnerReceipt ?? (async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }));
+    const runtime = readRuntime ?? (async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: true, steerable: true }));
+    const controlPlane = createSupervisorControlPlane({ readOwnerReceipt: owner, readRuntime: runtime, now, randomId: () => "receipt-1" });
+    const adapter = createSupervisorAdapter();
+    adapter.bind(async () => ({ content: [{ type: "text", text: "native" }] }));
+    createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorAdapter: adapter, supervisorControlPlane: controlPlane });
+    const ingress = pi.handlers.get("message_end")[0];
+    await ingress({ message: { customType: "subagent_supervisor_request", details: { id: "request-1", runId: "run-1", reason: "needs approval" } } }, ctx);
+    return { pi, controlPlane };
+  }
+
+  let owner = { rootSessionId: "root-1", ownerGeneration: 1 };
+  const staleOwner = await createScenario({ readOwnerReceipt: async (runId) => ({ runId, ...owner }) });
+  owner = { rootSessionId: "root-2", ownerGeneration: 2 };
+  const staleReply = await staleOwner.pi.tools[2].execute("stale-owner", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  assert.equal(staleReply.details.code, "SUPERVISOR_STALE_OWNER");
+
+  let clock = 1_000;
+  const expired = await createScenario({ now: () => clock });
+  clock += 21 * 60 * 1000;
+  const expiredReply = await expired.pi.tools[2].execute("expired", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  assert.equal(expiredReply.details.code, "SUPERVISOR_REQUEST_EXPIRED");
+
+  const notRunning = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: false, steerable: true }) });
+  await notRunning.pi.tools[2].execute("consume-request", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  const blockedSteer = await notRunning.pi.tools[0].execute("not-running", { action: "steer", runId: "run-1", message: "follow up" }, signal, undefined, ctx);
+  assert.equal(blockedSteer.details.code, "SUPERVISOR_STEER_NOT_ALLOWED");
+
+  const runtimeOwnerMismatch = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 2, liveRunEpoch: 4, running: true, steerable: true }) });
+  const mismatchReply = await runtimeOwnerMismatch.pi.tools[2].execute("runtime-owner-mismatch", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  assert.equal(mismatchReply.details.code, "SUPERVISOR_STALE_OWNER");
 });
 
 test("internal Supervisor target forwards the public two-argument handle through the native five-argument closure", async () => {

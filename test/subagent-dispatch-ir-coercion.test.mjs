@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts";
+import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 
 /**
  * Tests for coercing stringified JSON fields back to objects/arrays.
@@ -21,7 +21,6 @@ function validContract() {
     agent: "executor",
     risk: "normal",
     objective: "Verify coercion works.",
-    workflow: { mode: "tdd" },
     requirements: ["Requirement one."],
     context: {
       knownFacts: ["Fact one."],
@@ -38,21 +37,7 @@ function validContract() {
   };
 }
 
-test("coerces stringified workflow object", () => {
-  const input = validContract();
-  input.workflow = '{"mode": "tdd"}';
 
-  const ir = compileCodingDispatchIR(input, { cwd: "/repo" });
-  assert.deepEqual(ir.workflow, { mode: "tdd" });
-});
-
-test("coerces stringified workflow with reason", () => {
-  const input = validContract();
-  input.workflow = '{"mode": "existing-tests", "reason": "Covered by existing tests."}';
-
-  const ir = compileCodingDispatchIR(input, { cwd: "/repo" });
-  assert.deepEqual(ir.workflow, { mode: "existing-tests", reason: "Covered by existing tests." });
-});
 
 test("coerces stringified requirements array", () => {
   const input = validContract();
@@ -99,7 +84,6 @@ test("coerces stringified execution object", () => {
 
 test("coerces all stringified fields simultaneously", () => {
   const input = validContract();
-  input.workflow = '{"mode": "tdd"}';
   input.requirements = '["Req."]';
   input.context = '{"knownFacts": [], "decisions": [], "relevantFiles": []}';
   input.boundaries = '{"writePaths": ["src/x.ts"], "excludedWork": [], "forbiddenActions": []}';
@@ -107,7 +91,6 @@ test("coerces all stringified fields simultaneously", () => {
   input.execution = '{"timeoutMs": 90000}';
 
   const ir = compileCodingDispatchIR(input, { cwd: "/repo" });
-  assert.deepEqual(ir.workflow, { mode: "tdd" });
   assert.deepEqual(ir.requirements, ["Req."]);
   assert.deepEqual(ir.boundaries.writePaths, ["src/x.ts"]);
   assert.equal(ir.execution.timeoutMs, 90000);
@@ -116,7 +99,6 @@ test("coerces all stringified fields simultaneously", () => {
 test("coerced contract produces same hash as native object contract", () => {
   const native = validContract();
   const stringified = validContract();
-  stringified.workflow = '{"mode": "tdd"}';
   stringified.requirements = '["Requirement one."]';
   stringified.context = '{"knownFacts": ["Fact one."], "decisions": ["Decision one."], "relevantFiles": ["src/index.ts"]}';
   stringified.boundaries = '{"writePaths": ["src/index.ts"], "excludedWork": ["Nothing excluded."], "forbiddenActions": ["Nothing forbidden."]}';
@@ -129,49 +111,11 @@ test("coerced contract produces same hash as native object contract", () => {
   assert.equal(nativeIr.hash, stringifiedIr.hash);
 });
 
-test("rejects invalid JSON in stringified field", () => {
-  const input = validContract();
-  input.workflow = "{invalid json}";
 
-  assert.throws(
-    () => compileCodingDispatchIR(input, { cwd: "/repo" }),
-    (error) => {
-      assert.equal(error.code, "INVALID_CONTRACT");
-      return true;
-    },
-  );
-});
 
-test("rejects stringified field that parses to wrong type", () => {
-  const input = validContract();
-  input.workflow = '"just a string"';  // Valid JSON but not an object
-
-  assert.throws(
-    () => compileCodingDispatchIR(input, { cwd: "/repo" }),
-    (error) => {
-      assert.equal(error.code, "INVALID_CONTRACT");
-      return true;
-    },
-  );
-});
-
-test("does not coerce plain strings that are not JSON", () => {
-  const input = validContract();
-  input.workflow = "tdd";  // Not JSON, should fail as invalid object
-
-  assert.throws(
-    () => compileCodingDispatchIR(input, { cwd: "/repo" }),
-    (error) => {
-      assert.equal(error.code, "INVALID_CONTRACT");
-      return true;
-    },
-  );
-});
 
 test("handles whitespace-padded JSON strings", () => {
   const input = validContract();
-  input.workflow = '  {"mode": "tdd"}  ';
 
   const ir = compileCodingDispatchIR(input, { cwd: "/repo" });
-  assert.deepEqual(ir.workflow, { mode: "tdd" });
 });
