@@ -93,15 +93,16 @@ test("production runtime lifecycle identity and retry cleanup contract", async (
   const entry = await text("packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
 
   assert.match(entry, /const lifecycleSessionId = resolveCurrentSessionId\(ctx\.sessionManager\);/);
-  assert.match(entry, /new RootBrokerServer\(\{ rootSessionId, lifecycleSessionId, upstream, events: pi\.events \}\)/);
+  assert.match(entry, /const stateRoot = process\.env\.PI_CODING_WORKSPACE_DIR;/);
+  assert.match(entry, /new AuthorityStore\(\{ root: path\.join\(stateRoot, "root-broker-authority", rootSessionId\) \}\)/);
+  assert.match(entry, /: undefined;\n      const startingBroker = new RootBrokerServer\(\{ rootSessionId, lifecycleSessionId, upstream, events: pi\.events, authorityStore \}\)/);
+  assert.doesNotMatch(entry, /createManagedWorkspaceLedger\(\{ stateRoot \}\).*authorityStore/);
   assert.match(entry, /closeAndUnbindRootBroker\(pi, broker\)/);
   assert.doesNotMatch(entry, /closeRootSession\(\);\s*\}\s*finally\s*\{\s*unbindRootBroker/);
 });
 
 test("production dispatch modules are independent from Plan Runner and native tool definitions", async () => {
   const sources = await Promise.all([
-    "packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts",
-    "packages/pi-subagents-enhanced/src/subagent-dispatch/prompt.ts",
     "packages/pi-subagents-enhanced/src/subagent-dispatch/rpc-client.ts",
     "packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts",
     "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",

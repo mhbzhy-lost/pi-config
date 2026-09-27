@@ -24,12 +24,43 @@ export type ModelSelectionInput = {
   blockedProviders?: readonly string[];
 };
 
+export type ModelSelectionErrorDetails = {
+  code: "MODEL_NOT_AVAILABLE";
+  requestedModel: string;
+  requestedKind: "qualified" | "bare";
+  agent: string;
+  declaredCandidates: readonly string[];
+  availableCandidates: readonly string[];
+  suggestion?: string;
+};
+
 export class ModelSelectionError extends Error {
   code = "MODEL_NOT_AVAILABLE";
+  details: ModelSelectionErrorDetails;
 
-  constructor(requestedModel: string, agentName: string) {
-    super(`Requested model is not available: ${requestedModel}; agent=${agentName}`);
+  constructor(requestedModel: string, agentName: string, candidates: {
+    declaredCandidates?: readonly string[];
+    availableCandidates?: readonly string[];
+    suggestion?: string;
+  } = {}) {
+    const declared = [...(candidates.declaredCandidates ?? [])];
+    const available = [...(candidates.availableCandidates ?? [])].sort();
+    const parts = [`Requested model is not available: ${requestedModel}; agent=${agentName}.`];
+    if (declared.length > 0) parts.push(`Available declared IDs: ${JSON.stringify(declared)}.`);
+    if (available.length > 0) parts.push(`Available models: ${JSON.stringify(available)}.`);
+    if (candidates.suggestion) parts.push(`Did you mean \"${candidates.suggestion}\"?`);
+    parts.push(`Bare IDs must exactly match the full id segment after \"provider/\"; no alias or substring matching is performed.`);
+    super(parts.join(" "));
     this.name = "ModelSelectionError";
+    this.details = Object.freeze({
+      code: "MODEL_NOT_AVAILABLE",
+      requestedModel,
+      requestedKind: requestedModel.includes("/") ? "qualified" : "bare",
+      agent: agentName,
+      declaredCandidates: Object.freeze(declared),
+      availableCandidates: Object.freeze(available),
+      ...(candidates.suggestion ? { suggestion: candidates.suggestion } : {}),
+    });
   }
 }
 
@@ -51,6 +82,20 @@ function blockedProviderSet(blockedProviders: readonly string[] | undefined): Se
   return new Set((blockedProviders ?? []).map((provider) => provider.trim().toLowerCase()).filter(Boolean));
 }
 
+function suggestBareModelId(requested: string, declaredFullIds: readonly string[], availableFullIds: ReadonlySet<string>): string | undefined {
+  if (requested.includes("/")) return undefined;
+  const needle = requested.toLowerCase();
+  const hits = new Set<string>();
+  for (const full of declaredFullIds) {
+    if (!availableFullIds.has(full)) continue;
+    const id = candidateModelId(full).toLowerCase();
+    if (id === needle || !id.endsWith(needle)) continue;
+    const boundary = id.slice(0, id.length - needle.length).slice(-1);
+    if (boundary === "-" || boundary === ".") hits.add(candidateModelId(full));
+  }
+  return hits.size === 1 ? [...hits][0] : undefined;
+}
+
 export function resolveModelSelection({
   requestedModel,
   agentName,
@@ -66,7 +111,9 @@ export function resolveModelSelection({
   if (requested.includes("/")) {
     const matched = allowedModels.find((model) => fullModelId(model) === requested);
     if (matched) return { model: fullModelId(matched), source: "qualified" };
-    throw new ModelSelectionError(requested, agentName);
+    throw new ModelSelectionError(requested, agentName, {
+      availableCandidates: allowedModels.map(fullModelId),
+    });
   }
 
   if (agentModels !== undefined) {
@@ -76,7 +123,12 @@ export function resolveModelSelection({
       && candidateModelId(model) === requested && availableModelIds.has(model)
     ));
     if (matched) return { model: matched, source: "agent-candidates" };
-    throw new ModelSelectionError(requested, agentName);
+    const declaredCandidates = agentModels.filter((model) => !blocked.has(candidateProvider(model)?.toLowerCase() ?? ""));
+    throw new ModelSelectionError(requested, agentName, {
+      declaredCandidates,
+      availableCandidates: allowedModels.map(fullModelId),
+      suggestion: suggestBareModelId(requested, declaredCandidates, availableModelIds),
+    });
   }
 
   const matched = [...allowedModels]
@@ -86,7 +138,9 @@ export function resolveModelSelection({
       return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
     })
     .find((model) => model.id === requested);
-  if (!matched) throw new ModelSelectionError(requested, agentName);
+  if (!matched) throw new ModelSelectionError(requested, agentName, {
+    availableCandidates: allowedModels.map(fullModelId),
+  });
 
   const resolvedModel = fullModelId(matched);
   return {

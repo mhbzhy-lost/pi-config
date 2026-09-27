@@ -57,16 +57,11 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await mkdir(join(fixtureRepo, "scripts"), { recursive: true });
     await mkdir(join(fixtureRepo, "pi"), { recursive: true });
     await mkdir(join(fixtureRepo, "packages", "pi-subagents-enhanced"), { recursive: true });
-    await mkdir(join(fixtureRepo, "skill-overrides", "external-llm-review", "tests"), { recursive: true });
     await mkdir(join(home, ".local", "share", "opencode"), { recursive: true });
     await mkdir(fakeBin, { recursive: true });
     await copyFile(join(repoRoot, "init-pi.sh"), join(fixtureRepo, "init-pi.sh"));
     await copyFile(join(repoRoot, "scripts", "pi-shell.zsh"), join(fixtureRepo, "scripts", "pi-shell.zsh"));
     await copyFile(join(repoRoot, "scripts", "pi-launcher.zsh"), join(fixtureRepo, "scripts", "pi-launcher.zsh"));
-    await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "reviewer.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "reviewer.py"));
-    await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "_config.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "_config.py"));
-    await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "_provider.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "_provider.py"));
-    await copyFile(join(repoRoot, "skill-overrides", "external-llm-review", "tests", "test_reviewer.py"), join(fixtureRepo, "skill-overrides", "external-llm-review", "tests", "test_reviewer.py"));
     await chmod(join(fixtureRepo, "init-pi.sh"), 0o755);
 
     for (const command of ["git", "uv", "zsh"]) {
@@ -137,7 +132,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     const commands = await readFile(commandLog, "utf8");
     assert.doesNotMatch(commands, /submodule/);
-    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.84\.4/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.85\.1/);
     assert.doesNotMatch(commands, /pi-real registry=.*install npm:pi-subagents/);
     assert.match(commands, /node check-subagent-upgrade/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund --prefix .* run setup:subagents-enhanced markers=,,,/);
@@ -147,7 +142,6 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     assert.match(commands, /npm registry= test markers=,,,/);
     assert.match(commands, /npm registry= run doctor markers=,,,/);
     assert.match(commands, /npm registry= run test:integration markers=,,,/);
-    assert.match(commands, /uv run --no-project --with httpx --with python-dotenv --with pyyaml python -m unittest discover -s skill-overrides\/external-llm-review\/tests markers=,,,/);
     assert.match(commands, /uv tool install --force basic-memory==0\.22\.1 markers=,,,/);
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -34,4 +34,9 @@ test("scheduler package is isolated and its exact dependencies install without l
   const init = await readFile(join(repoRoot, "init-pi.sh"), "utf8");
   assert.match(init, /npm --no-audit --no-fund --prefix "\$SCRIPT_DIR" run setup:subagents-enhanced/, "init disables audit and fund before delegating repeatable local dependency setup");
   assert.doesNotMatch(init, /pi-task-scheduler.*(?:extension|dist\/index)/s, "init must not load upstream extension");
+
+  const adapter = await readFile(join(repoRoot, "src/task-scheduler/adapter.ts"), "utf8");
+  const extension = await readFile(join(repoRoot, "pi/extensions/task-scheduler.ts"), "utf8");
+  assert.doesNotMatch(`${adapter}\n${extension}`, /durable[-_/]root|\.pi\/durable|durableRoot/i, "scheduler recovery must not access a private durable root");
+  assert.doesNotMatch(extension, /packages\/pi-subagents-enhanced|pi-subagents-enhanced/, "scheduler recovery bridge must not load the subagents package");
 });

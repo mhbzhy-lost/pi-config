@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { registerTaskSchedulerAdapter } from "../src/task-scheduler/adapter.ts";
+import taskSchedulerExtension from "../pi/extensions/task-scheduler.ts";
 
 function fakePi() {
   const tools = new Map(), handlers = new Map(), commands = [], sent = [];
@@ -12,6 +13,25 @@ function fakePi() {
     registerTool: (definition) => tools.set(definition.name, definition), registerCommand: (name) => commands.push(name),
     on: (name, handler) => handlers.set(name, handler), sendUserMessage: (...args) => sent.push(args) };
 }
+
+test("extension consumes an injected P4-shaped public outcome and leaves its default path unchanged", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "scheduler-recovery-")));
+  const repo = join(root, "repo"); await mkdir(repo);
+  const pi = fakePi();
+  const consumed = [];
+  taskSchedulerExtension(pi, {
+    recoverySource: async () => ({ kind: "blocked-unknown", runId: "orphan-1", provenance: "owner unproven" }),
+    onRecoveryOutcome: (result) => consumed.push(result),
+  });
+  await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(consumed, [{ outcome: { kind: "blocked-unknown", runId: "orphan-1", provenance: "owner unproven" }, duplicate: false }]);
+  assert.deepEqual(pi.commands, [], "consuming recovery must not register a scheduler restart command");
+
+  const defaultPi = fakePi();
+  taskSchedulerExtension(defaultPi);
+  await Promise.resolve();
+  assert.deepEqual(defaultPi.commands, [], "without a source, the extension retains its existing default registration path");
+});
 
 test("exact upstream default extension is registered through the restricted Pi membrane", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "scheduler-membrane-")));

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -59,9 +59,9 @@ test("registers a same-name bash override with the base presentation fields and 
     assert.equal(registered.description, "base description");
     assert.equal(registered.renderCall, "render-call");
     assert.equal(registered.renderResult, "render-result");
-    assert.deepEqual(registered.promptGuidelines, ["base guideline", "可选；命令在此目录执行；必须在工作区内"]);
+    assert.deepEqual(registered.promptGuidelines, ["base guideline", "可选；命令在此目录执行"]);
     assert.equal(registered.parameters.properties.cwd.type, "string");
-    assert.match(registered.parameters.properties.cwd.description, /可选；命令在此目录执行；必须在工作区内/);
+    assert.match(registered.parameters.properties.cwd.description, /可选；命令在此目录执行/);
   });
 });
 
@@ -101,6 +101,19 @@ test("delegates bash with validated cwd through a factory definition using mirro
     });
     assert.equal(executions[0].input.cwd, undefined);
     assert.equal(executions[0].input.command, "pwd");
+  });
+});
+
+test("accepts an existing directory outside the workspace", async () => {
+  await withWorkspace(async (workspaceRoot) => {
+    const outside = await mkdtemp(join(tmpdir(), "bash-cwd-outside-"));
+    try {
+      const { registered, factoryCalls } = setup({ workspaceRoot });
+      await registered.execute("call-outside", { command: "pwd", cwd: outside }, undefined, undefined, { cwd: workspaceRoot });
+      assert.equal(factoryCalls[1].cwd, await realpath(outside));
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 });
 

@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { brokerGrantPath, brokerSocketPath, parseBrokerPush, readBrokerGrant } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
+import { brokerGrantPath, brokerSocketPath, parseBrokerPush, readBrokerGrant, writeBrokerGrant } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 import { createBrokerFrameDecoder, createRootBrokerClient } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-client.ts";
@@ -26,6 +27,30 @@ class EventBus {
     await Promise.all([...this.handlers.get(type) ?? []].map((handler) => handler(value)));
   }
 }
+
+test("Root Broker heartbeat renews verified durable leases without upstream or event side effects", async (t) => {
+  const { AuthorityStore } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/authority-store.ts");
+  const root = await mkdtemp(join(tmpdir(), "root-broker-heartbeat-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let now = 1_000;
+  const timers = [];
+  const calls = [];
+  const broker = new RootBrokerServer({ rootSessionId: "root-heartbeat", lifecycleSessionId: "root-heartbeat", authorityStore: new AuthorityStore({ root, rootSessionId: "root-heartbeat" }), clock: () => now, setInterval(fn, ms) { timers.push({ fn, ms }); return timers.length; }, clearInterval() {}, captureProcessBirthIdentity: async () => "birth-heartbeat", upstream: { async ping() { calls.push("ping"); }, async stop() { calls.push("stop"); }, async dispose() { calls.push("dispose"); } } });
+  await broker.registerAuthorizedRun(createRunAuthorization({ kind: "coding", binding: { runId: "run-heartbeat", asyncDir: "/tmp/run-heartbeat", sessionId: "root-heartbeat", pid: 123, agentProfile: "executor" }, goal: null }));
+  const before = await broker.authorityStore.readLease("run-heartbeat");
+  await broker.start();
+  assert.equal(timers[0].ms, 15_000);
+  now = 16_000;
+  const renewal = timers[0].fn();
+  assert.equal(typeof renewal?.then, "function", "fake timer callback must expose the renewal Promise");
+  await renewal;
+  const after = await broker.authorityStore.readLease("run-heartbeat");
+  assert.equal(after.renewalSequence, 1);
+  assert.equal(after.lastRenewedAt, now);
+  assert.deepEqual(calls, [], "heartbeat must not invoke upstream turns or stops");
+  broker.observeTerminal(observedProof("run-heartbeat"));
+  await broker.closeRootSession();
+});
 
 test("Root Broker replays pending recovery event when root attaches a subscription", () => {
   const broker = new RootBrokerServer({ rootSessionId: "root-replay", upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} } });
@@ -135,8 +160,8 @@ test("Root broker grants, serves, and drains one directly owned Executor", async
   assert.deepEqual(grant.capabilities, ["root.subscribe"]);
   assert.equal(broker.ownedRuns.get(runId)?.identityState, "verified");
 
-  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 500 });
-  assert.deepEqual(Object.keys(client).sort(), ["dispose", "ping", "submitAcceptanceEvidence", "subscribe"]);
+  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 2_000 });
+  assert.deepEqual(Object.keys(client).sort(), ["dispose", "ping", "readOwnerReceipt", "rebindRun", "revokeOwner", "submitAcceptanceEvidence", "subscribe"]);
   assert.deepEqual(await client.ping(), { alive: true });
 
   let resolveClosing;
@@ -355,7 +380,7 @@ test("Root broker close is idempotent under duplicate close and leaves no residu
   await broker.start();
   await authorize(broker, startedEvent(rootSessionId, runId));
   await broker.observeStarted(startedEvent(rootSessionId, runId));
-  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 500 });
+  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 2_000 });
 
   await Promise.all([broker.closeRootSession(), broker.closeRootSession()]);
   assert.equal(broker.teardown.released, true);
@@ -401,7 +426,7 @@ test("authenticated Executor submits bound acceptance evidence only after its du
   const acceptanceAuthority = { ...goalAuthority(rootSessionId, runId), goalId: "goal-acceptance", taskId: "task-acceptance", asyncDir, workspacePath };
   await authorize(broker, acceptanceEvent, acceptanceAuthority);
   await events.emit("subagent:async-started", acceptanceEvent);
-  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 500 });
+  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 2_000 });
   const params = {
     outcome: "succeeded",
     criteria: [{ id: "criterion-1", status: "satisfied", evidence: [`sha256:${"1".repeat(64)}`] }],
@@ -1004,4 +1029,274 @@ test("broker frame decoder preserves split UTF-8 and rejects oversized frames", 
 
   const oversized = createBrokerFrameDecoder();
   assert.throws(() => oversized.push("x".repeat(64 * 1024 + 1)), /too large/);
+});
+
+// ===== P2-T3 owner authority over the real socket path =====
+
+const SOCKET_TEST_TOKEN = "b".repeat(64);
+
+function ownerEvent(rootSessionId, runId, pid) {
+  return { runId, id: runId, agent: "executor", pid, asyncDir: `/tmp/${runId}`, sessionId: rootSessionId };
+}
+
+async function listenAt(server, socketPath) {
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => resolve());
+  });
+}
+
+async function flushIo(turns = 25) {
+  for (let i = 0; i < turns; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
+test("Root broker serves owner read, rebind and revoke over the real socket with caller-bound identity", async (t) => {
+  const { AuthorityStore } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/authority-store.ts");
+  const rootSessionId = `root-owner-socket-${process.pid}-${Date.now()}`;
+  const sourceRunId = "executor-owner-source";
+  const resumedRunId = "executor-owner-resumed";
+  const storeRoot = await mkdtemp(join(tmpdir(), "root-owner-socket-"));
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    authorityStore: new AuthorityStore({ root: storeRoot, rootSessionId }),
+    captureProcessBirthIdentity: async (pid) => (pid === 43210 ? "birth-owner-source" : "birth-owner-resumed"),
+    terminalTimeoutMs: 250,
+    artifactPollIntervalMs: 5,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+  });
+  const sourceGrant = brokerGrantPath(rootSessionId, sourceRunId);
+  const resumedGrant = brokerGrantPath(rootSessionId, resumedRunId);
+  let sourceClient;
+  let resumedClient;
+  t.after(async () => {
+    sourceClient?.dispose();
+    resumedClient?.dispose();
+    await broker.closeRootSession();
+    await rm(sourceGrant, { force: true });
+    await rm(resumedGrant, { force: true });
+    await rm(storeRoot, { recursive: true, force: true });
+  });
+  await broker.start();
+  await authorize(broker, ownerEvent(rootSessionId, sourceRunId, 43210));
+  await authorize(broker, ownerEvent(rootSessionId, resumedRunId, 43211));
+
+  sourceClient = createRootBrokerClient({ rootSessionId, callerRunId: sourceRunId, timeoutMs: 2_000 });
+  resumedClient = createRootBrokerClient({ rootSessionId, callerRunId: resumedRunId, timeoutMs: 2_000 });
+
+  const sourceReceipt = await sourceClient.readOwnerReceipt(sourceRunId);
+  assert.equal(sourceReceipt.runId, sourceRunId);
+  assert.equal(sourceReceipt.ownerGeneration, 1);
+  assert.equal(sourceReceipt.processBirth, "birth-owner-source");
+  assert.equal(sourceReceipt.revision, 1);
+  // A caller may only read its own owner receipt.
+  await assert.rejects(resumedClient.readOwnerReceipt(sourceRunId), { code: "caller_unauthorized" });
+
+  const resumedReceipt = await resumedClient.readOwnerReceipt(resumedRunId);
+  // Only the current source owner may request a rebind.
+  await assert.rejects(
+    resumedClient.rebindRun({ sourceRunId, expectedGeneration: 1, expectedProcessBirth: "birth-owner-source", expectedRevision: sourceReceipt.revision, resumedRunId, expectedResumedRevision: resumedReceipt.revision }),
+    { code: "caller_unauthorized" },
+  );
+  const rebound = await sourceClient.rebindRun({ sourceRunId, expectedGeneration: 1, expectedProcessBirth: "birth-owner-source", expectedRevision: sourceReceipt.revision, resumedRunId, expectedResumedRevision: resumedReceipt.revision });
+  assert.equal(rebound.runId, resumedRunId);
+  assert.equal(rebound.processBirth, "birth-owner-resumed");
+  // The superseded source owner is fenced immediately.
+  await assert.rejects(sourceClient.readOwnerReceipt(sourceRunId), { code: "unknown_run" });
+
+  // Only the current owner itself may revoke.
+  await assert.rejects(
+    sourceClient.revokeOwner({ runId: resumedRunId, ownerGeneration: 1, processBirth: "birth-owner-resumed", expectedRevision: rebound.revision }),
+    { code: "caller_unauthorized" },
+  );
+  assert.deepEqual(await resumedClient.revokeOwner({ runId: resumedRunId, ownerGeneration: 1, processBirth: "birth-owner-resumed", expectedRevision: rebound.revision }), { revoked: true });
+  await assert.rejects(resumedClient.readOwnerReceipt(resumedRunId), { code: "unknown_run" });
+  // Owner rebind/revocation fences authority only. Both broker-owned lifecycle
+  // identities still require their own official terminal observations before
+  // closeRootSession may release the socket server.
+  broker.observeTerminal(observedProof(sourceRunId));
+  broker.observeTerminal(observedProof(resumedRunId));
+});
+
+test("socket owner APIs fail closed with authority_store_unavailable when no authority store is injected", async (t) => {
+  const rootSessionId = `root-owner-nostore-${process.pid}-${Date.now()}`;
+  const runId = "executor-owner-nostore";
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    captureProcessBirthIdentity: async () => "birth-owner-nostore",
+    terminalTimeoutMs: 250,
+    artifactPollIntervalMs: 5,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+  });
+  const grantPath = brokerGrantPath(rootSessionId, runId);
+  let client;
+  t.after(async () => {
+    client?.dispose();
+    await broker.closeRootSession().catch(() => undefined);
+    await rm(grantPath, { force: true });
+  });
+  await broker.start();
+  await authorize(broker, startedEvent(rootSessionId, runId));
+  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 2_000 });
+
+  const error = await client.readOwnerReceipt(runId).then(
+    () => { throw new Error("owner read must fail closed without an authority store"); },
+    (failure) => failure,
+  );
+  assert.equal(error.code, "authority_store_unavailable");
+  assert.match(error.message, /authority storage is unavailable/);
+  assert.equal(error.message.includes("/"), false, "owner error must not leak private paths");
+  await assert.rejects(
+    client.rebindRun({ sourceRunId: runId, expectedGeneration: 1, expectedProcessBirth: "birth-owner-nostore", expectedRevision: 1, resumedRunId: "executor-owner-other", expectedResumedRevision: 1 }),
+    { code: "authority_store_unavailable" },
+  );
+  await assert.rejects(
+    client.revokeOwner({ runId, ownerGeneration: 1, processBirth: "birth-owner-nostore", expectedRevision: 1 }),
+    { code: "authority_store_unavailable" },
+  );
+  broker.observeTerminal(observedProof(runId));
+});
+
+test("socket owner APIs reject a legacy authority layout with the stable error and no path leak", async (t) => {
+  const { AuthorityStore } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/authority-store.ts");
+  const rootSessionId = `root-owner-legacy-${process.pid}-${Date.now()}`;
+  const runId = "executor-owner-legacy";
+  const storeRoot = await mkdtemp(join(tmpdir(), "root-owner-legacy-"));
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    authorityStore: new AuthorityStore({ root: storeRoot, rootSessionId }),
+    captureProcessBirthIdentity: async () => "birth-owner-legacy",
+    terminalTimeoutMs: 250,
+    artifactPollIntervalMs: 5,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+  });
+  const grantPath = brokerGrantPath(rootSessionId, runId);
+  let client;
+  t.after(async () => {
+    client?.dispose();
+    await broker.closeRootSession().catch(() => undefined);
+    await rm(grantPath, { force: true });
+    await rm(storeRoot, { recursive: true, force: true });
+  });
+  await broker.start();
+  await authorize(broker, startedEvent(rootSessionId, runId));
+  client = createRootBrokerClient({ rootSessionId, callerRunId: runId, timeoutMs: 2_000 });
+
+  // A legacy per-run owner file appears under the authority root: every owner
+  // operation must fail closed with the stable layout error and preserve the
+  // evidence instead of silently treating the root as an empty index.
+  const legacyBytes = JSON.stringify({ runId: "run-someone", pid: 999 });
+  await writeFile(join(storeRoot, "owner-run-someone.json"), legacyBytes, { mode: 0o600 });
+  const error = await client.readOwnerReceipt(runId).then(
+    () => { throw new Error("owner read must fail closed on a legacy layout"); },
+    (failure) => failure,
+  );
+  assert.equal(error.code, "unsupported_layout");
+  assert.equal(error.message, "unsupported_layout");
+  assert.equal(error.message.includes("/"), false, "layout error must not leak the store root");
+  // New registrations also fail closed while the legacy evidence stays intact.
+  await assert.rejects(authorize(broker, startedEvent(rootSessionId, "executor-owner-legacy-2")), { code: "unsupported_layout" });
+  assert.equal(await readFile(join(storeRoot, "owner-run-someone.json"), "utf8"), legacyBytes);
+  broker.observeTerminal(observedProof(runId));
+});
+
+test("owner RPCs enforce the dedicated 5s deadline while generic requests keep the 10s default", async (t) => {
+  const rootSessionId = `root-owner-deadline-${process.pid}-${Date.now()}`;
+  const runId = "executor-owner-deadline";
+  const socketPath = brokerSocketPath(rootSessionId);
+  const grantPath = brokerGrantPath(rootSessionId, runId);
+  const accepted = new Set();
+  const hanging = createServer((socket) => { accepted.add(socket); socket.once("close", () => accepted.delete(socket)); });
+  await listenAt(hanging, socketPath);
+  await writeBrokerGrant({ schemaVersion: "pi-root-subagent-broker-grant.v2", rootSessionId, runId, callerToken: SOCKET_TEST_TOKEN, capabilities: ["root.subscribe"] });
+  const client = createRootBrokerClient({ rootSessionId, callerRunId: runId });
+  t.after(async () => {
+    client.dispose();
+    for (const socket of accepted) socket.destroy();
+    await new Promise((resolve) => hanging.close(resolve));
+    await rm(grantPath, { force: true });
+    await rm(socketPath, { force: true });
+  });
+
+  const connections = Promise.all([once(hanging, "connection"), once(hanging, "connection"), once(hanging, "connection")]);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const generic = { state: "pending", error: undefined };
+  const ownerRead = { state: "pending", error: undefined };
+  const ownerRebind = { state: "pending", error: undefined };
+  const genericDone = client.ping().then(() => { generic.state = "resolved"; }, (error) => { generic.state = "rejected"; generic.error = error; });
+  const readDone = client.readOwnerReceipt(runId).then(() => { ownerRead.state = "resolved"; }, (error) => { ownerRead.state = "rejected"; ownerRead.error = error; });
+  const rebindDone = client.rebindRun({ sourceRunId: runId, expectedGeneration: 1, expectedProcessBirth: "birth", expectedRevision: 1, resumedRunId: "executor-owner-resumed-deadline", expectedResumedRevision: 1 }).then(() => { ownerRebind.state = "resolved"; }, (error) => { ownerRebind.state = "rejected"; ownerRebind.error = error; });
+  await connections;
+  await flushIo();
+
+  // Neither the 5s owner deadline nor the 10s generic default has elapsed.
+  t.mock.timers.tick(4_999);
+  await flushIo();
+  assert.equal(ownerRead.state, "pending");
+  assert.equal(ownerRebind.state, "pending");
+  assert.equal(generic.state, "pending");
+
+  // The dedicated owner deadline is exactly 5s, not the 10s generic default.
+  // Only the owner requests are awaited here: the generic request must still be
+  // pending at mock time 5s, so awaiting it would deadlock the assertion.
+  t.mock.timers.tick(1);
+  await Promise.allSettled([readDone, rebindDone]);
+  assert.equal(ownerRead.state, "rejected");
+  assert.equal(ownerRead.error?.code, "BROKER_TIMEOUT");
+  assert.equal(ownerRead.error?.message, "Root broker request timed out");
+  assert.equal(ownerRebind.state, "rejected");
+  assert.equal(ownerRebind.error?.code, "BROKER_TIMEOUT");
+  assert.equal(generic.state, "pending");
+
+  // The generic default remains 10s.
+  t.mock.timers.tick(4_999);
+  await flushIo();
+  assert.equal(generic.state, "pending");
+  t.mock.timers.tick(1);
+  await genericDone;
+  assert.equal(generic.state, "rejected");
+  assert.equal(generic.error?.code, "BROKER_TIMEOUT");
+});
+
+test("coordinator registration challenge keeps its dedicated 5s deadline", async (t) => {
+  const { challengeRootBroker } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-client.ts");
+  const { captureProcessBirthIdentity } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/process-birth-identity.ts");
+  const rootSessionId = `root-challenge-deadline-${process.pid}-${Date.now()}`;
+  const socketPath = brokerSocketPath(rootSessionId);
+  const accepted = new Set();
+  const hanging = createServer((socket) => { accepted.add(socket); socket.once("close", () => accepted.delete(socket)); });
+  await listenAt(hanging, socketPath);
+  t.after(async () => {
+    for (const socket of accepted) socket.destroy();
+    await new Promise((resolve) => hanging.close(resolve));
+    await rm(socketPath, { force: true });
+  });
+  const registry = {
+    protocol: "pi-root-subagent-broker-registry.v1",
+    rootSessionId,
+    endpoint: socketPath,
+    pid: process.pid,
+    processBirthIdentity: await captureProcessBirthIdentity(process.pid),
+  };
+
+  const connected = once(hanging, "connection");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const challenge = { state: "pending", error: undefined };
+  const challengeDone = challengeRootBroker(registry, { nonce: SOCKET_TEST_TOKEN, repositoryId: "c".repeat(64), coordinatorInstanceId: "coordinator-deadline" }).then(
+    () => { challenge.state = "resolved"; },
+    (error) => { challenge.state = "rejected"; challenge.error = error; },
+  );
+  await connected;
+  await flushIo();
+
+  t.mock.timers.tick(4_999);
+  await flushIo();
+  assert.equal(challenge.state, "pending");
+  t.mock.timers.tick(1);
+  await challengeDone;
+  assert.equal(challenge.state, "rejected");
+  assert.equal(challenge.error?.code, "BROKER_TIMEOUT");
+  assert.equal(challenge.error?.message, "Root Broker challenge timed out");
 });

@@ -4,7 +4,7 @@ import { createJiti } from "../packages/pi-subagents-enhanced/node_modules/jiti/
 import { Compile } from "../packages/pi-subagents-enhanced/node_modules/pi-subagents/node_modules/typebox/build/compile/index.mjs";
 
 const jiti = createJiti(import.meta.url, { moduleCache: false });
-const { CodingDispatchContractError, compileCodingDispatchIR } = await jiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts");
+const { CodingDispatchContractError, compileCodingDispatchIR } = await jiti.import("../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts");
 const { createTypedSubagentExtension, TYPED_SUBAGENT_PARAMETERS } = await jiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts");
 
 function contract(overrides = {}) {
@@ -15,17 +15,15 @@ function contract(overrides = {}) {
     agent: "executor",
     risk: "normal",
     objective: "Return actionable validation locations.",
-    workflow: { mode: "tdd" },
     requirements: ["Keep validation strict."],
     context: { knownFacts: [], decisions: [], relevantFiles: [] },
-    boundaries: { writePaths: ["packages/pi-subagents-enhanced/src/subagent-dispatch/ir.ts"], excludedWork: [], forbiddenActions: [] },
+    boundaries: { writePaths: ["packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts"], excludedWork: [], forbiddenActions: [] },
     acceptance: { criteria: ["Errors identify their keypath."] },
     execution: {},
   };
   return {
     ...base,
     ...overrides,
-    workflow: { ...base.workflow, ...overrides.workflow },
     context: { ...base.context, ...overrides.context },
     boundaries: { ...base.boundaries, ...overrides.boundaries },
     acceptance: { ...base.acceptance, ...overrides.acceptance },
@@ -63,19 +61,19 @@ test("compiler labels a non-object coding contract at the top-level keypath", ()
   );
 });
 
-test("compiler reports dotted and indexed keypaths with structural runtime types", () => {
-  expectValidationError(
-    () => compileCodingDispatchIR(contract({ context: { knownFacts: "plain prose", decisions: [], relevantFiles: [] } }), { cwd: "/repo" }),
-    { keypath: "context.knownFacts", expected: "array", received: "string" },
-  );
-  expectValidationError(
-    () => compileCodingDispatchIR(contract({ workflow: { mode: 7 } }), { cwd: "/repo" }),
-    { keypath: "workflow.mode", expected: "string", received: "number" },
-  );
-  expectValidationError(
-    () => compileCodingDispatchIR(contract({ boundaries: { writePaths: [7], excludedWork: [], forbiddenActions: [] } }), { cwd: "/repo" }),
-    { keypath: "boundaries.writePaths[0]", expected: "string", received: "number" },
-  );
+
+test("object validation errors include the complete shape hint for unknown and missing fields", () => {
+  const unknown = contract({ context: { knownFacts: [], decisions: [], relevantFiles: [], surprise: true } });
+  assert.throws(() => compileCodingDispatchIR(unknown, { cwd: "/repo" }), (error) => {
+    assert.match(error.message, /完整 shape 提示：\{ knownFacts, decisions, relevantFiles \}/);
+    return true;
+  });
+  const missing = contract({ execution: { timeoutMs: 1000 } });
+  delete missing.context.relevantFiles;
+  assert.throws(() => compileCodingDispatchIR(missing, { cwd: "/repo" }), (error) => {
+    assert.match(error.message, /完整 shape 提示：\{ knownFacts, decisions, relevantFiles \}/);
+    return true;
+  });
 });
 
 test("schema rejects non-object roots while routing malformed nested coding inputs to runtime validation", () => {

@@ -9,7 +9,7 @@ const validator = Compile(TYPED_SUBAGENT_PARAMETERS);
 function codingInput() {
   return {
     version: "dispatch-ir.v1", taskId: "schema-security", title: "Schema security", agent: "executor",
-    risk: "normal", objective: "Validate tool union fields.", workflow: { mode: "tdd" }, requirements: ["Test it."],
+    risk: "normal", objective: "Validate tool union fields.", requirements: ["Test it."],
     context: { knownFacts: [], decisions: [], relevantFiles: [] },
     boundaries: { writePaths: ["src/index.ts"], excludedWork: [], forbiddenActions: [] },
     acceptance: { criteria: ["Pass."] }, execution: {},

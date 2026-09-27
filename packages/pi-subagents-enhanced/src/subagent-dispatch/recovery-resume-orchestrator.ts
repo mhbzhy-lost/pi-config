@@ -5,6 +5,72 @@ const DEFAULT_POLL_INTERVAL_MS = 5000;
 const DEFAULT_START_TIMEOUT_MS = 15000;
 const DEFAULT_MAX_DELIVERY_ATTEMPTS = 3;
 const MAX_CAPTURED_STARTS = 64;
+export const ORPHAN_CHILD_START_TIMEOUT_MS = 120_000;
+
+export type RecoverOrphanOutcome =
+  | { kind: "rebound"; runId: string; ownerReceiptId: string }
+  | { kind: "blocked-unknown"; runId?: string; provenance: string; reason?: "authority_lease_expired" | "normal_stop" | "progress_stalled" | "explicit_stop" }
+  | { kind: "debt"; runId?: string; debtId: string };
+
+const ORPHAN_GATE_ORDER = [
+  ["runAuthorization", "RunAuthorization parse"],
+  ["sessionEligibility", "P0 session eligibility"],
+  ["identity", "identity/OwnerReceipt/processBirth"],
+  ["broker", "broker generation/revision gate"],
+  ["workspace", "workspace managed-workspace.v2 receipt"],
+  ["inventory", "inventory match"],
+  ["rebind", "CAS rebind"],
+  ["lease", "issue/rebind lease"],
+  ["barrier", "ReplayCursor barrier"],
+  ["replay", "replay"],
+  ["ack", "processing ACK"],
+] as const;
+
+const orphanOutcomes = new Map<string, Promise<RecoverOrphanOutcome>>();
+function safeProvenance(error: unknown, label: string): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return `${label}: ${raw.replace(/[\\w.+-]+@[\\w.-]+|(?:token|secret|credential|cookie|privateKey)[^\\s]*/gi, "[redacted]").slice(0, 240)}`;
+}
+
+/** Compose the standalone orphan recovery gates; this path never sends model/control messages. */
+export function recoverOrphanRun(input: {
+  runId?: string;
+  ownerReceiptId?: string;
+  lease?: { expiresAt?: string | number | Date };
+  gates?: Record<string, ((input: any) => unknown) | undefined>;
+  childStartTimeoutMs?: number;
+  recoveryCache?: Map<string, Promise<RecoverOrphanOutcome>>;
+} = {}): Promise<RecoverOrphanOutcome> {
+  const runId = typeof input.runId === "string" && input.runId.length > 0 ? input.runId : undefined;
+  const cache = input.recoveryCache ?? orphanOutcomes;
+  if (runId && cache.has(runId)) return cache.get(runId)!;
+  const task = (async (): Promise<RecoverOrphanOutcome> => {
+    if (!runId) return { kind: "blocked-unknown", provenance: "missing run id" };
+    if (typeof input.ownerReceiptId !== "string" || input.ownerReceiptId.length === 0) return { kind: "blocked-unknown", runId, provenance: "missing owner receipt" };
+    const expiresAt = input.lease?.expiresAt;
+    if (expiresAt !== undefined) {
+      const expiryTime = new Date(expiresAt).getTime();
+      if (!Number.isFinite(expiryTime) || expiryTime <= Date.now()) {
+        return { kind: "blocked-unknown", ...(runId ? { runId } : {}), provenance: "durable lease expired or invalid", reason: "authority_lease_expired" };
+      }
+    }
+    if (!input.gates) return { kind: "blocked-unknown", ...(runId ? { runId } : {}), provenance: "missing recovery gate dependency" };
+    for (const [name, label] of ORPHAN_GATE_ORDER) {
+      const gate = input.gates[name];
+      if (typeof gate !== "function") return { kind: "blocked-unknown", ...(runId ? { runId } : {}), provenance: `missing gate: ${label}` };
+      try {
+        const result: any = await gate({ ...input, childStartTimeoutMs: ORPHAN_CHILD_START_TIMEOUT_MS });
+        if (result?.kind === "debt" || result?.debtId) return { kind: "debt", ...(runId ? { runId } : {}), debtId: String(result.debtId ?? "recovery-debt") };
+        if (result === false || result?.kind === "blocked-unknown") return { kind: "blocked-unknown", ...(runId ? { runId } : {}), provenance: safeProvenance(result?.provenance ?? "gate rejected", label) };
+      } catch (error) {
+        return { kind: "blocked-unknown", ...(runId ? { runId } : {}), provenance: safeProvenance(error, label) };
+      }
+    }
+    return { kind: "rebound", runId, ownerReceiptId: input.ownerReceiptId };
+  })();
+  if (runId) cache.set(runId, task);
+  return task;
+}
 
 // 只驱动 child 恢复自身中断的 rebase：coordinator 仍是 FIFO/proof/release 的
 // 唯一门禁，prompt 明确禁止 child 调用 integration 变更工具。

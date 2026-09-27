@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createRecoveryResumeOrchestrator, RECOVERY_RESUME_PROMPT } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/recovery-resume-orchestrator.ts";
+import { createRecoveryResumeOrchestrator, RECOVERY_RESUME_PROMPT, recoverOrphanRun } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/recovery-resume-orchestrator.ts";
 import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createCoordinatorServer } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts";
 import { connectRepositoryCoordinator } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-client.ts";
@@ -332,6 +332,43 @@ test("诊断日志：orchestrator 各阶段打点到 trace sink（供真实 LLM 
   const debt = await failing.submit(resumeIntent());
   assert.equal(debt.state, "debt");
   assert.ok(failingEntries.some((entry) => entry.phase === "recovery-resume-resume-rejected"));
+});
+
+test("recoverOrphanRun exposes the standalone contract and fixed gate order", async () => {
+  assert.equal(typeof recoverOrphanRun, "function");
+  const calls = [];
+  const input = {
+    runId: "orphan-1", ownerReceiptId: "receipt-1", lease: { expiresAt: new Date(Date.now() + 60_000).toISOString() },
+    gates: Object.fromEntries([
+      ["runAuthorization", async () => { calls.push("RunAuthorization parse"); }],
+      ["sessionEligibility", async () => { calls.push("P0 session eligibility"); }],
+      ["identity", async () => { calls.push("identity/OwnerReceipt/processBirth"); }],
+      ["broker", async () => { calls.push("broker generation/revision gate"); }],
+      ["workspace", async () => { calls.push("workspace managed-workspace.v2 receipt"); }],
+      ["inventory", async () => { calls.push("inventory match"); }],
+      ["rebind", async () => { calls.push("CAS rebind"); }],
+      ["lease", async () => { calls.push("issue/rebind lease"); }],
+      ["barrier", async () => { calls.push("ReplayCursor barrier"); }],
+      ["replay", async () => { calls.push("replay"); }],
+      ["ack", async () => { calls.push("processing ACK"); }],
+    ]),
+    childStartTimeoutMs: 1,
+  };
+  const outcome = await recoverOrphanRun(input);
+  assert.deepEqual(outcome, { kind: "rebound", runId: "orphan-1", ownerReceiptId: "receipt-1" });
+  assert.deepEqual(calls, ["RunAuthorization parse", "P0 session eligibility", "identity/OwnerReceipt/processBirth", "broker generation/revision gate", "workspace managed-workspace.v2 receipt", "inventory match", "CAS rebind", "issue/rebind lease", "ReplayCursor barrier", "replay", "processing ACK"]);
+});
+
+test("recoverOrphanRun fails closed with debt/blocked-unknown and no heartbeat controls", async () => {
+  const calls = [];
+  const outcome = await recoverOrphanRun({ runId: "orphan-2", ownerReceiptId: "receipt-2", gates: {
+    runAuthorization: async () => {},
+    sessionEligibility: async () => { calls.push("gate"); throw new Error("secret token leaked"); },
+  } });
+  assert.equal(["blocked-unknown", "debt"].includes(outcome.kind), true);
+  assert.equal(outcome.runId, "orphan-2");
+  assert.equal(JSON.stringify(outcome).includes("secret token"), false);
+  assert.deepEqual(calls, ["gate"]);
 });
 
 test("诊断日志：start watcher 事件被 lifecycleSessionId 过滤时打点跳过原因", async () => {

@@ -108,7 +108,6 @@ function codingContract(originRoot) {
     agent: "executor",
     risk: "normal",
     objective: "Exercise the typed facade against the managed workspace service.",
-    workflow: { mode: "tdd" },
     requirements: ["Commit the allowed change."],
     context: { knownFacts: [], decisions: [], relevantFiles: ["allowed.txt"] },
     boundaries: { writePaths: ["allowed.txt"], excludedWork: [], forbiddenActions: [] },

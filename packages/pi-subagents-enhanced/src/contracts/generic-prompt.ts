@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 const PROMPT_KEYS = ["task", "context", "constraints", "deliverable", "done"] as const;
 const MAX_ARRAY_ITEMS = 32;
 const MAX_STRING_BYTES = 4 * 1024;
+const MAX_TASK_BYTES = 64 * 1024;
 const MAX_PROMPT_BYTES = 64 * 1024;
 
 export interface GenericPromptContract {
@@ -41,11 +42,11 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-function normalizeString(value, keypath) {
+function normalizeString(value, keypath, maxBytes = MAX_STRING_BYTES) {
   if (typeof value !== "string") fail(`${keypath} must be a string`, keypath);
   const normalized = value.trim();
   if (!normalized) fail(`${keypath} must not be empty`, keypath);
-  if (Buffer.byteLength(normalized, "utf8") > MAX_STRING_BYTES) fail(`${keypath} exceeds ${MAX_STRING_BYTES} bytes`, keypath);
+  if (Buffer.byteLength(normalized, "utf8") > maxBytes) fail(`${keypath} exceeds ${maxBytes} bytes`, keypath);
   return normalized;
 }
 
@@ -85,7 +86,7 @@ export function compileGenericPrompt(input): CompiledGenericPrompt {
     if (!Object.hasOwn(input, key)) fail(`generic prompt is missing required field ${key}`, key);
   }
   const canonical = {
-    task: normalizeString(input.task, "task"),
+    task: normalizeString(input.task, "task", MAX_TASK_BYTES),
     context: normalizeArray(input.context, "context"),
     constraints: normalizeArray(input.constraints, "constraints"),
     deliverable: normalizeString(input.deliverable, "deliverable"),

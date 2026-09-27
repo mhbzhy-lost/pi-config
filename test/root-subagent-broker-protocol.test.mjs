@@ -32,10 +32,12 @@ const request = (method = "ping") => ({
 });
 
 test("broker accepts only direct-owner operations and coordinator registration challenge", () => {
-  assert.deepEqual([...BROKER_METHODS], ["ping", "subscribe", "acceptance.submit", "coordinator.register"]);
+  assert.deepEqual([...BROKER_METHODS], ["ping", "subscribe", "acceptance.submit", "coordinator.register", "owner.read", "owner.rebind", "owner.revoke"]);
   assert.equal(Object.isFrozen(BROKER_METHODS), true);
   assert.deepEqual(parseBrokerRequest(request("ping")), request("ping"));
   assert.deepEqual(parseBrokerRequest(request("subscribe")), request("subscribe"));
+  const rebind = { sourceRunId: "run-1", expectedGeneration: 1, expectedRevision: 1, expectedProcessBirth: "birth-1", resumedRunId: "run-2", expectedResumedRevision: 1 };
+  assert.deepEqual(parseBrokerRequest({ ...request("owner.rebind"), params: rebind }).params, rebind);
   for (const method of ["spawn", "spawn.lookup", "status", "steer", "interrupt", "stop", "supervisor.pending", "supervisor.ack", "supervisor.reply", "caller.followup", "acceptance.write"]) {
     assert.throws(() => parseBrokerRequest(request(method)), BrokerProtocolError);
   }

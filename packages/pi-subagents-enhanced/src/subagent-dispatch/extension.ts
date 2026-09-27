@@ -13,6 +13,7 @@ import { createHeadlessSubagentApi } from "./runtime-membrane.ts";
 import { buildWorkflowSpawn, createWorkflowChildStartCollector, childStartTimeoutMs } from "./workflow-spawn.ts";
 import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
+import { supervisorCanonicalDigest } from "./supervisor-control-plane.ts";
 import { findGoalRunCoordinator } from "./root-broker-registry.ts";
 import { resolveModelSelection, type ModelSelectionWarning } from "./model-selection.ts";
 import { createRunAuthorization } from "./run-authorization.ts";
@@ -60,15 +61,6 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
     risk: { enum: ["low", "normal", "high"] },
     objective: { type: "string", minLength: 1, maxLength: 4096 },
     requirements: runtimeValidated({ ...stringList, minItems: 1 }, looseArray),
-    workflow: runtimeValidated({
-      type: "object",
-      additionalProperties: false,
-      required: ["mode"],
-      properties: {
-        mode: { enum: ["tdd", "existing-tests", "docs-only"] },
-        reason: { type: "string", minLength: 1, maxLength: 4096 },
-      },
-    }, looseObject),
     context: {
       anyOf: [
         {
@@ -125,7 +117,9 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
       ],
     },
     // generic 分支字段
-    task: { type: "string", minLength: 1, maxLength: 65536 },
+    // Runtime generic-prompt contract enforces the 64 KiB UTF-8-byte task limit;
+    // JSON Schema maxLength measures characters and cannot express that byte budget.
+    task: { type: "string", minLength: 1 },
     cwd: { type: "string", minLength: 1, maxLength: 4096 },
     output: { anyOf: [{ type: "string", minLength: 1 }, { const: false }] },
     outputMode: { enum: ["inline", "file-only"] },
@@ -912,7 +906,7 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     // 缺 version 的 coding 合同会被静默路由到 generic 分支；含 coding 特征
     // 字段的输入必须得到指向真实原因的自诊断报错，而非误导性的
     // generic agent/title/task 错误（实际派发事故复盘 2026-09-15）。
-    if (Object.hasOwn(input, "taskId") || Object.hasOwn(input, "objective") || Object.hasOwn(input, "workflow")) {
+    if (Object.hasOwn(input, "taskId") || Object.hasOwn(input, "objective")) {
       return failure("INVALID_CODING_ROUTER", "input resembles a coding contract but is missing version: \"dispatch-ir.v1\"; coding dispatch routes on the version field");
     }
     return failure("INVALID_GENERIC_DISPATCH", "generic dispatch requires non-empty agent, title, and task");
@@ -1011,7 +1005,15 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     details: { ...binding, agent: normalizedInput.agent, title, modelSelection: modelSelectionDetails(selection), ...(selection.warnings ? { warnings: selection.warnings } : {}), ...(workspace ? workspacePublic(workspace) : {}) },
   };
 }
-async function executeControl(input, rpc) {
+function controlFailure(code, receipt = undefined) {
+  return {
+    content: [{ type: "text", text: `${code}: Supervisor control request blocked.` }],
+    isError: true,
+    details: { code, ...(receipt?.receiptId ? { receiptId: receipt.receiptId } : {}), ...(receipt?.requestId ? { requestId: receipt.requestId } : {}), ...(receipt?.runId ? { runId: receipt.runId } : {}) },
+  };
+}
+
+async function executeControl(input, rpc, supervisorControlPlane, toolCallId) {
   if (!CONTROL_ACTIONS.has(input.action)) {
     return failure("UNSUPPORTED_ACTION", `unsupported subagent RPC action: ${String(input.action)}`);
   }
@@ -1019,7 +1021,58 @@ async function executeControl(input, rpc) {
     return failure("INVALID_RESUME_MESSAGE", "resume requires a non-empty message", undefined, "$.message");
   }
   const { action, ...params } = input;
+  if (action === "steer" && supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
+    const runId = params.runId ?? params.id;
+    const identity = typeof runId === "string" ? await supervisorControlPlane.identityForRun?.(runId) : undefined;
+    const owner = identity?.owner;
+    const runtime = identity?.runtime;
+    const decision = await supervisorControlPlane.resolveSupervisorControl({
+      schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId,
+      rootSessionId: owner?.rootSessionId, ownerGeneration: owner?.ownerGeneration, kind: "steer",
+      payloadDigest: supervisorCanonicalDigest(params.message), liveRunEpoch: runtime?.liveRunEpoch,
+    });
+    if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
+    if (decision.status !== "allowed") return controlFailure(decision.code);
+    try {
+      const result = await rpc[action](params);
+      const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent });
+      if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);
+      return rpcResult(result);
+    } catch (error) {
+      await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_STEER_DELIVERY_FAILED" });
+      throw error;
+    }
+  }
   return rpcResult(await rpc[action](params));
+}
+
+function createControlledSupervisorAdapter(adapter, supervisorControlPlane) {
+  if (!supervisorControlPlane) return adapter;
+  return Object.freeze({
+    bind: (...args) => adapter.bind(...args), dispose: () => adapter.dispose?.(), isBound: () => adapter.isBound?.(),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      if (params?.action !== "reply" || supervisorControlPlane.enabled?.() === false) return adapter.execute(toolCallId, params, signal, onUpdate, ctx);
+      const request = supervisorControlPlane.findRequest?.(params.replyTo) ?? supervisorControlPlane.listPending?.().find((entry) => entry.requestId === params.replyTo);
+      if (!request) return controlFailure("SUPERVISOR_REQUEST_NOT_PENDING");
+      const intent = {
+        schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId: request?.runId,
+        rootSessionId: request?.rootSessionId, ownerGeneration: request?.ownerGeneration, kind: "reply",
+        requestId: params.replyTo, requestGeneration: request?.requestGeneration,
+        payloadDigest: supervisorCanonicalDigest(params.message),
+      };
+      const decision = await supervisorControlPlane.resolveSupervisorControl(intent);
+      if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
+      if (decision.status !== "allowed") return controlFailure(decision.code);
+      try {
+        const result = await adapter.execute(toolCallId, params, signal, onUpdate, ctx);
+        const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent });
+        return committed.status === "committed" ? result : controlFailure(committed.code, committed.receipt);
+      } catch (error) {
+        await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_REPLY_DELIVERY_FAILED" });
+        throw error;
+      }
+    },
+  });
 }
 
 function shutdownDebtManager(cleanupStore) {
@@ -1172,6 +1225,7 @@ type TypedSubagentExtensionOptions = {
   afterBeforeDispose?: (...args: unknown[]) => Promise<void>;
   beforeSessionStart?: (...args: unknown[]) => Promise<void>;
   onSupervisorRequest?: (...args: unknown[]) => Promise<void>;
+  supervisorControlPlane?: any;
   workspaceService?: unknown;
   resolveRootSessionId?: (sessionManager: unknown) => string;
   registerAuthorizedRun?: (authorization: unknown) => Promise<void>;
@@ -1208,6 +1262,7 @@ export function createTypedSubagentExtension(
     afterBeforeDispose = async (_event: unknown, _context: unknown) => {},
     beforeSessionStart = async (_event: unknown, _context: unknown) => {},
     onSupervisorRequest,
+    supervisorControlPlane,
     workspaceService,
     resolveRootSessionId,
     registerAuthorizedRun,
@@ -1302,7 +1357,7 @@ export function createTypedSubagentExtension(
           return result;
         }
         if (Object.hasOwn(input, "action")) {
-          const result = await executeControl(input, rpc);
+          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId);
           trace("tool-returned");
           return result;
         }
@@ -1336,7 +1391,8 @@ export function createTypedSubagentExtension(
     renderCall: renderWorkspaceCall,
     renderResult: renderWorkspaceResult,
   });
-  const supervisorTool = supervisorAdapter ? createSupervisorTool(supervisorAdapter, {
+  const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane) : undefined;
+  const supervisorTool = controlledSupervisorAdapter ? createSupervisorTool(controlledSupervisorAdapter, {
     renderCall: renderSupervisorCall,
     renderResult: renderSupervisorResult,
   }) : undefined;
@@ -1345,11 +1401,13 @@ export function createTypedSubagentExtension(
     pi.registerTool(tool);
     pi.registerTool(workspaceTool);
 
-    if (typeof onSupervisorRequest === "function") {
+    if (typeof onSupervisorRequest === "function" || supervisorControlPlane) {
       pi.on("message_end", async (event, ctx) => {
         if (disposed || registry.get(pi)?.token !== token) return;
         const message = event?.message;
-        if (message?.customType === "subagent_supervisor_request") await onSupervisorRequest(message, ctx);
+        if (message?.customType !== "subagent_supervisor_request") return;
+        if (supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) await supervisorControlPlane.registerSupervisorRequest(message.details).catch(() => undefined);
+        if (typeof onSupervisorRequest === "function") await onSupervisorRequest(message, ctx);
       });
     }
 
@@ -1431,7 +1489,7 @@ export function createTypedSubagentExtension(
     throw error;
   }
 
-  const executeSupervisor = async (params, ctx) => supervisorAdapter.execute(randomUUID(), params, undefined, undefined, ctx);
+  const executeSupervisor = async (params, ctx) => controlledSupervisorAdapter.execute(randomUUID(), params, undefined, undefined, ctx);
   return Object.freeze({ tool, workspaceTool, supervisorTool, executeSupervisor, dispose, ready });
 }
 

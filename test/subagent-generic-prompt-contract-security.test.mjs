@@ -31,7 +31,6 @@ function coding() {
     agent: "executor",
     risk: "normal",
     objective: "Implement the projection.",
-    workflow: { mode: "tdd" },
     requirements: ["Preserve source identity."],
     context: {
       knownFacts: ["The v1 hash is externally observable."],
@@ -91,6 +90,35 @@ test("accepts explicit empty context and constraints but rejects empty required 
   ]) {
     assert.throws(() => compileGenericPrompt(invalid), GenericPromptContractError);
   }
+});
+
+test("accepts an ASCII task larger than the legacy 4096-byte limit without truncation", () => {
+  const task = "x".repeat(4097);
+  const compiled = compileGenericPrompt(generic({ task }));
+  assert.equal(compiled.task, task);
+  assert.equal(renderGenericPrompt(compiled).includes(JSON.stringify(task)), true);
+});
+
+test("limits task by UTF-8 bytes rather than JavaScript string length", () => {
+  const accepted = "界".repeat(21_845); // 65,535 UTF-8 bytes
+  const rejected = "界".repeat(21_846); // 65,538 UTF-8 bytes
+  assert.equal(compileGenericPrompt(generic({ task: accepted })).task, accepted);
+  assert.throws(() => compileGenericPrompt(generic({ task: rejected })), /task exceeds 65536 bytes/);
+});
+
+test("keeps the other generic fields at their 4096-byte limits", () => {
+  for (const field of ["context", "constraints", "deliverable", "done"]) {
+    const value = "x".repeat(4097);
+    const input = generic({ [field]: field === "context" || field === "constraints" || field === "done" ? [value] : value });
+    assert.throws(() => compileGenericPrompt(input), GenericPromptContractError);
+  }
+});
+
+test("rejects rendered generic prompts over 64 KiB without truncating", () => {
+  const task = "x".repeat(65_400);
+  const compiled = compileGenericPrompt(generic({ task }));
+  assert.throws(() => renderGenericPrompt(compiled), (error) =>
+    error instanceof GenericPromptContractError && error.code === "PROMPT_TOO_LARGE");
 });
 
 test("encodes untrusted values without allowing section injection", () => {

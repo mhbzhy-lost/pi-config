@@ -39,12 +39,21 @@
 |---|---|---|
 | `P-EVIDENCE` | 已完成，未提交 | 9 份调查产物已恢复到 `docs/investigations/2026-09-22-managed-worktree-merge-queue-practice/`；7 份 write/edit 型报告已独立逐字节重放一致，D 是 live 重跑快照；提交需单独授权 |
 | `P-SNAPSHOT-CONTRACT` | 已完成，结论修正后可消费 | 源码确认缺失 records 会被 list/listScoped 跳过；outbox 为数组/对象集合；root coordinator 另行存在且可解析 |
-| `P-SNAPSHOT` | 待执行（消费 `P-SNAPSHOT-CONTRACT`） | 按已确认契约只读复制四个 partition 的 records、queue、terminal-proof-outbox，并单独快照 root coordinator 元数据 |
-| `P-HARNESS` | 待执行 | 在临时目录构造真实 origin/state/coordinator/Root Broker/Git harness；不依赖旧 host 重启 |
-| `A-ENV` | 待执行 | 计划 A 的 T-ENV，必须在隔离 harness 上实测 control-plane |
-| `A0`–`A-ACC` | 待执行 | 计划 A 的实现与验收 |
-| `B6`–`B-ACC` | 待执行 | v2 T6/T7/T8 的修订版 workspace/proof 批次 |
-| `C9`–`C-ACC` | 待执行 | v2 T9/T10/T11/T12/T14 的修订版宿主工具面与测试卫生批次 |
+| `P-SNAPSHOT` | 已完成 | 四个 partition、root coordinator 与 worktree 数量已按契约快照 |
+| `P-HARNESS` | 已完成 | 临时 origin/state/coordinator/Root Broker/Git harness 通过 |
+| `A-ENV` | 已完成，`degraded` | contract-level fencing 通过，真实 supervisor transport 未证实 |
+| `A0`–`A-ACC` | 已完成 | A 阶段确定性验收通过，真实 Pi lane 环境受限 |
+| `B6`–`B-ACC` | 已完成 | B 阶段确定性验收通过，历史 debt 未清理 |
+| `C9`–`C-ACC` | 已完成 | C 阶段确定性验收通过，C11 来源未证实、E-PI 未验证 |
+| `C13` | 已完成 | workflow 合同迁移测试卫生收尾，workspace suite 36/36 |
+| `E-PI` | 已完成，环境受限 | 普通真实 Pi RPC 子集通过；attention lane 超时，真实 supervisor lane 未验证 |
+| `L-ORPHAN` | 已完成，来源未证实项保留 | 两个 lifecycle orphan 无 production importer，未删除/接线 |
+| `D-AUDIT` | 已完成 | 基于快照只读分类历史 proof debt，未执行 cleanup |
+| `E-PI-ISOLATION` | 已完成，探针 blocked | 隔离测试设计已落盘，需先实现测试专用进程组 launcher |
+| `L-ORPHAN-WIRING` | 已完成，外部 loader 未证实 | durable registry 可做生产组合点定位；coordinator-process 需仓外 loader 权威证据 |
+| `H-PI-1` | 待执行 | 只在测试 helper 中实现可验证的独立进程组回收；不启动真实 Pi |
+| `L-REGISTRY-ENTRY` | 待执行 | 只读定位 durable registry 合法生产组合点，给后继接线提供精确契约 |
+| `D-CLEANUP` | blocked | 历史 debt provenance 候选为 0；本轮不进行 live mutation |
 
 `P-EVIDENCE` 已有完整产物时不得重复从 `/tmp` 恢复；执行器应以恢复目录、README、独立重放结果和当前 `git status` 作为其完成证据。
 
@@ -72,8 +81,13 @@ P-EVIDENCE ─────┐
                  │                                                                      v
                  │                                             C9 ─────┐
                  │                                             C10 ────┤
-                 │                                             C11 ────┤──> C-ACC
-                 │                                             C12 ────┘
+                 │                                             C11 ────┤──> C-ACC ──> C13 ──┐
+                 │                                             C12 ────┘                     │
+                 │                                                                           ├──> E-PI
+                 │                                                                           ├──> L-ORPHAN
+                 │                                                                           ├──> D-AUDIT ──> D-PROVENANCE ──> D-INTERFACE-DESIGN ──┐
+                 │                                                                           ├──> E-PI ──> E-PI-ISOLATION ─────────────────────────────┼──> D-CLEANUP-RECHECK ──> D-CLEANUP [单独授权门]
+                 │                                                                           └──> L-ORPHAN ──> L-ORPHAN-WIRING ───────────────────────┘
 ```
 
 ### Canonical 依赖表
@@ -102,6 +116,18 @@ P-EVIDENCE ─────┐
 | `C11` | v2 / T11 | `B-ACC` | 只读归因文档；不得修改 compat 生产代码与测试 |
 | `C12` | v2 / T12 | `B-ACC` | 只修改测试时序参数；全量测试资源独占 |
 | `C-ACC` | v2 / T14 修订版 | `C9,C10,C11,C12` | 三组验收：确定性本地套件、环境依赖套件、只读现场观察；不要求已知失败的全量 `npm test` 伪造 exit 0 |
+| `C13` | 后续测试卫生收尾 | `C-ACC` | 迁移剩余旧 workflow contract fixtures；不恢复 production workflow，workspace suite 需恢复 36/36 |
+| `E-PI` | 后续真实 Pi lane 验收 | `C13` | 在临时、可终止环境中验证真实 Pi 普通 RPC/attention lane；不能连接旧 host 或 live coordinator |
+| `L-ORPHAN` | 后续 lifecycle 接线诊断 | `C13` | 只读确认 durable-run-registry/coordinator-process owner、入口与删除/接线建议 |
+| `D-AUDIT` | 后续历史 proof debt 审计 | `C13` | 只读消费 P-SNAPSHOT 快照，按 provenance 分类历史 debt，不执行 mutation |
+| `D-PROVENANCE` | 历史 debt 身份链核验 | `D-AUDIT` | 只读比对快照与权威 session/receipt 事件；逐类证明或否证 public 入口、owner、资源顺序，不以 reason 或缺失 records 推断身份 |
+| `D-INTERFACE-DESIGN` | proof debt 处置接口契约设计 | `D-PROVENANCE` | 分开 proof debt 与 workspace release；设计单项授权、durable audit、幂等和中断恢复形状，不在探索中改生产 |
+| `E-PI-ISOLATION` | 真实 Pi attention 测试隔离探索 | `E-PI` | 设计独立 cwd/state root 和进程组回收；真实 lane 不可结束时保留环境受限 |
+| `L-ORPHAN-WIRING` | lifecycle orphan 归属方案 | `L-ORPHAN` | 两个无 importer 模块分别确认 owner/entry；接线或删除须单独 TDD，不靠 allowlist 声明 |
+| `H-PI-1` | 测试专用进程组 launcher | `E-PI-ISOLATION` | 消费隔离方案的进程组回收契约；先以 fake parent/child 实测，不运行真实 Pi |
+| `L-REGISTRY-ENTRY` | durable registry 生产入口定位 | `L-ORPHAN-WIRING` | 只读定位 Host composition、权威 inventory 事实与实际接线所需的最窄边界 |
+| `D-CLEANUP-RECHECK` | cleanup 安全门复核 | `D-INTERFACE-DESIGN,E-PI-ISOLATION,L-ORPHAN-WIRING` | 只读核对 provenance、接口与 transport 证据；缺任一前置则保持 blocked |
+| `D-CLEANUP` | 历史 proof debt 处置 | `D-CLEANUP-RECHECK` | 单独明确授权门；只在复核通过且有合法 typed 实现后允许 mutation，默认 blocked |
 
 ### Waves 与并行规则
 
@@ -119,8 +145,14 @@ P-EVIDENCE ─────┐
 - **Wave 11：** `B-ACC`。
 - **Wave 12：** `C9`、`C10`、`C11`、`C12`。C12 持有 `full-test-suite`，其他三个节点不得占用该资源；C9/C10/C11 之间无真实 WritePaths 竞争，可并行。
 - **Wave 13：** `C-ACC`。
+- **Wave 14：** `C13`（测试卫生收尾，不改 production）。
+- **Wave 15：** `E-PI`、`L-ORPHAN`、`D-AUDIT`（互不共享 WritePaths，可并行；E-PI 真实 lane 必须有进程组 timeout）。
+- **Wave 16：** `D-PROVENANCE`、`E-PI-ISOLATION`、`L-ORPHAN-WIRING`，三个只读探索可并行。
+- **Wave 17：** `D-INTERFACE-DESIGN`，只消费已核验的 debt 身份链；若 D-PROVENANCE 不能证明 production 可达，只交付 fail-closed 候选契约和缺失证据，不启动实现。
+- **Wave 18：** `D-CLEANUP-RECHECK`，已执行的只读复核保持 blocked；`H-PI-1` 与 `L-REGISTRY-ENTRY` 两项写路径不相交，可并行。
+- **Wave 19：** 仅当 H-PI-1 的进程组回收通过且 Host/cwd/state 隔离被证明，再另立 H-PI-2 真实普通 RPC 接线任务；`D-CLEANUP` 保持 blocked，不因测试 helper 或接线研究而解锁。
 
-**关键路径：** `P-EVIDENCE → P-SNAPSHOT-CONTRACT → P-SNAPSHOT → P-HARNESS → A-ENV → A0 → A1 → A2 → A6 → A-ACC → B6/B7/B8 → B-ACC → C9/C10/C11/C12 → C-ACC`。B6/B7/B8 内部由最长的实现与回归时间决定，不人为增加三条之间的 DAG 依赖。
+**关键路径：** `P-EVIDENCE → P-SNAPSHOT-CONTRACT → P-SNAPSHOT → P-HARNESS → A-ENV → A0 → A1 → A2 → A6 → A-ACC → B6/B7/B8 → B-ACC → C9/C10/C11/C12 → C-ACC → C13 → D-AUDIT → D-PROVENANCE → D-INTERFACE-DESIGN → D-CLEANUP-RECHECK → D-CLEANUP [授权]`；E-PI-ISOLATION 与 L-ORPHAN-WIRING 独立完成后才允许 D-CLEANUP-RECHECK。
 
 ## 资源锁登记
 
@@ -633,6 +665,273 @@ P-EVIDENCE ─────┐
 - [ ] **环境依赖套件：** `npm run test:subagents`、真实 Pi lane、外部 SKILL 副本等逐项记录 `通过`、`环境受限未验证` 或真实失败；不得要求已知环境失败伪造 `exit=0`。
 - [ ] **只读现场观察：** 对照 `P-SNAPSHOT` 与 P-HARNESS 记录，只读比较 queue、proof outbox、worktree/record 数量；禁止把现场修复当作验收动作。
 - [ ] 明确列出 32 条缺陷中已处置、只产出探索、仍延后和来源未证实的条目；未完成项不得打勾为完成。
+
+### Task C13：workflow 合同迁移测试卫生收尾
+
+**Deps：** `C-ACC`（理由：消费 C-ACC 已确认的 4 个 workflow unknown-field 失败清单；只迁移测试 fixture，不改 production contract）
+
+**WritePaths：**
+- `test/subagent-managed-worktree.integration.mjs`
+- `test/managed-workspace-service.integration.mjs`
+- `test/managed-workspace-contract.test.mjs`
+- `test/managed-workspace-ledger.integration.mjs`
+- `test/managed-workspace-ledger.test.mjs`
+
+**Resources：** `none`
+
+**Dispatch：** coding；只处理已定位的测试卫生残留，不恢复 `workflow` 到 production。
+
+**Source：** C-ACC 的 workspace suite 输出与 C13 任务报告；实际失败文件、行号和旧 fixture 必须先从当前工作树确认。
+
+**Produces：** 与 `dispatch-ir.v1` 当前 schema 一致的 workspace 测试 fixture；workspace 专项套件恢复为确定性全绿，或对非目标失败给出分类记录。
+
+**验收标准：**
+- [ ] 先复现并记录 4 个旧 `workflow` unknown-field 失败及文件:行号。
+- [ ] 只删除/迁移 dispatch contract fixture 中的 `workflow`；保留 `workflowScript`、`workflowKey`、`parentWorkflowRunId` 等合法 workflow-spawn 生命周期语义。
+- [ ] `npm run test:subagent-workspace` 达到 `36/36`，或对剩余非目标失败给出真实分类；不得恢复 production workflow、不得删除无关断言。
+- [ ] git diff --check 通过，无 staged 文件，仅修改必要 WritePaths。
+
+### Task E-PI：真实 Pi lane 环境验收
+
+**Deps：** `C13`（理由：先消除已知确定性 workspace 测试卫生残留，再测真实 Pi lane，避免混合两个失败来源）
+
+**WritePaths：**
+- `docs/plans/records/2026-09-23-runtime-remediation/E-PI.md`
+
+**Resources：** `pi-real-lane`（最多 1 个并发）
+
+**Dispatch：** generic 只读环境验收；不得重启旧 `new-api-account-pool` host，不得连接其 live coordinator。
+
+**Source：** P-HARNESS、A-ENV、C-ACC 记录；已有真实 Pi 普通 RPC 通过证据与 attention lane 超时证据。
+
+**Produces：** 真实 Pi lane 的通过、真实失败或环境受限结论；若运行长任务，必须使用 process-group wrapper 和总 timeout，确保子进程可回收。
+
+**验收标准：**
+- [ ] 只临时设置 `PI_REAL_BIN`，不持久修改环境；仅使用隔离临时 HOME/XDG/TMP/agent/state，证明不会连接仓库 `.git/.pi-coordinator`。
+- [ ] 普通真实 Pi RPC 子集和 attention/supervisor-resume 子集分别记录实际 exit/timeout；timeout 不归因生产缺陷。
+- [ ] 进程组超时后 TERM→等待→KILL，确认本次测试产生的 Node/Pi/jiti 子树已回收。
+- [ ] 报告明确 `full`、`environment-constrained` 或 `source-unverified`，不伪造全量 `npm test` 通过。
+
+### Task L-ORPHAN：lifecycle orphan 归属与接线诊断
+
+**Deps：** `C13`（理由：在确定性测试卫生完成后，单独处理 A0 allowlist 暴露的 lifecycle 接线残余）
+
+**WritePaths：**
+- `docs/plans/records/2026-09-23-runtime-remediation/L-ORPHAN.md`
+
+**Resources：** `none`
+
+**Dispatch：** generic 只读归属诊断；不删除、不接线、不修改 allowlist。
+
+**Source：** A0 orphan guard 输出与限定 production roots 的静态/dynamic importer 搜索。
+
+**Produces：** `durable-run-registry.ts` 与 `coordinator-process.ts` 的 owner、production importer、public entry 和后续动作建议。
+
+**验收标准：**
+- [ ] 分别报告静态 importer、dynamic importer、package exports、CLI/宿主入口计数；测试/docs/artifact 不算 production importer。
+- [ ] 未证实的“宿主外部动态装载”必须标为来源未证实；不得用 allowlist 文本替代证据。
+- [ ] 明确保留 allowlist、另立接线任务或删除候选；本节点不执行 mutation。
+- [ ] git diff --check 通过，无 staged 文件，仅修改 L-ORPHAN.md。
+
+### Task D-AUDIT：历史 proof debt 只读审计
+
+**Deps：** `C13`（理由：只读消费已冻结 P-SNAPSHOT 与 B7 边界，避免把测试卫生失败混入 debt 分类）
+
+**WritePaths：**
+- `docs/plans/records/2026-09-23-runtime-remediation/D-AUDIT.md`
+
+**Resources：** `live-scene-readonly`（最多 1 个并发；优先只消费 P-SNAPSHOT，不读 live）
+
+**Dispatch：** generic 只读聚合审计；不得清理、迁移、重写 debt。
+
+**Source：** P-SNAPSHOT outbox 集合、P1 records 快照、coordinator-proof-outbox schema 与 B7 报告。
+
+**Produces：** 带时点的 pending/receipt/debt/supersession 聚合、reason/category 分类、partition 分布和 provenance 证据。
+
+**验收标准：**
+- [ ] 默认将无法证明完整入口/权威身份/事件顺序的 debt 分类为来源未证实，fail closed；不得把 492/529 任何历史数字当当前 live 数。
+- [ ] 明确 B7 仅阻止新增错误 debt；本节点不执行任何 mutation。
+- [ ] 不输出 proofId、runId、token、完整敏感路径或凭据；git diff --check 通过，无 staged 文件。
+
+### Task D-CLEANUP：历史 proof debt 处置（用户授权门）
+
+**Deps：** `D-AUDIT`、`E-PI`、`L-ORPHAN`（理由：只有完成 provenance 审计、真实 lane 结果和 orphan owner 归属后，才可能设计安全处置）
+
+**WritePaths：**
+- `var/workspaces/**`
+- `docs/plans/records/2026-09-23-runtime-remediation/D-CLEANUP.md`
+
+**Resources：** `live-state-mutation`（独占）
+
+**Dispatch：** **默认 blocked，不得自动派发**。只有用户另行明确授权 cleanup/recovery mutation，且先有独立 cleanup 计划、幂等测试和审计字段契约时，才可派发。
+
+**Source：** D-AUDIT、E-PI、L-ORPHAN 的实际产物；不得以历史计划自称“已完成”替代当前授权。
+
+**Produces：** 经用户授权的、可审计、可回滚/重试的 debt 处置结果；未授权时只保留 blocked 记录，不修改 live state。
+
+**验收标准：**
+- [ ] 未取得用户单独授权时，节点保持 `blocked`，不读取/修改 live state，不清理任何 debt/worktree/queue。
+- [ ] 获授权后必须先在临时 fixture 验证 identity、幂等、审计和 fail-closed 行为，再执行最小 mutation。
+- [ ] 每次 mutation 记录前后聚合计数、授权依据、失败原因和可重试状态；禁止 bulk rewrite 或 force cleanup。
+
+### Task D-PROVENANCE：历史 proof debt 身份链核验
+
+**Deps：** `D-AUDIT`（理由：消费已冻结快照及 529 条 debt 的聚合基线，不把历史计数当当前 live 数）
+
+**WritePaths：**
+- `docs/plans/records/2026-09-23-runtime-remediation/D-PROVENANCE.md`
+
+**Resources：** `live-scene-readonly`（独占，只读快照；默认不读 live）
+
+**Dispatch：** generic 只读调查；只消费 P-SNAPSHOT、权威 session/receipt 的只读记录及 public 入口源码，不执行 workspace/queue/proof mutation。
+
+**Source：** D-AUDIT、P-SNAPSHOT、`coordinator-proof-outbox.ts`、`terminal-proof-binding.ts`、Root Broker 的终态证明入口。对每一种身份匹配必须记载入口、权威 owner、事件先后和与生产事实的差异；只凭相同 reason 或时间邻近不得宣称绑定成立。
+
+**Produces：** 聚合层 provenance 矩阵，区分已证实 production 可达、仅测试/fixture 制造、来源未证实；原始敏感身份仅在内存中比较，不写入报告。
+
+**验收标准：**
+- [ ] 只读验证 debt 的入口、owner、session/run/workspace 身份、terminal proof 与资源顺序；无法证明时保留 `unknown`，不把无 record 解释成无 workspace。
+- [ ] 记录每类数量、证据来源和最早偏离点；未证实的身份不得纳入可清理集合。
+- [ ] 仅读/写本任务声明范围，报告不含 proofId、runId、token、cookie、授权值或敏感绝对路径，不修改 live state。
+
+### Task D-INTERFACE-DESIGN：proof debt 安全处置接口契约
+
+**Deps：** `D-PROVENANCE`（理由：处置目标和身份匹配规则必须消费上游实际 provenance 结果）
+
+**WritePaths：**
+- `docs/plans/records/2026-09-23-runtime-remediation/D-INTERFACE-DESIGN.md`
+
+**Resources：** `none`
+
+**Dispatch：** generic 只读接口设计；**不得编码实现或调用 live apply**。明确区分 proof outbox debt 与 workspace release；现有 `applyManagedWorkspaceCleanup` 不能直接用于历史 proof debt。
+
+**Source：** D-PROVENANCE 和 D-CLEANUP 阻断报告；`administration.ts` 的多 action 顺序 release 与 proof outbox 的 `recordDebt/receipt` 现状。
+
+**Produces：** 单项 proof debt 处置的 public/typed 契约草案：权威身份、预期 revision、授权材料、幂等键、durable audit record（先持久化意图，后执行，再记录结果）、中断恢复与失败保留；不承诺跨多个 action 原子回滚。若上游无可证明的清理目标，只给出 blocked 与缺失证据，禁止生产实现。
+
+**验收标准：**
+- [ ] 逐项列出类型/函数签名、请求/返回 shape、状态机、权限、重放与失败原子性边界；明确不把多 action 顺序 release 伪装成事务。
+- [ ] 临时 fixture 的安全场景清单包含错 owner、错 lease、stale revision、重复 key、写 audit 后崩溃、执行后回执前崩溃；这些是后续 TDD 任务的 RED 规格，不在本任务伪造 GREEN。
+- [ ] 不修改 production、测试、live state；若来源未证实，以 `blocked-unknown` 收尾。
+
+### Task E-PI-ISOLATION：真实 Pi attention 隔离方案
+
+**Deps：** `E-PI`（理由：消费普通 RPC 通过与 attention lane 超时、遗留子进程的实际证据）
+
+**WritePaths：**
+- `docs/plans/records/2026-09-23-runtime-remediation/E-PI-ISOLATION.md`
+
+**Resources：** `pi-real-lane`（独占）
+
+**Dispatch：** generic 只读方案节点；不得直接重复整个 `test:subagents`，不得在仓库 cwd 上启动可能绑定 live coordinator 的新 Host。
+
+**Source：** E-PI 与窄测诊断结果；现有 `test/pi-subagents-runtime.integration.mjs` 的真实 RPC/attention 用例、`test/subagent-runtime-root-broker-startup.integration.mjs` 的 cwd/state root 配置。
+
+**Produces：** 可复现的隔离测试契约：临时 Git origin/cwd、agent/home/config/state/tmp、process-group timeout、TERM→KILL 与 orphan 检查；若无法证明完全隔离，则输出环境受限与缺口，不运行 attention lane。
+
+**验收标准：**
+- [ ] 对普通 RPC 通过证据和 attention 超时分别给出入口与首个不可观察点；不把超时直接判 production 缺陷。
+- [ ] 明确 launcher 的进程组清理边界和 cwd/state-root 绑定证据；禁止读取/修改旧 host、live coordinator、`var/workspaces/`。
+- [ ] 给出后续实现与测试的精确 WritePaths 和验收命令；本节点仅写报告。
+
+### Task L-ORPHAN-WIRING：两个 lifecycle orphan 的 owner/接线决策
+
+**Deps：** `L-ORPHAN`（理由：消费静态/dynamic importer 诊断；不把 allowlist 理由当作生产接线证据）
+
+**WritePaths：**
+- `docs/plans/records/2026-09-23-runtime-remediation/L-ORPHAN-WIRING.md`
+
+**Resources：** `none`
+
+**Dispatch：** generic 只读方案节点；实现接线或删除必须另立 coding 计划，不在本节点直接修改源码。
+
+**Source：** L-ORPHAN 报告、A0 guard、lifecycle batch plans 和 production root 搜索结果。
+
+**Produces：** 每个 orphan 的明确 owner、候选 public/typed 入口、接线/删除/继续保留的可执行下一任务，以及 owner 不确定时的 blocked reason。
+
+**验收标准：**
+- [ ] `durable-run-registry.ts` 与 `coordinator-process.ts` 分别给出 owner 和至少一个可验证 production entry 方案；若无方案，明确 blocked/source-unverified。
+- [ ] 不把测试 Node spawn、README、handoff、artifact transcript 或 allowlist 文本当 production importer。
+- [ ] 明确后续 coding 任务的 WritePaths、TDD RED/GREEN、回归命令和删除/接线安全门；本节点不修改源码/allowlist。
+- [ ] 只写报告，git diff check 通过，无 staged 文件。
+
+### Task D-CLEANUP-RECHECK：审计出口与 provenance 复核
+
+**Deps：** `D-INTERFACE-DESIGN`、`E-PI-ISOLATION`、`L-ORPHAN-WIRING`（理由：只在身份链、处置接口、宿主隔离与 owner 方案均有可验证结论后复核；未知保持 blocked）
+
+**WritePaths：**
+- `docs/plans/records/2026-09-23-runtime-remediation/D-CLEANUP-RECHECK.md`
+
+**Resources：** `live-scene-readonly`（最多 1 个并发）
+
+**Dispatch：** generic 只读复核；不执行 mutation。
+
+**Source：** D-AUDIT、D-PROVENANCE、D-INTERFACE-DESIGN、E-PI-ISOLATION、L-ORPHAN-WIRING、P-SNAPSHOT。
+
+**Produces：** 对 D-CLEANUP 的阻塞矩阵：哪些仍未知、哪些已有 typed 实现与独立审计证据。接口草案不是实现；仅有设计时结论必须为 `blocked`。
+
+**验收标准：**
+- [ ] provenance 仍不能证明时保持 `blocked-unknown`；不得仅因 projection 存在就把历史 debt 自动归为 production 正常。
+- [ ] 只有 owner、scope、**已实现并通过 TDD 验证**的 audit/idempotency/retry 接口与用户针对 live mutation 的独立授权全部满足时才给出“可进入 mutation 计划”的结论；接口设计草案不满足此项，本节点不 mutation。
+- [ ] 报告写明未处理集合、聚合数量和安全边界，不输出敏感 identity；git diff check 通过。
+
+### Task H-PI-1：测试专用进程组 launcher
+
+**Deps：** `E-PI-ISOLATION`（理由：消费其对 timeout、TERM/KILL、进程组回收的契约；不需要债务接口或 orphan 接线结果）
+
+**WritePaths：**
+- `test/helpers/pi-process-group.mjs`
+- `test/helpers/pi-process-group.integration.mjs`
+
+**Resources：** `pi-process-group-test`（独占，仅操作本任务 fake 子进程组）
+
+**Dispatch：** coding；仅创建测试专用 helper 与真实 fake parent/child 集成测试，不启动 Pi。
+
+**Source：** `E-PI-ISOLATION.md` §下一步可执行的隔离测试契约、现有 `test/pi-subagents-runtime.integration.mjs` 的 `runRpcUntil` 单进程超时缺口。
+
+**Produces：** 可复用的测试专用 `spawnIsolatedProcessGroup` 与 fake parent/child 的回收证据，供后续 H-PI-2 在隔离 Git origin 中消费。
+
+**Files：**
+- Create：`test/helpers/pi-process-group.mjs`（测试专用 launcher，不向 production 导出）
+- Create：`test/helpers/pi-process-group.integration.mjs`（fake parent/child、成功退出、TERM 忽略与 KILL 验收）
+
+**接口契约：**
+- Consumes：Node `spawn` 的 `{detached:true,stdio:["pipe","pipe","pipe"]}`、`process.kill(-pgid, signal)`；不调用 Pi 或 workspace API。
+- Produces：`spawnIsolatedProcessGroup({command,args,cwd,env,input,totalTimeoutMs,termGraceMs,onRecord?})`。返回 `{status,signal,timedOut,records,termination:{termSent,killSent,groupAliveAfterTerm,groupAliveAfterKill}}`；异常/超时也必须完成进程组收敛检查，若仍存活则显式失败且保留诊断证据。只回收本 helper 创建且已核验的 PGID；不得按名称或全局 PID 杀进程。
+
+**验收标准：**
+- [ ] 先写 fake Node parent 派生 child 的失败测试；测试首行若需新增导出先断言函数存在，使 RED 为断言级失败，不以 module-not-found 或 TypeError 为 RED。
+- [ ] 正常提前退出不发送信号；超时先 TERM，短 grace 后组仍活则 KILL；leader 与 child 均被回收，输出和错误按测试目录的已有策略保留。
+- [ ] 非 POSIX/不能证明独立 PGID 时 fail closed，不退化为仅 `child.kill()`；不能误杀外部进程。
+- [ ] `node --test test/helpers/pi-process-group.integration.mjs` 与相关 typecheck 通过；本节点**不**启动真实 Pi，不触碰仓库 `.git/.pi-coordinator` 或 live `var/workspaces`。
+
+### Task L-REGISTRY-ENTRY：定位 durable registry 生产组合点
+
+**Deps：** `L-ORPHAN-WIRING`（理由：消费两个 orphan 的限定 importer 搜索和 lifecycle owner 结论）
+
+**WritePaths：**
+- `docs/plans/records/2026-09-23-runtime-remediation/L-REGISTRY-ENTRY.md`
+
+**Resources：** `none`
+
+**Dispatch：** generic 只读归属探索；不得修改生产 composition 或删除 orphan。
+
+**Source：** `L-ORPHAN-WIRING.md` 的零 importer 结论、lifecycle 总计划 P2-T4，以及 durable registry/Host composition 的实际源码。
+
+**Produces：** 经源码验证的最小生产接线合同，或说明权威输入缺失的 blocked-unknown 记录。
+
+**Files：**
+- Create：`docs/plans/records/2026-09-23-runtime-remediation/L-REGISTRY-ENTRY.md`
+- Read：`packages/pi-subagents-enhanced/src/subagent-dispatch/durable-run-registry.ts`、`extensions/subagent-runtime.ts`、`src/subagent-dispatch/authority-store.ts`、lifecycle plans 与测试。
+
+**接口契约：**
+- Consumes：L-ORPHAN-WIRING 报告、durable inventory 的合法 Host owner 和实际生产入口；无权威资源顺序时必须标来源未证实。
+- Produces：可单独派发的最小接线任务合同：精确 Host composition 文件/接口签名、owner receipt→inventory 引用和事件顺序、WritePaths、断言级 RED、最小 GREEN、聚焦回归。找不到合法真实入口时产出 blocked 与缺失证据，而不是为了移除 allowlist 虚接线。
+
+**验收标准：**
+- [ ] 明确生产 composition 是否真会在授权后的 run lifecycle 调用 registry，不能把测试 jiti import、模块自身导出或 plan 声明当接线证据。
+- [ ] 记录具体函数、可用的权威 owner receipt/lease、workspace reference 的取得时点与 provenance；证据不足标 blocked-unknown。
+- [ ] 只写目标中文报告，不修改 production/测试/allowlist/live state；`git diff --check` 通过。
 
 ## 统一派发协议
 

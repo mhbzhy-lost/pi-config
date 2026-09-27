@@ -27,25 +27,81 @@ const RUNTIME_METADATA_ROOTS = [
 class ManagedWorkspaceError extends Error {
   code: string;
   cause?: unknown;
-  constructor(code: string, message: string, cause?: unknown) {
+  detail?: GitFailureDetail;
+  constructor(code: string, message: string, cause?: unknown, detail?: GitFailureDetail) {
     super(message);
     this.code = code;
     if (cause !== undefined) this.cause = cause;
+    if (detail !== undefined) this.detail = detail;
   }
 }
 type GitRunner = (cwd: string, args: readonly string[]) => string;
 type ManagedWorkspaceRecord = { path: string; dispatchCwd: string; branchRef: string; request: { workspaceId: string; originRoot: string; originRef: string; baseCommit: string; policy: { publication: string; application: string; writePaths: string[] } } };
 type GitInspection = { headCommit: string; baseCommit: string; descendant: boolean; aheadCommits: string[]; aheadCount: number; hasCommits: boolean; changedFiles: string[]; clean: boolean; originRef: string | null; originHead: string | null; originClean: boolean; originError: string | null };
 
-function failure(code: string, message: string, cause?: unknown): ManagedWorkspaceError {
-  return new ManagedWorkspaceError(code, message, cause);
+function failure(code: string, message: string, cause?: unknown, detail?: GitFailureDetail): ManagedWorkspaceError {
+  return new ManagedWorkspaceError(code, message, cause, detail);
+}
+
+export type GitFailureCategory = "locked" | "sequencer-in-progress" | "path-missing" | "unmerged-entries" | "submodule-dirty" | "dirty-worktree" | "untracked-files" | "ignored-runtime-artifacts" | "unknown";
+export type GitFailureDetail = { readonly category: GitFailureCategory; readonly categories: readonly GitFailureCategory[]; readonly gitStderr: string; readonly porcelain?: string; readonly gitStatus?: number; readonly args: readonly string[] };
+const GIT_TEXT_MAX_BYTES = 512;
+const TOKEN_PATTERN = /managed-workspace-(?:owner|action|lease)\.v1:[A-Za-z0-9._:-]+/g;
+const HOME_PATTERN = /\/(?:Users|home)\/[^/\s'"]+/g;
+const TMPDIR_PATTERN = /\/(?:private\/)?var\/folders\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?/g;
+function truncateUtf8(text: string): string {
+  const bytes = Buffer.from(text, "utf8");
+  const marker = "…[truncated]";
+  if (bytes.length <= GIT_TEXT_MAX_BYTES) return text;
+  let end = GIT_TEXT_MAX_BYTES - Buffer.byteLength(marker, "utf8");
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return `${bytes.subarray(0, end).toString("utf8")}${marker}`;
+}
+export function redactGitText(raw: string, extraRoots: readonly string[] = []): string {
+  let text = String(raw).replace(TOKEN_PATTERN, (value) => `${value.split(":")[0]}:[redacted]`);
+  for (const root of extraRoots) if (root.length > 1) text = text.split(root).join("<redacted-root>");
+  return truncateUtf8(text.replace(TMPDIR_PATTERN, "<tmp>").replace(HOME_PATTERN, "~").trim());
+}
+const UNMERGED_XY = new Set(["AA", "AU", "UA", "UU", "DU", "UD", "DD"]);
+export function classifyPorcelain(porcelain: string, submodulePaths: readonly string[] = []): GitFailureCategory[] {
+  const hits = new Set<GitFailureCategory>();
+  const tokens = porcelain.includes("\0") ? porcelain.split("\0") : porcelain.split("\n");
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]; if (!token) continue;
+    const marker = token.slice(0, 2); let entry = token.slice(3);
+    if (token.length >= 2 && (marker[0] === "R" || marker[0] === "C") && i + 1 < tokens.length) { entry = tokens[++i]; }
+    if (entry.startsWith('"') && entry.endsWith('"')) { try { entry = JSON.parse(entry); } catch {} }
+    if (UNMERGED_XY.has(marker)) hits.add("unmerged-entries");
+    else if (marker === "!!") hits.add("ignored-runtime-artifacts");
+    else if (marker === "??") hits.add("untracked-files");
+    else if (submodulePaths.some((sub) => entry === sub || entry.startsWith(`${sub}/`))) hits.add("submodule-dirty");
+    else if (/[MADRC]/.test(marker)) hits.add("dirty-worktree");
+  }
+  return (["unmerged-entries", "submodule-dirty", "dirty-worktree", "untracked-files", "ignored-runtime-artifacts"] as GitFailureCategory[]).filter((c) => hits.has(c));
+}
+export function classifyGitFailure(input: { args: readonly string[]; cause: unknown; porcelain?: string; submodulePaths?: readonly string[]; extraRedactRoots?: readonly string[] }): GitFailureDetail {
+  const { args, cause, porcelain, submodulePaths = [], extraRedactRoots = [] } = input;
+  const value = cause as { stderr?: unknown; message?: unknown; status?: unknown };
+  const stderr = typeof value?.stderr === "string" ? value.stderr : typeof value?.message === "string" ? value.message : "";
+  const categories: GitFailureCategory[] = [];
+  const rules: [RegExp, GitFailureCategory][] = [[/index\.lock.*File exists|already locked/i, "locked"], [/interactive rebase|rebase-merge|rebase-apply|cherry-pick.*progress/i, "sequencer-in-progress"], [/does not exist|No such file or directory/i, "path-missing"]];
+  for (const [rule, category] of rules) if (rule.test(stderr)) { categories.push(category); break; }
+  const hasPorcelain = typeof porcelain === "string" && porcelain.length > 0;
+  if (hasPorcelain) categories.push(...classifyPorcelain(porcelain, submodulePaths));
+  else if (!categories.length && /modified or untracked|contains modified|Directory not empty/i.test(stderr)) categories.push("dirty-worktree");
+  if (!categories.length) categories.push("unknown");
+  return Object.freeze({ category: categories[0], categories: Object.freeze([...categories]), gitStderr: redactGitText(stderr || "(git produced no stderr)", extraRedactRoots), ...(hasPorcelain ? { porcelain: redactGitText(porcelain, extraRedactRoots) } : {}), ...(typeof value?.status === "number" ? { gitStatus: value.status } : {}), args: Object.freeze(args.map((arg) => redactGitText(arg, extraRedactRoots))) });
+}
+function gitFailure(args: readonly string[], cause: unknown, detail?: GitFailureDetail): ManagedWorkspaceError {
+  const resolved = detail ?? classifyGitFailure({ args, cause });
+  return failure("MANAGED_WORKSPACE_GIT", `git ${resolved.args.join(" ")} failed; category=${resolved.category}; all=[${resolved.categories.join(",")}]; git said: ${resolved.gitStderr}${resolved.porcelain ? `; worktree state: ${resolved.porcelain}` : ""}`, cause, resolved);
 }
 
 const git: GitRunner = (cwd, args) => {
   try {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   } catch (cause) {
-    throw failure("MANAGED_WORKSPACE_GIT", `git ${args.join(" ")} failed`, cause);
+    throw gitFailure(args, cause);
   }
 };
 
@@ -53,7 +109,7 @@ const gitRaw: GitRunner = (cwd, args) => {
   try {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (cause) {
-    throw failure("MANAGED_WORKSPACE_GIT", `git ${args.join(" ")} failed`, cause);
+    throw gitFailure(args, cause);
   }
 };
 
@@ -425,7 +481,20 @@ export function releaseManagedGitWorkspace(record: ManagedWorkspaceRecord, { exp
     const identity = inspectIdentity(record);
     if (expectedHead && identity.headCommit !== expectedHead) throw failure("MANAGED_WORKSPACE_IDENTITY", "workspace HEAD changed before release");
     removeUntrackedRuntimeMetadata(identity.workspacePath);
-    git(record.request.originRoot, ["worktree", "remove", record.path]);
+    const removeArgs = ["worktree", "remove", record.path] as const;
+    try { git(record.request.originRoot, removeArgs); }
+    catch (cause) {
+      let porcelain: string | undefined;
+      let submodulePaths: string[] = [];
+      try {
+        const config = execFileSync("git", ["config", "-f", ".gitmodules", "--get-regexp", "^submodule\\..*\\.path$"], { cwd: record.path, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        submodulePaths = config.split("\n").map((line) => line.split(/\s+/)[1]).filter(Boolean);
+      } catch {}
+      try { porcelain = execFileSync("git", ["status", "--porcelain", "--ignored=matching", "--untracked-files=all"], { cwd: record.path, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); } catch {}
+      const original = cause instanceof ManagedWorkspaceError ? cause.cause : cause;
+      const detail = classifyGitFailure({ args: removeArgs, cause: original, porcelain, submodulePaths });
+      throw gitFailure(removeArgs, original, detail);
+    }
   }
   const remainingBranchHead = branchHead(record);
   if (remainingBranchHead) {

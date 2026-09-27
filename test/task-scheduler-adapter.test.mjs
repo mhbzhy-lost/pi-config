@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, mkdir, realpath, symlink, lstat, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const execFileAsync = promisify(execFile);
-import { registerTaskSchedulerAdapter, repositoryDataDir } from "../src/task-scheduler/adapter.ts";
+import * as schedulerAdapter from "../src/task-scheduler/adapter.ts";
+const { registerTaskSchedulerAdapter, repositoryDataDir } = schedulerAdapter;
 
 // A local factory exercises the membrane directly, without creating scheduler state or timers.
 function fakeUpstream(pi) {
@@ -25,6 +27,20 @@ function makeHost() {
 let sessionNumber = 0;
 const ctx = (cwd, confirm = async () => true) => { const sessionId = `unique-session-${++sessionNumber}`; return { cwd, hasUI: true, sessionManager: { getSessionId: () => sessionId }, ui: { confirm, setStatus() {} } }; };
 const call = (tool, parameters, context) => tool.execute("id", parameters, new AbortController().signal, () => {}, context);
+
+test("consumeRecoveryOutcome freezes P4-shaped outcomes, dedupes run IDs, and never operates the scheduler", () => {
+  const runId = `recovery-${randomUUID()}`;
+  const rebound = { kind: "rebound", runId, ownerReceiptId: "owner-1" };
+  assert.equal(typeof schedulerAdapter.consumeRecoveryOutcome, "function", "the public recovery consumer must be exported");
+  assert.deepEqual(schedulerAdapter.consumeRecoveryOutcome(rebound), { outcome: rebound, duplicate: false });
+  assert.deepEqual(schedulerAdapter.consumeRecoveryOutcome(rebound), { outcome: rebound, duplicate: true }, "a second outcome for the same run must not be scheduled again");
+  const blocked = { kind: "blocked-unknown", runId: `blocked-${randomUUID()}`, provenance: "unproven owner" };
+  const debt = { kind: "debt", runId: `debt-${randomUUID()}`, debtId: "debt-1" };
+  assert.deepEqual(schedulerAdapter.consumeRecoveryOutcome(blocked), { outcome: blocked, duplicate: false }, "blocked recovery is only projected, never restarted");
+  assert.deepEqual(schedulerAdapter.consumeRecoveryOutcome(debt), { outcome: debt, duplicate: false }, "recovery debt is only projected, never restarted");
+  assert.throws(() => schedulerAdapter.consumeRecoveryOutcome({ kind: "rebound", runId }), /ownerReceiptId/);
+  assert.throws(() => schedulerAdapter.consumeRecoveryOutcome({ kind: "restart", runId }), /unknown scheduler recovery outcome/);
+});
 
 test("enabled scheduler tasks project to a redacted footer status and runtime active is ignored", async () => {
   const pi = makeHost();

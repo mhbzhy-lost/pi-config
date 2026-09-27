@@ -49,8 +49,15 @@ const GRANT_KEYS = ["rootSessionId", "allowedProfiles", "originRoot", "cwdRoot",
 const REQUEST_KEYS = ["agent", "cwd", "isolation", "worktree", "model", "prompt"];
 const CONTROL_CHARACTER = /[\u0000-\u001F\u007F-\u009F]/;
 
-function fail(message: string): never {
-  throw new Error(`Dispatch execution contract is invalid: ${message}`);
+function fail(message: string, code?: string, keypath?: string): never {
+  const error = new Error(`Dispatch execution contract is invalid: ${message}`) as
+    Error & { code?: string; keypath?: string; detail?: unknown };
+  if (code !== undefined) {
+    error.code = code;
+    error.detail = Object.freeze({ code, ...(keypath ? { keypath } : {}) });
+  }
+  if (keypath !== undefined) error.keypath = keypath;
+  throw error;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -160,7 +167,15 @@ export async function createAuthorizedDispatch(input: unknown, hostGrant: unknow
   const cwd = input.cwd === undefined ? grant.cwdRoot : await canonicalPath(input.cwd, "dispatch request cwd");
   if (!contains(grant.cwdRoot, cwd)) fail("dispatch request cwd escapes the Host cwd confinement");
   const stateRoot = await managedStateRoot();
-  if (stateRoot && contains(stateRoot, cwd)) fail("dispatch request cwd cannot be inside the managed state root");
+  if (stateRoot && contains(stateRoot, cwd)) {
+    fail(
+      `dispatch request cwd cannot be inside the managed state root: cwd=${cwd}, stateRoot=${stateRoot}. ` +
+      `Dispatch from the repository origin instead, or use execution.worktree to obtain a managed workspace. ` +
+      `An existing managed workspace cannot be re-entered as a public dispatch cwd.`,
+      "INVALID_EXECUTION_CWD",
+      "cwd",
+    );
+  }
   const model = optionalString(input.model, "dispatch request model");
   const prompt = optionalString(input.prompt, "dispatch request prompt");
   const request = {

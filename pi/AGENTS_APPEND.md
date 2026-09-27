@@ -17,3 +17,7 @@
 禁止主 agent 通过任何 bash git 删除回收受管 worktree，若用户明确要求删除目标 worktree，生成相应 git 命令，让用户手动执行。
 
 此规则不影响 runtime 提供的 worktree 管理 tool。
+
+## 模型黑名单
+
+主 agent 与 subagent 均不使用 deepseek 系列模型。
