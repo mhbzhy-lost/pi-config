@@ -26,7 +26,7 @@ Pi config root is `pi/` (not `~/.pi`). See `pi/AGENTS.md` for constraints.
 
 ## `pi/models.json` 本机配置
 
-本机专用 provider/model 定义可通过 `git update-index --skip-worktree pi/models.json` 仅保留在本地，禁止提交。上游修改 `pi/models.json` 时，必须先执行 `git update-index --no-skip-worktree pi/models.json`，再进行同步；同步完成并恢复本机定义后，如仍需隐藏本地差异，再重新设置 `--skip-worktree`。
+`pi/models.json` 已整体加入 .gitignore 并移出版本控制：本机专用 provider/model 定义直接维护在工作区文件中，无提交与同步流程，不再使用 skip-worktree。其他机器拉取到移除跟踪的提交时，若本地文件被 git 删除或根提示冲突，从本机备份恢复即可。
 
 ## TUI 精简边界
 

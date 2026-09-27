@@ -47,3 +47,4 @@ __pycache__/
 # Secrets
 /skill-overrides/external-llm-review/.env
 /skill-overrides/exa-search/.env
+/pi/models.json
