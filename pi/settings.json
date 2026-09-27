@@ -2,7 +2,7 @@
   "lastChangelogVersion": "0.85.1",
   "tuiMode": "fullscreen",
   "fullscreenExitOutput": "resume-hint",
-  "theme": "light",
+  "theme": "light/dark",
   "defaultProvider": "qwen-hangzhou",
   "defaultModel": "qwen38-nvfp4",
   "hideThinkingBlock": true,
