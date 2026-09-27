@@ -24,7 +24,8 @@
 - **WritePaths 封闭性：** 任何任务不得写自身 WritePaths 之外；T11（验收）唯一写路径为 `var/upgrade/final-gate-report.md`，失败修复回退原任务重新派发（先修订计划再执行新范围）。
 - **提交模型：** 升级分支上的提交由 runtime 集成队列在 `dispose integrate` 时产生（交付机制，不属违规 commit）；**手工 bash `git commit` 全程禁止**。T12 切换前须用户**分别**授权：①整理 clone 分支提交历史并按 `git-commit-convention` 产出最终提交（squash 或保留集成提交，由用户选择）；②从 clone merge 回主树；③运行 `init-pi.sh` 全量副作用（全局安装、shell 配置写入、skills 同步、Basic Memory CLI 重装、依赖重装）。三段授权独立，不得互相解释或提前。
 - **目标版本精确值（原子切换，杜绝混合 SDK）：** core 四包 `@earendil-works/pi-coding-agent`/`pi-ai`/`pi-agent-core`/`pi-tui` 全部 0.87.1；pi-subagents `0.71.0`。全部版本锁点在 T4 一次性切换（core + subagents + init-pi.sh + 探针名单），升级中段不存在「新 lib × 旧 SDK」混合态（0.71 peer 要求 `pi-ai >= 0.86.1`）。
-- **版本约束位置：** pi-subagents 三处（①enhanced `package.json` `dependencies`；②`scripts/setup-subagent-runtime-deps.ts` `PI_SUBAGENTS_VERSION`；③`packages/pi-subagents-enhanced/scripts/setup-runtime-deps.ts` 内部安装版本）；core 四包（root `package.json` `dependencies` 四包 + enhanced `devDependencies` 四包 + `init-pi.sh` `PI_VERSION` + `scripts/probes/pi-subagents-compat.ts` 支持名单）。**真实 lockfile 仅两处**：`package-lock.json`、`packages/pi-subagents-enhanced/package-lock.json`；`pi/npm` 是安装目录，无 lockfile、不创建。
+- **版本约束位置：** pi-subagents 三处（①enhanced `package.json` `dependencies`；②`scripts/setup-subagent-runtime-deps.ts` `PI_SUBAGENTS_VERSION`；③`packages/pi-subagents-enhanced/scripts/setup-runtime-deps.ts` 内部安装版本）；core 四包（root `package.json` `dependencies` 四包 + enhanced `devDependencies` 四包 + `init-pi.sh` `PI_VERSION` + `scripts/probes/pi-subagents-compat.ts` 支持名单）。
+- **真实 lockfile 共三处**（修订：二审「仅两处」有误，`pi/npm/package-lock.json` 实际被跟踪，gitignore 规则晚于入库）：`package-lock.json`、`packages/pi-subagents-enhanced/package-lock.json`、`pi/npm/package-lock.json`。凡涉及安装/lockfile 的任务必须固定 `NPM_CONFIG_REGISTRY=https://registry.npmjs.org`（否则 registry 镜像会改写 resolved URL 造成同版本假 diff）。
 - **缺陷分类门禁：** 所有失败**两列**记录——「版本归因（0.87-core / 0.71-lib / WIP 基线差 / 新引入）」与「AGENTS.md 数据来源三分类」，每条含 provenance 字段：入口（合法 public/typed 入口）、版本锁定（实际解析版本）、权威身份、事件/资源顺序、首个偏离点、修复后重跑命令。来源未证实一律 fail closed，禁止预防性兼容。
 - **安全 capability 语义：** 安全相关能力（terminal proof、身份、权限）缺失时 fail closed 并停止升级流程上报；仅展示类能力允许显式降级并记录诊断。禁止未经 T3 证明的「回退 0.62 行为」假设。
 - **TDD：** production/配置变更先 RED 后 GREEN；RED 预期只写「待实现行为缺失」，不混入旧实现多偏差。T2、T3 豁免但须落盘证据。
@@ -163,7 +164,7 @@ T5..T10 全部 ──> T11 (全量门禁矩阵+真实场景回归，clone 内直
 - `packages/pi-subagents-enhanced/scripts/setup-runtime-deps.ts`
 - `packages/pi-subagents-enhanced/scripts/verify-package.ts`
 - `packages/pi-subagents-enhanced/package.json`（`dependencies.pi-subagents` + devDeps 四包）
-- `package.json`（dependencies 四包）、`package-lock.json`、`packages/pi-subagents-enhanced/package-lock.json`
+- `package.json`（dependencies 四包）、`package-lock.json`、`packages/pi-subagents-enhanced/package-lock.json`、`pi/npm/package-lock.json`
 - `init-pi.sh`（`PI_VERSION`）
 - `scripts/probes/pi-subagents-compat.ts`（支持名单，`:41,120-123`）与 `test/pi-subagents-runtime.integration.mjs`（名单断言，约 `:416-421`）
 - `test/init-pi.test.mjs`（版本断言）
