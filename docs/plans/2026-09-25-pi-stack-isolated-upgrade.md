@@ -148,6 +148,7 @@ T5..T10 全部 ──> T11 (全量门禁矩阵+真实场景回归，clone 内直
   4. **capability 协商清单**（安全类 fail closed / 展示类可降级；静态不可确认项 → T11 动态矩阵）
   5. **authority/等待边图**（terminal proof 产生方/时点/消费方/等待边；A 段 child 参与型 / B 段终局门控边界，证据 `child-integration-lifecycle.ts:118-121,143-150`、`integration-queue.ts:250-274`）
   另附：**真实最小链路 trace（放行前提）**——以本仓真实 Host extension 入口启动 parent，经合法 public dispatch spawn child，完整记录 parent/root session identity、child runId 与 cwd、RPC ping/spawn reply、`agent_end`/`agent_settled`/terminal proof 事件序列（事件文件留存 `var/upgrade/trace/`，忽略路径）。**禁止**直接 import 内部模块、手工 event、fake child。安全 capability 缺失立即停止形成升级决策项。
+  **6. upstream worktree 替代可行性评估（用户决策项，2026-09-27）**：评估以社区库原生 worktree 替代本仓 workspace service 的可行性，重点三缺口：①集成时是否有 writePaths 级别的写路径门禁；②处置（integrate/discard/preserve）是否绑定 terminal proof/action token 语义；③身份模型是否绑定宿主会话 cwd（若不绑定，则是跨仓派发的解锁点）。产出裁决：可让渡（缺口为零或可接受，附迁移建议）/ 不可让渡（附缺失证据）。此裁决不改变本次升级 T9 的「禁用 upstream、单一 owner」策略，作为 Phase 2 迁移项目立项依据。
 
 **验收标准：** 五节 + trace 齐全；每决策附证据；无「待定」（决策或升级决策项二选一）；中文；集成后 clone 分支含契约提交。
 
