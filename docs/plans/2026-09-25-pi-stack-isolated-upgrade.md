@@ -11,7 +11,7 @@
 
 ## 全局约束
 
-- **前置门禁（T1 阻塞项）：** 主树在途 WIP 须由用户先行处置（当前 `git status --short` 仍有大量变更）；clone 从落地后的主树创建，T1 记录基点 SHA、主树 clean 证明与审计差异说明。主 agent 不代用户提交、stash 或清理 WIP。
+- **前置门禁（T1 阻塞项）：** 主树在途 WIP 须由用户先行处置（已落地）；clone 从落地后的主树创建，T1 记录基点 SHA、主树 clean 证明与审计差异说明。主树唯一豁免的本地差异：`pi/settings.json` 的 `enabledModels`（per-machine 字段，铁律禁提交；经用户决策保留在主树、不侵入 clone——clone 仅取提交态）。主 agent 不代用户提交、stash 或清理 WIP。
 - **隔离铁律：** 一切变更只发生在 `~/pi-config-upgrade` clone 及其派生的 managed worktree；严禁修改主树工作区、严禁修改全局 pi 安装与用户级状态（`~/.zshrc`、全局 npm、uv tool）；**T1–T11 禁止调用 `init-pi.sh`**（副作用仅在 T12 授权③后发生）。clone 的删除与主树 worktree 管理不由本计划执行；managed worktree 一律经 `subagent_worktree` typed action（list/status/dispose/release）处置，禁止任何 bash git 删受管 worktree。
 - **并发模型：**
   - Deps 是唯一调度权威：前驱任务的集成（`dispose integrate` 完成、clone 分支前进）完成后才派发后继。
@@ -84,7 +84,7 @@ T5..T10 全部 ──> T11 (全量门禁矩阵+真实场景回归，clone 内直
   - precondition.md：基点 SHA、主树 clean 证明、`node --version`、allocation preflight 四项核验结果、smoke workspace 记录、外部隔离目录初始化清单
 - **managed worktree 派发模板**：`execution: { cwd: "$UPGRADE_ROOT", worktree: true }` + 全局约束的环境自举约定 + `output` inline
 
-**验收标准：** ①用户已确认 WIP 处置且主树 clean（记录基点 SHA 与 node 版本）；②clone 为独立仓库（`.git` 是目录），分支 `upgrade/pi-stack-0.87` **直接自记录的基点 SHA 创建**，HEAD attached 于新分支，**clone 全程从不检出/使用 main**（`git branch --show-current` 输出即新分支）；③`node_modules/.bin/pi --version` = `0.87.1`，clone 内实读四包版本均 0.87.1；④隔离 shell 验证（`pi --version`=0.87.1、`PI_CODING_AGENT_DIR` 指向 clone、隔离变量生效）；⑤安装后 clone `git status --short` **为空**（`/var/`、`node_modules/`、`/pi/npm/` 均被 .gitignore 覆盖的证据）；⑥allocation preflight 四项全过（primary `.git` 目录、HEAD attached、ref 无漂移、origin clean）+ 一次 smoke managed worktree `allocate → status → dispose(discard)` 全链路成功；⑦inputs 副本齐全含 hash；⑧执行前后主树 `git status --short` 一致、用户级路径无变化。
+**验收标准：** ①主树除登记豁免项（`pi/settings.json` `enabledModels` 本机差异）外 clean，基点 SHA 与 node 版本已记录；②clone 为独立仓库（`.git` 是目录），分支 `upgrade/pi-stack-0.87` **直接自记录的基点 SHA 创建**，HEAD attached 于新分支，**clone 全程从不检出/使用 main**（`git branch --show-current` 输出即新分支）；③`node_modules/.bin/pi --version` = `0.87.1`，clone 内实读四包版本均 0.87.1；④隔离 shell 验证（`pi --version`=0.87.1、`PI_CODING_AGENT_DIR` 指向 clone、隔离变量生效）；⑤安装后 clone `git status --short` **为空**（`/var/`、`node_modules/`、`/pi/npm/` 均被 .gitignore 覆盖的证据）；⑥allocation preflight 四项全过（primary `.git` 目录、HEAD attached、ref 无漂移、origin clean）+ 一次 smoke managed worktree `allocate → status → dispose(discard)` 全链路成功；⑦inputs 副本齐全含 hash；⑧执行前后主树除豁免项外状态一致、用户级路径无变化。
 
 - [ ] **步骤 1：前置门禁**——用户确认 WIP 已处置；记录基点 SHA、clean 证明、`node --version`
 - [ ] **步骤 2：** `git clone --no-checkout ~/pi-config ~/pi-config-upgrade && cd ~/pi-config-upgrade && git checkout -b upgrade/pi-stack-0.87 <基点SHA>`（`--no-checkout` 保证 main 从未被检出；分支直接自 precondition.md 记录的基点 SHA 创建，不依赖默认分支 HEAD；本地 clone 共享对象存储）；创建 `var/tmp/` 隔离目录树
