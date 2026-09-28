@@ -237,6 +237,9 @@ function coordinatorParams(value: any) {
     exactObject(input, "params.input", ["queueItemId", "queueLeaseId", "retry"]);
     requireString("queueItemId"); requireString("queueLeaseId");
     if (typeof input.retry !== "boolean") fail("params.input.retry must be a boolean");
+  } else if (operation === "preserve_integration_debt") {
+    exactOptionalObject(input, "params.input", [], ["reason"]);
+    if (input.reason !== undefined) boundedString(input.reason, "params.input.reason", 4096);
   } else if (operation === "prepare_auto_integration" || operation === "inspect_auto_integration" || operation === "advance_auto_integration") {
     exactObject(input, "params.input", []);
   } else {
