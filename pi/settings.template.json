@@ -1,0 +1,22 @@
+{
+  "packages": [
+    {
+      "source": "../packages/pi-subagents-enhanced"
+    },
+    {
+      "source": "npm:@amaster.ai/pi-task-scheduler@0.1.9",
+      "extensions": [],
+      "skills": [],
+      "prompts": [],
+      "themes": []
+    }
+  ],
+  "subagents": {
+    "disableBuiltins": true,
+    "agentOverrides": {
+      "delegate": {
+        "disabled": false
+      }
+    }
+  }
+}

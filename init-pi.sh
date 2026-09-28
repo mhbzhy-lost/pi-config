@@ -47,6 +47,7 @@ fi
 NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" run setup:subagents-enhanced
 
 node "$SCRIPT_DIR/scripts/sync-skills.ts"
+node "$SCRIPT_DIR/scripts/ensure-pi-settings.ts"
 
 chmod +x "$PI_LAUNCHER"
 
