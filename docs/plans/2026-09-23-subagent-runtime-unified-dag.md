@@ -52,7 +52,7 @@
 | `E-PI-ISOLATION` | 已完成，探针 blocked | 隔离测试设计已落盘，attention lane 因无法证明不连接 live coordinator 保持 blocked |
 | `L-ORPHAN-WIRING` | 已完成，外部 loader 未证实 | durable registry 可做生产组合点定位；coordinator-process 需仓外 loader 权威证据 |
 | `H-PI-1` | 已完成 | fake parent/child 进程组回收 helper 4/4 通过，未启动真实 Pi |
-| `H-PI-2` | 已完成 | 真实 Pi Host 0.85.1 E2E 全链路通过（12.7s）：dispatch→workspace 分配→child bash commit→Auto Integration admission/rebase/publish→terminal proof→release→origin clean。同文件 hostile-legacy/rename-canary 为预存断裂（A2 workflow 字段删除后 fixture 未迁移），不属于本节点范围 |
+| `H-PI-2` | 已完成 | 真实 Pi Host 0.85.1 E2E 通过（12.2s）：dispatch→workspace 分配→child bash commit→Auto Integration→terminal proof→release→origin clean。独立验收报告：`docs/plans/records/2026-09-23-runtime-remediation/H-PI-2.md`。同文件 hostile-legacy/rename-canary 为预存断裂，不属本节点范围 |
 | `BUG-PRESERVE-REASON` | 已完成 | 协议允许可选 bounded `reason`，RED→GREEN，提交 `ddcf487`；protected-path 门禁后由用户将 settings/models 转 per-machine 解除 |
 | `BUG-TERMINAL-PROOF-GATE` | 已完成 | E2E 首个偏离点暴露：`executorProofSnapshot` 用 Goal 授权门禁 terminal proof 可见性，standalone run 永远 null。历史 529 条 debt 大量 `terminal-unobserved` 的根因。RED→GREEN 提交 `145c25a`；bug 记录 `docs/bugs/2026-09-28-standalone-terminal-proof-invisible.md` |
 | `L-REGISTRY-ENTRY` | 已完成，blocked-unknown | 无合法 production composition importer；需 owner/authority/reference 契约后再接线 |
