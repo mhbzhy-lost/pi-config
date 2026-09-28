@@ -725,7 +725,10 @@ export class RootBrokerServer {
 
   executorProofSnapshot(run: OwnedRun) {
     const authorized = run.identityState === "verified" && !!run.authorization.goal;
-    const proof = authorized && !this.terminalConflicts.has(run.runId) ? this.terminalProofs.get(run.runId) ?? null : null;
+    // Terminal 观察是进程事实，不以 Goal 授权为前提：standalone managed
+    // worktree child 的 proof/release 链同样需要已接受的 terminal proof。
+    // authorization.state 独立报告 Goal 验证，不固化为 proof 可见性门禁。
+    const proof = !this.terminalConflicts.has(run.runId) ? this.terminalProofs.get(run.runId) ?? null : null;
     const runner = proof?.instances?.find((instance: any) => instance.kind === "runner" && instance.processInstanceId === proof.runnerProcessInstanceId);
     const successful = Boolean(runner && proof.instances.every((instance: any) => instance.exitCode === 0 && instance.signal === null));
     return frozen({

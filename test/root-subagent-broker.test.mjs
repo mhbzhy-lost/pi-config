@@ -486,6 +486,31 @@ test("Root broker returns a stable attention code without upstream error leakage
   assert.deepEqual(result, { state: "attention", code: "OWNED_STOP_UNAVAILABLE" });
 });
 
+test("standalone run terminal proof is visible without Goal authority", async (t) => {
+  const rootSessionId = "root-standalone-proof";
+  const runId = "standalone-proof-run";
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} },
+    captureProcessBirthIdentity: async () => "birth-standalone-proof",
+    writeGrant: async () => "/tmp/nonexistent-standalone-grant",
+  });
+  t.after(() => broker.closeRootSession().catch(() => undefined));
+  // standalone coding dispatch：goal 为 null
+  await authorize(broker, startedEvent(rootSessionId, runId), null);
+  await broker.observeStarted(startedEvent(rootSessionId, runId));
+  broker.observeTerminal(observedProof(runId));
+
+  const snapshot = broker.inspectExecutionProof(runId);
+  assert.notEqual(snapshot.terminal, null, "standalone terminal proof must be observable after acceptance");
+  assert.equal(snapshot.terminal.outcome, "succeeded");
+  assert.match(snapshot.terminal.proofId, /^[a-f0-9]{64}$/);
+  assert.deepEqual(snapshot.terminal.proof, observedProof(runId));
+  // authorization.state 独立报告，不因 terminal 可见而变成 verified
+  assert.deepEqual(snapshot.authorization, { state: "unavailable" });
+});
+
 test("Root broker exposes an immutable neutral execution proof without the legacy executor inspector", async (t) => {
   const rootSessionId = "root-proof-snapshot";
   const runId = "executor-proof";

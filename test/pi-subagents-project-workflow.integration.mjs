@@ -86,6 +86,8 @@ export function providerSource(contract) {
     export default function (pi) {
       let ordinal = 0;
       let projectStep = 0;
+      let childStep = 0;
+      let probeIssued = false;
       const deterministicProvider = {
         baseUrl: "http://127.0.0.1:9", api: "fake", apiKey: "not-used",
         models: [{ id: "deterministic", name: "Deterministic", input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 256 }],
@@ -97,18 +99,27 @@ export function providerSource(contract) {
           const probe = results.find((message) => message.toolName === "compat_project_probe");
           let tool;
           let output;
-          if (Array.isArray(contract) && (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0)) {
+          if (process.env.PI_SUBAGENT_CHILD === "1") {
+            if (contract.execution?.worktree && childStep++ === 0) {
+              tool = { name: "bash", arguments: { command: "printf '\\nPROJECT_TYPED_CHILD_COMMIT\\n' >> README.md && git add README.md && git commit -m child-marker" } };
+            } else output = "PROJECT_TYPED_CHILD_DONE\\n\\n" + String.fromCharCode(96,96,96) + "acceptance-report\\n" + JSON.stringify({
+              criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "Committed PROJECT_TYPED_CHILD_COMMIT to README.md." }],
+              changedFiles: ["README.md"],
+              testsAddedOrUpdated: [],
+              commandsRun: [{ command: "git commit README.md", result: "passed", summary: "Child committed the marker." }],
+              validationOutput: ["PROJECT_TYPED_CHILD_COMMIT"],
+              residualRisks: [],
+              noStagedFiles: true,
+              diffSummary: "README.md marker commit.",
+            }) + "\\n" + String.fromCharCode(96,96,96);
+          } else if (Array.isArray(contract) && (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0)) {
             if (projectStep < contracts.length) tool = { name: "subagent", arguments: contracts[projectStep++] };
             else if (projectStep === contracts.length) { projectStep += 1; tool = { name: "compat_project_probe", arguments: {} }; }
             else output = "PROJECT_TYPED_PARENT_DONE";
           } else if (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0) {
             if (projectStep++ === 0) tool = { name: "subagent", arguments: contract };
-            else if (projectStep === 2) tool = { name: "compat_project_probe", arguments: {} };
-            else if (projectStep === 3 && contract.execution?.worktree) tool = { name: "subagent_worktree", arguments: { action: "status", workspace_id: dispatch?.details?.workspace_id } };
-            else if (projectStep === 4 && contract.execution?.worktree) {
-              const status = results.filter((message) => message.toolName === "subagent_worktree").at(-1);
-              tool = { name: "subagent_worktree", arguments: { action: "dispose", workspace_id: dispatch?.details?.workspace_id, disposition: "discard", action_token: status?.details?.action_token } };
-            }
+            else if (projectStep === 2) { projectStep += 1; probeIssued = true; tool = { name: "compat_project_probe", arguments: {} }; }
+            else if (contract.execution?.worktree && !probeIssued) { probeIssued = true; tool = { name: "compat_project_probe", arguments: {} }; }
             else output = "PROJECT_TYPED_PARENT_DONE";
           } else {
             output = ${JSON.stringify(`PROJECT_TYPED_CHILD_DONE
@@ -209,11 +220,16 @@ export function dispatchProbeSource() {
           const dispatches = executionEnds.filter((event) => event?.toolName === "subagent");
           const handles = dispatches.map((event) => event?.result?.details).filter((handle) => handle?.runId);
           if (handles.length === 0) throw new Error("public subagent handle did not include runId: " + JSON.stringify(dispatches));
-          const terminal = await Promise.all(handles.map(async (handle) => ({
-            handle,
-            completion: await waitForCompletion(handle.runId),
-            proof: requireRootBroker(pi, rootSessionId).inspectExecutionProof(handle.runId),
-          })));
+          const terminal = await Promise.all(handles.map(async (handle) => {
+            const completion = await waitForCompletion(handle.runId);
+            let proof;
+            for (let attempt = 0; attempt < 300; attempt++) {
+              proof = requireRootBroker(pi, rootSessionId).inspectExecutionProof(handle.runId);
+              if (proof?.terminal) break;
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+            return { handle, completion, proof };
+          }));
           return { content: [{ type: "text", text: "project workflow probe complete" }], details: { starts, completions, completion: terminal[0].completion, executionEnds: executionEnds.map((event) => ({ toolName: event?.toolName })), proof: terminal[0].proof, terminal } };
         },
       });
@@ -222,7 +238,7 @@ export function dispatchProbeSource() {
   `;
 }
 
-test("project typed dispatch binds the real 0.62.0 workflow leaf to the Root Broker", { skip: !piBinary }, async () => {
+test("project typed worktree commit completes Auto Integration and release", { skip: !piBinary }, async () => {
   assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
   const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
@@ -239,9 +255,8 @@ test("project typed dispatch binds the real 0.62.0 workflow leaf to the Root Bro
       title: "Run real workflow leaf",
       agent: "executor",
       risk: "normal",
-      objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
-      requirements: ["Use the project-owned typed facade."],
-      workflow: { mode: "existing-tests", reason: "This integration verifies the installed workflow transport." },
+      objective: "Commit the child marker to README.md through the managed worktree.",
+      requirements: ["Use the project-owned typed facade.", "Only modify README.md."],
       context: { knownFacts: ["pi-subagents is pinned to 0.62.0."], decisions: ["Bind only the leaf run."], relevantFiles: [] },
       boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
       acceptance: { criteria: ["The child returns the deterministic marker."] },
@@ -253,7 +268,7 @@ test("project typed dispatch binds the real 0.62.0 workflow leaf to the Root Bro
 name: executor
 description: deterministic typed workflow executor
 model: fake/deterministic
-tools: read
+tools: read, bash
 extensions: ${provider}
 ---
 Return the deterministic child marker without modifying files.
@@ -307,7 +322,7 @@ Return the deterministic child marker without modifying files.
     assert.equal(proof?.binding?.runId, handle.runId);
     assert.equal(proof.binding.asyncDir, handle.asyncDir);
     assert.equal(proof.binding.agentProfile, "executor");
-    assert.ok(proof.terminal?.proof?.instances.length > 0);
+    assert.ok(proof.terminal?.proof?.instances.length > 0, JSON.stringify(proof));
     const disposition = result.records.filter((record) => record.type === "tool_execution_end" && record.toolName === "subagent").at(-1);
     assert.equal(disposition.result.isError, false, JSON.stringify(disposition));
     assert.equal(probe.result.details.starts.some((event) => (event?.runId ?? event?.id) === handle.runId && event?.asyncDir === handle.asyncDir), true);
@@ -318,6 +333,10 @@ Return the deterministic child marker without modifying files.
     const terminal = JSON.parse(await readFile(join(handle.asyncDir, "status.json"), "utf8"));
     assert.equal(terminal.state, "complete", JSON.stringify(terminal));
     assert.equal(terminal.runId, handle.runId);
+    const originReadme = await readFile(join(projectRoot, "README.md"), "utf8");
+    assert.match(originReadme, /PROJECT_TYPED_CHILD_COMMIT/);
+    const originStatus = (await execFileAsync("git", ["status", "--porcelain"], { cwd: projectRoot, encoding: "utf8" })).stdout;
+    assert.equal(originStatus, "", `origin repository must be clean: ${originStatus}`);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
