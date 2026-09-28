@@ -32,7 +32,7 @@
 - **`.ts` 测试门禁：** `node --test test/*.test.ts` 依赖 Node 原生 type-stripping。T1 记录 `node --version`；T2/T11 先做无副作用加载探测（`node --test --test-name-pattern=__no_such_test__ <file>`），探测失败则该命令不作门禁、改 typecheck + 对应 runner 覆盖并记录。
 - **输出语言：** 新文档、注释一律中文。
 - **每任务执行时长（含测试）低于 30 分钟 watchdog**；T3/T5/T11 已预拆。
-- **范围声明：** 本计划仅覆盖 Phase 1；「持续跟随机制」为后续独立计划。
+- **范围声明：** 本计划仅覆盖 Phase 1；「持续跟随机制」为后续独立计划。**Phase 2 立项记录（2026-09-27，T3 裁决）：** ①worktree 迁移不可让渡（三缺口证据见契约 6.1-6.3），正确路径是向 pi-subagents 上游提 feature request：typed writePaths policy、terminal-proof + 一次性 action token 绑定处置、session/cwd 绑定的 allocation receipt——上游每补一项，本仓 fork 面缩小一块；②持续跟随机制（shadow 门禁、adapter-only 铁律、跟随策略）。
 
 ## 执行模式修订（方案 A，用户选定）
 
@@ -195,9 +195,11 @@ T5..T10 全部 ──> T11 (全量门禁矩阵+真实场景回归，clone 内直
 
 ---
 
-### Task 5：compat facade 重写与调用方迁移
+### Task 5：compat 公开面集成层重设计与调用方迁移（2026-09-27 依 T3 契约重设计）
 
-**Deps：** `T4`（理由：0.71 + 四包 0.87.1 实际可安装作为编译与加载基础）
+**Deps：** `T4`（理由：0.71 + 四包 0.87.1 实际可安装作为编译与运行基础）
+
+**设计变更（T3 契约裁决驱动）：** 0.62 的 6 项 compat 导入（loadConfig、notify、session identity、completion owner、artifacts、discoverAgents）在 0.71 无公开入口且禁止自建 facade；但其**需求**全部有 0.71 公开面替代：会话身份→RPC ping `session.*`；完成通知→`events.asyncComplete`；agent 发现→方向反转为公开 `registerAgent/registerAgentViaEvents`；配置→只写公开键（worktree 禁用等）；artifacts→spawn reply `asyncDir`（T11 动态验证）；身份/所有权继续由本仓 root broker/session-owner/workspace service 承担。集成层从「复刻导入」改为「公开面集成」，禁止任何 never-facade。
 
 **WritePaths：**
 - `packages/pi-subagents-enhanced/src/compat/pi-subagents-0.71.ts`（Create）
@@ -208,8 +210,8 @@ T5..T10 全部 ──> T11 (全量门禁矩阵+真实场景回归，clone 内直
 **Resources：** `none`
 
 **接口契约：**
-- Consumes：T3 契约第 2、3 节，逐字实现
-- Produces：facade 导出契约第 3 节全部签名；全部调用方仅 import 新 facade；facade 实际 `import` 可加载（联合验收）
+- Consumes：T3 契约第 2/3/4 节（映射决策、签名草案、capability 矩阵），逐字遵循
+- Produces：`src/compat/pi-subagents-0.71.ts` 公开面集成层（根 default 导入 + ping 会话身份 + events 订阅 + registerAgent 注册 + config 公开键设置 + fleet transcript 展示 facade）；**先产出调用方盘点表** `var/upgrade/t5-caller-map.md`（旧 8 项导入的每个调用点 → 新公开面映射 → 迁移动作），盘点完成后再逐点迁移；全部调用方不再 import 旧 compat；集成层实际 import 可加载
 
 **验收标准：** 根与 enhanced typecheck（0.87.1 SDK × 0.71 lib，无混合态）通过；compat 测试 GREEN；`node --input-type=module -e` 实测 import facade 全部能力成功；生产与有效配置路径 grep 无 `pi-subagents-0.62` 残留（历史文档与本计划排除）。
 
