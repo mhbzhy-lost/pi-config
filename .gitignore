@@ -48,3 +48,4 @@ __pycache__/
 /skill-overrides/external-llm-review/.env
 /skill-overrides/exa-search/.env
 /pi/models.json
+/pi/settings.json
