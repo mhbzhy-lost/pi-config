@@ -49,11 +49,14 @@
 | `E-PI` | 已完成，环境受限 | 普通真实 Pi RPC 子集通过；attention lane 超时，真实 supervisor lane 未验证 |
 | `L-ORPHAN` | 已完成，来源未证实项保留 | 两个 lifecycle orphan 无 production importer，未删除/接线 |
 | `D-AUDIT` | 已完成 | 基于快照只读分类历史 proof debt，未执行 cleanup |
-| `E-PI-ISOLATION` | 已完成，探针 blocked | 隔离测试设计已落盘，需先实现测试专用进程组 launcher |
+| `E-PI-ISOLATION` | 已完成，探针 blocked | 隔离测试设计已落盘，attention lane 因无法证明不连接 live coordinator 保持 blocked |
 | `L-ORPHAN-WIRING` | 已完成，外部 loader 未证实 | durable registry 可做生产组合点定位；coordinator-process 需仓外 loader 权威证据 |
-| `H-PI-1` | 待执行 | 只在测试 helper 中实现可验证的独立进程组回收；不启动真实 Pi |
-| `L-REGISTRY-ENTRY` | 待执行 | 只读定位 durable registry 合法生产组合点，给后继接线提供精确契约 |
-| `D-CLEANUP` | blocked | 历史 debt provenance 候选为 0；本轮不进行 live mutation |
+| `H-PI-1` | 已完成 | fake parent/child 进程组回收 helper 4/4 通过，未启动真实 Pi |
+| `H-PI-2` | 已完成 | 真实 Pi Host 0.85.1 E2E 全链路通过（12.7s）：dispatch→workspace 分配→child bash commit→Auto Integration admission/rebase/publish→terminal proof→release→origin clean。同文件 hostile-legacy/rename-canary 为预存断裂（A2 workflow 字段删除后 fixture 未迁移），不属于本节点范围 |
+| `BUG-PRESERVE-REASON` | 已完成 | 协议允许可选 bounded `reason`，RED→GREEN，提交 `ddcf487`；protected-path 门禁后由用户将 settings/models 转 per-machine 解除 |
+| `BUG-TERMINAL-PROOF-GATE` | 已完成 | E2E 首个偏离点暴露：`executorProofSnapshot` 用 Goal 授权门禁 terminal proof 可见性，standalone run 永远 null。历史 529 条 debt 大量 `terminal-unobserved` 的根因。RED→GREEN 提交 `145c25a`；bug 记录 `docs/bugs/2026-09-28-standalone-terminal-proof-invisible.md` |
+| `L-REGISTRY-ENTRY` | 已完成，blocked-unknown | 无合法 production composition importer；需 owner/authority/reference 契约后再接线 |
+| `D-CLEANUP` | blocked，根因已修复但保持冻结 | 历史 debt provenance 候选为 0；本轮不进行 live mutation。注意：`145c25a` 已修复 terminal-unobserved 根因，后续重新评估 debt 分类时可消费此事实；用户已明确“不急”，保持冻结 |
 
 `P-EVIDENCE` 已有完整产物时不得重复从 `/tmp` 恢复；执行器应以恢复目录、README、独立重放结果和当前 `git status` 作为其完成证据。
 
@@ -125,7 +128,10 @@ P-EVIDENCE ─────┐
 | `E-PI-ISOLATION` | 真实 Pi attention 测试隔离探索 | `E-PI` | 设计独立 cwd/state root 和进程组回收；真实 lane 不可结束时保留环境受限 |
 | `L-ORPHAN-WIRING` | lifecycle orphan 归属方案 | `L-ORPHAN` | 两个无 importer 模块分别确认 owner/entry；接线或删除须单独 TDD，不靠 allowlist 声明 |
 | `H-PI-1` | 测试专用进程组 launcher | `E-PI-ISOLATION` | 消费隔离方案的进程组回收契约；先以 fake parent/child 实测，不运行真实 Pi |
-| `L-REGISTRY-ENTRY` | durable registry 生产入口定位 | `L-ORPHAN-WIRING` | 只读定位 Host composition、权威 inventory 事实与实际接线所需的最窄边界 |
+| `H-PI-2` | 真实 `worktree:true` Host E2E | `H-PI-1` | 复用 `test/pi-subagents-project-workflow.integration.mjs` 的真实 Pi Host；child commit 后由 production integration queue 完成 admission/publish/proof/release，不新增 grant 探针 |
+| `BUG-PRESERVE-REASON` | Root Broker preserve 参数修复 | `L-ORPHAN-WIRING` | 只改 protocol/test 声明路径；先记录 bug、RED，再最小 GREEN；当前被 protected-path dirty 门禁阻塞 |
+| `L-REGISTRY-ENTRY` | durable registry 生产入口定位 | `L-ORPHAN-WIRING` | 只读定位 Host composition、权威 inventory 事实与实际接线所需的最窄边界；当前 blocked-unknown |
+
 | `D-CLEANUP-RECHECK` | cleanup 安全门复核 | `D-INTERFACE-DESIGN,E-PI-ISOLATION,L-ORPHAN-WIRING` | 只读核对 provenance、接口与 transport 证据；缺任一前置则保持 blocked |
 | `D-CLEANUP` | 历史 proof debt 处置 | `D-CLEANUP-RECHECK` | 单独明确授权门；只在复核通过且有合法 typed 实现后允许 mutation，默认 blocked |
 
@@ -150,7 +156,7 @@ P-EVIDENCE ─────┐
 - **Wave 16：** `D-PROVENANCE`、`E-PI-ISOLATION`、`L-ORPHAN-WIRING`，三个只读探索可并行。
 - **Wave 17：** `D-INTERFACE-DESIGN`，只消费已核验的 debt 身份链；若 D-PROVENANCE 不能证明 production 可达，只交付 fail-closed 候选契约和缺失证据，不启动实现。
 - **Wave 18：** `D-CLEANUP-RECHECK`，已执行的只读复核保持 blocked；`H-PI-1` 与 `L-REGISTRY-ENTRY` 两项写路径不相交，可并行。
-- **Wave 19：** 仅当 H-PI-1 的进程组回收通过且 Host/cwd/state 隔离被证明，再另立 H-PI-2 真实普通 RPC 接线任务；`D-CLEANUP` 保持 blocked，不因测试 helper 或接线研究而解锁。
+- **Wave 19：** `H-PI-2` 复用真实 Pi Host project-workflow fixture，待 `PI_REAL_BIN` 可用后运行一次窄 `worktree:true` child commit→queue→proof→release 验收；不得运行 attention lane 或连接 live coordinator。`BUG-PRESERVE-REASON` 在 protected-path dirty 门禁解除后按 TDD 独立执行；`D-CLEANUP` 保持 blocked。
 
 **关键路径：** `P-EVIDENCE → P-SNAPSHOT-CONTRACT → P-SNAPSHOT → P-HARNESS → A-ENV → A0 → A1 → A2 → A6 → A-ACC → B6/B7/B8 → B-ACC → C9/C10/C11/C12 → C-ACC → C13 → D-AUDIT → D-PROVENANCE → D-INTERFACE-DESIGN → D-CLEANUP-RECHECK → D-CLEANUP [授权]`；E-PI-ISOLATION 与 L-ORPHAN-WIRING 独立完成后才允许 D-CLEANUP-RECHECK。
 
@@ -904,6 +910,50 @@ P-EVIDENCE ─────┐
 - [ ] 正常提前退出不发送信号；超时先 TERM，短 grace 后组仍活则 KILL；leader 与 child 均被回收，输出和错误按测试目录的已有策略保留。
 - [ ] 非 POSIX/不能证明独立 PGID 时 fail closed，不退化为仅 `child.kill()`；不能误杀外部进程。
 - [ ] `node --test test/helpers/pi-process-group.integration.mjs` 与相关 typecheck 通过；本节点**不**启动真实 Pi，不触碰仓库 `.git/.pi-coordinator` 或 live `var/workspaces`。
+
+### Task H-PI-2：隔离临时环境验证真实普通 Pi RPC
+
+**Deps：** `H-PI-1`（理由：消费已通过 fake parent/child 验证的独立进程组 launcher；不运行 attention lane）
+
+**WritePaths：**
+- `test/pi-subagents-runtime.integration.mjs`
+
+**Resources：** `pi-real-lane`（最多 1 个并发）
+
+**Dispatch：** coding/test harness；只运行窄普通 RPC 测试，不连接 live coordinator，不修改 production。
+
+**Source：** `E-PI-ISOLATION.md` 的 H-PI-2 契约和 H-PI-1 helper。
+
+**Produces：** 临时 Git origin/cwd/state/agent/HOME/XDG/TMP/session 绑定的普通真实 Pi RPC 验收结果，或明确 `blocked-before-probe`/`environment-constrained`。
+
+**验收标准：**
+- [ ] 先以断言级 RED 证明当前普通 RPC fixture 缺少隔离绑定，再最小接线；不把 Host grant 启动错误、timeout 或 module-not-found 当 RED。
+- [ ] 普通 Pi RPC 使用临时 cwd/state 与 Host identity，exit 0、terminal complete、process group 无 orphan；不得运行 attention 或整体 `test:subagents`。
+- [ ] 不连接仓库 `.git/.pi-coordinator`、旧 host 或 `var/workspaces`；临时资源只在进程组收敛后清理。
+- [ ] 失败时记录首个阻塞点和实际 exit/timeout，不把验证失败归为 production bug；git diff check/typecheck/无 staged 结果如实记录。
+
+### Task BUG-PRESERVE-REASON：修复 preserve_integration_debt 的 Root Broker 参数契约
+
+**Deps：** `L-ORPHAN-WIRING`（理由：源码归属和 production composition 已完成只读核对；不依赖历史 debt cleanup 或真实 Pi E2E）
+
+**WritePaths：**
+- `docs/bugs/2026-09-28-preserve-integration-debt-reason.md`
+- `packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts`
+- `test/root-subagent-broker-protocol.test.mjs`
+
+**Resources：** `root-broker-protocol`（最多 1 个并发）
+
+**Dispatch：** coding；必须先读取 `/Users/leshi.zhy/.agents/skills/test-driven-development/SKILL.md` 和 `writing-good-tests.md`，先写并运行断言级 RED，再做最小 GREEN。代码节点开工前必须检查 `pi/agents/reviewer.md`、`pi/settings.json`、`pi/models.json`、`var/workspaces/`；任何 protected-path dirty 命中立即停止，不读取、回滚或覆盖现场。
+
+**Source：** `docs/bugs/2026-09-28-preserve-integration-debt-reason.md`、`packages/pi-subagents-enhanced/child-extensions/integration-queue.ts`、`packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts`。
+
+**Produces：** Root Broker `preserve_integration_debt` 合法 `{ reason }` 请求的 RED/GREEN 证据和 focused 回归；不增加 fallback、探针或吞错兼容。
+
+**验收标准：**
+- [ ] RED 必须是 `parseBrokerRequest` 对合法 production shape 的具体断言失败，不能用 TypeError/module-not-found/typecheck 失败替代。
+- [ ] GREEN 只允许 protocol 参数校验与必要 focused test 改动；请求能到达 coordinator preserve handler 的合同边界。
+- [ ] preserve reason 仍受非空/长度约束，未知字段仍拒绝；不改变其他 coordinator operation。
+- [ ] focused protocol/coordinator tests、`npm run typecheck:subagents-enhanced`、`git diff --check` 通过；protected path 无命中；无 staged/无 live state mutation。
 
 ### Task L-REGISTRY-ENTRY：定位 durable registry 生产组合点
 
