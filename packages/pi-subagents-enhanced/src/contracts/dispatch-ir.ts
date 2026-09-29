@@ -281,7 +281,7 @@ export function renderCodingDispatchPrompt(ir) {
     "# Coding Dispatch Contract v1", "", "## Identity",
     `- Version: \`${ir.version}\``, `- Task ID: ${JSON.stringify(ir.taskId)}`, `- Title: ${JSON.stringify(ir.title)}`,
     `- Agent: \`${ir.agent}\``, ...(ir.model === undefined ? [] : [`- Requested model: \`${ir.model}\``]),
-    `- Risk: \`${ir.risk}\``, `- Working directory: ${JSON.stringify(ir.execution.cwd)}`, `- Timeout: \`${ir.execution.timeoutMs}ms\``,
+    `- Risk: \`${ir.risk}\``, `- Working directory: ${JSON.stringify(ir.execution.cwd)}`,
     ...(ir.execution.worktree === true ? ["- Managed worktree: `true`"] : []),
     ...(ir.execution.worktree === true ? ["- Child integration lifecycle: commit -> subagent_integration enqueue -> await_admission -> git rebase targetHead -> report_conflict on conflict while retaining target changes -> verify -> publish. Do not finish before publish succeeds or an explicit fail is recorded."] : []), `- Contract SHA-256: \`${ir.hash}\``,
     "", "## Objective", JSON.stringify(ir.objective), "", "## Requirements", ordered(ir.requirements),

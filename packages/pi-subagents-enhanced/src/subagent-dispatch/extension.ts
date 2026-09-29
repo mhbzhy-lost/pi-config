@@ -360,10 +360,8 @@ export function codingWorkflowSpawnParams(ir, prompt, workflowKey, goalTicket?) 
     orchestratorCwd: ir.orchestratorCwd ?? ir.execution.cwd,
     childCwd: ir.execution.cwd,
     context: "fresh",
-    timeoutMs: ir.execution.timeoutMs,
     child: {
       output: false,
-      timeoutMs: ir.execution.timeoutMs,
       subagentOnlyExtensions: [
         ROOT_SESSION_OWNER_EXTENSION,
         ...(ir.execution.worktree === true ? [INTEGRATION_QUEUE_EXTENSION] : []),

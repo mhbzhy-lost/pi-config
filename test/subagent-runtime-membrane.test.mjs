@@ -178,7 +178,6 @@ function codingContract(overrides = {}) {
     agent: "executor",
     risk: "normal",
     objective: "Expose only the project-owned typed subagent facade.",
-    workflow: { mode: "tdd" },
     requirements: ["Compile a deterministic initial child prompt."],
     context: {
       knownFacts: ["pi-subagents is an implementation dependency."],
@@ -198,7 +197,6 @@ function codingContract(overrides = {}) {
   return {
     ...base,
     ...overrides,
-    workflow: { ...base.workflow, ...overrides.workflow },
     context: { ...base.context, ...overrides.context },
     boundaries: { ...base.boundaries, ...overrides.boundaries },
     acceptance: { ...base.acceptance, ...overrides.acceptance },
@@ -1185,7 +1183,8 @@ test("compiles a coding contract into one workflow root and returns its correlat
   assert.equal(spawn.params.worktree, false);
   assert.equal(spawn.params.mission, false);
   assert.equal(spawn.params.chatProgress, "off");
-  assert.equal(spawn.params.timeoutMs, 30 * 60_000);
+  assert.equal(Object.hasOwn(spawn.params, "timeoutMs"), false);
+  assert.equal(Object.hasOwn(spawn.params.child ?? {}, "timeoutMs"), false);
   assert.match(spawn.params.workflowScript, /runs\.run\("typed-dispatch-1"/);
   assert.match(spawn.params.workflowScript, /# Coding Dispatch Contract v1/);
   assert.match(spawn.params.workflowScript, /"level":"checked"/);

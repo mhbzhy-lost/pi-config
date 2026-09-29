@@ -158,6 +158,7 @@ test("renders the complete child prompt in a fixed section order", () => {
     ],
   );
   assert.match(prompt, /Contract SHA-256: `[a-f0-9]{64}`/);
+  assert.doesNotMatch(prompt, /- Timeout:/);
   assert.match(prompt, /contact_supervisor/);
   assert.match(prompt, /NEEDS_CONTEXT/);
   assert.match(prompt, /RED\/GREEN or exemption evidence/);
