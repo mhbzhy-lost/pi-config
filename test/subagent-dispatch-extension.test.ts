@@ -8,11 +8,10 @@ import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/c
 import { bindGoalRunCoordinator, bindGoalRunCoordinatorSession, unbindGoalRunCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
 
 const contract = {
-  version: "dispatch-ir.v1", taskId: "identity-ledger", title: "Bind durable spawn identity", agent: "executor", risk: "normal",
-  objective: "Bind coding calls to durable identities.", workflow: { mode: "tdd" }, requirements: ["Preserve the exact contract."],
-  context: { knownFacts: [], decisions: [], relevantFiles: ["test/subagent-dispatch-extension.test.ts"] },
-  boundaries: { writePaths: ["test/subagent-dispatch-extension.test.ts"], excludedWork: [], forbiddenActions: [] },
-  acceptance: { criteria: ["Identity is trusted."] }, execution: { cwd: "/repo" },
+  title: "Bind durable spawn identity", agent: "executor",
+  task: "Bind coding calls to durable identities. Preserve the exact contract.",
+  writePaths: ["test/subagent-dispatch-extension.test.ts"],
+  acceptance: { criteria: ["Identity is trusted."] }, cwd: "/repo",
 };
 
 function setup({ sessionId = "s" }: { sessionId?: string } = {}) {
@@ -135,11 +134,11 @@ async function assertCallerTimeoutRejected(name: string, input: any) {
 }
 
 test("coding object timeout is rejected before discovery, workspace allocation, and RPC", async () => {
-  await assertCallerTimeoutRejected("coding-object", { ...contract, execution: { ...contract.execution, timeoutMs: 1_000, worktree: true } });
+  await assertCallerTimeoutRejected("coding-object", { ...contract, timeoutMs: 1_000, worktree: true });
 });
 
 test("stringified coding execution timeout is rejected before discovery, workspace allocation, and RPC", async () => {
-  await assertCallerTimeoutRejected("coding-string", { ...contract, execution: JSON.stringify({ ...contract.execution, timeoutMs: 1_000, worktree: true }) });
+  await assertCallerTimeoutRejected("coding-string", { ...contract, timeoutMs: 1_000, worktree: true });
 });
 
 test("generic timeout is rejected before discovery, workspace allocation, and RPC", async () => {
@@ -167,12 +166,12 @@ test("caller timeout is rejected even with an active coordinator that issues no 
     },
   });
 
-  const result = await tools[0].execute("caller-timeout-no-ticket", { ...contract, execution: { ...contract.execution, timeoutMs: 1_000, worktree: true } }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await tools[0].execute("caller-timeout-no-ticket", { ...contract, timeoutMs: 1_000, worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, true);
   assert.equal(result.details.code, "INVALID_CONTRACT");
-  assert.equal(result.details.keypath, "execution.timeoutMs");
-  assert.equal(prepareSpawnCalls, 1, "coordinator preflight must run once");
+  assert.equal(result.details.keypath, "timeoutMs");
+  assert.equal(prepareSpawnCalls, 0, "invalid caller timeout must fail before coordinator preflight");
   assert.equal(discoveries, 0, "discovery");
   assert.equal(allocations, 0, "workspace allocation");
   assert.equal(rpcCalls, 0, "RPC");
@@ -185,11 +184,11 @@ test("Host owns coding execution timeout while generic workflow omits it", async
 
   const coding = await tools[0].execute("host-coding-timeout", {
     ...contract,
-    execution: { cwd: "/repo" },
+    cwd: "/repo",
   }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(coding.isError, false, coding.content[0]?.text);
-  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 30 * 60_000);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
 });
 
 test("generic workflow omits execution timeout while the Host collector remains bounded", async () => {
@@ -254,7 +253,7 @@ test("coding spawn binds the Goal coordinator through a same-root different-Exte
   bindGoalRunCoordinatorSession(goalPi, "root-shared", coordinator);
   try {
     createTestExtension(pi, { rpc, cleanupStore: {}, workspaceService, resolveRootSessionId() { return "root-shared"; } });
-    const result = await tools[0].execute("goal-wrapper-bridge", { ...contract, execution: { ...contract.execution, worktree: true } }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+    const result = await tools[0].execute("goal-wrapper-bridge", { ...contract, worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
     assert.equal(result.isError, false, result.content[0]?.text);
     assert.equal(bindings.length, 1);
     assert.equal(bindings[0].ticket.ticketId, "a".repeat(64));
@@ -266,12 +265,11 @@ test("coding spawn binds the Goal coordinator through a same-root different-Exte
 
 test("Goal trusted contract keeps a non-default caller timeout and canonical hash", async () => {
   const { pi, rpc, calls, tools } = setup();
-  const trustedTimeout = 45_000;
   const goalInput = {
     ...contract,
-    execution: { cwd: "/repo", timeoutMs: trustedTimeout, worktree: true },
+    cwd: "/repo", worktree: true,
   };
-  const expectedHash = compileCodingDispatchIR(goalInput, { cwd: "/repo" }).hash;
+  const expectedHash = compileCodingDispatchIR(goalInput, { cwd: "/repo" }).contractHash;
   let preparedRequest: any;
   const workspaceService = {
     ensureAllocated(request: any) { preparedRequest = request; return workspaceReceipt(request); },
@@ -298,7 +296,7 @@ test("Goal trusted contract keeps a non-default caller timeout and canonical has
 
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.equal(result.details.contractHash, expectedHash);
-  assert.equal(workflowLeaf(calls[0].params).timeoutMs, trustedTimeout);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
 });
 
 test("Goal coding spawn allocates through the shared service in the exact four-stage order", async () => {
@@ -343,7 +341,7 @@ test("Goal coding spawn allocates through the shared service in the exact four-s
 
   const result = await tools[0].execute("goal-unified", {
     ...contract,
-    execution: { ...contract.execution, worktree: true },
+    worktree: true,
   }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
@@ -375,7 +373,7 @@ test("standalone coding worktree uses the same service and binds without Goal re
       assert.equal(request.owner.kind, "standalone-subagent");
       assert.equal(request.owner.rootSessionId, "root-standalone");
       assert.equal(request.owner.toolCallId, "standalone-call");
-      assert.equal(request.contractHash, preparePublicCodingDispatch({ ...contract, execution: { ...contract.execution, worktree: true } }, { cwd: "/repo", timeoutMs: 30 * 60_000 }).hash);
+      assert.equal(request.contractHash, preparePublicCodingDispatch({ ...contract, worktree: true }, { cwd: "/repo", timeoutMs: 30 * 60_000 }).contractHash);
       allocated = workspaceReceipt({ ...request, workspaceId: request.workspaceId });
       return allocated;
     },
@@ -405,7 +403,7 @@ test("standalone coding worktree uses the same service and binds without Goal re
 
   const result = await tools[0].execute("standalone-call", {
     ...contract,
-    execution: { ...contract.execution, worktree: true },
+    worktree: true,
   }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
@@ -535,7 +533,7 @@ test("Goal coding registers exact ticket authority before returning a handle", a
     registerAuthorizedRun(authorization: any) { registered.push(authorization); },
   });
 
-  const result = await tools[0].execute("goal-authority", { ...contract, agent: "coder-alpha", execution: { ...contract.execution, worktree: true } }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await tools[0].execute("goal-authority", { ...contract, agent: "coder-alpha", worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.deepEqual(registered[0], {
@@ -573,7 +571,7 @@ test("standalone coding rejects registration failure and preserves the active un
     registerAuthorizedRun() { throw Object.assign(new Error("broker unavailable"), { code: "BROKER_UNAVAILABLE" }); },
   });
 
-  const result = await tools[0].execute("registration-failure", { ...contract, agent: "coder-alpha", execution: { ...contract.execution, worktree: true } }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await tools[0].execute("registration-failure", { ...contract, agent: "coder-alpha", worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /broker unavailable/);
@@ -670,7 +668,7 @@ test("coding spawn resolver receives the exact compiled hash", async () => {
   const { pi, rpc, tools } = setup(); const resolved = [];
   createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
   await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
-  assert.equal(resolved[0]?.contractHash, preparePublicCodingDispatch(contract, { cwd: "/repo", timeoutMs: 30 * 60_000 }).hash);
+  assert.equal(resolved[0]?.contractHash, preparePublicCodingDispatch(contract, { cwd: "/repo", timeoutMs: 30 * 60_000 }).contractHash);
 });
 
 test("coding spawn forwards resolver metadata raw as RPC options and excludes spawnKey from params", async () => {

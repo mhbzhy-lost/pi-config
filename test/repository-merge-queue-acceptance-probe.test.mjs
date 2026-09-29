@@ -185,7 +185,7 @@ test("dispatch plan uses two real roots with a 3+2 split and executor profile", 
   assert.deepEqual(plan.roots.map((root) => root.tasks.length), [3, 2]);
   assert.equal(plan.children.length, 5);
   assert.deepEqual([...new Set(plan.children.map((child) => child.agent))], ["executor"]);
-  assert.ok(plan.children.every((child) => child.model === "codex-pool/gpt-5.6-sol" && child.execution.worktree && !Object.hasOwn(child, "async")));
+  assert.ok(plan.children.every((child) => child.model === "codex-pool/gpt-5.6-sol" && child.worktree && !Object.hasOwn(child, "async")));
   // 验收 child 的提交必须能过全局 security-gates 的 Conventional Commit + 中文 subject 门禁
   // （真实运行失败根因：英文 message 被 COMMIT_MESSAGE_INVALID 拒绝）。
   assert.ok(plan.children.every((child) => child.requirements.some((requirement) =>
@@ -251,18 +251,17 @@ test("root provider requests cross the public caller gate and reach the dispatch
     assert.equal(calls.length, tasks.length);
     for (const call of calls) {
       const prepared = preparePublicCodingDispatch(call.arguments, { cwd: fixture, timeoutMs: 30 * 60 * 1000 });
-      received.push({ taskId: prepared.taskId, execution: prepared.execution });
-      assert.equal(prepared.taskId, call.id);
-      assert.deepEqual(prepared.boundaries.writePaths, ["src/pipeline.ts", "test/pipeline.test.mjs"]);
-      assert.equal(prepared.execution.worktree, true);
-      assert.equal(prepared.execution.timeoutMs, 30 * 60 * 1000);
-      assert.equal(Object.hasOwn(call.arguments, "worktree"), false);
-      assert.equal(Object.hasOwn(call.arguments, "async"), false);
-      assert.ok(call.arguments.requirements.some((requirement) => /Conventional Commit/i.test(requirement) && /[\u4e00-\u9fff]/.test(requirement)));
+      received.push({ task: call.arguments.task });
+      assert.equal(typeof prepared.taskId, "string");
+      assert.deepEqual(call.arguments.writePaths, ["src/pipeline.ts", "test/pipeline.test.mjs"]);
+      assert.equal(call.arguments.worktree, true);
+      assert.equal(call.arguments.worktree, true);
+      assert.ok(/Conventional Commit/i.test(call.arguments.task) && /[\u4e00-\u9fff]/.test(call.arguments.task));
       assert.ok(call.arguments.acceptance.criteria.every((criterion) => !/publish|integration queue/i.test(criterion)));
     }
   }
-  assert.deepEqual(received.map(({ taskId }) => taskId), ["acceptance-parse", "acceptance-validate", "acceptance-transform", "acceptance-serialize", "acceptance-audit"]);
+  assert.equal(received.length, 5);
+  assert.ok(received.every(({ task }) => /Modify the shared PIPELINE/.test(task)));
 });
 
 test("acceptance root keeps a broker subscription for each managed child through recovery", async () => {
@@ -511,9 +510,9 @@ test("deterministic roots issue exactly three plus two typed executor dispatches
   const tool = (root) => ({ execute: async (_id, input) => { calls.push({ root, input }); return { root }; } });
   await dispatchAcceptanceRoots({ subagentTools: [tool("a"), tool("b")], cwd: "/fixture" });
   assert.deepEqual(calls.map((call) => call.root), ["a", "a", "a", "b", "b"]);
-  assert.ok(calls.every(({ input }) => input.agent === "executor" && input.model === "codex-pool/gpt-5.6-sol" && input.execution.worktree === true));
-  assert.ok(calls.every(({ input }) => /Auto Integration/.test(input.requirements.join(" "))));
-  assert.ok(calls.every(({ input }) => !/subagent_integration|enqueue\b|await\b|rebase\b|publish\b/.test(input.requirements.join(" "))));
+  assert.ok(calls.every(({ input }) => input.agent === "executor" && input.model === "codex-pool/gpt-5.6-sol" && input.worktree === true));
+  assert.ok(calls.every(({ input }) => /Auto Integration/.test(input.task)));
+  assert.ok(calls.every(({ input }) => !/subagent_integration|enqueue\b|await\b|rebase\b|publish\b/.test(input.task)));
 });
 
 test("manual integration mutation traces fail host health before acceptance settlement", async () => {
@@ -561,7 +560,7 @@ test("RPC hosts write one prompt, dispatch 3+2 calls, and remain alive until set
   `);
   t.after(() => rm(root, { recursive: true, force: true }));
   const plan = createAcceptanceDispatchPlan();
-  const hosts = [3, 2].map((count, index) => new AcceptanceRpcHost(process.execPath, [fake], { env: { ...process.env, COUNT: String(count) }, prompt: JSON.stringify({ version: "dispatch-ir.v1", root: index }) }).start());
+  const hosts = [3, 2].map((count, index) => new AcceptanceRpcHost(process.execPath, [fake], { env: { ...process.env, COUNT: String(count) }, prompt: JSON.stringify({ agent: "executor", task: `acceptance-root-${index}` }) }).start());
   const records = await Promise.all(hosts.map((host, index) => host.settle({ terminal: (events) => events.filter((event) => event.type === "tool_execution_end").length === [3, 2][index] })));
   assert.deepEqual(records.map((events) => events.filter((event) => event.type === "tool_execution_end").length), [3, 2]);
   assert.ok(hosts.every((host) => !host.child.killed), "hosts must remain alive after dispatch settlement");

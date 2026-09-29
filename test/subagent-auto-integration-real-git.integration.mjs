@@ -239,18 +239,13 @@ function dispatchPiHarness(originRoot, leafAsyncDir) {
 
 function realDispatchCodingContract(originRoot) {
   return {
-    version: "dispatch-ir.v1",
-    taskId: "real-dispatch-v2",
     title: "Allocate through the real dispatch entry",
     agent: "executor",
-    risk: "normal",
-    objective: "Prove the real Auto Integration allocation path creates a v2 ledger and settles its terminal proof.",
-    workflow: { mode: "tdd" },
-    requirements: ["Commit the allowed change."],
-    context: { knownFacts: [], decisions: [], relevantFiles: ["shared.txt"] },
-    boundaries: { writePaths: ["shared.txt"], excludedWork: [], forbiddenActions: [] },
+    task: "Prove the real Auto Integration allocation path creates a v2 ledger and settles its terminal proof. Commit the allowed change. Known facts: none. Decisions: none. Relevant files: shared.txt.",
+    writePaths: ["shared.txt"],
     acceptance: { criteria: ["The ledger is v2 and the proof settles."] },
-    execution: { cwd: originRoot, worktree: true },
+    cwd: originRoot,
+    worktree: true,
   };
 }
 

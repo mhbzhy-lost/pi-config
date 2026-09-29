@@ -1,4 +1,3 @@
-import { compileGenericPrompt, renderGenericPrompt, type GenericPromptContract, type CompiledGenericPrompt } from "../contracts/generic-prompt.ts";
 import { assertAuthorizedDispatch, type AuthorizedDispatch } from "./execution-contract.ts";
 
 /** Shared execution boundary for all subagent input adapters.
@@ -58,18 +57,15 @@ export async function dispatchExecution(
 }
 
 export function createGenericDispatchAdapter(input: Readonly<{
-  agent: string; title: string; prompt: GenericPromptContract | CompiledGenericPrompt; cwd: string; model?: string;
+  agent: string; title: string; task: string; cwd: string; model?: string;
 }>): DispatchExecutionRequest {
   if (input && ["authorization", "authorizedDispatch", "capability", "goal", "ticket"].some((key) => Object.hasOwn(input, key))) {
     throw new TypeError("generic public dispatch cannot provide authority");
   }
-  if (!input || !input.prompt) throw new TypeError("generic dispatch prompt contract is required");
-  const { hash: _ignoredHash, ...promptInput } = input.prompt as GenericPromptContract & { hash?: string };
-  const prompt = compileGenericPrompt(promptInput);
   return Object.freeze({
     agent: input.agent,
     title: input.title,
-    prompt: renderGenericPrompt(prompt),
+    prompt: input.task,
     cwd: input.cwd,
     ...(input.model === undefined ? {} : { model: input.model }),
   });

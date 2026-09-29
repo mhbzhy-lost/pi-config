@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { compileGenericPrompt, renderGenericPrompt } from "../packages/pi-subagents-enhanced/src/contracts/generic-prompt.ts";
+import { compileDispatchIR, renderDispatchPrompt } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { preparePublicCodingDispatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 import { createAuthorizedDispatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/execution-contract.ts";
 import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
@@ -47,14 +47,14 @@ function hostEnvelope(root, cwdRoot, agent, kind) {
 
 test("standalone reviewer generic contract reaches shared execution through a Host envelope", async (t) => {
   const f = await fixture(t);
-  const prompt = compileGenericPrompt({
+  const prompt = compileDispatchIR({
     task: "Review the isolated diff.",
     context: ["The reviewer has read-only scope."],
     constraints: ["Do not modify files."],
     deliverable: "A findings report.",
     done: ["Every finding cites evidence."],
   });
-  assert.match(renderGenericPrompt(prompt), /## Done/);
+  assert.match(renderDispatchPrompt(prompt), /## Done/);
   const envelope = await hostEnvelope(f.root, f.originRoot, "reviewer", "generic");
   let seen;
   const receipt = await dispatchExecution(
@@ -70,18 +70,12 @@ test("standalone reviewer generic contract reaches shared execution through a Ho
 test("standalone executor coding contract reaches shared execution and allocates a v2 workspace", async (t) => {
   const f = await fixture(t);
   const coding = {
-    version: "dispatch-ir.v1",
-    taskId: "e2e.executor",
     title: "Executor coding task",
     agent: "executor",
-    risk: "normal",
-    objective: "Implement the change.",
-    workflow: { mode: "tdd" },
-    requirements: ["Preserve the public ABI."],
-    context: { knownFacts: ["The contract is repository-managed."], decisions: ["Use the typed coding contract."], relevantFiles: ["src/**"] },
-    boundaries: { writePaths: ["src/**"], excludedWork: ["Do not change the schema."], forbiddenActions: ["Do not commit."] },
+    task: "Implement the change. Preserve the public ABI. Known fact: the contract is repository-managed. Decision: use the typed coding contract. Relevant files: src/**. Do not change the schema. Do not commit.",
+    writePaths: ["src/**"],
     acceptance: { criteria: ["The change compiles."] },
-    execution: { worktree: true },
+    worktree: true,
   };
   const ir = preparePublicCodingDispatch(coding, { cwd: f.originRoot, timeoutMs: 30 * 60_000 });
   assert.equal(ir.hash.length, 64);

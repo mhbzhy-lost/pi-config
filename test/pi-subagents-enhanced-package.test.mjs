@@ -76,7 +76,6 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
   assert.deepEqual(manifest.pi.extensions, ["./extensions/subagent-runtime.ts", "./extensions/custom-footer.ts"]);
   assert.deepEqual(manifest.exports, {
     "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
-    "./generic-prompt": "./src/contracts/generic-prompt.ts",
     "./workspace": "./src/workspace/service.ts",
     "./workspace/admin": "./src/workspace/administration.ts",
   });
@@ -143,7 +142,6 @@ test("npm dry-run tarball contains the complete runtime closure and no repositor
     "src/tui/native-conversation.ts",
     "src/tui/session-browser.ts",
     "src/contracts/dispatch-ir.ts",
-    "src/contracts/generic-prompt.ts",
     "src/workspace/contract.ts",
     "src/workspace/ledger.ts",
     "src/workspace/git-worktree.ts",

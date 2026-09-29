@@ -100,7 +100,7 @@ export function providerSource(contract) {
           let tool;
           let output;
           if (process.env.PI_SUBAGENT_CHILD === "1") {
-            if (contract.execution?.worktree && childStep++ === 0) {
+            if (contract.worktree && childStep++ === 0) {
               tool = { name: "bash", arguments: { command: "printf '\\nPROJECT_TYPED_CHILD_COMMIT\\n' >> README.md && git add README.md && git commit -m child-marker" } };
             } else output = "PROJECT_TYPED_CHILD_DONE\\n\\n" + String.fromCharCode(96,96,96) + "acceptance-report\\n" + JSON.stringify({
               criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "Committed PROJECT_TYPED_CHILD_COMMIT to README.md." }],
@@ -119,7 +119,7 @@ export function providerSource(contract) {
           } else if (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0) {
             if (projectStep++ === 0) tool = { name: "subagent", arguments: contract };
             else if (projectStep === 2) { projectStep += 1; probeIssued = true; tool = { name: "compat_project_probe", arguments: {} }; }
-            else if (contract.execution?.worktree && !probeIssued) { probeIssued = true; tool = { name: "compat_project_probe", arguments: {} }; }
+            else if (contract.worktree && !probeIssued) { probeIssued = true; tool = { name: "compat_project_probe", arguments: {} }; }
             else output = "PROJECT_TYPED_PARENT_DONE";
           } else {
             output = ${JSON.stringify(`PROJECT_TYPED_CHILD_DONE
@@ -250,17 +250,13 @@ test("project typed worktree commit completes Auto Integration and release", { s
   const dispatchProbe = join(root, "dispatch-probe.mjs");
   try {
     const contract = {
-      version: "dispatch-ir.v1",
-      taskId: "project-workflow-real",
       title: "Run real workflow leaf",
       agent: "executor",
-      risk: "normal",
-      objective: "Commit the child marker to README.md through the managed worktree.",
-      requirements: ["Use the project-owned typed facade.", "Only modify README.md."],
-      context: { knownFacts: ["pi-subagents is pinned to 0.62.0."], decisions: ["Bind only the leaf run."], relevantFiles: [] },
-      boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
+      task: "Commit the child marker to README.md through the managed worktree. Use the project-owned typed facade. Only modify README.md. Known fact: pi-subagents is pinned to 0.62.0. Bind only the leaf run. Do not modify files or create a worktree.",
+      writePaths: ["README.md"],
       acceptance: { criteria: ["The child returns the deterministic marker."] },
-      execution: { cwd: projectRoot, worktree: true },
+      cwd: projectRoot,
+      worktree: true,
     };
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, "README.md"), "temporary real-host fixture\n");
@@ -354,17 +350,13 @@ test("non-Goal executor ignores a hostile legacy .pi-subagents tree", { skip: !p
   const dispatchProbe = join(root, "dispatch-probe.mjs");
   try {
     const contract = {
-      version: "dispatch-ir.v1",
-      taskId: "hostile-legacy-non-goal",
       title: "Ignore hostile legacy runtime entries",
       agent: "executor",
-      risk: "normal",
-      objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
-      requirements: ["Use package-owned child extensions."],
-      context: { knownFacts: ["The workspace contains hostile legacy entries."], decisions: ["Do not inspect or change those entries."], relevantFiles: [] },
-      boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
+      task: "Return the deterministic PROJECT_TYPED_CHILD marker. Use package-owned child extensions. The workspace contains hostile legacy entries; do not inspect or change those entries. Do not modify files or create a worktree.",
+      writePaths: ["README.md"],
       acceptance: { criteria: ["The child returns the deterministic marker."] },
-      execution: { cwd: projectRoot, worktree: false },
+      cwd: projectRoot,
+      worktree: false,
     };
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, "README.md"), "temporary hostile legacy fixture\n");
@@ -443,13 +435,11 @@ test("non-Goal persistent Host rename canary keeps typed coding and generic auth
   const provider = join(root, "typed-provider.mjs");
   const dispatchProbe = join(root, "dispatch-probe.mjs");
   const coding = (agent) => ({
-    version: "dispatch-ir.v1", taskId: `${agent}-rename-canary`, title: `Run ${agent} rename canary`, agent, model: "fake/deterministic", risk: "normal",
-    objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
-    requirements: ["Use the project-owned typed facade."],
-    context: { knownFacts: ["The Host is a fixture."], decisions: ["Use typed standalone dispatch."], relevantFiles: [] },
-    boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
+    title: `Run ${agent} rename canary`, agent, model: "fake/deterministic",
+    task: "Return the deterministic PROJECT_TYPED_CHILD marker. Use the project-owned typed facade. The Host is a fixture. Use typed standalone dispatch. Do not modify files or create a worktree.",
+    writePaths: ["README.md"],
     acceptance: { criteria: ["The child returns the deterministic marker."] },
-    execution: { cwd: projectRoot, worktree: false },
+    cwd: projectRoot, worktree: false,
   });
   const generic = { agent: "coder-alpha", title: "Inspect rename canary", task: "Read only.", model: "fake/deterministic", worktree: false };
   try {

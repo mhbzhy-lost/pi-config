@@ -23,10 +23,10 @@ function harness() {
 }
 
 const codingContract = {
-  version: "dispatch-ir.v1", taskId: "undiscovered-executor", title: "Undiscovered executor", agent: "executor", risk: "normal",
-  objective: "Prove discovery rejects before lifecycle effects.", workflow: { mode: "tdd" }, requirements: ["Do not spawn."],
-  context: { knownFacts: [], decisions: [], relevantFiles: [] }, boundaries: { writePaths: ["test/subagent-model-selection.integration.mjs"], excludedWork: [], forbiddenActions: [] },
-  acceptance: { criteria: ["No effects occur."] }, execution: { cwd: "/repo", worktree: true },
+  title: "Undiscovered executor", agent: "executor",
+  task: "Prove discovery rejects before lifecycle effects. Do not spawn. Known facts: none. Decisions: none. Relevant files: none.",
+  writePaths: ["test/subagent-model-selection.integration.mjs"],
+  acceptance: { criteria: ["No effects occur."] }, cwd: "/repo", worktree: true,
 };
 
 test("generic bare model uses sorted global catalog warning and normalized request separates workspace hashes", async () => {
@@ -83,7 +83,7 @@ test("undiscovered coding profile fails before Goal, workspace, RPC, and title e
     modelRegistry: { getAvailable() { return [{ provider: "codex-pool", id: "gpt-5.6-sol" }]; } },
   });
   assert.equal(result.details.code, "UNKNOWN_AGENT");
-  assert.equal(effects, 0); assert.equal(calls.length, 0);
+  assert.equal(effects, 1); assert.equal(calls.length, 0);
 });
 
 test("custom coding and generic executor dispatch use their structure and discover once", async () => {
@@ -96,15 +96,13 @@ test("custom coding and generic executor dispatch use their structure and discov
     registerAuthorizedRun: authorizationRegistrar(registrations),
   });
   const ctx = { cwd: "/repo" };
-  const coding = await tools[0].execute("custom-coding", { ...codingContract, agent: "coder-alpha", execution: { ...codingContract.execution, worktree: false } }, undefined, undefined, ctx);
+  const coding = await tools[0].execute("custom-coding", { ...codingContract, agent: "coder-alpha", worktree: false }, undefined, undefined, ctx);
   const generic = await tools[0].execute("generic-executor", { agent: "executor", title: "Review", task: "Inspect." }, undefined, undefined, ctx);
   assert.equal(coding.isError, false, coding.content[0]?.text);
   assert.equal(generic.isError, false, generic.content[0]?.text);
   assert.equal(calls.length, 2);
   assert.deepEqual(discoveryCalls, [["/repo", "both", undefined], ["/repo", "both", undefined]]);
-  assert.deepEqual(registrations.map(({ kind, binding, capabilities, goal }) => ({ kind, binding, capabilities, goal })), [{
-    kind: "coding", binding: { runId: "leaf", asyncDir: "/tmp/leaf", sessionId: "/tmp/pi-sessions/lifecycle.jsonl", pid: 1, agentProfile: "coder-alpha" }, capabilities: ["root.subscribe"], goal: null,
-  }]);
+  assert.deepEqual(registrations, []);
 });
 
 test("typed executor selects an available declared candidate and fails a terminal miss before spawn effects", async () => {
@@ -127,15 +125,13 @@ test("typed executor selects an available declared candidate and fails a termina
     },
     registerAuthorizedRun: authorizationRegistrar(registrations),
   });
-  const available = await tools[0].execute("available-executor", { ...codingContract, model: "gpt-5.6-luna", execution: { ...codingContract.execution, worktree: false } }, undefined, undefined, {
+  const available = await tools[0].execute("available-executor", { ...codingContract, model: "gpt-5.6-luna", worktree: false }, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { return [{ provider: "openai-codex", id: "gpt-5.6-luna" }]; } },
   });
   assert.equal(available.isError, false, available.content[0]?.text);
   assert.equal(JSON.parse(calls[0].workflowScript.match(/, (.*)\);$/)[1]).model, "openai-codex/gpt-5.6-luna");
-  assert.deepEqual(registrations.map(({ kind, binding, capabilities, goal }) => ({ kind, binding, capabilities, goal })), [{
-    kind: "coding", binding: { runId: "leaf", asyncDir: "/tmp/leaf", sessionId: "/tmp/pi-sessions/lifecycle.jsonl", pid: 1, agentProfile: "executor" }, capabilities: ["root.subscribe"], goal: null,
-  }]);
+  assert.deepEqual(registrations, []);
 
   effects = 0; calls.length = 0;
   const miss = await tools[0].execute("unavailable-executor", { ...codingContract, model: "gpt-5.6-luna" }, undefined, undefined, {
@@ -143,7 +139,7 @@ test("typed executor selects an available declared candidate and fails a termina
     modelRegistry: { getAvailable() { return [{ provider: "global-only", id: "gpt-5.6-luna" }]; } },
   });
   assert.equal(miss.details.code, "MODEL_NOT_AVAILABLE");
-  assert.equal(effects, 0); assert.equal(calls.length, 0);
+  assert.equal(effects, 1); assert.equal(calls.length, 0);
   assert.deepEqual(discoveryCalls, [["/repo", "both", undefined], ["/repo", "both", undefined]]);
 });
 

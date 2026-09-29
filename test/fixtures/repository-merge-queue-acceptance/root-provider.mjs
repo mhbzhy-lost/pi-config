@@ -13,32 +13,13 @@ function contract(task) {
     ? requestedModel
     : "codex-pool/gpt-5.6-sol";
   return {
-    version: "dispatch-ir.v1",
-    taskId,
     title: `Acceptance pipeline ${task} stage`,
     agent: "executor",
     model,
-    risk: "high",
-    objective: `Modify the shared PIPELINE declaration line to add only the ${task} stage.`,
-    workflow: { mode: "tdd" },
-    requirements: [
-      `Modify the same PIPELINE declaration line in src/pipeline.ts for the ${task} stage.`,
-      "Add a focused behavior test in test/pipeline.test.mjs, run it, and create a commit.",
-      `The commit message must use Conventional Commit format with a Chinese subject, for example 'feat: 添加 ${task} 阶段'; English-only or non-conventional subjects are rejected by the repository gate.`,
-      "Only perform business-file changes and, when given a conflict continuation, resolve unmerged files and git add them; Auto Integration queues, rebases, resolves lifecycle, and publishes the candidate.",
-    ],
-    context: {
-      knownFacts: ["All five acceptance tasks start at the same base commit and intentionally edit the same line."],
-      decisions: ["Auto Integration owns serialized queue admission, rebase, conflict continuation, and publication."],
-      relevantFiles: ["src/pipeline.ts", "test/pipeline.test.mjs"],
-    },
-    boundaries: {
-      writePaths: ["src/pipeline.ts", "test/pipeline.test.mjs"],
-      excludedWork: ["Do not modify repository coordinator production code."],
-      forbiddenActions: ["Do not call or orchestrate integration mutation tools."],
-    },
+    task: `Modify the shared PIPELINE declaration line in src/pipeline.ts for the ${task} stage. Add a focused behavior test in test/pipeline.test.mjs, run it, and create a commit. The commit message must use Conventional Commit format with a Chinese subject, for example 'feat: 添加 ${task} 阶段'; English-only or non-conventional subjects are rejected by the repository gate. Only perform business-file changes and, when given a conflict continuation, resolve unmerged files and git add them; Auto Integration owns serialized queue admission, rebase, conflict continuation, and publication. All five acceptance tasks start at the same base commit and intentionally edit the same line. Do not modify repository coordinator production code or call integration mutation tools.`,
+    writePaths: ["src/pipeline.ts", "test/pipeline.test.mjs"],
     acceptance: { criteria: [`The ${task} stage is present and covered by test/pipeline.test.mjs.`, "The business changes are committed with the required conventional message."] },
-    execution: { worktree: true },
+    worktree: true,
   };
 }
 

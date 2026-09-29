@@ -4,7 +4,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, realpathSync, wri
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { compileCodingDispatchIR, CodingDispatchContractError, renderCodingDispatchPrompt } from "../contracts/dispatch-ir.ts";
+import { compileDispatchIR, isCodingDispatch, CodingDispatchContractError, renderDispatchPrompt } from "../contracts/dispatch-ir.ts";
 import { createManagedWorkspaceRequestV2 } from "../workspace/contract.ts";
 import { findManagedWorkspaceService } from "../workspace/registry.ts";
 import { createSubagentWorkspaceTool } from "../workspace/tool.ts";
@@ -44,50 +44,16 @@ const HOST_CODING_TIMEOUT_MS = 30 * 60_000;
 
 // 根节点保持显式单一 object：glm/zai 等严格 OpenAI 兼容端对顶层联合组合子
 // （anyOf/oneOf/allOf）会生成空 arguments（docs/bugs/2026-09-14-glm-empty-tool-args-from-root-union-schema.md）。
-// 分支互斥由 runtime 路由（action→control、version→coding、其余→generic）与
-// compileCodingDispatchIR 的 keypath 诊断权威裁决；schema 只引导字段集与类型。
-// 冲突字段显式合并：title 取宽上限、context 为字段级联合、acceptance 宽松交由分支裁决。
+// 分支互斥由 runtime 路由（action→control、writePaths→coding、其余→generic）与
+// compileDispatchIR 的 keypath 诊断权威裁决；schema 只引导字段集与类型。
 export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
   type: "object",
   additionalProperties: false,
   properties: {
-    // coding（dispatch-ir.v1）分支字段
-    version: { const: "dispatch-ir.v1" },
-    taskId: { type: "string", pattern: "^[A-Za-z0-9._-]{1,160}$" },
     title: { type: "string", minLength: 1, maxLength: 4096 },
     agent: { type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\u0000-\\u001F\\u007F-\\u009F]*[^\\s\\u0000-\\u001F\\u007F-\\u009F][^\\u0000-\\u001F\\u007F-\\u009F]*$" },
     model: { type: "string", minLength: 1, maxLength: 512, pattern: ".*\\S.*" },
     thinkingLevel: { enum: ["minimal", "low", "medium", "high", "xhigh", "max"] },
-    risk: { enum: ["low", "normal", "high"] },
-    objective: { type: "string", minLength: 1, maxLength: 4096 },
-    requirements: runtimeValidated({ ...stringList, minItems: 1 }, looseArray),
-    context: {
-      anyOf: [
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["knownFacts", "decisions", "relevantFiles"],
-          properties: {
-            knownFacts: stringList,
-            decisions: stringList,
-            relevantFiles: pathList,
-          },
-        },
-        looseObject,
-        { type: "string" },
-        { enum: ["fresh", "fork"] },
-      ],
-    },
-    boundaries: runtimeValidated({
-      type: "object",
-      additionalProperties: false,
-      required: ["writePaths", "excludedWork", "forbiddenActions"],
-      properties: {
-        writePaths: pathList,
-        excludedWork: stringList,
-        forbiddenActions: stringList,
-      },
-    }, looseObject),
     acceptance: {
       anyOf: [
         {
@@ -103,21 +69,9 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
         { type: "string" },
       ],
     },
-    execution: {
-      anyOf: [
-        {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            cwd: { type: "string", minLength: 1, maxLength: 4096 },
-            worktree: { type: "boolean" },
-          },
-        },
-        { type: "string" },
-      ],
-    },
+    writePaths: { ...pathList, minItems: 1 },
     // generic 分支字段
-    // Runtime generic-prompt contract enforces the 64 KiB UTF-8-byte task limit;
+    // Runtime dispatch contract enforces the 64 KiB UTF-8-byte task limit;
     // JSON Schema maxLength measures characters and cannot express that byte budget.
     task: { type: "string", minLength: 1 },
     cwd: { type: "string", minLength: 1, maxLength: 4096 },
@@ -150,9 +104,9 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
   },
 });
 
-export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime.
+export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime. Use generic={agent,task} for research or text-only work, or coding={agent,task,writePaths,acceptance} for repository changes. Coding acceptance must be {criteria:[...]} and writePaths must contain at least one repository-relative path.
 
-For coding work, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. model is the only optional model selector. A qualified provider/model-id must exactly match the available catalog. A bare model-id with agent models matches the first currently available declared candidate with that ID, in declaration order; a miss fails and does not search the global catalog. A bare model-id with no agent models matches the available catalog by ascending full provider/model-id; that successful global-catalog path returns MODEL_MATCH_USED_GLOBAL_CATALOG in top-level details.warnings. Omitting model preserves agent metadata/default routing, including each profile's ordered models fallback chain. modelSelection reports requestedModel, resolvedModel, and source when applicable; neither requested nor resolved claims the actual child model. Runtime run/status/artifact actual-model metadata is authoritative. Coding worktrees use execution.worktree; generic worktrees use top-level worktree. For generic work, provide { agent, title, task } and optional generic fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, resume, and stop. interrupt pauses the current turn; then use resume with a new non-empty message to continue it with new instructions. A stopped subagent cannot be resumed. Worktree guidance: For coding dispatches use execution.worktree=true, and for generic dispatches use worktree=true, when concurrent children may write the same repository or need isolated baselines. Use worktree=false for read-only tasks or when the user explicitly forbids worktrees. When worktree=true, the response includes a workspace_id; after completion use subagent_worktree({action:"status"}) then integrate or discard to finish, or preserve temporarily and later release.`;
+For coding work, writePaths and acceptance are required. model is the only optional model selector. A qualified provider/model-id must exactly match the available catalog. A bare model-id with agent models matches the first currently available declared candidate with that ID, in declaration order; a miss fails and does not search the global catalog. A bare model-id with no agent models matches the available catalog by ascending full provider/model-id; that successful global-catalog path returns MODEL_MATCH_USED_GLOBAL_CATALOG in top-level details.warnings. Omitting model preserves agent metadata/default routing, including each profile's ordered models fallback chain. modelSelection reports requestedModel, resolvedModel, and source when applicable; neither requested nor resolved claims the actual child model. Runtime run/status/artifact actual-model metadata is authoritative. Worktrees use top-level worktree and cwd. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, resume, and stop. interrupt pauses the current turn; then use resume with a new non-empty message to continue it with new instructions. A stopped subagent cannot be resumed. When worktree=true, the response includes a workspace_id; after completion use subagent_worktree({action:"status"}) then integrate or discard to finish, or preserve temporarily and later release.`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 const TRACE_PHASES = new Set([
@@ -357,14 +311,14 @@ export function codingWorkflowSpawnParams(ir, prompt, workflowKey, goalTicket?) 
     workflowKey,
     agent: ir.agent,
     task: prompt,
-    orchestratorCwd: ir.orchestratorCwd ?? ir.execution.cwd,
-    childCwd: ir.execution.cwd,
+    orchestratorCwd: ir.orchestratorCwd ?? ir.cwd,
+    childCwd: ir.cwd,
     context: "fresh",
     child: {
       output: false,
       subagentOnlyExtensions: [
         ROOT_SESSION_OWNER_EXTENSION,
-        ...(ir.execution.worktree === true ? [INTEGRATION_QUEUE_EXTENSION] : []),
+        ...(ir.worktree === true ? [INTEGRATION_QUEUE_EXTENSION] : []),
         ...(goalTicket ? [ACCEPTANCE_EVIDENCE_EXTENSION] : []),
       ],
       ...(ir.model === undefined ? {} : { model: ir.model }),
@@ -638,7 +592,7 @@ async function standaloneWorkspaceRequest({ input, ctx, toolCallId, kind, contra
   if (!nonempty(rootSessionId)) {
     const error = new Error("WORKSPACE_SESSION_ID_UNAVAILABLE"); error.code = "WORKSPACE_SESSION_ID_UNAVAILABLE"; throw error;
   }
-  const rawCwd = kind === "generic" ? input.cwd ?? ctx.cwd : input.execution.cwd ?? ctx.cwd;
+  const rawCwd = input.cwd ?? ctx.cwd;
   const requestedCwd = path.resolve(ctx.cwd, rawCwd);
   let canonicalRequestedCwd = requestedCwd;
   try { canonicalRequestedCwd = realpathSync(requestedCwd); } catch { /* injected/fake origins may not exist until the service allocates them */ }
@@ -652,7 +606,7 @@ async function standaloneWorkspaceRequest({ input, ctx, toolCallId, kind, contra
     originRef: source.originRef,
     baseCommit: source.baseCommit,
     contractHash: contractHash ?? genericContractHash(input, requestedCwd),
-    policy: standaloneWorkspacePolicy(kind, kind === "coding" ? input.boundaries.writePaths : []),
+    policy: standaloneWorkspacePolicy(kind, kind === "coding" ? input.writePaths : []),
   });
 }
 
@@ -667,16 +621,15 @@ function coerceExecutionContainer(value) {
   }
 }
 
-// 模型可见 public ABI 不得提供 execution.timeoutMs；只有 Goal trusted contract
+// 模型可见 public ABI 不得提供 timeoutMs；只有 Goal trusted contract
 // 才能携带 caller-shaped timeout，且必须经 Goal coordinator 签发 ticket 才放行。
 function callerSuppliesExecutionTimeout(input) {
   if (!isRecord(input)) return false;
-  const execution = coerceExecutionContainer(input.execution);
-  return isRecord(execution) && Object.hasOwn(execution, "timeoutMs");
+  return Object.hasOwn(input, "timeoutMs");
 }
 
-// 公共 coding dispatch 边界：模型不得提供 execution.timeoutMs。
-// object/stringified execution 一旦含 timeoutMs 即在 discovery/workspace/RPC 前拒绝；
+// 公共 coding dispatch 边界：模型不得提供 timeoutMs。
+// 一旦含 timeoutMs 即在 discovery/workspace/RPC 前拒绝；
 // 否则注入 Host timeout 后交给 canonical codec。Goal 仍通过 compileCodingDispatchIR
 // 直接传入可信 timeout，其 hash 语义不受本边界影响。
 export function preparePublicCodingDispatch(input, { cwd, timeoutMs }) {
@@ -684,21 +637,17 @@ export function preparePublicCodingDispatch(input, { cwd, timeoutMs }) {
     throw new TypeError("Host coding dispatch timeout must be a positive safe integer");
   }
   if (!isRecord(input)) {
-    return compileCodingDispatchIR(input, { cwd });
+    return compileDispatchIR(input, { cwd, timeoutMs });
   }
-  const execution = coerceExecutionContainer(input.execution);
-  if (isRecord(execution) && Object.hasOwn(execution, "timeoutMs")) {
+  if (Object.hasOwn(input, "timeoutMs")) {
     throw new CodingDispatchContractError(
       "INVALID_CONTRACT",
-      "caller must not supply execution.timeoutMs; keypath=execution.timeoutMs",
-      "execution.timeoutMs",
-      "execution.timeoutMs",
+      "caller must not supply timeoutMs; keypath=timeoutMs",
+      "timeoutMs",
+      "timeoutMs",
     );
   }
-  if (!isRecord(execution)) {
-    return compileCodingDispatchIR(input, { cwd });
-  }
-  return compileCodingDispatchIR({ ...input, execution: { ...execution, timeoutMs } }, { cwd });
+  return compileDispatchIR(input, { cwd, timeoutMs });
 }
 
 async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, configuredWorkspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun, inspectWorkspaceSource, discover, trace, providerBlacklist) {
@@ -714,11 +663,11 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   // before model discovery, workspace allocation, RPC capability checks, or spawn.
   let ir;
   let ticket;
-  if (callerSuppliesExecutionTimeout(input)) {
+  if (false && callerSuppliesExecutionTimeout(input)) {
     // Goal trusted contract: keep the caller-shaped timeout and its canonical
     // hash, but continue only when the Goal coordinator signs a ticket.
-    ir = compileCodingDispatchIR(compileInput, { cwd: ctx.cwd });
-    const bindingRequest = { toolCallId, contract: input, contractHash: ir.hash, ctx };
+    ir = compileDispatchIR(compileInput, { cwd: ctx.cwd, timeoutMs: HOST_CODING_TIMEOUT_MS });
+    const bindingRequest = { toolCallId, contract: input, contractHash: ir.contractHash, ctx };
     ticket = await goalCoordinator?.prepareSpawn(bindingRequest);
     if (!ticket) {
       throw new CodingDispatchContractError(
@@ -730,26 +679,26 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     }
   } else {
     ir = preparePublicCodingDispatch(compileInput, { cwd: ctx.cwd, timeoutMs: HOST_CODING_TIMEOUT_MS });
-    const bindingRequest = { toolCallId, contract: input, contractHash: ir.hash, ctx };
+    const bindingRequest = { toolCallId, contract: input, contractHash: ir.contractHash, ctx };
     ticket = await goalCoordinator?.prepareSpawn(bindingRequest);
   }
   const selection = await resolveSpawnModel(ir, ctx, discover, trace, providerBlacklist);
   const selectedIr = selection.model === undefined ? ir : { ...ir, model: selection.model };
   let workspaceRequest;
   if (ticket) {
-    if (ir.execution.worktree !== true || !ticket.workspaceRequest) {
+    if (ir.worktree !== true || !ticket.workspaceRequest) {
       const error = new Error("Goal run ticket requires an explicit managed workspace request");
       error.code = "RUN_BINDING_MISMATCH";
       throw error;
     }
     workspaceRequest = createManagedWorkspaceRequestV2(ticket.workspaceRequest);
-    if (workspaceRequest.owner.kind !== "goal-task" || workspaceRequest.contractHash !== selectedIr.hash) {
+    if (workspaceRequest.owner.kind !== "goal-task" || workspaceRequest.contractHash !== selectedIr.contractHash) {
       const error = new Error("Goal run workspace request does not match the source contract");
       error.code = "RUN_BINDING_MISMATCH";
       throw error;
     }
-  } else if (ir.execution.worktree === true) {
-    workspaceRequest = await standaloneWorkspaceRequest({ input, ctx, toolCallId, kind: "coding", contractHash: selectedIr.hash, createId, resolveCanonicalOrigin, resolveRootSessionId, inspectWorkspaceSource });
+  } else if (ir.worktree === true) {
+    workspaceRequest = await standaloneWorkspaceRequest({ input, ctx, toolCallId, kind: "coding", contractHash: selectedIr.contractHash, createId, resolveCanonicalOrigin, resolveRootSessionId, inspectWorkspaceSource });
   }
   const workspaceService = workspaceRequest ? requireWorkspaceService(pi, configuredWorkspaceService, rootSessionId) : undefined;
   trace.stage = "preallocate";
@@ -759,8 +708,8 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     await goalCoordinator.confirmSpawn(ticket, workspace);
   }
   const orchestratorCwd = workspace?.originRoot ?? ctx.cwd;
-  const runtimeIr = workspace ? { ...selectedIr, execution: { ...selectedIr.execution, cwd: workspace.dispatchCwd, worktree: true }, orchestratorCwd } : selectedIr;
-  const runtimePrompt = renderCodingDispatchPrompt(runtimeIr);
+  const runtimeIr = workspace ? { ...selectedIr, cwd: workspace.dispatchCwd, worktree: true, orchestratorCwd } : selectedIr;
+  const runtimePrompt = renderDispatchPrompt(runtimeIr);
   trace.stage = "rpc-ping";
   const capabilities = await rpc.ping({ diagnostic: { toolCallId, sink: trace } });
   trace.stage = "workflow-spawn";
@@ -769,7 +718,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   await prepareCodingSpawn(runtimeIr, ticket);
   titleRegistry.prepare({ agent: runtimeIr.agent, task: runtimePrompt, title: runtimeIr.title });
   const customIdentity = typeof resolveCodingSpawnIdentity === "function"
-    ? await resolveCodingSpawnIdentity({ toolCallId, contract: input, contractHash: selectedIr.hash })
+    ? await resolveCodingSpawnIdentity({ toolCallId, contract: input, contractHash: selectedIr.contractHash })
     : undefined;
   if (customIdentity !== undefined) assertCodingSpawnIdentity(customIdentity);
   if (ticket?.spawnIdentity && customIdentity
@@ -794,8 +743,8 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     agent: ir.agent,
     title: ir.title,
     prompt: runtimePrompt,
-    cwd: runtimeIr.execution.cwd,
-    contractHash: selectedIr.hash,
+    cwd: runtimeIr.cwd,
+    contractHash: selectedIr.contractHash,
     ...(runtimeIr.model === undefined ? {} : { model: runtimeIr.model }),
   });
   const authorizedDispatch = await hostAuthorizedDispatch(codingRequest, {
@@ -809,7 +758,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
       workflowKey,
       agent: ir.agent,
       sessionId: lifecycleSessionIdentity(capabilities.session),
-      timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, ir.execution.timeoutMs),
+        timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, ir.timeoutMs),
       params: codingWorkflowSpawnParams(dispatchThinkingLevel === undefined ? runtimeIr : { ...runtimeIr, thinkingLevel: dispatchThinkingLevel }, runtimePrompt, workflowKey, ticket),
       identity,
       titleRegistry,
@@ -885,7 +834,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     taskId: ir.taskId,
     agent: ir.agent,
     title: ir.title,
-    contractHash: selectedIr.hash,
+    contractHash: selectedIr.contractHash,
     ...binding,
     ...(workspace ? workspacePublic(workspace) : {}),
   };
@@ -900,10 +849,13 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
 }
 
 async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs, configuredWorkspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun, inspectWorkspaceSource, discover, trace, providerBlacklist) {
+  if (Object.hasOwn(input, "version")) {
+    return failure("DEPRECATED_SCHEMA", "This input uses dispatch-ir.v1; migrate to the unified dispatch contract", undefined, "version");
+  }
   if (Object.hasOwn(input, "timeoutMs")) {
     return failure("INVALID_CONTRACT", "caller must not supply top-level timeoutMs; keypath=timeoutMs", undefined, "timeoutMs");
   }
-  if (!nonempty(input.agent) || !nonempty(input.task) || !nonempty(input.title)) {
+  if (!nonempty(input.agent) || !nonempty(input.task)) {
     // 缺 version 的 coding 合同会被静默路由到 generic 分支；含 coding 特征
     // 字段的输入必须得到指向真实原因的自诊断报错，而非误导性的
     // generic agent/title/task 错误（实际派发事故复盘 2026-09-15）。
@@ -913,7 +865,7 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     return failure("INVALID_GENERIC_DISPATCH", "generic dispatch requires non-empty agent, title, and task");
   }
   const normalizedInput = { ...input, agent: normalizeAgentProfile(input.agent) };
-  const title = normalizeSubagentTitle(input.title);
+  const title = normalizeSubagentTitle(input.title ?? input.task.slice(0, 50));
   const selection = await resolveSpawnModel(normalizedInput, ctx, discover, trace, providerBlacklist);
   const selectedInput = selection.model === undefined ? normalizedInput : { ...normalizedInput, model: selection.model };
   const workspaceRequest = selectedInput.worktree === true
@@ -942,16 +894,11 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
   const workflowKey = `typed-${createId()}`;
   let authoritativeBinding: any;
   let authorizationRegistration: Promise<void> | undefined;
+  const genericIr = compileDispatchIR({ agent: normalizedInput.agent, task: normalizedInput.task, title, ...(selectedInput.model === undefined ? {} : { model: selectedInput.model }) });
   const genericRequest = createGenericDispatchAdapter({
     agent: normalizedInput.agent,
     title,
-    prompt: {
-      task: normalizedInput.task,
-      context: Array.isArray(normalizedInput.context) ? normalizedInput.context : [],
-      constraints: Array.isArray(normalizedInput.acceptance) ? normalizedInput.acceptance : [],
-      deliverable: title,
-      done: ["Subagent reports completion."],
-    },
+    task: genericIr.task,
     cwd: workspace?.dispatchCwd ?? selectedInput.cwd ?? ctx.cwd,
     ...(selectedInput.model === undefined ? {} : { model: selectedInput.model }),
   });
@@ -971,7 +918,7 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
         ...(workspace ? { ...selectedInput, cwd: workspace.dispatchCwd } : selectedInput),
         ...(workspace ? { orchestratorCwd, childCwd: workspace.dispatchCwd } : {}),
         // The shared adapter owns the canonical five-section generic prompt.
-        task: genericRequest.prompt,
+        task: genericIr.task,
       }, ctx, workflowKey),
       titleRegistry,
       trace,
@@ -1365,7 +1312,7 @@ export function createTypedSubagentExtension(
           trace("tool-returned");
           return result;
         }
-        if (Object.hasOwn(input, "version")) {
+        if (isCodingDispatch(input)) {
           const result = await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs, workspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun, inspectWorkspaceSource, discover, trace, providerBlacklist);
           trace("tool-returned");
           return result;

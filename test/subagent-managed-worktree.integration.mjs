@@ -102,17 +102,13 @@ function piHarness(originRoot) {
 
 function codingContract(originRoot) {
   return {
-    version: "dispatch-ir.v1",
-    taskId: "unified-workspace",
     title: "Use unified workspace",
     agent: "executor",
-    risk: "normal",
-    objective: "Exercise the typed facade against the managed workspace service.",
-    requirements: ["Commit the allowed change."],
-    context: { knownFacts: [], decisions: [], relevantFiles: ["allowed.txt"] },
-    boundaries: { writePaths: ["allowed.txt"], excludedWork: [], forbiddenActions: [] },
+    task: "Exercise the typed facade against the managed workspace service. Commit the allowed change. Known facts: none. Decisions: none. Relevant files: allowed.txt.",
+    writePaths: ["allowed.txt"],
     acceptance: { criteria: ["The committed change is integrated."] },
-    execution: { cwd: originRoot, worktree: true },
+    cwd: originRoot,
+    worktree: true,
   };
 }
 

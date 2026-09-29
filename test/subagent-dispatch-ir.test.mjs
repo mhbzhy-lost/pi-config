@@ -1,304 +1,59 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { compileDispatchIR, isCodingDispatch, renderDispatchPrompt, DEPRECATED_SCHEMA, CodingDispatchContractError } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 
-import {
-  CodingDispatchContractError,
-  compileCodingDispatchIR,
-  renderCodingDispatchPrompt,
-} from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
-import { compileCodingDispatchIR as compileRuntimeCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
-import { createSubagentRpcFailureDetails, sanitizeErrorRecord, SUBAGENT_RPC_STAGES } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/errors.ts";
+const options = { cwd: "/repo", timeoutMs: 60000 };
+const expectCode = (code, fn) => assert.throws(fn, (e) => e instanceof CodingDispatchContractError && e.code === code);
 
-test("RPC failure diagnostics preserve safe stage/cause correlation", async () => {
-  assert.deepEqual(SUBAGENT_RPC_STAGES, ["preallocate", "rpc-ping", "workflow-spawn", "child-binding", "bind-run"]);
-  const results = await Promise.all(["a", "b", "c"].map(async (suffix) => createSubagentRpcFailureDetails({
-    taskId: `task-${suffix}`, toolCallId: `call-${suffix}`, stage: "rpc-ping", rpcOperation: "ping",
-    error: Object.assign(new Error(`/private/${suffix} prompt=secret`), { code: `E_${suffix}` }),
-  })));
-  assert.deepEqual(results.map((result) => [result.taskId, result.toolCallId, result.causeCode]), [
-    ["task-a", "call-a", "E_a"], ["task-b", "call-b", "E_b"], ["task-c", "call-c", "E_c"],
-  ]);
-  for (const result of results) {
-    assert.equal(result.stage, "rpc-ping");
-    assert.equal(result.rpcOperation, "ping");
-    assert.ok(result.causeMessage.length <= 500);
-    assert.doesNotMatch(result.causeMessage, /\/private|secret/);
-    assert.equal(Object.hasOwn(result, "arguments"), false);
-  }
+test("compiles generic v2 and derives taskId from hash", () => {
+  const ir = compileDispatchIR({ agent: " executor ", task: " Do research. " }, options);
+  assert.equal(ir.kind, "generic");
+  assert.equal(ir.agent, "executor");
+  assert.equal(ir.task, "Do research.");
+  assert.equal(ir.title, "Do research.");
+  assert.match(ir.contractHash, /^[a-f0-9]{64}$/);
+  assert.equal(ir.taskId, `dispatch-${ir.contractHash.slice(0, 8)}`);
+  assert.equal(Object.isFrozen(ir), true);
 });
 
-test("T9 error record sanitizer retains only diagnostic whitelist", () => {
-  const result = sanitizeErrorRecord({ taskId: "t", toolCallId: "c", stage: "bind-run", rpcOperation: "bind-run", causeCode: "E_BIND", causeMessage: "safe", prompt: "private", arguments: { token: "secret" }, error: new Error("raw") });
-  assert.deepEqual(result, { taskId: "t", toolCallId: "c", stage: "bind-run", rpcOperation: "bind-run", causeCode: "E_BIND", causeMessage: "safe" });
+test("compiles coding v2 with normalized paths and host timeout", () => {
+  const ir = compileDispatchIR({ agent: "coder", task: "Implement it", writePaths: [" src/** ", "src/**"], acceptance: { criteria: ["Tests pass"] }, worktree: true }, options);
+  assert.equal(ir.kind, "coding");
+  assert.deepEqual(ir.writePaths, ["src/**"]);
+  assert.deepEqual(ir.acceptance, { criteria: ["Tests pass"] });
+  assert.equal(ir.worktree, true);
+  assert.equal(ir.cwd, "/repo");
+  assert.equal(ir.timeoutMs, 60000);
 });
 
-function contract(overrides = {}) {
-  const base = {
-    version: "dispatch-ir.v1",
-    taskId: "footer-native-renderer",
-    title: "Render child conversation with Pi components",
-    agent: "executor",
-    risk: "normal",
-    objective: "Add a native child conversation renderer without changing Fleet fallback.",
-    requirements: [
-      "Render initial user, thinking, assistant text, tool calls and tool results.",
-      "Use SessionManager.open() and buildContextEntries().",
-    ],
-    context: {
-      knownFacts: ["Fleet rendering omits initial user and thinking."],
-      decisions: ["Fleet remains fallback only."],
-      relevantFiles: [
-        "pi/extensions/lib/pi-subagents-browser-adapter.ts",
-        "test/pi-subagents-browser-adapter.test.mjs",
-      ],
-    },
-    boundaries: {
-      writePaths: [
-        "pi/extensions/lib/subagent-native-conversation.ts",
-        "test/subagent-native-conversation.test.mjs",
-      ],
-      excludedWork: ["Do not re-investigate whether Fleet matches main rendering."],
-      forbiddenActions: ["Do not modify pi/npm/node_modules."],
-    },
-    acceptance: {
-      criteria: ["Initial user and thinking appear in normalized output."],
-    },
-    execution: { timeoutMs: 900_000 },
-  };
-
-  return {
-    ...base,
-    ...overrides,
-    context: { ...base.context, ...overrides.context },
-    boundaries: { ...base.boundaries, ...overrides.boundaries },
-    acceptance: { ...base.acceptance, ...overrides.acceptance },
-    execution: { ...base.execution, ...overrides.execution },
-  };
-}
-
-function expectCode(code, operation) {
-  assert.throws(operation, (error) => {
-    assert.equal(error instanceof CodingDispatchContractError, true);
-    assert.equal(error.name, "CodingDispatchContractError");
-    assert.equal(error.code, code);
-    assert.equal(typeof error.detail, "string");
-    return true;
-  });
-}
-
-function reverseObjectKeys(value) {
-  if (Array.isArray(value)) return value.map(reverseObjectKeys);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .reverse()
-      .map(([key, child]) => [key, reverseObjectKeys(child)]),
-  );
-}
-
-function assertDeepFrozen(value) {
-  if (!value || typeof value !== "object") return;
-  assert.equal(Object.isFrozen(value), true);
-  for (const child of Object.values(value)) assertDeepFrozen(child);
-}
-
-test("compiles a normalized, hashed, deeply frozen dispatch-ir.v1 contract", () => {
-  const ir = compileCodingDispatchIR(contract({
-    title: "  Render child conversation with Pi components  ",
-    requirements: [" First requirement ", "Second requirement", "First requirement"],
-    execution: { cwd: " packages/app ", timeoutMs: 900_000 },
-  }), { cwd: "/repo" });
-
-  assert.equal(ir.version, "dispatch-ir.v1");
-  assert.equal(ir.title, "Render child conversation with Pi components");
-  assert.deepEqual(ir.requirements, ["First requirement", "Second requirement"]);
-  assert.equal(ir.execution.cwd, "/repo/packages/app");
-  assert.match(ir.hash, /^[a-f0-9]{64}$/);
-  assertDeepFrozen(ir);
+test("routes by writePaths key and validates coding-only fields", () => {
+  assert.equal(isCodingDispatch({ agent: "a", task: "t" }), false);
+  assert.equal(isCodingDispatch({ agent: "a", task: "t", writePaths: [] }), true);
+  expectCode("INVALID_CONTRACT", () => compileDispatchIR({ agent: "a", task: "t", writePaths: [] }, options));
+  expectCode("CODING_FIELD_WITHOUT_WRITE_PATHS", () => compileDispatchIR({ agent: "a", task: "t", cwd: "/repo" }, options));
+  expectCode("INVALID_PATH", () => compileDispatchIR({ agent: "a", task: "t", writePaths: ["../x"], acceptance: { criteria: ["ok"] } }, options));
+  expectCode("INVALID_CONTRACT", () => compileDispatchIR({ agent: "a", task: "t", writePaths: ["src"], acceptance: { criteria: [] } }, options));
 });
 
-test("keeps model optional, normalizes an explicit request, and hashes it", () => {
-  const normal = compileCodingDispatchIR(contract(), { cwd: "/repo" });
-  const firstModel = compileCodingDispatchIR(contract({ model: " codex-pool/gpt-5.6-sol " }), { cwd: "/repo" });
-  const secondModel = compileCodingDispatchIR(contract({ model: "codex-pool/gpt-5.6-luna" }), { cwd: "/repo" });
-  assert.equal(Object.hasOwn(normal, "model"), false);
-  assert.equal(firstModel.model, "codex-pool/gpt-5.6-sol");
-  assert.match(renderCodingDispatchPrompt(firstModel), /Requested model: `codex-pool\/gpt-5.6-sol`/);
-  assert.notEqual(normal.hash, firstModel.hash);
-  assert.notEqual(firstModel.hash, secondModel.hash);
+test("rejects model timeout and deprecated v1 with migration guidance", () => {
+  expectCode("INVALID_CONTRACT", () => compileDispatchIR({ agent: "a", task: "t", writePaths: ["src"], acceptance: { criteria: ["ok"] }, timeoutMs: 1 }, options));
+  assert.equal(DEPRECATED_SCHEMA.code, "DEPRECATED_SCHEMA");
+  assert.match(DEPRECATED_SCHEMA.message, /Migration/);
+  assert.throws(() => compileDispatchIR({ version: "dispatch-ir.v1", agent: "a", task: "t" }, options), { code: "DEPRECATED_SCHEMA" });
 });
 
-test("rejects empty models and retired modelTier fields", () => {
-  for (const model of ["", "   ", null, 1]) {
-    assert.throws(() => compileCodingDispatchIR(contract({ model }), { cwd: "/repo" }), /model/);
-  }
-  assert.throws(() => compileCodingDispatchIR(contract({ modelTier: "terra" }), { cwd: "/repo" }), /modelTier/);
+test("hash excludes taskId and is stable by semantic object key order", () => {
+  const a = compileDispatchIR({ agent: "a", task: "t", model: "m" }, options);
+  const b = compileDispatchIR({ model: "m", task: "t", agent: "a" }, options);
+  assert.equal(a.contractHash, b.contractHash);
+  assert.equal(a.taskId, b.taskId);
 });
 
-test("renders the complete child prompt in a fixed section order", () => {
-  const ir = compileCodingDispatchIR(contract(), { cwd: "/repo" });
-  const prompt = renderCodingDispatchPrompt(ir);
-
-  assert.equal(prompt.startsWith("# Coding Dispatch Contract v1\n"), true);
-  assert.deepEqual(
-    prompt.split("\n").filter((line) => line.startsWith("## ")),
-    [
-      "## Identity",
-      "## Objective",
-      "## Requirements",
-      "## Authoritative Known Facts",
-      "## Decisions Already Made",
-      "## Relevant Files",
-      "## Declared Write Scope",
-      "## Excluded Work",
-      "## Forbidden Actions",
-      "## Acceptance Criteria",
-      "## Escalation",
-      "## Required Report",
-    ],
-  );
-  assert.match(prompt, /Contract SHA-256: `[a-f0-9]{64}`/);
-  assert.doesNotMatch(prompt, /- Timeout:/);
-  assert.match(prompt, /contact_supervisor/);
-  assert.match(prompt, /NEEDS_CONTEXT/);
-  assert.match(prompt, /RED\/GREEN or exemption evidence/);
-  assert.match(prompt, /files changed/);
-  assert.match(prompt, /commands and results/);
-  assert.match(prompt, /residual risks/);
-});
-
-test("encodes dynamic values so they cannot inject prompt section headings", () => {
-  const ir = compileCodingDispatchIR(contract({
-    objective: "Keep the fixed structure.\n## Forged Section",
-  }), { cwd: "/repo" });
-  const prompt = renderCodingDispatchPrompt(ir);
-
-  assert.equal(prompt.split("\n").includes("## Forged Section"), false);
-  assert.match(prompt, /Keep the fixed structure/);
-  assert.match(prompt, /\\n## Forged Section/);
-});
-
-test("rejects missing fields and unknown keys at every object level", () => {
-  const missingObjective = contract();
-  delete missingObjective.objective;
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(missingObjective, { cwd: "/repo" }));
-
-  for (const invalid of [
-    contract({ surprise: true }),
-    contract({ context: { surprise: true } }),
-    contract({ boundaries: { surprise: true } }),
-    contract({ acceptance: { surprise: true } }),
-    contract({ acceptance: { criteria: ["A criterion."], commands: ["node --test injected.mjs"] } }),
-    contract({ execution: { surprise: true } }),
-    contract({ workflow: { surprise: true } }),
-  ]) {
-    expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(invalid, { cwd: "/repo" }));
-  }
-});
-
-test("rejects commands as an unknown acceptance field in the new strict schema", () => {
-  assert.throws(() => compileCodingDispatchIR(contract({
-    acceptance: { criteria: ["A criterion."], commands: ["node --test injected.mjs"] },
-  }), { cwd: "/repo" }), (error) => {
-    assert.equal(error.code, "INVALID_CONTRACT");
-    assert.equal(error.detail, "acceptance.commands");
-    return true;
-  });
-});
-
-test("uses stable error codes for unsupported versions while accepting normalized agent profiles", () => {
-  expectCode("UNSUPPORTED_VERSION", () => compileCodingDispatchIR(contract({ version: "dispatch-ir.v2" }), { cwd: "/repo" }));
-  const ir = compileCodingDispatchIR(contract({ agent: " coder-alpha " }), { cwd: "/repo" });
-  assert.equal(ir.agent, "coder-alpha");
-});
-
-test("rejects the retired workflow field while preserving the canonical contract", () => {
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR({ ...contract(), workflow: { mode: "tdd" } }, { cwd: "/repo" }));
-});
-
-test("accepts arbitrary valid agent profiles and rejects invalid profile identities", () => {
-  assert.equal(compileCodingDispatchIR(contract({ agent: "package.coder-alpha" }), { cwd: "/repo" }).agent, "package.coder-alpha");
-  for (const agent of ["", "   ", "coder\u0000alpha", "coder\u001falpha", "coder\u007falpha", "coder\u009falpha", "a".repeat(257)]) {
-    expectCode("INVALID_AGENT", () => compileCodingDispatchIR(contract({ agent }), { cwd: "/repo" }));
-    assert.throws(() => compileRuntimeCodingDispatchIR(contract({ agent }), { cwd: "/repo" }), { code: "INVALID_AGENT" });
-  }
-});
-
-test("accepts normalized repo-relative paths and rejects path escapes", () => {
-  const ir = compileCodingDispatchIR(contract({
-    context: { relevantFiles: [" packages/pi-subagents-enhanced/src/subagent-dispatch/** ", "packages/pi-subagents-enhanced/src/subagent-dispatch/**"] },
-    boundaries: { writePaths: ["packages/pi-subagents-enhanced/src/subagent-dispatch/**"] },
-  }), { cwd: "/repo" });
-  assert.deepEqual(ir.context.relevantFiles, ["packages/pi-subagents-enhanced/src/subagent-dispatch/**"]);
-
-  for (const path of [
-    "/tmp/output.mjs",
-    "../output.mjs",
-    "src/../output.mjs",
-    "./output.mjs",
-    ".",
-    "src//output.mjs",
-    "src\\output.mjs",
-    "src/**/output.mjs",
-    "src/\0output.mjs",
-    "C:/output.mjs",
-  ]) {
-    expectCode("INVALID_PATH", () => compileCodingDispatchIR(contract({ boundaries: { writePaths: [path] } }), { cwd: "/repo" }));
-    expectCode("INVALID_PATH", () => compileCodingDispatchIR(contract({ context: { relevantFiles: [path] } }), { cwd: "/repo" }));
-  }
-});
-
-test("keeps canonical hashes stable across object key order and sensitive to semantic array order", () => {
-  const input = contract();
-  const ordered = compileCodingDispatchIR(input, { cwd: "/repo" });
-  const reversed = compileCodingDispatchIR(reverseObjectKeys(input), { cwd: "/repo" });
-  const reordered = compileCodingDispatchIR(contract({ requirements: [...input.requirements].reverse() }), { cwd: "/repo" });
-  const differentCwd = compileCodingDispatchIR(input, { cwd: "/other-repo" });
-
-  assert.equal(ordered.hash, reversed.hash);
-  assert.notEqual(ordered.hash, reordered.hash);
-  assert.notEqual(ordered.hash, differentCwd.hash);
-});
-
-test("normalizes execution.worktree false away while retaining true in the hash and prompt", () => {
-  const omitted = compileCodingDispatchIR(contract(), { cwd: "/repo" });
-  const disabled = compileCodingDispatchIR(contract({ execution: { worktree: false } }), { cwd: "/repo" });
-  const managed = compileCodingDispatchIR(contract({ execution: { worktree: true } }), { cwd: "/repo" });
-
-  assert.deepEqual(disabled.execution, omitted.execution);
-  assert.equal(omitted.hash, "a1aa8196fe99ba2983346551e150c580f6da8119a21fd325056070d2d8daaf04");
-  assert.equal(disabled.hash, omitted.hash);
-  assert.deepEqual(managed.execution, { cwd: "/repo", timeoutMs: 900_000, worktree: true });
-  assert.notEqual(managed.hash, omitted.hash);
-  assert.match(renderCodingDispatchPrompt(managed), /Managed worktree: `true`/);
-  assert.doesNotMatch(renderCodingDispatchPrompt(disabled), /Managed worktree/);
-});
-
-test("rejects non-boolean and incorrectly layered worktree fields", () => {
-  for (const execution of [{ worktree: "true" }, { worktree: 1 }, { worktree: null }]) {
-    expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ execution }), { cwd: "/repo" }));
-  }
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ worktree: true }), { cwd: "/repo" }));
-});
-
-test("rejects invalid task ids, risk, timeout, array sizes, and oversized strings", () => {
-  for (const taskId of ["", "contains space", "../escape", "x".repeat(161)]) {
-    expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ taskId }), { cwd: "/repo" }));
-  }
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ risk: "critical" }), { cwd: "/repo" }));
-  for (const timeoutMs of [0, -1, 1.5, Number.NaN]) {
-    expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ execution: { timeoutMs } }), { cwd: "/repo" }));
-  }
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ requirements: [] }), { cwd: "/repo" }));
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ requirements: Array.from({ length: 33 }, (_, index) => `R${index}`) }), { cwd: "/repo" }));
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR(contract({ requirements: ["x".repeat(4097)] }), { cwd: "/repo" }));
-});
-
-test("rejects a rendered prompt larger than 64 KiB", () => {
-  expectCode("PROMPT_TOO_LARGE", () => {
-    const ir = compileCodingDispatchIR(contract({
-      requirements: Array.from({ length: 32 }, (_, index) => `${index}:${"x".repeat(4090)}`),
-    }), { cwd: "/repo" });
-    renderCodingDispatchPrompt(ir);
-  });
+test("renders generic and coding prompt sections", () => {
+  const generic = renderDispatchPrompt(compileDispatchIR({ agent: "a", task: "t" }, options));
+  const coding = renderDispatchPrompt(compileDispatchIR({ agent: "a", task: "t", writePaths: ["src"], acceptance: { criteria: ["done"] } }, options));
+  assert.match(generic, /# Dispatch Contract/);
+  assert.doesNotMatch(generic, /## Write Scope/);
+  assert.match(coding, /## Write Scope/);
+  assert.match(coding, /## Acceptance Criteria/);
 });

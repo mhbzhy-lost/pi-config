@@ -27,9 +27,8 @@ test("coding Host loads the child integration tool and prompt while generic non-
   execFileSync("git", ["init", "-b", "main"], { cwd: repository, stdio: "ignore" });
   t.after(() => rm(root, { recursive: true, force: true }));
   const ir = {
-    version: "dispatch-ir.v1", taskId: "task", title: "title", agent: "executor", risk: "high", hash: "a".repeat(64),
-    execution: { cwd: repository, timeoutMs: 60_000, worktree: true }, workflow: { mode: "tdd" }, objective: "objective",
-    requirements: [], context: { knownFacts: [], decisions: [], relevantFiles: [] }, boundaries: { writePaths: ["result.txt"], excludedWork: [], forbiddenActions: [] },
+    title: "title", agent: "executor", hash: "a".repeat(64),
+    cwd: repository, worktree: true, task: "objective; commit -> subagent_integration enqueue -> await_admission -> git rebase targetHead", writePaths: ["result.txt"],
     acceptance: { criteria: ["criterion"] },
   };
   const prompt = renderCodingDispatchPrompt(ir);
@@ -38,7 +37,7 @@ test("coding Host loads the child integration tool and prompt while generic non-
   const leaf = JSON.parse(spawn.workflowScript.match(/runs\.run\([^,]+, (.*)\);$/s)[1]);
   assert.equal(leaf.worktree, false);
   assert.ok(leaf.subagentOnlyExtensions.some((entry) => entry.endsWith("/child-extensions/integration-queue.ts")));
-  const sharedSpawn = codingWorkflowSpawnParams({ ...ir, execution: { ...ir.execution, worktree: false } }, prompt, "shared-workflow-key");
+  const sharedSpawn = codingWorkflowSpawnParams({ ...ir, worktree: false }, prompt, "shared-workflow-key");
   const sharedLeaf = JSON.parse(sharedSpawn.workflowScript.match(/runs\.run\([^,]+, (.*)\);$/s)[1]);
   assert.equal(sharedLeaf.subagentOnlyExtensions.some((entry) => entry.endsWith("/child-extensions/integration-queue.ts")), false);
   assert.equal(await shouldStartRepositoryCoordinator(repository), true);

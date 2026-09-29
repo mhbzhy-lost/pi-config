@@ -83,13 +83,13 @@ export function createAcceptanceDispatchPlan({ model = "codex-pool/gpt-5.6-sol",
       tasks: Object.freeze(ACCEPTANCE_TASKS.slice(index * tasksPerRoot, Math.min(subagents, (index + 1) * tasksPerRoot)).map((task) => task.name)),
     }))),
     children: Object.freeze(ACCEPTANCE_TASKS.slice(0, subagents).map((task) => Object.freeze({
-      version: "dispatch-ir.v1", taskId: `acceptance-${task.name}`, title: `Acceptance pipeline ${task.name} stage`,
+      title: `Acceptance pipeline ${task.name} stage`,
       agent: "executor", model, risk: "high",
-      objective: `Modify the shared PIPELINE declaration line to add only the ${task.name} stage.`,
+      task: `Modify the shared PIPELINE declaration line to add only the ${task.name} stage.`,
       workflow: { mode: "tdd" },
       requirements: [`Modify the same line in ${task.writePath}.`, "Add test/pipeline.test.mjs, run the focused test, and create a commit.", "The commit message must use Conventional Commit format with a Chinese subject, for example 'feat: 添加 ${task.name} 阶段'; English-only or non-conventional subjects are rejected by the repository gate.", "Only perform business-file changes and, when given a conflict continuation, resolve unmerged files and git add them; Auto Integration queues, rebases, resolves lifecycle, and publishes the candidate."],
       context: { knownFacts: ["Five tasks intentionally edit the same pipeline line."], decisions: ["Auto Integration owns queue admission, rebase, conflict continuation, and publication."], relevantFiles: [task.writePath, "test/pipeline.test.mjs"] },
-      boundaries: { writePaths: [task.writePath, "test/pipeline.test.mjs"], excludedWork: ["Production coordinator changes."], forbiddenActions: ["Do not call or orchestrate integration mutation tools."] },
+      writePaths: [task.writePath, "test/pipeline.test.mjs"],
       acceptance: { criteria: [task.behaviorAssertion, `The ${task.writePath} change is covered by test/pipeline.test.mjs and committed with the required conventional message.`] },
       execution: { timeoutMs: 30 * 60 * 1000, worktree: true },
     }))),
@@ -98,7 +98,7 @@ export function createAcceptanceDispatchPlan({ model = "codex-pool/gpt-5.6-sol",
 
 export function createAcceptancePrompt(plan, root) {
   const children = plan.children.filter((child) => root.tasks.includes(child.taskId.replace(/^acceptance-/, "")));
-  return JSON.stringify({ version: "dispatch-ir.v1", agent: "executor", model: plan.children[0].model, workflow: "tdd", execution: { worktree: true }, roots: [{ rootSessionId: root.rootSessionId, children }] });
+  return JSON.stringify({ agent: "executor", model: plan.children[0].model, worktree: true, roots: [{ rootSessionId: root.rootSessionId, children }] });
 }
 
 /** A deliberately small JSON-lines RPC client. It remains open until settlement. */

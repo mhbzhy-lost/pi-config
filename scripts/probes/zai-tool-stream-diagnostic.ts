@@ -60,7 +60,7 @@ const anyOfSchema = {
 				title: { type: "string", minLength: 1, maxLength: 4096 },
 				agent: { type: "string", minLength: 1 },
 				risk: { type: "string", enum: ["low", "normal", "high"] },
-				objective: { type: "string", minLength: 1 },
+				task: { type: "string", minLength: 1 },
 				workflow: {
 					type: "object",
 					required: ["mode"],
@@ -142,7 +142,7 @@ const flatObjectSchema = {
 		title: { type: "string", minLength: 1, maxLength: 4096 },
 		agent: { type: "string", minLength: 1 },
 		risk: { type: "string", enum: ["low", "normal", "high"] },
-		objective: { type: "string", minLength: 1 },
+		task: { type: "string", minLength: 1 },
 		workflow: {
 			type: "object",
 			properties: {

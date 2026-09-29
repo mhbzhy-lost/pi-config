@@ -1,53 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  CodingDispatchContractError,
-  compileCodingDispatchIR,
-} from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+import { CodingDispatchContractError, compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 
 function contract(overrides = {}) {
   return {
-    version: "dispatch-ir.v1",
-    taskId: "explicit-read-only-dispatch",
     title: "Observe without modifying repository files",
     agent: "executor",
-    risk: "low",
-    objective: "Run a read-only dispatch without declaring a write path.",
-    requirements: ["Do not modify repository files."],
-    context: { knownFacts: [], decisions: [], relevantFiles: [] },
-    boundaries: {
-      writePaths: [],
-      excludedWork: ["Do not edit repository files."],
-      forbiddenActions: ["Do not write outside the declared scope."],
-    },
-    acceptance: { criteria: ["An empty write scope compiles as an explicit read-only contract."] },
-    execution: { timeoutMs: 1_000 },
+    task: "Run a read-only dispatch without declaring a write path. Do not modify repository files.",
+    writePaths: ["README.md"],
+    acceptance: { criteria: ["The dispatch compiles as a coding contract."] },
     ...overrides,
   };
 }
 
-test("canonical compiler accepts an explicit empty writePaths read-only contract", () => {
-  const input = contract();
-  const ir = compileCodingDispatchIR(input, { cwd: "/repo" });
-
-  assert.deepEqual(ir.boundaries.writePaths, []);
-  assert.equal(Array.isArray(ir.boundaries.writePaths), true);
-  assert.equal(Object.hasOwn(input.boundaries, "writePaths"), true);
+test("canonical compiler requires at least one declared write path", () => {
+  assert.throws(
+    () => compileCodingDispatchIR(contract({ writePaths: [] }), { cwd: "/repo" }),
+    (error) => error instanceof CodingDispatchContractError && error.code === "INVALID_CONTRACT",
+  );
 });
 
-test("canonical compiler still rejects a contract with missing boundaries", () => {
-  const input = contract();
-  delete input.boundaries;
-
+test("canonical compiler rejects retired nested boundaries", () => {
   assert.throws(
-    () => compileCodingDispatchIR(input, { cwd: "/repo" }),
-    (error) => {
-      assert.equal(error instanceof CodingDispatchContractError, true);
-      assert.equal(error.code, "INVALID_CONTRACT");
-      assert.equal(error.keypath, "$.boundaries");
-      assert.match(error.message, /missing required field boundaries/);
-      return true;
-    },
+    () => compileCodingDispatchIR({ ...contract(), boundaries: { writePaths: ["README.md"] } }, { cwd: "/repo" }),
+    (error) => error.code === "INVALID_CONTRACT",
   );
 });
