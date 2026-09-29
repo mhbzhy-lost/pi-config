@@ -11,7 +11,7 @@ test("generic v2 compiles only the flat generic fields", () => {
 });
 
 test("generic v2 rejects retired schema fields", () => {
-  for (const field of ["taskId", "risk", "requirements", "context", "boundaries", "execution"]) {
+  for (const field of ["taskId", "risk", "requirements", "boundaries", "execution"]) {
     assert.throws(
       () => compileDispatchIR({ agent: "reviewer", task: "Review safely.", [field]: field === "taskId" || field === "risk" ? "retired" : {} }),
       (error) => error.code === "INVALID_CONTRACT",

@@ -4,7 +4,10 @@ import path from "node:path";
 const MAX_ARRAY_ITEMS = 32;
 const MAX_STRING_BYTES = 4 * 1024;
 const MAX_PROMPT_BYTES = 64 * 1024;
-const PUBLIC_KEYS = new Set(["agent", "task", "title", "model", "writePaths", "acceptance", "worktree", "cwd"]);
+const PUBLIC_KEYS = new Set(["agent", "task", "title", "model", "writePaths", "acceptance", "worktree", "cwd",
+  // generic-only spawn parameters (only valid without writePaths)
+  "context", "output", "outputMode", "outputSchema", "artifacts", "progress", "skill", "reads", "thinkingLevel",
+]);
 
 export class CodingDispatchContractError extends Error {
   code: string;
@@ -72,7 +75,7 @@ export function compileDispatchIR(input, options: { cwd?: string; timeoutMs?: nu
   const source = { ...input };
   for (const key of Object.keys(source)) if (!PUBLIC_KEYS.has(key)) fail("INVALID_CONTRACT", `unknown field ${key}`, key);
   const coding = isCodingDispatch(source);
-  if (!coding && ["acceptance", "worktree", "cwd"].some(k => Object.hasOwn(source, k))) fail("CODING_FIELD_WITHOUT_WRITE_PATHS", "coding-only field requires writePaths", "writePaths");
+  if (!coding && Object.hasOwn(source, "acceptance")) fail("CODING_FIELD_WITHOUT_WRITE_PATHS", "acceptance requires writePaths to make this a coding dispatch", "acceptance");
   if (Object.hasOwn(source, "timeoutMs")) fail("INVALID_CONTRACT", "timeoutMs is host-injected and must not be provided", "timeoutMs");
   const agent = string(source.agent, "agent"), task = string(source.task, "task"), title = source.title === undefined ? task.slice(0, 50) : string(source.title, "title");
   const model = source.model === undefined ? undefined : string(source.model, "model", 512);

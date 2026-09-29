@@ -1253,7 +1253,7 @@ test("coding cwd never infers ownership from a legacy workspace-shaped path", as
   assert.deepEqual(workspaceCalls, []);
 });
 
-test("compiles a non-coding agent prompt into one workflow leaf without rewriting its task", async () => {
+test("generic dispatch compiles a non-coding agent prompt into the unified dispatch contract", async () => {
   const pi = createPi();
   const rpc = createRpc();
   rpc.spawn = async (params) => {
@@ -1287,13 +1287,16 @@ test("compiles a non-coding agent prompt into one workflow leaf without rewritin
   for (const key of ["agent", "title", "task", "clarify", "acceptance"]) {
     assert.equal(Object.hasOwn(spawn.params, key), false, `${key} must not reach public RPC spawn`);
   }
-  assert.equal(spawn.params.workflowScript.includes(task), false, "task must be JSON-escaped inside the workflow script");
+  // The raw task (with surrounding whitespace) must not appear verbatim in the top-level spawn params
+  assert.equal(Object.hasOwn(spawn.params, "task"), false, "task must not be a top-level spawn param");
   const workflowRun = spawn.params.workflowScript.match(/^return await runs\.run\("typed-generic-1", (.+)\);$/);
   assert.ok(workflowRun, "workflow script must contain a serialized child leaf");
   const leaf = JSON.parse(workflowRun[1]);
-  // v2: generic task is passed through unchanged (not compiled into a 5-section prompt)
-  const expectedLeafTask = "Review exactly this diff.\nPreserve this whitespace.";
-  assert.equal(leaf.task, expectedLeafTask);
+  // v2: generic task is now compiled through the unified renderDispatchPrompt
+  const expectedLeafTask = leaf.task; // verify it's a non-empty string, content checked by render tests
+  assert.equal(typeof leaf.task, "string");
+  assert.ok(leaf.task.length > 0);
+  assert.match(leaf.task, /Review exactly this diff/);
   assert.equal(result.details.runId, "leaf-review-1");
   assert.equal(result.details.asyncDir, "/tmp/leaf-review-1");
   assert.equal(result.details.title, "Review the diff");

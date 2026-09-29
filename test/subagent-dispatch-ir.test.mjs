@@ -30,7 +30,9 @@ test("routes by writePaths key and validates coding-only fields", () => {
   assert.equal(isCodingDispatch({ agent: "a", task: "t" }), false);
   assert.equal(isCodingDispatch({ agent: "a", task: "t", writePaths: [] }), true);
   expectCode("INVALID_CONTRACT", () => compileDispatchIR({ agent: "a", task: "t", writePaths: [] }, options));
-  expectCode("CODING_FIELD_WITHOUT_WRITE_PATHS", () => compileDispatchIR({ agent: "a", task: "t", cwd: "/repo" }, options));
+  // cwd and worktree are valid generic optional fields (only acceptance is coding-only)
+  const genericWithCwd = compileDispatchIR({ agent: "a", task: "t", cwd: "/repo" }, options);
+  assert.equal(genericWithCwd.kind, "generic");
   expectCode("INVALID_PATH", () => compileDispatchIR({ agent: "a", task: "t", writePaths: ["../x"], acceptance: { criteria: ["ok"] } }, options));
   expectCode("INVALID_CONTRACT", () => compileDispatchIR({ agent: "a", task: "t", writePaths: ["src"], acceptance: { criteria: [] } }, options));
 });

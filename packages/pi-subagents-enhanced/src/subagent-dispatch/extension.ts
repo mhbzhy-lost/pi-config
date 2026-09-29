@@ -866,6 +866,20 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
   }
   const normalizedInput = { ...input, agent: normalizeAgentProfile(input.agent) };
   const title = normalizeSubagentTitle(input.title ?? input.task.slice(0, 50));
+  // 前置统一编译：对完整公共输入校验，确保 coding 专属字段（acceptance/worktree/cwd）
+  // 在无 writePaths 时被拒绝，未知字段在 discovery/workspace/RPC 之前被拒绝。
+  // 只剥离 runtime 注入的 timeoutMs，其余字段全部传给编译器校验。
+  let genericIr;
+  try {
+    const { timeoutMs: _excluded, ...publicInput } = normalizedInput;
+    genericIr = compileDispatchIR(publicInput);
+  } catch (error) {
+    if (error instanceof CodingDispatchContractError) {
+      return failure(error.code, error.message, error.detail, error.keypath);
+    }
+    throw error;
+  }
+  const genericPrompt = renderDispatchPrompt(genericIr);
   const selection = await resolveSpawnModel(normalizedInput, ctx, discover, trace, providerBlacklist);
   const selectedInput = selection.model === undefined ? normalizedInput : { ...normalizedInput, model: selection.model };
   const workspaceRequest = selectedInput.worktree === true
@@ -894,11 +908,10 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
   const workflowKey = `typed-${createId()}`;
   let authoritativeBinding: any;
   let authorizationRegistration: Promise<void> | undefined;
-  const genericIr = compileDispatchIR({ agent: normalizedInput.agent, task: normalizedInput.task, title, ...(selectedInput.model === undefined ? {} : { model: selectedInput.model }) });
   const genericRequest = createGenericDispatchAdapter({
     agent: normalizedInput.agent,
     title,
-    task: genericIr.task,
+    task: genericPrompt,
     cwd: workspace?.dispatchCwd ?? selectedInput.cwd ?? ctx.cwd,
     ...(selectedInput.model === undefined ? {} : { model: selectedInput.model }),
   });
@@ -918,7 +931,7 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
         ...(workspace ? { ...selectedInput, cwd: workspace.dispatchCwd } : selectedInput),
         ...(workspace ? { orchestratorCwd, childCwd: workspace.dispatchCwd } : {}),
         // The shared adapter owns the canonical five-section generic prompt.
-        task: genericIr.task,
+        task: genericPrompt,
       }, ctx, workflowKey),
       titleRegistry,
       trace,
