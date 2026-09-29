@@ -494,10 +494,22 @@ Return the deterministic child marker without modifying files.
     assert.ok(Array.isArray(terminal), JSON.stringify(probe));
     assert.equal(terminal.length, 3);
     assert.deepEqual(terminal.slice(0, 2).map((entry) => entry.handle.agent), ["coder-alpha", "coder-beta"]);
-    assert.deepEqual(terminal.slice(0, 2).map((entry) => entry.proof?.capabilities), [["root.subscribe"], ["root.subscribe"]]);
+    assert.deepEqual(terminal.slice(0, 2).map((entry) => entry.proof), [null, null], "worktree:false coding dispatches have no managed workspace and therefore no broker proof");
     assert.equal(terminal[2].handle.agent, "coder-alpha");
     assert.equal(terminal[2].proof, null, "generic calls cannot gain a Broker proof from profile metadata");
-    await assert.rejects(lstat(join(root, "workspaces")), { code: "ENOENT" }, "worktree:false does not allocate a managed workspace root");
+    // Host startup creates the workspace root for the coordinator; worktree:false dispatches
+    // must not allocate any managed workspace records inside it.
+    const workspaceRoot = join(root, "workspaces");
+    let workspaceRecords = [];
+    try {
+      const repositoriesDir = join(workspaceRoot, "repositories");
+      const readdir = (await import("node:fs/promises")).readdir;
+      for (const repo of await readdir(repositoriesDir).catch(() => [])) {
+        const recordsDir = join(repositoriesDir, repo, "records");
+        for (const file of await readdir(recordsDir).catch(() => [])) workspaceRecords.push(file);
+      }
+    } catch {}
+    assert.equal(workspaceRecords.length, 0, `worktree:false must not allocate managed workspace records, found: ${workspaceRecords.length}`);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
