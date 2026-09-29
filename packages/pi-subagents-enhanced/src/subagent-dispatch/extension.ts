@@ -152,7 +152,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
 
 export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime.
 
-For coding work, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. model is the only optional model selector. A qualified provider/model-id must exactly match the available catalog. A bare model-id with agent models matches the first currently available declared candidate with that ID, in declaration order; a miss fails and does not search the global catalog. A bare model-id with no agent models matches the available catalog by ascending full provider/model-id; that successful global-catalog path returns MODEL_MATCH_USED_GLOBAL_CATALOG in top-level details.warnings. Omitting model preserves agent metadata/default routing, including each profile's ordered models fallback chain. modelSelection reports requestedModel, resolvedModel, and source when applicable; neither requested nor resolved claims the actual child model. Runtime run/status/artifact actual-model metadata is authoritative. Coding worktrees use execution.worktree; generic worktrees use top-level worktree. For generic work, provide { agent, title, task } and optional generic fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, resume, and stop. interrupt pauses the current turn; then use resume with a new non-empty message to continue it with new instructions. A stopped subagent cannot be resumed. Optional worktree:true creates an isolated managed workspace; after completion manage it with subagent_worktree.`;
+For coding work, provide the complete dispatch-ir.v1 contract; free-form task dispatch is rejected. model is the only optional model selector. A qualified provider/model-id must exactly match the available catalog. A bare model-id with agent models matches the first currently available declared candidate with that ID, in declaration order; a miss fails and does not search the global catalog. A bare model-id with no agent models matches the available catalog by ascending full provider/model-id; that successful global-catalog path returns MODEL_MATCH_USED_GLOBAL_CATALOG in top-level details.warnings. Omitting model preserves agent metadata/default routing, including each profile's ordered models fallback chain. modelSelection reports requestedModel, resolvedModel, and source when applicable; neither requested nor resolved claims the actual child model. Runtime run/status/artifact actual-model metadata is authoritative. Coding worktrees use execution.worktree; generic worktrees use top-level worktree. For generic work, provide { agent, title, task } and optional generic fields; title is a concise single-line display label and task is forwarded unchanged. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, resume, and stop. interrupt pauses the current turn; then use resume with a new non-empty message to continue it with new instructions. A stopped subagent cannot be resumed. Worktree guidance: For coding dispatches use execution.worktree=true, and for generic dispatches use worktree=true, when concurrent children may write the same repository or need isolated baselines. Use worktree=false for read-only tasks or when the user explicitly forbids worktrees. When worktree=true, the response includes a workspace_id; after completion use subagent_worktree({action:"status"}) then integrate or discard to finish, or preserve temporarily and later release.`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 const TRACE_PHASES = new Set([
@@ -889,8 +889,11 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     ...binding,
     ...(workspace ? workspacePublic(workspace) : {}),
   };
+  const workspaceNotice = workspace
+    ? ` Workspace ${workspace.workspaceId} allocated (state: ${workspace.state}). After the run completes: subagent_worktree({action:"status",workspace_id:"${workspace.workspaceId}"}) to check dispositions; then integrate or discard to finish, or preserve temporarily and later release.`
+    : "";
   return {
-    content: [{ type: "text", text: `Started ${handle.agent}: ${handle.title} (${handle.runId}).${modelSelectionWarningText(selection)} ${ASYNC_SPAWN_GUIDANCE}` }],
+    content: [{ type: "text", text: `Started ${handle.agent}: ${handle.title} (${handle.runId}).${modelSelectionWarningText(selection)} ${ASYNC_SPAWN_GUIDANCE}${workspaceNotice}` }],
     isError: false,
     details: { ...handle, modelSelection: modelSelectionDetails(selection), ...(selection.warnings ? { warnings: selection.warnings } : {}) },
   };
@@ -997,8 +1000,11 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     workspace = await workspaceService.bindRun({ workspaceId: workspace.workspaceId, run: binding });
   }
   titleRegistry.remember(binding.runId, title);
+  const workspaceNotice = workspace
+    ? ` Workspace ${workspace.workspaceId} allocated (state: ${workspace.state}). After the run completes: subagent_worktree({action:"status",workspace_id:"${workspace.workspaceId}"}) to check dispositions; then integrate or discard to finish, or preserve temporarily and later release.`
+    : "";
   return {
-    content: [{ type: "text", text: `Started ${normalizedInput.agent}: ${title} (${binding.runId}).${modelSelectionWarningText(selection)} ${ASYNC_SPAWN_GUIDANCE}` }],
+    content: [{ type: "text", text: `Started ${normalizedInput.agent}: ${title} (${binding.runId}).${modelSelectionWarningText(selection)} ${ASYNC_SPAWN_GUIDANCE}${workspaceNotice}` }],
     isError: false,
     details: { ...binding, agent: normalizedInput.agent, title, modelSelection: modelSelectionDetails(selection), ...(selection.warnings ? { warnings: selection.warnings } : {}), ...(workspace ? workspacePublic(workspace) : {}) },
   };

@@ -928,6 +928,10 @@ test("headless runtime installation exposes only project-owned subagent tools", 
   assert.equal(pi.tools.some((tool) => tool.name === "subagent_workspace"), false);
   assert.equal(pi.commands.length, 0);
   assert.equal(pi.tools[0].description, TYPED_SUBAGENT_DESCRIPTION);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /execution\.worktree=true/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /generic dispatches use worktree=true/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /explicitly forbids worktrees/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /integrate or discard to finish, or preserve temporarily and later release/);
   assert.doesNotMatch(pi.tools[0].description, /proactive skill methodology/i);
   assert.doesNotMatch(pi.tools[1].description, /pi-subagents|upstream/i);
 });
@@ -1280,6 +1284,32 @@ test("compiles a non-coding agent prompt into one workflow leaf without rewritin
   );
 });
 
+test("generic worktree spawn result explains workspace disposition without exposing lease data", async () => {
+  const pi = createPi();
+  const rpc = createRpc({
+    async spawn(params) {
+      this.calls.push({ method: "spawn", params });
+      pi.events.emit("subagent:async-started", { id: "generic-worktree-leaf", runId: "generic-worktree-leaf", asyncDir: "/tmp/generic-worktree-leaf", sessionId: "session-1", agent: "reviewer", pid: 104, workflowKey: "typed-generic-worktree", parentWorkflowRunId: "generic-worktree-root" });
+      return { details: { runId: "generic-worktree-root", asyncDir: "/tmp/generic-worktree-root" } };
+    },
+  });
+  const workspaceService = {
+    ensureAllocated(request) { return managedReceipt({ workspaceId: request.workspaceId, owner: request.owner }); },
+    bindRun({ run }) { return managedReceipt({ workspaceId: "generic-workspace", state: "active", run }); },
+  };
+  createTypedSubagentExtension(pi, {
+    rpc, cleanupStore: {}, randomUUID: () => "generic-workspace", workspaceService,
+    resolveRootSessionId: () => "root-1", resolveCanonicalOrigin: async () => "/repo",
+    inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
+    registerAuthorizedRun() {},
+  });
+  const result = await execute(pi.tools[0], { agent: "reviewer", title: "Review", task: "Review it", worktree: true }, { cwd: "/repo", sessionManager: {} });
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.match(result.content[0].text, /Workspace generic-workspace allocated \(state: active\)/);
+  assert.match(result.content[0].text, /integrate or discard to finish, or preserve temporarily and later release/);
+  assert.doesNotMatch(result.content[0].text, /action_token|lease[_-]id|\/Users\//i);
+});
+
 test("uses a bounded fallback while waiting for a generic leaf without input timeout", async () => {
   const pi = createPi();
   const rpc = createRpc();
@@ -1572,6 +1602,9 @@ test("standalone managed coding registers minimal Host authority before binding 
   const result = await execute(pi.tools[0], codingContract({ execution: { worktree: true } }), { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
+  assert.match(result.content[0].text, /Workspace standalone-managed allocated \(state: active\)/);
+  assert.match(result.content[0].text, /integrate or discard to finish, or preserve temporarily and later release/);
+  assert.doesNotMatch(result.content[0].text, /action_token|lease[_-]id|\/Users\//i);
   assert.deepEqual(order, ["allocate", "grant", "bind"]);
   assert.deepEqual(registrations.map(({ kind, capabilities, goal, binding }) => ({ kind, capabilities, goal, binding })), [{
     kind: "coding", capabilities: ["root.subscribe"], goal: null,

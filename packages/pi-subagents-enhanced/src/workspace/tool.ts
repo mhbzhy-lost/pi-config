@@ -26,8 +26,9 @@ export const SUBAGENT_WORKSPACE_PARAMETERS = Object.freeze({
   type: "object", anyOf: [WORKSPACE_LIST_SCHEMA, WORKSPACE_STATUS_SCHEMA, WORKSPACE_DISPOSE_SCHEMA, WORKSPACE_RELEASE_SCHEMA],
 });
 export const SUBAGENT_WORKSPACE_DESCRIPTION =
-  "Manage only standalone subagent workspaces owned by the current session. " +
-  "Use status before dispose; use release only after preserve. " +
+  "Use this when a subagent dispatch with worktree=true returned a workspace_id and the run has completed. " +
+  "Every allocated workspace must be explicitly handled: integrate or discard to finish, or preserve temporarily and later release. " +
+  "Start with action:\"status\" to see allowed_dispositions and any integrate_blocked_reasons. " +
   `Workspace states: ${MANAGED_WORKSPACE_STATES.join(" | ")}. ` +
   `Agent-callable actions per state: ${MANAGED_WORKSPACE_STATES.map((state) => `${state}=[${allowedActionsFor(state).join(",") || "none"}]`).join("; ")}.`;
 
