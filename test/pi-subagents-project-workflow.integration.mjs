@@ -361,7 +361,6 @@ test("non-Goal executor ignores a hostile legacy .pi-subagents tree", { skip: !p
       risk: "normal",
       objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
       requirements: ["Use package-owned child extensions."],
-      workflow: { mode: "existing-tests", reason: "This integration verifies legacy workspace runtime entries are inert." },
       context: { knownFacts: ["The workspace contains hostile legacy entries."], decisions: ["Do not inspect or change those entries."], relevantFiles: [] },
       boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
       acceptance: { criteria: ["The child returns the deterministic marker."] },
@@ -444,16 +443,15 @@ test("non-Goal persistent Host rename canary keeps typed coding and generic auth
   const provider = join(root, "typed-provider.mjs");
   const dispatchProbe = join(root, "dispatch-probe.mjs");
   const coding = (agent) => ({
-    version: "dispatch-ir.v1", taskId: `${agent}-rename-canary`, title: `Run ${agent} rename canary`, agent, model: "codex-pool/gpt-5.6-terra", risk: "normal",
+    version: "dispatch-ir.v1", taskId: `${agent}-rename-canary`, title: `Run ${agent} rename canary`, agent, model: "fake/deterministic", risk: "normal",
     objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
     requirements: ["Use the project-owned typed facade."],
-    workflow: { mode: "existing-tests", reason: "This canary verifies name-independent non-Goal authorization." },
     context: { knownFacts: ["The Host is a fixture."], decisions: ["Use typed standalone dispatch."], relevantFiles: [] },
     boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
     acceptance: { criteria: ["The child returns the deterministic marker."] },
     execution: { cwd: projectRoot, worktree: false },
   });
-  const generic = { agent: "coder-alpha", title: "Inspect rename canary", task: "Read only.", model: "codex-pool/gpt-5.6-terra", worktree: false };
+  const generic = { agent: "coder-alpha", title: "Inspect rename canary", task: "Read only.", model: "fake/deterministic", worktree: false };
   try {
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, "README.md"), "rename canary fixture\n");
@@ -461,7 +459,7 @@ test("non-Goal persistent Host rename canary keeps typed coding and generic auth
 name: ${name}
 description: deterministic rename canary profile
 models:
-  - codex-pool/gpt-5.6-terra
+  - fake/deterministic
 tools: read
 extensions: ${provider}
 ---
