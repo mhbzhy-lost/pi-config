@@ -20,7 +20,7 @@ const EXCLUDED_INTEGRATION_FILES = new Map([
   ["subagent-auto-integration-resumed-child.integration.mjs",
     "DIAGNOSED-UPSTREAM: 根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空→挂起；非 merge 引入，修复归属 upstream，见 docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md"],
   ["session-owner-runtime.integration.mjs",
-    "PENDING-DIAGNOSIS: 3 个 -c 相关 PTY 用例失败，机制为 session-owner 守卫拦截 fixture pi（registry 空、exitCode 0），非时序预算；见 var/upgrade/fix-three-orphaned-tests.md"],
+    "DIAGNOSED-FIXTURE: 3 个 -c PTY 用例为负载/冷启动时序脆弱（2 个独跑通过，SIGKILL 接管超 60s 预算）；守卫/ESRCH 逻辑正确、非 merge 引入（merge 仅附加审计日志），见 var/upgrade/t8-session-owner-pty-diagnosis.md"],
   ["managed-workspace-terminal-proof-handoff.integration.mjs",
     "PENDING-ADJUDICATION: 跨 owner scope unresolved binding 被 not-applicable 吞没 vs 应记 proof debt——语义裁决待用户；见 var/upgrade/orphaned-integration-triage.md 第 4 节"],
 ]);
