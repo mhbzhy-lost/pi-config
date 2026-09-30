@@ -1,6 +1,6 @@
 # 升级会话交接文档（Handoff）
 
-> 写于 2026-09-30（第三段：main-merge 完成 + 三缺陷收尾）。主仓编排会话 → 新仓续接会话（pi-new）。本段完成 `docs/plans/2026-09-30-main-merge-and-consolidation.md` 的 T1-T10。
+> 写于 2026-09-30（第三段：main-merge 完成 + 三缺陷收尾 + steer 拦截修复）。主仓编排会话 → 新仓续接会话（pi-new）。本段完成 `docs/plans/2026-09-30-main-merge-and-consolidation.md` 的 T1-T10，并追加修复用户报告的主动 steer 拦截缺陷。
 
 ## 你在哪
 
@@ -26,6 +26,7 @@
 | T8 session-owner PTY 诊断 | ✅ 定性 | `13d2806`；夹具时序脆弱，非生产缺陷 |
 | T9 terminal-proof 裁决 | ⏸ suspended | 待用户 (a)/(b)；集成门禁保持 PENDING-ADJUDICATION |
 | T10 HANDOFF + 收尾 | ✅ | 本文件 |
+| 追加：修复非 workspace run 主动 steer 被控制面拦截 | ✅ | `5039a40`；docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md；membrane RED 单测 + 真实 Host 集成回归（steer 文本真正插入 child 会话） |
 
 ## 本会话（第二段）完成的清账
 
@@ -51,9 +52,9 @@
 
 footgun 复核结论（`var/upgrade/footgun-injection-fix.md`）：注入点语义当前已正确（completionApi 从不带 suppression），零生产改动，+1 守卫用例。
 
-## 静态门禁状态（merge 后新基线，2026-09-30）
+## 静态门禁状态（merge + steer 修复后新基线，2026-09-30）
 
-npm test **934tests/933pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件对齐 registry）· 真实 Host focused：project-workflow 2/2、session-owner-install 3/3、notification 2/2、runtime 3/5（attention 双测受决策项 #3 影响）。
+npm test **935tests/934pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件对齐 registry）· 真实 Host focused：project-workflow 2/2、session-owner-install 3/3、notification 2/2、steer-text-insertion 1/1、runtime 3/5（attention 双测受决策项 #3 影响）。
 
 集成门禁 `test:all-integration` 保持 4 显式排除（均已精确诊断）：pi-subagents-runtime（WIRED-ELSEWHERE）、resumed-child（DIAGNOSED-UPSTREAM）、session-owner-runtime（DIAGNOSED-FIXTURE）、terminal-proof-handoff（PENDING-ADJUDICATION，待 T9 裁决）。**最终完整 integration gate 待所有子任务收口后一次性重跑（用户指示，避免重复全量循环）。**
 
