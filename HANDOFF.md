@@ -27,6 +27,7 @@
 | T9 terminal-proof 裁决 | ⏸ suspended | 待用户 (a)/(b)；集成门禁保持 PENDING-ADJUDICATION |
 | T10 HANDOFF + 收尾 | ✅ | 本文件 |
 | 追加：修复非 workspace run 主动 steer 被控制面拦截 | ✅ | `5039a40`；docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md；membrane RED 单测 + 真实 Host 集成回归（steer 文本真正插入 child 会话） |
+| T9 terminal-proof 跨 owner 绑定裁决实施（用户选 a） | ✅ | `49931ed`；docs/bugs/2026-09-30-terminal-proof-cross-owner-binding-silent.md；跨 scope 复查命中即记债暴露，解除门禁排除，terminal-proof-handoff 7/7 绿 |
 
 ## 本会话（第二段）完成的清账
 
@@ -52,11 +53,11 @@
 
 footgun 复核结论（`var/upgrade/footgun-injection-fix.md`）：注入点语义当前已正确（completionApi 从不带 suppression），零生产改动，+1 守卫用例。
 
-## 静态门禁状态（merge + steer 修复后新基线，2026-09-30）
+## 静态门禁状态（merge + steer 修复 + T9 裁决后新基线，2026-09-30）
 
-npm test **935tests/934pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件对齐 registry）· 真实 Host focused：project-workflow 2/2、session-owner-install 3/3、notification 2/2、steer-text-insertion 1/1、runtime 3/5（attention 双测受决策项 #3 影响）。
+npm test **935tests/934pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件对齐 registry）· **完整 integration gate：32 文件 225/225 全绿**（3 显式排除：pi-subagents-runtime WIRED-ELSEWHERE、resumed-child DIAGNOSED-UPSTREAM、session-owner-runtime DIAGNOSED-FIXTURE）· 真实 Host focused：project-workflow 2/2、session-owner-install 3/3、notification 2/2、steer-text-insertion 1/1、terminal-proof-handoff 7/7、runtime 3/5（attention 双测受决策项 #3 影响）。
 
-集成门禁 `test:all-integration` 保持 4 显式排除（均已精确诊断）：pi-subagents-runtime（WIRED-ELSEWHERE）、resumed-child（DIAGNOSED-UPSTREAM）、session-owner-runtime（DIAGNOSED-FIXTURE）、terminal-proof-handoff（PENDING-ADJUDICATION，待 T9 裁决）。**最终完整 integration gate 待所有子任务收口后一次性重跑（用户指示，避免重复全量循环）。**
+集成门禁 `test:all-integration` 保持 3 显式排除（均已精确诊断）：pi-subagents-runtime（WIRED-ELSEWHERE）、resumed-child（DIAGNOSED-UPSTREAM）、session-owner-runtime（DIAGNOSED-FIXTURE）。terminal-proof-handoff 的 PENDING-ADJUDICATION 已随 T9 裁决（选项 a）解除。**最终完整 integration gate 已重跑：32 文件 225/225 全绿。**
 
 ## 升级决策项（留档待用户拍板，含新增）
 
@@ -71,14 +72,14 @@ npm test **935tests/934pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ 
 9. ~~**门禁覆盖产品决策**~~（已落地：用户定原则「长耗时属集成测试不进主 glob」；已建 `test:all-integration` 门禁 runner，自动枚举+串行+显式排除表，新文件自动接线，首跑 30 文件 218/218 绿）
 10. ~~**产品语义观察项**~~（已裁决关闭，2026-09-30：经代码验证，broker 身份三项服务——integration 订阅/proof settlement/lease 存活——全部面向 managed workspace 生命周期，无 workspace 的 coding run 无需 broker；b332005 门控为正确设计，canary 测试按 worktree:true 钉住现行语义）
 11. ~~两项待专项诊断的集成测试失败面~~（**已诊断定性，2026-09-30**）：(a) resumed-child——根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空；非 merge 引入，修复归属 upstream（docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md）。(b) session-owner-runtime 三 PTY 用例——夹具时序脆弱（2 独跑通过、SIGKILL 接管超 60s 预算）；守卫/ESRCH 逻辑正确、merge 仅附加审计日志，非生产缺陷（var/upgrade/t8-session-owner-pty-diagnosis.md）。注：resumed-child 是 auto-integration 恢复续跑（child 退出后自动收尾），与控制面手动 resume 无关，后者使用正常。
-12. **terminal-proof-handoff 语义裁决（待用户，T9 suspended）**：跨 owner scope 的 unresolved binding 被 not-applicable 吞没 vs 应记 proof debt——二选一：(a) 修生产（classifyTerminalProofBinding 跨 scope 复查→recordDebt，符合“失败不静默”哲学，主会话倾向此项）；(b) 认定 not-applicable 为有意语义改测试期望（var/upgrade/orphaned-integration-triage.md 第 4 节）
+12. ~~**terminal-proof-handoff 语义裁决**~~（已裁决实施，2026-09-30 选项 a）：跨 owner scope 未解析绑定经 ledger.list() 跨 scope 复查命中即 recordDebt 暴露，不再静默 not-applicable；terminal-proof-handoff 集成门禁排除已解除，7/7 绿（docs/bugs/2026-09-30-terminal-proof-cross-owner-binding-silent.md）
 
 ## 后续切换阶段前置条件（原 T12 第三段，届时需用户三段授权）
 
 1. ~~**提交整理**~~（已完成：T1 两笔 + merge 后逐任务提交，工作区干净）
 2. ~~**基点对齐**~~（已完成：main 已 merge，76 冲突解完，静态门禁 933/0）
 3. **merge + init-pi.sh**：合回主树 → 全局安装 0.87.1 → shell/skills/Basic Memory 同步（待三段授权）
-4. **待用户裁决**：T9 terminal-proof (a)/(b)；裁决后解除对应集成门禁排除并重跑完整 gate
+4. ~~待用户裁决：T9 terminal-proof (a)/(b)~~（已裁决选项 a 并实施，门禁排除已解除、完整 gate 已重跑全绿）
 
 ### T12 准备登记项（本仓之外，不归本仓改）
 
