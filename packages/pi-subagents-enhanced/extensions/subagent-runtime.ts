@@ -114,6 +114,10 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
         proofOutbox,
         readLedger: () => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
           .listScoped({ owner: proofOwnerScope }).filter((record: any) => record.run?.runId === run.runId),
+        // 跨 owner scope 复查：scoped 查询为空时区分「run 真没有 workspace」与
+        // 「workspace 挂在别的 owner scope 下」（后者记债暴露，不静默）。
+        readCrossScope: () => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
+          .list().filter((record: any) => record.run?.runId === run.runId),
         run,
         proof,
         proofId,
