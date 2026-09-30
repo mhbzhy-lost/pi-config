@@ -574,7 +574,7 @@ function configuredTimeout(name, fallback) {
 
 export async function runAcceptance(options = parseAcceptanceOptions()) {
   const piBinary = process.env.PI_REAL_BIN;
-  if (!piBinary) throw new Error("PI_REAL_BIN must identify the real Pi 0.85.1 binary; acceptance probe never substitutes a fake model");
+  if (!piBinary) throw new Error("PI_REAL_BIN must identify the real Pi 0.87.1 binary; acceptance probe never substitutes a fake model");
   const root = await mkdtemp(join(tmpdir(), "repository-merge-queue-acceptance-"));
   const repository = join(root, "repository");
   await cp(resolve("test/fixtures/repository-merge-queue-acceptance"), repository, { recursive: true });

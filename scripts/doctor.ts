@@ -9,7 +9,6 @@ import { promisify } from "node:util";
 import { homedir, tmpdir } from "node:os";
 import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
 import { auditManagedWorkspaces } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
-import { verifyOrderedModelsRuntimePatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/ordered-models-runtime-patch.ts";
 import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { assertRunAuthorization, createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
@@ -18,8 +17,8 @@ import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced
 
 const execFile = promisify(execFileCallback);
 
-const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4", "0.85.1"];
-const PI_SUBAGENTS_VERSION = "0.62.0";
+const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4", "0.85.1", "0.87.1"];
+const PI_SUBAGENTS_VERSION = "0.71.0";
 const ENHANCED_SUBAGENTS_VERSION = "0.1.0";
 const ENHANCED_SUBAGENTS_SOURCE = "../packages/pi-subagents-enhanced";
 const TYPEBOX_VERSION = "1.1.38";
@@ -37,6 +36,15 @@ const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/index.mjs",
 ];
 const REQUIRED_RPC_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];
+
+/**
+ * 解析 pi-subagents 的 RPC v1 源：0.62 发布 TS 源，0.71 起仅发布编译版。
+ * 优先 .ts（可读性更好），缺失时回退 .js；两者皆无返回 null。
+ */
+export async function resolveRpcSource(packageRoot) {
+  return (await readIfExists(join(packageRoot, "src", "extension", "rpc.ts")))
+    ?? (await readIfExists(join(packageRoot, "src", "extension", "rpc.js")));
+}
 const LEGACY_TASK7_FILES = [
   "scripts/lib/subagent-jobs.mjs",
   "scripts/lib/subagent-extension.mjs",
@@ -349,7 +357,7 @@ export async function inspectConfiguration(repoRoot, options = {}) {
       } catch (error) {
         issues.push(`pi-subagents RPC probe failed: ${error.message}`);
       }
-      const rpcSource = await readIfExists(join(packageRoot, "src", "extension", "rpc.ts"));
+      const rpcSource = await resolveRpcSource(packageRoot);
       if (!rpcSource) {
         issues.push("pi-subagents RPC v1 source is unavailable");
       } else {
@@ -359,11 +367,8 @@ export async function inspectConfiguration(repoRoot, options = {}) {
           }
         }
       }
-      try {
-        await verifyOrderedModelsRuntimePatch(packageRoot);
-      } catch (error) {
-        issues.push(`pi-subagents ordered models patch is unavailable: ${error.message}`);
-      }
+      // ordered-models patch 已随升级退役（T6）：等价校验由 verify-package 的
+      // 原包受控比较承担，此处不再存在独立 patch 检查项。
     }
   } catch {
     issues.push(`missing Pi package: pi-subagents@${PI_SUBAGENTS_VERSION}`);

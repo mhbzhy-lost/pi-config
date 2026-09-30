@@ -19,7 +19,6 @@ export function dispatchContract(task) {
     model: "fake/deterministic",
     risk: "high",
     objective: `Append the ${task} change and commit it.`,
-    workflow: { mode: "tdd" },
     requirements: [`Write ${file} with the ${task} content and create a commit.`, "Only perform business-file changes; Auto Integration owns queue admission, rebase, conflict continuation, and publication."],
     context: { knownFacts: ["The recovery harness drives integration via the trusted lifecycle."], decisions: ["Auto Integration owns the queue."], relevantFiles: [file] },
     boundaries: { writePaths: [file], excludedWork: ["Production coordinator changes."], forbiddenActions: ["Do not call integration mutation tools."] },

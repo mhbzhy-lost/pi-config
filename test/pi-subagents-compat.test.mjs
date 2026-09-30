@@ -1,600 +1,103 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import * as compat from "../scripts/probes/pi-subagents-compat.ts";
-import { createSupervisorAdapter } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts";
-import { getTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
-import { createIsolatedHostRepository } from "./helpers/pi-runtime.mjs";
-import { piHostAliases, piHostJitiUrl, piHostModuleUrl } from "./helpers/pi-host.mjs";
+import * as facade from "../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.71.ts";
+import { assertBrowserTranscriptCompatibility, loadPublicPiModule } from "../scripts/probes/pi-subagents-compat.ts";
 
-const { createJiti } = await import(piHostJitiUrl);
-const {
-  createAgentSession,
-  DefaultResourceLoader,
-  SessionManager,
-} = await import(piHostModuleUrl);
-const { createSubagentsRpcClient, REQUIRED_METHODS } = compat;
-const repoRoot = process.cwd();
-const enhancedPackageRoot = join(repoRoot, "packages/pi-subagents-enhanced");
-const upstreamPackageRoot = join(enhancedPackageRoot, "node_modules/pi-subagents");
-const compatibleReport = {
-  piVersion: "0.84.1",
-  version: "0.62.0",
-  typeboxVersion: "1.1.38",
-  typeboxCompileResolvable: true,
-  rpcVersion: 1,
-  methods: ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"],
-  events: ["subagent:async-started", "subagent:async-complete", "subagent:process-terminal"],
-  rootBrokerReady: true,
-  flatRuntimeDepth: 1,
-  childAdapterRegistered: true,
-  noFanoutExtension: true,
-  exactCwd: true,
-  worktreeDisabled: true,
-  waitWakesOnCompletion: true,
-  rpcStatusFindsActiveRun: true,
-  statusArtifactObservesSupervisorBlock: true,
-  supervisorRoundTrip: true,
-  executorFanoutBlocked: true,
-  nestedEventFiles: 0,
+const theme = {
+  fg(_color, text) { return text; },
+  bold(text) { return text; },
 };
 
-function evaluate(report) {
-  assert.equal(typeof compat.evaluatePlanHarnessCompatibility, "function");
-  return compat.evaluatePlanHarnessCompatibility(report);
-}
-
-test("public supervisor adapter setup reaches an explicitly bound target", async () => {
-  const adapter = createSupervisorAdapter();
-  const params = { action: "status" };
-  const targetResult = { content: [{ type: "text", text: "fixture target active" }], details: { active: true, pending: 0 } };
-  let received;
-  adapter.bind(async (...args) => {
-    received = args;
-    return targetResult;
-  });
-
-  assert.equal(await adapter.execute("fixture-status", params), targetResult);
-  assert.deepEqual(received.slice(0, 2), ["fixture-status", params]);
-});
-
-test("exports the stable RPC v1 methods", () => {
-  assert.deepEqual(REQUIRED_METHODS, ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"]);
-});
-
-test("loads the public Pi API after asynchronously resolving the npm global root", async () => {
-  const globalRoot = await mkdtemp(join(tmpdir(), "pi-global-root-"));
-  const packageRoot = join(globalRoot, "@earendil-works", "pi-coding-agent");
-  try {
-    await mkdir(packageRoot, { recursive: true });
-    await writeFile(join(packageRoot, "package.json"), JSON.stringify({ type: "module", exports: { ".": "./public.js" } }));
-    await writeFile(join(packageRoot, "public.js"), "export const fixtureMarker = 'portable-pi-api';\n");
-
-    const piModule = await compat.loadPublicPiModule({
-      resolveGlobalNodeModules: async () => globalRoot,
-    });
-
-    assert.equal(piModule.fixtureMarker, "portable-pi-api");
-  } finally {
-    await rm(globalRoot, { recursive: true, force: true });
+ test("0.71 facade exposes the public integration surface and no never facades", () => {
+  for (const name of ["upstreamSubagentRuntime", "resolveCurrentSessionId", "registerAgentViaEvents", "readFleetTranscript", "renderFleetTranscript"]) {
+    assert.equal(typeof facade[name], "function", `${name} must be exported`);
+  }
+  for (const name of ["loadConfig", "registerSubagentNotify", "currentCompletionOwnerId", "getArtifactsDir", "discoverAgents"]) {
+    assert.equal(facade[name], undefined, `${name} must remain an unresolved security gap`);
+  }
+  // 用户决策：删除增强层 completion notifier 包装，完成投递+ack 完全依赖上游 0.71 原生 notify
+  //（node_modules/pi-subagents/src/runs/background/notify.js sendCompletion 发送 subagent-notify）。
+  for (const name of ["createCompletionNotifier", "subscribeAsyncComplete"]) {
+    assert.equal(facade[name], undefined, `${name} wrapper is removed; upstream native notify owns completion delivery`);
   }
 });
 
-test("rejects an empty asynchronously resolved npm global root", async () => {
-  await assert.rejects(
-    compat.loadPublicPiModule({ resolveGlobalNodeModules: async () => "   " }),
-    /non-empty npm global module root/,
-  );
+test("session identity projection consumes Host session manager fields", () => {
+  assert.deepEqual(facade.readSessionIdentity({
+    getSessionId: () => "session-1",
+    getSessionFile: () => "/tmp/session.jsonl",
+    getCwd: () => "/tmp/project",
+  }), { sessionId: "session-1", sessionFile: "/tmp/session.jsonl", cwd: "/tmp/project" });
+  assert.equal(facade.resolveCurrentSessionId({ getSessionId: () => "session-1" }), "session-1");
+  assert.throws(() => facade.resolveCurrentSessionId({ getSessionId: () => undefined }), /identity is unavailable/);
 });
 
-test("rejects a non-string asynchronously resolved npm global root", async () => {
-  await assert.rejects(
-    compat.loadPublicPiModule({ resolveGlobalNodeModules: async () => 42 }),
-    /non-empty npm global module root/,
-  );
-});
-
-test("preserves npm stderr when resolving the global root fails", async () => {
-  const resolverError = Object.assign(new Error("npm lookup failed"), { stderr: "fixture npm stderr" });
-  await assert.rejects(
-    compat.loadPublicPiModule({ resolveGlobalNodeModules: async () => { throw resolverError; } }),
-    /could not resolve the npm global module root: fixture npm stderr/,
-  );
-});
-
-test("pinned process-terminal event is declared and emitted by async execution", async () => {
-  const packageRoot = upstreamPackageRoot;
-  const [types, execution] = await Promise.all([
-    readFile(join(packageRoot, "src/shared/types.ts"), "utf8"),
-    readFile(join(packageRoot, "src/runs/background/async-execution.ts"), "utf8"),
-  ]);
-  assert.match(types, /export const SUBAGENT_PROCESS_TERMINAL_EVENT = "subagent:process-terminal";/);
-  assert.match(execution, /ctx\.pi\.events\.emit\(SUBAGENT_PROCESS_TERMINAL_EVENT, proof\)/);
-});
-
-test("installed launch arguments keep project child agents outside fanout hierarchy", async () => {
-  const jiti = createJiti(import.meta.url, { moduleCache: false });
-  const piArgs = await jiti.import(join(upstreamPackageRoot, "src/runs/shared/pi-args.ts"));
-  const rootOwnerExtension = join(enhancedPackageRoot, "child-extensions/root-session-owner.ts");
-  const agents = Object.fromEntries(await Promise.all(["executor"].map(async (name) => {
-    const source = await readFile(join(repoRoot, "pi/agents", `${name}.md`), "utf8");
-    const fields = Object.fromEntries(source.match(/^---\n([\s\S]*?)\n---/)[1].split("\n").map((line) => line.split(/:\s*/, 2)));
-    return [name, fields];
-  })));
-  for (const fields of Object.values(agents)) {
-    const plan = piArgs.resolvePiLaunchToolPlan({ tools: fields.tools?.split(/,\s*/), subagentOnlyExtensions: [rootOwnerExtension], cwd: repoRoot });
-    assert.equal(plan.fanoutAuthorized, false);
-    assert.ok(!plan.declaredBuiltinTools.includes("subagent"));
-    assert.ok(!plan.extensionArgs.some((entry) => entry.includes("fanout-child")));
-  }
-  await access(rootOwnerExtension);
-  const built = piArgs.buildPiArgs({ baseArgs: [], task: "probe", sessionEnabled: false, inheritProjectContext: false, inheritSkills: false, tools: agents.executor.tools.split(/,\s*/), subagentOnlyExtensions: [rootOwnerExtension], cwd: repoRoot });
-  try {
-    assert.equal(built.env.PI_SUBAGENT_FANOUT_CHILD, "0");
-    assert.equal(built.env.PI_SUBAGENT_PARENT_DEPTH || undefined, undefined);
-    assert.equal(built.env.PI_SUBAGENT_PARENT_RUN_ID || undefined, undefined);
-    assert.equal(built.env.PI_SUBAGENT_PARENT_PATH || undefined, undefined);
-    assert.ok(built.args.includes(rootOwnerExtension));
-    assert.ok(built.args.includes("--no-context-files"));
-  } finally { await rm(built.tempDir, { recursive: true, force: true }); }
-});
-
-test("requires upstream fleet transcript, artifact-root, and every public Pi native conversation capability", async () => {
-  assert.equal(typeof compat.assertBrowserTranscriptCompatibility, "function");
-  const imported = [];
-  const capabilities = [
-    "SessionManager", "sessionEntryToContextMessages", "AssistantMessageComponent", "BashExecutionComponent",
-    "BranchSummaryMessageComponent", "CompactionSummaryMessageComponent", "CustomMessageComponent", "parseSkillBlock",
-    "SkillInvocationMessageComponent", "ToolExecutionComponent", "UserMessageComponent",
-  ];
-  const piModule = Object.fromEntries(capabilities.map((capability) => [capability, () => {}]));
-  await compat.assertBrowserTranscriptCompatibility({
-    packageRoot: "/tmp/pi-subagents",
-    piModule,
-    jiti: { import: async (path) => {
-      imported.push(path);
-      return { readFleetTranscript() {}, renderFleetTranscript() {}, getArtifactsDir() {} };
-    } },
-  });
-  assert.deepEqual(imported, [join("/tmp/pi-subagents", "src/compat/pi-subagents-0.62.ts")]);
-
-  for (const capability of capabilities) {
-    const incomplete = { ...piModule };
-    delete incomplete[capability];
-    await assert.rejects(
-      compat.assertBrowserTranscriptCompatibility({
-        packageRoot: "/tmp/pi-subagents", piModule: incomplete,
-        jiti: { import: async () => ({ readFleetTranscript() {}, renderFleetTranscript() {}, getArtifactsDir() {} }) },
-      }),
-      new RegExp(capability),
-    );
-  }
-});
-
-test("checks browser transcript compatibility through the enhanced package compat boundary", async () => {
-  const jiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
-  await compat.assertBrowserTranscriptCompatibility({
-    packageRoot: enhancedPackageRoot,
-    jiti,
-  });
-});
-
-test("loads exactly one enhanced runtime and footer from a local package source", async () => {
-  const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_CODING_WORKSPACE_DIR"];
-  const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
-  for (const name of markers) delete process.env[name];
-  const runtimeMarkers = new Map(markers.map((name) => [name, process.env[name]]));
-
-  // The Host must start inside an isolated Git common-dir: the repository
-  // under test carries a live coordinator whose recorded state root is not
-  // this fixture's temporary workspace dir, so reusing it fails closed.
-  const { root, repository } = await createIsolatedHostRepository("pi-subagents-compat-");
-  const agentDir = join(root, "agent");
-  await mkdir(agentDir);
-  process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
-  let result;
-  try {
-    await writeFile(join(agentDir, "settings.json"), JSON.stringify({
-      packages: [{ source: enhancedPackageRoot }],
-    }));
-    const loader = new DefaultResourceLoader({
-      cwd: repository,
-      agentDir,
-      noSkills: true,
-      noPromptTemplates: true,
-      noThemes: true,
-      noContextFiles: true,
-    });
-    await loader.reload();
-    result = await createAgentSession({
-      cwd: repository,
-      agentDir,
-      resourceLoader: loader,
-      sessionManager: SessionManager.inMemory(repository),
-    });
-    const errors = [];
-
-    await result.session.bindExtensions({
-      mode: "rpc",
-      shutdownHandler() {},
-      onError(error) { errors.push(error); },
-    });
-    assert.equal(process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED, "1");
-    const toolNames = result.session.getAllTools()
-      .map((tool) => tool.name)
-      .filter((name) => name.includes("subagent") || name === "intercom");
-    const subagent = result.session.getToolDefinition("subagent");
-    const loadedExtensions = result.session.resourceLoader.getExtensions().extensions;
-    const notifyRenderers = loadedExtensions
-      .map((extension) => extension.messageRenderers.get("subagent-notify"))
-      .filter((renderer) => typeof renderer === "function");
-    const supervisorRenderers = loadedExtensions
-      .map((extension) => extension.messageRenderers.get("subagent_supervisor_request"))
-      .filter((renderer) => typeof renderer === "function");
-    const controlNoticeRenderers = loadedExtensions
-      .map((extension) => extension.messageRenderers.get("subagent_control_notice"))
-      .filter((renderer) => typeof renderer === "function");
-    const footerOwners = loadedExtensions.filter((extension) => String(extension.path).endsWith("/extensions/custom-footer.ts"));
-    const notifyRenderer = notifyRenderers[0];
-    const controlNoticeRenderer = controlNoticeRenderers[0];
-    const supervisor = result.session.getToolDefinition("subagent_supervisor");
-    const signal = new AbortController().signal;
-    await assert.rejects(
-      supervisor.execute("compat-status", { action: "status" }, signal, undefined, undefined),
-      (error) => error?.code === "SUPERVISOR_TARGET_UNAVAILABLE",
-    );
-    await assert.rejects(
-      supervisor.execute("compat-pending", { action: "pending" }, signal, undefined, undefined),
-      (error) => error?.code === "SUPERVISOR_TARGET_UNAVAILABLE",
-    );
-    const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text };
-    const notifyMessage = {
-      customType: "subagent-notify",
-      content: "Background task completed: **delegate** [Renderer smoke]\n\nfull output\n\nSession file: /tmp/session.jsonl",
-      display: true,
-      details: { titles: ["Renderer smoke"] },
-    };
-    const notifyBefore = structuredClone(notifyMessage);
-    const notifyLines = notifyRenderer(notifyMessage, { expanded: true, outputPad: 0 }, theme)
-      .render(120)
-      .map((line) => line.trimEnd());
-    const statusResult = {
-      content: [{ type: "text", text: "Run: run-1\nState: running\nDir: /tmp/run-1\nLog: /tmp/log" }],
-      details: { mode: "single", results: [], runId: "run-1", asyncDir: "/tmp/run-1" },
-    };
-    const statusBefore = structuredClone(statusResult);
-    const statusLines = subagent.renderResult(
-      statusResult,
-      { expanded: true },
-      theme,
-      { args: { action: "status", id: "run-1" } },
-    ).render(120).map((line) => line.trimEnd());
-    const controlNotice = {
-      customType: "subagent_control_notice",
-      content: "Subagent needs attention: executor\nRun: run-1 step 1\nSignal: executor is waiting for a supervisor reply",
-      display: true,
-      details: {
-        event: { type: "needs_attention", reason: "supervisor_request", runId: "run-1", agent: "executor", index: 0 },
-        source: "async",
-      },
-    };
-    const controlNoticeBefore = structuredClone(controlNotice);
-    const controlNoticeLines = controlNoticeRenderer(controlNotice, { expanded: true, outputPad: 0 }, theme).render(120);
-    const replyArgs = { action: "reply", replyTo: "request-1", message: "结束本 run 为 BLOCKED。" };
-    const replyResult = {
-      content: [{ type: "text", text: "Replied to supervisor request request-1." }],
-      details: { replyTo: "request-1", runId: "reply-run-1", agent: "executor" },
-    };
-    getTitleRegistry().remember("reply-run-1", "物化 spec 并完成 T6", "executor");
-    const replyArgsBefore = structuredClone(replyArgs);
-    const replyResultBefore = structuredClone(replyResult);
-
-    assert.ok(errors.every((error) => error.error === "SUPERVISOR_TARGET_UNAVAILABLE"));
-    assert.equal(loadedExtensions.length, 2);
-    assert.equal(footerOwners.length, 1);
-    assert.equal(notifyRenderers.length, 1);
-    assert.equal(supervisorRenderers.length, 1);
-    assert.equal(controlNoticeRenderers.length, 1);
-    assert.deepEqual(toolNames, ["subagent", "subagent_worktree", "subagent_supervisor"]);
-    assert.equal(typeof subagent.renderResult, "function");
-    assert.equal(typeof notifyRenderer, "function");
-    assert.equal(typeof controlNoticeRenderer, "function");
-    assert.equal(typeof supervisor.renderCall, "function");
-    assert.equal(typeof supervisor.renderResult, "function");
-    assert.deepEqual(notifyLines, ["", " ✓ Renderer smoke · completed", ""]);
-    assert.deepEqual(statusLines, ["Status: running · run: run-1"]);
-    assert.deepEqual(controlNoticeLines, []);
-    assert.deepEqual(supervisor.renderCall(replyArgs, theme, { args: replyArgs }).render(120), []);
-    assert.notDeepEqual(supervisor.renderCall({ action: "status" }, theme, { args: { action: "status" } }).render(120), []);
-    assert.deepEqual(
-      supervisor.renderResult(replyResult, { expanded: true }, theme, { args: replyArgs }).render(120).map((line) => line.trimEnd()),
-      ["→ [reply] (executor) 物化 spec 并完成 T6：", "结束本 run 为 BLOCKED。"],
-    );
-    assert.deepEqual(notifyMessage, notifyBefore);
-    assert.deepEqual(statusResult, statusBefore);
-    assert.deepEqual(controlNotice, controlNoticeBefore);
-    assert.deepEqual(replyArgs, replyArgsBefore);
-    assert.deepEqual(replyResult, replyResultBefore);
-    assert.doesNotMatch(supervisor.description, /pi-subagents|upstream/i);
-  } finally {
-    try {
-      if (result) {
-        try {
-          await result.session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });
-          assert.equal(process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED, runtimeMarkers.get("PI_ROOT_SUBAGENT_BROKER_ENABLED"));
-        } finally {
-          result.session.dispose();
-        }
-      }
-    } finally {
-      try {
-        await rm(root, { recursive: true, force: true });
-      } finally {
-        for (const [name, value] of previousMarkers) {
-          if (value === undefined) delete process.env[name];
-          else process.env[name] = value;
-        }
-      }
-    }
-  }
-});
-
-test("accepts the flat runtime compatibility report", () => {
-  assert.deepEqual(evaluate(compatibleReport), { ok: true, failures: [] });
-});
-
-test("accepts approved runtime versions and rejects unapproved patch releases", () => {
-  for (const version of ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4"]) {
-    assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }), { ok: true, failures: [] });
-  }
-  for (const version of ["0.83.1", "0.84.0"]) {
-    assert.deepEqual(evaluate({ ...compatibleReport, piVersion: version }).failures, [`unsupported Pi version: ${version}`]);
-  }
-  assert.deepEqual(evaluate({ ...compatibleReport, version: "0.35.1" }).failures, ["unexpected pi-subagents version: 0.35.1"]);
-  assert.deepEqual(evaluate({ ...compatibleReport, typeboxVersion: "1.1.24" }).failures, ["unexpected typebox version: 1.1.24"]);
-});
-
-test("requires TypeBox compiler resolution from pi-subagents", () => {
-  assert.deepEqual(evaluate({ ...compatibleReport, typeboxCompileResolvable: false }).failures, [
-    "typebox/compile is not resolvable from pi-subagents",
-  ]);
-});
-
-test("requires RPC v1 methods and existing lifecycle events", () => {
-  assert.deepEqual(evaluate({ ...compatibleReport, rpcVersion: 2 }).failures, ["unexpected RPC version: 2"]);
-  assert.deepEqual(evaluate({ ...compatibleReport, methods: compatibleReport.methods.filter((method) => method !== "resume") }).failures, [
-    "missing RPC method: resume",
-  ]);
-  assert.deepEqual(evaluate({ ...compatibleReport, events: compatibleReport.events.filter((event) => event !== "subagent:async-started") }).failures, [
-    "missing lifecycle event: subagent:async-started",
-  ]);
-  assert.deepEqual(evaluate({ ...compatibleReport, events: compatibleReport.events.filter((event) => event !== "subagent:async-complete") }).failures, [
-    "missing lifecycle event: subagent:async-complete",
-  ]);
-});
-
-test("requires the process-terminal lifecycle event", () => {
-  assert.deepEqual(evaluate({
-    ...compatibleReport,
-    events: compatibleReport.events.filter((event) => event !== "subagent:process-terminal"),
-  }).failures, ["missing lifecycle event: subagent:process-terminal"]);
-});
-
-for (const [field, value, message] of [
-  ["rootBrokerReady", false, "Root subagent broker is not ready"],
-  ["flatRuntimeDepth", 2, "unexpected flat runtime depth: 2"],
-  ["childAdapterRegistered", false, "project child adapter is not registered"],
-  ["noFanoutExtension", false, "fanout-child extension is active"],
-]) {
-  test(`requires flat runtime boundary: ${field}`, () => {
-    assert.deepEqual(evaluate({ ...compatibleReport, [field]: value }).failures, [message]);
-  });
-}
-
-test("requires Executor/runtime boundaries", () => {
-  const requirements = [
-    ["exactCwd", "Executor did not use the authorized cwd"],
-    ["worktreeDisabled", "pi-subagents created an unauthorized worktree"],
-    ["waitWakesOnCompletion", "wait did not wake on completion"],
-    ["rpcStatusFindsActiveRun", "RPC status did not find the active Executor"],
-    ["statusArtifactObservesSupervisorBlock", "Status artifact did not observe the Supervisor block"],
-    ["supervisorRoundTrip", "Supervisor request/reply failed"],
-    ["executorFanoutBlocked", "Executor can dispatch nested subagents"],
-  ];
-
-  for (const [field, message] of requirements) {
-    assert.deepEqual(evaluate({ ...compatibleReport, [field]: false }).failures, [message], field);
-  }
-});
-
-test("rejects nested event files on the executor path", () => {
-  assert.deepEqual(evaluate({ ...compatibleReport, nestedEventFiles: 1 }).failures, ["unexpected nested event files: 1"]);
-});
-
-test("retires standalone compatibility environment API", () => {
-  const retiredExport = ["build", "Standalone", "RuntimeEnv"].join("");
-  assert.equal(compat[retiredExport], undefined);
-  assert.equal(typeof compat.buildTopLevelRuntimeEnv, "function");
-});
-
-test("builds a top-level runtime environment without inherited child markers", () => {
-  assert.equal(typeof compat.buildTopLevelRuntimeEnv, "function");
-  assert.deepEqual(compat.buildTopLevelRuntimeEnv({
-    PATH: "/test/bin",
-    PI_SUBAGENT_PARENT_SESSION: "parent-session",
-  }), { PATH: "/test/bin" });
-  assert.throws(() => compat.buildTopLevelRuntimeEnv({ PI_SUBAGENT_CHILD: "1" }), /PI_SUBAGENT_CHILD/);
-  assert.throws(() => compat.buildTopLevelRuntimeEnv({ PI_SUBAGENT_FANOUT_CHILD: "1" }), /PI_SUBAGENT_FANOUT_CHILD/);
-});
-
-test("flat runtime compat probe source retires standalone boundaries", async () => {
-  const source = await readFile(join(repoRoot, "scripts/probes/pi-subagents-compat.ts"), "utf8");
-  for (const removedName of [
-    ["build", "Standalone", "RuntimeEnv"],
-    ["standalone", "Root", "Service"],
-    ["standalone", "No", "Child", "Env"],
-    ["standalone", "Session", "Rebased"],
-  ].map((parts) => parts.join(""))) {
-    assert.doesNotMatch(source, new RegExp(`\\b${removedName}\\b`));
-  }
-  assert.match(source, /\bbuildTopLevelRuntimeEnv\b/);
-  for (const flatField of [
-    "rootBrokerReady",
-    "flatRuntimeDepth",
-    "childAdapterRegistered",
-    "noFanoutExtension",
-  ]) {
-    assert.match(source, new RegExp(`\\b${flatField}\\b`));
-  }
-});
-
-test("retires the standalone top-level runtime dependency install command", async () => {
-  const setup = await import("../scripts/setup-subagent-runtime-deps.ts");
-  assert.equal(setup.buildSubagentRuntimeInstallCommand, undefined);
-});
-
-test("uninstalls retired standalone dependencies before coordinating enhanced runtime and scheduler dependencies", async () => {
-  const setup = await import("../scripts/setup-subagent-runtime-deps.ts");
-  assert.equal(typeof setup.installSubagentRuntimeDependencies, "function");
-  const calls = [];
-  const result = await setup.installSubagentRuntimeDependencies({
-    enhancedPackageRoot: "/tmp/pi-subagents-enhanced",
-    piNpmDir: "/tmp/pi/npm",
-    env: { PATH: "/test/bin" },
-    run: async (...args) => calls.push(args),
-  });
-
-  assert.deepEqual(calls, [
-    [
-      "npm",
-      ["--no-audit", "--no-fund", "uninstall", "--prefix", "/tmp/pi/npm", "@juicesharp/rpiv-todo", "pi-subagents", "typebox"],
-      { env: { PATH: "/test/bin" } },
-    ],
-    [
-      "npm",
-      ["--no-audit", "--no-fund", "install", "--prefix", "/tmp/pi-subagents-enhanced", "--ignore-scripts", "--omit=peer"],
-      { env: { PATH: "/test/bin" } },
-    ],
-    ["npm", ["--no-audit", "--no-fund", "--prefix", "/tmp/pi-subagents-enhanced", "run", "setup:runtime"], { env: { PATH: "/test/bin" } }],
-    ["npm", ["--no-audit", "--no-fund", "--prefix", "/tmp/pi-subagents-enhanced", "run", "verify:package"], { env: { PATH: "/test/bin" } }],
-    [
-      "npm",
-      [
-        "--no-audit", "--no-fund", "install", "--prefix", "/tmp/pi/npm", "--include=peer", "--save-exact",
-        "@amaster.ai/pi-task-scheduler@0.1.9", "@amaster.ai/pi-shared@0.1.9", "croner@10.0.1",
-      ],
-      { env: { PATH: "/test/bin" } },
-    ],
-    [
-      "npm",
-      ["--no-audit", "--no-fund", "install", "--prefix", "/tmp/pi/npm", "--no-save", "--save-exact", "typebox@1.1.38"],
-      { env: { PATH: "/test/bin" } },
-    ],
-  ]);
-  assert.deepEqual(result, { piNpmDir: "/tmp/pi/npm", enhancedPackageRoot: "/tmp/pi-subagents-enhanced" });
-});
-
-function createEvents() {
-  const listeners = new Map();
+test("admission is exactly the repository profiles and rejects every other source", () => {
   const emitted = [];
-
-  return {
-    emitted,
-    on(channel, listener) {
-      const channelListeners = listeners.get(channel) ?? new Set();
-      channelListeners.add(listener);
-      listeners.set(channel, channelListeners);
-      return () => channelListeners.delete(listener);
-    },
-    emit(channel, value) {
-      emitted.push({ channel, value });
-      for (const listener of listeners.get(channel) ?? []) listener(value);
-    },
-    listenerCount(channel) {
-      return listeners.get(channel)?.size ?? 0;
-    },
+  const events = {
+    emit(name, payload) { emitted.push({ name, payload }); },
+    on() { throw new Error("runtime registration observation is forbidden"); },
   };
-}
+  const admission = facade.registerBuiltinAgentsViaEvents({ pi: { events }, agentDir: join(process.cwd(), "pi") });
+  const discovered = admission.discoverAgents(join(tmpdir(), "project-without-repository-agents"), "both");
+  assert.deepEqual(discovered.agents.map((agent) => agent.name), ["delegate", "executor", "reviewer"]);
+  assert.equal(discovered.admission, "repository-configured");
+  assert.equal(emitted.length, 0, "repository profiles are configured, not runtime-registered");
+  for (const requestedName of ["probe-worker", "project-worker", "runtime-worker"]) {
+    assert.throws(
+      () => admission.discoverAgents("/repo", "both", undefined, requestedName),
+      (error) => error?.code === "AGENT_ADMISSION_UNAVAILABLE" && error.message === "AGENT_ADMISSION_UNAVAILABLE",
+    );
+  }
+  admission.dispose();
+});
 
-test("subagents RPC subscribes before emitting and resolves a successful reply", async () => {
-  const events = createEvents();
-  const client = createSubagentsRpcClient(events, { randomUUID: () => "request-1" });
-  const replyChannel = "subagents:rpc:v1:reply:request-1";
-
-  const request = client.call("ping");
-
-  assert.equal(events.listenerCount(replyChannel), 1);
-  assert.deepEqual(events.emitted, [{
-    channel: "subagents:rpc:v1:request",
-    value: { version: 1, requestId: "request-1", method: "ping", params: {} },
-  }]);
-  events.emit(replyChannel, {
-    version: 1,
-    requestId: "request-1",
-    success: true,
-    data: { version: 1, methods: ["ping"], capabilities: {} },
+test("agent registration is wired through the public registerAgentViaEvents API", () => {
+  const emitted = [];
+  const events = { emit(name, payload) {
+    emitted.push({ name, payload });
+    payload.result = { ok: true, registration: { dispose() {} } };
+  } };
+  const registration = facade.registerAgentViaEvents({
+    pi: { events },
+    name: "fixture",
+    definition: { description: "fixture", systemPrompt: "fixture" },
   });
-
-  assert.deepEqual(await request, { version: 1, methods: ["ping"], capabilities: {} });
-  assert.equal(events.listenerCount(replyChannel), 0);
+  assert.equal(typeof registration.dispose, "function");
+  assert.equal(emitted[0].name, "pi-subagents:runtime-agent-register:v1");
+  assert.equal(emitted[0].payload.version, 1);
 });
 
-test("subagents RPC default UUID generator keeps the Crypto receiver", async () => {
-  const events = createEvents();
-  const emit = events.emit.bind(events);
-  events.emit = (channel, value) => {
-    emit(channel, value);
-    if (channel !== "subagents:rpc:v1:request") return;
-    emit(`subagents:rpc:v1:reply:${value.requestId}`, {
-      version: 1,
-      requestId: value.requestId,
-      success: true,
-      data: { version: 1 },
-    });
-  };
-
-  const result = await createSubagentsRpcClient(events).call("ping");
-
-  assert.deepEqual(result, { version: 1 });
-  assert.match(events.emitted[0].value.requestId, /^[0-9a-f-]{36}$/);
+test("fleet transcript facade parses and renders a trusted transcript fixture", async () => {
+  const root = await mkdtemp(join(tmpdir(), "t5-transcript-"));
+  const file = join(root, "session.jsonl");
+  try {
+    await writeFile(file, [
+      JSON.stringify({ role: "user", content: "Inspect the fixture" }),
+      JSON.stringify({ role: "assistant", content: "Fixture inspected" }),
+      JSON.stringify({ role: "tool", name: "read", output: "ok", status: "complete" }),
+    ].join("\n"));
+    const transcript = facade.readFleetTranscript(file, { trustedRoots: [root] });
+    assert.equal(transcript.warning, undefined);
+    assert.deepEqual(transcript.events.map((event) => event.kind), ["user", "assistant", "tool"]);
+    const lines = facade.renderFleetTranscript(transcript, 120, theme, {});
+    assert.ok(lines.some((line) => line.includes("Fixture inspected")));
+    assert.ok(lines.some((line) => line.includes("read")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
-test("subagents RPC rejects an error reply and unsubscribes", async () => {
-  const events = createEvents();
-  const client = createSubagentsRpcClient(events, { randomUUID: () => "request-2" });
-  const replyChannel = "subagents:rpc:v1:reply:request-2";
-  const request = client.call("ping");
-
-  events.emit(replyChannel, {
-    version: 1,
-    requestId: "request-2",
-    success: false,
-    error: { code: "unavailable", message: "unavailable" },
+test("facade import is loadable through the enhanced package compatibility probe", async () => {
+  await assertBrowserTranscriptCompatibility({
+    packageRoot: join(process.cwd(), "packages/pi-subagents-enhanced"),
+    jiti: { import: async (specifier) => import(specifier) },
   });
-
-  await assert.rejects(request, /unavailable/);
-  assert.equal(events.listenerCount(replyChannel), 0);
 });
 
-test("subagents RPC rejects replies with a mismatched version or request id", async () => {
-  const events = createEvents();
-  const client = createSubagentsRpcClient(events, { randomUUID: () => "request-4" });
-  const replyChannel = "subagents:rpc:v1:reply:request-4";
-  const request = client.call("ping");
-
-  events.emit(replyChannel, { version: 2, requestId: "request-4", success: true, data: {} });
-
-  await assert.rejects(request, /version/);
-  assert.equal(events.listenerCount(replyChannel), 0);
-});
-
-test("subagents RPC times out and unsubscribes", async () => {
-  const events = createEvents();
-  const client = createSubagentsRpcClient(events, { randomUUID: () => "request-3", timeoutMs: 1 });
-  const replyChannel = "subagents:rpc:v1:reply:request-3";
-
-  await assert.rejects(client.call("ping"), /timed out/);
-  assert.equal(events.listenerCount(replyChannel), 0);
+test("public Pi module loader rejects an empty module root", async () => {
+  await assert.rejects(loadPublicPiModule({ resolveGlobalNodeModules: async () => "   " }), /non-empty npm global module root/);
 });

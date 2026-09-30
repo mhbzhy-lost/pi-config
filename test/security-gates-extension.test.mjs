@@ -56,7 +56,7 @@ test("tool_call keeps ctx.cwd as shell-policy workspaceRoot while using a valid 
 test("tool_call blocks an invalid declared bash cwd", async () => {
   const handlers = setup();
   const result = await handlers.get("tool_call")(
-    { toolName: "bash", input: { command: "pwd", cwd: "/Users/shared" } },
+    { toolName: "bash", input: { command: "pwd", cwd: "/Users/shared/pi-config-nonexistent" } },
     { cwd: workspace },
   );
 

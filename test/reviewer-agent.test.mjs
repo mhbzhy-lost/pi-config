@@ -8,26 +8,8 @@ import { resolveModelSelection } from "../packages/pi-subagents-enhanced/src/sub
 import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 
 const { jiti } = await loadPiTestRuntime(import.meta.url);
-const { discoverAgents } = await jiti.import("../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.62.ts");
 
-test("reviewer discovery selects the requested model and thinking without privileged authorization", async () => {
-  const root = await mkdtemp(join(tmpdir(), "reviewer-profile-"));
-  try {
-    await mkdir(join(root, ".pi", "agents"), { recursive: true });
-    await copyFile(new URL("../pi/agents/reviewer.md", import.meta.url), join(root, ".pi", "agents", "reviewer.md"));
-    const reviewer = discoverAgents(root, "project").agents.find((agent) => agent.name === "reviewer");
-    assert.ok(reviewer);
-    assert.equal(reviewer.thinking, "xhigh");
-    const selection = resolveModelSelection({ agentName: reviewer.name, agentModels: reviewer.models, requestedModel: "gpt-6-astra", availableModels: [{ provider: "openai-codex", id: "gpt-6-astra" }, { provider: "other", id: "gpt-6-astra" }] });
-    assert.equal(selection.model, "openai-codex/gpt-6-astra");
-    assert.equal(selection.source, "agent-candidates");
-    assert.throws(() => resolveModelSelection({ agentName: reviewer.name, agentModels: reviewer.models, requestedModel: "gpt-6-astra", availableModels: [{ provider: "other", id: "gpt-6-astra" }] }), /available/i);
-    const authorization = createRunAuthorization({ kind: "generic", binding: { runId: "review", asyncDir: root, sessionId: "root", pid: process.pid, agentProfile: reviewer.name }, goal: null });
-    assert.deepEqual(authorization.capabilities, []);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+test.todo("reviewer admission/discovery moves to the public registerAgent API (T7-T9 follow-up)");
 
 test("reviewer and executor profiles keep configuration out of their operating instructions", async () => {
   const reviewer = await readFile(new URL("../pi/agents/reviewer.md", import.meta.url), "utf8");
@@ -35,8 +17,8 @@ test("reviewer and executor profiles keep configuration out of their operating i
   const reviewerBody = reviewer.split("---\n").at(-1);
   const executorBody = executor.split("---\n").at(-1);
 
-  assert.match(reviewer, /^models:\n  - openai-codex\/gpt-6-astra\n  - codex-pool\/gpt-5\.6-sol\n  - qoder-pool\/GLM-5\.3-0\.6x\n  - zai-coding-cn\/glm-5\.3\nthinking: xhigh/m);
-  assert.match(executor, /^models:\n  - codex-pool\/gpt-5\.6-terra\n  - openai-codex\/gpt-5\.6-terra\n  - qoder-pool\/GLM-5\.3-Flash-0\.1x\n  - qoder-pool\/Qwen3\.8-Flash-0\.04x\n  - zai-coding-cn\/glm-5\.3-flash\n  - codex-pool\/gpt-5\.6-luna\n  - openai-codex\/gpt-5\.6-luna\nthinking: medium/m);
+  assert.match(reviewer, /^models:\n  - codex-pool\/gpt-6-astra\n  - openai-codex\/gpt-6-astra\n  - codex-pool\/gpt-6-sol\n  - qoder-pool\/GLM-5\.3-0\.6x\n  - zai-coding-cn\/glm-5\.3\nthinking: xhigh/m);
+  assert.match(executor, /^models:\n  - codex-pool\/gpt-6-luna\n  - openai-codex\/gpt-6-luna\n  - qoder-pool\/GLM-5\.3-Flash-0\.1x\n  - qoder-pool\/Qwen3\.8-Flash-0\.04x\n  - zai-coding-cn\/glm-5\.3-flash\nthinking: medium/m);
   assert.doesNotMatch(executor, /^\s*- deepseek\//m);
   const subagentConfig = JSON.parse(await readFile(new URL("../pi/extensions/subagent/config.json", import.meta.url), "utf8"));
   assert.deepEqual(subagentConfig.providerBlacklist, ["deepseek"]);

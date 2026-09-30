@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -36,6 +36,7 @@ test("persisted root session shares its broker registry with an independent Jiti
   const socket = brokerSocketPath(sessionId);
   try {
     await mkdir(agentDir);
+    await cp(path.join(repoRoot, "pi", "agents"), path.join(agentDir, "agents"), { recursive: true });
     const result = spawnSync(piBinary, [
       "--mode", "rpc", "--session-dir", sessions, "--session-id", sessionId,
       "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
@@ -72,6 +73,7 @@ test("persisted root session shares its broker registry with an independent Jiti
     assert.ok(facts.activeToolNames.includes("subagent"), JSON.stringify(facts));
     assert.equal(facts.error, null, JSON.stringify(facts));
     assert.equal(facts.brokerRootSessionId, sessionId, JSON.stringify(facts));
+    assert.equal(facts.brokerLifecycleSessionId, facts.getSessionFile, JSON.stringify(facts));
     assert.equal(facts.brokerServerExists, true, JSON.stringify(facts));
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });

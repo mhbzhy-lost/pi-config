@@ -34,11 +34,10 @@ test("runtime dependency setup rejects a package-local cross-version upgrade fro
       piNpmDir,
       env: { PI_ROOT_SUBAGENT_BROKER_ENABLED: "1" },
       async run(...args) { calls.push(args); },
-      patchSubagentRuntime: async () => {},
     }),
     (error) => error?.code === "SUBAGENT_RUNTIME_LIVE_UPGRADE"
       && /0\.45\.2/.test(error.message)
-      && /0\.62\.0/.test(error.message)
+      && /0\.71\.0/.test(error.message)
       && /fresh Host/.test(error.message),
   );
   assert.deepEqual(calls, []);
@@ -49,7 +48,7 @@ test("runtime upgrade preflight allows an external terminal and an active same-v
   const packageJsonPath = join(enhancedPackageRoot, "node_modules", "pi-subagents", "package.json");
   await assert.doesNotReject(() => assertSafeSubagentRuntimeUpgrade({ enhancedPackageRoot, env: {} }));
 
-  await writeFile(packageJsonPath, JSON.stringify({ name: "pi-subagents", version: "0.62.0" }));
+  await writeFile(packageJsonPath, JSON.stringify({ name: "pi-subagents", version: "0.71.0" }));
   await assert.doesNotReject(() => assertSafeSubagentRuntimeUpgrade({
     enhancedPackageRoot,
     env: { PI_ROOT_SUBAGENT_BROKER_ENABLED: "1" },
@@ -57,7 +56,7 @@ test("runtime upgrade preflight allows an external terminal and an active same-v
 });
 
 test("clean runtime setup installs the scheduler ESM peer at its Node resolution host", async (t) => {
-  const enhancedPackageRoot = await enhancedFixture(t, "0.62.0");
+  const enhancedPackageRoot = await enhancedFixture(t, "0.71.0");
   const piNpmDir = await mkdtemp(join(tmpdir(), "subagent-scheduler-clean-"));
   t.after(() => rm(piNpmDir, { recursive: true, force: true }));
 
@@ -76,7 +75,7 @@ test("clean runtime setup installs the scheduler ESM peer at its Node resolution
 });
 
 test("runtime dependency setup coordinates the enhanced package and scheduler without installing standalone upstream", async (t) => {
-  const enhancedPackageRoot = await enhancedFixture(t, "0.62.0");
+  const enhancedPackageRoot = await enhancedFixture(t, "0.71.0");
   const piNpmDir = await mkdtemp(join(tmpdir(), "subagent-scheduler-"));
   t.after(() => rm(piNpmDir, { recursive: true, force: true }));
   const calls = [];
@@ -86,7 +85,6 @@ test("runtime dependency setup coordinates the enhanced package and scheduler wi
     piNpmDir,
     env: {},
     async run(command, args) { calls.push([command, ...args]); },
-    patchSubagentRuntime: async () => {},
   });
 
   assert.deepEqual(result, { piNpmDir, enhancedPackageRoot });

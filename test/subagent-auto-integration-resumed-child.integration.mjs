@@ -62,6 +62,17 @@ async function startScenario(t, { tasks, originAdvance = false, faultControl }) 
   const modelServer = await startScriptedModelServer({ tasks });
   const configRoot = join(root, "config");
   await mkdir(join(configRoot, "extensions"), { recursive: true });
+  // 生产接线要求 PI_CODING_AGENT_DIR/agents 存在 delegate/executor/reviewer 三个
+  // 内置 profile：registerBuiltinAgentsViaEvents 在扩展加载期同步读取，缺文件即
+  // ENOENT 使 Host 退出 1。注意不能直接复制 pi/agents 生产 profile：其 models 链
+  // 在本测试的 fake 目录下全部不可用，resolveSpawnModel 的 declared-chain 预检
+  // （resolveModelCandidates）会对带 model 的派发直接抛 MODEL_NOT_AVAILABLE；
+  // 因此采用与 fake catalog 兼容的最小 profile（等价于 triage 第 2 节诊断用的
+  // variant C wrapper 形态，见 var/upgrade/orphaned-integration-triage.md）。
+  await mkdir(join(configRoot, "agents"), { recursive: true });
+  for (const name of ["delegate", "executor", "reviewer"]) {
+    await writeFile(join(configRoot, "agents", `${name}.md`), `---\nname: ${name}\ndescription: R8 scripted builtin ${name} for the recovery resume fixture\nmodel: fake/deterministic\n---\nR8 scripted builtin ${name} profile for the recovery resume fixture.\n`);
+  }
   await writeFile(join(configRoot, "settings.json"), "{}\n");
   await writeFile(join(configRoot, "auth.json"), JSON.stringify({ fake: { type: "api_key", key: "r8-recovery-test" } }, null, 2));
   await writeFile(join(configRoot, "models.json"), JSON.stringify({
@@ -109,7 +120,14 @@ async function startScenario(t, { tasks, originAdvance = false, faultControl }) 
   await server.listen();
 
   const environment = buildAcceptanceEnvironment(process.env, stateRoot, configRoot);
-  const host = new AcceptanceRpcHost(piBinary, ["--mode", "rpc", "--no-session", "--no-extensions", "--approve", "-e", runtimePath, "--provider", "fake", "--model", "fake/deterministic"], {
+  // spawn 形态必须携带真实 session：0.71 能力协商契约（rpc-client.ts 的
+  // negotiateCapabilities，fail closed）要求 ping 投影的 session.sessionId/
+  // sessionFile/cwd 三字段非空；--no-session 下 sessionFile=null，所有派发在
+  // spawn 前即 CAPABILITY_NEGOTIATION_FAILED; missing: session.sessionFile。
+  // 真实 session 环境由 buildAcceptanceEnvironment 已注入的
+  // PI_CODING_AGENT_SESSION_DIR=stateRoot/sessions 提供，Host 自建会话文件
+  // （绿先例 subagent-completion-notification 同一形态，无 --no-session）。
+  const host = new AcceptanceRpcHost(piBinary, ["--mode", "rpc", "--no-extensions", "--approve", "-e", runtimePath, "--provider", "fake", "--model", "fake/deterministic"], {
     cwd: repository,
     env: {
       ...environment,

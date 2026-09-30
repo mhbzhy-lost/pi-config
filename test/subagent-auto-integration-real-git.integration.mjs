@@ -245,7 +245,6 @@ function realDispatchCodingContract(originRoot) {
     agent: "executor",
     risk: "normal",
     objective: "Prove the real Auto Integration allocation path creates a v2 ledger and settles its terminal proof.",
-    workflow: { mode: "tdd" },
     requirements: ["Commit the allowed change."],
     context: { knownFacts: [], decisions: [], relevantFiles: ["shared.txt"] },
     boundaries: { writePaths: ["shared.txt"], excludedWork: [], forbiddenActions: [] },

@@ -1,4 +1,18 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+
+// 0.87.1 起 provider 收到 TranscriptContext（无 context.tools）；工具经 system 消息的
+// toolsAdded/toolsRemoved 增量解析。此处理内联最小解析（同上游
+// pi-ai/dist/utils/transcript.js 的 getCurrentTools），避免跨版本 subpath import
+// 在旧加载器（全局 0.85.1 jiti）下不可解析。
+function resolveTranscriptTools(messages) {
+  const tools = new Map();
+  for (const message of messages) {
+    if (message?.role !== "system") continue;
+    for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+    for (const tool of message.toolsAdded ?? []) tools.set(tool.name, tool);
+  }
+  return [...tools.values()];
+}
 import {
   decideDeterministicTurn,
   deterministicExecutorAcceptanceReport,
@@ -19,11 +33,23 @@ export default function deterministicProviderExtension(pi) {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 4096,
       maxTokens: 256,
-    }],
+    },
+    // repository profile（如 executor 声明 thinking: medium）会让上游拼接
+    // model:thinking 后缀（applyThinkingSuffix）；为这些衍生 id 提供注册，
+    // 避免模型解析失败。行为逻辑不区分 id。
+    ...["minimal", "low", "medium", "high", "xhigh", "max"].map((level) => ({
+      id: `deterministic:${level}`,
+      name: `Deterministic ${level}`,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 256,
+    }))],
     streamSimple(model, context) {
       const stream = createAssistantMessageEventStream();
       const messages = context?.messages ?? [];
-      const tools = context?.tools ?? [];
+      // mock/旧式调用仍直接传 tools 字段；官方 0.87.1 路径只传 transcript，两者兼容
+      const tools = Array.isArray(context?.tools) ? context.tools : resolveTranscriptTools(messages);
       const toolNames = tools.map((tool) => tool.name);
       const toolResults = messages.filter((message) => message?.role === "toolResult");
       const userText = messages.filter((message) => message?.role === "user").at(-1)?.content

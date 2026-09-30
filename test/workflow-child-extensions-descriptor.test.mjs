@@ -1,47 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
+import { realpath } from "node:fs/promises";
+const { registerRequiredChildExtensions } = await import("../packages/pi-subagents-enhanced/node_modules/pi-subagents/src/api/required-child-extensions.js");
 
-const { createJiti } = await import(piHostJitiUrl);
-const jiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
-const { patchWorkflowChildExtensionsSource, WORKFLOW_CHILD_EXTENSIONS_PATCH_VERSION } = await jiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/ordered-models-runtime-patch.ts");
+test("public required-child-extensions registration preserves an immutable launch snapshot", async () => {
+  const extensionPath = await realpath(new URL("../packages/pi-subagents-enhanced/child-extensions/root-session-owner.ts", import.meta.url));
+  const stableSessionId = `descriptor-test-${Date.now()}`;
+  const stable = registerRequiredChildExtensions({
+    sessionId: stableSessionId,
+    extensions: [{ id: "root-session-owner", path: extensionPath }],
+  });
+  try {
+    assert.equal(typeof stable.dispose, "function");
+  } finally {
+    stable.dispose();
+  }
+ });
 
-// v1 已应用（marker 存在）但 recovery descriptor 仍读 recoveryAgentConfig：
-// resumed child 丢失 workflow 注入的 managed integration child 扩展。
-const v1PatchedExecution = [
-  "\tconst toolPlan = resolvePiLaunchToolPlan({",
-  "\t\ttools: agentConfig.tools,",
-  "\t});",
-  "\t// pi-config patch: workflow-child-extensions.v1",
-  "\tconst workflowSubagentOnlyExtensions = params.subagentOnlyExtensions;",
-  "\tconst effectiveSubagentOnlyExtensions = [...new Set([",
-  "\t\t...(agentConfig.subagentOnlyExtensions ?? []),",
-  "\t\t...(workflowSubagentOnlyExtensions ?? []),",
-  "\t])];",
-  "\tconst recoveryDescriptor: SteeringRecoveryDescriptor = {",
-  "\t\tversion: 1,",
-  "\t\t...(recoveryAgentConfig.subagentOnlyExtensions ? { subagentOnlyExtensions: [...recoveryAgentConfig.subagentOnlyExtensions] } : {}),",
-  "\t};",
-].join("\n");
-
-test("v2 patch 使 recovery descriptor 捕获 effective workflow child extensions", () => {
-  const source = patchWorkflowChildExtensionsSource(v1PatchedExecution, "execution-fixture.ts");
-  assert.match(source, /workflow-child-extensions\.v2/);
-  assert.doesNotMatch(source, /recoveryAgentConfig\.subagentOnlyExtensions \? \{ subagentOnlyExtensions: \[\.\.\.recoveryAgentConfig\.subagentOnlyExtensions\] \} : \{\}/);
-  assert.match(source, /effectiveSubagentOnlyExtensions\?\.length \? \{ subagentOnlyExtensions: \[\.\.\.new Set\(\[\.\.\.\(recoveryAgentConfig\.subagentOnlyExtensions \?\? \[\]\), \.\.\.\(effectiveSubagentOnlyExtensions \?\? \[\]\)\]\)\] \} : \{\}/);
-  assert.equal(source.match(/workflow-child-extensions\.v2/g)?.length, 1, "v2 marker 只出现一次");
-});
-
-test("v2 patch 幂等：已含 v2 marker 的 source 不再改写", () => {
-  const once = patchWorkflowChildExtensionsSource(v1PatchedExecution, "execution-fixture.ts");
-  const twice = patchWorkflowChildExtensionsSource(once, "execution-fixture.ts");
-  assert.equal(twice, once);
-});
-
-test("v2 patch 拒绝缺失锚点的 source（防静默失配）", () => {
-  assert.throws(() => patchWorkflowChildExtensionsSource("const x = 1;\n", "broken-fixture.ts"), /expected one patch anchor/);
-});
-
-test("patch 版本号推进到 v2", () => {
-  assert.equal(WORKFLOW_CHILD_EXTENSIONS_PATCH_VERSION, "workflow-child-extensions.v2");
+test("public required-child-extensions registration rejects duplicate IDs", async () => {
+  const extensionPath = await realpath(new URL("../packages/pi-subagents-enhanced/child-extensions/root-session-owner.ts", import.meta.url));
+  assert.throws(() => registerRequiredChildExtensions({
+    sessionId: "descriptor-test-duplicate",
+    extensions: [
+      { id: "root-session-owner", path: extensionPath },
+      { id: "root-session-owner", path: extensionPath },
+    ],
+  }), /duplicated/i);
 });

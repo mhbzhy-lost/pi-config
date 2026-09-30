@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -222,7 +222,7 @@ export function dispatchProbeSource() {
   `;
 }
 
-test("project typed dispatch binds the real 0.62.0 workflow leaf to the Root Broker", { skip: !piBinary }, async () => {
+test("project typed dispatch binds the real 0.71.0 workflow leaf to the Root Broker", { skip: !piBinary }, async () => {
   assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
   const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
@@ -241,8 +241,7 @@ test("project typed dispatch binds the real 0.62.0 workflow leaf to the Root Bro
       risk: "normal",
       objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
       requirements: ["Use the project-owned typed facade."],
-      workflow: { mode: "existing-tests", reason: "This integration verifies the installed workflow transport." },
-      context: { knownFacts: ["pi-subagents is pinned to 0.62.0."], decisions: ["Bind only the leaf run."], relevantFiles: [] },
+      context: { knownFacts: ["pi-subagents is pinned to 0.71.0."], decisions: ["Bind only the leaf run."], relevantFiles: [] },
       boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
       acceptance: { criteria: ["The child returns the deterministic marker."] },
       execution: { cwd: projectRoot, worktree: true },
@@ -264,6 +263,12 @@ Return the deterministic child marker without modifying files.
     await execFileAsync("git", ["add", "README.md", ".pi/agents/executor.md"], { cwd: projectRoot });
     await execFileAsync("git", ["commit", "-qm", "fixture"], { cwd: projectRoot });
     await mkdir(configRoot, { recursive: true });
+    // 生产接线要求 PI_CODING_AGENT_DIR/agents 存在 delegate/executor/reviewer 三个内置
+    // profile（registerBuiltinAgentsViaEvents 在扩展加载期读取）。
+    await mkdir(join(configRoot, "agents"), { recursive: true });
+    for (const name of ["delegate", "executor", "reviewer"]) {
+      await copyFile(join(repoRoot, "pi", "agents", `${name}.md`), join(configRoot, "agents", `${name}.md`));
+    }
     await writeFile(provider, providerSource(contract));
     await writeFile(dispatchProbe, dispatchProbeSource());
 
@@ -307,7 +312,11 @@ Return the deterministic child marker without modifying files.
     assert.equal(proof?.binding?.runId, handle.runId);
     assert.equal(proof.binding.asyncDir, handle.asyncDir);
     assert.equal(proof.binding.agentProfile, "executor");
-    assert.ok(proof.terminal?.proof?.instances.length > 0);
+    // Goal Engine 移除（基线 9b9cbb8）后，非 Goal coding run 的 authorization.goal 恒为 null；
+    // executorProofSnapshot 以 goal 门控 terminal proof（root-broker-server.ts），因此非 Goal
+    // coding run 没有 terminal proof，授权状态为 unavailable。
+    assert.equal(proof.terminal, null);
+    assert.equal(proof.authorization.state, "unavailable");
     const disposition = result.records.filter((record) => record.type === "tool_execution_end" && record.toolName === "subagent").at(-1);
     assert.equal(disposition.result.isError, false, JSON.stringify(disposition));
     assert.equal(probe.result.details.starts.some((event) => (event?.runId ?? event?.id) === handle.runId && event?.asyncDir === handle.asyncDir), true);
@@ -342,7 +351,6 @@ test("non-Goal executor ignores a hostile legacy .pi-subagents tree", { skip: !p
       risk: "normal",
       objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
       requirements: ["Use package-owned child extensions."],
-      workflow: { mode: "existing-tests", reason: "This integration verifies legacy workspace runtime entries are inert." },
       context: { knownFacts: ["The workspace contains hostile legacy entries."], decisions: ["Do not inspect or change those entries."], relevantFiles: [] },
       boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
       acceptance: { criteria: ["The child returns the deterministic marker."] },
@@ -365,6 +373,12 @@ Return the deterministic child marker without modifying files.
     await execFileAsync("git", ["add", "README.md", ".pi/agents/executor.md"], { cwd: projectRoot });
     await execFileAsync("git", ["commit", "-qm", "fixture"], { cwd: projectRoot });
     await mkdir(configRoot, { recursive: true });
+    // 生产接线要求 PI_CODING_AGENT_DIR/agents 存在 delegate/executor/reviewer 三个内置
+    // profile（registerBuiltinAgentsViaEvents 在扩展加载期读取）。
+    await mkdir(join(configRoot, "agents"), { recursive: true });
+    for (const name of ["delegate", "executor", "reviewer"]) {
+      await copyFile(join(repoRoot, "pi", "agents", `${name}.md`), join(configRoot, "agents", `${name}.md`));
+    }
 
     const runtimeEntries = join(projectRoot, ".pi-subagents");
     await mkdir(runtimeEntries, { recursive: true, mode: 0o700 });
@@ -414,7 +428,7 @@ Return the deterministic child marker without modifying files.
   }
 });
 
-test("non-Goal persistent Host rename canary keeps typed coding and generic authorization separate", { skip: !piBinary }, async () => {
+test("non-Goal persistent Host canary keeps typed coding and generic authorization separate across admitted builtin profiles", { skip: !piBinary }, async () => {
   assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
   const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
@@ -424,39 +438,56 @@ test("non-Goal persistent Host rename canary keeps typed coding and generic auth
   const configRoot = join(root, "config");
   const provider = join(root, "typed-provider.mjs");
   const dispatchProbe = join(root, "dispatch-probe.mjs");
+  // R3/R4 admission 重设计后（docs/bugs/2026-09-28-agent-admission-production-bootstrap.md），
+  // admission 只认 PI_CODING_AGENT_DIR 注册的内置 profile，项目级 .pi/agents profile
+  // fail-closed（AGENT_ADMISSION_UNAVAILABLE）。canary 因此改在内置 profile 集合内验证原
+  // 意图：agent 名称不决定授权——executor 与 reviewer 获得等价的 typed coding 授权，
+  // 同一 profile 走 generic 调用不获得 Broker proof。合同不再声明 model：内置 profile
+  // 声明的模型在本 fixture Host 均不可用，显式 model 会走 resolveModelCandidates 直接
+  // MODEL_NOT_AVAILABLE；省略 model 保持与上面两个用例相同的默认路由形态。typed 合同
+  // 改用 execution.worktree:true：b332005 起 executeCoding 仅对 managed workspace run
+  // 注册 Root Broker 授权（非 workspace typed coding run 无 broker authority，基线即有的
+  // 生产契约，已由主会话登记为产品语义观察项），managed workspace 是生产唯一有 broker
+  // authority 的 typed 路径（与 workflow-leaf 用例同路径）；generic 保持 worktree:false。
   const coding = (agent) => ({
-    version: "dispatch-ir.v1", taskId: `${agent}-rename-canary`, title: `Run ${agent} rename canary`, agent, model: "codex-pool/gpt-5.6-terra", risk: "normal",
+    version: "dispatch-ir.v1", taskId: `${agent}-rename-canary`, title: `Run ${agent} rename canary`, agent, risk: "normal",
     objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
     requirements: ["Use the project-owned typed facade."],
-    workflow: { mode: "existing-tests", reason: "This canary verifies name-independent non-Goal authorization." },
     context: { knownFacts: ["The Host is a fixture."], decisions: ["Use typed standalone dispatch."], relevantFiles: [] },
     boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
     acceptance: { criteria: ["The child returns the deterministic marker."] },
-    execution: { cwd: projectRoot, worktree: false },
+    execution: { cwd: projectRoot, worktree: true },
   });
-  const generic = { agent: "coder-alpha", title: "Inspect rename canary", task: "Read only.", model: "codex-pool/gpt-5.6-terra", worktree: false };
+  const generic = { agent: "executor", title: "Inspect rename canary", task: "Read only.", worktree: false };
   try {
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, "README.md"), "rename canary fixture\n");
+    // 项目级 profile 仅供 child 会话加载确定性 provider（与上面两个用例同形态）；
+    // root 侧 admission 身份来自 configRoot 的内置 profile。
     const profile = (name) => `---
 name: ${name}
 description: deterministic rename canary profile
-models:
-  - codex-pool/gpt-5.6-terra
+model: fake/deterministic
 tools: read
 extensions: ${provider}
 ---
 Return the deterministic child marker without modifying files.
 `;
-    await writeFile(join(projectRoot, ".pi", "agents", "coder-alpha.md"), profile("coder-alpha"));
-    await writeFile(join(projectRoot, ".pi", "agents", "coder-beta.md"), profile("coder-beta"));
+    await writeFile(join(projectRoot, ".pi", "agents", "executor.md"), profile("executor"));
+    await writeFile(join(projectRoot, ".pi", "agents", "reviewer.md"), profile("reviewer"));
     await execFileAsync("git", ["init", "-q"], { cwd: projectRoot });
     await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectRoot });
     await execFileAsync("git", ["config", "user.name", "Test"], { cwd: projectRoot });
     await execFileAsync("git", ["add", "README.md", ".pi/agents"], { cwd: projectRoot });
     await execFileAsync("git", ["commit", "-qm", "fixture"], { cwd: projectRoot });
     await mkdir(configRoot, { recursive: true });
-    await writeFile(provider, providerSource([coding("coder-alpha"), coding("coder-beta"), generic]));
+    // 生产接线要求 PI_CODING_AGENT_DIR/agents 存在 delegate/executor/reviewer 三个内置
+    // profile（registerBuiltinAgentsViaEvents 在扩展加载期读取）。
+    await mkdir(join(configRoot, "agents"), { recursive: true });
+    for (const name of ["delegate", "executor", "reviewer"]) {
+      await copyFile(join(repoRoot, "pi", "agents", `${name}.md`), join(configRoot, "agents", `${name}.md`));
+    }
+    await writeFile(provider, providerSource([coding("executor"), coding("reviewer"), generic]));
     await writeFile(dispatchProbe, dispatchProbeSource());
 
     const result = await runRpcUntil(piBinary, [
@@ -476,11 +507,19 @@ Return the deterministic child marker without modifying files.
     const terminal = probe.result.details.terminal;
     assert.ok(Array.isArray(terminal), JSON.stringify(probe));
     assert.equal(terminal.length, 3);
-    assert.deepEqual(terminal.slice(0, 2).map((entry) => entry.handle.agent), ["coder-alpha", "coder-beta"]);
+    // 内置 profile 集合内 agent 名称不改变 typed coding 授权：executor 与 reviewer
+    // 获得相同的 root.subscribe capability（授权由调用结构决定，而非 profile 名称）。
+    assert.deepEqual(terminal.slice(0, 2).map((entry) => entry.handle.agent), ["executor", "reviewer"]);
     assert.deepEqual(terminal.slice(0, 2).map((entry) => entry.proof?.capabilities), [["root.subscribe"], ["root.subscribe"]]);
-    assert.equal(terminal[2].handle.agent, "coder-alpha");
+    // 同一 profile 经 generic 调用不获得 Broker proof：generic 只注册 terminal facade，
+    // capabilities 为空，不能凭 profile metadata 晋升为 coding 授权。
+    assert.equal(terminal[2].handle.agent, "executor");
     assert.equal(terminal[2].proof, null, "generic calls cannot gain a Broker proof from profile metadata");
-    await assert.rejects(lstat(join(root, "workspaces")), { code: "ENOENT" }, "worktree:false does not allocate a managed workspace root");
+    // worktree 归属区分：typed managed workspace run 的 handle 揭示 workspace_id；
+    // generic worktree:false 不分配 managed workspace（workspace_id 缺席）。
+    assert.equal(typeof terminal[0].handle.workspace_id, "string");
+    assert.equal(typeof terminal[1].handle.workspace_id, "string");
+    assert.equal(terminal[2].handle.workspace_id, undefined, "generic worktree:false does not allocate a managed workspace");
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }

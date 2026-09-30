@@ -20,7 +20,6 @@ function contract(task) {
     model,
     risk: "high",
     objective: `Modify the shared PIPELINE declaration line to add only the ${task} stage.`,
-    workflow: { mode: "tdd" },
     requirements: [
       `Modify the same PIPELINE declaration line in src/pipeline.ts for the ${task} stage.`,
       "Add a focused behavior test in test/pipeline.test.mjs, run it, and create a commit.",

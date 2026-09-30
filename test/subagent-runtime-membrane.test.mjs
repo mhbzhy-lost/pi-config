@@ -10,10 +10,8 @@ const { createJiti } = await import(piHostJitiUrl);
 const runtimeJiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
 const {
   createSubagentToolRenderers,
-  initializeCompletionNotifierState,
   projectManagedWorkspaceTerminalProof,
 } = await runtimeJiti.import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
-const { registerSubagentNotify, currentCompletionOwnerId } = await runtimeJiti.import("../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.62.ts");
 
 import { createHeadlessSubagentApi } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts";
 import { createTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
@@ -157,9 +155,6 @@ test("the enhanced package runtime closes every relative implementation import i
       edges.push({ source: relative(isolatedRoot, file), specifier, target: targetRelative });
     }
   }
-  assert.ok(edges.some((edge) => edge.source === "scripts/setup-runtime-deps.ts" && edge.target === "src/subagent-dispatch/ordered-models-runtime-patch.ts"));
-  assert.ok(edges.some((edge) => edge.source === "scripts/verify-package.ts" && edge.target === "src/subagent-dispatch/ordered-models-runtime-patch.ts"));
-
   const isolatedExtension = await import(`${pathToFileURL(join(isolatedRoot, "src/subagent-dispatch/extension.ts")).href}?closure=${Date.now()}`);
   const isolatedOwner = await import(`${pathToFileURL(join(isolatedRoot, "child-extensions/root-session-owner.ts")).href}?closure=${Date.now()}`);
   const isolatedEvidence = await import(`${pathToFileURL(join(isolatedRoot, "child-extensions/acceptance-evidence.ts")).href}?closure=${Date.now()}`);
@@ -178,7 +173,6 @@ function codingContract(overrides = {}) {
     agent: "executor",
     risk: "normal",
     objective: "Expose only the project-owned typed subagent facade.",
-    workflow: { mode: "tdd" },
     requirements: ["Compile a deterministic initial child prompt."],
     context: {
       knownFacts: ["pi-subagents is an implementation dependency."],
@@ -198,7 +192,6 @@ function codingContract(overrides = {}) {
   return {
     ...base,
     ...overrides,
-    workflow: { ...base.workflow, ...overrides.workflow },
     context: { ...base.context, ...overrides.context },
     boundaries: { ...base.boundaries, ...overrides.boundaries },
     acceptance: { ...base.acceptance, ...overrides.acceptance },
@@ -310,59 +303,65 @@ function createRpc(overrides = {}) {
   return rpc;
 }
 
-test("project completion notifier delivers complete and failed terminal events with the upstream owner", async () => {
-  const pi = createPi();
-  const state = { currentSessionId: "session-owner" };
-  const notifier = registerSubagentNotify(pi, state, { batchConfig: { enabled: false } });
-  const ownerId = currentCompletionOwnerId();
-  assert.equal(await notifier.deliver({
-    id: "missing-owner",
-    agent: "executor",
-    success: false,
-    summary: "failed",
-    sessionId: "session-owner",
-    completionOwnerId: ownerId,
-  }), false);
-  initializeCompletionNotifierState(state);
-  assert.equal(state.completionOwnerId, ownerId);
-  for (const success of [true, false]) {
-    const accepted = await notifier.deliver({
-      id: `completion-${success}`,
-      agent: "executor",
-      success,
-      summary: success ? "done" : "failed",
-      sessionId: "session-owner",
-      completionOwnerId: ownerId,
-    });
-    assert.equal(accepted, true);
+test("production runtime wires no compat completion notifier; upstream native notify owns delivery", async () => {
+  const entry = await readFile(join(enhancedPackageRoot, "extensions", "subagent-runtime.ts"), "utf8");
+  const compat = await readFile(join(enhancedPackageRoot, "src", "compat", "pi-subagents-0.71.ts"), "utf8");
+  // 用户决策：删除增强层 completion notifier 包装（asyncComplete→sendMessage 转发链），
+  // 完成投递+ack 完全依赖上游 pi-subagents@0.71 原生 notify 语义。
+  for (const wrapper of ["createCompletionNotifier", "subscribeAsyncComplete", "completionNotifierFactory", "initializeCompletionNotifierState"]) {
+    assert.doesNotMatch(entry, new RegExp(wrapper), `${wrapper} wiring must not exist in the production runtime entry`);
+    assert.doesNotMatch(compat, new RegExp(wrapper), `${wrapper} must not exist in the compat facade`);
   }
-  assert.equal(pi.messages.length, 2);
-  notifier.dispose();
+  // 上游原生 notify 仍发送 subagent-notify customType（notify.js sendCompletion），
+  // 项目 renderer 保留以赢得 last-write 所有权。
+  assert.match(entry, /registerMessageRenderer\("subagent-notify"/);
 });
 
-test("completion notice preserves raw summary and authoritative fields without event rewriting", async () => {
+test("the designated completion notifier api delivers subagent-notify while the upstream bootstrap api keeps its suppression", async () => {
+  // 具名不变式（docs/bugs/2026-09-29-async-completion-notification-silent-swallow.md 残留风险 1，
+  // 2026-09-29 复核确认现状已满足）：completionNotifierFactory 注入点构造的 completionApi
+  // 不得携带 suppressCompletionNotifications——suppression 只属于 upstream bootstrap api
+  // （防上游 native 双投递），host 指定的投递者必须能投递。
   const pi = createPi();
-  const state = { currentSessionId: "session-owner", completionOwnerId: currentCompletionOwnerId() };
-  const notifier = registerSubagentNotify(pi, state, { batchConfig: { enabled: false } });
-  const upstreamApi = createHeadlessSubagentApi(pi);
-  let delivery;
-  upstreamApi.events.on("subagent:async-complete", (event) => { delivery = notifier.deliver(event); });
-  upstreamApi.events.emit("subagent:async-complete", {
-    id: "authoritative-failure",
-    agent: "executor",
-    success: false,
-    state: "failed",
-    summary: "Status: completed",
-    acceptance: { status: "rejected" },
-    error: "runtime error: child exited before acceptance",
-    sessionId: "session-owner",
-    completionOwnerId: state.completionOwnerId,
+  let upstreamApi;
+  let factoryApi;
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) {
+      upstreamApi = api;
+      api.registerTool({ name: "subagent_supervisor", execute() {} });
+    },
+    completionNotifierFactory(api) {
+      factoryApi = api;
+      return { dispose() {} };
+    },
+    resolveSessionId(sessionManager) { return sessionManager.id; },
+    rpc: createRpc(),
+    cleanupStore: {},
   });
-  const accepted = await delivery;
-  assert.equal(accepted, true);
-  assert.match(pi.messages[0].content, /Status: completed/);
-  assert.doesNotMatch(pi.messages[0].content, /Acceptance:|Runtime error:/);
-  notifier.dispose();
+  assert.ok(upstreamApi, "the upstream bootstrap must receive the membrane api");
+  assert.ok(factoryApi, "the designated notifier factory must receive the completion api");
+
+  const notify = { customType: "subagent-notify", content: "Background task completed: **delegate**\n\nDone" };
+
+  // upstream bootstrap api：suppression 原样有效（防上游 native 双投递的语义不变）。
+  const upstreamSend = upstreamApi.sendMessage({ ...notify }, { triggerTurn: true });
+  assert.equal(upstreamSend, undefined, "the upstream bootstrap api must keep suppressing subagent-notify");
+  assert.equal(pi.messages.length, 0, "the suppressed upstream send must not reach the Host");
+
+  // 不变式主体：designated notifier 收到的 api 发送 subagent-notify 直达真实 Host sendMessage。
+  factoryApi.sendMessage({ ...notify }, { triggerTurn: true });
+  assert.equal(pi.messages.filter((message) => message?.customType === "subagent-notify").length, 1,
+    "the designated notifier's subagent-notify send must reach the real Host sendMessage");
+  assert.equal(pi.messages[0].content, notify.content);
+
+  // 检测力对照分支：同一 createHeadlessSubagentApi 构造若回归为携带
+  // suppressCompletionNotifications（footgun 复发形态），等价发送被吞且无任何 Host 消息——
+  // 若注入点的 completionApi 构造回归，上方不变式断言将以同一形态失败。
+  const suppressedApi = createHeadlessSubagentApi(pi, { suppressCompletionNotifications: true });
+  const swallowed = suppressedApi.sendMessage({ ...notify }, { triggerTurn: true });
+  assert.equal(swallowed, undefined, "the suppression membrane primitive still swallows the equivalent send");
+  assert.equal(pi.messages.filter((message) => message?.customType === "subagent-notify").length, 1,
+    "the suppressed contrast send must add no Host message");
 });
 
 test("completion lifecycle events preserve the original authoritative payload and summary", () => {
@@ -1452,7 +1451,7 @@ test("fails closed when RPC capabilities or spawn identity are incomplete", asyn
     createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
     const result = await execute(pi.tools[0], codingContract());
     assert.equal(result.isError, true);
-    assert.match(result.details.code, /CAPABILITY_MISMATCH|SPAWN_REPLY_INVALID/);
+    assert.match(result.details.code, /CAPABILITY_NEGOTIATION_FAILED|CAPABILITY_MISMATCH|SPAWN_REPLY_INVALID/);
   }
 });
 

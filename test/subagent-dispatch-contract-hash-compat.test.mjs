@@ -65,7 +65,9 @@ function request(f, contractHash) {
 test("persists and loads an old IR hash containing workflow without putting workflow in request v2", async (t) => {
   const f = await fixture(t);
   const currentIR = compileCodingDispatchIR(dispatchContract(), { cwd: "/repo" });
-  const legacyIR = { ...currentIR, workflow: { mode: "tdd" } };
+  // The current 0.71 IR has no workflow field; preserve a legacy hash that
+  // was computed from the retired field while loading it as opaque data.
+  const legacyIR = { ...currentIR, workflow: { mode: "legacy" } };
   delete legacyIR.hash;
   const legacyHash = hashCanonical(legacyIR);
   const currentHash = currentIR.hash;

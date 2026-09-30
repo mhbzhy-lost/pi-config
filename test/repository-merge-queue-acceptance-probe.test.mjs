@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { access, mkdtemp, readFile, realpath, writeFile, rm } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -28,6 +29,7 @@ import {
 const fixture = join(import.meta.dirname, "fixtures", "repository-merge-queue-acceptance");
 const { createJiti } = await import(piHostJitiUrl);
 const discoveryJiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
+const resolveUpstream = createRequire(join(import.meta.dirname, "../packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json"));
 
 async function providerTurn(tasks) {
   let provider;
@@ -91,14 +93,30 @@ test("acceptance fixture has one shared pipeline line and five conflict tasks", 
   }
 });
 
-test("real agent discovery accepts the executor fixture and resolves its barrier extension", async () => {
-  const { discoverAgents } = await discoveryJiti.import("../packages/pi-subagents-enhanced/node_modules/pi-subagents/src/agents/agents.ts");
-  const discovered = discoverAgents(fixture, "project");
-  const executor = discovered.agents.find((agent) => agent.name === "executor");
-  assert.ok(executor, JSON.stringify(discovered.agentDiagnostics ?? []));
-  assert.match(executor.description, /acceptance coding executor/i);
-  assert.deepEqual(executor.subagentOnlyExtensions, [join(fixture, "acceptance-barrier.mjs")]);
-  await access(executor.subagentOnlyExtensions[0]);
+test("public runtime agent registration emits the executor definition", async () => {
+  const { registerAgentViaEvents, RUNTIME_AGENT_REGISTER_EVENT } = await discoveryJiti.import(resolveUpstream.resolve("pi-subagents/agents"));
+  let request;
+  const definition = {
+    description: "acceptance coding executor",
+    model: "codex-pool/gpt-5.6-sol",
+    subagentOnlyExtensions: [join(fixture, "acceptance-barrier.mjs")],
+  };
+  const pi = { events: { emit(type, value) {
+    assert.equal(type, RUNTIME_AGENT_REGISTER_EVENT);
+    request = value;
+    value.result = { ok: true, registration: { dispose() {} } };
+  } } };
+  const registration = registerAgentViaEvents({ pi, name: "executor", definition });
+  assert.equal(typeof registration.dispose, "function");
+  assert.deepEqual(request, {
+    version: 1, name: "executor", definition: {
+      description: "acceptance coding executor",
+      model: "codex-pool/gpt-5.6-sol",
+      subagentOnlyExtensions: [join(fixture, "acceptance-barrier.mjs")],
+    }, result: { ok: true, registration },
+  });
+  await access(definition.subagentOnlyExtensions[0]);
+  registration.dispose();
 });
 
 test("test-only barrier rejects model identity and blocks until five distinct same-base worktrees are ready", async () => {

@@ -24,6 +24,7 @@ export default function rootBrokerRegistryProbe(pi: any): void {
       activeToolNames: [...pi.getActiveTools()].sort(),
       allToolNames: pi.getAllTools().map((tool: any) => tool?.name).filter(Boolean).sort(),
       brokerRootSessionId: broker?.rootSessionId ?? null,
+      brokerLifecycleSessionId: broker?.lifecycleSessionId ?? null,
       brokerServerExists: Boolean(broker?.server),
       error,
     }));

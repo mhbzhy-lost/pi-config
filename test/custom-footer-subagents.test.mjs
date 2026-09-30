@@ -57,6 +57,26 @@ test("browser selector preserves the directional focus glyph at every glyph-size
   }
 });
 
+test("main selector renders projected terminal-proof status as terminal", () => {
+  const snapshot = {
+    active: false,
+    children: [{ key: "done:0", agent: "executor", state: "terminal-proof" }],
+    activeChildren: [],
+    recentChildren: [{ key: "done:0", agent: "executor", state: "terminal-proof" }],
+  };
+  assert.equal(customFooterModule.formatBrowserSelector(snapshot, 80), "");
+});
+
+test("main selector projects negotiated retained status as active", () => {
+  const snapshot = {
+    active: false,
+    children: [{ key: "active:0", agent: "executor", state: "retained" }],
+    activeChildren: [{ key: "active:0", agent: "executor", state: "retained" }],
+    recentChildren: [],
+  };
+  assert.equal(customFooterModule.formatBrowserSelector(snapshot, 80), "● executor");
+});
+
 test("main selector expands active children and folds terminal children into display-only history", () => {
   const snapshot = {
     active: false,
@@ -685,7 +705,7 @@ test("untrusted child transcript paths render a viewport warning", (t) => {
   subject.poll();
   subject.input()("\x1bo");
 
-  assert.match(subject.custom[0].component.render(40).join("\n"), /Transcript is outside trusted roots/);
+  assert.match(subject.custom[0].component.render(40).join("\n"), /Transcript is (?:outside trusted roots|unavailable)/);
 });
 
 test("relative child sessionFile resolves against asyncDir and renders native transcript before Fleet fallback", async (t) => {

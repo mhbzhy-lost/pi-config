@@ -13,11 +13,11 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 ## 安装 Pi
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.4
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.87.1
 pi --version
 ```
 
-本仓已验证 Pi `0.82.0`、`0.82.1`、`0.83.0`、`0.84.1`、`0.84.2`、`0.84.3` 和 `0.84.4`，初始化默认安装精确 `0.84.4`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
+本仓已验证 Pi `0.82.0`、`0.82.1`、`0.83.0`、`0.84.1`、`0.84.2`、`0.84.3`、`0.85.1` 和 `0.87.1`，初始化默认安装精确 `0.87.1`。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
 
 ## 初始化
 
@@ -27,8 +27,8 @@ pi --version
 
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
-- 安装并固定 Pi `0.84.4`。
-- 在 `pi/npm` 顶层精确安装 `pi-subagents@0.62.0` 与 `typebox@1.1.38`。
+- 安装并固定 Pi `0.87.1`。
+- 在 `pi/npm` 顶层精确安装 `pi-subagents@0.71.0` 与 `typebox@1.1.38`。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
 
@@ -88,11 +88,11 @@ node --test test/repository-merge-queue-acceptance-probe.test.mjs
 node scripts/probes/repository-merge-queue-acceptance.ts
 ```
 
-真实 probe 必须设置 `PI_REAL_BIN` 指向 Pi 0.85.1，并使用真实 `executor` child model；不得用 fake 或 deterministic model 替代。probe 使用独立临时 repo、session、state、socket roots，失败时保留现场并报告路径；本任务不运行五 child 真实验收或全量 `npm test`。
+真实 probe 必须设置 `PI_REAL_BIN` 指向 Pi 0.87.1，并使用真实 `executor` child model；不得用 fake 或 deterministic model 替代。probe 使用独立临时 repo、session、state、socket roots，失败时保留现场并报告路径；本任务不运行五 child 真实验收或全量 `npm test`。
 
 合同测试还校验 trusted `run/cwd/HEAD/PID` barrier ready、Git 冲突证据（非零 rebase、unmerged、sequencer、digest）、public receipt 生命周期计数，以及统一的 `ACCEPTANCE_OVERALL_TIMEOUT_MS` 门禁。失败现场不得 force cleanup；真实五-child 命令仅在 T11 完成后运行。
 
-## Pi 0.84.4 TUI 与工具限制
+## Pi 0.87.1 TUI 与工具限制
 
 Pi 官方是 fullscreen 的唯一 owner；Shell 不发送 `DECSET/DECRST 1049`。`pi-inline` 和 `pi-full` 分别是官方 `--tui-mode regular` 与 `--tui-mode fullscreen` 的别名。
 

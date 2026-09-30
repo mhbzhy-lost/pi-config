@@ -24,6 +24,17 @@ export type ModelSelectionInput = {
   blockedProviders?: readonly string[];
 };
 
+export type ModelCandidateProfile = {
+  agentName?: string;
+  /** Ordered profile declaration. `agentModels` is accepted for compatibility. */
+  models?: readonly string[];
+  agentModels?: readonly string[];
+  model?: string;
+  fallbackModels?: readonly string[];
+  availableModels: readonly AvailableModel[];
+  blockedProviders?: readonly string[];
+};
+
 export type ModelSelectionErrorDetails = {
   code: "MODEL_NOT_AVAILABLE";
   requestedModel: string;
@@ -46,6 +57,7 @@ export class ModelSelectionError extends Error {
     const declared = [...(candidates.declaredCandidates ?? [])];
     const available = [...(candidates.availableCandidates ?? [])].sort();
     const parts = [`Requested model is not available: ${requestedModel}; agent=${agentName}.`];
+    if (requestedModel === "<profile>") parts.push("The declared candidate chain is empty.");
     if (declared.length > 0) parts.push(`Available declared IDs: ${JSON.stringify(declared)}.`);
     if (available.length > 0) parts.push(`Available models: ${JSON.stringify(available)}.`);
     if (candidates.suggestion) parts.push(`Did you mean \"${candidates.suggestion}\"?`);
@@ -80,6 +92,32 @@ function candidateProvider(model: string): string | undefined {
 
 function blockedProviderSet(blockedProviders: readonly string[] | undefined): Set<string> {
   return new Set((blockedProviders ?? []).map((provider) => provider.trim().toLowerCase()).filter(Boolean));
+}
+
+/**
+ * Resolve the profile's ordered model declaration before a run is launched.
+ * Runtime retries must not mutate this chain or consult a second catalog.
+ */
+export function resolveModelCandidates(profile: ModelCandidateProfile): string[] {
+  const agentName = profile.agentName ?? "unknown";
+  const declared = profile.models ?? profile.agentModels
+    ?? (profile.model === undefined ? profile.fallbackModels : [profile.model, ...(profile.fallbackModels ?? [])]);
+  const candidates = [...(declared ?? [])];
+  if (candidates.length === 0) {
+    throw new ModelSelectionError("<profile>", agentName, { declaredCandidates: candidates });
+  }
+  const blocked = blockedProviderSet(profile.blockedProviders);
+  const available = new Set(profile.availableModels
+    .filter((model) => !blocked.has(model.provider.trim().toLowerCase()))
+    .map(fullModelId));
+  const unavailable = candidates.filter((candidate) => !available.has(candidate));
+  if (unavailable.length === candidates.length) {
+    throw new ModelSelectionError(candidates.join(", "), agentName, {
+      declaredCandidates: candidates,
+      availableCandidates: [...available],
+    });
+  }
+  return candidates.filter((candidate) => available.has(candidate));
 }
 
 function suggestBareModelId(requested: string, declaredFullIds: readonly string[], availableFullIds: ReadonlySet<string>): string | undefined {

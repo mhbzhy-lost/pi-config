@@ -3,8 +3,5 @@
   "fleetView": false,
   "asyncWidget": false,
   "providerBlacklist": ["deepseek"],
-  "artifactDir": "project",
-  "modelExclusions": {
-    "defaultTtlMs": 1000
-  }
+  "artifactDir": "project"
 }

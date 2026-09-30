@@ -6,10 +6,13 @@ import { createTypedSubagentExtension, preparePublicCodingDispatch } from "../pa
 import { childStartTimeoutMs } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/workflow-spawn.ts";
 import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { bindGoalRunCoordinator, bindGoalRunCoordinatorSession, unbindGoalRunCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import * as lifecycleModule from "../packages/pi-subagents-enhanced/src/workspace/child-integration-lifecycle.ts";
+import { createChildIntegrationLifecycle } from "../packages/pi-subagents-enhanced/src/workspace/child-integration-lifecycle.ts";
+import { createSupervisorControlPlane } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts";
 
 const contract = {
   version: "dispatch-ir.v1", taskId: "identity-ledger", title: "Bind durable spawn identity", agent: "executor", risk: "normal",
-  objective: "Bind coding calls to durable identities.", workflow: { mode: "tdd" }, requirements: ["Preserve the exact contract."],
+  objective: "Bind coding calls to durable identities.", requirements: ["Preserve the exact contract."],
   context: { knownFacts: [], decisions: [], relevantFiles: ["test/subagent-dispatch-extension.test.ts"] },
   boundaries: { writePaths: ["test/subagent-dispatch-extension.test.ts"], excludedWork: [], forbiddenActions: [] },
   acceptance: { criteria: ["Identity is trusted."] }, execution: { cwd: "/repo" },
@@ -110,6 +113,62 @@ function createTestExtension(pi: any, options: any) {
     ...options,
   });
 }
+
+test("T7 queued follow-up does not authorize B-stage disposition before child consumption", () => {
+  assert.deepEqual(lifecycleModule.terminalDispositionDecision({ state: "pending" }), {
+    allowed: false, code: "TERMINAL_PROOF_PENDING",
+  });
+});
+
+test("T7 follow-up receipt becomes delivered only after child consumption", async () => {
+  const plane = createSupervisorControlPlane({
+    readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }),
+    readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 2, running: true, steerable: true }),
+    randomId: () => "receipt-1",
+  });
+  await plane.registerSupervisorRequest({ id: "request-1", runId: "run-1", reason: "follow-up" });
+  const replyIntent = {
+    schemaVersion: "supervisor-control-intent.v1", intentId: "reply-intent", runId: "run-1", rootSessionId: "root-1",
+    ownerGeneration: 1, kind: "reply", payloadDigest: `sha256:${"b".repeat(64)}`,
+    requestId: "request-1", requestGeneration: 1,
+  } as const;
+  await plane.commitDelivery({ intent: replyIntent, consumed: true });
+  const intent = {
+    schemaVersion: "supervisor-control-intent.v1", intentId: "intent-1", runId: "run-1", rootSessionId: "root-1",
+    ownerGeneration: 1, kind: "steer", payloadDigest: `sha256:${"a".repeat(64)}`, liveRunEpoch: 2,
+  } as const;
+  const queued = await plane.commitDelivery({ intent, consumed: false });
+  assert.equal(queued.receipt.status, "queued");
+  const delivered = await plane.commitDelivery({ intent, consumed: true });
+  assert.equal(delivered.receipt.status, "delivered");
+});
+
+test("T7 conflict continuation remains awaited in agent_end and settled is observation-only", async () => {
+  const listeners = new Map<string, Function[]>();
+  const calls: string[] = [];
+  const pi = {
+    on(type: string, listener: Function) { const list = listeners.get(type) ?? []; list.push(listener); listeners.set(type, list); return () => {}; },
+    async sendMessage() { calls.push("follow-up"); },
+  };
+  let phase = 0;
+  const coordinator = {
+    async prepareAutoIntegration() { calls.push("prepare"); return { queueState: "resolving-conflict" }; },
+    async advanceAutoIntegration() { calls.push("advance"); phase++; return { queueState: "resolving-conflict", conflictDigest: `digest-${phase}` }; },
+  };
+  createChildIntegrationLifecycle({ pi, coordinator, key: "t7-conflict", pollDelayMs: 0, maxAdmissionPolls: 1 });
+  for (const listener of listeners.get("agent_settled") ?? []) await listener();
+  assert.deepEqual(calls, []);
+  for (const listener of listeners.get("agent_end") ?? []) await listener();
+  assert.deepEqual(calls, ["prepare", "advance", "follow-up"]);
+});
+
+test("T7 B-stage disposition is rejected before proof and released after durable proof", () => {
+  const pending = lifecycleModule.terminalDispositionDecision({ state: "pending" });
+  const proof = { state: "observed", conflict: false, runId: "run-1", rootSessionId: "root-1", asyncDir: "/tmp/run-1", processInstance: "proc-1", proofId: "a".repeat(64) };
+  const accepted = lifecycleModule.terminalDispositionDecision(proof);
+  assert.equal(pending.allowed, false);
+  assert.deepEqual(accepted, { allowed: true, proofId: proof.proofId });
+});
 
 async function assertCallerTimeoutRejected(name: string, input: any) {
   const { pi, rpc, calls, tools } = setup();
@@ -423,6 +482,21 @@ test("standalone coding worktree uses the same service and binds without Goal re
   });
 });
 
+test("generic shared run registers owner authority without a managed worktree", async () => {
+  const { pi, rpc, tools } = setup({ sessionId: "root-generic-no-worktree" });
+  const registered: any[] = [];
+  createTestExtension(pi, { rpc, cleanupStore: {}, registerAuthorizedRun: (authorization: any) => registered.push(authorization) });
+  const result = await tools[0].execute("generic-no-worktree", { agent: "reviewer", title: "Review", task: "Inspect the shared workspace." }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.deepEqual(registered[0], {
+    version: "subagent-run-authorization.v1",
+    kind: "generic",
+    binding: { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "root-generic-no-worktree", pid: 123, agentProfile: "reviewer" },
+    capabilities: [],
+    goal: null,
+  });
+});
+
 test("generic worktree uses the unified service without enabling upstream worktrees", async () => {
   const { pi, rpc, calls, tools } = setup({ sessionId: "root-generic" });
   const registered: any[] = [];
@@ -487,8 +561,9 @@ test("coding without a worktree does not register Goal ownership", async () => {
 
   assert.equal(coding.isError, false, coding.content[0]?.text);
   assert.equal(generic.isError, false, generic.content[0]?.text);
-  assert.equal(registrations.length, 0);
-  assert.equal(workflowLeaf(calls[0].params).subagentOnlyExtensions.length, 1);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].kind, "generic");
+  assert.equal(Object.hasOwn(workflowLeaf(calls[0].params), "subagentOnlyExtensions"), false);
   assert.equal(Object.hasOwn(workflowLeaf(calls[1].params), "subagentOnlyExtensions"), false);
 });
 
@@ -508,7 +583,9 @@ test("renamed standalone profiles do not acquire Goal authorization", async () =
   const generic = await tools[0].execute("same-profile-generic", { agent: "coder-alpha", title: "Inspect", task: "Read only." }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(generic.isError, false, generic.content[0]?.text);
-  assert.deepEqual(registrations, []);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].kind, "generic");
+  assert.equal(registrations[0].binding.agentProfile, "coder-alpha");
 });
 
 test("Goal coding registers exact ticket authority before returning a handle", async () => {

@@ -17,6 +17,9 @@ function hostPackageEntry(packageName: string, options: { inferredRoot?: string;
   // 传递依赖，repo root 无本地副本，不再依赖 argv 布局。
   const candidates: Array<() => string> = [
     () => createRequire(pathToFileURL(join(root, "package.json"))).resolve(packageName),
+    // Pi bundles keep transitive runtime dependencies under the Host package;
+    // resolve from that package manifest instead of assuming root/node_modules.
+    () => createRequire(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"))).resolve(packageName),
     () => createRequire(selfUrl).resolve(packageName),
     () => {
       let directory = dirname(realpathSync(fileURLToPath(selfUrl)));

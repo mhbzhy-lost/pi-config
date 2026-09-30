@@ -133,11 +133,33 @@ exit $status
   });
 }
 
+// 官方二进制版本随 pi 栈升级演进（0.84.4 → 0.85.1 → …），且其 --version 输出受 env 重定向
+// （PI_PACKAGE_DIR 会改写包根：pi 会话内的 ambient 探测会拿到工作区版本而非 homebrew 实际版本）。
+// 期望值必须在 wrapper 同款隔离 env 下运行时探测 PI_REAL_BIN --version 构造，
+// 既避免版本演进再红，也避免本进程 ambient env 重定向探测结果。
+const officialPiBin = "/opt/homebrew/bin/pi";
+
+function officialEnvironment(state) {
+  return environment(state, {
+    PI_REAL_BIN: officialPiBin,
+    ISOLATED_AGENT_DIR: join(state.root, "official-agent-dir"),
+    ISOLATED_SESSION_DIR: join(state.root, "official-sessions"),
+    ISOLATED_REGISTRY: state.registry,
+  });
+}
+
+function officialPiVersionPattern(env) {
+  const probe = spawnSync(officialPiBin, ["--version"], { encoding: "utf8", env, timeout: 20_000, maxBuffer: 1024 * 1024 });
+  assert.equal(probe.status, 0, probe.stderr);
+  return probe.stdout.trim().replaceAll(".", "\\.");
+}
+
 function runOfficialFreshZsh(state) {
+  const officialEnv = officialEnvironment(state);
   const program = `set timeout 20
 spawn -noecho /bin/zsh -f -c {source "$ZDOTDIR/.zshrc"; export PI_CODING_AGENT_DIR="$ISOLATED_AGENT_DIR" PI_CODING_AGENT_SESSION_DIR="$ISOLATED_SESSION_DIR" PI_SESSION_OWNER_REGISTRY="$ISOLATED_REGISTRY"; pi --version}
 expect {
-  -re {0\\.84\\.4} {}
+  -re {${officialPiVersionPattern(officialEnv)}} {}
   eof { exit 1 }
   timeout { exit 1 }
 }
@@ -148,12 +170,7 @@ exit $status
   return spawnSync("/usr/bin/expect", ["-c", program], {
     cwd: state.repo,
     encoding: "utf8",
-    env: environment(state, {
-      PI_REAL_BIN: "/opt/homebrew/bin/pi",
-      ISOLATED_AGENT_DIR: join(state.root, "official-agent-dir"),
-      ISOLATED_SESSION_DIR: join(state.root, "official-sessions"),
-      ISOLATED_REGISTRY: state.registry,
-    }),
+    env: officialEnv,
     timeout: 30_000,
     maxBuffer: 1024 * 1024,
   });
@@ -210,7 +227,7 @@ test("fresh zsh wrapper invokes official Pi version in an isolated environment a
     const result = runOfficialFreshZsh(state);
     assertCompleted(result, "official fresh zsh");
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /0\.84\.4/);
+    assert.match(result.stdout, new RegExp(officialPiVersionPattern(officialEnvironment(state))));
     assert.deepEqual(await listLiveRecords(createRegistryStore(state.registry)), []);
   } finally {
     await rm(state.root, { recursive: true, force: true });

@@ -3,12 +3,11 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { Box, Text } from "@earendil-works/pi-tui";
 import {
-  currentCompletionOwnerId,
-  loadConfig,
-  registerSubagentNotify,
+  readSessionIdentity,
+  registerBuiltinAgentsViaEvents,
   resolveCurrentSessionId,
   upstreamSubagentRuntime,
-} from "../src/compat/pi-subagents-0.62.ts";
+} from "../src/compat/pi-subagents-0.71.ts";
 import {
   formatCompactSubagentNotification,
   formatCompactSubagentWorkspaceReminder,
@@ -19,6 +18,7 @@ import {
 } from "../src/tui/compact-rendering.ts";
 import { createSubagentDispatchTraceFileSink, installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
 import { createSupervisorControlPlane } from "../src/subagent-dispatch/supervisor-control-plane.ts";
+import { runtimeFromStatus } from "../src/subagent-dispatch/runtime-state.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
 import { createCoordinatorProofOutbox } from "../src/subagent-dispatch/coordinator-proof-outbox.ts";
 import { classifyTerminalProofBinding } from "../src/subagent-dispatch/terminal-proof-binding.ts";
@@ -216,12 +216,6 @@ function notificationColor(text: string): "error" | "warning" | "success" | "dim
 
 const SUBAGENT_SPAWN_SUMMARY_KEY = "subagentSpawnSummary";
 
-export function initializeCompletionNotifierState(state: { currentSessionId: string | null; completionOwnerId?: string }) {
-  state.completionOwnerId = currentCompletionOwnerId();
-  return state;
-}
-
-
 function spawnStartingSummary(args: any): string | undefined {
   if (!args || typeof args !== "object" || Object.hasOwn(args, "action")) return undefined;
   const agent = typeof args.agent === "string" ? args.agent.trim() : "";
@@ -282,12 +276,22 @@ export function createSubagentToolRenderers() {
 
 export default function subagentRuntime(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.PI_SUBAGENT_FANOUT_CHILD === "1") return;
-  const config = loadConfig() as Record<string, unknown>;
-  const completionBatch = config.completionBatch;
-  const providerBlacklist = Array.isArray(config.providerBlacklist) ? config.providerBlacklist : ["deepseek"];
+  // 0.71 config is write-only at the public boundary (contract §4, types.d.ts:2592-2600).
+  // Provider policy is owned by this package; do not read upstream private config.
+  const providerBlacklist = ["deepseek"];
   const { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderCompletionNotification } = createSubagentToolRenderers();
   let brokerStarted = false;
   let brokerReady = false;
+  let builtinAdmission: ReturnType<typeof registerBuiltinAgentsViaEvents> | undefined;
+  const registerBuiltinAgents = (api: any) => {
+    const agentDir = process.env.PI_CODING_AGENT_DIR;
+    if (!agentDir) throw new Error("PI_CODING_AGENT_DIR is required for repository agent admission");
+    builtinAdmission = registerBuiltinAgentsViaEvents({ pi: api, agentDir });
+    if (process.env.T11B1_DEBUG === "1") {
+      const debugView = builtinAdmission.discoverAgents(process.cwd(), "both");
+      console.error(`[bootstrap-debug] agentDir=${agentDir} registered=${debugView.agents.map((a: any) => a.name).join(",") || "(none)"}`);
+    }
+  };
   let previousBrokerMarker: string | undefined;
   const rpc = createRenewableTypedSubagentRpcClient(() => createTypedSubagentRpcClient(pi.events));
   let diagnosticSink: (((entry: unknown) => void) & { dispose?: () => void }) | undefined;
@@ -303,17 +307,30 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   let workspaceLifecycleSessionId: string | undefined;
   const supervisorControlPlane = createSupervisorControlPlane({
     readOwnerReceipt: async (runId) => {
-      if (!brokerReady || !broker) return undefined;
-      try { return await broker.readOwnerReceipt(runId); } catch { return undefined; }
+      if (!brokerReady || !broker) {
+        if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] owner-read unavailable brokerReady=${brokerReady} broker=${!!broker} runId=${runId}`);
+        return undefined;
+      }
+      try {
+        const receipt = await broker.readOwnerReceipt(runId);
+        if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] owner-read receipt=${JSON.stringify(receipt)}`);
+        return receipt;
+      } catch (error) {
+        if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] owner-read error=${error instanceof Error ? error.message : String(error)} runId=${runId}`);
+        return undefined;
+      }
     },
     readRuntime: async (runId) => {
       if (!brokerReady) return undefined;
       try {
         const status: any = await rpc.status({ id: runId });
-        const details = status?.details ?? status;
         const owner = broker ? await broker.readOwnerReceipt(runId) : undefined;
-        return { runId, ownerGeneration: owner?.ownerGeneration, liveRunEpoch: details?.liveRunEpoch, running: details?.state === "running" || details?.running === true, steerable: details?.steerable === true };
-      } catch { return undefined; }
+        const runtime = runtimeFromStatus(runId, status);
+        return { ...runtime, ...(owner?.ownerGeneration !== undefined ? { ownerGeneration: owner.ownerGeneration } : {}) };
+      } catch (error) {
+        if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] runtime-read error=${error instanceof Error ? error.message : String(error)} runId=${runId}`);
+        return undefined;
+      }
     },
   });
   const enabledSupervisorControlPlane = Object.freeze({
@@ -325,8 +342,20 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     providerBlacklist,
     diagnosticSink,
     workingStateTrace: diagnosticSink,
-    extraDisposables: diagnosticSink ? [diagnosticSink] : [],
+    extraDisposables: [
+      ...(diagnosticSink ? [diagnosticSink] : []),
+      { dispose() { builtinAdmission?.dispose(); builtinAdmission = undefined; } },
+    ],
     bootstrap: upstreamSubagentRuntime,
+    afterBootstrap: registerBuiltinAgents,
+    async discoverAgents(...args: [string, string, string?]) {
+      if (!builtinAdmission) {
+        const error = new Error("AGENT_ADMISSION_UNAVAILABLE");
+        (error as Error & { code?: string }).code = "AGENT_ADMISSION_UNAVAILABLE";
+        throw error;
+      }
+      return builtinAdmission.discoverAgents(...args);
+    },
     workspaceCompletionReminderFactory(api: ExtensionAPI) {
       return createWorkspaceCompletionReminder({
         events: api.events,
@@ -338,17 +367,20 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         },
       });
     },
-    completionNotifierFactory(api: ExtensionAPI, state: { currentSessionId: string | null; completionOwnerId?: string }) {
-      initializeCompletionNotifierState(state);
-      return registerSubagentNotify(api, state, { batchConfig: completionBatch });
-    },
+    // Completion delivery and acknowledgement rely on upstream native notify
+    // (pi-subagents 0.71 registerSubagentNotify in extension/index.js:440); the
+    // enhanced layer no longer forwards subagent:async-complete into custom
+    // subagent-notify messages.
     resolveSessionId: resolveCurrentSessionId,
     async beforeUpstreamSessionStart(_event, ctx) {
       if (brokerReady) return;
       if (brokerStarted) throw new Error("Root subagent broker startup is incomplete");
       rpc.renew();
       const rootSessionId = resolveRootSessionId(ctx.sessionManager);
-      const lifecycleSessionId = resolveCurrentSessionId(ctx.sessionManager);
+      const lifecycleSessionId = readSessionIdentity(ctx.sessionManager).sessionFile ?? resolveCurrentSessionId(ctx.sessionManager);
+      // Root broker is the sole completion owner (contract §2.5); no upstream
+      // completion-owner identity is generated in this integration layer.
+      readSessionIdentity(ctx.sessionManager);
       const upstream = createRootBrokerUpstream({ rpc });
       const stateRoot = process.env.PI_CODING_WORKSPACE_DIR;
       // This is an independent private authority root, never a workspace ledger.

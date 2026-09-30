@@ -268,10 +268,12 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
 
   function recordTerminalProof({ workspaceId, ownerScope, proof }: any = {}) {
     let lease = loadOwned(workspaceId, ownerScope);
+    const accepted = resolveProof(lease.record, proof);
     if (lease.record.state === "cleanup-debt") {
-      const accepted = resolveProof(lease.record, proof);
       if (!observed(accepted)) throw failure("MANAGED_WORKSPACE_TERMINAL", "authoritative terminal proof is required to settle proof debt");
-      lease = mutate(lease, (record) => { record.state = "active"; record.cleanupDebt = null; return record; });
+      lease = mutate(lease, (record) => { record.state = "active"; record.cleanupDebt = null; record.terminalProof = structuredClone(accepted); return record; });
+    } else if (observed(accepted)) {
+      lease = mutate(lease, (record) => { record.terminalProof = structuredClone(accepted); return record; });
     }
     return receipt(lease.record);
   }
@@ -395,6 +397,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
 
   function resolveProof(record, supplied) {
     let value = supplied;
+    if (value === undefined && record.terminalProof?.state === "observed") value = record.terminalProof;
     if (value === undefined && activeTerminalProofProvider) {
       value = activeTerminalProofProvider({ workspaceId: record.workspaceId, run: structuredClone(record.run) });
       if (value && typeof value.then === "function") throw failure("MANAGED_WORKSPACE_TERMINAL", "terminalProofProvider must be synchronous");

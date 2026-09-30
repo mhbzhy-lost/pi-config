@@ -212,7 +212,7 @@ test("uses stable error codes for unsupported versions while accepting normalize
 });
 
 test("rejects the retired workflow field while preserving the canonical contract", () => {
-  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR({ ...contract(), workflow: { mode: "tdd" } }, { cwd: "/repo" }));
+  expectCode("INVALID_CONTRACT", () => compileCodingDispatchIR({ ...contract(), workflow: { mode: "legacy" } }, { cwd: "/repo" }));
 });
 
 test("accepts arbitrary valid agent profiles and rejects invalid profile identities", () => {

@@ -119,6 +119,11 @@ type Dependencies = {
 };
 
 const MAX_BUFFER = 64 * 1024;
+// Bug #4 fix ②: parallel registrations race the same authority-index lock for
+// a single-digit-millisecond critical section. Bounded retry with a short
+// linear backoff lets both registrants settle inside one dispatch window.
+const AUTHORITY_CONTENTION_RETRY_MAX_ATTEMPTS = 3;
+const AUTHORITY_CONTENTION_RETRY_BACKOFF_MS = 25;
 const execFile = promisify(execFileCallback);
 
 class TerminalDeadlineError extends Error {
@@ -362,9 +367,13 @@ export class RootBrokerServer {
       return; // owned is the sole record; facade observations cannot duplicate it.
     }
     const existing = this.facadeRuns.get(incoming.runId);
-    if (existing && (existing.asyncDir !== incoming.asyncDir || existing.sessionId !== incoming.sessionId || existing.pid !== incoming.pid || existing.agent !== incoming.agent || existing.kind !== incoming.kind)) {
+    if (existing && (existing.asyncDir !== incoming.asyncDir || existing.sessionId !== incoming.sessionId || existing.pid !== incoming.pid || existing.agent !== incoming.agent)) {
       throw new Error("Facade run identity conflicts");
     }
+    // `kind` is a non-authoritative observation. A workflow may first be
+    // observed through the generic upstream event classifier and later be
+    // registered by Host authorization as generic; never fence valid identity
+    // on that label alone.
     this.facadeRuns.set(incoming.runId, existing ?? incoming);
   }
 
@@ -382,11 +391,30 @@ export class RootBrokerServer {
       || JSON.stringify(existing.authorization.goal) !== JSON.stringify(authorization.goal))) {
       throw new Error("Run authorization binding conflicts");
     }
+    if (existing) return;
     if (authorization.capabilities.length === 0) {
       this.registerFacadeRun({ runId: binding.runId, asyncDir: binding.asyncDir, sessionId: binding.sessionId, pid: binding.pid, agent: binding.agentProfile, kind: authorization.kind });
+      // A generic run is a terminal-proof facade, not a broker principal, but
+      // its owner identity is still needed by the control plane. Persist that
+      // identity without promoting the run into the capability-bearing owned
+      // set below.
+      if (this.authorityStore) {
+        const birthIdentity = await this.captureProcessBirthIdentity(binding.pid).catch(() => undefined);
+        if (typeof birthIdentity === "string" && birthIdentity.trim().length > 0) {
+          const receipt = createOwnerReceipt({
+            receiptId: `owner-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`,
+            rootSessionId: this.rootSessionId,
+            runId: binding.runId,
+            ownerGeneration: 1,
+            processBirth: birthIdentity,
+            revision: 1,
+            authorizationReference: `sha256:${createHash("sha256").update(JSON.stringify(authorization)).digest("hex")}`,
+          });
+          await this.createAuthorityLeaseWithRetry(receipt, { leaseId: `lease-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`, now: this.clock(), windowMs: HEARTBEAT_LEASE_MS });
+        }
+      }
       return;
     }
-    if (existing) return;
     this.promoteFacadeRun(authorization);
     const initial: OwnedRun = {
       rootSessionId: this.rootSessionId,
@@ -425,7 +453,7 @@ export class RootBrokerServer {
           revision: 1,
           authorizationReference: `sha256:${createHash("sha256").update(JSON.stringify(authorization)).digest("hex")}`,
         });
-        await this.authorityStore.createWithLease(receipt, { leaseId: `lease-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`, now: this.clock(), windowMs: HEARTBEAT_LEASE_MS });
+        await this.createAuthorityLeaseWithRetry(receipt, { leaseId: `lease-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`, now: this.clock(), windowMs: HEARTBEAT_LEASE_MS });
       }
       // A successful authorization reply follows the durable owner receipt.
       await this.ensureAuthorizedPrincipal(binding.runId);
@@ -439,6 +467,25 @@ export class RootBrokerServer {
       throw error;
     } finally {
       if (this.startedObservations.get(binding.runId) === observation) this.startedObservations.delete(binding.runId);
+    }
+  }
+
+  /**
+   * Bug #4 fix ②: authority-index lock contention is a transient same-window
+   * race between parallel registrations, not an authority or storage fault.
+   * Retry only the distinctive contention code, bounded by a short linear
+   * backoff; deterministic authority failures and genuine storage faults fail
+   * fast on the first attempt.
+   */
+  private async createAuthorityLeaseWithRetry(receipt: OwnerReceiptV1, input: { leaseId: string; now: number; windowMs: number }): Promise<unknown> {
+    const store = this.requireAuthorityStore();
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await store.createWithLease(receipt, input);
+      } catch (error) {
+        if (!(error instanceof AuthorityStoreError) || error.code !== "authority_lock_contention" || attempt >= AUTHORITY_CONTENTION_RETRY_MAX_ATTEMPTS) throw error;
+        await new Promise((resolve) => setTimeout(resolve, AUTHORITY_CONTENTION_RETRY_BACKOFF_MS * attempt));
+      }
     }
   }
 

@@ -24,7 +24,7 @@ test("shell integration makes bare pi use the repository configuration", async (
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
       {
         encoding: "utf8",
-        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_AGENT_SESSION_DIR: "", PI_CODING_GOAL_DIR: "" },
+        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_AGENT_SESSION_DIR: "", PI_CODING_AGENT_GOAL_DIR: "", PI_CODING_AGENT_WORKSPACE_DIR: "", PI_CODING_GOAL_DIR: "", PI_CODING_WORKSPACE_DIR: "" },
       },
     );
 
@@ -53,7 +53,7 @@ test("shell integration preserves an absolute custom workspace state directory",
     const result = spawnSync(
       "zsh",
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
-      { encoding: "utf8", env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_WORKSPACE_DIR: "/tmp/custom-pi-workspaces" } },
+      { encoding: "utf8", env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_AGENT_GOAL_DIR: "", PI_CODING_AGENT_WORKSPACE_DIR: "", PI_CODING_WORKSPACE_DIR: "/tmp/custom-pi-workspaces" } },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -80,6 +80,7 @@ test("shell integration preserves a custom Goal state directory", async () => {
           ...process.env,
           PI_REAL_BIN: fakePi,
           OUTPUT: output,
+          PI_CODING_AGENT_GOAL_DIR: "",
           PI_CODING_GOAL_DIR: "/tmp/custom-pi-goals",
         },
       },
@@ -88,6 +89,46 @@ test("shell integration preserves a custom Goal state directory", async () => {
     assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(await readFile(output, "utf8"), "/tmp/custom-pi-goals");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("shell integration lets pi-new agent-prefixed state roots win over stale inherited non-agent values", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-shell-agent-vars-"));
+  try {
+    const output = join(root, "state-roots.json");
+    const fakePi = join(root, "pi-real");
+    await writeFile(
+      fakePi,
+      "#!/usr/bin/env bash\nnode -e 'require(\"fs\").writeFileSync(process.env.OUTPUT, JSON.stringify({ goals: process.env.PI_CODING_GOAL_DIR, workspaces: process.env.PI_CODING_WORKSPACE_DIR }))' -- \"$@\"\n",
+    );
+    await chmod(fakePi, 0o755);
+
+    // 模拟 pi-new 的权威通道（AGENT_ 前缀显式设置）与用户 shell 中残留的旧仓导出值（非 AGENT 变体）共存。
+    const result = spawnSync(
+      "zsh",
+      ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PI_REAL_BIN: fakePi,
+          OUTPUT: output,
+          PI_CODING_AGENT_GOAL_DIR: join(repoRoot, "var", "goals"),
+          PI_CODING_AGENT_WORKSPACE_DIR: join(repoRoot, "var", "workspaces"),
+          PI_CODING_GOAL_DIR: "/Users/leshi.zhy/pi-config/var/goals",
+          PI_CODING_WORKSPACE_DIR: "/Users/leshi.zhy/pi-config/var/workspaces",
+        },
+      },
+    );
+
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(await readFile(output, "utf8")), {
+      goals: join(repoRoot, "var", "goals"),
+      workspaces: join(repoRoot, "var", "workspaces"),
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -169,7 +210,7 @@ test("pi-full requests official fullscreen TUI mode", async () => {
   }
 });
 
-test("pi-explore launches the lean read-only exploration mode", async () => {
+test("pi-lite launches the lean read-only exploration mode", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-shell-explore-"));
   try {
     const output = join(root, "args.txt");
@@ -179,7 +220,7 @@ test("pi-explore launches the lean read-only exploration mode", async () => {
 
     const result = spawnSync(
       "zsh",
-      ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi-explore --version`],
+      ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi-lite --version`],
       {
         encoding: "utf8",
         env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output },

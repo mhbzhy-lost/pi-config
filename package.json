@@ -10,6 +10,7 @@
     "typecheck": "npm run typecheck:root && npm run typecheck:subagents-enhanced",
     "typecheck:root": "tsc --noEmit -p tsconfig.json",
     "typecheck:subagents-enhanced": "npm --prefix packages/pi-subagents-enhanced run typecheck",
+    "test:all-integration": "node scripts/run-integration-gate.ts",
     "test:integration": "node --test test/pi-runtime.integration.mjs",
     "test:subagents": "node --test test/pi-subagents-runtime.integration.mjs",
     "test:subagents-enhanced": "npm --prefix packages/pi-subagents-enhanced test",
@@ -27,9 +28,9 @@
     "typescript": "7.0.2"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.85.1",
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-tui": "0.85.1"
+    "@earendil-works/pi-agent-core": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-tui": "0.87.1"
   }
 }

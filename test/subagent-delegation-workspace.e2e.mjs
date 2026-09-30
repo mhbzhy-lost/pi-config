@@ -76,7 +76,6 @@ test("standalone executor coding contract reaches shared execution and allocates
     agent: "executor",
     risk: "normal",
     objective: "Implement the change.",
-    workflow: { mode: "tdd" },
     requirements: ["Preserve the public ABI."],
     context: { knownFacts: ["The contract is repository-managed."], decisions: ["Use the typed coding contract."], relevantFiles: ["src/**"] },
     boundaries: { writePaths: ["src/**"], excludedWork: ["Do not change the schema."], forbiddenActions: ["Do not commit."] },

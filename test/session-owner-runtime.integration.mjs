@@ -172,7 +172,9 @@ test("waitForRecord 在 watch 不发事件且二次读取过早时周期重读 a
 });
 
 async function waitForRecord(store, predicate, {
-  readRecords = () => listLiveRecords(store), watchDirectory = watch, pollIntervalMs = 25, timeoutMs = 20_000,
+  // 默认预算 60s：PTY 用例单个内含 2-3 次真实 Pi 冷启动，整机负载下 registry record
+  // 达到 active 的时间可逼近/超过 20s（实测失败集合在运行间漂移）；单测独跑通过。
+  readRecords = () => listLiveRecords(store), watchDirectory = watch, pollIntervalMs = 25, timeoutMs = 60_000,
 } = {}) {
   const ready = async () => (await readRecords()).find(predicate);
   const initial = await ready();

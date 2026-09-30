@@ -46,6 +46,11 @@ export async function installRootSessionOwner(pi: any, options: Options = {}) {
   const rootSessionId = env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID;
   const callerRunId = env.PI_SUBAGENT_RUN_ID;
   if (!enabled) return Object.freeze({ dispose() {} });
+  // 宿主 broker marker 可经环境继承到 generic child；只有完整 child 身份才能绑定 Root ownership。
+  if (!rootSessionId && !callerRunId) {
+    try { console.error("[subagent-root-owner] root ownership disabled: child broker identity unavailable"); } catch { /* 诊断不影响 generic child */ }
+    return Object.freeze({ dispose() {} });
+  }
   if (!rootSessionId || !callerRunId) throw new Error("Root ownership requires PI_SUBAGENT_RUN_ID and PI_SUBAGENT_ORCHESTRATOR_SESSION_ID");
   const createClient = options.createClient ?? createRootBrokerClient;
   const client = createClient({ rootSessionId, callerRunId, requiredCapability: "root.subscribe" });

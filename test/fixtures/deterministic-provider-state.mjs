@@ -102,6 +102,10 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
     if (toolNames.includes("contact_supervisor")) {
       return { tool: { name: "contact_supervisor", arguments: { reason: "need_decision", message: "Approve compatibility probe" } } };
     }
+    // The 0.71 public child runtime can omit optional supervisor tools when
+    // the agent declares no tools; finish with the observable compatibility
+    // marker instead of manufacturing a retired tool route.
+    return { text: `COMPAT_OK tools=${inventory}` };
   }
   return undefined;
 }

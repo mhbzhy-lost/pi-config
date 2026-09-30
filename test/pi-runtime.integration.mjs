@@ -19,6 +19,7 @@ const piTypes = join(piRoot, "dist", "core", "extensions", "types.d.ts");
 test("configured enhanced local package registers one authoritative subagent tool owner", async () => {
   const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_CODING_WORKSPACE_DIR"];
   const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   // The Host must start inside an isolated Git common-dir: the repository
   // under test carries a live coordinator whose recorded state root is not
   // this fixture's temporary workspace dir, so reusing it fails closed.
@@ -26,8 +27,12 @@ test("configured enhanced local package registers one authoritative subagent too
   const agentDir = join(root, "agent");
   let session;
   try {
-    await mkdir(agentDir);
+    await mkdir(join(agentDir, "agents"), { recursive: true });
+    for (const name of ["delegate", "executor", "reviewer"]) {
+      await writeFile(join(agentDir, "agents", `${name}.md`), await readFile(join(repoRoot, "pi", "agents", `${name}.md`)));
+    }
     for (const name of markers) delete process.env[name];
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({
       packages: [{ source: join(repoRoot, "packages", "pi-subagents-enhanced") }],
@@ -57,7 +62,6 @@ test("configured enhanced local package registers one authoritative subagent too
     const toolNames = session.getAllTools().map((tool) => tool.name)
       .filter((name) => ["subagent", "subagent_worktree", "subagent_supervisor"].includes(name)).sort();
     const runtime = enhanced.find((extension) => String(extension.path).endsWith("/subagent-runtime.ts"));
-
     assert.deepEqual(errors, []);
     assert.equal(enhanced.length, 2);
     assert.equal(legacy.length, 0);
@@ -83,6 +87,8 @@ test("configured enhanced local package registers one authoritative subagent too
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
       }
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     }
   }
 });

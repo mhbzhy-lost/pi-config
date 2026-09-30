@@ -80,6 +80,24 @@ async function commitWorkspace(receipt, name, content = name) {
   git(receipt.path, "commit", "-m", `add ${name}`);
 }
 
+test("recorded terminal proof is consumed by status and disposition without a provider", async (t) => {
+  const f = await fixture(t);
+  const service = createManagedWorkspaceService({ stateRoot: f.stateRoot, terminalProofProvider: () => ({ state: "pending" }) });
+  const active = service.ensureAllocated(request(f, "recorded-proof-ws"));
+  const run = { runId: "recorded-proof-run", asyncDir: join(f.root, "recorded-proof-async") };
+  service.bindRun({ workspaceId: active.workspaceId, run });
+  const ownerScope = { kind: "standalone-subagent", rootSessionId: "root-1" };
+  const proof = observedProof(run, { seed: "f" });
+
+  service.recordTerminalProof({ workspaceId: active.workspaceId, ownerScope, proof });
+  const status = service.status({ workspaceId: active.workspaceId });
+  assert.equal(status.terminalProof.proofId, proof.proofId);
+  assert.ok(status.allowedDispositions.includes("discard"));
+  const issued = service.issueDisposition({ workspaceId: active.workspaceId });
+  const discarded = service.dispose({ workspaceId: active.workspaceId, disposition: "discard", actionToken: issued.actionToken });
+  assert.equal(discarded.state, "released");
+});
+
 test("v2 discard persists the settled terminal proof on the released record and receipt", async (t) => {
   // R12g 归因：v2Receipt 曾结构性缺 terminalProof，settlement 判定的 proof 证据
   // 在 released 后无 durable 投影；proof 应随 ledger 持久化（released 的证明链）。

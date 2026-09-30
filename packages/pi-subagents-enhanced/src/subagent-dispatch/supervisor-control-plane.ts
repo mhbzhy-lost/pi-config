@@ -12,7 +12,7 @@ export type SupervisorControlIntentV1 = {
   requestId?: string; requestGeneration?: number; liveRunEpoch?: number;
 };
 export type SupervisorDeliveryReceipt = {
-  receiptId: string; idempotencyKey: string; kind: "reply" | "steer"; status: "delivered" | "failed";
+  receiptId: string; idempotencyKey: string; kind: "reply" | "steer"; status: "queued" | "delivered" | "failed"; consumed: boolean;
   runId: string; requestId?: string; code?: string;
 };
 
@@ -87,15 +87,36 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     if (intent.kind === "steer" && replyPayloads.has(`${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}`)) return blocked("STEER_DUPLICATES_REPLY");
     return { status: "allowed" as const, intent, idempotencyKey: key, request: pending };
   }
-  async function commitDelivery(input: { intent: unknown; success?: boolean; code?: string }) {
-    const intent = parseSupervisorControlIntentV1(input.intent); const decision: any = await resolveSupervisorControl(intent); if (decision.status === "idempotent") return decision;
+  async function commitDelivery(input: { intent: unknown; success?: boolean; code?: string; consumed?: boolean }) {
+    const intent = parseSupervisorControlIntentV1(input.intent); const decision: any = await resolveSupervisorControl(intent);
+    if (decision.status === "idempotent") {
+      // A queued follow-up is not terminally delivered yet. The child may
+      // later consume the same correlated payload, so allow that observation
+      // to advance the existing durable receipt exactly once.
+      if (input.consumed === true && decision.receipt.status === "queued") {
+        decision.receipt.status = "delivered";
+        decision.receipt.consumed = true;
+        const request = intent.kind === "reply" ? findPending(intent) : undefined;
+        if (request) request.state = "replied";
+        if (intent.kind === "reply") replyPayloads.add(`${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}`);
+        return { status: "committed" as const, receipt: decision.receipt };
+      }
+      return decision;
+    }
     if (decision.status !== "allowed") return decision;
-    const receipt: SupervisorDeliveryReceipt = { receiptId: `receipt-${id()}`, idempotencyKey: decision.idempotencyKey, kind: intent.kind, status: input.success === false ? "failed" : "delivered", runId: intent.runId, ...(intent.requestId ? { requestId: intent.requestId } : {}), ...(input.code ? { code: input.code } : {}) };
+    const consumed = input.consumed === true;
+    const receipt: SupervisorDeliveryReceipt = { receiptId: `receipt-${id()}`, idempotencyKey: decision.idempotencyKey, kind: intent.kind, status: input.success === false ? "failed" : consumed ? "delivered" : "queued", consumed, runId: intent.runId, ...(intent.requestId ? { requestId: intent.requestId } : {}), ...(input.code ? { code: input.code } : {}) };
     receipts.set(decision.idempotencyKey, receipt);
-    if (intent.kind === "reply" && decision.request) { decision.request.state = receipt.status === "delivered" ? "replied" : "failed"; if (receipt.status === "delivered") replyPayloads.add(`${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}`); }
+    if (intent.kind === "reply" && decision.request) {
+      decision.request.state = receipt.status === "delivered" ? "replied" : receipt.status === "failed" ? "failed" : "pending";
+      if (receipt.status === "delivered") replyPayloads.add(`${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}`);
+    }
     return { status: "committed" as const, receipt };
   }
-  return Object.freeze({ registerSupervisorRequest, resolveSupervisorControl, commitDelivery,
+  async function markDeliveryConsumed(intent: unknown) {
+    return commitDelivery({ intent, consumed: true });
+  }
+  return Object.freeze({ registerSupervisorRequest, resolveSupervisorControl, commitDelivery, markDeliveryConsumed,
     identityForRun: async (runId: string) => ({ owner: await options.readOwnerReceipt?.(runId), runtime: await options.readRuntime?.(runId) }),
     listPending: () => [...requests.values()].filter(r => r.state === "pending"), findRequest: (requestId: string) => [...requests.values()].find(r => r.requestId === requestId), markProgressStalled: (runId: string) => ({ status: "stalled-suspected", runId }), snapshot: () => ({ requests: [...requests.values()] }) });
 }
