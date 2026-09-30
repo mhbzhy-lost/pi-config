@@ -18,7 +18,7 @@ const EXCLUDED_INTEGRATION_FILES = new Map([
   ["pi-subagents-runtime.integration.mjs",
     "WIRED-ELSEWHERE: 已由 test:subagents script 维护验收；当前已知 3/5（attention 双测受 supervisor 桥接升级决策项 #3 影响，child 侧行为已实证正确，见 var/upgrade/final-gate-report.md）"],
   ["subagent-auto-integration-resumed-child.integration.mjs",
-    "PENDING-DIAGNOSIS: 四用例同族系统性挂起（~180s，queue 恒空、proof debts 不解）；fixture 一/二层已修，干净链路复现证据见 var/upgrade/fix-resumed-child-fixture.md"],
+    "DIAGNOSED-UPSTREAM: 根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空→挂起；非 merge 引入，修复归属 upstream，见 docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md"],
   ["session-owner-runtime.integration.mjs",
     "PENDING-DIAGNOSIS: 3 个 -c 相关 PTY 用例失败，机制为 session-owner 守卫拦截 fixture pi（registry 空、exitCode 0），非时序预算；见 var/upgrade/fix-three-orphaned-tests.md"],
   ["managed-workspace-terminal-proof-handoff.integration.mjs",
