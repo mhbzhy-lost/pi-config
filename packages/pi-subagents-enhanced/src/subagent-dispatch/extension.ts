@@ -23,7 +23,8 @@ import { createSubagentRpcFailureDetails } from "./errors.ts";
 
 const CLEANUP_KEY = "__typedSubagentRuntimeCleanup";
 const SHUTDOWN_DEBT_KEY = "__typedSubagentRuntimeShutdownDebt";
-const CONTROL_ACTIONS = new Set(["status", "steer", "interrupt", "resume", "stop"]);
+const CONTROL_ACTIONS = new Set(["status", "steer", "interrupt", "resume", "stop", "list"]);
+const LIST_EXCLUDED_FIELDS = new Set(["description", "frontmatter", "file", "path"]);
 
 const stringList = {
   type: "array",
@@ -95,7 +96,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
       ],
     },
     // control 分支字段
-    action: { enum: ["status", "steer", "interrupt", "resume", "stop"] },
+    action: { enum: ["status", "steer", "interrupt", "resume", "stop", "list"] },
     id: { type: "string", minLength: 1, maxLength: 4096 },
     runId: { type: "string", minLength: 1, maxLength: 4096 },
     dir: { type: "string", minLength: 1, maxLength: 4096 },
@@ -104,7 +105,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
   },
 });
 
-export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime. Use generic={agent,task} for research or text-only work, or coding={agent,task,writePaths,acceptance} for repository changes. Coding acceptance must be {criteria:[...]} and writePaths must contain at least one repository-relative path.
+export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime. Use generic={agent,task} for research or text-only work, or coding={agent,task,writePaths,acceptance} for repository changes. Available agents: delegate (primary/complex), executor (deterministic), reviewer (review). Use {action:"list"} to see the current agent roster. Coding acceptance must be {criteria:[...]} and writePaths must contain at least one repository-relative path.
 
 For coding work, writePaths and acceptance are required. model is the only optional model selector. A qualified provider/model-id must exactly match the available catalog. A bare model-id with agent models matches the first currently available declared candidate with that ID, in declaration order; a miss fails and does not search the global catalog. A bare model-id with no agent models matches the available catalog by ascending full provider/model-id; that successful global-catalog path returns MODEL_MATCH_USED_GLOBAL_CATALOG in top-level details.warnings. Omitting model preserves agent metadata/default routing, including each profile's ordered models fallback chain. modelSelection reports requestedModel, resolvedModel, and source when applicable; neither requested nor resolved claims the actual child model. Runtime run/status/artifact actual-model metadata is authoritative. Worktrees use top-level worktree and cwd. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, resume, and stop. interrupt pauses the current turn; then use resume with a new non-empty message to continue it with new instructions. A stopped subagent cannot be resumed. When worktree=true, the response includes a workspace_id; after completion use subagent_worktree({action:"status"}) then integrate or discard to finish, or preserve temporarily and later release.`;
 
@@ -977,9 +978,25 @@ function controlFailure(code, receipt = undefined) {
   };
 }
 
-async function executeControl(input, rpc, supervisorControlPlane, toolCallId) {
+async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx) {
   if (!CONTROL_ACTIONS.has(input.action)) {
     return failure("UNSUPPORTED_ACTION", `unsupported subagent RPC action: ${String(input.action)}`);
+  }
+  if (input.action === "list") {
+    try {
+      const discovery = await discover(ctx.cwd, "both", ctx.model?.provider);
+      const agents = discovery.agents
+        .filter((a) => !a.disabled)
+        .map((a) => ({ name: a.name, model: a.model ?? null, tools: a.tools ?? null }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      return {
+        content: [{ type: "text", text: `Available agents: ${agents.map((a) => a.name).join(", ")}` }],
+        isError: false,
+        details: { agents },
+      };
+    } catch (error) {
+      return failure("AGENT_DISCOVERY_FAILED", error instanceof Error ? error.message : String(error));
+    }
   }
   if (input.action === "resume" && !nonempty(input.message)) {
     return failure("INVALID_RESUME_MESSAGE", "resume requires a non-empty message", undefined, "$.message");
@@ -1321,7 +1338,7 @@ export function createTypedSubagentExtension(
           return result;
         }
         if (Object.hasOwn(input, "action")) {
-          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId);
+          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx);
           trace("tool-returned");
           return result;
         }
