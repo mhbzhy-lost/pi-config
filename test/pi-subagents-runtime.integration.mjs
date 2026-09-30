@@ -407,7 +407,7 @@ Use the deterministic compatibility marker from the assigned task.
     assert.equal(typeof details.spawned?.runId, "string");
     assert.equal(typeof details.spawned?.asyncDir, "string");
     assert.equal(details.spawned.parentWorkflowRunId, details.workflowRoot.runId);
-    assert.equal(details.spawned.workflowKey, "compat-worker");
+    assert.equal(details.spawned.workflowKey, "executor");
     assert.notEqual(details.spawned.runId, details.workflowRoot.runId);
 
     const terminal = await waitForStatus(details.spawned.asyncDir, (status) => status.state !== "running" && status.state !== "queued");

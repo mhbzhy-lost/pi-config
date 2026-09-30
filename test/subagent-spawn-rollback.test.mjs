@@ -109,38 +109,14 @@ async function execute(tool, params, context = { cwd: "/repo" }) {
 
 function codingContract(overrides = {}) {
   const base = {
-    version: "dispatch-ir.v1",
-    taskId: "spawn-rollback",
-    title: "Probe the spawn failure rollback",
-    agent: "executor",
-    risk: "normal",
-    objective: "Spawn must roll back spawned runs when post-spawn registration fails.",
-    requirements: ["Issue a best-effort stop for already spawned runs."],
-    context: {
-      knownFacts: ["Registration failure leaves an orphan run."],
-      decisions: ["Rollback is best effort and never masks the original error."],
-      relevantFiles: ["packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts"],
-    },
-    boundaries: {
-      writePaths: ["packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts"],
-      excludedWork: ["Do not change authority-store or root-broker-server."],
-      forbiddenActions: ["Do not invent a new stop protocol."],
-    },
-    acceptance: {
-      criteria: ["Failed dispatches stop their spawned runs."],
-    },
-    execution: {},
+    title: "Probe the spawn failure rollback", agent: "executor",
+    task: "Spawn must roll back spawned runs when post-spawn registration fails.",
+    writePaths: ["packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts"],
+    acceptance: { criteria: ["Failed dispatches stop their spawned runs."] },
+    worktree: false,
   };
-  return {
-    ...base,
-    ...overrides,
-    context: { ...base.context, ...overrides.context },
-    boundaries: { ...base.boundaries, ...overrides.boundaries },
-    acceptance: { ...base.acceptance, ...overrides.acceptance },
-    execution: { ...base.execution, ...overrides.execution },
-  };
+  return { ...base, ...overrides, acceptance: { ...base.acceptance, ...overrides.acceptance } };
 }
-
 function managedReceipt(overrides = {}) {
   return {
     schemaVersion: "managed-workspace.v2",
@@ -306,12 +282,15 @@ test("coding managed workspace：注册失败回滚已 spawn 的 root/leaf，原
     resolveCanonicalOrigin: async () => "/repo",
     inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
     discoverAgents,
+    resolveRootSessionId: () => "root-1",
+    resolveCanonicalOrigin: async () => "/repo",
+    inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
     async registerAuthorizedRun() { throw authorityStoreUnavailable(); },
   });
 
   const result = await execute(
     pi.tools[0],
-    codingContract({ execution: { worktree: true } }),
+    codingContract({ worktree: true }),
     { cwd: "/repo", sessionManager: {} },
   );
 

@@ -23,7 +23,7 @@ const requiredTarballPaths = [
   "child-extensions/acceptance-evidence.ts", "scripts/setup-runtime-deps.ts", "scripts/verify-package.ts",
   "src/subagent-dispatch/extension.ts", "src/subagent-dispatch/root-broker-server.ts",
   "src/tui/native-conversation.ts", "src/tui/session-browser.ts", "src/contracts/dispatch-ir.ts",
-  "src/contracts/generic-prompt.ts", "src/workspace/contract.ts", "src/workspace/ledger.ts",
+  "src/workspace/contract.ts", "src/workspace/ledger.ts",
   "src/workspace/git-worktree.ts", "src/workspace/service.ts", "src/workspace/registry.ts",
   "src/workspace/tool.ts", "src/workspace/completion-reminder.ts", "src/workspace/administration.ts",
   "node_modules/pi-subagents/package.json",

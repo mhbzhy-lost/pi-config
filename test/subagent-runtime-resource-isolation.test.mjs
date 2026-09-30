@@ -125,9 +125,9 @@ test("production dispatch modules are independent from Plan Runner and native to
 test("the model-facing description contains the project dispatch and push-notification contract", async () => {
   const { TYPED_SUBAGENT_DESCRIPTION } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts");
 
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /dispatch-ir\.v1/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /For coding work, provide the complete dispatch-ir\.v1 contract/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /For generic work, provide \{ agent, title, task \}/);
+  assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /dispatch-ir\.v1/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /For coding work, provide the complete dispatch-ir.v2 contract/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /generic=\{agent,task\}/);
   assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /For executor, provide/);
   assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /spark/);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /completion notifications are delivered automatically/i);

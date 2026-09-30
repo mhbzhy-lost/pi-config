@@ -141,7 +141,6 @@ test("npm dry-run tarball contains the complete runtime closure and no repositor
     "src/tui/native-conversation.ts",
     "src/tui/session-browser.ts",
     "src/contracts/dispatch-ir.ts",
-    "src/contracts/generic-prompt.ts",
     "src/workspace/contract.ts",
     "src/workspace/ledger.ts",
     "src/workspace/git-worktree.ts",
