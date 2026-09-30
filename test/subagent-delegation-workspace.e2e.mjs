@@ -47,24 +47,18 @@ function hostEnvelope(root, cwdRoot, agent, kind) {
 
 test("standalone reviewer generic contract reaches shared execution through a Host envelope", async (t) => {
   const f = await fixture(t);
-  const prompt = compileDispatchIR({
-    task: "Review the isolated diff.",
-    context: ["The reviewer has read-only scope."],
-    constraints: ["Do not modify files."],
-    deliverable: "A findings report.",
-    done: ["Every finding cites evidence."],
-  });
-  assert.match(renderDispatchPrompt(prompt), /## Done/);
+  const prompt = compileDispatchIR({ agent: "reviewer", task: "Review the isolated diff. The reviewer has read-only scope. Do not modify files. Deliverable: a findings report. Every finding cites evidence." });
+  assert.match(renderDispatchPrompt(prompt), /## Task/);
   const envelope = await hostEnvelope(f.root, f.originRoot, "reviewer", "generic");
   let seen;
   const receipt = await dispatchExecution(
-    createGenericDispatchAdapter({ agent: "reviewer", title: "Review", prompt, cwd: f.originRoot }),
+    createGenericDispatchAdapter({ agent: "reviewer", title: "Review", task: prompt.task, cwd: f.originRoot }),
     { authorizedDispatch: envelope, execute: (value) => { seen = value; return { runId: "reviewer-run" }; } },
   );
   assert.equal(receipt.runId, "reviewer-run");
   assert.equal(seen.worktree, false);
   assert.equal(seen.authorizedDispatch, envelope);
-  assert.match(seen.prompt, /# Generic Subagent Prompt/);
+  assert.match(seen.prompt, /Review the isolated diff/);
 });
 
 test("standalone executor coding contract reaches shared execution and allocates a v2 workspace", async (t) => {
@@ -78,15 +72,15 @@ test("standalone executor coding contract reaches shared execution and allocates
     worktree: true,
   };
   const ir = preparePublicCodingDispatch(coding, { cwd: f.originRoot, timeoutMs: 30 * 60_000 });
-  assert.equal(ir.hash.length, 64);
+  assert.equal(ir.contractHash.length, 64);
   const envelope = await hostEnvelope(f.root, f.originRoot, "executor", "coding");
   let seen;
   await dispatchExecution(
-    createCodingDispatchAdapter({ agent: "executor", title: ir.title, prompt: "# Coding Dispatch Contract v1", cwd: f.originRoot, contractHash: ir.hash }),
+    createCodingDispatchAdapter({ agent: "executor", title: ir.title, prompt: "# Coding Dispatch Contract v2", cwd: f.originRoot, contractHash: ir.contractHash }),
     { authorizedDispatch: envelope, execute: (value) => { seen = value; return { runId: "executor-run" }; } },
   );
   assert.equal(seen.worktree, false);
-  assert.equal(seen.contractHash, ir.hash);
+  assert.equal(seen.contractHash, ir.contractHash);
 
   const service = createManagedWorkspaceService({ stateRoot: join(f.root, "state") });
   const request = createManagedWorkspaceRequestV2({
@@ -96,7 +90,7 @@ test("standalone executor coding contract reaches shared execution and allocates
     requestedCwd: join(f.originRoot, "src"),
     originRef: "refs/heads/main",
     baseCommit: f.baseCommit,
-    contractHash: ir.hash,
+    contractHash: ir.contractHash,
     policy: { publication: "allowed", application: "allowed", writePaths: ["src/**"] },
   });
   const active = service.ensureAllocated(request);
