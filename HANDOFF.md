@@ -1,6 +1,12 @@
 # 升级会话交接文档（Handoff）
 
-> 写于 2026-09-30（第三段：main-merge 完成 + 三缺陷收尾 + steer 拦截修复）。主仓编排会话 → 新仓续接会话（pi-new）。本段完成 `docs/plans/2026-09-30-main-merge-and-consolidation.md` 的 T1-T10，并追加修复用户报告的主动 steer 拦截缺陷。
+> 写于 2026-09-30（第四段：main-merge 执行 + reviewer 审核整改）。主仓编排会话 → 新仓续接会话（pi-new）。
+>
+> **本文是唯一终态摘要，下方所有门禁数字以本文「当前门禁基线」节为准；历史段落中的旧数字均已显式标记为历史。**
+>
+> 执行范围：`docs/plans/2026-09-30-main-merge-and-consolidation.md` 的 T1–T10，外加三项追加修复（steer 拦截、dispatch task 上界、以及 reviewer Blocker B1/B2 整改）。
+>
+> ⚠️ **计划验收未全部达成**：astra reviewer 执行后审核结论为「不通过」。T7/T8 仅完成诊断、**未按计划修复也未解除排除**；T4 的「focused 全绿后再 merge」与 canary 保留要求未满足。详见下方「计划验收偏差」节。
 
 ## 你在哪
 
@@ -11,24 +17,27 @@
 
 ## 升级状态一句话
 
-**pi core 0.87.1 × pi-subagents 0.71.0 升级本体 + main merge（v2 dispatch 合同 × 0.71 运行时）全部完成；静态门禁 933/0 全绿；三项遗留缺陷中 T7/T8 已诊断定性（均非 merge 引入、非生产缺陷）并登记，T9（terminal-proof 语义）待用户 (a)/(b) 裁决、暂 suspended；仅剩后续切换阶段（原 T12 第三段）待三段授权。**
+**pi core 0.87.1 × pi-subagents 0.71.0 升级本体 + main merge（v2 dispatch 合同 × 0.71 运行时）已落地；当前静态门禁 951/950/0/1todo、完整 integration gate 32 文件 225/225（3 项排除）。T9 已按用户裁决 (a) 实施完成；T7/T8 仅诊断、未修复、排除仍在，属计划验收未完成项，待用户决定「修复」还是「正式豁免并登记 owner/期限」。后续切换阶段（原 T12 第三段）在 reviewer Blocker 全部关闭前不建议启动。**
 
-## 本段（第三段）完成：main-merge + 三缺陷收尾
+## 本段完成：main-merge + 缺陷收尾 + reviewer 整改
 
 | 任务 | 状态 | 提交 / 证据 |
 |---|---|---|
 | T1 工作区分组提交（代码/文档两笔，排除 settings） | ✅ | `f41234a`、`93b00b3` |
 | T2 fetch+merge+批量取侧+僵尸清理 | ✅ | merge `fcc43a6`（B25 theirs/C29 ours/4 modify-delete/2 僵尸删除） |
 | T3 A 类生产交织（extension.ts 29 块）+ T5 doctor v2 迁移 | ✅ | 并入 `fcc43a6`；typecheck 双绿 |
-| T4 A 类测试交织 + 真实 Host 夹具迁移 | ✅ | `fcc43a6`、`7ee6ef3`、`115f3e8` |
-| T6 全量门禁收口 | ✅ | `7ee6ef3`（npm test 933/0） |
-| T7 resumed-child 诊断 | ✅ 定性 | `e3df534`；upstream 扩展传播缺陷，非 merge 引入 |
-| T8 session-owner PTY 诊断 | ✅ 定性 | `13d2806`；夹具时序脆弱，非生产缺陷 |
-| T9 terminal-proof 裁决 | ⏸ suspended | 待用户 (a)/(b)；集成门禁保持 PENDING-ADJUDICATION |
-| T10 HANDOFF + 收尾 | ✅ | 本文件 |
-| 追加：修复非 workspace run 主动 steer 被控制面拦截 | ✅ | `5039a40`；docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md；membrane RED 单测 + 真实 Host 集成回归（steer 文本真正插入 child 会话） |
-| T9 terminal-proof 跨 owner 绑定裁决实施（用户选 a） | ✅ | `49931ed`；docs/bugs/2026-09-30-terminal-proof-cross-owner-binding-silent.md；跨 scope 复查命中即记债暴露，解除门禁排除，terminal-proof-handoff 7/7 绿 |
-| 追加：dispatch task 上界 4 KiB → 32 KiB | ✅ | `81eb18f`；docs/bugs/2026-09-30-dispatch-task-4k-limit.md；membrane 无关，新增 dispatch-ir 3 用例；~7 KB task 真实派发端到端验证通过 |
+| T4 A 类测试交织 + 真实 Host 夹具迁移 | ⚠️ 部分 | `fcc43a6`、`7ee6ef3`、`115f3e8`；**未达验收**：计划要求 focused 全绿后再 merge，且已裁决保留的 canary 用例被删除（见「计划验收偏差」） |
+| T6 全量门禁收口 | ✅ | `7ee6ef3`（历史基线 933/0，已被后续基线取代） |
+| T7 resumed-child | ❌ **未达验收** | `e3df534` 仅诊断。**是 production 可达的真实缺陷**（upstream `runs.run` leaf→step 丢失 `subagentOnlyExtensions`），非 merge 引入≠可安全切换；计划要求的 4/4 绿与解除排除**均未完成**，排除仍在 |
+| T8 session-owner PTY | ❌ **未达验收** | `13d2806` 仅诊断，且定性证据不足（readiness 超时无法区分「晚到」与「永不到」）；计划要求的连续两遍全绿与解除排除**均未完成**，排除仍在 |
+| T9 terminal-proof 裁决（用户选 a） | ✅ | `49931ed` + B2 加固 `471f473`；docs/bugs/2026-09-30-terminal-proof-cross-owner-binding-silent.md；跨 scope 复查命中即记债，复查不可用亦 fail-closed；解除门禁排除，7/7 绿 |
+| T10 HANDOFF + 收尾 | ✅（本次重写修正） | 本文件；首版存在自相矛盾的 suspended/旧门禁数字，已按 reviewer B4 统一为单一终态摘要 |
+| 追加：修复非 workspace run 主动 steer 被控制面拦截 | ✅（后被 B1 加固） | `5039a40`；docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md |
+| 追加：dispatch task 上界 4 KiB → 32 KiB | ✅ | `81eb18f`；docs/bugs/2026-09-30-dispatch-task-4k-limit.md；~7 KB task 真实派发端到端验证通过 |
+| **reviewer Blocker B1：steer 控制面目标别名绕过（P0，由 `5039a40` 引入）** | ✅ 已修 | `4499941`；docs/bugs/2026-09-30-steer-control-plane-target-aliasing.md；目标规范化 + owner 三态 + 错误码分类；membrane 78/78、真实 Host steer 集成 1/1 |
+| **reviewer Blocker B2：跨 scope 复查失败静默退化** | ✅ 已修 | `471f473`；`readCrossScope` 改必选，缺失/抛错/非法一律记债；proof-binding 8/8 |
+| **reviewer Blocker B3：T7/T8 验收合同未完成** | ⏳ **待用户决策** | 见「计划验收偏差」；不得以执行报告替代授权 |
+| **reviewer Blocker B4：HANDOFF 自相矛盾** | ✅ 已修 | 本次重写；历史数字已标记为历史 |
 
 ## 本会话（第二段）完成的清账
 
@@ -54,11 +63,65 @@
 
 footgun 复核结论（`var/upgrade/footgun-injection-fix.md`）：注入点语义当前已正确（completionApi 从不带 suppression），零生产改动，+1 守卫用例。
 
-## 静态门禁状态（merge + steer 修复 + T9 裁决 + task 上界提升后新基线，2026-09-30）
+## 当前门禁基线（唯一权威，2026-09-30 reviewer 整改后）
 
-npm test **938tests/937pass/0fail/1todo**（TMPDIR=/tmp；较 T9 后基线 +3 为 dispatch task 上界用例）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件对齐 registry）· **完整 integration gate：32 文件 225/225 全绿**（3 显式排除：pi-subagents-runtime WIRED-ELSEWHERE、resumed-child DIAGNOSED-UPSTREAM、session-owner-runtime DIAGNOSED-FIXTURE）· 真实 Host focused：project-workflow 2/2、session-owner-install 3/3、notification 2/2、steer-text-insertion 1/1、terminal-proof-handoff 7/7、runtime 3/5（attention 双测受决策项 #3 影响）。
+npm test **951tests/950pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件）· membrane **78/78** · proof-binding **8/8** · dispatch 相关 **109/109**。
 
-集成门禁 `test:all-integration` 保持 3 显式排除（均已精确诊断）：pi-subagents-runtime（WIRED-ELSEWHERE）、resumed-child（DIAGNOSED-UPSTREAM）、session-owner-runtime（DIAGNOSED-FIXTURE）。terminal-proof-handoff 的 PENDING-ADJUDICATION 已随 T9 裁决（选项 a）解除。**最终完整 integration gate 已重跑：32 文件 225/225 全绿。**
+**完整 integration gate：32 文件 225/225 全绿**（日志 `var/upgrade/final-integration-gate-v3.log`），3 项显式排除。⚠️ 该 gate 结果采集于 B1/B2 整改**之前**；B1/B2 后已重跑受影响面（membrane / proof-binding / steer 集成 / terminal-proof 集成），**完整 gate 尚需重跑一次**。
+
+历史基线（仅存档，不代表当前）：933/0（T6）→ 935/934（T9）→ 938/937（task 上界）→ **951/950（当前）**。
+
+### 集成门禁排除项（3 项，均无 owner/期限，属 B3 待整改）
+
+| 排除文件 | 声称定性 | reviewer 判定 |
+|---|---|---|
+| `pi-subagents-runtime.integration.mjs` | WIRED-ELSEWHERE（`test:subagents` script 存在） | 有独立 script **不等于**有通过的门禁；该文件已知只 3/5，且含真实 supervisor reply 死锁 |
+| `subagent-resumed-child-*.integration.mjs` | DIAGNOSED-UPSTREAM | **production 可达的真实缺陷**，仅「非 merge 引入」不足以支持安全切换 |
+| `session-owner-runtime.integration.mjs` | DIAGNOSED-FIXTURE | 定性证据不足：readiness 超时无法区分「晚到」与「永不到」 |
+
+## 计划验收偏差（reviewer 审核结论：不通过）
+
+以下偏差均为**实际存在、尚未关闭**，不得当作已完成：
+
+### B3（Blocker）——T7/T8 从「修复并解除排除」被降为「诊断后永久排除」
+
+计划 Task 7 要求四用例全绿 + TDD 修复 + 删除排除；Task 8 要求文件连续两遍全绿 + 删除排除。
+实际仅交付诊断报告，排除仍在，且三项排除**均无 owner / issue / 到期时间 / 恢复门禁条件**。
+这属于单方面缩减验收合同，**必须用户显式裁决**：要么按原计划修复，要么正式豁免并登记责任人与期限。
+
+### S1（Suggestion）——删除项并非全部具备等价覆盖
+
+| 删除项 | 结论 |
+|---|---|
+| `generic-prompt.ts` | 删除合理，`test/subagent-generic-prompt-contract.test.mjs` 已覆盖 |
+| `model-tiers.yaml` | 需明确哪些旧能力正式退出产品合同 |
+| `agents-append.test.mjs` | 入口已退役但 `src/agents-append/index.ts:47-84` 仍留存，应按**死代码清理**，不能仅称「已等价迁移」 |
+| `subagent-stream-read-error-retry.test.mjs` | 旧测试删除可接受，但**能力缺失**不得宣称覆盖已替代（上游无等价 recovery） |
+| `workflow-child-extensions-descriptor.test.mjs` | **非等价替代**：删除了恢复 descriptor 保留扩展/幂等/锚点拒绝覆盖，而这正是 T7 失败所在的风险面 |
+| project-workflow canary | **偏离已裁决方案**：现仅验证单 executor managed workspace/proof，丢失多 profile typed/generic 隔离与计划要求保留的 `authorization.state === "unavailable"` 断言 |
+
+### S2（Suggestion）——计划产物路径缺失与任务编号串用
+
+下列计划要求的产物**从未交付**：`merge-task3/4/5-report.md`、`merge-gate-report.md`、
+`resumed-child-hang-diagnosis.md`、`resumed-child-hang-fix.md`、
+`session-owner-pty-guard-diagnosis.md`、`terminal-proof-adjudication.md`。
+
+更严重的是：`var/upgrade/t4-report.md` 至 `t10-report.md` **属于前一轮升级任务**（例如
+`t10-report.md` 是 TUI schema 验收，**不是**本计划 T10 收尾），却曾被当作本计划证据引用。
+待补：「计划要求路径 → 实际证据路径 → commit/日志」索引，未产出的明确记为缺失。
+
+### S3（Suggestion）——冲突总数成立但分类文字矛盾
+
+76 路径总数与唐一性成立（`var/upgrade/t2-unmerged.txt` 76 行、含四个 modify-delete）。
+但 A22+B25+C29 后又另列四个 modify-delete，形成 76/80 混算（四者本就是 76 的子集）；
+且 A22 被描述为「均为内容/添加冲突」却含 `pi/settings.json`。待改为逐路径分类清单 +
+独立的冲突类型维度。两个僵尸文件确实不在 76 内。
+
+### O2（Observation）——T9 跨 scope 复查仅以 runId 匹配
+
+未发现跨 scope 写入或内容外泄（分类器只输出通用债务原因，命中即返回 debt、不进入投递写路径）。
+但仅以 runId 匹配、未联合仓库/进程实例等身份，**合法 owner 迁移、历史残留、重复标识的误报尚无测试**。
+待补：明确 debt 是「当前 broker 的对账债务」而非「另一个 owner 的错误结算」，并补迁移/历史记录场景。
 
 ## 升级决策项（留档待用户拍板，含新增）
 
@@ -72,15 +135,16 @@ npm test **938tests/937pass/0fail/1todo**（TMPDIR=/tmp；较 T9 后基线 +3 �
 8. ~~**T12 命名冲突**~~（已裁定：**pi-lite**，2026-09-29；新仓已回退 R2a 改名与主仓收敛，函数/测试 9/9 绿，T12 此项冲突解除）
 9. ~~**门禁覆盖产品决策**~~（已落地：用户定原则「长耗时属集成测试不进主 glob」；已建 `test:all-integration` 门禁 runner，自动枚举+串行+显式排除表，新文件自动接线，首跑 30 文件 218/218 绿）
 10. ~~**产品语义观察项**~~（已裁决关闭，2026-09-30：经代码验证，broker 身份三项服务——integration 订阅/proof settlement/lease 存活——全部面向 managed workspace 生命周期，无 workspace 的 coding run 无需 broker；b332005 门控为正确设计，canary 测试按 worktree:true 钉住现行语义）
-11. ~~两项待专项诊断的集成测试失败面~~（**已诊断定性，2026-09-30**）：(a) resumed-child——根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空；非 merge 引入，修复归属 upstream（docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md）。(b) session-owner-runtime 三 PTY 用例——夹具时序脆弱（2 独跑通过、SIGKILL 接管超 60s 预算）；守卫/ESRCH 逻辑正确、merge 仅附加审计日志，非生产缺陷（var/upgrade/t8-session-owner-pty-diagnosis.md）。注：resumed-child 是 auto-integration 恢复续跑（child 退出后自动收尾），与控制面手动 resume 无关，后者使用正常。
+11. ~~两项待专项诊断的集成测试失败面~~（**已诊断但未修复，2026-09-30；reviewer 判定为验收未完成项**）：(a) resumed-child——根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空；非 merge 引入，**但属 production 可达的真实缺陷**，修复归属 upstream 不等于可安全切换（docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md）。(b) session-owner-runtime 三 PTY 用例——归因为夹具时序脆弱（2 独跑通过、SIGKILL 接管超 60s 预算），**但证据不足**：readiness 超时无法区分「晚到」与「永久启动失败」，需有界实验定调后才能定性（var/upgrade/t8-session-owner-pty-diagnosis.md）。注：resumed-child 是 auto-integration 恢复续跑（child 退出后自动收尾），与控制面手动 resume 无关，后者使用正常。
 12. ~~**terminal-proof-handoff 语义裁决**~~（已裁决实施，2026-09-30 选项 a）：跨 owner scope 未解析绑定经 ledger.list() 跨 scope 复查命中即 recordDebt 暴露，不再静默 not-applicable；terminal-proof-handoff 集成门禁排除已解除，7/7 绿（docs/bugs/2026-09-30-terminal-proof-cross-owner-binding-silent.md）
 
 ## 后续切换阶段前置条件（原 T12 第三段，届时需用户三段授权）
 
 1. ~~**提交整理**~~（已完成：T1 两笔 + merge 后逐任务提交，工作区干净）
-2. ~~**基点对齐**~~（已完成：main 已 merge，76 冲突解完，静态门禁 933/0）
+2. ~~**基点对齐**~~（已完成：main 已 merge，76 冲突解完）
 3. **merge + init-pi.sh**：合回主树 → 全局安装 0.87.1 → shell/skills/Basic Memory 同步（待三段授权）
-4. ~~待用户裁决：T9 terminal-proof (a)/(b)~~（已裁决选项 a 并实施，门禁排除已解除、完整 gate 已重跑全绿）
+4. ~~待用户裁决：T9 terminal-proof (a)/(b)~~（已裁决选项 a 并实施，门禁排除已解除）
+5. **新增前置：reviewer Blocker 全部关闭**。B1/B2/B4 已修；**B3（T7/T8 验收合同）仍待用户决策**，未关闭前不建议启动切换。
 
 ### T12 准备登记项（本仓之外，不归本仓改）
 
