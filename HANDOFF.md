@@ -67,7 +67,7 @@ footgun 复核结论（`var/upgrade/footgun-injection-fix.md`）：注入点语�
 
 npm test **951tests/950pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件）· membrane **78/78** · proof-binding **8/8** · dispatch 相关 **109/109**。
 
-**完整 integration gate：32 文件 225/225 全绿**（日志 `var/upgrade/final-integration-gate-v3.log`），3 项显式排除。⚠️ 该 gate 结果采集于 B1/B2 整改**之前**；B1/B2 后已重跑受影响面（membrane / proof-binding / steer 集成 / terminal-proof 集成），**完整 gate 尚需重跑一次**。
+**完整 integration gate（B1/B2 整改后已重跑）：32 文件 225/225 全绿、0 fail、0 cancelled**（日志 `var/upgrade/final-integration-gate-v4.log`，exit 0），3 项显式排除。
 
 历史基线（仅存档，不代表当前）：933/0（T6）→ 935/934（T9）→ 938/937（task 上界）→ **951/950（当前）**。
 
