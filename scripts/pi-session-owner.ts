@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, constants, lstatSync, openSync, closeSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, constants, lstatSync, openSync, closeSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { canonicalizeCwd, classifyPiLaunch, loadPublicSessionManager, resolveLaunchTarget } from "../src/session-owner/contract.ts";
 import { createRegistryStore, prepareLaunch } from "../src/session-owner/registry.ts";
@@ -35,6 +35,9 @@ async function prepare(options: { pid: number; cwd: string; stdinTty: boolean; s
   let action: Decision = "blocked";
   let sessionPath: string | null = null;
   let continueArgIndex = -1;
+  // 审计日志：拦截/固定决策的持久化依据（用户可追溯「谁、何时、为何拦」）。
+  let auditReason: string | null = null;
+  let auditConflictingOwnerId: string | undefined;
   try {
     const intent = classifyPiLaunch(options.argv, { stdinTty: options.stdinTty, stdoutTty: options.stdoutTty });
     continueArgIndex = intent.continueArgIndex ?? -1;
@@ -57,15 +60,36 @@ async function prepare(options: { pid: number; cwd: string; stdinTty: boolean; s
         },
       });
       if (result.decision === "allow") action = intent.kind === "continue" && sessionPath !== null ? "pin-session" : "pass";
+      else {
+        auditReason = result.reason;
+        auditConflictingOwnerId = result.conflictingOwnerId;
+      }
     }
-  } catch {
+  } catch (error) {
     action = "blocked";
+    auditReason = "prepare-error";
+    auditConflictingOwnerId = error instanceof Error ? String(error.message).slice(0, 200) : undefined;
   }
   privateFile(directory, "action", `${action}\n`);
   if (action !== "bypass") {
     privateFile(directory, "owner-id", `${ownerId}\n`);
     privateFile(directory, "continue-arg-index", `${continueArgIndex}\n`);
     if (action === "pin-session" && sessionPath !== null) privateFile(directory, "session-path", Buffer.concat([Buffer.from(sessionPath), Buffer.from([0])]));
+  }
+  // 只记拦截与固定决策（pass/bypass 高频不记）；registry 目录已存在且 700。
+  if ((action === "blocked" || action === "pin-session") && typeof process.env.PI_SESSION_OWNER_REGISTRY === "string" && process.env.PI_SESSION_OWNER_REGISTRY.length > 0) {
+    try {
+      const logPath = resolve(process.env.PI_SESSION_OWNER_REGISTRY, "decisions.log");
+      appendFileSync(logPath, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        action,
+        reason: auditReason ?? (action === "pin-session" ? "pinned-session" : null),
+        conflictingOwnerId: auditConflictingOwnerId ?? null,
+        pid: options.pid,
+        cwd: options.cwd,
+      }) + "\n", { mode: 0o600 });
+      chmodSync(logPath, 0o600);
+    } catch { /* 审计日志失败不得阻断启动决策本身 */ }
   }
 }
 
