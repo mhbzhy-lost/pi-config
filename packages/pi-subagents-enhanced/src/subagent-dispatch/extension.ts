@@ -1144,22 +1144,27 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
     const identity = typeof runId === "string" ? await supervisorControlPlane.identityForRun?.(runId) : undefined;
     const owner = identity?.owner;
     const runtime = identity?.runtime;
-    const decision = await supervisorControlPlane.resolveSupervisorControl({
-      schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId,
-      rootSessionId: owner?.rootSessionId, ownerGeneration: owner?.ownerGeneration, kind: "steer",
-      payloadDigest: supervisorCanonicalDigest(params.message), liveRunEpoch: runtime?.liveRunEpoch,
-    });
-    if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
-    if (decision.status !== "allowed") return controlFailure(decision.code);
-    try {
-      const result = await rpc[action](params);
-      const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent });
+    // 无 broker owner receipt 的 run（非 workspace typed/generic run，b332005 门控）
+    // 不在控制面围栏内，其 supervisor 请求也无法登记；steer 直接透传 rpc.steer，
+    // 由上游 steer 投递与 steerable 校验负责。见 docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md。
+    if (owner) {
+      const decision = await supervisorControlPlane.resolveSupervisorControl({
+        schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId,
+        rootSessionId: owner?.rootSessionId, ownerGeneration: owner?.ownerGeneration, kind: "steer",
+        payloadDigest: supervisorCanonicalDigest(params.message), liveRunEpoch: runtime?.liveRunEpoch,
+      });
+      if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
+      if (decision.status !== "allowed") return controlFailure(decision.code);
+      try {
+        const result = await rpc[action](params);
+        const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent });
 
-      if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);
-      return rpcResult(result);
-    } catch (error) {
-      await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_STEER_DELIVERY_FAILED" });
-      throw error;
+        if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);
+        return rpcResult(result);
+      } catch (error) {
+        await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_STEER_DELIVERY_FAILED" });
+        throw error;
+      }
     }
   }
   return rpcResult(await rpc[action](params));

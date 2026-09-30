@@ -1826,6 +1826,24 @@ test("supervisor control plane fails closed for stale owners, expired requests, 
   assert.equal(mismatchReply.details.code, "SUPERVISOR_STALE_OWNER");
 });
 
+// docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md：非 workspace run
+// （coding worktree:false）无 broker owner receipt，主动 steer 不应被控制面以
+// SUPERVISOR_INTENT_INVALID 拦截，而应透传到 rpc.steer 由上游投递。
+test("steer on a run without a broker owner receipt bypasses the control plane and reaches rpc.steer", async () => {
+  const pi = createPi();
+  const rpc = createRpc();
+  const controlPlane = createSupervisorControlPlane({
+    readOwnerReceipt: async () => undefined,
+    readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: true, steerable: true }),
+    randomId: () => "receipt-1",
+  });
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorControlPlane: controlPlane });
+  const result = await pi.tools[0].execute("steer-no-owner", { action: "steer", runId: "run-1", message: "Continue please." }, signal, undefined, ctx);
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.notEqual(result.details?.code, "SUPERVISOR_INTENT_INVALID", JSON.stringify(result));
+  assert.deepEqual(rpc.calls.filter((call) => call.method === "steer"), [{ method: "steer", params: { runId: "run-1", message: "Continue please." } }]);
+});
+
 test("internal Supervisor target forwards the public two-argument handle through the native five-argument closure", async () => {
   const pi = createPi();
   const params = { action: "reply", replyTo: "native-1", message: "Proceed." };
