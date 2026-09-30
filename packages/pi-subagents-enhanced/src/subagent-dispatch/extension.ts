@@ -985,8 +985,9 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
   if (input.action === "list") {
     try {
       const discovery = await discover(ctx.cwd, "both", ctx.model?.provider);
+      // 只返回项目 agent（pi/agents/ 目录），过滤 ~/.agents/ 下的 skill 定义
       const agents = discovery.agents
-        .filter((a) => !a.disabled)
+        .filter((a) => !a.disabled && a.filePath && !a.filePath.includes(".agents"))
         .map((a) => ({ name: a.name, model: a.model ?? null, tools: a.tools ?? null }))
         .sort((a, b) => a.name.localeCompare(b.name));
       return {
