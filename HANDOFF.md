@@ -28,6 +28,7 @@
 | T10 HANDOFF + 收尾 | ✅ | 本文件 |
 | 追加：修复非 workspace run 主动 steer 被控制面拦截 | ✅ | `5039a40`；docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md；membrane RED 单测 + 真实 Host 集成回归（steer 文本真正插入 child 会话） |
 | T9 terminal-proof 跨 owner 绑定裁决实施（用户选 a） | ✅ | `49931ed`；docs/bugs/2026-09-30-terminal-proof-cross-owner-binding-silent.md；跨 scope 复查命中即记债暴露，解除门禁排除，terminal-proof-handoff 7/7 绿 |
+| 追加：dispatch task 上界 4 KiB → 32 KiB | ✅ | `81eb18f`；docs/bugs/2026-09-30-dispatch-task-4k-limit.md；membrane 无关，新增 dispatch-ir 3 用例；~7 KB task 真实派发端到端验证通过 |
 
 ## 本会话（第二段）完成的清账
 
@@ -53,9 +54,9 @@
 
 footgun 复核结论（`var/upgrade/footgun-injection-fix.md`）：注入点语义当前已正确（completionApi 从不带 suppression），零生产改动，+1 守卫用例。
 
-## 静态门禁状态（merge + steer 修复 + T9 裁决后新基线，2026-09-30）
+## 静态门禁状态（merge + steer 修复 + T9 裁决 + task 上界提升后新基线，2026-09-30）
 
-npm test **935tests/934pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件对齐 registry）· **完整 integration gate：32 文件 225/225 全绿**（3 显式排除：pi-subagents-runtime WIRED-ELSEWHERE、resumed-child DIAGNOSED-UPSTREAM、session-owner-runtime DIAGNOSED-FIXTURE）· 真实 Host focused：project-workflow 2/2、session-owner-install 3/3、notification 2/2、steer-text-insertion 1/1、terminal-proof-handoff 7/7、runtime 3/5（attention 双测受决策项 #3 影响）。
+npm test **938tests/937pass/0fail/1todo**（TMPDIR=/tmp；较 T9 后基线 +3 为 dispatch task 上界用例）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件对齐 registry）· **完整 integration gate：32 文件 225/225 全绿**（3 显式排除：pi-subagents-runtime WIRED-ELSEWHERE、resumed-child DIAGNOSED-UPSTREAM、session-owner-runtime DIAGNOSED-FIXTURE）· 真实 Host focused：project-workflow 2/2、session-owner-install 3/3、notification 2/2、steer-text-insertion 1/1、terminal-proof-handoff 7/7、runtime 3/5（attention 双测受决策项 #3 影响）。
 
 集成门禁 `test:all-integration` 保持 3 显式排除（均已精确诊断）：pi-subagents-runtime（WIRED-ELSEWHERE）、resumed-child（DIAGNOSED-UPSTREAM）、session-owner-runtime（DIAGNOSED-FIXTURE）。terminal-proof-handoff 的 PENDING-ADJUDICATION 已随 T9 裁决（选项 a）解除。**最终完整 integration gate 已重跑：32 文件 225/225 全绿。**
 

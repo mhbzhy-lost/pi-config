@@ -89,4 +89,12 @@ typed 入口的正常输入，`pi/AGENTS.md` 明确要求「subagent 启动时�
 
 - RED→GREEN：20 KiB task 可编译且能渲染 prompt；32 KiB 边界内通过；超限仍被拒并带
   `keypath=task`；`agent` 超 4 KiB 仍被拒（确认未连带放宽）。
-- `npm test` 全量无回归；`typecheck:subagents-enhanced` 通过。
+  RED 原始输出：`Error [CodingDispatchContractError]: task exceeds 4096 bytes; keypath=task`。
+- dispatch 相关测试集 **109/109 绿**（ir / ir-coercion / contract-hash-compat /
+  schema-security / schema-coercion / extension / durable-lifecycle / root-subagent-broker）。
+- `npm test` 全量 **938 tests / 937 pass / 0 fail / 1 todo**（较修前 935 基线 +3
+  为本次新增用例）；`typecheck:root` 与 `typecheck:subagents-enhanced` 均通过；
+  `verify:subagents-enhanced` 通过（controlled 1207 文件对齐 registry）。
+- **真实派发端到端验证**：以 ≈ 7 KB 中文 task（远超旧 4096 字节上界）实際调用
+  `subagent` 工具派发 executor，**未再出现 `INVALID_CONTRACT`**，子 run `c4276a90`
+  正常启动并按指令返回 `LARGE_TASK_OK`，证明新上界在真实 Host 链路上生效。
