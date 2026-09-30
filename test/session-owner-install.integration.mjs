@@ -62,6 +62,7 @@ async function makeFixture() {
     cp(join(repoRoot, "scripts"), join(repo, "scripts"), { recursive: true }),
     cp(join(repoRoot, "src"), join(repo, "src"), { recursive: true }),
     cp(join(repoRoot, "pi", "extensions"), join(repo, "pi", "extensions"), { recursive: true }),
+    cp(join(repoRoot, "pi", "settings.template.json"), join(repo, "pi", "settings.template.json")),
   ]);
   await chmod(join(repo, "init-pi.sh"), 0o755);
   await chmod(join(repo, "scripts", "pi-launcher.zsh"), 0o644);

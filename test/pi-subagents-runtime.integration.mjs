@@ -147,14 +147,16 @@ async function runScenario(mode) {
   const packageRoot = await mkdtemp(join(tmpdir(), "pi-subagents-top-level-probe-"));
   const projectRoot = await mkdtemp(join(tmpdir(), "pi-subagents-top-level-project-"));
   const runtimeTmp = await mkdtemp(join(tmpdir(), "pi-subagents-top-level-runtime-"));
+  const configRoot = join(packageRoot, "config");
   const probe = join(packageRoot, "top-level-rpc-probe.mjs");
   const outputPath = join(projectRoot, `${mode}-output.txt`);
 
   try {
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
+    await mkdir(join(configRoot, "agents"), { recursive: true });
     await writeFile(join(projectRoot, ".pi", "agents", "compat-worker.md"), `---
 name: compat-worker
-description: deterministic top-level RPC compatibility worker
+description: legacy project fixture profile; admission must ignore it
 model: fake/deterministic
 tools: contact_supervisor, read
 extensions: ""
@@ -162,6 +164,17 @@ subagentOnlyExtensions: ${providerExtension}
 ---
 Use the deterministic compatibility marker from the assigned task.
 `);
+    await writeFile(join(configRoot, "agents", "executor.md"), `---
+name: executor
+description: deterministic top-level RPC compatibility worker
+model: fake/deterministic
+tools: contact_supervisor, read
+extensions: ${providerExtension}
+---
+Use the deterministic compatibility marker from the assigned task.
+`);
+    await writeFile(join(configRoot, "agents", "delegate.md"), `---\nname: delegate\ndescription: deterministic delegate profile\nmodel: fake/deterministic\ntools: read\n---\nReturn the deterministic compatibility marker.\n`);
+    await writeFile(join(configRoot, "agents", "reviewer.md"), `---\nname: reviewer\ndescription: deterministic reviewer profile\nmodel: fake/deterministic\ntools: read\n---\nReturn the deterministic compatibility marker.\n`);
     await writeFile(probe, `
       import { readFile, readdir } from "node:fs/promises";
       import { join } from "node:path";
@@ -372,7 +385,7 @@ Use the deterministic compatibility marker from the assigned task.
             PI_ROOT_SUBAGENT_BROKER_ENABLED: _broker, PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: _orchestrator,
             PI_SUBAGENT_RUN_ID: _run, ...topLevelEnv } = process.env;
 
-          return { ...buildTopLevelRuntimeEnv(topLevelEnv), TMPDIR: runtimeTmp, PI_CODING_AGENT_DIR: join(repoRoot, "pi"), OPENAI_API_KEY: "not-used" };
+          return { ...buildTopLevelRuntimeEnv(topLevelEnv), TMPDIR: runtimeTmp, PI_CODING_AGENT_DIR: configRoot, OPENAI_API_KEY: "not-used" };
         })(),
         input: JSON.stringify({ id: `top-level-rpc-${mode}`, type: "prompt", message: prompt }),
         until: (record) => {

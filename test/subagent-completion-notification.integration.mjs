@@ -279,25 +279,13 @@ test("async typed dispatch delivers the upstream subagent-notify custom message 
   });
 
   const contract = {
-    version: "dispatch-ir.v1",
-    taskId: "notify-arrival-guard",
     title: "Notify arrival deterministic child",
     agent: "executor",
-    risk: "normal",
-    objective: `Return exactly the ${CHILD_DONE_MARKER} marker for the ${CHILD_OBJECTIVE_MARKER} fixture.`,
-    requirements: ["Return the deterministic child marker without modifying files."],
-    context: {
-      knownFacts: ["The provider is deterministic and fake; no real model is invoked."],
-      decisions: ["Completion notification delivery relies on the upstream native notify chain."],
-      relevantFiles: [],
-    },
-    boundaries: {
-      writePaths: [],
-      excludedWork: ["Do not modify files."],
-      forbiddenActions: ["Do not invoke real providers or models."],
-    },
+    task: `Return exactly the ${CHILD_DONE_MARKER} marker for the ${CHILD_OBJECTIVE_MARKER} fixture.`,
+    writePaths: ["README.md"],
     acceptance: { criteria: ["The child returns the deterministic marker."] },
-    execution: { cwd: projectRoot, worktree: false },
+    cwd: projectRoot,
+    worktree: false,
   };
 
   await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
