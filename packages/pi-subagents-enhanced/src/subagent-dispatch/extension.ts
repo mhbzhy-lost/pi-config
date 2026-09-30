@@ -78,9 +78,10 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
     },
     writePaths: { ...pathList, minItems: 1 },
     // generic 分支字段
-    // Runtime dispatch contract enforces the 64 KiB UTF-8-byte task limit;
-
-    // JSON Schema maxLength measures characters and cannot express that byte budget.
+    // Runtime dispatch contract enforces the 32 KiB UTF-8-byte task limit
+    // (MAX_TASK_BYTES in contracts/dispatch-ir.ts) and a 128 KiB rendered-prompt limit;
+    // JSON Schema maxLength measures characters and cannot express that byte budget,
+    // so the contract stays authoritative and no maxLength is declared here.
     task: { type: "string", minLength: 1 },
     cwd: { type: "string", minLength: 1, maxLength: 4096 },
     output: { anyOf: [{ type: "string", minLength: 1 }, { const: false }] },

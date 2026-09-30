@@ -3,7 +3,13 @@ import path from "node:path";
 
 const MAX_ARRAY_ITEMS = 32;
 const MAX_STRING_BYTES = 4 * 1024;
-const MAX_PROMPT_BYTES = 64 * 1024;
+// task 是任务正文（文档级载荷），不得与 agent/title 等标识符共用 4 KiB 上界；
+// pi/AGENTS.md 要求派发时必须携带完整信息。超限仍 fail-closed 拒绝。
+// 见 docs/bugs/2026-09-30-dispatch-task-4k-limit.md。
+export const MAX_TASK_BYTES = 32 * 1024;
+// task 经 JSON.stringify 渲染进 prompt 会因转义膨胀，需为最大合法 task 留余量，
+// 避免出现「task 通过校验却被 PROMPT_TOO_LARGE 拒绝」的不一致失败。
+const MAX_PROMPT_BYTES = 128 * 1024;
 const PUBLIC_KEYS = new Set(["agent", "task", "title", "model", "writePaths", "acceptance", "worktree", "cwd",
   // generic-only spawn parameters (only valid without writePaths)
   "context", "output", "outputMode", "outputSchema", "artifacts", "progress", "skill", "reads", "thinkingLevel",
@@ -77,7 +83,7 @@ export function compileDispatchIR(input, options: { cwd?: string; timeoutMs?: nu
   const coding = isCodingDispatch(source);
   if (!coding && Object.hasOwn(source, "acceptance")) fail("CODING_FIELD_WITHOUT_WRITE_PATHS", "acceptance requires writePaths to make this a coding dispatch", "acceptance");
   if (Object.hasOwn(source, "timeoutMs")) fail("INVALID_CONTRACT", "timeoutMs is host-injected and must not be provided", "timeoutMs");
-  const agent = string(source.agent, "agent"), task = string(source.task, "task"), title = source.title === undefined ? task.slice(0, 50) : string(source.title, "title");
+  const agent = string(source.agent, "agent"), task = string(source.task, "task", MAX_TASK_BYTES), title = source.title === undefined ? task.slice(0, 50) : string(source.title, "title");
   const model = source.model === undefined ? undefined : string(source.model, "model", 512);
   const base = { agent, task, title, ...(model === undefined ? {} : { model }) };
   let value: any = { kind: coding ? "coding" : "generic", ...base };
