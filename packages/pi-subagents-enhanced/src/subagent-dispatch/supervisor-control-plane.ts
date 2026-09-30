@@ -46,6 +46,13 @@ export function parseSupervisorControlIntentV1(value: unknown): SupervisorContro
   return value as SupervisorControlIntentV1;
 }
 
+export type SupervisorOwnerState = "owned" | "unowned" | "unavailable";
+export type SupervisorRunIdentity = {
+  owner: unknown;
+  ownerState: SupervisorOwnerState;
+  runtime: { runId?: string; ownerGeneration?: number; liveRunEpoch?: number; running?: boolean; steerable?: boolean } | undefined;
+};
+
 export type SupervisorControlPlaneOptions = {
   readOwnerReceipt?: (runId: string) => unknown | Promise<unknown>;
   readRuntime?: (runId: string) => { runId?: string; ownerGeneration?: number; liveRunEpoch?: number; running?: boolean; steerable?: boolean } | Promise<any>;
@@ -58,9 +65,26 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
   const now = options.now ?? (() => Date.now());
   const id = options.randomId ?? (() => `${now()}-${Math.random().toString(36).slice(2)}`);
   const blocked = (code: string, extra: Record<string, unknown> = {}) => ({ status: "blocked" as const, code, ...extra });
+  // owner 读取三态：依赖缺失或抛异常一律 unavailable（无法证明非受管），
+  // 只有成功查询且确认无 receipt 才是 unowned。“读不到”绝不等同于“不受管”。
+  async function readOwnerState(runId: string): Promise<{ state: SupervisorOwnerState; receipt: any }> {
+    if (typeof options.readOwnerReceipt !== "function") return { state: "unavailable", receipt: undefined };
+    try {
+      const receipt = await options.readOwnerReceipt(runId);
+      return receipt ? { state: "owned", receipt } : { state: "unowned", receipt: undefined };
+    } catch (error) {
+      // broker 对「无当前 owner receipt」的权威回答是抛 code=unknown_run
+      // （root-broker-server.ts readOwnerReceipt / authority-store.ts read），
+      // 这是唯一可用来「确认非受管」的信号；其余任何失败（存储不可用、锁竞争、
+      // CAS 冲突、revoked、布局不支持、无 code 的未知错误）均为「无法确认」，
+      // 必须 fail-closed，绝不得当成非受管而放行。
+      if ((error as any)?.code === "unknown_run") return { state: "unowned", receipt: undefined };
+      return { state: "unavailable", receipt: undefined };
+    }
+  }
   async function registerSupervisorRequest(native: any) {
     if (!isObject(native) || typeof native.id !== "string" || typeof native.runId !== "string" || typeof native.reason !== "string") return blocked("SUPERVISOR_REQUEST_IDENTITY_UNAVAILABLE");
-    const owner: any = await options.readOwnerReceipt?.(native.runId);
+    const owner: any = (await readOwnerState(native.runId)).receipt;
     if (!owner || owner.runId !== native.runId || typeof owner.rootSessionId !== "string" || !Number.isSafeInteger(owner.ownerGeneration)) return blocked("SUPERVISOR_OWNER_UNAVAILABLE");
     const requestId = native.id; const requestDigest = supervisorCanonicalDigest({ id: native.id, runId: native.runId, agent: native.agent, reason: native.reason, expectsReply: native.expectsReply, replyTo: native.replyTo });
     const key = `${owner.rootSessionId}:${native.runId}:${owner.ownerGeneration}:${requestId}:${requestDigest}`;
@@ -73,7 +97,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
   async function resolveSupervisorControl(intentInput: unknown) {
     let intent: SupervisorControlIntentV1; try { intent = parseSupervisorControlIntentV1(intentInput); } catch { return blocked("SUPERVISOR_INTENT_INVALID"); }
     const runtime: any = await options.readRuntime?.(intent.runId);
-    const owner: any = await options.readOwnerReceipt?.(intent.runId);
+    const owner: any = (await readOwnerState(intent.runId)).receipt;
     if (!owner || owner.rootSessionId !== intent.rootSessionId || owner.ownerGeneration !== intent.ownerGeneration || runtime?.ownerGeneration !== intent.ownerGeneration) return blocked("SUPERVISOR_STALE_OWNER");
     const pending = intent.kind === "steer"
       ? [...requests.values()].find(r => r.state === "pending" && r.runId === intent.runId && r.rootSessionId === intent.rootSessionId && r.ownerGeneration === intent.ownerGeneration)
@@ -117,6 +141,11 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     return commitDelivery({ intent, consumed: true });
   }
   return Object.freeze({ registerSupervisorRequest, resolveSupervisorControl, commitDelivery, markDeliveryConsumed,
-    identityForRun: async (runId: string) => ({ owner: await options.readOwnerReceipt?.(runId), runtime: await options.readRuntime?.(runId) }),
+    identityForRun: async (runId: string): Promise<SupervisorRunIdentity> => {
+      const { state, receipt } = await readOwnerState(runId);
+      let runtime: SupervisorRunIdentity["runtime"];
+      try { runtime = await options.readRuntime?.(runId); } catch { runtime = undefined; }
+      return { owner: receipt, ownerState: state, runtime };
+    },
     listPending: () => [...requests.values()].filter(r => r.state === "pending"), findRequest: (requestId: string) => [...requests.values()].find(r => r.requestId === requestId), markProgressStalled: (runId: string) => ({ status: "stalled-suspected", runId }), snapshot: () => ({ requests: [...requests.values()] }) });
 }

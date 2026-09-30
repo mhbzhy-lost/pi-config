@@ -1106,6 +1106,35 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     details: { ...binding, agent: normalizedInput.agent, title, modelSelection: modelSelectionDetails(selection), ...(selection.warnings ? { warnings: selection.warnings } : {}), ...(workspace ? workspacePublic(workspace) : {}) },
   };
 }
+// steer 必须先规范化出唯一目标，再以同一标识做 owner 授权，否则会对「查不到 owner
+// 的别名」放行、而上游却投递到真实受管 run，绕过全部控制面围栏。
+// 上游语义见 pi-subagents/src/runs/background/async-resume.js:159-196 与
+// run-id-query.js（MIN_SAFE=8、FULL=36，[8,36) 会触发前缀扇描）。
+// 详见 docs/bugs/2026-09-30-steer-control-plane-target-aliasing.md。
+const STEER_PREFIX_MIN_LENGTH = 8;
+const STEER_FULL_RUN_ID_LENGTH = 36;
+// 本 package tsconfig 未开 strictNullChecks，字面量 true/false 会被 widen 成 boolean，
+// 因此不能用 { ok: true } / { ok: false } 做判别式窄化，改用 typeof 窄化。
+type SteerTarget = { runId: string | undefined; code: string | undefined };
+const steerTargetRejected = (code: string): SteerTarget => ({ runId: undefined, code });
+function canonicalSteerTarget(params: Record<string, any>): SteerTarget {
+  // dir 可单独定位 run，本层无法据其证明授权目标等于投递目标 → fail-closed。
+  if (params.dir !== undefined) return steerTargetRejected("SUPERVISOR_STEER_TARGET_ALIAS");
+  const { id, runId } = params;
+  for (const value of [id, runId]) {
+    // 上游 assertRunId 不做 trim，故此处也保留原始字串，仅拒绝空/非字串。
+    if (value !== undefined && (typeof value !== "string" || value.trim() === "")) return steerTargetRejected("SUPERVISOR_STEER_TARGET_INVALID");
+  }
+  // 上游优先级为 id ?? runId；两者同时存在且不一致时无法确定唯一目标。
+  if (typeof id === "string" && typeof runId === "string" && id !== runId) return steerTargetRejected("SUPERVISOR_STEER_TARGET_CONFLICT");
+  const canonical = typeof id === "string" ? id : typeof runId === "string" ? runId : undefined;
+  if (typeof canonical !== "string") return steerTargetRejected("SUPERVISOR_STEER_TARGET_UNRESOLVED");
+  if (path.isAbsolute(canonical) || /[\\/]/.test(canonical) || canonical.includes("..")) return steerTargetRejected("SUPERVISOR_STEER_TARGET_INVALID");
+  // 前缀形态会被上游扇描解析成另一个完整 runId，授权目标与投递目标可能不一致。
+  if (canonical.length >= STEER_PREFIX_MIN_LENGTH && canonical.length < STEER_FULL_RUN_ID_LENGTH) return steerTargetRejected("SUPERVISOR_STEER_TARGET_AMBIGUOUS");
+  return { runId: canonical, code: undefined };
+}
+
 function controlFailure(code, receipt = undefined) {
   return {
     content: [{ type: "text", text: `${code}: Supervisor control request blocked.` }],
@@ -1141,17 +1170,20 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
   }
   const { action, ...params } = input;
   if (action === "steer" && supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
-    const runId = params.runId ?? params.id;
-    const identity = typeof runId === "string" ? await supervisorControlPlane.identityForRun?.(runId) : undefined;
+    const target = canonicalSteerTarget(params);
+    if (typeof target.runId !== "string") return controlFailure(target.code ?? "SUPERVISOR_STEER_TARGET_UNRESOLVED");
+    const identity = await supervisorControlPlane.identityForRun?.(target.runId);
     const owner = identity?.owner;
-    const runtime = identity?.runtime;
-    // 无 broker owner receipt 的 run（非 workspace typed/generic run，b332005 门控）
-    // 不在控制面围栏内，其 supervisor 请求也无法登记；steer 直接透传 rpc.steer，
-    // 由上游 steer 投递与 steerable 校验负责。见 docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md。
-    if (owner) {
+    // identityForRun 缺失或未返回三态时一律当作 unavailable，不得默认放行。
+    const ownerState = identity?.ownerState ?? (owner ? "owned" : "unavailable");
+    // 只有「成功查询且确认无 owner receipt」的非受管 run（b332005 门控）才绕过控制面：
+    // 其 supervisor 请求无从登记，由上游 steer 投递与 steerable 校验负责。
+    if (ownerState !== "unowned") {
+      if (ownerState !== "owned" || !owner) return controlFailure("SUPERVISOR_OWNER_UNAVAILABLE");
+      const runtime = identity?.runtime;
       const decision = await supervisorControlPlane.resolveSupervisorControl({
-        schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId,
-        rootSessionId: owner?.rootSessionId, ownerGeneration: owner?.ownerGeneration, kind: "steer",
+        schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId: target.runId,
+        rootSessionId: owner.rootSessionId, ownerGeneration: owner.ownerGeneration, kind: "steer",
         payloadDigest: supervisorCanonicalDigest(params.message), liveRunEpoch: runtime?.liveRunEpoch,
       });
       if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);

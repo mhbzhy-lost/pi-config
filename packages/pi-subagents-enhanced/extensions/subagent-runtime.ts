@@ -311,9 +311,14 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   let workspaceLifecycleSessionId: string | undefined;
   const supervisorControlPlane = createSupervisorControlPlane({
     readOwnerReceipt: async (runId) => {
+      // 不得把「broker 未就绲 / 读取失败」降级成 undefined：那会让控制面把
+      // 「无法确认是否受管」误判为「确认非受管」，从而绕过 steer 围栏。
+      // 三态判定见 supervisor-control-plane.ts 的 readOwnerState。
       if (!brokerReady || !broker) {
         if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] owner-read unavailable brokerReady=${brokerReady} broker=${!!broker} runId=${runId}`);
-        return undefined;
+        // code 故意不用 unknown_run：后者是「权威确认非受管」的专用信号，
+        // broker 未就绲属于「无法确认」，必须被归为 unavailable 而 fail-closed。
+        throw Object.assign(new Error("ROOT_BROKER_UNAVAILABLE"), { code: "authority_store_unavailable" });
       }
       try {
         const receipt = await broker.readOwnerReceipt(runId);
@@ -321,7 +326,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         return receipt;
       } catch (error) {
         if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] owner-read error=${error instanceof Error ? error.message : String(error)} runId=${runId}`);
-        return undefined;
+        throw error;
       }
     },
     readRuntime: async (runId) => {

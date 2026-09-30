@@ -2134,3 +2134,100 @@ test("completion lifecycle adds a presentation projection without changing raw f
   assert.equal(emitted[0].payload.presentation, "reported");
   assert.equal(source.presentation, undefined);
 });
+
+// B1（docs/bugs/2026-09-30-steer-control-plane-target-aliasing.md）：授权目标必须与
+// 上游实际投递目标一致。上游 resolveAsyncRunLocation 的优先级是 `params.id ?? params.runId`，
+// 且支持 dir 单独定位、以及长度落在 [8,36) 的前缀扫描。本层若用相反的 `runId ?? id`
+// 优先级、或跳过别名路径，就会对「查不到 owner 的标识」放行，而上游却 steer 到真实
+// 受管 run，从而绕过 STALE_OWNER / REPLY_REQUIRED / DUPLICATES_REPLY 等全部围栏。
+const FULL_RUN_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const OTHER_FULL_RUN_ID = "ffffffff-1111-2222-3333-444444444444";
+const FULL_RUN_PREFIX = FULL_RUN_ID.slice(0, 8);
+
+function createSteerScenario({ readOwnerReceipt, withOwnerDep = true } = {}) {
+  const pi = createPi();
+  const rpc = createRpc();
+  const options = {
+    readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: true, steerable: true }),
+    randomId: () => "receipt-1",
+  };
+  if (withOwnerDep) options.readOwnerReceipt = readOwnerReceipt;
+  const controlPlane = createSupervisorControlPlane(options);
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorControlPlane: controlPlane });
+  return { pi, rpc };
+}
+
+const steerCalls = (rpc) => rpc.calls.filter((call) => call.method === "steer");
+
+test("steer 拒绝 id 与 runId 冲突的别名目标，不得按其中一个放行", async () => {
+  const { pi, rpc } = createSteerScenario({
+    readOwnerReceipt: async (runId) => (runId === FULL_RUN_ID ? { runId, rootSessionId: "root-1", ownerGeneration: 1 } : undefined),
+  });
+  const result = await pi.tools[0].execute("steer-conflict", { action: "steer", id: FULL_RUN_ID, runId: OTHER_FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_CONFLICT", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), [], "冲突目标绝不得投递");
+});
+
+test("steer 拒绝 dir 别名目标，避免绕过 owner 判定", async () => {
+  const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }) });
+  const result = await pi.tools[0].execute("steer-dir", { action: "steer", dir: `/tmp/async/${FULL_RUN_ID}`, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_ALIAS", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), []);
+});
+
+test("steer 拒绝前缀形态 runId，避免授权目标与上游扫描解析结果不一致", async () => {
+  const { pi, rpc } = createSteerScenario({
+    readOwnerReceipt: async (runId) => (runId === FULL_RUN_ID ? { runId, rootSessionId: "root-1", ownerGeneration: 1 } : undefined),
+  });
+  const result = await pi.tools[0].execute("steer-prefix", { action: "steer", runId: FULL_RUN_PREFIX, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_AMBIGUOUS", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), []);
+});
+
+test("owner 查询抛异常时 steer 必须 fail-closed，不得当作非受管放行", async () => {
+  const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => { throw new Error("ROOT_BROKER_UNAVAILABLE"); } });
+  const result = await pi.tools[0].execute("steer-owner-error", { action: "steer", runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), []);
+});
+
+test("未接线 owner 读取依赖时 steer 必须 fail-closed", async () => {
+  const { pi, rpc } = createSteerScenario({ withOwnerDep: false });
+  const result = await pi.tools[0].execute("steer-no-dep", { action: "steer", runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), []);
+});
+
+test("明确非受管的精确 runId 仍可 steer 透传（原缺陷修复不得回归）", async () => {
+  const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => undefined });
+  const result = await pi.tools[0].execute("steer-unowned", { action: "steer", runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), [{ method: "steer", params: { runId: FULL_RUN_ID, message: "Continue please." } }]);
+});
+
+test("受管精确 runId 在 id 与 runId 同值时仍走控制面并成功投递", async () => {
+  const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }) });
+  const result = await pi.tools[0].execute("steer-managed", { action: "steer", id: FULL_RUN_ID, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.equal(steerCalls(rpc).length, 1, "受管 run 经控制面放行后应投递一次");
+});
+
+// broker 对「无当前 owner receipt」的权威回答是抛 code=unknown_run；这是唯一可用于
+// 「确认非受管」的信号。其余错误码都属「无法确认」，必须 fail-closed。
+test("broker 抛 unknown_run 时判定为明确非受管并透传 steer", async () => {
+  const { pi, rpc } = createSteerScenario({
+    readOwnerReceipt: async () => { throw Object.assign(new Error("Owner is no longer current"), { code: "unknown_run" }); },
+  });
+  const result = await pi.tools[0].execute("steer-unknown-run", { action: "steer", runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.equal(steerCalls(rpc).length, 1, "unknown_run 是权威的非受管信号，应透传投递");
+});
+
+test("broker 存储类错误一律 fail-closed，不得当作非受管放行", async () => {
+  for (const code of ["authority_store_unavailable", "authority_lock_contention", "cas_conflict", "revoked", "unsupported_layout"]) {
+    const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => { throw Object.assign(new Error(code), { code }); } });
+    const result = await pi.tools[0].execute(`steer-${code}`, { action: "steer", runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+    assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", `${code} 必须 fail-closed，实际 ${JSON.stringify(result)}`);
+    assert.deepEqual(steerCalls(rpc), [], `${code} 绝不得投递`);
+  }
+});
