@@ -62,6 +62,9 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await copyFile(join(repoRoot, "init-pi.sh"), join(fixtureRepo, "init-pi.sh"));
     await copyFile(join(repoRoot, "scripts", "pi-shell.zsh"), join(fixtureRepo, "scripts", "pi-shell.zsh"));
     await copyFile(join(repoRoot, "scripts", "pi-launcher.zsh"), join(fixtureRepo, "scripts", "pi-launcher.zsh"));
+    await copyFile(join(repoRoot, "scripts", "ensure-pi-settings.ts"), join(fixtureRepo, "scripts", "ensure-pi-settings.ts"));
+    await copyFile(join(repoRoot, "pi", "settings.template.json"), join(fixtureRepo, "pi", "settings.template.json"));
+
     await chmod(join(fixtureRepo, "init-pi.sh"), 0o755);
 
     for (const command of ["git", "uv", "zsh"]) {
@@ -133,12 +136,15 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const commands = await readFile(commandLog, "utf8");
     assert.doesNotMatch(commands, /submodule/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.87\.1/);
+
     assert.doesNotMatch(commands, /pi-real registry=.*install npm:pi-subagents/);
     assert.match(commands, /node check-subagent-upgrade/);
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund --prefix .* run setup:subagents-enhanced markers=,,,/);
     assert.ok(commands.indexOf("node check-subagent-upgrade") < commands.indexOf("run setup:subagents-enhanced"), "live-upgrade preflight must run before package setup mutates the package");
     assert.doesNotMatch(commands, /rpiv-todo/);
     assert.match(commands, /node sync-skills markers=,,,/);
+    assert.match(commands, /node .*ensure-pi-settings\.ts/);
+    assert.ok(commands.indexOf("ensure-pi-settings.ts") < commands.indexOf("npm registry= test"), "settings must be ensured before npm test");
     assert.match(commands, /npm registry= test markers=,,,/);
     assert.match(commands, /npm registry= run doctor markers=,,,/);
     assert.match(commands, /npm registry= run test:integration markers=,,,/);

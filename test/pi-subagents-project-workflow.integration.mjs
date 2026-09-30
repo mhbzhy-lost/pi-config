@@ -86,6 +86,8 @@ export function providerSource(contract) {
     export default function (pi) {
       let ordinal = 0;
       let projectStep = 0;
+      let childStep = 0;
+      let probeIssued = false;
       const deterministicProvider = {
         baseUrl: "http://127.0.0.1:9", api: "fake", apiKey: "not-used",
         models: [{ id: "deterministic", name: "Deterministic", input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 256 }],
@@ -97,18 +99,27 @@ export function providerSource(contract) {
           const probe = results.find((message) => message.toolName === "compat_project_probe");
           let tool;
           let output;
-          if (Array.isArray(contract) && (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0)) {
+          if (process.env.PI_SUBAGENT_CHILD === "1") {
+            if (contract.worktree && childStep++ === 0) {
+              tool = { name: "bash", arguments: { command: "printf '\\nPROJECT_TYPED_CHILD_COMMIT\\n' >> README.md && git add README.md && git commit -m child-marker" } };
+            } else output = "PROJECT_TYPED_CHILD_DONE\\n\\n" + String.fromCharCode(96,96,96) + "acceptance-report\\n" + JSON.stringify({
+              criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "Committed PROJECT_TYPED_CHILD_COMMIT to README.md." }],
+              changedFiles: ["README.md"],
+              testsAddedOrUpdated: [],
+              commandsRun: [{ command: "git commit README.md", result: "passed", summary: "Child committed the marker." }],
+              validationOutput: ["PROJECT_TYPED_CHILD_COMMIT"],
+              residualRisks: [],
+              noStagedFiles: true,
+              diffSummary: "README.md marker commit.",
+            }) + "\\n" + String.fromCharCode(96,96,96);
+          } else if (Array.isArray(contract) && (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0)) {
             if (projectStep < contracts.length) tool = { name: "subagent", arguments: contracts[projectStep++] };
             else if (projectStep === contracts.length) { projectStep += 1; tool = { name: "compat_project_probe", arguments: {} }; }
             else output = "PROJECT_TYPED_PARENT_DONE";
           } else if (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0) {
             if (projectStep++ === 0) tool = { name: "subagent", arguments: contract };
-            else if (projectStep === 2) tool = { name: "compat_project_probe", arguments: {} };
-            else if (projectStep === 3 && contract.execution?.worktree) tool = { name: "subagent_worktree", arguments: { action: "status", workspace_id: dispatch?.details?.workspace_id } };
-            else if (projectStep === 4 && contract.execution?.worktree) {
-              const status = results.filter((message) => message.toolName === "subagent_worktree").at(-1);
-              tool = { name: "subagent_worktree", arguments: { action: "dispose", workspace_id: dispatch?.details?.workspace_id, disposition: "discard", action_token: status?.details?.action_token } };
-            }
+            else if (projectStep === 2) { projectStep += 1; probeIssued = true; tool = { name: "compat_project_probe", arguments: {} }; }
+            else if (contract.worktree && !probeIssued) { probeIssued = true; tool = { name: "compat_project_probe", arguments: {} }; }
             else output = "PROJECT_TYPED_PARENT_DONE";
           } else {
             output = ${JSON.stringify(`PROJECT_TYPED_CHILD_DONE
@@ -209,11 +220,16 @@ export function dispatchProbeSource() {
           const dispatches = executionEnds.filter((event) => event?.toolName === "subagent");
           const handles = dispatches.map((event) => event?.result?.details).filter((handle) => handle?.runId);
           if (handles.length === 0) throw new Error("public subagent handle did not include runId: " + JSON.stringify(dispatches));
-          const terminal = await Promise.all(handles.map(async (handle) => ({
-            handle,
-            completion: await waitForCompletion(handle.runId),
-            proof: requireRootBroker(pi, rootSessionId).inspectExecutionProof(handle.runId),
-          })));
+          const terminal = await Promise.all(handles.map(async (handle) => {
+            const completion = await waitForCompletion(handle.runId);
+            let proof;
+            for (let attempt = 0; attempt < 300; attempt++) {
+              proof = requireRootBroker(pi, rootSessionId).inspectExecutionProof(handle.runId);
+              if (proof?.terminal) break;
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+            return { handle, completion, proof };
+          }));
           return { content: [{ type: "text", text: "project workflow probe complete" }], details: { starts, completions, completion: terminal[0].completion, executionEnds: executionEnds.map((event) => ({ toolName: event?.toolName })), proof: terminal[0].proof, terminal } };
         },
       });
@@ -222,7 +238,8 @@ export function dispatchProbeSource() {
   `;
 }
 
-test("project typed dispatch binds the real 0.71.0 workflow leaf to the Root Broker", { skip: !piBinary }, async () => {
+test("project typed worktree commit completes Auto Integration and release", { skip: !piBinary }, async () => {
+
   assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
   const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
@@ -234,17 +251,14 @@ test("project typed dispatch binds the real 0.71.0 workflow leaf to the Root Bro
   const dispatchProbe = join(root, "dispatch-probe.mjs");
   try {
     const contract = {
-      version: "dispatch-ir.v1",
-      taskId: "project-workflow-real",
       title: "Run real workflow leaf",
       agent: "executor",
-      risk: "normal",
-      objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
-      requirements: ["Use the project-owned typed facade."],
-      context: { knownFacts: ["pi-subagents is pinned to 0.71.0."], decisions: ["Bind only the leaf run."], relevantFiles: [] },
-      boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
+      task: "Commit the child marker to README.md through the managed worktree. Use the project-owned typed facade. Only modify README.md. Known fact: pi-subagents is pinned to 0.71.0. Bind only the leaf run. Do not create a worktree.",
+      writePaths: ["README.md"],
       acceptance: { criteria: ["The child returns the deterministic marker."] },
-      execution: { cwd: projectRoot, worktree: true },
+      cwd: projectRoot,
+      worktree: true,
+
     };
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, "README.md"), "temporary real-host fixture\n");
@@ -252,7 +266,7 @@ test("project typed dispatch binds the real 0.71.0 workflow leaf to the Root Bro
 name: executor
 description: deterministic typed workflow executor
 model: fake/deterministic
-tools: read
+tools: read, bash
 extensions: ${provider}
 ---
 Return the deterministic child marker without modifying files.
@@ -312,11 +326,8 @@ Return the deterministic child marker without modifying files.
     assert.equal(proof?.binding?.runId, handle.runId);
     assert.equal(proof.binding.asyncDir, handle.asyncDir);
     assert.equal(proof.binding.agentProfile, "executor");
-    // Goal Engine 移除（基线 9b9cbb8）后，非 Goal coding run 的 authorization.goal 恒为 null；
-    // executorProofSnapshot 以 goal 门控 terminal proof（root-broker-server.ts），因此非 Goal
-    // coding run 没有 terminal proof，授权状态为 unavailable。
-    assert.equal(proof.terminal, null);
-    assert.equal(proof.authorization.state, "unavailable");
+    assert.ok(proof.terminal?.proof?.instances.length > 0, JSON.stringify(proof));
+
     const disposition = result.records.filter((record) => record.type === "tool_execution_end" && record.toolName === "subagent").at(-1);
     assert.equal(disposition.result.isError, false, JSON.stringify(disposition));
     assert.equal(probe.result.details.starts.some((event) => (event?.runId ?? event?.id) === handle.runId && event?.asyncDir === handle.asyncDir), true);
@@ -327,6 +338,10 @@ Return the deterministic child marker without modifying files.
     const terminal = JSON.parse(await readFile(join(handle.asyncDir, "status.json"), "utf8"));
     assert.equal(terminal.state, "complete", JSON.stringify(terminal));
     assert.equal(terminal.runId, handle.runId);
+    const originReadme = await readFile(join(projectRoot, "README.md"), "utf8");
+    assert.match(originReadme, /PROJECT_TYPED_CHILD_COMMIT/);
+    const originStatus = (await execFileAsync("git", ["status", "--porcelain"], { cwd: projectRoot, encoding: "utf8" })).stdout;
+    assert.equal(originStatus, "", `origin repository must be clean: ${originStatus}`);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
@@ -344,17 +359,14 @@ test("non-Goal executor ignores a hostile legacy .pi-subagents tree", { skip: !p
   const dispatchProbe = join(root, "dispatch-probe.mjs");
   try {
     const contract = {
-      version: "dispatch-ir.v1",
-      taskId: "hostile-legacy-non-goal",
       title: "Ignore hostile legacy runtime entries",
       agent: "executor",
-      risk: "normal",
-      objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
-      requirements: ["Use package-owned child extensions."],
-      context: { knownFacts: ["The workspace contains hostile legacy entries."], decisions: ["Do not inspect or change those entries."], relevantFiles: [] },
-      boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
+      task: "Return the deterministic PROJECT_TYPED_CHILD marker. Use package-owned child extensions. The workspace contains hostile legacy entries; do not inspect or change those entries. Do not modify files or create a worktree.",
+      writePaths: ["README.md"],
       acceptance: { criteria: ["The child returns the deterministic marker."] },
-      execution: { cwd: projectRoot, worktree: false },
+      cwd: projectRoot,
+      worktree: false,
+
     };
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, "README.md"), "temporary hostile legacy fixture\n");
@@ -450,15 +462,12 @@ test("non-Goal persistent Host canary keeps typed coding and generic authorizati
   // 生产契约，已由主会话登记为产品语义观察项），managed workspace 是生产唯一有 broker
   // authority 的 typed 路径（与 workflow-leaf 用例同路径）；generic 保持 worktree:false。
   const coding = (agent) => ({
-    version: "dispatch-ir.v1", taskId: `${agent}-rename-canary`, title: `Run ${agent} rename canary`, agent, risk: "normal",
-    objective: "Return the deterministic PROJECT_TYPED_CHILD marker.",
-    requirements: ["Use the project-owned typed facade."],
+    title: `Run ${agent} rename canary`, agent, task: "Return the deterministic PROJECT_TYPED_CHILD marker.",
     context: { knownFacts: ["The Host is a fixture."], decisions: ["Use typed standalone dispatch."], relevantFiles: [] },
-    boundaries: { writePaths: ["README.md"], excludedWork: ["Do not modify files."], forbiddenActions: ["Do not create a worktree."] },
-    acceptance: { criteria: ["The child returns the deterministic marker."] },
-    execution: { cwd: projectRoot, worktree: true },
+    writePaths: ["README.md"], acceptance: { criteria: ["The child returns the deterministic marker."] }, cwd: projectRoot, worktree: true,
   });
   const generic = { agent: "executor", title: "Inspect rename canary", task: "Read only.", worktree: false };
+
   try {
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await writeFile(join(projectRoot, "README.md"), "rename canary fixture\n");
@@ -468,6 +477,7 @@ test("non-Goal persistent Host canary keeps typed coding and generic authorizati
 name: ${name}
 description: deterministic rename canary profile
 model: fake/deterministic
+
 tools: read
 extensions: ${provider}
 ---
@@ -506,7 +516,7 @@ Return the deterministic child marker without modifying files.
     assert.ok(probe?.result?.details, result.stdout);
     const terminal = probe.result.details.terminal;
     assert.ok(Array.isArray(terminal), JSON.stringify(probe));
-    assert.equal(terminal.length, 3);
+    assert.equal(terminal.length, 1);
     // 内置 profile 集合内 agent 名称不改变 typed coding 授权：executor 与 reviewer
     // 获得相同的 root.subscribe capability（授权由调用结构决定，而非 profile 名称）。
     assert.deepEqual(terminal.slice(0, 2).map((entry) => entry.handle.agent), ["executor", "reviewer"]);
@@ -520,6 +530,7 @@ Return the deterministic child marker without modifying files.
     assert.equal(typeof terminal[0].handle.workspace_id, "string");
     assert.equal(typeof terminal[1].handle.workspace_id, "string");
     assert.equal(terminal[2].handle.workspace_id, undefined, "generic worktree:false does not allocate a managed workspace");
+
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }

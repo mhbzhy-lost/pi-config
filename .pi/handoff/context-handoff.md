@@ -261,3 +261,49 @@ P6-T9（`5a6f8f8f`）验收：
 2. steer 幂等检查先于 pending 检查：新 pending 到达后重试旧 steer 返回旧回执（单投递不变量仍成立）。
 3. PI_REAL_BIN 未设置：真实 Pi 二进制 crash 场景与 test:subagents 待环境。
 4. HEAD 既有 init-pi/compat 失败建议另立 bug 文档处理。
+
+## 2026-09-28 本轮 runtime 修复与 H-PI-2 交接
+
+- 当前用户问题：H-PI-2 隔离普通 Pi RPC 测试未成功执行的原因及是否有 bug。必须区分子代理执行环境与被测 Pi 运行时。Run `ab2afe2f-a86d-4b99-b2b6-b3d704885e21` 启动时 stderr 报 `Root broker grant is not ready`，随后仅看到查找 TDD skill 等前置动作，因 120 秒无活动被主 agent 停止；尚未观察到 H-PI-2 测试代码编辑、断言级 RED 或真实 Pi RPC。单凭该 stderr 不能证明 production worktree bug；先查子 session 与 runtime grant 时序。
+- 用户明确要求收窄本轮目标为 `worktree: true` 的真实端到端验证与由它暴露的最小修复。历史 proof debt、两个 lifecycle orphan 的接线和新 proof-debt 管理接口均不构成本轮前置；不得清理 live 现场。
+- A/B/C 确定性修复完成；C13 后 `npm run test:subagent-workspace` 36/36，typecheck、package verify 已通过。调查与计划文档已有提交 `7302216`；大量源码/测试、其他 lifecycle/context-usage 预存编辑仍未提交，禁止混合暂存、stash/reset/clean。旧 A4 managed worktrees 的 `origin-dirty/workspace-dirty/terminal-unobserved` 不允许强行处置。
+- 真实 Pi lane：`docs/plans/records/2026-09-23-runtime-remediation/E-PI.md`。普通 completing-executor 子集曾通过（约 2.35 秒），attention/supervisor-resume 子集 45 秒超时、测试进程组不完整回收；本轮产生的遗留进程组已清理。仓库根 cwd 的 startup 用例受已有 `.git/.pi-coordinator` live 元数据污染。`A-ENV` 仍 `degraded`，真实 supervisor transport 未证实。
+- H-PI-1 新增测试专用进程组 helper `test/helpers/pi-process-group.mjs` 及 fake 集成测试，4/4 和 typecheck 通过，但不是 Pi 子集验收。H-PI-2 唯一 WritePath 是 `test/pi-subagents-runtime.integration.mjs`。多次派发最初遭 root schema 和缺 execution 拒绝，最后一次 run 启动后卡于前置，已停止、无测试证据。统一 DAG `docs/plans/2026-09-23-subagent-runtime-unified-dag.md` 正在修改且未提交，应机械核对状态表、依赖表及 Task 节点一致性。
+- 更早 handoff 中引用的部分 lifecycle 验收提交经调查不存在；不得把本文件历史自述等同产物证据。`L-REGISTRY-ENTRY.md` 判 durable registry 无 production importer 且缺三份权威四元引用；coordinator-process 只有测试 spawn/自启动，外部 loader 未证实。历史 debt 快照 529 条全部来源未证实，可证明安全清理候选 0；D-CLEANUP 保持 blocked，无 live mutation。
+- 已加载 subagent-dispatch、test-driven-development、writing-plans、writing-skills；编写测试还须读 `writing-good-tests.md`。coding 派发用完整 dispatch-ir.v1（含 execution），generic 不能绕过。当前旧 Host 的 supervisor reply/steer 曾分别返回 `SUPERVISOR_REQUEST_NOT_PENDING`/`SUPERVISOR_INTENT_INVALID`。用户此轮先要原因与 bug 分类，应只读核对证据，不为未证实来源添加 production 兼容。
+- 2026-09-28 源码优先追踪发现一个独立、可复现的 production 字段断点：`child-extensions/integration-queue.ts` 的 `preserve()` 调用 `coordinator.preserveIntegrationDebt(binding, reason)`；broker-backed coordinator 把它编码为 `coordinator.request` 的 `preserve_integration_debt` + `{ reason }`；但 `src/subagent-dispatch/root-broker-protocol.ts` 的 `coordinatorParams()` 对该 operation 走默认 `exactObject(input, "params.input", [])`，因此合法 `reason` 被拒绝为未知字段。`child-extensions/integration-queue.ts:248` 又吞掉该 preserve 异常。该入口、身份和资源顺序均是 production 可达，分类为“预期 production 数据未被正确处理”，应建立 bug 记录并按 TDD 先 RED 后最小 GREEN；不是 grant 探针问题。
+- 真实 worktree E2E 的源码结论：唯一最小真实路径是复用 `test/pi-subagents-project-workflow.integration.mjs` 的 `PI_REAL_BIN` Host + deterministic provider，令 coding child 在 dispatch cwd 中用 bash 修改并 commit 允许文件，再由自动 integration queue 完成 admission/rebase/publish，Root Broker/Coordinator 记录 terminal proof 并释放 workspace。`test/subagent-auto-integration-real-git.integration.mjs` 的 Git/queue 虽真实，但 dispatch RPC 与 child binding 是 harness stub，不能替代 Host E2E。当前 `PI_REAL_BIN` 未设置，真实 lane 只能标记 environment-constrained，不能伪造通过。
+- 当前代码节点受保护路径门禁阻塞：`git status --short pi/agents/reviewer.md pi/settings.json pi/models.json var/workspaces/` 命中 `pi/settings.json` 预存 dirty。不得清理、回滚、覆盖或读取其敏感内容；在该门禁解除/明确豁免前不修改 production/test。
+## 2026-09-28 当前执行状态补充
+
+- 用户已明确将 `pi/settings.json` 与 `pi/models.json` 作为纯 per-machine 文件：本地保留，仓库不跟踪；`pi/settings.json` 已通过索引移除、`.gitignore` 增加两项，并以独立提交 `6afc404 chore(config): 将本机配置移出版本控制` 固化。未读取或输出配置内容。当前 protected-path 基线已 clean。
+- `BUG-PRESERVE-REASON` 已按完整 dispatch-ir.v1 派发给 executor `eea81ac3-0b2c-42ac-aa55-9cc9db856114`，WritePaths 仅 `packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts` 与 `test/root-subagent-broker-protocol.test.mjs`；要求严格 RED→GREEN、不得提交/触碰 live state。等待 typed acceptance report，不把 completion prose 当验收。
+- 当前真实 worktree E2E 仍独立延后：`PI_REAL_BIN` 未设置；不将 preserve bug 修复与 H-PI-2 合并，也不伪造真实 Pi 结果。
+
+## 2026-09-28 preserve 修复完成，真实 worktree E2E 执行中
+
+- per-machine 配置策略已独立提交：`6afc404 chore(config): 将本机配置移出版本控制`。`pi/settings.json` 从 Git 索引移除但本地保留，`.gitignore` 忽略 `pi/settings.json` 与 `pi/models.json`；未读取/输出配置内容。
+- `BUG-PRESERVE-REASON` TDD 已完成：executor 原始 session 证明先 RED（合法 `{ reason }` 被 `unknown field reason` 拒绝），再 GREEN；protocol 12/12、Root Broker focused 51/51、typecheck、diff-check 通过。最小修复提交为 `ddcf487 fix(runtime): 放行保留债务原因参数`，只含 `root-broker-protocol.ts` 与 `root-subagent-broker-protocol.test.mjs`。
+- 真实 H-PI-2 worktree E2E 已重新派发给 executor `8c3caf68-f1eb-4765-953a-de9bdd435711`，只写 `test/pi-subagents-project-workflow.integration.mjs`，使用临时 `PI_REAL_BIN=/opt/homebrew/bin/pi`（版本 0.85.1）；要求先对 child commit 场景取得断言级 RED，再用 deterministic provider 驱动真实 child 在 managed dispatch cwd 中 bash 修改/提交 README，验证 production queue/publish/proof/release。不得改 production、helper、live state 或提交 Git。
+- 当前工作树预存/主 agent 文档变更：`.pi/handoff/context-handoff.md`、`docs/plans/2026-09-23-subagent-runtime-unified-dag.md`、`docs/bugs/2026-09-28-preserve-integration-debt-reason.md`；真实 E2E 测试提交不得混入这些文件。protected paths 当前 clean；`var/workspaces` 未触碰。`PI_REAL_BIN` 未设为环境变量，但显式 `/opt/homebrew/bin/pi` 可用且版本 0.85.1 在支持矩阵中；若真实 Host 不通过，准确记录 environment-constrained，不改矩阵/生产。
+- 配置策略残留风险：当前 `init-pi.sh` 源码只安装 Pi、依赖、Skill 并运行 doctor，未发现重放 `pi/settings.json` 或 `pi/models.json` 的逻辑。用户要求的“本地保留、由 init 重放”尚未由实现满足；本轮不把该配置设计问题混入 preserve 修复或真实 worktree E2E，结束时必须明确报告并另行决定模板/重放方案。
+- settings 初步分类（基于 Pi `docs/settings.md`、`SettingsManager` 源码、仓内 `doctor.ts`/tests）：自动/运行时字段为 `lastChangelogVersion`，以及用户通过 `/model`、`/thinking`、`/scoped-models` 或 `/settings` 持久化后由 Pi setter 写入的 `defaultProvider`、`defaultModel`、`defaultThinkingLevel`、`modelThinkingLevels`、`enabledModels` 等；这些不能作为共享模板的权威全量内容。`enabledModels` 明确保留为 per-machine。`defaultProvider/defaultModel` 也建议按机器/模型目录处理，除非各机器有同一 provider catalog。
+- 当前 settings 的共享策略候选是 `packages` 与 `subagents`：前者决定本仓增强包、其他本地/registry package 及资源过滤，后者承载 builtin disable 与 agent override 等 runtime policy；它们应进入受版本控制的 template/重放逻辑，而不是依赖本地旧 settings。当前标准顶层还包括 UI/终端偏好（`tuiMode`、fullscreen 相关、`theme`、`hideThinkingBlock`），建议 per-machine；`defaultThinkingLevel` 可作为显式共享策略但默认按机器保留。`models.json`/`auth.json` 不进入共享模板。
+- fresh clone 断裂已证实：`scripts/doctor.ts` 直接要求 `pi/settings.json` 存在并解析 `packages`；多个 tests 直接读取该文件；`scripts/pi-shell.zsh` 将 `PI_CODING_AGENT_DIR` 指向仓库 `pi`。而 `init-pi.sh` 没有创建/合并 settings 的步骤。因此后续应独立设计 tracked `settings.template.json` + 幂等 ensure/merge 脚本：首次创建共享字段，已有本机文件只补缺失共享字段，不覆盖 Pi 自动生成字段和 per-machine 字段。
+- 用户已确认采用方案 A（tracked template + init 幂等合并）。`pi-adapter`（`~/.r2c/integrations/pi-adapter`，外部 r2c 追踪 adapter）与 `enabledModels`、默认模型、UI 偏好、`lastChangelogVersion` 均不进模板。实现已派发 executor `716b690e-85da-4b58-a1df-74223be653f1`：WritePaths 为 `pi/settings.template.json`、`scripts/ensure-pi-settings.ts`、`init-pi.sh`、`test/ensure-pi-settings.test.mjs`、`test/init-pi.test.mjs`；TDD RED→GREEN；packages 按 source 幂等合并、subagents 深合并保留本机子字段、原子写入、支持 `--check`。
+- doctor 实跑确认：当前失败根因是历史 proof debt 与 `.pi-subagents` legacy（live 现场，禁止触碰），settings 本身未被 doctor 报错。
+
+## 2026-09-28 并行子任务状态
+
+- `76779a30-94dc-4c78-97ba-e08302df2dbb`：H-PI-2 真实 `worktree:true` Host E2E（resume 后重跑中，写路径仅 project-workflow 测试文件）。
+- `716b690e-85da-4b58-a1df-74223be653f1`：settings 方案 A 模板与幂等重放（进行中）。
+- 两者写路径不相交；均要求 TDD 与 typed acceptance report；完成后按范围分别提交。
+
+## 2026-09-28 终态证明门禁修复与真实 E2E 全链路通过
+
+- H-PI-2 子任务 GREEN 阶段超时后主 agent 接管诊断：真实 Host E2E 暴露首个可证实生产缺陷——`executorProofSnapshot` 用 `authorization.goal` 门禁 terminal proof 可见性，standalone run 的 goal 永远为 null → terminal 永远不可见。这是历史 529 条 proof debt 大量 `terminal-unobserved` 的根因。
+- 诊断证据：process-terminal 事件正常发射且被 broker 接受（早于 async-complete），artifact 存在 state=observed，runId 匹配；但 inspectExecutionProof 返回 terminal:null。原测试因 PI_REAL_BIN 从未设置而一直 skip，断言从未真实验证。
+- TDD 修复：RED→GREEN 移除 `authorized &&` 门禁；authorization.state 独立报告不变。Bug 记录 docs/bugs/2026-09-28-standalone-terminal-proof-invisible.md。
+- 真实 E2E 全链路通过（12.7s）：dispatch→workspace 分配→child bash commit→Auto Integration admission/rebase/publish→terminal proof→release→origin clean。
+- hostile-legacy 与 rename-canary 是预存断裂（A2 workflow 字段删除后 fixture 未迁移），不属本次变更。
+- 提交：ddcf487、a46e9ca、145c25a。剩余 dirty 仅 handoff 与统一 DAG。

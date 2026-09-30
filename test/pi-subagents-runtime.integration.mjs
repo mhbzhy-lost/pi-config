@@ -10,6 +10,7 @@ import { buildTopLevelRuntimeEnv, REQUIRED_METHODS, SUPPORTED_PI_VERSIONS } from
 import { renderCodingDispatchPrompt } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import integrationQueue from "../packages/pi-subagents-enhanced/child-extensions/integration-queue.ts";
 
+
 const repoRoot = resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;
 const enhancedPackageRoot = join(repoRoot, "packages", "pi-subagents-enhanced");
@@ -31,6 +32,7 @@ test("generic child without a Root Broker loads required integration extension a
   assert.match(messages[0], /disabled: trusted Root Broker session unavailable/);
 });
 
+
 test("coding Host loads the child integration tool and prompt while generic non-Git cwd does not start a coordinator", async (t) => {
   const { codingWorkflowSpawnParams } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts");
   const { shouldStartRepositoryCoordinator } = await import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
@@ -41,9 +43,9 @@ test("coding Host loads the child integration tool and prompt while generic non-
   execFileSync("git", ["init", "-b", "main"], { cwd: repository, stdio: "ignore" });
   t.after(() => rm(root, { recursive: true, force: true }));
   const ir = {
-    version: "dispatch-ir.v1", taskId: "task", title: "title", agent: "executor", risk: "high", hash: "a".repeat(64),
-    execution: { cwd: repository, timeoutMs: 60_000, worktree: true }, objective: "objective",
-    requirements: [], context: { knownFacts: [], decisions: [], relevantFiles: [] }, boundaries: { writePaths: ["result.txt"], excludedWork: [], forbiddenActions: [] },
+    title: "title", agent: "executor", contractHash: "a".repeat(64),
+    cwd: repository, worktree: true, task: "objective; commit -> subagent_integration enqueue -> await_admission -> git rebase targetHead", writePaths: ["result.txt"],
+
     acceptance: { criteria: ["criterion"] },
   };
   const prompt = renderCodingDispatchPrompt(ir);
@@ -51,10 +53,11 @@ test("coding Host loads the child integration tool and prompt while generic non-
   const spawn = codingWorkflowSpawnParams(ir, prompt, "workflow-key");
   const leaf = JSON.parse(spawn.workflowScript.match(/runs\.run\([^,]+, (.*)\);$/s)[1]);
   assert.equal(leaf.worktree, false);
-  assert.equal(Object.hasOwn(leaf, "subagentOnlyExtensions"), false);
-  const sharedSpawn = codingWorkflowSpawnParams({ ...ir, execution: { ...ir.execution, worktree: false } }, prompt, "shared-workflow-key");
+  assert.ok((leaf.subagentOnlyExtensions ?? []).some((entry) => entry.endsWith("/child-extensions/integration-queue.ts")));
+  const sharedSpawn = codingWorkflowSpawnParams({ ...ir, worktree: false }, prompt, "shared-workflow-key");
   const sharedLeaf = JSON.parse(sharedSpawn.workflowScript.match(/runs\.run\([^,]+, (.*)\);$/s)[1]);
-  assert.equal(Object.hasOwn(sharedLeaf, "subagentOnlyExtensions"), false);
+  assert.equal((sharedLeaf.subagentOnlyExtensions ?? []).some((entry) => entry.endsWith("/child-extensions/integration-queue.ts")), false);
+
   assert.equal(await shouldStartRepositoryCoordinator(repository), true);
   assert.equal(await shouldStartRepositoryCoordinator(plain), false);
 });
@@ -368,6 +371,7 @@ Use the deterministic compatibility marker from the assigned task.
           const { PI_SUBAGENT_CHILD: _child, PI_SUBAGENT_FANOUT_CHILD: _fanout, PI_SUBAGENT_PARENT_SESSION: _parent,
             PI_ROOT_SUBAGENT_BROKER_ENABLED: _broker, PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: _orchestrator,
             PI_SUBAGENT_RUN_ID: _run, ...topLevelEnv } = process.env;
+
           return { ...buildTopLevelRuntimeEnv(topLevelEnv), TMPDIR: runtimeTmp, PI_CODING_AGENT_DIR: join(repoRoot, "pi"), OPENAI_API_KEY: "not-used" };
         })(),
         input: JSON.stringify({ id: `top-level-rpc-${mode}`, type: "prompt", message: prompt }),

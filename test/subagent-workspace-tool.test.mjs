@@ -33,6 +33,9 @@ test("subagent_worktree derives standalone ownership from live context and expos
   });
 
   assert.equal(tool.name, "subagent_worktree");
+  assert.match(tool.description, /workspace_id.*completed/i);
+  assert.match(tool.description, /integrate or discard to finish, or preserve temporarily and later release/);
+  assert.doesNotMatch(tool.description, /preserve.*terminal disposition/i);
   assert.deepEqual(tool.parameters.anyOf.map((branch) => branch.properties.action.const), ["list", "status", "dispose", "release"]);
   assert.equal(JSON.stringify(tool.parameters).includes("rootSessionId"), false);
   const status = await tool.execute("call", { action: "status", workspace_id: "workspace-a" }, undefined, undefined, { sessionManager: { rootSessionId: "session-a" } });

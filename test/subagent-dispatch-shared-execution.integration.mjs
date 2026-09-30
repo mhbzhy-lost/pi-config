@@ -4,7 +4,6 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dispatchExecution, createGenericDispatchAdapter, createCodingDispatchAdapter } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/execution.ts";
-import { compileGenericPrompt } from "../packages/pi-subagents-enhanced/src/contracts/generic-prompt.ts";
 import { createAuthorizedDispatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/execution-contract.ts";
 import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 
@@ -28,29 +27,24 @@ test("generic and coding adapters converge on one execution service", async (t) 
   const codingAuthorization = await hostEnvelope(root, "executor", "coding");
   const calls = [];
   const execute = (request) => { calls.push(request); return { runId: `run-${calls.length}` }; };
-  const generic = createGenericDispatchAdapter({ agent: "reviewer", title: "Review", prompt: compileGenericPrompt({ task: "inspect", context: ["facts"], constraints: ["safe"], deliverable: "report", done: ["done"] }), cwd: "/repo" });
+  const generic = createGenericDispatchAdapter({ agent: "reviewer", title: "Review", task: "inspect. Facts: facts. Constraints: safe. Deliverable: report. Done: done.", cwd: "/repo" });
   const coding = createCodingDispatchAdapter({ agent: "executor", prompt: "# Coding Dispatch Contract v1", contractHash: "a".repeat(64), cwd: "/repo" });
   const genericReceipt = await dispatchExecution(generic, { authorizedDispatch: genericAuthorization, execute });
   const codingReceipt = await dispatchExecution(coding, { authorizedDispatch: codingAuthorization, execute });
   assert.equal(genericReceipt.runId, "run-1");
   assert.equal(codingReceipt.runId, "run-2");
   assert.equal(calls.length, 2);
-  assert.match(calls[0].prompt, /# Generic Subagent Prompt/);
-  assert.match(calls[0].prompt, /## Task/);
-  assert.match(calls[0].prompt, /## Context/);
-  assert.match(calls[0].prompt, /## Constraints/);
-  assert.match(calls[0].prompt, /## Deliverable/);
-  assert.match(calls[0].prompt, /## Done/);
+  assert.match(calls[0].prompt, /inspect/);
   assert.equal(calls[0].worktree, false);
   assert.equal(calls[1].worktree, false);
   assert.equal(calls[1].contractHash, "a".repeat(64));
 });
 
 test("public adapters reject authority fields and shared execution requires a Host envelope", async (t) => {
-  const prompt = compileGenericPrompt({ task: "inspect", context: [], constraints: [], deliverable: "report", done: ["done"] });
-  assert.throws(() => createGenericDispatchAdapter({ agent: "reviewer", title: "Review", prompt, cwd: "/repo", authorization: {} }), /authority/i);
+  const prompt = "inspect. Deliverable: report. Done: done.";
+  assert.throws(() => createGenericDispatchAdapter({ agent: "reviewer", title: "Review", task: prompt, cwd: "/repo", authorization: {} }), /authority/i);
   const fake = { request: { agent: "reviewer", cwd: "/repo", isolation: "shared" } };
-  await assert.rejects(() => dispatchExecution(createGenericDispatchAdapter({ agent: "reviewer", title: "Review", prompt, cwd: "/repo" }), {
+  await assert.rejects(() => dispatchExecution(createGenericDispatchAdapter({ agent: "reviewer", title: "Review", task: prompt, cwd: "/repo" }), {
     authorizedDispatch: fake,
     execute: () => ({ runId: "must-not-run" }),
   }), /Host-authorized/);
@@ -67,7 +61,7 @@ test("public adapters reject authority fields and shared execution requires a Ho
     authorization: createRunAuthorization({ kind: "generic", binding: { runId: "run", asyncDir: "/tmp/run", sessionId: "root", pid: 1, agentProfile: "reviewer" }, goal: null }),
   });
   let seen;
-  await dispatchExecution(createGenericDispatchAdapter({ agent: "reviewer", title: "Review", prompt, cwd: "/repo" }), {
+  await dispatchExecution(createGenericDispatchAdapter({ agent: "reviewer", title: "Review", task: prompt, cwd: "/repo" }), {
     authorizedDispatch: envelope,
     execute: (value) => { seen = value; return { runId: "run" }; },
   });
@@ -75,8 +69,8 @@ test("public adapters reject authority fields and shared execution requires a Ho
 });
 
 test("shared execution rejects a missing Host envelope before executing", async () => {
-  const prompt = compileGenericPrompt({ task: "inspect", context: [], constraints: [], deliverable: "report", done: ["done"] });
-  await assert.rejects(() => dispatchExecution(createGenericDispatchAdapter({ agent: "reviewer", title: "Review", prompt, cwd: "/repo" }), {
+  const prompt = "inspect. Deliverable: report. Done: done.";
+  await assert.rejects(() => dispatchExecution(createGenericDispatchAdapter({ agent: "reviewer", title: "Review", task: prompt, cwd: "/repo" }), {
     execute: () => ({ runId: "must-not-run" }),
   }), /Host-authorized/);
 });
@@ -86,7 +80,7 @@ test("managed workspace service is the only cwd replacement and missing state ro
   t.after(() => rm(root, { recursive: true, force: true }));
   const authorization = await hostEnvelope(root, "reviewer");
   let seen;
-  const request = createGenericDispatchAdapter({ agent: "reviewer", title: "Review", prompt: compileGenericPrompt({ task: "inspect", context: [], constraints: [], deliverable: "report", done: ["done"] }), cwd: "/repo" });
+  const request = createGenericDispatchAdapter({ agent: "reviewer", title: "Review", task: "inspect. Deliverable: report. Done: done.", cwd: "/repo" });
   const receipt = await dispatchExecution(request, {
     authorizedDispatch: authorization,
     workspace: { dispatchCwd: "/managed/workspace" },

@@ -12,18 +12,14 @@ const ALLOWED_TASKS = new Set(["solo", "head", "follower", "conflict", "prepared
 export function dispatchContract(task) {
   const file = task === "head" || task === "follower" ? `src/${task}.txt` : "src/pipeline.ts";
   return {
-    version: "dispatch-ir.v1",
-    taskId: `r8-${task}`,
     title: `R8 recovery stage ${task}`,
     agent: "executor",
     model: "fake/deterministic",
-    risk: "high",
-    objective: `Append the ${task} change and commit it.`,
-    requirements: [`Write ${file} with the ${task} content and create a commit.`, "Only perform business-file changes; Auto Integration owns queue admission, rebase, conflict continuation, and publication."],
-    context: { knownFacts: ["The recovery harness drives integration via the trusted lifecycle."], decisions: ["Auto Integration owns the queue."], relevantFiles: [file] },
-    boundaries: { writePaths: [file], excludedWork: ["Production coordinator changes."], forbiddenActions: ["Do not call integration mutation tools."] },
+    task: `Append the ${task} change and commit it. Write ${file} with the ${task} content and create a commit. Only perform business-file changes; Auto Integration owns queue admission, rebase, conflict continuation, and publication. The recovery harness drives integration via the trusted lifecycle. Do not call integration mutation tools.`,
+    writePaths: [file],
     acceptance: { criteria: [`${file} contains the ${task} change and is committed.`] },
-    execution: { worktree: true },
+    worktree: true,
+
   };
 }
 

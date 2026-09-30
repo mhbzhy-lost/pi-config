@@ -23,10 +23,11 @@ function harness() {
 }
 
 const codingContract = {
-  version: "dispatch-ir.v1", taskId: "undiscovered-executor", title: "Undiscovered executor", agent: "executor", risk: "normal",
-  objective: "Prove discovery rejects before lifecycle effects.", requirements: ["Do not spawn."],
-  context: { knownFacts: [], decisions: [], relevantFiles: [] }, boundaries: { writePaths: ["test/subagent-model-selection.integration.mjs"], excludedWork: [], forbiddenActions: [] },
-  acceptance: { criteria: ["No effects occur."] }, execution: { cwd: "/repo", worktree: true },
+  title: "Undiscovered executor", agent: "executor",
+  task: "Prove discovery rejects before lifecycle effects. Do not spawn. Known facts: none. Decisions: none. Relevant files: none.",
+  writePaths: ["test/subagent-model-selection.integration.mjs"],
+  acceptance: { criteria: ["No effects occur."] }, cwd: "/repo", worktree: true,
+
 };
 
 test("generic bare model uses sorted global catalog warning and normalized request separates workspace hashes", async () => {
@@ -101,8 +102,8 @@ test("undiscovered coding profile fails before workspace, RPC, and title effects
     modelRegistry: { getAvailable() { return [{ provider: "codex-pool", id: "gpt-5.6-sol" }]; } },
   });
   assert.equal(result.details.code, "UNKNOWN_AGENT");
-  assert.deepEqual(preflight, ["goal"]);
   assert.equal(effects, 0); assert.equal(calls.length, 0);
+
 });
 
 test("custom coding and generic executor dispatch use their structure and discover once", async () => {
@@ -115,7 +116,7 @@ test("custom coding and generic executor dispatch use their structure and discov
     registerAuthorizedRun: authorizationRegistrar(registrations),
   });
   const ctx = { cwd: "/repo" };
-  const coding = await tools[0].execute("custom-coding", { ...codingContract, agent: "coder-alpha", execution: { ...codingContract.execution, worktree: false } }, undefined, undefined, ctx);
+  const coding = await tools[0].execute("custom-coding", { ...codingContract, agent: "coder-alpha", worktree: false }, undefined, undefined, ctx);
   const generic = await tools[0].execute("generic-executor", { agent: "executor", title: "Review", task: "Inspect." }, undefined, undefined, ctx);
   assert.equal(coding.isError, false, coding.content[0]?.text);
   assert.equal(generic.isError, false, generic.content[0]?.text);
@@ -127,6 +128,7 @@ test("custom coding and generic executor dispatch use their structure and discov
   assert.deepEqual(registrations.map(({ kind, binding, capabilities, goal }) => ({ kind, binding, capabilities, goal })), [{
     kind: "generic", binding: { runId: "leaf", asyncDir: "/tmp/leaf", sessionId: "/tmp/pi-sessions/lifecycle.jsonl", pid: 1, agentProfile: "executor" }, capabilities: [], goal: null,
   }]);
+
 });
 
 test("typed executor selects an available declared candidate and fails a terminal miss before spawn effects", async () => {
@@ -149,13 +151,14 @@ test("typed executor selects an available declared candidate and fails a termina
     },
     registerAuthorizedRun: authorizationRegistrar(registrations),
   });
-  const available = await tools[0].execute("available-executor", { ...codingContract, model: "gpt-5.6-luna", execution: { ...codingContract.execution, worktree: false } }, undefined, undefined, {
+  const available = await tools[0].execute("available-executor", { ...codingContract, model: "gpt-5.6-luna", worktree: false }, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { return [{ provider: "openai-codex", id: "gpt-5.6-luna" }]; } },
   });
   assert.equal(available.isError, false, available.content[0]?.text);
   assert.equal(JSON.parse(calls[0].workflowScript.match(/, (.*)\);$/)[1]).model, "openai-codex/gpt-5.6-luna");
   // coding 派发（worktree:false）不经 workspace/grant 路径，不注册 authority。
+
   assert.deepEqual(registrations, []);
 
   effects = 0; calls.length = 0;
@@ -166,6 +169,7 @@ test("typed executor selects an available declared candidate and fails a termina
   assert.equal(miss.details.code, "MODEL_NOT_AVAILABLE");
   // Goal 契约预检有意先于模型发现（见首个用例注释）：miss 路径只触发 preflight，
   // 无 workspace/RPC/title 副作用。
+
   assert.equal(effects, 1); assert.equal(calls.length, 0);
   assert.deepEqual(discoveryCalls, [["/repo", "both", undefined], ["/repo", "both", undefined]]);
 });

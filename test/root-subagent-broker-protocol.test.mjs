@@ -77,6 +77,11 @@ test("broker coordinator requests accept exact child integration and completion 
     inspect_integration_state: {},
     preserve_integration_debt: {},
   };
+  const preserveWithReason = { ...request("coordinator.request"), params: { operation: "preserve_integration_debt", input: { reason: "rpc-rejected" } } };
+  assert.deepEqual(parseBrokerRequest(preserveWithReason), preserveWithReason);
+  for (const invalid of [{ reason: "" }, { reason: "rpc-rejected", extra: true }]) {
+    assert.throws(() => parseBrokerRequest({ ...request("coordinator.request"), params: { operation: "preserve_integration_debt", input: invalid } }), BrokerProtocolError);
+  }
   for (const [operation, input] of Object.entries(inputs)) {
     const value = { ...request("coordinator.request"), params: { operation, input } };
     assert.deepEqual(parseBrokerRequest(value), value, operation);

@@ -178,8 +178,8 @@ test("callers may narrow shared isolation but cannot downgrade managed isolation
 
 test("forged envelope with a same-description symbol is rejected", async () => {
   const { dispatchExecution, createGenericDispatchAdapter } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/execution.ts");
-  const { compileGenericPrompt } = await import("../packages/pi-subagents-enhanced/src/contracts/generic-prompt.ts");
-  const prompt = compileGenericPrompt({ task: "inspect", context: [], constraints: [], deliverable: "report", done: ["done"] });
+  const { compileDispatchIR, renderDispatchPrompt } = await import("../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts");
+  const prompt = renderDispatchPrompt(compileDispatchIR({ agent: "reviewer", task: "inspect" }));
   const forgedBrand = Symbol("authorized-dispatch");
   const forged = Object.freeze({
     request: { agent: "reviewer", cwd: "/repo", isolation: "shared" },
@@ -187,7 +187,7 @@ test("forged envelope with a same-description symbol is rejected", async () => {
     [forgedBrand]: true,
   });
   await assert.rejects(
-    () => dispatchExecution(createGenericDispatchAdapter({ agent: "reviewer", title: "Review", prompt, cwd: "/repo" }), {
+    () => dispatchExecution(createGenericDispatchAdapter({ agent: "reviewer", title: "Review", task: prompt, cwd: "/repo" }), {
       authorizedDispatch: forged,
       execute: () => ({ runId: "must-not-run" }),
     }),

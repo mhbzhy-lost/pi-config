@@ -45,6 +45,7 @@ test("workspace reminder queues one standalone terminal completion before its no
   assert.equal(messages[0].message.customType, "subagent-workspace-reminder");
   assert.match(messages[0].message.content, /workspace-a/);
   assert.match(messages[0].message.content, /subagent_worktree\(\{action:"status",workspace_id:"workspace-a"\}\)/);
+  assert.match(messages[0].message.content, /then integrate or discard to finish, or preserve temporarily and later release\./);
   assert.deepEqual(messages[0].message.details, {
     schemaVersion: "subagent-workspace-reminder.v1", rootSessionId: "root-session", runId: "leaf-run", workspaceId: "workspace-a", workspaceState: "active", mode: "standalone-subagent",
   });

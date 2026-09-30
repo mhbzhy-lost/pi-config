@@ -10,7 +10,7 @@ import { homedir, tmpdir } from "node:os";
 import { discoverManagedSkills } from "../src/skill-whitelist/skill.ts";
 import { auditManagedWorkspaces } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
 import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
-import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+import { compileDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { assertRunAuthorization, createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
@@ -109,7 +109,7 @@ export async function inspectSubagentRuntime({ requests = [], discovery, cwd = p
   for (const request of requests) {
     try {
       if (!validator.Check(request)) throw new Error("invalid subagent call structure");
-      if (request.version === "dispatch-ir.v1") compileCodingDispatchIR(request, { cwd });
+      if (request && typeof request === "object") compileDispatchIR(request, { cwd });
       if (typeof request.agent !== "string") throw new Error("dispatch request must identify a profile");
       if (available && !discovery.agents.some((agent) => agent.name === request.agent)) issues.push(`PROFILE_NOT_DISCOVERED: ${request.agent}`);
     } catch (error) {

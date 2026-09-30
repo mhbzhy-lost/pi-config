@@ -52,7 +52,7 @@ export function createWorkspaceCompletionReminder({ events, sendMessage, getCont
     try {
       await sendMessage({
         customType: "subagent-workspace-reminder",
-        content: `Subagent workspace awaiting disposition: ${receipt.workspaceId}. Call subagent_worktree({action:"status",workspace_id:"${receipt.workspaceId}"}), then integrate, discard, or preserve according to the returned allowed_dispositions. After preserve, use release when the workspace is no longer needed.`,
+        content: `Subagent workspace awaiting disposition: ${receipt.workspaceId}. Call subagent_worktree({action:"status",workspace_id:"${receipt.workspaceId}"}), then integrate or discard to finish, or preserve temporarily and later release.`,
         display: true,
         details: {
           schemaVersion: "subagent-workspace-reminder.v1",

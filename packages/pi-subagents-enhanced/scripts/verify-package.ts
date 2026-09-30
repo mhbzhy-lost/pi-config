@@ -14,7 +14,6 @@ const expectedExtensions = ["./extensions/subagent-runtime.ts", "./extensions/cu
 const expectedFiles = ["AGENTS.md", "README.md", "extensions", "child-extensions", "scripts", "src"];
 const expectedExports = {
   "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
-  "./generic-prompt": "./src/contracts/generic-prompt.ts",
   "./workspace": "./src/workspace/service.ts",
   "./workspace/admin": "./src/workspace/administration.ts",
 };

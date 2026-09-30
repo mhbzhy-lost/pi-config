@@ -8,11 +8,11 @@ const validator = Compile(TYPED_SUBAGENT_PARAMETERS);
 
 function codingInput() {
   return {
-    version: "dispatch-ir.v1", taskId: "schema-security", title: "Schema security", agent: "executor",
-    risk: "normal", objective: "Validate tool union fields.", requirements: ["Test it."],
-    context: { knownFacts: [], decisions: [], relevantFiles: [] },
-    boundaries: { writePaths: ["src/index.ts"], excludedWork: [], forbiddenActions: [] },
-    acceptance: { criteria: ["Pass."] }, execution: {},
+    title: "Schema security",
+    agent: "executor",
+    task: "Validate tool union fields. Test it.",
+    writePaths: ["src/index.ts"],
+    acceptance: { criteria: ["Pass."] },
   };
 }
 
@@ -56,7 +56,7 @@ test("root schema stays a plain top-level object without union combinators", () 
 });
 
 test("branch mixing is tolerated at the schema layer and routed by runtime shape", () => {
-  // 分支互斥由 runtime 路由（action→control、version→coding、其余→generic）
+  // 分支互斥由 runtime 路由（action→control、writePaths→coding、其余→generic）
   // 与 compileCodingDispatchIR keypath 诊断裁决；schema 层只保证字段集合法。
   const mixed = codingInput();
   mixed.task = "generic field beside a coding contract";
@@ -83,7 +83,7 @@ test("thinkingLevel accepts pi thinking levels on coding and generic branches an
 
 test("public schemas reject caller-controlled execution timeouts", () => {
   const codingObject = codingInput();
-  codingObject.execution = { timeoutMs: 60_000 };
+  codingObject.timeoutMs = 60_000;
   assert.equal(validator.Check(codingObject), false);
 
   const generic = genericInput();

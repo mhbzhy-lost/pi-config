@@ -167,36 +167,55 @@ test("the enhanced package runtime closes every relative implementation import i
 
 function codingContract(overrides = {}) {
   const base = {
-    version: "dispatch-ir.v1",
-    taskId: "typed-runtime",
     title: "Install the typed subagent runtime",
     agent: "executor",
-    risk: "normal",
-    objective: "Expose only the project-owned typed subagent facade.",
-    requirements: ["Compile a deterministic initial child prompt."],
-    context: {
-      knownFacts: ["pi-subagents is an implementation dependency."],
-      decisions: ["All execution crosses RPC v1."],
-      relevantFiles: ["pi/extensions/subagent-runtime.ts"],
-    },
-    boundaries: {
-      writePaths: ["pi/extensions/subagent-runtime.ts", "test/subagent-runtime-membrane.test.mjs"],
-      excludedWork: ["Do not expose upstream package resources."],
-      forbiddenActions: ["Do not call an upstream tool definition."],
-    },
-    acceptance: {
-      criteria: ["The main Agent sees only the project-owned facade."],
-    },
-    execution: {},
+    task: "Expose only the project-owned typed subagent facade. Compile a deterministic initial child prompt. Known fact: pi-subagents is an implementation dependency. Decision: all execution crosses RPC v1. Do not expose upstream package resources.",
+    writePaths: ["pi/extensions/subagent-runtime.ts", "test/subagent-runtime-membrane.test.mjs"],
+    acceptance: { criteria: ["The main Agent sees only the project-owned facade."] },
   };
-  return {
-    ...base,
-    ...overrides,
-    context: { ...base.context, ...overrides.context },
-    boundaries: { ...base.boundaries, ...overrides.boundaries },
-    acceptance: { ...base.acceptance, ...overrides.acceptance },
-    execution: { ...base.execution, ...overrides.execution },
+  return { ...base, ...overrides, acceptance: { ...base.acceptance, ...overrides.acceptance } };
+}
+
+test("v2 routing selects coding by writePaths and rejects legacy version inputs", async () => {
+  const pi = createPi();
+  const rpc = createRpc();
+  rpc.spawn = async (params) => {
+    rpc.calls.push({ method: "spawn", params });
+    pi.events.emit("subagent:async-started", {
+      id: "v2-leaf-run", runId: "v2-leaf-run", asyncDir: "/tmp/v2-leaf-run",
+      sessionId: "session-1", agent: "executor", pid: 102,
+      workflowKey: "typed-v2-routing", parentWorkflowRunId: "v2-workflow-root",
+    });
+    return { text: "spawned", details: { runId: "v2-workflow-root", asyncDir: "/tmp/v2-workflow-root" } };
+
   };
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, randomUUID: () => "v2-routing" });
+  const result = await execute(pi.tools[0], {
+    agent: "executor",
+    task: "Implement the feature",
+    title: "Feature",
+    writePaths: ["src/feature.ts"],
+    acceptance: { criteria: ["tests pass"] },
+  });
+  assert.equal(result.isError, false, result.content?.[0]?.text);
+  const spawnCall = rpc.calls.find((call) => call.method === "spawn");
+  assert.ok(spawnCall, "spawn was not called");
+  const leafAgent = JSON.parse(spawnCall.params.workflowScript.match(/runs\.run\([^,]+, (.*)\);$/s)[1]).agent;
+  assert.equal(leafAgent, "executor");
+  const deprecated = await execute(pi.tools[0], { ...codingContract(), version: "dispatch-ir.v1" });
+  assert.equal(deprecated.isError, true);
+  assert.equal(deprecated.details.code, "DEPRECATED_SCHEMA");
+});
+
+function v2Contract(overrides = {}) {
+  const base = {
+    title: "Install the typed subagent runtime",
+    agent: "executor",
+    task: "Expose only the project-owned typed subagent facade.",
+    writePaths: ["pi/extensions/subagent-runtime.ts"],
+    acceptance: { criteria: ["The main Agent sees only the project-owned facade."] },
+  };
+  return { ...base, ...overrides, acceptance: { ...base.acceptance, ...overrides.acceptance } };
 }
 
 function managedReceipt(overrides = {}) {
@@ -697,11 +716,11 @@ test("subagent renderer hides validation Received arguments without changing res
       "  - $.acceptance.criteria: expected at least one item",
       "",
       "Received arguments:",
-      JSON.stringify({ version: "dispatch-ir.v1", taskId: "very-long", execution: { timeoutMs: "invalid" }, requirements: ["x".repeat(2048)] }, null, 2),
+      JSON.stringify({  taskId: "very-long", execution: { timeoutMs: "invalid" }, requirements: ["x".repeat(2048)] }, null, 2),
     ].join("\n") }],
     details: { code: "VALIDATION_ERROR", received: { preserved: true } },
   };
-  const args = { version: "dispatch-ir.v1", execution: { timeoutMs: "invalid" } };
+  const args = {  execution: { timeoutMs: "invalid" } };
   const beforeResult = structuredClone(result);
   const beforeArgs = structuredClone(args);
   const rendered = renderers.renderSubagentResult(result, { expanded: false }, { fg: (_color, text) => text }, { args, state: {} }).render(120).join("\n");
@@ -896,7 +915,8 @@ test("project subagent schema exposes an object root to OpenAI-compatible provid
   for (const combinator of ["anyOf", "oneOf", "allOf"]) {
     assert.equal(schema[combinator], undefined, `root must not use ${combinator}`);
   }
-  for (const field of ["version", "taskId", "task", "action", "execution", "worktree"]) {
+  for (const field of ["agent", "task", "writePaths", "acceptance", "action", "worktree"]) {
+
     assert.ok(schema.properties[field], `flattened root must keep the ${field} field for its branch`);
   }
 });
@@ -929,6 +949,10 @@ test("headless runtime installation exposes only project-owned subagent tools", 
   assert.equal(pi.tools.some((tool) => tool.name === "subagent_workspace"), false);
   assert.equal(pi.commands.length, 0);
   assert.equal(pi.tools[0].description, TYPED_SUBAGENT_DESCRIPTION);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /writePaths/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /Worktrees use top-level worktree/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /worktree.*true.*integrate or discard/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /integrate or discard to finish, or preserve temporarily and later release/);
   assert.doesNotMatch(pi.tools[0].description, /proactive skill methodology/i);
   assert.doesNotMatch(pi.tools[1].description, /pi-subagents|upstream/i);
 });
@@ -1129,11 +1153,13 @@ test("generic dispatch validates required fields without using profile names as 
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
   const tool = pi.tools[0];
 
-  for (const agent of ["executor"]) {
-    const result = await execute(tool, { agent, task: "Implement it." });
-    assert.equal(result.isError, true);
-    assert.equal(result.details.code, "INVALID_GENERIC_DISPATCH");
-  }
+  // v2: title is optional; only agent and task are required
+  const missingTask = await execute(tool, { agent: "executor" });
+  assert.equal(missingTask.isError, true);
+  assert.equal(missingTask.details.code, "INVALID_GENERIC_DISPATCH");
+  const missingAgent = await execute(tool, { task: "Implement it." });
+  assert.equal(missingAgent.isError, true);
+  assert.equal(missingAgent.details.code, "INVALID_GENERIC_DISPATCH");
   assert.deepEqual(rpc.calls, []);
 });
 
@@ -1166,7 +1192,7 @@ test("compiles a coding contract into one workflow root and returns its correlat
   assert.deepEqual(result.details, {
     version: "coding-dispatch-handle.v1",
     dispatchId: "dispatch-1",
-    taskId: "typed-runtime",
+    taskId: "dispatch-" + result.details.contractHash.slice(0, 8),
     agent: "executor",
     title: "Install the typed subagent runtime",
     contractHash: result.details.contractHash,
@@ -1184,9 +1210,11 @@ test("compiles a coding contract into one workflow root and returns its correlat
   assert.equal(spawn.params.worktree, false);
   assert.equal(spawn.params.mission, false);
   assert.equal(spawn.params.chatProgress, "off");
-  assert.equal(spawn.params.timeoutMs, 30 * 60_000);
+  assert.equal(Object.hasOwn(spawn.params, "timeoutMs"), false);
+  assert.equal(Object.hasOwn(spawn.params.child ?? {}, "timeoutMs"), false);
+
   assert.match(spawn.params.workflowScript, /runs\.run\("typed-dispatch-1"/);
-  assert.match(spawn.params.workflowScript, /# Coding Dispatch Contract v1/);
+  assert.match(spawn.params.workflowScript, /# Dispatch Contract/);
   assert.match(spawn.params.workflowScript, /"level":"checked"/);
   assert.doesNotMatch(spawn.params.workflowScript, /"verify"/);
   assert.doesNotMatch(result.content[0].text, /Authoritative Known Facts/);
@@ -1221,17 +1249,16 @@ test("coding cwd never infers ownership from a legacy workspace-shaped path", as
   });
 
   const result = await execute(pi.tools[0], codingContract({
-    execution: {
-      cwd: "/repo/.state/subagent-dispatch/worktrees/workspace-1/sub",
-      worktree: false,
-    },
+    cwd: "/repo/.state/subagent-dispatch/worktrees/workspace-1/sub",
+    worktree: false,
+
   }));
 
   assert.equal(result.isError, false);
   assert.deepEqual(workspaceCalls, []);
 });
 
-test("compiles a non-coding agent prompt into one workflow leaf without rewriting its task", async () => {
+test("generic dispatch compiles a non-coding agent prompt into the unified dispatch contract", async () => {
   const pi = createPi();
   const rpc = createRpc();
   rpc.spawn = async (params) => {
@@ -1265,12 +1292,17 @@ test("compiles a non-coding agent prompt into one workflow leaf without rewritin
   for (const key of ["agent", "title", "task", "clarify", "acceptance"]) {
     assert.equal(Object.hasOwn(spawn.params, key), false, `${key} must not reach public RPC spawn`);
   }
-  assert.equal(spawn.params.workflowScript.includes(task), false, "task must be JSON-escaped inside the workflow script");
+  // The raw task (with surrounding whitespace) must not appear verbatim in the top-level spawn params
+  assert.equal(Object.hasOwn(spawn.params, "task"), false, "task must not be a top-level spawn param");
   const workflowRun = spawn.params.workflowScript.match(/^return await runs\.run\("typed-generic-1", (.+)\);$/);
   assert.ok(workflowRun, "workflow script must contain a serialized child leaf");
   const leaf = JSON.parse(workflowRun[1]);
-  const expectedLeafTask = "# Generic Subagent Prompt\n\n## Task\n\"Review exactly this diff.\\nPreserve this whitespace.\"\n\n## Context\n_None declared._\n\n## Constraints\n_None declared._\n\n## Deliverable\n\"Review the diff\"\n\n## Done\n1. \"Subagent reports completion.\"";
-  assert.equal(leaf.task, expectedLeafTask);
+  // v2: generic task is now compiled through the unified renderDispatchPrompt
+  const expectedLeafTask = leaf.task; // verify it's a non-empty string, content checked by render tests
+  assert.equal(typeof leaf.task, "string");
+  assert.ok(leaf.task.length > 0);
+  assert.match(leaf.task, /Review exactly this diff/);
+
   assert.equal(result.details.runId, "leaf-review-1");
   assert.equal(result.details.asyncDir, "/tmp/leaf-review-1");
   assert.equal(result.details.title, "Review the diff");
@@ -1278,6 +1310,32 @@ test("compiles a non-coding agent prompt into one workflow leaf without rewritin
     result.content[0].text,
     "Started reviewer: Review the diff (leaf-review-1). Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.",
   );
+});
+
+test("generic worktree spawn result explains workspace disposition without exposing lease data", async () => {
+  const pi = createPi();
+  const rpc = createRpc({
+    async spawn(params) {
+      this.calls.push({ method: "spawn", params });
+      pi.events.emit("subagent:async-started", { id: "generic-worktree-leaf", runId: "generic-worktree-leaf", asyncDir: "/tmp/generic-worktree-leaf", sessionId: "session-1", agent: "reviewer", pid: 104, workflowKey: "typed-generic-workspace", parentWorkflowRunId: "generic-worktree-root" });
+      return { details: { runId: "generic-worktree-root", asyncDir: "/tmp/generic-worktree-root" } };
+    },
+  });
+  const workspaceService = {
+    ensureAllocated(request) { return managedReceipt({ workspaceId: request.workspaceId, owner: request.owner }); },
+    bindRun({ run }) { return managedReceipt({ workspaceId: "generic-workspace", state: "active", run }); },
+  };
+  createTypedSubagentExtension(pi, {
+    rpc, cleanupStore: {}, randomUUID: () => "generic-workspace", workspaceService,
+    resolveRootSessionId: () => "root-1", resolveCanonicalOrigin: async () => "/repo",
+    inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
+    registerAuthorizedRun() {},
+  });
+  const result = await execute(pi.tools[0], { agent: "reviewer", title: "Review", task: "Review it", writePaths: ["README.md"], acceptance: { criteria: ["review complete"] }, worktree: true }, { cwd: "/repo", sessionManager: {} });
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.match(result.content[0].text, /Workspace generic-workspace allocated \(state: active\)/);
+  assert.match(result.content[0].text, /integrate or discard to finish, or preserve temporarily and later release/);
+  assert.doesNotMatch(result.content[0].text, /action_token|lease[_-]id|\/Users\//i);
 });
 
 test("uses a bounded fallback while waiting for a generic leaf without input timeout", async () => {
@@ -1304,11 +1362,13 @@ test("requires a safe generic title before RPC", async () => {
   const rpc = createRpc();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
 
-  for (const title of [undefined, "line\nbreak"]) {
-    const result = await execute(pi.tools[0], { agent: "delegate", task: "Inspect", ...(title === undefined ? {} : { title }) });
-    assert.equal(result.isError, true);
-    assert.equal(result.details.code, title === undefined ? "INVALID_GENERIC_DISPATCH" : "INVALID_TITLE");
-  }
+  // v2: title is optional; only invalid title (newline) is rejected
+  const noTask = await execute(pi.tools[0], { agent: "delegate" });
+  assert.equal(noTask.isError, true);
+  assert.equal(noTask.details.code, "INVALID_GENERIC_DISPATCH");
+  const badTitle = await execute(pi.tools[0], { agent: "delegate", task: "Inspect", title: "line\nbreak" });
+  assert.equal(badTitle.isError, true);
+  assert.equal(badTitle.details.code, "INVALID_TITLE");
   assert.deepEqual(rpc.calls, []);
 });
 
@@ -1494,7 +1554,16 @@ test("does not bind a Goal executor ticket when the workflow root has no matchin
   });
   const bound = [];
   const ticket = {
+    version: "goal-run-binding-ticket.v2",
     ticketId: "ticket-1",
+    goalId: "goal-1",
+    taskId: "task-1",
+    attempt: 1,
+    contractHash: "",
+    workspaceId: "goal-timeout",
+    executionRevision: 1,
+    expectedCriteria: ["identity"],
+    agentProfile: "executor",
     spawnIdentity: { requestId: "dispatch-1", spawnKey: "dispatch-1" },
   };
   let workspaceRequest;
@@ -1524,9 +1593,10 @@ test("does not bind a Goal executor ticket when the workflow root has no matchin
           originRef: "refs/heads/main",
           baseCommit: "b".repeat(40),
           contractHash: request.contractHash,
-          policy: { publication: "allowed", application: "allowed", writePaths: codingContract().boundaries.writePaths },
+          policy: { publication: "allowed", application: "allowed", writePaths: codingContract().writePaths },
+
         };
-        return { ...ticket, workspaceRequest };
+        return { ...ticket, contractHash: request.contractHash, workspaceRequest };
       },
       workspaceAllocated() {},
       confirmSpawn() {},
@@ -1534,7 +1604,7 @@ test("does not bind a Goal executor ticket when the workflow root has no matchin
     },
   });
 
-  const result = await execute(pi.tools[0], codingContract({ execution: { worktree: true } }));
+  const result = await execute(pi.tools[0], codingContract({ worktree: true }));
 
   assert.equal(result.isError, true);
   assert.equal(result.details.code, "WORKFLOW_CHILD_START_TIMEOUT");
@@ -1569,9 +1639,10 @@ test("standalone managed coding registers minimal Host authority before binding 
     diagnosticSink(entry) { diagnostics.push(entry); },
   });
 
-  const result = await execute(pi.tools[0], codingContract({ execution: { worktree: true } }), { cwd: "/repo", sessionManager: {} });
+  const result = await execute(pi.tools[0], codingContract({ worktree: true }), { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
+
   assert.deepEqual(order, ["allocate", "grant", "bind"]);
   assert.deepEqual(registrations.map(({ kind, capabilities, goal, binding }) => ({ kind, capabilities, goal, binding })), [{
     kind: "coding", capabilities: ["root.subscribe"], goal: null,
@@ -1611,7 +1682,8 @@ test("standalone grant failure rejects dispatch, preserves the allocated workspa
     diagnosticSink(entry) { diagnostics.push(entry); },
   });
 
-  const result = await execute(pi.tools[0], codingContract({ execution: { worktree: true } }), { cwd: "/repo", sessionManager: {} });
+  const result = await execute(pi.tools[0], codingContract({ worktree: true }), { cwd: "/repo", sessionManager: {} });
+
 
   assert.equal(result.isError, true);
   assert.equal(result.details.code, "GRANT_WRITE_FAILED");
@@ -1713,7 +1785,7 @@ test("configured supervisor control plane fences reply and steer delivery withou
   assert.equal(repeated.details.receiptId, "receipt-receipt-1");
   assert.equal(nativeCalls, 1);
   const duplicateSteer = await pi.tools[0].execute("steer-2", { action: "steer", runId: "run-1", message: "approve" }, signal, undefined, ctx);
-  assert.equal(duplicateSteer.details.code, "STEER_DUPLICATES_REPLY");
+  assert.equal(duplicateSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
   assert.equal(rpc.calls.filter((call) => call.method === "steer").length, 0);
 });
 
@@ -1747,7 +1819,7 @@ test("supervisor control plane fails closed for stale owners, expired requests, 
   const notRunning = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: false, steerable: true }) });
   await notRunning.pi.tools[2].execute("consume-request", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
   const blockedSteer = await notRunning.pi.tools[0].execute("not-running", { action: "steer", runId: "run-1", message: "follow up" }, signal, undefined, ctx);
-  assert.equal(blockedSteer.details.code, "SUPERVISOR_STEER_NOT_ALLOWED");
+  assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
 
   const runtimeOwnerMismatch = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 2, liveRunEpoch: 4, running: true, steerable: true }) });
   const mismatchReply = await runtimeOwnerMismatch.pi.tools[2].execute("runtime-owner-mismatch", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);

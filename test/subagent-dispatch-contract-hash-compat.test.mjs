@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+import { compileDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+
 import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createManagedWorkspaceLedger } from "../packages/pi-subagents-enhanced/src/workspace/ledger.ts";
 
@@ -35,17 +36,13 @@ async function fixture(t) {
 
 function dispatchContract() {
   return {
-    version: "dispatch-ir.v1",
-    taskId: "legacy-contract-hash-pin",
-    title: "Legacy contract hash persistence",
+    title: "Contract hash persistence",
     agent: "executor",
-    risk: "normal",
-    objective: "Preserve a legacy hash string in workspace persistence.",
-    requirements: ["Keep old persisted contractHash values loadable."],
-    context: { knownFacts: [], decisions: [], relevantFiles: [] },
-    boundaries: { writePaths: ["README.md"], excludedWork: [], forbiddenActions: [] },
-    acceptance: { criteria: ["Legacy request loads with a self-consistent requestHash."] },
-    execution: { cwd: "/repo", timeoutMs: 1800000 },
+    task: "Preserve a contract hash in workspace persistence. Keep persisted contractHash values loadable.",
+    writePaths: ["README.md"],
+    acceptance: { criteria: ["Request loads with a self-consistent requestHash."] },
+    cwd: "/repo",
+
   };
 }
 
@@ -64,13 +61,12 @@ function request(f, contractHash) {
 
 test("persists and loads an old IR hash containing workflow without putting workflow in request v2", async (t) => {
   const f = await fixture(t);
-  const currentIR = compileCodingDispatchIR(dispatchContract(), { cwd: "/repo" });
-  // The current 0.71 IR has no workflow field; preserve a legacy hash that
-  // was computed from the retired field while loading it as opaque data.
-  const legacyIR = { ...currentIR, workflow: { mode: "legacy" } };
-  delete legacyIR.hash;
+  const currentIR = compileDispatchIR(dispatchContract(), { cwd: "/repo" });
+  const legacyIR = { ...currentIR, workflow: { mode: "tdd" } };
+  delete legacyIR.contractHash;
   const legacyHash = hashCanonical(legacyIR);
-  const currentHash = currentIR.hash;
+  const currentHash = currentIR.contractHash;
+
   assert.notEqual(currentHash, legacyHash);
 
   const input = request(f, legacyHash);

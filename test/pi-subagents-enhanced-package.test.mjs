@@ -76,7 +76,6 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
   assert.deepEqual(manifest.pi.extensions, ["./extensions/subagent-runtime.ts", "./extensions/custom-footer.ts"]);
   assert.deepEqual(manifest.exports, {
     "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
-    "./generic-prompt": "./src/contracts/generic-prompt.ts",
     "./workspace": "./src/workspace/service.ts",
     "./workspace/admin": "./src/workspace/administration.ts",
   });
@@ -86,6 +85,7 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
     "@earendil-works/pi-ai": "0.87.1",
     "@earendil-works/pi-coding-agent": "0.87.1",
     "@earendil-works/pi-tui": "0.87.1",
+
   });
   assert.deepEqual(manifest.bundleDependencies, ["pi-subagents"]);
   assert.equal(Object.hasOwn(manifest, "bundledDependencies"), false);
@@ -176,6 +176,7 @@ test("npm dry-run tarball contains the complete runtime closure and no repositor
 test("package setup installs Pi core typings as development dependencies", async () => {
   for (const peer of forbiddenLocalPeers) {
     assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules", peer))).version, "0.87.1", peer);
+
   }
   assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules/pi-subagents/node_modules/typebox"))).name, "typebox");
 });
@@ -219,6 +220,12 @@ test("package verification rejects upstream drift, missing patch, and escaping e
   escapingManifest.pi.extensions[0] = "../outside.ts";
   await writeFile(join(escaping, "package.json"), JSON.stringify(escapingManifest));
   await assert.rejects(() => verifyEnhancedPackage({ packageRoot: escaping }), /outside|escape|package/i);
+
+  const unpatched = await fixture("unpatched");
+  await cp(join(packageRoot, "node_modules/pi-subagents"), join(unpatched, "node_modules/pi-subagents"), { recursive: true });
+  await writeFile(join(unpatched, "node_modules/pi-subagents/CHANGELOG.md"), "drifted upstream\n");
+  await assert.rejects(() => verifyEnhancedPackage({ packageRoot: unpatched }), /controlled files differ|registry|drift/i);
+
 
   const missingWorkspaceTool = await mkdtemp(join(tmpdir(), "enhanced-missing-workspace-tool-"));
   t.after(() => rm(missingWorkspaceTool, { recursive: true, force: true }));
