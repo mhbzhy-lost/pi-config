@@ -47,3 +47,36 @@ silent」原则冲突，workspace 会无声滞留在 active 且无 debt 标记�
   "binding"）、workspace 保持 active、`inspectTerminalProofDelivery` 返回 "debt"。
 - 整个 terminal-proof-handoff 文件 7/7 绿（其余投递/重放/debt 用例无回归）。
 - 集成门禁解除该文件的 PENDING-ADJUDICATION 排除。
+
+## 追加加固（B2，reviewer 执行后审核发现）
+
+首版修复（`49931ed`）把 `readCrossScope` 写成**可选依赖**且 `catch` 后回退为 `[]`：
+
+```ts
+let crossScope: unknown = [];
+try { crossScope = deps.readCrossScope?.() ?? []; } catch { crossScope = []; }
+```
+
+这使三种情形重新退化为静默 `not-applicable`，正是本文要消灭的缺陷类别：
+
+1. 依赖未接线（`undefined`）；
+2. `readCrossScope()` 抛异常——`ledger.list()` 会因**任一** scope 目录下的
+   `MANAGED_WORKSPACE_STORAGE` / `MANAGED_WORKSPACE_RECORD` / 记录校验失败而整体抛错，
+   即别的 scope 里一条损坏记录就能吞掉当前 run 的终局；
+3. 返回非法结构（非数组、元素缺 `workspaceId`）。
+
+### 加固
+
+- `readCrossScope` 改为**必选依赖**（类型层）；
+- 运行时对「依赖缺失 / 抛异常 / 返回非法结构」一律 `debt(deps)` fail-closed；
+- 只有在**成功完成查询且明确为空**时才返回 `not-applicable`。
+
+判据：「无法确认没有 workspace」绝不等同于「确认没有 workspace」。
+
+### 追加验收
+
+`test/subagent-proof-binding-classification.test.mjs` 新增 4 条用例（依赖缺失、抛异常、
+5 种非法返回值、跨 scope 命中），均 RED→GREEN，并断言三者都**不 enqueue、不调用
+`recordTerminalProof`**；原有「合法空绑定为 not-applicable」用例改为显式提供
+`readCrossScope: () => []`，以体现 not-applicable 必须建立在成功复查之上。
+该文件 8/8 绿，terminal-proof-handoff 集成 7/7 绿，typecheck 通过。
