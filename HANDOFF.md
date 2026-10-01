@@ -77,7 +77,7 @@ npm test **951tests/950pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ 
 |---|---|---|
 | `pi-subagents-runtime.integration.mjs` | WIRED-ELSEWHERE（`test:subagents` script 存在） | 有独立 script **不等于**有通过的门禁；该文件已知只 3/5，且含真实 supervisor reply 死锁 |
 | `subagent-resumed-child-*.integration.mjs` | DIAGNOSED-UPSTREAM | **production 可达的真实缺陷**，仅「非 merge 引入」不足以支持安全切换 |
-| `session-owner-runtime.integration.mjs` | DIAGNOSED-FIXTURE | 定性证据不足：readiness 超时无法区分「晚到」与「永不到」 |
+| `session-owner-runtime.integration.mjs` | ~~DIAGNOSED-FIXTURE~~ → **类别 3 诊断中** | 原「夹具时序脆弱/超 60s 预算」定性**已被推翻**（失败发生在第一个 owner，未走到 SIGKILL）；「Host 版本错配」假设亦**已被 A/B 实验证伪**（0.85.1 与 0.87.1 均 ~890ms 出 record）；ESRCH 探针为测试自身缺陷（zombie 语义）已修 `7847863`。当前为类别 3 现场：守卫文案「该会话正由另一个 Pi 窗口使用，已取消切换」、复现不稳定，诊断进行中。证据：`docs/bugs/2026-10-01-integration-host-binary-resolution-inconsistent.md`、`var/upgrade/t8-bounded-experiment.md` §6 |
 
 ## 计划验收偏差（reviewer 审核结论：不通过）
 
@@ -156,7 +156,7 @@ npm test **951tests/950pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ 
 8. ~~**T12 命名冲突**~~（已裁定：**pi-lite**，2026-09-29；新仓已回退 R2a 改名与主仓收敛，函数/测试 9/9 绿，T12 此项冲突解除）
 9. ~~**门禁覆盖产品决策**~~（已落地：用户定原则「长耗时属集成测试不进主 glob」；已建 `test:all-integration` 门禁 runner，自动枚举+串行+显式排除表，新文件自动接线，首跑 30 文件 218/218 绿）
 10. ~~**产品语义观察项**~~（已裁决关闭，2026-09-30：经代码验证，broker 身份三项服务——integration 订阅/proof settlement/lease 存活——全部面向 managed workspace 生命周期，无 workspace 的 coding run 无需 broker；b332005 门控为正确设计，canary 测试按 worktree:true 钉住现行语义）
-11. ~~两项待专项诊断的集成测试失败面~~（**已诊断但未修复，2026-09-30；reviewer 判定为验收未完成项**）：(a) resumed-child——根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空；非 merge 引入，**但属 production 可达的真实缺陷**，修复归属 upstream 不等于可安全切换（docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md）。(b) session-owner-runtime 三 PTY 用例——归因为夹具时序脆弱（2 独跑通过、SIGKILL 接管超 60s 预算），**但证据不足**：readiness 超时无法区分「晚到」与「永久启动失败」，需有界实验定调后才能定性（var/upgrade/t8-session-owner-pty-diagnosis.md）。注：resumed-child 是 auto-integration 恢复续跑（child 退出后自动收尾），与控制面手动 resume 无关，后者使用正常。
+11. ~~两项待专项诊断的集成测试失败面~~（**已诊断但未修复，2026-09-30；reviewer 判定为验收未完成项**）：(a) resumed-child——根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空；非 merge 引入，**但属 production 可达的真实缺陷**，修复归属 upstream 不等于可安全切换（docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md）。(b) session-owner-runtime 三 PTY 用例——**原归因「夹具时序脆弱（SIGKILL 接管超 60s 预算）」已被推翻**：有界实验证实失败发生在**第一个 owner**（trace 无 `owner-sigkill` 事件）、registry record 在 63s 内被采样 15668 次恒为空，根本不是接管阶段超时；且 `PI_OWNER_READY` 实为 expect 脚本 `send_user`（非 pi 打印），原诊断把「进程启动」误当「扩展注册成功」。**「Host 版本错配」假设也已被 A/B 对照证伪**（A 组全局 0.85.1 与 B 组 repo-local 0.87.1 均 ~890ms 产出 active record）。另查出一个**测试自身缺陷（类别 2）并已修**：ESRCH 探针置于 wrapper 退出之前，而 zombie 对 `kill(pid,0)` 会成功，故永远拿不到 ESRCH（`7847863`）。**当前状态：类别 3（来源尚未证实）**——修正后暴露新现场（pi 启动正常、扩展已加载、但 record 未 active，且出现守卫拒绕文案），复现不稳定，诊断进行中。见 `docs/bugs/2026-10-01-integration-host-binary-resolution-inconsistent.md` 与 `var/upgrade/t8-bounded-experiment.md` §6。注：resumed-child 是 auto-integration 恢复续跑（child 退出后自动收尾），与控制面手动 resume 无关，后者使用正常。
 12. ~~**terminal-proof-handoff 语义裁决**~~（已裁决实施，2026-09-30 选项 a）：跨 owner scope 未解析绑定经 ledger.list() 跨 scope 复查命中即 recordDebt 暴露，不再静默 not-applicable；terminal-proof-handoff 集成门禁排除已解除，7/7 绿（docs/bugs/2026-09-30-terminal-proof-cross-owner-binding-silent.md）
 
 ## 后续切换阶段前置条件（原 T12 第三段，届时需用户三段授权）
