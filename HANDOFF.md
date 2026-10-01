@@ -23,7 +23,7 @@
 
 | 任务 | 状态 | 提交 / 证据 |
 |---|---|---|
-| T1 工作区分组提交（代码/文档两笔，排除 settings） | ✅ | `f41234a`、`93b00b3` |
+| T1 工作区分组提交（代码/文档两笔，排除 settings） | ✅ | `f41234a`、`93b00b3`；动态清单 `var/upgrade/t1-preflight-status.txt` 已经复核确实存在（100 行） |
 | T2 fetch+merge+批量取侧+僵尸清理 | ✅ | merge `fcc43a6`（B25 theirs/C29 ours/4 modify-delete/2 僵尸删除） |
 | T3 A 类生产交织（extension.ts 29 块）+ T5 doctor v2 迁移 | ✅ | 并入 `fcc43a6`；typecheck 双绿 |
 | T4 A 类测试交织 + 真实 Host 夹具迁移 | ⚠️ 部分 | `fcc43a6`、`7ee6ef3`、`115f3e8`；**未达验收**：计划要求 focused 全绿后再 merge，且已裁决保留的 canary 用例被删除（见「计划验收偏差」） |
@@ -81,6 +81,10 @@ npm test **951tests/950pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ 
 
 ## 计划验收偏差（reviewer 审核结论：不通过）
 
+> 证据索引（权威）：`var/upgrade/plan-evidence-index.md` —— 含计划要求产物 → 实际证据 →
+> commit/日志 逐条对照、`var/upgrade/*.md` 轮次归属甸清、T1–T10 验收标准逐条判定，
+> 以及主 agent 对其一处假阴性的复核更正。
+
 以下偏差均为**实际存在、尚未关闭**，不得当作已完成：
 
 ### B3（Blocker）——T7/T8 从「修复并解除排除」被降为「诊断后永久排除」
@@ -100,15 +104,32 @@ npm test **951tests/950pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ 
 | `workflow-child-extensions-descriptor.test.mjs` | **非等价替代**：删除了恢复 descriptor 保留扩展/幂等/锚点拒绝覆盖，而这正是 T7 失败所在的风险面 |
 | project-workflow canary | **偏离已裁决方案**：现仅验证单 executor managed workspace/proof，丢失多 profile typed/generic 隔离与计划要求保留的 `authorization.state === "unavailable"` 断言 |
 
-### S2（Suggestion）——计划产物路径缺失与任务编号串用
+### S2（Suggestion）——计划产物路径缺失与任务编号串用 · **已整改**
 
-下列计划要求的产物**从未交付**：`merge-task3/4/5-report.md`、`merge-gate-report.md`、
+权威索引已交付：`var/upgrade/plan-evidence-index.md`（四部分 + 主 agent 复核更正，254 行）。
+
+**确实缺失**（经 `[ -e ]` 逐个重验）9 项：`merge-task3/4/5-report.md`、`merge-gate-report.md`、
 `resumed-child-hang-diagnosis.md`、`resumed-child-hang-fix.md`、
-`session-owner-pty-guard-diagnosis.md`、`terminal-proof-adjudication.md`。
+`session-owner-pty-guard-diagnosis.md`、`terminal-proof-adjudication.md`，以及
+`docs/bugs/<日期>-session-owner-pty-guard-interception.md`（T8 要求的 bug 文档）。
 
-更严重的是：`var/upgrade/t4-report.md` 至 `t10-report.md` **属于前一轮升级任务**（例如
-`t10-report.md` 是 TUI schema 验收，**不是**本计划 T10 收尾），却曾被当作本计划证据引用。
-待补：「计划要求路径 → 实际证据路径 → commit/日志」索引，未产出的明确记为缺失。
+**编号串用已甸清**：`var/upgrade/t4-report.md`–`t10-report.md` 逐个按**内容**判定均属
+**前一轮 pi 栈升级**（例如 `t10-report.md` 实为 TUI 状态投影 schema 化验收、
+`t7-report.md` 实为 lifecycle 两段式状态机、`t8-report.md` 实为 RPC capability 协商），
+**均不得**再作为本计划 T4–T10 的证据引用。本轮真正归属的仅
+`main-merge-conflict-analysis.md`、`t7-resumed-child-diagnosis.md`、
+`t8-session-owner-pty-diagnosis.md`、`post-execution-review-brief.md`、
+`main-merge-closure.md`（历史快照）等少数文件。
+
+**主 agent 复核纠正了索引的一处假阴性**：索引原将 `var/upgrade/t1-preflight-status.txt`
+判为「缺失」，依据是 `git status` / `git log --diff-filter=A` 无输出——但 `.gitignore:25`
+有 `/var/`，对 gitignored 路径这两个命令**永远**无输出，依据无效。实际该文件
+**存在**（5008 bytes、正好 100 行，首行 ` M README.md`），与 T1 执行时记录的
+「动态清单 100 条（77 tracked + 23 untracked）」吻合，故 **T1 验收第 1 项应判满足**。
+已补充方法论规则：判定 gitignored 证据文件只能用文件系统手段，禁用 git 命令作为不存在证据。
+
+防再犯规则（索引第四部分 1–6 条）已采纳：产物名必带计划 slug 与轮次、报告头固定写
+`plan_id`/`task_id`/`round`/`commit`、证据目录按轮次子目录隔离、缺失只能写「缺失」。
 
 ### S3（Suggestion）——冲突总数成立但分类文字矛盾
 
