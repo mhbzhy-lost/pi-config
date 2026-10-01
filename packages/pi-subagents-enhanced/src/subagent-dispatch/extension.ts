@@ -1203,14 +1203,22 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
   return rpcResult(await rpc[action](params));
 }
 
-function createControlledSupervisorAdapter(adapter, supervisorControlPlane) {
+function createControlledSupervisorAdapter(adapter, supervisorControlPlane, registrationFailures) {
   if (!supervisorControlPlane) return adapter;
   return Object.freeze({
     bind: (...args) => adapter.bind(...args), dispose: () => adapter.dispose?.(), isBound: () => adapter.isBound?.(),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       if (params?.action !== "reply" || supervisorControlPlane.enabled?.() === false) return adapter.execute(toolCallId, params, signal, onUpdate, ctx);
       const request = supervisorControlPlane.findRequest?.(params.replyTo) ?? supervisorControlPlane.listPending?.().find((entry) => entry.requestId === params.replyTo);
-      if (!request) return controlFailure("SUPERVISOR_REQUEST_NOT_PENDING");
+      if (!request) {
+        const registrationCode = registrationFailures.get(params.replyTo);
+        if (registrationCode) return {
+          content: [{ type: "text", text: `SUPERVISOR_REQUEST_REGISTRATION_FAILED: Request ${params.replyTo} was shown by native Supervisor but was not registered for authorized reply (${registrationCode}). Interrupt the run and resume it to recover.` }],
+          isError: true,
+          details: { code: "SUPERVISOR_REQUEST_REGISTRATION_FAILED", registrationCode, requestId: params.replyTo },
+        };
+        return controlFailure("SUPERVISOR_REQUEST_NOT_PENDING");
+      }
       const intent = {
         schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId: request?.runId,
         rootSessionId: request?.rootSessionId, ownerGeneration: request?.ownerGeneration, kind: "reply",
@@ -1554,7 +1562,8 @@ export function createTypedSubagentExtension(
     renderCall: renderWorkspaceCall,
     renderResult: renderWorkspaceResult,
   });
-  const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane) : undefined;
+  const registrationFailures = new Map<string, string>();
+  const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane, registrationFailures) : undefined;
   const supervisorTool = controlledSupervisorAdapter ? createSupervisorTool(controlledSupervisorAdapter, {
     renderCall: renderSupervisorCall,
     renderResult: renderSupervisorResult,
@@ -1570,7 +1579,26 @@ export function createTypedSubagentExtension(
         if (disposed || registry.get(pi)?.token !== token) return;
         const message = event?.message;
         if (message?.customType !== "subagent_supervisor_request") return;
-        if (supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) await supervisorControlPlane.registerSupervisorRequest(message.details).catch(() => undefined);
+        if (supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
+          let result;
+          try {
+            result = await supervisorControlPlane.registerSupervisorRequest(message.details);
+          } catch {
+            result = { status: "blocked", code: "SUPERVISOR_REQUEST_REGISTRATION_FAILED" };
+          }
+          const requestId = message.details?.id;
+          if (result?.status !== "registered") {
+            const errorCode = result?.code ?? "SUPERVISOR_REQUEST_REGISTRATION_FAILED";
+            if (typeof requestId === "string") registrationFailures.set(requestId, errorCode);
+            const details = { code: errorCode, requestId, runId: message.details?.runId };
+            if (typeof diagnosticSink === "function") {
+              try { diagnosticSink({ version: 1, phase: "supervisor-registration-failed", errorCode, ...details }); } catch { /* 诊断输出不得改变派发结果。 */ }
+            }
+            pi.sendMessage({ customType: "subagent_supervisor_registration_failed", content: `Supervisor request ${requestId ?? "(missing id)"} was not registered (${errorCode}). Reply is unavailable; interrupt the run and resume it to recover.`, details });
+          } else if (typeof requestId === "string") {
+            registrationFailures.delete(requestId);
+          }
+        }
         if (typeof onSupervisorRequest === "function") await onSupervisorRequest(message, ctx);
       });
     }

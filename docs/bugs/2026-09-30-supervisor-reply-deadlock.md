@@ -146,3 +146,24 @@ interrupt 会停止旧 async run 的等待 turn，并清理/冻结旧 runner 的
 - 本轮没有运行 attention 测试，不能声称其当前实际 exit 结果；版本错配排除仍待固定 Host 证据。
 - 当前现场证明 local registration absent 与三平面分裂，但没有脱敏的 owner receipt/local register tuple，不能进一步宣称某个 `ownerGeneration` 数值必然漂移。
 - 4499941 的三态改动保持 fail-closed，但仍允许 ingress 吞掉登记失败结果；这只是修复方向，不是本任务实现项。
+
+## 本轮修复（登记失败显式化，2026-09-30）
+
+- **实际方案：** `extension.ts` 的 native `message_end` ingress 逐一检查 `registerSupervisorRequest` 的返回状态并捕获抛错。未登记时记录 `diagnosticSink` 的 `supervisor-registration-failed` 条目，发送带稳定错误码、request/run id 与 `interrupt → resume` 恢复说明的 parent 消息；仅以 native 消息中的 request id 记住此次登记失败。reply 缺少 local request 且该 id 有登记失败记录时返回 `SUPERVISOR_REQUEST_REGISTRATION_FAILED`（附 `registrationCode` 和恢复说明），真正未知 id 仍为 `SUPERVISOR_REQUEST_NOT_PENDING`。本轮不自动重试；诊断在既有文件 sink 下可审计，parent 消息即刻可见。没有新增 owner 推断，也没有改动 control-plane 的身份比较与 fail-closed 三态。
+- **原方向 1：局部关联** request id/run id 的登记失败状态与 reply；没有统一 native 展示、runtime pending 和本地授权三平面 authority-backed projection，也没有新增持久的 owner/request generation projection。大范围架构变更留待方案评审；现有成功登记的 control-plane record 继续保存 rootSessionId/ownerGeneration/requestGeneration。
+- **原方向 2：已落实** 捕获抛错和检查非 `registered` 返回，并在展示与 reply 两个入口显示故障及恢复路径。不做有界重试，因此没有重试退避及重复登记副作用。
+- **原方向 3：已遵守** `supervisor-control-plane.ts` 未修改，`findPending` 六项全等身份围栏和 `readOwnerState` 三态保持原样。
+- **原方向 4：未做** 固定 repo-local Pi Host 的 attention 集成双测与 gate 排除表恢复属另一工作线；本轮禁止运行完整 integration gate。
+
+### RED → GREEN 与门禁
+
+- RED 原始输出：`var/upgrade/supervisor-reply-deadlock-red.txt`。新增三条用例分别模拟 owner authority 读失败、native details 缺 reason、register 本身抛错；修复前 3/3 FAIL，实际 reply code 均为 `SUPERVISOR_REQUEST_NOT_PENDING`、diagnostics=0、messages=0。
+- GREEN 输出：`var/upgrade/supervisor-reply-deadlock-membrane-green.txt`，membrane 81/81 PASS，新增三条 PASS；既有 reply/steer/stale/expired/幂等围栏与 B1 steer 对照均同文件通过。
+- `TMPDIR=/tmp timeout 240 npm test`：`var/upgrade/supervisor-reply-deadlock-npm-test.txt`，954 tests / 949 pass / 4 fail / 1 todo，**全量未绿**。四项分别是 `managed-workspace-coordinator-recovery` 的 retained queue/git activity 时序断言，`reviewer-agent` 的模型名配置预期（实际 GLM-5.3，预期 GLM-5.3-0.6x），`session-owner-decision-log` 两项得到 bypass（预期 blocked/pass）；这些路径未被本修复改动，且 `pi/agents/**`、session-owner 属本任务禁止编辑范围。未再次运行全量，以遵守一次限额。
+- `TMPDIR=/tmp npm run typecheck:root` 与 `TMPDIR=/tmp npm run typecheck:subagents-enhanced` 均 exit 0；输出分别在 `var/upgrade/supervisor-reply-deadlock-typecheck-root.txt`、`var/upgrade/supervisor-reply-deadlock-typecheck-enhanced.txt`。
+- 所有测试执行前均用 `ps` 检查无其它 `node --test` / `expect` / `pi-coding-agent` 进程；没有运行完整 integration gate。
+
+### 保留限制
+
+- 登记失败 id 与错误码保存在当前 extension 代内存；reload 后 reply 无法从该 map 区分 native pending 与真正未知 request。parent 的失败消息和既有 diagnosticSink 文件输出仍保留故障证据；完整跨代恢复需要原方向 1 的统一持久 projection。
+- registration failure 不是对 native pending 生命周期的自动修复；操作员须按照错误说明 interrupt + resume。注意原文“恢复门禁”的 attention 固定 Host 条件仍未满足，不宣称已恢复集成门禁。

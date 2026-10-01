@@ -1789,6 +1789,46 @@ test("configured supervisor control plane fences reply and steer delivery withou
   assert.equal(rpc.calls.filter((call) => call.method === "steer").length, 0);
 });
 
+// Missing ingress registration must not turn a native-visible ask into a misleading NOT_PENDING reply.
+for (const scenario of [
+  { name: "owner authority unavailable", details: { id: "request-1", runId: "run-1", reason: "needs approval" }, ownerUnavailable: true, code: "SUPERVISOR_OWNER_UNAVAILABLE" },
+  { name: "native request missing reason", details: { id: "request-1", runId: "run-1" }, code: "SUPERVISOR_REQUEST_IDENTITY_UNAVAILABLE" },
+  { name: "registration throws", details: { id: "request-1", runId: "run-1", reason: "needs approval" }, throws: true, code: "SUPERVISOR_REQUEST_REGISTRATION_FAILED" },
+]) {
+  test(`native Supervisor ask with ${scenario.name} reports registration failure and actionable reply error`, async () => {
+    const pi = createPi();
+    const diagnostics = [];
+    const realPlane = createSupervisorControlPlane({
+      readOwnerReceipt: async (runId) => {
+        if (scenario.ownerUnavailable) throw Object.assign(new Error("broker unavailable"), { code: "authority_store_unavailable" });
+        return { runId, rootSessionId: "root-1", ownerGeneration: 1 };
+      },
+      readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: true, steerable: true }),
+    });
+    const controlPlane = scenario.throws ? {
+      ...realPlane,
+      async registerSupervisorRequest() { throw new Error("registration storage failed"); },
+    } : realPlane;
+    let nativeCalls = 0;
+    const adapter = createSupervisorAdapter();
+    adapter.bind(async () => { nativeCalls++; return { content: [{ type: "text", text: "native" }] }; });
+    createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore: {}, supervisorAdapter: adapter, supervisorControlPlane: controlPlane, diagnosticSink: (entry) => diagnostics.push(entry) });
+    const ingress = pi.handlers.get("message_end")[0];
+    await ingress({ message: { customType: "subagent_supervisor_request", details: scenario.details } }, ctx);
+    assert.deepEqual(realPlane.snapshot().requests, []);
+    const reply = await pi.tools[2].execute("reply-failed", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+    assert.equal(reply.isError, true);
+    assert.equal(reply.details.code, "SUPERVISOR_REQUEST_REGISTRATION_FAILED", `native-visible ask cannot reply; actual=${reply.details.code}, diagnostics=${diagnostics.length}, messages=${pi.messages.length}`);
+    assert.equal(reply.details.registrationCode, scenario.code);
+    assert.match(reply.content[0].text, /interrupt.*resume/i);
+    assert.equal(diagnostics.at(-1)?.phase, "supervisor-registration-failed");
+    assert.equal(diagnostics.at(-1)?.errorCode, scenario.code);
+    assert.equal(diagnostics.at(-1)?.requestId, "request-1");
+    assert.equal(pi.messages.at(-1)?.details?.code, scenario.code, "parent must see failed registration without first trying reply");
+    assert.equal(nativeCalls, 0);
+  });
+}
+
 test("supervisor control plane fails closed for stale owners, expired requests, and non-running steers", async () => {
   async function createScenario({ now = () => 1_000, readOwnerReceipt, readRuntime } = {}) {
     const pi = createPi();
