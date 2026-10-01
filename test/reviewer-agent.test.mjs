@@ -17,8 +17,23 @@ test("reviewer and executor profiles keep configuration out of their operating i
   const reviewerBody = reviewer.split("---\n").at(-1);
   const executorBody = executor.split("---\n").at(-1);
 
-  assert.match(reviewer, /^models:\n  - codex-pool\/gpt-6-astra\n  - openai-codex\/gpt-6-astra\n  - codex-pool\/gpt-6-sol\n  - qoder-pool\/GLM-5\.3-0\.6x\n  - zai-coding-cn\/glm-5\.3\nthinking: xhigh/m);
-  assert.match(executor, /^models:\n  - codex-pool\/gpt-6-luna\n  - openai-codex\/gpt-6-luna\n  - qoder-pool\/GLM-5\.3-Flash-0\.1x\n  - qoder-pool\/Qwen3\.8-Flash-0\.04x\n  - zai-coding-cn\/glm-5\.3-flash\nthinking: medium/m);
+  // 不得把逐字模型 id 钉进本跟踪测试：`pi/models.json` 按根 AGENTS.md 是 per-machine
+  // 且已移出版本控制，模型 id 会随本机可用模型变更（已发生过：GLM-5.3-0.6x → GLM-5.3、
+  // 摘除 gpt-6-luna），钉死会造成每次调模型都必须同步改测试。
+  // 此处只校验**结构不变量**：models 为非空、形如 provider/model、无重复的候选链。
+  const assertModelChain = (text, label, thinking) => {
+    const block = text.match(/^models:\n((?:  - \S+\n)+)/m);
+    assert.ok(block, `${label} frontmatter 必须声明 models 候选链`);
+    const ids = block[1].split("\n").filter(Boolean).map((line) => line.replace(/^  - /, ""));
+    assert.ok(ids.length >= 1, `${label} models 候选链不得为空`);
+    for (const id of ids) {
+      assert.match(id, /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/, `${label} 模型 id 必须为 provider/model 形式，实际 ${id}`);
+    }
+    assert.equal(new Set(ids).size, ids.length, `${label} models 候选链不得含重复项`);
+    assert.match(text, new RegExp(`^thinking: ${thinking}$`, "m"), `${label} thinking 级别必须为 ${thinking}`);
+  };
+  assertModelChain(reviewer, "reviewer", "xhigh");
+  assertModelChain(executor, "executor", "medium");
   assert.doesNotMatch(executor, /^\s*- deepseek\//m);
   const subagentConfig = JSON.parse(await readFile(new URL("../pi/extensions/subagent/config.json", import.meta.url), "utf8"));
   assert.deepEqual(subagentConfig.providerBlacklist, ["deepseek"]);
