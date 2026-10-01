@@ -28,8 +28,8 @@
 | T3 A 类生产交织（extension.ts 29 块）+ T5 doctor v2 迁移 | ✅ | 并入 `fcc43a6`；typecheck 双绿 |
 | T4 A 类测试交织 + 真实 Host 夹具迁移 | ⚠️ 部分 | `fcc43a6`、`7ee6ef3`、`115f3e8`；**未达验收**：计划要求 focused 全绿后再 merge，且已裁决保留的 canary 用例被删除（见「计划验收偏差」） |
 | T6 全量门禁收口 | ✅ | `7ee6ef3`（历史基线 933/0，已被后续基线取代） |
-| T7 resumed-child | ❌ **未达验收** | `e3df534` 仅诊断。**是 production 可达的真实缺陷**（upstream `runs.run` leaf→step 丢失 `subagentOnlyExtensions`），非 merge 引入≠可安全切换；计划要求的 4/4 绿与解除排除**均未完成**，排除仍在 |
-| T8 session-owner PTY | ❌ **未达验收** | `13d2806` 仅诊断，且定性证据不足（readiness 超时无法区分「晚到」与「永不到」）；计划要求的连续两遍全绿与解除排除**均未完成**，排除仍在 |
+| T7 resumed-child | ⚠️ **因果已闭合，修复未完成** | A/B 对照证实：全局 0.85.1（182357ms）与 repo-local 0.87.1（180673ms）下同一用例现场签名完全同类（`queue=[] intents=[] workspaces=[active] auditDebts=[{kind:proof,status:unresolved}]`、child `launchResolvedExtensions.configured/required` 均空）⟹ **版本错配排除**，upstream `subagent-executor.js:2938-3002` 丢 `subagentOnlyExtensions` 确认为致因。本仓不覆写 node_modules；剩余工作为可观测 fail-closed 护栏 + S1 descriptor 覆盖恢复（波 3）。证据 `var/upgrade/t7-ab-experiment.md`、`var/upgrade/t7-ab/` |
+| T8 session-owner PTY | ✅ **已修复**（排除待 gate 验证后解除） | `fe6bfa6` 可观测性 + `0926655` registry guard 原子发布；真因为 `.guard` 半写读取竞态（类别 1），非夹具时序、非版本错配、非 ownerId 碰撞。连续两遍 12/12、SIGKILL 5/5（此前 3/5 失败）。计划原验收要求「连续两遍全绿 + 删除排除」，前者已达成，后者待主 agent 完整 gate 验证后执行 |
 | T9 terminal-proof 裁决（用户选 a） | ✅ | `49931ed` + B2 加固 `471f473`；docs/bugs/2026-09-30-terminal-proof-cross-owner-binding-silent.md；跨 scope 复查命中即记债，复查不可用亦 fail-closed；解除门禁排除，7/7 绿 |
 | T10 HANDOFF + 收尾 | ✅（本次重写修正） | 本文件；首版存在自相矛盾的 suspended/旧门禁数字，已按 reviewer B4 统一为单一终态摘要 |
 | 追加：修复非 workspace run 主动 steer 被控制面拦截 | ✅（后被 B1 加固） | `5039a40`；docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md |
@@ -63,13 +63,18 @@
 
 footgun 复核结论（`var/upgrade/footgun-injection-fix.md`）：注入点语义当前已正确（completionApi 从不带 suppression），零生产改动，+1 守卫用例。
 
-## 当前门禁基线（唯一权威，2026-09-30 reviewer 整改后）
+## 当前门禁基线（唯一权威，2026-10-01 波 1 完成后）
 
-npm test **951tests/950pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · verify:subagents-enhanced ✓（controlled 1207 文件）· membrane **78/78** · proof-binding **8/8** · dispatch 相关 **109/109**。
+npm test **972tests/971pass/0fail/1todo**（波 1B 报告值，`env -u PI_SUBAGENT_CHILD -u PI_SUBAGENT_FANOUT_CHILD TMPDIR=/tmp`；**待主 agent 收口时统一复核**）· typecheck:root ✓ · typecheck:subagents-enhanced ✓ · membrane **88/88** · proof-binding **8/8** · session-owner 聚焦 **40/40** · scheduler+doctor 聚焦 **28/28**。
 
-**完整 integration gate（B1/B2 整改后已重跑）：32 文件 225/225 全绿、0 fail、0 cancelled**（日志 `var/upgrade/final-integration-gate-v4.log`，exit 0），3 项显式排除。
+**完整 integration gate：上次全绿为 32 文件 225/225（日志 `var/upgrade/final-integration-gate-v4.log`），但采集于波 1 修复之前，已失效；收口时须重跑。**
 
-历史基线（仅存档，不代表当前）：933/0（T6）→ 935/934（T9）→ 938/937（task 上界）→ **951/950（当前）**。
+⚠️ 两个会污染门禁结果的环境陷阱（均已实测踩中）：
+
+1. **`PI_SUBAGENT_CHILD`**：在 pi 会话内跑 `npm test`，ambient 的 `PI_SUBAGENT_CHILD=1` 会让 decision-log 类子进程走 bypass 而**假失败**（实测 955pass/2fail）。正确姿势：`env -u PI_SUBAGENT_CHILD -u PI_SUBAGENT_FANOUT_CHILD TMPDIR=/tmp npm test` → 957pass/0fail。
+2. **版本判定**：`pi --version` 在 ambient 的 `PI_REAL_BIN` / `PI_PACKAGE_DIR` / `PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT` 覆盖下会**误报**（绝对路径直接调用 `/opt/homebrew/bin/pi --version` 也会输出 0.87.1，而真实为 0.85.1）。**唯一权威方式**是读绝对路径 `package.json`，或先 `env -u` 清除三个覆盖变量。详见 `docs/bugs/2026-10-01-pi-version-misreports-under-package-root-override.md`。
+
+历史基线（仅存档）：933/0（T6）→ 935/934（T9）→ 938/937（task 上界）→ 951/950（B1/B2 整改）→ 959/958（死锁修复）→ **972/971（波 1 完成，待复核）**。
 
 ### 集成门禁排除项（3 项，均无 owner/期限，属 B3 待整改）
 
@@ -77,7 +82,7 @@ npm test **951tests/950pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ 
 |---|---|---|
 | `pi-subagents-runtime.integration.mjs` | WIRED-ELSEWHERE（`test:subagents` script 存在） | 有独立 script **不等于**有通过的门禁；该文件已知只 3/5，且含真实 supervisor reply 死锁 |
 | `subagent-resumed-child-*.integration.mjs` | DIAGNOSED-UPSTREAM | **production 可达的真实缺陷**，仅「非 merge 引入」不足以支持安全切换 |
-| `session-owner-runtime.integration.mjs` | ~~DIAGNOSED-FIXTURE~~ → **类别 3 诊断中** | 原「夹具时序脆弱/超 60s 预算」定性**已被推翻**（失败发生在第一个 owner，未走到 SIGKILL）；「Host 版本错配」假设亦**已被 A/B 实验证伪**（0.85.1 与 0.87.1 均 ~890ms 出 record）；ESRCH 探针为测试自身缺陷（zombie 语义）已修 `7847863`。当前为类别 3 现场：守卫文案「该会话正由另一个 Pi 窗口使用，已取消切换」、复现不稳定，诊断进行中。证据：`docs/bugs/2026-10-01-integration-host-binary-resolution-inconsistent.md`、`var/upgrade/t8-bounded-experiment.md` §6 |
+| `session-owner-runtime.integration.mjs` | ~~DIAGNOSED-FIXTURE~~ → ~~类别 3 诊断中~~ → **已修复，待完整 gate 验证后解除排除** | 真因是 `registry.ts` 的 `.guard` **半写读取竞态**（类别 1）：`acquireGuard` 用非原子的 `writePrivate` 直接写 guard，并发读取方看到半写内容，且任何读取失败被压成无 cause 的 `registry guard is invalid`。取证决定性证据：5 份现场底层错误均为 `SyntaxError: Expected double-quoted property name in JSON at position 40`，快照记录 `.guard` size **恰好 40**、内容为 `{"protocol":"pi-session-owner.guard.v1",`。修复 `0926655`：新增 `publishExclusivePrivate`（temp write/fsync/close 后 **`link`** 发布，用 link 而非 rename 是为保住 EEXIST 独占语义），`acquireGuard` 仅对 ENOENT 在 deadline 内重试、持续损坏仍 fail closed 并携 cause 与快照、**代码自身永不删 guard**。验证：连续两遍 **12/12**、SIGKILL 用例串行 **5/5**（此前 3/5 失败）、聚焦 40/40。**排除条目尚未解除**：原诊断曾称「2 个独跑通过」但 gate 内仍失败，独跑绿 ≠ gate 绿，故留待主 agent 跑完整 gate 验证后统一解除，避免门禁红灯窗口。此前被推翻的定性：「夹具时序脆弱/超 60s 预算」（失败发生在第一个 owner，未走到 SIGKILL）、「Host 版本错配」（A/B 显示 0.85.1 与 0.87.1 均 ~890ms 出 record）、「ownerId 碰撞」（失败时 registry 非空且 ownerId 不在 previous 中）。证据：`docs/bugs/2026-10-02-session-owner-registry-guard-race.md`、`var/upgrade/registry-guard-fix.md` |
 
 ## 计划验收偏差（reviewer 审核结论：不通过）
 
@@ -184,6 +189,8 @@ npm test **951tests/950pass/0fail/1todo**（TMPDIR=/tmp）· typecheck:root ✓ 
 - **coordinator socket**：`.git/.pi-coordinator/coordinator.json` 偶有死 PID，doctor 前清理
 - **jiti 缓存**：改 fixture 后清 `var/tmp/jiti/`
 - **派发含全量回归的任务**：subagent 30 分钟 watchdog 会杀全量 npm test（本会话 2 例超时均为此）；全量门禁由主会话统一执行
+- **subagent 等待循环会吃掉 watchdog**：波 1B 因在「阻塞式等待测试窗口」循环里耗尽 30 分钟预算而被杀（成果已完整落盘）。派发时若任务需要等待独占资源，等待上限必须给实际工作留足余量（本仓现行做法：最多 2 轮 × 30s，仍不空闲则写完报告正常结束，由主 agent 补跑验证）。
+- **reply 通道已修复并持久化**：`6ff2829`（非受管 run 用 Host 会话权威登记）+ `7283394`（登记状态跨 Host reload 持久化，`supervisor-state.v1`）。真实链路已验证（探针四步全通）。注意 attention 通知存在**滞后竞态**：reply 成功后仍可能收到「等待回复」通知，此时用 `subagent_supervisor({action:"pending"})` 核对，为空即已成功，**不要**重复 reply 或贸然 interrupt+resume。
 - **supervisor reply 死锁**：child 请示后 reply 可能被拒（`SUPERVISOR_REQUEST_NOT_PENDING` 但 pending 列表仍显示）→ interrupt + resume 是有效解锁路径；派发指令中应预先包含「contact_supervisor 无响应则写报告收尾」兜底
 - **root/leaf 双条目**：footer 修复后 root facade 完成迁入 history 与 leaf 条目并列显示（产品去重决策待定，见 footer-fix-123 遗留）
 
