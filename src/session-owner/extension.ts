@@ -45,7 +45,8 @@ export function installSessionOwnerExtension(pi: ExtensionAPI, deps: SessionOwne
     try {
       if (!lifecycle) throw new Error("session owner environment is incomplete");
       await lifecycle.start(identity(ctx));
-    } catch {
+    } catch (error) {
+      console.error("[session-owner] session_start failed:", error);
       notify(ctx);
       try { await ctx.shutdown?.(); } catch { /* 此时保护逻辑已按 fail closed 处理。 */ }
       return { cancel: true };
@@ -57,7 +58,8 @@ export function installSessionOwnerExtension(pi: ExtensionAPI, deps: SessionOwne
         notify(ctx);
         return { cancel: true };
       }
-    } catch {
+    } catch (error) {
+      console.error("[session-owner] session_before_switch failed:", error);
       notify(ctx);
       return { cancel: true };
     }

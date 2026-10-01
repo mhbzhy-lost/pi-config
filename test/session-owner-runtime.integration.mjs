@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, readdir, utimes, writeFile } fr
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { format } from "node:util";
 import test from "node:test";
 import { createTestRuntime } from "./helpers/test-runtime.mjs";
 
@@ -538,6 +539,55 @@ test("真实 Pi PTY: SIGKILL owner is cleaned by ESRCH before the next wrapper s
     await killPty(first?.child);
     await rm(state.root, { recursive: true, force: true });
   }
+});
+
+test("session_start 内层失败仍取消并记录原始异常及 cause", async () => {
+  const handlers = new Map();
+  const error = new Error("startup registry failure", { cause: new Error("guard acquisition failure") });
+  const output = [];
+  const original = console.error;
+  let shutdowns = 0;
+  let notices = 0;
+  console.error = (...args) => output.push(format(...args));
+  try {
+    installSessionOwnerExtension({ on(event, handler) { handlers.set(event, handler); } }, {
+      env: { PI_SESSION_OWNER_ID: "owner-observe-start", PI_SESSION_OWNER_REGISTRY: "/tmp/owner-observe-start" },
+      store: createRegistryStore("/tmp/owner-observe-start"),
+      async listLiveRecords() { throw error; },
+    });
+    const ctx = {
+      sessionManager: { getCwd: () => process.cwd(), getSessionId: () => null, getSessionFile: () => null },
+      ui: { notify() { notices += 1; } },
+      async shutdown() { shutdowns += 1; },
+    };
+    assert.deepEqual(await handlers.get("session_start")({}, ctx), { cancel: true });
+    assert.equal(notices, 1);
+    assert.equal(shutdowns, 1);
+    assert.match(output.join("\n"), /startup registry failure/);
+    assert.match(output.join("\n"), /guard acquisition failure/);
+  } finally { console.error = original; }
+});
+
+test("session_before_switch 内层失败仍取消并记录原始异常及 cause", async () => {
+  const handlers = new Map();
+  const error = new Error("switch identity failure", { cause: new Error("session manager unavailable") });
+  const output = [];
+  const original = console.error;
+  let notices = 0;
+  console.error = (...args) => output.push(format(...args));
+  try {
+    installSessionOwnerExtension({ on(event, handler) { handlers.set(event, handler); } }, {
+      env: { PI_SESSION_OWNER_ID: "owner-observe-switch", PI_SESSION_OWNER_REGISTRY: "/tmp/owner-observe-switch" },
+    });
+    const ctx = {
+      sessionManager: { getCwd() { throw error; }, getSessionId: () => null, getSessionFile: () => null },
+      ui: { notify() { notices += 1; } },
+    };
+    assert.deepEqual(await handlers.get("session_before_switch")({ reason: "resume", targetSessionFile: "/tmp/next.jsonl" }, ctx), { cancel: true });
+    assert.equal(notices, 1);
+    assert.match(output.join("\n"), /switch identity failure/);
+    assert.match(output.join("\n"), /session manager unavailable/);
+  } finally { console.error = original; }
 });
 
 test("owner-less RPC/direct runtime is explicitly unsupported and writes no record", async () => {

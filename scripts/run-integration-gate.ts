@@ -20,7 +20,7 @@ const EXCLUDED_INTEGRATION_FILES = new Map([
   ["subagent-auto-integration-resumed-child.integration.mjs",
     "DIAGNOSED-UPSTREAM: 根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空→挂起；非 merge 引入，修复归属 upstream，见 docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md"],
   ["session-owner-runtime.integration.mjs",
-    "PENDING-ADJUDICATION: 同一 repo-local 0.87.1、同一空闲串行条件下 5 次中 2 次首 owner 仅为 pending、3 次达 active；失败时 session_start fail-closed warning 出现，但既有 owner provenance 与 lifecycle.start 内层异常尚未证实；原始输出/trace/registry snapshot/env 见 var/upgrade/t8-repeat-*，详见 var/upgrade/t8-root-cause.md"],
+    "DIAGNOSED-PRODUCTION: repo-local 0.87.1 串行 PTY 5 次中 3 次 lifecycle.start 在 registry.ts:153 因 registry guard is invalid 失败；真实 launcher / Host / registry 入口触发 guard 读写竞争，仍 fail closed；未修根因，见 var/upgrade/t8-provenance-report.md 与 t8-observed-*.trace.json"],
 ]);
 
 /** 纯选择逻辑：integration 文件全集 − 显式排除表，排序输出（供单测消费）。 */
