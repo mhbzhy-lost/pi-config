@@ -182,3 +182,40 @@ interrupt 会停止旧 async run 的等待 turn，并清理/冻结旧 runner 的
 - 最小生产修复：控制面保持 `readOwnerState` 三态和 `findPending` 六字段全等；仅 unowned 用具名 `UNOWNED_OWNER_GENERATION=1` 作非 broker 世代占位，与 Host session root 共同锁定意图；该值不是 broker 的第 1 代，也不参与 broker stale generation 判定。owned 仍完全使用 receipt root/generation 和 runtime ownerGeneration；unavailable 不接受 Host root 放行。`extension.ts` ingress/reply 复用已接线的 `resolveRootSessionId(ctx.sessionManager)`；reply → commit 重用同一 Host root。对已有 unowned request 的 steer 也保留控制面 pending / `STEER_DUPLICATES_REPLY` 校验，而无 supervisor request 的 unowned steer 仍按原来的 upstream 透传。
 - `var/upgrade/supervisor-reply-deadlock-fix2-membrane.txt`：86/86 pass；覆盖 unowned 登记 → native reply 一次 → queued receipt 幂等重放 → commit consumed → replied 状态与 payload 去重、Host root / 哨兵 / requestGeneration / 过期判定、两种 unavailable（依赖缺失、authority_store_unavailable）及登记后 broker 不可用；同文件 B1 7 条 steer 负向与 3 条正向对照以及 owned stale/reply-required/expired/not-pending/幂等均绿。`var/upgrade/supervisor-reply-deadlock-fix2-npm-test.txt`：清除 ambient child 环境变量后 `TMPDIR=/tmp` 全量 959 tests、958 pass、0 fail、1 todo。最终 membrane 加强 pending-steer 断言后 86/86 再次通过（全量只运行一次）；root/enhanced 两项 typecheck 输出见同前缀日志，exit 0。每次测试前确认 `ps` 无兄弟 node --test/expect/pi-coding-agent；未跑完整 integration gate。
 - 当前成功登记的 unowned request 减少了因 broker receipt 缺失而发生的本次确定性死锁，**但并未降低跨 Host reload 丢失状态的结构性风险**：控制面 requests/receipts、registrationFailures Map 都仍驻留本代内存，reload 后本地登记状态与失败映射不持久；缺陷单原方向 1（统一权威持久 projection）仍待后续。注意前文历史「修复方向（只给方向，不实现）」与旧门禁结果属于之前轮次，不代表此次测试或本轮新的变更范围。
+
+## 真实链路验证（2026-10-01，Host 重启载入 `6ff2829` 后）
+
+单测只能证明控制面逻辑贯通，不能证明真实编排链路恢复。故补一次生产验证探针：
+派发一个**非受管 run**（`worktree:false`，即此前必然死锁的形态），令其立即
+`contact_supervisor` 请示并等待回复。
+
+结果**闭环全部达成**：
+
+1. **登记成功**：child 的请示正常到达主会话 attention，request id
+   `8a92ce08-dd6a-40b9-870b-793e625c2594`，run `606b761c-47f7-45c3-8168-1dc810f6969d`，
+   agent `executor`（`codex-pool/gpt-6-sol`）。修复前这一形态**必然**登记失败。
+2. **reply 不再被拒**：`subagent_supervisor({action:"reply", replyTo:"8a92ce08-…",
+   message:"PROBE_OK_20261001"})` 返回
+   `Replied to supervisor request 8a92ce08-dd6a-40b9-870b-793e625c2594.`，
+   **未再出现** `SUPERVISOR_REQUEST_NOT_PENDING`。
+3. **请求已消费**：随后 `subagent_supervisor({action:"pending"})` 返回
+   `No pending supervisor requests.`。
+4. **child 侧确实收到**：探针最终输出
+   `PROBE_RESULT: reply_received=yes reply_text=PROBE_OK_20261001`
+   —— 收到的文本与主 agent 发出的完全一致。
+
+### 一个需要记录的观测：attention 通知与 reply 存在竞态
+
+reply 返回成功后，主会话**仍收到**一条 attention 通知称该 child
+"is waiting for a supervisor reply / Supervisor request: reply to the pending request"。
+经 `pending` 查询为空证实该通知为**滞后/竞态产物**，不是投递失败。
+
+运维含义：收到"等待 reply"通知时，若刚刚已 reply 成功，应先用
+`subagent_supervisor({action:"pending"})` 核对，**不要**据滞后通知重复 reply 或
+贸然 interrupt+resume（后者会丢弃 child 当前 turn 并产生新 run）。
+
+### 结论
+
+本缺陷在真实编排链路上**已消除**。残留风险仍为：登记状态与 `registrationFailures`
+Map 不跨 Host reload 持久化（修复方向 1），故重启会孤儿化在飞的 pending ask
+——本次重启前即需先 interrupt 在飞 child 正是该风险的实际体现。
