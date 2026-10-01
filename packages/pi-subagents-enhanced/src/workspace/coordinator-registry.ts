@@ -31,7 +31,10 @@ export const COORDINATOR_METADATA_FILE = "coordinator.json";
 export type CoordinatorMetadata = { protocol: string; instanceId: string; pid: number; birthIdentity: string; repositoryId: string; storageRepositoryId: string; canonicalStateRoot: string; endpoint: string; supersededStateRoots?: string[] };
 const protocol = "repository-workspace-coordinator.v1";
 
-export function createCoordinatorRegistry(options: { commonDir: string; stateRoot: string }) {
+export function createCoordinatorRegistry(options: { commonDir: string; stateRoot: string; diagnosticSink?: (entry: unknown) => void }) {
+  const diagnose = (entry: unknown) => {
+    try { options.diagnosticSink?.(entry); } catch (diagnosticError) { console.error("[coordinator-registry] diagnostic sink failed", { entry, diagnosticError }); }
+  };
   const metadataDir = path.join(options.commonDir, ".pi-coordinator");
   const repositoryHash = createHash("sha256").update(path.resolve(options.commonDir)).digest("hex");
   const uid = typeof process.getuid === "function" ? String(process.getuid()) : "user";
@@ -64,25 +67,47 @@ export function createCoordinatorRegistry(options: { commonDir: string; stateRoo
     if (existing) {
       if (existing.repositoryId !== input.repositoryId) throw new Error("Coordinator repository scope mismatch");
       if (existing.storageRepositoryId && existing.storageRepositoryId !== input.storageRepositoryId) throw new Error("Coordinator storage repository scope mismatch");
-      let alive = false;
-      try { alive = existing.pid > 0 && (await captureProcessBirthIdentity(existing.pid)) === existing.birthIdentity; } catch { /* stale */ }
+      let ownerState: "alive" | "dead" | "mismatch" | "undetermined" = "undetermined";
+      if (existing.pid > 0 && typeof existing.birthIdentity === "string" && /^[a-f0-9]{64}$/.test(existing.birthIdentity)) {
+        try {
+          const observed = await captureProcessBirthIdentity(existing.pid);
+          ownerState = observed === existing.birthIdentity ? "alive" : "mismatch";
+          if (ownerState === "mismatch") diagnose({ version: 1, phase: "coordinator-owner-mismatch", reason: "birth-identity-mismatch", owner: existing });
+        } catch (error: any) {
+          let errno = error?.cause?.code ?? error?.code;
+          if (errno !== "ESRCH") {
+            try { process.kill(existing.pid, 0); } catch (signalError: any) {
+              if (signalError?.code === "ESRCH") {
+                errno = "ESRCH";
+                diagnose({ version: 1, phase: "coordinator-owner-dead", reason: "process-not-found", error: signalError, cause: error, errno, owner: existing });
+              } else errno = signalError?.code ?? errno;
+            }
+          }
+          ownerState = errno === "ESRCH" ? "dead" : "undetermined";
+          if (ownerState === "dead" && error?.cause?.code === "ESRCH") diagnose({ version: 1, phase: "coordinator-owner-dead", reason: "process-not-found", error, cause: error?.cause, errno, owner: existing });
+          if (ownerState === "undetermined") diagnose({ version: 1, phase: "coordinator-owner-liveness-undetermined", error, cause: error?.cause, errno, owner: existing });
+        }
+      } else {
+        diagnose({ version: 1, phase: "coordinator-owner-identity-invalid", owner: existing });
+      }
       // A legacy metadata file can still carry the aliased form; comparing
       // canonical values keeps one coordinator scope per state root. An
       // unusable recorded root fails closed as a scope mismatch.
       let recorded: string | undefined;
       try { recorded = canonicalWorkspaceStateRoot(existing.canonicalStateRoot); } catch { recorded = undefined; }
       const inherited = Array.isArray(existing.supersededStateRoots) ? existing.supersededStateRoots.filter((value): value is string => typeof value === "string") : [];
-      if (alive) {
+      if (ownerState === "alive") {
         // A live owner holds the single repository endpoint, so a different
         // canonical state root is an unrecoverable split brain. A recorded
         // root that cannot be resolved is equally unusable.
         if (recorded !== canonicalStateRoot()) throw new Error("Coordinator state root scope mismatch");
         return existing;
       }
-      // Only a confirmed dead owner (birth identity mismatch or unavailable)
+      // Only a confirmed dead owner (ESRCH or observed identity mismatch)
       // may be replaced; a wall-clock TTL or a missing socket never
       // authorizes it. The abandoned canonical state root is retained so the
       // audit keeps reporting the migration debt instead of erasing history.
+      if (ownerState === "undetermined") throw new Error("Coordinator owner liveness is undetermined");
       supersededStateRoots = [...new Set(typeof recorded === "string" && recorded !== canonicalStateRoot() ? [...inherited, recorded] : inherited)];
       await unlink(metadataPath).catch(() => undefined);
     }
@@ -119,7 +144,7 @@ export function createCoordinatorRegistry(options: { commonDir: string; stateRoo
     try {
       owner = JSON.parse((await readFile(lockPath, "utf8")).trim());
     } catch { owner = undefined; }
-    if (!owner || typeof owner.pid !== "number" || typeof owner.birthIdentity !== "string") {
+    if (!owner || typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.birthIdentity !== "string" || !/^[a-f0-9]{64}$/.test(owner.birthIdentity)) {
       try {
         const age = Date.now() - (await stat(lockPath)).mtimeMs;
         return age > 30_000;
@@ -127,10 +152,27 @@ export function createCoordinatorRegistry(options: { commonDir: string; stateRoo
     }
     try {
       const observed = await captureProcessBirthIdentity(owner.pid);
-      return observed !== owner.birthIdentity;
-    } catch {
-      // PID 不可用（ESRCH 等）：owner 已死，可回收。
-      return true;
+      if (observed !== owner.birthIdentity) {
+        const error = new Error("coordinator lock owner birth identity mismatch");
+        error.code = "COORDINATOR_OWNER_IDENTITY_MISMATCH";
+        diagnose({ version: 1, phase: "coordinator-lock-owner-mismatch", error, reason: "birth-identity-mismatch", owner });
+        return true;
+      }
+      return false;
+    } catch (error: any) {
+      const cause = error?.cause;
+      let errno = cause?.code ?? error?.code;
+      if (errno !== "ESRCH") {
+        try { process.kill(owner.pid, 0); } catch (signalError: any) {
+          if (signalError?.code === "ESRCH") {
+            diagnose({ version: 1, phase: "coordinator-lock-owner-dead", reason: "process-not-found", error: signalError, cause: error, errno: "ESRCH", owner });
+            return true;
+          }
+          errno = signalError?.code ?? errno;
+        }
+      }
+      diagnose({ version: 1, phase: errno === "ESRCH" ? "coordinator-lock-owner-dead" : "coordinator-lock-liveness-check-failed", ...(errno === "ESRCH" ? { reason: "process-not-found" } : {}), error, cause, errno, owner });
+      return errno === "ESRCH";
     }
   }
   async function release() {

@@ -85,7 +85,7 @@ export const RECOVERY_RESUME_PROMPT = [
 
 type ResumedRunIdentity = { runId: string; asyncDir: string; sessionId: string; pid: number; agentProfile: string };
 type ResumeOutcome = { state: "activated"; resumeIntentId: string; resumedRun: ResumedRunIdentity }
-  | { state: "debt"; resumeIntentId: string; reason: string }
+  | { state: "debt"; resumeIntentId: string; reason: string; cause?: unknown }
   | { state: "skipped"; reason: string };
 
 interface StartCapture {
@@ -254,8 +254,10 @@ export function createRecoveryResumeOrchestrator({
       try {
         // resume 失败写 delivery debt：attempts 递增，超过上限后轮询通道停止重试。
         await coordinatorClient.resumeDebt({ resumeIntentId: intent.resumeIntentId, ownerScope: intent.ownerScope, authorization: "root", reason: reason.slice(0, 240) });
-      } catch { /* debt 记录失败保持 pending，由下次轮询重试 */ }
-      return { state: "debt", resumeIntentId: intent.resumeIntentId, reason };
+      } catch (secondaryError) {
+        traced("recovery-resume-debt-record-failed", { error: secondaryError, cause: secondaryError?.cause, primaryError: error, primaryCause: error?.cause }, intent);
+      }
+      return { state: "debt", resumeIntentId: intent.resumeIntentId, reason, cause: error };
     }
   }
 
@@ -278,7 +280,7 @@ export function createRecoveryResumeOrchestrator({
   async function poll() {
     if (disposed) return;
     let intents: unknown;
-    try { intents = await coordinatorClient.recoveryStatus(); } catch { return; }
+    try { intents = await coordinatorClient.recoveryStatus(); } catch (error) { traced("recovery-resume-status-failed", { error, cause: error?.cause }, { ownerScope: { rootSessionId }, attempt: 0 }); return; }
     if (disposed || !Array.isArray(intents)) return;
     for (const intent of intents) await submit(intent);
   }

@@ -112,7 +112,7 @@ export function createCoordinatorProofOutbox(directory: string) {
         return structuredClone(record);
       });
     },
-    async replay(deliver: (proof: any) => Promise<unknown>) {
+    async replay(deliver: (proof: any) => Promise<unknown>, options: { onDiagnostic?: (entry: unknown) => void } = {}) {
       return serialized(file, async () => {
         const state = await read();
         const pending = [];
@@ -124,8 +124,10 @@ export function createCoordinatorProofOutbox(directory: string) {
             state.receipts[id] = structuredClone(receipt);
             delete state.debts[id];
             delivered += 1;
-          } catch {
+          } catch (error) {
             pending.push(proof);
+            const entry = { version: 1, phase: "coordinator-proof-delivery-failed", error, cause: error?.cause, proofId: proof.proofId, runId: proof.runId };
+            try { options.onDiagnostic?.(entry); } catch (diagnosticError) { console.error("[coordinator-proof-outbox] diagnostic sink failed", { entry, diagnosticError }); }
           }
         }
         state.pending = pending;

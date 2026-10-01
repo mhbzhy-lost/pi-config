@@ -1,7 +1,7 @@
 import net from "node:net";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmod, unlink } from "node:fs/promises";
+import { chmod, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { challengeRootBroker } from "../subagent-dispatch/root-broker-client.ts";
 import { createCoordinatorProofOutbox } from "../subagent-dispatch/coordinator-proof-outbox.ts";
@@ -14,10 +14,12 @@ import { createIntegrationQueue } from "./integration-queue.ts";
 import { auditManagedWorkspaces } from "./administration.ts";
 
 type CoordinatorFault = (event: { operation: string; phase: string; queueItemId?: string; workspaceId?: string }) => void;
+type CoordinatorDiagnostic = (entry: unknown) => void;
 
 const RESUMABLE_PROOF_QUEUE_STATES = ["queued", "admitted", "resolving-conflict", "prepared"];
 
-export function createCoordinatorServer(options: { endpoint: string; repositoryId: string; storageRepositoryId?: string; stateRoot?: string; capability?: string; instanceId?: string; idleGraceMs?: number; handler?: (request: any) => unknown; challengeBroker?: typeof challengeRootBroker; recoveryEventSink?: (event: any) => Promise<any> | any; fault?: CoordinatorFault; admissionProbe?: () => void }) {
+export function createCoordinatorServer(options: { endpoint: string; repositoryId: string; storageRepositoryId?: string; stateRoot?: string; capability?: string; instanceId?: string; idleGraceMs?: number; handler?: (request: any) => unknown; challengeBroker?: typeof challengeRootBroker; recoveryEventSink?: (event: any) => Promise<any> | any; fault?: CoordinatorFault; diagnosticSink?: CoordinatorDiagnostic; admissionProbe?: () => void }) {
+  const diagnose = (entry: unknown) => { try { options.diagnosticSink?.(entry); } catch (diagnosticError) { console.error("[coordinator-server] diagnostic sink failed", { entry, diagnosticError }); } };
   const instanceId = options.instanceId ?? randomUUID();
   const challengeBroker = options.challengeBroker ?? challengeRootBroker;
   const registrations = new Map<string, TrustedBrokerRegistration>();
@@ -102,10 +104,10 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     // daemon restart: the fire-and-forget call never blocks the queue commit,
     // undeliverable proofs stay pending for the next trigger, and receipts
     // make repeated triggers idempotent.
-    void replayTerminalProofs().catch(() => undefined);
+    void replayTerminalProofs().catch((error) => { diagnose({ version: 1, phase: "coordinator-proof-replay-failed", error, cause: error?.cause }); });
     // 完成队首后立即升级并投递下一个 waiting-head resume intent，不唤醒其余
     // followers；投递失败记 delivery debt，由下次触发或 R5 轮询通道重放。
-    void pumpResumeIntents().catch(() => undefined);
+    void pumpResumeIntents().catch((error) => { diagnose({ version: 1, phase: "coordinator-resume-pump-failed", error, cause: error?.cause }); });
     return completed;
   }
 
@@ -232,7 +234,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       integrationQueue.preserveByBinding(binding, reason);
       const intent = integrationQueue.recoveryIntent({ queueItemId: item.queueItemId, workspaceId: item.workspaceId, ownerScope: binding.ownerScope, runId: binding.runId,
         attempt: item.attempt, generation: item.admissionGeneration, reason, requiredAction: "preserve" });
-      void Promise.resolve(options.recoveryEventSink?.(intent)).then((delivery) => integrationQueue.markRecoveryDelivery(intent.recoveryIntentId, delivery ?? { state: "debt", reason: "recovery event sink unavailable" })).catch((error) => integrationQueue.markRecoveryDelivery(intent.recoveryIntentId, { state: "debt", reason: String(error?.message ?? error) }).catch(() => undefined));
+      void Promise.resolve(options.recoveryEventSink?.(intent)).then((delivery) => integrationQueue.markRecoveryDelivery(intent.recoveryIntentId, delivery ?? { state: "debt", reason: "recovery event sink unavailable" })).catch((error) => integrationQueue.markRecoveryDelivery(intent.recoveryIntentId, { state: "debt", reason: String(error?.message ?? error) }).catch((secondaryError) => { diagnose({ version: 1, phase: "coordinator-recovery-debt-record-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, recoveryIntentId: intent.recoveryIntentId }); }));
     }
     workspaceService.preserveIntegrationDebt(binding);
     return inspectIntegrationState(binding);
@@ -250,7 +252,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
           : advanceAutoIntegration({}, binding));
       }
       catch (error) {
-        try { preserveIntegrationDebt(binding, "coordinator-reconcile-rejected"); } catch { /* report the original recovery failure below */ }
+        try { preserveIntegrationDebt(binding, "coordinator-reconcile-rejected"); } catch (secondaryError) { diagnose({ version: 1, phase: "coordinator-reconcile-preserve-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, queueItemId: item.queueItemId }); }
         results.push({ queueItemId: item.queueItemId, state: "preserved", error: String((error as any)?.message ?? error) });
       }
     }
@@ -268,7 +270,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         const delivery = await options.recoveryEventSink?.(structuredClone(intent));
         integrationQueue.markResumeDelivery(intent.resumeIntentId, delivery ?? { state: "debt", reason: "recovery event sink unavailable" });
       } catch (error) {
-        try { integrationQueue.markResumeDelivery(intent.resumeIntentId, { state: "debt", reason: String((error as any)?.message ?? error) }); } catch { /* undeliverable intent stays pending for the next trigger */ }
+        try { integrationQueue.markResumeDelivery(intent.resumeIntentId, { state: "debt", reason: String((error as any)?.message ?? error) }); } catch (secondaryError) { diagnose({ version: 1, phase: "coordinator-resume-debt-record-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, resumeIntentId: intent.resumeIntentId }); }
       }
     }
     return { promoted, delivered: deliverable.length };
@@ -285,7 +287,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       // recoveryEventSink 投递 requiredAction=resume-child。
       if (RESUMABLE_PROOF_QUEUE_STATES.includes(item.state)) {
         integrationQueue!.requestChildResume({ queueItemId: item.queueItemId, sourceRunId: terminalProof.runId, sourceAsyncDir: terminalProof.asyncDir, sourceProofId: terminalProof.proofId });
-        await pumpResumeIntents().catch(() => undefined);
+        await pumpResumeIntents().catch((error) => { diagnose({ version: 1, phase: "coordinator-resume-pump-failed", error, cause: error?.cause }); });
       }
       throw new Error("terminal proof delivery remains pending until the child integration completes");
     }
@@ -489,17 +491,38 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       socketCapabilities.delete(socket); schedule();
     }); });
   function schedule() { if (clients.size || active || retained || timer) return; timer = setTimeout(() => { if (!clients.size && !active && !retained) server.close(); timer = undefined; }, options.idleGraceMs ?? 30_000); timer.unref(); }
-  server.on("listening", () => { void chmod(options.endpoint, 0o600).catch(() => undefined); schedule(); });
+  async function closeAfterPermissionFailure(error: unknown) {
+    let actualMode: number | undefined;
+    try { actualMode = (await stat(options.endpoint)).mode & 0o777; } catch (statError) { error = new Error("coordinator socket permission verification failed", { cause: new AggregateError([error, statError], "coordinator socket permission verification failed") }); }
+    const permissionError = new Error("coordinator socket chmod failed", { cause: error });
+    permissionError.code = "COORDINATOR_SOCKET_PERMISSION_FAILED";
+    (permissionError as any).socketPath = options.endpoint;
+    (permissionError as any).expectedMode = 0o600;
+    (permissionError as any).actualMode = actualMode;
+    await new Promise<void>((resolve) => { if (server.listening) server.close(() => resolve()); else resolve(); });
+    throw permissionError;
+  }
+  const listenOnEndpoint = () => new Promise<void>((resolve, reject) => {
+    server.once("listening", () => {
+      void chmod(options.endpoint, 0o600).then(async () => {
+        const actualMode = (await stat(options.endpoint)).mode & 0o777;
+        if (actualMode !== 0o600) throw new Error(`coordinator socket mode is ${actualMode.toString(8)}, expected 600`);
+        schedule(); resolve();
+      }).catch((error) => { void closeAfterPermissionFailure(error).then(() => undefined, reject); });
+    });
+    server.once("error", reject);
+    server.listen(options.endpoint);
+  });
   function beginActivity() { retained++; if (timer) { clearTimeout(timer); timer = undefined; } let released = false; return () => { if (released) return; released = true; retained--; schedule(); }; }
   async function listen() {
     try {
-      await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); server.listen(options.endpoint); });
+      await listenOnEndpoint();
       // Startup replay closes the crash window between durable enqueue and
       // coordinator availability; failed delivery remains pending.
-      await replayTerminalProofs().catch(() => undefined);
+      await replayTerminalProofs().catch((error) => { diagnose({ version: 1, phase: "coordinator-proof-replay-failed", error, cause: error?.cause }); });
       // 启动时升级并投递 crash 前遗留的队首 resume intent；已 delivered 的
       // intent 不重复投递，投递失败记 debt 由后续触发重放。
-      await pumpResumeIntents().catch(() => undefined);
+      await pumpResumeIntents().catch((error) => { diagnose({ version: 1, phase: "coordinator-resume-pump-failed", error, cause: error?.cause }); });
     } catch (error: any) {
       if (error?.code !== "EADDRINUSE") throw error;
       // A killed daemon can leave the UNIX socket inode behind. Probe it
@@ -511,7 +534,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       });
       if (live) throw error;
       await unlink(options.endpoint).catch(() => undefined);
-      await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); server.listen(options.endpoint); });
+      await listenOnEndpoint();
     }
   }
   const internal = workspaceService && integrationQueue ? Object.freeze({ workspaceService, integrationQueue, enqueueIntegration, awaitIntegrationAdmission, publishRebasedCandidate, reportResolvingConflict, abandonIntegration, inspectIntegrationState, prepareAutoIntegration, inspectAutoIntegration, advanceAutoIntegration, preserveIntegrationDebt, reconcileIntegrations }) : undefined;
