@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1836,6 +1836,65 @@ test("worktree:false unowned contact_supervisor ask registers and reply commits 
   assert.equal(redundant.receipt.receiptId, replay.details.receiptId);
   const absent = await pi.tools[2].execute("reply-unknown", { action: "reply", replyTo: "unknown-request", message: "approved" }, signal, undefined, host);
   assert.equal(absent.details.code, "SUPERVISOR_REQUEST_NOT_PENDING");
+});
+
+test("supervisor pending request survives a Host reload and can reply through commit idempotently", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-reload-red-"));
+  try {
+    const options = {
+      persistenceRoot: stateRoot,
+      readOwnerReceipt: async () => { throw Object.assign(new Error("non-workspace"), { code: "unknown_run" }); },
+      readRuntime: async (runId) => ({ runId, running: true }),
+    };
+    const native = { id: "reload-request-1", runId: "reload-run-1", reason: "approval", expectsReply: true };
+    const first = createSupervisorControlPlane(options);
+    const reloaded = createSupervisorControlPlane(options);
+    const registered = await first.registerSupervisorRequest(native, "reload-root-1");
+    assert.equal(registered.status, "registered");
+    assert.equal((await readdir(stateRoot)).filter((entry) => entry.endsWith(".json")).length, 1, "registration must write durable state");
+    const request = registered.request;
+    const intent = {
+      schemaVersion: "supervisor-control-intent.v1", intentId: "reload-reply-1", runId: native.runId,
+      rootSessionId: request.rootSessionId, ownerGeneration: request.ownerGeneration, kind: "reply",
+      requestId: request.requestId, requestGeneration: request.requestGeneration,
+      payloadDigest: supervisorCanonicalDigest("reload-approved"),
+    };
+    assert.equal(await reloaded.ready("reload-root-1"), true);
+    assert.equal(reloaded.listPending().length, 1, "a new control-plane instance must restore pending state");
+    const committed = await reloaded.commitDelivery({ intent, consumed: true }, "reload-root-1");
+    assert.equal(committed.status, "committed");
+    assert.equal(reloaded.snapshot().requests[0].state, "replied");
+    const replay = await reloaded.commitDelivery({ intent, consumed: true }, "reload-root-1");
+    assert.equal(replay.status, "idempotent");
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("supervisor persistence rejects cross-root, expired, and corrupted records observably", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-reload-invalid-"));
+  const diagnostics = [];
+  try {
+    const options = { persistenceRoot: stateRoot, diagnosticSink: (entry) => diagnostics.push(entry), now: () => 10_000,
+      readOwnerReceipt: async () => { throw Object.assign(new Error("non-workspace"), { code: "unknown_run" }); } };
+    const first = createSupervisorControlPlane(options);
+    const registered = await first.registerSupervisorRequest({ id: "invalid-request-1", runId: "invalid-run-1", reason: "approval" }, "invalid-root-1");
+    assert.equal(registered.status, "registered");
+    const crossRoot = createSupervisorControlPlane(options);
+    assert.equal(await crossRoot.ready("other-root"), true);
+    assert.deepEqual(crossRoot.listPending(), []);
+    const file = (await readdir(stateRoot)).find((entry) => entry.endsWith(".json"));
+    const statePath = join(stateRoot, file);
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.value.requests[0].requestDigest = `sha256:${"f".repeat(64)}`;
+    await writeFile(statePath, JSON.stringify(state), { mode: 0o600 });
+    const corrupted = createSupervisorControlPlane(options);
+    assert.equal(await corrupted.ready("invalid-root-1"), false);
+    assert.deepEqual(corrupted.listPending(), []);
+    assert.equal(diagnostics.some((entry) => entry.type === "supervisor-persistence-corrupt"), true);
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
 });
 
 test("unowned reply retains expiry, pending identity and Host root fences", async () => {

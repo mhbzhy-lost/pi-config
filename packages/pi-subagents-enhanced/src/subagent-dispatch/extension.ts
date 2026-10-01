@@ -1218,7 +1218,11 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
     bind: (...args) => adapter.bind(...args), dispose: () => adapter.dispose?.(), isBound: () => adapter.isBound?.(),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       if (params?.action !== "reply" || supervisorControlPlane.enabled?.() === false) return adapter.execute(toolCallId, params, signal, onUpdate, ctx);
-      const request = supervisorControlPlane.findRequest?.(params.replyTo) ?? supervisorControlPlane.listPending?.().find((entry) => entry.requestId === params.replyTo);
+      let hostRootSessionId;
+      try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* fail closed below */ }
+      const request = supervisorControlPlane.findRequestAsync
+        ? await supervisorControlPlane.findRequestAsync(params.replyTo, hostRootSessionId)
+        : supervisorControlPlane.findRequest?.(params.replyTo) ?? supervisorControlPlane.listPending?.().find((entry) => entry.requestId === params.replyTo);
       if (!request) {
         const registrationCode = registrationFailures.get(params.replyTo);
         if (registrationCode) return {
@@ -1234,7 +1238,6 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
         requestId: params.replyTo, requestGeneration: request?.requestGeneration,
         payloadDigest: supervisorCanonicalDigest(params.message),
       };
-      let hostRootSessionId;
       try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* owner receipt remains authoritative for managed runs. */ }
       const decision = await supervisorControlPlane.resolveSupervisorControl(intent, hostRootSessionId);
       if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);

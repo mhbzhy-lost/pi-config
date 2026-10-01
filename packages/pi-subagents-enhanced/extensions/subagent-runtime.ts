@@ -310,6 +310,12 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   let workspaceRootSessionId: string | undefined;
   let workspaceLifecycleSessionId: string | undefined;
   const supervisorControlPlane = createSupervisorControlPlane({
+    persistenceRoot: (typeof process.env.PI_CODING_WORKSPACE_DIR === "string" && process.env.PI_CODING_WORKSPACE_DIR.length > 0
+      ? process.env.PI_CODING_WORKSPACE_DIR
+      : typeof process.env.PI_CODING_AGENT_DIR === "string" && process.env.PI_CODING_AGENT_DIR.length > 0
+        ? process.env.PI_CODING_AGENT_DIR : undefined)
+      ? path.join((process.env.PI_CODING_WORKSPACE_DIR || process.env.PI_CODING_AGENT_DIR) as string, "supervisor-control") : undefined,
+    diagnosticSink,
     readOwnerReceipt: async (runId) => {
       // 不得把「broker 未就绲 / 读取失败」降级成 undefined：那会让控制面把
       // 「无法确认是否受管」误判为「确认非受管」，从而绕过 steer 围栏。
@@ -386,6 +392,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       if (brokerStarted) throw new Error("Root subagent broker startup is incomplete");
       rpc.renew();
       const rootSessionId = resolveRootSessionId(ctx.sessionManager);
+      await supervisorControlPlane.ready(rootSessionId);
       const lifecycleSessionId = readSessionIdentity(ctx.sessionManager).sessionFile ?? resolveCurrentSessionId(ctx.sessionManager);
       // Root broker is the sole completion owner (contract §2.5); no upstream
       // completion-owner identity is generated in this integration layer.

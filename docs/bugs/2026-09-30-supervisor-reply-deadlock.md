@@ -219,3 +219,42 @@ reply 返回成功后，主会话**仍收到**一条 attention 通知称该 chil
 本缺陷在真实编排链路上**已消除**。残留风险仍为：登记状态与 `registrationFailures`
 Map 不跨 Host reload 持久化（修复方向 1），故重启会孤儿化在飞的 pending ask
 ——本次重启前即需先 interrupt 在飞 child 正是该风险的实际体现。
+
+## 跨 Host reload 登记状态持久化设计（2026-10-01，波 1B）
+
+### 载体选型
+
+本轮选择 root-session 级私有 JSON 状态，并复用已有
+`src/subagent-dispatch/durable-storage.ts` 的 `DurableStorage` 原子落盘范式（私有目录
+0700、记录 0600、`O_NOFOLLOW`、临时文件 + fsync + rename、锁与 revision CAS）。不复用
+`DurableEventOutbox`：当前仓库没有生产代码构造 durable envelope，也没有生产调用
+`DurableEventOutbox.append`；outbox 是带 cursor/envelope/eventId/metadata 的事件重放机制，
+而 supervisor projection 是 root-session 级当前授权状态，接入 outbox 会无必要地引入事件
+排序与消费者语义。若使用 durable envelope，还必须额外承受 payload 32 KiB、frame 64 KiB、
+禁止 sensitive key 与 JSON-only 限制；本状态载体不把请示正文写入持久层。
+
+### Schema 与敏感数据边界
+
+持久 envelope 为 `supervisor-state.v1`，包含 `rootSessionId`、`requests`、`receipts`、
+`replyPayloads`。每个 request 严格只包含 `requestId`、`runId`、`rootSessionId`、
+`ownerGeneration`、`requestGeneration`、`requestDigest`、`createdAt`、`expiresAt`、
+`state`。receipt 与 reply-payload projection 只保存 root、run/request identity、世代、
+digest、状态等授权校验字段；不保存 `reason`、reply/steer message、agent 文本或任何
+凭据。正文仍只存在 native 传输和进程内执行路径，`requestDigest` 是其完整性约束。
+
+### 载入校验与威胁模型
+
+载入使用严格 schema 白名单；rootSessionId 必须等于当前 Host root。request 的身份字段、
+正整数 owner/request generation、digest 格式、时间与 state 均校验；过期 request、身份不
+匹配、世代不匹配、digest 不符、JSON/权限/文件损坏均 fail-closed，不载入为可用 request。
+损坏记录必须向 diagnostic sink 暴露 `supervisor-persistence-corrupt`，不得静默忽略。跨
+reload 的信任边界由 rootSessionId 分区隔离、expiresAt TTL、owned 路径 broker receipt
+与 runtime ownerGeneration 双重校验共同围栏；unowned 仍只接受 broker 权威
+`unknown_run`，使用 Host root 与既有 `UNOWNED_OWNER_GENERATION`，绝不猜测 owner 或把
+unavailable 降级为 unowned。
+
+### registrationFailures 关系
+
+`registrationFailures` 不是授权来源，不持久化正文或凭据；reload 后只要 durable projection
+仍合法，reply 走正常 request 授权而不会误报 `SUPERVISOR_REQUEST_NOT_PENDING`。没有合法
+projection 的登记失败仍 fail-closed，并保持可观测的持久化/登记错误，不做猜测恢复。
