@@ -16,7 +16,7 @@ const {
 import { createHeadlessSubagentApi } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts";
 import { createTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
 import { createSupervisorAdapter } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts";
-import { createSupervisorControlPlane } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts";
+import { createSupervisorControlPlane, supervisorCanonicalDigest } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts";
 import {
   createSupervisorRequestMailbox,
   createTypedSubagentExtension as createTypedSubagentExtensionProduction,
@@ -1787,6 +1787,111 @@ test("configured supervisor control plane fences reply and steer delivery withou
   const duplicateSteer = await pi.tools[0].execute("steer-2", { action: "steer", runId: "run-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(duplicateSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
   assert.equal(rpc.calls.filter((call) => call.method === "steer").length, 0);
+});
+
+// A worktree:false native ask has no broker owner receipt; Host session is its root authority.
+// Removing the unowned registration/resolve branch must make this fail at the public reply boundary.
+test("worktree:false unowned contact_supervisor ask registers and reply commits without interrupt/resume", async () => {
+  const pi = createPi();
+  let nativeCalls = 0;
+  const plane = createSupervisorControlPlane({
+    readOwnerReceipt: async () => { throw Object.assign(new Error("no broker owner for non-workspace run"), { code: "unknown_run" }); },
+    readRuntime: async (runId) => ({ runId, running: true, steerable: true }), // no runtime.ownerGeneration
+    randomId: () => "unowned-receipt",
+  });
+  const adapter = createSupervisorAdapter();
+  adapter.bind(async () => { nativeCalls++; return { content: [{ type: "text", text: "native reply delivered" }] }; });
+  const host = { cwd: "/repo", sessionManager: { getSessionId: () => "host-root-1" } };
+  createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore: {}, supervisorAdapter: adapter,
+    supervisorControlPlane: plane, resolveRootSessionId: (sessionManager) => sessionManager.getSessionId() });
+  const native = { id: "ask-unowned-1", runId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", agent: "delegate", childIndex: 0,
+    reason: "need decision", expectsReply: true }; // worktree:false is proven by broker unknown_run, not native message metadata
+  await pi.handlers.get("message_end")[0]({ message: { customType: "subagent_supervisor_request", details: native } }, host);
+  assert.equal(plane.listPending().length, 1, "ingress must register before reply");
+  const blockedSteer = await pi.tools[0].execute("steer-while-pending", { action: "steer", runId: native.runId, message: "approved" }, signal, undefined, host);
+  assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
+  const reply = await pi.tools[2].execute("reply-unowned-1", { action: "reply", replyTo: native.id, message: "approved" }, signal, undefined, host);
+  assert.equal(reply.isError, undefined, `registration=${JSON.stringify(pi.messages.at(-1)?.details)}, reply=${JSON.stringify(reply.details)}`);
+  assert.equal(plane.listPending().length, 1, "the native pending ask must register locally");
+  assert.equal(pi.messages.some((message) => message.customType === "subagent_supervisor_registration_failed"), false);
+  assert.equal(nativeCalls, 1);
+  assert.equal(plane.snapshot().requests[0].state, "pending", "unconsumed delivery stays pending");
+  const replay = await pi.tools[2].execute("reply-unowned-1", { action: "reply", replyTo: native.id, message: "approved" }, signal, undefined, host);
+  assert.equal(replay.details.code, "SUPERVISOR_DELIVERY_IDEMPOTENT");
+  assert.equal(replay.details.receiptId, "receipt-unowned-receipt");
+  assert.equal(nativeCalls, 1);
+  const request = plane.snapshot().requests[0];
+  const intent = { schemaVersion: "supervisor-control-intent.v1", intentId: "reply-unowned-1", runId: native.runId,
+    rootSessionId: "host-root-1", ownerGeneration: request.ownerGeneration, kind: "reply",
+    requestId: native.id, requestGeneration: request.requestGeneration, payloadDigest: supervisorCanonicalDigest("approved") };
+  const consumed = await plane.commitDelivery({ intent, consumed: true }, "host-root-1");
+  assert.equal(consumed.status, "committed");
+  assert.equal(consumed.receipt.receiptId, replay.details.receiptId);
+  assert.equal(plane.listPending().length, 0);
+  assert.equal(plane.snapshot().requests[0].state, "replied");
+  const duplicateSteer = await pi.tools[0].execute("steer-duplicate-unowned", { action: "steer", runId: native.runId, message: "approved" }, signal, undefined, host);
+  assert.equal(duplicateSteer.details?.code, "STEER_DUPLICATES_REPLY", JSON.stringify(duplicateSteer));
+  const redundant = await plane.resolveSupervisorControl(intent, "host-root-1");
+  assert.equal(redundant.status, "idempotent");
+  assert.equal(redundant.receipt.receiptId, replay.details.receiptId);
+  const absent = await pi.tools[2].execute("reply-unknown", { action: "reply", replyTo: "unknown-request", message: "approved" }, signal, undefined, host);
+  assert.equal(absent.details.code, "SUPERVISOR_REQUEST_NOT_PENDING");
+});
+
+test("unowned reply retains expiry, pending identity and Host root fences", async () => {
+  let clock = 1_000;
+  let root = "host-root-1";
+  const plane = createSupervisorControlPlane({ readOwnerReceipt: async () => undefined, now: () => clock,
+    readRuntime: async (runId) => ({ runId, running: true }) });
+  const host = { sessionManager: { getSessionId: () => root } };
+  const getRoot = (ctx) => ctx.sessionManager.getSessionId();
+  const registered = await plane.registerSupervisorRequest({ id: "ask-1", runId: "run-1", reason: "approve" }, getRoot(host));
+  assert.equal(registered.status, "registered");
+  const intent = { schemaVersion: "supervisor-control-intent.v1", intentId: "reply-1", runId: "run-1",
+    rootSessionId: registered.request.rootSessionId, ownerGeneration: registered.request.ownerGeneration,
+    kind: "reply", requestId: "ask-1", requestGeneration: 1, payloadDigest: `sha256:${"a".repeat(64)}` };
+  const mismatch = await plane.resolveSupervisorControl({ ...intent, requestGeneration: 2 }, getRoot(host));
+  assert.equal(mismatch.code, "SUPERVISOR_REQUEST_NOT_PENDING");
+  assert.equal((await plane.resolveSupervisorControl({ ...intent, requestId: "ask-missing" }, getRoot(host))).code, "SUPERVISOR_REQUEST_NOT_PENDING");
+  assert.equal((await plane.resolveSupervisorControl({ ...intent, ownerGeneration: 2 }, getRoot(host))).code, "SUPERVISOR_STALE_OWNER");
+  root = "other-host";
+  assert.equal((await plane.resolveSupervisorControl(intent, getRoot(host))).code, "SUPERVISOR_STALE_OWNER");
+  root = "host-root-1";
+  clock += 21 * 60 * 1000;
+  assert.equal((await plane.resolveSupervisorControl(intent, getRoot(host))).code, "SUPERVISOR_REQUEST_EXPIRED");
+});
+
+for (const scenario of [
+  { name: "missing owner dependency", options: {} },
+  { name: "broker not ready", options: { readOwnerReceipt: async () => { throw Object.assign(new Error("not ready"), { code: "authority_store_unavailable" }); } } },
+]) {
+  test(`unavailable (${scenario.name}) fails closed for registration and reply`, async () => {
+    const plane = createSupervisorControlPlane(scenario.options);
+    const result = await plane.registerSupervisorRequest({ id: "ask-1", runId: "run-1", reason: "approval" }, "host-root-1");
+    assert.equal(result.code, "SUPERVISOR_OWNER_UNAVAILABLE");
+    assert.deepEqual(plane.listPending(), []);
+    const reply = await plane.resolveSupervisorControl({ schemaVersion: "supervisor-control-intent.v1", intentId: "reply-1",
+      runId: "run-1", rootSessionId: "host-root-1", ownerGeneration: 1, kind: "reply", requestId: "ask-1",
+      requestGeneration: 1, payloadDigest: `sha256:${"a".repeat(64)}` }, "host-root-1");
+    assert.equal(reply.code, "SUPERVISOR_STALE_OWNER");
+  });
+}
+
+test("owner authority loss after unowned registration cannot authorize reply or commit", async () => {
+  let unavailable = false;
+  const plane = createSupervisorControlPlane({ readOwnerReceipt: async () => {
+    if (unavailable) throw Object.assign(new Error("broker not ready"), { code: "authority_store_unavailable" });
+    throw Object.assign(new Error("non-workspace"), { code: "unknown_run" });
+  } });
+  const registered = await plane.registerSupervisorRequest({ id: "ask-1", runId: "run-1", reason: "approval" }, "host-root-1");
+  assert.equal(registered.status, "registered");
+  unavailable = true;
+  const intent = { schemaVersion: "supervisor-control-intent.v1", intentId: "reply-1", runId: "run-1",
+    rootSessionId: registered.request.rootSessionId, ownerGeneration: registered.request.ownerGeneration,
+    kind: "reply", requestId: "ask-1", requestGeneration: 1, payloadDigest: `sha256:${"a".repeat(64)}` };
+  assert.equal((await plane.resolveSupervisorControl(intent, "host-root-1")).code, "SUPERVISOR_STALE_OWNER");
+  assert.equal((await plane.commitDelivery({ intent, consumed: true }, "host-root-1")).code, "SUPERVISOR_STALE_OWNER");
+  assert.equal(plane.listPending().length, 1);
 });
 
 // Missing ingress registration must not turn a native-visible ask into a misleading NOT_PENDING reply.

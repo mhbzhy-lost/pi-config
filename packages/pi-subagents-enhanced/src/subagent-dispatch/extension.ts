@@ -1143,7 +1143,7 @@ function controlFailure(code, receipt = undefined) {
   };
 }
 
-async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx) {
+async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId) {
 
   if (!CONTROL_ACTIONS.has(input.action)) {
     return failure("UNSUPPORTED_ACTION", `unsupported subagent RPC action: ${String(input.action)}`);
@@ -1176,26 +1176,35 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
     const owner = identity?.owner;
     // identityForRun 缺失或未返回三态时一律当作 unavailable，不得默认放行。
     const ownerState = identity?.ownerState ?? (owner ? "owned" : "unavailable");
-    // 只有「成功查询且确认无 owner receipt」的非受管 run（b332005 门控）才绕过控制面：
-    // 其 supervisor 请求无从登记，由上游 steer 投递与 steerable 校验负责。
-    if (ownerState !== "unowned") {
-      if (ownerState !== "owned" || !owner) return controlFailure("SUPERVISOR_OWNER_UNAVAILABLE");
+    // 未登记 supervisor request 的明确非受管 run 仍由 upstream steer 投递；
+    // 已登记请求即使 replied，也需经控制面核查 pending 和 reply payload 去重。
+    const unownedRequest = ownerState === "unowned"
+      ? supervisorControlPlane.snapshot?.().requests.find((request) => request.runId === target.runId)
+      : undefined;
+    if (ownerState !== "unowned" || unownedRequest) {
+      if (ownerState !== "owned" && ownerState !== "unowned") return controlFailure("SUPERVISOR_OWNER_UNAVAILABLE");
+      if (ownerState === "owned" && !owner) return controlFailure("SUPERVISOR_OWNER_UNAVAILABLE");
+      let hostRootSessionId;
+      if (unownedRequest) {
+        try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { return controlFailure("SUPERVISOR_STALE_OWNER"); }
+      }
       const runtime = identity?.runtime;
       const decision = await supervisorControlPlane.resolveSupervisorControl({
         schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId: target.runId,
-        rootSessionId: owner.rootSessionId, ownerGeneration: owner.ownerGeneration, kind: "steer",
+        rootSessionId: unownedRequest ? unownedRequest.rootSessionId : owner.rootSessionId,
+        ownerGeneration: unownedRequest ? unownedRequest.ownerGeneration : owner.ownerGeneration, kind: "steer",
         payloadDigest: supervisorCanonicalDigest(params.message), liveRunEpoch: runtime?.liveRunEpoch,
-      });
+      }, hostRootSessionId);
       if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
       if (decision.status !== "allowed") return controlFailure(decision.code);
       try {
         const result = await rpc[action](params);
-        const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent });
+        const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent }, hostRootSessionId);
 
         if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);
         return rpcResult(result);
       } catch (error) {
-        await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_STEER_DELIVERY_FAILED" });
+        await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_STEER_DELIVERY_FAILED" }, hostRootSessionId);
         throw error;
       }
     }
@@ -1203,7 +1212,7 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
   return rpcResult(await rpc[action](params));
 }
 
-function createControlledSupervisorAdapter(adapter, supervisorControlPlane, registrationFailures) {
+function createControlledSupervisorAdapter(adapter, supervisorControlPlane, registrationFailures, resolveRootSessionId) {
   if (!supervisorControlPlane) return adapter;
   return Object.freeze({
     bind: (...args) => adapter.bind(...args), dispose: () => adapter.dispose?.(), isBound: () => adapter.isBound?.(),
@@ -1225,16 +1234,18 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
         requestId: params.replyTo, requestGeneration: request?.requestGeneration,
         payloadDigest: supervisorCanonicalDigest(params.message),
       };
-      const decision = await supervisorControlPlane.resolveSupervisorControl(intent);
+      let hostRootSessionId;
+      try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* owner receipt remains authoritative for managed runs. */ }
+      const decision = await supervisorControlPlane.resolveSupervisorControl(intent, hostRootSessionId);
       if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
       if (decision.status !== "allowed") return controlFailure(decision.code);
       try {
         const result = await adapter.execute(toolCallId, params, signal, onUpdate, ctx);
-        const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent });
+        const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent }, hostRootSessionId);
 
         return committed.status === "committed" ? result : controlFailure(committed.code, committed.receipt);
       } catch (error) {
-        await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_REPLY_DELIVERY_FAILED" });
+        await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_REPLY_DELIVERY_FAILED" }, hostRootSessionId);
         throw error;
       }
     },
@@ -1527,7 +1538,7 @@ export function createTypedSubagentExtension(
           return result;
         }
         if (Object.hasOwn(input, "action")) {
-          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx);
+          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId);
           trace("tool-returned");
           return result;
         }
@@ -1563,7 +1574,7 @@ export function createTypedSubagentExtension(
     renderResult: renderWorkspaceResult,
   });
   const registrationFailures = new Map<string, string>();
-  const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane, registrationFailures) : undefined;
+  const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane, registrationFailures, resolveRootSessionId) : undefined;
   const supervisorTool = controlledSupervisorAdapter ? createSupervisorTool(controlledSupervisorAdapter, {
     renderCall: renderSupervisorCall,
     renderResult: renderSupervisorResult,
@@ -1582,7 +1593,9 @@ export function createTypedSubagentExtension(
         if (supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
           let result;
           try {
-            result = await supervisorControlPlane.registerSupervisorRequest(message.details);
+            let hostRootSessionId;
+            try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* non-workspace registration fails closed without Host identity. */ }
+            result = await supervisorControlPlane.registerSupervisorRequest(message.details, hostRootSessionId);
           } catch {
             result = { status: "blocked", code: "SUPERVISOR_REQUEST_REGISTRATION_FAILED" };
           }

@@ -16,6 +16,8 @@ export type SupervisorDeliveryReceipt = {
   runId: string; requestId?: string; code?: string;
 };
 
+// A non-workspace run has no broker owner generation; only Host session authority can fence its requests.
+const UNOWNED_OWNER_GENERATION = 1;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -82,9 +84,11 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
       return { state: "unavailable", receipt: undefined };
     }
   }
-  async function registerSupervisorRequest(native: any) {
+  async function registerSupervisorRequest(native: any, hostRootSessionId?: string) {
     if (!isObject(native) || typeof native.id !== "string" || typeof native.runId !== "string" || typeof native.reason !== "string") return blocked("SUPERVISOR_REQUEST_IDENTITY_UNAVAILABLE");
-    const owner: any = (await readOwnerState(native.runId)).receipt;
+    const { state, receipt } = await readOwnerState(native.runId);
+    if (state === "unavailable") return blocked("SUPERVISOR_OWNER_UNAVAILABLE");
+    const owner: any = state === "owned" ? receipt : { runId: native.runId, rootSessionId: hostRootSessionId, ownerGeneration: UNOWNED_OWNER_GENERATION };
     if (!owner || owner.runId !== native.runId || typeof owner.rootSessionId !== "string" || !Number.isSafeInteger(owner.ownerGeneration)) return blocked("SUPERVISOR_OWNER_UNAVAILABLE");
     const requestId = native.id; const requestDigest = supervisorCanonicalDigest({ id: native.id, runId: native.runId, agent: native.agent, reason: native.reason, expectsReply: native.expectsReply, replyTo: native.replyTo });
     const key = `${owner.rootSessionId}:${native.runId}:${owner.ownerGeneration}:${requestId}:${requestDigest}`;
@@ -94,11 +98,13 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     requests.set(key, request); return { status: "registered" as const, request };
   }
   function findPending(intent: SupervisorControlIntentV1) { return [...requests.values()].find(r => r.state === "pending" && r.runId === intent.runId && r.rootSessionId === intent.rootSessionId && r.ownerGeneration === intent.ownerGeneration && r.requestId === intent.requestId && r.requestGeneration === intent.requestGeneration); }
-  async function resolveSupervisorControl(intentInput: unknown) {
+  async function resolveSupervisorControl(intentInput: unknown, hostRootSessionId?: string) {
     let intent: SupervisorControlIntentV1; try { intent = parseSupervisorControlIntentV1(intentInput); } catch { return blocked("SUPERVISOR_INTENT_INVALID"); }
     const runtime: any = await options.readRuntime?.(intent.runId);
-    const owner: any = (await readOwnerState(intent.runId)).receipt;
-    if (!owner || owner.rootSessionId !== intent.rootSessionId || owner.ownerGeneration !== intent.ownerGeneration || runtime?.ownerGeneration !== intent.ownerGeneration) return blocked("SUPERVISOR_STALE_OWNER");
+    const { state, receipt: owner } = await readOwnerState(intent.runId);
+    if (state === "owned") {
+      if (!owner || owner.rootSessionId !== intent.rootSessionId || owner.ownerGeneration !== intent.ownerGeneration || runtime?.ownerGeneration !== intent.ownerGeneration) return blocked("SUPERVISOR_STALE_OWNER");
+    } else if (state !== "unowned" || typeof hostRootSessionId !== "string" || hostRootSessionId !== intent.rootSessionId || intent.ownerGeneration !== UNOWNED_OWNER_GENERATION) return blocked("SUPERVISOR_STALE_OWNER");
     const pending = intent.kind === "steer"
       ? [...requests.values()].find(r => r.state === "pending" && r.runId === intent.runId && r.rootSessionId === intent.rootSessionId && r.ownerGeneration === intent.ownerGeneration)
       : findPending(intent);
@@ -111,8 +117,8 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     if (intent.kind === "steer" && replyPayloads.has(`${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}`)) return blocked("STEER_DUPLICATES_REPLY");
     return { status: "allowed" as const, intent, idempotencyKey: key, request: pending };
   }
-  async function commitDelivery(input: { intent: unknown; success?: boolean; code?: string; consumed?: boolean }) {
-    const intent = parseSupervisorControlIntentV1(input.intent); const decision: any = await resolveSupervisorControl(intent);
+  async function commitDelivery(input: { intent: unknown; success?: boolean; code?: string; consumed?: boolean }, hostRootSessionId?: string) {
+    const intent = parseSupervisorControlIntentV1(input.intent); const decision: any = await resolveSupervisorControl(intent, hostRootSessionId);
     if (decision.status === "idempotent") {
       // A queued follow-up is not terminally delivered yet. The child may
       // later consume the same correlated payload, so allow that observation
@@ -137,8 +143,8 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     }
     return { status: "committed" as const, receipt };
   }
-  async function markDeliveryConsumed(intent: unknown) {
-    return commitDelivery({ intent, consumed: true });
+  async function markDeliveryConsumed(intent: unknown, hostRootSessionId?: string) {
+    return commitDelivery({ intent, consumed: true }, hostRootSessionId);
   }
   return Object.freeze({ registerSupervisorRequest, resolveSupervisorControl, commitDelivery, markDeliveryConsumed,
     identityForRun: async (runId: string): Promise<SupervisorRunIdentity> => {
