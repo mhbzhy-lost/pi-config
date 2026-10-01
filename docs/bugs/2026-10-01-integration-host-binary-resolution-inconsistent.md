@@ -161,3 +161,39 @@ wrapper 的子进程，wrapper 未退出前它是 **zombie**，`kill(pid, 0)` �
 - 2026-10-01 更正：A/B 对照实验（A 组 0.85.1 / B 组 0.87.1，record 分别 169ms、170ms 出现）
   **证伪**该因果结论；T8 根因改判类别 3 待诊断。本文核心发现（解析契约不一致、
   `WIRED-ELSEWHERE` 不构成门禁、`PI_OWNER_READY` 来自 expect 而非 pi）不受影响，依然成立。
+
+## 追加更正（2026-10-01）：本文的「版本核实方法」不可靠，必须改用 package.json
+
+本文「版本事实」一节把 `/opt/homebrew/bin/pi --version → 0.85.1` 当作**绝对路径核实**的
+权威结论。该结论的**数值仍然正确**（`package.json` 交叉核实同为 0.85.1），
+但**方法不成立**，且本文据此对子任务作出的"误判"指责是错的。
+
+真因（由 T7 A/B 实验查明，详见
+`docs/bugs/2026-10-01-pi-version-misreports-under-package-root-override.md`）：
+派发运行时向子进程注入 `PI_REAL_BIN`、`PI_PACKAGE_DIR`、
+`PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT` 三个指向 repo-local 的覆盖变量；
+**带着它们时，即使绝对路径直接调用 `/opt/homebrew/bin/pi --version` 也会输出 0.87.1**，
+`env -u` 清除后才输出 0.85.1。即 `--version` 报告的是**覆盖后解析到的包版本**，
+不是**被调用二进制自身**的版本。
+
+因此：
+
+- 子任务在其环境下读到 0.87.1、主 agent 在自己的 bash 环境（不含覆盖变量）读到 0.85.1，
+  **双方读数都正确**；主 agent 据此两次驳回子任务，属误判。
+- 主 agent 此前列出的三个猜测成因（PATH 解析、`npx`、相对 symlink 在 cwd 下解析）
+  **全部错误**，本文相关表述作废。
+
+**唯一权威规程**（本文「修复方向」第 1、2 条据此补充）：
+
+```bash
+# 版本判定只允许这一种方式：读绝对路径 package.json，不经过任何二进制
+node -e 'console.log(require("<绝对路径>/@earendil-works/pi-coding-agent/package.json").version)'
+```
+
+若必须用 `--version`，须先 `env -u PI_PACKAGE_DIR -u
+PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT -u PI_REAL_BIN`；报告版本结论时必须附原始命令
+输出并注明是否清除了覆盖变量。
+
+另：本文关于 T8 的结论不受影响（版本错配假设仍已被 A/B 证伪），关于
+「无 script 注入 `PI_REAL_BIN`」「三个排除文件解析方式互不一致」
+「`WIRED-ELSEWHERE` 不构成有效门禁」的核心发现亦不受影响，仍然成立。
