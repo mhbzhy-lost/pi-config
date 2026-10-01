@@ -71,9 +71,14 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
   const loadedRoots = new Set<string>();
   const corruptRoots = new Set<string>();
   const stateKey = (root: string) => `supervisor-${createHash("sha256").update(root).digest("hex")}`;
+  const report = (entry: unknown) => {
+    try { options.diagnosticSink?.(entry); } catch (diagnosticError) {
+      console.error("[supervisor-control-plane] diagnostic sink failed", diagnosticError);
+    }
+  };
   const persistenceError = (root: string, error: unknown) => {
     corruptRoots.add(root);
-    options.diagnosticSink?.({ type: "supervisor-persistence-corrupt", rootSessionId: root, code: (error as any)?.code ?? "SUPERVISOR_PERSISTENCE_CORRUPT" });
+    report({ type: "supervisor-persistence-corrupt", rootSessionId: root, code: (error as any)?.code ?? "SUPERVISOR_PERSISTENCE_CORRUPT", error, cause: (error as any)?.cause });
   };
   const stateDigest = (value: unknown) => supervisorCanonicalDigest(value);
   async function loadRoot(root: string): Promise<boolean> {
@@ -88,7 +93,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
         const request = parseSupervisorRequestV1(raw);
         if (request.rootSessionId !== root) throw new Error("request root mismatch");
         if (request.state === "pending" && now() < request.expiresAt) requests.set(`${root}:${request.runId}:${request.ownerGeneration}:${request.requestId}:${request.requestDigest}`, request);
-        else if (request.state === "pending") options.diagnosticSink?.({ type: "supervisor-persistence-rejected", rootSessionId: root, requestId: request.requestId, code: "SUPERVISOR_REQUEST_EXPIRED" });
+        else if (request.state === "pending") report({ type: "supervisor-persistence-rejected", rootSessionId: root, requestId: request.requestId, code: "SUPERVISOR_REQUEST_EXPIRED" });
       }
       for (const raw of value.receipts) {
         if (!isObject(raw) || Object.keys(raw).some(key => !["receiptId", "idempotencyKey", "kind", "status", "consumed", "runId", "requestId", "code", "rootSessionId", "ownerGeneration", "requestGeneration", "requestDigest"].includes(key)) || typeof raw.idempotencyKey !== "string" || typeof raw.receiptId !== "string" || raw.rootSessionId !== root || typeof raw.runId !== "string" || !Number.isSafeInteger(raw.ownerGeneration) || (raw.requestGeneration !== undefined && !Number.isSafeInteger(raw.requestGeneration)) || (raw.requestDigest !== undefined && !DIGEST.test(raw.requestDigest))) throw new Error("receipt schema invalid");
@@ -131,6 +136,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
       // CAS 冲突、revoked、布局不支持、无 code 的未知错误）均为「无法确认」，
       // 必须 fail-closed，绝不得当成非受管而放行。
       if ((error as any)?.code === "unknown_run") return { state: "unowned", receipt: undefined };
+      report({ phase: "supervisor-owner-read-failed", runId, error, cause: (error as any)?.cause, errorCode: (error as any)?.code ?? "SUPERVISOR_OWNER_UNAVAILABLE" });
       return { state: "unavailable", receipt: undefined };
     }
   }
@@ -206,7 +212,10 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     identityForRun: async (runId: string): Promise<SupervisorRunIdentity> => {
       const { state, receipt } = await readOwnerState(runId);
       let runtime: SupervisorRunIdentity["runtime"];
-      try { runtime = await options.readRuntime?.(runId); } catch { runtime = undefined; }
+      try { runtime = await options.readRuntime?.(runId); } catch (error) {
+        report({ phase: "supervisor-runtime-read-failed", runId, error, cause: (error as any)?.cause, errorCode: (error as any)?.code ?? "SUPERVISOR_RUNTIME_UNAVAILABLE" });
+        runtime = undefined;
+      }
       return { owner: receipt, ownerState: state, runtime };
     },
     listPending: () => [...requests.values()].filter(r => r.state === "pending"), findRequest: (requestId: string) => [...requests.values()].find(r => r.requestId === requestId), markProgressStalled: (runId: string) => ({ status: "stalled-suspected", runId }), snapshot: () => ({ requests: [...requests.values()] }) });

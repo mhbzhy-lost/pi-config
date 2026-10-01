@@ -48,7 +48,7 @@ export function shouldStartRepositoryCoordinator(cwd: string): boolean {
 }
 
 /** Connect the Host to the common-dir singleton after the Root Broker exists. */
-export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rpc }: { pi: object; cwd: string; broker: RootBrokerServer; stateRoot?: string; rpc?: any }) {
+export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rpc, diagnosticSink }: { pi: object; cwd: string; broker: RootBrokerServer; stateRoot?: string; rpc?: any; diagnosticSink?: (entry: unknown) => void }) {
   if (!shouldStartRepositoryCoordinator(cwd) || typeof stateRoot !== "string" || stateRoot.length === 0) return undefined;
   const identity = await resolveRepositoryIdentity(cwd);
   const registry = createCoordinatorRegistry({ commonDir: identity.commonDir, stateRoot });
@@ -69,14 +69,24 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
         // durable recovery.status 轮询通道负责。legacy preserve 事件仍走
         // broker push。coordinator 的 durable 状态仍是唯一权威。
         if (intent?.requiredAction === "resume-child") {
-          void recoveryOrchestrator?.submit(intent);
+          const submission = Promise.resolve().then(() => recoveryOrchestrator?.submit(intent));
+          void submission.then((outcome) => {
+            if (outcome?.state === "debt" || outcome?.state === "skipped") {
+              try { diagnosticSink?.({ version: 1, phase: "recovery-resume-submit-settled", state: outcome.state, reason: outcome.reason, resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId, rootSessionId: broker.rootSessionId, cause: (outcome as any).cause }); } catch (diagnosticError) { console.error("[subagent-runtime] recovery diagnostic sink failed", diagnosticError); }
+            }
+          }).catch((error) => {
+            try { diagnosticSink?.({ version: 1, phase: "recovery-resume-submit-rejected", error, cause: error?.cause, resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId, rootSessionId: broker.rootSessionId }); } catch (diagnosticError) { console.error("[subagent-runtime] recovery diagnostic sink failed", diagnosticError); }
+          });
           return { state: "delivered" };
         }
         return broker.publishRecoveryEvent(intent);
       },
     });
     try { await server.listen(); } catch (error) {
-      await registry.release().catch(() => undefined);
+      try { await registry.release(); } catch (cleanupError) {
+        try { diagnosticSink?.({ version: 1, phase: "coordinator-start-cleanup-failed", error, cause: error?.cause, secondaryError: cleanupError }); } catch (diagnosticError) { console.error("[subagent-runtime] recovery diagnostic sink failed", diagnosticError); }
+        throw new AggregateError([error, cleanupError], "coordinator startup and cleanup failed", { cause: error });
+      }
       throw error;
     }
   }
@@ -415,6 +425,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
           broker: startingBroker,
           stateRoot: process.env.PI_CODING_WORKSPACE_DIR,
           rpc,
+          diagnosticSink,
         });
         workspaceRootSessionId = rootSessionId;
         workspaceLifecycleSessionId = lifecycleSessionId;
@@ -451,8 +462,17 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     async beforeRuntimeDispose() {
       // Keep coordinator callbacks alive while Root Broker drains accepted child
       // integration requests and terminal proof delivery.
-      if (brokerStarted && broker) await closeAndUnbindRootBroker(pi, broker).catch(() => undefined);
-      await coordinatorRuntime?.close().catch(() => undefined);
+      const cleanupErrors: unknown[] = [];
+      if (brokerStarted && broker) {
+        try { await closeAndUnbindRootBroker(pi, broker); } catch (error) {
+          cleanupErrors.push(error);
+          try { diagnosticSink?.({ version: 1, phase: "root-broker-close-failed", error, cause: error?.cause }); } catch (diagnosticError) { console.error("[subagent-runtime] cleanup diagnostic sink failed", diagnosticError); }
+        }
+      }
+      try { await coordinatorRuntime?.close(); } catch (error) {
+        cleanupErrors.push(error);
+        try { diagnosticSink?.({ version: 1, phase: "coordinator-close-failed", error, cause: error?.cause }); } catch (diagnosticError) { console.error("[subagent-runtime] cleanup diagnostic sink failed", diagnosticError); }
+      }
       coordinatorRuntime = undefined;
       if (workspaceService && workspaceRootSessionId) {
         unbindManagedWorkspaceServiceSession(pi, workspaceRootSessionId, workspaceService);
@@ -460,13 +480,15 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         workspaceRootSessionId = undefined;
         workspaceLifecycleSessionId = undefined;
       }
-      if (!brokerStarted || !broker) return;
-      if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
-      else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
-      previousBrokerMarker = undefined;
-      broker = undefined;
-      brokerStarted = false;
-      brokerReady = false;
+      if (brokerStarted && broker) {
+        if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
+        else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
+        previousBrokerMarker = undefined;
+        broker = undefined;
+        brokerStarted = false;
+        brokerReady = false;
+      }
+      if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "subagent runtime cleanup failed", { cause: cleanupErrors[0] });
     },
     renderSubagentCall,
     renderSubagentResult,

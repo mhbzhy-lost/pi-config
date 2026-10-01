@@ -1143,7 +1143,29 @@ function controlFailure(code, receipt = undefined) {
   };
 }
 
-async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId) {
+function reportSupervisorDiagnostic(diagnosticSink, entry) {
+  if (typeof diagnosticSink !== "function") return;
+  try { diagnosticSink(entry); } catch (diagnosticError) {
+    console.error("[typed-subagent-supervisor] diagnostic sink failed", diagnosticError);
+  }
+}
+
+async function compensateSupervisorDelivery({ supervisorControlPlane, intent, hostRootSessionId, code, primaryError, diagnosticSink, phase }) {
+  try {
+    const result = await supervisorControlPlane.commitDelivery({ intent, success: false, code }, hostRootSessionId);
+    if (result?.status !== "committed") {
+      const compensationError = Object.assign(new Error(`supervisor delivery compensation blocked: ${result?.code ?? "unknown"}`), { code: result?.code ?? "SUPERVISOR_DELIVERY_COMPENSATION_BLOCKED", receipt: result?.receipt });
+      reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-delivery-compensation-failed", deliveryPhase: phase, error: primaryError, cause: primaryError?.cause, secondaryError: compensationError, compensation: result });
+      return compensationError;
+    }
+    return undefined;
+  } catch (compensationError) {
+    reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-delivery-compensation-failed", deliveryPhase: phase, error: primaryError, cause: primaryError?.cause, secondaryError: compensationError });
+    return compensationError;
+  }
+}
+
+async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink) {
 
   if (!CONTROL_ACTIONS.has(input.action)) {
     return failure("UNSUPPORTED_ACTION", `unsupported subagent RPC action: ${String(input.action)}`);
@@ -1204,15 +1226,15 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
         if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);
         return rpcResult(result);
       } catch (error) {
-        await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_STEER_DELIVERY_FAILED" }, hostRootSessionId);
-        throw error;
+        const compensationError = await compensateSupervisorDelivery({ supervisorControlPlane, intent: decision.intent, hostRootSessionId, code: "SUPERVISOR_STEER_DELIVERY_FAILED", primaryError: error, diagnosticSink, phase: "steer" });
+        throw compensationError ? new AggregateError([error, compensationError], "supervisor steer delivery and compensation failed", { cause: error }) : error;
       }
     }
   }
   return rpcResult(await rpc[action](params));
 }
 
-function createControlledSupervisorAdapter(adapter, supervisorControlPlane, registrationFailures, resolveRootSessionId) {
+function createControlledSupervisorAdapter(adapter, supervisorControlPlane, registrationFailures, resolveRootSessionId, diagnosticSink) {
   if (!supervisorControlPlane) return adapter;
   return Object.freeze({
     bind: (...args) => adapter.bind(...args), dispose: () => adapter.dispose?.(), isBound: () => adapter.isBound?.(),
@@ -1248,8 +1270,8 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
 
         return committed.status === "committed" ? result : controlFailure(committed.code, committed.receipt);
       } catch (error) {
-        await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_REPLY_DELIVERY_FAILED" }, hostRootSessionId);
-        throw error;
+        const compensationError = await compensateSupervisorDelivery({ supervisorControlPlane, intent: decision.intent, hostRootSessionId, code: "SUPERVISOR_REPLY_DELIVERY_FAILED", primaryError: error, diagnosticSink, phase: "reply" });
+        throw compensationError ? new AggregateError([error, compensationError], "supervisor reply delivery and compensation failed", { cause: error }) : error;
       }
     },
   });
@@ -1541,7 +1563,7 @@ export function createTypedSubagentExtension(
           return result;
         }
         if (Object.hasOwn(input, "action")) {
-          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId);
+          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink);
           trace("tool-returned");
           return result;
         }
@@ -1577,7 +1599,7 @@ export function createTypedSubagentExtension(
     renderResult: renderWorkspaceResult,
   });
   const registrationFailures = new Map<string, string>();
-  const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane, registrationFailures, resolveRootSessionId) : undefined;
+  const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane, registrationFailures, resolveRootSessionId, diagnosticSink) : undefined;
   const supervisorTool = controlledSupervisorAdapter ? createSupervisorTool(controlledSupervisorAdapter, {
     renderCall: renderSupervisorCall,
     renderResult: renderSupervisorResult,
@@ -1599,17 +1621,16 @@ export function createTypedSubagentExtension(
             let hostRootSessionId;
             try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* non-workspace registration fails closed without Host identity. */ }
             result = await supervisorControlPlane.registerSupervisorRequest(message.details, hostRootSessionId);
-          } catch {
+          } catch (error) {
             result = { status: "blocked", code: "SUPERVISOR_REQUEST_REGISTRATION_FAILED" };
+            result.error = error;
           }
           const requestId = message.details?.id;
           if (result?.status !== "registered") {
             const errorCode = result?.code ?? "SUPERVISOR_REQUEST_REGISTRATION_FAILED";
             if (typeof requestId === "string") registrationFailures.set(requestId, errorCode);
             const details = { code: errorCode, requestId, runId: message.details?.runId };
-            if (typeof diagnosticSink === "function") {
-              try { diagnosticSink({ version: 1, phase: "supervisor-registration-failed", errorCode, ...details }); } catch { /* 诊断输出不得改变派发结果。 */ }
-            }
+            reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-registration-failed", errorCode, ...details, ...(result?.error ? { error: result.error, cause: result.error?.cause } : {}) });
             pi.sendMessage({ customType: "subagent_supervisor_registration_failed", content: `Supervisor request ${requestId ?? "(missing id)"} was not registered (${errorCode}). Reply is unavailable; interrupt the run and resume it to recover.`, details });
           } else if (typeof requestId === "string") {
             registrationFailures.delete(requestId);

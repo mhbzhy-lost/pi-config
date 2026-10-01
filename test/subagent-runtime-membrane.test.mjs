@@ -1988,10 +1988,60 @@ for (const scenario of [
     assert.equal(diagnostics.at(-1)?.phase, "supervisor-registration-failed");
     assert.equal(diagnostics.at(-1)?.errorCode, scenario.code);
     assert.equal(diagnostics.at(-1)?.requestId, "request-1");
+    if (scenario.throws) assert.equal(diagnostics.at(-1)?.error?.message, "registration storage failed");
     assert.equal(pi.messages.at(-1)?.details?.code, scenario.code, "parent must see failed registration without first trying reply");
     assert.equal(nativeCalls, 0);
   });
 }
+
+test("supervisor control plane diagnoses owner and runtime read failures without changing fail-closed states", async () => {
+  const diagnostics = [];
+  const ownerError = Object.assign(new Error("owner storage unavailable"), { code: "authority_store_unavailable", cause: new Error("disk offline") });
+  const runtimeError = Object.assign(new Error("runtime lookup unavailable"), { code: "RUNTIME_READ_FAILED" });
+  const plane = createSupervisorControlPlane({
+    readOwnerReceipt: async () => { throw ownerError; },
+    readRuntime: async () => { throw runtimeError; },
+    diagnosticSink: (entry) => diagnostics.push(entry),
+  });
+  const identity = await plane.identityForRun("run-diagnostic-1");
+  assert.equal(identity.ownerState, "unavailable");
+  assert.equal(identity.runtime, undefined);
+  assert.equal(diagnostics.find((entry) => entry.phase === "supervisor-owner-read-failed")?.error, ownerError);
+  assert.equal(diagnostics.find((entry) => entry.phase === "supervisor-runtime-read-failed")?.error, runtimeError);
+  assert.equal(diagnostics.find((entry) => entry.phase === "supervisor-owner-read-failed")?.cause, ownerError.cause);
+});
+
+test("supervisor delivery compensation preserves the primary error and diagnoses a blocked compensation", async () => {
+  const pi = createPi();
+  const diagnostics = [];
+  const primary = new Error("native delivery failed");
+  const compensation = new Error("durable compensation unavailable");
+  const realPlane = createSupervisorControlPlane({
+    readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }),
+    readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 1, running: true, steerable: true }),
+    randomId: () => "compensation-receipt",
+  });
+  const plane = {
+    ...realPlane,
+    async commitDelivery(input, root) {
+      if (input.success === false) throw compensation;
+      return realPlane.commitDelivery(input, root);
+    },
+  };
+  const adapter = createSupervisorAdapter();
+  adapter.bind(async () => { throw primary; });
+  createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore: {}, supervisorAdapter: adapter, supervisorControlPlane: plane, diagnosticSink: (entry) => diagnostics.push(entry) });
+  const ctxWithSession = { ...ctx, sessionManager: { getSessionId: () => "root-1" } };
+  await pi.handlers.get("message_end")[0]({ message: { customType: "subagent_supervisor_request", details: { id: "compensation-request", runId: "run-compensation", reason: "approve" } } }, ctxWithSession);
+  await assert.rejects(
+    () => pi.tools[2].execute("reply-compensation", { action: "reply", replyTo: "compensation-request", message: "approved" }, signal, undefined, ctxWithSession),
+    (error) => error instanceof AggregateError && error.cause === primary && error.errors.includes(primary) && error.errors.includes(compensation),
+  );
+  const diagnostic = diagnostics.find((entry) => entry.phase === "supervisor-delivery-compensation-failed");
+  assert.equal(diagnostic?.error, primary);
+  assert.equal(diagnostic?.cause, primary.cause);
+  assert.equal(diagnostic?.secondaryError, compensation);
+});
 
 test("supervisor control plane fails closed for stale owners, expired requests, and non-running steers", async () => {
   async function createScenario({ now = () => 1_000, readOwnerReceipt, readRuntime } = {}) {
