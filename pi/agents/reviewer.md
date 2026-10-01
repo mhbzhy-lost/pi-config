@@ -5,7 +5,7 @@ models:
   - codex-pool/gpt-6-astra
   - openai-codex/gpt-6-astra
   - codex-pool/gpt-6-sol
-  - qoder-pool/GLM-5.3-0.6x
+  - qoder-pool/GLM-5.3
   - zai-coding-cn/glm-5.3
 thinking: xhigh
 tools: read,grep,find,ls,bash
