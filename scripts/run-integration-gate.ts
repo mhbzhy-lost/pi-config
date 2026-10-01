@@ -20,7 +20,7 @@ const EXCLUDED_INTEGRATION_FILES = new Map([
   ["subagent-auto-integration-resumed-child.integration.mjs",
     "DIAGNOSED-UPSTREAM: 根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空→挂起；非 merge 引入，修复归属 upstream，见 docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md"],
   ["session-owner-runtime.integration.mjs",
-    "DIAGNOSED-FIXTURE: 3 个 -c PTY 用例为负载/冷启动时序脆弱（2 个独跑通过，SIGKILL 接管超 60s 预算）；守卫/ESRCH 逻辑正确、非 merge 引入（merge 仅附加审计日志），见 var/upgrade/t8-session-owner-pty-diagnosis.md"],
+    "PENDING-ADJUDICATION: 同一 repo-local 0.87.1、同一空闲串行条件下 5 次中 2 次首 owner 仅为 pending、3 次达 active；失败时 session_start fail-closed warning 出现，但既有 owner provenance 与 lifecycle.start 内层异常尚未证实；原始输出/trace/registry snapshot/env 见 var/upgrade/t8-repeat-*，详见 var/upgrade/t8-root-cause.md"],
 ]);
 
 /** 纯选择逻辑：integration 文件全集 − 显式排除表，排序输出（供单测消费）。 */
