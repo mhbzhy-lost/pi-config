@@ -18,7 +18,7 @@ const EXCLUDED_INTEGRATION_FILES = new Map([
   ["pi-subagents-runtime.integration.mjs",
     "WIRED-ELSEWHERE: 已由 test:subagents script 维护验收；当前已知 3/5（attention 双测受 supervisor 桥接升级决策项 #3 影响，child 侧行为已实证正确，见 var/upgrade/final-gate-report.md）"],
   ["subagent-auto-integration-resumed-child.integration.mjs",
-    "DIAGNOSED-UPSTREAM: 根因为 upstream pi-subagents@0.71 runs.run leaf→step 丢弃 subagentOnlyExtensions，child 不加载 integration-queue 扩展→队列恒空→挂起；非 merge 引入，修复归属 upstream，见 docs/bugs/2026-09-30-resumed-child-integration-extension-propagation.md"],
+    "DIAGNOSED-UPSTREAM: A/B root Host 0.85.1/0.87.1 均挂起（var/upgrade/t7-ab/global-085.tap.log、local-087.tap.log；两组 runs/*/status.json configured/required=[]）；root Host 版本错配已排除为单独致因。pi-subagents@0.71.0 runs/foreground/subagent-executor.js:2938-3002 未将请求级 subagentOnlyExtensions 传入 executeAsyncSingle，child 无 integration-queue 扩展、admission 恒未发生；待上游字段传播修复，见 var/upgrade/t7-ab-experiment.md"],
   ["session-owner-runtime.integration.mjs",
     "DIAGNOSED-PRODUCTION: repo-local 0.87.1 串行 PTY 5 次中 3 次 lifecycle.start 在 registry.ts:153 因 registry guard is invalid 失败；真实 launcher / Host / registry 入口触发 guard 读写竞争，仍 fail closed；未修根因，见 var/upgrade/t8-provenance-report.md 与 t8-observed-*.trace.json"],
 ]);
