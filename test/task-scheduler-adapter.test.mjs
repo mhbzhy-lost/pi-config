@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 const execFileAsync = promisify(execFile);
 import * as schedulerAdapter from "../src/task-scheduler/adapter.ts";
+import taskSchedulerExtension from "../pi/extensions/task-scheduler.ts";
 const { registerTaskSchedulerAdapter, repositoryDataDir } = schedulerAdapter;
 
 // A local factory exercises the membrane directly, without creating scheduler state or timers.
@@ -27,6 +28,87 @@ function makeHost() {
 let sessionNumber = 0;
 const ctx = (cwd, confirm = async () => true) => { const sessionId = `unique-session-${++sessionNumber}`; return { cwd, hasUI: true, sessionManager: { getSessionId: () => sessionId }, ui: { confirm, setStatus() {} } }; };
 const call = (tool, parameters, context) => tool.execute("id", parameters, new AbortController().signal, () => {}, context);
+
+test("recoverySource rejection remains asynchronous but reports its original cause independently", async () => {
+  const pi = makeHost(), logs = [], original = console.error;
+  const cause = new Error("source cause"), failure = new Error("source failure", { cause });
+  let callbacks = 0;
+  console.error = (...args) => logs.push(args);
+  try {
+    assert.doesNotThrow(() => taskSchedulerExtension(pi, { recoverySource: () => Promise.reject(failure), onRecoveryOutcome: () => callbacks++ }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(callbacks, 0, "no recovery result can be projected after source failure");
+    const diagnostics = logs.filter((args) => args[1] === failure);
+    assert.equal(diagnostics.length, 1, "the source rejection must not disappear without a callback or log");
+    assert.match(diagnostics[0][0], /task.scheduler.*recovery/i);
+    assert.equal(diagnostics[0][1].cause, cause);
+  } finally { console.error = original; }
+});
+
+test("synchronous recoverySource failure does not block registration and remains observable", async () => {
+  const pi = makeHost(), logs = [], original = console.error;
+  const cause = new Error("sync cause"), failure = new Error("sync failure", { cause });
+  console.error = (...args) => logs.push(args);
+  try {
+    assert.doesNotThrow(() => taskSchedulerExtension(pi, { recoverySource: () => { throw failure; } }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0][1], failure);
+    assert.equal(logs[0][1].cause, cause);
+  } finally { console.error = original; }
+});
+
+test("invalid consumeRecoveryOutcome keeps the original outcome rejected and reports validation error", async () => {
+  const pi = makeHost(), logs = [], original = console.error;
+  const outcome = Object.freeze({ kind: "rebound", runId: `bad-${randomUUID()}` });
+  let callbacks = 0;
+  console.error = (...args) => logs.push(args);
+  try {
+    assert.doesNotThrow(() => taskSchedulerExtension(pi, { recoverySource: () => outcome, onRecoveryOutcome: () => callbacks++ }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(callbacks, 0, "invalid outcomes must stay fail-closed");
+    assert.deepEqual(outcome, { kind: "rebound", runId: outcome.runId });
+    assert.equal(logs.length, 1);
+    assert.match(logs[0][0], /consumeRecoveryOutcome/);
+    assert.match(logs[0][1].message, /ownerReceiptId/);
+  } finally { console.error = original; }
+});
+
+test("onRecoveryOutcome failure preserves the projected outcome and reports its original cause", async () => {
+  const pi = makeHost(), logs = [], original = console.error;
+  const outcome = Object.freeze({ kind: "debt", runId: `callback-${randomUUID()}`, debtId: "debt-1" });
+  const cause = new Error("callback cause"), failure = new Error("callback failure", { cause });
+  let observed;
+  console.error = (...args) => logs.push(args);
+  try {
+    assert.doesNotThrow(() => taskSchedulerExtension(pi, { recoverySource: () => outcome, onRecoveryOutcome: (result) => { observed = result; throw failure; } }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(observed.outcome, outcome);
+    assert.equal(observed.duplicate, false);
+    assert.deepEqual(outcome, { kind: "debt", runId: outcome.runId, debtId: "debt-1" });
+    assert.equal(logs.length, 1);
+    assert.match(logs[0][0], /onRecoveryOutcome/);
+    assert.equal(logs[0][1], failure);
+    assert.equal(logs[0][1].cause, cause);
+  } finally { console.error = original; }
+});
+
+test("failed recovery diagnostic retains both errors through a separate non-blocking warning", async () => {
+  const pi = makeHost(), originalLog = console.error, originalWarning = process.emitWarning;
+  const warnings = [], root = new Error("root cause"), failure = new Error("recovery failed", { cause: root });
+  const diagnosticError = new Error("stderr unavailable");
+  console.error = () => { throw diagnosticError; };
+  process.emitWarning = (warning) => { warnings.push(warning); };
+  try {
+    assert.doesNotThrow(() => taskSchedulerExtension(pi, { recoverySource: () => Promise.reject(failure) }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].cause, failure);
+    assert.equal(warnings[0].errors[0], failure);
+    assert.equal(warnings[0].errors[0].cause, root);
+    assert.equal(warnings[0].errors[1], diagnosticError);
+  } finally { console.error = originalLog; process.emitWarning = originalWarning; }
+});
 
 test("consumeRecoveryOutcome freezes P4-shaped outcomes, dedupes run IDs, and never operates the scheduler", () => {
   const runId = `recovery-${randomUUID()}`;

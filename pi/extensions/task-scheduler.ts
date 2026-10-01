@@ -11,9 +11,18 @@ export type SchedulerRecoveryBridge = {
 export default function taskSchedulerExtension(pi: ExtensionAPI, bridge: SchedulerRecoveryBridge = {}): void {
   registerTaskSchedulerAdapter(pi);
   if (typeof bridge.recoverySource === "function") {
-    void Promise.resolve(bridge.recoverySource()).then((outcome) => {
+    let phase = "recoverySource";
+    void Promise.resolve().then(() => bridge.recoverySource!()).then((outcome) => {
+      phase = "consumeRecoveryOutcome";
       const result = consumeRecoveryOutcome(outcome);
+      phase = "onRecoveryOutcome";
       bridge.onRecoveryOutcome?.(result);
-    }).catch(() => undefined);
+    }).catch((error) => {
+      try {
+        console.error(`[task-scheduler recovery] ${phase} failed`, error);
+      } catch (diagnosticError) {
+        process.emitWarning(new AggregateError([error, diagnosticError], `task-scheduler recovery diagnostic failed (${phase})`, { cause: error }));
+      }
+    });
   }
 }

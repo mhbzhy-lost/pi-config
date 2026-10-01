@@ -76,9 +76,14 @@ const FORBIDDEN_LOCAL_PI_PEERS = [
 async function readIfExists(path) {
   try {
     return await readFile(path, "utf8");
-  } catch {
-    return null;
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
   }
+}
+
+function unreadableIssue(label, error) {
+  return Object.assign(new Error(`unreadable ${label}: ${error.message}`, { cause: error }), { code: "DOCTOR_UNREADABLE" });
 }
 
 function packageSource(entry) {
@@ -245,8 +250,13 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     }
   }
 
-  const settingsSource = await readIfExists(join(repoRoot, "pi", "settings.json"));
+  let settingsSource;
   try {
+    settingsSource = await readIfExists(join(repoRoot, "pi", "settings.json"));
+  } catch (error) {
+    issues.push(unreadableIssue("pi/settings.json", error));
+  }
+  if (settingsSource !== undefined) try {
     const settings = JSON.parse(settingsSource ?? "{}");
     const sources = (settings?.packages ?? []).map(packageSource);
     if (sources.filter((source) => source === ENHANCED_SUBAGENTS_SOURCE).length !== 1) issues.push("pi-subagents-enhanced local package source must be uniquely configured");
@@ -263,7 +273,9 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     try {
       await access(join(repoRoot, legacy));
       issues.push(`duplicate auto-discovered subagent entry still exists: ${legacy}`);
-    } catch {}
+    } catch (error) {
+      if (error?.code !== "ENOENT") issues.push(unreadableIssue(`legacy subagent entry: ${legacy}`, error));
+    }
   }
 
   for (const relativeComponent of ROOT_BROKER_COMPONENTS) {
@@ -284,27 +296,37 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     issues.push(`unexpected basic-memory version: ${bmVersion}; expected ${BASIC_MEMORY_VERSION}`);
   }
 
-  const gitignore = await readIfExists(join(repoRoot, ".gitignore"));
-  if (!gitignore?.split(/\r?\n/).includes("/var/")) issues.push("runtime namespace is not ignored: /var/");
+  try {
+    const gitignore = await readIfExists(join(repoRoot, ".gitignore"));
+    if (!gitignore?.split(/\r?\n/).includes("/var/")) issues.push("runtime namespace is not ignored: /var/");
+  } catch (error) {
+    issues.push(unreadableIssue(".gitignore", error));
+  }
 
   for (const legacy of LEGACY_TASK7_FILES) {
     try {
       await access(join(repoRoot, legacy));
       issues.push(`legacy Task 7 runtime still exists: ${legacy}`);
-    } catch {}
+    } catch (error) {
+      if (error?.code !== "ENOENT") issues.push(unreadableIssue(`legacy Task 7 runtime: ${legacy}`, error));
+    }
   }
 
   for (const legacy of LEGACY_RUNTIME_FILES) {
     try {
       await access(join(repoRoot, legacy));
       issues.push(`legacy generic subagent runtime still exists: ${legacy}`);
-    } catch {}
+    } catch (error) {
+      if (error?.code !== "ENOENT") issues.push(unreadableIssue(`legacy generic subagent runtime: ${legacy}`, error));
+    }
   }
 
   try {
     await access(join(repoRoot, "pi", "skills"));
     issues.push(`unexpected auto-discovery directory: ${join(repoRoot, "pi", "skills")}`);
-  } catch {}
+  } catch (error) {
+    if (error?.code !== "ENOENT") issues.push(unreadableIssue("pi/skills auto-discovery directory", error));
+  }
 
   const enhancedPackageRoot = join(repoRoot, "packages", "pi-subagents-enhanced");
   const enhancedPackagePath = join(enhancedPackageRoot, "package.json");
@@ -357,15 +379,19 @@ export async function inspectConfiguration(repoRoot, options = {}) {
       } catch (error) {
         issues.push(`pi-subagents RPC probe failed: ${error.message}`);
       }
-      const rpcSource = await resolveRpcSource(packageRoot);
-      if (!rpcSource) {
-        issues.push("pi-subagents RPC v1 source is unavailable");
-      } else {
-        for (const method of REQUIRED_RPC_METHODS) {
-          if (!new RegExp(`(?:^|[\\s,\\[])['\"]${method}['\"](?:[\\s,\\]]|$)`).test(rpcSource)) {
-            issues.push(`pi-subagents RPC v1 method missing: ${method}`);
+      try {
+        const rpcSource = await resolveRpcSource(packageRoot);
+        if (!rpcSource) {
+          issues.push("pi-subagents RPC v1 source is unavailable");
+        } else {
+          for (const method of REQUIRED_RPC_METHODS) {
+            if (!new RegExp(`(?:^|[\\s,\\[])['\"]${method}['\"](?:[\\s,\\]]|$)`).test(rpcSource)) {
+              issues.push(`pi-subagents RPC v1 method missing: ${method}`);
+            }
           }
         }
+      } catch (error) {
+        issues.push(unreadableIssue("pi-subagents RPC v1 source", error));
       }
       // ordered-models patch 已随升级退役（T6）：等价校验由 verify-package 的
       // 原包受控比较承担，此处不再存在独立 patch 检查项。
