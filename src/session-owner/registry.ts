@@ -6,8 +6,10 @@ import {
   fstatSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   readdirSync,
   realpathSync,
@@ -62,9 +64,10 @@ export function createRegistryStore(root = join(process.env.XDG_RUNTIME_DIR ?? p
   return Object.freeze({ root: resolve(root), guardTimeoutMs });
 }
 
-function unavailable(message: string): Error {
-  const error = new Error(message) as Error & { code?: string };
+function unavailable(message: string, cause?: unknown, details?: unknown): Error {
+  const error = new Error(message, cause === undefined ? undefined : { cause }) as Error & { code?: string; details?: unknown };
   error.code = "REGISTRY_UNAVAILABLE";
+  if (details !== undefined) error.details = details;
   return error;
 }
 
@@ -121,6 +124,16 @@ function writePrivate(path: string, value: unknown): void {
   chmodSync(path, 0o600);
 }
 
+function publishExclusivePrivate(path: string, value: unknown): void {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writePrivate(temporary, value);
+    linkSync(temporary, path);
+  } finally {
+    try { unlinkSync(temporary); } catch { /* temp 已发布或由异常清理。 */ }
+  }
+}
+
 function recordPath(store: RegistryStore, ownerId: string): string {
   if (!OWNER_ID.test(ownerId) || ownerId.includes("..")) throw unavailable("owner id is invalid");
   return join(store.root, `${ownerId}.json`);
@@ -139,18 +152,37 @@ function isDead(pid: unknown): boolean {
 
 function guardPath(store: RegistryStore): string { return join(store.root, ".guard"); }
 
+function guardSnapshot(store: RegistryStore): Record<string, unknown> {
+  const path = guardPath(store);
+  try {
+    const info = lstatSync(path);
+    let content: string | null = null;
+    try { content = readFileSync(path, "utf8"); } catch (error) { content = `[read failed: ${(error as Error).message}]`; }
+    let parsed: unknown = null;
+    let parseError: string | null = null;
+    try { parsed = JSON.parse(content); } catch (error) { parseError = (error as Error).message; }
+    return { exists: true, isFile: info.isFile(), mode: info.mode & 0o777, size: info.size, mtimeMs: info.mtimeMs, content, parsed, parseError };
+  } catch (error) {
+    return { exists: false, error: (error as Error).message };
+  }
+}
+
 function acquireGuard(store: RegistryStore): Guard {
   ensureRoot(store);
   const guard = { protocol: GUARD_PROTOCOL, pid: process.pid, token: randomUUID() };
   const deadline = Date.now() + store.guardTimeoutMs;
   for (;;) {
-    try { writePrivate(guardPath(store), guard); return { pid: guard.pid, token: guard.token }; }
+    try { publishExclusivePrivate(guardPath(store), guard); return { pid: guard.pid, token: guard.token }; }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw unavailable("cannot create registry guard");
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw unavailable("cannot create registry guard", error, guardSnapshot(store));
     }
     let observed: any;
     try { observed = privateJson(store, guardPath(store), "registry guard"); }
-    catch { throw unavailable("registry guard is invalid"); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" && Date.now() < deadline) continue;
+      throw unavailable("registry guard is invalid", error, guardSnapshot(store));
+    }
     // 共享 guard 陈旧或损坏时只能人工确认后恢复，当前进程绝不能删除它。
     if (Date.now() >= deadline) throw busy("registry guard is held; inspect and remove .guard manually after verifying its owner");
   }
@@ -161,7 +193,7 @@ function releaseGuard(store: RegistryStore, guard: Guard): void {
     const observed: any = privateJson(store, guardPath(store), "registry guard");
     if (observed?.protocol === GUARD_PROTOCOL && observed.pid === guard.pid && observed.token === guard.token) unlinkSync(guardPath(store));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw unavailable("cannot release registry guard");
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw unavailable("cannot release registry guard", error, guardSnapshot(store));
   }
 }
 
@@ -266,6 +298,7 @@ export async function prepareLaunch(input: PrepareLaunchInput): Promise<PrepareL
       return { decision: "allow", record, recordPath: publishLocked(input.store, record) };
     });
   } catch (error) {
+    console.error("[session-owner] registry prepare failed:", error);
     return { decision: "blocked", reason: (error as { code?: string }).code === "REGISTRY_BUSY" ? "registry-busy" : "registry-unavailable" };
   }
 }

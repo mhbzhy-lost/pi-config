@@ -48,7 +48,7 @@ export function createSessionOwnerLifecycle(deps: SessionOwnerLifecycleDeps) {
       const identity = canonical(value);
       const own = (await list(deps.store)).find((record) => owns(record, deps));
       return !own || own.state !== "active" || !matches(own, identity);
-    } catch { return true; }
+    } catch (error) { console.error("[session-owner] source availability check failed:", error); return true; }
   }
   async function beforeSwitch(reason: "new" | "resume", targetSessionFile: string | undefined, value: SessionIdentity): Promise<boolean> {
     if (await sourceIsUnavailable(value)) return true;
@@ -58,14 +58,14 @@ export function createSessionOwnerLifecycle(deps: SessionOwnerLifecycleDeps) {
       const source = canonical(value);
       const target = canonical({ ...source, sessionId: null, sessionFile: targetSessionFile });
       return (await list(deps.store)).some((record) => !owns(record, deps) && matches(record, target));
-    } catch { return true; }
+    } catch (error) { console.error("[session-owner] session switch guard failed:", error); return true; }
   }
   async function beforeFork(value: SessionIdentity): Promise<boolean> {
     if (await sourceIsUnavailable(value)) return true;
     try {
       const identity = canonical(value);
       return (await list(deps.store)).some((record) => !owns(record, deps) && matches(record, identity));
-    } catch { return true; }
+    } catch (error) { console.error("[session-owner] session fork guard failed:", error); return true; }
   }
   async function shutdown(reason: "quit" | "reload" | "new" | "resume" | "fork", value: SessionIdentity): Promise<void> {
     if (reason === "reload") return;
