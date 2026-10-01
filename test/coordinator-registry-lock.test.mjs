@@ -98,6 +98,14 @@ test("无 owner 数据的旧格式 lock 仍按 TTL 兜底回收（向后兼容�
   const metadata = await registry.claim({ repositoryId: f.repositoryId });
   assert.match(metadata.instanceId, /^[a-f0-9]{32}$/);
   t.after(() => registry.release().catch(() => undefined));
+  const malformed = await fixture(t);
+  const malformedLock = lockPathOf(malformed);
+  await mkdir(join(malformed.commonDir, ".pi-coordinator"), { recursive: true });
+  await writeFile(malformedLock, JSON.stringify({ pid: process.pid, birthIdentity: "invalid" }), { mode: 0o600 });
+  await utimes(malformedLock, past, past);
+  const malformedRegistry = createCoordinatorRegistry({ commonDir: malformed.commonDir, stateRoot: malformed.stateRoot });
+  assert.match((await malformedRegistry.claim({ repositoryId: malformed.repositoryId })).instanceId, /^[a-f0-9]{32}$/);
+  t.after(() => malformedRegistry.release().catch(() => undefined));
 });
 
 test("无 owner 数据的新 lock（TTL 内）不被回收", async (t) => {
@@ -113,4 +121,16 @@ test("无 owner 数据的新 lock（TTL 内）不被回收", async (t) => {
   await rm(lock, { force: true });
   await racing;
   t.after(() => registry.release().catch(() => undefined));
+
+  const malformed = await fixture(t);
+  const malformedLock = lockPathOf(malformed);
+  await mkdir(join(malformed.commonDir, ".pi-coordinator"), { recursive: true });
+  await writeFile(malformedLock, JSON.stringify({ pid: process.pid, birthIdentity: "invalid" }), { mode: 0o600 });
+  const malformedRegistry = createCoordinatorRegistry({ commonDir: malformed.commonDir, stateRoot: malformed.stateRoot });
+  const pending = malformedRegistry.claim({ repositoryId: malformed.repositoryId });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal((await stat(malformedLock)).isFile(), true, "TTL 内格式非法的旧 lock 不得误判 mismatch 而删除");
+  await rm(malformedLock, { force: true });
+  await pending;
+  t.after(() => malformedRegistry.release().catch(() => undefined));
 });
