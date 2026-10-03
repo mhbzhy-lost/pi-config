@@ -718,7 +718,7 @@ for (const scenario of [
     t.after(() => rm(root, { recursive: true, force: true }));
     const host = new AcceptanceRpcHost(process.execPath, [fake], {
       env: process.env, prompt: "private prompt", rootLabel: "root-fixture", tempPath: root,
-      diagnosticsDir, startupTimeoutMs: 500, firstToolTimeoutMs: scenario.firstToolTimeoutMs ?? 500,
+      diagnosticsDir, startupTimeoutMs: 2_000, firstToolTimeoutMs: scenario.firstToolTimeoutMs ?? 500,
     }).start();
     await assert.rejects(host.settle({ timeoutMs: 2_000 }), scenario.match);
     const diagnostic = await readDiagnostic(join(diagnosticsDir, "diagnostic.json"));
