@@ -80,6 +80,16 @@ test("hashes complete untrimmed ps stdout bytes", async (t) => {
   assert.equal(identity, createHash("sha256").update(stdout).digest("hex"));
 });
 
+test("rejects non-empty but unparseable ps output without producing an identity", async (t) => {
+  const captureProcessBirthIdentity = captureForTest(t, async () => "0".repeat(64));
+  for (const stdout of [Buffer.from("garbage", "utf8"), Buffer.from("Tue Jul 29 12:34", "utf8")]) {
+    await assert.rejects(
+      captureProcessBirthIdentity(123, { execFile: async () => ({ stdout }) }),
+      expectCode("PROCESS_BIRTH_IDENTITY_OUTPUT_INVALID"),
+    );
+  }
+});
+
 test("fails closed without a hash when ps stdout is empty or whitespace", async (t) => {
   const captureProcessBirthIdentity = captureForTest(t, async () => "0".repeat(64));
   for (const stdout of [Buffer.alloc(0), Buffer.from(" \t\n", "utf8")]) {

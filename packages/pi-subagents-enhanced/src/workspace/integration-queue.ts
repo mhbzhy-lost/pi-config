@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { createCoordinatorLedger } from "./coordinator-ledger.ts";
+import { assertProcessBirthOutput } from "../subagent-dispatch/process-birth-identity.ts";
 import { createIntegrationResumeIntentV1, progressFingerprint } from "../subagent-dispatch/recovery-resume-contract.ts";
 
 export const INTEGRATION_QUEUE_RECORD_VERSION = "workspace-integration-queue-item.v1";
@@ -39,6 +40,11 @@ export function processAliveStatus(pid: number, birthIdentity: string): ProcessA
     if (!Buffer.isBuffer(observed) || observed.length === 0 || observed.toString("utf8").trim().length === 0) {
       const error = new Error("process birth identity output is unavailable");
       return { state: "undetermined", error };
+    }
+    try {
+      assertProcessBirthOutput(observed);
+    } catch (error: any) {
+      return { state: "undetermined", error, errno: error?.code };
     }
     const observedIdentity = createHash("sha256").update(observed).digest("hex");
     if (observedIdentity === birthIdentity) return { state: "alive" };
