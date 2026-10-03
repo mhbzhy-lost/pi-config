@@ -4,7 +4,7 @@ import path from "node:path";
 
 export class DurableStorageError extends Error {
   readonly code: string;
-  constructor(code: string, message = code) { super(message); this.code = code; }
+  constructor(code: string, message = code, options?: { cause?: unknown }) { super(message, options); this.code = code; }
 }
 export interface StoredValue<T = unknown> { revision: number; value: T; }
 const name = (value: string) => { if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value)) throw new DurableStorageError("DURABLE_STORAGE_NAME"); return value; };
@@ -17,7 +17,7 @@ export class DurableStorage {
     const file = this.file(key); await this.ensureRoot();
     let handle;
     try { handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW); const info = await handle.stat(); if (!info.isFile() || (info.mode & 0o077) !== 0) throw new DurableStorageError("DURABLE_STORAGE_PERMISSIONS"); const text = await handle.readFile("utf8"); const parsed = JSON.parse(text); if (!parsed || !Number.isSafeInteger(parsed.revision) || parsed.revision < 1 || !Object.hasOwn(parsed, "value")) throw new Error("invalid"); return { revision: parsed.revision, value: parsed.value as T }; }
-    catch (error: any) { if (error?.code === "ENOENT") return null; if (error instanceof DurableStorageError) throw error; throw new DurableStorageError("DURABLE_STORAGE_CORRUPT"); }
+    catch (error: any) { if (error?.code === "ENOENT") return null; if (error instanceof DurableStorageError) throw error; throw new DurableStorageError("DURABLE_STORAGE_CORRUPT", "DURABLE_STORAGE_CORRUPT", { cause: error }); }
     finally { await handle?.close(); }
   }
   async acquireLock(key: string): Promise<() => Promise<void>> {
@@ -27,7 +27,7 @@ export class DurableStorage {
       if (error?.code !== "EEXIST") throw error;
       const info = await stat(lock); if (Date.now() - info.mtimeMs <= this.staleLockMs) throw new DurableStorageError("DURABLE_LOCK_HELD");
       const quarantine = `${lock}.quarantine-${Date.now()}-${randomUUID()}`;
-      try { await rename(lock, quarantine); } catch { throw new DurableStorageError("DURABLE_LOCK_UNPROVEN"); }
+      try { await rename(lock, quarantine); } catch (cause) { throw new DurableStorageError("DURABLE_LOCK_UNPROVEN", "DURABLE_LOCK_UNPROVEN", { cause }); }
       return this.acquireLock(key);
     }
     return async () => { try { const raw = JSON.parse(await readFile(lock, "utf8")); if (raw.owner === owner) await unlink(lock); } catch {} };

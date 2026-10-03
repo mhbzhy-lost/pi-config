@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { createRegistryStore, prepareLaunch } from "../src/session-owner/registry.ts";
+import { createRegistryStore, listLiveRecords, prepareLaunch } from "../src/session-owner/registry.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const launcher = join(repoRoot, "scripts", "pi-launcher.zsh");
 const decisionCli = join(repoRoot, "scripts", "pi-session-owner.ts");
+
+async function temporaryStore() {
+  return mkdtemp(join(tmpdir(), "pi-session-owner-guard-"));
+}
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-session-owner-wrapper-"));
@@ -55,6 +59,47 @@ async function runPrepare(args, env) {
   });
   return { result, decisionDir };
 }
+
+test("registry guard read failures retain the underlying cause for diagnosis", async () => {
+  const root = await temporaryStore();
+  try {
+    await writeFile(join(root, ".guard"), "{\"protocol\":\"pi-session-owner.guard.v1\",", { mode: 0o600 });
+    await assert.rejects(listLiveRecords(createRegistryStore(root)), (error) => {
+      assert.equal(error.message, "registry guard is invalid");
+      assert.equal(error.cause?.name, "SyntaxError");
+      assert.match(error.cause?.message ?? "", /JSON/);
+      return true;
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("concurrent create/read/release never exposes a partially written guard", async () => {
+  const root = await temporaryStore();
+  const registryUrl = new URL("../src/session-owner/registry.ts", import.meta.url).href;
+  const source = `import { listLiveRecords, prepareLaunch, releaseOwnRecord, createRegistryStore } from ${JSON.stringify(registryUrl)};
+const store = createRegistryStore(process.env.ROOT, 1000);
+for (let i = 0; i < 80; i++) {
+  const ownerId = \`race-\${process.pid}-\${i}-12345678\`;
+  const result = await prepareLaunch({ store, pid: process.pid, ownerId, startedAt: new Date().toISOString(), reservation: { kind: "new" } });
+  if (result.decision === "allow") await releaseOwnRecord({ store, ownerId, pid: process.pid });
+}
+`;
+  const children = Array.from({ length: 4 }, () => spawn(process.execPath, ["--input-type=module", "-e", source], { env: { ...process.env, ROOT: root }, stdio: ["ignore", "pipe", "pipe"] }));
+  const errors = [];
+  for (const child of children) { child.stderr.on("data", (chunk) => errors.push(chunk.toString())); }
+  const reads = [];
+  try {
+    for (let i = 0; i < 320; i++) {
+      try { reads.push(await listLiveRecords(createRegistryStore(root, 1000))); }
+      catch (error) { errors.push(String(error)); }
+    }
+    await Promise.all(children.map((child) => new Promise((resolve, reject) => {
+      child.once("error", reject); child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child exited ${code}`)));
+    })));
+    assert.deepEqual(errors, [], errors.join("\\n"));
+    assert.ok(reads.every((records) => Array.isArray(records)));
+  } finally { for (const child of children) child.kill("SIGKILL"); await rm(root, { recursive: true, force: true }); }
+});
 
 test("prepare requires an explicit verified Pi binary", async () => {
   const decisionDir = await mkdtemp(join(tmpdir(), "pi-session-owner-decision-"));

@@ -2,10 +2,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getMarkdownTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Key, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { loadConfig } from "../src/compat/pi-subagents-0.62.ts";
 import { browserTrustedRoots, readBrowserRunStatus, renderBrowserTranscript } from "../src/tui/browser-adapter.ts";
 import { NativeChildConversationRenderer } from "../src/tui/native-conversation.ts";
-import { SubagentSessionBrowserState } from "../src/tui/session-browser.ts";
+import { projectSessionStatus, SubagentSessionBrowserState } from "../src/tui/session-browser.ts";
 import { parseSgrWheelDirection, ReadOnlyBrowserEditor, SubagentTranscriptViewport } from "../src/tui/session-viewport.ts";
 import { layoutFooter } from "../src/tui/footer-layout.ts";
 import { getTitleRegistry } from "../src/subagent-dispatch/title-registry.ts";
@@ -32,6 +31,7 @@ function lifecycleGlyph(state: string | undefined, presentation?: string): strin
     case "stopped": return "■";
     case "runtime-failed": return "✗";
   }
+  if (projectSessionStatus(undefined, state).classification === "active") return "●";
   switch (state?.toLowerCase()) {
     case "queued":
     case "running":
@@ -420,11 +420,9 @@ export default function customFooter(pi: ExtensionAPI) {
     teardown(event?.reason === "reload");
     if (!nextCtx.hasUI) return;
     ctx = nextCtx;
+    // 0.71 config has no public read surface (contract §2.2, §4); keep the
+    // display projection on the package-owned project root by default.
     cachedArtifactDir = "project";
-    try {
-      const artifactDir = loadConfig().artifactDir;
-      if (artifactDir === "project" || artifactDir === "session" || artifactDir === "temp") cachedArtifactDir = artifactDir;
-    } catch {}
     try { cachedMarkdownTheme = getMarkdownTheme(); } catch { cachedMarkdownTheme = undefined; }
     nativeRenderer = new NativeChildConversationRenderer({
       resolveToolRenderer(name) {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PI_VERSION="0.85.1"
+PI_VERSION="0.87.1"
 PI_PACKAGE="@earendil-works/pi-coding-agent@$PI_VERSION"
 NPM_REGISTRY="https://registry.npmjs.org"
 BASIC_MEMORY_VERSION="0.22.1"
@@ -36,7 +36,7 @@ if [[ -n "$pi_binary" && -x "$pi_binary" ]]; then
   installed_version="$($pi_binary --version 2>/dev/null || true)"
 fi
 if [[ "$installed_version" != "$PI_VERSION" ]]; then
-  NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm --no-audit --no-fund install -g --ignore-scripts "$PI_PACKAGE"
+  NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund install -g --ignore-scripts "$PI_PACKAGE"
   pi_binary="${PI_REAL_BIN:-$(command -v pi || true)}"
 fi
 if [[ -z "$pi_binary" || ! -x "$pi_binary" ]]; then
@@ -44,7 +44,7 @@ if [[ -z "$pi_binary" || ! -x "$pi_binary" ]]; then
   exit 1
 fi
 
-NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" run setup:subagents-enhanced
+NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" run setup:subagents-enhanced
 
 node "$SCRIPT_DIR/scripts/sync-skills.ts"
 node "$SCRIPT_DIR/scripts/ensure-pi-settings.ts"
@@ -101,8 +101,13 @@ uv tool install --force "basic-memory==$BASIC_MEMORY_VERSION"
   npm test
   npm run doctor
   PI_REAL_BIN="$pi_binary" npm run test:integration
-  uv run --no-project --with httpx --with python-dotenv --with pyyaml \
-    python -m unittest discover -s skill-overrides/external-llm-review/tests
+  review_tests="$SCRIPT_DIR/skill-overrides/external-llm-review/tests"
+  if [[ -d "$review_tests" ]]; then
+    uv run --no-project --with httpx --with python-dotenv --with pyyaml \
+      python -m unittest discover -s "$review_tests"
+  else
+    printf "[info] external-llm-review tests directory is absent; no tests run\n"
+  fi
 )
 
 printf '[ok] Pi initialization complete\n'

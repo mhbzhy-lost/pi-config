@@ -6,12 +6,16 @@ import { createTypedSubagentExtension, preparePublicCodingDispatch } from "../pa
 import { childStartTimeoutMs } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/workflow-spawn.ts";
 import { compileCodingDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
 import { bindGoalRunCoordinator, bindGoalRunCoordinatorSession, unbindGoalRunCoordinatorSession } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts";
+import * as lifecycleModule from "../packages/pi-subagents-enhanced/src/workspace/child-integration-lifecycle.ts";
+import { createChildIntegrationLifecycle } from "../packages/pi-subagents-enhanced/src/workspace/child-integration-lifecycle.ts";
+import { createSupervisorControlPlane } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts";
 
 const contract = {
   title: "Bind durable spawn identity", agent: "executor",
   task: "Bind coding calls to durable identities. Preserve the exact contract.",
   writePaths: ["test/subagent-dispatch-extension.test.ts"],
   acceptance: { criteria: ["Identity is trusted."] }, cwd: "/repo",
+
 };
 
 function setup({ sessionId = "s" }: { sessionId?: string } = {}) {
@@ -110,6 +114,63 @@ function createTestExtension(pi: any, options: any) {
   });
 }
 
+test("T7 queued follow-up does not authorize B-stage disposition before child consumption", () => {
+  assert.deepEqual(lifecycleModule.terminalDispositionDecision({ state: "pending" }), {
+    allowed: false, code: "TERMINAL_PROOF_PENDING",
+  });
+});
+
+test("T7 follow-up receipt becomes delivered only after child consumption", async () => {
+  const plane = createSupervisorControlPlane({
+    readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }),
+    readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 2, running: true, steerable: true }),
+    randomId: () => "receipt-1",
+  });
+  await plane.registerSupervisorRequest({ id: "request-1", runId: "run-1", reason: "follow-up" });
+  const replyIntent = {
+    schemaVersion: "supervisor-control-intent.v1", intentId: "reply-intent", runId: "run-1", rootSessionId: "root-1",
+    ownerGeneration: 1, kind: "reply", payloadDigest: `sha256:${"b".repeat(64)}`,
+    requestId: "request-1", requestGeneration: 1,
+  } as const;
+  await plane.commitDelivery({ intent: replyIntent, consumed: true });
+  const intent = {
+    schemaVersion: "supervisor-control-intent.v1", intentId: "intent-1", runId: "run-1", rootSessionId: "root-1",
+    ownerGeneration: 1, kind: "steer", payloadDigest: `sha256:${"a".repeat(64)}`, liveRunEpoch: 2,
+  } as const;
+  const queued = await plane.commitDelivery({ intent, consumed: false });
+  assert.equal(queued.receipt.status, "queued");
+  const delivered = await plane.commitDelivery({ intent, consumed: true });
+  assert.equal(delivered.receipt.status, "delivered");
+});
+
+test("T7 conflict continuation remains awaited in agent_end and settled is observation-only", async () => {
+  const listeners = new Map<string, Function[]>();
+  const calls: string[] = [];
+  const pi = {
+    on(type: string, listener: Function) { const list = listeners.get(type) ?? []; list.push(listener); listeners.set(type, list); return () => {}; },
+    async sendMessage() { calls.push("follow-up"); },
+  };
+  let phase = 0;
+  const coordinator = {
+    async prepareAutoIntegration() { calls.push("prepare"); return { queueState: "resolving-conflict" }; },
+    async advanceAutoIntegration() { calls.push("advance"); phase++; return { queueState: "resolving-conflict", conflictDigest: `digest-${phase}` }; },
+  };
+  createChildIntegrationLifecycle({ pi, coordinator, key: "t7-conflict", pollDelayMs: 0, maxAdmissionPolls: 1 });
+  for (const listener of listeners.get("agent_settled") ?? []) await listener();
+  assert.deepEqual(calls, []);
+  for (const listener of listeners.get("agent_end") ?? []) await listener();
+  assert.deepEqual(calls, ["prepare", "advance", "follow-up"]);
+});
+
+test("T7 B-stage disposition is rejected before proof and released after durable proof", () => {
+  const pending = lifecycleModule.terminalDispositionDecision({ state: "pending" });
+  const proof = { state: "observed", conflict: false, runId: "run-1", rootSessionId: "root-1", asyncDir: "/tmp/run-1", processInstance: "proc-1", proofId: "a".repeat(64) };
+  const accepted = lifecycleModule.terminalDispositionDecision(proof);
+  assert.equal(pending.allowed, false);
+  assert.deepEqual(accepted, { allowed: true, proofId: proof.proofId });
+});
+
+
 async function assertCallerTimeoutRejected(name: string, input: any) {
   const { pi, rpc, calls, tools } = setup();
   let discoveries = 0;
@@ -139,6 +200,7 @@ test("coding object timeout is rejected before discovery, workspace allocation, 
 
 test("stringified coding execution timeout is rejected before discovery, workspace allocation, and RPC", async () => {
   await assertCallerTimeoutRejected("coding-string", { ...contract, timeoutMs: 1_000, worktree: true });
+
 });
 
 test("generic timeout is rejected before discovery, workspace allocation, and RPC", async () => {
@@ -172,6 +234,7 @@ test("caller timeout is rejected even with an active coordinator that issues no 
   assert.equal(result.details.code, "INVALID_CONTRACT");
   assert.equal(result.details.keypath, "timeoutMs");
   assert.equal(prepareSpawnCalls, 0, "invalid caller timeout must fail before coordinator preflight");
+
   assert.equal(discoveries, 0, "discovery");
   assert.equal(allocations, 0, "workspace allocation");
   assert.equal(rpcCalls, 0, "RPC");
@@ -188,7 +251,8 @@ test("Host owns coding execution timeout while generic workflow omits it", async
   }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(coding.isError, false, coding.content[0]?.text);
-  assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 30 * 60_000);
+
 });
 
 test("generic workflow omits execution timeout while the Host collector remains bounded", async () => {
@@ -265,11 +329,13 @@ test("coding spawn binds the Goal coordinator through a same-root different-Exte
 
 test("Goal trusted contract keeps a non-default caller timeout and canonical hash", async () => {
   const { pi, rpc, calls, tools } = setup();
+  const trustedTimeout = 45_000;
   const goalInput = {
     ...contract,
-    cwd: "/repo", worktree: true,
+    worktree: true,
   };
   const expectedHash = compileCodingDispatchIR(goalInput, { cwd: "/repo" }).contractHash;
+
   let preparedRequest: any;
   const workspaceService = {
     ensureAllocated(request: any) { preparedRequest = request; return workspaceReceipt(request); },
@@ -296,7 +362,8 @@ test("Goal trusted contract keeps a non-default caller timeout and canonical has
 
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.equal(result.details.contractHash, expectedHash);
-  assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 30 * 60_000);
+
 });
 
 test("Goal coding spawn allocates through the shared service in the exact four-stage order", async () => {
@@ -374,6 +441,7 @@ test("standalone coding worktree uses the same service and binds without Goal re
       assert.equal(request.owner.rootSessionId, "root-standalone");
       assert.equal(request.owner.toolCallId, "standalone-call");
       assert.equal(request.contractHash, preparePublicCodingDispatch({ ...contract, worktree: true }, { cwd: "/repo", timeoutMs: 30 * 60_000 }).contractHash);
+
       allocated = workspaceReceipt({ ...request, workspaceId: request.workspaceId });
       return allocated;
     },
@@ -419,6 +487,22 @@ test("standalone coding worktree uses the same service and binds without Goal re
     capabilities: ["root.subscribe"],
     goal: null,
   });
+});
+
+test("generic shared run registers owner authority without a managed worktree", async () => {
+  const { pi, rpc, tools } = setup({ sessionId: "root-generic-no-worktree" });
+  const registered: any[] = [];
+  createTestExtension(pi, { rpc, cleanupStore: {}, registerAuthorizedRun: (authorization: any) => registered.push(authorization) });
+  const result = await tools[0].execute("generic-no-worktree", { agent: "reviewer", title: "Review", task: "Inspect the shared workspace." }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  assert.equal(result.isError, false, result.content[0]?.text);
+  assert.deepEqual(registered[0], {
+    version: "subagent-run-authorization.v1",
+    kind: "generic",
+    binding: { runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId: "root-generic-no-worktree", pid: 123, agentProfile: "reviewer" },
+    capabilities: [],
+    goal: null,
+  });
+
 });
 
 test("generic worktree uses the unified service without enabling upstream worktrees", async () => {
@@ -485,8 +569,9 @@ test("coding without a worktree does not register Goal ownership", async () => {
 
   assert.equal(coding.isError, false, coding.content[0]?.text);
   assert.equal(generic.isError, false, generic.content[0]?.text);
-  assert.equal(registrations.length, 0);
-  assert.equal(workflowLeaf(calls[0].params).subagentOnlyExtensions.length, 1);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].kind, "generic");
+  assert.equal(Object.hasOwn(workflowLeaf(calls[0].params), "subagentOnlyExtensions"), false);
   assert.equal(Object.hasOwn(workflowLeaf(calls[1].params), "subagentOnlyExtensions"), false);
 });
 
@@ -506,7 +591,9 @@ test("renamed standalone profiles do not acquire Goal authorization", async () =
   const generic = await tools[0].execute("same-profile-generic", { agent: "coder-alpha", title: "Inspect", task: "Read only." }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(generic.isError, false, generic.content[0]?.text);
-  assert.deepEqual(registrations, []);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].kind, "generic");
+  assert.equal(registrations[0].binding.agentProfile, "coder-alpha");
 });
 
 test("Goal coding registers exact ticket authority before returning a handle", async () => {
@@ -572,6 +659,7 @@ test("standalone coding rejects registration failure and preserves the active un
   });
 
   const result = await tools[0].execute("registration-failure", { ...contract, agent: "coder-alpha", worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+
 
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /broker unavailable/);
@@ -669,6 +757,7 @@ test("coding spawn resolver receives the exact compiled hash", async () => {
   createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
   await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(resolved[0]?.contractHash, preparePublicCodingDispatch(contract, { cwd: "/repo", timeoutMs: 30 * 60_000 }).contractHash);
+
 });
 
 test("coding spawn forwards resolver metadata raw as RPC options and excludes spawnKey from params", async () => {

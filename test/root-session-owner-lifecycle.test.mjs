@@ -39,6 +39,30 @@ function fixture() {
 }
 const lease = (expiresAt, extra = {}) => ({ type: "lease.updated", data: { runId: "run", ownerGeneration: 1, lastRenewedAt: 100, expiresAt, leaseId: "lease", renewalSequence: 0, ...extra } });
 
+test("generic child with only host broker marker does not activate root ownership", async (t) => {
+  const errors = [];
+  const originalError = console.error;
+  console.error = (message) => errors.push(String(message));
+  t.after(() => { console.error = originalError; });
+  const owner = await installRootSessionOwner({}, {
+    env: { PI_ROOT_SUBAGENT_BROKER_ENABLED: "1" },
+    createClient() { throw new Error("generic child must not connect to Root Broker"); },
+  });
+  assert.equal(typeof owner.dispose, "function");
+  owner.dispose();
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /root ownership disabled: child broker identity unavailable/);
+});
+
+test("partial child Root Broker identity fails closed", async () => {
+  for (const identity of [{ PI_SUBAGENT_RUN_ID: "run" }, { PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: "root" }]) {
+    await assert.rejects(installRootSessionOwner({}, {
+      env: { PI_ROOT_SUBAGENT_BROKER_ENABLED: "1", ...identity },
+      createClient() { throw new Error("partial identity must not connect"); },
+    }), /Root ownership requires PI_SUBAGENT_RUN_ID and PI_SUBAGENT_ORCHESTRATOR_SESSION_ID/);
+  }
+});
+
 test("child lease expiry is deterministic, fenced, and has no Pi side effects", async () => {
   const f = fixture(); const owner = await f.ownerPromise;
   f.subscription.push(lease(200));

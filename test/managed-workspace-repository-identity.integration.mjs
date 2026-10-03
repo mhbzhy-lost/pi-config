@@ -41,7 +41,9 @@ test("common-dir identity shares the canonical main-worktree storage partition",
   assert.equal(linked.originRoot, main.originRoot);
   assert.equal(linked.storageRepositoryId, main.storageRepositoryId);
   assert.notEqual(otherClone.repositoryId, main.repositoryId);
-  assert.equal(main.originRoot, f.origin);
+  // macOS 上 tmpdir() 返回 /tmp（symlink），git worktree list 返回 realpath 形态 /private/tmp；
+  // 身份哈希本就要求 canonical realpath（见下个用例），期望值必须同样规范化。
+  assert.equal(main.originRoot, await realpath(f.origin));
 });
 
 test("identity fails closed for non-Git, missing, and symlink cwd values", async (t) => {

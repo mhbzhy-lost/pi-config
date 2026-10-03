@@ -76,7 +76,7 @@ test("keeps subagent dependencies owned by the enhanced package setup", async ()
 test("loads upstream only through the enhanced package and removes duplicate auto-discovered entries", async () => {
   const entry = await text("packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
 
-  assert.match(entry, /\.\.\/src\/compat\/pi-subagents-0\.62\.ts/);
+  assert.match(entry, /\.\.\/src\/compat\/pi-subagents-0\.71\.ts/);
   assert.match(entry, /installHeadlessTypedSubagentRuntime/);
   assert.doesNotMatch(entry, /registerTool\s*\(/);
   for (const legacy of [
@@ -92,7 +92,7 @@ test("loads upstream only through the enhanced package and removes duplicate aut
 test("production runtime lifecycle identity and retry cleanup contract", async () => {
   const entry = await text("packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
 
-  assert.match(entry, /const lifecycleSessionId = resolveCurrentSessionId\(ctx\.sessionManager\);/);
+  assert.match(entry, /const lifecycleSessionId = readSessionIdentity\(ctx\.sessionManager\)\.sessionFile \?\? resolveCurrentSessionId\(ctx\.sessionManager\);/);
   assert.match(entry, /const stateRoot = process\.env\.PI_CODING_WORKSPACE_DIR;/);
   assert.match(entry, /new AuthorityStore\(\{ root: path\.join\(stateRoot, "root-broker-authority", rootSessionId\) \}\)/);
   assert.match(entry, /: undefined;\n      const startingBroker = new RootBrokerServer\(\{ rootSessionId, lifecycleSessionId, upstream, events: pi\.events, authorityStore \}\)/);
@@ -125,9 +125,9 @@ test("production dispatch modules are independent from Plan Runner and native to
 test("the model-facing description contains the project dispatch and push-notification contract", async () => {
   const { TYPED_SUBAGENT_DESCRIPTION } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts");
 
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /dispatch-ir\.v1/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /For coding work, provide the complete dispatch-ir\.v1 contract/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /For generic work, provide \{ agent, title, task \}/);
+  assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /dispatch-ir\.v1/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /For coding work, provide the complete dispatch-ir.v2 contract/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /generic=\{agent,task\}/);
   assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /For executor, provide/);
   assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /spark/);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /completion notifications are delivered automatically/i);

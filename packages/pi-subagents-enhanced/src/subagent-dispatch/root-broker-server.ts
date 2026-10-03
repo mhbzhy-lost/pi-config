@@ -116,9 +116,15 @@ type Dependencies = {
   clock?: () => number;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
+  diagnosticSink?: (entry: unknown) => void;
 };
 
 const MAX_BUFFER = 64 * 1024;
+// Bug #4 fix ②: parallel registrations race the same authority-index lock for
+// a single-digit-millisecond critical section. Bounded retry with a short
+// linear backoff lets both registrants settle inside one dispatch window.
+const AUTHORITY_CONTENTION_RETRY_MAX_ATTEMPTS = 3;
+const AUTHORITY_CONTENTION_RETRY_BACKOFF_MS = 25;
 const execFile = promisify(execFileCallback);
 
 class TerminalDeadlineError extends Error {
@@ -239,6 +245,7 @@ export class RootBrokerServer {
   /** Observable preserved/debt state when an integration request cannot settle before close. */
   integrationDebt = new Map<string, { operation: string; reason: string }>();
   requestBoundaryDebt = 0;
+  diagnosticSink?: (entry: unknown) => void;
 
   constructor({
     rootSessionId,
@@ -260,6 +267,7 @@ export class RootBrokerServer {
     clock = Date.now,
     setInterval: setHeartbeatInterval = setInterval,
     clearInterval: clearHeartbeatInterval = clearInterval,
+    diagnosticSink,
   }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
@@ -283,6 +291,7 @@ export class RootBrokerServer {
     this.clock = clock;
     this.setHeartbeatInterval = setHeartbeatInterval;
     this.clearHeartbeatInterval = clearHeartbeatInterval;
+    this.diagnosticSink = diagnosticSink;
     this.authorityStore?.setRootSessionId(rootSessionId);
   }
 
@@ -362,9 +371,13 @@ export class RootBrokerServer {
       return; // owned is the sole record; facade observations cannot duplicate it.
     }
     const existing = this.facadeRuns.get(incoming.runId);
-    if (existing && (existing.asyncDir !== incoming.asyncDir || existing.sessionId !== incoming.sessionId || existing.pid !== incoming.pid || existing.agent !== incoming.agent || existing.kind !== incoming.kind)) {
+    if (existing && (existing.asyncDir !== incoming.asyncDir || existing.sessionId !== incoming.sessionId || existing.pid !== incoming.pid || existing.agent !== incoming.agent)) {
       throw new Error("Facade run identity conflicts");
     }
+    // `kind` is a non-authoritative observation. A workflow may first be
+    // observed through the generic upstream event classifier and later be
+    // registered by Host authorization as generic; never fence valid identity
+    // on that label alone.
     this.facadeRuns.set(incoming.runId, existing ?? incoming);
   }
 
@@ -382,11 +395,30 @@ export class RootBrokerServer {
       || JSON.stringify(existing.authorization.goal) !== JSON.stringify(authorization.goal))) {
       throw new Error("Run authorization binding conflicts");
     }
+    if (existing) return;
     if (authorization.capabilities.length === 0) {
       this.registerFacadeRun({ runId: binding.runId, asyncDir: binding.asyncDir, sessionId: binding.sessionId, pid: binding.pid, agent: binding.agentProfile, kind: authorization.kind });
+      // A generic run is a terminal-proof facade, not a broker principal, but
+      // its owner identity is still needed by the control plane. Persist that
+      // identity without promoting the run into the capability-bearing owned
+      // set below.
+      if (this.authorityStore) {
+        const birthIdentity = await this.captureProcessBirthIdentity(binding.pid).catch(() => undefined);
+        if (typeof birthIdentity === "string" && birthIdentity.trim().length > 0) {
+          const receipt = createOwnerReceipt({
+            receiptId: `owner-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`,
+            rootSessionId: this.rootSessionId,
+            runId: binding.runId,
+            ownerGeneration: 1,
+            processBirth: birthIdentity,
+            revision: 1,
+            authorizationReference: `sha256:${createHash("sha256").update(JSON.stringify(authorization)).digest("hex")}`,
+          });
+          await this.createAuthorityLeaseWithRetry(receipt, { leaseId: `lease-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`, now: this.clock(), windowMs: HEARTBEAT_LEASE_MS });
+        }
+      }
       return;
     }
-    if (existing) return;
     this.promoteFacadeRun(authorization);
     const initial: OwnedRun = {
       rootSessionId: this.rootSessionId,
@@ -425,7 +457,7 @@ export class RootBrokerServer {
           revision: 1,
           authorizationReference: `sha256:${createHash("sha256").update(JSON.stringify(authorization)).digest("hex")}`,
         });
-        await this.authorityStore.createWithLease(receipt, { leaseId: `lease-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`, now: this.clock(), windowMs: HEARTBEAT_LEASE_MS });
+        await this.createAuthorityLeaseWithRetry(receipt, { leaseId: `lease-${createHash("sha256").update(`${this.rootSessionId}:${binding.runId}:1`).digest("hex").slice(0, 48)}`, now: this.clock(), windowMs: HEARTBEAT_LEASE_MS });
       }
       // A successful authorization reply follows the durable owner receipt.
       await this.ensureAuthorizedPrincipal(binding.runId);
@@ -442,6 +474,24 @@ export class RootBrokerServer {
     }
   }
 
+  /**
+   * Bug #4 fix ②: authority-index lock contention is a transient same-window
+   * race between parallel registrations, not an authority or storage fault.
+   * Retry only the distinctive contention code, bounded by a short linear
+   * backoff; deterministic authority failures and genuine storage faults fail
+   * fast on the first attempt.
+   */
+  private async createAuthorityLeaseWithRetry(receipt: OwnerReceiptV1, input: { leaseId: string; now: number; windowMs: number }): Promise<unknown> {
+    const store = this.requireAuthorityStore();
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await store.createWithLease(receipt, input);
+      } catch (error) {
+        if (!(error instanceof AuthorityStoreError) || error.code !== "authority_lock_contention" || attempt >= AUTHORITY_CONTENTION_RETRY_MAX_ATTEMPTS) throw error;
+        await new Promise((resolve) => setTimeout(resolve, AUTHORITY_CONTENTION_RETRY_BACKOFF_MS * attempt));
+      }
+    }
+  }
   private requireAuthorityStore(): AuthorityStore {
     if (!this.authorityStore) throw brokerError("authority_store_unavailable", "Root Broker authority storage is unavailable");
     return this.authorityStore;
@@ -1165,7 +1215,7 @@ export class RootBrokerServer {
     const safe = frozen({ schemaVersion: "recovery-event.v1", rootSessionId: this.rootSessionId,
       recoveryIntentId: event?.recoveryIntentId, queueItemId: event?.queueItemId, workspaceId: event?.workspaceId,
       ownerScope: event?.ownerScope, runId: event?.runId, attempt: event?.attempt, reason: event?.reason, requiredAction: event?.requiredAction,
-      generation: event?.generation, delivery: { state: "delivered" } });
+      generation: event?.generation, handoff: event?.handoff, delivery: { state: "delivered" } });
     this.recoveryNotifications.push(safe);
     const callerRunId = typeof event?.runId === "string" ? event.runId : undefined;
     const sockets = callerRunId ? this.subscriptions.get(callerRunId) : undefined;
@@ -1203,8 +1253,12 @@ export class RootBrokerServer {
     if (this.closed || socket.destroyed || this.principals.get(request.callerRunId)?.callerToken !== request.callerToken) return;
     try {
       socket.write(`${JSON.stringify({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: request.callerRunId, type: "subscription.ready", data: {} })}\n`);
-      if (this.authorityStore) void this.authorityStore.readLease(request.callerRunId).then((lease) => this.publishLeaseUpdate(request.callerRunId, lease)).catch(() => {});
-    } catch { /* socket failure leaves the subscription unready */ }
+      if (this.authorityStore) void this.authorityStore.readLease(request.callerRunId).then((lease) => this.publishLeaseUpdate(request.callerRunId, lease)).catch((error) => {
+        try { this.diagnosticSink?.({ version: 1, phase: "root-broker-lease-read-failed", error, cause: error?.cause, callerRunId: request.callerRunId }); } catch (diagnosticError) { console.error("[root-broker] diagnostic sink failed", { error, diagnosticError }); }
+      });
+    } catch (error) {
+      try { this.diagnosticSink?.({ version: 1, phase: "root-broker-subscription-ready-write-failed", error, cause: error?.cause, callerRunId: request.callerRunId }); } catch (diagnosticError) { console.error("[root-broker] diagnostic sink failed", { error, diagnosticError }); }
+    }
   }
 
   async dispatch(request: any, socket: Socket, { deferSubscription = false }: { deferSubscription?: boolean } = {}) {

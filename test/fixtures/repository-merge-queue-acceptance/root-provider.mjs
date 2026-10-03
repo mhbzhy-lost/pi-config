@@ -20,6 +20,7 @@ function contract(task) {
     writePaths: ["src/pipeline.ts", "test/pipeline.test.mjs"],
     acceptance: { criteria: [`The ${task} stage is present and covered by test/pipeline.test.mjs.`, "The business changes are committed with the required conventional message."] },
     worktree: true,
+
   };
 }
 

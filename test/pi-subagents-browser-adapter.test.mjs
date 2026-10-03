@@ -63,9 +63,9 @@ test("reads bounded object status and renders the upstream transcript", async (t
 
   const parentSessionFile = join(root, "sessions", "parent.jsonl");
   const cases = [
-    ["project", [asyncDir, artifactsDir, join(parentCwd, ".pi", "subagents", "artifacts")]],
-    ["session", [asyncDir, join(root, "sessions", "subagent-artifacts")]],
-    ["temp", [asyncDir]],
+    ["project", [asyncDir, runCwd, parentCwd]],
+    ["session", [asyncDir, runCwd, parentCwd, join(root, "sessions")]],
+    ["temp", [asyncDir, runCwd, parentCwd, tmpdir()]],
   ];
   for (const [artifactDirPreference, expectedRoots] of cases) {
     const roots = adapter.browserTrustedRoots({
@@ -75,12 +75,7 @@ test("reads bounded object status and renders the upstream transcript", async (t
       parentSessionFile,
       artifactDirPreference,
     });
-    if (artifactDirPreference === "temp") {
-      assert.deepEqual(roots.slice(0, 1), expectedRoots, artifactDirPreference);
-      assert.equal(roots.length, 2, artifactDirPreference);
-    } else {
-      assert.deepEqual(roots, expectedRoots, artifactDirPreference);
-    }
+    assert.deepEqual(roots, expectedRoots, artifactDirPreference);
   }
 
   const rendered = adapter.renderBrowserTranscript({ transcriptPath, trustedRoots: [artifactsDir], width: 80, theme, markdownTheme });

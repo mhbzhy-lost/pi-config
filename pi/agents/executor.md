@@ -2,10 +2,8 @@
 name: executor
 description: 按任务约束完成实现与验证的编码执行代理
 models:
-  - codex-pool/gpt-6-luna
-  - openai-codex/gpt-6-luna
-  - qoder-pool/GLM-5.3-Flash-0.1x
-  - qoder-pool/Qwen3.8-Flash-0.04x
+  - qoder-pool/GLM-5.3-Flash
+  - qoder-pool/Qwen3.8-Flash
   - zai-coding-cn/glm-5.3-flash
 thinking: medium
 tools: read,write,edit,bash,grep,find,ls,apply_patch,contact_supervisor

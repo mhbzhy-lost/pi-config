@@ -3,7 +3,7 @@ name: delegate
 description: 承接复杂实现、跨模块 TDD 开发与源码级归因诊断的主力执行代理
 models:
   - codex-pool/gpt-6-sol
-  - qoder-pool/GLM-5.3-0.6x
+  - qoder-pool/GLM-5.3
   - zai-coding-cn/glm-5.3
 thinking: high
 systemPromptMode: replace

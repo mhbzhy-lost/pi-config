@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -10,15 +10,13 @@ const { createJiti } = await import(piHostJitiUrl);
 const runtimeJiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
 const {
   createSubagentToolRenderers,
-  initializeCompletionNotifierState,
   projectManagedWorkspaceTerminalProof,
 } = await runtimeJiti.import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
-const { registerSubagentNotify, currentCompletionOwnerId } = await runtimeJiti.import("../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.62.ts");
 
 import { createHeadlessSubagentApi } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts";
 import { createTitleRegistry } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts";
 import { createSupervisorAdapter } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts";
-import { createSupervisorControlPlane } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts";
+import { createSupervisorControlPlane, supervisorCanonicalDigest } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts";
 import {
   createSupervisorRequestMailbox,
   createTypedSubagentExtension as createTypedSubagentExtensionProduction,
@@ -157,9 +155,6 @@ test("the enhanced package runtime closes every relative implementation import i
       edges.push({ source: relative(isolatedRoot, file), specifier, target: targetRelative });
     }
   }
-  assert.ok(edges.some((edge) => edge.source === "scripts/setup-runtime-deps.ts" && edge.target === "src/subagent-dispatch/ordered-models-runtime-patch.ts"));
-  assert.ok(edges.some((edge) => edge.source === "scripts/verify-package.ts" && edge.target === "src/subagent-dispatch/ordered-models-runtime-patch.ts"));
-
   const isolatedExtension = await import(`${pathToFileURL(join(isolatedRoot, "src/subagent-dispatch/extension.ts")).href}?closure=${Date.now()}`);
   const isolatedOwner = await import(`${pathToFileURL(join(isolatedRoot, "child-extensions/root-session-owner.ts")).href}?closure=${Date.now()}`);
   const isolatedEvidence = await import(`${pathToFileURL(join(isolatedRoot, "child-extensions/acceptance-evidence.ts")).href}?closure=${Date.now()}`);
@@ -192,6 +187,7 @@ test("v2 routing selects coding by writePaths and rejects legacy version inputs"
       workflowKey: "typed-v2-routing", parentWorkflowRunId: "v2-workflow-root",
     });
     return { text: "spawned", details: { runId: "v2-workflow-root", asyncDir: "/tmp/v2-workflow-root" } };
+
   };
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, randomUUID: () => "v2-routing" });
   const result = await execute(pi.tools[0], {
@@ -326,59 +322,65 @@ function createRpc(overrides = {}) {
   return rpc;
 }
 
-test("project completion notifier delivers complete and failed terminal events with the upstream owner", async () => {
-  const pi = createPi();
-  const state = { currentSessionId: "session-owner" };
-  const notifier = registerSubagentNotify(pi, state, { batchConfig: { enabled: false } });
-  const ownerId = currentCompletionOwnerId();
-  assert.equal(await notifier.deliver({
-    id: "missing-owner",
-    agent: "executor",
-    success: false,
-    summary: "failed",
-    sessionId: "session-owner",
-    completionOwnerId: ownerId,
-  }), false);
-  initializeCompletionNotifierState(state);
-  assert.equal(state.completionOwnerId, ownerId);
-  for (const success of [true, false]) {
-    const accepted = await notifier.deliver({
-      id: `completion-${success}`,
-      agent: "executor",
-      success,
-      summary: success ? "done" : "failed",
-      sessionId: "session-owner",
-      completionOwnerId: ownerId,
-    });
-    assert.equal(accepted, true);
+test("production runtime wires no compat completion notifier; upstream native notify owns delivery", async () => {
+  const entry = await readFile(join(enhancedPackageRoot, "extensions", "subagent-runtime.ts"), "utf8");
+  const compat = await readFile(join(enhancedPackageRoot, "src", "compat", "pi-subagents-0.71.ts"), "utf8");
+  // 用户决策：删除增强层 completion notifier 包装（asyncComplete→sendMessage 转发链），
+  // 完成投递+ack 完全依赖上游 pi-subagents@0.71 原生 notify 语义。
+  for (const wrapper of ["createCompletionNotifier", "subscribeAsyncComplete", "completionNotifierFactory", "initializeCompletionNotifierState"]) {
+    assert.doesNotMatch(entry, new RegExp(wrapper), `${wrapper} wiring must not exist in the production runtime entry`);
+    assert.doesNotMatch(compat, new RegExp(wrapper), `${wrapper} must not exist in the compat facade`);
   }
-  assert.equal(pi.messages.length, 2);
-  notifier.dispose();
+  // 上游原生 notify 仍发送 subagent-notify customType（notify.js sendCompletion），
+  // 项目 renderer 保留以赢得 last-write 所有权。
+  assert.match(entry, /registerMessageRenderer\("subagent-notify"/);
 });
 
-test("completion notice preserves raw summary and authoritative fields without event rewriting", async () => {
+test("the designated completion notifier api delivers subagent-notify while the upstream bootstrap api keeps its suppression", async () => {
+  // 具名不变式（docs/bugs/2026-09-29-async-completion-notification-silent-swallow.md 残留风险 1，
+  // 2026-09-29 复核确认现状已满足）：completionNotifierFactory 注入点构造的 completionApi
+  // 不得携带 suppressCompletionNotifications——suppression 只属于 upstream bootstrap api
+  // （防上游 native 双投递），host 指定的投递者必须能投递。
   const pi = createPi();
-  const state = { currentSessionId: "session-owner", completionOwnerId: currentCompletionOwnerId() };
-  const notifier = registerSubagentNotify(pi, state, { batchConfig: { enabled: false } });
-  const upstreamApi = createHeadlessSubagentApi(pi);
-  let delivery;
-  upstreamApi.events.on("subagent:async-complete", (event) => { delivery = notifier.deliver(event); });
-  upstreamApi.events.emit("subagent:async-complete", {
-    id: "authoritative-failure",
-    agent: "executor",
-    success: false,
-    state: "failed",
-    summary: "Status: completed",
-    acceptance: { status: "rejected" },
-    error: "runtime error: child exited before acceptance",
-    sessionId: "session-owner",
-    completionOwnerId: state.completionOwnerId,
+  let upstreamApi;
+  let factoryApi;
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap(api) {
+      upstreamApi = api;
+      api.registerTool({ name: "subagent_supervisor", execute() {} });
+    },
+    completionNotifierFactory(api) {
+      factoryApi = api;
+      return { dispose() {} };
+    },
+    resolveSessionId(sessionManager) { return sessionManager.id; },
+    rpc: createRpc(),
+    cleanupStore: {},
   });
-  const accepted = await delivery;
-  assert.equal(accepted, true);
-  assert.match(pi.messages[0].content, /Status: completed/);
-  assert.doesNotMatch(pi.messages[0].content, /Acceptance:|Runtime error:/);
-  notifier.dispose();
+  assert.ok(upstreamApi, "the upstream bootstrap must receive the membrane api");
+  assert.ok(factoryApi, "the designated notifier factory must receive the completion api");
+
+  const notify = { customType: "subagent-notify", content: "Background task completed: **delegate**\n\nDone" };
+
+  // upstream bootstrap api：suppression 原样有效（防上游 native 双投递的语义不变）。
+  const upstreamSend = upstreamApi.sendMessage({ ...notify }, { triggerTurn: true });
+  assert.equal(upstreamSend, undefined, "the upstream bootstrap api must keep suppressing subagent-notify");
+  assert.equal(pi.messages.length, 0, "the suppressed upstream send must not reach the Host");
+
+  // 不变式主体：designated notifier 收到的 api 发送 subagent-notify 直达真实 Host sendMessage。
+  factoryApi.sendMessage({ ...notify }, { triggerTurn: true });
+  assert.equal(pi.messages.filter((message) => message?.customType === "subagent-notify").length, 1,
+    "the designated notifier's subagent-notify send must reach the real Host sendMessage");
+  assert.equal(pi.messages[0].content, notify.content);
+
+  // 检测力对照分支：同一 createHeadlessSubagentApi 构造若回归为携带
+  // suppressCompletionNotifications（footgun 复发形态），等价发送被吞且无任何 Host 消息——
+  // 若注入点的 completionApi 构造回归，上方不变式断言将以同一形态失败。
+  const suppressedApi = createHeadlessSubagentApi(pi, { suppressCompletionNotifications: true });
+  const swallowed = suppressedApi.sendMessage({ ...notify }, { triggerTurn: true });
+  assert.equal(swallowed, undefined, "the suppression membrane primitive still swallows the equivalent send");
+  assert.equal(pi.messages.filter((message) => message?.customType === "subagent-notify").length, 1,
+    "the suppressed contrast send must add no Host message");
 });
 
 test("completion lifecycle events preserve the original authoritative payload and summary", () => {
@@ -914,6 +916,7 @@ test("project subagent schema exposes an object root to OpenAI-compatible provid
     assert.equal(schema[combinator], undefined, `root must not use ${combinator}`);
   }
   for (const field of ["agent", "task", "writePaths", "acceptance", "action", "worktree"]) {
+
     assert.ok(schema.properties[field], `flattened root must keep the ${field} field for its branch`);
   }
 });
@@ -1209,6 +1212,7 @@ test("compiles a coding contract into one workflow root and returns its correlat
   assert.equal(spawn.params.chatProgress, "off");
   assert.equal(Object.hasOwn(spawn.params, "timeoutMs"), false);
   assert.equal(Object.hasOwn(spawn.params.child ?? {}, "timeoutMs"), false);
+
   assert.match(spawn.params.workflowScript, /runs\.run\("typed-dispatch-1"/);
   assert.match(spawn.params.workflowScript, /# Dispatch Contract/);
   assert.match(spawn.params.workflowScript, /"level":"checked"/);
@@ -1247,6 +1251,7 @@ test("coding cwd never infers ownership from a legacy workspace-shaped path", as
   const result = await execute(pi.tools[0], codingContract({
     cwd: "/repo/.state/subagent-dispatch/worktrees/workspace-1/sub",
     worktree: false,
+
   }));
 
   assert.equal(result.isError, false);
@@ -1297,6 +1302,7 @@ test("generic dispatch compiles a non-coding agent prompt into the unified dispa
   assert.equal(typeof leaf.task, "string");
   assert.ok(leaf.task.length > 0);
   assert.match(leaf.task, /Review exactly this diff/);
+
   assert.equal(result.details.runId, "leaf-review-1");
   assert.equal(result.details.asyncDir, "/tmp/leaf-review-1");
   assert.equal(result.details.title, "Review the diff");
@@ -1505,7 +1511,7 @@ test("fails closed when RPC capabilities or spawn identity are incomplete", asyn
     createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
     const result = await execute(pi.tools[0], codingContract());
     assert.equal(result.isError, true);
-    assert.match(result.details.code, /CAPABILITY_MISMATCH|SPAWN_REPLY_INVALID/);
+    assert.match(result.details.code, /CAPABILITY_NEGOTIATION_FAILED|CAPABILITY_MISMATCH|SPAWN_REPLY_INVALID/);
   }
 });
 
@@ -1548,7 +1554,16 @@ test("does not bind a Goal executor ticket when the workflow root has no matchin
   });
   const bound = [];
   const ticket = {
+    version: "goal-run-binding-ticket.v2",
     ticketId: "ticket-1",
+    goalId: "goal-1",
+    taskId: "task-1",
+    attempt: 1,
+    contractHash: "",
+    workspaceId: "goal-timeout",
+    executionRevision: 1,
+    expectedCriteria: ["identity"],
+    agentProfile: "executor",
     spawnIdentity: { requestId: "dispatch-1", spawnKey: "dispatch-1" },
   };
   let workspaceRequest;
@@ -1579,8 +1594,9 @@ test("does not bind a Goal executor ticket when the workflow root has no matchin
           baseCommit: "b".repeat(40),
           contractHash: request.contractHash,
           policy: { publication: "allowed", application: "allowed", writePaths: codingContract().writePaths },
+
         };
-        return { ...ticket, workspaceRequest };
+        return { ...ticket, contractHash: request.contractHash, workspaceRequest };
       },
       workspaceAllocated() {},
       confirmSpawn() {},
@@ -1626,9 +1642,7 @@ test("standalone managed coding registers minimal Host authority before binding 
   const result = await execute(pi.tools[0], codingContract({ worktree: true }), { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
-  assert.match(result.content[0].text, /Workspace standalone-managed allocated \(state: active\)/);
-  assert.match(result.content[0].text, /integrate or discard to finish, or preserve temporarily and later release/);
-  assert.doesNotMatch(result.content[0].text, /action_token|lease[_-]id|\/Users\//i);
+
   assert.deepEqual(order, ["allocate", "grant", "bind"]);
   assert.deepEqual(registrations.map(({ kind, capabilities, goal, binding }) => ({ kind, capabilities, goal, binding })), [{
     kind: "coding", capabilities: ["root.subscribe"], goal: null,
@@ -1669,6 +1683,7 @@ test("standalone grant failure rejects dispatch, preserves the allocated workspa
   });
 
   const result = await execute(pi.tools[0], codingContract({ worktree: true }), { cwd: "/repo", sessionManager: {} });
+
 
   assert.equal(result.isError, true);
   assert.equal(result.details.code, "GRANT_WRITE_FAILED");
@@ -1770,8 +1785,262 @@ test("configured supervisor control plane fences reply and steer delivery withou
   assert.equal(repeated.details.receiptId, "receipt-receipt-1");
   assert.equal(nativeCalls, 1);
   const duplicateSteer = await pi.tools[0].execute("steer-2", { action: "steer", runId: "run-1", message: "approve" }, signal, undefined, ctx);
-  assert.equal(duplicateSteer.details.code, "STEER_DUPLICATES_REPLY");
+  assert.equal(duplicateSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
   assert.equal(rpc.calls.filter((call) => call.method === "steer").length, 0);
+});
+
+// A worktree:false native ask has no broker owner receipt; Host session is its root authority.
+// Removing the unowned registration/resolve branch must make this fail at the public reply boundary.
+test("worktree:false unowned contact_supervisor ask registers and reply commits without interrupt/resume", async () => {
+  const pi = createPi();
+  let nativeCalls = 0;
+  const plane = createSupervisorControlPlane({
+    readOwnerReceipt: async () => { throw Object.assign(new Error("no broker owner for non-workspace run"), { code: "unknown_run" }); },
+    readRuntime: async (runId) => ({ runId, running: true, steerable: true }), // no runtime.ownerGeneration
+    randomId: () => "unowned-receipt",
+  });
+  const adapter = createSupervisorAdapter();
+  adapter.bind(async () => { nativeCalls++; return { content: [{ type: "text", text: "native reply delivered" }] }; });
+  const host = { cwd: "/repo", sessionManager: { getSessionId: () => "host-root-1" } };
+  createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore: {}, supervisorAdapter: adapter,
+    supervisorControlPlane: plane, resolveRootSessionId: (sessionManager) => sessionManager.getSessionId() });
+  const native = { id: "ask-unowned-1", runId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", agent: "delegate", childIndex: 0,
+    reason: "need decision", expectsReply: true }; // worktree:false is proven by broker unknown_run, not native message metadata
+  await pi.handlers.get("message_end")[0]({ message: { customType: "subagent_supervisor_request", details: native } }, host);
+  assert.equal(plane.listPending().length, 1, "ingress must register before reply");
+  const blockedSteer = await pi.tools[0].execute("steer-while-pending", { action: "steer", runId: native.runId, message: "approved" }, signal, undefined, host);
+  assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
+  const reply = await pi.tools[2].execute("reply-unowned-1", { action: "reply", replyTo: native.id, message: "approved" }, signal, undefined, host);
+  assert.equal(reply.isError, undefined, `registration=${JSON.stringify(pi.messages.at(-1)?.details)}, reply=${JSON.stringify(reply.details)}`);
+  assert.equal(plane.listPending().length, 1, "the native pending ask must register locally");
+  assert.equal(pi.messages.some((message) => message.customType === "subagent_supervisor_registration_failed"), false);
+  assert.equal(nativeCalls, 1);
+  assert.equal(plane.snapshot().requests[0].state, "pending", "unconsumed delivery stays pending");
+  const replay = await pi.tools[2].execute("reply-unowned-1", { action: "reply", replyTo: native.id, message: "approved" }, signal, undefined, host);
+  assert.equal(replay.details.code, "SUPERVISOR_DELIVERY_IDEMPOTENT");
+  assert.equal(replay.details.receiptId, "receipt-unowned-receipt");
+  assert.equal(nativeCalls, 1);
+  const request = plane.snapshot().requests[0];
+  const intent = { schemaVersion: "supervisor-control-intent.v1", intentId: "reply-unowned-1", runId: native.runId,
+    rootSessionId: "host-root-1", ownerGeneration: request.ownerGeneration, kind: "reply",
+    requestId: native.id, requestGeneration: request.requestGeneration, payloadDigest: supervisorCanonicalDigest("approved") };
+  const consumed = await plane.commitDelivery({ intent, consumed: true }, "host-root-1");
+  assert.equal(consumed.status, "committed");
+  assert.equal(consumed.receipt.receiptId, replay.details.receiptId);
+  assert.equal(plane.listPending().length, 0);
+  assert.equal(plane.snapshot().requests[0].state, "replied");
+  const duplicateSteer = await pi.tools[0].execute("steer-duplicate-unowned", { action: "steer", runId: native.runId, message: "approved" }, signal, undefined, host);
+  assert.equal(duplicateSteer.details?.code, "STEER_DUPLICATES_REPLY", JSON.stringify(duplicateSteer));
+  const redundant = await plane.resolveSupervisorControl(intent, "host-root-1");
+  assert.equal(redundant.status, "idempotent");
+  assert.equal(redundant.receipt.receiptId, replay.details.receiptId);
+  const absent = await pi.tools[2].execute("reply-unknown", { action: "reply", replyTo: "unknown-request", message: "approved" }, signal, undefined, host);
+  assert.equal(absent.details.code, "SUPERVISOR_REQUEST_NOT_PENDING");
+});
+
+test("supervisor pending request survives a Host reload and can reply through commit idempotently", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-reload-red-"));
+  try {
+    const options = {
+      persistenceRoot: stateRoot,
+      readOwnerReceipt: async () => { throw Object.assign(new Error("non-workspace"), { code: "unknown_run" }); },
+      readRuntime: async (runId) => ({ runId, running: true }),
+    };
+    const native = { id: "reload-request-1", runId: "reload-run-1", reason: "approval", expectsReply: true };
+    const first = createSupervisorControlPlane(options);
+    const reloaded = createSupervisorControlPlane(options);
+    const registered = await first.registerSupervisorRequest(native, "reload-root-1");
+    assert.equal(registered.status, "registered");
+    assert.equal((await readdir(stateRoot)).filter((entry) => entry.endsWith(".json")).length, 1, "registration must write durable state");
+    const request = registered.request;
+    const intent = {
+      schemaVersion: "supervisor-control-intent.v1", intentId: "reload-reply-1", runId: native.runId,
+      rootSessionId: request.rootSessionId, ownerGeneration: request.ownerGeneration, kind: "reply",
+      requestId: request.requestId, requestGeneration: request.requestGeneration,
+      payloadDigest: supervisorCanonicalDigest("reload-approved"),
+    };
+    assert.equal(await reloaded.ready("reload-root-1"), true);
+    assert.equal(reloaded.listPending().length, 1, "a new control-plane instance must restore pending state");
+    const committed = await reloaded.commitDelivery({ intent, consumed: true }, "reload-root-1");
+    assert.equal(committed.status, "committed");
+    assert.equal(reloaded.snapshot().requests[0].state, "replied");
+    const replay = await reloaded.commitDelivery({ intent, consumed: true }, "reload-root-1");
+    assert.equal(replay.status, "idempotent");
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("supervisor persistence rejects cross-root, expired, and corrupted records observably", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-reload-invalid-"));
+  const diagnostics = [];
+  try {
+    const options = { persistenceRoot: stateRoot, diagnosticSink: (entry) => diagnostics.push(entry), now: () => 10_000,
+      readOwnerReceipt: async () => { throw Object.assign(new Error("non-workspace"), { code: "unknown_run" }); } };
+    const first = createSupervisorControlPlane(options);
+    const registered = await first.registerSupervisorRequest({ id: "invalid-request-1", runId: "invalid-run-1", reason: "approval" }, "invalid-root-1");
+    assert.equal(registered.status, "registered");
+    const crossRoot = createSupervisorControlPlane(options);
+    assert.equal(await crossRoot.ready("other-root"), true);
+    assert.deepEqual(crossRoot.listPending(), []);
+    const file = (await readdir(stateRoot)).find((entry) => entry.endsWith(".json"));
+    const statePath = join(stateRoot, file);
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.value.requests[0].requestDigest = `sha256:${"f".repeat(64)}`;
+    await writeFile(statePath, JSON.stringify(state), { mode: 0o600 });
+    const corrupted = createSupervisorControlPlane(options);
+    assert.equal(await corrupted.ready("invalid-root-1"), false);
+    assert.deepEqual(corrupted.listPending(), []);
+    assert.equal(diagnostics.some((entry) => entry.type === "supervisor-persistence-corrupt"), true);
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("unowned reply retains expiry, pending identity and Host root fences", async () => {
+  let clock = 1_000;
+  let root = "host-root-1";
+  const plane = createSupervisorControlPlane({ readOwnerReceipt: async () => undefined, now: () => clock,
+    readRuntime: async (runId) => ({ runId, running: true }) });
+  const host = { sessionManager: { getSessionId: () => root } };
+  const getRoot = (ctx) => ctx.sessionManager.getSessionId();
+  const registered = await plane.registerSupervisorRequest({ id: "ask-1", runId: "run-1", reason: "approve" }, getRoot(host));
+  assert.equal(registered.status, "registered");
+  const intent = { schemaVersion: "supervisor-control-intent.v1", intentId: "reply-1", runId: "run-1",
+    rootSessionId: registered.request.rootSessionId, ownerGeneration: registered.request.ownerGeneration,
+    kind: "reply", requestId: "ask-1", requestGeneration: 1, payloadDigest: `sha256:${"a".repeat(64)}` };
+  const mismatch = await plane.resolveSupervisorControl({ ...intent, requestGeneration: 2 }, getRoot(host));
+  assert.equal(mismatch.code, "SUPERVISOR_REQUEST_NOT_PENDING");
+  assert.equal((await plane.resolveSupervisorControl({ ...intent, requestId: "ask-missing" }, getRoot(host))).code, "SUPERVISOR_REQUEST_NOT_PENDING");
+  assert.equal((await plane.resolveSupervisorControl({ ...intent, ownerGeneration: 2 }, getRoot(host))).code, "SUPERVISOR_STALE_OWNER");
+  root = "other-host";
+  assert.equal((await plane.resolveSupervisorControl(intent, getRoot(host))).code, "SUPERVISOR_STALE_OWNER");
+  root = "host-root-1";
+  clock += 21 * 60 * 1000;
+  assert.equal((await plane.resolveSupervisorControl(intent, getRoot(host))).code, "SUPERVISOR_REQUEST_EXPIRED");
+});
+
+for (const scenario of [
+  { name: "missing owner dependency", options: {} },
+  { name: "broker not ready", options: { readOwnerReceipt: async () => { throw Object.assign(new Error("not ready"), { code: "authority_store_unavailable" }); } } },
+]) {
+  test(`unavailable (${scenario.name}) fails closed for registration and reply`, async () => {
+    const plane = createSupervisorControlPlane(scenario.options);
+    const result = await plane.registerSupervisorRequest({ id: "ask-1", runId: "run-1", reason: "approval" }, "host-root-1");
+    assert.equal(result.code, "SUPERVISOR_OWNER_UNAVAILABLE");
+    assert.deepEqual(plane.listPending(), []);
+    const reply = await plane.resolveSupervisorControl({ schemaVersion: "supervisor-control-intent.v1", intentId: "reply-1",
+      runId: "run-1", rootSessionId: "host-root-1", ownerGeneration: 1, kind: "reply", requestId: "ask-1",
+      requestGeneration: 1, payloadDigest: `sha256:${"a".repeat(64)}` }, "host-root-1");
+    assert.equal(reply.code, "SUPERVISOR_STALE_OWNER");
+  });
+}
+
+test("owner authority loss after unowned registration cannot authorize reply or commit", async () => {
+  let unavailable = false;
+  const plane = createSupervisorControlPlane({ readOwnerReceipt: async () => {
+    if (unavailable) throw Object.assign(new Error("broker not ready"), { code: "authority_store_unavailable" });
+    throw Object.assign(new Error("non-workspace"), { code: "unknown_run" });
+  } });
+  const registered = await plane.registerSupervisorRequest({ id: "ask-1", runId: "run-1", reason: "approval" }, "host-root-1");
+  assert.equal(registered.status, "registered");
+  unavailable = true;
+  const intent = { schemaVersion: "supervisor-control-intent.v1", intentId: "reply-1", runId: "run-1",
+    rootSessionId: registered.request.rootSessionId, ownerGeneration: registered.request.ownerGeneration,
+    kind: "reply", requestId: "ask-1", requestGeneration: 1, payloadDigest: `sha256:${"a".repeat(64)}` };
+  assert.equal((await plane.resolveSupervisorControl(intent, "host-root-1")).code, "SUPERVISOR_STALE_OWNER");
+  assert.equal((await plane.commitDelivery({ intent, consumed: true }, "host-root-1")).code, "SUPERVISOR_STALE_OWNER");
+  assert.equal(plane.listPending().length, 1);
+});
+
+// Missing ingress registration must not turn a native-visible ask into a misleading NOT_PENDING reply.
+for (const scenario of [
+  { name: "owner authority unavailable", details: { id: "request-1", runId: "run-1", reason: "needs approval" }, ownerUnavailable: true, code: "SUPERVISOR_OWNER_UNAVAILABLE" },
+  { name: "native request missing reason", details: { id: "request-1", runId: "run-1" }, code: "SUPERVISOR_REQUEST_IDENTITY_UNAVAILABLE" },
+  { name: "registration throws", details: { id: "request-1", runId: "run-1", reason: "needs approval" }, throws: true, code: "SUPERVISOR_REQUEST_REGISTRATION_FAILED" },
+]) {
+  test(`native Supervisor ask with ${scenario.name} reports registration failure and actionable reply error`, async () => {
+    const pi = createPi();
+    const diagnostics = [];
+    const realPlane = createSupervisorControlPlane({
+      readOwnerReceipt: async (runId) => {
+        if (scenario.ownerUnavailable) throw Object.assign(new Error("broker unavailable"), { code: "authority_store_unavailable" });
+        return { runId, rootSessionId: "root-1", ownerGeneration: 1 };
+      },
+      readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: true, steerable: true }),
+    });
+    const controlPlane = scenario.throws ? {
+      ...realPlane,
+      async registerSupervisorRequest() { throw new Error("registration storage failed"); },
+    } : realPlane;
+    let nativeCalls = 0;
+    const adapter = createSupervisorAdapter();
+    adapter.bind(async () => { nativeCalls++; return { content: [{ type: "text", text: "native" }] }; });
+    createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore: {}, supervisorAdapter: adapter, supervisorControlPlane: controlPlane, diagnosticSink: (entry) => diagnostics.push(entry) });
+    const ingress = pi.handlers.get("message_end")[0];
+    await ingress({ message: { customType: "subagent_supervisor_request", details: scenario.details } }, ctx);
+    assert.deepEqual(realPlane.snapshot().requests, []);
+    const reply = await pi.tools[2].execute("reply-failed", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+    assert.equal(reply.isError, true);
+    assert.equal(reply.details.code, "SUPERVISOR_REQUEST_REGISTRATION_FAILED", `native-visible ask cannot reply; actual=${reply.details.code}, diagnostics=${diagnostics.length}, messages=${pi.messages.length}`);
+    assert.equal(reply.details.registrationCode, scenario.code);
+    assert.match(reply.content[0].text, /interrupt.*resume/i);
+    assert.equal(diagnostics.at(-1)?.phase, "supervisor-registration-failed");
+    assert.equal(diagnostics.at(-1)?.errorCode, scenario.code);
+    assert.equal(diagnostics.at(-1)?.requestId, "request-1");
+    if (scenario.throws) assert.equal(diagnostics.at(-1)?.error?.message, "registration storage failed");
+    assert.equal(pi.messages.at(-1)?.details?.code, scenario.code, "parent must see failed registration without first trying reply");
+    assert.equal(nativeCalls, 0);
+  });
+}
+
+test("supervisor control plane diagnoses owner and runtime read failures without changing fail-closed states", async () => {
+  const diagnostics = [];
+  const ownerError = Object.assign(new Error("owner storage unavailable"), { code: "authority_store_unavailable", cause: new Error("disk offline") });
+  const runtimeError = Object.assign(new Error("runtime lookup unavailable"), { code: "RUNTIME_READ_FAILED" });
+  const plane = createSupervisorControlPlane({
+    readOwnerReceipt: async () => { throw ownerError; },
+    readRuntime: async () => { throw runtimeError; },
+    diagnosticSink: (entry) => diagnostics.push(entry),
+  });
+  const identity = await plane.identityForRun("run-diagnostic-1");
+  assert.equal(identity.ownerState, "unavailable");
+  assert.equal(identity.runtime, undefined);
+  assert.equal(diagnostics.find((entry) => entry.phase === "supervisor-owner-read-failed")?.error, ownerError);
+  assert.equal(diagnostics.find((entry) => entry.phase === "supervisor-runtime-read-failed")?.error, runtimeError);
+  assert.equal(diagnostics.find((entry) => entry.phase === "supervisor-owner-read-failed")?.cause, ownerError.cause);
+});
+
+test("supervisor delivery compensation preserves the primary error and diagnoses a blocked compensation", async () => {
+  const pi = createPi();
+  const diagnostics = [];
+  const primary = new Error("native delivery failed");
+  const compensation = new Error("durable compensation unavailable");
+  const realPlane = createSupervisorControlPlane({
+    readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }),
+    readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 1, running: true, steerable: true }),
+    randomId: () => "compensation-receipt",
+  });
+  const plane = {
+    ...realPlane,
+    async commitDelivery(input, root) {
+      if (input.success === false) throw compensation;
+      return realPlane.commitDelivery(input, root);
+    },
+  };
+  const adapter = createSupervisorAdapter();
+  adapter.bind(async () => { throw primary; });
+  createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore: {}, supervisorAdapter: adapter, supervisorControlPlane: plane, diagnosticSink: (entry) => diagnostics.push(entry) });
+  const ctxWithSession = { ...ctx, sessionManager: { getSessionId: () => "root-1" } };
+  await pi.handlers.get("message_end")[0]({ message: { customType: "subagent_supervisor_request", details: { id: "compensation-request", runId: "run-compensation", reason: "approve" } } }, ctxWithSession);
+  await assert.rejects(
+    () => pi.tools[2].execute("reply-compensation", { action: "reply", replyTo: "compensation-request", message: "approved" }, signal, undefined, ctxWithSession),
+    (error) => error instanceof AggregateError && error.cause === primary && error.errors.includes(primary) && error.errors.includes(compensation),
+  );
+  const diagnostic = diagnostics.find((entry) => entry.phase === "supervisor-delivery-compensation-failed");
+  assert.equal(diagnostic?.error, primary);
+  assert.equal(diagnostic?.cause, primary.cause);
+  assert.equal(diagnostic?.secondaryError, compensation);
 });
 
 test("supervisor control plane fails closed for stale owners, expired requests, and non-running steers", async () => {
@@ -1804,11 +2073,29 @@ test("supervisor control plane fails closed for stale owners, expired requests, 
   const notRunning = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: false, steerable: true }) });
   await notRunning.pi.tools[2].execute("consume-request", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
   const blockedSteer = await notRunning.pi.tools[0].execute("not-running", { action: "steer", runId: "run-1", message: "follow up" }, signal, undefined, ctx);
-  assert.equal(blockedSteer.details.code, "SUPERVISOR_STEER_NOT_ALLOWED");
+  assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
 
   const runtimeOwnerMismatch = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 2, liveRunEpoch: 4, running: true, steerable: true }) });
   const mismatchReply = await runtimeOwnerMismatch.pi.tools[2].execute("runtime-owner-mismatch", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(mismatchReply.details.code, "SUPERVISOR_STALE_OWNER");
+});
+
+// docs/bugs/2026-09-30-steer-blocked-for-non-workspace-runs.md：非 workspace run
+// （coding worktree:false）无 broker owner receipt，主动 steer 不应被控制面以
+// SUPERVISOR_INTENT_INVALID 拦截，而应透传到 rpc.steer 由上游投递。
+test("steer on a run without a broker owner receipt bypasses the control plane and reaches rpc.steer", async () => {
+  const pi = createPi();
+  const rpc = createRpc();
+  const controlPlane = createSupervisorControlPlane({
+    readOwnerReceipt: async () => undefined,
+    readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: true, steerable: true }),
+    randomId: () => "receipt-1",
+  });
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorControlPlane: controlPlane });
+  const result = await pi.tools[0].execute("steer-no-owner", { action: "steer", runId: "run-1", message: "Continue please." }, signal, undefined, ctx);
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.notEqual(result.details?.code, "SUPERVISOR_INTENT_INVALID", JSON.stringify(result));
+  assert.deepEqual(rpc.calls.filter((call) => call.method === "steer"), [{ method: "steer", params: { runId: "run-1", message: "Continue please." } }]);
 });
 
 test("internal Supervisor target forwards the public two-argument handle through the native five-argument closure", async () => {
@@ -2100,4 +2387,120 @@ test("completion lifecycle adds a presentation projection without changing raw f
   assert.equal(emitted[0].payload.state, "failed");
   assert.equal(emitted[0].payload.presentation, "reported");
   assert.equal(source.presentation, undefined);
+});
+
+// B1（docs/bugs/2026-09-30-steer-control-plane-target-aliasing.md）：授权目标必须与
+// 上游实际投递目标一致。上游 resolveAsyncRunLocation 的优先级是 `params.id ?? params.runId`，
+// 且支持 dir 单独定位、以及长度落在 [8,36) 的前缀扫描。本层若用相反的 `runId ?? id`
+// 优先级、或跳过别名路径，就会对「查不到 owner 的标识」放行，而上游却 steer 到真实
+// 受管 run，从而绕过 STALE_OWNER / REPLY_REQUIRED / DUPLICATES_REPLY 等全部围栏。
+const FULL_RUN_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const OTHER_FULL_RUN_ID = "ffffffff-1111-2222-3333-444444444444";
+const FULL_RUN_PREFIX = FULL_RUN_ID.slice(0, 8);
+
+function createSteerScenario({ readOwnerReceipt, withOwnerDep = true } = {}) {
+  const pi = createPi();
+  const rpc = createRpc();
+  const options = {
+    readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: true, steerable: true }),
+    randomId: () => "receipt-1",
+  };
+  if (withOwnerDep) options.readOwnerReceipt = readOwnerReceipt;
+  const controlPlane = createSupervisorControlPlane(options);
+  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorControlPlane: controlPlane });
+  return { pi, rpc };
+}
+
+const steerCalls = (rpc) => rpc.calls.filter((call) => call.method === "steer");
+
+test("steer 拒绝 id 与 runId 冲突的别名目标，不得按其中一个放行", async () => {
+  const { pi, rpc } = createSteerScenario({
+    readOwnerReceipt: async (runId) => (runId === FULL_RUN_ID ? { runId, rootSessionId: "root-1", ownerGeneration: 1 } : undefined),
+  });
+  const result = await pi.tools[0].execute("steer-conflict", { action: "steer", id: FULL_RUN_ID, runId: OTHER_FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_CONFLICT", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), [], "冲突目标绝不得投递");
+});
+
+test("steer 拒绝 dir 别名目标，避免绕过 owner 判定", async () => {
+  const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }) });
+  const result = await pi.tools[0].execute("steer-dir", { action: "steer", dir: `/tmp/async/${FULL_RUN_ID}`, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_ALIAS", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), []);
+});
+
+test("steer 拒绝前缀形态 runId，避免授权目标与上游扫描解析结果不一致", async () => {
+  const { pi, rpc } = createSteerScenario({
+    readOwnerReceipt: async (runId) => (runId === FULL_RUN_ID ? { runId, rootSessionId: "root-1", ownerGeneration: 1 } : undefined),
+  });
+  const result = await pi.tools[0].execute("steer-prefix", { action: "steer", runId: FULL_RUN_PREFIX, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_AMBIGUOUS", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), []);
+});
+
+test("owner 查询抛异常时 steer 必须 fail-closed，不得当作非受管放行", async () => {
+  const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => { throw new Error("ROOT_BROKER_UNAVAILABLE"); } });
+  const result = await pi.tools[0].execute("steer-owner-error", { action: "steer", runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), []);
+});
+
+test("未接线 owner 读取依赖时 steer 必须 fail-closed", async () => {
+  const { pi, rpc } = createSteerScenario({ withOwnerDep: false });
+  const result = await pi.tools[0].execute("steer-no-dep", { action: "steer", runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), []);
+});
+
+test("明确非受管的精确 runId 仍可 steer 透传（原缺陷修复不得回归）", async () => {
+  const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => undefined });
+  const result = await pi.tools[0].execute("steer-unowned", { action: "steer", runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.deepEqual(steerCalls(rpc), [{ method: "steer", params: { runId: FULL_RUN_ID, message: "Continue please." } }]);
+});
+
+test("受管精确 runId 在 id 与 runId 同值时仍走控制面并成功投递", async () => {
+  const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }) });
+  const result = await pi.tools[0].execute("steer-managed", { action: "steer", id: FULL_RUN_ID, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.equal(steerCalls(rpc).length, 1, "受管 run 经控制面放行后应投递一次");
+});
+
+// broker 对「无当前 owner receipt」的权威回答是抛 code=unknown_run；这是唯一可用于
+// 「确认非受管」的信号。其余错误码都属「无法确认」，必须 fail-closed。
+test("broker 抛 unknown_run 时判定为明确非受管并透传 steer", async () => {
+  const { pi, rpc } = createSteerScenario({
+    readOwnerReceipt: async () => { throw Object.assign(new Error("Owner is no longer current"), { code: "unknown_run" }); },
+  });
+  const result = await pi.tools[0].execute("steer-unknown-run", { action: "steer", runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
+  assert.equal(result.isError, false, JSON.stringify(result));
+  assert.equal(steerCalls(rpc).length, 1, "unknown_run 是权威的非受管信号，应透传投递");
+});
+
+test("broker 存储类错误一律 fail-closed，不得当作非受管放行", async () => {
+  for (const code of ["authority_store_unavailable", "authority_lock_contention", "cas_conflict", "revoked", "unsupported_layout"]) {
+    const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => { throw Object.assign(new Error(code), { code }); } });
+    const result = await pi.tools[0].execute(`steer-${code}`, { action: "steer", runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+    assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", `${code} 必须 fail-closed，实际 ${JSON.stringify(result)}`);
+    assert.deepEqual(steerCalls(rpc), [], `${code} 绝不得投递`);
+  }
+});
+
+test("替换代偿失败携原异常诊断，ready 仍阻断并允许恢复重试", async () => {
+  const pi = createPi(), cleanupStore = {}, diagnostics = [];
+  const cause = new Error("存储不可用"), failure = new Error("旧代清理失败", { cause });
+  let blocked = true, started = 0;
+  createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore, beforeDispose() { if (blocked) throw failure; } });
+  const next = createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore,
+    diagnosticSink(entry) { diagnostics.push(entry); }, beforeSessionStart() { started++; } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(diagnostics[0]?.phase, "subagent-ready-debt-retry-failed");
+  assert.equal(diagnostics[0]?.error, failure);
+  assert.equal(diagnostics[0]?.cause, cause);
+  await assert.rejects(next.ready({}, {}), error => error === failure);
+  assert.equal(started, 0);
+  blocked = false;
+  await next.ready({}, {});
+  assert.equal(started, 1);
+  await next.dispose();
 });

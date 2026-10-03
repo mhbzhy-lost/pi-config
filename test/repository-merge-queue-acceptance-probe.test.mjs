@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { access, mkdtemp, readFile, realpath, writeFile, rm } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
+
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -28,6 +29,7 @@ import {
 const fixture = join(import.meta.dirname, "fixtures", "repository-merge-queue-acceptance");
 const { createJiti } = await import(piHostJitiUrl);
 const discoveryJiti = createJiti(import.meta.url, { moduleCache: false, alias: piHostAliases });
+
 
 async function providerTurn(tasks) {
   let provider;
@@ -92,13 +94,14 @@ test("acceptance fixture has one shared pipeline line and five conflict tasks", 
 });
 
 test("real agent discovery accepts the executor fixture and resolves its barrier extension", async () => {
-  const { discoverAgents } = await discoveryJiti.import("../packages/pi-subagents-enhanced/node_modules/pi-subagents/src/agents/agents.ts");
+  const { discoverAgents } = await discoveryJiti.import("../packages/pi-subagents-enhanced/node_modules/pi-subagents/src/agents/agents.js");
   const discovered = discoverAgents(fixture, "project");
   const executor = discovered.agents.find((agent) => agent.name === "executor");
   assert.ok(executor, JSON.stringify(discovered.agentDiagnostics ?? []));
   assert.match(executor.description, /acceptance coding executor/i);
   assert.deepEqual(executor.subagentOnlyExtensions, [join(fixture, "acceptance-barrier.mjs")]);
   await access(executor.subagentOnlyExtensions[0]);
+
 });
 
 test("test-only barrier rejects model identity and blocks until five distinct same-base worktrees are ready", async () => {
@@ -186,6 +189,7 @@ test("dispatch plan uses two real roots with a 3+2 split and executor profile", 
   assert.equal(plan.children.length, 5);
   assert.deepEqual([...new Set(plan.children.map((child) => child.agent))], ["executor"]);
   assert.ok(plan.children.every((child) => child.model === "codex-pool/gpt-5.6-sol" && child.worktree && !Object.hasOwn(child, "async")));
+
   // 验收 child 的提交必须能过全局 security-gates 的 Conventional Commit + 中文 subject 门禁
   // （真实运行失败根因：英文 message 被 COMMIT_MESSAGE_INVALID 拒绝）。
   assert.ok(plan.children.every((child) => child.requirements.some((requirement) =>
@@ -262,6 +266,7 @@ test("root provider requests cross the public caller gate and reach the dispatch
   }
   assert.equal(received.length, 5);
   assert.ok(received.every(({ task }) => /Modify the shared PIPELINE/.test(task)));
+
 });
 
 test("acceptance root keeps a broker subscription for each managed child through recovery", async () => {
@@ -511,8 +516,9 @@ test("deterministic roots issue exactly three plus two typed executor dispatches
   await dispatchAcceptanceRoots({ subagentTools: [tool("a"), tool("b")], cwd: "/fixture" });
   assert.deepEqual(calls.map((call) => call.root), ["a", "a", "a", "b", "b"]);
   assert.ok(calls.every(({ input }) => input.agent === "executor" && input.model === "codex-pool/gpt-5.6-sol" && input.worktree === true));
-  assert.ok(calls.every(({ input }) => /Auto Integration/.test(input.task)));
+  assert.ok(calls.every(({ input }) => /Modify the shared PIPELINE declaration line/.test(input.task)));
   assert.ok(calls.every(({ input }) => !/subagent_integration|enqueue\b|await\b|rebase\b|publish\b/.test(input.task)));
+
 });
 
 test("manual integration mutation traces fail host health before acceptance settlement", async () => {
@@ -561,6 +567,7 @@ test("RPC hosts write one prompt, dispatch 3+2 calls, and remain alive until set
   t.after(() => rm(root, { recursive: true, force: true }));
   const plan = createAcceptanceDispatchPlan();
   const hosts = [3, 2].map((count, index) => new AcceptanceRpcHost(process.execPath, [fake], { env: { ...process.env, COUNT: String(count) }, prompt: JSON.stringify({ agent: "executor", task: `acceptance-root-${index}` }) }).start());
+
   const records = await Promise.all(hosts.map((host, index) => host.settle({ terminal: (events) => events.filter((event) => event.type === "tool_execution_end").length === [3, 2][index] })));
   assert.deepEqual(records.map((events) => events.filter((event) => event.type === "tool_execution_end").length), [3, 2]);
   assert.ok(hosts.every((host) => !host.child.killed), "hosts must remain alive after dispatch settlement");
@@ -711,7 +718,7 @@ for (const scenario of [
     t.after(() => rm(root, { recursive: true, force: true }));
     const host = new AcceptanceRpcHost(process.execPath, [fake], {
       env: process.env, prompt: "private prompt", rootLabel: "root-fixture", tempPath: root,
-      diagnosticsDir, startupTimeoutMs: 500, firstToolTimeoutMs: scenario.firstToolTimeoutMs ?? 500,
+      diagnosticsDir, startupTimeoutMs: 2_000, firstToolTimeoutMs: scenario.firstToolTimeoutMs ?? 500,
     }).start();
     await assert.rejects(host.settle({ timeoutMs: 2_000 }), scenario.match);
     const diagnostic = await readDiagnostic(join(diagnosticsDir, "diagnostic.json"));

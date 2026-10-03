@@ -5,6 +5,7 @@ import {
   TypedSubagentRpcError,
   createRenewableTypedSubagentRpcClient,
   createTypedSubagentRpcClient,
+  negotiateCapabilities,
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/rpc-client.ts";
 
 function createEvents() {
@@ -271,6 +272,149 @@ test("recovers lazily when an eager renew factory call fails", async () => {
   assert.deepEqual(await recovered, { recovered: true });
   assert.equal(factoryCalls, 3);
   client.dispose();
+});
+
+test("negotiates all capabilities and validates the negotiated spawn reply", async () => {
+  const pingResponse = {
+    version: 1,
+    methods: [
+      "ping", "spawn", "status", "steer", "nonRecoveringSteer", "interrupt", "stop", "resume", "cost",
+    ],
+    capabilities: {
+      asyncSpawn: true,
+      processTerminalProof: true,
+      launchResolvedExtensions: true,
+      runtimeAcknowledgedExtensions: true,
+      statusProjection: true,
+      fleetStatus: true,
+    },
+    events: { processTerminal: "terminal", asyncComplete: "complete", childStatus: "status" },
+    session: { sessionId: "session-1", sessionFile: "/repo/session.jsonl", cwd: "/repo" },
+    unknownField: { preserve: true },
+  };
+  const rpc = { async ping() { return pingResponse; } };
+  const negotiated = await negotiateCapabilities(rpc, { cwd: "/repo" });
+  assert.equal(negotiated.canSpawn, true);
+  assert.deepEqual(negotiated.securityMissing, []);
+  assert.equal(negotiated.enabled.status, true);
+  assert.equal(negotiated.enabled.cost, true);
+  // 真实 0.71 契约形态（rpc.js:307-336）：安全 capability 为对象而非布尔
+  const objectShaped = await negotiateCapabilities({
+    async ping() {
+      return {
+        ...pingResponse,
+        capabilities: {
+          asyncSpawn: true,
+          processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 },
+          launchResolvedExtensions: { version: 1, source: "launch-resolved" },
+          runtimeAcknowledgedExtensions: { version: 1, source: "child-runtime" },
+          statusProjection: { version: 1, untargeted: "in-memory-when-ready", targeted: "executor" },
+          fleetStatus: { version: 1 },
+        },
+      };
+    },
+  }, { cwd: "/repo" });
+  assert.equal(objectShaped.canSpawn, true, "对象型安全 capability（真实 0.71 形态）应视为具备");
+  assert.deepEqual(objectShaped.securityMissing, []);
+  assert.deepEqual(negotiated.raw.unknownField, { preserve: true });
+  assert.deepEqual(negotiated.validateSpawnReply({ details: { runId: "run-1", asyncDir: "/tmp/run-1", cwd: "/repo" } }), {
+    runId: "run-1", asyncDir: "/tmp/run-1", cwd: "/repo",
+  });
+});
+
+test("recognizes object-shaped 0.71 capabilities as negotiated capabilities", async () => {
+  const negotiated = await negotiateCapabilities({
+    async ping() {
+      return {
+        version: 1,
+        methods: ["ping", "spawn", "status"],
+        capabilities: {
+          asyncSpawn: true,
+          processTerminalProof: true,
+          launchResolvedExtensions: true,
+          runtimeAcknowledgedExtensions: true,
+          statusProjection: { version: 1, untargeted: "in-memory-when-ready", targeted: "executor" },
+          fleetStatus: { version: 1 },
+          asyncStatusSnapshot: { kind: "pi-subagents.async-status-snapshot", version: 1 },
+        },
+        session: { sessionId: "session-1", sessionFile: "/repo/session.jsonl", cwd: "/repo" },
+      };
+    },
+  }, { cwd: "/repo" });
+  assert.equal(negotiated.canSpawn, true);
+  assert.equal(negotiated.enabled.status, true);
+  assert.equal(negotiated.enabled.fleetStatus, true);
+});
+
+test("fails closed when a security capability is absent and reports upgrade stop", async () => {
+  const negotiated = await negotiateCapabilities({
+    async ping() {
+      return {
+        version: 1,
+        methods: ["ping", "spawn"],
+        capabilities: { asyncSpawn: true },
+        session: { sessionId: "session-1", sessionFile: "/repo/session.jsonl", cwd: "/repo" },
+      };
+    },
+  }, { cwd: "/repo" });
+  assert.equal(negotiated.canSpawn, false);
+  assert.equal(negotiated.upgradeStopped, true);
+  assert.ok(negotiated.securityMissing.includes("processTerminalProof"));
+  assert.throws(() => negotiated.assertSpawnAllowed(), (error) => {
+    assert.equal(error.code, "CAPABILITY_NEGOTIATION_FAILED");
+    assert.deepEqual(error.missingCapabilities, negotiated.securityMissing);
+    assert.equal(error.upgradeStopped, true);
+    return true;
+  });
+});
+
+test("downgrades missing display capabilities without treating unavailable as terminal", async () => {
+  const negotiated = await negotiateCapabilities({
+    async ping() {
+      return {
+        version: 1,
+        methods: ["ping", "spawn"],
+        capabilities: {
+          asyncSpawn: true, processTerminalProof: true, launchResolvedExtensions: true,
+          runtimeAcknowledgedExtensions: true,
+        },
+        session: { sessionId: "session-1", sessionFile: "/repo/session.jsonl", cwd: "/repo" },
+      };
+    },
+  }, { cwd: "/repo" });
+  assert.equal(negotiated.canSpawn, true);
+  assert.equal(negotiated.enabled.status, false);
+  assert.equal(negotiated.enabled.cost, false);
+  assert.equal(negotiated.displayUnavailable.includes("status"), true);
+  assert.equal(negotiated.displayUnavailable.includes("cost"), true);
+  assert.equal(negotiated.diagnostics[0].code, "DISPLAY_CAPABILITY_UNAVAILABLE");
+  assert.equal(negotiated.isTerminalStatus("unavailable"), false);
+});
+
+test("passes through unknown methods and fields without throwing", async () => {
+  const raw = {
+    version: 1, methods: ["ping", "spawn", "futureMethod"],
+    capabilities: { asyncSpawn: true, processTerminalProof: true, launchResolvedExtensions: true, runtimeAcknowledgedExtensions: true, futureCapability: { mode: "x" } },
+    session: { sessionId: "session-1", sessionFile: "/repo/session.jsonl", cwd: "/repo", futureSessionField: 42 },
+    futureField: ["opaque"],
+  };
+  const negotiated = await negotiateCapabilities({ async ping() { return raw; } }, { cwd: "/repo" });
+  assert.equal(negotiated.canSpawn, true);
+  assert.deepEqual(negotiated.raw, raw);
+});
+
+test("validates spawn reply fields only when their capabilities are negotiated", async () => {
+  const base = {
+    version: 1, methods: ["ping", "spawn"],
+    capabilities: { asyncSpawn: true, processTerminalProof: true, launchResolvedExtensions: true, runtimeAcknowledgedExtensions: true },
+    session: { sessionId: "session-1", sessionFile: "/repo/session.jsonl", cwd: "/repo" },
+  };
+  const strict = await negotiateCapabilities({ async ping() { return { ...base, capabilities: { ...base.capabilities, spawnReplyIdentity: true, spawnReplyCwd: true } }; } }, { cwd: "/repo" });
+  assert.throws(() => strict.validateSpawnReply({ details: { runId: "run-1", asyncDir: "/tmp/run-1", cwd: "/wrong" } }), /cwd/);
+  assert.throws(() => strict.validateSpawnReply({ details: { runId: "run-1", cwd: "/repo" } }), /asyncDir/);
+
+  const permissive = await negotiateCapabilities({ async ping() { return base; } }, { cwd: "/repo" });
+  assert.deepEqual(permissive.validateSpawnReply({ details: { arbitrary: "reply" } }), { arbitrary: "reply" });
 });
 
 test("dispose rejects pending calls and fences invalid request ids", async () => {

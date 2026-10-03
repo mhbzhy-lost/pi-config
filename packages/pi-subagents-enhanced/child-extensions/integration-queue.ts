@@ -171,6 +171,15 @@ export function createSubagentIntegrationTool({ coordinator, resolveBinding }: {
 }
 
 export default function integrationQueue(pi: any, options: any = {}) {
+  // Required child extensions 也会被 generic 顶层 RPC Host 注入；该场景没有
+  // Root Broker 身份，必须静默禁用，不能把不可用的 broker 当作加载错误。
+  const env = options.env ?? process.env;
+  if (!options.coordinator
+    && (env.PI_ROOT_SUBAGENT_BROKER_ENABLED !== "1"
+      || !env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID || !env.PI_SUBAGENT_RUN_ID)) {
+    try { console.error("[subagent-integration] disabled: trusted Root Broker session unavailable"); } catch { /* 诊断输出不得影响 child 加载 */ }
+    return Object.freeze({ dispose() {} });
+  }
   const tool = createSubagentIntegrationTool(options);
   pi.registerTool(tool);
   const disposers: Array<() => unknown> = [];

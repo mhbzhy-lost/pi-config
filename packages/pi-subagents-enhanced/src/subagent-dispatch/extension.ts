@@ -5,21 +5,24 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { compileDispatchIR, isCodingDispatch, CodingDispatchContractError, renderDispatchPrompt } from "../contracts/dispatch-ir.ts";
+
 import { createManagedWorkspaceRequestV2 } from "../workspace/contract.ts";
 import { findManagedWorkspaceService } from "../workspace/registry.ts";
 import { createSubagentWorkspaceTool } from "../workspace/tool.ts";
-import { createTypedSubagentRpcClient } from "./rpc-client.ts";
+import { createTypedSubagentRpcClient, negotiateCapabilities } from "./rpc-client.ts";
 import { createHeadlessSubagentApi } from "./runtime-membrane.ts";
 import { buildWorkflowSpawn, createWorkflowChildStartCollector, childStartTimeoutMs } from "./workflow-spawn.ts";
 import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
 import { supervisorCanonicalDigest } from "./supervisor-control-plane.ts";
 import { findGoalRunCoordinator } from "./root-broker-registry.ts";
-import { resolveModelSelection, type ModelSelectionWarning } from "./model-selection.ts";
+import { resolveModelCandidates, resolveModelSelection, type ModelSelectionWarning } from "./model-selection.ts";
 import { createRunAuthorization } from "./run-authorization.ts";
 import { createAuthorizedDispatch } from "./execution-contract.ts";
 import { dispatchExecution, createGenericDispatchAdapter, createCodingDispatchAdapter } from "./execution.ts";
 import { createSubagentRpcFailureDetails } from "./errors.ts";
+import { registerRequiredChildExtensions } from "pi-subagents/required-child-extensions";
+
 
 const CLEANUP_KEY = "__typedSubagentRuntimeCleanup";
 const SHUTDOWN_DEBT_KEY = "__typedSubagentRuntimeShutdownDebt";
@@ -47,14 +50,17 @@ const HOST_CODING_TIMEOUT_MS = 30 * 60_000;
 // （anyOf/oneOf/allOf）会生成空 arguments（docs/bugs/2026-09-14-glm-empty-tool-args-from-root-union-schema.md）。
 // 分支互斥由 runtime 路由（action→control、writePaths→coding、其余→generic）与
 // compileDispatchIR 的 keypath 诊断权威裁决；schema 只引导字段集与类型。
+
 export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
   type: "object",
   additionalProperties: false,
   properties: {
+
     title: { type: "string", minLength: 1, maxLength: 4096 },
     agent: { type: "string", minLength: 1, maxLength: 256, pattern: "^[^\\u0000-\\u001F\\u007F-\\u009F]*[^\\s\\u0000-\\u001F\\u007F-\\u009F][^\\u0000-\\u001F\\u007F-\\u009F]*$" },
     model: { type: "string", minLength: 1, maxLength: 512, pattern: ".*\\S.*" },
     thinkingLevel: { enum: ["minimal", "low", "medium", "high", "xhigh", "max"] },
+
     acceptance: {
       anyOf: [
         {
@@ -72,8 +78,10 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
     },
     writePaths: { ...pathList, minItems: 1 },
     // generic 分支字段
-    // Runtime dispatch contract enforces the 64 KiB UTF-8-byte task limit;
-    // JSON Schema maxLength measures characters and cannot express that byte budget.
+    // Runtime dispatch contract enforces the 32 KiB UTF-8-byte task limit
+    // (MAX_TASK_BYTES in contracts/dispatch-ir.ts) and a 128 KiB rendered-prompt limit;
+    // JSON Schema maxLength measures characters and cannot express that byte budget,
+    // so the contract stays authoritative and no maxLength is declared here.
     task: { type: "string", minLength: 1 },
     cwd: { type: "string", minLength: 1, maxLength: 4096 },
     output: { anyOf: [{ type: "string", minLength: 1 }, { const: false }] },
@@ -97,6 +105,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
     },
     // control 分支字段
     action: { enum: ["status", "steer", "interrupt", "resume", "stop", "list"] },
+
     id: { type: "string", minLength: 1, maxLength: 4096 },
     runId: { type: "string", minLength: 1, maxLength: 4096 },
     dir: { type: "string", minLength: 1, maxLength: 4096 },
@@ -107,7 +116,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
 
 export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime. Use generic={agent,task} for research or text-only work, or coding={agent,task,writePaths,acceptance} for repository changes. Available agents: delegate (primary/complex), executor (deterministic), reviewer (review). Use {action:"list"} to see the current agent roster. Coding acceptance must be {criteria:[...]} and writePaths must contain at least one repository-relative path.
 
-For coding work, writePaths and acceptance are required. model is the only optional model selector. A qualified provider/model-id must exactly match the available catalog. A bare model-id with agent models matches the first currently available declared candidate with that ID, in declaration order; a miss fails and does not search the global catalog. A bare model-id with no agent models matches the available catalog by ascending full provider/model-id; that successful global-catalog path returns MODEL_MATCH_USED_GLOBAL_CATALOG in top-level details.warnings. Omitting model preserves agent metadata/default routing, including each profile's ordered models fallback chain. modelSelection reports requestedModel, resolvedModel, and source when applicable; neither requested nor resolved claims the actual child model. Runtime run/status/artifact actual-model metadata is authoritative. Worktrees use top-level worktree and cwd. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, resume, and stop. interrupt pauses the current turn; then use resume with a new non-empty message to continue it with new instructions. A stopped subagent cannot be resumed. When worktree=true, the response includes a workspace_id; after completion use subagent_worktree({action:"status"}) then integrate or discard to finish, or preserve temporarily and later release.`;
+For coding work, provide the complete dispatch-ir.v2 contract; writePaths and acceptance are required. model is the only optional model selector. A qualified provider/model-id must exactly match the available catalog. A bare model-id with agent models matches the first currently available declared candidate with that ID, in declaration order; a miss fails and does not search the global catalog. A bare model-id with no agent models matches the available catalog by ascending full provider/model-id; that successful global-catalog path returns MODEL_MATCH_USED_GLOBAL_CATALOG in top-level details.warnings. Omitting model preserves agent metadata/default routing, including each profile's ordered models fallback chain. modelSelection reports requestedModel, resolvedModel, and source when applicable; neither requested nor resolved claims the actual child model. Runtime run/status/artifact actual-model metadata is authoritative. Worktrees use top-level worktree and cwd. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, resume, and stop. interrupt pauses the current turn; then use resume with a new non-empty message to continue it with new instructions. A stopped subagent cannot be resumed. When worktree=true, the response includes a workspace_id; after completion use subagent_worktree({action:"status"}) then integrate or discard to finish, or preserve temporarily and later release.`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 const TRACE_PHASES = new Set([
@@ -261,6 +270,18 @@ function lifecycleSessionIdentity(session) {
 function assertSpawnCapabilities(result, cwd) {
   const methods = new Set(Array.isArray(result?.methods) ? result.methods : []);
   const session = result?.session;
+  const securityMissing = [];
+  // Responses with an explicit capabilities envelope are authoritative 0.71+
+  // negotiation responses. Legacy test doubles without that envelope retain the
+  // static v1 identity assertion; they do not represent a production endpoint.
+  if (result?.capabilities && typeof result.capabilities === "object") {
+    for (const capability of ["asyncSpawn", "processTerminalProof", "launchResolvedExtensions", "runtimeAcknowledgedExtensions"]) {
+      // 0.71 契约形态（rpc.js:307-336）：capability 可为布尔或对象（含 version 等元数据）；
+      // 存在且非 null/undefined/false 即视为具备，与 rpc-client 的 capabilityValue 语义一致。
+      const value = result.capabilities[capability];
+      if (value === undefined || value === null || value === false) securityMissing.push(capability);
+    }
+  }
   if (
     result?.version !== 1
     || !methods.has("spawn")
@@ -268,15 +289,32 @@ function assertSpawnCapabilities(result, cwd) {
     || !lifecycleSessionIdentity(session)
     || !nonempty(session?.cwd)
     || session.cwd !== cwd
-  ) {
-    const error = new Error("pi-subagents RPC v1 spawn capability or session identity mismatch");
-    error.code = "CAPABILITY_MISMATCH";
+  ) securityMissing.push("rpc:v1/session");
+  if (securityMissing.length) {
+    const error: any = new Error(`pi-subagents RPC capability negotiation failed; missing: ${securityMissing.join(", ")}`);
+    error.code = "CAPABILITY_NEGOTIATION_FAILED";
+    error.missingCapabilities = securityMissing;
+    error.upgradeStopped = true;
     throw error;
   }
 }
 
-function spawnBinding(reply) {
+function spawnBinding(reply, capabilities = undefined) {
   const details = reply?.details ?? reply;
+  if (capabilities?.capabilities && typeof capabilities.capabilities === "object") {
+    for (const [field, capability] of [["runId", "spawnReplyIdentity"], ["asyncDir", "spawnReplyIdentity"], ["cwd", "spawnReplyCwd"]]) {
+      if (capabilities.capabilities[capability] === true && !nonempty(details?.[field])) {
+        const error = new Error(`pi-subagents spawn reply is missing ${field}`);
+        error.code = "SPAWN_REPLY_INVALID";
+        throw error;
+      }
+    }
+    if (capabilities.capabilities.spawnReplyCwd === true && details.cwd !== capabilities.session?.cwd) {
+      const error = new Error("pi-subagents spawn reply cwd does not match negotiated cwd");
+      error.code = "SPAWN_REPLY_INVALID";
+      throw error;
+    }
+  }
   const runId = details?.runId ?? details?.asyncId;
   const asyncDir = details?.asyncDir;
   if (!nonempty(runId) || !nonempty(asyncDir)) {
@@ -284,7 +322,7 @@ function spawnBinding(reply) {
     error.code = "SPAWN_REPLY_INVALID";
     throw error;
   }
-  return { runId, asyncDir };
+  return { runId, asyncDir, ...(nonempty(details?.cwd) ? { cwd: details.cwd } : {}) };
 }
 
 function assertCodingSpawnIdentity(identity) {
@@ -314,14 +352,18 @@ export function codingWorkflowSpawnParams(ir, prompt, workflowKey, goalTicket?) 
     task: prompt,
     orchestratorCwd: ir.orchestratorCwd ?? ir.cwd,
     childCwd: ir.cwd,
+
     context: "fresh",
     child: {
       output: false,
-      subagentOnlyExtensions: [
-        ROOT_SESSION_OWNER_EXTENSION,
-        ...(ir.worktree === true ? [INTEGRATION_QUEUE_EXTENSION] : []),
-        ...(goalTicket ? [ACCEPTANCE_EVIDENCE_EXTENSION] : []),
-      ],
+      timeoutMs: ir.timeoutMs,
+      ...((ir.worktree || goalTicket) ? {
+        subagentOnlyExtensions: [
+          ...(ir.worktree ? [INTEGRATION_QUEUE_EXTENSION] : []),
+          ...(goalTicket ? [ACCEPTANCE_EVIDENCE_EXTENSION] : []),
+        ],
+      } : {}),
+
       ...(ir.model === undefined ? {} : { model: ir.model }),
       ...(ir.thinkingLevel === undefined ? {} : { thinking: ir.thinkingLevel }),
     },
@@ -351,26 +393,59 @@ function genericWorkflowSpawnParams(input, ctx, workflowKey) {
   });
 }
 
+// Bug docs/bugs/2026-09-29-authority-lock-contention-orphan-spawn.md 修复面③：
+// 派发失败后对已 spawn 的 root/leaf 经既有 typed RPC client 的 stop control method
+// 尽力回滚，阻止孤儿 run 与重派副本并行重复执行。尽力语义：stop 失败仅记日志，
+// 绝不改变原失败错误；不新造协议、不改 rpc-client。复用上游 stopAsyncRun 语义：
+// 运行中的 run（leaf 或仍在运行的 workflow root）会被终止；已完成的 root facade
+// 返回 invalid_state，同样仅记日志。
+async function stopSpawnedRunsBestEffort(rpc, spawnedRunIds) {
+  if (!Array.isArray(spawnedRunIds) || spawnedRunIds.length === 0) return;
+  const runIds = [...new Set(spawnedRunIds.filter((runId) => nonempty(runId)))];
+  if (runIds.length === 0) return;
+  if (typeof rpc?.stop !== "function") {
+    console.error(`[typed-subagent-runtime] rollback stop unavailable: spawned runs ${runIds.join(", ")} have no RPC stop channel`);
+    return;
+  }
+  await Promise.all(runIds.map(async (runId) => {
+    try {
+      await rpc.stop({ runId });
+    } catch (error) {
+      console.error(`[typed-subagent-runtime] rollback stop failed for spawned run ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }));
+}
+
 async function spawnWorkflowLeaf(pi, rpc, {
   workflowKey,
   agent,
   sessionId,
   timeoutMs,
   params,
+  capabilities = undefined,
   identity = undefined,
   titleRegistry,
   onBinding,
   trace,
+  spawnedRunIds = undefined,
 }) {
   const collector = createWorkflowChildStartCollector(pi.events, {
     workflowKey,
     agent,
     sessionId,
     timeoutMs,
-    onBinding,
+    // leaf 绑定先于调用方 onBinding 记录，后续注册同步抛错时失败路径才能对已 spawn 的 leaf 回滚。
+    onBinding: spawnedRunIds === undefined ? onBinding : (observed) => {
+      spawnedRunIds.push(observed.runId);
+      onBinding?.(observed);
+    },
   });
   try {
-    const root = spawnBinding(await rpc.spawn(params, { ...identity, diagnostic: { toolCallId: trace?.toolCallId, sink: trace } }));
+    const rootReply = await rpc.spawn(params, { ...identity, diagnostic: { toolCallId: trace?.toolCallId, sink: trace } });
+    const root = capabilities?.validateSpawnReply
+      ? capabilities.validateSpawnReply(rootReply)
+      : spawnBinding(rootReply, capabilities);
+    spawnedRunIds?.push(root.runId);
     titleRegistry.bindWorkflowRoot(root.runId);
     trace?.("leaf-wait-started", { rootRunId: root.runId });
     let leaf;
@@ -383,6 +458,11 @@ async function spawnWorkflowLeaf(pi, rpc, {
     }
     titleRegistry.bindWorkflowLeaf(root.runId, leaf.runId);
     return leaf;
+  } catch (error) {
+    // 失败路径尽力回滚（修复面③）：对已 spawn 的 root（及已观察到绑定的 leaf）发起 stop；
+    // stop 失败仅记日志，原错误照常上抛。
+    await stopSpawnedRunsBestEffort(rpc, spawnedRunIds);
+    throw error;
   } finally {
     collector.cancel();
   }
@@ -429,9 +509,23 @@ function genericContractHash(input, requestedCwd) {
   })).digest("hex");
 }
 
-async function defaultDiscoverAgents(...args) {
-  const compat = await import("../compat/pi-subagents-0.62.ts");
-  return compat.discoverAgents(...args);
+type DiscoveredAgent = {
+  name: string;
+  description?: string;
+  systemPrompt?: string;
+  models?: string[];
+  model?: string;
+  thinking?: string | false;
+};
+type AgentDiscovery = { agents: DiscoveredAgent[]; admission?: string };
+
+async function defaultDiscoverAgents(..._args): Promise<AgentDiscovery> {
+  // 0.71 exposes registration, not discovery (contract §2.8). Admission must
+  // be supplied by the Host/root broker; never scan directories or recreate the
+  // upstream discovery authority in this integration layer.
+  const error = new Error("AGENT_ADMISSION_UNAVAILABLE");
+  error.code = "AGENT_ADMISSION_UNAVAILABLE";
+  throw error;
 }
 
 async function resolveSpawnModel(input, ctx, discover, trace, blockedProviders = []) : Promise<ModelSelectionResult> {
@@ -445,8 +539,9 @@ async function resolveSpawnModel(input, ctx, discover, trace, blockedProviders =
   }
   const agent = discovery.agents.find((candidate) => candidate.name === input.agent);
   if (!agent) {
-    const error = new Error(`Unknown agent: ${input.agent}`);
-    error.code = "UNKNOWN_AGENT";
+    const admissionUnavailable = discovery.admission === "repository-configured";
+    const error = new Error(admissionUnavailable ? "AGENT_ADMISSION_UNAVAILABLE" : `Unknown agent: ${input.agent}`);
+    error.code = admissionUnavailable ? "AGENT_ADMISSION_UNAVAILABLE" : "UNKNOWN_AGENT";
     throw error;
   }
   if (!requestedModel) return { source: "default" };
@@ -456,10 +551,19 @@ async function resolveSpawnModel(input, ctx, discover, trace, blockedProviders =
     error.code = "MODEL_REGISTRY_UNAVAILABLE";
     throw error;
   }
+  const declaredProfile = agent.models !== undefined || agent.model !== undefined || agent.fallbackModels !== undefined;
+  const candidates = declaredProfile ? resolveModelCandidates({
+    agentName: input.agent,
+    models: agent.models,
+    model: agent.model,
+    fallbackModels: agent.fallbackModels,
+    availableModels,
+    blockedProviders,
+  }) : undefined;
   const selection = resolveModelSelection({
     requestedModel,
     agentName: input.agent,
-    agentModels: agent.models,
+    agentModels: candidates,
     availableModels,
     blockedProviders,
   });
@@ -608,6 +712,7 @@ async function standaloneWorkspaceRequest({ input, ctx, toolCallId, kind, contra
     baseCommit: source.baseCommit,
     contractHash: contractHash ?? genericContractHash(input, requestedCwd),
     policy: standaloneWorkspacePolicy(kind, kind === "coding" ? input.writePaths : []),
+
   });
 }
 
@@ -631,6 +736,7 @@ function callerSuppliesExecutionTimeout(input) {
 
 // 公共 coding dispatch 边界：模型不得提供 timeoutMs。
 // 一旦含 timeoutMs 即在 discovery/workspace/RPC 前拒绝；
+
 // 否则注入 Host timeout 后交给 canonical codec。Goal 仍通过 compileCodingDispatchIR
 // 直接传入可信 timeout，其 hash 语义不受本边界影响。
 export function preparePublicCodingDispatch(input, { cwd, timeoutMs }) {
@@ -649,9 +755,11 @@ export function preparePublicCodingDispatch(input, { cwd, timeoutMs }) {
     );
   }
   return compileDispatchIR(input, { cwd, timeoutMs });
+
 }
 
 async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, configuredWorkspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun, inspectWorkspaceSource, discover, trace, providerBlacklist) {
+  const spawnedRunIds: string[] = [];
   // thinkingLevel 是执行参数而非任务合同：不进入 IR/contractHash，
   // 只透传到 spawn 的 child.thinking（与 model 选择器同一消费层）。
   // resolver 与 Goal ticket 仍接收 raw contract 原引用，仅在 compile 入口剥离。
@@ -669,6 +777,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     // hash, but continue only when the Goal coordinator signs a ticket.
     ir = compileDispatchIR(compileInput, { cwd: ctx.cwd, timeoutMs: HOST_CODING_TIMEOUT_MS });
     const bindingRequest = { toolCallId, contract: input, contractHash: ir.contractHash, ctx };
+
     ticket = await goalCoordinator?.prepareSpawn(bindingRequest);
     if (!ticket) {
       throw new CodingDispatchContractError(
@@ -681,6 +790,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   } else {
     ir = preparePublicCodingDispatch(compileInput, { cwd: ctx.cwd, timeoutMs: HOST_CODING_TIMEOUT_MS });
     const bindingRequest = { toolCallId, contract: input, contractHash: ir.contractHash, ctx };
+
     ticket = await goalCoordinator?.prepareSpawn(bindingRequest);
   }
   const selection = await resolveSpawnModel(ir, ctx, discover, trace, providerBlacklist);
@@ -694,6 +804,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     }
     workspaceRequest = createManagedWorkspaceRequestV2(ticket.workspaceRequest);
     if (workspaceRequest.owner.kind !== "goal-task" || workspaceRequest.contractHash !== selectedIr.contractHash) {
+
       const error = new Error("Goal run workspace request does not match the source contract");
       error.code = "RUN_BINDING_MISMATCH";
       throw error;
@@ -714,6 +825,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   trace.stage = "rpc-ping";
   const capabilities = await rpc.ping({ diagnostic: { toolCallId, sink: trace } });
   trace.stage = "workflow-spawn";
+
   assertSpawnCapabilities(capabilities, orchestratorCwd);
   trace.parentSessionId = lifecycleSessionIdentity(capabilities.session);
   await prepareCodingSpawn(runtimeIr, ticket);
@@ -746,12 +858,14 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     prompt: runtimePrompt,
     cwd: runtimeIr.cwd,
     contractHash: selectedIr.contractHash,
+
     ...(runtimeIr.model === undefined ? {} : { model: runtimeIr.model }),
   });
   const authorizedDispatch = await hostAuthorizedDispatch(codingRequest, {
     workspace, rootSessionId, sessionId: lifecycleSessionIdentity(capabilities.session), dispatchId,
   });
   trace.stage = "workflow-spawn";
+
   const binding = await dispatchExecution(codingRequest, {
     workspace,
     authorizedDispatch,
@@ -760,10 +874,13 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
       agent: ir.agent,
       sessionId: lifecycleSessionIdentity(capabilities.session),
         timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, ir.timeoutMs),
+
       params: codingWorkflowSpawnParams(dispatchThinkingLevel === undefined ? runtimeIr : { ...runtimeIr, thinkingLevel: dispatchThinkingLevel }, runtimePrompt, workflowKey, ticket),
       identity,
       titleRegistry,
       trace,
+      spawnedRunIds,
+
       onBinding: (observed) => {
         trace.stage = "child-binding";
         authoritativeBinding = {
@@ -814,7 +931,14 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
       error.code = "FACADE_PROOF_UNAVAILABLE";
       throw error;
     }
-    await authorizationRegistration;
+    try {
+      await authorizationRegistration;
+    } catch (error) {
+      // 修复面③：spawn 成功但授权注册失败时对已 spawn 的 root/leaf 尽力 stop 回滚，
+      // 阻止孤儿 run；stop 失败仅记日志，原错误照常上抛。
+      await stopSpawnedRunsBestEffort(rpc, spawnedRunIds);
+      throw error;
+    }
   }
   if (workspace) {
     trace.stage = "bind-run";
@@ -850,6 +974,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
 }
 
 async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, workflowChildStartTimeoutMs, configuredWorkspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun, inspectWorkspaceSource, discover, trace, providerBlacklist) {
+  const spawnedRunIds: string[] = [];
   if (Object.hasOwn(input, "version")) {
     return failure("DEPRECATED_SCHEMA", "This input uses dispatch-ir.v1; migrate to the unified dispatch contract", undefined, "version");
   }
@@ -857,6 +982,7 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     return failure("INVALID_CONTRACT", "caller must not supply top-level timeoutMs; keypath=timeoutMs", undefined, "timeoutMs");
   }
   if (!nonempty(input.agent) || !nonempty(input.task)) {
+
     // 缺 version 的 coding 合同会被静默路由到 generic 分支；含 coding 特征
     // 字段的输入必须得到指向真实原因的自诊断报错，而非误导性的
     // generic agent/title/task 错误（实际派发事故复盘 2026-09-15）。
@@ -881,6 +1007,7 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     throw error;
   }
   const genericPrompt = renderDispatchPrompt(genericIr);
+
   const selection = await resolveSpawnModel(normalizedInput, ctx, discover, trace, providerBlacklist);
   const selectedInput = selection.model === undefined ? normalizedInput : { ...normalizedInput, model: selection.model };
   const workspaceRequest = selectedInput.worktree === true
@@ -903,6 +1030,11 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
   const orchestratorCwd = workspace?.originRoot ?? ctx.cwd;
   trace.stage = "rpc-ping";
   const capabilities = await rpc.ping({ diagnostic: { toolCallId, sink: trace } });
+  const negotiatedCapabilities = capabilities?.capabilities
+    ? await negotiateCapabilities(rpc, { cwd: orchestratorCwd, diagnostic: { toolCallId, sink: trace }, response: capabilities })
+    : undefined;
+  negotiatedCapabilities?.assertSpawnAllowed();
+
   assertSpawnCapabilities(capabilities, orchestratorCwd);
   trace.parentSessionId = lifecycleSessionIdentity(capabilities.session);
   titleRegistry.prepare({ agent: normalizedInput.agent, task: normalizedInput.task, title });
@@ -912,9 +1044,10 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
   const genericRequest = createGenericDispatchAdapter({
     agent: normalizedInput.agent,
     title,
-    task: genericPrompt,
+    task: normalizedInput.task,
     cwd: workspace?.dispatchCwd ?? selectedInput.cwd ?? ctx.cwd,
     ...(selectedInput.model === undefined ? {} : { model: selectedInput.model }),
+
   });
   const authorizedDispatch = await hostAuthorizedDispatch(genericRequest, {
     workspace, rootSessionId, sessionId: lifecycleSessionIdentity(capabilities.session), dispatchId: createId(),
@@ -927,36 +1060,39 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
       workflowKey,
       agent: normalizedInput.agent,
       sessionId: lifecycleSessionIdentity(capabilities.session),
+      capabilities: negotiatedCapabilities,
       timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, 120_000),
       params: genericWorkflowSpawnParams({
         ...(workspace ? { ...selectedInput, cwd: workspace.dispatchCwd } : selectedInput),
         ...(workspace ? { orchestratorCwd, childCwd: workspace.dispatchCwd } : {}),
         // The shared adapter owns the canonical five-section generic prompt.
-        task: genericPrompt,
+        task: genericRequest.prompt,
       }, ctx, workflowKey),
       titleRegistry,
       trace,
+      spawnedRunIds,
       onBinding: (observed) => {
           trace.stage = "child-binding";
           authoritativeBinding = observed;
-        if (workspace) {
-          if (typeof registerAuthorizedRun !== "function") {
-            const error = new Error("FACADE_PROOF_UNAVAILABLE");
-            error.code = "FACADE_PROOF_UNAVAILABLE";
-            throw error;
-          }
+        if (typeof registerAuthorizedRun === "function") {
           authorizationRegistration = Promise.resolve(registerAuthorizedRun(genericRunAuthorization(observed)));
         }
       },
     }),
   });
-  if (workspace) {
-    if (!authorizationRegistration) {
-      const error = new Error("FACADE_PROOF_UNAVAILABLE");
-      error.code = "FACADE_PROOF_UNAVAILABLE";
+  if (authorizationRegistration) {
+    try {
+      await authorizationRegistration;
+    } catch (error) {
+      // 修复面③：spawn 成功但增强层授权注册失败（现场：authority 锁竞争后的
+      // authority_store_unavailable）时，对已 spawn 的 root/leaf 尽力 stop 回滚，
+      // 阻止孤儿 run 与重派副本并行重复执行；stop 失败仅记日志，原错误照常上抛。
+      await stopSpawnedRunsBestEffort(rpc, spawnedRunIds);
       throw error;
     }
-    await authorizationRegistration;
+  }
+  if (workspace) {
+
     trace.stage = "bind-run";
     workspace = await workspaceService.bindRun({ workspaceId: workspace.workspaceId, run: binding });
   }
@@ -970,6 +1106,35 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
     details: { ...binding, agent: normalizedInput.agent, title, modelSelection: modelSelectionDetails(selection), ...(selection.warnings ? { warnings: selection.warnings } : {}), ...(workspace ? workspacePublic(workspace) : {}) },
   };
 }
+// steer 必须先规范化出唯一目标，再以同一标识做 owner 授权，否则会对「查不到 owner
+// 的别名」放行、而上游却投递到真实受管 run，绕过全部控制面围栏。
+// 上游语义见 pi-subagents/src/runs/background/async-resume.js:159-196 与
+// run-id-query.js（MIN_SAFE=8、FULL=36，[8,36) 会触发前缀扇描）。
+// 详见 docs/bugs/2026-09-30-steer-control-plane-target-aliasing.md。
+const STEER_PREFIX_MIN_LENGTH = 8;
+const STEER_FULL_RUN_ID_LENGTH = 36;
+// 本 package tsconfig 未开 strictNullChecks，字面量 true/false 会被 widen 成 boolean，
+// 因此不能用 { ok: true } / { ok: false } 做判别式窄化，改用 typeof 窄化。
+type SteerTarget = { runId: string | undefined; code: string | undefined };
+const steerTargetRejected = (code: string): SteerTarget => ({ runId: undefined, code });
+function canonicalSteerTarget(params: Record<string, any>): SteerTarget {
+  // dir 可单独定位 run，本层无法据其证明授权目标等于投递目标 → fail-closed。
+  if (params.dir !== undefined) return steerTargetRejected("SUPERVISOR_STEER_TARGET_ALIAS");
+  const { id, runId } = params;
+  for (const value of [id, runId]) {
+    // 上游 assertRunId 不做 trim，故此处也保留原始字串，仅拒绝空/非字串。
+    if (value !== undefined && (typeof value !== "string" || value.trim() === "")) return steerTargetRejected("SUPERVISOR_STEER_TARGET_INVALID");
+  }
+  // 上游优先级为 id ?? runId；两者同时存在且不一致时无法确定唯一目标。
+  if (typeof id === "string" && typeof runId === "string" && id !== runId) return steerTargetRejected("SUPERVISOR_STEER_TARGET_CONFLICT");
+  const canonical = typeof id === "string" ? id : typeof runId === "string" ? runId : undefined;
+  if (typeof canonical !== "string") return steerTargetRejected("SUPERVISOR_STEER_TARGET_UNRESOLVED");
+  if (path.isAbsolute(canonical) || /[\\/]/.test(canonical) || canonical.includes("..")) return steerTargetRejected("SUPERVISOR_STEER_TARGET_INVALID");
+  // 前缀形态会被上游扇描解析成另一个完整 runId，授权目标与投递目标可能不一致。
+  if (canonical.length >= STEER_PREFIX_MIN_LENGTH && canonical.length < STEER_FULL_RUN_ID_LENGTH) return steerTargetRejected("SUPERVISOR_STEER_TARGET_AMBIGUOUS");
+  return { runId: canonical, code: undefined };
+}
+
 function controlFailure(code, receipt = undefined) {
   return {
     content: [{ type: "text", text: `${code}: Supervisor control request blocked.` }],
@@ -978,7 +1143,30 @@ function controlFailure(code, receipt = undefined) {
   };
 }
 
-async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx) {
+function reportSupervisorDiagnostic(diagnosticSink, entry) {
+  if (typeof diagnosticSink !== "function") return;
+  try { diagnosticSink(entry); } catch (diagnosticError) {
+    console.error("[typed-subagent-supervisor] diagnostic sink failed", diagnosticError);
+  }
+}
+
+async function compensateSupervisorDelivery({ supervisorControlPlane, intent, hostRootSessionId, code, primaryError, diagnosticSink, phase }) {
+  try {
+    const result = await supervisorControlPlane.commitDelivery({ intent, success: false, code }, hostRootSessionId);
+    if (result?.status !== "committed") {
+      const compensationError = Object.assign(new Error(`supervisor delivery compensation blocked: ${result?.code ?? "unknown"}`), { code: result?.code ?? "SUPERVISOR_DELIVERY_COMPENSATION_BLOCKED", receipt: result?.receipt });
+      reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-delivery-compensation-failed", deliveryPhase: phase, error: primaryError, cause: primaryError?.cause, secondaryError: compensationError, compensation: result });
+      return compensationError;
+    }
+    return undefined;
+  } catch (compensationError) {
+    reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-delivery-compensation-failed", deliveryPhase: phase, error: primaryError, cause: primaryError?.cause, secondaryError: compensationError });
+    return compensationError;
+  }
+}
+
+async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink) {
+
   if (!CONTROL_ACTIONS.has(input.action)) {
     return failure("UNSUPPORTED_ACTION", `unsupported subagent RPC action: ${String(input.action)}`);
   }
@@ -1004,54 +1192,86 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
   }
   const { action, ...params } = input;
   if (action === "steer" && supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
-    const runId = params.runId ?? params.id;
-    const identity = typeof runId === "string" ? await supervisorControlPlane.identityForRun?.(runId) : undefined;
+    const target = canonicalSteerTarget(params);
+    if (typeof target.runId !== "string") return controlFailure(target.code ?? "SUPERVISOR_STEER_TARGET_UNRESOLVED");
+    const identity = await supervisorControlPlane.identityForRun?.(target.runId);
     const owner = identity?.owner;
-    const runtime = identity?.runtime;
-    const decision = await supervisorControlPlane.resolveSupervisorControl({
-      schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId,
-      rootSessionId: owner?.rootSessionId, ownerGeneration: owner?.ownerGeneration, kind: "steer",
-      payloadDigest: supervisorCanonicalDigest(params.message), liveRunEpoch: runtime?.liveRunEpoch,
-    });
-    if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
-    if (decision.status !== "allowed") return controlFailure(decision.code);
-    try {
-      const result = await rpc[action](params);
-      const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent });
-      if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);
-      return rpcResult(result);
-    } catch (error) {
-      await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_STEER_DELIVERY_FAILED" });
-      throw error;
+    // identityForRun 缺失或未返回三态时一律当作 unavailable，不得默认放行。
+    const ownerState = identity?.ownerState ?? (owner ? "owned" : "unavailable");
+    // 未登记 supervisor request 的明确非受管 run 仍由 upstream steer 投递；
+    // 已登记请求即使 replied，也需经控制面核查 pending 和 reply payload 去重。
+    const unownedRequest = ownerState === "unowned"
+      ? supervisorControlPlane.snapshot?.().requests.find((request) => request.runId === target.runId)
+      : undefined;
+    if (ownerState !== "unowned" || unownedRequest) {
+      if (ownerState !== "owned" && ownerState !== "unowned") return controlFailure("SUPERVISOR_OWNER_UNAVAILABLE");
+      if (ownerState === "owned" && !owner) return controlFailure("SUPERVISOR_OWNER_UNAVAILABLE");
+      let hostRootSessionId;
+      if (unownedRequest) {
+        try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { return controlFailure("SUPERVISOR_STALE_OWNER"); }
+      }
+      const runtime = identity?.runtime;
+      const decision = await supervisorControlPlane.resolveSupervisorControl({
+        schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId: target.runId,
+        rootSessionId: unownedRequest ? unownedRequest.rootSessionId : owner.rootSessionId,
+        ownerGeneration: unownedRequest ? unownedRequest.ownerGeneration : owner.ownerGeneration, kind: "steer",
+        payloadDigest: supervisorCanonicalDigest(params.message), liveRunEpoch: runtime?.liveRunEpoch,
+      }, hostRootSessionId);
+      if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
+      if (decision.status !== "allowed") return controlFailure(decision.code);
+      try {
+        const result = await rpc[action](params);
+        const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent }, hostRootSessionId);
+
+        if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);
+        return rpcResult(result);
+      } catch (error) {
+        const compensationError = await compensateSupervisorDelivery({ supervisorControlPlane, intent: decision.intent, hostRootSessionId, code: "SUPERVISOR_STEER_DELIVERY_FAILED", primaryError: error, diagnosticSink, phase: "steer" });
+        throw compensationError ? new AggregateError([error, compensationError], "supervisor steer delivery and compensation failed", { cause: error }) : error;
+      }
     }
   }
   return rpcResult(await rpc[action](params));
 }
 
-function createControlledSupervisorAdapter(adapter, supervisorControlPlane) {
+function createControlledSupervisorAdapter(adapter, supervisorControlPlane, registrationFailures, resolveRootSessionId, diagnosticSink) {
   if (!supervisorControlPlane) return adapter;
   return Object.freeze({
     bind: (...args) => adapter.bind(...args), dispose: () => adapter.dispose?.(), isBound: () => adapter.isBound?.(),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       if (params?.action !== "reply" || supervisorControlPlane.enabled?.() === false) return adapter.execute(toolCallId, params, signal, onUpdate, ctx);
-      const request = supervisorControlPlane.findRequest?.(params.replyTo) ?? supervisorControlPlane.listPending?.().find((entry) => entry.requestId === params.replyTo);
-      if (!request) return controlFailure("SUPERVISOR_REQUEST_NOT_PENDING");
+      let hostRootSessionId;
+      try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* fail closed below */ }
+      const request = supervisorControlPlane.findRequestAsync
+        ? await supervisorControlPlane.findRequestAsync(params.replyTo, hostRootSessionId)
+        : supervisorControlPlane.findRequest?.(params.replyTo) ?? supervisorControlPlane.listPending?.().find((entry) => entry.requestId === params.replyTo);
+      if (!request) {
+        const registrationCode = registrationFailures.get(params.replyTo);
+        if (registrationCode) return {
+          content: [{ type: "text", text: `SUPERVISOR_REQUEST_REGISTRATION_FAILED: Request ${params.replyTo} was shown by native Supervisor but was not registered for authorized reply (${registrationCode}). Interrupt the run and resume it to recover.` }],
+          isError: true,
+          details: { code: "SUPERVISOR_REQUEST_REGISTRATION_FAILED", registrationCode, requestId: params.replyTo },
+        };
+        return controlFailure("SUPERVISOR_REQUEST_NOT_PENDING");
+      }
       const intent = {
         schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId: request?.runId,
         rootSessionId: request?.rootSessionId, ownerGeneration: request?.ownerGeneration, kind: "reply",
         requestId: params.replyTo, requestGeneration: request?.requestGeneration,
         payloadDigest: supervisorCanonicalDigest(params.message),
       };
-      const decision = await supervisorControlPlane.resolveSupervisorControl(intent);
+      try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* owner receipt remains authoritative for managed runs. */ }
+      const decision = await supervisorControlPlane.resolveSupervisorControl(intent, hostRootSessionId);
       if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
       if (decision.status !== "allowed") return controlFailure(decision.code);
       try {
         const result = await adapter.execute(toolCallId, params, signal, onUpdate, ctx);
-        const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent });
+        const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent }, hostRootSessionId);
+
         return committed.status === "committed" ? result : controlFailure(committed.code, committed.receipt);
       } catch (error) {
-        await supervisorControlPlane.commitDelivery({ intent: decision.intent, success: false, code: "SUPERVISOR_REPLY_DELIVERY_FAILED" });
-        throw error;
+        const compensationError = await compensateSupervisorDelivery({ supervisorControlPlane, intent: decision.intent, hostRootSessionId, code: "SUPERVISOR_REPLY_DELIVERY_FAILED", primaryError: error, diagnosticSink, phase: "reply" });
+        throw compensationError ? new AggregateError([error, compensationError], "supervisor reply delivery and compensation failed", { cause: error }) : error;
       }
     },
   });
@@ -1278,7 +1498,8 @@ export function createTypedSubagentExtension(
   };
   const previous = registry.get(pi);
   if (previous?.debt && !previous.debt.completed) {
-    Promise.resolve(previous.debt.run(previous.debt.event, previous.debt.ctx, true)).catch(() => {
+    Promise.resolve(previous.debt.run(previous.debt.event, previous.debt.ctx, true)).catch((error) => {
+      reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "subagent-ready-debt-retry-failed", error, cause: error?.cause, retry: true });
       // The replacement generation's ready gate retains and retries this debt.
     });
   }
@@ -1296,6 +1517,10 @@ export function createTypedSubagentExtension(
     if (disposeFlight) return disposeFlight;
     disposeFlight = (async () => {
       const errors = [];
+      if (requiredChildExtensionsRegistration) {
+        try { requiredChildExtensionsRegistration.dispose(); } catch { /* best effort */ }
+        requiredChildExtensionsRegistration = undefined;
+      }
       for (const resource of resources) {
         if (resource.done) continue;
         try { await resource.dispose(); resource.done = true; } catch (error) { errors.push(error); }
@@ -1339,11 +1564,12 @@ export function createTypedSubagentExtension(
           return result;
         }
         if (Object.hasOwn(input, "action")) {
-          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx);
+          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink);
           trace("tool-returned");
           return result;
         }
         if (isCodingDispatch(input)) {
+
           const result = await executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs, workspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun, inspectWorkspaceSource, discover, trace, providerBlacklist);
           trace("tool-returned");
           return result;
@@ -1373,11 +1599,13 @@ export function createTypedSubagentExtension(
     renderCall: renderWorkspaceCall,
     renderResult: renderWorkspaceResult,
   });
-  const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane) : undefined;
+  const registrationFailures = new Map<string, string>();
+  const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane, registrationFailures, resolveRootSessionId, diagnosticSink) : undefined;
   const supervisorTool = controlledSupervisorAdapter ? createSupervisorTool(controlledSupervisorAdapter, {
     renderCall: renderSupervisorCall,
     renderResult: renderSupervisorResult,
   }) : undefined;
+  let requiredChildExtensionsRegistration;
   let ready;
   try {
     pi.registerTool(tool);
@@ -1388,7 +1616,27 @@ export function createTypedSubagentExtension(
         if (disposed || registry.get(pi)?.token !== token) return;
         const message = event?.message;
         if (message?.customType !== "subagent_supervisor_request") return;
-        if (supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) await supervisorControlPlane.registerSupervisorRequest(message.details).catch(() => undefined);
+        if (supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
+          let result;
+          try {
+            let hostRootSessionId;
+            try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* non-workspace registration fails closed without Host identity. */ }
+            result = await supervisorControlPlane.registerSupervisorRequest(message.details, hostRootSessionId);
+          } catch (error) {
+            result = { status: "blocked", code: "SUPERVISOR_REQUEST_REGISTRATION_FAILED" };
+            result.error = error;
+          }
+          const requestId = message.details?.id;
+          if (result?.status !== "registered") {
+            const errorCode = result?.code ?? "SUPERVISOR_REQUEST_REGISTRATION_FAILED";
+            if (typeof requestId === "string") registrationFailures.set(requestId, errorCode);
+            const details = { code: errorCode, requestId, runId: message.details?.runId };
+            reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-registration-failed", errorCode, ...details, ...(result?.error ? { error: result.error, cause: result.error?.cause } : {}) });
+            pi.sendMessage({ customType: "subagent_supervisor_registration_failed", content: `Supervisor request ${requestId ?? "(missing id)"} was not registered (${errorCode}). Reply is unavailable; interrupt the run and resume it to recover.`, details });
+          } else if (typeof requestId === "string") {
+            registrationFailures.delete(requestId);
+          }
+        }
         if (typeof onSupervisorRequest === "function") await onSupervisorRequest(message, ctx);
       });
     }
@@ -1436,6 +1684,16 @@ export function createTypedSubagentExtension(
           return;
         }
         await repayDebts(debtLane, shutdownDebt, ctx);
+        const sessionId = lifecycleSessionIdentity(ctx?.sessionManager);
+        if (sessionId && !requiredChildExtensionsRegistration) {
+          requiredChildExtensionsRegistration = registerRequiredChildExtensions({
+            sessionId,
+            extensions: [
+              { id: "root-session-owner", path: ROOT_SESSION_OWNER_EXTENSION },
+              { id: "integration-queue", path: INTEGRATION_QUEUE_EXTENSION },
+            ],
+          });
+        }
         await beforeSessionStart(event, ctx);
         started = true;
       })();
@@ -1477,6 +1735,7 @@ export function createTypedSubagentExtension(
 
 export function installHeadlessTypedSubagentRuntime(pi, {
   bootstrap,
+  afterBootstrap,
   completionNotifierFactory,
   resolveSessionId,
   beforeRuntimeDispose,
@@ -1485,6 +1744,7 @@ export function installHeadlessTypedSubagentRuntime(pi, {
   ...options
 }: TypedSubagentExtensionOptions & {
   bootstrap?: (api: unknown) => void;
+  afterBootstrap?: (api: unknown) => void;
   completionNotifierFactory?: (api: unknown, state: { currentSessionId: string | null; completionOwnerId?: string }) => { dispose(): unknown };
   workspaceCompletionReminderFactory?: (api: unknown, state: { currentSessionId: string | null }) => { dispose(): unknown };
   resolveSessionId?: (sessionManager: unknown) => string;
@@ -1607,6 +1867,29 @@ export function installHeadlessTypedSubagentRuntime(pi, {
     throw error;
   }
   generationOwnership = new Map(globalCleanupKeys.map((key) => [key, snapshotOwnership(key)]));
+  // Bootstrap callbacks may use a public event registration API immediately
+  // after installing the upstream runtime; registration requires the captured
+  // upstream event listeners to be active, otherwise a valid production
+  // registration is indistinguishable from an unavailable pi-subagents host
+  // and admission fails closed.  When an old generation's shutdown debt is
+  // still pending, defer both activation and registration to the repayment
+  // point (beforeSessionStart) so the new RPC bridge stays silent during the
+  // old drain and admission stays unavailable until the debt is repaid.
+  let pendingAfterBootstrap;
+  if (hiddenOwnership) {
+    pendingAfterBootstrap = () => afterBootstrap?.(createHeadlessSubagentApi(pi, {
+      titleRegistry,
+      captureEventSubscription,
+      workingStateTrace,
+    }));
+  } else {
+    activateEventSubscriptions();
+    afterBootstrap?.(createHeadlessSubagentApi(pi, {
+      titleRegistry,
+      captureEventSubscription,
+      workingStateTrace,
+    }));
+  }
 
   let completionNotifier;
   let workspaceCompletionReminder;
@@ -1673,6 +1956,11 @@ export function installHeadlessTypedSubagentRuntime(pi, {
       await beforeUpstreamSessionStart(event, ctx as { sessionManager: unknown });
       for (const handler of upstreamSessionStartHandlers) await handler(event, ctx);
       activateEventSubscriptions();
+      if (pendingAfterBootstrap) {
+        const run = pendingAfterBootstrap;
+        pendingAfterBootstrap = undefined;
+        run();
+      }
     },
     async afterBeforeDispose(event, ctx) {
       for (const entry of upstreamShutdownHandlers) {

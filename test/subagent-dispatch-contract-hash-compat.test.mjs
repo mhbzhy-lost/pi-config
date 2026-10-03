@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { compileDispatchIR } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+
 import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createManagedWorkspaceLedger } from "../packages/pi-subagents-enhanced/src/workspace/ledger.ts";
 
@@ -41,6 +42,7 @@ function dispatchContract() {
     writePaths: ["README.md"],
     acceptance: { criteria: ["Request loads with a self-consistent requestHash."] },
     cwd: "/repo",
+
   };
 }
 
@@ -64,6 +66,7 @@ test("persists and loads an old IR hash containing workflow without putting work
   delete legacyIR.contractHash;
   const legacyHash = hashCanonical(legacyIR);
   const currentHash = currentIR.contractHash;
+
   assert.notEqual(currentHash, legacyHash);
 
   const input = request(f, legacyHash);

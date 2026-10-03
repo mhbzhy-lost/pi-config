@@ -19,6 +19,7 @@ export function dispatchContract(task) {
     writePaths: [file],
     acceptance: { criteria: [`${file} contains the ${task} change and is committed.`] },
     worktree: true,
+
   };
 }
 
@@ -56,7 +57,7 @@ function scriptedResponse(messages, tasks) {
     const file = task === "head" || task === "follower" ? `src/${task}.txt` : "src/pipeline.ts";
     return { toolCalls: [{ id: "r8-work", name: "bash", arguments: { command: `echo '${task}' > ${file} && git add ${file} && git commit -m 'feat: 添加 ${task} 阶段'` } }] };
   }
-  return { text: "r8 scripted turn complete" };
+  return { text: "r8 scripted turn complete\n\n```acceptance-report\n{\"criteriaSatisfied\":[{\"id\":\"criterion-1\",\"status\":\"satisfied\",\"evidence\":\"The scripted task completed.\"}],\"changedFiles\":[],\"testsAddedOrUpdated\":[],\"commandsRun\":[{\"command\":\"scripted fixture\",\"result\":\"passed\",\"summary\":\"Deterministic recovery fixture completed.\"}],\"validationOutput\":[\"r8 scripted turn complete\"],\"residualRisks\":[],\"noStagedFiles\":true,\"diffSummary\":\"Scripted fixture turn.\"}\n```" };
 }
 
 /** 启动本地 openai-completions 兼容服务；返回 { port, requests, close }。 */

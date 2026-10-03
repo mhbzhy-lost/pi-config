@@ -52,6 +52,46 @@ test("Root Broker heartbeat renews verified durable leases without upstream or e
   await broker.closeRootSession();
 });
 
+test("facade classification may converge from executor observation to generic authorization", () => {
+  const broker = new RootBrokerServer({ rootSessionId: "root-facade-kind", lifecycleSessionId: "root-facade-kind", upstream: { async ping() {}, async stop() {}, async dispose() {} } });
+  const identity = { runId: "facade-kind-run", asyncDir: "/tmp/facade-kind-run", sessionId: "root-facade-kind", pid: 123, agent: "probe-worker" };
+  broker.registerFacadeRun({ ...identity, kind: "executor" });
+  assert.doesNotThrow(() => broker.registerFacadeRun({ ...identity, kind: "generic" }));
+  assert.equal(broker.facadeRuns.get(identity.runId).kind, "executor");
+});
+
+test("generic authorization persists owner identity without granting broker capabilities", async (t) => {
+  const { AuthorityStore } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/authority-store.ts");
+  const root = await mkdtemp(join(tmpdir(), "root-broker-generic-owner-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const rootSessionId = "root-generic-owner";
+  const runId = "generic-owner";
+  const broker = new RootBrokerServer({
+    rootSessionId,
+    lifecycleSessionId: rootSessionId,
+    authorityStore: new AuthorityStore({ root, rootSessionId }),
+    captureProcessBirthIdentity: async () => "birth-generic-owner",
+    upstream: { async ping() {}, async stop() {}, async dispose() {} },
+    writeGrant: async () => { throw new Error("generic run must not write a broker grant"); },
+  });
+  await broker.registerAuthorizedRun(createRunAuthorization({
+    kind: "generic",
+    binding: { runId, asyncDir: `/tmp/${runId}`, sessionId: rootSessionId, pid: 123, agentProfile: "probe-worker" },
+    goal: null,
+  }));
+  const owner = await broker.readOwnerReceipt(runId);
+  assert.deepEqual({ rootSessionId: owner.rootSessionId, runId: owner.runId, ownerGeneration: owner.ownerGeneration, processBirth: owner.processBirth }, {
+    rootSessionId,
+    runId,
+    ownerGeneration: 1,
+    processBirth: "birth-generic-owner",
+  });
+  assert.equal(broker.ownedRuns.has(runId), false);
+  assert.equal(broker.principals.has(runId), false);
+  await broker.closeRootSession();
+});
+
+
 test("Root Broker replays pending recovery event when root attaches a subscription", () => {
   const broker = new RootBrokerServer({ rootSessionId: "root-replay", upstream: { async ping() { return {}; }, async stop() {}, async dispose() {} } });
   const writes = [];

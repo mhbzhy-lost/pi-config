@@ -1,9 +1,60 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 const { jiti } = await loadPiTestRuntime(import.meta.url);
-const { SubagentSessionBrowserState } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/session-browser.ts");
+const { SubagentSessionBrowserState, projectSessionStatus } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/session-browser.ts");
+
+// 真实 0.71 ping capability envelope，来源：pi-subagents/src/extension/rpc.js:313-316。
+const negotiated71 = {
+  enabled: { status: true, fleetStatus: true },
+  capabilities: {
+    statusProjection: { version: 1, untargeted: "in-memory-when-ready", targeted: "executor" },
+    fleetStatus: { version: 1 },
+    asyncStatusSnapshot: { kind: "pi-subagents.async-status-snapshot", version: 1 },
+  },
+};
+
+test("projects legacy and 0.71 status schema without rewriting raw status", () => {
+  const cases = [
+    ["active", "active"], ["queued", "active"], ["running", "active"], ["pending", "active"],
+    ["terminal", "terminal"], ["complete", "terminal"], ["completed", "terminal"], ["failed", "terminal"],
+    ["rejected", "terminal"], ["detached", "terminal"], ["timed-out", "terminal"],
+    ["retained", "active"], ["paused", "terminal"], ["stopped", "terminal"], ["terminal-proof", "terminal"],
+  ];
+  for (const [status, classification] of cases) {
+    const projected = projectSessionStatus(negotiated71, { status });
+    assert.equal(projected.classification, classification, status);
+    assert.deepEqual(projected.raw, { status });
+    assert.equal(projected.status, status);
+  }
+});
+
+test("projects missing and unknown status as awaiting disposition and preserves raw value", () => {
+  for (const raw of [undefined, {}, { state: "future-status", detail: 42 }]) {
+    const projected = projectSessionStatus(negotiated71, raw);
+    assert.equal(projected.classification, "awaiting-disposition");
+    assert.deepEqual(projected.raw, raw);
+  }
+});
+
+test("uses negotiated status projection and keeps unavailable non-terminal", () => {
+  const negotiated = {
+    enabled: { status: false, fleetStatus: false },
+    capabilities: { statusProjection: false },
+  };
+  const projected = projectSessionStatus(negotiated, { state: "unavailable" });
+  assert.equal(projected.classification, "awaiting-disposition");
+  assert.equal(projected.status, "unavailable");
+  assert.deepEqual(projected.raw, { state: "unavailable" });
+
+  const minimal = projectSessionStatus(null, { state: "complete" });
+  assert.equal(minimal.classification, "terminal");
+  assert.equal(minimal.status, "complete");
+});
 
 function startRun(state, id, agents = ["executor", "reviewer"]) {
   state.trackStarted({
@@ -476,4 +527,97 @@ test("projects real completion results to each child without rewriting lifecycle
     { raw: "failed", presentation: "reported" },
     { raw: "rejected", presentation: "runtime-failed" },
   ]);
+});
+
+// typed 派发的 root facade 完成：run 级 state 终局，逐 child 条目携带 detach 时刻 state:"running"
+// （上游 subagent-executor.js workflowResultChildren）。两条消费路径都必须让 run 级终局兜底
+// child 级非终局，否则 root 条目被自己的完成事件锁死在运行区（bug #1）。
+test("run-level terminal completion settles children whose facade result is frozen at running", () => {
+  const state = new SubagentSessionBrowserState();
+  startRun(state, "facade-complete", ["delegate"]);
+
+  state.trackCompleted({ runId: "facade-complete", state: "complete", results: [{ state: "running" }] });
+
+  const snapshot = state.snapshot();
+  assert.equal(snapshot.children[0].state, "complete");
+  assert.equal(snapshot.activeChildren.length, 0);
+  assert.equal(snapshot.recentChildren.length, 1);
+});
+
+test("run-level terminal reconcile settles frozen running step status and later polls do not resurrect it", () => {
+  const state = new SubagentSessionBrowserState();
+  startRun(state, "facade-poll", ["delegate"]);
+  const facadeStatus = {
+    state: "complete",
+    steps: [{ agent: "delegate", status: "running", label: "typed-facade", runId: "leaf-run", async: true }],
+  };
+
+  state.reconcileRun("facade-poll", facadeStatus);
+  assert.equal(state.snapshot().children[0].state, "complete");
+  assert.equal(state.snapshot().activeChildren.length, 0);
+  assert.equal(state.snapshot().recentChildren.length, 1);
+
+  state.reconcileRun("facade-poll", facadeStatus);
+  assert.equal(state.snapshot().children[0].state, "complete");
+  assert.equal(state.snapshot().activeChildren.length, 0);
+});
+
+// root facade 容器 steps 从不携带 model/thinking/tokens（spawn 时刻定格），数据在邻接 leaf
+// run 的 status.json steps 里完整存在（bug #2/#3）。reconcileRun 必须经 step.runId 解析
+// 同一 runs 根下邻接 leaf 的 status 补齐投影。
+test("reconcile projects facade model, thinking, and tokens from the adjacent leaf status", (t) => {
+  const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "footer-facade-runs-"));
+  t.after(() => { fs.rmSync(runsRoot, { recursive: true, force: true }); });
+  const rootDir = path.join(runsRoot, "facade-root-run");
+  const leafDir = path.join(runsRoot, "facade-leaf-run");
+  fs.mkdirSync(rootDir);
+  fs.mkdirSync(leafDir);
+  fs.writeFileSync(path.join(leafDir, "status.json"), JSON.stringify({
+    state: "complete",
+    steps: [{
+      agent: "delegate", status: "completed",
+      model: "qoder-pool/GLM-5.3-0.6x:high", thinking: "high",
+      tokens: { input: 956232, output: 66034, total: 1022266 },
+    }],
+  }));
+
+  const state = new SubagentSessionBrowserState();
+  state.trackStarted({ id: "facade-root-run", asyncDir: rootDir, cwd: "/repo", agent: "workflow" });
+  state.reconcileRun("facade-root-run", {
+    state: "complete",
+    steps: [{ agent: "delegate", status: "running", label: "typed-facade", runId: "facade-leaf-run", async: true }],
+  });
+
+  const child = state.snapshot().children[0];
+  assert.equal(child.state, "complete");
+  assert.equal(child.model, "qoder-pool/GLM-5.3-0.6x:high");
+  assert.equal(child.thinking, "high");
+  assert.equal(child.tokens, 1022266);
+});
+
+test("facade leaf resolution is confined to the adjacent runs root", (t) => {
+  const runsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "footer-facade-confined-"));
+  const escapeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "footer-facade-escape-"));
+  t.after(() => {
+    fs.rmSync(runsRoot, { recursive: true, force: true });
+    fs.rmSync(escapeRoot, { recursive: true, force: true });
+  });
+  const rootDir = path.join(runsRoot, "facade-root-run");
+  fs.mkdirSync(rootDir);
+  fs.writeFileSync(path.join(escapeRoot, "status.json"), JSON.stringify({
+    state: "complete",
+    steps: [{ agent: "delegate", status: "completed", model: "escape-pool/escaped-model:high", thinking: "high", tokens: { total: 1 } }],
+  }));
+
+  const state = new SubagentSessionBrowserState();
+  state.trackStarted({ id: "facade-root-run", asyncDir: rootDir, cwd: "/repo", agent: "workflow" });
+  state.reconcileRun("facade-root-run", {
+    state: "running",
+    steps: [{ agent: "delegate", status: "running", runId: `../${path.basename(escapeRoot)}` }],
+  });
+
+  const child = state.snapshot().children[0];
+  assert.equal(child.model, undefined);
+  assert.equal(child.thinking, undefined);
+  assert.equal(child.tokens, undefined);
 });

@@ -1,4 +1,6 @@
+import * as path from "node:path";
 import { classifySubagentChildPresentation, type SubagentPresentationStatus } from "../subagent-dispatch/presentation-status.ts";
+import { readBrowserRunStatus } from "./browser-adapter.ts";
 
 export interface BrowserChild {
   key: string;
@@ -44,12 +46,70 @@ type RecordValue = Record<string, unknown>;
 
 const RECENT_RUN_LIMIT = 20;
 
-// pi-subagents 0.62.0 state contract: active states may advance; terminal states are immutable recent runs.
-const ACTIVE_STATES = new Set(["queued", "running", "pending"]);
-const TERMINAL_STATES = new Set(["complete", "completed", "failed", "paused", "stopped", "rejected", "detached", "timed-out"]);
+// 旧版状态仍作为无协商信息时的最小投影；未知状态不得推断为终局。
+const ACTIVE_STATES = new Set(["active", "queued", "running", "pending", "retained"]);
+const TERMINAL_STATES = new Set(["complete", "completed", "failed", "paused", "stopped", "rejected", "detached", "timed-out", "terminal", "terminal-proof"]);
 const PRESENTATION_STATUSES = new Set<SubagentPresentationStatus>(["running", "completed", "reported", "needs-context", "limited", "paused", "stopped", "runtime-failed"]);
 
-type StateClassification = "active" | "terminal" | "unknown";
+type StateClassification = "active" | "terminal" | "awaiting-disposition";
+
+export interface SessionStatusProjection {
+  classification: StateClassification;
+  status?: string;
+  raw: unknown;
+}
+
+type StatusProjectionSchema = Record<string, unknown>;
+
+function statusFromRaw(raw: unknown): string | undefined {
+  if (typeof raw === "string" && raw.length > 0) return raw;
+  if (!isRecord(raw)) return undefined;
+  return stringValue(raw.status) ?? stringValue(raw.state);
+}
+
+function projectionSchemas(negotiated: unknown): StatusProjectionSchema[] {
+  if (!isRecord(negotiated)) return [];
+  const candidates: unknown[] = [
+    negotiated.statusProjection,
+    isRecord(negotiated.capabilities) ? negotiated.capabilities.statusProjection : undefined,
+    isRecord(negotiated.raw) && isRecord(negotiated.raw.capabilities)
+      ? negotiated.raw.capabilities.statusProjection : undefined,
+  ];
+  return candidates.filter(isRecord);
+}
+
+function schemaStates(schema: StatusProjectionSchema, names: string[]): Set<string> {
+  const states = new Set<string>();
+  for (const name of names) {
+    const value = schema[name];
+    if (Array.isArray(value)) {
+      for (const candidate of value) if (typeof candidate === "string") states.add(candidate.toLowerCase());
+    }
+  }
+  return states;
+}
+
+export function projectSessionStatus(negotiated: unknown, raw: unknown): SessionStatusProjection {
+  const status = statusFromRaw(raw);
+  if (!status) return { classification: "awaiting-disposition", raw };
+  const normalized = status.toLowerCase();
+
+  for (const schema of projectionSchemas(negotiated)) {
+    if (schemaStates(schema, ["active", "activeStates"]).has(normalized)) {
+      return { classification: "active", status, raw };
+    }
+    if (schemaStates(schema, ["terminal", "terminalStates"]).has(normalized)) {
+      return { classification: "terminal", status, raw };
+    }
+    if (schemaStates(schema, ["awaitingDisposition", "awaiting-disposition", "awaitingDispositionStates"]).has(normalized)) {
+      return { classification: "awaiting-disposition", status, raw };
+    }
+  }
+
+  if (ACTIVE_STATES.has(normalized)) return { classification: "active", status, raw };
+  if (TERMINAL_STATES.has(normalized)) return { classification: "terminal", status, raw };
+  return { classification: "awaiting-disposition", status, raw };
+}
 
 function isRecord(value: unknown): value is RecordValue {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -64,15 +124,28 @@ function numberValue(value: unknown): number | undefined {
 }
 
 function classifyState(state: string | undefined): StateClassification {
-  if (state === undefined) return "unknown";
-  const normalizedState = state.toLowerCase();
-  if (ACTIVE_STATES.has(normalizedState)) return "active";
-  if (TERMINAL_STATES.has(normalizedState)) return "terminal";
-  return "unknown";
+  return projectSessionStatus(undefined, state).classification;
 }
 
 function isTerminalState(state: string | undefined): boolean {
   return classifyState(state) === "terminal";
+}
+
+// typed 派发的 root facade step 携带 leaf runId（steps 自身不携带 model/tokens，
+// 数据在邻接 leaf run 的 status.json）。解析必须经 readBrowserRunStatus 防线，
+// 且路径限定在 path.dirname(asyncDir) 的直接子目录（邻接 runs 根）。
+function adjacentFacadeLeafStep(asyncDir: string, step: RecordValue): RecordValue | undefined {
+  const leafRunId = stringValue(step.runId);
+  if (!leafRunId) return undefined;
+  const runsRoot = path.dirname(asyncDir);
+  const leafAsyncDir = path.join(runsRoot, leafRunId);
+  if (path.dirname(leafAsyncDir) !== runsRoot) return undefined;
+  const leafStatus = readBrowserRunStatus(leafAsyncDir);
+  if (!isRecord(leafStatus) || !Array.isArray(leafStatus.steps)) return undefined;
+  for (const leafStep of leafStatus.steps) {
+    if (isRecord(leafStep)) return leafStep;
+  }
+  return undefined;
 }
 
 export class SubagentSessionBrowserState {
@@ -171,7 +244,12 @@ export class SubagentSessionBrowserState {
       const existing = run.children[index];
       const agent = stringValue(step.agent) ?? existing?.agent;
       if (!agent) return [];
-      const requestedState = stringValue(step.status) ?? runState ?? existing?.state ?? "unknown";
+      const stepStatus = stringValue(step.status);
+      // run 级终局兑底 child 级非终局：root facade 的 step.status 冻结在 detach 时刻的
+      // "running"，不能遮蔽容器自身的终局 state。
+      const requestedState = isTerminalState(runState) && !isTerminalState(stepStatus)
+        ? runState
+        : stepStatus ?? runState ?? existing?.state ?? "unknown";
       const state = isTerminalState(existing?.state) && !isTerminalState(requestedState) ? existing.state : requestedState;
       const child: BrowserChild = {
         key: `${runId}:${index}`,
@@ -187,9 +265,17 @@ export class SubagentSessionBrowserState {
       const label = stringValue(step.label) ?? stringValue(step.title) ?? existing?.label;
       const sessionFile = stringValue(step.sessionFile);
       const transcriptPath = stringValue(step.transcriptPath);
-      const model = stringValue(step.model);
-      const thinking = stringValue(step.thinking);
-      const tokens = isRecord(step.tokens) ? numberValue(step.tokens.total) : undefined;
+      let model = stringValue(step.model);
+      let thinking = stringValue(step.thinking);
+      let tokens = isRecord(step.tokens) ? numberValue(step.tokens.total) : undefined;
+      if (model === undefined || thinking === undefined || tokens === undefined) {
+        const leafStep = adjacentFacadeLeafStep(run.asyncDir, step);
+        if (leafStep !== undefined) {
+          if (model === undefined) model = stringValue(leafStep.model);
+          if (thinking === undefined) thinking = stringValue(leafStep.thinking);
+          if (tokens === undefined && isRecord(leafStep.tokens)) tokens = numberValue(leafStep.tokens.total);
+        }
+      }
       if (label) child.label = label;
       if (sessionFile) child.sessionFile = sessionFile;
       if (transcriptPath) child.transcriptPath = transcriptPath;
@@ -210,9 +296,13 @@ export class SubagentSessionBrowserState {
     if (!run) return;
     const state = stringValue(event.state) ?? stringValue(event.status) ?? "complete";
     const results = Array.isArray(event.results) ? event.results : [];
+    const runTerminal = isTerminalState(state);
     run.children = run.children.map((child) => {
       const result = isRecord(results[child.index]) ? results[child.index] : undefined;
-      const childState = stringValue(result?.status) ?? stringValue(result?.state) ?? state;
+      const resultState = stringValue(result?.status) ?? stringValue(result?.state);
+      // root facade 完成事件的逐 child 条目携带 detach 时刻 state:"running"；run 级终局
+      // 必须兑底未携带显式终局的 child，否则 root 条目被自己的完成事件锁死。
+      const childState = runTerminal && !isTerminalState(resultState) ? state : resultState ?? state;
       return {
         ...child,
         state: isTerminalState(child.state) ? child.state : childState,

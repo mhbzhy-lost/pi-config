@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { compileDispatchIR, renderDispatchPrompt } from "../packages/pi-subagents-enhanced/src/contracts/dispatch-ir.ts";
+
 import { preparePublicCodingDispatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 import { createAuthorizedDispatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/execution-contract.ts";
 import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
@@ -53,12 +54,14 @@ test("standalone reviewer generic contract reaches shared execution through a Ho
   let seen;
   const receipt = await dispatchExecution(
     createGenericDispatchAdapter({ agent: "reviewer", title: "Review", task: prompt.task, cwd: f.originRoot }),
+
     { authorizedDispatch: envelope, execute: (value) => { seen = value; return { runId: "reviewer-run" }; } },
   );
   assert.equal(receipt.runId, "reviewer-run");
   assert.equal(seen.worktree, false);
   assert.equal(seen.authorizedDispatch, envelope);
   assert.match(seen.prompt, /Review the isolated diff/);
+
 });
 
 test("standalone executor coding contract reaches shared execution and allocates a v2 workspace", async (t) => {
@@ -82,6 +85,7 @@ test("standalone executor coding contract reaches shared execution and allocates
   assert.equal(seen.worktree, false);
   assert.equal(seen.contractHash, ir.contractHash);
 
+
   const service = createManagedWorkspaceService({ stateRoot: join(f.root, "state") });
   const request = createManagedWorkspaceRequestV2({
     workspaceId: "e2e-executor",
@@ -91,6 +95,7 @@ test("standalone executor coding contract reaches shared execution and allocates
     originRef: "refs/heads/main",
     baseCommit: f.baseCommit,
     contractHash: ir.contractHash,
+
     policy: { publication: "allowed", application: "allowed", writePaths: ["src/**"] },
   });
   const active = service.ensureAllocated(request);

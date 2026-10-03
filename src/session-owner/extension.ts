@@ -26,7 +26,8 @@ function identity(ctx: SessionOwnerContext): SessionIdentity {
 }
 
 function notify(ctx: SessionOwnerContext): void {
-  try { ctx.ui.notify("该会话正由另一个 Pi 窗口使用，已取消切换", "warning"); } catch { /* UI 通知失败不能影响保护逻辑。 */ }
+  try { ctx.ui.notify("该会话正由另一个 Pi 窗口使用，已取消切换", "warning"); }
+  catch (error) { console.error("[session-owner] notification failed:", error); /* UI 通知失败不能影响保护逻辑。 */ }
 }
 
 export function installSessionOwnerExtension(pi: ExtensionAPI, deps: SessionOwnerExtensionDeps = {}): void {
@@ -45,9 +46,11 @@ export function installSessionOwnerExtension(pi: ExtensionAPI, deps: SessionOwne
     try {
       if (!lifecycle) throw new Error("session owner environment is incomplete");
       await lifecycle.start(identity(ctx));
-    } catch {
+    } catch (error) {
+      console.error("[session-owner] session_start failed:", error);
       notify(ctx);
-      try { await ctx.shutdown?.(); } catch { /* 此时保护逻辑已按 fail closed 处理。 */ }
+      try { await ctx.shutdown?.(); }
+      catch (error) { console.error("[session-owner] shutdown after session_start failure failed:", error); /* 此时保护逻辑已按 fail closed 处理。 */ }
       return { cancel: true };
     }
   });
@@ -57,7 +60,8 @@ export function installSessionOwnerExtension(pi: ExtensionAPI, deps: SessionOwne
         notify(ctx);
         return { cancel: true };
       }
-    } catch {
+    } catch (error) {
+      console.error("[session-owner] session_before_switch failed:", error);
       notify(ctx);
       return { cancel: true };
     }
@@ -69,7 +73,8 @@ export function installSessionOwnerExtension(pi: ExtensionAPI, deps: SessionOwne
         notify(ctx);
         return { cancel: true };
       }
-    } catch {
+    } catch (error) {
+      console.error("[session-owner] session_before_fork failed:", error);
       notify(ctx);
       return { cancel: true };
     }
@@ -77,6 +82,6 @@ export function installSessionOwnerExtension(pi: ExtensionAPI, deps: SessionOwne
   });
   pi.on("session_shutdown", async (event, ctx) => {
     try { await lifecycle?.shutdown(event.reason, identity(ctx)); }
-    catch { notify(ctx); }
+    catch (error) { console.error("[session-owner] session_shutdown failed:", error); notify(ctx); }
   });
 }

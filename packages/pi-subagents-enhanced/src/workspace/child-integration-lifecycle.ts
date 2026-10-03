@@ -5,6 +5,17 @@ const KEY = Symbol.for("pi.subagent.child-integration-lifecycle.v1");
 const TERMINAL = new Set(["completed", "preserved", "cancelled", "blocked"]);
 const CONFLICT = "Resolve only the current rebase conflict, then git add the resolved files. Do not enqueue, publish, or change integration state.";
 
+/** B 段唯一允许消费的终局证明；agent_end/agent_settled 都不是证明。 */
+export function terminalDispositionDecision(proof: any) {
+  if (!proof || proof.state !== "observed" || proof.conflict !== false) {
+    return { allowed: false as const, code: "TERMINAL_PROOF_PENDING" };
+  }
+  if (typeof proof.proofId !== "string" || proof.proofId.length === 0) {
+    return { allowed: false as const, code: "TERMINAL_PROOF_INVALID" };
+  }
+  return { allowed: true as const, proofId: proof.proofId };
+}
+
 function records(): Map<string, any> {
   const processObject = process as any;
   if (!(processObject[KEY] instanceof Map)) Object.defineProperty(processObject, KEY, { value: new Map(), configurable: true });
@@ -35,9 +46,21 @@ export function createChildIntegrationLifecycle(options: any = {}) {
   };
   const preserve = async (binding: any, reason = "integration recovery required") => {
     if (!current()) return;
+    // preserve 属于 B 段处置。没有 coordinator 已持久化的终局证明时，
+    // 拒绝处置并保留当前生命周期，等待 proof consumer 重试；不得用 settled
+    // 或模型回合结束推断 terminal。
+    if (typeof coordinator.inspectIntegrationState === "function") {
+      let completion: any;
+      try { completion = await coordinator.inspectIntegrationState(binding); }
+      catch (error) { trace("integration-lifecycle-disposition-blocked", { reason: "terminal-proof-unavailable", error, cause: error?.cause }); return; }
+      if (completion?.proofState !== "accepted") {
+        trace("integration-lifecycle-disposition-blocked", { reason: "terminal-proof-pending" });
+        return;
+      }
+    }
     record.terminal = true;
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
-    try { await coordinator.preserveIntegrationDebt(binding, reason); } catch { /* durable coordinator state remains authoritative */ }
+    try { await coordinator.preserveIntegrationDebt(binding, reason); } catch (error) { trace("integration-lifecycle-preserve-failed", { reason, error, cause: error?.cause }); /* durable coordinator state remains authoritative */ }
   };
   const durableStates = new Set(["queued", "admission-pending", "admitted", "rebasing", "resolving-conflict", "prepared"]);
   const shutdown = async (binding: any) => {
@@ -62,7 +85,8 @@ export function createChildIntegrationLifecycle(options: any = {}) {
       }
       // Unknown state is not a reason to terminate a durable queue item;
       // leave it for coordinator reconciliation on the next lifecycle.
-    } catch {
+    } catch (error) {
+      trace("integration-lifecycle-shutdown-inspect-failed", { error, cause: error?.cause });
       // A dead coordinator cannot be waited on during shutdown.  The existing
       // preserve/debt RPC is deliberately attempted once so a reconnecting
       // coordinator can persist an explicit recovery intent.

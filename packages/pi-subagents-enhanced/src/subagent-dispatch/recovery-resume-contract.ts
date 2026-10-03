@@ -53,6 +53,15 @@ export interface IntegrationResumeIntentV1 {
   updatedAt: string;
 }
 
+export function createManualIntegrationHandoff(input: { resumeIntentId: string; sourceRunId: string; workspaceId: string; queueItemId: string }) {
+  for (const [key, value] of Object.entries(input)) if (typeof value !== "string" || value.length === 0) throw new TypeError(`${key} must be a non-empty string`);
+  return Object.freeze({
+    customType: "subagent-integration-handoff",
+    content: `子 Agent 生命周期已结束，但 merge queue 项尚未完成。系统不会自动恢复该 child。请主 Agent 接管 worktree ${input.workspaceId}，检查未提交修改并完成提交，然后继续将其送入 merge queue。`,
+    details: Object.freeze({ ...input }),
+  });
+}
+
 export interface RecoveryResumeActivationV1 {
   version: "recovery-resume-activation.v1";
   resumeIntentId: string;

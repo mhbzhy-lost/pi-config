@@ -246,6 +246,7 @@ function realDispatchCodingContract(originRoot) {
     acceptance: { criteria: ["The ledger is v2 and the proof settles."] },
     cwd: originRoot,
     worktree: true,
+
   };
 }
 

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { createCoordinatorLedger } from "./coordinator-ledger.ts";
+import { assertProcessBirthOutput } from "../subagent-dispatch/process-birth-identity.ts";
 import { createIntegrationResumeIntentV1, progressFingerprint } from "../subagent-dispatch/recovery-resume-contract.ts";
 
 export const INTEGRATION_QUEUE_RECORD_VERSION = "workspace-integration-queue-item.v1";
@@ -15,15 +16,48 @@ const RESUME_ACTIVE_STATES = ["waiting-head", "pending", "starting", "activated"
 const RESUME_MAX_ATTEMPTS = 6;
 const RESUME_MAX_NO_PROGRESS = 2;
 
-function processAlive(pid: number, birthIdentity: string) {
+export type ProcessAliveStatus = { state: "alive" | "dead" | "mismatch" | "undetermined"; reason?: "process-not-found" | "birth-identity-mismatch"; error?: unknown; errno?: string };
+
+/**
+ * Process liveness is security-sensitive: only ESRCH proves death. EPERM,
+ * ps failures, malformed output, and invalid birth identities remain unknown.
+ * A successfully observed different birth identity is explicit PID reuse.
+ */
+export function processAliveStatus(pid: number, birthIdentity: string): ProcessAliveStatus {
+  if (typeof birthIdentity !== "string" || !/^[a-f0-9]{64}$/.test(birthIdentity)) {
+    const error = new Error("process birth identity is invalid");
+    error.code = "PROCESS_IDENTITY_INVALID";
+    return { state: "undetermined", error, errno: error.code };
+  }
   try {
     process.kill(pid, 0);
+  } catch (error: any) {
+    if (error?.code === "ESRCH") return { state: "dead", reason: "process-not-found", error, errno: error.code };
+    return { state: "undetermined", error, errno: error?.code };
+  }
+  try {
     const observed = execFileSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "lstart=", "-o", "command="], { encoding: "buffer" });
-    return createHash("sha256").update(observed).digest("hex") === birthIdentity;
-  } catch { return false; }
+    if (!Buffer.isBuffer(observed) || observed.length === 0 || observed.toString("utf8").trim().length === 0) {
+      const error = new Error("process birth identity output is unavailable");
+      return { state: "undetermined", error };
+    }
+    try {
+      assertProcessBirthOutput(observed);
+    } catch (error: any) {
+      return { state: "undetermined", error, errno: error?.code };
+    }
+    const observedIdentity = createHash("sha256").update(observed).digest("hex");
+    if (observedIdentity === birthIdentity) return { state: "alive" };
+    const error = new Error("process birth identity does not match");
+    error.code = "PROCESS_IDENTITY_MISMATCH";
+    return { state: "mismatch", reason: "birth-identity-mismatch", error, errno: error.code };
+  } catch (error: any) {
+    return { state: "undetermined", error, errno: error?.code };
+  }
 }
 
-export function createIntegrationQueue({ stateRoot, repositoryId, storageRepositoryId }: { stateRoot: string; repositoryId: string; storageRepositoryId?: string }) {
+export function createIntegrationQueue({ stateRoot, repositoryId, storageRepositoryId, diagnosticSink }: { stateRoot: string; repositoryId: string; storageRepositoryId?: string; diagnosticSink?: (entry: unknown) => void }) {
+  const diagnose = (entry: unknown) => { try { diagnosticSink?.(entry); } catch (diagnosticError) { console.error("[integration-queue] diagnostic sink failed", { entry, diagnosticError }); } };
   digest(repositoryId, "repositoryId");
   const storageId = storageRepositoryId ?? repositoryId;
   digest(storageId, "storageRepositoryId");
@@ -333,7 +367,11 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     });
   }
   function transition(receipt: any, state: string) { return ledger.withLock(() => { const current = load(`${id(receipt.queueItemId, "queueItemId")}.json`); const allowed = state === "preserved" ? ["admitted", "rebasing", "resolving-conflict", "prepared", "blocked"] : ["admitted"]; if (!current || !allowed.includes(current.state) || current.queueLeaseId !== receipt.queueLeaseId || current.revision !== receipt.revision) throw new Error("queue lease or revision mismatch"); const next = { ...current, state, revision: current.revision + 1 }; save(`${current.queueItemId}.json`, next); return structuredClone(next); }); }
-  function recoverClaims(instanceIdentity: any) { return ledger.withLock(() => { const recovered: any[] = []; for (const current of listQueue()) if (current.state === "admitted" && current.daemonClaim && current.daemonClaim.instanceId === instanceIdentity.instanceId && !processAlive(instanceIdentity.pid ?? current.daemonClaim.pid, instanceIdentity.birthIdentity ?? current.daemonClaim.birthIdentity)) { const next = { ...current, state: "queued", revision: current.revision + 1, daemonClaim: undefined, queueLeaseId: undefined, childAdmissionLeaseId: undefined }; save(`${current.queueItemId}.json`, next); recovered.push(next); } return recovered; }); }
+  function recoverClaims(instanceIdentity: any) { return ledger.withLock(() => { const recovered: any[] = []; for (const current of listQueue()) if (current.state === "admitted" && current.daemonClaim && current.daemonClaim.instanceId === instanceIdentity.instanceId) {
+    const status = processAliveStatus(instanceIdentity.pid ?? current.daemonClaim.pid, instanceIdentity.birthIdentity ?? current.daemonClaim.birthIdentity);
+    if (status.state === "undetermined") diagnose({ version: 1, phase: "integration-queue-owner-liveness-undetermined", state: status.state, error: status.error, cause: (status.error as any)?.cause, errno: status.errno, instanceId: instanceIdentity.instanceId });
+    if (status.state === "dead" || status.state === "mismatch") { const next = { ...current, state: "queued", revision: current.revision + 1, daemonClaim: undefined, queueLeaseId: undefined, childAdmissionLeaseId: undefined }; save(`${current.queueItemId}.json`, next); recovered.push(next); }
+  } return recovered; }); }
   return Object.freeze({ enqueueIntegration, claimNext, getItem, findByBinding, preserveByBinding, prepareCandidate, completePrepared, markResolvingConflict, completeItem, failItem, cancelItem, retryItem, recoverClaims, listQueue, recoveryIntent, listRecoveryIntents, mutateRecovery, markRecoveryDelivery, notificationDeliveryDebt,
     requestChildResume, promoteRecoverableHead, markResumeDelivery, markResumeStarting, markResumeActivated, completeResumeIntent, failResumeIntent, listResumeIntents, rebindChildRunForRecovery, refreshAuthorizedWorkspaceHead });
 }

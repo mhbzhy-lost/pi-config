@@ -115,6 +115,21 @@ test("compiles one safe checked leaf workflow without public direct-execution fi
   assert.equal(Object.hasOwn(started[0].params.acceptance, "verify"), false);
 });
 
+test("disables upstream worktree allocation while preserving the managed leaf cwd", async () => {
+  const request = buildWorkflowSpawn({
+    workflowKey: "typed-managed-owner", agent: "executor", task: "inspect", orchestratorCwd: "/repo", childCwd: "/state/worktrees/managed",
+    context: "fresh", child: { output: false },
+  });
+  const started = [];
+  await runInNewContext(`(async () => {\n${request.workflowScript}\n})()`, {
+    runs: { async run(key, params) { started.push({ key, params }); return { key }; } },
+  });
+  assert.equal(request.worktree, false);
+  assert.equal(started[0].params.worktree, false);
+  assert.equal(started[0].params.cwd, "/state/worktrees/managed");
+  assert.equal(started[0].params.worktreeProvider, undefined, "0.71 exposes provider selection only; no disable sentinel exists");
+});
+
 test("separates orchestrator root cwd from managed leaf cwd", async () => {
   const request = buildWorkflowSpawn({
     workflowKey: "typed-managed-1", agent: "executor", task: "inspect", orchestratorCwd: "/repo", childCwd: "/state/worktrees/managed",

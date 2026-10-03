@@ -19,11 +19,13 @@ test("extension consumes an injected P4-shaped public outcome and leaves its def
   const repo = join(root, "repo"); await mkdir(repo);
   const pi = fakePi();
   const consumed = [];
+  let resolveConsumed;
+  const consumedDone = new Promise((resolve) => { resolveConsumed = resolve; });
   taskSchedulerExtension(pi, {
     recoverySource: async () => ({ kind: "blocked-unknown", runId: "orphan-1", provenance: "owner unproven" }),
-    onRecoveryOutcome: (result) => consumed.push(result),
+    onRecoveryOutcome: (result) => { consumed.push(result); resolveConsumed(); },
   });
-  await Promise.resolve(); await Promise.resolve();
+  await consumedDone;
   assert.deepEqual(consumed, [{ outcome: { kind: "blocked-unknown", runId: "orphan-1", provenance: "owner unproven" }, duplicate: false }]);
   assert.deepEqual(pi.commands, [], "consuming recovery must not register a scheduler restart command");
 

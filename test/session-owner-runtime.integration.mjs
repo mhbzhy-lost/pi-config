@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { watch } from "node:fs";
-import { mkdtemp, mkdir, readFile, realpath, rm, readdir, utimes } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, readdir, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { format } from "node:util";
 import test from "node:test";
 import { createTestRuntime } from "./helpers/test-runtime.mjs";
 
@@ -59,6 +60,7 @@ async function createRealRuntime(root, ownerId, { failReplacement = false, cance
 
 const launcher = join(repoRoot, "scripts", "pi-launcher.zsh");
 const provider = join(repoRoot, "test", "fixtures", "deterministic-provider.mjs");
+const repoLocalPi = join(repoRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
 const piArgs = ["--offline", "--provider", "fake", "--model", "fake/deterministic", "-e", provider, "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"];
 
 async function ptyFixture(t) {
@@ -67,16 +69,21 @@ async function ptyFixture(t) {
   const store = createRegistryStore(fixture.registryDir);
   const cwd = fixture.cwd;
   await Promise.all(["home", "agent", "sessions", "tmp", "registry", "cwd"].map((name) => mkdir(join(root, name), { recursive: true, mode: 0o700 })));
-  return { root, store, cwd, env: {
+  const piBinary = process.env.T8_PI_REAL_BIN ?? repoLocalPi;
+  const piVersion = spawnSync(piBinary, ["--version"], {
+    encoding: "utf8", env: { PATH: process.env.PATH ?? "", HOME: "/tmp", TMPDIR: "/tmp" },
+  });
+  assert.equal(piVersion.status, 0, `PI_REAL_BIN must be executable: ${piBinary}\n${piVersion.stderr}`);
+  return { root, store, cwd, piBinary, piVersion: piVersion.stdout.trim(), env: {
     PATH: process.env.PATH ?? "", HOME: join(root, "home"), PI_CODING_AGENT_DIR: fixture.agentDir,
     PI_CODING_AGENT_SESSION_DIR: fixture.sessionDir, PI_SESSION_OWNER_REGISTRY: store.root,
     PI_CODING_WORKSPACE_DIR: fixture.workspaceDir, PI_CODING_GOAL_DIR: fixture.goalDir,
-    TMPDIR: join(root, "tmp"), PI_REAL_BIN: "/opt/homebrew/bin/pi", LAUNCHER: launcher,
+    TMPDIR: join(root, "tmp"), PI_REAL_BIN: piBinary, T8_PI_VERSION: piVersion.stdout.trim(), LAUNCHER: launcher,
     PROVIDER: provider, TERM: "xterm-256color",
   } };
 }
 
-function startPty(state, args, marker = "PI_OWNER_READY") {
+function startPty(state, args, marker = "PI_OWNER_READY", trace = undefined) {
   const command = [...piArgs, "--session-dir", join(state.root, "sessions"), ...args].map((value) => JSON.stringify(value)).join(" ");
   const expect = `set timeout 20
 spawn -noecho $env(LAUNCHER) ${command}
@@ -92,7 +99,15 @@ expect {
   timeout { exit 1 }
 }
 `;
+  const spawnedAt = Date.now();
   const child = spawn("/usr/bin/expect", ["-c", expect], { cwd: state.cwd, env: state.env });
+  if (trace) {
+    trace.output = "";
+    child.stdout.on("data", (chunk) => { trace.output += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { trace.output += chunk.toString(); });
+  }
+  trace?.events.push({ at: new Date().toISOString(), elapsedMs: Date.now() - spawnedAt, type: "wrapper-spawn", pid: child.pid });
+  child.once("exit", (code, signal) => trace?.events.push({ at: new Date().toISOString(), elapsedMs: Date.now() - spawnedAt, type: "wrapper-exit", pid: child.pid, code, signal }));
   return child;
 }
 
@@ -172,9 +187,15 @@ test("waitForRecord 在 watch 不发事件且二次读取过早时周期重读 a
 });
 
 async function waitForRecord(store, predicate, {
-  readRecords = () => listLiveRecords(store), watchDirectory = watch, pollIntervalMs = 25, timeoutMs = 20_000,
+  // 记录每次观察到的完整 live-record 集合；ready 只由权威 registry 状态判定。
+  readRecords = () => listLiveRecords(store), watchDirectory = watch, pollIntervalMs = 25, timeoutMs = 60_000,
+  onSample = undefined,
 } = {}) {
-  const ready = async () => (await readRecords()).find(predicate);
+  const ready = async () => {
+    const records = await readRecords();
+    onSample?.(records);
+    return records.find(predicate);
+  };
   const initial = await ready();
   if (initial) return initial;
   return new Promise((resolveRecord, reject) => {
@@ -215,12 +236,16 @@ async function waitForRecord(store, predicate, {
   });
 }
 
-async function readyPty(state, args) {
+async function readyPty(state, args, { trace = undefined } = {}) {
   const previous = new Set((await listLiveRecords(state.store)).map((record) => record.ownerId));
-  const child = startPty(state, args);
+  const child = startPty(state, args, "PI_OWNER_READY", trace);
   await waitForOutput(child, /PI_OWNER_READY/);
-  const record = await waitForRecord(state.store, (candidate) => !previous.has(candidate.ownerId) && candidate.state === "active" && candidate.sessionFile !== null);
+  trace?.events.push({ at: new Date().toISOString(), type: "wrapper-ready-marker", pid: child.pid });
+  const record = await waitForRecord(state.store, (candidate) => !previous.has(candidate.ownerId) && candidate.state === "active" && candidate.sessionFile !== null, {
+    onSample(records) { trace?.recordSamples.push({ at: new Date().toISOString(), records }); },
+  });
   assert.ok(record, "ready Pi must commit a registry record");
+  trace?.events.push({ at: new Date().toISOString(), type: "record-ready", ownerId: record.ownerId, pid: record.pid, state: record.state, sessionFile: record.sessionFile });
   return { child, record };
 }
 
@@ -363,7 +388,7 @@ expect {
         PATH: process.env.PATH ?? "",
         HOME: join(root, "home"), PI_CODING_AGENT_DIR: join(root, "agent"),
         PI_CODING_AGENT_SESSION_DIR: join(root, "sessions"), PI_SESSION_OWNER_REGISTRY: store.root,
-        TMPDIR: join(root, "tmp"), PI_REAL_BIN: "/opt/homebrew/bin/pi",
+        TMPDIR: join(root, "tmp"), PI_REAL_BIN: process.env.T8_PI_REAL_BIN ?? repoLocalPi,
         LAUNCHER: join(repoRoot, "scripts", "pi-launcher.zsh"),
         PROVIDER: join(repoRoot, "test", "fixtures", "deterministic-provider.mjs"), TERM: "xterm-256color",
       },
@@ -473,14 +498,33 @@ test("真实 Pi PTY: selecting picker blocks -c and --session reuse before eithe
 
 test("真实 Pi PTY: SIGKILL owner is cleaned by ESRCH before the next wrapper starts", { timeout: 120_000 }, async (t) => {
   const state = await ptyFixture(t);
+  const trace = { startedAt: new Date().toISOString(), piBinary: state.piBinary, piVersion: state.piVersion, events: [], recordSamples: [] };
   let first;
   let second;
   try {
-    first = await readyPty(state, ["--", "killable owner"]);
+    first = await readyPty(state, ["--", "killable owner"], { trace });
     assert.notEqual(first.record.pid, first.child.pid, "registry PID must be the real spawned Pi process");
-    process.kill(first.record.pid, "SIGKILL");
+    const killedPid = first.record.pid;
+    const killAt = new Date().toISOString();
+    process.kill(killedPid, "SIGKILL");
+    trace.events.push({ at: killAt, type: "owner-sigkill", pid: killedPid });
     await new Promise((resolveExit) => first.child.once("exit", resolveExit));
-    second = await readyPty(state, ["--", "ESRCH replacement owner"]);
+    trace.events.push({ at: new Date().toISOString(), type: "first-wrapper-exit-observed", pid: first.child.pid, code: first.child.exitCode, signal: first.child.signalCode });
+    // ESRCH 探针必须在 wrapper 退出之后：被 SIGKILL 的 pi 是 expect wrapper 的子进程，
+    // wrapper 未退出前它是 zombie，而 kill(pid, 0) 对 zombie 会成功（PID 仍存在），
+    // 因此在 wrapper 存活期间探针永远拿不到 ESRCH。生产语义也是「下一个 wrapper
+    // 启动前」做 ESRCH 清理，此时前一个 wrapper 已退出并 reap 掉 zombie。
+    const esrchDeadline = Date.now() + 10_000;
+    let esrch = false;
+    while (Date.now() < esrchDeadline) {
+      try { process.kill(killedPid, 0); } catch (error) { if (error?.code === "ESRCH") { esrch = true; break; } }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    }
+    trace.events.push({ at: new Date().toISOString(), type: "owner-esrch-probe", pid: killedPid, esrch });
+    assert.equal(esrch, true, "SIGKILL owner must be reaped and gone before replacement launch");
+    const afterKillRecords = await listLiveRecords(state.store);
+    trace.events.push({ at: new Date().toISOString(), type: "esrch-cleanup-observation", pid: killedPid, records: afterKillRecords });
+    second = await readyPty(state, ["--", "ESRCH replacement owner"], { trace });
     const records = await listLiveRecords(state.store);
     assert.equal(records.length, 1);
     assert.equal(records[0].ownerId, second.record.ownerId);
@@ -488,10 +532,62 @@ test("真实 Pi PTY: SIGKILL owner is cleaned by ESRCH before the next wrapper s
     await quitPty(second.child);
     second = undefined;
   } finally {
+    trace.finishedAt = new Date().toISOString();
+    const traceFile = process.env.T8_TRACE_FILE;
+    if (traceFile) await writeFile(traceFile, `${JSON.stringify(trace, null, 2)}\n`);
     await stopPty(second?.child);
     await killPty(first?.child);
     await rm(state.root, { recursive: true, force: true });
   }
+});
+
+test("session_start 内层失败仍取消并记录原始异常及 cause", async () => {
+  const handlers = new Map();
+  const error = new Error("startup registry failure", { cause: new Error("guard acquisition failure") });
+  const output = [];
+  const original = console.error;
+  let shutdowns = 0;
+  let notices = 0;
+  console.error = (...args) => output.push(format(...args));
+  try {
+    installSessionOwnerExtension({ on(event, handler) { handlers.set(event, handler); } }, {
+      env: { PI_SESSION_OWNER_ID: "owner-observe-start", PI_SESSION_OWNER_REGISTRY: "/tmp/owner-observe-start" },
+      store: createRegistryStore("/tmp/owner-observe-start"),
+      async listLiveRecords() { throw error; },
+    });
+    const ctx = {
+      sessionManager: { getCwd: () => process.cwd(), getSessionId: () => null, getSessionFile: () => null },
+      ui: { notify() { notices += 1; } },
+      async shutdown() { shutdowns += 1; },
+    };
+    assert.deepEqual(await handlers.get("session_start")({}, ctx), { cancel: true });
+    assert.equal(notices, 1);
+    assert.equal(shutdowns, 1);
+    assert.match(output.join("\n"), /startup registry failure/);
+    assert.match(output.join("\n"), /guard acquisition failure/);
+  } finally { console.error = original; }
+});
+
+test("session_before_switch 内层失败仍取消并记录原始异常及 cause", async () => {
+  const handlers = new Map();
+  const error = new Error("switch identity failure", { cause: new Error("session manager unavailable") });
+  const output = [];
+  const original = console.error;
+  let notices = 0;
+  console.error = (...args) => output.push(format(...args));
+  try {
+    installSessionOwnerExtension({ on(event, handler) { handlers.set(event, handler); } }, {
+      env: { PI_SESSION_OWNER_ID: "owner-observe-switch", PI_SESSION_OWNER_REGISTRY: "/tmp/owner-observe-switch" },
+    });
+    const ctx = {
+      sessionManager: { getCwd() { throw error; }, getSessionId: () => null, getSessionFile: () => null },
+      ui: { notify() { notices += 1; } },
+    };
+    assert.deepEqual(await handlers.get("session_before_switch")({ reason: "resume", targetSessionFile: "/tmp/next.jsonl" }, ctx), { cancel: true });
+    assert.equal(notices, 1);
+    assert.match(output.join("\n"), /switch identity failure/);
+    assert.match(output.join("\n"), /session manager unavailable/);
+  } finally { console.error = original; }
 });
 
 test("owner-less RPC/direct runtime is explicitly unsupported and writes no record", async () => {

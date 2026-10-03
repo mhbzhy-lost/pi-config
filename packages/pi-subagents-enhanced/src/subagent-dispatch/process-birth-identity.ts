@@ -20,6 +20,17 @@ function unavailableError(cause?: unknown) {
   return error;
 }
 
+export function assertProcessBirthOutput(bytes: Buffer): void {
+  const text = bytes.toString("utf8");
+  const english = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\s+\S[^\r\n]*(?:\r?\n)?$/;
+  const localized = /^\S+\s+\S+\/\s*\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\s+\S[^\r\n]*(?:\r?\n)?$/;
+  if (!english.test(text) && !localized.test(text)) {
+    const error = new Error("Process birth identity ps output is malformed");
+    error.code = "PROCESS_BIRTH_IDENTITY_OUTPUT_INVALID";
+    throw error;
+  }
+}
+
 export async function captureProcessBirthIdentity(
   pid: number,
   { execFile = defaultExecFile }: { execFile?: ExecFile } = {},
@@ -45,6 +56,7 @@ export async function captureProcessBirthIdentity(
   if (!bytes || bytes.length === 0 || bytes.toString("utf8").trim().length === 0) {
     throw unavailableError();
   }
+  assertProcessBirthOutput(bytes);
 
   return createHash("sha256").update(bytes).digest("hex");
 }

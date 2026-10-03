@@ -3,12 +3,11 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { Box, Text } from "@earendil-works/pi-tui";
 import {
-  currentCompletionOwnerId,
-  loadConfig,
-  registerSubagentNotify,
+  readSessionIdentity,
+  registerBuiltinAgentsViaEvents,
   resolveCurrentSessionId,
   upstreamSubagentRuntime,
-} from "../src/compat/pi-subagents-0.62.ts";
+} from "../src/compat/pi-subagents-0.71.ts";
 import {
   formatCompactSubagentNotification,
   formatCompactSubagentWorkspaceReminder,
@@ -19,6 +18,7 @@ import {
 } from "../src/tui/compact-rendering.ts";
 import { createSubagentDispatchTraceFileSink, installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
 import { createSupervisorControlPlane } from "../src/subagent-dispatch/supervisor-control-plane.ts";
+import { runtimeFromStatus } from "../src/subagent-dispatch/runtime-state.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
 import { createCoordinatorProofOutbox } from "../src/subagent-dispatch/coordinator-proof-outbox.ts";
 import { classifyTerminalProofBinding } from "../src/subagent-dispatch/terminal-proof-binding.ts";
@@ -29,7 +29,6 @@ import { RootBrokerServer, rootBrokerTerminalProofId, type TerminalProofDelivery
 import { AuthorityStore } from "../src/subagent-dispatch/authority-store.ts";
 import { rootBrokerRegistryEntry } from "../src/subagent-dispatch/root-broker-registry.ts";
 import { createTrustedRunBindingResolver } from "../src/subagent-dispatch/run-binding-resolver.ts";
-import { createRecoveryResumeOrchestrator } from "../src/subagent-dispatch/recovery-resume-orchestrator.ts";
 import { connectRepositoryCoordinator } from "../src/workspace/coordinator-client.ts";
 import { createCoordinatorRegistry } from "../src/workspace/coordinator-registry.ts";
 import { createCoordinatorServer } from "../src/workspace/coordinator-server.ts";
@@ -48,13 +47,12 @@ export function shouldStartRepositoryCoordinator(cwd: string): boolean {
 }
 
 /** Connect the Host to the common-dir singleton after the Root Broker exists. */
-export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rpc }: { pi: object; cwd: string; broker: RootBrokerServer; stateRoot?: string; rpc?: any }) {
+export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rpc, diagnosticSink }: { pi: object; cwd: string; broker: RootBrokerServer; stateRoot?: string; rpc?: any; diagnosticSink?: (entry: unknown) => void }) {
   if (!shouldStartRepositoryCoordinator(cwd) || typeof stateRoot !== "string" || stateRoot.length === 0) return undefined;
   const identity = await resolveRepositoryIdentity(cwd);
   const registry = createCoordinatorRegistry({ commonDir: identity.commonDir, stateRoot });
   const metadata = await registry.claim({ repositoryId: identity.repositoryId, storageRepositoryId: identity.storageRepositoryId });
   let server: any;
-  let recoveryOrchestrator: ReturnType<typeof createRecoveryResumeOrchestrator> | undefined;
   const ownsServer = metadata.pid === process.pid;
   if (ownsServer) {
     server = createCoordinatorServer({
@@ -63,20 +61,34 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
       storageRepositoryId: metadata.storageRepositoryId,
       instanceId: metadata.instanceId,
       stateRoot: metadata.canonicalStateRoot,
-      recoveryEventSink: (intent: any) => {
+      diagnosticSink,
+      recoveryEventSink: async (intent: any) => {
         // resume intent 的快路径：本 Host 的 orchestrator 直接消费（仅限本
         // root 拥有的 intent，submit 内部校验 owner scope）；跨 Host 投递由
         // durable recovery.status 轮询通道负责。legacy preserve 事件仍走
         // broker push。coordinator 的 durable 状态仍是唯一权威。
         if (intent?.requiredAction === "resume-child") {
-          void recoveryOrchestrator?.submit(intent);
-          return { state: "delivered" };
+          const handoff = intent.handoff;
+          if (!handoff || handoff.customType !== "subagent-integration-handoff") {
+            diagnosticSink?.({ version: 1, phase: "recovery-handoff-invalid", resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId });
+            return { state: "debt", reason: "manual handoff notification is invalid" };
+          }
+          try {
+            await (pi as any).sendMessage(handoff, { deliverAs: "followUp", triggerTurn: true });
+            return { state: "delivered" };
+          } catch (error) {
+            diagnosticSink?.({ version: 1, phase: "recovery-handoff-delivery-failed", error, cause: error?.cause, resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId });
+            return { state: "debt", reason: "manual handoff notification failed" };
+          }
         }
         return broker.publishRecoveryEvent(intent);
       },
     });
     try { await server.listen(); } catch (error) {
-      await registry.release().catch(() => undefined);
+      try { await registry.release(); } catch (cleanupError) {
+        try { diagnosticSink?.({ version: 1, phase: "coordinator-start-cleanup-failed", error, cause: error?.cause, secondaryError: cleanupError }); } catch (diagnosticError) { console.error("[subagent-runtime] recovery diagnostic sink failed", diagnosticError); }
+        throw new AggregateError([error, cleanupError], "coordinator startup and cleanup failed", { cause: error });
+      }
       throw error;
     }
   }
@@ -114,6 +126,10 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
         proofOutbox,
         readLedger: () => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
           .listScoped({ owner: proofOwnerScope }).filter((record: any) => record.run?.runId === run.runId),
+        // 跨 owner scope 复查：scoped 查询为空时区分「run 真没有 workspace」与
+        // 「workspace 挂在别的 owner scope 下」（后者记债暴露，不静默）。
+        readCrossScope: () => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
+          .list().filter((record: any) => record.run?.runId === run.runId),
         run,
         proof,
         proofId,
@@ -127,27 +143,9 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
         }),
       });
     };
-    // durable recovery resume：轮询 recovery.status（按 rootSessionId 过滤）
-    // 发现本 root children 的 pending/starting resume intent，经 upstream
-    // public resume 恢复 session 后注册新 run 授权并激活 rebind。仅在本
-    // Host 持有 typed RPC 时启用；无 RPC 的宿主保持纯观察。
-    if (rpc && typeof rpc.resume === "function") {
-      recoveryOrchestrator = createRecoveryResumeOrchestrator({
-        rpc,
-        events: (pi as any).events,
-        coordinatorClient: client,
-        registerAuthorizedRun: (authorization: unknown) => broker.registerAuthorizedRun(authorization as any),
-        activateResume: (input: any) => client.activateResume(input),
-        rootSessionId: broker.rootSessionId,
-        lifecycleSessionId: broker.lifecycleSessionId,
-        // 诊断打点写 root host stderr（acceptance harness 会保留 stderr tail）；
-// 阶段与身份字段不含 prompt/token/凭据。
-        trace: (entry: any) => { try { process.stderr.write(`${JSON.stringify(entry)}\n`); } catch { /* 诊断输出不得影响恢复主链 */ } },
-      });
-      recoveryOrchestrator.start();
-    }
+    // 已结束 child 不再自动 resume；recovery.status 仍由 coordinator 保留，
+    // 由主 Agent 接管 worktree 并完成 merge queue 收尾。普通控制面 resume 不受影响。
     return Object.freeze({ client, server, registry, ownsServer, identity, async close() {
-      recoveryOrchestrator?.dispose();
       await client.close();
       if (ownsServer) {
         await server.close();
@@ -216,12 +214,6 @@ function notificationColor(text: string): "error" | "warning" | "success" | "dim
 
 const SUBAGENT_SPAWN_SUMMARY_KEY = "subagentSpawnSummary";
 
-export function initializeCompletionNotifierState(state: { currentSessionId: string | null; completionOwnerId?: string }) {
-  state.completionOwnerId = currentCompletionOwnerId();
-  return state;
-}
-
-
 function spawnStartingSummary(args: any): string | undefined {
   if (!args || typeof args !== "object" || Object.hasOwn(args, "action")) return undefined;
   const agent = typeof args.agent === "string" ? args.agent.trim() : "";
@@ -282,12 +274,22 @@ export function createSubagentToolRenderers() {
 
 export default function subagentRuntime(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.PI_SUBAGENT_FANOUT_CHILD === "1") return;
-  const config = loadConfig() as Record<string, unknown>;
-  const completionBatch = config.completionBatch;
-  const providerBlacklist = Array.isArray(config.providerBlacklist) ? config.providerBlacklist : ["deepseek"];
+  // 0.71 config is write-only at the public boundary (contract §4, types.d.ts:2592-2600).
+  // Provider policy is owned by this package; do not read upstream private config.
+  const providerBlacklist = ["deepseek"];
   const { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderCompletionNotification } = createSubagentToolRenderers();
   let brokerStarted = false;
   let brokerReady = false;
+  let builtinAdmission: ReturnType<typeof registerBuiltinAgentsViaEvents> | undefined;
+  const registerBuiltinAgents = (api: any) => {
+    const agentDir = process.env.PI_CODING_AGENT_DIR;
+    if (!agentDir) throw new Error("PI_CODING_AGENT_DIR is required for repository agent admission");
+    builtinAdmission = registerBuiltinAgentsViaEvents({ pi: api, agentDir });
+    if (process.env.T11B1_DEBUG === "1") {
+      const debugView = builtinAdmission.discoverAgents(process.cwd(), "both");
+      console.error(`[bootstrap-debug] agentDir=${agentDir} registered=${debugView.agents.map((a: any) => a.name).join(",") || "(none)"}`);
+    }
+  };
   let previousBrokerMarker: string | undefined;
   const rpc = createRenewableTypedSubagentRpcClient(() => createTypedSubagentRpcClient(pi.events));
   let diagnosticSink: (((entry: unknown) => void) & { dispose?: () => void }) | undefined;
@@ -302,18 +304,42 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   let workspaceRootSessionId: string | undefined;
   let workspaceLifecycleSessionId: string | undefined;
   const supervisorControlPlane = createSupervisorControlPlane({
+    persistenceRoot: (typeof process.env.PI_CODING_WORKSPACE_DIR === "string" && process.env.PI_CODING_WORKSPACE_DIR.length > 0
+      ? process.env.PI_CODING_WORKSPACE_DIR
+      : typeof process.env.PI_CODING_AGENT_DIR === "string" && process.env.PI_CODING_AGENT_DIR.length > 0
+        ? process.env.PI_CODING_AGENT_DIR : undefined)
+      ? path.join((process.env.PI_CODING_WORKSPACE_DIR || process.env.PI_CODING_AGENT_DIR) as string, "supervisor-control") : undefined,
+    diagnosticSink,
     readOwnerReceipt: async (runId) => {
-      if (!brokerReady || !broker) return undefined;
-      try { return await broker.readOwnerReceipt(runId); } catch { return undefined; }
+      // 不得把「broker 未就绲 / 读取失败」降级成 undefined：那会让控制面把
+      // 「无法确认是否受管」误判为「确认非受管」，从而绕过 steer 围栏。
+      // 三态判定见 supervisor-control-plane.ts 的 readOwnerState。
+      if (!brokerReady || !broker) {
+        if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] owner-read unavailable brokerReady=${brokerReady} broker=${!!broker} runId=${runId}`);
+        // code 故意不用 unknown_run：后者是「权威确认非受管」的专用信号，
+        // broker 未就绲属于「无法确认」，必须被归为 unavailable 而 fail-closed。
+        throw Object.assign(new Error("ROOT_BROKER_UNAVAILABLE"), { code: "authority_store_unavailable" });
+      }
+      try {
+        const receipt = await broker.readOwnerReceipt(runId);
+        if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] owner-read receipt=${JSON.stringify(receipt)}`);
+        return receipt;
+      } catch (error) {
+        if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] owner-read error=${error instanceof Error ? error.message : String(error)} runId=${runId}`);
+        throw error;
+      }
     },
     readRuntime: async (runId) => {
       if (!brokerReady) return undefined;
       try {
         const status: any = await rpc.status({ id: runId });
-        const details = status?.details ?? status;
         const owner = broker ? await broker.readOwnerReceipt(runId) : undefined;
-        return { runId, ownerGeneration: owner?.ownerGeneration, liveRunEpoch: details?.liveRunEpoch, running: details?.state === "running" || details?.running === true, steerable: details?.steerable === true };
-      } catch { return undefined; }
+        const runtime = runtimeFromStatus(runId, status);
+        return { ...runtime, ...(owner?.ownerGeneration !== undefined ? { ownerGeneration: owner.ownerGeneration } : {}) };
+      } catch (error) {
+        if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] runtime-read error=${error instanceof Error ? error.message : String(error)} runId=${runId}`);
+        return undefined;
+      }
     },
   });
   const enabledSupervisorControlPlane = Object.freeze({
@@ -325,8 +351,20 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     providerBlacklist,
     diagnosticSink,
     workingStateTrace: diagnosticSink,
-    extraDisposables: diagnosticSink ? [diagnosticSink] : [],
+    extraDisposables: [
+      ...(diagnosticSink ? [diagnosticSink] : []),
+      { dispose() { builtinAdmission?.dispose(); builtinAdmission = undefined; } },
+    ],
     bootstrap: upstreamSubagentRuntime,
+    afterBootstrap: registerBuiltinAgents,
+    async discoverAgents(...args: [string, string, string?]) {
+      if (!builtinAdmission) {
+        const error = new Error("AGENT_ADMISSION_UNAVAILABLE");
+        (error as Error & { code?: string }).code = "AGENT_ADMISSION_UNAVAILABLE";
+        throw error;
+      }
+      return builtinAdmission.discoverAgents(...args);
+    },
     workspaceCompletionReminderFactory(api: ExtensionAPI) {
       return createWorkspaceCompletionReminder({
         events: api.events,
@@ -338,17 +376,21 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         },
       });
     },
-    completionNotifierFactory(api: ExtensionAPI, state: { currentSessionId: string | null; completionOwnerId?: string }) {
-      initializeCompletionNotifierState(state);
-      return registerSubagentNotify(api, state, { batchConfig: completionBatch });
-    },
+    // Completion delivery and acknowledgement rely on upstream native notify
+    // (pi-subagents 0.71 registerSubagentNotify in extension/index.js:440); the
+    // enhanced layer no longer forwards subagent:async-complete into custom
+    // subagent-notify messages.
     resolveSessionId: resolveCurrentSessionId,
     async beforeUpstreamSessionStart(_event, ctx) {
       if (brokerReady) return;
       if (brokerStarted) throw new Error("Root subagent broker startup is incomplete");
       rpc.renew();
       const rootSessionId = resolveRootSessionId(ctx.sessionManager);
-      const lifecycleSessionId = resolveCurrentSessionId(ctx.sessionManager);
+      await supervisorControlPlane.ready(rootSessionId);
+      const lifecycleSessionId = readSessionIdentity(ctx.sessionManager).sessionFile ?? resolveCurrentSessionId(ctx.sessionManager);
+      // Root broker is the sole completion owner (contract §2.5); no upstream
+      // completion-owner identity is generated in this integration layer.
+      readSessionIdentity(ctx.sessionManager);
       const upstream = createRootBrokerUpstream({ rpc });
       const stateRoot = process.env.PI_CODING_WORKSPACE_DIR;
       // This is an independent private authority root, never a workspace ledger.
@@ -367,12 +409,14 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
           broker: startingBroker,
           stateRoot: process.env.PI_CODING_WORKSPACE_DIR,
           rpc,
+          diagnosticSink,
         });
         workspaceRootSessionId = rootSessionId;
         workspaceLifecycleSessionId = lifecycleSessionId;
         workspaceService = createManagedWorkspaceService({
           stateRoot: process.env.PI_CODING_WORKSPACE_DIR,
           storageRepositoryId: coordinatorRuntime?.identity.storageRepositoryId,
+          diagnosticSink,
           terminalProofProvider({ run }: { run: { runId?: string } | null }) {
             const snapshot = run?.runId ? startingBroker.inspectExecutionProof(run.runId) : null;
             return projectManagedWorkspaceTerminalProof(run, snapshot);
@@ -403,8 +447,17 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     async beforeRuntimeDispose() {
       // Keep coordinator callbacks alive while Root Broker drains accepted child
       // integration requests and terminal proof delivery.
-      if (brokerStarted && broker) await closeAndUnbindRootBroker(pi, broker).catch(() => undefined);
-      await coordinatorRuntime?.close().catch(() => undefined);
+      const cleanupErrors: unknown[] = [];
+      if (brokerStarted && broker) {
+        try { await closeAndUnbindRootBroker(pi, broker); } catch (error) {
+          cleanupErrors.push(error);
+          try { diagnosticSink?.({ version: 1, phase: "root-broker-close-failed", error, cause: error?.cause }); } catch (diagnosticError) { console.error("[subagent-runtime] cleanup diagnostic sink failed", diagnosticError); }
+        }
+      }
+      try { await coordinatorRuntime?.close(); } catch (error) {
+        cleanupErrors.push(error);
+        try { diagnosticSink?.({ version: 1, phase: "coordinator-close-failed", error, cause: error?.cause }); } catch (diagnosticError) { console.error("[subagent-runtime] cleanup diagnostic sink failed", diagnosticError); }
+      }
       coordinatorRuntime = undefined;
       if (workspaceService && workspaceRootSessionId) {
         unbindManagedWorkspaceServiceSession(pi, workspaceRootSessionId, workspaceService);
@@ -412,13 +465,15 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         workspaceRootSessionId = undefined;
         workspaceLifecycleSessionId = undefined;
       }
-      if (!brokerStarted || !broker) return;
-      if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
-      else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
-      previousBrokerMarker = undefined;
-      broker = undefined;
-      brokerStarted = false;
-      brokerReady = false;
+      if (brokerStarted && broker) {
+        if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
+        else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
+        previousBrokerMarker = undefined;
+        broker = undefined;
+        brokerStarted = false;
+        brokerReady = false;
+      }
+      if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "subagent runtime cleanup failed", { cause: cleanupErrors[0] });
     },
     renderSubagentCall,
     renderSubagentResult,

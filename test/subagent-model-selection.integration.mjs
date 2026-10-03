@@ -27,6 +27,7 @@ const codingContract = {
   task: "Prove discovery rejects before lifecycle effects. Do not spawn. Known facts: none. Decisions: none. Relevant files: none.",
   writePaths: ["test/subagent-model-selection.integration.mjs"],
   acceptance: { criteria: ["No effects occur."] }, cwd: "/repo", worktree: true,
+
 };
 
 test("generic bare model uses sorted global catalog warning and normalized request separates workspace hashes", async () => {
@@ -67,14 +68,32 @@ test("model misses and undiscovered generic targets have no workspace, Goal, RPC
   assert.equal(effects, 0); assert.equal(calls.length, 0);
 });
 
-test("undiscovered coding profile fails before Goal, workspace, RPC, and title effects without a model", async () => {
+test("repository admission rejection preserves AGENT_ADMISSION_UNAVAILABLE before spawn effects", async () => {
   const { pi, rpc, calls, tools } = harness(); let effects = 0;
   rpc.ping = async () => { effects += 1; return {}; };
   createTypedSubagentExtension(pi, {
     rpc,
     cleanupStore: {},
+    discoverAgents() { return { admission: "repository-configured", agents: [{ name: "delegate" }, { name: "executor" }, { name: "reviewer" }] }; },
+    workspaceService: { ensureAllocated() { effects += 1; } },
+    titleRegistry: { prepare() { effects += 1; } },
+  });
+  const result = await tools[0].execute("probe-worker", { agent: "probe-worker", title: "Probe", task: "Reject." }, undefined, undefined, { cwd: "/repo", modelRegistry: { getAvailable() { return []; } } });
+  assert.equal(result.details.code, "AGENT_ADMISSION_UNAVAILABLE");
+  assert.match(result.content[0].text, /AGENT_ADMISSION_UNAVAILABLE/);
+  assert.equal(effects, 0); assert.equal(calls.length, 0);
+});
+
+test("undiscovered coding profile fails before workspace, RPC, and title effects without a model", async () => {
+  const { pi, rpc, calls, tools } = harness(); const preflight = []; let effects = 0;
+  rpc.ping = async () => { effects += 1; return {}; };
+  createTypedSubagentExtension(pi, {
+    rpc,
+    cleanupStore: {},
     discoverAgents() { return { agents: [] }; },
-    goalExecutorCoordinator: { prepareSpawn() { effects += 1; return undefined; } },
+    // Goal 契约预检是有意先于模型发现/准入执行的设计（extension.ts "production
+    // contract preflight" 注释）；单独计数以区分 spawn 侧副作用。
+    goalExecutorCoordinator: { prepareSpawn() { preflight.push("goal"); return undefined; } },
     workspaceService: { ensureAllocated() { effects += 1; } },
     titleRegistry: { prepare() { effects += 1; } },
   });
@@ -83,7 +102,8 @@ test("undiscovered coding profile fails before Goal, workspace, RPC, and title e
     modelRegistry: { getAvailable() { return [{ provider: "codex-pool", id: "gpt-5.6-sol" }]; } },
   });
   assert.equal(result.details.code, "UNKNOWN_AGENT");
-  assert.equal(effects, 1); assert.equal(calls.length, 0);
+  assert.equal(effects, 0); assert.equal(calls.length, 0);
+
 });
 
 test("custom coding and generic executor dispatch use their structure and discover once", async () => {
@@ -102,7 +122,13 @@ test("custom coding and generic executor dispatch use their structure and discov
   assert.equal(generic.isError, false, generic.content[0]?.text);
   assert.equal(calls.length, 2);
   assert.deepEqual(discoveryCalls, [["/repo", "both", undefined], ["/repo", "both", undefined]]);
-  assert.deepEqual(registrations, []);
+  // coding 派发（worktree:false）不经 workspace/grant 路径，不注册 authority（基线
+  // dff0da9 解耦代理名称与运行授权以来的有意语义，生产 7a2f7322 同样不注册）；
+  // 只有 generic 派发经 onBinding 注册。
+  assert.deepEqual(registrations.map(({ kind, binding, capabilities, goal }) => ({ kind, binding, capabilities, goal })), [{
+    kind: "generic", binding: { runId: "leaf", asyncDir: "/tmp/leaf", sessionId: "/tmp/pi-sessions/lifecycle.jsonl", pid: 1, agentProfile: "executor" }, capabilities: [], goal: null,
+  }]);
+
 });
 
 test("typed executor selects an available declared candidate and fails a terminal miss before spawn effects", async () => {
@@ -131,6 +157,8 @@ test("typed executor selects an available declared candidate and fails a termina
   });
   assert.equal(available.isError, false, available.content[0]?.text);
   assert.equal(JSON.parse(calls[0].workflowScript.match(/, (.*)\);$/)[1]).model, "openai-codex/gpt-5.6-luna");
+  // coding 派发（worktree:false）不经 workspace/grant 路径，不注册 authority。
+
   assert.deepEqual(registrations, []);
 
   effects = 0; calls.length = 0;
@@ -139,6 +167,9 @@ test("typed executor selects an available declared candidate and fails a termina
     modelRegistry: { getAvailable() { return [{ provider: "global-only", id: "gpt-5.6-luna" }]; } },
   });
   assert.equal(miss.details.code, "MODEL_NOT_AVAILABLE");
+  // Goal 契约预检有意先于模型发现（见首个用例注释）：miss 路径只触发 preflight，
+  // 无 workspace/RPC/title 副作用。
+
   assert.equal(effects, 1); assert.equal(calls.length, 0);
   assert.deepEqual(discoveryCalls, [["/repo", "both", undefined], ["/repo", "both", undefined]]);
 });
