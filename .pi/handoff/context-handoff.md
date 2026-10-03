@@ -307,3 +307,48 @@ P6-T9（`5a6f8f8f`）验收：
 - 真实 E2E 全链路通过（12.7s）：dispatch→workspace 分配→child bash commit→Auto Integration admission/rebase/publish→terminal proof→release→origin clean。
 - hostile-legacy 与 rename-canary 是预存断裂（A2 workflow 字段删除后 fixture 未迁移），不属本次变更。
 - 提交：ddcf487、a46e9ca、145c25a。剩余 dirty 仅 handoff 与统一 DAG。
+
+## 2026-09-29 统一 Dispatch Schema v2 完成与 v0.0.1 发布
+
+### 本轮全部提交（已推送 origin/main，tag v0.0.1）
+
+- 76e665b test: 迁移 delegation workspace 测试到 v2 schema
+- 503815b feat: session-owner 启动决策审计日志
+- 3b04815 fix: agent list 只返回项目 agent（过滤 ~/.agents/ skill 定义）
+- 9198280 feat: subagent agent 发现（action:"list"）+ 移除自定义 system prompt（pi/SYSTEM.qwen.md + model-system-prompt 机制）
+- b2534dd fix: generic 路由前置编译 + 统一提示渲染（reviewer P1 修复）
+- 7c8e1cf refactor: 统一 dispatch schema v2（39 文件，+1225/-2018）
+- 更早：80114d1 rename canary、bafe714 worktree 工具面、041f9f9 fixture 清理、64d80d4 移除执行超时、886973a H-PI-2 报告、ab4a88a DAG 更新、145c25a terminal proof 修复、a46e9ca settings 模板、ddcf487 preserve reason、6afc404 配置移出
+
+### v2 Schema 设计（最终确认）
+
+- generic：{agent, task} 必填，{title, model} 可选
+- coding：{agent, task, writePaths, acceptance:{criteria}} 必填，+ {title, model, worktree, cwd} 可选
+- 路由：isCodingDispatch = Object.hasOwn(input, "writePaths")
+- taskId = "dispatch-" + contractHash.slice(0,8)，hash 不含 taskId
+- timeoutMs 由 Host 注入，模型提供则拒绝
+- 旧 v1 输入返回 DEPRECATED_SCHEMA 含迁移指引
+- generic-prompt.ts 已删除，功能合并进 dispatch-ir.ts
+- skill-overrides/subagent-dispatch/ 已退役，核心约束迁入 pi/AGENTS_APPEND.md（115 行）
+- subagent({action:"list"}) 可查询可用 agent（只返回 pi/agents/ 下的项目 agent）
+
+### rebase 后 settings/models 恢复
+
+- rebase 过程中 pi/settings.json 丢失 packages（ensure-pi-settings.ts 幂等恢复）和 defaultProvider/defaultModel（手动补回）
+- pi/models.json 被 git rm 物理删除，从 git show db60aa2 恢复（7 provider / 8 model）
+- 确认：settings.json 和 models.json 均不进 git（per-machine）
+
+### 工作树残留（用户保留）
+
+- scripts/pi-shell.zsh + test/pi-shell.test.mjs（pi-new 函数，用户决定留着不提交不删除）
+- scripts/pi-session-owner.ts 已提交（503815b）
+
+### 遗留项（均按用户决策冻结或延后）
+
+- 历史 529 条 proof debt：不处理
+- 旧 A4 managed workspaces：不管
+- attention lane / supervisor transport：不在本轮范围
+- L-REGISTRY-ENTRY：blocked-unknown
+- 上游兼容导出（compileCodingDispatchIR alias）：低优先级后续清理
+- README/probes v1 引用清理：低优先级
+- 真实模型 T6 v2 schema 行为验证：待环境可用时执行

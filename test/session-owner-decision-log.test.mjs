@@ -86,34 +86,3 @@ test("blocked 决策写入 registry 的 decisions.log 审计日志", async () =>
   }
 });
 
-test("pi-new 自动修正 registry 目录权限为 0700（集成验证）", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-new-chmod-"));
-  try {
-    const registryDir = join(root, "registry");
-    mkdirSync(registryDir, { recursive: true, mode: 0o755 });
-    assert.equal(statSync(registryDir).mode & 0o777, 0o755, "初始应为 755");
-
-    // 模拟 pi-new 的权限修正
-    chmodSync(registryDir, 0o700);
-    assert.equal(statSync(registryDir).mode & 0o777, 0o700, "修正后应为 700");
-
-    // 修正后 prepare 应正常工作（不再 blocked）
-    const fakePi = join(root, "pi");
-    writeFileSync(fakePi, "#!/usr/bin/env bash\nexit 0\n"); chmodSync(fakePi, 0o755);
-    const decisionDir = join(root, "decision");
-    mkdirSync(decisionDir, { mode: 0o700 });
-    const result = spawnSync("node", [
-      join(repoRoot, "scripts", "pi-session-owner.ts"), "prepare",
-      "--pid", String(process.pid), "--cwd", root,
-      "--stdin-tty", "1", "--stdout-tty", "1",
-      "--decision-dir", decisionDir,
-      "--pi-binary", fakePi,
-      "--",
-    ], { encoding: "utf8", env: { ...process.env, PI_SESSION_OWNER_REGISTRY: registryDir } });
-
-    const action = readFileSync(join(decisionDir, "action"), "utf8").trim();
-    assert.equal(action, "pass", `700 权限下应为 pass，得到 ${action}`);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -94,7 +95,7 @@ test("shell integration preserves a custom Goal state directory", async () => {
   }
 });
 
-test("shell integration lets pi-new agent-prefixed state roots win over stale inherited non-agent values", async () => {
+test("shell integration keeps explicit agent-prefixed state roots isolated from stale inherited values", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-shell-agent-vars-"));
   try {
     const output = join(root, "state-roots.json");
@@ -105,7 +106,7 @@ test("shell integration lets pi-new agent-prefixed state roots win over stale in
     );
     await chmod(fakePi, 0o755);
 
-    // 模拟 pi-new 的权威通道（AGENT_ 前缀显式设置）与用户 shell 中残留的旧仓导出值（非 AGENT 变体）共存。
+    // 模拟显式 AGENT_ 前缀的权威通道（AGENT_ 前缀显式设置）与用户 shell 中残留的旧仓导出值（非 AGENT 变体）共存。
     const result = spawnSync(
       "zsh",
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
