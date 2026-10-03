@@ -2485,3 +2485,22 @@ test("broker 存储类错误一律 fail-closed，不得当作非受管放行", a
     assert.deepEqual(steerCalls(rpc), [], `${code} 绝不得投递`);
   }
 });
+
+test("替换代偿失败携原异常诊断，ready 仍阻断并允许恢复重试", async () => {
+  const pi = createPi(), cleanupStore = {}, diagnostics = [];
+  const cause = new Error("存储不可用"), failure = new Error("旧代清理失败", { cause });
+  let blocked = true, started = 0;
+  createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore, beforeDispose() { if (blocked) throw failure; } });
+  const next = createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore,
+    diagnosticSink(entry) { diagnostics.push(entry); }, beforeSessionStart() { started++; } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(diagnostics[0]?.phase, "subagent-ready-debt-retry-failed");
+  assert.equal(diagnostics[0]?.error, failure);
+  assert.equal(diagnostics[0]?.cause, cause);
+  await assert.rejects(next.ready({}, {}), error => error === failure);
+  assert.equal(started, 0);
+  blocked = false;
+  await next.ready({}, {});
+  assert.equal(started, 1);
+  await next.dispose();
+});

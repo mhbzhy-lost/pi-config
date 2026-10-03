@@ -1498,7 +1498,8 @@ export function createTypedSubagentExtension(
   };
   const previous = registry.get(pi);
   if (previous?.debt && !previous.debt.completed) {
-    Promise.resolve(previous.debt.run(previous.debt.event, previous.debt.ctx, true)).catch(() => {
+    Promise.resolve(previous.debt.run(previous.debt.event, previous.debt.ctx, true)).catch((error) => {
+      reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "subagent-ready-debt-retry-failed", error, cause: error?.cause, retry: true });
       // The replacement generation's ready gate retains and retries this debt.
     });
   }
