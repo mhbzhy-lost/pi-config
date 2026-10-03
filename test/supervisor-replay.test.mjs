@@ -43,6 +43,26 @@ test("terminal completion uses authority terminal receipt stable key across the 
   assert.equal(restart.userVisibleCompletionReceipt.receiptId, result.userVisibleCompletionReceipt.receiptId);
 });
 
+test("delivery failure remains blocked and emits the original diagnostic", async () => {
+  const { outbox, storage } = await fixture();
+  await outbox.appendEvent(event(1));
+  const diagnostics = [];
+  const adapter = createSupervisorReplay({
+    outbox,
+    barrier: new ReplayBarrier({ storage, outbox }),
+    consumerId: "supervisor-1",
+    ownerValidator: async () => true,
+    cursorValidator: async () => true,
+    deliverySink: { async hasDelivered() { return false; }, async deliver() { throw new Error("delivery failed"); } },
+    diagnosticSink: (entry) => diagnostics.push(entry),
+  });
+  const result = await adapter.replaySupervisor({ rootSessionId: "root-1", runId: "run-1", ownerReceipt: receipt(), after: cursor(), batchSize: 1 });
+  assert.equal(result.status, "blocked-unknown");
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].phase, "supervisor-replay-failed");
+  assert.match(diagnostics[0].error.message, /delivery failed/);
+});
+
 test("invalid authority/cursor, stale generation and missing idempotency lookup fail closed", async () => {
   const { outbox, adapter, delivered } = await fixture(); await outbox.appendEvent(event(1));
   for (const input of [

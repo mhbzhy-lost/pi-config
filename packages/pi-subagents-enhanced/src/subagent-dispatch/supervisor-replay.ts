@@ -8,7 +8,7 @@ type DeliverySink = {
   hasDelivered: (idempotencyKey: string) => Promise<boolean> | boolean;
   deliver: (input: { eventId: string; payloadDigest: string; payload: unknown; idempotencyKey: string; receiptId: string; kind: "event" | "completion" }) => Promise<unknown> | unknown;
 };
-type Options = { outbox: DurableEventOutbox; barrier: ReplayBarrier; consumerId: string; ownerValidator: OwnerValidator; cursorValidator: (cursor: ReplayCursorV1, receipt: OwnerReceiptV1) => Promise<boolean> | boolean; terminalReceiptValidator?: (event: OutboxEventV1, terminalReceiptId: string) => Promise<boolean> | boolean; deliverySink: DeliverySink };
+type Options = { outbox: DurableEventOutbox; barrier: ReplayBarrier; consumerId: string; ownerValidator: OwnerValidator; cursorValidator: (cursor: ReplayCursorV1, receipt: OwnerReceiptV1) => Promise<boolean> | boolean; terminalReceiptValidator?: (event: OutboxEventV1, terminalReceiptId: string) => Promise<boolean> | boolean; deliverySink: DeliverySink; diagnosticSink?: (entry: unknown) => void };
 const sameIdentity = (a: ReplayCursorV1, b: { rootSessionId: string; runId: string; ownerGeneration: number }) => a.rootSessionId === b.rootSessionId && a.runId === b.runId && a.ownerGeneration === b.ownerGeneration;
 const blocked = () => ({ status: "blocked-unknown" as const, events: [] as OutboxEventV1[], transportReceipts: [] as DurableReceiptV1[], processingReceipts: [] as DurableReceiptV1[] });
 
@@ -42,7 +42,10 @@ export function createSupervisorReplay(options: Options) {
       }
       if (batch.events.length > 0 && batch.events.at(-1)!.cursor.sequence >= begun.highWater.sequence) await options.barrier.switchLiveAfterBarrier({ cursor: after });
       return { status: "replayed" as const, events: batch.events, transportReceipts, processingReceipts, ...(completion ? { userVisibleCompletionReceipt: completion } : {}) };
-    } catch { return blocked(); }
+    } catch (error) {
+      try { options.diagnosticSink?.({ version: 1, phase: "supervisor-replay-failed", error, cause: (error as any)?.cause }); } catch (diagnosticError) { console.error("[supervisor-replay] diagnostic sink failed", { error, diagnosticError }); }
+      return blocked();
+    }
   }
   return { replaySupervisor };
 }
