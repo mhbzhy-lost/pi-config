@@ -399,7 +399,11 @@ Use the deterministic compatibility marker from the assigned task.
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     if (mode === "attention") {
       const childRun = spawnedDetails(result.records).spawned;
-      const transcript = await readFile(join(projectRoot, ".pi", "subagents", "artifacts", `${childRun.runId}_executor_transcript.jsonl`), "utf8");
+      const transcriptPath = join(projectRoot, ".pi", "subagents", "artifacts", `${childRun.runId}_executor_transcript.jsonl`);
+      let transcript = "";
+      try { transcript = await readFile(transcriptPath, "utf8"); } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
       console.log("CHILD DIAGNOSTICS", await readFile(join(childRun.asyncDir, "runner.stderr.log"), "utf8"), transcript.split("\n").filter(line => line.includes('"role":"assistant"') || line.includes('"recordType":"stderr"')).map(line => line.slice(0, 900)).join("\n"));
     }
     assert.ok(result.records.some((record) => assistantText(record).includes("COMPAT_PARENT_DONE")), `parent did not complete: ${JSON.stringify(result.records.slice(-10))}`);
