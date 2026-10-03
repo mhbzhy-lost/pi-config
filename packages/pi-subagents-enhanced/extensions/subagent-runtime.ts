@@ -63,6 +63,7 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
       storageRepositoryId: metadata.storageRepositoryId,
       instanceId: metadata.instanceId,
       stateRoot: metadata.canonicalStateRoot,
+      diagnosticSink,
       recoveryEventSink: (intent: any) => {
         // resume intent 的快路径：本 Host 的 orchestrator 直接消费（仅限本
         // root 拥有的 intent，submit 内部校验 owner scope）；跨 Host 投递由
@@ -432,6 +433,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         workspaceService = createManagedWorkspaceService({
           stateRoot: process.env.PI_CODING_WORKSPACE_DIR,
           storageRepositoryId: coordinatorRuntime?.identity.storageRepositoryId,
+          diagnosticSink,
           terminalProofProvider({ run }: { run: { runId?: string } | null }) {
             const snapshot = run?.runId ? startingBroker.inspectExecutionProof(run.runId) : null;
             return projectManagedWorkspaceTerminalProof(run, snapshot);

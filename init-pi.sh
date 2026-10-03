@@ -101,8 +101,13 @@ uv tool install --force "basic-memory==$BASIC_MEMORY_VERSION"
   npm test
   npm run doctor
   PI_REAL_BIN="$pi_binary" npm run test:integration
-  uv run --no-project --with httpx --with python-dotenv --with pyyaml \
-    python -m unittest discover -s skill-overrides/external-llm-review/tests
+  review_tests="$SCRIPT_DIR/skill-overrides/external-llm-review/tests"
+  if [[ -d "$review_tests" ]]; then
+    uv run --no-project --with httpx --with python-dotenv --with pyyaml \
+      python -m unittest discover -s "$review_tests"
+  else
+    printf "[info] external-llm-review tests directory is absent; no tests run\n"
+  fi
 )
 
 printf '[ok] Pi initialization complete\n'
