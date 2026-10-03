@@ -116,6 +116,7 @@ type Dependencies = {
   clock?: () => number;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
+  diagnosticSink?: (entry: unknown) => void;
 };
 
 const MAX_BUFFER = 64 * 1024;
@@ -244,6 +245,7 @@ export class RootBrokerServer {
   /** Observable preserved/debt state when an integration request cannot settle before close. */
   integrationDebt = new Map<string, { operation: string; reason: string }>();
   requestBoundaryDebt = 0;
+  diagnosticSink?: (entry: unknown) => void;
 
   constructor({
     rootSessionId,
@@ -265,6 +267,7 @@ export class RootBrokerServer {
     clock = Date.now,
     setInterval: setHeartbeatInterval = setInterval,
     clearInterval: clearHeartbeatInterval = clearInterval,
+    diagnosticSink,
   }: { rootSessionId: string; upstream: Upstream } & Dependencies) {
     if (!Number.isSafeInteger(terminalTimeoutMs) || terminalTimeoutMs <= 0) throw new Error("Root subagent broker terminal timeout must be a positive safe integer");
     if (!Number.isSafeInteger(artifactPollIntervalMs) || artifactPollIntervalMs <= 0) throw new Error("Root subagent broker artifact poll interval must be a positive safe integer");
@@ -288,6 +291,7 @@ export class RootBrokerServer {
     this.clock = clock;
     this.setHeartbeatInterval = setHeartbeatInterval;
     this.clearHeartbeatInterval = clearHeartbeatInterval;
+    this.diagnosticSink = diagnosticSink;
     this.authorityStore?.setRootSessionId(rootSessionId);
   }
 
@@ -1249,8 +1253,12 @@ export class RootBrokerServer {
     if (this.closed || socket.destroyed || this.principals.get(request.callerRunId)?.callerToken !== request.callerToken) return;
     try {
       socket.write(`${JSON.stringify({ schemaVersion: "pi-root-subagent-broker-push.v1", rootSessionId: this.rootSessionId, callerRunId: request.callerRunId, type: "subscription.ready", data: {} })}\n`);
-      if (this.authorityStore) void this.authorityStore.readLease(request.callerRunId).then((lease) => this.publishLeaseUpdate(request.callerRunId, lease)).catch(() => {});
-    } catch { /* socket failure leaves the subscription unready */ }
+      if (this.authorityStore) void this.authorityStore.readLease(request.callerRunId).then((lease) => this.publishLeaseUpdate(request.callerRunId, lease)).catch((error) => {
+        try { this.diagnosticSink?.({ version: 1, phase: "root-broker-lease-read-failed", error, cause: error?.cause, callerRunId: request.callerRunId }); } catch (diagnosticError) { console.error("[root-broker] diagnostic sink failed", { error, diagnosticError }); }
+      });
+    } catch (error) {
+      try { this.diagnosticSink?.({ version: 1, phase: "root-broker-subscription-ready-write-failed", error, cause: error?.cause, callerRunId: request.callerRunId }); } catch (diagnosticError) { console.error("[root-broker] diagnostic sink failed", { error, diagnosticError }); }
+    }
   }
 
   async dispatch(request: any, socket: Socket, { deferSubscription = false }: { deferSubscription?: boolean } = {}) {
