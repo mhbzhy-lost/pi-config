@@ -32,7 +32,7 @@ class ManagedWorkspaceError extends Error {
 
 type TerminalProof = { state: "pending" } | { state: "observed"; conflict: boolean; runId: string; rootSessionId: string; asyncDir: string; processInstance: string; proofId: string };
 type ServiceFault = (event: { operation: string; phase: string; workspaceId: string }) => void;
-type ServiceOptions = { stateRoot?: string; storageRepositoryId?: string; terminalProofProvider?: (input: { workspaceId: string; run: unknown }) => unknown; fault?: ServiceFault; admissionProbe?: () => void };
+type ServiceOptions = { stateRoot?: string; storageRepositoryId?: string; terminalProofProvider?: (input: { workspaceId: string; run: unknown }) => unknown; fault?: ServiceFault; admissionProbe?: () => void; diagnosticSink?: (entry: unknown) => void };
 export type WorkspaceOwnerScope = Readonly<{ kind: "standalone-subagent"; rootSessionId: string }>;
 type StatusInput = { workspaceId?: string; terminalProof?: unknown; expectedHead?: string };
 type DisposeInput = StatusInput & { disposition?: "integrate" | "discard" | "preserve"; strategy?: "cherry-pick" | "merge"; reason?: string; actionToken?: string };
@@ -156,8 +156,9 @@ function serviceRegistry(): Map<string, any> {
   return created;
 }
 
-function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, storageRepositoryId, terminalProofProvider, fault, admissionProbe }: ServiceOptions = {}) {
+function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, storageRepositoryId, terminalProofProvider, fault, admissionProbe, diagnosticSink }: ServiceOptions = {}) {
   const ledger = createManagedWorkspaceLedger({ stateRoot, storageRepositoryId });
+  const diagnose = (entry: unknown) => { try { diagnosticSink?.(entry); } catch (diagnosticError) { console.error("[managed-workspace-service] diagnostic sink failed", { entry, diagnosticError }); } };
   let activeTerminalProofProvider = terminalProofProvider;
   let activeFault = fault;
   let activeAdmissionProbe = admissionProbe;
@@ -222,7 +223,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     } catch (error) {
       if (error?.code === "TEST_FAULT") throw error;
       if (error?.code === "MANAGED_WORKSPACE_IDENTITY") {
-        try { markDebt(lease, error, "allocation"); } catch {}
+        try { markDebt(lease, error, "allocation"); } catch (secondaryError) { diagnose({ version: 1, phase: "workspace-allocation-debt-write-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, workspaceId: lease.workspaceId }); }
       }
       throw error;
     }
@@ -490,7 +491,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       }).record);
     } catch (error) {
       if (error?.code === "TEST_FAULT") throw error;
-      try { markDebt(lease, error, "discard"); } catch {}
+      try { markDebt(lease, error, "discard"); } catch (secondaryError) { diagnose({ version: 1, phase: "workspace-discard-debt-write-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, workspaceId: lease.workspaceId }); }
       throw error;
     }
   }
@@ -547,7 +548,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       });
     } catch (error) {
       if (error?.code === "TEST_FAULT") throw error;
-      try { markDebt(lease, error, "disposition"); } catch {}
+      try { markDebt(lease, error, "disposition"); } catch (secondaryError) { diagnose({ version: 1, phase: "workspace-disposition-debt-write-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, workspaceId: lease.workspaceId }); }
       throw error;
     }
   }
@@ -641,7 +642,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       });
       return receipt(lease.record);
     } catch (error) {
-      try { markDebt(lease, error, "release"); } catch {}
+      try { markDebt(lease, error, "release"); } catch (secondaryError) { diagnose({ version: 1, phase: "workspace-release-debt-write-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, workspaceId: lease.workspaceId }); }
       throw error;
     }
   }
@@ -688,7 +689,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
         if (error?.code === "TEST_FAULT") throw error;
         current = ledger.load(record.workspaceId, { originRoot: record.request.originRoot });
         if (current.record.state !== "cleanup-debt") {
-          try { current = markDebt(current, error, "reconcile"); } catch {}
+          try { current = markDebt(current, error, "reconcile"); } catch (secondaryError) { diagnose({ version: 1, phase: "workspace-reconcile-debt-write-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, workspaceId: current.workspaceId }); }
         }
         results.push(receipt(current.record));
       }
