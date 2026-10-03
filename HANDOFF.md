@@ -17,7 +17,7 @@
 
 ## 升级状态一句话
 
-**pi core 0.87.1 × pi-subagents 0.71.0 升级本体 + main merge 已落地；当前静态门禁 982/981/0/1todo；完整 integration gate 34 文件 242/242（仅 1 项排除）。B9、B5、C3、C4、C8、C9、C10 已按 RED/GREEN 完成并提交；T8 与 `pi-subagents-runtime` 已解除排除。T7 resumed-child 仍为已确认的上游字段传播缺陷，排除保留；S1 与 T7 本仓护栏待后续整理。全局 pi 已切换到 0.87.1，shell/skills/Basic Memory 同步完成；doctor 仍报告旧仓库只读迁移债务 `/Users/leshi.zhy/pi-config/var/workspaces`，未删除旧数据。**
+**pi core 0.87.1 × pi-subagents 0.71.0 已完成全局切换；当前静态门禁 956/955/0/1todo；完整 integration gate 35 文件 243/243（无排除）。B9、B5、C3、C4、C8、C9、C10 已完成；结束 child 的自动 resume 已按产品裁决下线，保留 queue/worktree/proof/owner 检查和 durable intent，改由主 Agent 接管 worktree，T7 上游缺陷不再适用。全局 pi 0.87.1、shell/skills/Basic Memory 已同步；doctor 仍报告旧仓库只读迁移债务 `/Users/leshi.zhy/pi-config/var/workspaces`，未删除旧数据。**
 
 ## 本段完成：main-merge + 缺陷收尾 + reviewer 整改
 
@@ -28,7 +28,7 @@
 | T3 A 类生产交织（extension.ts 29 块）+ T5 doctor v2 迁移 | ✅ | 并入 `fcc43a6`；typecheck 双绿 |
 | T4 A 类测试交织 + 真实 Host 夹具迁移 | ⚠️ 部分 | `fcc43a6`、`7ee6ef3`、`115f3e8`；**未达验收**：计划要求 focused 全绿后再 merge，且已裁决保留的 canary 用例被删除（见「计划验收偏差」） |
 | T6 全量门禁收口 | ✅ | `7ee6ef3`（历史基线 933/0，已被后续基线取代） |
-| T7 resumed-child | ⚠️ **因果已闭合，修复未完成** | A/B 对照证实：全局 0.85.1（182357ms）与 repo-local 0.87.1（180673ms）下同一用例现场签名完全同类（`queue=[] intents=[] workspaces=[active] auditDebts=[{kind:proof,status:unresolved}]`、child `launchResolvedExtensions.configured/required` 均空）⟹ **版本错配排除**，upstream `subagent-executor.js:2938-3002` 丢 `subagentOnlyExtensions` 确认为致因。本仓不覆写 node_modules；剩余工作为可观测 fail-closed 护栏 + S1 descriptor 覆盖恢复（波 3）。证据 `var/upgrade/t7-ab-experiment.md`、`var/upgrade/t7-ab/` |
+| T7 resumed-child | ✅ **按产品裁决下线自动恢复** | 保留未完成 merge queue 的检查、durable resume intent 与 owner/worktree/proof 事实；不再调用 upstream resume，发送 `subagent-integration-handoff` 文本给主 Agent 接管 worktree。T7 上游 `subagentOnlyExtensions` 缺陷不再进入产品路径；见 `docs/bugs/2026-10-04-retired-ended-child-auto-resume.md`、提交 `9dca9cd` |
 | T8 session-owner PTY | ✅ **已修复**（排除待 gate 验证后解除） | `fe6bfa6` 可观测性 + `0926655` registry guard 原子发布；真因为 `.guard` 半写读取竞态（类别 1），非夹具时序、非版本错配、非 ownerId 碰撞。连续两遍 12/12、SIGKILL 5/5（此前 3/5 失败）。计划原验收要求「连续两遍全绿 + 删除排除」，前者已达成，后者待主 agent 完整 gate 验证后执行 |
 | T9 terminal-proof 裁决（用户选 a） | ✅ | `49931ed` + B2 加固 `471f473`；docs/bugs/2026-09-30-terminal-proof-cross-owner-binding-silent.md；跨 scope 复查命中即记债，复查不可用亦 fail-closed；解除门禁排除，7/7 绿 |
 | T10 HANDOFF + 收尾 | ✅（本次重写修正） | 本文件；首版存在自相矛盾的 suspended/旧门禁数字，已按 reviewer B4 统一为单一终态摘要 |
@@ -90,7 +90,7 @@ npm test **972tests/971pass/0fail/1todo**（波 1B 报告值，`env -u PI_SUBAGE
 
 以下偏差均为**实际存在、尚未关闭**，不得当作已完成：
 
-### B3（Blocker）——T7 上游缺陷仍保留排除，T8 已完成解除
+### B3（Blocker）——T7 自动恢复路径已按产品裁决下线，T8 已完成解除
 
 计划 Task 7 要求四用例全绿 + TDD 修复 + 删除排除；Task 8 要求文件连续两遍全绿 + 删除排除。
 实际仅交付诊断报告，排除仍在，且三项排除**均无 owner / issue / 到期时间 / 恢复门禁条件**。
