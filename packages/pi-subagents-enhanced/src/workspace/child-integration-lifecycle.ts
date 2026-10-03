@@ -52,7 +52,7 @@ export function createChildIntegrationLifecycle(options: any = {}) {
     if (typeof coordinator.inspectIntegrationState === "function") {
       let completion: any;
       try { completion = await coordinator.inspectIntegrationState(binding); }
-      catch { trace("integration-lifecycle-disposition-blocked", { reason: "terminal-proof-unavailable" }); return; }
+      catch (error) { trace("integration-lifecycle-disposition-blocked", { reason: "terminal-proof-unavailable", error, cause: error?.cause }); return; }
       if (completion?.proofState !== "accepted") {
         trace("integration-lifecycle-disposition-blocked", { reason: "terminal-proof-pending" });
         return;
@@ -60,7 +60,7 @@ export function createChildIntegrationLifecycle(options: any = {}) {
     }
     record.terminal = true;
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
-    try { await coordinator.preserveIntegrationDebt(binding, reason); } catch { /* durable coordinator state remains authoritative */ }
+    try { await coordinator.preserveIntegrationDebt(binding, reason); } catch (error) { trace("integration-lifecycle-preserve-failed", { reason, error, cause: error?.cause }); /* durable coordinator state remains authoritative */ }
   };
   const durableStates = new Set(["queued", "admission-pending", "admitted", "rebasing", "resolving-conflict", "prepared"]);
   const shutdown = async (binding: any) => {
@@ -85,7 +85,8 @@ export function createChildIntegrationLifecycle(options: any = {}) {
       }
       // Unknown state is not a reason to terminate a durable queue item;
       // leave it for coordinator reconciliation on the next lifecycle.
-    } catch {
+    } catch (error) {
+      trace("integration-lifecycle-shutdown-inspect-failed", { error, cause: error?.cause });
       // A dead coordinator cannot be waited on during shutdown.  The existing
       // preserve/debt RPC is deliberately attempted once so a reconnecting
       // coordinator can persist an explicit recovery intent.
