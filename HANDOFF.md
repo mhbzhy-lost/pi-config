@@ -17,7 +17,7 @@
 
 ## 升级状态一句话
 
-**pi core 0.87.1 × pi-subagents 0.71.0 升级本体 + main merge（v2 dispatch 合同 × 0.71 运行时）已落地；当前静态门禁 980/979/0/1todo；完整 integration gate 34 文件 242/242（仅 1 项排除）。B9 已修复并提交（`e5f3a2a`）；T8 与 `pi-subagents-runtime` 已解除排除并经完整 gate 验证（`3543454`）。T9 已按用户裁决 (a) 实施完成；T7/T8 仅诊断、未修复、排除仍在，属计划验收未完成项，待用户决定「修复」还是「正式豁免并登记 owner/期限」。后续切换阶段（原 T12 第三段）在 reviewer Blocker 全部关闭前不建议启动。**
+**pi core 0.87.1 × pi-subagents 0.71.0 升级本体 + main merge 已落地；当前静态门禁 982/981/0/1todo；完整 integration gate 34 文件 242/242（仅 1 项排除）。B9、B5、C3、C4、C8、C9、C10 已按 RED/GREEN 完成并提交；T8 与 `pi-subagents-runtime` 已解除排除。T7 resumed-child 仍为已确认的上游字段传播缺陷，排除保留；S1 与 T7 本仓护栏待后续整理。全局 pi 已切换到 0.87.1，shell/skills/Basic Memory 同步完成；doctor 仍报告旧仓库只读迁移债务 `/Users/leshi.zhy/pi-config/var/workspaces`，未删除旧数据。**
 
 ## 本段完成：main-merge + 缺陷收尾 + reviewer 整改
 
@@ -90,7 +90,7 @@ npm test **972tests/971pass/0fail/1todo**（波 1B 报告值，`env -u PI_SUBAGE
 
 以下偏差均为**实际存在、尚未关闭**，不得当作已完成：
 
-### B3（Blocker）——T7/T8 从「修复并解除排除」被降为「诊断后永久排除」
+### B3（Blocker）——T7 上游缺陷仍保留排除，T8 已完成解除
 
 计划 Task 7 要求四用例全绿 + TDD 修复 + 删除排除；Task 8 要求文件连续两遍全绿 + 删除排除。
 实际仅交付诊断报告，排除仍在，且三项排除**均无 owner / issue / 到期时间 / 恢复门禁条件**。
