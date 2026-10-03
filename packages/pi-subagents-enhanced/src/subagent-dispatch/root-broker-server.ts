@@ -1215,7 +1215,7 @@ export class RootBrokerServer {
     const safe = frozen({ schemaVersion: "recovery-event.v1", rootSessionId: this.rootSessionId,
       recoveryIntentId: event?.recoveryIntentId, queueItemId: event?.queueItemId, workspaceId: event?.workspaceId,
       ownerScope: event?.ownerScope, runId: event?.runId, attempt: event?.attempt, reason: event?.reason, requiredAction: event?.requiredAction,
-      generation: event?.generation, delivery: { state: "delivered" } });
+      generation: event?.generation, handoff: event?.handoff, delivery: { state: "delivered" } });
     this.recoveryNotifications.push(safe);
     const callerRunId = typeof event?.runId === "string" ? event.runId : undefined;
     const sockets = callerRunId ? this.subscriptions.get(callerRunId) : undefined;
