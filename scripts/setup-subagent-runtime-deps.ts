@@ -52,7 +52,7 @@ export async function installSubagentRuntimeDependencies({
   run = execFile,
 } = {}) {
   await assertSafeSubagentRuntimeUpgrade({ enhancedPackageRoot, env });
-  const npmEnv = { ...env, NPM_CONFIG_REGISTRY: "https://registry.npmjs.org", npm_config_cache: env.npm_config_cache ?? `${env.HOME ?? process.env.HOME}/pi-config-upgrade/var/tmp/npm-cache` };
+  const npmEnv = { ...env, NPM_CONFIG_REGISTRY: "https://registry.npmjs.org", npm_config_cache: env.npm_config_cache ?? `${env.HOME ?? process.env.HOME}/pi-config/var/tmp/npm-cache` };
   await run("npm", ["--no-audit", "--no-fund", "uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo", "pi-subagents", "typebox"], { env: npmEnv });
   await run("npm", ["--no-audit", "--no-fund", "install", "--prefix", enhancedPackageRoot, "--ignore-scripts", "--omit=peer"], { env: npmEnv });
   await run("npm", ["--no-audit", "--no-fund", "--prefix", enhancedPackageRoot, "run", "setup:runtime"], { env: npmEnv });

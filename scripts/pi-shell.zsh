@@ -3,7 +3,6 @@ typeset -g _PI_CONFIG_ROOT="${${(%):-%N}:A:h:h}"
 export PI_CONFIG_HOME="$_PI_CONFIG_ROOT"
 export PI_CODING_AGENT_DIR="$_PI_CONFIG_ROOT/pi"
 export PI_CODING_AGENT_SESSION_DIR="${PI_CODING_AGENT_SESSION_DIR:-$_PI_CONFIG_ROOT/var/sessions}"
-# pi-new 的权威通道是 AGENT_ 前缀变体（显式 env 设置）；非 AGENT 变体仅作为裸 source
 # 时的用户覆盖通道。若优先级颠倒，用户 shell 中残留的旧仓导出值会泄漏进新仓会话
 # （docs/bugs/2026-09-29-pi-shell-inherits-cross-repo-state-roots.md）。
 export PI_CODING_GOAL_DIR="${PI_CODING_AGENT_GOAL_DIR:-${PI_CODING_GOAL_DIR:-$_PI_CONFIG_ROOT/var/goals}}"
