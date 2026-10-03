@@ -176,14 +176,20 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     let head: string;
     try {
       head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: entry.path, encoding: "utf8" }).trim();
-    } catch { return; }
+    } catch (error) {
+      diagnose({ version: 1, phase: "coordinator-authorized-head-read-failed", error, cause: error?.cause, queueItemId: item.queueItemId, workspaceId: item.workspaceId });
+      return;
+    }
     if (head === item.authorizedWorkspaceHead) return;
     // 只接受旧授权头的后代：child 纯新增 commit。任何其它漂移都不刷新。
     let descendant = false;
     try {
       execFileSync("git", ["merge-base", "--is-ancestor", item.authorizedWorkspaceHead, head], { cwd: entry.path, stdio: ["ignore", "ignore", "ignore"] });
       descendant = true;
-    } catch { descendant = false; }
+    } catch (error) {
+      diagnose({ version: 1, phase: "coordinator-authorized-head-ancestry-check-failed", error, cause: error?.cause, queueItemId: item.queueItemId, workspaceId: item.workspaceId, authorizedWorkspaceHead: item.authorizedWorkspaceHead, observedHead: head });
+      descendant = false;
+    }
     if (!descendant) return;
     integrationQueue.refreshAuthorizedWorkspaceHead({ queueItemId: item.queueItemId, authorizedWorkspaceHead: head });
   }
