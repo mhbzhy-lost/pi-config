@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createRecoveryResumeOrchestrator, RECOVERY_RESUME_PROMPT, recoverOrphanRun } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/recovery-resume-orchestrator.ts";
+import { createManualIntegrationHandoff } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/recovery-resume-contract.ts";
 import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createCoordinatorServer } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts";
 import { connectRepositoryCoordinator } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-client.ts";
@@ -76,6 +77,15 @@ function orchestratorFor(deps, options = {}) {
     pollIntervalMs: options.pollIntervalMs, startTimeoutMs: options.startTimeoutMs ?? 1000,
   });
 }
+
+test("结束 child 的 merge queue 未完成时生成主 agent 接管提示", () => {
+  const message = createManualIntegrationHandoff({ resumeIntentId: "intent-1", sourceRunId: "run-source-1", workspaceId: "ws1", queueItemId: "q1" });
+  assert.equal(message.customType, "subagent-integration-handoff");
+  assert.match(message.content, /不会自动恢复/);
+  assert.match(message.content, /主 Agent/);
+  assert.match(message.content, /ws1/);
+  assert.deepEqual(message.details, { resumeIntentId: "intent-1", sourceRunId: "run-source-1", workspaceId: "ws1", queueItemId: "q1" });
+});
 
 test("resume → child-start → 授权先于 activation，prompt 不含 model 覆盖", async () => {
   const deps = fakeDeps();

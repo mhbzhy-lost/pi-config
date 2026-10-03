@@ -5,7 +5,7 @@ import { chmod, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { challengeRootBroker } from "../subagent-dispatch/root-broker-client.ts";
 import { createCoordinatorProofOutbox } from "../subagent-dispatch/coordinator-proof-outbox.ts";
-import { RECOVERY_RESUME_ACTIVATION_VERSION, parseRecoveryResumeActivationV1 } from "../subagent-dispatch/recovery-resume-contract.ts";
+import { RECOVERY_RESUME_ACTIVATION_VERSION, createManualIntegrationHandoff, parseRecoveryResumeActivationV1 } from "../subagent-dispatch/recovery-resume-contract.ts";
 import { parseCoordinatorRequest, parseCoordinatorRegistrationRequest, authorizeCoordinatorRequest } from "./coordinator-protocol.ts";
 import type { TrustedBrokerRegistration } from "./coordinator-auth.ts";
 import { canonicalWorkspaceStateRoot } from "./coordinator-registry.ts";
@@ -264,17 +264,18 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     }
     return results;
   }
-  // FIFO 队首升级 + resume intent 投递：只升级队首的 waiting-head intent，
-  // 只投递尚未 delivered 的 pending intent；receipt 与 delivery 状态均以
-  // coordinator durable 存储为权威，重复触发幂等。
+  // FIFO 队首升级 + 主 Agent 接管提示：只升级队首的 waiting-head intent。
+  // 已结束 child 不自动 resume；检查与 durable intent 保留，交由主 Agent 接管 worktree。
+  // receipt 与 delivery 状态均以 coordinator durable 存储为权威，重复触发幂等。
   async function pumpResumeIntents() {
     if (!integrationQueue) return { promoted: null, delivered: 0 };
     const promoted = integrationQueue.promoteRecoverableHead();
     const deliverable = integrationQueue.listResumeIntents().filter((intent: any) => intent.state === "pending" && intent.delivery?.state !== "delivered");
     for (const intent of deliverable) {
       try {
-        const delivery = await options.recoveryEventSink?.(structuredClone(intent));
-        integrationQueue.markResumeDelivery(intent.resumeIntentId, delivery ?? { state: "debt", reason: "recovery event sink unavailable" });
+        const handoff = createManualIntegrationHandoff({ resumeIntentId: intent.resumeIntentId, sourceRunId: intent.sourceRunId, workspaceId: intent.workspaceId, queueItemId: intent.queueItemId });
+        const delivery = await options.recoveryEventSink?.({ ...structuredClone(intent), handoff });
+        integrationQueue.markResumeDelivery(intent.resumeIntentId, delivery ?? { state: "debt", reason: "manual handoff notification unavailable" });
       } catch (error) {
         try { integrationQueue.markResumeDelivery(intent.resumeIntentId, { state: "debt", reason: String((error as any)?.message ?? error) }); } catch (secondaryError) { diagnose({ version: 1, phase: "coordinator-resume-debt-record-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, resumeIntentId: intent.resumeIntentId }); }
       }
@@ -289,8 +290,8 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         throw new Error("terminal proof does not match trusted child binding");
       }
       // child 在 integration 完成前退出：proof 保持 pending，同时创建/更新
-      // durable resume intent；只有当前队首的 intent 升级为 pending 并经
-      // recoveryEventSink 投递 requiredAction=resume-child。
+      // durable resume intent；队首 intent 升级后只发送主 Agent 接管提示，
+      // 不再调用 upstream resume 拉起已结束的 child。
       if (RESUMABLE_PROOF_QUEUE_STATES.includes(item.state)) {
         integrationQueue!.requestChildResume({ queueItemId: item.queueItemId, sourceRunId: terminalProof.runId, sourceAsyncDir: terminalProof.asyncDir, sourceProofId: terminalProof.proofId });
         await pumpResumeIntents().catch((error) => { diagnose({ version: 1, phase: "coordinator-resume-pump-failed", error, cause: error?.cause }); });

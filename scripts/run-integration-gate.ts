@@ -15,8 +15,6 @@ const testDir = join(repoRoot, "test");
 
 // 显式排除表：每项必须带登记原因；解除排除时删除条目即可。
 const EXCLUDED_INTEGRATION_FILES = new Map([
-  ["subagent-auto-integration-resumed-child.integration.mjs",
-    "DIAGNOSED-UPSTREAM: A/B root Host 0.85.1/0.87.1 均挂起（var/upgrade/t7-ab/global-085.tap.log、local-087.tap.log；两组 runs/*/status.json configured/required=[]）；root Host 版本错配已排除为单独致因。pi-subagents@0.71.0 runs/foreground/subagent-executor.js:2938-3002 未将请求级 subagentOnlyExtensions 传入 executeAsyncSingle，child 无 integration-queue 扩展、admission 恒未发生；待上游字段传播修复，见 var/upgrade/t7-ab-experiment.md"],
 ]);
 
 /** 纯选择逻辑：integration 文件全集 − 显式排除表，排序输出（供单测消费）。 */

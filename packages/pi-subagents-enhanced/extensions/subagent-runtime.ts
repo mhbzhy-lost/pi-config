@@ -29,7 +29,6 @@ import { RootBrokerServer, rootBrokerTerminalProofId, type TerminalProofDelivery
 import { AuthorityStore } from "../src/subagent-dispatch/authority-store.ts";
 import { rootBrokerRegistryEntry } from "../src/subagent-dispatch/root-broker-registry.ts";
 import { createTrustedRunBindingResolver } from "../src/subagent-dispatch/run-binding-resolver.ts";
-import { createRecoveryResumeOrchestrator } from "../src/subagent-dispatch/recovery-resume-orchestrator.ts";
 import { connectRepositoryCoordinator } from "../src/workspace/coordinator-client.ts";
 import { createCoordinatorRegistry } from "../src/workspace/coordinator-registry.ts";
 import { createCoordinatorServer } from "../src/workspace/coordinator-server.ts";
@@ -54,7 +53,6 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
   const registry = createCoordinatorRegistry({ commonDir: identity.commonDir, stateRoot });
   const metadata = await registry.claim({ repositoryId: identity.repositoryId, storageRepositoryId: identity.storageRepositoryId });
   let server: any;
-  let recoveryOrchestrator: ReturnType<typeof createRecoveryResumeOrchestrator> | undefined;
   const ownsServer = metadata.pid === process.pid;
   if (ownsServer) {
     server = createCoordinatorServer({
@@ -64,21 +62,24 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
       instanceId: metadata.instanceId,
       stateRoot: metadata.canonicalStateRoot,
       diagnosticSink,
-      recoveryEventSink: (intent: any) => {
+      recoveryEventSink: async (intent: any) => {
         // resume intent 的快路径：本 Host 的 orchestrator 直接消费（仅限本
         // root 拥有的 intent，submit 内部校验 owner scope）；跨 Host 投递由
         // durable recovery.status 轮询通道负责。legacy preserve 事件仍走
         // broker push。coordinator 的 durable 状态仍是唯一权威。
         if (intent?.requiredAction === "resume-child") {
-          const submission = Promise.resolve().then(() => recoveryOrchestrator?.submit(intent));
-          void submission.then((outcome) => {
-            if (outcome?.state === "debt" || outcome?.state === "skipped") {
-              try { diagnosticSink?.({ version: 1, phase: "recovery-resume-submit-settled", state: outcome.state, reason: outcome.reason, resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId, rootSessionId: broker.rootSessionId, cause: (outcome as any).cause }); } catch (diagnosticError) { console.error("[subagent-runtime] recovery diagnostic sink failed", diagnosticError); }
-            }
-          }).catch((error) => {
-            try { diagnosticSink?.({ version: 1, phase: "recovery-resume-submit-rejected", error, cause: error?.cause, resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId, rootSessionId: broker.rootSessionId }); } catch (diagnosticError) { console.error("[subagent-runtime] recovery diagnostic sink failed", diagnosticError); }
-          });
-          return { state: "delivered" };
+          const handoff = intent.handoff;
+          if (!handoff || handoff.customType !== "subagent-integration-handoff") {
+            diagnosticSink?.({ version: 1, phase: "recovery-handoff-invalid", resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId });
+            return { state: "debt", reason: "manual handoff notification is invalid" };
+          }
+          try {
+            await (pi as any).sendMessage(handoff, { deliverAs: "followUp", triggerTurn: true });
+            return { state: "delivered" };
+          } catch (error) {
+            diagnosticSink?.({ version: 1, phase: "recovery-handoff-delivery-failed", error, cause: error?.cause, resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId });
+            return { state: "debt", reason: "manual handoff notification failed" };
+          }
         }
         return broker.publishRecoveryEvent(intent);
       },
@@ -142,27 +143,9 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
         }),
       });
     };
-    // durable recovery resume：轮询 recovery.status（按 rootSessionId 过滤）
-    // 发现本 root children 的 pending/starting resume intent，经 upstream
-    // public resume 恢复 session 后注册新 run 授权并激活 rebind。仅在本
-    // Host 持有 typed RPC 时启用；无 RPC 的宿主保持纯观察。
-    if (rpc && typeof rpc.resume === "function") {
-      recoveryOrchestrator = createRecoveryResumeOrchestrator({
-        rpc,
-        events: (pi as any).events,
-        coordinatorClient: client,
-        registerAuthorizedRun: (authorization: unknown) => broker.registerAuthorizedRun(authorization as any),
-        activateResume: (input: any) => client.activateResume(input),
-        rootSessionId: broker.rootSessionId,
-        lifecycleSessionId: broker.lifecycleSessionId,
-        // 诊断打点写 root host stderr（acceptance harness 会保留 stderr tail）；
-// 阶段与身份字段不含 prompt/token/凭据。
-        trace: (entry: any) => { try { process.stderr.write(`${JSON.stringify(entry)}\n`); } catch { /* 诊断输出不得影响恢复主链 */ } },
-      });
-      recoveryOrchestrator.start();
-    }
+    // 已结束 child 不再自动 resume；recovery.status 仍由 coordinator 保留，
+    // 由主 Agent 接管 worktree 并完成 merge queue 收尾。普通控制面 resume 不受影响。
     return Object.freeze({ client, server, registry, ownsServer, identity, async close() {
-      recoveryOrchestrator?.dispose();
       await client.close();
       if (ownsServer) {
         await server.close();
