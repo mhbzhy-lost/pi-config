@@ -17,7 +17,7 @@
 
 ## 升级状态一句话
 
-**pi core 0.87.1 × pi-subagents 0.71.0 升级本体 + main merge（v2 dispatch 合同 × 0.71 运行时）已落地；当前静态门禁 951/950/0/1todo、完整 integration gate 32 文件 225/225（3 项排除）。T9 已按用户裁决 (a) 实施完成；T7/T8 仅诊断、未修复、排除仍在，属计划验收未完成项，待用户决定「修复」还是「正式豁免并登记 owner/期限」。后续切换阶段（原 T12 第三段）在 reviewer Blocker 全部关闭前不建议启动。**
+**pi core 0.87.1 × pi-subagents 0.71.0 升级本体 + main merge（v2 dispatch 合同 × 0.71 运行时）已落地；当前静态门禁 980/979/0/1todo；完整 integration gate 34 文件 242/242（仅 1 项排除）。B9 已修复并提交（`e5f3a2a`）；T8 与 `pi-subagents-runtime` 已解除排除并经完整 gate 验证（`3543454`）。T9 已按用户裁决 (a) 实施完成；T7/T8 仅诊断、未修复、排除仍在，属计划验收未完成项，待用户决定「修复」还是「正式豁免并登记 owner/期限」。后续切换阶段（原 T12 第三段）在 reviewer Blocker 全部关闭前不建议启动。**
 
 ## 本段完成：main-merge + 缺陷收尾 + reviewer 整改
 
@@ -76,13 +76,11 @@ npm test **972tests/971pass/0fail/1todo**（波 1B 报告值，`env -u PI_SUBAGE
 
 历史基线（仅存档）：933/0（T6）→ 935/934（T9）→ 938/937（task 上界）→ 951/950（B1/B2 整改）→ 959/958（死锁修复）→ **972/971（波 1 完成，待复核）**。
 
-### 集成门禁排除项（3 项，均无 owner/期限，属 B3 待整改）
+### 集成门禁排除项（1 项，T7 上游缺陷；B3 仍待正式处置）
 
 | 排除文件 | 声称定性 | reviewer 判定 |
 |---|---|---|
-| `pi-subagents-runtime.integration.mjs` | WIRED-ELSEWHERE（`test:subagents` script 存在） | 有独立 script **不等于**有通过的门禁；该文件已知只 3/5，且含真实 supervisor reply 死锁 |
-| `subagent-resumed-child-*.integration.mjs` | DIAGNOSED-UPSTREAM | **production 可达的真实缺陷**，仅「非 merge 引入」不足以支持安全切换 |
-| `session-owner-runtime.integration.mjs` | ~~DIAGNOSED-FIXTURE~~ → ~~类别 3 诊断中~~ → **已修复，待完整 gate 验证后解除排除** | 真因是 `registry.ts` 的 `.guard` **半写读取竞态**（类别 1）：`acquireGuard` 用非原子的 `writePrivate` 直接写 guard，并发读取方看到半写内容，且任何读取失败被压成无 cause 的 `registry guard is invalid`。取证决定性证据：5 份现场底层错误均为 `SyntaxError: Expected double-quoted property name in JSON at position 40`，快照记录 `.guard` size **恰好 40**、内容为 `{"protocol":"pi-session-owner.guard.v1",`。修复 `0926655`：新增 `publishExclusivePrivate`（temp write/fsync/close 后 **`link`** 发布，用 link 而非 rename 是为保住 EEXIST 独占语义），`acquireGuard` 仅对 ENOENT 在 deadline 内重试、持续损坏仍 fail closed 并携 cause 与快照、**代码自身永不删 guard**。验证：连续两遍 **12/12**、SIGKILL 用例串行 **5/5**（此前 3/5 失败）、聚焦 40/40。**排除条目尚未解除**：原诊断曾称「2 个独跑通过」但 gate 内仍失败，独跑绿 ≠ gate 绿，故留待主 agent 跑完整 gate 验证后统一解除，避免门禁红灯窗口。此前被推翻的定性：「夹具时序脆弱/超 60s 预算」（失败发生在第一个 owner，未走到 SIGKILL）、「Host 版本错配」（A/B 显示 0.85.1 与 0.87.1 均 ~890ms 出 record）、「ownerId 碰撞」（失败时 registry 非空且 ownerId 不在 previous 中）。证据：`docs/bugs/2026-10-02-session-owner-registry-guard-race.md`、`var/upgrade/registry-guard-fix.md` |
+| `subagent-auto-integration-resumed-child.integration.mjs` | DIAGNOSED-UPSTREAM | **production 可达的真实缺陷**：`pi-subagents@0.71.0` 的 `subagent-executor.js:2938-3002` 未传播请求级 `subagentOnlyExtensions`，child 无 integration-queue 扩展，admission 恒未发生；本仓完整 gate 仍须保留排除，待上游修复或正式豁免。证据：`var/upgrade/t7-ab-experiment.md`、`var/upgrade/t7-ab/` |
 
 ## 计划验收偏差（reviewer 审核结论：不通过）
 
