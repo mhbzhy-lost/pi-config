@@ -1,0 +1,205 @@
+{
+  "schema": "joint-candidate.v1",
+  "candidateRoot": "/tmp/pi-102-subagents075.ye2_0hoh",
+  "hostRoot": "/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/@earendil-works/pi-coding-agent",
+  "repoRoot": "/tmp/pi-102-subagents075.ye2_0hoh/repo",
+  "nodes": {
+    "minimum": "/tmp/pi-100-upgrade.Nxvr1T/artifacts/node-v22.19.0-darwin-arm64/bin/node",
+    "current": "/opt/homebrew/Cellar/node/26.8.1/bin/node"
+  },
+  "baselineHead": "6a80920e26ce6757b360c062ef6813a4d799288d",
+  "packages": [
+    {
+      "scope": "repo",
+      "name": "@earendil-works/pi-coding-agent",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/@earendil-works/pi-coding-agent",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "repo",
+      "name": "@earendil-works/pi-ai",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/@earendil-works/pi-ai",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "repo",
+      "name": "@earendil-works/pi-agent-core",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/@earendil-works/pi-agent-core",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "repo",
+      "name": "@earendil-works/pi-tui",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/@earendil-works/pi-tui",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "repo",
+      "name": "typebox",
+      "version": "1.3.27",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/typebox",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "repo/packages/pi-subagents-enhanced",
+      "name": "@earendil-works/pi-coding-agent",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/@earendil-works/pi-coding-agent",
+      "link": true,
+      "resolved": "https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-1.0.2.tgz",
+      "integrity": "sha512-3ZdIghMSELMGV3sKi5iASOb1Jwb696fLjmNu0aezaqDxTLLWWoRpqBYkGxJ1CgAMCbtfqXWEF0lcRrlVXmiEGQ==",
+      "inBundle": true
+    },
+    {
+      "scope": "repo/packages/pi-subagents-enhanced",
+      "name": "@earendil-works/pi-ai",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/@earendil-works/pi-ai",
+      "link": true,
+      "resolved": "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.0.2.tgz",
+      "integrity": "sha512-JP59xGlSAQ/HhQ6EHN5qmneBlWfDyu6FPPryAvAaSo8A38ubAsEpS9YisCM5Jbbns0srrDffLZonE0OXorHI5A==",
+      "inBundle": true
+    },
+    {
+      "scope": "repo/packages/pi-subagents-enhanced",
+      "name": "@earendil-works/pi-agent-core",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/@earendil-works/pi-agent-core",
+      "link": true,
+      "resolved": "https://registry.npmjs.org/@earendil-works/pi-agent-core/-/pi-agent-core-1.0.2.tgz",
+      "integrity": "sha512-VRfewY1R5mbedJzlm01PxdCmqU8QrSXjXXhV50bp6rvVuT8YYQv1inTXRY4YzssmGAYpkC2rXipJKP5BpBFXew==",
+      "inBundle": true
+    },
+    {
+      "scope": "repo/packages/pi-subagents-enhanced",
+      "name": "@earendil-works/pi-tui",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/node_modules/@earendil-works/pi-tui",
+      "link": true,
+      "resolved": "https://registry.npmjs.org/@earendil-works/pi-tui/-/pi-tui-1.0.2.tgz",
+      "integrity": "sha512-ElfzjnckohEjzHK5Q5iOpqLpQ1YbM/c/XmjBdPVR5k4uoorQPnny5BtT+rvC0cAjVVCUOHWAWppust7FAaEsOQ==",
+      "inBundle": true
+    },
+    {
+      "scope": "repo/packages/pi-subagents-enhanced",
+      "name": "pi-subagents",
+      "version": "0.75.0",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/repo/packages/pi-subagents-enhanced/node_modules/pi-subagents",
+      "link": false,
+      "resolved": "https://registry.npmjs.org/pi-subagents/-/pi-subagents-0.75.0.tgz",
+      "integrity": "sha512-RO4DiTJM6pnK8y9PnD7Y6TLeiX2c8Kh6QhmkecFo+ou5qtnz5qiM+vUKru48UmJG1nB9eJ6rALd1M04uBOR4XQ==",
+      "inBundle": true
+    },
+    {
+      "scope": "host",
+      "name": "@earendil-works/pi-coding-agent",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/host/node_modules/@earendil-works/pi-coding-agent",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "host",
+      "name": "@earendil-works/pi-ai",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/host/node_modules/@earendil-works/pi-ai",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "host",
+      "name": "@earendil-works/pi-agent-core",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/host/node_modules/@earendil-works/pi-agent-core",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "host",
+      "name": "@earendil-works/pi-tui",
+      "version": "1.0.2",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/host/node_modules/@earendil-works/pi-tui",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "host",
+      "name": "typebox",
+      "version": "1.3.27",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/host/node_modules/typebox",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    },
+    {
+      "scope": "scheduler",
+      "name": "@amaster.ai/pi-task-scheduler",
+      "version": "0.1.9",
+      "physicalRoot": "/private/tmp/pi-102-subagents075.ye2_0hoh/scheduler/node_modules/@amaster.ai/pi-task-scheduler",
+      "link": false,
+      "resolved": null,
+      "integrity": null,
+      "inBundle": false
+    }
+  ],
+  "lockHashes": {
+    "repo": "f62a2028c47fbc6f60fdba2a7dc882b2d64de955ed8dda2ed1c9fb150e38dbf9",
+    "repo/packages/pi-subagents-enhanced": "26547c49ee25faebb9c24ede4882d6d98e493e8efd8c1dd133b8af0949a57c54",
+    "host": "0744ff1b63745fcfac84b19cc003ff9c953131401ca6d34b19f7a76fdc2c1eb3",
+    "scheduler": "73074e4ff8fb7da0ec01e64350ea522b77f4c4653c095339fcb41596a144131b"
+  },
+  "status": "NO-GO-J5-C6-consumption-receipt",
+  "note": "全部production改动仅保留candidate repo。根Host unified deployment基础已验；安装器正式接线和全量门禁未完成。三lane不能相互替代。",
+  "priorSeparateHostRoot": "/tmp/pi-102-subagents075.ye2_0hoh/host/node_modules/@earendil-works/pi-coding-agent",
+  "physicalDeployment": {
+    "owner": "root manifest exact four core",
+    "enhancedInstall": [
+      "npm",
+      "ci",
+      "--omit=dev",
+      "--omit=peer",
+      "--ignore-scripts"
+    ],
+    "separateHost": "historical artifact comparison only"
+  },
+  "evidence": {
+    "passedSlices": {
+      "node22": "220/220",
+      "nodeCurrent": "220/220"
+    },
+    "typechecks": "root/enhanced both Nodes passed",
+    "controlledUpstream": "1259 files equal; both Nodes package verifier passed",
+    "physicalIdentity": "watchdog/Container and SessionManager preliminary same-realm passed after explicit peer binding; not full launcher/Doctor/child graph",
+    "contact": "C1 actual往返成立; C6 queued/consumed:false production RED both Nodes",
+    "node22ContactRoot": "/tmp/joint-contact-e2e-oaea0A",
+    "nodeCurrentContactRoot": "/tmp/joint-contact-e2e-YYx5Jj"
+  }
+}

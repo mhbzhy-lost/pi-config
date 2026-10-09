@@ -1,354 +1,315 @@
-# 紧急交接：Subagent 生命周期改造（更新至 2026-09-21）
+# 紧急交接：Pi 试用修复 Subagent-Driven（F1/F4验收完成，F2新run刚完成待验收）
+
+> 当前紧急快照。用户要求立即write handoff。最新通知：F2接续run `655e8fa7-a328-4a2a-95fa-074544b43345` completed、no output，通知标题错为F1；必须按runId读自有输出/状态投影，不能据标题判断。计划尚未完成，收到完成通知后必须立即续推DAG，不能所有任务结束后停等用户。
+
+## 目标与授权
+
+用户选择 **Subagent-Driven** 执行统一计划：
+`docs/plans/2026-10-08-pi-production-trial-fixes.md`。
+六项：T1 agent列表空、T2默认模型丢有序候选、T4成功completion不可见、T5折叠工具错误不可见、T6历史root/leaf重复、T7builtin替代警告。
+
+- T3用户认为可能误报且发现subagent中可显示，暂关闭不修。
+- T5 **只修TUI错误可见性**，provider/重试/网络/代理/上游断流不属于本仓，不追查、不改。
+- 主agent只编排/技术决策/验收diff、回复child、亲写计划状态；production实现/行为测试派subagent，不inline修代码。
+- DAG：F0 → F1/F2/F3/F4/F5（路径独立，可编码并行、共享TUI验证串行）→ F6。
+- 计划修改只能main inline；子任务不改计划checkbox。
+- 不能每子任务询问用户，依赖满足立即派发。无独立工作且有active child可结束turn，自动completion/decision唤醒；不得sleep/status/pending轮询等待。
+
+## 约束
+
+- TDD Skill绝对路径 `/Users/leshi.zhy/.agents/skills/test-driven-development/SKILL.md`，参考同目录 `writing-good-tests.md`。main已加载，每实现child必先read。
+- 六项中文bug provenance已经存在：`docs/bugs/2026-10-08-pi-1.0.2-production-trial-issues.md`，根因report `docs/investigations/2026-10-08-pi-production-trial-root-causes.md`；无需每child新增bugdoc，不能因其WritePaths禁docs而停。
+- **显示只能renderer，原message/content/display/details/toolResult/structuredContent/event/session不能为显示改写。**不新增completion sender/authority，native消息仍唯一触发模型。
+- 不改上游/深私有factory/vendor/万能resolver，不恢复Goal/auto-continuation/ended-childautoresume，不扩大权限。
+- 新prod .ts、Node>=22.19、中文新增注释、tsc覆盖。
+- 不读auth/models/credentials/真实sessions/state；本机settings仅临时脚本间接读/内部比对/定点resources变更，enabledModels+所有其他字段不变，不打印正文。
+- 不安装/升级依赖/global switch/commit/push/reset/restore/stash/工单，不hotreload/终止既有用户Host。
+- 不全量主suite/36integration/60秒lease/五paidchild；单聚焦command<=60秒，正确RED/GREEN和必要静态检查，F6一次聚焦集合。不要重复宽审/整套升级门禁。
+- bash cwd参数历史不可靠，正文显式`cd /Users/leshi.zhy/pi-config`；**禁止find ..、宽范围grep用户/var/.pi/session**。只指定源码paths。
+- 每dispatch需完整task、writePaths、acceptance criteria；代码工作无worktree（当前main大量uncommitteddirty不得commit使worktree继承），paths分owner。
+- workflowdispatchreceipt只是launch不是child完成；通知title过期，按runId。
 
-## 用户目标与无人值守授权
+## 仓库、实际依赖、保护基线
 
-用户已明确要求：执行 `docs/plans/2026-09-20-subagent-lifecycle-overall.md`，进入无人值守模式，按 DAG 持续推进，正常停止点是当前生命周期计划全部实现、测试和验收完成；不要每个子任务后停。仅真实安全/产品决策阻塞才暂停。不得默认提交。
+Main `/Users/leshi.zhy/pi-config`，main，HEAD `6a80920e26ce6757b360c062ef6813a4d799288d`，大量升级dirty已存在，不能丢。
+唯一代码rollback tag `pi-config-0.87.1` 不含dirty/runtime/凭据；不要自动回滚。
+实际root四core **1.0.2**、enhanced `pi-subagents 0.75.0`已装；四peer realpath绑定root physical Host。
+Host `/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-coding-agent`，entry dist/cli.js。
+旧global0.87.1和既有Host保留，不终止/升级；current source不意味着旧进程加载了新代码。
+Node：
+- current `/opt/homebrew/Cellar/node/26.8.1/bin/node`
+- minimum `/tmp/pi-100-upgrade.Nxvr1T/artifacts/node-v22.19.0-darwin-arm64/bin/node`
+
+F0 **accepted** run `fd13a2e6-ef38-4209-a824-8a6109b794f2`。
+基线 `docs/plans/records/2026-10-08-pi-trial-fixes/baseline.json`：31 WritePaths，29保护（6新null），staging[]，versions/peers匹配；main29hash核对0偏差。
+Arena `/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou`。
+Before副本 `<arena>/baseline-files/<repo-relative path>`，只非敏感声明文件（不settings/session/auth）。验收用其diff，**git diff含先前升级dirty不能直接归本轮**。
+临时账本 `<arena>/evidence/dispatch-ledger.json` 已旧，需更新，不poll其等待。
+每child自有F1/F2/F3/F4/F5子HOME/agent/XDG/evidence，测试env-i、explicitmainHost/offline/telemetryoff不inheritrealcreds/live markers。
+F0早期错误find..扫描user，owned scan被main精确SIGTERM取消，baseline有scanIncident。不要复刻。baseline dirtyPaths首行因strip格式丢点/状态位，不表示真的stage（git实际空）。
 
-Pi `0.86.0` 升级独立且暂缓，不属于本批次。旧 `docs/plans/2026-09-20-subagent-orphan-recovery.md` 仅背景；总计划是唯一执行入口。
+## 已验收任务
 
-必须遵守根 `AGENTS.md`、`pi/AGENTS.md`、`pi/AGENTS_APPEND.md`、`packages/pi-subagents-enhanced/AGENTS.md`。代码/config/Skill 改动遵循 TDD；Skill 改动另需 `writing-skills`。不读取/输出 auth/token/cookie/private key/models。异常做 provenance 分类，unknown fail closed。`pi/settings.json` 有预存修改且 enabledModels 不得提交。工作树脏，禁止 stash/reset/清理无关变更。无 staged files。
+### F1 T1/T2 accepted
 
-## 冻结产品语义
+原run `a7b9662a-5d3d-44b0-9334-cded187042a9`，58/58。
+Main验收发现自制frontmatter parser不符计划，补派run **`a7dc46ec-8c67-455e-a083-e24acdc800b1`**，已complete **87/87**。
+最终证据 `/tmp/arenaF1-followup-7Iaqgd/evidence/{f1-red.log,f1-final.log,f1-hashes.json}`；RED51tests19fail为CRLF/类型语义失败，GREEN87tests87pass0fail；main已读日志并5最终hash匹配。
+实现：公开SDK parseFrontmatter底层（导入alias hostParseFrontmatter），固定repository三个profile元数据models/model/tools/thinking；BOMCRLF/YAML/空非法models/model/tools failclosed；list可信admission不需要filePath，不伪造路径，metadata不是actualmodel；省略profile模型选首可用qualified进入generic/coding leaf.model sourceagent-default，requestedModel仅explicit，no-profiledefault，次位/全缺零spawn/explicit/virtual/blocked/providererror不再次spawn测试；工具description已同步。
+Paths：
+- enhanced src/compat/pi-subagents-0.75.ts
+- enhanced src/subagent-dispatch/extension.ts
+- test/pi-subagents-compat.test.mjs
+- test/subagent-model-selection.integration.mjs（快速内存RPC）
+- test/subagent-dispatch-extension.test.ts（未必要改动）
+Plan F1全x（最新87/87追加）。早前main误称scripts/probes/pi-subagents-compat.ts是F1越界，已查自有events无写，实际为之前升级dirty，不得恢复它。
+小留意：tools数组拆逗号并filter空；目前计划合同满足已有合法形式，不预防扩容fallback。F6类型check可能发现额外入口问题，按owned owner修。
 
-### 进程/关闭
-- 两进程：主 Host/runner + subagent child；无第三 watchdog/sidecar。
-- 正常 graceful shutdown：方案 A `stop/drain`。
-- 主 Host crash：不再续租；child 自身 runtime/timer按 durable绝对 `expiresAt` 过期后 SIGTERM退出。
-- 普通异步 Bash不阻塞Node event loop；同步阻塞JS/第三方扩展是不保证边界。
-- 主会话 resume 不自动收集active child；只 replay durable facts。用户显式 continuation 时复用同一 `sessionFile`，创建新run/process incarnation。
+### F4 T6 accepted
 
-### Heartbeat/progress
-- lease window 60s，Host renew 15s；无 missed counter；绝对 expiresAt唯一过期事实。
-- progress stall 20m；无 decision grace。`stalled-suspected` 继续heartbeat，等待主Agent主动决策。
-- active async Bash/tool、合法Supervisor等待、正常provider/tool I/O不计stall。
-- heartbeat/renew纯control-plane：禁止 `sendMessage/sendUserMessage/triggerTurn/followUp/steer/reply/resume/spawn`，不得新增session/message/tool/async/completion事件或改变identity；只CAS更新 `lastRenewedAt/expiresAt/renewalSequence`。
-- `progress_stalled`可作为durable control-plane event，但不触发turn。
+run **`da6df870-ad43-4ab7-9815-1c17a60c4d74`** complete、**90/90**（0.872秒）。
+证据 `<arena>/F4/evidence/`：environment.json、red-baseline.log、red-footer.log、red-trim.log（21terminal两个正确RED）、green-three-files.log、changed-hashes.json。main已核对5finalsha当前一致。
+Paths：enhanced src/tui/session-browser.ts、extensions/custom-footer.ts、test/subagent-session-browser.test.mjs、test/custom-footer-subagents.test.mjs、新fixture trial-browser-lifecycle.json。
+实现：runMode/parentWorkflowRunId/workflowKey/facadeLeafRunId只显示metadata；confirmedFacades双向parent/key/session/agent/single匹配，canonical snapshot隐藏root对应step、不改leaf实际状态；serialize raw children；footer persist raw、trackedRuns仍poll隐藏root发现后续steps；selection迁canonical；trimRuns用confirmed关系组件全组淘汰/active-selected保护，exit重新20预算，无永久墓碑。
+早期测试未env-i解析global报theme错误，已纠正并恢复owned prod基线重RED→GREEN，这些旧结果废弃不当GREEN。F4计划全x。
 
-### Session continuation
-- Colima真实证明：官方 pi-subagents 0.62 resume复用同一native Pi sessionFile，创建新runId/asyncDir/PID/process incarnation；不是原进程恢复。
-- source/resumed provenance双轨保留。
-- no-session/external/missing session不可恢复。
-- SessionManager.open只读内容，不是authority；接受header identity mismatch。
-- 合法header+torn tail是官方repair；no-header/all-unparseable fail closed。
-- 最终orphan resume = P0 session/provenance gate + P2 Root authority gate + workspace public receipt。
+## 剩余任务及运行状态（最新必须按ID）
 
-### reply/steer
-- 有匹配pending Supervisor request只能reply；无pending且running/steerable才steer。
-- reply成功后禁止等价steer；stale request/generation/owner/epoch fail closed；相同幂等键返回receipt。
+### F2 T4 completion UI **completed，实际报告已核对26/26，待最终diff验收**
 
-## P0 已完成
+原run `13c4af1a-deb3-4a2b-a41d-82242ff9c55a` 长期active但测试走错路径。mainexplicitinterrupt后paused observed，再explicitresume，**接续run `655e8fa7-a328-4a2a-95fa-074544b43345`** 刚收到completed/nooutput通知。通知标题错成F1，实际它是F2。
 
-Colima linux/arm64，node:22-bookworm、Node22.23.1、Pi0.85.1、pi-subagents0.62、本地deterministic provider、无真实凭据。
+Paths5个：
+- 新 enhanced src/tui/completion-notices.ts
+- enhanced extensions/subagent-runtime.ts
+- enhanced src/tui/compact-rendering.ts
+- 新 test/subagent-completion-notices.test.mjs
+- test/subagent-compact-rendering.test.mjs
 
-真实链：provider→RPC ping→official spawn→async-started→child native sessionFile/status→SessionManager.open/buildContextEntries→official rpc.resume(file-only)→新runId/asyncDir/PID/process identity、同sessionFile、resumed entries保留source前缀。
+已落盘observer用公开pi.on message_end→mode:tui hidden subagent-notify→ctx.ui.notify(info)，WeakMap sessionManager/WeakSet message dedup、dispose listeners，不send/append不改raw。main尚未accept：必须检查runtime接线、正确真实测试和formatter。
 
-负向：no-session/missing/external fail closed；合法torn-tail repair；no-header/unparseable error；header mismatch被loader接受，项目临时gate已RED/GREEN拒绝 mismatch/no-header/unparseable/descriptor mismatch且resumeCallCount=0。真实provenance与临时gate闭合。P0 `feasibility-proven / eligible-for-P1`。
+纠正指令已发给新run（steer9bf303d0...送达）：
+1. **不能mode.init()**，它startterminal/startup资源，fake写0断言矛盾；只InteractiveMode constructor+subscribeToAgent+session.bindExtensions(mode:tui/uiContext)。
+2. **必须sendCustomMessage(original,{triggerTurn:true})** 走真实AgentSession `_runAgentPrompt→agent-loop→extension message_end`，syntheticprovider无联网；triggerTurn:false idle只_appendCustomMessage/public_emit不触发extension hook。不能manualemitMessageEnd伪造GREEN。
+3. 断言一次custom persist/display:false/rawcontent/details不变、syntheticassistant回合1不额外；visible原卡不双显、非TUI不notify、生命周期释放。
+4. runtime没有dispose；cleanup mode.unsubscribe/footer.dispose/renderer.stop+h.close。
+5. formatter真实upstream消息**无details.mode/counts**，实际firstline `Background task completed: **workflow** (dispatch complete; 1 child running or uncollected)`；不得要求原数据新增fields，需renderer读取明确firstline表达receipt不✓child业务完成。
 
-报告：`/tmp/subagent-lifecycle-p0-colima-report.md`、`/tmp/subagent-lifecycle-p0-report.md`、`/tmp/subagent-lifecycle-poc/real-colima-provenance.json`。
+前序wrongtest保留现场，不拿它完成T4。完成后应释放TUIpermit；现在completed说明可以核对owned测试进程并授权新F3（资源依赖非DAG）。
 
-## P1 已完成
+### F3 T5 **已新派接续，真实TUI许可现归F3**
 
-新增：
-- `packages/pi-subagents-enhanced/src/subagent-dispatch/lifecycle-identity.ts`
-- `.../lifecycle-policy.ts`
-- `test/subagent-lifecycle-contract.test.mjs`
-- `test/lifecycle-policy.test.mjs`
+原run **`909639f7-d8b4-4c8d-be9e-c181358edc37`**，main明确允许blocked/待续结束后task通知failed（不是prod故障）。无active F3 child。
+Paths6个：src/compact-tools/renderer.ts、pi/extensions/compact-tools.ts、tsconfig.json（唯一owner）、test/compact-tools-renderer.test.mjs、test/compact-tools-extension.test.mjs、新test/compact-tools-error-visibility.test.mjs。
 
-纯identity/policy、source/resumed/provenance、方案A、60s/15s/20m/10m、无grace/counter、progress排除、reply/steer纯决策。无timer/storage/broker/RPC。
+流程偏差：初fake test未env-i+在真实componentRED前提前renderer实现。main核对后要求撤销自身行为，renderer/entry已恢复F0hash（renderer cb4aaa7f83779dd759a075deaf0fc82e16a3eaa7afd91c2dbe9ca0b365a5eea6、entry e221e0...），禁止gitresetrestore；测试保留。
+tsconfig仅增加指定include（compact入口、ensure入口），静态coverage豁免，不F3runtsc。
+preparation `<arena>/F3/evidence/preparation.md`、临时runner `<arena>/F3/run-focused.sh`，47真实componenttests+existingfile各1test准备，正确实际RED/GREEN未跑。pureenv baseline20/20、skillerror20pass1fail仅准备证据，初不隔离日志废弃。
 
-验收：新8/8、recovery27/27、typecheck、diff-check。
+**已执行：**main读取F2新run655e8fa7的最终acceptance报告（26/26）、原生triggerTurn:true纠正命令与progress_update明确释放许可，并确认F2runner不再alive。已新派F3 continuation **run `0192a576-bb84-4d03-a1c9-5df1099d71ed`**，明确授予当前真实TUI独占许可，完整6paths/acceptance/TDD/环境/禁止边界已给；从existing47tests准确RED→最小shared+Host双层errorGREEN→五文件聚焦。 context.isError优先/directresult兼容、readSKILL错误不吞、edit/write不done、中文ANSI窄宽度4lines/invalidate/successerror切换/rawdeepEqual。正确RED前保持rendererbaseline。No execute/provider/retry/真实network，env-i mainHost，每cmd60s，progressupdate释放给F5。
 
-## Generic prompt 4096 修复已完成
+F3历史许可UUID均只reply排队不授权：19b56db7...、c03b40c9...、7e548d35...（被main错误reply“保持阻塞”其实唤醒导致child反复ask）、79368b1d...最终明确allowedblockedend。以后资源排队**不要立刻回复只是排队，保持pending直到许可ready**；或如child无法真正等待允许blockedend后新派，不能忙等loop。Controlsteer遇SUPERVISOR_REPLY_REQUIRED不要声称发送成功。
 
-修改 `generic-prompt.ts`、`extension.ts`、`test/subagent-generic-prompt-contract-security.test.mjs`。generic task 64KiB UTF-8；其他字段单项4KiB；rendered aggregate64KiB；不截断。测试8/8、相关28/28、typecheck/diff-check。
+### F5 T7 **pure部分complete，待真实owner-loading+本机resources**
 
-## P2 Durable/outbox 已完成
+原run `20c2ec76-0c33-4dd3-bbf8-693fd8c42fc2` provider `Upstream response stream was interrupted`失败，未落盘。
+重派pure run **`a1462d7e-fe84-41d1-ac98-8be19c82e68b`** complete/nooutput通知，但owned output-0.log末尾有acceptance-report；main已读取：**6 ensurepass，1 owner scaffold skipped**，不能接纳完整F5。
+Paths5个：pi/settings.template.json、scripts/ensure-pi-settings.ts、test/ensure-pi-settings.test.mjs、新test/mcp-policy-owner-loading.test.mjs、pi/settings.json（仅临时脚本间接resources）。
+已落盘template两个builtinexclude+ensure/check sharedexact相反+/-检测code SETTINGS_RESOURCE_OVERRIDE_CONFLICT/field/selector在mkdirwrite之前、pureJSONtests。owner-loading文件目前只有skippedscaffold。
+本机settings没改（旧hash eb009b...是私有config不用报告正文），资源仍未生效。
 
-新增：
-- `durable-contract.ts`
-- `durable-storage.ts`
-- `durable-run-registry.ts`
-- `durable-event-outbox.ts`
-- `replay-barrier.ts`
-- `test/durable-lifecycle.test.mjs`
-- `test/subagent-delivery-recovery.test.mjs`
+过程偏差：该child误跑npx tsc（explicitfileTS5112、rootpass），计划说F6统一check；未来直接node localtypescript不npx/安装。未有实际install证据，不能宣称偷偷安装但也不能仅childclaim说没有。puretest命令报告可能未完整env-i，后续按正确safeenv重做聚焦/保存logs，F6统一。
 
-严格JSON/reference/provenance、0600/temp+fsync+rename+dir fsync、revision CAS/lock/quarantine、inventory不授予authority、三层receipt primitive、at-least-once、ACK前不删、sequence/digest fencing、durable high-water barrier/live epoch。基础统一38/38 + typecheck。
+**F3验证释放后新派F5ownerfollowup**，补公开DefaultResourceLoader真实policy+builtin factory owner加载RED/GREEN：main模板已GREEN，RED用F0模板副本在临时synthetic配置实际加载复现warnings，不回滚main或手写diagnostics；fresh/persistent-openresume errorwarning0、唯一tool/command、无configMCPconn0、allowedstdio/denied0/modelonly边界，no skip。safe本机config操作临时脚本间接只mergeextensions/defaultTools、预比对所有其它enabledModelsunchanged、冲突前置阻塞，不改externalproject/CLI相反override、不secretoutput。还需已有both-token/check、template自相反/check、defaultToolsselector真实场景等计划边界。
 
-## P2 Authority/rebind 已完成主体及全量验收
+## 下一阶段 F6（尚未派）
 
-新增/修改：authority-contract/store、durable-storage最小Node stripping修复、root-broker protocol/client/server、runtime injection、tests。
+F1/F4accepted，F2刚complete待验收，F3/F5未闭合，所以F6不能现在派。子任务全部完成后必须派F6验收，不问用户。
 
-设计：
-- OwnerReceiptV1、ExecutionLeaseV1、新owner RPC dedicated5s；旧client10s/challenge5s、registerAuthorizedRun Promise<void>保留。
-- AuthorityStore root `<PI_CODING_WORKSPACE_DIR>/root-broker-authority/<rootSessionId>`；无root时新API fail closed。
-- legacy owner-*.json unsupported_layout保留现场。
-- root-scoped single `authority-index`（entries/associations/leases/revision），单key lock/CAS原子source→resumed；请求不信任new pid/birth；两run先verified+PID birth capture；source fenced/resumed current；幂等association。
-- 真实socket owner.read/rebind/revoke；caller binding；5s deadline。
+F6 allowed docs只问题清单、根因report、records/acceptance.md；**plan仍main更新**（尽管计划F6WritePaths列plan，globalmainonly）。必要补修只能另owner明确paths，不给验收child偷偷prod修。
+F6一次currentNode计划8file聚焦集合，minimum只新3tests+F1/F4实际新名字pattern（现在测试英文字名，计划中文pattern未必命中，需调整到actualnames，不把0tests当pass）。once tsc listFilesOnly精确覆盖pi/extensions/compact-tools.ts与scripts/ensure-pi-settings.ts，再两Node root/enhanced noEmit各一次，不重复pack/fulltests；TUI短验证复用F2/F3新tests，不duplicate额外smoke。
+声明文件对F0before保护，非owned/allowedhash保持、staging不变、settings非resources字段内部相等，自有tmpTUI/network资源关闭，用户Host不动。freshHost生效不hotreload、不commit。
 
-曾有完整broker挂起，已诊断为测试fixture缺source/resumed terminal proof，不是production close bug。fixture已用 `broker.observeTerminal(observedProof(runId))` 正常收敛。
+## 计划review背景
 
-主流程最近验收：
-- root broker完整38/38
-- runtime/resource18/18
-- authority/durable/recovery39/39
-- typecheck与diff-check通过。
+一次readonlyreview run2456b0df-a46d-4d43-b6e0-c250383a0be6：整体可行需调整，0Critical/3Important/2Minor。main已全部采纳，无第二review：
+- F3独占tsconfig補2prodinclude+F6真实listFilescoverage。
+- F5ensure/check长期精确冲突保护，不只是人工safeonceMerge。
+- F4关系组件whole淘汰/active-selected保护/21pressure。
+- F0从WritePaths全集汇总新null+F6docs。
+- F4真实rootagentworkflow→reviewerstep→leaf。
+record `/tmp/pi-102-subagents075.ye2_0hoh/evidence/trial-fix-plan-review.json` 已completed（历史证据，不等于修复完成）。
 
-## Heartbeat runtime：实现已落盘，P2最终验收接近完成
+## 历史不要误归因
 
-Partial task曾30m timeout，但代码已落盘：
-- AuthorityStore index增加leases；createWithLease/issue/read/renew/release。
-- RootBroker register verified receipt+lease；Host setInterval 15s renew；lease.updated push；terminal/revoke/rebind/close release/debt。
-- child root-session-owner缓存lease.updated、5s timer检查绝对expiresAt、root.closing explicit_stop、EOF有有效lease等待expiry、无lease fail-closed、dispose清timer；删除sendMessage副作用。
-- 两进程无sidecar。
+前序升级代码合回/本地npmci/peerbind已完成，无commit/global；本轮不重做升级。历史双Node主1035/1034pass/1todo、typed36、actualsupervisor17、pi-lite等不替代本轮验收。完整mainintegration被用户嫌耗时停在23/36file204pass，不得恢复大矩阵。
+主agent此前曾将已有gitdirty当F1scopeviolation、将F2pause通知旧title当F3状态，已按events/runId纠正；验收以F0snapshots+runId，不以title或HEADdiff猜。本轮主agent尚未inline改production，只文档与子任务调度/精确owned错误scan取消。
 
-聚焦发现heartbeat test callback不返回Promise及cleanup缺terminal，已修：interval callback return renewHeartbeats；official terminal cleanup；release promise/debt。
+## F2正式接受与当前DAG（覆盖前述待验收）
 
-最近统一验收（heartbeat closeout之后）：
-- runtime/broker/authority：148/148
-- durable/outbox/recovery：39/39
-- `npm run typecheck` pass
-- diff-check pass。
+F2接续655e8fa7...accepted；main实际读取raw正确RED/GREEN26/26，测试无mode.init/manualemit、3native sends→3synthetic provider/assistantturn、session一次custom/displayfalse/rawcontentdetails不变；runtime observer进extraDisposables、formatter实际firstline无detailsmode需求。planF2五x，hash/证据在arena/evidence/F2-main-acceptance.json。所有fake scaffold缺listenerTypeError不单独当RED，实际InteractiveMode缺正文为准确RED。
 
-之后发现缺child owner独立测试，派发任务 `cc76...`，进度/最终报告：
-- 新 `test/root-session-owner-lifecycle.test.mjs`，lease.updated严格runId/generation/time、expiry fake timer、root.closing explicit_stop、EOF/dispose fail-closed、零sendMessage。
-- 新测试3/3；相关回归170/170；typecheck/diff-check pass。
-- 子任务系统仍显示needs attention/可能未terminal，但实现已落盘；需先复跑确认。
+现在F1accepted87/F2accepted26/F4accepted90。**唯一active coding F3 run0192a576-bb84-4d03-a1c9-5df1099d71ed**，明确独占真实TUIpermit，WritePaths6、原47测试/先准确RED再GREEN，max60秒，无tsc/fulltests/provider。F5owner-loading/本机resources待F3释放后立即新派（pure6passed但1skip不算完成）；F6待剩2任务完成。ledger已更新真实状态，不poll它等child。主agent仍只docs/验收，未inlineprod改动。
 
-**压缩后第一步必须运行：**
-```bash
-node --test test/root-session-owner-lifecycle.test.mjs
-node --test test/root-subagent-broker.test.mjs test/root-subagent-broker-protocol.test.mjs test/root-subagent-rebind.test.mjs test/subagent-runtime-resource-isolation.test.mjs test/subagent-runtime-production-shutdown.test.mjs test/subagent-runtime-membrane.test.mjs test/subagent-completion-ownership.test.mjs test/subagent-broker-capabilities.integration.mjs
-node --test test/durable-lifecycle.test.mjs test/subagent-delivery-recovery.test.mjs test/workspace-recovery-contract.test.mjs test/recovery-resume-contract.test.mjs test/recovery-resume-orchestrator.test.mjs
-npm run typecheck
-git diff --check
-```
-若全绿，标记P2完成并进入P3-T5 Supervisor replay。
+## F3正式接受与F5owner加载已派发（最新）
 
-## 下一 DAG
+run0192a576...completed（无inlineout但ownedoutput有完整acceptancereport）；main核对47/47真实组件correctRED->GREEN、五文件80/80/1.47s，F3final6hash精确匹配current，共享renderercontextisError+Hostwrapper/skill错误放行、40/100列/4physicalline/invalidate/状态switch/rawunchanged。tsconfig两入口只include，staticF6未做。planF3五x，arena/evidence/F3-main-acceptance.json记hash/log。F3明确progress_update释放TUI许可。
 
-1. P2最终统一验收（上面命令）。
-2. P3-T5 Supervisor replay：消费OwnerReceipt/lease + inventory/outbox/barrier；实现 `supervisor-replay.ts`，offline/restart/ACK loss、transport/processing/user-visible receipt、completion key runId+terminalReceiptId exactly-once。
-3. P3-T6 reply/steer control-plane：pending→reply；无pending→steer；同intent禁止双投递；stale/generation/epoch fencing；progress_stalled 20m control event但无自动turn。
-4. P4-T7 orphan crash matrix：120s child-start独立路径、P0 session gate+P2 authority+workspace receipt、crash/restart/lease expiry。
-5. P5-T8 scheduler typed outcome接入。
-6. P6-T9 Skill后置（用户授权整个计划无人值守，但写Skill必须先加载writing-skills）。
-7. Pi0.86仍暂停、独立、不执行。
+**唯一active coding task F5 continuationrun `1ec6607d-e070-49a2-8269-c2ba70f4b966`** 已派完整coding合同5paths，现在独占loader/TUIstdio许可。补F0template真实warningRED(临时copy不能rollbackmain)/currentGREEN/freshsyntheticresume/0connection唯一owner/codemode阳性；补ensure相反精确selector含hyphen/已有both/check/template自身check/normalmerge；本机settings间接仅resources原子merge、其他includingenabledModels内部deepEqual，不secretbody。最大60s四shortfiles，不tsc/npx/install/Git/fulltests。
 
-## 最新 active subagent
+现在F0–F4均accepted；F5待complete验收后立即派F6（docsowner不改plan，main更新）。ledgerpermit已F5，F6stillwaiting。不用pending/status轮询等待，有独立mainacceptance可读diff，否则endturn activeF5保持。
 
-`cc76dca8-ed12-4ac4-99dd-2600dd908c4b`（补齐 child owner lease expiry测试）曾progress报告已完成3/3+170/170+typecheck，但随后系统needs attention。可status或等待最终；不要重复实现，先检查工作树/测试。
+## F5最新真实加载结果与portable测试补齐（覆盖前述active1ec）
 
-## 工作树注意
+F5 continuation **1ec6607d-e070-49a2-8269-c2ba70f4b966 completed**，main读ownedoutput末尾acceptancereport：ensure8/8+ownerloading3+jointpolicy3+modelonly1合计15/15/0skip/1.70s。root currenttemplate ownerwarning0/syntheticresume owner1/无configconn等。main核对4代码hash与report一致。pi/settings.json未被child回写，本机nonsecretresources本来已有全部-builtin:toolsearch/llama/codemode/mcp和+codemode/-tool_search；其余enabledModelsPresenttrue，不能声称本任务改了整份config。未输出config正文。
 
-大量预存脏文件；禁止清理/stash/reset。生命周期文件多未跟踪/修改。无staged。精确路径验收，不假设clean。
+main验收发现owner-test mandatorypath硬编码arenaF0template、currenttemplate写成literal，不可移植且缺currenttemplatemutationguard。因此**F5未finalaccepted，planF5仍未全x**，已立即派短测试补齐run **2330e195-b9d8-44c9-b748-4885cc6b5169** executor显式Astra，allowed只`test/ensure-pi-settings.test.mjs`和`test/mcp-policy-owner-loading.test.mjs`，明确当前独占loader/stdio许可，无其它implementationactive。要求旧行为对照literal独立测试资源选择、current加载真实pi/settings.template.json资源字段（不packages/bootstrap），无任何tmpbaselinemandatory、fresh/公开syntheticresume bind真实sessionstart+codemode纯text阳性/零MCPconfigconn、cleanup、ensure补真实codemode及hyphen/both/check/template相反/check，两文件+joint短回归一轮env-i，不tsc/npx/fulltests/安装，所有prod/settings不改。完成后验收F5并立即派F6，不问用户确认。
 
-## 自动执行规则
+**外部并行变更必须保留：**当前ensure-pi-settings.ts/test新增r2cAdapterDir与missing-adapter清理逻辑、settings.template及main settings也有外部资源更新。main查两个F5run events：F5只加exactresourceconflict/修hyphenregex/ensuretests，未写r2cAdapter功能。该功能是其他会话并行工作，不归本计划，不机械rollback到F0。新的portablechild已明确保留r2c逻辑/测试不reset。F6static与changedfile保护需区分外部追加diff和本轮ownership，不能因同WritePathhash变而抹他人工作。F5report无diff不等于全周期settings没外部改，内部安全比对仅其自身处理期间。
 
-持续推进，不逐任务停；每coding任务TDD；拆小于30m；并发仅不重叠WritePaths；reviewer须用户逐次授权，勿自动派；不提交。
+当前active只有2330e195 portable补齐，F6尚未派。F1accepted87、F2accepted26、F3accepted80(47new)、F4accepted90。每任务plan状态main已x，仅F5/F6待执行验收。
 
-## P3-T5 + P3-T6 已完成（2026-09-21）
+## F5接受，F6已派发（当前唯一active）
 
-### P3-T5 Supervisor replay（已完成并验收）
-- 新增 `packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-replay.ts`：barrier high-water 批量 replay、owner/cursor/terminal fail-closed、processing receipt/ACK、completion stable key（runId+terminalReceiptId）exactly-once、sink crash-gap 幂等。
-- `durable-event-outbox.ts` 扩展 completion receipt 完成标记与 ACK 查询；ACK 不删 append event。
-- 新增 `test/supervisor-replay.test.mjs`（含 `test/subagent-delivery-recovery.test.mjs` 扩展）；19/19、typecheck、diff-check 通过。
+F5 portablefollowup2330e195...completed，main读/tmp/f5-3a0bc04e.log 15/15/0fail/0skip/0.863s，owner-test读actualsharedtemplate/no/tmpmandatorybaseline旧对照literal，code/no settingschange。planF5五x，F5mainacceptancehash/log在arena/evidence/F5-main-acceptance.json。只有F5freshbind一次，syntheticresume恢复loader/SessionManager，网络MCP/provider不验证，不扩大为paidlane。
 
-### P3-T6 reply/steer 单投递控制面（已完成并验收）
-- 新增 `packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts`：SupervisorRequestV1/ControlIntentV1 严格 parser + canonical SHA-256 digest、pending ingress 注册、reply 优先、幂等 receipt（幂等检查先于 pending 检查，保证重复 reply 返回回执而非误报 NOT_PENDING）、stale/expired/generation/epoch fencing、STEER_DUPLICATES_REPLY、markProgressStalled 纯投影。
-- 接线（`extension.ts`）：
-  - ingress：`message_end` 对 `subagent_supervisor_request` 先注册控制面 request，再走既有 `onSupervisorRequest`；注册失败吞掉不破坏事件流。
-  - reply：`createControlledSupervisorAdapter` 包装 supervisor adapter，`action==="reply"` 时先 `findRequest(replyTo)` → resolve → native → commitDelivery；幂等重试不再调 native。
-  - steer：`executeControl` 增加 supervisorControlPlane/toolCallId 参数，`action==="steer"` 先 identityForRun（readOwnerReceipt+readRuntime）→ resolve → rpc.steer → commitDelivery。
-  - 未配置控制面时 legacy 行为完全不变（既有 79 测试零回归）。
-- 生产注入（`extensions/subagent-runtime.ts`）：`createSupervisorControlPlane` + `enabled: () => brokerReady && !!broker`；readOwnerReceipt 用 `broker.readOwnerReceipt`（owner.read RPC），readRuntime 用 `rpc.status`；broker 未就绪显式保持 legacy；同时接入了 AuthorityStore（PI_CODING_WORKSPACE_DIR/root-broker-authority/<rootSessionId>）。
-- 验收（主 agent 复跑）：
-  - 三组主测试 80/80（含新测试，RED 证据为具体断言失败）
-  - replay/delivery/rebind/owner-lifecycle/durable/lifecycle-contract/policy 30/30
-  - broker-protocol/broker/workspace-recovery/generic-prompt-security 61/61
-  - typecheck + `git diff --check` 通过
-- 已知残留（P4 硬化候选，不阻塞）：
-  1. resolve→native→commit 非原子：并发相同 reply/steer 工具调用理论上可双投递（顺序重试已幂等）；建议 P4 对 request 加 in-flight 锁或同步置 replying。
-  2. steer 幂等检查先于 pending 检查：新 pending 到达后重试旧 steer 返回旧回执而非 REPLY_REQUIRED（单投递不变量仍成立）。
-- 补充切片 `7e70b0bc`：fail-closed 路径测试断言（stale owner/expired/non-running/generation mismatch），完成后 P3-T6 完全关闭。
+**F6 executor run `e1126ddc-8634-43c4-87bf-f3c2552e7a73` active**，完整coding合同只allowed3docs：问题清单/根因report/recordsacceptance.md，不能改plan/prod/test/settings/tsconfig。独占TUI/stdio许可，所有实现children结束。任务一次current8file聚焦集合+minnew3file与actualpatternF1/F4、once listFilesOnly覆盖compactensure、两Noderoot/enhancednoEmit、diff/baseline/protectedhash/externalsource/privatesettingsresourcesreadonly/safety/staging/resources，中文交付limits。明确错误需need_decision不得偷修prod。recordrun/permitF6在ledger。
 
-## 下一 DAG（更新）
+精确证据输入：F1followup87 /tmp/arenaF1-followup-7Iaqgd/evidence/f1-final.log/hash；F2correct26 arena/F2/evidence/green-final.log；F3true47+reg80 arena/F3/evidence/f3-regression.log/6hash；F4correct90 arena/F4/evidence/green-three-files.log/5hash；F5correct15 /tmp/f5-3a0bc04e.log(最新测试修维护另reporthash)。F6不得重pack/fullmatrix/reinstall/hotreload。实际并行r2c变化保持不归本计划，不能因此rollback或宣称全保护hash未变。settings现在targetresources已有，不本轮整包回写。
 
-1. 等待 `7e70b0bc`（fail-closed 测试断言）完成并复跑 membrane 测试。
-2. P4-T7 orphan crash matrix：120s child-start 独立路径（integration 15s 不变）、P0 session gate + P2 authority + workspace receipt 串联、Host crash→lease expiry、terminal/non-resumable、显式 session continuation、completion replay 集成。注意：需真实 Pi 二进制（PI_REAL_BIN）或 Colima 环境；本机环境缺失时需用户确认路径。
-3. P5-T8 scheduler typed outcome 接入。
-4. P6-T9 Skill 后置（需 writing-skills）。
-5. 全生命周期验收矩阵最终复跑。
+main后续收到F6needdecision若noEmit报ownedtype错误，派声明owner微修（完整RED/provenance或static豁免），不inlineprod、不无限重复验收；若外部unsupported数据按gate分类不加防御。F6通过后main读log/count/hash/docs，更新planF6五x/ledgercompleted、最终报告六问题与freshHost/未commit/不paid/upstreamoutscope/T3closed。不询问用户是否继续每任务。
 
-## 最新 active subagent
+## F6首轮验收查出漏跑，最小补齐active（覆盖前述GO）
 
-`7e70b0bc-60fe-4552-8baf-a425a57f9eb3`（P3-T6 fail-closed 测试断言补充，仅测试不改 production）。
+F6首轮e1126ddc...completed reportGO，main已读logs/docs/source+docsha9+3全部matched/staging空/whitespace0。**不能直接accept**：mincmd将globalpattern用于6files，`f6-min-pattern.log`三newfile `1..0`/ok文件占位，51pass中只有48actualpatterncase+3空占位，completion/errorvisibility/owner newcases并未执行。static第一cmd listFilesOnly后currentrootnoemit确为exit0/wall0.8，又loopcurrentrootnoemit ->**4uniqueNode/config全pass但5invocations/currentroot2**，须记录预算偏差，不能声称4calls。listFilesOnly1419lines含末人工entriesline=1418sourcepaths。bugdoc仍首部只plan未实施/各未修复与结尾GO冲突。
 
-## P3-T6 正式关闭（2026-09-21）
+立即派唯一active **1ec02236-1662-4bc6-ba7a-354c7c907cd9** executorAstra：只一次minNode无pattern跑新增3files（预期54但actual为准），不重跑current176/F1F4pattern/types。只3docsWritePaths，纠正各currentstatus/历史现场时态、minimum48+3empty/noemit5unique4/listcount、summary/log/docsha。失败needdecision不修prod。独占F6最小验证许可；no install/fulltests/hotreload/model/userHost。其余已全部结束。
 
-- fail-closed 切片 `7e70b0bc` 完成：membrane 66/66（新增 stale owner / expired request / 非 running steer / ownerGeneration mismatch 四条断言），production 零修改，typecheck + diff-check 通过。
-- P3-T6 最终状态：**完成**。全部验收命令：三组主测试 80/80、membrane 66/66、replay/delivery/rebind/owner/durable/lifecycle 30/30、broker/workspace/generic-prompt 61/61、typecheck、diff-check 全绿。
+main已inline修计划F6minimum两个cmd明确分离，保留实际执行偏差说明。F6五checkbox仍未x，F0-F5完成。completion通知correlate真实runid，receipt不result。收到1ec02236final后main读new3logactualcount/summary/3hash及docs状态确认，不再追加任何test；通过markF6五x/ledgercomplete/许可null、交付六修复/Node26current176、Node22newN与48actualpattern、static4unique5calls/freshHost/no paid/T3closed/T5upstreamoutscope/无commit。不要claim旧minimum51代表newcases。
 
-## P4-T7 切片计划（执行中）
+## F6验证齐备，仅doc整合active（不再跑测试）
 
-readiness 报告：`.pi/handoff/p4-p5-readiness.md`（executor 已完成，含 P4/P5 依赖图、WritePaths、RED 基线、PI_REAL_BIN 现状）。
+补验run1ec02236completed57newcases/0fail/0skip/7.494s，此run曾首次错误envPI_TEST_CODING_AGENT_ROOT传repo导致三个import-onlyfail，后正确physicalroot57通过；无代码改，分类2手工testenv非法，禁止为它加productionbranch。它未遵守权威arena而find/tmp-maxdepth3错用/tmp/pi-100-upgrade.Nxvr1T/artifacts/arena/evidence，覆盖自身首次失败log。main已按明确路径复制成功f6-min-new3files.log/.exit到权威arena/evidence，从ownedtoolresult提取保存firstdiagnostic f6-min-new3files-invalid-env-diagnostic.json（不是丢失失败后伪全pass）；报告processdeviations在summary，无需再测试或宽搜。外部arena新3dochash与main全部matched，currentcode9sha仍same。
 
-串行切片（WritePaths 相同，禁止并行）：
-1. **切片1 `b63ff875`（进行中）**：recoverOrphanRun contract + 最小组合骨架（注入式 gate 链、三分支 outcome union、120s 固定、15s 零变更、fail-closed provenance）。
-2. 切片2：`test/subagent-orphan-recovery-crash.test.mjs` crash matrix（每行 8 字段：injectionPoint/initialFacts/expectedOutcome/retainedEvidence/forbiddenMutations/provenance/clockStrategy/processStrategy；覆盖全部 pipeline 注入点；同 PID/不同 processBirth 用受信 capture seam fixture）。
-3. 切片3：`test/subagent-orphan-recovery.integration.test.mjs` 真实双 Node 进程 capture/rebind 边界、eligible/non-eligible session、host crash 停止 renew、child 到期自退出。
+**准确F6：current176actual；minF1F4pattern48actual+3emptyplaceholder(old51)，new3files独立57actual**；static4unique5invocations/currentroot2，list1418paths+1summaryline1419total。最新权威f6-summary已main更正，旧外部summary不权威。planF6步骤1–4x，5pendingdocs，F0–F5全x。
 
-P4 完成后 → P5-T8（scheduler outcome union + adapter/extension 接入）→ P6-T9（Skill 同步，需 writing-skills）→ 全生命周期最终验收矩阵。
+三doc最新仍acceptance错arena路径/少F1-F5接受loglink/shouldwritehash，rootcause结尾还有51actualpattern矛盾。因此唯一active doc-only delegate **2641e0e0-c562-4938-99c9-c749b4a4d28e** Astra，only3docWritePaths，禁止任何bash/test/typecheck，精确整合正确arena/evidence、176/57/48+3、1418+1、4unique5calls、F1-F5各RED/GREEN记录/limits，保siximplemented/T3closed/T5displayonly/freshHost/no paid/外部r2c/index。主agent不要因此再派验证。ownedstdio许可已经释放，无排队实现。
 
-关键事实：PI_REAL_BIN 未设置；真实 Pi crash 场景后续需用户确认环境路径（Node 双进程先行不阻塞）。
+收到2641e0e0结果后main读三个doc确认counter事实、hash按current生成到arena/evidence/f6-doc-hashes.log和F6-main-acceptance.json，markplan步骤5x并写completedtail、ledgerF6accepted/permitNone、handofffinal。然后直接用户交付六项修复/current176/min57+48/两Nodecompileall4组合/freshstart，不提旧51为验收、不承诺upstream原因/旧Host热更新，无commit。已无生产修复缺口，不要再衍生review/testcost。
 
-## P4-T7 完成（2026-09-21）
+## 最终收尾：生产试用六项修复计划完成（本节权威）
 
-三个串行切片全部验收：
-- 切片1 `b63ff875`：recoverOrphanRun contract + 11 gate 组合骨架（注入式）、三分支 outcome union、ORPHAN_CHILD_START_TIMEOUT_MS=120_000、既有 15s 零变更、provenance 脱敏、promise cache 幂等。
-- 切片2 `c23ec052`：16 行 crash matrix（8 必填字段/行、16 injection point、逐 gate fail-closed、authority_lease_expired 独立 reason、同 PID/不同 processBirth fixture、heartbeat 禁止清单+identity 不变）。
-- 切片3 `7181e605`：真实双 Node 进程 integration——跨进程 birth capture + durable rebind（generation 递增）、eligible/non-eligible session 路由、host 停止 renew 后 child 依 durable expiresAt 自行退出（exit 42 + authority_lease_expired，无 stop 信号）；RED 发现并修复不可解析 expiresAt 曾被误判为有效 lease 的 fail-closed 缺陷。
+**F0–F6全x、ledgercompleted，无activechild/测试资源/排队，无用户阻塞。**F1–F5分别87/26/80（新47）/90/15接受；F6currentNode26.8.1一次8file176实际病例、minimumNode22.19.0新增3file57实际病例+F1F4pattern48实际病例。旧minimum聚合51=48实际+3空文件占位不得冒充新增完整验证。两Noderoot/enhanced4unique组合类型均通过，共5次noEmit/currentroot重复一次；list1418pathlines+1manualsummary=1419total，两个入口实际覆盖。no fullmatrix/paid/hotreload/commit。
 
-P4 全回归（主 agent 复跑）：contract/orchestrator/broker/delivery/crash/integration 82/82；typecheck:subagents-enhanced；diff-check 全绿。
+F6doc-only run2641e0e0结束但harness拒绝commandsRun[]（任务禁任何bash），非代码/测试fail。main读3docs，纠正原报告F2/F3职责错配、日志名称不完整，并作为报告整合接受；没有为凑harness格式继续跑命令。最新三docsha在arena/evidence/f6-doc-hashes.log，mainacceptance在F6-main-acceptance.json，f6-summary statusGO-main-accepted记录doc-runtimefail与mainaccept原因。9sourcehash全部与current相同、Gitstaging空、doc/plan whitespacepass。
 
-残留：真实 Pi 二进制 crash 场景（PI_REAL_BIN 未设置）留待环境可用时补充，不阻塞 P5/P6。
+权威arena/evidence=/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/evidence，已归集minnew57log/.exit，不用外部candidatearena为证据入口。首次补验错误env importonly3fail分类2，ownedtoolresultdiagnostic保留，prod未改；globalpattern漏跑/重复rootstatic/错误arena/tmp扫描等process偏差均记录，不隐藏、不扩成newprod。旧日志与其他dirty都保留。
 
-## 下一步：P5-T8 scheduler typed outcome
+交付文档docs/plans/records/2026-10-08-pi-trial-fixes/acceptance.md包含六项、F1F5实际RED/GREEN、正确Nodecounts/static/limits；bug/rootcause六状态一致。T3按用户意见暂闭；T5只修错误展示不解决上游断流；completion提示实时UI非sessionpersist新副本。本机资源字段已目标无需整包回写，enabledModels/外部r2c/notours配置实现不动。**用户需fresh启动Host才生效**；旧Host未动、globalPi未切、未安装/commit/push/paid生产canary。本计划已完成，不再派子任务、全suite、第二review或旧升级doc收尾；后续如新用户需求单独处理。
 
-WritePaths：src/task-scheduler/adapter.ts、pi/extensions/task-scheduler.ts、三个既有 scheduler tests。
-readiness 要点：先冻结 SchedulerRecoveryOutcome union + consumeRecoveryOutcome（adapter），测试通过后 extension 注入 P4 真实 outcome；禁止 fake scheduler recovery API、禁止读 private durable root。
+## 2026-10-09 最新：共享规范/list 已验收，steer 历史查找仍在查
 
-## P5-T8 完成 + P0–P5 验收矩阵全绿（2026-09-21）
+本节覆盖此前TDD强制/1.0.2候选/AGENTS_APPEND默认注入等旧判断。**默认禁止TDD和任何TDD类skill**（用户已改规则），不读writing-skills/TDD，不新增测试，用户明确授权单项补测试/TDD才例外。调研/实施默认subagent；书面计划主only，目前新任务无书面计划。只运行用户允许短纯单测+新增TS所需静态检查，不真实Host/PTY/MCP/provider/模型canary/全量集成，不安装/热载/commit/index/reset。
 
-P5-T8（`d98c4c41`）验收：
-- adapter 导出 SchedulerRecoveryOutcome 三分支 union（rebound/blocked-unknown含reason/debt）+ consumeRecoveryOutcome（校验、runId 去重、仅观测投影）
-- extension 显式可选 SchedulerRecoveryBridge（recoverySource/onRecoveryOutcome），无 source 时默认路径零变更
-- scheduler 19/19、orchestrator 回归 16/16、typecheck、diff-check 全绿；仅五个声明 WritePaths 修改
+### 当前安装与init现场
+四Pi核心已1.0.4，增强dev peers1.0.4、pi-subagents0.75.0不变。升级run44b01894与init常量补af480d0c已结束：158个挑选非MCP单测通过，init纯假命令fixture1通过；themefixture失败曾被排除，不能说全unit通过。**chord/pi-codemode/pi-mcp/pi-telemetry caret解析为1.1.0**，非纯1.0.4闭包，不再当稳定目标已证明。用户实际跑init多错尚未给log；只读诊断d5fac3c5完成，init尾部有fullnpmtest/Doctorphysicalprobe/runtimeintegration，之前unitgreen不证明init。PI_VERSION/PI_PACKAGE实际unused，rootnpmci由lock决定；此前说常量导致重装旧版已纠正。无现场log不能归因，只请求第一error/末summary，不自动重跑init/修配置。
 
-P0–P5 完整生命周期验收矩阵（主 agent 复跑）：
-- owner/broker/authority/rebind/isolation/shutdown：78/78
-- membrane/supervisor-adapter/rpc/completion/replay：88/88
-- durable/delivery/workspace/lifecycle-contract/policy/generic-prompt：28/28
-- P4 crash+integration+contract / P5 scheduler：42/42
-- npm run typecheck + git diff --check：通过
-- 合计 236 tests 全绿
+### agent list已验收
+实现run34faa86f结束，compat0.75保rawfrontmattermetadata(unknownfields/types/false/scalartools)深clone，dispatchlistcontentJSON[{name,frontmatter}]同时details保持原fields+metadata，不含body/fakepaths；无RPC/modelcatalog/spawn。曾有4旧wholeobjectdeepEqual fail，收尾run3e7458a0只test/pi-subagents-compat.test.mjs加2metadataexpectedliteral+titleupdate，**29/29**日志/tmp/dispatch-8531707b/run.log，main读diff与实际count接受，没新增tests/TDD。code尚须freshHostlive生效，当前tools可能旧nameonly。
 
-## P6-T9 执行中（最终任务）
+### agent正文与context
+ecde9b05正文TDD清理已accepted：delegate/executorbody删TDD，reviewer原无未改，3frontmatterbyte相同（/tmp/dispatch-00e433a6 before），**delegate frontmatterdescription仍含TDD用户仅授权body，所以没改**。e0b29b82源码追踪已结束：实际selectedagentbody在system，generic task user原task，codingtask userDispatchContract，task不覆盖system；上游再discover按childcwd/projectoverride或settings不同不能保证所选body为本仓profile。delegateprojecttrue/globalfalse，exec/reviewinheritfalse，不能可靠拿pi/AGENTS。用户拒child直接globalinherit。正文reviewer原ad648258overload，重派b4f35bab(Sol)已完成三body建议，**用户只要求分析未确认采用，没有写新的300-600字rolebody**。适合body：delegate复杂归因/方案+实现，exec确定性契约实现，review只读真实产物/严重性路径证据建议；shared通用，task本次paths/docs/acceptance。未经明确采用别自动改profiles。
 
-`5a6f8f8f`：按 writing-skills RED-GREEN-REFACTOR + fresh-context baseline 更新 skill-overrides/subagent-dispatch/SKILL.md 与 test/subagent-dispatch-skill.test.mjs；WritePaths 仅这两个文件；最终验收含 verify:package/npm test/test:subagents/test:subagents-enhanced。
+### AGENTS_SHARED规范与接线已验收
+文档run496f5362先拆4docs，用户指出shared不应rolejudge后纠正run6f587735两docs结束，main读final/sharedrolewordzero/安全义务保全+hash。旧pi/AGENTS_APPEND.md删除、新pi/AGENTS_SHARED.md**角色中立**，没有主/subagent分支；主pi/AGENTS.md保dispatch/DAG/reviewer逐次批准/用户工单决策（注意之后实际派reviewer须userexplicit，不可自动一轮review）；rootAGENTS仅导航+provenance“精确RED”改“精确复现证据”，工程规范仍all适用。源码runb0846492已结束accepted：src/agents-append/index.ts删除无facade→src/agents-shared/index.ts；newpi/extensions/agents-shared.ts为自动main+requiredchild绑定；可靠childenv显式传scope，shared正文同源、child另runtimeblock(no nesteddelegate/needdecision/contact/工单确认)，不让模型自己判role；不打开inheritGlobal，不加tools/activeTools权限。默认sharedpath锚feature所属root，不随worktreecwd漂移。input每轮read一次snapshot，beforeagentstartappendtag去重；session_start读取成功才ACK，childrequired startup失败用既有Hosterrorcollector，main缺文件为扩展错误+后续inputhandled门禁，不宣称所有providercontinue硬阻断。same-session required registration数组appendshared，registration顶层requireForAllRunners保持默认（per-entry被API拒绝，顶层true会同时改变旧owner/queue义务）；**仅本生产detachedRPC nativechild保证加载，external/foregroundlegacy不扩大保证**。
+验收：existingorderedmodels **4/4**、membrane **91/91**、root/enhancedtsc通过(rootscope变更后再check所以2次root)，没有真实startup验证；temp纯factoryhook与APIshapeprobe通过，earlyprobe import/重复path/Darwinrealpath错均只fixture修正，无prod兼容。main已直接读源码/ACK权威文件与result投影，不重复tests。runtime9?finalhash: sharedfile582c2c2344cc5331310c90fe5cfa08176e8b78d50a4fd340205dd788488829f1；feature8e337dcc1d93416fc286676f251ef66478843c5de9d9e94de05d936bbb00eb2c；bindingd53342b47b76036cf9ba664a5d5710ba08f631f3acb3a4715909c3195abd165d；enhancedmainb2330411dcd925d425d3aa2863d1633f5363a4c25c423bff1292a197acea1121；dispatch41f6c9c653029c9b310cf2abe97889f34afc8a1856ae2c4df09a6cda17c2441e；tsconfigc6fe15f411fd63ca37896a666f6800d69ddb07325af91b60f90cc434d5e4379e。staging空/whitespacepass，nohotreload，用户尚未为此restart。
 
-P6 完成后剩余：最终汇总报告（P0–P6 全链路状态、残留风险：PI_REAL_BIN 真实 Pi crash 场景待环境、控制面并发窗口 P4 硬化候选、steer幂等先于pending的边界）。
+### 模型fallback取消
+只读65e75843完成：多models只是startuporderedcatalog，upstream0.75已移除fallbackModels，postspawnprovider失败不能catchspawn重派。user明确“先不支持modelfallback”，**不实施、不自动换模/重派**，后续不同error自己roledecision即可。
 
-## P6-T9 完成 + 全生命周期收官（2026-09-21）
+### Steer证据与当前唯一active历史查找任务
+用户已明确授权targetsession及相关historymeta读取，不其他session/body。targetdelegate **e0b29b82-394f-4f70-952d-bbcdbdbe4430**，root0fc3c5f4-7d5b-45a7-8610-7ec3d3739e68，keytyped-654a6dd2-dd78-4b2e-9b85-3c7e5bf1a577，dispatchtitle“追踪 tool 内容与 agent.md 正文进入 child 上下文的形式”。steerrequestfd8f2b3e-4410-42f5-937c-79071f0cbfbf。
+授权exactsession /Users/leshi.zhy/pi-config/var/sessions/2026-10-03T05-50-45-905Z_01a10050-9e91-7461-901b-068420357d64/0f19d968-1edf-40f1-82a4-204a2625965e/run-0/session.jsonl。entry505db537 parent72be0d01 UTC06:18:25.903(本地14:18:25),user普通消息无display/customType，1029chars sha2568c4d59b2ed24fa1706776e9a2454373deca3e68daf8ce9205da778dad3d8baf2含完整steerwrapper+AGENTS新问题，主已independentscript验证。delivered06:18:25.902,queued10.378s前。persist证明收到，不凭nativeflag证明模型正确执行。57c482fc证据report中“工具造假”无独立支持不能传播当事实，只有自读entry支持。
+用户入口Option+O；d7f9142d只读进一步证明onactivebranch、nativeUserMarkdown无截断；fallbackrenderer仅一行可能英文wrapper占据中文被slice。默认viewportautoFollow尾部、Home/PageUp/End有效，无searchjump。但未实际UIcapture/当前Host实例证据不能断言scroll或fallback就根因。先请求用户观察完整/英文单行/无msg。用户问title时main只给了dispatchtitle未验historiestitle，用户反馈**本会话历史无此title**，因此不能再要求按该title找。
+**当前唯一活跃任务 `0d33f5ed-7192-4f6a-b7f8-d3e463c9444b` executor只读核对history**：实际rosterlabel、parentmembership、canonicalfacade/leaf、max20terminalbudget/eviction。只允许exacttargetartifacts+从statusmetadata定位exact父session并filterbrowsercustomentry/目标titlemeta；不dump父msgbody，不findsessionsdirs。它新spawn会影响terminalbudget必须在report标snapshot时点，不猜先前user一定无项。不能为了验证修TUI/restorehistory/re发steer/更新realsettings，也不新test。收到结果main读相关投影/实际label或removed证据，给用户确切可找label或确认已被historyevict，不将新任务通知staletitle当actualtitle。所有已派coding已finishedaccepted，不再启动review/newtests，共享已完成，无implementationpending。
 
-P6-T9（`5a6f8f8f`）验收：
-- Skill RED→GREEN：旧文本具体失败（缺 stop/drain 不承诺 detached）→ 新增最小"生命周期与控制面边界"表（resume/rebind fencing、pending→reply、reply 后禁等价 steer+幂等 receipt、completion 分层 exactly-once、authority_lease_expired、blocked-unknown/debt、scheduler consume、敏感信息/TUI 边界）；skill 测试 3/3。
-- fresh-context 闭环：基线（6 场景缺精确状态名/边界）→ post-update（6/6 命中、0 语义缺口、0 假阳性）；基线/postupdate 由宿主代跑，证据在 .pi/handoff/p6-fresh-context-{baseline,postupdate}.md。
-- typecheck、verify:package、test:subagents-enhanced(8/8) 通过。
+异步通知经常挂旧title，**始终以runId关联**。workflowreceipt只有launch不result，no睡/pollstatus等完成。只有明确用户诊断/介入才一次status；后续无独立工作即可endturn，不重复十次“回执已收”。
 
-**npm test 3 失败全部归因为范围外（HEAD 干净导出复现验证）：**
-1. test/init-pi：HEAD 既有（commit c35c596 移除 external-llm-review 目录后测试期望未同步）。
-2. test/pi-subagents-compat "local package source"：HEAD 干净导出同断言失败（compat:244 Missing expected rejection）——与生命周期批次无关的既有缺陷。
-3. test/reviewer-agent：用户预存未提交的 pi/agents/reviewer.md 编辑（gpt-6-astra 模型行）所致；HEAD 上 2/2 通过。不得替用户回滚。
-另：BROKER_TIMEOUT 为全量并发负载下 flake（单独重跑 39/39 通过，两次全量跑仅一次出现）；test:subagents 需 PI_REAL_BIN（环境未设，readiness 已记录）。
+## 2026-10-09 最新补充：GLOBAL/MCP禁令验收，两个任务仍active
 
-## 生命周期总状态：P0–P6 全部完成
+GLOBAL迁名runb99ed1fe-790f-4986-becf-c25eb57e7f18已完成：pi/AGENTS.md删除→pi/AGENTS_GLOBAL.md；newsrc/agents-global/index.ts+pi/extensions/agents-global.ts，bindingchildguard前return（不读/不注GLOBAL），maininput/read/独立systemtag；tsconfig仅两个include。main读源码/rootnavdiff+静态hash接受，rootnoEmit一次passed日志/tmp/agents-global-before/tsc-root.log。用户不要文档自判role，原首段仍role说明因此补runa128c397-9ba0-4ce1-a81e-d5d5b69bd8e0已complete只首段一行替换（before/tmp/dispatch-8d65a8a7/AGENTS_GLOBAL.before.md），main读完整报告/hash确认accept：GLOBALfinalsha f19e8f186d45230231471ec69bed5cda350d26a1fc84ee06dcea0171715a1fc3；globalfeature69148a024f11752d5853e59bcaab11e1c691f982039082ea8f759369c9212557；globalbindinge608114b8a3c953dd192cf0f90113f990b17465d403b43b5186624cc3f442d2f；tsconfig6625be0f2026f519c29ee0d17dbff7028df8f2251278f0f6a9369e69ab2a21db。SHARED/source/entry三sha与此前相同。GLOBALtext无角色适用判断，subagent客观对象词保留。no freshHost/hotreload，旧Host尚用已加载代码，新生效需restart。
 
-最终验收汇总：P0 gate（Colima 实证）→ P1 policy → P2 authority/lease/heartbeat → P3 replay+control-plane → P4 orphan recovery（三切片+真实双进程）→ P5 scheduler outcome → P6 Skill 同步。生命周期范围 236+ tests、typecheck、verify:package、skill 3/3、fresh-context 6/6 全绿。
+**Exa MCP迁移取消**：用户先要skill→MCP+迁cred，主请求计划user明确不要直做，但未派实施/未写配置或读cred；用户随后暂停并要求根AGENTS禁MCP。最终run902bdb40-d6a5-47d8-b66a-07a034a4624a仅根AGENTS新增+4行“外部工具接入规范”已main读taskbeforediff与sha接受。最终根AGENTSsha e1e5569b20d710303c0c01715bb4d37fa2d6f008709612972d4e65c78e8061bd；before/tmp/AGENTS.root.before-mcp-ban.md。**禁止MCP接入/注册/直call/server，所有外部能力走skillwrapper非MCP CLI/SDK/HTTP，不可把MCPclient藏skill**。本次只新增规范，不清除已有mcp-policy代码/配置；Exa保持旧skill/Python，不迁/读/轮换凭据。不能继续旧MCP任务。
 
-**残留风险（后续候选，不阻塞）：**
-1. 控制面 resolve→native→commit 非原子：并发相同 reply/steer 理论可双投递（顺序重试已幂等）——建议 in-flight 锁。
-2. steer 幂等检查先于 pending 检查：新 pending 到达后重试旧 steer 返回旧回执（单投递不变量仍成立）。
-3. PI_REAL_BIN 未设置：真实 Pi 二进制 crash 场景与 test:subagents 待环境。
-4. HEAD 既有 init-pi/compat 失败建议另立 bug 文档处理。
+### 当前两个active编码任务，无其它实施待验收
+1 **a1466187-382a-4ffa-89f6-44f7c5c347e3** executor：用户已贴init报错（全局旧Pi theme okhsl不支持、requiredsharedfixture缺入口、旧版本1.0.2断言、缺PI_TEST_HOSTenv、旧TDD断言、runToolCall/outputSchema/disposition/session失败可能Host混用）。only17个test/helperpaths，productioncode/config/install不改。任务集中helperdefaultrootphysicalmainSDK、syntheticagentDir补sharedentry、更新现有旧期望，不新增tests/TDD；只短pureunits，**禁init/Doctor/PTY/RPC/session/actualtool/hostprobe/MCP/integration/全量真实flows**。根公共API如修host后仍不符给needdecision不compatfallback。不claimallinitpassed，只unit/staticupdated vsnotverified分开。用户贴故障是test污染来源，不能以此前挑158pass忽略。这run还未result，不statuspoll等完成。
+2 **e838774b-4685-4efd-8118-381223755041** executor：user要求supervisorreply冗余bodybox改confirmationreceipt，onlycompact-rendering.ts/增强主subagent-runtime.ts/test/subagent-compact-rendering.test.mjs现有期望。查真正subagent_supervisor_reply默认renderer覆盖，不只toolresult。**TUIonly不改native消息/session/details/display或deliverlogic，requests正文仍保留，不发第二notify**。后来user要求复用“派发完成，1个子任务仍运行或待收集”同样式，主steer87dcdc57-577e-4341-88ea-fd45ba14a6aa queued，补充是否consume/实现需final代码核对不能queued=done。文案“回复已提交/已送达”依据真实事实不能echo声称childconsume。现有unit19一次+root/enhancedtsc，noTDD/newtests/realreply/Hostflow。收到actualrunidreport验源码formatter+MessageRenderer+共享code先前delta保留/日志，不额外review。
 
-## 2026-09-28 本轮 runtime 修复与 H-PI-2 交接
+### steer历史查找关闭只读调查
+0d33f5ed-7192-4f6a-b7f8-d3e463c9444b已complete，Option+O roster是globalThis进程内存不落disk，RECENT_RUN_LIMIT20**rawterminalrun**而root+leaf各占1导致约10任务；canonical折叠不会还budget，整组最旧evict。目标e0b29b82原dispatchtitle确“追踪 tool 内容与 agent.md 正文进入 child 上下文的形式”，parent本会话meta确认，当前32run16组件31终局推oldtarget第4老被evict。但**未readlive内存**只是高置信推定，用户已告知不能绝对证明当前list。此前让用户按title找浪费时间已道歉，别再让在无record中盲找。exactchildsession文件与entry505db537steer保存（授权范围），不重发steer/恢复history/改limits。user尚未授权历史上限改。readtask报告的伪造tool指控无独立事实不传播。当前init有log归因可修test，不继续credential讨论。
 
-- 当前用户问题：H-PI-2 隔离普通 Pi RPC 测试未成功执行的原因及是否有 bug。必须区分子代理执行环境与被测 Pi 运行时。Run `ab2afe2f-a86d-4b99-b2b6-b3d704885e21` 启动时 stderr 报 `Root broker grant is not ready`，随后仅看到查找 TDD skill 等前置动作，因 120 秒无活动被主 agent 停止；尚未观察到 H-PI-2 测试代码编辑、断言级 RED 或真实 Pi RPC。单凭该 stderr 不能证明 production worktree bug；先查子 session 与 runtime grant 时序。
-- 用户明确要求收窄本轮目标为 `worktree: true` 的真实端到端验证与由它暴露的最小修复。历史 proof debt、两个 lifecycle orphan 的接线和新 proof-debt 管理接口均不构成本轮前置；不得清理 live 现场。
-- A/B/C 确定性修复完成；C13 后 `npm run test:subagent-workspace` 36/36，typecheck、package verify 已通过。调查与计划文档已有提交 `7302216`；大量源码/测试、其他 lifecycle/context-usage 预存编辑仍未提交，禁止混合暂存、stash/reset/clean。旧 A4 managed worktrees 的 `origin-dirty/workspace-dirty/terminal-unobserved` 不允许强行处置。
-- 真实 Pi lane：`docs/plans/records/2026-09-23-runtime-remediation/E-PI.md`。普通 completing-executor 子集曾通过（约 2.35 秒），attention/supervisor-resume 子集 45 秒超时、测试进程组不完整回收；本轮产生的遗留进程组已清理。仓库根 cwd 的 startup 用例受已有 `.git/.pi-coordinator` live 元数据污染。`A-ENV` 仍 `degraded`，真实 supervisor transport 未证实。
-- H-PI-1 新增测试专用进程组 helper `test/helpers/pi-process-group.mjs` 及 fake 集成测试，4/4 和 typecheck 通过，但不是 Pi 子集验收。H-PI-2 唯一 WritePath 是 `test/pi-subagents-runtime.integration.mjs`。多次派发最初遭 root schema 和缺 execution 拒绝，最后一次 run 启动后卡于前置，已停止、无测试证据。统一 DAG `docs/plans/2026-09-23-subagent-runtime-unified-dag.md` 正在修改且未提交，应机械核对状态表、依赖表及 Task 节点一致性。
-- 更早 handoff 中引用的部分 lifecycle 验收提交经调查不存在；不得把本文件历史自述等同产物证据。`L-REGISTRY-ENTRY.md` 判 durable registry 无 production importer 且缺三份权威四元引用；coordinator-process 只有测试 spawn/自启动，外部 loader 未证实。历史 debt 快照 529 条全部来源未证实，可证明安全清理候选 0；D-CLEANUP 保持 blocked，无 live mutation。
-- 已加载 subagent-dispatch、test-driven-development、writing-plans、writing-skills；编写测试还须读 `writing-good-tests.md`。coding 派发用完整 dispatch-ir.v1（含 execution），generic 不能绕过。当前旧 Host 的 supervisor reply/steer 曾分别返回 `SUPERVISOR_REQUEST_NOT_PENDING`/`SUPERVISOR_INTENT_INVALID`。用户此轮先要原因与 bug 分类，应只读核对证据，不为未证实来源添加 production 兼容。
-- 2026-09-28 源码优先追踪发现一个独立、可复现的 production 字段断点：`child-extensions/integration-queue.ts` 的 `preserve()` 调用 `coordinator.preserveIntegrationDebt(binding, reason)`；broker-backed coordinator 把它编码为 `coordinator.request` 的 `preserve_integration_debt` + `{ reason }`；但 `src/subagent-dispatch/root-broker-protocol.ts` 的 `coordinatorParams()` 对该 operation 走默认 `exactObject(input, "params.input", [])`，因此合法 `reason` 被拒绝为未知字段。`child-extensions/integration-queue.ts:248` 又吞掉该 preserve 异常。该入口、身份和资源顺序均是 production 可达，分类为“预期 production 数据未被正确处理”，应建立 bug 记录并按 TDD 先 RED 后最小 GREEN；不是 grant 探针问题。
-- 真实 worktree E2E 的源码结论：唯一最小真实路径是复用 `test/pi-subagents-project-workflow.integration.mjs` 的 `PI_REAL_BIN` Host + deterministic provider，令 coding child 在 dispatch cwd 中用 bash 修改并 commit 允许文件，再由自动 integration queue 完成 admission/rebase/publish，Root Broker/Coordinator 记录 terminal proof 并释放 workspace。`test/subagent-auto-integration-real-git.integration.mjs` 的 Git/queue 虽真实，但 dispatch RPC 与 child binding 是 harness stub，不能替代 Host E2E。当前 `PI_REAL_BIN` 未设置，真实 lane 只能标记 environment-constrained，不能伪造通过。
-- 当前代码节点受保护路径门禁阻塞：`git status --short pi/agents/reviewer.md pi/settings.json pi/models.json var/workspaces/` 命中 `pi/settings.json` 预存 dirty。不得清理、回滚、覆盖或读取其敏感内容；在该门禁解除/明确豁免前不修改 production/test。
-## 2026-09-28 当前执行状态补充
+## 2026-10-09 最新：init单测修复已接受，reply收尾active，违规扫描已精确取消
 
-- 用户已明确将 `pi/settings.json` 与 `pi/models.json` 作为纯 per-machine 文件：本地保留，仓库不跟踪；`pi/settings.json` 已通过索引移除、`.gitignore` 增加两项，并以独立提交 `6afc404 chore(config): 将本机配置移出版本控制` 固化。未读取或输出配置内容。当前 protected-path 基线已 clean。
-- `BUG-PRESERVE-REASON` 已按完整 dispatch-ir.v1 派发给 executor `eea81ac3-0b2c-42ac-aa55-9cc9db856114`，WritePaths 仅 `packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-protocol.ts` 与 `test/root-subagent-broker-protocol.test.mjs`；要求严格 RED→GREEN、不得提交/触碰 live state。等待 typed acceptance report，不把 completion prose 当验收。
-- 当前真实 worktree E2E 仍独立延后：`PI_REAL_BIN` 未设置；不将 preserve bug 修复与 H-PI-2 合并，也不伪造真实 Pi 结果。
+initfix **a1466187-382a-4ffa-89f6-44f7c5c347e3** 已完成/mainaccepted：6testpathsonly(taskbefore/tmp/init-fixture-fix-before/，main读逐filediff)、helpers/pi-runtime.mjs默认本仓rootSDK而非npmroot-global，显式envpin/显式globalreader注入仍支持，无root时fail不fallback；helpers/joint-upgrade-session.mjs新增sharedbinding真symlink保障requiredrealpath；compat/peerinstall用helper不joinundefined；hostprobeexpect1.0.4；revieweragent旧TDDassert改doesnotmatch、不恢复TDD。实际units helper10、profile/compat/peer32+1todo、errorvisibility47/footer45/nativeconversation13 -> **148total/147pass/0fail/1todo**。main核对events实际count/noextra execution接受。旧主题okhsl失败出自global0.87.1，不合法新版theme问题，不能再说simplefixturewrongcolors。真正RPC/session/ceiling/feature/Host-probe/process-fleet没有跑（禁realflows），仅修helper/expect并静态核验当前1.0.4exports，所以**不claiminit全过/全suite通过**。prod代码/config/depinstall/noTDD/newtests/index零改。
 
-## 2026-09-28 preserve 修复完成，真实 worktree E2E 执行中
+reply第一任务 **e838774b-4685-4efd-8118-381223755041** ended，main读源码：actual冗余是upstream registerEntryRenderer subagent_supervisor_reply（不是messageRenderer）；newcompactformatter原生writeReply成功之后appendEntry本侧提交日志 -> “回复已提交 · delegate · run8”，不拿queued说delivered；mainentry后注册覆盖同Map，复用派发完成receipt的messageBox(Box+Text)style，request正文保留、raw/session/details/display全不改。19unitpass，root/enhancedtsc无error，但cmd pipehead掩exit控制能力只是输出佐证。**不能finalaccept用户目标**，仍第二toolresult formatter完整输出messagebody。
 
-- per-machine 配置策略已独立提交：`6afc404 chore(config): 将本机配置移出版本控制`。`pi/settings.json` 从 Git 索引移除但本地保留，`.gitignore` 忽略 `pi/settings.json` 与 `pi/models.json`；未读取/输出配置内容。
-- `BUG-PRESERVE-REASON` TDD 已完成：executor 原始 session 证明先 RED（合法 `{ reason }` 被 `unknown field reason` 拒绝），再 GREEN；protocol 12/12、Root Broker focused 51/51、typecheck、diff-check 通过。最小修复提交为 `ddcf487 fix(runtime): 放行保留债务原因参数`，只含 `root-broker-protocol.ts` 与 `root-subagent-broker-protocol.test.mjs`。
-- 真实 H-PI-2 worktree E2E 已重新派发给 executor `8c3caf68-f1eb-4765-953a-de9bdd435711`，只写 `test/pi-subagents-project-workflow.integration.mjs`，使用临时 `PI_REAL_BIN=/opt/homebrew/bin/pi`（版本 0.85.1）；要求先对 child commit 场景取得断言级 RED，再用 deterministic provider 驱动真实 child 在 managed dispatch cwd 中 bash 修改/提交 README，验证 production queue/publish/proof/release。不得改 production、helper、live state 或提交 Git。
-- 当前工作树预存/主 agent 文档变更：`.pi/handoff/context-handoff.md`、`docs/plans/2026-09-23-subagent-runtime-unified-dag.md`、`docs/bugs/2026-09-28-preserve-integration-debt-reason.md`；真实 E2E 测试提交不得混入这些文件。protected paths 当前 clean；`var/workspaces` 未触碰。`PI_REAL_BIN` 未设为环境变量，但显式 `/opt/homebrew/bin/pi` 可用且版本 0.85.1 在支持矩阵中；若真实 Host 不通过，准确记录 environment-constrained，不改矩阵/生产。
-- 配置策略残留风险：当前 `init-pi.sh` 源码只安装 Pi、依赖、Skill 并运行 doctor，未发现重放 `pi/settings.json` 或 `pi/models.json` 的逻辑。用户要求的“本地保留、由 init 重放”尚未由实现满足；本轮不把该配置设计问题混入 preserve 修复或真实 worktree E2E，结束时必须明确报告并另行决定模板/重放方案。
-- settings 初步分类（基于 Pi `docs/settings.md`、`SettingsManager` 源码、仓内 `doctor.ts`/tests）：自动/运行时字段为 `lastChangelogVersion`，以及用户通过 `/model`、`/thinking`、`/scoped-models` 或 `/settings` 持久化后由 Pi setter 写入的 `defaultProvider`、`defaultModel`、`defaultThinkingLevel`、`modelThinkingLevels`、`enabledModels` 等；这些不能作为共享模板的权威全量内容。`enabledModels` 明确保留为 per-machine。`defaultProvider/defaultModel` 也建议按机器/模型目录处理，除非各机器有同一 provider catalog。
-- 当前 settings 的共享策略候选是 `packages` 与 `subagents`：前者决定本仓增强包、其他本地/registry package 及资源过滤，后者承载 builtin disable 与 agent override 等 runtime policy；它们应进入受版本控制的 template/重放逻辑，而不是依赖本地旧 settings。当前标准顶层还包括 UI/终端偏好（`tuiMode`、fullscreen 相关、`theme`、`hideThinkingBlock`），建议 per-machine；`defaultThinkingLevel` 可作为显式共享策略但默认按机器保留。`models.json`/`auth.json` 不进入共享模板。
-- fresh clone 断裂已证实：`scripts/doctor.ts` 直接要求 `pi/settings.json` 存在并解析 `packages`；多个 tests 直接读取该文件；`scripts/pi-shell.zsh` 将 `PI_CODING_AGENT_DIR` 指向仓库 `pi`。而 `init-pi.sh` 没有创建/合并 settings 的步骤。因此后续应独立设计 tracked `settings.template.json` + 幂等 ensure/merge 脚本：首次创建共享字段，已有本机文件只补缺失共享字段，不覆盖 Pi 自动生成字段和 per-machine 字段。
-- 用户已确认采用方案 A（tracked template + init 幂等合并）。`pi-adapter`（`~/.r2c/integrations/pi-adapter`，外部 r2c 追踪 adapter）与 `enabledModels`、默认模型、UI 偏好、`lastChangelogVersion` 均不进模板。实现已派发 executor `716b690e-85da-4b58-a1df-74223be653f1`：WritePaths 为 `pi/settings.template.json`、`scripts/ensure-pi-settings.ts`、`init-pi.sh`、`test/ensure-pi-settings.test.mjs`、`test/init-pi.test.mjs`；TDD RED→GREEN；packages 按 source 幂等合并、subagents 深合并保留本机子字段、原子写入、支持 `--check`。
-- doctor 实跑确认：当前失败根因是历史 proof debt 与 `.pi-subagents` legacy（live 现场，禁止触碰），settings 本身未被 doctor 报错。
+当前唯一active收尾run **19fb846f-e8cf-4f7a-8cf2-7644a6a9c949** executor：只compactrender.ts/enhancedmainentry/existingcompacttestexpected，success toolresult须空只entry一confirmation，error/blocked/pending短状态保留，Hostcontext.isError补正确，不改实际内容。无新tests/TDD/realreply/Hostflow/安装/MCP/index。只existing19unit一次+enhancedstatic一次，真实exitcapture。main之前派此合同特别给了exact上游intercomnativejs路径。
 
-## 2026-09-28 并行子任务状态
+**attention后诊断事件**：child违规 `find / -name native-supervisor-channel* -not -path */proc/*` 经rtk全盘扫描，call05f2df296ae54260904ba426 240s。main读owned events确认call未end，不等待poll，用ps元数据精确树 **runner63252 -> bash69559 -> rtk69567 -> /usr/bin/find69571**。首检查commandstring因rtk改args未匹配，没信号；第二据确切ancestor链再TERM **仅69571**（未动runner/userHost），随后精确进程诊断确认清理。已steerrequest197e9362-0f03-49e4-a146-1a13a85fba32要求禁止再宽搜、只given installednode_modules/pi-subagents/src/intercom/native-supervisor-channel.js和directimports收尾，报告执行范围偏差，不隐瞒、不修安全框架/扩大scope。**这个queued不是已消费，只有completionresult能验**。可处置错误命令不重启child或安装/terminatehost。继续任务不能无新result就finaldeclare通过，也别因已70kturn继续派更多诊断子任务。
 
-- `76779a30-94dc-4c78-97ba-e08302df2dbb`：H-PI-2 真实 `worktree:true` Host E2E（resume 后重跑中，写路径仅 project-workflow 测试文件）。
-- `716b690e-85da-4b58-a1df-74223be653f1`：settings 方案 A 模板与幂等重放（进行中）。
-- 两者写路径不相交；均要求 TDD 与 typed acceptance report；完成后按范围分别提交。
+GLOBAL/shared/list/rootMCPban全部已接受，body建议稿仍未采用(用户只问内容)，modelfallbackuser明确先不支持；ExaMCP迁移取消未read/movecredentials。后续19fbcomplete读production两路径delta/currentexistingtest19counts/statictrueexit确保第二正文去掉，必要一精准修scope别循环realflow。最后交付singleconfirmation/freshHost/nohotreload/index、更新handoff，不commit。
 
-## 2026-09-28 终态证明门禁修复与真实 E2E 全链路通过
+## 2026-10-09 reply展示最终接受，prompt可观测方法只读研究active
 
-- H-PI-2 子任务 GREEN 阶段超时后主 agent 接管诊断：真实 Host E2E 暴露首个可证实生产缺陷——`executorProofSnapshot` 用 `authorization.goal` 门禁 terminal proof 可见性，standalone run 的 goal 永远为 null → terminal 永远不可见。这是历史 529 条 proof debt 大量 `terminal-unobserved` 的根因。
-- 诊断证据：process-terminal 事件正常发射且被 broker 接受（早于 async-complete），artifact 存在 state=observed，runId 匹配；但 inspectExecutionProof 返回 terminal:null。原测试因 PI_REAL_BIN 从未设置而一直 skip，断言从未真实验证。
-- TDD 修复：RED→GREEN 移除 `authorized &&` 门禁；authorization.state 独立报告不变。Bug 记录 docs/bugs/2026-09-28-standalone-terminal-proof-invisible.md。
-- 真实 E2E 全链路通过（12.7s）：dispatch→workspace 分配→child bash commit→Auto Integration admission/rebase/publish→terminal proof→release→origin clean。
-- hostile-legacy 与 rename-canary 是预存断裂（A2 workflow 字段删除后 fixture 未迁移），不属本次变更。
-- 提交：ddcf487、a46e9ca、145c25a。剩余 dirty 仅 handoff 与统一 DAG。
+reply收尾run **19fb846f-e8cf-4f7a-8cf2-7644a6a9c949 completed/mainaccepted**。actualEntry已复用派发完成messageBox、回执“回复已提交 · agent · run8”，不展开原生回复bodybox；成功tool-result(renderer context.isError权威，details.replyTo非空)空显示避免第二完整正文；error/nonreply保文本且error色，unknownreply“回复状态未确认”中性。raw native reply/session/details/isError/display/RPC/control权威未改，无新增sender/notify/permission。19existingunits/0fail/0skip，enhancedtsc真实capturedexit0（root没再跑），main读source+taskbeforetwofilediff/currenthash/日志接受。testfile前后byte相等，没有新tests/TDD。最后sourcehash compactrender d8638a2ba538ba0d5ea90c799b38e0fa0670ae85bcd5f5265465299c2ebf8f99，mainentry5770ebedf5d7e42d74eecce83ab99c97414e7df4421722a70cc1438627331186，test07774d3f1586536a86f52b3d60878cb1e59989ad7d7d6040d19539c417b74a47。证据/tmp/supervisor-reply-final/report.md/unit.log/tsc-enhanced.log/beforehash/diffs。
+残余：上游writeReply成功后appendEntry为trycatch日志，若Hostjournal损坏/append失败成功tool仍无displayreceipt；不是投递失败，不为罕见非已证prod数据追加compat。本轮只正常mainHostentry展示，不承诺所有childhistory也compact。缺少新formatter直接unit授权故只旧19相关case+静态合同，未真实HostUI重启验证。此前违规全盘find69571已精确取消，命令rtk/shell都exit，不用户Host操作。所有源码实现任务已结束，无activecoding。
 
-## 2026-09-29 统一 Dispatch Schema v2 完成与 v0.0.1 发布
+**当前唯一active只读调研** af0dbdd0-f864-4710-a921-f9e285ca4afe executor：用户问怎么看GLOBAL/SHARED初始prompt输出记录、确保loading。查当前Pi1.0.4内置/debug/context/export/SDKgetSystemPrompt/before_provider_request最终payloadhook是否真支持，sessionjsonl是否保存system，以及main期待shared+global、childshared+runtimechildblock无global。禁止执行模型/Hostflows/newlogger/tests/TDD/真实payload/auth/settings/session读取；用户只问办法，未授权自动采全文日志。工具README/extensions/sdk文档完整read，sourcepublic精确read；结果提供可观测方法与安全默认metadata，完整systemprompt敏感需再授权local0600/ignore不打印APIheaders。不能发明CLIflag或叫用户查不含system的session文件。通知staletitle按actualrunId。收到研究完成后main给用户具体办法/必要是否要临时diagnostic入口，**不用为了此研究另跑model验证或安装**。
 
-### 本轮全部提交（已推送 origin/main，tag v0.0.1）
+## 2026-10-09 最终状态：样式与 resume title 已接受，暂无活跃任务
 
-- 76e665b test: 迁移 delegation workspace 测试到 v2 schema
-- 503815b feat: session-owner 启动决策审计日志
-- 3b04815 fix: agent list 只返回项目 agent（过滤 ~/.agents/ skill 定义）
-- 9198280 feat: subagent agent 发现（action:"list"）+ 移除自定义 system prompt（pi/SYSTEM.qwen.md + model-system-prompt 机制）
-- b2534dd fix: generic 路由前置编译 + 统一提示渲染（reviewer P1 修复）
-- 7c8e1cf refactor: 统一 dispatch schema v2（39 文件，+1225/-2018）
-- 更早：80114d1 rename canary、bafe714 worktree 工具面、041f9f9 fixture 清理、64d80d4 移除执行超时、886973a H-PI-2 报告、ab4a88a DAG 更新、145c25a terminal proof 修复、a46e9ca settings 模板、ddcf487 preserve reason、6afc404 配置移出
+本节覆盖前述active/不全统一/旧review批准口径。所有已派发编码和只读任务均已返回或失败后被明确接替完成；**暂无activechild/实现pending**。不再派新review/fullsuite/真实canary，不为已完成任务继续查询status等待。用户没有授权Gitcommit/push/globalinstall/模型请求/MCP，idx仍空，所有既有dirty保留。
 
-### v2 Schema 设计（最终确认）
+### GLOBAL审阅流程及文档漂移已修
+run3d22b18a-b86b-4cfc-b389-b9d4d722723a completed，main读任务前副本/tmp/dispatch-35ef623a/AGENTS_GLOBAL.before.md diff接受：新完整计划写完首轮reviewer**自动且只一次无需授权**，收到结果按意见inline修订，再问执行方式或继续review；后续每轮包括成果review均用户明确授权，**无次数上限**，修订不重置首轮，SubagentDriven不视review授权。此次只规范变更没有实际新计划/首轮review派发。模型qualified先profilecandidate整体API验证不能绕过全缺/guardfail，目录availability非provider活着；30min是task组织预算非runtime超时；skills不假设恒环境0且不自动全文注入，给确path要求read；resume非空新消息，stopped不可，未承诺原live进程续跑。
+额外doc收尾0c501de4-e5f3-4db0-9344-016f3816f418 completed，仅Workspace节任务前后byte范围变，main读最后确认state分支/无常规父integrate，GLOBAL最终sha a74723534901543fd55525d5b35cd0dd20b8e67fdd47b3bc1c651471c35fc326，before/tmp/AGENTS_GLOBAL.dispatch-c1b2a90a.before。保dirty/rawgit禁令。doc示例是概念性工具返回state投影，不能把pendingdispose当新action（仍仅dispose）。codingchildqueue集成，released无操作，active选status实际disposition+token，preserved/cleanupdebt独立release，reserved/allocatingruntime处理。未真实工具试验。
+工具描述6c7e8366-052e-4eae-acaa-2c3d127befd1 completed/main检查去掉两个description块后代码与taskbeforebyte相同(/tmp/pi-docdrift-before/)，改中文扁平args+模型门槛+worktreechildowns/control语义；schema/logic没变。workspace/tool.ts最终sha2810abfe67f023ca47d889efa45bc4d07485c966336bf081f768d5412585911d，dispatchdescription之后resume逻辑下条另改。注意workflow Started工具result中的workspaceNotice仍旧integrate文本(当时taskonlydescription未改rawtoolcontent)，用户授权的是说明修正，不为TUI擅改rawmessage；如后续要完整指令口径再单独用户scope，不伪称所有历史/rawmessage都统一。
 
-- generic：{agent, task} 必填，{title, model} 可选
-- coding：{agent, task, writePaths, acceptance:{criteria}} 必填，+ {title, model, worktree, cwd} 可选
-- 路由：isCodingDispatch = Object.hasOwn(input, "writePaths")
-- taskId = "dispatch-" + contractHash.slice(0,8)，hash 不含 taskId
-- timeoutMs 由 Host 注入，模型提供则拒绝
-- 旧 v1 输入返回 DEPRECATED_SCHEMA 含迁移指引
-- generic-prompt.ts 已删除，功能合并进 dispatch-ir.ts
-- skill-overrides/subagent-dispatch/ 已退役，核心约束迁入 pi/AGENTS_APPEND.md（115 行）
-- subagent({action:"list"}) 可查询可用 agent（只返回 pi/agents/ 下的项目 agent）
+### 最终样式用户批准已实现
+用户明确①所有subagent关联主工具调用原生色块pending/success/error，②**runtime回执包括失败/暂停/停止**无框dim保图标，③supervisorneeddecision请求维持强调正文。此前e838/19fbaccepted replyBox方案被此最新规则覆盖。style审计88671fa4completed只读，实施 **05ebade8-fe01-4f4c-803c-ae95f06bc064 completed/mainaccepted**：主entryrenderSupervisorReplyEntry与renderCompletionNotification直接Textdim无Box，所有subagent-notify状态含workflowreceipt同样式；hiddencompletedobservercompletion-notices.ts原notify(info)/去重/display门控保持且该filebyte未改，workspacereminderdim不变。所有control/reply调用短callline恢复，interrupt/reply成功结果不再整卡empty；工具只Text原生Host状态背景，call+短result不正文回显。context.isError权威保spawn/resume/interrupt/status错误和errorfg，不把failed说resumed/interrupted；保先前steer目标runId/body。request强调Box/正文保，controlnotice历史隐藏策略与技术warning/childnativepreview不本次改，不宣称全部第三方告警样式统一。只3files(mainentry/compactformatter/existingcompactunit2expect+title修改)，无新case/noTDD/rawpayload/session/details/display/RPC权限不改。**19/19 unit，enhancedtsc0**证据/tmp/subagent-style-final(unit.log/tsc.log/taskbefore/diffs/hash)，main读真实diff/source+结果接受，无真实HostUI验证。最终mainentrysha6c1a2b9f4465e4abc275f6fe21d0ff7acc57ce7168e1b4bf8a5aaf973588384e、compactsha fd8cbc15ce95034a3ad6b4488c0348053f02eb1da97bdd62593573f0fa26bacd、unitsha3a574021ff416f0463c3b47badd7951a420b5f22080a1490a220593043262bbe。
 
-### rebase 后 settings/models 恢复
+### steer目标与 resume title
+steerfix965004f3已accepted：formatter漏input.runId导致subagent未知， now inputid→inputrunId→replydetails，registry title/agent +结构metadatafallback、cachemissrunid/dirlabel/identityabsent明示unknown、errorrawtext不deliveryheader；19unit/enhancedtsc0；task过程违规find/Users和find/导致240s，main精确取消ownedfind87827(runrunner77052->shell87734->rtk87825)，之后指定upstreamexactpath；报告保执行偏差，未动userHost。style最终包上述context传递不覆盖此fix。
+resume只读a5e0962ccompleted找到first缺口：0.75resume正常生成newrunid，原executeControl直通未延续displaytitle，新status/notify/selector恒miss。实施3f0f27f0(Astra)overloadfailed/main核对无write，不模型自动fallback；手工显式Sol接替 **13c8fa78-abfb-4d8e-b8b0-3bda125fc9ac completed/mainaccepted**。仅dispatch/extension.ts3处(pass闭包registry→successresume确定reply.details.runId/asyncId时oldfullinput.id/runIdtitle存在记newid，新id已有title不覆盖，失败/缺id/cachemiss无猜测)与中文bugdoc docs/bugs/2026-10-09-resume-display-title-mapping.md。rawrpcResult/content/details/实际恢复/权限/model策略均未改，title-registry.ts本身与tests没改。**37actualunits pass**=dispatch34+title3，2个deepimport上游characterization被明确excluded不计pass，即Node报告skip0不表示那2passed；enhancedtsc真正exit0，/tmp/resume-title-final unit.exit/typecheck.exit/logs/before/diffhash，main读source+日志真count/exit及descriptionbyte保持接受。最终dispatchsha304aa78a17c58c33a9810bfd708a7b3e70ad32b337de3dce4990b6af142bfff8；bugdocsha2c2de6bc3480fa640d8311e1dc7c129cf1cec1f1db25d7a21d398339bd7de011。限制：仅同进程已有旧fullidtitle→publicnewid，prefix/dir/no cache/重启LRU无法恢复；started先返回前短暂空title未假发event，内部自动恢复不此路径；无真实resume/Host验证，freshHost才新code。
 
-- rebase 过程中 pi/settings.json 丢失 packages（ensure-pi-settings.ts 幂等恢复）和 defaultProvider/defaultModel（手动补回）
-- pi/models.json 被 git rm 物理删除，从 git show db60aa2 恢复（7 provider / 8 model）
-- 确认：settings.json 和 models.json 均不进 git（per-machine）
+### 用户当前问题结论/未做事项
+- 用户看var/sessions system没有GLOBAL/SHARED内容：源码证明forcedsystembefore_agent_start只requesttransformprojection不persist完整text，session存sectionsdiff，无md不证未load也不证已load。prompt研究af0dbdd0completed：无/context，/debug仅TUI，export不是forcedfullprompt；ctx.getSystemPrompt在active run可含forced，但idle_runfinally清回base；before_provider_request.payload在projection/provideronPayload层HTTP前可观测最终体，格式providerdependent；上下游后续hook仍可能改payload。**没有新增logger/metadata记录/全文dump**，user仅问方法，真正全文日志需要明确授权local0600ignore不headers/token，不私读session。mainblockshared+global/nochild，childshared+childexecutionboundary/noglobal。
+- ExaMCP迁移取消、root禁MCPskillwrapper已接受，MCP现存code未拆（user仅doc禁令），cred未读/迁/轮换。
+- init真实用户日志的test污染6文件已修147pass0fail1todo但**整体init未经验证**，仅helper/mainphysicalroot/旧themeglobalmix/requiredsharedfixture/旧versionTDDexpect，不建议再自动跑初始化，没修其它unknown流程，sibling1.1.0闭包已知仍未调整，不承诺pure1.0.4稳定闭包。
+- agentprofilebody只TDD清理已接受，rolebody建议稿未采用（user没明确落盘授权）；delegatefrontmatterdescription仍TDD文字（上次onlybody，不擅改metadata）。list完整frontmatter29unitpass，newtool描述/renderer/GLOBAL/shared生效**需freshHost**；未执行hotreload/新产品canary/commit。用户modelfallback已说先不支持，保持startup候选无providererrorfallback。
+- OptionO旧steer任务e0b29b82 session存在entry505db537，普通user1029chars已authorisedread+主independent验证。历史只内存20rawterminalroot+leaf各算，target可能正常旧组件evict，不live内存不绝对断言；没有调historylimit或恢复数据。
 
-### 工作树残留（用户保留）
+最终没有任何活跃子任务，不需要再派review或重复单测。用户后续新需求另行处理，当前已经完成的代码报告按这些边界交付即可。
 
-- scripts/pi-shell.zsh + test/pi-shell.test.mjs（pi-new 函数，用户决定留着不提交不删除）
-- scripts/pi-session-owner.ts 已提交（503815b）
+## 2026-10-09 最新用户纠正：绿色reply工具卡要完整正文，下面dim回执左边距对齐（active）
 
-### 遗留项（均按用户决策冻结或延后）
+用户截图/pi-clipboard-3d7723db...png显示绿色reply工具卡与下面dimreceipt都简短，用户明确**工具调用卡不能精简：需要目标/完整reply正文**；runtime回执下面保持短dim，绿卡和receipt是不同动作。主已澄清nativeentry“回复已提交”目前本侧journal不是child消费ACK，不能把用户以为的“子收到确认”当协议事实，此scope只display不加ACK/改delivery。此前style05eb“工具replyshort”被此新要求覆盖，未改其它工具card/所有状态receipticon dim/requestBox规范。
 
-- 历史 529 条 proof debt：不处理
-- 旧 A4 managed workspaces：不管
-- attention lane / supervisor transport：不在本轮范围
-- L-REGISTRY-ENTRY：blocked-unknown
-- 上游兼容导出（compileCodingDispatchIR alias）：低优先级后续清理
-- README/probes v1 引用清理：低优先级
-- 真实模型 T6 v2 schema 行为验证：待环境可用时执行
+**唯一active实现 run0d8b63f5-15a7-4ca5-b61e-80656c602484 executor（GLM-5.3-Flash）**：onlycompact-rendering.ts/subagent-runtime.ts，两file，成功replyformatter从结构details投影fullrunid/requestid/agent/现存titlelookup +原input.message完整不truncate，error保原error文本，nonreply不变；reply entry formatterdimreceipt本体不改。existing19unit+enhancedtsconce(no新tests/TDD/realflows/配置/安装/模型)。不能因为green card完整去复冗余大runtimeReplybox。
+用户追加缩进：“回复已提交”与“派发完成...”不同；main已独立readHost1.0.4 showStatus:3101 ThemedText(dim,1,0)，entrycomponent无水平补padding，当前entryrendererText(dim,0,0)造成一列差。steerrequestc303b2e2-66cb-4241-a479-c29f00fae29c交唯一writer调整replyentry Text horizontalpadding1,vpadding0，无Box/手动正文空格；visiblecompletionreceipt如同padding1可一起，在两允许file内，workspace提醒不扩大。status一次diagnostic已delivered（需finalsource确认），不要queued=done。
+
+### 此active run违规扫描诊断
+用户attentioncall5ab94208a0224b539d070732 240s，main读owned events发现**find / -path /proc -prune -o -name native-supervisor-channel* 全盘扫描**（又把node_modules真实source误读为不存在packages/pi-subagents）。本次diagnostic时command已endexit0/wall242.4s/返回5pathlines，未打印不需要的路径；**不是此前两run被cancel无输出，这次不能声称无返回内容**。因此main没有发signals或中断runner/userHost。已发steer511fba23-2f9a-4542-9d9c-14a09f28ccaa要求停widefind/只确切source，事实上formatter改无需再查sender：给定packages/pi-subagents-enhanced/node_modules/pi-subagents/src/intercom/native-supervisor-channel.js即可；立即收敛改两rendererfiles/一次unit+static/实际process偏差如实report。当前beforecopy刚存/tmp/supervisor-reply-detail-final/，还没有validfinalacceptance。原stageempty/dirty保持；noMCPskilltool/newlogger/fullinit。
+
+后续收到0d8b63f5complete（标题可能stale）：主readtaskbefore2diff+fullinput.message包含/visible目标数据、原nativeentryformatter未改且padding1、19pureunitsactual+enhancedtsctrueexit、不新增case/noIO，indexempty，才能接受绿卡full+下方dim同padding。若缺一项focusedcorrect但不要再次10页dispatch导致漂移，多数source两行已明确。完成后user需freshHost才cachedrenderer变，不hotreload/生成实际reply来证明。除了这active任务其余style/resumetitle/global/shared/rootMCPban/list/inithelper/doc漂移都已结束接受，不再派review/真实canary。用户body建议稿仍未采用，logger方法只给口头方案未实施，modelerrorfallback取消、ExaMCP迁移取消/凭据未动。
+
+## 2026-10-09 最新最终：reply完整工具卡与回执缩进已接受，暂无active任务
+
+run0d8b63f5-15a7-4ca5-b61e-80656c602484 completed/mainaccepted。用户截图纠正绿色reply工具调用卡不能精简，下面dimreceipt保留。主已读taskbeforetwofilediff/finalsource/hash：formatCompactSupervisorToolResult成功reply显示真实agent/已有titlelookup/完整Run与Reply to +**完整原input.message**，不裁字/不摘要；unknown非error仍显示正文并标状态未确认，error/nonreply保原result文本。call标题完整replyTo但不重复正文。投递/消息/details/session/display/权限均未改，下方nativeentry仍本侧“回复已提交”不是child消费ACK，原formatCompactSupervisorReply函数体byte-identical。
+
+用户说replyreceipt与workflowreceipt缩进不齐：main先readHostshowStatus ThemedText(dim,1,0)vsentryText(dim,0,0)，明确steer补充被消费；renderSupervisorReplyEntry和visible renderCompletionNotification统一Text水平padding1/vpad0，无Box/硬加字符串空格，hiddencompletionobserver原ui.notify/info路径不变。其它toolnative色块/requestBox不改。freshHost才能加载newcachedrenderer，未热载或真实UI验证，不自动发reply来试。
+
+最终acceptedsource compact-rendering.ts SHA69e689a65cad7b0de2a8fea5a3ef0f49f8aaf32b2784fc0d614ecc478e1b6103，增强mainentrySHA0b29de1046fcdeeee064f674704014ed03fa2f6acc68f869e995379c9111d40e。证据/tmp/supervisor-reply-detail-final/{taskbefore,diffs,after.sha256,test-run.log,tsc-run.log,main-acceptance.json}。existing19unitpass0fail/0skip，未增case，无reply专项unitcoverage，enhancedstatic返回成功；**过程偏差必须保真**：越界find/242.4s已end返5pathlines(此前已记录，不能说无输出)；子使用了禁止npx --no-install tsc日志有npm更新notice，未安装/升级依赖但不能声称严格离线localtsc；额外临时虚构formatter检查越出禁止新增probe约束，不计正式unitcoverage。mainaccept为源码/已有unit检查的有效结果，非对违规过程背书，不因这些问题扩fallback/新协议/安全框架。staging空/whitespacepass，原dirty均保，无提交/秘密操作。
+
+当前所有已派发任务已结束，无实现pending或activechild。GLOBAL/shared/systemloading/listmetadata/docdrift/reviewerpolicy/newstyle/steertarget/resumetitle/inithelper均按前述边界接受，role正文建议未用户确认不落盘，model失败fallback暂不支持，ExaMCP迁移取消保持skill且root禁MCP，credential未读/迁移/rotate。用户问查看prompt只给公开before_provider_request方法，未新logger，不把var/sessions system缺md全文推未加载。整体init真实流程仍未验证(用户只单测)。后续新要求再处理，不重复单测/重新安装/全suite/业务canary/review。

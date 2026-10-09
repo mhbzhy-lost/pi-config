@@ -1,0 +1,809 @@
+{
+  "schema": "pi-trial-fix-baseline.v1",
+  "task": "F0",
+  "tdd": {
+    "exempt": true,
+    "reason": "纯文档变更；仅创建基线JSON，不改生产/测试/配置逻辑。"
+  },
+  "head": "6a80920e26ce6757b360c062ef6813a4d799288d",
+  "stagedPaths": [],
+  "dirtyPaths": [
+    {
+      "code": "M ",
+      "path": "pi/handoff/context-handoff.md"
+    },
+    {
+      "code": " M",
+      "path": "README.md"
+    },
+    {
+      "code": " M",
+      "path": "init-pi.sh"
+    },
+    {
+      "code": " M",
+      "path": "package-lock.json"
+    },
+    {
+      "code": " M",
+      "path": "package.json"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/AGENTS.md"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/README.md"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/child-extensions/integration-queue.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/child-extensions/root-session-owner.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/extensions/subagent-runtime.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/package-lock.json"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/package.json"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/scripts/setup-runtime-deps.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/scripts/verify-package.ts"
+    },
+    {
+      "code": " D",
+      "path": "packages/pi-subagents-enhanced/src/compat/pi-subagents-0.71.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/authority-store.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/durable-storage.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/model-selection.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/rpc-client.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/workflow-spawn.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/tui/browser-adapter.ts"
+    },
+    {
+      "code": " M",
+      "path": "packages/pi-subagents-enhanced/src/workspace/tool.ts"
+    },
+    {
+      "code": " M",
+      "path": "pi/settings.template.json"
+    },
+    {
+      "code": " M",
+      "path": "scripts/doctor.ts"
+    },
+    {
+      "code": " M",
+      "path": "scripts/ensure-pi-settings.ts"
+    },
+    {
+      "code": " M",
+      "path": "scripts/pi-launcher.zsh"
+    },
+    {
+      "code": " M",
+      "path": "scripts/pi-shell.zsh"
+    },
+    {
+      "code": " M",
+      "path": "scripts/probes/pi-subagents-compat.ts"
+    },
+    {
+      "code": " M",
+      "path": "scripts/setup-subagent-runtime-deps.ts"
+    },
+    {
+      "code": " M",
+      "path": "src/session-owner/contract.ts"
+    },
+    {
+      "code": " M",
+      "path": "src/session-owner/registry.ts"
+    },
+    {
+      "code": " M",
+      "path": "src/task-scheduler/adapter.ts"
+    },
+    {
+      "code": " M",
+      "path": "test/doctor.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/ensure-pi-settings.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/helpers/pi-host.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/helpers/pi-host.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/helpers/pi-runtime.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/init-pi.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/package-orphan-export-guard.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/pi-shell.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/pi-subagents-045-workflow.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/pi-subagents-compat.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/pi-subagents-enhanced-package.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/pi-subagents-project-workflow.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/pi-subagents-runtime.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/session-owner-extension.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/session-owner-install.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/session-owner-registry.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/session-owner-runtime.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/session-owner-wrapper.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/setup-subagent-runtime-deps.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/shell-policy.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-auto-integration-real-git.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-completion-notification.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-dispatch-extension.test.ts"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-dispatch-rpc.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-dispatch-schema-coercion.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-managed-worktree.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-model-candidates.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-model-selection.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-model-selection.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-ordered-models.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-runtime-membrane.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-runtime-production-shutdown.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-runtime-resource-isolation.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-runtime-root-broker-startup.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-spawn-rollback.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-steer-text-insertion.integration.mjs"
+    },
+    {
+      "code": " M",
+      "path": "test/subagent-workflow-spawn.test.mjs"
+    },
+    {
+      "code": " M",
+      "path": "tsconfig.json"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-03-doctor-dev-pi-peers.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-03-root-pi-dependency-drift.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-03-subagent-default-execution-deadline.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-03-verifier-legacy-cache-path.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-05-ephemeral-ping-session-file.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-05-opt-in-ceiling-session-identity.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-05-session-owner-value-options.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-05-supervisor-consumption-receipt.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-08-pi-1.0.2-production-trial-issues.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-08-session-owner-concurrent-guard-race.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/bugs/2026-10-08-supervisor-durable-lock-release-race.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/investigations/2026-10-08-pi-production-trial-root-causes.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/plans/2026-10-03-pi-1.0.0-compatibility-upgrade.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/plans/2026-10-04-pi-1.0.2-subagents-0.75.0-joint-upgrade.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/plans/2026-10-08-pi-production-trial-fixes.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/upgrades/2026-10-03-pi-1.0.0-candidate-manifest.json"
+    },
+    {
+      "code": "??",
+      "path": "docs/upgrades/2026-10-03-pi-1.0.0-compatibility-audit.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/upgrades/2026-10-03-pi-1.0.0-release-decision.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/upgrades/2026-10-04-contact-supervisor-compatibility.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/upgrades/2026-10-04-joint-candidate.json"
+    },
+    {
+      "code": "??",
+      "path": "docs/upgrades/2026-10-04-joint-loader-decision.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/upgrades/2026-10-04-joint-release-decision.md"
+    },
+    {
+      "code": "??",
+      "path": "docs/upgrades/2026-10-04-pi-1.0.2-subagents-0.75.0-audit.md"
+    },
+    {
+      "code": "??",
+      "path": "packages/pi-subagents-enhanced/src/compat/pi-subagents-0.75.ts"
+    },
+    {
+      "code": "??",
+      "path": "packages/pi-subagents-enhanced/src/host-runtime/index.ts"
+    },
+    {
+      "code": "??",
+      "path": "packages/pi-subagents-enhanced/src/host-runtime/peer-installation.ts"
+    },
+    {
+      "code": "??",
+      "path": "packages/pi-subagents-enhanced/src/host-runtime/probe-extension.ts"
+    },
+    {
+      "code": "??",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/child-broker-binding.ts"
+    },
+    {
+      "code": "??",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/child-tool-policy.ts"
+    },
+    {
+      "code": "??",
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-consumption.ts"
+    },
+    {
+      "code": "??",
+      "path": "pi/extensions/mcp-policy.ts"
+    },
+    {
+      "code": "??",
+      "path": "pi/pi-subagents/last-seen-version.json"
+    },
+    {
+      "code": "??",
+      "path": "scripts/assert-session-tool-policy.ts"
+    },
+    {
+      "code": "??",
+      "path": "scripts/probes/physical-host.ts"
+    },
+    {
+      "code": "??",
+      "path": "scripts/resolve-physical-pi.ts"
+    },
+    {
+      "code": "??",
+      "path": "src/mcp-policy/index.ts"
+    },
+    {
+      "code": "??",
+      "path": "test/child-broker-binding.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/doctor-pi-peer-runtime.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/fixtures/doctor-pi-peer-probe.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/fixtures/joint-upgrade/contact-provider.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/fixtures/joint-upgrade/loader-entry.ts"
+    },
+    {
+      "code": "??",
+      "path": "test/fixtures/joint-upgrade/loader-native.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/fixtures/joint-upgrade/mcp-server.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/fixtures/joint-upgrade/provider-capture.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/helpers/joint-upgrade-environment.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/helpers/joint-upgrade-layout.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/helpers/joint-upgrade-session.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/helpers/physical-launcher-fixture.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-artifact.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-ceiling-runtime.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-contact-supervisor.integration.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-feature.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-host-ceiling.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-host-probe.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-loader.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-model-only.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-model-policy.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-peer-installation.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-physical-launcher.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-provider.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-rpc-wire.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-rpc.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-session.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-tool-policy.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/joint-upgrade-tui.test.mjs"
+    },
+    {
+      "code": "??",
+      "path": "test/supervisor-consumption.test.mjs"
+    }
+  ],
+  "declaredWritePaths": [
+    "docs/bugs/2026-10-08-pi-1.0.2-production-trial-issues.md",
+    "docs/investigations/2026-10-08-pi-production-trial-root-causes.md",
+    "docs/plans/2026-10-08-pi-production-trial-fixes.md",
+    "docs/plans/records/2026-10-08-pi-trial-fixes/acceptance.md",
+    "docs/plans/records/2026-10-08-pi-trial-fixes/baseline.json",
+    "packages/pi-subagents-enhanced/extensions/custom-footer.ts",
+    "packages/pi-subagents-enhanced/extensions/subagent-runtime.ts",
+    "packages/pi-subagents-enhanced/src/compat/pi-subagents-0.75.ts",
+    "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",
+    "packages/pi-subagents-enhanced/src/tui/compact-rendering.ts",
+    "packages/pi-subagents-enhanced/src/tui/completion-notices.ts",
+    "packages/pi-subagents-enhanced/src/tui/session-browser.ts",
+    "pi/extensions/compact-tools.ts",
+    "pi/settings.json",
+    "pi/settings.template.json",
+    "scripts/ensure-pi-settings.ts",
+    "src/compact-tools/renderer.ts",
+    "test/compact-tools-error-visibility.test.mjs",
+    "test/compact-tools-extension.test.mjs",
+    "test/compact-tools-renderer.test.mjs",
+    "test/custom-footer-subagents.test.mjs",
+    "test/ensure-pi-settings.test.mjs",
+    "test/fixtures/trial-browser-lifecycle.json",
+    "test/mcp-policy-owner-loading.test.mjs",
+    "test/pi-subagents-compat.test.mjs",
+    "test/subagent-compact-rendering.test.mjs",
+    "test/subagent-completion-notices.test.mjs",
+    "test/subagent-dispatch-extension.test.ts",
+    "test/subagent-model-selection.integration.mjs",
+    "test/subagent-session-browser.test.mjs",
+    "tsconfig.json"
+  ],
+  "protectedFiles": [
+    {
+      "path": "docs/bugs/2026-10-08-pi-1.0.2-production-trial-issues.md",
+      "sha256": "e3b4dccad815de0d8f760b9b5b3ab4353004643a5e3116efc75b2eb565d839e7"
+    },
+    {
+      "path": "docs/investigations/2026-10-08-pi-production-trial-root-causes.md",
+      "sha256": "923956680a7bddfdc22f0635ba6322f5802c83db094bbd81bacce5a51a1d7cb8"
+    },
+    {
+      "path": "docs/plans/2026-10-08-pi-production-trial-fixes.md",
+      "sha256": "f2adc6c810dff10b253ca9eab3670fa48d75a5e4b018becc236f89f73f1db8b9"
+    },
+    {
+      "path": "docs/plans/records/2026-10-08-pi-trial-fixes/acceptance.md",
+      "sha256": null
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/extensions/custom-footer.ts",
+      "sha256": "02145661dc65440a0e8715d93dbd82bac33baaead396db1eb7d6b4c454502436"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/extensions/subagent-runtime.ts",
+      "sha256": "570a05a98557e080fe861972760a72abb0a770e03b418dc36e2757d870953d3e"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/compat/pi-subagents-0.75.ts",
+      "sha256": "e6cc96c74bf880b671a3deb77cfdfcfd4fd9dd4511c27ebe1cc3c96219145347"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",
+      "sha256": "b15fea2d7538210e7d61ddf071b36120061bd2834087b56a5010b56ca3a9fbee"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/tui/compact-rendering.ts",
+      "sha256": "5222b4d1c2f0151560bc37f23a0df6cdb7424be271e7ed851d0e4b756d6548b9"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/tui/completion-notices.ts",
+      "sha256": null
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/tui/session-browser.ts",
+      "sha256": "8d21593cd837bc78d306f68d15cf7a19ec59729f0e20d15c7cda73125cd6690c"
+    },
+    {
+      "path": "pi/extensions/compact-tools.ts",
+      "sha256": "e221e0cace864a4c7e300c48239171216b995dc14c40665fc2918be22f9a752f"
+    },
+    {
+      "path": "pi/settings.template.json",
+      "sha256": "01f429629730562e88d66d01430ba0d80b6613d92da4a5f35ed9f49c04766397"
+    },
+    {
+      "path": "scripts/ensure-pi-settings.ts",
+      "sha256": "8d5776fe14104c3e3d570d24e697b6332c89543abeb83a9b9560e2e145c96545"
+    },
+    {
+      "path": "src/compact-tools/renderer.ts",
+      "sha256": "cb4aaa7f83779dd759a075deaf0fc82e16a3eaa7afd91c2dbe9ca0b365a5eea6"
+    },
+    {
+      "path": "test/compact-tools-error-visibility.test.mjs",
+      "sha256": null
+    },
+    {
+      "path": "test/compact-tools-extension.test.mjs",
+      "sha256": "c09ee2052cbbc1e97aaf65be12ae8b109e1aaddc5e03b3927d890af6f9b7e4d6"
+    },
+    {
+      "path": "test/compact-tools-renderer.test.mjs",
+      "sha256": "a8db01a32080651cc43c6470d7a2a784fbf2ac20364660b4f96e90fa57e59a19"
+    },
+    {
+      "path": "test/custom-footer-subagents.test.mjs",
+      "sha256": "e4b313a30e0e783fa1a79b2dc64cf369c7231c4b2af7255ab46b9d565a72ca80"
+    },
+    {
+      "path": "test/ensure-pi-settings.test.mjs",
+      "sha256": "ca7f7c0210f4548f7f332616053dc351ac8ddb7b869fc2c725f9d020b10d588f"
+    },
+    {
+      "path": "test/fixtures/trial-browser-lifecycle.json",
+      "sha256": null
+    },
+    {
+      "path": "test/mcp-policy-owner-loading.test.mjs",
+      "sha256": null
+    },
+    {
+      "path": "test/pi-subagents-compat.test.mjs",
+      "sha256": "16482b1d6ad4aaacef9c8cdcdeb2aae126a47965b15216d46378d43af39f7714"
+    },
+    {
+      "path": "test/subagent-compact-rendering.test.mjs",
+      "sha256": "bc620ae3b9abaa5ebb42ae57b29e66afa805742286f35fbc56e9a34fb0e8478a"
+    },
+    {
+      "path": "test/subagent-completion-notices.test.mjs",
+      "sha256": null
+    },
+    {
+      "path": "test/subagent-dispatch-extension.test.ts",
+      "sha256": "39755aa430521f72ef99f671c80d36ca4d66d90d25c0e2343618c3e9ccdb6cea"
+    },
+    {
+      "path": "test/subagent-model-selection.integration.mjs",
+      "sha256": "d166ba5fd01f04512c4cb51dbd36ed16239c58306500dcb820ecad8dcbe29f54"
+    },
+    {
+      "path": "test/subagent-session-browser.test.mjs",
+      "sha256": "107eade02028e729063dd2e83bc74bff31bd471feaa384d6405f8eff22cdcb1f"
+    },
+    {
+      "path": "tsconfig.json",
+      "sha256": "ab8011356286b65750b5812eb958f2830da08d798dbd1cd7ad703616bf03c53a"
+    }
+  ],
+  "packageVersions": {
+    "rootCore": {
+      "name": "@earendil-works/pi-coding-agent",
+      "version": "1.0.2",
+      "realpath": "/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-coding-agent"
+    },
+    "upstreamPiSubagents": {
+      "name": "pi-subagents",
+      "version": "0.75.0",
+      "realpath": "/Users/leshi.zhy/pi-config/packages/pi-subagents-enhanced/node_modules/pi-subagents"
+    },
+    "peers": [
+      {
+        "name": "@earendil-works/pi-agent-core",
+        "version": "1.0.2",
+        "realpath": "/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-agent-core",
+        "boundRoot": "/Users/leshi.zhy/pi-config",
+        "realpathMatchesRoot": true
+      },
+      {
+        "name": "@earendil-works/pi-ai",
+        "version": "1.0.2",
+        "realpath": "/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-ai",
+        "boundRoot": "/Users/leshi.zhy/pi-config",
+        "realpathMatchesRoot": true
+      },
+      {
+        "name": "@earendil-works/pi-coding-agent",
+        "version": "1.0.2",
+        "realpath": "/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-coding-agent",
+        "boundRoot": "/Users/leshi.zhy/pi-config",
+        "realpathMatchesRoot": true
+      },
+      {
+        "name": "@earendil-works/pi-tui",
+        "version": "1.0.2",
+        "realpath": "/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-tui",
+        "boundRoot": "/Users/leshi.zhy/pi-config",
+        "realpathMatchesRoot": true
+      }
+    ]
+  },
+  "nodes": {
+    "minimum": {
+      "path": "/tmp/pi-100-upgrade.Nxvr1T/artifacts/node-v22.19.0-darwin-arm64/bin/node",
+      "version": "v22.19.0"
+    },
+    "current": {
+      "path": "/opt/homebrew/Cellar/node/26.8.1/bin/node",
+      "version": "v26.8.1"
+    }
+  },
+  "host": {
+    "path": "/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-coding-agent",
+    "realpath": "/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-coding-agent",
+    "root": "/Users/leshi.zhy/pi-config"
+  },
+  "settingsProjection": {
+    "resourceSelections": {
+      "extensions": [],
+      "defaultTools": []
+    },
+    "conflicts": [],
+    "consistentWithTemplate": true
+  },
+  "arena": {
+    "path": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou",
+    "home": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/home",
+    "agent": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/agent",
+    "config": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/config",
+    "state": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/state",
+    "evidence": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/evidence",
+    "securityEnv": {
+      "HOME": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/home",
+      "XDG_CONFIG_HOME": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/config",
+      "XDG_STATE_HOME": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/state",
+      "PI_CODING_AGENT_DIR": "/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-trial-fixes.wivt8gou/agent",
+      "PI_TEST_CODING_AGENT_ROOT": "/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-coding-agent",
+      "PI_HOST_ROOT": "/Users/leshi.zhy/pi-config/node_modules/@earendil-works/pi-coding-agent",
+      "PI_HOST_NODE": "/opt/homebrew/Cellar/node/26.8.1/bin/node",
+      "PI_OFFLINE": "1",
+      "PI_SKIP_VERSION_CHECK": "1",
+      "PI_TELEMETRY": "0"
+    }
+  },
+  "scanIncident": "初次find ..误扫仓库父目录/用户目录，已由主agent SIGTERM取消；本次脚本仅访问计划、已声明路径元数据、已知package manifests、Git路径状态及pi/settings非敏感选择投影。"
+}
