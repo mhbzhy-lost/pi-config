@@ -18,6 +18,10 @@ Pi config root is `pi/` (not `~/.pi`). Agent 规范入口：`pi/AGENTS_SHARED.md
 
 本仓禁止通过 MCP 接入、注册或直接使用任何工具，包括运行 MCP server 和调用其暴露的 tools。外部工具能力统一通过 skill wrapper 封装调用：任何原 MCP 工具一律改为 skill wrapper 形式使用，不得绕开本规范直接调用 MCP。wrapper 必须消费受支持的 CLI、SDK、HTTP 等非 MCP 入口，不得把 MCP client 藏在 skill 内以 wrapper 名义继续走 MCP。本规范仅约束 MCP 接入形态，不泛化禁止 web browser 等非 MCP 普通工具。
 
+## npm 源规范
+
+npm 只能使用官方源 `https://registry.npmjs.org/`；禁止使用淘宝、阿里或其他第三方 registry。
+
 ## Goal 改造执行方式
 
 在 `docs/superpowers/plans/2026-08-13-goal-obligation-runtime.md` 的 R0–R13 全部完成并通过 R13 验收前，禁止使用 Goal Engine 执行、编排或验收该改造计划；所有任务必须按计划 DAG 采用 Subagent-Driven 执行。既有 `planned-goal` 仅作为冻结的历史账本，不得阻塞 R1–R13；待 R13 通过并启动 fresh Host 后再通过 typed 工具收尾。
