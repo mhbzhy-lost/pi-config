@@ -1,6 +1,6 @@
 # Agent Configuration
 
-Pi config root is `pi/` (not `~/.pi`). See `pi/AGENTS.md` for constraints.
+Pi config root is `pi/` (not `~/.pi`). Agent 规范入口：`pi/AGENTS_SHARED.md` 对主 agent 与全部 subagent 生效；`pi/AGENTS_GLOBAL.md` 由 runtime 仅加载进父/main 会话，root 不会要求 child 再读 GLOBAL。角色限定只影响 pi/ 规范文件的适用范围，不改变本根目录工程规范对所有 agent（含 subagent）的适用。
 
 ## 目录职责与依赖边界
 
@@ -13,6 +13,10 @@ Pi config root is `pi/` (not `~/.pi`). See `pi/AGENTS.md` for constraints.
 - `packages/<name>/extensions/` 只放该 package manifest 声明的主 Host 入口，`packages/<name>/child-extensions/` 只放显式注入 child 的入口，实际实现放在 `packages/<name>/src/`。主 Host 与 child 入口不得因复用方便混用发现边界。
 - 跨 feature 依赖只能通过对方明确的公开入口或 package `exports`；禁止深层引用其他 feature 的内部文件，也禁止从 `src/**` 或 `packages/**/src/**` 反向依赖 `scripts/**`、`pi/extensions/**` 等宿主入口。
 - 只有具备稳定领域边界、明确 owner 和独立发行/版本价值的能力才可抽为共享 package；不得仅为消除少量重复创建新的通用库。
+
+## 外部工具接入规范
+
+本仓禁止通过 MCP 接入、注册或直接使用任何工具，包括运行 MCP server 和调用其暴露的 tools。外部工具能力统一通过 skill wrapper 封装调用：任何原 MCP 工具一律改为 skill wrapper 形式使用，不得绕开本规范直接调用 MCP。wrapper 必须消费受支持的 CLI、SDK、HTTP 等非 MCP 入口，不得把 MCP client 藏在 skill 内以 wrapper 名义继续走 MCP。本规范仅约束 MCP 接入形态，不泛化禁止 web browser 等非 MCP 普通工具。
 
 ## Goal 改造执行方式
 
@@ -36,7 +40,7 @@ Pi config root is `pi/` (not `~/.pi`). See `pi/AGENTS.md` for constraints.
 
 测试、恢复或实际运行发现异常时，在增加任何 production 兼容、防御或 fallback 逻辑前，必须先记录数据来源、首个偏离点和完整生成调用链，并完成以下分类：
 
-1. **预期 production 数据未被正确处理**：数据可由合法 public/typed 入口、权威 Host/Store 与正常事件顺序产生，且身份、时间和资源事实均有效。按生产缺陷处理：中文问题记录、精确 RED、最小修复。
+1. **预期 production 数据未被正确处理**：数据可由合法 public/typed 入口、权威 Host/Store 与正常事件顺序产生，且身份、时间和资源事实均有效。按生产缺陷处理：中文问题记录、精确复现证据、最小修复。
 2. **测试制造的非预期数据**：数据来自手工拼 projection/event、绕过 public 入口的直接 append、非法或倒退时间、缺字段 mock、过期 fixture，或设计中不可达的状态组合。只修测试、fixture 或 harness；禁止为其增加 production 兼容分支。
 3. **来源尚未证实**：无法证明 production 可达，也无法证明仅为 fixture 污染。必须 fail closed、保留现场并补充 provenance 证据；在完成分类前禁止预防性兼容。
 
